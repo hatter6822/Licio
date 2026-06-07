@@ -718,3 +718,17 @@ When coordinated reporting is detected:
 - MFCI test: coordination score correctly conditions on base rates (large community discussing controversial topic is not flagged as coordinated reporting).
 
 ---
+
+## Workstream definition of done
+
+WS-J is complete when ALL of the following conditions hold:
+
+1. **Reports, blocks, mutes, and appeals:** Users can report content and accounts, block and mute other users, and appeal moderation decisions. All flows work end-to-end with appropriate confirmation and feedback.
+
+2. **Emergency report routing:** Emergency reports (imminent harm, CSAM, credible threats) receive priority routing to trained responders with expedited review timelines.
+
+3. **Moderation console:** The moderation console is operational for stewards and safety moderators, providing case queues, action tools, audit history, and decision templates.
+
+4. **Automated pre-checks:** Automated pre-moderation checks catch spam, malware, and known-bad content before publication, with configurable thresholds and false-positive review paths.
+
+5. **Coordinated-report detection:** MFCI-backed coordinated-report detection is active, identifying temporal clustering and account correlation patterns that distinguish genuine community concern from organized report abuse.

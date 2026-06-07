@@ -769,3 +769,19 @@ Aggregate all signal features per item per session into an `AttentionAggregate` 
 | WS-C.4.2 (Source/context tracker) | WS-C.4.1a |
 | WS-C.4.3 (Return/traversal tracker) | WS-C.4.1a |
 | WS-C.4.4 (Aggregate uploader) | WS-C.4.1a-d, WS-C.4.2, WS-C.4.3, WS-C.2.2a |
+
+## Workstream definition of done
+
+WS-C is complete when ALL of the following conditions hold:
+
+1. **Routing and code splitting:** TanStack Router is operational with all route definitions, route guards, and code splitting producing separate chunks per route that load on demand.
+
+2. **Service worker lifecycle:** The service worker registers, caches assets, serves cached content offline, and handles updates with a user-facing update prompt -- no stale content after deployment.
+
+3. **Offline resilience:** The IndexedDB offline store persists data across browser restarts, survives iOS WebKit eviction (with detection and recovery), and maintains data integrity with checksum verification.
+
+4. **Push notifications:** VAPID keys are configured, push subscriptions are registered, and notifications are delivered and displayed correctly with user-configurable notification preferences.
+
+5. **Signal processing:** The in-browser signal processor tracks dwell time, scroll cadence, source clicks, context expansion, and return visits with per-item caps, and all raw attention events are processed and discarded locally without upload -- privacy compliance is enforced.
+
+6. **Crypto flags:** All crypto-related feature flags default to false, and no crypto feature activates without explicit flag enablement.

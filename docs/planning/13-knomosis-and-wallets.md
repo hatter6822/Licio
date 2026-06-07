@@ -1274,3 +1274,21 @@ Log all simulated governance actions to an audit log. Each entry includes: actio
 
 **Security considerations:**
 - Audit log immutability is critical for governance accountability; even simulated actions should be auditable to establish good practices.
+
+## Workstream definition of done
+
+WS-L is complete when ALL of the following conditions hold:
+
+1. **Feature flags:** All Knomosis and wallet features are behind feature flags that default to disabled. No crypto feature activates without explicit flag enablement. The core social product functions fully with all crypto flags off.
+
+2. **Wallet connect/disconnect:** Users can connect and disconnect wallets. Connection produces a verified wallet identity. Disconnection removes all wallet associations cleanly with no residual linkage.
+
+3. **SIWE and EIP-1271:** Sign-In with Ethereum (SIWE) authentication works for EOA wallets. EIP-1271 signature verification works for smart-contract wallets (multisigs, account abstraction).
+
+4. **Gateway preflight:** The Knomosis gateway preflight validates all constraints (jurisdiction, feature flags, age, sanctions, contract allowlist) before any transaction proceeds. Unknown jurisdiction or unknown contract results in rejection.
+
+5. **Reconciliation:** On-chain and off-chain state reconciliation runs continuously with a target gap of zero. Any reconciliation discrepancy triggers alerts and blocks further transactions until resolved.
+
+6. **Kill switches:** All 5 kill switches (wallet connect, gateway transactions, treasury operations, governance execution, receipt minting) work independently. Activating one does not affect the others. Each kill switch takes effect immediately without requiring a deployment.
+
+7. **Simulation labeling:** All simulated governance actions are clearly labeled as simulations in the UI and audit log. No simulated action has real on-chain effects.

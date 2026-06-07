@@ -837,3 +837,19 @@ Automated test that verifies internal dashboards separate revenue and treasury m
 - Audit test: dashboard configuration changes are logged and reviewable.
 
 ---
+
+## Workstream definition of done
+
+WS-I is complete when ALL of the following conditions hold:
+
+1. **Feature store denylist:** The ranking feature store schema-level denylist rejects wallet balances, payment history, donor status, token holdings, and all other financial fields. Attempts to add denied fields fail at migration time.
+
+2. **Scoring engine:** The scoring engine assembles PWAtt scores, invariant outputs, and safety constraints into a composite ranking score with normalized, configurable weights.
+
+3. **MERI diversification:** Feed diversification uses MERI independence scores to prevent duplicate and near-duplicate content from clustering in the feed.
+
+4. **Neutrality tests in CI:** All 10 ranking-neutrality tests pass in CI on every PR. Tests verify that wallet activity, payment status, donor tier, token holdings, and other financial signals have zero influence on ranking.
+
+5. **Per-item explanations:** Every ranked item has a specific, human-readable explanation of why it was ranked at its position, referencing the signals and invariants that contributed to the score.
+
+6. **Kill switch:** The ranking kill switch is operational and can immediately revert the feed to a safe fallback (chronological or editorial) without requiring a deployment.

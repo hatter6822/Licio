@@ -620,3 +620,17 @@ Create an automated test that proves no SQL join path exists between wallet tabl
 - This test is the structural enforcement of the "no pay-to-rank" invariant at the database level.
 - It complements the feature-store denylist (WS-I.2.1) and ranking-neutrality tests (Section 30.6) with a schema-level guarantee.
 - If the test ever needs to be bypassed, it requires explicit security-owner sign-off with a documented justification.
+
+## Workstream definition of done
+
+WS-D is complete when ALL of the following conditions hold:
+
+1. **Authentication:** WebAuthn (passkey) registration and authentication work end-to-end. Email-based authentication (magic link or OTP) works as a fallback. Both flows produce valid sessions.
+
+2. **Session security:** Session cookies are set with `HttpOnly`, `Secure`, and `SameSite=Strict` flags. Session creation, renewal, and revocation work correctly. Concurrent session limits are enforced.
+
+3. **Age gating:** Age verification blocks users under 13 from account creation. Age-gated users cannot bypass the restriction through any flow. Age data is handled with minimal retention.
+
+4. **Privacy controls:** Users can control personalization level (including full opt-out). Data export produces a complete, machine-readable archive of the user's data. Account deletion removes all personal data from PostgreSQL, Redis, and object storage within the documented retention window.
+
+5. **Wallet identity isolation:** Wallet identity tables are schema-isolated from ranking and attention tables. The automated schema isolation test passes in CI, proving no foreign-key join path exists between wallet and ranking bounded contexts.

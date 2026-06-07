@@ -839,3 +839,19 @@ Implementation:
 | WS-G.4.2b | WS-G.4.2a |
 | WS-G.4.2c | WS-G.4.2a |
 | WS-G.4.2d | WS-G.4.2b |
+
+## Workstream definition of done
+
+WS-G is complete when ALL of the following conditions hold:
+
+1. **All 11 contribution types:** All contribution types (question, answer, evidence, correction, synthesis, context, dissent, bridge, meta, proposal, steward-note) are implemented, validated, and renderable in threads.
+
+2. **Thread branching:** Thread branching works correctly -- contributions form a tree structure with parent-child relationships, and the tree can be traversed and rendered at any depth.
+
+3. **Rooms and lenses:** Rooms are operational with creation, membership, moderation, and topic scoping. Lenses provide interpretation contexts for SCOI and are selectable per room.
+
+4. **Composer performance:** The composer opens in under 300ms with all contribution modes available, including rich text editing, claim attachment, evidence linking, and source citation.
+
+5. **UGC sanitization:** All user-generated content is sanitized through the Markdown AST to DOMPurify pipeline with Trusted Types enforced throughout. Zero XSS vectors pass through the sanitization chain.
+
+6. **Security defense-in-depth:** CSP, Trusted Types, DOMPurify, and Markdown AST sanitization work together as layered defenses. No single bypass defeats all layers.

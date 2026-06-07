@@ -309,3 +309,17 @@ Implement optimized similarity query functions for MERI and SCOI use cases. Crea
 **Testing:**
 - Integration: Insert known embeddings with known similarities. Verify `findSimilarStories` returns the correct results above threshold. Verify `findSimilarInterpretations` identifies divergent interpretations. Verify index usage.
 - Performance: Benchmark query latency with 10K, 50K, and 100K embeddings. Verify sub-100ms p99.
+
+## Workstream definition of done
+
+WS-F is complete when ALL of the following conditions hold:
+
+1. **Story submission and dedup:** Stories can be submitted via the API. Duplicate and near-duplicate stories are detected and handled (merged or rejected) before publication.
+
+2. **Claims and evidence cards:** Claims can be extracted from or attached to stories. Evidence cards link to claims with typed relationships (supports, contradicts, contextualizes). All link types are navigable.
+
+3. **Source profiles:** Sources (publications, authors, domains) have profiles with metadata. Source profiles are created automatically on first ingestion and are editable by stewards.
+
+4. **Full-text search:** Full-text search returns relevant results for stories, claims, and evidence cards with ranking by relevance. Search supports filters by date, source, and content type.
+
+5. **Embeddings for MERI/SCOI:** Vector embeddings are generated asynchronously for stories, claims, and evidence cards. Similarity queries (findSimilarStories, findSimilarClaims, findSimilarInterpretations, findNearestEvidenceCards) use the pgvector ANN index and return results within the latency target.

@@ -632,3 +632,21 @@ Implement an automated license compatibility check that verifies all dependencie
 
 **Testing:**
 - CI: Run the license check. Verify zero incompatible or unknown licenses (or all are in the reviewed allowlist). Add a dependency with a proprietary license -- verify the check fails.
+
+## Workstream definition of done
+
+WS-O is complete when ALL of the following conditions hold:
+
+1. **Zero XSS vectors:** The full XSS test suite passes with zero vectors reaching the DOM. CSP, Trusted Types, DOMPurify, and Markdown AST sanitization are all enforced and tested together.
+
+2. **Auth attack mitigation:** Authentication attacks (credential stuffing, brute force, session fixation, session hijacking) are mitigated with rate limiting, account lockout, secure session management, and monitoring.
+
+3. **API authorization coverage:** Authorization is tested for every API endpoint. Horizontal and vertical privilege escalation attempts are rejected. Unauthenticated access to protected endpoints returns 401/403.
+
+4. **Wallet security:** Wallet-related security is tested, including transaction signing verification, replay protection, gateway preflight enforcement, and private key non-exposure.
+
+5. **Incident playbook:** The incident response playbook is documented and tested via tabletop exercise. Escalation paths, communication templates, and recovery procedures are validated.
+
+6. **Reproducible builds with SRI:** Production builds are reproducible (same source produces identical output). All served scripts and stylesheets have Subresource Integrity (SRI) hashes.
+
+7. **SBOM generated:** A Software Bill of Materials (SBOM) in SPDX or CycloneDX format is generated for every production build, listing all runtime dependencies with name, version, license, source, and hash.

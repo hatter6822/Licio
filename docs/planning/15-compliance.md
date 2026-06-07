@@ -466,3 +466,17 @@ Implement automated safeguards ensuring that no support workflow, compliance cas
 - Unit: Content filter detects hex strings of key length, BIP-39 mnemonic patterns.
 - Integration: Attempt to submit a support form with a seed phrase -- verify blocked with warning. CI scan of all support templates passes.
 - Security: Review all support workflows for private key request vectors.
+
+## Workstream definition of done
+
+WS-N is complete when ALL of the following conditions hold:
+
+1. **Fail-closed jurisdiction handling:** Unknown or unclassified jurisdictions result in all crypto features being disabled. No crypto feature is accessible to users in unrecognized regions.
+
+2. **Hot-reloadable jurisdiction policies:** Jurisdiction-feature policies can be updated and take effect without a deployment. Policy changes are version-controlled and auditable.
+
+3. **Financial compliance case tracking:** All financial compliance cases (SAR filings, law enforcement requests, regulatory inquiries) are tracked in the compliance case system with full audit trails.
+
+4. **Sanctions screening:** Sanctions screening is active and runs against current OFAC/EU/UN lists. Screening failures block wallet operations and crypto features for the affected user.
+
+5. **Support workflows:** Support workflows for financial complaints, unauthorized transactions, law enforcement data requests, and private key safety are operational with appropriate routing, escalation, and response time targets.

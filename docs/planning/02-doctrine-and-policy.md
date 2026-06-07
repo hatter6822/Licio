@@ -548,3 +548,23 @@ Create `docs/policy/CRYPTO_FEATURE_MATRIX.md` detailing which crypto and financi
 - The matrix is compatible with the jurisdiction-feature matrix template (WS-A.2.1).
 - Core social product availability is explicitly documented as independent of crypto features.
 - Document is reviewed and approved.
+
+## Workstream definition of done
+
+WS-A is complete when ALL of the following conditions hold:
+
+1. **Signal matrix:** The signal matrix document exists, enumerates every tracked signal with its privacy classification, and is reviewed and approved.
+
+2. **Moderation taxonomy:** The moderation taxonomy document exists with violation categories, severity levels, and escalation paths, and is reviewed and approved.
+
+3. **Transparency dictionary:** The transparency dictionary document exists defining all user-facing terms for algorithmic and moderation processes, and is reviewed and approved.
+
+4. **Jurisdiction template:** The jurisdiction-feature matrix template exists with per-jurisdiction crypto-feature enablement rules, and is reviewed and approved.
+
+5. **Steward roles:** The steward roles and responsibilities document exists defining capabilities, obligations, and accountability structures, and is reviewed and approved.
+
+6. **Signal-to-test mapping:** The signal-to-test mapping document exists linking every signal to its validation test, and is reviewed and approved.
+
+7. **Privacy regulation mapping:** The privacy regulation mapping document exists covering GDPR, CCPA, and other applicable frameworks with per-requirement compliance notes, and is reviewed and approved.
+
+8. **Crypto feature matrix:** The crypto feature matrix document exists defining all five feature tiers with default states, enablement requirements, per-jurisdiction rules, and fail-closed behavior, and is reviewed and approved.

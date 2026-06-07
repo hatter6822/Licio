@@ -425,3 +425,19 @@ Implement safety-state constraints for PWAtt v1. When content is flagged by mode
 **Testing:**
 - Integration: Flag content, submit attention events, verify score does not increase. Clear content, submit events, verify score resumes growth. Remove content, verify score is zero. Apply MERI redundancy penalty, verify dampening.
 - Regression: Verify freeze does not prevent Signal Ledger population.
+
+## Workstream definition of done
+
+WS-E is complete when ALL of the following conditions hold:
+
+1. **Event schemas:** All event schemas are defined with field-level privacy classification (public, pseudonymous, sensitive, prohibited). Schema validation rejects events with missing or misclassified fields.
+
+2. **Retention enforcement:** Retention jobs run on schedule and enforce per-event-type retention limits. Expired events are deleted. Retention compliance is verifiable via audit query.
+
+3. **PWAtt v0 shadow mode:** PWAtt v0 computes attention scores in shadow mode -- scores are logged and visible in internal dashboards but do not affect ranking or distribution.
+
+4. **PWAtt v1 saturation curves:** PWAtt v1 implements saturation (diminishing-returns) curves for each signal dimension, preventing any single signal from dominating the composite score.
+
+5. **PWAtt v1 weight normalization:** PWAtt v1 positive weights are normalized and sum to exactly 100%. Penalty terms are subtracted separately and can drive scores below zero.
+
+6. **Safety-state constraints:** Flagged content has its PWAtt growth frozen (events recorded but score unchanged). Cleared content resumes growth. Removed content has its score set to zero.

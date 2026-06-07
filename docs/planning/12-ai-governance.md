@@ -470,3 +470,17 @@ Implement the correction workflow for AI-generated summaries. The workflow enabl
 - Immutability test: attempt to modify a historical version fails.
 
 ---
+
+## Workstream definition of done
+
+WS-K (AI) is complete when ALL of the following conditions hold:
+
+1. **Model cards:** Every AI model used in the platform has a complete model card documenting its purpose, training data summary, known limitations, prohibited uses, bias evaluation results, and owner.
+
+2. **Prohibited uses enforced:** Prohibited AI uses (autonomous treasury execution, investment advice, manipulative voting recommendations) are blocked at the application layer with tests verifying enforcement.
+
+3. **Bias and safety evaluations:** Every model passes bias and safety evaluations before deployment. Evaluation results are documented in the model card and reviewed by the responsible owner.
+
+4. **Machine-generated labeling:** All AI-generated outputs (summaries, classifications, suggestions) are labeled as machine-generated in the UI. Steward-corrected versions carry a distinct "steward-corrected" label.
+
+5. **Source citation and uncertainty:** AI-generated summaries cite their source materials and preserve uncertainty -- claims without strong evidence are presented with appropriate hedging rather than false confidence.

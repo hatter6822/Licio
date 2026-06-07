@@ -703,3 +703,19 @@ Build the feed mode selector. Available modes: "Balanced" (default PWAtt), "Chro
 | WS-B.2.7 (Source reader) | WS-B.1.3a, WS-B.1.5 |
 | WS-B.2.8a-c (Stopping cues) | WS-B.1.2a, WS-B.1.1d |
 | WS-B.2.9 (Feed mode switcher) | WS-B.1.2d, WS-C.1.3b |
+
+## Workstream definition of done
+
+WS-B is complete when ALL of the following conditions hold:
+
+1. **Design tokens:** All design tokens (color, typography, spacing, motion, elevation) render correctly in light, dark, and high-contrast modes with no visual regressions.
+
+2. **Primitive accessibility:** All primitive components (buttons, inputs, selects, checkboxes, radios, textareas, overlays, drawers, toasts) pass axe-core automated accessibility checks with zero violations.
+
+3. **WCAG 2.2 AA compliance:** The complete design system meets WCAG 2.2 AA across all components, including keyboard operability, screen-reader compatibility, focus management, and zoom safety to 200%.
+
+4. **No applause affordances:** Zero likes, upvotes, hearts, reactions, karma badges, follower counts, or public scores exist anywhere in the component library or application layer.
+
+5. **Stopping cues:** All stopping cue components (session timer, reading pace nudge, break prompt) terminate feed consumption and function correctly.
+
+6. **Application components:** All application-level components (StoryCard, swipe actions, rating labels, context cards, state components, Signal Ledger UI, source reader, feed mode switcher) render with proper loading, empty, error, and populated states.
