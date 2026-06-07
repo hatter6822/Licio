@@ -3,14 +3,20 @@
 **Milestone:** M0-M6
 **Priority:** P0
 **Dependencies:** WS-0 (repository foundation)
-**Wave:** 2+6
+**Wave:** 2+6 (continuous)
 **Estimated duration:** Continuous
 
 ---
 
 ## Overview
 
-Security is a release gate at every milestone. This is a continuous workstream, not a one-time phase. Licio's combined UGC + wallet surface makes XSS the dominant risk: a single injection could trigger a malicious wallet signature and drain funds (Section 25.2). Defense-in-depth against XSS is therefore paramount, followed by auth/session hardening, API authorization, and wallet-specific security. Incident response covers severity classification, escalation, rollback, and treasury-specific procedures. Reproducible builds and supply-chain provenance ensure that no backdoored bundle can be served without public evidence. Every security test described here runs in CI and is a merge-blocking gate for relevant code paths.
+Security is a release gate at every milestone. This is a continuous workstream, not a one-time phase. Licio's combined UGC + wallet surface makes XSS the dominant risk: a single injection could trigger a malicious wallet signature and drain funds (Section 25.2). Defense-in-depth against XSS is therefore paramount, followed by auth/session hardening, API authorization, and wallet-specific security. Because a PWA cannot use native device attestation, abuse defense is **server-side and behavioral** (Section 25.5): bot/sock resistance, coordination detection, forged-attention-event rejection, and look-alike-domain defense are first-class security tasks, not afterthoughts. Backend hardening covers secrets management, least-privilege keys, encryption at rest, and supply-chain scanning (Section 25.4). Reliability and disaster recovery (SLOs, backups, restore drills, chain monitoring) live here because availability is a security property for a financial surface. Incident response covers severity classification, escalation, rollback, emergency feature flags, and treasury-specific procedures. Reproducible builds and supply-chain provenance ensure that no backdoored bundle can be served without public evidence (Section 20.2). Every security test described here runs in CI and is a merge-blocking gate for relevant code paths.
+
+**Cross-cutting requirements for this workstream:**
+- Every task carries `**ID:**`, `**Ref:**`, `**Description:**`, `**Acceptance criteria:**`, `**Testing:**`, and `**Dependencies:**`; security-sensitive tasks add observability and edge-case notes.
+- No secret, signing key, or seed phrase is ever embedded in or handled by the client bundle (Section 25.2 #7).
+- The integrity model assumes the browser is hostile-adjacent and every wallet signature is a high-risk action (Section 25.1).
+- Emergency feature flags (WS-O.2.2) are the universal "stop" control and underpin rollback (WS-O.2.1c) and treasury incident response (WS-O.2.1d).
 
 ---
 
@@ -21,10 +27,10 @@ Security is a release gate at every milestone. This is a continuous workstream, 
 **Ref:** Section 25.2
 
 **Description:**
-Build an automated test suite that runs every XSS vector from the OWASP XSS Cheat Sheet against every user-generated-content rendering path in the application. UGC rendering paths include: story cards (title, source summary, context chips), thread contributions (body, citations), room descriptions, user profiles (display name, bio if present), evidence cards (relevance notes, citations), context cards (summary text), and AI-generated summaries. Each vector is injected into each rendering path and the test verifies that: (1) the injected script does not execute (no alert, no network request, no DOM mutation beyond the sanitized output); (2) the output is sanitized by DOMPurify through the Trusted Types pipeline; (3) no raw HTML is rendered -- all output passes through the allow-list sanitizer. The test suite uses Playwright to render the component in a real browser context and verify that no script executes.
+Build an automated test suite that runs every XSS vector from the OWASP XSS Cheat Sheet against every user-generated-content rendering path in the application. UGC rendering paths include: story cards (title, source summary, context chips), thread contributions (body, citations), room descriptions, user profiles (display name, bio if present), evidence cards (relevance notes, citations), context cards (summary text), and AI-generated summaries. Each vector is injected into each rendering path and the test verifies that: (1) the injected script does not execute (no alert, no network request, no DOM mutation beyond the sanitized output); (2) the output is sanitized by DOMPurify through the Trusted Types pipeline; (3) no raw HTML is rendered -- all output passes through the allow-list sanitizer. The vector corpus must include modern bypass families beyond the classic cheat sheet: mutation XSS (mXSS), DOM-clobbering, `srcset`/`<template>`/`<noscript>` parsing quirks, SVG `<use>`/`xlink:href`, and Markdown-link `javascript:`/`data:` smuggling. The test suite uses Playwright to render the component in a real browser context and verify that no script executes.
 
 **Acceptance criteria:**
-- Every OWASP XSS Cheat Sheet vector is tested against every UGC rendering path.
+- Every OWASP XSS Cheat Sheet vector plus the mXSS/DOM-clobbering/SVG/Markdown families is tested against every UGC rendering path.
 - Zero vectors result in script execution.
 - Test results include the vector, the rendering path, and the sanitized output for audit.
 - The test suite runs in CI on every PR that modifies UGC rendering, sanitization, or CSP configuration.
@@ -34,6 +40,8 @@ Build an automated test suite that runs every XSS vector from the OWASP XSS Chea
 - E2E: Playwright tests inject each vector and assert no script execution (no `alert`, no injected network requests, no DOM mutations outside the sanitized container).
 - CI: Test suite is a required check in GitHub Actions.
 
+**Dependencies:** WS-G.4.1 (Markdown-lite parser), WS-G.4.2a-d (DOMPurify/Trusted Types pipeline + wallet-drainer detection), WS-0.5.1 (CSP/Trusted Types headers), WS-0.4.3 (Playwright + axe-core harness).
+
 ---
 
 ### WS-O.1.1b Trusted Types violation detection
@@ -41,11 +49,12 @@ Build an automated test suite that runs every XSS vector from the OWASP XSS Chea
 **Ref:** Section 25.2
 
 **Description:**
-Implement automated testing that verifies Trusted Types enforcement across the application. The test suite must prove that any call to `innerHTML`, `document.write`, `eval`, `setTimeout(string)`, `setInterval(string)`, or `new Function(string)` that does not go through a registered Trusted Types policy triggers a violation. The test is run in a browser context (Playwright) with Trusted Types enforcement enabled (`require-trusted-types-for 'script'`). The test navigates through all major application routes and interactions, and asserts that zero Trusted Types violations are logged. If a violation occurs, the test captures the call site (stack trace) and the violating value for debugging.
+Implement automated testing that verifies Trusted Types enforcement across the application. The test suite must prove that any call to `innerHTML`, `document.write`, `eval`, `setTimeout(string)`, `setInterval(string)`, or `new Function(string)` that does not go through a registered Trusted Types policy triggers a violation. The test is run in a browser context (Playwright) with Trusted Types enforcement enabled (`require-trusted-types-for 'script'`). The test navigates through all major application routes and interactions, and asserts that zero Trusted Types violations are logged. If a violation occurs, the test captures the call site (stack trace) and the violating value for debugging. The test also asserts that only the named `licio-ugc` policy (WS-G.4.2a) is registered and that `trustedTypes.defaultPolicy` is not used as an escape hatch.
 
 **Acceptance criteria:**
 - Trusted Types are enforced in the test browser context via CSP header.
 - Zero Trusted Types violations occur during a full application navigation (all routes, all UGC rendering paths, all dynamic content loading).
+- Only the allow-listed named policy is registered; no permissive default policy exists.
 - Any violation is captured with stack trace and violating value.
 - The test suite runs in CI on every PR.
 - New routes or dynamic content paths are covered by extending the navigation in the test.
@@ -54,6 +63,8 @@ Implement automated testing that verifies Trusted Types enforcement across the a
 - E2E: Playwright navigates all routes with a violation listener that fails the test on any Trusted Types violation.
 - CI: Required check in GitHub Actions.
 
+**Dependencies:** WS-0.5.1 (CSP `require-trusted-types-for`), WS-0.5.4 (Trusted Types policy wiring), WS-G.4.2a (named `licio-ugc` policy).
+
 ---
 
 ### WS-O.1.1c CSP bypass testing
@@ -61,7 +72,7 @@ Implement automated testing that verifies Trusted Types enforcement across the a
 **Ref:** Section 25.2
 
 **Description:**
-Implement a test suite that attempts to bypass the Content Security Policy. Tests include: (1) inline script injection -- inject `<script>alert(1)</script>` into UGC and verify it is blocked by CSP; (2) eval injection -- attempt to execute `eval()` from UGC context and verify it is blocked; (3) external script injection -- inject `<script src="https://evil.example.com/malware.js">` and verify it is blocked by `default-src 'self'`; (4) data URI injection -- inject `<a href="data:text/html,<script>alert(1)</script>">` and verify it is blocked; (5) javascript URI injection -- inject `<a href="javascript:alert(1)">` and verify it is stripped by the sanitizer and blocked by CSP; (6) object/embed injection -- inject `<object>` and `<embed>` tags and verify blocked by `object-src 'none'`; (7) base tag injection -- inject `<base href="https://evil.example.com">` and verify blocked by `base-uri 'self'`; (8) style injection with expression/behavior -- inject CSS expressions and verify blocked. Each test runs in Playwright with the production CSP headers.
+Implement a test suite that attempts to bypass the Content Security Policy. Tests include: (1) inline script injection -- inject `<script>alert(1)</script>` into UGC and verify it is blocked by CSP; (2) eval injection -- attempt to execute `eval()` from UGC context and verify it is blocked; (3) external script injection -- inject `<script src="https://evil.example.com/malware.js">` and verify it is blocked by `default-src 'self'`; (4) data URI injection -- inject `<a href="data:text/html,<script>alert(1)</script>">` and verify it is blocked; (5) javascript URI injection -- inject `<a href="javascript:alert(1)">` and verify it is stripped by the sanitizer and blocked by CSP; (6) object/embed injection -- inject `<object>` and `<embed>` tags and verify blocked by `object-src 'none'`; (7) base tag injection -- inject `<base href="https://evil.example.com">` and verify blocked by `base-uri 'self'`; (8) style injection with expression/behavior -- inject CSS expressions and verify blocked. Each test runs in Playwright with the production CSP headers. A CSP report-only endpoint captures any violation for triage.
 
 **Acceptance criteria:**
 - All eight CSP bypass categories are tested.
@@ -73,6 +84,8 @@ Implement a test suite that attempts to bypass the Content Security Policy. Test
 **Testing:**
 - E2E: Playwright tests inject each bypass attempt and verify no script execution, no external resource loading, no base URI change.
 - CI: Required check in GitHub Actions.
+
+**Dependencies:** WS-0.5.1a/b (CSP string + reporting), WS-G.4.2 (sanitizer).
 
 ---
 
@@ -95,6 +108,8 @@ Implement a CI check that audits the codebase for unsafe DOM access patterns. Th
 - Unit: Test the scanner against known-good and known-bad code samples. Verify detection of each pattern. Verify DOMPurify-wrapped patterns are allowed.
 - CI: Required check in GitHub Actions.
 
+**Dependencies:** WS-0.4.1b (Biome security rules), WS-0.6.1e (security audit CI job).
+
 ---
 
 ### WS-O.1.2a Credential brute-force test
@@ -115,6 +130,8 @@ Implement a test that verifies progressive delays and account lockout for creden
 **Testing:**
 - Integration: Attempt 15 failed logins against a test account. Verify progressive delays after attempt 5. Verify lockout after attempt 10. Wait for lockout expiry, verify successful login. Repeat with a nonexistent account, verify identical responses.
 
+**Dependencies:** WS-D.1.3d (auth rate limiting/lockout), WS-D.1.4c (login flow), WS-O.4.1 (turnstile/PoW for repeated abuse).
+
 ---
 
 ### WS-O.1.2b Session fixation test
@@ -133,6 +150,8 @@ Implement a test that verifies session ID regeneration after authentication. The
 **Testing:**
 - Integration: Record session ID before login. Authenticate. Verify new session ID. Use old session ID to access a protected endpoint -- verify rejection.
 
+**Dependencies:** WS-D.1.3b (session creation), WS-D.1.3e (session rotation on privilege change).
+
 ---
 
 ### WS-O.1.2c Session hijacking prevention test
@@ -140,16 +159,18 @@ Implement a test that verifies session ID regeneration after authentication. The
 **Ref:** Sections 25.2, 25.3
 
 **Description:**
-Implement a test that verifies session cookie security attributes. The test inspects the `Set-Cookie` header on authentication responses and verifies: (1) `HttpOnly` flag is present (prevents JavaScript access); (2) `Secure` flag is present (cookies sent only over HTTPS); (3) `SameSite=Strict` is set (prevents cross-site request attachment) or `SameSite=Lax` with CSRF token for cross-site posts; (4) cookie `Path` is set to the minimum required scope; (5) cookie `Max-Age` or `Expires` is set to a reasonable session duration. The test also verifies that session tokens are not transmitted in URLs, local storage, or non-HttpOnly cookies.
+Implement a test that verifies session cookie security attributes. The test inspects the `Set-Cookie` header on authentication responses and verifies: (1) `HttpOnly` flag is present (prevents JavaScript access); (2) `Secure` flag is present (cookies sent only over HTTPS); (3) `SameSite=Strict` is set (prevents cross-site request attachment) or `SameSite=Lax` with CSRF token for cross-site posts; (4) cookie uses the `__Host-` prefix and `Path=/` minimum scope; (5) cookie `Max-Age` or `Expires` is set to a reasonable session duration. The test also verifies that session tokens are not transmitted in URLs, local storage, or non-HttpOnly cookies.
 
 **Acceptance criteria:**
 - Session cookies have `HttpOnly`, `Secure`, and `SameSite=Strict` (or `Lax` with CSRF).
-- Cookie `Path` is scoped appropriately.
+- Cookie uses the `__Host-` prefix and is scoped appropriately.
 - Session tokens are not present in URLs, localStorage, or non-HttpOnly cookies.
 - All assertions pass on both WebAuthn and email/password auth flows.
 
 **Testing:**
 - Integration: Authenticate and inspect response headers. Verify all cookie attributes. Attempt to read the session cookie from JavaScript (Playwright `page.evaluate`) -- verify failure (HttpOnly). Check localStorage and URL for session tokens -- verify absent.
+
+**Dependencies:** WS-D.1.3b (secure cookie session), WS-0.5.1 (HSTS/transport headers).
 
 ---
 
@@ -170,6 +191,8 @@ Implement a test that verifies used nonces and tokens are rejected on reuse. The
 **Testing:**
 - Integration: Execute a valid request with a CSRF token. Replay the same token -- verify rejection. Complete a WebAuthn authentication. Replay the challenge -- verify rejection. Complete a SIWE signing. Replay the signed message -- verify rejection.
 
+**Dependencies:** WS-0.5.2b (CSRF anti-replay nonces), WS-D.1.2a (WebAuthn challenge TTL), WS-L.2.3a (SIWE nonce store).
+
 ---
 
 ### WS-O.1.2e CSRF verification test
@@ -177,7 +200,7 @@ Implement a test that verifies used nonces and tokens are rejected on reuse. The
 **Ref:** Section 25.2
 
 **Description:**
-Implement a test that verifies all state-changing API requests require a valid CSRF token (via Hono CSRF middleware). The test: (1) identifies all state-changing endpoints (POST, PUT, PATCH, DELETE); (2) attempts each endpoint without a CSRF token; (3) verifies that all return 403 Forbidden; (4) attempts each endpoint with an invalid CSRF token; (5) verifies 403; (6) attempts with a valid CSRF token; (7) verifies success (200/201/204). The test also verifies that GET/HEAD/OPTIONS requests do not require CSRF tokens.
+Implement a test that verifies all state-changing API requests require a valid CSRF token (via Hono CSRF middleware). The test: (1) identifies all state-changing endpoints (POST, PUT, PATCH, DELETE); (2) attempts each endpoint without a CSRF token; (3) verifies that all return 403 Forbidden; (4) attempts each endpoint with an invalid CSRF token; (5) verifies 403; (6) attempts with a valid CSRF token; (7) verifies success (200/201/204). The test also verifies that GET/HEAD/OPTIONS requests do not require CSRF tokens, and that the CSRF comparison is constant-time.
 
 **Acceptance criteria:**
 - All state-changing endpoints (POST, PUT, PATCH, DELETE) require a CSRF token.
@@ -189,6 +212,8 @@ Implement a test that verifies all state-changing API requests require a valid C
 
 **Testing:**
 - Integration: Enumerate all state-changing routes. Attempt each without token, with invalid token, and with valid token. Verify expected responses.
+
+**Dependencies:** WS-0.5.2b (CSRF middleware), WS-0.3.3 (Hono app factory for route discovery).
 
 ---
 
@@ -208,6 +233,8 @@ Implement a test suite that verifies object-level authorization across all API e
 
 **Testing:**
 - Integration: Create two users. Authenticate as user A. Attempt to access each of user B's private resources. Verify rejection. Authenticate as user B. Verify own resource access succeeds.
+
+**Dependencies:** WS-D.1.6b (object-level authz helpers), WS-D.1.6c (audit logging).
 
 ---
 
@@ -229,6 +256,8 @@ Implement a test suite that verifies role-based access control (RBAC) across all
 **Testing:**
 - Integration: Create users with each role. Authenticate as each. Attempt to access endpoints at each role level. Verify correct access/denial patterns.
 
+**Dependencies:** WS-D.1.6b (RBAC middleware), WS-A.2.2 (steward role definitions).
+
 ---
 
 ### WS-O.1.3c Privilege escalation test
@@ -247,6 +276,8 @@ Implement a test suite that verifies users cannot escalate their own privileges.
 
 **Testing:**
 - Integration: Authenticate as a regular user. Attempt each escalation vector. Verify rejection. Query the database to confirm role is unchanged.
+
+**Dependencies:** WS-D.1.6b (authz), WS-O.1.3d (mass-assignment defense), WS-D.1.3b (server-side session).
 
 ---
 
@@ -267,6 +298,8 @@ Implement a test that verifies mass assignment protection on all API endpoints t
 **Testing:**
 - Integration: For each mutation endpoint, send a request with extra protected fields. Verify the request succeeds (for the valid fields) but the protected fields are not applied. Query the database to confirm.
 
+**Dependencies:** WS-D.1.1d (zod schemas with strict/strip), WS-0.2.2 (workspace boundaries for shared schemas).
+
 ---
 
 ### WS-O.1.4a Wallet-drainer phishing simulation
@@ -285,6 +318,8 @@ Implement a test that simulates wallet-drainer phishing attacks and verifies tha
 
 **Testing:**
 - E2E: Playwright injects drainer URLs into UGC. Navigates to the content. Verifies the interstitial appears. Verifies the warning text is specific. Verifies the drainer contract is flagged in a transaction preview.
+
+**Dependencies:** WS-G.4.2c (wallet-drainer link detection), WS-L.2.6 (transaction preview), WS-O.6.3 (updatable threat-intel list).
 
 ---
 
@@ -305,6 +340,8 @@ Implement a test that verifies blind signing is prevented in all wallet interact
 **Testing:**
 - E2E: Playwright walks through each signing flow (wallet link, payment, proposal, grant payout). Verifies the preview appears with all fields. Attempts to skip the preview -- verifies failure. Verifies EIP-712 format in the signing request.
 - Integration: Submit a signature with mismatched typed data -- verify backend rejection.
+
+**Dependencies:** WS-L.2.6 (transaction preview renderer), WS-L.2.4 (signature verification), WS-L.3.1 (preflight match check).
 
 ---
 
@@ -327,6 +364,8 @@ Implement a test that verifies a warning is shown when a user is sending to an u
 - E2E: Initiate a transaction to a new address. Verify the warning appears. Acknowledge the warning and complete the transaction. Initiate a transaction to a previously-used address. Verify no warning.
 - Integration: Check the recipient-recognition logic for known contracts, known recipients, and unknown addresses.
 
+**Dependencies:** WS-L.2.6 (preview), WS-L.3.1b-1 (contract allowlist), WS-M.2.3 (room-known recipients).
+
 ---
 
 ### WS-O.1.4d Contract-address allowlist test
@@ -345,6 +384,8 @@ Implement a test that verifies only allowlisted contract addresses pass the gate
 
 **Testing:**
 - Integration: Submit transactions to allowlisted, non-allowlisted, and EOA addresses. Verify correct preflight responses. Switch environment configuration, verify different allowlists apply.
+
+**Dependencies:** WS-L.3.1b-1 (contract-allowlist registry), WS-L.1.1a-1 (deployment manifest / pinned addresses).
 
 ---
 
@@ -365,6 +406,8 @@ Implement a test that verifies EIP-712 domain separation prevents cross-chain an
 
 **Testing:**
 - Integration: Generate signatures with each type of mismatch. Submit to the backend. Verify specific rejection reasons. Generate a valid signature. Verify acceptance.
+
+**Dependencies:** WS-L.2.4c (EIP-712 typed-data validation), WS-L.2.4d (shared typed-data registry).
 
 ---
 
@@ -387,6 +430,8 @@ Define and document the incident severity classification system. Severity levels
 **Testing:**
 - Review: Classification document exists and covers all categories. Each severity level has quantitative response/resolution targets. Examples are provided for each level.
 
+**Dependencies:** None (foundational doc); informs WS-O.2.1b-e.
+
 ---
 
 ### WS-O.2.1b Escalation paths
@@ -407,6 +452,8 @@ Define escalation paths for each incident severity level. The escalation path sp
 **Testing:**
 - Review: Escalation paths are documented and complete. Templates exist for each severity level. Treasury escalation is distinct from general escalation.
 - Drill: A tabletop exercise verifies the escalation path works for a simulated Sev1 and a simulated treasury incident.
+
+**Dependencies:** WS-O.2.1a (severity classification).
 
 ---
 
@@ -430,6 +477,8 @@ Define and test rollback procedures for every high-risk feature. Rollback proced
 - Integration: Execute each rollback procedure in staging. Measure time to effect. Verify the system is stable after rollback.
 - Drill: Quarterly rollback drill for at least one high-risk feature.
 
+**Dependencies:** WS-O.2.2 (emergency feature flags), WS-O.6.2 (backup/restore for DB rollback), WS-M.2.4 (treasury freeze).
+
 ---
 
 ### WS-O.2.1d Treasury incident procedure
@@ -452,6 +501,8 @@ Define and test the treasury incident response procedure per the spec's treasury
 - Drill: Tabletop exercise simulating a treasury incident. Walk through all seven phases. Verify roles, actions, and communication.
 - Integration: Test pause/resume of treasury operations via emergency flags. Test reconciliation worker against known divergence. Verify user-facing status message rendering.
 
+**Dependencies:** WS-O.2.2 (kill switches), WS-L.3.4 (reconciliation engine), WS-M.2.4 (treasury freeze), WS-N.2.1 (financial compliance case).
+
 ---
 
 ### WS-O.2.1e Post-incident review template
@@ -470,6 +521,52 @@ Define a structured post-incident review (PIR) template. The template includes: 
 
 **Testing:**
 - Review: Template is complete and covers all sections. A sample PIR using the template is reviewed for clarity and actionability.
+
+**Dependencies:** WS-O.2.1a (severity), WS-P.2.1 (transparency report inputs).
+
+---
+
+### WS-O.2.2a Emergency feature-flag infrastructure
+**ID:** WS-O.2.2a
+**Ref:** Sections 25.6, 29.7
+
+**Description:**
+Build the emergency feature-flag substrate that all kill switches and rollbacks depend on (referenced by WS-O.2.1c/d and mirrored in WS-L.3.5). Requirements: flags are evaluated server-side on every request and propagate to clients within one polling interval; flag state is stored in a fast, replicated store (Redis) with a durable audit trail; each flag has a scope dimension (global, per-region, per-room) with documented precedence (global overrides region overrides room); flag changes require an authenticated operator with the incident-responder role and are recorded with actor, timestamp, reason, and previous value; flags are fail-safe (if the flag store is unreachable, security-sensitive flags fail to the SAFE/disabled state); a read-only status surface shows current flag state to on-call. The substrate is independent of application deploys so a flag can be flipped without shipping code.
+
+**Acceptance criteria:**
+- A flag flip takes effect server-side immediately and on clients within one polling interval.
+- Scope precedence (global > region > room) is enforced and tested.
+- Every flag change is recorded with actor/timestamp/reason/previous value in an append-only audit log.
+- If the flag store is unreachable, security-sensitive flags evaluate to disabled (fail-closed).
+- Only incident-responder/admin roles can change flags; attempts by other roles are rejected and logged.
+
+**Testing:**
+- Integration: Flip a flag; assert server-side effect is immediate and client effect within the interval. Simulate flag-store outage; assert security-sensitive flags fail closed. Attempt a flag change as a non-privileged user; assert rejection.
+- Unit: Scope-precedence resolution across global/region/room combinations.
+
+**Dependencies:** WS-0.7.2 (Redis), WS-C.1.3c (client feature-flag store, fail-closed), WS-D.1.6b (role checks), WS-D.1.6c (audit log).
+
+---
+
+### WS-O.2.2b Kill switches for wallet, payment, action, treasury, and governance
+**ID:** WS-O.2.2b
+**Ref:** Sections 25.6, 29.7
+
+**Description:**
+Implement the five spec-mandated emergency kill switches on top of WS-O.2.2a: (1) wallet connection; (2) payment-intent creation; (3) action submission; (4) treasury execution; (5) governance voting. Each switch is independently togglable at global, per-region, and per-room scope, takes effect immediately, and when engaged produces a clear, accessible, localizable disabled-state message (coordinated with WS-N.1.2) rather than an opaque failure. Engaging a switch must not corrupt in-flight state: in-flight actions reach a safe terminal/paused state and are reconciled (WS-L.3.4). This task is the WS-O view of the same switches owned operationally in WS-L.3.5; the two MUST resolve to the same flag keys (single source of truth) to avoid drift.
+
+**Acceptance criteria:**
+- All five kill switches exist and are independently togglable at global/region/room scope.
+- Engaging any switch takes effect immediately and surfaces a specific disabled-state explanation.
+- In-flight operations reach a safe state and reconcile; no funds or records are lost or duplicated.
+- The five switches share flag keys with WS-L.3.5 (verified by a cross-reference test).
+- Crypto kill switches default to engaged (disabled) until a jurisdiction/feature is explicitly enabled (fail-closed).
+
+**Testing:**
+- Integration: Engage each switch; assert the corresponding flow is blocked with the correct message and in-flight items reconcile. Verify shared flag keys with WS-L.3.5.
+- E2E: Disabled-state UX is accessible (screen reader, focus) and localized.
+
+**Dependencies:** WS-O.2.2a (flag substrate), WS-L.3.5 (operational kill switches), WS-N.1.2 (disabled-state UX), WS-L.3.4 (reconciliation).
 
 ---
 
@@ -493,6 +590,8 @@ Configure the Vite/Rollup build pipeline to produce deterministic output. Two bu
 - CI: Build twice, `diff -r` the two `dist/` directories. Fail on any difference.
 - Manual: Build locally and compare against CI build output (should match given same toolchain versions).
 
+**Dependencies:** WS-0.3.1a/b (Vite base config + build validation), WS-0.1.4 (pinned toolchain via `.nvmrc`).
+
 ---
 
 ### WS-O.3.1b Content-hashed filenames
@@ -512,6 +611,8 @@ Verify that all output files from the Vite/Rollup build include content hashes i
 
 **Testing:**
 - Unit: Build the project. Verify filename patterns match `{name}-{hash}.{ext}`. Modify a source file. Rebuild. Verify the output hash changed. Rebuild without changes. Verify the hash is stable.
+
+**Dependencies:** WS-0.3.1a (Vite config), WS-O.3.1a (determinism).
 
 ---
 
@@ -533,6 +634,8 @@ Generate Subresource Integrity (SRI) hashes for all assets loaded by the applica
 **Testing:**
 - CI: Post-build step parses `index.html`, extracts integrity attributes, recomputes hashes from the referenced files, and verifies they match. Fail on mismatch or missing integrity.
 
+**Dependencies:** WS-0.3.1c (SRI manifest generation), WS-O.3.1a (deterministic output).
+
 ---
 
 ### WS-O.3.1d Inline script verification
@@ -551,6 +654,8 @@ Implement an automated CI check that verifies the production build output contai
 
 **Testing:**
 - CI: Parse all HTML files in `dist/`. Fail on any inline `<script>` or `<style>`.
+
+**Dependencies:** WS-0.3.1b (build validation), WS-0.6.1e (security audit job).
 
 ---
 
@@ -573,6 +678,8 @@ Integrate Sigstore/cosign signing into the CI/CD pipeline to sign build artifact
 - CI: Production build pipeline includes signing step. Verify signature exists after build. Run verification command against transparency log -- verify success.
 - Manual: Download a signed artifact. Run the verification command. Verify it passes.
 
+**Dependencies:** WS-O.3.1a (deterministic artifact), WS-0.6.1 (CI pipeline with OIDC).
+
 ---
 
 ### WS-O.3.2b In-toto attestations
@@ -592,6 +699,8 @@ Generate in-toto attestations for each build step in the CI/CD pipeline. Attesta
 **Testing:**
 - CI: Verify attestations are generated and signed after production builds. Verify attestation includes correct source commit and output hashes.
 - Manual: Verify the attestation chain from a served bundle back to the source commit.
+
+**Dependencies:** WS-O.3.2a (cosign signing), WS-O.3.2c (SBOM as input material).
 
 ---
 
@@ -613,6 +722,8 @@ Generate a Software Bill of Materials (SBOM) for every release. The SBOM lists a
 **Testing:**
 - CI: Verify SBOM is generated after production build. Verify SBOM lists all runtime dependencies. Verify SBOM format is valid (schema validation against SPDX or CycloneDX spec).
 
+**Dependencies:** WS-0.2.1 (pnpm lockfile), WS-0.4.4 (lockfile-lint).
+
 ---
 
 ### WS-O.3.2d License cross-check
@@ -633,20 +744,369 @@ Implement an automated license compatibility check that verifies all dependencie
 **Testing:**
 - CI: Run the license check. Verify zero incompatible or unknown licenses (or all are in the reviewed allowlist). Add a dependency with a proprietary license -- verify the check fails.
 
+**Dependencies:** WS-O.3.2c (SBOM), WS-0.1.2 (AGPL license posture).
+
+---
+
+## WS-O.4 Integrity and abuse defense (no device attestation)
+
+Because a PWA cannot use native device attestation, abuse defense is server-side and behavioral (Section 25.5). These tasks build the non-attestation defenses and the test harnesses that prove them.
+
+### WS-O.4.1 Bot/sock-account resistance
+**ID:** WS-O.4.1
+**Ref:** Section 25.5
+
+**Description:**
+Implement server-side, behavioral bot and sock-puppet resistance without device attestation. Components: (1) account-age and trust tiers (new accounts have reduced reach and rate limits that relax with established, non-abusive history); (2) a privacy-preserving challenge layer (Turnstile-style CAPTCHA and/or lightweight proof-of-work) triggered on risk signals such as burst registration, datacenter IP ranges, or anomalous velocity -- never on normal use; (3) behavioral anomaly scoring (registration velocity, action cadence, device/locale churn) that feeds the trust tier and the MFCI coordination signal; (4) WebAuthn as a strong, phishing-resistant trust booster that raises an account's tier. No mechanism uses device attestation or fingerprinting beyond coarse, privacy-respecting signals; raw signals are not retained beyond what the abuse model needs.
+
+**Acceptance criteria:**
+- New accounts start in a low trust tier with reduced reach and stricter rate limits; tiers relax with verified, non-abusive history.
+- Challenge prompts fire only on documented risk signals, not on normal use; solving a challenge does not require an account.
+- Behavioral anomaly scores are produced and exposed to MFCI (WS-H.3) and moderation (WS-J.2.2c) without exposing private attention behavior.
+- WebAuthn enrollment measurably raises trust tier.
+- The defense degrades gracefully: if the challenge provider is unavailable, the system tightens rate limits rather than failing open.
+
+**Testing:**
+- Integration: Simulate burst registration from a datacenter range; assert challenges fire and reach is throttled. Establish a clean history; assert tier relaxation. Enroll WebAuthn; assert tier increase.
+- Unit: Trust-tier state machine and risk-trigger thresholds.
+
+**Dependencies:** WS-D.1.1 (User/account state), WS-D.1.2 (WebAuthn), WS-E.1.3c (rate limiting), WS-H.3 (MFCI consumer).
+
+**Observability:** Emit metrics for challenge rate, challenge solve rate, tier distribution, and false-positive appeals; alert on challenge-rate spikes (possible attack or provider issue).
+
+---
+
+### WS-O.4.2 Forged-attention-event defense
+**ID:** WS-O.4.2
+**Ref:** Sections 25.5, 19.2
+
+**Description:**
+Harden the attention-event ingestion path (WS-E.1.3) against forgery and inflation so that client aggregates are treated as hints, never sole truth. Components: (1) server-side validation of event shape, bounds, and plausibility (e.g., dwell within physical limits, per-item caps re-enforced server-side); (2) replay protection (nonce + timestamp window) and per-user/per-IP rate limits; (3) lightweight integrity tokens binding an event batch to an authenticated session without device attestation; (4) cross-checks that flag implausible aggregates (e.g., source-open without a corresponding fetch) for downweighting and MFCI review; (5) strict rejection of any attention field that could encode wealth/payment data (defense-in-depth for no-pay-to-rank). This task is the security view of WS-E.1.3; the two share the same endpoint and validators.
+
+**Acceptance criteria:**
+- Events failing shape/bounds/plausibility validation are rejected or quarantined, never silently trusted.
+- Replayed event batches (same nonce) are rejected; rate limits apply per user and per IP.
+- Server re-enforces per-item dwell caps regardless of client-reported values.
+- Implausible aggregates are downweighted and flagged to MFCI.
+- No financial field can enter the attention path (schema denylist test passes).
+
+**Testing:**
+- Integration: Submit forged/inflated/replayed batches; assert rejection/quarantine and no ranking effect. Submit a batch with an injected wallet field; assert schema rejection.
+- Unit: Plausibility validators and cap re-enforcement.
+
+**Dependencies:** WS-E.1.3 (ingestion API + replay protection), WS-I.2.1b (schema-level financial denylist), WS-H.3 (MFCI), WS-C.4 (in-browser processing contract).
+
+---
+
+### WS-O.4.3 Coordinated-abuse and brigading hooks
+**ID:** WS-O.4.3
+**Ref:** Sections 25.5, 29.3
+
+**Description:**
+Provide the security-side integration that turns invariant signals into protective action for brigading, coordinated reporting, and harassment raids, per the coordination-incident workflow (Section 29.3). Components: (1) report-delay/aggregation mechanism so a sudden burst of reports on one target does not produce immediate automated action (mitigates weaponized reporting); (2) wiring from MFCI (WS-H.3) and tropical cascade (WS-H.7.2) risk states to ranking slow/freeze (WS-I.2.7) and the integrity analyst queue (WS-J.2); (3) target-protection actions (distribution freeze, surfacing protective controls to the targeted user) on harassment-raid detection; (4) a clear human-review path so automated freezes are confirmable, reversible, and appealable. Sub-minute response uses cheap statistics; the exact fiber test confirms (WS-H.3.3).
+
+**Acceptance criteria:**
+- A burst of reports on one target is delayed/aggregated rather than auto-actioned; the workflow matches Section 29.3.
+- MFCI/cascade risk states drive ranking slow/freeze and create analyst cases with preserved margins/baselines.
+- Harassment-raid detection triggers target protection and surfaces controls to the targeted user.
+- Every automated protective action is reversible and appealable (notice + appeal).
+
+**Testing:**
+- Integration: Simulate a coordinated report burst; assert delay/aggregation and case creation, not immediate action. Simulate a synchronized cascade; assert ranking freeze and analyst case. Verify appeal path reverses a false-positive freeze.
+
+**Dependencies:** WS-H.3 (MFCI), WS-H.7.2 (tropical cascade), WS-I.2.7 (kill switch/freeze), WS-J.1.1d/2 (report handling, console), WS-J.1.3 (appeals).
+
+---
+
+### WS-O.4.4 Phishing-PWA and look-alike-domain defense
+**ID:** WS-O.4.4
+**Ref:** Sections 25.5, 20.2
+
+**Description:**
+Defend against phishing PWAs and look-alike domains -- the web equivalent of repackaged-build threats. Components: (1) prominent publication of Licio's canonical domain and an onboarding/anti-impersonation step that teaches users to verify it; (2) the wallet risk interstitial reiterates the canonical domain before any signing flow; (3) signed provenance (WS-O.3.2) so the authentic bundle is publicly verifiable; (4) optional monitoring for newly registered look-alike domains and a takedown intake path; (5) a documented user-reporting channel for suspected fake "Licio" installs. No defense relies on app-store gatekeeping (out of scope by design).
+
+**Acceptance criteria:**
+- The canonical domain is published prominently and reinforced in onboarding and the wallet interstitial.
+- Signing flows display the canonical-domain reminder (verified in WS-L.2.6 previews).
+- A look-alike-domain monitoring + takedown intake path is documented and operational.
+- A user-reporting channel for fake installs exists and routes to T&S.
+
+**Testing:**
+- E2E: Onboarding and wallet interstitial display the canonical-domain verification step (accessible, localized).
+- Review: Takedown intake and user-reporting runbooks exist and are linked from support.
+
+**Dependencies:** WS-O.3.2 (signed provenance), WS-L.2.6 (wallet interstitial), WS-A.2.1 (jurisdiction/onboarding posture), WS-N.2.3 (support workflows).
+
+---
+
+### WS-O.4.5 Model-gaming and adversarial-testing defense
+**ID:** WS-O.4.5
+**Ref:** Sections 25.5, 24.4
+
+**Description:**
+Reduce the gameability of ranking and invariant features. Components: (1) feature caps and saturation already in PWAtt (WS-E.2.3) are stress-tested for manipulation resistance; (2) randomized audits that periodically sample ranking decisions and re-score them with held-out/perturbed features to detect over-fitting to a single gameable signal; (3) an adversarial test corpus that simulates known gaming strategies (burst commenting, synthetic source-opens, threshold-gaming of trending) and asserts they do not gain disproportionate reach; (4) a feedback loop filing detections to MFCI/Braid (WS-H.7.3) and the integrity queue. These tests run before any ranking-power promotion (M3 gate).
+
+**Acceptance criteria:**
+- An adversarial corpus of known gaming strategies is maintained and runs against the ranking/invariant pipeline.
+- No simulated gaming strategy achieves disproportionate reach beyond defined bounds.
+- Randomized audits run on a schedule and surface anomalies to the integrity queue.
+- Results gate ranking-power promotion at M3.
+
+**Testing:**
+- Integration: Run the adversarial corpus against the scoring pipeline; assert reach bounds hold. Run a randomized audit; assert anomalies are surfaced.
+
+**Dependencies:** WS-E.2.3 (PWAtt saturation/caps), WS-H.3 (MFCI), WS-H.7.3 (braid agenda dynamics), WS-I.3 (neutrality suite), WS-I.2.7 (kill switch).
+
+---
+
+## WS-O.5 Backend hardening, secrets, and key management
+
+### WS-O.5.1 Secrets management and rotation
+**ID:** WS-O.5.1
+**Ref:** Sections 25.2, 25.4, 25.6
+
+**Description:**
+Establish secrets management so no secret, signing key, or seed phrase is ever embedded in the client bundle (Section 25.2 #7) and server secrets are centrally managed. Components: (1) a secrets store (cloud KMS/secret manager) as the single source of truth; server reads secrets at boot via the validated env schema (WS-0.5.3), never from source control; (2) rotation procedures and schedules for each secret class (DB credentials, session signing keys, VAPID keys, service-to-service tokens, indexer/gateway/treasury operator keys); (3) CI secret scanning (WS-0.6) blocks any secret committed to the repo; (4) a documented "no private keys/seed phrases ever requested, stored, transmitted, or logged" rule enforced by a log-redaction policy (WS-0.3.8) covering key/seed-phrase field names.
+
+**Acceptance criteria:**
+- All server secrets come from the secrets store; none are present in the repo or client bundle (verified by build-output scan and secret scanning).
+- Each secret class has a documented rotation procedure and schedule; rotation is rehearsed at least once.
+- Private keys/seed phrases are never logged: log-redaction covers their field names and a test asserts redaction.
+- CI fails if a secret is committed.
+
+**Testing:**
+- CI: Secret scanner over the repo and build output; assert zero findings. Log-redaction unit test for key/seed-phrase fields.
+- Drill: Execute one secret rotation in staging; verify no downtime and old secret invalidated.
+
+**Dependencies:** WS-0.5.3 (env validation), WS-0.3.8 (pino redaction), WS-0.6.2 (dependency/secret scanning).
+
+**Security:** Separation of duties: the operator who can read a secret cannot also approve its rotation policy unilaterally for treasury keys (see WS-O.5.2).
+
+---
+
+### WS-O.5.2 Least-privilege service keys and separation of duties
+**ID:** WS-O.5.2
+**Ref:** Section 25.6
+
+**Description:**
+Apply least privilege to every service identity and enforce separation of duties for high-value keys. Components: (1) distinct, minimally-scoped credentials for the event indexer, gateway workers, treasury operators, and deployment scripts -- no shared "god" credential; (2) platform signing keys (if any) stored in HSM/KMS with access policies and dual control; (3) treasury execution above low thresholds requires multisig and timelock (coordinated with WS-M.2.3); (4) per-identity audit logging of privileged operations; (5) periodic data-access reviews that re-justify each identity's scope. No human holds a single credential that can both move treasury funds and approve the policy that authorizes the move.
+
+**Acceptance criteria:**
+- Each service identity has a documented, minimal scope; no shared high-privilege credential exists.
+- Platform signing keys are in HSM/KMS with dual-control access policies.
+- Treasury execution above the configured threshold requires multisig + timelock.
+- Privileged operations are audit-logged per identity; a periodic access review is scheduled and recorded.
+- A separation-of-duties matrix shows no single actor can both execute and authorize a treasury movement.
+
+**Testing:**
+- Integration: Attempt a cross-scope operation with a service identity; assert denial. Attempt treasury execution below multisig threshold with a single key; assert it requires the second approval/timelock.
+- Review: Access-review record and separation-of-duties matrix exist.
+
+**Dependencies:** WS-O.5.1 (secrets store), WS-M.2.3 (spend auth/timelocks), WS-L.3 (gateway/indexer identities), WS-D.1.6c (audit log).
+
+---
+
+### WS-O.5.3 Encryption at rest, audit logging, and data-access reviews
+**ID:** WS-O.5.3
+**Ref:** Section 25.4
+
+**Description:**
+Implement backend data-protection controls. Components: (1) encryption at rest for sensitive stores (user PII, privacy settings, compliance cases, wallet-link table) using managed encryption with documented key custody; (2) append-only, tamper-evident audit logging for security-relevant actions (auth, role changes, moderation, financial, privacy requests) -- consistent with WS-D.1.6c, extended to all sensitive subsystems; (3) scheduled data-access reviews that re-justify which roles can read which sensitive datasets; (4) least-privilege database roles (app role cannot DROP/ALTER; migration role is separate). Audit logs themselves are access-controlled and retained per the retention policy (WS-E.1.4 / Section 22.4).
+
+**Acceptance criteria:**
+- Sensitive tables are encrypted at rest with documented key custody.
+- All security-relevant actions write to an append-only, tamper-evident audit log.
+- A scheduled data-access review exists with a recorded last-run and owner.
+- Database roles follow least privilege (separate app vs migration roles; app role lacks DDL).
+
+**Testing:**
+- Integration: Verify sensitive tables are encrypted; verify the app DB role cannot run DDL. Generate each security-relevant action; assert an audit record is written and is append-only.
+- Review: Data-access review record exists.
+
+**Dependencies:** WS-0.7.2 (Postgres config), WS-D.1.6c (audit logging baseline), WS-E.1.4 (retention jobs), WS-N.2.1 (compliance case store).
+
+---
+
+### WS-O.5.4 Dependency, secret, and static/dynamic security scanning in CI
+**ID:** WS-O.5.4
+**Ref:** Sections 25.2, 25.4
+
+**Description:**
+Stand up the continuous supply-chain and code-security scanning that backstops WS-0's tooling. Components: (1) dependency vulnerability scanning (e.g., `pnpm audit` + advisory database) failing CI on high/critical with a documented triage/allowlist process; (2) secret scanning on every PR and on the full history (push-protection); (3) SAST (e.g., CodeQL) on application code with security queries; (4) optional DAST against a staging deployment for the OWASP top risks; (5) lockfile-lint (WS-0.4.4) and provenance checks gating release. Findings route to a security backlog with severity-based SLAs aligned to WS-O.2.1a.
+
+**Acceptance criteria:**
+- High/critical dependency vulnerabilities fail CI unless explicitly triaged with an expiry-dated allowlist entry.
+- Secret scanning runs on PRs and history with push protection enabled.
+- SAST runs on every PR to application code; new high-severity findings block merge.
+- DAST runs against staging on a schedule (where applicable) and files findings.
+- Findings have severity-based remediation SLAs.
+
+**Testing:**
+- CI: Introduce a known-vulnerable dependency in a test branch; assert CI fails. Commit a fake secret; assert push protection blocks it. Introduce a SAST-detectable flaw; assert the check fails.
+
+**Dependencies:** WS-0.4.4 (lockfile-lint), WS-0.6.1e (security audit job), WS-0.6.2 (dependency scanning), WS-O.2.1a (severity/SLA).
+
+---
+
+## WS-O.6 Reliability and disaster recovery
+
+### WS-O.6.1 Service-level objectives, monitoring, and alerting
+**ID:** WS-O.6.1
+**Ref:** Section 25.4
+
+**Description:**
+Define SLOs and stand up monitoring/alerting so availability and latency regressions are detected before users report them. Components: (1) SLOs for API availability and latency, ranking-pipeline freshness, and Core Web Vitals (the p75 budgets owned by WS-P.1.1d / WS-C.5.1); (2) structured-log-based and metric-based dashboards (built on pino logging from WS-0.3.8) for request rates, error rates, saturation, and queue depths; (3) alerting with severity mapping to WS-O.2.1a and routing to on-call (WS-O.2.1b); (4) synthetic checks for critical user journeys (load feed, submit contribution, sign-in) from multiple regions. Error budgets inform release gating.
+
+**Acceptance criteria:**
+- SLOs are documented with targets and error budgets for availability, latency, freshness, and Core Web Vitals.
+- Dashboards show request/error/saturation/queue metrics in real time.
+- Alerts fire on SLO burn and route to on-call with the correct severity.
+- Synthetic checks cover the critical journeys and run continuously.
+
+**Testing:**
+- Integration: Inject latency/error in staging; assert alert fires with correct severity and routing. Verify synthetic checks detect a simulated outage of a critical journey.
+
+**Dependencies:** WS-0.3.8 (pino structured logging), WS-P.1.1d (Core Web Vitals), WS-C.5.1 (RUM budgets), WS-O.2.1a/b (severity/escalation).
+
+---
+
+### WS-O.6.2 Backups and restore drills
+**ID:** WS-O.6.2
+**Ref:** Section 25.4
+
+**Description:**
+Implement backups and prove recoverability. Components: (1) automated, encrypted backups of PostgreSQL (and any durable state) with a documented RPO; (2) point-in-time recovery configured where supported; (3) periodic restore drills into an isolated environment that verify backups are usable and measure RTO; (4) documented runbooks for partial (single-table) and full restore; (5) backup integrity checks (restore + checksum) so a silently-corrupt backup is detected. Database migration rollback (WS-O.2.1c) depends on tested down migrations plus these backups as a safety net.
+
+**Acceptance criteria:**
+- Encrypted backups run automatically on a schedule meeting the documented RPO.
+- A restore drill is performed on a schedule and recorded, with measured RTO meeting target.
+- Restore runbooks exist for partial and full restore and are validated in the drill.
+- Backup integrity is verified (a restore + checksum) -- corrupt backups are detected and alerted.
+
+**Testing:**
+- Drill: Restore the latest backup into an isolated environment; verify data integrity and measure RTO. Simulate a corrupt backup; assert integrity check fails and alerts.
+
+**Dependencies:** WS-0.7.2 (Postgres), WS-O.2.1c (DB rollback), WS-O.5.3 (encryption/key custody).
+
+---
+
+### WS-O.6.3 Chain monitoring and threat-intelligence feeds
+**ID:** WS-O.6.3
+**Ref:** Sections 25.6, 29.7
+
+**Description:**
+Monitor on-chain and threat-intel signals that feed wallet/treasury security and incident response. Components: (1) monitoring of event ingestion lag, reorgs, deposits, withdrawals, and challenge windows (coordinated with the reorg-aware indexer WS-L.3.3 and reconciliation WS-L.3.4); (2) alerts on indexer divergence, suspicious treasury movement, high-risk recipients, and contract anomalies that open a treasury incident case (WS-O.2.1d); (3) an updatable wallet-drainer/threat-intel list backing the UGC interstitial (WS-O.1.4a) and transaction-preview risk labels, refreshable without a deploy; (4) suspicious-call monitoring on allowlisted contracts. Privacy boundary: monitoring uses on-chain/operational data, never users' private attention behavior.
+
+**Acceptance criteria:**
+- Reorg, ingestion-lag, deposit/withdrawal, and challenge-window events are monitored with alert thresholds.
+- Indexer divergence or suspicious movement automatically opens a treasury incident case (WS-O.2.1d).
+- The drainer/threat-intel list is updatable without a deploy and is consumed by WS-O.1.4a and transaction previews.
+- Monitoring does not read or expose private attention behavior.
+
+**Testing:**
+- Integration: Simulate a reorg and an indexer divergence; assert alerts and case creation. Update the threat-intel list; assert the interstitial reflects it without a deploy.
+
+**Dependencies:** WS-L.3.3 (reorg-aware indexer), WS-L.3.4 (reconciliation), WS-O.2.1d (treasury incident), WS-O.1.4a (drainer interstitial).
+
+---
+
+### WS-O.6.4 External audit and bug-bounty program
+**ID:** WS-O.6.4
+**Ref:** Sections 25.6, 20.2
+
+**Description:**
+Operationalize external security assurance. Components: (1) scope and schedule external audits of wallet signature flows, gateway, contract/L2 interactions, indexer, reconciliation, and treasury before mainnet funds and after material law-pack/contract changes (coordinated with the WS-L.1.3 audit-scope definition); (2) run a bug-bounty program with a published scope, safe-harbor language, severity rubric, and payout tiers; (3) a triage pipeline that routes external findings into the security backlog with WS-O.2.1a severities and SLAs; (4) re-test and disclosure procedures. Real-funds milestones (M5) are gated on a clean external audit and a live bounty.
+
+**Acceptance criteria:**
+- External audit scope and cadence are documented; an audit is completed before any real-funds pilot.
+- A bug-bounty program is live with published scope, safe harbor, severity rubric, and payouts.
+- External findings are triaged into the backlog with severities and SLAs and re-tested on fix.
+- M5 gating on clean audit + live bounty is enforced in the launch-readiness register.
+
+**Testing:**
+- Review: Audit scope, bounty policy, and triage runbook exist; M5 gate references them. Submit a test finding through the triage pipeline; verify routing and SLA assignment.
+
+**Dependencies:** WS-L.1.3 (audit requirement/bounty scope), WS-O.2.1a (severity/SLA), WS-M.2 (treasury), WS-N (compliance sign-off).
+
+---
+
+## Task dependency summary
+
+| ID | Task | Key dependencies |
+|---|---|---|
+| WS-O.1.1a | OWASP XSS vector testing | WS-G.4.1/4.2a-d, WS-0.5.1, WS-0.4.3 |
+| WS-O.1.1b | Trusted Types violation detection | WS-0.5.1/5.4, WS-G.4.2a |
+| WS-O.1.1c | CSP bypass testing | WS-0.5.1a/b, WS-G.4.2 |
+| WS-O.1.1d | Code audit (unsafe DOM) | WS-0.4.1b, WS-0.6.1e |
+| WS-O.1.2a | Credential brute-force test | WS-D.1.3d, WS-D.1.4c, WS-O.4.1 |
+| WS-O.1.2b | Session fixation test | WS-D.1.3b, WS-D.1.3e |
+| WS-O.1.2c | Session hijacking prevention | WS-D.1.3b, WS-0.5.1 |
+| WS-O.1.2d | Token replay test | WS-0.5.2b, WS-D.1.2a, WS-L.2.3a |
+| WS-O.1.2e | CSRF verification test | WS-0.5.2b, WS-0.3.3 |
+| WS-O.1.3a | Object-level authorization test | WS-D.1.6b/c |
+| WS-O.1.3b | Role-based access test | WS-D.1.6b, WS-A.2.2 |
+| WS-O.1.3c | Privilege escalation test | WS-D.1.6b, WS-O.1.3d |
+| WS-O.1.3d | Mass assignment test | WS-D.1.1d, WS-0.2.2 |
+| WS-O.1.4a | Wallet-drainer phishing simulation | WS-G.4.2c, WS-L.2.6, WS-O.6.3 |
+| WS-O.1.4b | Blind-signing prevention | WS-L.2.6, WS-L.2.4, WS-L.3.1 |
+| WS-O.1.4c | Unknown-recipient warning | WS-L.2.6, WS-L.3.1b-1, WS-M.2.3 |
+| WS-O.1.4d | Contract-address allowlist test | WS-L.3.1b-1, WS-L.1.1a-1 |
+| WS-O.1.4e | EIP-712 domain-separation test | WS-L.2.4c/d |
+| WS-O.2.1a | Severity classification | (foundational) |
+| WS-O.2.1b | Escalation paths | WS-O.2.1a |
+| WS-O.2.1c | Rollback procedures | WS-O.2.2, WS-O.6.2, WS-M.2.4 |
+| WS-O.2.1d | Treasury incident procedure | WS-O.2.2, WS-L.3.4, WS-M.2.4, WS-N.2.1 |
+| WS-O.2.1e | Post-incident review template | WS-O.2.1a, WS-P.2.1 |
+| WS-O.2.2a | Emergency feature-flag infrastructure | WS-0.7.2, WS-C.1.3c, WS-D.1.6b/c |
+| WS-O.2.2b | Kill switches (5) | WS-O.2.2a, WS-L.3.5, WS-N.1.2, WS-L.3.4 |
+| WS-O.3.1a | Deterministic build output | WS-0.3.1a/b, WS-0.1.4 |
+| WS-O.3.1b | Content-hashed filenames | WS-0.3.1a, WS-O.3.1a |
+| WS-O.3.1c | SRI hash generation | WS-0.3.1c, WS-O.3.1a |
+| WS-O.3.1d | Inline script verification | WS-0.3.1b, WS-0.6.1e |
+| WS-O.3.2a | Sigstore/cosign signatures | WS-O.3.1a, WS-0.6.1 |
+| WS-O.3.2b | In-toto attestations | WS-O.3.2a, WS-O.3.2c |
+| WS-O.3.2c | SBOM generation | WS-0.2.1, WS-0.4.4 |
+| WS-O.3.2d | License cross-check | WS-O.3.2c, WS-0.1.2 |
+| WS-O.4.1 | Bot/sock-account resistance | WS-D.1.1/1.2, WS-E.1.3c, WS-H.3 |
+| WS-O.4.2 | Forged-attention-event defense | WS-E.1.3, WS-I.2.1b, WS-H.3, WS-C.4 |
+| WS-O.4.3 | Coordinated-abuse/brigading hooks | WS-H.3, WS-H.7.2, WS-I.2.7, WS-J.1/2 |
+| WS-O.4.4 | Phishing-PWA/look-alike defense | WS-O.3.2, WS-L.2.6, WS-A.2.1, WS-N.2.3 |
+| WS-O.4.5 | Model-gaming/adversarial testing | WS-E.2.3, WS-H.3, WS-H.7.3, WS-I.3 |
+| WS-O.5.1 | Secrets management and rotation | WS-0.5.3, WS-0.3.8, WS-0.6.2 |
+| WS-O.5.2 | Least-privilege keys / SoD | WS-O.5.1, WS-M.2.3, WS-L.3, WS-D.1.6c |
+| WS-O.5.3 | Encryption at rest / audit / reviews | WS-0.7.2, WS-D.1.6c, WS-E.1.4, WS-N.2.1 |
+| WS-O.5.4 | Dependency/secret/SAST-DAST scanning | WS-0.4.4, WS-0.6.1e/6.2, WS-O.2.1a |
+| WS-O.6.1 | SLOs, monitoring, alerting | WS-0.3.8, WS-P.1.1d, WS-C.5.1, WS-O.2.1a/b |
+| WS-O.6.2 | Backups and restore drills | WS-0.7.2, WS-O.2.1c, WS-O.5.3 |
+| WS-O.6.3 | Chain monitoring / threat-intel | WS-L.3.3/3.4, WS-O.2.1d, WS-O.1.4a |
+| WS-O.6.4 | External audit and bug bounty | WS-L.1.3, WS-O.2.1a, WS-M.2, WS-N |
+
+---
+
 ## Workstream definition of done
 
 WS-O is complete when ALL of the following conditions hold:
 
-1. **Zero XSS vectors:** The full XSS test suite passes with zero vectors reaching the DOM. CSP, Trusted Types, DOMPurify, and Markdown AST sanitization are all enforced and tested together.
+1. **Zero XSS vectors:** The full XSS test suite (incl. mXSS/DOM-clobbering/SVG/Markdown families) passes with zero vectors reaching the DOM. CSP, Trusted Types (named policy only), DOMPurify, and Markdown AST sanitization are enforced and tested together (WS-O.1.1a-d).
 
-2. **Auth attack mitigation:** Authentication attacks (credential stuffing, brute force, session fixation, session hijacking) are mitigated with rate limiting, account lockout, secure session management, and monitoring.
+2. **Auth attack mitigation:** Credential stuffing, brute force, session fixation, session hijacking, token replay, and CSRF are tested and mitigated with rate limiting, lockout, secure `__Host-` cookies, rotation, and constant-time CSRF checks (WS-O.1.2a-e).
 
-3. **API authorization coverage:** Authorization is tested for every API endpoint. Horizontal and vertical privilege escalation attempts are rejected. Unauthenticated access to protected endpoints returns 401/403.
+3. **API authorization coverage:** Object-level, RBAC, privilege-escalation, and mass-assignment defenses are tested for every endpoint; unauthorized access returns 403/404 with no existence leakage (WS-O.1.3a-d).
 
-4. **Wallet security:** Wallet-related security is tested, including transaction signing verification, replay protection, gateway preflight enforcement, and private key non-exposure.
+4. **Wallet security:** Drainer phishing, blind-signing prevention, unknown-recipient warnings, contract allowlist, and EIP-712 domain separation are tested; the application never generates raw-hex signing requests (WS-O.1.4a-e).
 
-5. **Incident playbook:** The incident response playbook is documented and tested via tabletop exercise. Escalation paths, communication templates, and recovery procedures are validated.
+5. **Integrity without attestation:** Bot/sock resistance, forged-attention-event defense, coordinated-abuse hooks, phishing-PWA defense, and model-gaming defense are implemented and tested entirely server-side/behaviorally -- no device attestation or invasive fingerprinting (WS-O.4.1-4.5).
 
-6. **Reproducible builds with SRI:** Production builds are reproducible (same source produces identical output). All served scripts and stylesheets have Subresource Integrity (SRI) hashes.
+6. **Emergency controls:** The feature-flag substrate and all five kill switches (wallet, payment, action submission, treasury execution, governance voting) work at global/region/room scope, fail closed, share flag keys with WS-L.3.5, and underpin rollback and treasury incident response (WS-O.2.2a/b).
 
-7. **SBOM generated:** A Software Bill of Materials (SBOM) in SPDX or CycloneDX format is generated for every production build, listing all runtime dependencies with name, version, license, source, and hash.
+7. **Incident readiness:** Severity classification, escalation paths, rollback procedures, the seven-phase treasury incident procedure, and the PIR template are documented and validated via tabletop and rollback drills (WS-O.2.1a-e).
+
+8. **Backend hardening:** Secrets come only from the managed store (never the client bundle or repo), with rotation rehearsed; least-privilege service identities and separation of duties are enforced for treasury keys; sensitive data is encrypted at rest with append-only audit logging; dependency/secret/SAST(/DAST) scanning gates CI (WS-O.5.1-5.4).
+
+9. **Reliability and DR:** SLOs with error budgets, monitoring/alerting, synthetic journey checks, automated encrypted backups, and a recorded restore drill (measured RTO/RPO) are in place; chain monitoring feeds treasury incident response (WS-O.6.1-6.3).
+
+10. **Reproducible builds with provenance:** Two builds from one commit are byte-identical; all served scripts/styles carry SRI; production builds are cosign-signed with in-toto attestations in an append-only log; an SBOM is generated and license-cross-checked against AGPL-3.0-or-later; zero inline scripts/styles ship (WS-O.3.1a-d, WS-O.3.2a-d).
+
+11. **External assurance:** External audit scope is defined and a clean audit plus a live bug bounty gate the M5 real-funds pilot (WS-O.6.4).
+
+12. **No secrets in client; no private keys ever:** The bundle contains no secret, signing key, or seed phrase; private keys/seed phrases are never requested, stored, transmitted, or logged (redaction tested).
