@@ -1,10 +1,12 @@
 # Licio Workstream Plan
 
-**Document status:** v1.0 — Implementation-ready workstream plan
+**Document status:** v2.0 — Refined, expanded, and cross-validated against SPEC.md v0.6
 **Source specification:** docs/SPEC.md v0.6
 **Prepared:** June 7, 2026
 
-This document decomposes the Licio specification into atomic, dependency-ordered workstreams. Each task targets one to three engineering days and is independently reviewable, testable, and reversible. The plan follows the spec's milestone structure (M0–M6), workstream labels (A–P), and the critical-path ordering from Section 30.2.
+This document decomposes the Licio specification into atomic, dependency-ordered workstreams. Each task targets one to three engineering days and is independently reviewable, testable, and reversible per Section 30.8. The plan follows the spec's milestone structure (M0–M6), workstream labels (A–P), and the critical-path ordering from Section 30.2.
+
+**Conventions:** Each task has a unique ID (e.g., WS-0.1.1), a definition of done, and a spec-section reference. Dependencies are explicit. Security rationale is provided where the spec mandates it. Tasks that exceed three days are split into sub-tasks.
 
 ## Table of contents
 
@@ -15,7 +17,7 @@ This document decomposes the Licio specification into atomic, dependency-ordered
 - **WS-D.** Identity, accounts, and privacy
 - **WS-E.** Event pipeline and PWAtt
 - **WS-F.** Ingestion, source model, and search
-- **WS-G.** Forum and conversation
+- **WS-G.** Forum, conversation, rooms, and lenses
 - **WS-H.** Core invariant services
 - **WS-I.** Ranking and distribution
 - **WS-J.** Trust, safety, and abuse operations
@@ -25,88 +27,54 @@ This document decomposes the Licio specification into atomic, dependency-ordered
 - **WS-N.** Compliance, finance, and distribution readiness
 - **WS-O.** Security, reliability, and incident response
 - **WS-P.** Experimentation, metrics, and launch operations
-- **Cross-cutting.** Dependency map and milestone gates
+- **Cross-cutting.** Dependency map, milestone gates, parallel execution, and risk mitigations
 
 ---
 
 # WS-0. Repository foundation and secure development environment
 
-This workstream establishes the monorepo structure, toolchain, security baseline, and CI pipeline. Every subsequent workstream depends on WS-0 being correct. No feature code is written until WS-0 is complete.
+Every subsequent workstream depends on WS-0. No feature code is written until WS-0 is complete.
 
-**Milestone:** M0 (Planning)
-**Priority:** 0 — absolute prerequisite
+**Milestone:** M0 | **Priority:** 0
 
 ## WS-0.1 Repository hygiene
 
 ### WS-0.1.1 Create .gitignore
+**Ref:** Section 25.2 (no secrets in client)
 
-Create a comprehensive `.gitignore` covering:
-- Node.js artifacts (`node_modules/`, `dist/`, `build/`, `.cache/`)
-- Environment files (`.env`, `.env.local`, `.env.*.local`)
-- IDE configuration (`.vscode/`, `.idea/`, `*.swp`, `*.swo`)
-- OS files (`.DS_Store`, `Thumbs.db`)
-- Test coverage and reports (`coverage/`, `test-results/`, `playwright-report/`)
-- TypeScript build cache (`*.tsbuildinfo`, `.tsbuildinfo`)
-- pnpm debug logs (`*.log`)
-- Secrets and credentials (`*.pem`, `*.key`, `*.p12`)
-- Vite output (`.vite/`)
-- Drizzle artifacts (`drizzle/meta/`)
+Covers: `node_modules/`, `dist/`, `build/`, `.cache/`, `.vite/`; `.env`, `.env.local`, `.env.*.local`; `.vscode/`, `.idea/`, `*.swp`; `.DS_Store`, `Thumbs.db`; `coverage/`, `test-results/`, `playwright-report/`; `*.tsbuildinfo`; `*.log`; `*.pem`, `*.key`, `*.p12`; `drizzle/meta/`.
 
-**Security rationale:** Prevents accidental commit of secrets, environment variables, credentials, and local IDE state. This is the first file created because every subsequent commit could otherwise leak sensitive data.
-
-**Definition of done:** `.gitignore` exists and covers all categories above. Verified by staging a test `.env` file and confirming it is ignored.
+**Done:** `.gitignore` exists. A test `.env` file is not staged by `git add`.
 
 ### WS-0.1.2 Update LICENSE to AGPL-3.0-or-later
+**Ref:** Section 20.4
 
-The spec (Section 20.4) requires AGPL-3.0-or-later for network-served code. The current repository contains GPL-3.0. Replace the LICENSE file with the full AGPL-3.0-or-later text and add SPDX identifiers.
+Replace GPL-3.0 with AGPL-3.0-or-later. Set SPDX `AGPL-3.0-or-later` in root `package.json`. The current GPL-3.0 does not close the network/SaaS gap; AGPL-3.0 does, and is compatible with Knomosis GPL-3.0-or-later.
 
-**Definition of done:** LICENSE file contains AGPL-3.0-or-later text. SPDX identifier `AGPL-3.0-or-later` is set in root `package.json` under the `license` field.
+**Done:** LICENSE is AGPL-3.0-or-later. `license` field set in root `package.json`.
 
 ### WS-0.1.3 Create CLAUDE.md
 
-Create the project-level Claude Code configuration:
-- Project structure overview
-- Build, test, and lint commands
-- Coding conventions (TypeScript strict, no inline styles, no `dangerouslySetInnerHTML` without review)
-- Security constraints (no secrets in client, CSP compliance, Trusted Types)
-- Commit message conventions
-- Monorepo workspace layout
+Project-level Claude Code configuration: monorepo layout, build/test/lint commands, coding conventions (TypeScript strict, no `dangerouslySetInnerHTML`, no inline styles, sanitize all UGC via DOMPurify), security constraints, commit message conventions, dependency budget (client < 15, BFF < 20 direct deps per Section 6.12.12).
 
-**Definition of done:** `CLAUDE.md` at repo root with accurate, actionable guidance.
+**Done:** `CLAUDE.md` at repo root with accurate guidance.
 
 ## WS-0.2 Monorepo structure and package management
 
 ### WS-0.2.1 Initialize pnpm workspace
-
-Create the monorepo skeleton with pnpm workspaces:
+**Ref:** Section 6.12.2
 
 ```
 licio/
 ├── apps/
 │   ├── web/                 # React 19 PWA (Vite 6)
-│   │   ├── public/
-│   │   ├── src/
-│   │   ├── index.html
-│   │   ├── package.json
-│   │   ├── tsconfig.json
-│   │   └── vite.config.ts
 │   └── api/                 # Hono BFF server
-│       ├── src/
-│       ├── package.json
-│       └── tsconfig.json
 ├── packages/
-│   ├── shared/              # Shared types, zod schemas, constants
-│   │   ├── src/
-│   │   ├── package.json
-│   │   └── tsconfig.json
-│   └── db/                  # Drizzle schema and migrations
-│       ├── src/
-│       ├── drizzle/
-│       ├── package.json
-│       └── tsconfig.json
+│   ├── shared/              # Shared zod schemas, types, constants, enums
+│   ├── db/                  # Drizzle schema and migrations
+│   └── invariants/          # Invariant computation modules
 ├── docs/
-├── .github/
-│   └── workflows/
+├── .github/workflows/
 ├── biome.json
 ├── pnpm-workspace.yaml
 ├── tsconfig.base.json
@@ -114,1699 +82,1521 @@ licio/
 └── .npmrc
 ```
 
-Create:
-- Root `package.json` with `"private": true`, license `AGPL-3.0-or-later`, workspace scripts
-- `pnpm-workspace.yaml` declaring `apps/*` and `packages/*`
-- `.npmrc` with `strict-peer-dependencies=true`, `auto-install-peers=false`, `shamefully-hoist=false` (enforce strict resolution per Section 6.12.2)
+Root `package.json`: `"private": true`, `license: "AGPL-3.0-or-later"`, workspace scripts.
+`pnpm-workspace.yaml`: `apps/*`, `packages/*`.
+`.npmrc`: `strict-peer-dependencies=true`, `auto-install-peers=false`, `shamefully-hoist=false`.
 
-**Security rationale (Section 6.12.2):** pnpm enforces strict dependency resolution. A package cannot import a transitive dependency it did not declare. `.npmrc` settings prevent hoisting that would circumvent this.
+**Security (Section 6.12.2):** pnpm strict resolution prevents phantom dependencies.
 
-**Definition of done:** `pnpm install` succeeds from root. Each workspace is resolvable. No phantom dependency access is possible.
+**Done:** `pnpm install` succeeds. Each workspace resolves independently. An import of an undeclared transitive dependency fails.
 
 ### WS-0.2.2 Configure TypeScript strict mode
+**Ref:** Section 6.12.2
 
-Create `tsconfig.base.json` at root with the mandated strict settings (Section 6.12.2):
+`tsconfig.base.json` at root:
+- `strict: true`, `noUncheckedIndexedAccess: true`, `exactOptionalPropertyTypes: true`
+- `noEmit: true`, `esModuleInterop: true`, `moduleResolution: "bundler"`, `module: "ESNext"`, `target: "ES2022"`
+- `lib: ["ES2022", "DOM", "DOM.Iterable"]`, `skipLibCheck: true`, `forceConsistentCasingInFileNames: true`
+- `isolatedModules: true`, `resolveJsonModule: true`, `declaration: true`, `declarationMap: true`, `sourceMap: true`
 
-```json
-{
-  "compilerOptions": {
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
-    "noEmit": true,
-    "esModuleInterop": true,
-    "moduleResolution": "bundler",
-    "module": "ESNext",
-    "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "isolatedModules": true,
-    "resolveJsonModule": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true
-  }
-}
-```
+Each workspace `tsconfig.json` extends `tsconfig.base.json` with workspace-specific includes and paths. `apps/api/tsconfig.json` omits DOM libs and adds Node.js types.
 
-Each workspace `tsconfig.json` extends `tsconfig.base.json` with workspace-specific paths, includes, and outDir.
-
-**Security rationale (Section 6.12.2):** `strict: true` catches null-safety violations and type-coercion bugs at compile time. `noUncheckedIndexedAccess` prevents unguarded property access. `exactOptionalPropertyTypes` prevents `undefined` from silently satisfying optional properties.
-
-**Definition of done:** `pnpm tsc --noEmit` passes across all workspaces with zero errors on empty source files.
+**Done:** `pnpm tsc --noEmit` passes across all workspaces with zero errors.
 
 ## WS-0.3 Build tooling and framework initialization
 
 ### WS-0.3.1 Set up Vite 6 for the web app
+**Ref:** Section 6.12.2
 
-Install and configure Vite 6 in `apps/web/`:
-- `vite.config.ts` with React plugin (`@vitejs/plugin-react`)
-- Route-level code splitting configuration
-- Content-hashed output filenames for deterministic builds
-- No inline scripts in HTML output (verify with build inspection)
-- Source maps for development, not for production by default
-- Define `base: '/'`
+Install Vite 6 in `apps/web/`. `vite.config.ts` with `@vitejs/plugin-react`, route-level code splitting, content-hashed output filenames, `base: '/'`, no source maps in production. Verify build output contains zero inline `<script>` or `<style>` blocks.
 
-**Security rationale (Section 6.12.2):** Vite produces no inline `<script>` blocks, enabling strict CSP. Rollup output is deterministic for reproducible builds and SRI hashes.
+**Security (Section 6.12.2):** No inline scripts enables strict CSP. Deterministic Rollup output enables SRI hashes.
 
-**Definition of done:** `pnpm --filter web build` produces a `dist/` with no inline scripts. `pnpm --filter web dev` starts a dev server with HMR. HTML output verified to contain only `<script src="...">` references.
+**Done:** `pnpm --filter web build` produces `dist/` with no inline scripts. Dev server starts with HMR.
 
 ### WS-0.3.2 Initialize React 19
 
-Install React 19 and ReactDOM 19 in `apps/web/`. Create:
-- `src/main.tsx` — root entry point with `createRoot`
-- `src/App.tsx` — placeholder root component
-- `index.html` — minimal HTML shell referencing `src/main.tsx`
+Install React 19 and ReactDOM 19 in `apps/web/`. Create `src/main.tsx` (createRoot), `src/App.tsx` (placeholder), `index.html` (minimal shell referencing `src/main.tsx`).
 
-No routing, state management, or styling at this stage — just a verified React render.
-
-**Definition of done:** Dev server renders a React component. Production build produces working HTML/JS output.
+**Done:** Dev server renders a React component. Production build produces working output.
 
 ### WS-0.3.3 Initialize Hono BFF
+**Ref:** Section 6.12.8
 
-Install Hono in `apps/api/`. Create:
-- `src/index.ts` — Hono application with health-check route (`GET /health`)
-- `src/app.ts` — application factory for testability
-- Dev script using `tsx` or Node.js `--loader`
-- Build script targeting Node.js LTS
+Install Hono in `apps/api/`. Create `src/index.ts` (application entry), `src/app.ts` (factory for testability), health-check route `GET /health`. Dev script via `tsx`. Build targeting Node.js LTS.
 
-**Security rationale (Section 6.12.8):** The BFF is a separate process with its own entry point, deployment, and security boundary. No framework-level blurring of client-server boundaries.
-
-**Definition of done:** `pnpm --filter api dev` starts a server responding to `GET /health` with `200`. `pnpm --filter api build` produces runnable output.
+**Done:** `pnpm --filter api dev` responds `200` on `GET /health`. Build produces runnable output.
 
 ### WS-0.3.4 Set up Tailwind CSS 4
+**Ref:** Section 6.12.6
 
-Install Tailwind CSS 4 in `apps/web/`:
-- PostCSS configuration (or Vite Tailwind plugin)
-- Base CSS file with `@tailwind base`, `@tailwind components`, `@tailwind utilities`
-- Design tokens for colors, spacing, typography (placeholder values)
-- Dark mode configuration (`class` strategy for user preference)
-- Verify: no JavaScript runtime in production, only static CSS files
+Install Tailwind CSS 4 in `apps/web/`. Create base CSS file using v4 syntax:
+```css
+@import "tailwindcss";
+```
 
-**Security rationale (Section 6.12.6):** Tailwind compiles to static CSS at build time. Zero JavaScript runtime for styling. No `'unsafe-inline'` requirement in CSP `style-src`.
+Configure design tokens via CSS custom properties (Tailwind v4 uses CSS-first configuration, not `tailwind.config.js`). Set up dark mode via `@variant dark` and `prefers-color-scheme`. Verify: production CSS is a static file with zero JavaScript runtime.
 
-**Definition of done:** A Tailwind utility class renders correctly in the browser. Production build CSS is a static file with no runtime JS injection.
+**Security (Section 6.12.6):** Static CSS output requires no `'unsafe-inline'` in CSP `style-src`.
+
+**Done:** Tailwind utility classes render correctly. Production CSS is static with no JS injection.
 
 ### WS-0.3.5 Set up shared package with zod
 
-Initialize `packages/shared/`:
-- Install zod
-- Create placeholder schema file (`src/schemas/index.ts`)
-- Export barrel file
-- TypeScript project references from `apps/web` and `apps/api`
+Initialize `packages/shared/`. Install zod. Create `src/schemas/index.ts` (placeholder), export barrel. TypeScript project references from both apps.
 
-**Definition of done:** Both `apps/web` and `apps/api` can import from `@licio/shared`. Type checking passes.
+**Done:** Both apps import from `@licio/shared`. Type checking passes.
 
 ### WS-0.3.6 Set up database package with Drizzle
+**Ref:** Section 6.12.8
 
-Initialize `packages/db/`:
-- Install `drizzle-orm` and `drizzle-kit`
-- Install the PostgreSQL driver (`postgres` or `@neondatabase/serverless`)
-- Create `drizzle.config.ts`
-- Create placeholder schema file (`src/schema/index.ts`)
-- Configure migration output directory (`drizzle/`)
+Initialize `packages/db/`. Install `drizzle-orm`, `drizzle-kit`, PostgreSQL driver (`postgres`). Create `drizzle.config.ts` and placeholder schema `src/schema/index.ts`. Migration output directory at `drizzle/`.
 
-**Security rationale (Section 6.12.8):** Drizzle ORM is SQL-first with parameterized queries. No implicit query generation or lazy loading. Schema-as-code keeps DB and TypeScript types synchronized.
+**Done:** `drizzle-kit generate` runs. Schema types importable from `@licio/db`.
 
-**Definition of done:** `drizzle-kit generate` runs without error. Schema types are importable from `@licio/db`.
+### WS-0.3.7 Set up invariants package
+
+Initialize `packages/invariants/`. Placeholder for invariant computation modules. Shared types for `InvariantOutput`, `InvariantType` enums, confidence/coverage structures. No external dependencies beyond `@licio/shared`.
+
+**Done:** Package builds. Types importable from `@licio/invariants`.
+
+### WS-0.3.8 Set up structured logging with pino
+**Ref:** Section 6.12.8
+
+Install `pino` in `apps/api/`. Create logging middleware for Hono: request/response logging with request IDs, structured JSON output, configurable log levels per environment. Audit-sensitive actions (auth, moderation, financial) receive dedicated log fields.
+
+**Done:** Every API request is logged with a request ID. Structured JSON output in production.
 
 ## WS-0.4 Code quality and security tooling
 
 ### WS-0.4.1 Configure Biome
+**Ref:** Section 6.12.10
 
-Install Biome at the workspace root. Create `biome.json` with:
-- Formatter: tab width 2, single quotes, trailing commas
-- Linter rules enabled:
-  - Block `eval()` usage
-  - Block `dangerouslySetInnerHTML`
-  - Block `innerHTML` assignment
-  - Block `document.write`
-  - Block `javascript:` URLs
-  - Enforce `===` over `==`
-  - No unused variables
-  - No explicit `any`
-- Organize imports
+Install Biome at root. `biome.json`: formatter (2-space indent, single quotes, trailing commas), linter rules blocking `eval()`, `dangerouslySetInnerHTML`, `innerHTML`, `document.write`, `javascript:` URLs; enforce `===`, no unused variables, no explicit `any`, organize imports.
 
-**Security rationale (Section 6.12.10):** Biome flags injection-risk patterns. Violations block CI. This catches XSS vectors at lint time before code review.
-
-**Definition of done:** `pnpm biome check .` passes on the empty workspace. A test file with `eval()` fails the lint. CI will gate on this check (configured in WS-0.6.1).
+**Done:** `pnpm biome check .` passes on clean workspace. A file with `eval()` fails lint.
 
 ### WS-0.4.2 Configure Vitest
 
-Install Vitest in the workspace root (Vite-native, shared configuration):
-- `vitest.config.ts` at root or per-workspace
-- Coverage configuration (v8 provider)
-- Test file pattern (`**/*.test.ts`, `**/*.test.tsx`)
-- TypeScript path aliases matching workspace setup
-- Workspace configuration for running tests across `apps/` and `packages/`
+Install Vitest at root. Workspace configuration for `apps/` and `packages/`. Coverage via v8 provider. Test pattern `**/*.test.ts`, `**/*.test.tsx`. TypeScript aliases matching workspace setup.
 
-**Security rationale (Section 6.12.10):** Tests run against the same build pipeline as production, ensuring CSP and Trusted Types behavior is tested, not mocked.
-
-**Definition of done:** `pnpm test` discovers and runs a placeholder test in each workspace. Coverage reports generate.
+**Done:** `pnpm test` discovers and runs placeholder tests. Coverage reports generate.
 
 ### WS-0.4.3 Configure Playwright
 
-Install Playwright in `apps/web/`:
-- `playwright.config.ts` with Chromium, Firefox, WebKit
-- Integration with `@axe-core/playwright` for accessibility regression
-- Base URL pointing to Vite dev server
-- Screenshot and trace collection for failures
-- PWA-specific test helpers (service worker registration, offline simulation)
+Install Playwright in `apps/web/` with Chromium, Firefox, WebKit. Install `@axe-core/playwright`. Configure base URL for Vite dev server. Screenshot and trace collection on failure.
 
-**Security rationale (Section 6.12.10):** Playwright verifies strict CSP enforcement in real browsers. Accessibility regression tests run against WCAG 2.2 AA with `@axe-core/playwright`.
-
-**Definition of done:** `pnpm --filter web test:e2e` launches browsers and runs a placeholder test. Axe accessibility check runs on the placeholder page.
+**Done:** `pnpm --filter web test:e2e` runs a placeholder test. Axe accessibility check runs.
 
 ### WS-0.4.4 Configure lockfile-lint
+**Ref:** Section 6.12.2
 
-Install `lockfile-lint` and configure it to validate the pnpm lockfile:
-- Allowed registries: `https://registry.npmjs.org`
-- Allowed protocols: `https:`
-- Lockfile path: `pnpm-lock.yaml`
+Install `lockfile-lint`. Allowed registries: `https://registry.npmjs.org`. Allowed protocols: `https:`. Lockfile path: `pnpm-lock.yaml`.
 
-**Security rationale (Section 6.12.2):** Prevents lockfile-poisoning attacks where a dependency is silently redirected to a malicious registry.
-
-**Definition of done:** `pnpm lockfile-lint` passes. A manually corrupted lockfile with a different registry fails the check.
+**Done:** `pnpm lockfile-lint` passes. A corrupted lockfile pointing to a different registry fails.
 
 ## WS-0.5 Security baseline
 
-### WS-0.5.1 Configure CSP headers in Hono
+### WS-0.5.1 Configure security headers in Hono
+**Ref:** Sections 6.12.8, 25.2, 20.2
 
-Add Hono security-headers middleware to the BFF:
-- `Content-Security-Policy`: `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; require-trusted-types-for 'script'`
+Hono security-headers middleware:
+- `Content-Security-Policy`: `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; frame-ancestors 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; require-trusted-types-for 'script'`
 - `Strict-Transport-Security`: `max-age=63072000; includeSubDomains; preload`
 - `X-Content-Type-Options`: `nosniff`
 - `X-Frame-Options`: `SAMEORIGIN`
 - `Referrer-Policy`: `strict-origin-when-cross-origin`
-- `Permissions-Policy`: restrict camera, microphone, geolocation, payment to `self` or none
+- `Permissions-Policy`: camera=(), microphone=(), geolocation=(), payment=()
 
-**Security rationale (Sections 6.12.8, 25.2):** Defense-in-depth against XSS, clickjacking, and data exfiltration. The strict CSP with no `'unsafe-inline'` works because Vite emits no inline scripts and Tailwind emits no runtime styles.
+**Done:** Headers verified via integration test. CSP violation triggered on inline script attempt.
 
-**Definition of done:** Response headers verified via integration test. CSP violations trigger console errors in the browser for any inline script attempt.
+### WS-0.5.2 Configure CORS and CSRF in Hono
+**Ref:** Section 6.12.11
 
-### WS-0.5.2 Configure CORS in Hono
+CORS: allow only PWA domain (configurable), `GET/POST/PATCH/DELETE/OPTIONS`, credentials true.
+CSRF: `SameSite=Strict` cookies for session tokens, anti-replay nonces on state-changing requests, CSRF token validation on POST/PATCH/DELETE.
 
-Add Hono CORS middleware:
-- Allow origin: only the PWA's domain (configurable per environment)
-- Allow methods: `GET, POST, PATCH, DELETE, OPTIONS`
-- Allow headers: `Content-Type, Authorization, X-CSRF-Token`
-- Credentials: true
-- Max age: 3600
+**Done:** Cross-origin requests from unauthorized origins rejected. State-changing request without CSRF token returns 403.
 
-**Definition of done:** Cross-origin requests from unauthorized origins are rejected. Same-origin requests succeed.
+### WS-0.5.3 Set up environment variable validation
+**Ref:** Section 6.12.7
 
-### WS-0.5.3 Configure CSRF protection
+zod schemas in `packages/shared/` for env var validation. Separate schemas for client-safe (`VITE_` prefix) vs server-only variables. Fail fast on missing/malformed vars. No secret ever exposed to client bundle.
 
-Add Hono CSRF middleware:
-- `SameSite=Strict` cookies for session tokens
-- Anti-replay nonces on state-changing requests
-- CSRF token validation on all POST/PATCH/DELETE
-
-**Security rationale (Section 6.12.11):** Prevents cross-site request forgery. Combined with `SameSite=Strict` cookies for defense in depth.
-
-**Definition of done:** A state-changing request without a valid CSRF token returns 403.
-
-### WS-0.5.4 Set up environment variable validation
-
-Create a zod schema in `packages/shared/` for environment variable validation:
-- Validate all required env vars at application startup
-- Fail fast with clear error messages for missing or malformed vars
-- Separate schemas for client-safe vs server-only variables
-- No secret or signing key is ever exposed to the client bundle
-
-**Security rationale (Section 6.12.7, 25.2):** Runtime validation prevents misconfigured deployments. Explicit client/server separation prevents accidental secret exposure.
-
-**Definition of done:** Server startup fails with a descriptive error if a required env var is missing. Client build does not bundle any server-only variables.
+**Done:** Server startup fails if required env var is missing. Client build does not bundle server-only variables.
 
 ## WS-0.6 CI/CD pipeline
 
-### WS-0.6.1 GitHub Actions: CI workflow
+### WS-0.6.1 GitHub Actions CI workflow
 
-Create `.github/workflows/ci.yml`:
+`.github/workflows/ci.yml`. Triggers: push/PR to `main`.
 
-**Triggers:** push to `main`, pull requests to `main`
+Parallel jobs: (1) Lint + lockfile-lint, (2) Type check all workspaces, (3) Unit tests with coverage (fail below 80%), (4) Build web + api + verify no inline scripts + record bundle size, (5) E2E tests with Playwright + axe-core on built app (depends on build), (6) Security checks: `pnpm audit`, lockfile-lint.
 
-**Jobs (parallelized where independent):**
-
-1. **Lint and format:**
-   - `pnpm biome check .`
-   - `pnpm lockfile-lint`
-
-2. **Type check:**
-   - `pnpm tsc --noEmit` across all workspaces
-
-3. **Unit tests:**
-   - `pnpm test` with coverage reporting
-   - Fail if coverage drops below threshold (initially 80%)
-
-4. **Build:**
-   - `pnpm --filter web build`
-   - `pnpm --filter api build`
-   - Verify no inline scripts in web build output
-   - Record bundle size for budget tracking
-
-5. **E2E tests (on build completion):**
-   - Playwright against the built web app served by the BFF
-   - Accessibility checks via `@axe-core/playwright`
-
-6. **Security checks:**
-   - `pnpm audit` for known vulnerabilities
-   - Lockfile-lint validation
-
-**Definition of done:** A PR that introduces `eval()` or fails type checking is blocked from merging. All jobs pass on the clean repository.
+**Done:** PRs with `eval()`, type errors, or failing tests are blocked.
 
 ### WS-0.6.2 Dependency scanning
 
-Configure automated dependency scanning:
-- GitHub Dependabot or Renovate for automated dependency updates
-- Block PRs that introduce packages with install scripts (flag for manual review)
-- Alert on known CVEs in direct and transitive dependencies
+Dependabot or Renovate for automated updates. Flag packages with install scripts for manual review. Alert on known CVEs.
 
-**Security rationale (Section 6.12.10):** Detects install scripts, obfuscated code, unexpected network access, and known CVEs.
-
-**Definition of done:** Dependabot/Renovate creates PRs for outdated dependencies. Known vulnerable packages are flagged.
+**Done:** Dependency update PRs created automatically. Vulnerable packages flagged.
 
 ## WS-0.7 Development environment
 
 ### WS-0.7.1 Development scripts
 
-Add root `package.json` scripts:
-- `dev` — starts both web dev server and API dev server concurrently
-- `build` — builds all workspaces in dependency order
-- `test` — runs all unit tests
-- `test:e2e` — runs Playwright tests
-- `lint` — runs Biome check
-- `typecheck` — runs TypeScript type checking
-- `db:generate` — generates Drizzle migrations
-- `db:migrate` — runs Drizzle migrations
-- `clean` — removes all build artifacts
+Root `package.json` scripts: `dev` (concurrent web + api), `build`, `test`, `test:e2e`, `lint`, `typecheck`, `db:generate`, `db:migrate`, `db:push`, `clean`.
 
-**Definition of done:** Each script runs successfully from the repository root.
+**Done:** Each script runs from repo root.
 
 ### WS-0.7.2 Docker Compose for local services
 
-Create `docker-compose.yml` for local development dependencies:
-- PostgreSQL (primary database)
-- Redis (session store, rate limiting, caching — if needed)
-- Minimal configuration with health checks
+`docker-compose.yml`: PostgreSQL 16 (primary database), Redis 7 (session store, rate limiting, caching). Health checks. Persistent volumes for data.
 
-**Definition of done:** `docker compose up` starts services. The API can connect to the database.
+**Done:** `docker compose up` starts services. API connects to PostgreSQL.
 
 ---
 
 # WS-A. Doctrine, policy, and governance configuration
 
-Policy documents and configuration that constrain all implementation decisions. No ranking, moderation, or governance code is written without these artifacts.
+Document-only workstream constraining all implementation. No ranking, moderation, or governance code is written without these artifacts.
 
-**Milestone:** M0 (Planning)
-**Priority:** 0
-**Dependencies:** None (document-only)
+**Milestone:** M0 | **Priority:** 0 | **Dependencies:** None
 
 ## WS-A.1 No-applause doctrine
 
-### WS-A.1.1 Create the signal allowlist/denylist
+### WS-A.1.1 Signal allowlist/denylist
+**Ref:** Sections 5.3, 13.6, 30.3-A
 
 Create `docs/policy/SIGNAL_MATRIX.md`:
-- **Allowed positive signals:** active dwell (capped), source open, context open, return visit, thread traversal, save-for-later, share, clarifying question, evidence addition, correction, synthesis, counterexample, domain explanation, bridge comment, steward action
-- **Prohibited signals (never affect ranking):** likes, upvotes, hearts, reactions, public karma, follower counts, donor badges, token balances, payment amounts, treasury contributions, DAO votes, wallet connection status, paid membership, NFT ownership
+- **Allowed positive signals** (Section 5.3): active dwell (capped), source open, context open, return visit, thread traversal, save-for-later, share outside app, clarifying question, evidence addition, correction, synthesis, counterexample, domain explanation, bridge comment, steward action
+- **Prohibited signals** (Section 13.6, never affect ranking): likes, upvotes, hearts, reactions, public karma, follower counts, donor badges, token balances, payment amounts, treasury contributions, DAO votes, wallet connection status, paid membership, NFT ownership, governance vote outcomes (without evidence process)
+- **Anti-signals** (Section 5.3): rapid repetitive commenting, coordinated bursts, rage-loop behavior, low-information replies, source-free accusation, brigading reports, harassment cascade
 
-This document is the source of truth for WS-I (ranking) and WS-O (ranking-neutrality tests).
+Each prohibited signal maps to a ranking-neutrality test in WS-I.3.
 
-**Definition of done:** Document exists and is reviewed. Every prohibited signal has a corresponding automated test requirement in WS-O.
+**Done:** Document reviewed. Every prohibited signal has a corresponding test requirement.
 
-### WS-A.1.2 Create the moderation-escalation taxonomy
+### WS-A.1.2 Moderation-escalation taxonomy
+**Ref:** Sections 18.1–18.5
 
-Create `docs/policy/MODERATION_TAXONOMY.md`:
-- Policy categories from Section 18.1 (illegal content, threats, harassment, hate, CSAM, graphic content, misinformation, impersonation, spam, privacy violations, synthetic media, IP reports)
-- Severity levels and expected response times
-- Escalation paths (user controls → automated → steward → professional → integrity → external)
-- Reason codes for moderation actions
-- Appeal eligibility and process
+Create `docs/policy/MODERATION_TAXONOMY.md`: 12 policy categories (illegal content, threats/incitement, harassment, hate/dehumanization, sexual exploitation/child safety, graphic content, misinformation, impersonation, spam/manipulation, privacy/doxxing, synthetic media, IP reports). Severity levels with SLA targets. Escalation paths (user → automated → steward → professional → integrity → external). Enumerable, machine-readable reason codes. Appeal eligibility per action type. Crypto-specific abuse modes (Section 18.5): wallet-drainer links, impersonation, bounty collusion, vote buying, treasury capture, sanctions evasion, paid harassment, misleading investment claims, fraudulent grants.
 
-**Definition of done:** Document covers all Section 18 policy categories. Reason codes are enumerable and machine-readable.
+**Done:** Document covers all Section 18 categories plus crypto abuse modes.
 
-### WS-A.1.3 Create the transparency-report data dictionary
+### WS-A.1.3 Transparency-report data dictionary
+**Ref:** Section 28
 
-Create `docs/policy/TRANSPARENCY_DICTIONARY.md`:
-- Metrics definitions for transparency reports (Section 28)
-- Data fields required from moderation, ranking, integrity, and invariant services
-- Aggregation thresholds for privacy protection
-- Report cadence and publication requirements
+Create `docs/policy/TRANSPARENCY_DICTIONARY.md`: metrics definitions, data sources per metric, aggregation thresholds for privacy, report cadence. Anti-metrics (Section 28.2): never optimize for outrage, compulsion, speculation, vanity engagement, total value locked, tokens traded, wallet connects as growth KPI, speculative price.
 
-**Definition of done:** Document defines every metric needed for transparency reports. Each metric maps to a data source and a responsible workstream.
+**Done:** Every transparency metric maps to a data source and responsible workstream.
 
 ## WS-A.2 Jurisdiction and feature matrix
 
-### WS-A.2.1 Create the jurisdiction-feature matrix template
+### WS-A.2.1 Jurisdiction-feature matrix template
+**Ref:** Sections 17.10, 30.3-N
 
-Create `docs/policy/JURISDICTION_MATRIX.md`:
-- Template for region/feature/asset availability
-- Crypto feature flags by jurisdiction
-- Age-gate requirements by region
-- Privacy regulation mapping (GDPR, CCPA/CPRA, COPPA)
-- Placeholders for legal review sign-off
+Create `docs/policy/JURISDICTION_MATRIX.md`: template for region/feature/asset availability, crypto flags by jurisdiction, age-gate requirements, privacy regulation mapping (GDPR, CCPA/CPRA, COPPA), KYC/AML triggers, sanctions restrictions, placeholders for legal review sign-off. Default posture: crypto features disabled, fail-closed.
 
-**Definition of done:** Template exists with structure for all feature categories. Placeholders clearly marked as requiring legal review before launch.
+**Done:** Template covers all feature categories. All cells requiring legal review are clearly marked.
+
+### WS-A.2.2 Steward roles and capabilities
+**Ref:** Section 16.3
+
+Create `docs/policy/STEWARD_ROLES.md` defining: community steward, evidence steward, safety moderator, appeals reviewer, integrity analyst — with capabilities, access levels, and accountability requirements for each.
+
+**Done:** All five steward roles documented with permissions and audit requirements.
 
 ---
 
 # WS-B. PWA UX and design system
 
-Design system foundation and component library. All UI components are built to WCAG 2.2 AA from the start, not retrofitted.
+All components built to WCAG 2.2 AA from the start. Accessibility is a release gate (Section 26.1).
 
-**Milestone:** M0–M1
-**Priority:** 0–1
-**Dependencies:** WS-0.3 (Vite, React, Tailwind)
+**Milestone:** M0–M1 | **Priority:** 0–1 | **Dependencies:** WS-0.3
 
 ## WS-B.1 Design system foundation
 
 ### WS-B.1.1 Design tokens
+**Ref:** Sections 6.12.6, 26.2
 
-Define Tailwind CSS 4 design tokens in `apps/web/src/styles/`:
-- Color palette: primary, secondary, neutral, semantic (success, warning, error, info)
-- Dark mode palette
-- High-contrast palette (accessibility)
-- Typography scale: font families, sizes, weights, line heights
-- Spacing scale
-- Border radius scale
-- Shadow scale
-- Animation durations (with `prefers-reduced-motion` overrides)
-- Touch target minimum sizes (48x48px per WCAG 2.2 AA)
-- Z-index scale
-- Breakpoints: mobile-first (sm, md, lg, xl)
+Tailwind CSS 4 design tokens via CSS custom properties: color palette (primary, secondary, neutral, semantic), dark mode palette, high-contrast palette, typography scale, spacing scale, border radius, shadows, animation durations with `prefers-reduced-motion` overrides, touch target minimums (48×48px per WCAG 2.2), z-index scale, breakpoints (mobile-first: sm, md, lg, xl).
 
-**Definition of done:** Tokens are defined in Tailwind config. Dark and high-contrast modes render correctly. `prefers-reduced-motion` disables animations.
+**Done:** Tokens render in all modes (light, dark, high-contrast). `prefers-reduced-motion` disables animations.
 
-### WS-B.1.2 Base component library — primitives
+### WS-B.1.2 Primitive components — form controls
 
-Build accessible primitive components in `apps/web/src/components/ui/`:
+Build in `apps/web/src/components/ui/`: `Button` (focus visible, disabled, loading, min target size, aria-label for icon-only), `Input` (label association, error with aria-describedby, required), `TextArea` (same + auto-resize), `Select` (keyboard nav, aria-expanded), `Checkbox` (label, indeterminate), `RadioGroup` (arrow keys, aria-checked).
 
-| Component | Accessibility requirements |
-|---|---|
-| `Button` | Focus visible, disabled state, loading state, minimum target size, aria-label for icon-only |
-| `Input` | Label association, error state with aria-describedby, required indication |
-| `TextArea` | Same as Input, auto-resize option |
-| `Select` | Keyboard navigation, aria-expanded, aria-selected |
-| `Checkbox` | Label association, indeterminate state |
-| `RadioGroup` | Arrow-key navigation, aria-checked |
-| `Dialog` | Focus trap, escape to close, aria-modal, return focus on close |
-| `Sheet` | Bottom sheet for mobile, focus trap, swipe-to-dismiss |
-| `Toast` | aria-live polite, auto-dismiss with pause-on-hover |
-| `Skeleton` | aria-busy, reduced-motion alternative |
-| `Badge` | Semantic span with sr-only context if icon-only |
-| `Card` | Semantic article or section, heading hierarchy |
-| `Tabs` | Arrow-key navigation, aria-selected, roving tabindex |
+Each: semantic HTML, keyboard navigation, ARIA, axe-core tests, zoom to 200%.
 
-Each component:
-- Uses semantic HTML elements
-- Supports keyboard navigation
-- Has ARIA attributes where needed
-- Passes `@axe-core/playwright` checks
-- Works with dynamic type/zoom to 200%
-- Has a Vitest unit test
-- Has a Playwright accessibility test
+**Done:** All form controls pass axe accessibility checks. Keyboard-operable.
 
-**Definition of done:** Each component renders, is keyboard-operable, and passes axe accessibility checks. No `div` soup — semantic elements only.
+### WS-B.1.3 Primitive components — overlays and feedback
 
-### WS-B.1.3 Layout components
+Build: `Dialog` (focus trap, escape, aria-modal, return focus), `Sheet` (bottom sheet for mobile, focus trap, swipe-dismiss), `Toast` (aria-live polite, auto-dismiss with pause-on-hover), `Tooltip` (keyboard accessible, delay, not covering target).
 
-Build layout components:
+**Done:** Overlays trap focus, dismiss on escape, return focus on close.
 
-| Component | Purpose |
-|---|---|
-| `AppShell` | Root layout with bottom navigation, main content, and header |
-| `BottomNav` | Five-tab navigation (Front Page, Rooms, Submit, Threads, Profile) — thumb zone |
-| `PageHeader` | Sticky header with title, back button, and actions |
-| `ScrollArea` | Virtualized scrolling for long lists |
-| `SafeArea` | Respects device safe areas (notch, home indicator) |
+### WS-B.1.4 Primitive components — display
 
-**Definition of done:** Shell renders on mobile viewports. Bottom nav is reachable with one thumb. Focus management on route changes moves focus to new view heading.
+Build: `Skeleton` (aria-busy, reduced-motion alt), `Badge` (sr-only context if icon-only), `Card` (semantic article/section, heading hierarchy), `Tabs` (arrow keys, aria-selected, roving tabindex), `Avatar` (initials fallback, alt text), `Separator` (aria role).
 
-### WS-B.1.4 SPA focus management
+**Done:** All display components pass axe checks and zoom to 200%.
 
-Implement focus management for single-page-app route changes (Section 26.2):
-- On route change, move focus to the new view's `<h1>` or main landmark
-- Announce route changes via `aria-live` region
-- Scroll position restoration on back navigation
-- Skip-to-content link
+### WS-B.1.5 Layout components
+**Ref:** Section 6.2
 
-**Definition of done:** Screen reader announces page changes. Focus moves to the new view heading. Back navigation restores scroll position.
+`AppShell` (root layout: bottom nav + main content + header), `BottomNav` (five tabs — Front Page, Rooms, Submit, Threads, Profile — thumb-zone reachable), `PageHeader` (sticky, back button, actions), `ScrollArea` (virtualized for long lists), `SafeArea` (device notch/home indicator).
+
+**Done:** Shell renders on mobile viewports. Bottom nav reachable with one thumb.
+
+### WS-B.1.6 SPA focus management
+**Ref:** Section 26.2
+
+On route change: move focus to new view's `<h1>` or main landmark, announce via `aria-live` region. Scroll position restoration on back navigation. Skip-to-content link on every page.
+
+**Done:** Screen reader announces page changes. Focus moves to heading. Back restores scroll.
 
 ## WS-B.2 Application-specific components
 
 ### WS-B.2.1 Story card (no-applause)
+**Ref:** Section 6.3
 
-Build the `StoryCard` component (Section 6.3):
-- Story title
-- Source and origin badge
-- Rating label (e.g., "Deepening," "Needs Context")
-- One-line distribution reason
-- Context chips ("3 lenses," "2 primary sources," "low coordination risk")
-- Reading estimate
-- Thread-branch preview
-- Swipe actions (save, context card, long-press menu)
-- **No like count, vote count, heart icon, public score, or reaction bar**
+`StoryCard`: title, source badge, rating label, one-line distribution reason, context chips, reading estimate, thread-branch preview. Swipe left = save, right = context card, long-press = menu (signal problem, mute source, adjust topic). **No like count, vote count, heart, public score, or reaction bar.**
 
-**Definition of done:** Card renders with all fields. No applause affordances are present. Swipe gestures work on touch devices. Screen reader reads all information in logical order.
+**Done:** Card renders all fields. Zero applause affordances. Swipe gestures work. Screen reader reads logical order.
 
-### WS-B.2.2 Rating label components
+### WS-B.2.2 Story card swipe actions
 
-Build label components for user-facing rating states (Section 5.6):
-- "Getting Attention"
-- "Deepening"
-- "Well-Sourced"
-- "Needs Context"
-- "Under Review"
-- "Resolved Context"
-- "Bridge Active"
+Touch gesture layer for `StoryCard`: left swipe (save-for-later), right swipe (open context card), long-press (context menu). Ensure gestures have non-gesture alternatives (buttons visible on focus/hover). Respect `prefers-reduced-motion`.
 
-Each label uses color + icon + text (never color-only per WCAG).
+**Done:** Gestures work on touch. Non-gesture alternatives exist. Reduced-motion respected.
 
-**Definition of done:** Labels render with appropriate color, icon, and text. Colors meet 4.5:1 contrast ratio. Non-color indicators are present for each state.
+### WS-B.2.3 Rating label components
+**Ref:** Section 5.6
 
-### WS-B.2.3 Context card overlay
+Seven labels: "Getting Attention," "Deepening," "Well-Sourced," "Needs Context," "Under Review," "Resolved Context," "Bridge Active." Each uses color + icon + text (never color-only per WCAG). 4.5:1 contrast ratio.
 
-Build the `ContextCard` bottom-sheet component (Section 6.5):
-- Sections: What happened, Why it matters, Where interpretations differ, Evidence status, Conversation state, Distribution reason, User controls
-- Swipeable between sections on mobile
-- Does not lose reading position when opened
-- Dismissible with escape or swipe-down
+**Done:** Labels render with color, icon, and text. Contrast verified. Non-color indicators present.
 
-**Definition of done:** Context card opens as a bottom sheet on mobile. Content is scrollable. Underlying content position is preserved. Focus traps within the card.
+### WS-B.2.4 Context card overlay
+**Ref:** Section 6.5
 
-### WS-B.2.4 Empty, loading, error, and offline states
+Bottom-sheet `ContextCard` with sections: What happened, Why it matters, Where interpretations differ (SCOI), Evidence status, Conversation state, Distribution reason, User controls. Swipeable sections on mobile. Does not displace reading position. Dismiss with escape or swipe-down.
 
-Design and implement state components:
-- `EmptyState` — illustrated empty state with action prompt
-- `LoadingState` — skeleton screens matching content layout (aria-busy)
-- `ErrorState` — error message with retry action
-- `OfflineState` — offline indicator with cached content fallback
+**Done:** Opens as bottom sheet. Reading position preserved. Focus traps.
 
-**Definition of done:** Each state renders correctly. Screen readers announce state changes. Skeleton matches the layout of loaded content.
+### WS-B.2.5 Empty, loading, error, and offline states
+
+`EmptyState` (illustration + action), `LoadingState` (skeleton matching content, aria-busy), `ErrorState` (message + retry), `OfflineState` (indicator + cached fallback), `RestrictedState` (feature-disabled explanation).
+
+**Done:** Each state renders. Screen readers announce changes. Skeleton matches loaded layout.
+
+### WS-B.2.6 Signal Ledger UI
+**Ref:** Sections 3.2, 5.4
+
+Private, user-facing explanation panel within Profile tab: what attention and participation signals were counted per item, why items are visible. Simplified explanation format (e.g., "Rising because many readers opened the source"). Never a public score.
+
+**Done:** Ledger displays per-item signal breakdown. No public score visible.
+
+### WS-B.2.7 In-app source reader
+**Ref:** Section 6.1 requirement 6
+
+Sandboxed `iframe` / readability-mode reader for opening external sources without leaving the thread. Clear escape button back to thread. Citation capture from reader content. CSP `sandbox` attribute on iframe to prevent script execution from external content.
+
+**Done:** Source opens in-app. Escape returns to thread. External scripts blocked by sandbox.
+
+### WS-B.2.8 Stopping cues and wellbeing UI
+**Ref:** Section 6.7
+
+Section endpoint components ("You are caught up on high-confidence stories"), diminishing-returns prompt ("The next items are lower confidence or more repetitive"), focus-mode toggle, local-news-only mode, quiet-hours setting, notification budget indicator. Not endless scroll — finite sections.
+
+**Done:** Feed terminates with stopping cue. Focus mode hides low-priority content.
+
+### WS-B.2.9 Feed mode switcher
+**Ref:** Section 11.6
+
+Mode selector: "Balanced" (default PWAtt), "Chronological," "Source-diverse," "Local," "Low personalization." Persists in user preferences. Accessible as a dropdown or segmented control.
+
+**Done:** Modes switch feed ordering. Selection persists across sessions.
 
 ---
 
 # WS-C. PWA client application
 
-Core PWA infrastructure: routing, state management, service worker, offline, and wallet module stub.
+Core PWA infrastructure: routing, state, service worker, offline, notifications, signal processing.
 
-**Milestone:** M1 (Core social alpha)
-**Priority:** 0–1
-**Dependencies:** WS-0 (complete), WS-B.1 (design system primitives)
+**Milestone:** M1 | **Priority:** 0–1 | **Dependencies:** WS-0 (complete), WS-B.1
 
 ## WS-C.1 Routing and navigation
 
 ### WS-C.1.1 Set up TanStack Router
+**Ref:** Section 6.12.4
 
-Install and configure TanStack Router (Section 6.12.4):
-- File-based routing in `apps/web/src/routes/`
-- Type-safe route parameters and search params
-- Route-level code splitting via lazy loading
-- Root layout with `AppShell`
-- Routes for all five primary tabs:
-  - `/` — Front Page
-  - `/rooms` — Rooms
-  - `/submit` — Submit
-  - `/threads` — Threads
-  - `/profile` — Profile
-- Nested routes for detail views:
-  - `/stories/:storyId`
-  - `/threads/:threadId`
-  - `/threads/:threadId/branches/:branchId`
-  - `/rooms/:roomId`
-  - `/profile/signal-ledger`
-  - `/profile/settings`
-  - `/profile/privacy`
+File-based routing in `apps/web/src/routes/`. Type-safe params and search params. Route-level code splitting via lazy loading. Root layout with `AppShell`.
 
-**Definition of done:** Navigation between all primary tabs works. Route params are type-checked. Code splitting produces separate chunks per route. Focus management fires on route change (WS-B.1.4).
+Primary routes: `/` (Front Page), `/rooms` (Rooms), `/submit` (Submit), `/threads` (Threads), `/profile` (Profile).
+
+Detail routes: `/stories/:storyId`, `/threads/:threadId`, `/threads/:threadId/branches/:branchId`, `/rooms/:roomId`, `/rooms/:roomId/governance` (behind flag), `/profile/signal-ledger`, `/profile/settings`, `/profile/privacy`, `/profile/wallet` (behind flag).
+
+**Done:** Navigation works between all tabs. Route params type-checked. Code splitting verified.
 
 ### WS-C.1.2 Set up TanStack Query
+**Ref:** Section 6.12.4
 
-Install and configure TanStack Query v5 (Section 6.12.4):
-- `QueryClientProvider` at the app root
-- Default stale-while-revalidate configuration
-- Offline support configuration (persisted queries for PWA)
-- Query key factory pattern for type-safe query keys
-- Mutation hooks with optimistic updates pattern
-- **zod validation** on every API response before entering the cache
+`QueryClientProvider` at root. Default stale-while-revalidate. Offline support (persisted queries). Query key factory. Mutation hooks with optimistic update pattern. **zod validation on every API response** before entering cache.
 
-**Definition of done:** A placeholder query fetches from the BFF and validates the response with zod. Offline behavior returns cached data. A malformed response is rejected at the zod boundary.
+**Done:** Placeholder query fetches from BFF with zod validation. Offline returns cache. Malformed response rejected.
 
 ### WS-C.1.3 Set up Zustand
+**Ref:** Section 6.12.4
 
-Install Zustand (Section 6.12.4):
-- Create stores for:
-  - `useAuthStore` — authentication state
-  - `useUIStore` — UI state (dark mode, reduced motion, bottom sheet state)
-  - `useFeatureFlagStore` — feature flags (crypto, governance, etc.)
-- Persist relevant state to `localStorage` with zod validation on rehydration
+Stores: `useAuthStore` (auth state), `useUIStore` (theme, reduced motion, sheet state), `useFeatureFlagStore` (crypto, governance, per-region flags — all crypto disabled by default). Persist to `localStorage` with zod validation on rehydration.
 
-**Definition of done:** Stores are created and type-safe. Persistence survives page reload. Invalid persisted state is safely rejected.
+**Done:** Stores type-safe. Persistence survives reload. Invalid state rejected. Crypto flags default false.
 
 ## WS-C.2 Service worker and PWA
 
-### WS-C.2.1 Set up vite-plugin-pwa
+### WS-C.2.1 Set up vite-plugin-pwa and Web App Manifest
+**Ref:** Section 6.12.5, 20.1
 
-Install and configure `vite-plugin-pwa` with Workbox 7 (Section 6.12.5):
-- **Precaching:** revision-hashed manifest for app-shell static assets (cache-first)
-- **Runtime caching:** network-first with cached fallback for API data
-- **Stale-while-revalidate** for non-critical assets
-- Service worker scope locked to `/`
-- No `importScripts` from external origins
-- No remote code evaluation within the worker
-- Update lifecycle: prompt user to activate new version
-- Web App Manifest generation:
-  - `name`: "Licio"
-  - `short_name`: "Licio"
-  - `display`: "standalone"
-  - `theme_color` and `background_color`
-  - Maskable icons in required sizes
-  - `start_url`: "/"
-  - `scope`: "/"
+`vite-plugin-pwa` with Workbox 7:
+- **Precaching:** revision-hashed manifest for static assets (cache-first)
+- **Runtime caching:** network-first with cached fallback for API data; stale-while-revalidate for non-critical assets
+- **Service worker scope:** locked to `/`; no `importScripts` from external origins; no remote code evaluation
+- **Update lifecycle:** prompt user to activate new version
 
-**Security rationale (Section 6.12.5):** Locked scope prevents scope expansion attacks. No remote code evaluation prevents service worker poisoning. Revision-hashed manifests prevent stale cache injection.
+Web App Manifest: `name: "Licio"`, `short_name: "Licio"`, `display: "standalone"`, `theme_color`, `background_color`, maskable icons (192, 512), `start_url: "/"`, `scope: "/"`.
 
-**Definition of done:** PWA installs on Android (WebAPK), iOS (add-to-home-screen), and desktop. Service worker caches static assets. Update prompt appears on new deployment. Lighthouse PWA audit passes.
+**Done:** PWA installs on Android/iOS/desktop. Service worker caches. Update prompt works. Lighthouse PWA audit passes.
 
-### WS-C.2.2 Offline store
+### WS-C.2.2 Offline store — IndexedDB schema
+**Ref:** Section 6.9
 
-Implement offline storage using IndexedDB (Section 6.9):
-- Saved stories for offline reading
-- Draft contributions with local autosave
-- Thread summary snapshots
-- Signal Ledger snapshot
-- Queue for pending submissions (background sync)
-- **iOS storage eviction detection and resync** (Section 6.11)
+IndexedDB stores: saved stories, draft contributions (autosave), thread summary snapshots, Signal Ledger snapshot, pending submission queue. iOS storage-eviction detection: check for unexpected data loss on resume, trigger server resync, never silently lose a queued contribution or pending transaction record (Section 6.11).
 
-**Definition of done:** Drafts survive offline/online transitions. Queued submissions sync when connectivity returns. Storage eviction is detected and triggers resync.
+**Done:** Drafts survive offline/online transitions. Eviction detected and resync triggered.
 
-### WS-C.2.3 Background sync
+### WS-C.2.3 Background sync and submission queue
+**Ref:** Section 6.9
 
-Implement background sync for queued operations:
-- Pending contribution submissions
-- Pending report submissions
-- Draft sync (when user opts in)
-- Retry logic with exponential backoff
-- Conflict resolution strategy (server wins for published content, client wins for drafts)
+Workbox Background Sync for queued operations: pending contributions, pending reports, draft sync (opt-in). Retry with exponential backoff. Conflict resolution: server wins for published content, client wins for drafts.
 
-**Definition of done:** A contribution composed offline is submitted when connectivity returns. Conflicts are resolved without data loss.
+**Done:** Offline contribution submits on reconnect. Conflicts resolved without data loss.
+
+### WS-C.2.4 Web Push notification setup
+**Ref:** Sections 6.1 requirement 9, 21.1
+
+VAPID key generation (server-side). Push subscription management. Notification permission request flow (guided after install on iOS 16.4+). Notification preferences: grouped by default, daily digest option, quiet hours, per-topic controls. Notification budget indicator. Limited, explainable, user-controllable.
+
+**Done:** Push notifications deliver on Android and installed iOS PWA. Quiet hours suppress. Grouping works.
 
 ## WS-C.3 Hono RPC client
 
-### WS-C.3.1 Set up type-safe API client
+### WS-C.3.1 Type-safe API client
+**Ref:** Section 6.12.8
 
-Configure Hono RPC for end-to-end type-safe client-server communication (Section 6.12.8):
-- Import route types from `apps/api`
-- Create typed API client in `apps/web/src/lib/api.ts`
-- Integrate with TanStack Query hooks
-- zod validation on every response
-- Error handling with typed error responses
-- Request/response interceptors for auth tokens and CSRF
+Hono RPC: import route types from `apps/api`, create typed client in `apps/web/src/lib/api.ts`. Integrate with TanStack Query hooks. zod validation on every response. Request interceptors for auth tokens and CSRF.
 
-**Definition of done:** API calls are compile-time checked against BFF route contracts. A mismatched request shape is a build failure. zod validates every response.
+**Done:** API calls compile-time checked against BFF contracts. Mismatched shape is a build failure.
 
 ## WS-C.4 In-browser signal processing
 
-### WS-C.4.1 Attention signal processor
+### WS-C.4.1 Active dwell tracker
+**Ref:** Sections 5.3, 6.8, 19.1–19.2
 
-Implement the client-side attention signal processor (Section 6.8):
-- Active dwell tracking (foreground focus + normal scroll cadence)
-- Idle detection and filtering
-- Source-open event capture
-- Context-open event capture
-- Return visit tracking
-- Thread traversal depth tracking
-- Per-item caps on dwell time
-- Per-session aggregation
-- **Privacy filters:** process raw scroll/touch events in-browser, discard after feature extraction (Section 19.2)
-- Upload only aggregated features, never raw traces
-- Configurable via privacy settings
+Track active dwell per story: foreground focus detection (Page Visibility API + focus events), normal scroll cadence detection, idle filtering (no activity > threshold = idle). Per-item cap on dwell time. Raw scroll/touch events processed in-browser and discarded after feature extraction — never uploaded.
 
-**Security/privacy rationale (Section 19.1):** Raw attention events stay in the browser. Only aggregated, capped features are uploaded. This is the core privacy-by-design mechanism.
+**Done:** Active dwell tracked. Idle time excluded. Per-item cap enforced. Raw events discarded.
 
-**Definition of done:** Signal processor captures attention events. Raw events are discarded after aggregation. Aggregated features match the spec's `AttentionAggregate` schema. Privacy settings disable or limit collection.
+### WS-C.4.2 Source and context open tracker
+
+Capture source-open events (user opens original article/document via in-app reader or external). Capture context-open events (user opens context card). Count once per meaningful session to avoid gaming.
+
+**Done:** Source and context opens captured with deduplication.
+
+### WS-C.4.3 Return visit and thread traversal tracker
+
+Track return visits (same story after time threshold). Track thread traversal depth (branches visited, opposing views read). Weight nonredundant traversal above repeated same-branch reading. Detect and flag rage-loop patterns (repeated hostile returns).
+
+**Done:** Return visits and traversal depth measured. Rage loops flagged.
+
+### WS-C.4.4 Attention aggregate uploader
+**Ref:** Section 19.2
+
+Aggregate all signal features per item/session into `AttentionAggregate` matching spec schema (Section 22.1): `user_id_or_privacy_bucket`, `story_id`, `session_bucket`, `active_dwell_bucket`, `source_opened`, `context_opened`, `branch_depth_bucket`, `return_visit_count_bucket`, `privacy_level`. Upload aggregated features only, never raw traces. Respect user privacy settings — if user disables personalization, reduce or stop collection. Configurable upload frequency.
+
+**Done:** Aggregates match schema. Only aggregated features uploaded. Privacy settings enforced.
 
 ---
 
 # WS-D. Identity, accounts, and privacy
 
-Account system, authentication, privacy controls, and data rights. This workstream provides the identity foundation for all other workstreams.
-
-**Milestone:** M1 (Core social alpha)
-**Priority:** 0–1
-**Dependencies:** WS-0 (complete), WS-C.1 (routing), packages/db (Drizzle)
+**Milestone:** M1 | **Priority:** 0–1 | **Dependencies:** WS-0, WS-C.1, packages/db
 
 ## WS-D.1 Account and authentication
 
 ### WS-D.1.1 User schema and migration
+**Ref:** Section 22.1
 
-Create the `User` entity in Drizzle (Section 22.1):
-- `user_id` (UUID, primary key)
-- `handle` (unique, validated)
-- `display_name`
-- `email` (unique, validated, for auth)
-- `account_state` (enum: active, suspended, deactivated, deleted)
-- `created_at`, `updated_at`
-- `locale`
-- `age_band_if_known` (enum, nullable)
-- `privacy_settings` (JSONB, validated by zod schema)
-- `personalization_settings` (JSONB, validated by zod schema)
-- Indexes on `handle`, `email`, `account_state`
+`User` entity in Drizzle: `user_id` (UUID PK), `handle` (unique), `display_name`, `email` (unique), `account_state` (enum: active, suspended, deactivated, deleted), `created_at`, `updated_at`, `locale`, `age_band_if_known` (enum, nullable), `privacy_settings` (JSONB, zod-validated), `personalization_settings` (JSONB, zod-validated), `reputation_summary_private` (JSONB). Indexes on `handle`, `email`, `account_state`.
 
-**Definition of done:** Migration generates and applies. Drizzle types match the schema. Insert and query operations work via parameterized queries.
+**Done:** Migration applies. CRUD via parameterized queries. zod validates JSONB on read/write.
 
-### WS-D.1.2 Authentication — WebAuthn/passkeys
+### WS-D.1.2 WebAuthn registration
+**Ref:** Section 25.3
 
-Implement WebAuthn/passkey authentication (Section 25.3):
-- Registration flow (create credential)
-- Authentication flow (get credential)
-- Credential management (list, delete)
-- Session token generation (short-lived JWT or opaque token in `HttpOnly`, `Secure`, `SameSite=Strict` cookie)
-- Session management (device list, revocation)
-- Rate limiting on authentication attempts
+WebAuthn/passkey credential creation flow: challenge generation, attestation verification, credential storage (credential ID, public key, counter, device info). Support for platform authenticators (Touch ID, Windows Hello) and roaming authenticators (security keys).
 
-**Security rationale (Section 25.3):** WebAuthn is phishing-resistant and the preferred credential type. Session tokens use protected storage with secure cookie attributes.
+**Done:** User can register a passkey. Credential stored securely.
 
-**Definition of done:** User can register and authenticate with a passkey. Sessions are stored securely. Rate limiting prevents credential brute-force.
+### WS-D.1.3 WebAuthn authentication
 
-### WS-D.1.3 Authentication — email/password fallback
+WebAuthn authentication flow: challenge generation, assertion verification, session creation. Session token as `HttpOnly`, `Secure`, `SameSite=Strict` cookie. Device list for active sessions. Session revocation. Rate limiting on auth attempts.
 
-Implement email/password authentication as a fallback:
-- Email verification flow
-- Password hashing (Argon2id)
-- Password reset flow
-- Rate limiting
-- Suspicious-login detection (new device/location)
-- Multi-factor authentication for stewards and moderators
+**Done:** User authenticates with passkey. Session created with secure cookie. Rate limiting active.
 
-**Definition of done:** Registration, login, password reset, and MFA work end-to-end. Passwords are hashed with Argon2id. Suspicious logins trigger alerts.
+### WS-D.1.4 Email/password fallback auth
 
-### WS-D.1.4 Auth middleware for Hono
+Registration with email verification. Password hashing with Argon2id. Login flow. Password reset via email. Rate limiting. Suspicious-login detection (new device/location → alert).
 
-Create authentication middleware for the BFF:
-- Session validation on protected routes
-- User context injection into route handlers
-- Role-based access control (user, steward, moderator, admin)
-- Object-level authorization helpers
-- Audit logging for authenticated actions
+**Done:** Registration, login, password reset work. Argon2id hashing. Suspicious logins trigger alerts.
 
-**Definition of done:** Protected routes reject unauthenticated requests. Role checks prevent unauthorized access. Audit log records authenticated actions.
+### WS-D.1.5 Multi-factor authentication for stewards
+**Ref:** Section 25.3
+
+MFA requirement for steward and moderator roles. TOTP (authenticator app) support. Enforcement on role elevation.
+
+**Done:** Stewards/moderators must complete MFA. TOTP setup and verification work.
+
+### WS-D.1.6 Auth middleware for Hono
+
+Session validation middleware. User context injection. Role-based access (user, steward, moderator, admin). Object-level authorization helpers (user can only access own data unless role permits). Audit logging for authenticated actions.
+
+**Done:** Protected routes reject unauthenticated requests. Role checks prevent unauthorized access.
+
+### WS-D.1.7 Age gating
+**Ref:** Sections 19.4, 20.3
+
+Age declaration during registration. Under-13 rejected (product not directed to children under 13 — Section 19.4). Teens (13–17) default to: stricter privacy, reduced personalization, limited direct contact, safer recommendations, stronger content filters, excluded from wallet/payment/treasury/governance features.
+
+**Done:** Under-13 blocked. Teen defaults enforced. Minors excluded from financial features.
 
 ## WS-D.2 Privacy controls
 
 ### WS-D.2.1 Privacy settings API
+**Ref:** Section 19.3
 
-Implement privacy settings endpoints:
-- `GET /v1/privacy/settings` — current privacy configuration
-- `PATCH /v1/privacy/settings` — update privacy preferences
-- Settings: personalization on/off, cross-device sync on/off, attention history retention, notification preferences, data sharing preferences
+`GET /v1/privacy/settings`, `PATCH /v1/privacy/settings`. Settings: personalization on/off, cross-device sync on/off, attention history retention preference, notification preferences, data sharing preferences. Disabling personalization stops attention-based ranking for that user and triggers "less personalized feed" (Section 26.2).
 
-**Definition of done:** Privacy settings persist and are enforced. Disabling personalization stops attention-based ranking for that user.
+**Done:** Settings persist and are enforced across the stack.
 
-### WS-D.2.2 Data export
+### WS-D.2.2 Data export (DSAR)
+**Ref:** Section 19.3
 
-Implement DSAR export (Section 19.3):
-- `POST /v1/privacy/export` — request data export
-- Asynchronous job that packages all user data
-- Includes: account info, contributions, attention aggregates, privacy settings, moderation notices
-- Excludes: other users' data, internal model weights
-- Notification when export is ready
-- Download with authentication
+`POST /v1/privacy/export`. Async job packages: account info, contributions, attention aggregates, privacy settings, moderation notices, wallet links (if any). Excludes: other users' data, internal model weights. Notification on completion. Authenticated download. Machine-readable JSON.
 
-**Definition of done:** A user can request and download a complete export of their data. Export completes within a reasonable time. File format is machine-readable (JSON).
+**Done:** Export completes within reasonable time. Format is JSON.
 
 ### WS-D.2.3 Attention history deletion
 
-Implement attention history deletion (Section 19.3):
-- `POST /v1/privacy/delete-attention` — delete all attention history
-- Deletes aggregated attention features for the user
-- Does not affect published contributions
-- Confirmation step before deletion
-- Audit log of deletion request (without the deleted data)
+`POST /v1/privacy/delete-attention`. Deletes all aggregated attention features. Does not affect published contributions. Confirmation step. Audit log (without deleted data).
 
-**Definition of done:** Deletion removes all attention aggregates for the user. Ranking adjusts without the deleted data. Deletion is logged for compliance.
+**Done:** Deletion removes all attention data. Ranking adjusts. Logged for compliance.
 
 ### WS-D.2.4 Account deletion
 
-Implement account deletion:
-- `POST /v1/privacy/delete-account` — request account deletion
-- Grace period (configurable) before permanent deletion
-- Anonymize contributions (replace author with "[deleted]") or delete per policy
-- Remove all personal data
-- Cancel active sessions
-- Handle wallet unlinking (if linked)
-- Audit log of deletion request
+`POST /v1/privacy/delete-account`. Grace period before permanent deletion. Anonymize contributions ("[deleted]" author) or delete per policy. Remove all personal data. Cancel sessions. Handle wallet unlinking. Audit log.
 
-**Definition of done:** Account deletion removes or anonymizes all personal data. Published contributions are handled per policy. Deletion is irreversible after the grace period.
+**Done:** Deletion removes/anonymizes all personal data. Irreversible after grace period.
 
 ## WS-D.3 Wallet identity (isolated)
 
 ### WS-D.3.1 Wallet-link table
+**Ref:** Sections 22.2, 21.5
 
-Create the `WalletAccount` entity in Drizzle (Section 22.2):
-- `wallet_account_id` (UUID, primary key)
-- `user_id` (foreign key to User)
-- `address_hash` (indexed, for lookup without storing raw address)
-- `address_truncated` (display only, e.g., `0x1234...abcd`)
-- `chain_id`
-- `wallet_type` (enum: eoa, contract, multisig)
-- `linked_at`, `last_used_at`
-- `unlink_state`, `risk_state`
+`WalletAccount` entity: `wallet_account_id` (UUID PK), `user_id` (FK), `address_hash` (indexed), `address_truncated` (display: `0x1234...abcd`), `chain_id`, `wallet_type` (enum: eoa, contract, multisig), `linked_at`, `last_used_at`, `unlink_state`, `risk_state`.
 
-**Security rationale (Section 21.5):** Wallet identity is isolated from social identity, attention data, and ranking features. The wallet-link table is in a separate bounded context.
+**Security (Section 21.5):** Isolated bounded context. No join path from wallet data to ranking features or attention schemas at the schema level. Ranking services never read wallet wealth or payment amounts.
 
-**Definition of done:** Wallet table is isolated from ranking and attention schemas. No join path exists from wallet data to ranking features at the schema level.
+**Done:** Table isolated. No join to ranking/attention. Verified at schema level.
 
 ---
 
 # WS-E. Event pipeline and PWAtt
 
-Privacy-preserving event ingestion and the Participation-Weighted Attention scoring system.
-
-**Milestone:** M1–M2
-**Priority:** 1
-**Dependencies:** WS-D.1 (auth), WS-C.4 (client signal processor)
+**Milestone:** M1–M2 | **Priority:** 1 | **Dependencies:** WS-D.1, WS-C.4
 
 ## WS-E.1 Event schema and ingestion
 
-### WS-E.1.1 Event schema definition
+### WS-E.1.1 Core event schema definition
+**Ref:** Sections 19.2, 21.3, 22.4
 
-Define event schemas in `packages/shared/` using zod:
-- `AttentionEvent` — aggregated attention features per item/session
-- `ContributionEvent` — contribution creation with type classification
-- `SourceOpenEvent` — source/evidence card opened
-- `ContextOpenEvent` — context card opened
-- `ReportEvent` — content/account report
-- `ModerationEvent` — moderation action taken
-- Privacy classification per event type (Section 19.2)
-- Retention tier per event type (Section 22.4)
+zod schemas in `packages/shared/` for core event topics:
+- `content.submitted`, `content.normalized`
+- `source.opened.aggregate`, `attention.aggregate`
+- `contribution.created`, `evidence.added`, `claim.updated`
+- `thread.state.changed`
+- `moderation.case.created`, `integrity.signal.detected`
+- `invariant.run.completed`, `ranking.decision.logged`
+- `notification.sent`, `privacy.request.created`
 
-**Definition of done:** Schemas are defined with zod and exported. Each event has a privacy classification and retention tier.
+Each event: privacy classification (public, aggregated, sensitive, restricted), retention tier (Section 22.4: raw attention ≤7 days, aggregated 90–180 days, ranking logs 180–365 days, moderation logs per legal need).
 
-### WS-E.1.2 Event ingestion API
+**Done:** All event schemas defined. Privacy classification and retention tier assigned.
 
-Implement event ingestion endpoints in the BFF:
-- `POST /v1/events/attention` — receive aggregated attention features
-- Server-side validation against zod schemas
-- Replay protection (nonce + timestamp)
-- Rate limiting per user
-- Privacy-level enforcement (reject events that exceed the user's privacy settings)
-- Structured logging (pino) for audit trail
+### WS-E.1.2 Knomosis event schemas
+**Ref:** Section 21.3
 
-**Security rationale (Section 25.5):** Server-side validation treats client aggregates as hints, not sole truth. Replay protection prevents forged attention events.
+Separate schemas for Knomosis topics (behind feature flag):
+- `wallet.link.requested`, `wallet.linked`
+- `payment.intent.created`, `payment.intent.failed`, `payment.receipt.indexed`
+- `room.governance.mode.changed`
+- `governance.proposal.created`, `governance.signature.recorded`, `governance.proposal.executed`, `governance.proposal.challenged`
+- `treasury.deposit.indexed`, `treasury.grant.approved`, `treasury.payout.executed`
+- `knomosis.action.preflighted`, `knomosis.action.submitted`, `knomosis.event.indexed`
+- `compliance.financial.case.created`, `jurisdiction.feature.disabled`
 
-**Definition of done:** Events are ingested, validated, and stored. Replay attacks are rejected. Rate limits prevent flooding.
+**Done:** Knomosis schemas defined. All behind feature flags.
 
-### WS-E.1.3 Event storage and retention
+### WS-E.1.3 Event ingestion API
 
-Implement event storage with retention enforcement:
-- Raw client attention events: ≤ 7 days if stored (prefer not uploading)
-- Aggregated attention features: 90–180 days, then anonymize
-- Contribution events: per content retention policy
-- Retention jobs that run on schedule and enforce limits
+`POST /v1/events/attention` — receive aggregated attention features. Server-side zod validation. Replay protection (nonce + timestamp). Rate limiting per user. Privacy-level enforcement (reject events exceeding user's settings). Structured pino logging.
 
-**Definition of done:** Retention jobs delete or anonymize data past its retention window. Job runs are logged.
+**Security (Section 25.5):** Client aggregates treated as hints, not sole truth. Replay protection.
+
+**Done:** Events ingested, validated, stored. Replays rejected. Rate limits active.
+
+### WS-E.1.4 Event storage and retention jobs
+
+Storage in PostgreSQL (structured events) and Redis (real-time aggregation). Scheduled retention jobs: anonymize attention aggregates at 180 days, delete raw events at 7 days, enforce per-class retention limits. Job runs logged.
+
+**Done:** Retention jobs execute on schedule. Data deleted/anonymized per policy.
 
 ## WS-E.2 PWAtt scoring
 
-### WS-E.2.1 PWAtt v0 — instrumented salience
+### WS-E.2.1 PWAtt v0 — instrumented salience (no ranking power)
+**Ref:** Section 30.5
 
-Implement PWAtt v0 (Section 30.5), which computes scores but does not affect ranking:
-- Event aggregation per item/window
-- Active attention computation with per-item caps and idle filtering
-- Source-open and context-open weighting
-- Return-visit weighting
-- Save-for-later (low weight)
-- Anti-signals: rapid repetitive commenting dampening, rage-loop detection
-- Score stored per item in `InvariantOutput` table
-- Private Signal Ledger populated for the user
+Computes scores but does not affect ranking. Event aggregation per item/window. Active attention with caps and idle filtering. Source-open and context-open weighting. Return-visit weighting. Save-for-later (low weight). Anti-signals: rapid repetitive commenting dampening, rage-loop detection, low-information reply dampening. Scores stored in `InvariantOutput` table. Private Signal Ledger populated.
 
-**Definition of done:** PWAtt v0 computes scores for all active items. Scores are visible in the Signal Ledger. Scores do not affect ranking. Anti-signals dampen abusive patterns.
+**Done:** PWAtt v0 computes for all active items. Visible in Signal Ledger. Does not rank.
 
-### WS-E.2.2 PWAtt v1 — bounded ranking input
+### WS-E.2.2 PWAtt v0 — anti-signal implementation
 
-Extend PWAtt to serve as a bounded ranking input (Section 30.5):
-- Per-user/item/window saturation curves (diminishing returns)
-- Contribution-type weighting (evidence > question > correction > synthesis > explanation > low-info reply)
-- MERI v1 redundancy dampening integration
-- Safety-state constraints (freeze ranking growth for flagged content)
-- Normalize positive weights to sum to 100% per ranking profile (Section 5.5)
-- Explanation generation for user-facing labels
+Separate task for anti-signal detection (Section 5.3): coordinated burst detection (flag for MFCI), source-free accusation downweighting, harassment cascade detection (freeze ranking growth, trigger safety review, protect targets).
 
-**Definition of done:** PWAtt v1 produces bounded, explainable scores. Saturation curves prevent any single signal from dominating. Weights sum to 100%. Explanations are human-readable.
+**Done:** Anti-signals fire for all defined patterns. Harassment cascades trigger protective measures.
+
+### WS-E.2.3 PWAtt v1 — bounded ranking input
+**Ref:** Section 30.5
+
+Per-user/item/window saturation curves (diminishing returns — no single signal dominates). Contribution-type weighting hierarchy: evidence > correction > synthesis > question > counterexample > explanation > low-info reply. MERI v1 redundancy dampening integration. Safety-state constraints (freeze growth for flagged content). Normalize positive weights to sum to 100% per ranking profile (Section 5.5): wA 20–30%, wP 25–40%, wE 10–20%, wS 5–15%, wC 5–15%. Penalties (pM, pH, pT, pR) are separate nonnegative terms, not part of convex combination. Explanation generation for labels.
+
+**Done:** Bounded, explainable scores. Saturation curves work. Weights sum to 100%.
 
 ---
 
 # WS-F. Ingestion, source model, and search
 
-Content ingestion pipeline, source tracking, and search infrastructure.
-
-**Milestone:** M1 (Core social alpha)
-**Priority:** 1
-**Dependencies:** WS-D.1 (auth), WS-0.3.6 (Drizzle)
+**Milestone:** M1 | **Priority:** 1 | **Dependencies:** WS-D.1, packages/db
 
 ## WS-F.1 Story ingestion
 
 ### WS-F.1.1 Story schema and migration
+**Ref:** Section 22.1
 
-Create the `Story` entity in Drizzle (Section 22.1):
-- Fields per spec: `story_id`, `canonical_url`, `title`, `submitted_by`, `source_id`, `language`, `topic_ids`, `location_scope`, `sensitivity_labels`, `lifecycle_state`, `created_at`, `updated_at`
-- Lifecycle states: submitted, gathering_attention, deepening, context_needed, bridging, stable, archived
-- Indexes on `canonical_url`, `submitted_by`, `lifecycle_state`, `created_at`
+`Story` in Drizzle: `story_id` (UUID PK), `canonical_url`, `title`, `submitted_by` (FK User), `source_id` (FK Source), `language`, `topic_ids` (array), `location_scope`, `sensitivity_labels` (array), `lifecycle_state` (enum: submitted, gathering_attention, deepening, context_needed, bridging, stable, archived), `created_at`, `updated_at`. Indexes: `canonical_url`, `submitted_by`, `lifecycle_state`, `created_at`.
 
-**Definition of done:** Migration applies. CRUD operations work with parameterized queries.
+**Done:** Migration applies. CRUD with parameterized queries.
 
-### WS-F.1.2 URL canonicalization and duplicate detection
+### WS-F.1.2 Claim schema
+**Ref:** Sections 3.3, 22.3
 
-Implement URL normalization (Section 14.2):
-- Strip tracking parameters (utm_*, fbclid, etc.)
-- Normalize protocol, www prefix, trailing slashes
-- Detect syndicated copies (same content, different publisher)
-- Near-duplicate text detection (shingling/MinHash or similar)
-- Exact-URL duplicate rejection with redirect to existing story
+`Claim` entity: `claim_id` (UUID PK), `story_id` (FK), `text`, `extracted_by` (enum: user, ai_draft), `status` (enum: unverified, supported, challenged, corrected, retracted), `evidence_card_ids` (linked), `created_at`. Claims are discrete propositions extracted from stories or comments. Evidence cards support or challenge claims.
 
-**Definition of done:** Submitting the same URL twice (with different tracking params) finds the existing story. Near-duplicate text is flagged.
+**Done:** Claims linked to stories and evidence cards. Status tracks lifecycle.
 
-### WS-F.1.3 Story submission API
+### WS-F.1.3 URL canonicalization and duplicate detection
+**Ref:** Section 14.2
 
-Implement submission endpoints (Sections 14.1, 23.2):
-- `POST /v1/stories` — submit link or original story
-- Submission types: link story, original brief, question, evidence card, local update, live thread
-- Required metadata validation per type
-- Rate limiting per user
-- Initial safety checks (spam, malware links)
-- Thread shell creation on submission
+Strip tracking parameters (utm_*, fbclid, gclid, etc.). Normalize protocol, www, trailing slashes, case. Exact-URL duplicate rejection with redirect to existing story. Near-duplicate text detection (shingling/MinHash). Syndicated-copy detection (same content, different publisher). Respect robots.txt and publisher restrictions. Copyright-aware display and takedown intake path.
 
-**Definition of done:** All submission types work. Rate limits prevent spam. Safety checks block obvious abuse. A thread is created for each new story.
+**Done:** Same URL (with different tracking) finds existing story. Near-duplicates flagged. robots.txt respected.
+
+### WS-F.1.4 Story submission API
+**Ref:** Sections 14.1, 23.2
+
+`POST /v1/stories`. Submission types: link story, original brief, question, evidence card, local update, live thread. Required metadata per type (Section 14.1 table). Rate limiting. Initial safety checks (spam, malware links). Thread shell creation on submission. Metadata extraction (author, date, publisher, media type). Topic/language/sensitivity classification.
+
+**Done:** All types work. Rate limits prevent spam. Thread created per story.
+
+### WS-F.1.5 Story detail and lifecycle API
+
+`GET /v1/stories/:id` — story detail with source summary, claims, evidence status, context. Story lifecycle transitions: submitted → gathering_attention → deepening → context_needed → bridging → stable → archived. Transitions driven by PWAtt, SCOI, and moderation signals.
+
+**Done:** Story detail returns full context. Lifecycle transitions execute correctly.
 
 ## WS-F.2 Source model
 
 ### WS-F.2.1 Source schema and metadata
+**Ref:** Section 14.3
 
-Create the Source entity:
-- `source_id`, `canonical_domain`, `name`, `ownership_lineage`, `typical_topics`, `correction_history`, `syndication_relationships`
-- Community notes and context cards (linked)
-- No simplistic "truth scores" — context and history only
+`Source` entity: `source_id` (UUID PK), `canonical_domain`, `name`, `ownership_lineage` (nullable), `typical_topics` (array), `correction_history_ref`, `syndication_relationships` (array of source_id refs). Community notes and context cards linked. No simplistic "truth scores" — context and history only.
 
-**Definition of done:** Source profiles are created on story ingestion. Syndication relationships link related sources.
+**Done:** Source profiles created on ingestion. Syndication relationships linked.
 
-## WS-F.3 Search
+## WS-F.3 Search and embeddings
 
-### WS-F.3.1 Search indexing
+### WS-F.3.1 Full-text search indexing
 
-Implement basic search infrastructure:
-- Full-text search on story titles, bodies, and claims
-- Source search
-- Room search
-- Topic filtering
-- Freshness weighting
-- No ranking influence from wallet/payment data
+PostgreSQL full-text search on story titles, bodies, claims. Source search by name/domain. Room search. Topic filtering. Freshness weighting. No ranking influence from wallet/payment data.
 
-**Definition of done:** Users can search for stories, sources, and rooms. Results are relevant and fresh. No financial data influences search results.
+**Done:** Search returns relevant results. No financial data influences search.
+
+### WS-F.3.2 Embedding infrastructure
+
+Vector embeddings for content, claims, sources, evidence cards, community interpretations. Used by MERI (similarity/independence), SCOI (interpretation comparison), and candidate retrieval. Store in PostgreSQL with pgvector extension or dedicated vector store. Embedding model registered in AI model registry (WS-K).
+
+**Done:** Embeddings generated and stored. Similarity queries work for MERI and SCOI.
 
 ---
 
-# WS-G. Forum and conversation
+# WS-G. Forum, conversation, rooms, and lenses
 
-Thread structure, contribution taxonomy, and conversation quality model.
-
-**Milestone:** M1 (Core social alpha)
-**Priority:** 1
-**Dependencies:** WS-F.1 (story schema), WS-D.1 (auth), WS-B.2 (UI components)
+**Milestone:** M1 | **Priority:** 1 | **Dependencies:** WS-F.1, WS-D.1, WS-B.2
 
 ## WS-G.1 Thread and contribution schema
 
 ### WS-G.1.1 Thread schema
+**Ref:** Section 22.1
 
-Create the `Thread` entity in Drizzle (Section 22.1):
-- `thread_id`, `story_id`, `room_id`, `branch_index`, `current_summary_id`, `conversation_state`, `safety_state`, `created_at`
-- Conversation states: active, deepening, tense, under_review, resolved, archived
-- Safety states: normal, elevated, under_review, restricted
+`Thread` in Drizzle: `thread_id` (UUID PK), `story_id` (FK), `room_id` (FK, nullable), `branch_index`, `current_summary_id` (FK, nullable), `conversation_state` (enum: active, deepening, tense, under_review, resolved, archived), `safety_state` (enum: normal, elevated, under_review, restricted), `created_at`.
 
-**Definition of done:** Threads are created with stories. Branch structure supports multiple branches per thread.
+**Done:** Threads created with stories. Multiple branches per thread supported.
 
 ### WS-G.1.2 Contribution schema
+**Ref:** Section 22.1
 
-Create the `Contribution` entity (Section 22.1):
-- `contribution_id`, `thread_id`, `user_id`, `type`, `body`, `citations`, `target_claim_id`, `parent_contribution_id`, `edit_history_ref`, `moderation_state`, `created_at`
-- Contribution types: question, answer, evidence, correction, synthesis, counterexample, explanation, local_context, direct_experience, moderation_concern, meta_discussion
-- Moderation states: published, under_review, hidden, removed
+`Contribution`: `contribution_id` (UUID PK), `thread_id` (FK), `user_id` (FK), `type` (enum: question, answer, evidence, correction, synthesis, counterexample, explanation, local_context, direct_experience, moderation_concern, meta_discussion), `body`, `citations` (JSONB array), `target_claim_id` (FK, nullable), `parent_contribution_id` (FK, nullable), `edit_history_ref`, `moderation_state` (enum: published, under_review, hidden, removed), `created_at`.
 
-**Definition of done:** Contributions support all types. Parent-child relationships form tree/graph structure.
+**Done:** All 11 types supported. Parent-child tree structure works.
 
 ### WS-G.1.3 Evidence card schema
+**Ref:** Section 22.1
 
-Create the `EvidenceCard` entity (Section 22.1):
-- `evidence_id`, `claim_id`, `source_id`, `submitted_by`, `evidence_type`, `citation_url_or_ref`, `relevance_note`, `verification_state`, `independence_group_id`
-- Evidence types: primary_source, dataset, transcript, legal_text, report, expert_reference, fact_check
+`EvidenceCard`: `evidence_id` (UUID PK), `claim_id` (FK), `source_id` (FK, nullable), `submitted_by` (FK), `evidence_type` (enum: primary_source, dataset, transcript, legal_text, report, expert_reference, fact_check), `citation_url_or_ref`, `relevance_note`, `verification_state` (enum: unverified, verified, disputed, retracted), `independence_group_id`. Links to claims and sources.
 
-**Definition of done:** Evidence cards link to claims and sources. Independence groups support MERI calculations.
+**Done:** Evidence cards link to claims. Independence groups support MERI.
 
-## WS-G.2 Contribution API
+## WS-G.2 Room and lens schema
 
-### WS-G.2.1 Create contribution endpoint
+### WS-G.2.1 Room schema
+**Ref:** Sections 16.1, 22.1
 
-Implement `POST /v1/contributions` (Section 23.2):
-- Validate contribution type and required fields per type (Section 6.6)
-- Citation validation
-- Spam and safety pre-checks
-- Local draft ID for offline-to-online sync
-- Client integrity token validation
+`Room` entity: `room_id` (UUID PK), `name`, `description`, `room_type` (enum: global_topic, local_geographic, professional_domain, event, learning, steward), `visibility` (enum: public, restricted, expert_led), `created_by` (FK), `steward_ids` (array), `created_at`, `updated_at`.
 
-**Definition of done:** All contribution types can be created. Required fields are enforced per type. Offline drafts sync correctly.
+**Done:** Rooms created and listed. Types and visibility enforced.
 
-### WS-G.2.2 Thread reading endpoints
+### WS-G.2.2 Lens schema
+**Ref:** Sections 16.2, 10.2
 
-Implement thread reading:
-- `GET /v1/threads/:id` — thread overview with branch index
-- `GET /v1/threads/:id/branches/:branch` — branch content
-- Semantic anchoring for deep linking
-- Lazy loading for long branches
+`Lens` entity: `lens_id` (UUID PK), `room_id` (FK), `name`, `lens_type` (enum: local_resident, beginner, expert, affected_community, skeptical, policy, historical), `description`. Lenses are interpretation contexts, not echo chambers. SCOI uses lenses to identify where meanings diverge.
 
-**Definition of done:** Threads load with branch structure. Deep links work. Long threads lazy-load.
+**Done:** Lenses linked to rooms. SCOI can query lens interpretations.
 
-## WS-G.3 Participation composer
+### WS-G.2.3 Room API
 
-### WS-G.3.1 Structured composer UI
+`GET /v1/rooms` — list joined and recommended rooms. `GET /v1/rooms/:roomId` — room detail with threads, lenses, stewards. `POST /v1/rooms` — create room (restricted to authorized users). Room subscription management.
 
-Build the Participation Composer (Section 6.6):
-- "What are you adding?" type selector
-- Per-type prompts and required fields:
-  - Ask: question text, optional claim reference
-  - Evidence: link/citation, relevance note, claim reference
-  - Correction: correction text, evidence, target text
-  - Synthesis: summary, included branches, uncertainty note
-  - Counterexample: example, relevance, source
-  - Experience: scope, location/time, privacy warning
-  - Explain: explanation, assumptions, caveats
-  - Flag: reason, target, urgency
-- Citation capture from browser share target
-- Image/document attachment with privacy warnings
-- Local draft autosave (IndexedDB)
-- Voice dictation (Web Speech API where available)
+**Done:** Room CRUD and subscription work. Recommended rooms served.
 
-**Definition of done:** Composer opens within 300ms (Section 6.10). All types work with validation. Drafts autosave. Citations are captured correctly.
+## WS-G.3 Contribution API and composer
+
+### WS-G.3.1 Contribution creation endpoint
+**Ref:** Section 23.2
+
+`POST /v1/contributions`. Validate type and required fields per type (Section 6.6 table). Citation validation. Spam/safety pre-checks. Local draft ID for offline sync. Client integrity token validation.
+
+**Done:** All types created with proper validation. Offline drafts sync.
+
+### WS-G.3.2 Evidence card endpoint
+
+`POST /v1/evidence`. Citation URL/ref, relevance note, claim reference. Evidence-type classification. Link to independence group for MERI.
+
+**Done:** Evidence cards created and linked to claims.
+
+### WS-G.3.3 Thread reading endpoints
+
+`GET /v1/threads/:id` — overview with branch index and structured sections (Overview, Questions, Evidence, Challenges, Local/Expert Lenses, Chronology per Section 6.4). `GET /v1/threads/:id/branches/:branch` — branch content. Semantic anchoring for deep links. Lazy loading for long branches.
+
+**Done:** Thread branches load with structure. Deep links work. Lazy loading active.
+
+### WS-G.3.4 Composer — type selector and Ask/Flag modes
+
+Participation Composer UI: "What are you adding?" type selector. Implement Ask mode (question text, optional claim reference) and Flag mode (reason, target, urgency). Floating "Contribute" button. Opens within 300ms (Section 6.10).
+
+**Done:** Type selector renders. Ask and Flag modes work with validation. Opens < 300ms.
+
+### WS-G.3.5 Composer — Evidence/Correction/Synthesis modes
+
+Evidence mode (link/citation, relevance note, claim reference). Correction mode (correction text, supporting evidence, target text). Synthesis mode (summary, included branches, uncertainty note).
+
+**Done:** All three modes work with required field validation.
+
+### WS-G.3.6 Composer — Counterexample/Experience/Explain modes
+
+Counterexample (example, relevance, source). Experience (scope, location/time, privacy warning). Explain (explanation, assumptions, caveats).
+
+**Done:** All three modes work. Privacy warning shown for Experience mode.
+
+### WS-G.3.7 Composer — citations, attachments, and drafts
+
+Citation capture from browser share target. Image/document attachment with privacy warnings. Local draft autosave to IndexedDB. Draft recovery after interruption. Voice dictation (Web Speech API where available).
+
+**Done:** Citations captured. Attachments upload. Drafts autosave and recover.
+
+### WS-G.3.8 Feed preferences endpoint
+**Ref:** Section 23.2
+
+`PATCH /v1/feed/preferences` — update personalization mode, topic preferences, feed mode selection, notification preferences. Integrates with ranking (WS-I) and privacy (WS-D.2).
+
+**Done:** Preferences persist. Feed mode changes take effect immediately.
 
 ## WS-G.4 UGC safety
 
-### WS-G.4.1 Content sanitization pipeline
+### WS-G.4.1 Markdown-lite parser
 
-Implement defense-in-depth sanitization (Section 6.12.7):
-1. Parse Markdown-lite to safe AST (strict parser)
-2. Pass AST through DOMPurify with `RETURN_TRUSTED_TYPE: true`
-3. Allow-list: safe tags, attributes, URL schemes only
-4. Strip: `javascript:`, `data:` URLs, event-handler attributes, raw HTML
-5. Normalize links and interstitial for suspicious patterns (wallet-drainer detection)
+Strict Markdown-lite parser producing safe AST. Allowed: paragraphs, headings, bold, italic, code, links (normalized), blockquotes, lists. Stripped: raw HTML, `javascript:` URLs, `data:` URLs, event-handler attributes.
 
-**Security rationale (Section 6.12.7):** Defense in depth so that a bug in either the parser or the sanitizer alone cannot produce an injection. Trusted Types integration prevents DOM-based XSS.
+**Done:** Parser produces safe AST. Dangerous constructs stripped. Vitest tests cover edge cases.
 
-**Definition of done:** XSS payloads in any field are sanitized. Trusted Types violations are caught. Wallet-drainer links are interstitialed. Vitest tests cover OWASP XSS vectors.
+### WS-G.4.2 DOMPurify sanitization with Trusted Types
+**Ref:** Section 6.12.7
+
+DOMPurify configured with `RETURN_TRUSTED_TYPE: true`. Allow-list: only permitted tags, attributes, and URL schemes. Defense in depth: Markdown AST → DOMPurify → render. Link normalization and interstitial for wallet-drainer patterns (suspicious contract interaction URLs).
+
+**Done:** XSS payloads sanitized. Trusted Types violations caught. Wallet-drainer links interstitialed. OWASP XSS cheat-sheet vectors tested.
 
 ---
 
 # WS-H. Core invariant services
 
-Mathematical invariant implementations. All invariants run in shadow before affecting ranking.
+All invariants run in shadow before affecting ranking. Each output carries confidence, coverage, reason codes, and fallback behavior (Section 30.4).
 
-**Milestone:** M2 (Invariant shadow)
-**Priority:** 2
-**Dependencies:** WS-E (event pipeline), WS-F (ingestion), WS-G (forum)
+**Milestone:** M2 | **Priority:** 2 | **Dependencies:** WS-E, WS-F, WS-G
 
 ## WS-H.1 Invariant computation platform
 
 ### WS-H.1.1 Invariant output schema
+**Ref:** Section 22.1
 
-Create the `InvariantOutput` entity (Section 22.1):
-- `invariant_output_id`, `invariant_type`, `target_type`, `target_id`, `time_window`, `version`, `score_vector`, `explanation_summary`, `confidence`, `created_at`
-- Invariant types: MERI, MFCI, GWEI, SCOI, PHI, hodge_tension, tropical_cascade, braid_dynamics, reeb_landscape, counterfactual_defect, path_signature_wellbeing
+`InvariantOutput` in Drizzle: `invariant_output_id` (UUID PK), `invariant_type` (enum: MERI, MFCI, GWEI, SCOI, PHI, hodge_tension, tropical_cascade, braid_dynamics, reeb_landscape, counterfactual_defect, path_signature_wellbeing), `target_type` (enum: story, thread, feed, room, cohort, session), `target_id`, `time_window`, `version`, `score_vector` (JSONB), `explanation_summary`, `confidence` (0–1), `coverage` (0–1), `created_at`.
 
-**Definition of done:** Schema supports all invariant types. Versioning enables A/B comparison. Explanation summaries are human-readable.
+**Done:** Schema supports all invariant types. Versioning enables A/B comparison.
 
 ### WS-H.1.2 Invariant service framework
 
-Build the shared invariant computation framework:
-- Batch computation interface (for audits)
-- Near-real-time approximation interface (for ranking)
-- Feature versioning and model/invariant cards
-- Confidence and coverage reporting
-- Fallback behavior when an invariant fails
-- Regression test harness on synthetic and labeled datasets
+Shared framework in `packages/invariants/`: `InvariantService` interface with `computeBatch(targets, window)` and `computeRealtime(target)` methods. Model/invariant card schema (owner, version, input/output schema, confidence bounds, known failure modes). Feature versioning. Fallback behavior: if invariant fails, ranking proceeds without it and logs the gap. Regression test harness with synthetic datasets.
 
-**Definition of done:** A new invariant can be registered and runs on schedule. Outputs include confidence, coverage, and reason codes. Failures fall back gracefully.
+**Done:** New invariant registered via interface. Outputs include confidence/coverage/reason codes. Failures fall back gracefully with logging.
 
 ## WS-H.2 MERI — Matroid Exposure Rank Invariant
 
 ### WS-H.2.1 MERI v0 — URL/text dedup
+**Ref:** Section 30.4
 
-Implement MERI v0 (Section 30.4):
-- Exact URL duplicate detection
-- Text similarity via shingling/MinHash
-- Near-duplicate grouping
-- Marginal exposure gain calculation (returns 0 for duplicates, epsilon for same-claim/same-source)
-- Feed deduplication signal
+Exact URL duplicate detection (post-canonicalization). Text similarity via shingling/MinHash for near-duplicate grouping. Marginal exposure gain: 0 for duplicates, epsilon for same-claim/same-source. Feed deduplication signal.
 
-**Definition of done:** Near-identical syndicated articles do not each increase feed rank (MERI-1). Duplicate groups are correctly identified.
+**Done:** MERI-1 (syndicated duplicates don't inflate rank). Groups correctly identified.
 
 ### WS-H.2.2 MERI v1 — multi-dimensional independence
+**Ref:** Sections 7.4–7.5, 30.4
 
-Extend MERI to multi-dimensional independence (Section 7.4):
-- Source lineage independence
-- Claim content independence
-- Evidence base independence
-- Community origin independence
-- Semantic framing independence
-- Temporal update independence
-- Partition matroid construction
-- Greedy rank computation (exact for matroid)
-- Marginal rank gain as ranking feature
+Six independence dimensions: source lineage, claim content, evidence base, community origin, semantic framing, temporal update. Partition matroid construction (near-duplicate/shared-source/shared-evidence classes). Greedy rank computation (exact for matroid). Marginal rank gain as ranking feature. When falling back to general similarity-graph, flag output as approximation in invariant card.
 
-**Definition of done:** MERI-2 (primary document adds more value than ten derivative posts). MERI-3 (topic pages expose source/evidence lineage). MERI-5 (features are explainable).
+**Done:** MERI-2 (primary document > ten derivative posts). MERI-3 (topic pages expose lineage). MERI-5 (explainable).
+
+### WS-H.2.3 MERI UI integration
+**Ref:** Section 7.6
+
+Feed cards show "New angle," "Independent source," "Duplicate context," or "Same claim, new evidence." Topic pages include "independent sources" drawer. User preference: "show fewer repeats" or "show all updates" per topic. Never say "this is true because many outlets repeated it."
+
+**Done:** Labels render on feed cards. Independent sources drawer works.
 
 ## WS-H.3 MFCI — Markov-Fiber Coordination Invariant
 
-### WS-H.3.1 MFCI v0 — shadow anomaly reports
+### WS-H.3.1 MFCI v0 — cheap synchrony statistics
+**Ref:** Section 8.2 latency note, 30.4
 
-Implement MFCI v0 (Section 30.4):
-- Contingency table construction (user_group × topic × time_bucket × action_type × target)
-- Fixed-margin computation (total per group, topic, time, action, baseline target popularity)
-- Cheap synchrony statistics for sub-minute freeze path
-- Shadow reporting (no enforcement)
-- Analyst dashboard with preserved margins and baselines
+Sub-minute "freeze trend acceleration" path: target-concentration score and synchrony score computed from lightweight statistics with precomputed null calibrations. No MCMC — fast enough for real-time. Shadow reporting: logs to analyst dashboard, no enforcement.
 
-**Definition of done:** MFCI-1 (large communities not penalized for volume). MFCI-4 (automated actions log margins and statistics). Shadow mode produces reports without enforcement.
+**Done:** Sub-minute statistics computed. Dashboard shows anomalies. No enforcement.
 
-### WS-H.3.2 MFCI v1 — analyst-reviewed dampening
+### WS-H.3.2 MFCI v0 — contingency table and margin computation
 
-Extend MFCI for production enforcement:
-- Markov-basis MCMC sampler for conditional fiber distribution
-- Add-one p-value estimator
-- Risk states: normal, elevated, high, severe (Section 8.5)
-- Ranking integration: distribution dampening, trend freeze, cross-community spread limits
-- Analyst review queue with human-readable summaries
-- Appeal support (MFCI-5)
+Full contingency table construction: user_group × topic × time_bucket × action_type × target. Fixed-margin computation. Analyst dashboard showing preserved margins and baselines.
 
-**Definition of done:** MFCI-2 (coordinated reporting delayed until reviewed). MFCI-3 (severe synchronization freezes trends within one minute). Appeals can inspect coordination rationale.
+**Done:** MFCI-1 (large communities not penalized for volume). MFCI-4 (margins logged).
+
+### WS-H.3.3 MFCI v1 — Markov-basis fiber test
+**Ref:** Section 8.2
+
+Markov-basis generation (Diaconis–Sturmfels) for fiber connectivity. Metropolis–Hastings sampler over conditional fiber distribution (log-linear null). Add-one p-value: `p_hat = (1 + #exceeding) / (N + 1)`. `MFCI = -log p_hat`. Exact fiber test confirms or clears the cheap-statistics freeze.
+
+**Done:** Fiber test produces finite MFCI scores. Confirms/clears cheap-statistics freezes.
+
+### WS-H.3.4 MFCI v1 — enforcement and appeals
+**Ref:** Section 8.5
+
+Risk states: normal, elevated (distribution dampening), high (freeze trend acceleration, review queue), severe (limit cross-community spread, immediate safety/integrity review). Analyst review queue with human-readable summaries. Appeal support — users can inspect coordination rationale (MFCI-5).
+
+**Done:** MFCI-2 (coordinated reports delayed). MFCI-3 (severe sync freezes within 1 min). Appeals inspect rationale.
 
 ## WS-H.4 SCOI — Sheaf Context Obstruction Invariant
 
 ### WS-H.4.1 SCOI v0 — lens-summary disagreement
+**Ref:** Section 30.4
 
-Implement SCOI v0 (Section 30.4):
-- Lens definition and community interpretation capture
-- Lens-summary disagreement scoring
-- Context states: coherent, ambiguous, split, obstructed, weaponized (Section 10.4)
-- Steward reports for context obstruction
+Lens definitions from WS-G.2.2. Community interpretation capture per lens per story. Disagreement scoring between lens interpretations. Context states: coherent, ambiguous, split, obstructed, weaponized (Section 10.4). Steward reports.
 
-**Definition of done:** Context states are computed for cross-community content. Stewards can view interpretation differences.
+**Done:** Context states computed. Stewards view interpretation differences.
 
 ### WS-H.4.2 SCOI v1 — sheaf-Laplacian Dirichlet energy
+**Ref:** Section 10.2
 
-Extend SCOI to the mathematical model (Section 10.2):
-- Restriction maps between overlapping communities
-- Coboundary operator computation
-- Sheaf Laplacian construction
-- Normalized Dirichlet energy scoring
-- Bridge/context routing (invite contributions that reduce SCOI)
-- Context card population
+Restriction maps between overlapping communities. Coboundary operator `d0`. Sheaf Laplacian `L0 = d0^T d0`. Normalized Dirichlet energy scoring `SCOI = (s^T L0 s) / normalizer`, normalized to [0,1]. Bridge/context routing: invite contributions that reduce SCOI. Context card population. "Needs Context" label means interpretations differ — never false/bad/banned.
 
-**Definition of done:** SCOI-1 (cross-community distribution includes context). SCOI-2 (bridge comments receive credit when obstruction decreases). SCOI-3 (users inspect interpretation differences).
+**Done:** SCOI-1 (context included in cross-community distribution). SCOI-2 (bridge credit). SCOI-3 (users inspect differences).
+
+### WS-H.4.3 SCOI UI integration
+**Ref:** Section 10.5
+
+Feed label "Needs Context" when elevated. Context card section "Where interpretations differ." Thread branch "Bridge attempts." Composer warning: "People in another room are reading this differently." Share dialog: "This item is context-sensitive. Include origin context?"
+
+**Done:** All SCOI UI elements render at appropriate thresholds.
 
 ## WS-H.5 GWEI — Gromov-Wasserstein Experience Isometry
 
 ### WS-H.5.1 GWEI v0 — cohort dashboards
+**Ref:** Section 30.4
 
-Implement GWEI v0 (Section 30.4):
-- Cohort definition (language, region, age band, new vs established)
-- Experience metric extraction (source diversity, topic diversity, evidence access, discussion depth)
-- Descriptive cohort comparison dashboards
-- Privacy-protected access controls
+Cohort definitions: language, region, age band, new vs established. Experience metrics: source diversity, topic diversity, evidence access, discussion depth, viewpoint geometry, novelty, safety state (Section 9.4). Descriptive comparison dashboards. Privacy-protected access controls.
 
-**Definition of done:** GWEI-4 (dashboards are privacy-protected and access-controlled). Cohort comparisons are descriptive and informative.
+**Done:** GWEI-4 (dashboards privacy-protected). Cohort comparisons descriptive.
 
-### WS-H.5.2 GWEI v1 — entropic-regularized GW
+### WS-H.5.2 GWEI v1 — entropic-regularized GW distance
+**Ref:** Section 9.2
 
-Extend GWEI to the mathematical model (Section 9.2):
-- Metric-measure space construction per cohort
-- Entropic-regularized Gromov-Wasserstein distance computation
-- Seed-stability reporting across random initializations
-- Release-gate integration (block launches that degrade cohort parity)
-- Confidence interval reporting
+Metric-measure space per cohort: items shown, pairwise distance (semantic + source + evidence + community), normalized probability measure. Entropic-regularized GW₂ computation. Seed-stability reporting across random initializations. Release-gate integration: block launches degrading cohort parity. Confidence intervals reported.
 
-**Definition of done:** GWEI-1 (ranking launches require isometry audits). GWEI-2 (audits compare relational structure). GWEI-3 (degradation above threshold requires mitigation).
+**Done:** GWEI-1 (launches require audits). GWEI-2 (relational structure). GWEI-3 (degradation requires mitigation).
 
 ## WS-H.6 PHI — Preference Holonomy Invariant
 
 ### WS-H.6.1 PHI v0 — narrow-loop detection
+**Ref:** Section 30.4
 
-Implement PHI v0 (Section 30.4):
-- Session topic-sequence tracking
-- Narrow-loop detection (same topic cluster visited repeatedly)
-- Compulsive-session detection (rapid, repeated hostile returns)
-- Wellbeing prompts ("Your feed is narrowing")
-- User controls: reset topic history, reduce personalization, feed-mode switch
+Session topic-sequence tracking. Narrow-loop detection (same topic cluster repeatedly). Compulsive-session detection (rapid hostile returns). Wellbeing prompts ("Your feed is narrowing"). User controls: reset topic history, reduce personalization, feed-mode switch (WS-B.2.9).
 
-**Definition of done:** PHI-2 (high-holonomy loops dampened). PHI-4 (users can reset personalization). Wellbeing prompts appear for narrow loops.
+**Done:** PHI-2 (loops dampened). PHI-4 (reset without account deletion).
 
 ### WS-H.6.2 PHI v1 — orthogonal transport estimation
+**Ref:** Section 11.2
 
-Extend PHI to the mathematical model (Section 11.2):
-- Local coordinate frames for preference space per topic context
-- Orthogonal transport map estimation between contexts
-- Loop holonomy computation (ordered product of transport maps)
-- `PHI(γ) = ||log(H(γ))||_F` scoring
-- Gauge-invariant norm (conjugation-invariant)
-- Sensitive-topic stricter thresholds (self-harm, eating disorders, medical misinformation, extremism)
+Local coordinate frames per topic context. Orthogonal transport maps `A_xy ∈ O(n)`. Loop holonomy `H(γ) = product of transport maps`. Score: `PHI(γ) = ||log(H(γ))||_F`. Fallback `||H - I||` for rotation-by-π edge case. Gauge-invariant (conjugation-invariant) summaries. Sensitive-topic stricter thresholds: self-harm, eating disorders, medical misinformation, extremist ideology, harassment.
 
-**Definition of done:** PHI-1 (ranking computes path-risk features). PHI-3 (sensitive topics use stricter thresholds). PHI-5 (experiments report holonomy distribution).
+**Done:** PHI-1 (path-risk features). PHI-3 (sensitive topics stricter). PHI-5 (experiments report distribution).
 
 ## WS-H.7 Supporting invariants
 
 ### WS-H.7.1 Hodge conversation tension
+**Ref:** Section 12.1
 
-Implement discrete Hodge decomposition (Section 12.1):
-- Conversation as simplicial complex
-- Flow decomposition: gradient + curl + harmonic
-- Thread-health labels: "High disagreement, low hostility" vs "Global unresolved conflict"
-- Moderator queue routing for high harmonic tension
+Conversation as simplicial complex. Discrete Hodge decomposition: gradient + curl + harmonic. Thread labels: "High disagreement, low hostility" vs "Global unresolved conflict." Moderator queue routing for high harmonic tension. `HarmfulTensionRisk` in PWAtt combines harmonic tension with safety classifiers — tension alone never penalizes legitimate disagreement.
 
-**Definition of done:** Threads are labeled with tension state. Moderators receive high-tension threads in their queue.
+**Done:** Threads labeled. Moderators receive high-tension threads.
 
 ### WS-H.7.2 Tropical cascade rank
+**Ref:** Section 12.2
 
-Implement tropical semiring cascade analysis (Section 12.2):
-- Min-plus earliest-arrival computation along spread paths
-- Cascade timing features
-- Synchronized cascade detection
-- MFCI complementary timing geometry
+Min-plus semiring earliest-arrival computation along spread paths. Cascade timing features. Synchronized cascade detection. MFCI complementary timing geometry.
 
-**Definition of done:** Coordinated link drops are detected via timing geometry. Cascade features feed MFCI analysis.
+**Done:** Coordinated link drops detected. Features feed MFCI.
+
+### WS-H.7.3 Braid agenda dynamics
+**Ref:** Section 12.3
+
+Trending topics as strands over time. Crossings (rank swaps) form braid word. Crossing number and braid entropy measure agenda turbulence. Detect manufactured churn and repeated threshold-gaming.
+
+**Done:** Agenda turbulence measured. Gaming attempts flagged for stewards.
+
+### WS-H.7.4 Reeb attention landscape
+**Ref:** Section 12.4
+
+Scalar function over content space (engagement velocity, controversy). Reeb graph tracking level-set component merges/splits. Visualize narrative basins in Civic Map (WS-B, later milestone). Bridge prompts when basins share fragile saddle.
+
+**Done:** Reeb graph computed. Bifurcation points detected.
+
+### WS-H.7.5 Counterfactual invariance defect (CID)
+**Ref:** Section 12.5
+
+`CID(x,u) = E_g |R(g.x, g.u) - R(x,u)|` for transformation group G that should not change ranking. Identity-proxy bias detection. Translation fairness testing. Model-release gate.
+
+**Done:** CID computed for protected-attribute transformations.
+
+### WS-H.7.6 Path-signature wellbeing
+**Ref:** Section 12.6
+
+Session events as a path. Iterated integrals (path signature). Ordered behavior encoding: read→source→question vs scroll→rage-reply→repeat. Detect unhealthy loops. Improve stopping cues. No private content reading.
+
+**Done:** Session health classified. Unhealthy patterns feed stopping cues.
 
 ---
 
 # WS-I. Ranking and distribution
 
-The ranking system that brings all signals and invariants together.
-
-**Milestone:** M2–M3 (Invariant shadow → Bounded ranking beta)
-**Priority:** 2–3
-**Dependencies:** WS-E.2 (PWAtt), WS-H (invariants), WS-F (ingestion)
+**Milestone:** M2–M3 | **Priority:** 2–3 | **Dependencies:** WS-E.2, WS-H, WS-F
 
 ## WS-I.1 Candidate generation
 
 ### WS-I.1.1 Candidate retrieval
+**Ref:** Section 13.2
 
-Implement candidate generation (Section 13.2):
-- Sources: subscribed rooms, local/regional news, global candidates, emerging discussions, independent source additions, cross-community bridges, expert explanations, chronological catch-up
-- Minimum quota for fresh, independent, and local sources
-- **Candidate generation is independent of likes, follower counts, wallet activity, payments, and donor status**
+Sources: subscribed rooms, local/regional news, global candidates, emerging discussions, independent source additions, cross-community bridges, expert explanations, chronological catch-up. Minimum quota for fresh, independent, and local sources. **Independent of likes, follower counts, wallet activity, payments, donor status.**
 
-**Definition of done:** Candidates are retrieved from multiple sources. No financial or social-status data influences candidate selection. Minimum diversity quotas are met.
+**Done:** Candidates from multiple sources. No financial data influences. Diversity quotas met.
 
 ## WS-I.2 Ranking pipeline
 
-### WS-I.2.1 Feature store
+### WS-I.2.1 Feature store with allowlist/denylist
+**Ref:** Section 30.6
 
-Implement the ranking feature store:
-- Per-item feature vectors including PWAtt, MERI, MFCI, SCOI, PHI, supporting invariants
-- **Allowlist/denylist enforcement:** wallet, token, payment, treasury, follower-count fields are denied at the schema level
-- Feature versioning for reproducibility
-- Feature logging for audit
+Per-item feature vectors: PWAtt, MERI, MFCI, SCOI, PHI, supporting invariants, freshness, topic relevance. **Schema-level denylist:** wallet, token, payment, treasury, follower-count, donor fields rejected. Feature versioning. Feature logging for audit.
 
-**Security rationale (Section 30.6):** The feature store schema enforces ranking neutrality by construction. Payment-related fields cannot be added without schema change and review.
+**Done:** Feature store populates. Denied fields rejected at schema. Versions tracked.
 
-**Definition of done:** Feature store populates for active items. Denied fields are rejected at the schema level. Feature versions are tracked.
+### WS-I.2.2 Safety filter
 
-### WS-I.2.2 Ranking decision engine
+Remove or restrict policy-violating content before scoring. Hard filters: content under active moderation, legally restricted, age-inappropriate (for minors), blocked by user.
 
-Implement the constrained multi-objective ranking (Section 13.4):
-- Safety filter (remove policy-violating content)
-- Feature join (all invariant features)
-- PWAtt scoring with normalized weights
-- Risk constraint enforcement (MFCI, PHI thresholds)
-- Diversification using matroid rank (MERI)
-- Context requirements (SCOI)
-- GWEI cohort parity check
-- Per-item decision logging with all features, constraints, and explanations
-- Rollback kill switch
+**Done:** Safety-filtered content never reaches scoring. Filters are auditable.
 
-**Definition of done:** Ranking produces an ordered feed. Decision logs are complete and reproducible. Kill switch disables the ranker and falls back to chronological.
+### WS-I.2.3 Scoring engine
 
-### WS-I.2.3 Explanation service
+PWAtt scoring with normalized positive weights (Section 5.4). Penalty application (coordination, holonomy, tension, redundancy). Risk constraint enforcement: MFCI < threshold, PHI < threshold. Baseline `B_i,t` (freshness, source reliability, topic relevance).
 
-Implement ranking explanation generation (Section 13.5):
-- User-facing distribution reasons (e.g., "Rising because readers opened the source and three evidence cards were added")
-- Attach to each feed item
-- Log for transparency
+**Done:** Scores computed. Constraints enforced. High-risk items penalized.
 
-**Definition of done:** Every feed item has a human-readable explanation. Explanations reference specific signals, never vague terms.
+### WS-I.2.4 Diversification pass
+
+Diversify using matroid rank (MERI): prevent n near-identical items from dominating. Source, lens, and topic balancing. SCOI context requirements (high-obstruction content gets context card before broad distribution).
+
+**Done:** Feed is diverse. Duplicate clusters bounded. Context cards attached to high-SCOI items.
+
+### WS-I.2.5 Decision logging
+
+Per-item decision log: `RankingDecisionLog` (Section 23.3) with `request_id`, `user_privacy_bucket`, `candidate_ids`, `selected_ids`, `score_components`, `invariant_versions`, `constraints_applied`, `explanation_ids`, `experiment_ids`, `timestamp`. Sufficient for replay and audit.
+
+**Done:** Every ranking decision logged. Rankings reproducible from logs.
+
+### WS-I.2.6 Explanation service
+**Ref:** Section 13.5
+
+User-facing distribution reasons per item: "Rising because readers in three rooms opened the source and added independent evidence." "Shown with context because communities are interpreting the quote differently." "Distribution is slowed because synchronized activity is under review." Never vague ("because of the algorithm").
+
+**Done:** Every feed item has a specific, human-readable explanation.
+
+### WS-I.2.7 Ranking kill switch
+
+Emergency fallback: disable the ranker, serve chronological feed. Per-surface, per-region, and global scope. Triggered manually or by automated guardrail.
+
+**Done:** Kill switch immediately reverts to chronological. Recovery restores ranking.
 
 ## WS-I.3 Ranking-neutrality test suite
 
 ### WS-I.3.1 Automated neutrality tests
+**Ref:** Section 30.6
 
-Implement the ranking-neutrality verification suite (Section 30.6):
-- Feed replay with and without wallet links → identical ranking
-- Payment amount absent from organic feature schemas
-- Donor identity absent from PWAtt and invariant joins
-- Treasury balance does not change story rank
-- Governance vote outcomes do not change claim labels without evidence
-- Paid membership does not bypass safety or rate limits
-- ML feature audits fail if wallet/payment fields are added
-- Sponsored content labeled and excluded from unpaid ranking
+All tests run in CI. A test that introduces a wallet field into the feature store fails:
+1. Feed replay with/without wallet links → identical ranking
+2. Payment amount absent from organic feature schemas
+3. Donor identity absent from PWAtt and invariant joins
+4. Treasury balance does not change story rank
+5. Governance vote outcomes do not change claim labels without evidence/steward process
+6. Paid membership does not bypass safety, rate limits, or moderation
+7. ML feature audits fail if wallet/payment/treasury fields added to organic rankers
+8. Sponsored/treasury-funded content labeled and excluded from unpaid ranking
+9. Public explanations state payments are support/governance, not endorsements
+10. Dashboards separate revenue/treasury metrics from product-health metrics
 
-**Definition of done:** All neutrality tests pass. Tests run in CI before every crypto-related release. A test that introduces a wallet field into the feature store fails.
+**Done:** All 10 tests pass. Run before every crypto release. Real payment events in staging before any real-funds pilot.
 
 ---
 
 # WS-J. Trust, safety, and abuse operations
 
-Moderation system, report handling, and abuse defense.
-
-**Milestone:** M1 (Core social alpha)
-**Priority:** 0–1
-**Dependencies:** WS-D.1 (auth), WS-G.1 (contributions)
+**Milestone:** M1 | **Priority:** 0–1 | **Dependencies:** WS-D.1
 
 ## WS-J.1 User safety controls
 
 ### WS-J.1.1 Report flow
+**Ref:** Sections 18.3, 23.2
 
-Implement content and account reporting (Section 18.3):
-- `POST /v1/reports` — create report
-- Report reasons mapped to moderation taxonomy (WS-A.1.2)
-- Emergency report flow (separate from disagreement)
-- Report from long-press on any content
-- Rate limiting on reports
-- MFCI integration for coordinated-reporting detection
+`POST /v1/reports`. Report reasons mapped to taxonomy (WS-A.1.2). Emergency reports distinguished from disagreement. Two-tap report from long-press on any content. Rate limiting. MFCI integration for coordinated-reporting detection. Published support contact accessible from every screen.
 
-**Definition of done:** Users can report any content with specific reasons. Emergency reports are distinguished from ordinary ones. Coordinated reports are flagged.
+**Done:** Users report with specific reasons. Emergency reports distinguished. Support contact published.
 
 ### WS-J.1.2 Block and mute
 
-Implement blocking and muting:
-- Block: prevents all interaction, hides content bilaterally
-- Mute: hides content from the muting user, no notification to the muted
-- Block/mute from any content interaction
-- Persisted in user settings
-- Enforced at the API level (blocked users cannot interact)
+Block: prevents all interaction, hides content bilaterally. Mute: hides content from muting user, no notification to muted. Immediate effect. Persisted. API-level enforcement (blocked users cannot interact).
 
-**Definition of done:** Blocking and muting work immediately. Blocked users cannot interact with the blocker. Muted users' content is hidden.
+**Done:** Blocking/muting work immediately. API enforcement active.
 
 ### WS-J.1.3 Appeal flow
 
-Implement moderation appeals:
-- `POST /v1/appeals` — submit appeal with reason
-- Appeal eligibility per moderation action type
-- Appeal review queue for moderators
-- Outcome notification to appellant
-- Audit log of appeal and outcome
+`POST /v1/appeals`. Appeal eligibility per action type. Review queue. Outcome notification. Audit log. Notice + appeal for all significant moderation actions (Section 16.4).
 
-**Definition of done:** Users can appeal significant moderation actions. Appeals are reviewed and resolved. Outcomes are communicated.
+**Done:** Appeals submitted, reviewed, resolved. Outcomes communicated. Logged.
 
 ## WS-J.2 Moderation console
 
-### WS-J.2.1 Steward console
+### WS-J.2.1 Report queue view
 
-Build the moderator/steward console (Section 3.2):
-- Report queue with priority and SLA tracking
-- Content review with full context (thread, user history, invariant signals)
-- Action palette: warn, hide, remove, restrict, escalate, clear
-- Reason code selection per action
-- Appeal review interface
-- Audit log viewer
+Report queue with priority sorting and SLA tracking. Filter by severity, category, status. Bulk actions for obvious spam. Case assignment to reviewers.
 
-**Definition of done:** Moderators can review reports, take actions, and handle appeals. All actions are logged with reason codes. SLAs are tracked.
+**Done:** Queue renders with priority. SLAs tracked. Bulk spam actions work.
 
-### WS-J.2.2 Automated pre-checks
+### WS-J.2.2 Content review interface
 
-Implement automated safety pre-checks (Section 18.2):
-- Spam detection
-- Malware link detection
-- Duplicate flood detection
-- Policy-risk content flagging (for human review, not auto-removal)
-- Severity classification for queue prioritization
+Full-context review: thread, user history, invariant signals (MFCI coordination score, SCOI context state), moderation history. Side-by-side original/reported content.
 
-**Definition of done:** Obvious spam and malware are blocked automatically. Policy-risk content is flagged for human review. False positives are minimized.
+**Done:** Reviewers see full context including invariant signals.
+
+### WS-J.2.3 Moderation action palette
+
+Actions: warn, hide, remove, restrict, escalate, clear. Reason code selection per action (WS-A.1.2). User notice generation. Undo/revert for reversible actions.
+
+**Done:** All actions work. Reason codes required. Notices sent. Undo available.
+
+### WS-J.2.4 Appeal review interface
+
+Appeals queue. Original decision context. New evidence from appellant. Overturn/uphold/modify decision. Outcome notification.
+
+**Done:** Appeals reviewed with full context. Outcomes communicated.
+
+### WS-J.2.5 Audit log viewer
+
+Searchable audit log of all moderation actions. Filter by moderator, user, action type, date, reason code. Export for transparency reports. Access-controlled.
+
+**Done:** Audit log captures all actions. Searchable and exportable.
+
+### WS-J.2.6 Automated pre-checks
+**Ref:** Section 18.2
+
+Spam detection. Malware link detection. Duplicate flood detection. Policy-risk content flagging (human review, not auto-removal). Severity classification for queue prioritization.
+
+**Done:** Spam/malware blocked. Policy-risk flagged for humans. False positives minimized.
 
 ---
 
 # WS-K. AI and model governance
 
-AI-assisted features with responsible-AI constraints.
-
-**Milestone:** M3 (Bounded ranking beta)
-**Priority:** 3
-**Dependencies:** WS-G (forum), WS-H (invariants)
+**Milestone:** M3 | **Priority:** 3 | **Dependencies:** WS-G, WS-H
 
 ## WS-K.1 AI infrastructure
 
-### WS-K.1.1 Model registry and evaluation harness
+### WS-K.1.1 Model registry
+**Ref:** Section 24.2
 
-Implement the AI governance infrastructure (Section 24.2):
-- Model cards for each AI use case (topic classification, duplicate detection, claim extraction, toxicity triage, summarization, translation)
-- Data lineage tracking
-- Evaluation harness with bias/subgroup audits
-- Version logging for audit-sensitive outputs
-- Prohibited-use inventory (Section 24.5)
+Model cards for each use case: topic classification, duplicate detection, claim extraction, toxicity/safety triage, summarization, translation, embedding generation. Data lineage tracking. Prohibited-use inventory (Section 24.5): no autonomous treasury execution, no investment advice, no manipulative voting recs, no wealth-based profiling, no risk-identity hiding.
 
-**Definition of done:** Each model has a card. Evaluations run before deployment. Prohibited uses are enforced.
+**Done:** Each model has a card. Prohibited uses enforced.
 
-### WS-K.1.2 Summarization pipeline
+### WS-K.1.2 Evaluation harness
 
-Implement thread summarization (Section 15.4):
-- Automated draft summary (labeled machine-generated)
-- Citations to source branches and evidence cards
-- Distinguish facts, claims, and interpretations
-- Preserve uncertainty and unresolved questions
-- Avoid presenting majority view as truth
-- User-reportable for bad summaries
-- Correction workflow
+Bias and subgroup audits. Hallucination detection. Safety/privacy tests. Red-team testing before launch. Version logging for audit-sensitive outputs.
 
-**Definition of done:** Summaries cite sources. Uncertainty is preserved. Users can report and correct summaries. Summaries are labeled as machine-generated.
+**Done:** Evaluations run before deployment.
+
+### WS-K.1.3 Topic classification and claim extraction
+**Ref:** Section 24.1
+
+AI-assisted topic classification for stories. Claim extraction from story text. Both labeled as AI-draft, editable by users/stewards.
+
+**Done:** Topics classified. Claims extracted. Both labeled machine-generated.
+
+### WS-K.1.4 Summarization pipeline
+**Ref:** Sections 15.4, 24.3
+
+Automated draft summary (labeled machine-generated). Cites source branches and evidence. Distinguishes facts/claims/interpretations. Preserves uncertainty and unresolved questions. Includes relevant minority views. Avoid presenting majority as truth. User-reportable. Correction workflow.
+
+**Done:** Summaries cite sources. Uncertainty preserved. Reportable and correctable.
 
 ---
 
 # WS-L. Knomosis gateway, wallets, and receipts
 
-Wallet integration, Knomosis gateway, and receipt infrastructure. All features are behind feature flags and disabled by default.
+All features behind feature flags, disabled by default. Crypto never blocks core social product.
 
-**Milestone:** M4 (Knomosis sim + testnet)
-**Priority:** 4
-**Dependencies:** WS-D.3 (wallet identity), WS-J (moderation), WS-O (security)
+**Milestone:** M4 | **Priority:** 4 | **Dependencies:** WS-D.3, WS-J, WS-O
 
 ## WS-L.1 Due diligence (K0)
 
-### WS-L.1.1 Knomosis pin and threat model
+### WS-L.1.1 Knomosis commit pin and ADR
+**Ref:** Section 30.7
 
-- Pin Knomosis commit, toolchains, contracts
-- Threat-model bridge, runtime, wallet, treasury, indexer
-- Architecture decision record
-- License/copyleft analysis (AGPL/GPL compatibility)
-- Audit requirement definition
+Pin Knomosis commit, Lean toolchain version, contract addresses. Architecture decision record. License compatibility analysis (AGPL ↔ GPL-3.0-or-later).
 
-**Definition of done:** Pinned commit is documented. Threat model covers all Knomosis integration surfaces. ADR is reviewed.
+**Done:** Pinned commit documented. ADR reviewed.
+
+### WS-L.1.2 Threat model
+**Ref:** Section 30.7
+
+Threat-model: L1 bridge, Rust runtime, wallet flows, treasury operations, event indexer, law-pack registry, gateway, reconciliation. Per Section 25.6.
+
+**Done:** All Knomosis integration surfaces covered.
+
+### WS-L.1.3 Audit requirement definition
+
+External audit scope for: wallet signature flows, gateway, contract/L2 interactions, indexer, reconciliation, treasury. Bug bounty scope.
+
+**Done:** Audit scope defined. Bug bounty requirements documented.
 
 ## WS-L.2 Wallet integration
 
-### WS-L.2.1 Wallet connection flow
+### WS-L.2.1 EIP-6963 provider discovery
 
-Implement wallet connection (Section 17.3.1):
-- EIP-6963 injected-provider discovery (desktop extensions)
-- WalletConnect v2 (mobile wallets via QR/deep link)
-- EIP-4361 Sign-In with Ethereum flow
-- EIP-712 typed-data signing with domain separation
-- Signature verification: ECDSA `ecrecover` (EOAs) and EIP-1271 `isValidSignature` (contract wallets)
-- Nonce, expiration, chain ID validation
-- Risk-state assessment
-- Wallet label (user-defined, not full address)
-- Unlink flow
+Desktop injected-provider discovery via EIP-6963 `eip6963:requestProvider` events. Provider list UI showing available wallets.
 
-**Definition of done:** Wallet connects via both EIP-6963 and WalletConnect v2. Signatures are verified for both EOAs and contract wallets. Users see labels, not addresses.
+**Done:** Desktop extensions discovered and listed.
 
-### WS-L.2.2 Wallet API endpoints
+### WS-L.2.2 WalletConnect v2 setup
 
-Implement wallet API (Section 23.4):
-- `POST /v1/wallet/nonce` — request nonce for signing
-- `POST /v1/wallet/link` — link wallet with signed message
-- `POST /v1/wallet/unlink/request` — request wallet unlink
-- `GET /v1/wallets` — list linked wallets
-- `GET /v1/wallets/:id/risk-state` — check wallet risk state
+Mobile wallet connection via WalletConnect v2. QR code display for desktop→mobile. Deep link for mobile→mobile.
 
-**Definition of done:** All endpoints work with proper auth. Contract-address allowlist is enforced.
+**Done:** Mobile wallets connect via QR and deep link.
+
+### WS-L.2.3 EIP-4361 Sign-In with Ethereum
+
+SIWE nonce generation (`POST /v1/wallet/nonce`). Message construction with domain, address, chain ID, nonce, expiration. User signs in wallet. Server verifies.
+
+**Done:** SIWE flow works end-to-end.
+
+### WS-L.2.4 Signature verification — ECDSA and EIP-1271
+**Ref:** Section 25.6
+
+Verify ECDSA `ecrecover` for EOAs. Verify EIP-1271 `isValidSignature` for contract wallets/multisigs. Validate domain, chain ID, address, expiration, nonce in EIP-712 typed data.
+
+**Done:** Both EOA and contract wallet signatures verified.
+
+### WS-L.2.5 Wallet link/unlink API
+**Ref:** Section 23.4
+
+`POST /v1/wallet/link` — link with verified signature. `POST /v1/wallet/unlink/request` — unlink (blocked if unresolved obligations). `GET /v1/wallets` — list linked wallets. `GET /v1/wallets/:id/risk-state`. User-defined labels (not full addresses). Abuse limits on multiple wallet linking.
+
+**Done:** Link/unlink work. Labels displayed. Abuse limits enforced.
+
+### WS-L.2.6 Transaction preview renderer
+**Ref:** Section 17.8
+
+Every preview shows: plain-language action, room, recipient/contract, asset/amount, estimated fee, reversibility, timelock/challenge period, public visibility, jurisdiction status, risk label, wallet address, chain ID, contract domain, expiration, nonce, proposal link, support contact. Primary button states exact outcome. No countdown pressure, fake scarcity, or hidden fees. Accessible with large text, reduced motion, screen readers.
+
+**Done:** Previews show all required fields. Accessible. No manipulative patterns.
 
 ## WS-L.3 Knomosis gateway
 
-### WS-L.3.1 Gateway service
+### WS-L.3.1 Gateway preflight service
+**Ref:** Section 23.4
 
-Implement the Knomosis gateway service:
-- Preflight validation for actions
-- Action submission
-- Receipt indexing (reorg-aware)
-- Reconciliation engine
-- Event ingestion from L1/L2
-- Emergency feature flags
+`POST /v1/knomosis/actions/preflight`. Validate action type, signatures, role permissions, caps, policy conflicts, distribution constraints, sanctions/fraud checks. Contract-address allowlist check on every action.
 
-**Definition of done:** Gateway preflights, submits, and indexes Knomosis actions. Reorgs are handled. Emergency flags can disable all Knomosis features.
+**Done:** Preflight validates all constraints. Unknown contracts rejected.
+
+### WS-L.3.2 Gateway submission service
+
+`POST /v1/knomosis/actions/submit`. Submit validated action. `GET /v1/knomosis/actions/:id` — action status. Idempotency keys. Anti-replay nonces.
+
+**Done:** Actions submitted with idempotency. Status queryable.
+
+### WS-L.3.3 Event indexer (reorg-aware)
+
+Ingest on-chain events. Track `OnChainEvent` entity (Section 22.2): `event_id`, `deployment_id`, `chain_id`, `block_number`, `tx_hash`, `log_index`, `event_type`, `decoded_payload_ref`, `reorg_state`, `indexed_at`. Handle reorgs: mark reorged events, reconcile state.
+
+**Done:** Events indexed. Reorgs detected and state reconciled.
+
+### WS-L.3.4 Reconciliation engine
+
+Compare product DB state, Knomosis receipts, and L1/L2 observations. Detect divergence. Alert on gaps. Treasury reconciliation gap must be zero or explained (Section 28.3).
+
+**Done:** Reconciliation runs after every sequenced action. Divergence alerts fire.
+
+### WS-L.3.5 Emergency feature flags
+**Ref:** Section 25.6
+
+Kill switches: wallet connection, payment-intent creation, action submission, treasury execution, governance voting. Per-room, per-region, and global scope. Immediate effect.
+
+**Done:** Each switch works independently. Immediate disable on activation.
 
 ## WS-L.4 Governance simulation (K1)
 
 ### WS-L.4.1 Simulated governance
+**Ref:** Section 30.7
 
-Implement governance simulation mode (Section 30.7):
-- Governance tab in enabled rooms
-- Proposal templates
-- Simulated treasury with fake assets
-- Simulated voting and execution
-- Audit log (simulated)
-- Comprehension testing (can users understand previews?)
+Governance tab in enabled rooms. Proposal templates (charter update, bounty, capped grant). Simulated treasury with fake assets. Simulated voting and execution. Audit log. Comprehension testing. Clear "SIMULATION" labeling.
 
-**Definition of done:** Users can experience governance without real funds. Simulation is clearly labeled. User comprehension is measurable.
+**Done:** Users experience governance with no real funds. Clearly labeled. Comprehension measurable.
 
 ---
 
 # WS-M. Forum-commons, law-packs, and treasury
 
-Room treasury management and DAO-like governance.
-
-**Milestone:** M4–M5 (Testnet → Capped real-funds pilot)
-**Priority:** 4–5
-**Dependencies:** WS-L (Knomosis gateway), WS-G (forum), WS-J (moderation)
+**Milestone:** M4–M5 | **Priority:** 4–5 | **Dependencies:** WS-L, WS-G, WS-J
 
 ## WS-M.1 Room governance
 
 ### WS-M.1.1 Room governance profile
+**Ref:** Section 22.2
 
-Create room governance entities (Section 22.2):
-- `RoomGovernanceProfile` — governance mode, law pack, charter, quorum/threshold/timelock policies, jurisdiction, freeze state
-- Governance modes: ordinary, simulated, testnet, capped_production, mature_production, frozen, migrating
+`RoomGovernanceProfile`: `room_id`, `governance_mode` (enum: ordinary, simulated, testnet, capped_production, mature_production, frozen, migrating), `law_pack_id`, `charter_version_id`, `treasury_id`, `quorum_policy_ref`, `threshold_policy_ref`, `timelock_policy_ref`, `jurisdiction_policy_id`, `freeze_state`. Freeze halts all governance actions.
 
-**Definition of done:** Rooms can transition through governance modes. Freeze state halts all governance actions.
+**Done:** Rooms transition through modes. Freeze works.
 
-### WS-M.1.2 Law-pack registry
+### WS-M.1.2 Room readiness checklist
+**Ref:** Section 16.5
 
-Implement law-pack management (Section 17.3.4):
-- MVP law-pack template: treasury deposits, capped grants, bounty lifecycle, steward rotation, public audit logs
-- Machine-readable governance bundles
-- Version control and migration path
-- Hash commitments for off-chain documents
-- Test fixtures for expected transition behavior
+Before Knomosis opt-in: plain-language charter, ≥2 independent stewards + appeals path, treasury policy with spend categories, COI rules, transparency standard, safety override preserving platform moderation, fork/exit process.
 
-**Definition of done:** Law packs are versioned and validated. Test fixtures prove correct behavior. MVP template covers all required operations.
+**Done:** Checklist enforced before Knomosis enablement.
+
+### WS-M.1.3 Law-pack registry
+**Ref:** Section 17.3.4
+
+MVP template: treasury deposits, capped grants, bounty lifecycle, steward rotation, public audit logs. Machine-readable bundles with: identifier/version, human summary, allowed/disallowed proposal types, role definitions, quorum/threshold rules, timelock rules, spend caps, COI requirements, appeal rules, fork/exit rules, emergency constraints, schema version, hash commitments, test fixtures.
+
+**Done:** Law packs versioned and validated. Test fixtures prove behavior.
 
 ## WS-M.2 Treasury
 
-### WS-M.2.1 Treasury management
+### WS-M.2.1 Treasury schema
+**Ref:** Section 22.2
 
-Implement room treasury (Section 17.6):
-- Treasury address and accepted assets
-- Deposit limits per user/room/period/asset
-- Spend categories and caps
-- Multisig or policy-controlled execution
-- Timelocks for material disbursements
-- Emergency freeze
-- Public ledger and reconciliation
-- No commingling between treasuries
+`RoomTreasury`: `treasury_id`, `room_id`, `deployment_id`, `treasury_address`, `accepted_assets`, `balance_snapshot_ref`, `deposit_limits_ref`, `spend_limits_ref`, `freeze_state`, `reconciliation_state`. No commingling between treasuries or with platform operating funds.
 
-**Definition of done:** Treasury operates with caps and timelocks. Freezes work. Reconciliation matches on-chain state.
+**Done:** Treasury entities isolated. No commingling at schema level.
 
-### WS-M.2.2 Payment intents
+### WS-M.2.2 Deposit flow
 
-Implement payment intent lifecycle (Section 22.2):
-- `PaymentIntent` entity with full lifecycle states: created, preflighted, quoted, signed, submitted, pending, confirmed, finalized, reverted, reorged, disputed, abandoned, failed
-- Transaction preview with all required disclosures (Section 17.8)
-- Receipt generation
+Deposit limits per user/room/period/asset. Deposit transaction preview (WS-L.2.6). Receipt after finality. Dashboard update after reconciliation.
 
-**Definition of done:** Payment intents track full lifecycle. Previews show all disclosures. Receipts are generated on completion.
+**Done:** Deposits work within limits. Receipts generated.
 
-## WS-M.3 Proposals
+### WS-M.2.3 Spend authorization and timelocks
 
-### WS-M.3.1 Proposal lifecycle
+Spend categories and caps. Multisig or policy-controlled execution. Timelocks for material disbursements. Dual/multi-role approval. COI declaration. Independent review for grants/bounties.
 
-Implement governance proposal lifecycle (Section 17.4):
-- Draft → Preflight → Publication → Deliberation → Voting → Challenge → Execution → Indexing → Appeal → Postmortem
-- Completeness validation per type
-- Linked discussion threads
-- Quorum and threshold checks
-- Anti-capture controls (MFCI monitoring, eligibility requirements, conflict-of-interest disclosure)
+**Done:** Spend authorized via policy. Timelocks enforced. COI required.
 
-**Definition of done:** Full proposal lifecycle works. Anti-capture controls prevent suspicious voting patterns.
+### WS-M.2.4 Treasury freeze and emergency controls
+
+Emergency freeze (per-treasury, per-room). Pause new deposits/proposals/executions independently. Withdrawals/remediation remain where possible. Triggered by monitoring, security, legal, T&S, or manual.
+
+**Done:** Freeze halts new operations. Remediation path available.
+
+### WS-M.2.5 Public ledger and accounting export
+
+Public ledger of treasury actions. Reconciliation reports. Tax/accounting export. Separate user/room assets, platform fees, processor fees, network fees.
+
+**Done:** Ledger publicly viewable. Accounting export works.
+
+## WS-M.3 Payment intents
+
+### WS-M.3.1 Payment intent lifecycle
+**Ref:** Section 22.2
+
+`PaymentIntent`: `payment_intent_id`, `user_id`, `room_id`, `target_type`, `target_id`, `asset`, `amount`, `jurisdiction_state`, `compliance_state`, `quote_ref`, `expiration`, `execution_state` (enum: created, preflighted, quoted, signed, submitted, pending, confirmed, finalized, reverted, reorged, disputed, abandoned, failed), `receipt_ref`. Idempotency keys. Anti-replay nonces.
+
+**Done:** Full lifecycle tracked. Previews show all disclosures. Receipts generated.
+
+## WS-M.4 Proposals
+
+### WS-M.4.1 Proposal creation and preflight
+**Ref:** Section 17.4
+
+`GovernanceProposal` entity (Section 22.2). Draft with completeness validation: title, summary, type, scope, budget, conflicts, risks, action, deliverable. Preflight: simulate action, check type/signatures/roles/caps/policy/distribution/sanctions.
+
+**Done:** Proposals validated at creation. Preflight catches policy violations.
+
+### WS-M.4.2 Deliberation and voting
+
+Publication in governance tab. Linked discussion thread. Deliberation ranked by constructive participation (not token votes). Voting with configurable weight model (per Section 17.5). Quorum/threshold checks. Anti-capture: MFCI monitoring, max voting weight, eligibility requirements, COI disclosure, cooling-off for new wallets.
+
+**Done:** Voting works with anti-capture controls.
+
+### WS-M.4.3 Challenge, execution, and indexing
+
+Challenge window: flag conflicts/fraud/capture/legal/evidence defects. Execution after thresholds + timelocks + checks pass. Indexing to audit log. Appeal/dispute per charter and platform policy. Postmortem for high-impact or disputed actions.
+
+**Done:** Full challenge→execution→indexing pipeline. Appeals work.
 
 ---
 
 # WS-N. Compliance, finance, and distribution readiness
 
-Jurisdiction engine, compliance controls, and distribution integrity.
-
-**Milestone:** M5 (Capped real-funds pilot)
-**Priority:** 4–5
-**Dependencies:** WS-L (Knomosis), WS-M (treasury), WS-A.2 (jurisdiction matrix)
+**Milestone:** M5 | **Priority:** 4–5 | **Dependencies:** WS-L, WS-M, WS-A.2
 
 ## WS-N.1 Jurisdiction policy engine
 
 ### WS-N.1.1 Feature-flag engine
+**Ref:** Section 17.10
 
-Implement the jurisdiction-based feature-flag engine:
-- Region detection
-- Feature availability by region
-- Asset availability by region
-- Age-gate enforcement
-- Crypto feature disable by default
-- Fail-closed behavior (unknown region → no crypto features)
+`JurisdictionFeaturePolicy` entity (Section 22.2): `policy_id`, `country_or_region`, `feature_flags`, `asset_flags`, `age_gate_policy`, `kyc_policy`, `disclosure_refs`, `legal_approval_ref`, `effective_at`. Region detection. Feature availability by region. Crypto disabled by default. **Fail-closed:** unknown region → no crypto features.
 
-**Definition of done:** Crypto features are disabled in unsupported jurisdictions. Fail-closed behavior verified.
+**Done:** Crypto disabled in unsupported jurisdictions. Fail-closed verified.
+
+### WS-N.1.2 Disabled-state UX
+
+When a feature is unavailable: clear explanation of why, what's needed, and when it might become available. No vague "coming soon." Accessible and localizable.
+
+**Done:** Disabled features show clear, specific explanations.
 
 ## WS-N.2 Compliance controls
 
 ### WS-N.2.1 Financial compliance case management
+**Ref:** Section 22.2
 
-Implement compliance case management (Section 22.2):
-- `FinancialComplianceCase` entity
-- Trigger types: velocity, pattern, sanctions, manual
-- Review workflow
-- Retention policies
+`FinancialComplianceCase`: `case_id`, `user_id_or_room_id`, `trigger_type` (enum: velocity, pattern, sanctions, manual, fraud, scam, impersonation, bribery, coercion), `risk_level`, `partner_case_ref`, `review_state`, `resolution`, `retention_policy`, `created_at`.
 
-**Definition of done:** Cases are created, reviewed, and resolved. Retention is enforced.
+**Done:** Cases created, reviewed, resolved. Retention enforced.
+
+### WS-N.2.2 Sanctions and transaction monitoring
+**Ref:** Section 17.10
+
+Sanctions screening where required. Transaction monitoring. Velocity limits. Fraud queue. Risk checks that do not expose private attention behavior. Manual review of high-value disbursements.
+
+**Done:** Screening active. Velocity limits enforced. Fraud queue operational.
+
+### WS-N.2.3 Support workflows
+**Ref:** Section 17.10
+
+Workflows for: mistaken transfers, scams, wallet compromise, lost access, stuck/failed transactions. Law-enforcement request workflow. SAR/STR workflow if model creates reporting obligations. No private key requests ever.
+
+**Done:** Support paths documented and operational for all scenarios.
 
 ---
 
 # WS-O. Security, reliability, and incident response
 
-Security hardening, testing, and operational readiness.
+Continuous workstream. Security is a release gate at every milestone.
 
-**Milestone:** M0–M6 (continuous)
-**Priority:** 0 (foundational, ongoing)
-**Dependencies:** WS-0 (baseline), all other workstreams produce security-relevant code
+**Milestone:** M0–M6 | **Priority:** 0 | **Dependencies:** WS-0
 
 ## WS-O.1 Security testing
 
 ### WS-O.1.1 XSS test suite
+**Ref:** Section 25.2
 
-Comprehensive XSS testing:
-- OWASP XSS cheat-sheet vectors against all UGC rendering paths
-- Trusted Types violation detection
-- CSP bypass attempts
-- `dangerouslySetInnerHTML` usage audit (must be zero outside DOMPurify)
-- `innerHTML`, `document.write`, `eval` audit (must be zero)
+OWASP XSS cheat-sheet vectors against all UGC rendering paths. Trusted Types violation detection. CSP bypass attempts. Audit: zero `dangerouslySetInnerHTML` outside DOMPurify, zero `innerHTML`, zero `document.write`, zero `eval`.
 
-**Definition of done:** All OWASP XSS vectors are tested. No CSP or Trusted Types violations. Zero unsafe DOM access outside the sanitization pipeline.
+**Done:** All vectors tested. Zero unsafe DOM access.
 
 ### WS-O.1.2 Authentication and session security tests
 
-- Credential brute-force protection
-- Session fixation prevention
-- Session hijacking prevention
-- Token rotation and replay protection
-- CSRF protection verification
+Credential brute-force protection. Session fixation prevention. Session hijacking prevention. Token rotation and replay protection. CSRF verification.
 
-**Definition of done:** All authentication and session attack vectors are tested and mitigated.
+**Done:** All auth attack vectors tested and mitigated.
 
 ### WS-O.1.3 API authorization tests
 
-- Object-level authorization (users can only access their own data)
-- Action-level authorization (role-based access control)
-- Privilege escalation prevention
-- Mass assignment prevention
+Object-level authorization (own data only unless role permits). Action-level (RBAC). Privilege escalation prevention. Mass assignment prevention. Every API endpoint tested.
 
-**Definition of done:** Every API endpoint has authorization tests. Privilege escalation attempts fail.
+**Done:** Every endpoint has auth tests. Escalation attempts fail.
+
+### WS-O.1.4 Wallet security tests
+**Ref:** Section 25.6
+
+Wallet-drainer phishing simulation. Blind-signing prevention (reject unsigned/unreviewed actions). Unknown-recipient warning. Contract-address allowlist enforcement. EIP-712 domain-separation verification. Replay-across-chains prevention.
+
+**Done:** Phishing simulations pass. Blind signing rejected. Allowlist enforced.
 
 ## WS-O.2 Incident response
 
 ### WS-O.2.1 Incident response playbook
 
-Create incident response documentation:
-- Severity classification
-- Escalation paths
-- Communication plan
-- Rollback procedures per feature
-- Treasury incident procedure (Section 29.7)
-- Post-incident review process
+Severity classification. Escalation paths. Communication plan. Rollback procedures per feature. Treasury incident procedure (Section 29.7): detect → case open → pause → review → reconcile → resolve → postmortem. Post-incident review process.
 
-**Definition of done:** Playbook covers all severity levels. Rollback procedures are tested.
+**Done:** Playbook covers all severities. Rollback procedures tested.
 
 ### WS-O.2.2 Emergency feature flags
 
-Implement emergency kill switches:
-- Wallet connection disable
-- Payment-intent creation disable
-- Action submission disable
-- Treasury execution disable
-- Governance voting disable
-- Per-room, per-region, and global scope
+Kill switches: wallet connection, payment-intent creation, action submission, treasury execution, governance voting. Per-room, per-region, global. Immediate effect. Each independent.
 
-**Definition of done:** Each kill switch works independently. Disabling a flag immediately prevents the associated action.
+**Done:** Each switch works. Immediate disable verified.
 
 ## WS-O.3 Reproducible builds and provenance
 
-### WS-O.3.1 Reproducible build pipeline
+### WS-O.3.1 Deterministic build output
 
-Implement reproducible builds (Section 20.2):
-- Deterministic Vite/Rollup output
-- Content-hashed filenames
-- Subresource Integrity (SRI) hashes for all assets
-- Build provenance attestation (Sigstore/cosign)
-- SBOM generation
+Deterministic Vite/Rollup output. Content-hashed filenames. SRI hashes for all assets. Two builds from same source produce identical output.
 
-**Definition of done:** Two builds from the same source produce identical output. SRI hashes are generated. Provenance attestations are published.
+**Done:** Builds are reproducible. SRI hashes generated.
+
+### WS-O.3.2 Build provenance and SBOM
+**Ref:** Section 20.2
+
+Sigstore/cosign signatures. In-toto attestations. Append-only transparency log. SBOM generation. License cross-check against AGPL-3.0-or-later.
+
+**Done:** Provenance attestations published. SBOM generated. Licenses verified.
 
 ---
 
 # WS-P. Experimentation, metrics, and launch operations
 
-Metrics collection, experimentation framework, and launch gates.
-
-**Milestone:** M3–M6
-**Priority:** 3
-**Dependencies:** WS-I (ranking), WS-H (invariants), WS-J (moderation)
+**Milestone:** M3–M6 | **Priority:** 3 | **Dependencies:** WS-I, WS-H, WS-J
 
 ## WS-P.1 Metrics infrastructure
 
 ### WS-P.1.1 Product-health metrics
+**Ref:** Section 28.1
 
-Implement metrics collection (Section 28.1):
-- Constructive-participation rate
-- Source-open rate
-- Evidence-addition rate
-- Question-resolution rate
-- MERI distribution
-- SCOI reduction after bridge/synthesis
-- MFCI incidents by severity
-- GWEI cohort disparity
-- PHI steering-risk distribution
-- Harassment-protection latency
-- Appeal-overturn rate
-- Accessibility-defect rate
-- Core Web Vitals (LCP, INP, CLS at p75)
+Collect: constructive-participation rate, source-open rate, evidence-addition rate, question-resolution rate, MERI distribution, SCOI reduction after bridge/synthesis, MFCI incidents by severity, GWEI cohort disparity, PHI steering-risk distribution, harassment-protection latency, appeal-overturn rate, accessibility-defect rate, Core Web Vitals (LCP, INP, CLS at p75).
 
-**Definition of done:** All metrics are collected and visualized. Dashboards are operational.
+**Done:** All metrics collected and dashboarded.
 
-### WS-P.1.2 Experimentation framework
+### WS-P.1.2 Anti-metrics
+**Ref:** Section 28.2
 
-Implement the experiment framework (Section 28.2):
-- Feature-flag-based experiment assignment
-- Experiment registry with harm/fairness/wellbeing guardrails
-- Rollback switches per experiment
-- Invariant version logging per experiment
-- **Prohibited experiments:** no likes, upvotes, public reactions, follower leaderboards
-- No engagement-only success criteria
+Define and monitor anti-metrics — signals that must not be optimized: total dwell time, outrage-driven engagement, compulsive session length, speculation-driven activity, vanity status (follower growth, karma accumulation), total value locked, token trading volume, wallet-connect growth rate.
 
-**Definition of done:** Experiments can be defined, assigned, monitored, and rolled back. Prohibited experiment types are rejected.
+**Done:** Anti-metrics monitored. Experiments blocked if anti-metrics deteriorate.
+
+### WS-P.1.3 Experimentation framework
+**Ref:** Section 28.2
+
+Feature-flag-based experiment assignment. Experiment registry with harm/fairness/wellbeing guardrails. Rollback switches. Invariant version logging. **Prohibited:** no likes, upvotes, public reactions, follower leaderboards. No engagement-only success criteria.
+
+**Done:** Experiments defined, assigned, monitored, rolled back. Prohibited types rejected.
 
 ## WS-P.2 Transparency pipeline
 
 ### WS-P.2.1 Transparency report generator
+**Ref:** Section 29
 
-Implement transparency report generation (Section 29):
-- Aggregate moderation actions by category and severity
-- Aggregate integrity incidents
-- Aggregate invariant health metrics
-- Privacy-protected aggregation (small-cell suppression)
-- Publishable format
+Aggregate moderation actions by category/severity. Aggregate integrity incidents. Aggregate invariant health. Privacy-protected aggregation (small-cell suppression). Publishable format.
 
-**Definition of done:** Transparency reports generate from live data without manual reconstruction.
+**Done:** Reports generate from live data without manual reconstruction.
+
+### WS-P.2.2 Internationalization foundation
+**Ref:** Section 26.4
+
+Localization pipeline for UI strings. Right-to-left layout support. Translation disclosure with original text access. Region-sensitive policy handling.
+
+**Done:** i18n infrastructure ready. RTL renders correctly.
 
 ---
 
-# Cross-cutting: dependency map and milestone gates
+# Cross-cutting: dependency map, milestone gates, parallel execution, and risk mitigations
 
 ## Dependency graph
 
@@ -1814,209 +1604,249 @@ Implement transparency report generation (Section 29):
 WS-0 (Repository foundation)
  ├── WS-A (Doctrine) [parallel — documents only]
  ├── WS-B.1 (Design system primitives)
- │    └── WS-B.2 (App-specific components)
+ │    └── WS-B.2 (Application components)
  ├── WS-C.1 (Routing/state)
- │    ├── WS-C.2 (Service worker/PWA)
+ │    ├── WS-C.2 (Service worker/PWA/notifications)
  │    ├── WS-C.3 (Hono RPC client)
- │    └── WS-C.4 (Signal processor)
+ │    └── WS-C.4 (Signal processor) → depends on WS-E.1.1 (event schema)
  ├── WS-D.1 (Auth/accounts)
+ │    ├── WS-D.1.7 (Age gating)
  │    ├── WS-D.2 (Privacy controls)
  │    ├── WS-D.3 (Wallet identity — isolated)
  │    ├── WS-E (Event pipeline → PWAtt)
  │    ├── WS-F (Ingestion/source/search)
- │    │    └── WS-G (Forum/conversation)
- │    │         ├── WS-H (Invariants)
- │    │         │    └── WS-I (Ranking)
+ │    │    └── WS-G (Forum/conversation/rooms/lenses)
+ │    │         ├── WS-H (Invariants) → depends on WS-E, WS-F.3.2 (embeddings)
+ │    │         │    └── WS-I (Ranking) → depends on WS-E.2
  │    │         ├── WS-K (AI governance)
- │    │         └── WS-L (Knomosis gateway)
+ │    │         └── WS-L (Knomosis) → depends on WS-D.3, WS-O
  │    │              └── WS-M (Treasury/governance)
  │    │                   └── WS-N (Compliance)
- │    └── WS-J (Trust/safety)
+ │    └── WS-J (Trust/safety) [no dependency on WS-G — reports work before forum]
  ├── WS-O (Security — continuous)
  └── WS-P (Metrics/experiments — from M3 onward)
 ```
 
-## Milestone gate checklist
+Note: WS-L.1 (due diligence) is document-only and can start in Wave 1 alongside WS-A.
 
-### M0 — Planning (WS-0, WS-A)
+## Milestone gate checklists
 
-| Gate | Workstream | Requirement |
+### M0 — Planning
+**Ref:** Section 30.10
+
+| Gate | WS | Requirement |
 |---|---|---|
-| Repository | WS-0 | Monorepo, TypeScript strict, CI pipeline, security baseline, all tooling configured |
-| Doctrine | WS-A | Signal matrix, moderation taxonomy, transparency dictionary, jurisdiction matrix template |
-| No forbidden-signal ambiguity | WS-A.1.1 | Every prohibited signal is documented and has a test requirement |
-| Crypto non-blocking | WS-A | Crypto features confirmed as feature-flagged and non-blocking for core alpha |
+| Repository | WS-0 | Monorepo, TS strict, CI, security baseline, all tooling |
+| Doctrine | WS-A | Signal matrix, moderation taxonomy, transparency dictionary, jurisdiction template, steward roles |
+| No forbidden-signal ambiguity | WS-A.1.1 | Every prohibited signal documented with test requirement |
+| Crypto non-blocking | WS-A | Crypto confirmed feature-flagged, fail-closed, non-blocking for alpha |
+| Knomosis due diligence started | WS-L.1 | Commit pinned, threat model in progress, ADR drafted |
 
-### M1 — Core social alpha (WS-B, WS-C, WS-D, WS-E, WS-F, WS-G, WS-J)
+### M1 — Core social alpha
+**Ref:** Sections 30.10, 30.11
 
-| Gate | Workstream | Requirement |
+| Gate | WS | Requirement |
 |---|---|---|
-| No-applause UI | WS-B.2 | No likes, upvotes, hearts, reactions, karma, or follower counts in UI |
-| PWA shell | WS-C | Installable, offline-tolerant, service worker functional |
-| Accounts | WS-D.1 | Registration, authentication, basic privacy settings |
-| Story submission | WS-F.1 | Link and original story submission with dedup |
+| No-applause UI | WS-B | Zero likes/upvotes/hearts/reactions/karma/follower counts |
+| PWA shell | WS-C | Installable, offline-tolerant, service worker, update prompt |
+| Accounts | WS-D.1 | Registration, auth (WebAuthn + email), age gating |
+| Privacy | WS-D.2 | Export, deletion, attention controls, settings |
+| Story submission | WS-F | Link/original submission with dedup |
 | Threads | WS-G | Thread reading, structured contributions, composer |
-| Reporting/blocking | WS-J.1 | Report, block, mute, appeal flow operational |
+| Rooms | WS-G.2 | Room creation, listing, subscription |
+| Reporting/blocking | WS-J.1 | Report, block, mute, appeal, published support contact |
 | Moderation | WS-J.2 | Steward console with queue, actions, audit log |
 | Event pipeline | WS-E.1 | Events ingested with privacy classification |
-| PWAtt shadow | WS-E.2.1 | PWAtt computes scores but does not rank |
+| PWAtt shadow | WS-E.2.1 | Computes scores, does not rank |
 | UGC safety | WS-G.4 | DOMPurify + Trusted Types + strict CSP |
-| Privacy | WS-D.2 | Export, deletion, attention history controls |
-| Accessibility | WS-B | WCAG 2.2 AA alpha threshold (screen reader, focus management, zoom, contrast) |
+| Accessibility | WS-B | WCAG 2.2 AA alpha threshold (screen reader, focus, zoom, contrast) |
 | Web security | WS-O.1 | No XSS, CSRF, or session vulnerabilities |
-| Wallet disabled | WS-C.1.3 | Crypto features flag-disabled, fail-closed |
+| Wallet disabled | WS-C.1.3 | Crypto flags false, fail-closed |
+| Reproducible bundle | WS-O.3.1 | Strict CSP, no inline scripts, deterministic output |
 
-### M2 — Invariant shadow (WS-H)
+### M2 — Invariant shadow
 
-| Gate | Workstream | Requirement |
+| Gate | WS | Requirement |
 |---|---|---|
 | MERI v0/v1 | WS-H.2 | Duplicate grouping and multi-dimensional independence |
-| MFCI v0 | WS-H.3.1 | Shadow anomaly reports without enforcement |
+| MFCI v0 | WS-H.3 | Shadow anomaly reports, no enforcement |
 | SCOI v0 | WS-H.4.1 | Lens disagreement labels |
 | PHI v0 | WS-H.6.1 | Narrow-loop detection |
 | GWEI v0 | WS-H.5.1 | Cohort dashboards |
-| Decision logs | WS-I | Ranking decisions logged with all features |
-| Explanation cards | WS-I.2.3 | User-facing distribution reasons |
-| Ranking allowlist | WS-I.2.1 | Payment/wallet data excluded from feature store |
+| Decision logs | WS-I.2.5 | Ranking decisions logged, reproducible |
+| Explanations | WS-I.2.6 | User-facing distribution reasons |
+| Feature store denylist | WS-I.2.1 | Payment/wallet data excluded at schema level |
 | No hidden sanctions | WS-H.1.2 | Invariants report reason codes and fallback |
 
-### M3 — Bounded ranking beta (WS-I, WS-P)
+### M3 — Bounded ranking beta
 
-| Gate | Workstream | Requirement |
+| Gate | WS | Requirement |
 |---|---|---|
-| PWAtt bounded | WS-E.2.2 | Bounded, explainable, with saturation curves |
-| MERI dampening | WS-H.2.2 | Duplicate dampening active |
-| MFCI queue | WS-H.3.2 | Abuse queue operational |
+| PWAtt bounded | WS-E.2.3 | Saturation curves, weights sum to 100% |
+| MERI dampening | WS-H.2.2 | Active in ranking |
+| MFCI queue | WS-H.3.4 | Abuse queue operational |
 | SCOI context gates | WS-H.4.2 | Context cards on high-obstruction content |
 | PHI dampening | WS-H.6.2 | Loop dampening active |
 | GWEI audit | WS-H.5.2 | Experiment release gate |
-| Ranking reproducible | WS-I.2.2 | Rankings reproducible from logs |
-| Neutrality tests | WS-I.3 | All ranking-neutrality tests pass |
+| Ranking reproducible | WS-I.2.5 | From logs |
+| Neutrality tests | WS-I.3 | All 10 pass |
 | Core Web Vitals | WS-P.1.1 | LCP ≤ 2.5s, INP ≤ 200ms, CLS ≤ 0.1 at p75 |
-| Transparency | WS-P.2 | Reports generate from live data |
+| Transparency | WS-P.2 | Reports from live data |
+| No-pay-to-rank | WS-I.3 | Tests pass even though crypto disabled/simulated |
 
-### M4 — Knomosis sim + testnet (WS-L, WS-M)
+### M4 — Knomosis sim + testnet
 
-| Gate | Workstream | Requirement |
+| Gate | WS | Requirement |
 |---|---|---|
-| Knomosis pinned | WS-L.1 | Commit, deployment, contracts pinned |
-| Wallet UX | WS-L.2 | Wallet connect/disconnect accessible |
-| Governance simulation | WS-L.4 | Simulated proposals and treasury |
+| Knomosis pinned | WS-L.1 | Commit, deployment, contracts, Lean toolchain |
+| Wallet UX | WS-L.2 | Connect/disconnect accessible |
+| Governance sim | WS-L.4 | Simulated proposals and treasury |
 | Testnet gateway | WS-L.3 | Preflight, submit, receipt, reconciliation |
-| Law-pack registry | WS-M.1.2 | MVP template operational |
+| Law-pack registry | WS-M.1.3 | MVP template operational |
 | Testnet treasury | WS-M.2 | Treasury with test assets |
-| Security review | WS-O | No launch-blocking wallet/gateway issues |
-| Emergency holds | WS-O.2.2 | All kill switches operational |
+| Room readiness | WS-M.1.2 | Checklist enforced |
+| Security | WS-O | No launch-blocking wallet/gateway issues |
+| Emergency holds | WS-L.3.5 | All kill switches operational |
+| Lean/Sol/Rust CI | WS-L.1 | Cross-stack fixtures pass |
 
-### M5 — Capped real-funds pilot (WS-M, WS-N)
+### M5 — Capped real-funds pilot
 
-| Gate | Workstream | Requirement |
+| Gate | WS | Requirement |
 |---|---|---|
 | Legal approval | WS-N | Per jurisdiction |
 | External audit | WS-O | Wallet flows, gateway, contracts |
-| Treasury caps | WS-M.2.1 | Caps, timelocks, freeze operational |
-| Compliance controls | WS-N.2 | Financial case management live |
-| Neutrality with real payments | WS-I.3 | Tests pass with real payment events |
+| Treasury caps | WS-M.2 | Caps, timelocks, freeze operational |
+| Compliance | WS-N.2 | Financial case management live |
+| Neutrality with real payments | WS-I.3 | Tests pass with real payment events in staging |
 | Incident drills | WS-O.2 | Treasury incident response tested |
-| Review board | WS-P | Weekly go/no-go review |
+| Review board | WS-P | Weekly go/no-go |
+| Risk disclosures | WS-N.1.2 | Published |
+| Bug bounty | WS-L.1.3 | Live |
 
 ### M6 — Mature launch
+**Ref:** Section 30.11
 
-| Gate | Workstream | Requirement |
+| Gate | WS | Requirement |
 |---|---|---|
 | Core social value | WS-P.1 | Product-health metrics healthy without crypto |
 | Safety metrics | WS-J | Incident rate, appeal quality, SLAs within target |
-| Invariant stability | WS-H | All invariants stable and auditable |
-| Continuous neutrality | WS-I.3 | Ranking neutrality continuously tested |
+| Invariant stability | WS-H | All stable and auditable |
+| Continuous neutrality | WS-I.3 | Continuously tested |
 | Accessibility | WS-B | Production threshold WCAG 2.2 AA |
-| Security | WS-O | High-severity risks resolved |
-| Transparency | WS-P.2 | Reports generate from logs |
-| Independent rollback | WS-O.2.2 | Each feature rolls back independently |
-
----
+| Security | WS-O | High-severity resolved |
+| Transparency | WS-P.2 | Reports from logs |
+| Independent rollback | WS-O.2.2, WS-L.3.5 | Each feature rolls back independently |
+| Non-crypto usability | M6 gate | User can use full social product without wallet |
+| Moderation override | M6 gate | Platform can moderate harmful content regardless of local governance votes |
 
 ## Parallel execution map
 
-The following workstreams can execute in parallel after their dependencies are met:
-
 **Wave 1 (Week 1–2): Foundation**
-- WS-0 (Repository) — all tasks
-- WS-A (Doctrine) — all tasks (document-only, no code dependency)
+- WS-0 (all tasks)
+- WS-A (all tasks — document-only, parallel with WS-0)
+- WS-L.1 (due diligence — document-only, can start immediately)
 
 **Wave 2 (Week 2–4): Core infrastructure**
-- WS-B.1 (Design system primitives)
-- WS-C.1 (Routing/state)
-- WS-D.1 (Auth schema/backend)
-- WS-O.1 (Security test framework)
+- WS-B.1 (design tokens, primitive components, layout, focus management)
+- WS-C.1 (TanStack Router, Query, Zustand)
+- WS-D.1.1 (User schema)
+- WS-D.1.2–D.1.4 (WebAuthn + email auth)
+- WS-O.1 (security test framework)
 
 **Wave 3 (Week 4–8): Core social product**
-- WS-B.2 (App components) — depends on WS-B.1
-- WS-C.2 (Service worker/PWA) — depends on WS-C.1
-- WS-C.3 (API client) — depends on WS-C.1
-- WS-D.2 (Privacy controls) — depends on WS-D.1
-- WS-F.1 (Story ingestion) — depends on WS-D.1
-- WS-J.1 (User safety) — depends on WS-D.1
+- WS-B.2 (story cards, labels, context cards, states, reader, stopping cues, feed modes)
+- WS-C.2 (service worker, offline store, background sync, push notifications)
+- WS-C.3 (Hono RPC client)
+- WS-D.1.5–D.1.7 (MFA, auth middleware, age gating)
+- WS-D.2 (privacy controls)
+- WS-F.1 (story schema, claims, URL canon, submission API)
+- WS-J.1 (report, block, mute, appeal)
 
 **Wave 4 (Week 6–10): Content and conversation**
-- WS-C.4 (Signal processor) — depends on WS-C.1
-- WS-F.2–F.3 (Source model, search) — depends on WS-F.1
-- WS-G (Forum/conversation) — depends on WS-F.1, WS-D.1
-- WS-J.2 (Moderation console) — depends on WS-J.1
-- WS-E.1 (Event pipeline) — depends on WS-D.1, WS-C.4
+- WS-E.1 (event schemas and ingestion)
+- WS-C.4 (signal processor — depends on WS-E.1.1)
+- WS-F.2–F.3 (source model, search, embeddings)
+- WS-G.1 (thread/contribution/evidence schemas)
+- WS-G.2 (rooms, lenses)
+- WS-G.3 (composer — all sub-tasks)
+- WS-G.4 (UGC sanitization)
+- WS-J.2 (moderation console — all sub-tasks)
 
 **Wave 5 (Week 8–14): Signals and invariants**
-- WS-E.2 (PWAtt scoring) — depends on WS-E.1
-- WS-H.2 (MERI) — depends on WS-F, WS-E
-- WS-H.3 (MFCI) — depends on WS-E
-- WS-H.4 (SCOI) — depends on WS-G
-- WS-H.5 (GWEI) — depends on WS-E
-- WS-H.6 (PHI) — depends on WS-E
-- WS-K (AI governance) — depends on WS-G
+- WS-E.2 (PWAtt v0, anti-signals, v1)
+- WS-H.1 (invariant platform)
+- WS-H.2 (MERI v0, v1, UI)
+- WS-H.3 (MFCI v0 cheap stats, contingency tables, v1 fiber test, enforcement)
+- WS-H.4 (SCOI v0, v1, UI)
+- WS-H.5 (GWEI v0, v1)
+- WS-H.6 (PHI v0, v1)
+- WS-H.7 (supporting invariants)
+- WS-K (AI governance)
 
-**Wave 6 (Week 12–16): Ranking and operations**
-- WS-I (Ranking) — depends on WS-E.2, WS-H
-- WS-P (Metrics/experiments) — depends on WS-I, WS-H
-- WS-O.2 (Incident response) — depends on WS-J, WS-I
-- WS-O.3 (Reproducible builds) — depends on WS-0.6
+**Wave 6 (Week 12–18): Ranking and operations**
+- WS-I (candidate gen, feature store, safety filter, scoring, diversification, logging, explanations, kill switch, neutrality tests)
+- WS-P (metrics, anti-metrics, experiments, transparency, i18n)
+- WS-O.2 (incident response playbook, emergency flags)
+- WS-O.3 (reproducible builds, provenance, SBOM)
 
-**Wave 7 (Week 14–20): Knomosis**
-- WS-L.1 (Due diligence) — depends on WS-O
-- WS-L.2 (Wallet) — depends on WS-D.3, WS-L.1
-- WS-L.3 (Gateway) — depends on WS-L.1
-- WS-L.4 (Governance sim) — depends on WS-L.2, WS-L.3, WS-G
+**Wave 7 (Week 16–22): Knomosis**
+- WS-L.2 (wallet — provider discovery, WalletConnect, SIWE, verification, API, previews)
+- WS-L.3 (gateway — preflight, submission, indexer, reconciliation, emergency flags)
+- WS-L.4 (governance simulation)
 
-**Wave 8 (Week 18–24): Treasury and compliance**
-- WS-M (Treasury/governance) — depends on WS-L
-- WS-N (Compliance) — depends on WS-M, WS-A.2
-
----
+**Wave 8 (Week 20–26): Treasury and compliance**
+- WS-M.1 (governance profiles, readiness checklist, law-pack registry)
+- WS-M.2 (treasury schema, deposits, spend auth, freeze, ledger)
+- WS-M.3 (payment intents)
+- WS-M.4 (proposals — creation, voting, execution)
+- WS-N (jurisdiction engine, compliance, sanctions, support)
 
 ## Task sizing reference
 
-Per Section 30.8, each task card targets one to three engineering days:
+Per Section 30.8:
 
-| Task type | Sizing rule |
-|---|---|
-| Backend task | One schema/API/job/dashboard |
-| Client task | One user-journey state (empty, loading, success, error, offline, abuse/safety, accessibility) |
-| Invariant task | Input/output/confidence/failure-mode/one consumer |
-| Moderation task | Policy reason/permissions/notice/appealability/audit event/rollback |
-| Privacy task | Data element/purpose/retention/access/export/deletion/legal status |
-| Release task | Feature flag/metric guardrail/owner/rollback trigger/review date |
+| Task type | Sizing rule | Example |
+|---|---|---|
+| Backend | One schema/API/job/dashboard | WS-D.1.1 (User schema) |
+| Client | One user-journey state (empty/loading/success/error/offline/safety/a11y) | WS-B.2.5 (state components) |
+| Invariant | Input/output/confidence/failure-mode/one consumer | WS-H.2.1 (MERI v0) |
+| Moderation | Policy reason/permissions/notice/appealability/audit/rollback | WS-J.2.3 (action palette) |
+| Privacy | Data element/purpose/retention/access/export/deletion/legal | WS-D.2.3 (attention deletion) |
+| Release | Feature flag/metric guardrail/owner/rollback trigger/review date | WS-L.3.5 (emergency flags) |
 
 Tasks exceeding three days are split until independently reviewable, testable, and reversible.
 
----
+## Risk mitigation matrix
 
-## Risk mitigation integrated into the plan
+| Risk | Severity | Mitigation tasks |
+|---|---|---|
+| XSS → wallet drain | Critical | WS-0.5.1 (CSP/Trusted Types day 1), WS-G.4 (DOMPurify), WS-O.1.1 (XSS tests), WS-0.4.1 (Biome blocks unsafe DOM) |
+| Supply-chain compromise | Critical | WS-0.2.1 (pnpm strict), WS-0.4.4 (lockfile-lint), WS-0.6.2 (dep scanning), WS-O.3.2 (SBOM + provenance) |
+| Pay-to-rank leakage | Critical | WS-A.1.1 (signal denylist), WS-I.2.1 (feature store denylist), WS-I.3 (10 neutrality tests), WS-D.3.1 (schema isolation) |
+| Attention surveillance | High | WS-C.4 (in-browser processing), WS-D.2 (privacy controls), WS-E.1 (aggregation, retention limits) |
+| False coordination positives | High | WS-H.3 (MFCI base-rate conditioning), WS-J.1.3 (appeals), WS-H.3.4 (human review) |
+| iOS storage eviction | Medium | WS-C.2.2 (eviction detection + resync), WS-C.2.3 (background sync queue) |
+| Accessibility regression | High | WS-B (accessible from start), WS-0.4.3 (Playwright + axe-core CI gate), WS-B.1.6 (SPA focus management) |
+| Cold start | Medium | WS-F.1.4 (freshness baseline), WS-I.1.1 (diversity quotas), WS-G.2 (room seeding) |
+| Phishing PWA | High | WS-O.3.2 (signed provenance), WS-L.2.6 (transaction previews), WS-0.5.1 (strict CSP) |
+| Governance capture | High | WS-M.4.2 (anti-capture controls), WS-H.3 (MFCI monitoring), WS-M.1.2 (readiness checklist) |
+| Smart contract bug | Critical | WS-L.1.2 (threat model), WS-L.1.3 (external audit), WS-M.2.4 (freeze), WS-L.3.5 (kill switches) |
+| Regulatory noncompliance | High | WS-N.1 (jurisdiction engine), WS-A.2.1 (matrix), WS-N.2 (compliance controls), fail-closed default |
 
-| Risk | Mitigation in plan |
-|---|---|
-| XSS → wallet drain | WS-0.5 (CSP/Trusted Types from day 1), WS-G.4 (DOMPurify), WS-O.1.1 (XSS test suite) |
-| Supply-chain compromise | WS-0.2.1 (pnpm strict), WS-0.4.4 (lockfile-lint), WS-0.6.2 (dependency scanning) |
-| Pay-to-rank leakage | WS-A.1.1 (signal denylist), WS-I.2.1 (feature store denylist), WS-I.3 (neutrality tests) |
-| Attention-surveillance concern | WS-C.4 (in-browser processing), WS-D.2 (privacy controls), WS-E.1 (aggregation) |
-| False coordination positives | WS-H.3 (MFCI conditioning), WS-J.1.3 (appeals), WS-H.3.2 (human review) |
-| iOS storage eviction | WS-C.2.2 (eviction detection and resync) |
-| Accessibility regressions | WS-B.1.2 (accessible from start), WS-0.4.3 (Playwright + axe-core), WS-0.6.1 (CI gate) |
-| Cold start | WS-F.1.3 (freshness baseline), WS-I.1 (diversity quotas) |
+## Open questions requiring resolution during implementation
+**Ref:** Section 33
+
+1. Minimum viable SCOI without over-relying on language models
+2. How much attention aggregation can run in-browser given storage-eviction limits
+3. Source profile editability (stewards, staff, or both)
+4. Which transparency metrics are useful without exposing manipulation defenses
+5. Pseudonymity balance (protect vulnerable speakers, limit abuse)
+6. Local room launch strategy (avoid empty/captured communities)
+7. Chronological vs invariant-constrained ranking balance
+8. Revenue structure avoiding attention-extraction pressure
+9. Which invariant explanations should be public vs internal
+10. Exact Knomosis production commit, chain IDs, contract addresses
+11. Custody model per jurisdiction (non-custodial, partner, first-party)
+12. Allowed assets and governance weight model for pilot rooms
+13. Room fork/exit interaction with treasury assets
+14. Bridge/fault-proof/finality assumptions for transaction previews
