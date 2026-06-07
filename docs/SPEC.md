@@ -1,6 +1,6 @@
-# Licio v0.4 Final: Mobile-First Social News, Knomosis L2 Payments, and DAO-Like Forum Governance
+# Licio v0.4.1: Mobile-First Social News, Knomosis L2 Payments, and DAO-Like Forum Governance
 
-**Document status:** v0.4 final double-check, end-to-end optimization, and expanded implementation plan with Knomosis L2 integration  
+**Document status:** v0.4.1 deep-audit revision (mathematical-correctness, security, and consistency pass — see Section 0.7) layered on the v0.4 final double-check, end-to-end optimization, and Knomosis L2 implementation plan  
 **Prepared date:** June 7, 2026  
 **Revision date:** June 7, 2026  
 **Working product name:** Licio  
@@ -11,6 +11,7 @@
 
 - **0.** Revision audit and optimization summary
 - **0.6.** Final v0.4 double-check and optimization verdict
+- **0.7.** v0.4.1 deep-audit corrections (mathematical correctness, security, consistency)
 - **1.** Executive summary
 - **2.** Product north star
 - **3.** Platform concept
@@ -202,6 +203,34 @@ This specification is ready for execution when the team can answer yes to each q
 6. Can every launch gate fail closed without breaking the non-crypto social news experience?
 7. Can security, privacy, legal, accessibility, and trust-and-safety reviewers inspect logs, decisions, and model/ranking inputs without reconstructing state manually?
 8. Can the platform explain every AI summary, invariant gate, ranking dampener, payment hold, moderation action, and governance denial in user-readable form?
+
+## 0.7 v0.4.1 deep-audit corrections (mathematical correctness, security, consistency)
+
+### 0.7.1 Audit scope and verdict
+
+A line-by-line audit of v0.4 was performed against three questions: are the mathematical models stated correctly, were any security or compliance shortcuts taken, and is the document internally consistent end to end? The verdict is that the product concept, the invariant-as-audit-service architecture, the no-pay-to-rank boundaries, and the staged Knomosis rollout are sound and need no structural change. The audit found a small number of precise defects — mostly under-specified mathematics that would have been implemented incorrectly, one operational security gap, and one previously unflagged licensing conflict — plus minor internal inconsistencies. All are corrected in v0.4.1 and recorded below so the corrections are auditable. This revision is surgical: it tightens correctness, security, and consistency rather than restyling prose that was already sound.
+
+### 0.7.2 Mathematical corrections
+
+1.  **MERI (Section 7.2).** v0.4 called `r(S)` "the matroid rank function" while defining independence by pairwise nonredundancy, which is a general independence system, not a matroid; in that general case the maximum nonredundant subset is the NP-hard maximum-independent-set problem and greedy is not exact. v0.4.1 commits MERI to an explicit matroid model (partition or transversal matroid) where rank is well-defined and greedy is exact, notes the submodularity and the resulting greedy guarantees, and requires the general similarity-graph fallback to be reported as an approximation.
+2.  **MFCI (Section 8.2).** The fiber test now specifies its reference distribution: the conditional (log-linear / generalized-hypergeometric) distribution on the fiber given the fixed margins, sampled by a Metropolis-Hastings chain over Markov-basis moves that targets that distribution — not the uniform distribution over lattice points. The p-value uses the add-one estimator `p_hat = (1 + #extreme)/(N + 1)` so that `MFCI = -log p_hat` is always finite. A latency note reconciles the sub-minute freeze (MFCI-3) with the heavier exact test.
+3.  **GWEI (Section 9.2).** Measures must now be normalized probability distributions (or unbalanced GW used otherwise), `d` is stated to be a (pseudo)metric, the order-2 GW formula and its coupling constraint are written out, and the `GW = 0` iff measure-preserving-isometry property is stated to justify the word "isometry." Entropic approximation and seed-stability reporting are made explicit.
+4.  **SCOI (Section 10.2).** v0.4 presented the obstruction as the cochain `rho_i(s_i) - rho_j(s_j)`, which is by construction a coboundary and therefore always cohomologically trivial. v0.4.1 corrects this: the data-level context-collapse score is the normalized Dirichlet energy of the local interpretations under the sheaf Laplacian (the squared distance from the space of globally consistent sections), while a genuine cohomological obstruction (nontrivial `H1`) is reserved for the structural, persistent case targeted by SCOI v2.
+5.  **PHI (Section 11.2).** Transport maps are now modeled as invertible, metric-preserving (orthogonal) maps so that the loop holonomy `H(gamma)` lies in `O(n)` and `log(H)` is well-defined; the score uses a conjugation- (gauge-) invariant norm, with `||H - I||` as the fallback at the rotation-by-pi boundary. This removes the risk of an undefined or exploding `log` of a singular transport.
+6.  **PWA weights (Section 5.5).** The five positive-value weights are now explicitly normalized to sum to 100% per ranking profile (the table gives per-component guardrail ranges, jointly satisfiable at 100%), and the safety/manipulation penalties are stated to be separate nonnegative terms outside that convex combination. This resolves the prior ambiguity in which the listed ranges could sum to between 65% and 120%.
+
+### 0.7.3 Security and compliance corrections
+
+1.  **Smart-contract-wallet signature verification (Sections 24.6, 16A.11).** EIP-1271 was listed as a reference but never operationalized. Signature verification must now explicitly support both paths — ECDSA `ecrecover` for externally owned accounts and EIP-1271 `isValidSignature` for contract wallets and multisigs — and authenticate linkage with EIP-4361 (Sign-In with Ethereum) over EIP-712 typed data. Without this, the contract wallets and multisigs the spec relies on for stewards and treasuries would be silently rejected or mis-verified.
+2.  **Open-source license and copyleft conflict (new Section 16A.10.5).** Knomosis and this repository are GPL-3.0. The audit flags two previously unaddressed issues: GPL-3.0 copyleft can extend to Licio components that link Knomosis code (mitigated by keeping the gateway/indexer on an RPC/process boundary), and a GPL-3.0 mobile client has a well-documented incompatibility with Apple App Store distribution terms. This is now a documented launch blocker (closed-alpha gate 29C.1) with concrete resolution paths.
+
+### 0.7.4 Consistency corrections
+
+1.  **Bottom-navigation tabs (Sections 6.2, 29.3).** The two sections disagreed on the fourth tab (Threads vs. Ledger). Section 6.2 is now the single source of truth: Front Page, Rooms, Submit, Threads, Profile — with the private Signal Ledger living inside Profile.
+
+### 0.7.5 Confirmed correct (no change needed)
+
+The discrete Hodge decomposition (12.1), tropical earliest-arrival timing (12.2), Reeb level-set landscapes (12.4), counterfactual-invariance defect (12.5), and path-signature session encoding (12.6) are used correctly at the level of detail given. The privacy architecture (on-device aggregation, wallet/civic separation, on-chain minimization), the no-pay-to-rank isolation and ranking-neutrality test suite (29.15.9, 29B.3), and the staged shadow-before-ranking / simulate-before-signing rollout remain the strongest parts of the design and are unchanged.
 
 # 1. Executive summary
 
@@ -451,6 +480,8 @@ Initial default weights:
 | Context coherence gain            | 5-15%         | Rewards bridge work and clear framing.                   |
 | Safety and manipulation penalties | Variable      | Penalties can dominate when risk is high.                |
 
+The five positive-value components — active attention `wA`, constructive participation `wP`, exposure independence `wE`, evidence/source completeness `wS`, and context coherence gain `wC` — are **normalized to sum to 100%** for each ranking profile. The ranges above are per-component guardrails, and a deployed profile must choose shares inside those ranges that together sum to 100% (the ranges are jointly satisfiable, for example 30/40/15/10/5). The safety and manipulation penalties (`pM`, `pH`, `pT`, `pR` in Section 5.4) are **not** part of this convex combination: they are separate nonnegative coefficients applied to the risk terms, so a high-risk item's penalties can drive its score below any positive contribution. The baseline `B_i,t` is calibrated on the same scale as the normalized positive score.
+
 Weights are not one global constant. They vary by surface, topic sensitivity, freshness, age group, jurisdiction, and risk state. For example, breaking disaster news should emphasize timeliness and verified source context, while an evergreen science discussion should emphasize evidence, synthesis, and nonredundancy.
 
 ## 5.6 User-facing rating labels
@@ -580,13 +611,22 @@ MERI ensures that feed diversity and topic quality are based on nonredundant exp
 
 ## 7.2 Mathematical model
 
-Let `E` be the set of candidate exposures in a feed, room, topic, or thread. Define an independence system where a subset `S` is independent if its members are nonredundant with respect to source lineage, claim content, evidence basis, creator network, and semantic framing.
+Let `E` be the set of candidate exposures in a feed, room, topic, or thread, and let `S` be a subset of `E`. Nonredundancy is modeled by a **matroid** `M = (E, I)` whose independent sets `I` are the nonredundant subsets with respect to source lineage, claim content, evidence basis, creator network, and semantic framing. The rank function
 
-A matroid rank function `r(S)` gives the maximum size of an independent subset. The core invariant is:
+    r(S) = max { |T| : T subset of S, T in I }
 
-    MERI(S) = r(S) / |S|
+returns the size of the largest nonredundant subset of `S`. The core invariant is the normalized rank:
 
-`MERI(S) = 1` means every exposure is independent. Low MERI means the feed or topic is repetitive.
+    MERI(S) = r(S) / |S|,   with 0 < MERI(S) <= 1
+
+`MERI(S) = 1` means every exposure is independent; low MERI means the feed or topic is repetitive.
+
+**Correctness note on the matroid model.** If nonredundancy is defined only by pairwise similarity, the independent sets form a general *independence system* (a downward-closed family), not necessarily a matroid. In that general case, computing the largest nonredundant subset is the maximum-independent-set problem, which is NP-hard and is *not* computed exactly by greedy selection. Licio therefore models redundancy as a genuine matroid, so that rank is well-defined and the greedy procedure in Section 7.5 is exact:
+
+- **Partition matroid.** Partition exposures into near-duplicate, shared-source-lineage, and shared-primary-evidence classes (Section 7.5, steps 3-4). A subset is independent if it takes at most a bounded number of items from each class; the rank equals the number of classes represented, up to the per-class bound.
+- **Transversal matroid.** Independence is the existence of a system of distinct representatives matching exposures to distinct evidence bases or distinct primary documents.
+
+Matroid rank functions are monotone and submodular, so the marginal gain `r(S union {x}) - r(S)` is a diminishing-returns feature and greedy maximization of nonredundant coverage is optimal for the matroid (with the standard `1 - 1/e` cardinality and `1/2` matroid-constraint guarantees when balanced against the other ranking objectives). Where production must fall back to the general similarity-graph view, MERI is reported as a greedy *approximation* of rank, with that limitation recorded in the invariant card (Section 20.4).
 
 ## 7.3 Product interpretation
 
@@ -666,11 +706,13 @@ Fix selected margins:
 4.  Total activity per action type.
 5.  Expected baseline target popularity.
 
-The set of all tables with those margins is a **fiber**. Markov-basis moves sample plausible alternative tables inside the same fiber. MFCI estimates how extreme the observed coordination statistic is relative to this conditioned distribution.
+The set of all nonnegative integer tables sharing those margins is the **fiber** of the observed table `X`. Under a log-linear null model (independence / quasi-independence of the conditioned dimensions), the fixed margins are the sufficient statistics, so the correct reference distribution is the **conditional distribution on the fiber given those margins** — the generalized hypergeometric induced by the null, not the uniform distribution over the fiber's lattice points. A Markov basis (Diaconis-Sturmfels) connects every table in the fiber by integer moves that preserve all fixed margins; a Metropolis-Hastings sampler proposes such moves and accepts them so that its stationary distribution is exactly that conditional distribution. MFCI then measures how extreme the observed coordination statistic `T` is relative to this conditioned reference:
 
-    MFCI(X) = -log P_fiber(T(X') >= T(X))
+    MFCI(X) = -log p_hat,   p_hat = (1 + #{ sampled X' : T(X') >= T(X) }) / (N + 1)
 
-Where `T` may measure synchrony, repeated co-action, target concentration, same-phrase repetition, or simultaneous reporting.
+Here `p_hat` is the one-sided conditional p-value estimated from `N` Markov-chain samples, using the add-one estimator so that `p_hat > 0` always and `MFCI(X)` is finite even when no sampled table is as extreme as `X`. Larger MFCI means stronger evidence of coordination beyond the conditioned base rates. `T` may measure synchrony, repeated co-action, target concentration, same-phrase repetition, or simultaneous reporting.
+
+**Latency note.** The full conditional test (Markov-chain sampling) runs in the near-real-time and batch tiers. The sub-minute "freeze trend acceleration" path (MFCI-3) is driven by cheap, conservative synchrony and target-concentration statistics with precomputed null calibrations; the exact fiber test then confirms or clears the freeze and feeds the analyst case (Sections 8.5, 28.3).
 
 ## 8.3 Product interpretation
 
@@ -732,15 +774,19 @@ GWEI audits whether cohorts receive structurally comparable platform experiences
 
 For cohort `A`, define a metric-measure space:
 
-    X_A = items shown to cohort A
-    d_A = pairwise distance between items by semantic, source, evidence, and community relation
-    mu_A = impression or attention weight
+    X_A  = items shown to cohort A
+    d_A  = pairwise distance between items by semantic, source, evidence, and community relation
+    mu_A = a probability measure over X_A (normalized impression or attention share, sum = 1)
 
-For cohort `B`, define `(X_B, d_B, mu_B)`. Gromov-Wasserstein distance compares relational structure without requiring exact item identity:
+`d_A` is a (pseudo)metric: a nonnegative-weighted sum of the per-relation (pseudo)metrics, symmetric and zero on the diagonal. `mu_A` is normalized so that couplings with prescribed marginals exist. For cohort `B`, define `(X_B, d_B, mu_B)` the same way. The order-2 Gromov-Wasserstein distance compares relational structure without requiring exact item identity:
 
-    GWEI(A,B) = GW((X_A, d_A, mu_A), (X_B, d_B, mu_B))
+    GWEI(A,B) = GW_2((X_A,d_A,mu_A),(X_B,d_B,mu_B))
+              = ( inf over pi in Pi(mu_A,mu_B) of
+                  sum_{i,j,k,l} |d_A(i,k) - d_B(j,l)|^2 * pi(i,j) * pi(k,l) )^{1/2}
 
-Low distance means structurally similar experience; high distance indicates potential disparity.
+where `Pi(mu_A, mu_B)` is the set of couplings (transport plans) with marginals `mu_A` and `mu_B`. `GW_2` is a pseudometric on isomorphism classes of metric-measure spaces, and `GWEI(A,B) = 0` exactly when the two experiences are measure-preserving isometric — which is what justifies the word "isometry." Low distance means structurally comparable experience; high distance indicates potential disparity, regardless of whether the cohorts saw identical items.
+
+Exact GW is a non-convex quadratic assignment problem (NP-hard in general), so production uses sampled cohort windows and **entropic-regularized** GW. Runs report stability across random seeds and regularization strength, and the invariant card records the approximation and its confidence interval (Sections 9.7, 29.4.3).
 
 ## 9.3 Product interpretation
 
@@ -801,15 +847,18 @@ SCOI measures context collapse: the failure of local community interpretations t
 
 ## 10.2 Mathematical model
 
-Let communities, topic rooms, or lenses be open sets `U_i`. Each has a local interpretation `s_i`, such as a semantic summary, stance distribution, assumed background, or local norm.
+Model the communities, topic rooms, or lenses as the cells of a **cellular sheaf** over the nerve of their overlaps. Each lens `U_i` carries a stalk (a vector space of admissible interpretations) and a local interpretation `s_i` in that stalk — a semantic summary, stance distribution, assumed background, or local norm encoded as a vector. The collection `s = (s_i)` is a 0-cochain. For each overlap `U_i cap U_j`, restriction maps `rho_i, rho_j` carry `s_i, s_j` into a shared comparison space, and the coboundary operator `d0` records their disagreement:
 
-On overlaps `U_i cap U_j`, restriction maps translate local interpretations into a shared comparison space. Differences are cochains:
+    (d0 s)_ij = rho_i(s_i) - rho_j(s_j)   on each overlap U_i cap U_j
 
-    delta s_ij = rho_i(s_i) - rho_j(s_j)
+The product-level score is the **normalized Dirichlet energy** of `s` under the sheaf Laplacian `L0 = d0^T d0`:
 
-If differences cannot be resolved by choosing consistent local adjustments, the obstruction class is nontrivial. The product-level score is:
+    SCOI(content) = ( s^T L0 s ) / normalizer
+                  = ( sum over overlaps ij of || rho_i(s_i) - rho_j(s_j) ||^2 ) / normalizer
 
-    SCOI(content) = normalized obstruction magnitude across community overlaps
+normalized to [0, 1] by the energy of a maximally-disagreeing configuration on the same overlap graph. `SCOI = 0` exactly when the local interpretations already agree on all overlaps and therefore glue into a single global section (the sheaf gluing axiom); higher SCOI means the local readings cannot be reconciled across overlaps without added context. Equivalently, SCOI is the squared distance of `s` from the space of globally consistent sections `H0 = ker d0`.
+
+**Correctness note on the obstruction.** The raw cochain `(d0 s)_ij = rho_i(s_i) - rho_j(s_j)` is by construction a *coboundary*, so it is always exact and its Cech cohomology class is trivial; it is the *magnitude* (Dirichlet energy) of this discrepancy, not its cohomology class, that quantifies context collapse for a given set of readings. A genuinely cohomological obstruction arises only at the structural level — when the restriction maps themselves admit no consistent global gluing for any choice of local readings, i.e. when the first sheaf cohomology `H1` of the overlap diagram is nontrivial. That structural obstruction is the target of SCOI v2 (Section 29.4.4), where persistent cross-community interpretation failures are summarized by the norm of the harmonic representative (the Hodge-minimal cochain) of the nontrivial class.
 
 ## 10.3 Product interpretation
 
@@ -870,17 +919,21 @@ PHI detects path-dependent steering in recommendation. The concern is not only w
 
 ## 11.2 Mathematical model
 
-Each topic context has a local coordinate system for user preferences. Moving from context `x` to `y` applies a transport map `A_xy`. Around a closed path:
+Each topic context has a local coordinate system (a frame) for the user's latent-preference space. Moving from context `x` to `y` applies a transport map `A_xy`. Because transport should preserve the geometry of preference space (lengths and angles), the maps are modeled as **invertible and metric-preserving** — orthogonal maps `A_xy in O(n)`, i.e. a metric connection — so that their composition around a loop stays in `O(n)` and the loop holonomy is well-defined. Around a closed path
 
     x0 -> x1 -> ... -> xk = x0
 
-Compute loop product:
+the holonomy is the ordered product
 
-    H(gamma) = A_x{k-1},xk ... A_x0,x1
+    H(gamma) = A_{x_{k-1}, x_k} ... A_{x_1, x_2} A_{x_0, x_1}
 
-If `H(gamma)` differs from identity, returning to the same apparent topic has changed the user representation. PHI can use norms, traces, eigenvalue summaries, or log-map approximations:
+If `H(gamma)` differs from the identity, returning to the same apparent topic has rotated the user's preference representation — path-dependent steering. The risk score is the magnitude of that rotation:
 
-    PHI(gamma) = || log(H(gamma)) ||
+    PHI(gamma) = || log( H(gamma) ) ||_F
+
+`PHI(gamma) = 0` exactly when `H(gamma) = I` (flat, path-independent transport). For `H in SO(n)` the principal matrix logarithm `log(H)` is a real skew-symmetric matrix whose Frobenius norm equals `sqrt( 2 * sum_k theta_k^2 )` in the loop's rotation angles `theta_k`, giving a direct "total rotation" reading.
+
+**Correctness and gauge-invariance notes.** The matrix logarithm is well-defined when `H` has no eigenvalue on the negative real axis; modeling transports as orthogonal keeps the eigenvalues of `H` on the unit circle, so this holds except at isolated rotation-by-pi configurations, where `|| log(H) ||` is still finite and the robust fallback `|| H - I ||` is used. Holonomy is defined only up to a choice of basepoint and frame (conjugation `H -> Q H Q^T`), so PHI must use a conjugation-invariant summary — the Frobenius norm of `log(H)`, the rotation angles, or other eigenvalue/trace summaries — never coordinate-specific embedding values. This is the gauge-invariant requirement made explicit in the PHI v2 build plan (Section 29.4.5).
 
 ## 11.3 Product interpretation
 
@@ -1685,6 +1738,16 @@ Controls required before real funds:
 11. Record-retention schedule approved by counsel.
 12. User support workflow for mistaken transfers, scams, wallet compromise, and lost access.
 
+### 16A.10.5 Open-source license and copyleft compliance
+
+Knomosis is published under **GPL-3.0-or-later**, and the repository carrying this specification is itself GPL-3.0. Copyleft scope must be analyzed before integration, because it interacts with both Knomosis reuse and mobile app-store distribution:
+
+1.  **Knomosis copyleft scope.** Determine which Licio components become a "derivative work" or "work based on" Knomosis. Incorporating or statically/dynamically linking the Knomosis Rust runtime crates or Lean sources into Licio binaries propagates GPL-3.0 obligations to those components; merely *interacting* with already-deployed Knomosis contracts or a separate Knomosis process over an RPC/network boundary generally does not. Prefer process/RPC isolation (the gateway and indexer boundary in Section 16A.14) so the social product is not pulled under copyleft by accident, and record the linking analysis in the dependency manifest (Section 16A.18.1).
+2.  **GPL-3.0 versus Apple App Store distribution.** A GPL-3.0 binary distributed through the Apple App Store has a well-documented incompatibility: Apple's App Store Terms impose usage rules and DRM/technical restrictions that conflict with GPL-3.0's "no further restrictions" requirement and its anti-Tivoization and installation-information clauses. Shipping a GPL-3.0 iOS client is therefore a launch blocker until resolved by one of: (a) licensing the Licio client apps under a license the copyright holders may additionally grant (the holders can dual-license or add an App Store distribution exception); (b) keeping all GPL-obligated code behind a network boundary so the distributed client is not a GPL derivative; or (c) choosing an App-Store-compatible license for the client while honoring Knomosis's GPL terms for any GPL-derived components.
+3.  **Attribution and source-offer obligations.** If any distributed artifact is GPL-derived, satisfy GPL-3.0 source-availability, license-text, and modification-notice obligations, and confirm compatibility with every other third-party license in the build (SBOM cross-check, Sections 24.4 and 29A.17).
+
+This analysis must be completed and signed off by counsel and the security/engineering leads before the first distributed client build, because it affects what can ship through app stores at all (closed-alpha gate 29C.1). Re-run it whenever the pinned Knomosis commit or the client's dependency graph changes.
+
 ## 16A.11 Security architecture
 
 Security requirements:
@@ -1694,7 +1757,7 @@ Security requirements:
 3.  Use typed structured-data signing, explicit domain separators, nonces, expirations, and replay protection.
 4.  Treat all wallet signatures as high-risk user actions.
 5.  Never request seed phrases.
-6.  Support hardware wallets and contract wallets where feasible.
+6.  Support hardware wallets and contract wallets (verifying contract-wallet signatures via EIP-1271) where feasible.
 7.  Provide transaction simulation before signing.
 8.  Maintain allowlists for production contracts.
 9.  Warn on unknown chain, unknown contract, high allowance, unlimited approval, suspicious recipient, and mismatched domain.
@@ -3070,7 +3133,7 @@ The mobile and backend security program should align with OWASP MASVS for mobile
 
 Additional security controls for Knomosis-enabled features:
 
-1.  Use structured typed-data signing with domain separation, nonces, expirations, and chain IDs.
+1.  Use structured typed-data signing (EIP-712) with domain separation, nonces, expirations, and chain IDs; authenticate wallet linkage with Sign-In with Ethereum (EIP-4361); and verify signatures over **both** paths — ECDSA `ecrecover` for externally owned accounts and EIP-1271 `isValidSignature` for smart-contract wallets and multisigs — so contract-wallet stewards and treasuries are neither silently rejected nor mis-verified.
 2.  Maintain production contract allowlists and block unknown contract interactions.
 3.  Run transaction simulation and human-readable previews before signing.
 4.  Never request, store, transmit, or log private keys or seed phrases.
@@ -3469,7 +3532,7 @@ The optimized dependency rule is: **PWA and MERI must exist before public beta; 
 
 **Units of work:**
 
-1.  Build a mobile information architecture with five bottom tabs at most: Front Page, Rooms, Submit, Ledger, Profile/Settings.
+1.  Build a mobile information architecture with at most five bottom tabs, matching Section 6.2: Front Page, Rooms, Submit, Threads, and Profile (the private Signal Ledger lives within Profile, not as a separate tab).
 2.  Design feed cards with finite sections, source indicators, context labels, and no applause affordances.
 3.  Design the in-app source reader with reading position preservation, citation capture, accessibility controls, and escape back to thread.
 4.  Design thread navigation by branches: evidence, questions, corrections, synthesis, counterpoint, local witness, and moderator notes.
@@ -5181,6 +5244,7 @@ Closed alpha can launch only when:
 6. Accessibility review passes the alpha threshold.
 7. Security review finds no launch-blocking account/session issues.
 8. Wallet and real-funds features are disabled.
+9. Open-source license posture is resolved for app-store distribution (Section 16A.10.5): the distributed client does not violate GPL-3.0 or app-store terms, and any GPL-derived components are isolated or appropriately licensed.
 
 ## 29C.2 Public beta gate
 
@@ -5271,6 +5335,7 @@ General availability can launch only when:
 | Sanctions/AML exposure | Payments involve restricted actors or suspicious flows. | Compliance provider, region gating, transaction monitoring, freeze/escalation workflow. |
 | Speculation drift | Product culture shifts toward token hype and financial status. | No TVL KPI, no token leaderboards, no price widgets, no tradable social points. |
 | DAO-policy conflict | A room votes to permit unsafe or illegal behavior. | Platform policy supremacy, law-pack constraints, emergency freeze, appeals. |
+| License/app-store incompatibility | GPL-3.0 (Knomosis and this repository) conflicts with Apple App Store distribution terms and can extend copyleft to client code. | License/copyleft analysis (16A.10.5), RPC/process isolation of GPL code, app-store-compatible client licensing or distribution exception, SBOM cross-check. |
 | Operational overload | Financial support exceeds team capacity. | Pilot caps, support training, clear disabled states, weekly risk review. |
 
 # 31. Best-practice checklist
