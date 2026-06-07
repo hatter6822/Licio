@@ -1,34 +1,40 @@
 # Licio Implementation Plan — Master Index
 
-**Version:** v3.0
+**Version:** v4.0
 **Source specification:** docs/SPEC.md v0.6
 **Date:** June 7, 2026
 
-This plan decomposes the Licio specification into 17 workstream documents housed in `docs/planning/`. Each document is independently actionable, dependency-ordered, and composed of atomic tasks targeting one to three engineering days. Tasks are independently reviewable, testable, and reversible per Section 30.8. The plan follows the spec's milestone structure (M0-M6), workstream labels (0, A-P), and the critical-path ordering from Section 30.2.
+This plan decomposes the Licio specification into 17 workstream documents housed in `docs/planning/`. Each document is independently actionable, dependency-ordered, and composed of **~646 atomic tasks** targeting 0.5-2 engineering days each. Every task carries a unique ID, a spec reference (`Ref:`), a description, measurable acceptance criteria, testing requirements, and explicit dependencies; data-bearing tasks include Drizzle/zod schemas and API request/response shapes. Tasks are independently reviewable, testable, and reversible per Section 30.8. The plan follows the spec's milestone structure (M0-M6), workstream labels (0, A-P), and the critical-path ordering from Section 30.2.
+
+**Revision history:**
+- **v4.0** — Deep audit + expansion of every workstream (≈2x depth; ~22,900 lines; ~646 atomic tasks). Closed spec-coverage gaps surfaced during the audit, including: emergency feature-flag substrate and kill switches (WS-O.2.2), integrity/abuse defense without device attestation (WS-O.4), backend hardening/secrets and reliability/DR (WS-O.5/O.6), Knomosis event schemas behind the pay-to-rank firewall (WS-E.1.2), event storage + retention jobs (WS-E.3), governance action budgets (WS-M.3.2a) and delegation/anti-capture (WS-M.4.2c-*), on-chain privacy (WS-L.1.2e), Knomosis transparency metrics and phase success-gates (WS-P.1.4a/3.1a), Core Web Vitals enforcement (WS-C.5.1), and source/claim/search definitions referenced cross-workstream (WS-F.1.1/1.2/2/3.1). Standardized per-task dependencies and definitions of done across all documents.
+- **v3.0** — Split the monolithic `WORKSTREAM_PLAN.md` into 17 dependency-ordered documents.
+- **v2.0** — Refined and cross-validated the monolithic plan against SPEC.md v0.6.
 
 ---
 
 ## Document Map
 
-| File | Workstream | Milestone | Priority | Wave | Summary |
-|---|---|---|---|---|---|
-| `01-repository-foundation.md` | WS-0 | M0 | P0 | 1 | Monorepo, TypeScript strict, CI/CD, security baseline |
-| `02-doctrine-and-policy.md` | WS-A | M0 | P0 | 1 | No-applause doctrine, moderation taxonomy, jurisdiction, steward roles |
-| `03-design-system.md` | WS-B | M0-M1 | P0-1 | 2-3 | Design tokens, WCAG 2.2 AA primitives, app-specific components |
-| `04-pwa-client.md` | WS-C | M1 | P0-1 | 2-4 | Routing, state, service worker, offline, push, signal processing |
-| `05-identity-and-privacy.md` | WS-D | M1 | P0-1 | 2-3 | WebAuthn, accounts, privacy controls, wallet identity |
-| `06-event-pipeline-and-pwatt.md` | WS-E | M1-M2 | P1 | 4-5 | Event schemas, ingestion, PWAtt v0/v1 scoring |
-| `07-ingestion-and-search.md` | WS-F | M1 | P1 | 3-4 | Story/claim/source schemas, search, embeddings |
-| `08-forum-and-conversation.md` | WS-G | M1 | P1 | 4 | Threads, contributions, rooms, lenses, composer, UGC safety |
-| `09-invariant-services.md` | WS-H | M2 | P2 | 5 | MERI, MFCI, SCOI, GWEI, PHI, 6 supporting invariants |
-| `10-ranking-and-distribution.md` | WS-I | M2-M3 | P2-3 | 5-6 | Candidate gen, ranking pipeline, neutrality tests |
-| `11-trust-and-safety.md` | WS-J | M1 | P0-1 | 3-4 | User safety, moderation console, automated pre-checks |
-| `12-ai-governance.md` | WS-K | M3 | P3 | 5 | Model registry, evaluation, classification, summarization |
-| `13-knomosis-and-wallets.md` | WS-L | M4 | P4 | 1+7 | Due diligence, wallet integration, gateway, simulation |
-| `14-treasury-and-governance.md` | WS-M | M4-M5 | P4-5 | 8 | Room governance, treasury, payments, proposals |
-| `15-compliance.md` | WS-N | M5 | P4-5 | 8 | Jurisdiction engine, financial compliance, support |
-| `16-security-and-reliability.md` | WS-O | M0-M6 | P0 | 2+6 | Security testing, incident response, reproducible builds |
-| `17-experimentation-and-launch.md` | WS-P | M3-M6 | P3 | 6 | Product metrics, anti-metrics, experiments, i18n |
+| File | Workstream | Milestone | Priority | Wave | Tasks | Summary |
+|---|---|---|---|---|---|---|
+| `01-repository-foundation.md` | WS-0 | M0 | P0 | 1 | 48 | Monorepo, TypeScript strict, CI/CD, security baseline |
+| `02-doctrine-and-policy.md` | WS-A | M0 | P0 | 1 | 18 | No-applause doctrine, moderation taxonomy, jurisdiction, steward roles |
+| `03-design-system.md` | WS-B | M0-M1 | P0-1 | 2-3 | 35 | Design tokens, WCAG 2.2 AA primitives, app-specific components |
+| `04-pwa-client.md` | WS-C | M1 | P0-1 | 2-4 | 28 | Routing, state, service worker, offline, push, signal processing, CWV budgets |
+| `05-identity-and-privacy.md` | WS-D | M1 | P0-1 | 2-3 | 37 | WebAuthn, accounts, MFA, age gating, privacy controls, wallet identity |
+| `06-event-pipeline-and-pwatt.md` | WS-E | M1-M2 | P1 | 4-5 | 30 | Event schemas, storage/retention, ingestion, PWAtt v0/v1 scoring |
+| `07-ingestion-and-search.md` | WS-F | M1 | P1 | 3-4 | 30 | Story/claim/source schemas, lifecycle, search, embeddings |
+| `08-forum-and-conversation.md` | WS-G | M1 | P1 | 4 | 38 | Threads, contributions, rooms, lenses, composer, UGC safety |
+| `09-invariant-services.md` | WS-H | M2 | P2 | 5 | 82 | MERI, MFCI, SCOI, GWEI, PHI, 6 supporting invariants |
+| `10-ranking-and-distribution.md` | WS-I | M2-M3 | P2-3 | 5-6 | 36 | Candidate gen, ranking pipeline, neutrality tests, kill switch |
+| `11-trust-and-safety.md` | WS-J | M1 | P0-1 | 3-4 | 29 | User safety, moderation console, automated pre-checks |
+| `12-ai-governance.md` | WS-K | M3 | P3 | 5 | 20 | Model registry, evaluation, classification, summarization, lineage |
+| `13-knomosis-and-wallets.md` | WS-L | M4 | P4 | 1+7 | 61 | Due diligence, wallet integration, gateway, simulation |
+| `14-treasury-and-governance.md` | WS-M | M4-M5 | P4-5 | 8 | 49 | Room governance, treasury, payments, proposals, action budgets |
+| `15-compliance.md` | WS-N | M5 | P4-5 | 8 | 27 | Jurisdiction engine, financial compliance, support |
+| `16-security-and-reliability.md` | WS-O | M0-M6 | P0 | 2+6 | 46 | Security testing, integrity defense, incident response, reproducible builds, reliability/DR |
+| `17-experimentation-and-launch.md` | WS-P | M3-M6 | P3 | 6 | 32 | Product metrics, anti-metrics, experiments, transparency, i18n |
+| **Total** | | | | | **~646** | Atomic tasks across 17 workstreams (~22,900 lines) |
 
 ---
 
