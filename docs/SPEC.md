@@ -1,10 +1,10 @@
-# Licio v0.4.1: Mobile-First Social News, Knomosis L2 Payments, and DAO-Like Forum Governance
+# Licio v0.5: Mobile-First Social News, Knomosis L2 Payments, and DAO-Like Forum Governance
 
-**Document status:** v0.4.1 deep-audit revision (mathematical-correctness, security, and consistency pass — see Section 0.7) layered on the v0.4 final double-check, end-to-end optimization, and Knomosis L2 implementation plan  
+**Document status:** v0.5 independent-distribution revision (Section 0.8) and v0.4.1 deep-audit pass (Section 0.7), layered on the v0.4 final double-check, end-to-end optimization, and Knomosis L2 implementation plan  
 **Prepared date:** June 7, 2026  
 **Revision date:** June 7, 2026  
 **Working product name:** Licio  
-**Primary platform:** Mobile first: iOS and Android native apps, with web as a secondary companion surface  
+**Primary platform:** Mobile-first, distributed independently of the gatekept app stores. The universal surface is an installable Progressive Web App (PWA); native Android ships via F-Droid and direct signed builds; native iOS ships via EU alternative distribution (DMA) and sideloading. The Apple App Store and Google Play are out of scope because of the GPL-3.0 licensing conflict and crypto-policy restrictions. See Section 19A  
 **Core premise:** There are no traditional user-cast upvotes, likes, heart buttons, karma counts, follower-count leaderboards, or popularity badges. Public visibility is derived from privacy-preserving measures of active attention, participation depth, conversation quality, nonredundant exposure, cross-context coherence, anti-coordination checks, and recommender-safety constraints. Knomosis L2 is used only as an optional, compliance-gated payment and forum-governance substrate; cryptocurrency, wallets, treasuries, DAO-like votes, and payments never buy visibility, status, notifications, search placement, or recommendation advantage.
 
 ## Table of contents
@@ -12,6 +12,7 @@
 - **0.** Revision audit and optimization summary
 - **0.6.** Final v0.4 double-check and optimization verdict
 - **0.7.** v0.4.1 deep-audit corrections (mathematical correctness, security, consistency)
+- **0.8.** v0.5 distribution-architecture revision (independent distribution)
 - **1.** Executive summary
 - **2.** Product north star
 - **3.** Platform concept
@@ -32,6 +33,7 @@
 - **17.** Trust, safety, and moderation
 - **18.** Privacy and data protection
 - **19.** Mobile client architecture
+- **19A.** Independent distribution and update architecture
 - **20.** Backend architecture
 - **21.** Data model
 - **22.** API specification overview
@@ -231,6 +233,32 @@ A line-by-line audit of v0.4 was performed against three questions: are the math
 ### 0.7.5 Confirmed correct (no change needed)
 
 The discrete Hodge decomposition (12.1), tropical earliest-arrival timing (12.2), Reeb level-set landscapes (12.4), counterfactual-invariance defect (12.5), and path-signature session encoding (12.6) are used correctly at the level of detail given. The privacy architecture (on-device aggregation, wallet/civic separation, on-chain minimization), the no-pay-to-rank isolation and ranking-neutrality test suite (29.15.9, 29B.3), and the staged shadow-before-ranking / simulate-before-signing rollout remain the strongest parts of the design and are unchanged.
+
+## 0.8 v0.5 distribution-architecture revision (independent distribution)
+
+### 0.8.1 Why this revision exists
+
+The v0.4.1 audit (Section 0.7) confirmed that Licio cannot rely on the traditional gatekept app stores. Two independent blockers compound:
+
+1.  **Licensing.** Knomosis and this repository are GPL-3.0. A GPL-3.0 binary is incompatible with Apple App Store distribution terms (the "no further restrictions," anti-Tivoization, and installation-information clauses), as documented in Section 16A.10.5.
+2.  **Crypto policy.** Licio's wallet, treasury, and DAO-like governance features collide with Apple App Review Guideline 3.1.5 and Google Play's Financial Services and Blockchain-based Content policies, which restrict crypto functionality, reward mechanics, and tokenized assets.
+
+Rather than mutilate the product to fit a storefront it can never fully satisfy, v0.5 adopts an **independent, multi-channel distribution model** as the optimal methodology, specified authoritatively in the new **Section 19A**. This is not a downgrade: shedding the app-store dependency removes the in-app-purchase tax and the content-policy chokepoints on crypto, and aligns distribution with the project's open-source values.
+
+### 0.8.2 The model in one paragraph
+
+The universal surface is an installable **Progressive Web App (PWA)** served from Licio's own domain, reaching iOS, Android, and desktop with no gatekeeper. **Native Android** is distributed through **F-Droid** (and a self-hosted F-Droid repository) plus **direct signed APKs** with a signature-verified in-app updater. **Native iOS** is distributed, where users want native quality, through **EU alternative-distribution channels** enabled by the Digital Markets Act (alternative marketplaces and Web Distribution, subject only to Apple's lighter notarization) and through **sideloading** elsewhere, with the PWA as the universal iOS fallback. **Desktop** uses the PWA or a signed Tauri build with Linux packaging (Flathub/AppImage). Because no store performs review, Licio itself owns trust and integrity through **reproducible builds, published signing keys, binary-transparency attestations, and secure auto-update**.
+
+### 0.8.3 Interpretation clause for the rest of the document
+
+Sections written before v0.5 refer frequently to "app-store review," "app-store declarations," "Apple/Google review packages," and "app-storefront" feature flags. Except where a section has been explicitly rewritten in this revision, those phrases must now be read as their **independent-distribution equivalents** defined in Section 19A:
+
+- "app-store review" / "review package" maps to Apple **notarization** (iOS EU), **F-Droid inclusion review**, and Licio's own **release-integrity gate** (reproducible build plus signature plus security scan);
+- "app-store declarations" maps to Licio's **public content rating, financial-risk disclosures, and DSA-aligned transparency notices**, which are channel-independent legal obligations rather than store paperwork;
+- "app-storefront feature flags" maps to **per-channel and per-jurisdiction feature flags** (PWA / F-Droid / direct / iOS-EU-alternative / sideload) in the same compliance engine;
+- "must comply with Apple and Google policies" maps to "must comply with the **distribution-channel policies that actually apply** (notarization terms, F-Droid policy, web/PWA platform constraints) and with **law** (DSA, GDPR, financial regulation), which apply regardless of channel."
+
+The user-safety requirements (reporting, blocking, moderation, contact, age assurance) remain mandatory in every channel: they were never only an app-store demand; they are legal obligations (for example under the EU DSA) and product principles.
 
 # 1. Executive summary
 
@@ -1708,18 +1736,18 @@ The app must maintain a jurisdiction policy engine with:
 11. Disabled-region fallback UX.
 12. Evidence of legal approval by release.
 
-### 16A.10.3 App-store constraints
+### 16A.10.3 Distribution-channel constraints
 
-Mobile releases must comply with Apple and Google policies. Product rules:
+Licio does not ship the full product through the Apple App Store or Google Play (Sections 0.8, 19A); it distributes via PWA, F-Droid, direct signed builds, EU alternative distribution, and sideloading. The constraints below are expressed against the channels that actually apply, while the product-integrity rules they encode remain in force:
 
-1.  The iOS app must not use cryptocurrency or wallet ownership to unlock ordinary app functionality or digital content that app-store rules require to use in-app purchase.
-2.  The app must not offer crypto for social tasks, posting, inviting, dwell time, or engagement.
-3.  The app must not allow paid post boosts through off-platform crypto payments.
-4.  Wallet functionality must be provided only under eligible developer/account structures and region-specific requirements.
+1.  Crypto and wallet ownership never unlock ordinary app functionality, and Licio sells no digital content that would require app-store in-app purchase — so the IAP conflict does not arise. Voluntary contributions and treasury flows go directly through the wallet (Section 16A.3.2), not through a storefront billing system.
+2.  The app must not offer crypto for social tasks, posting, inviting, dwell time, or engagement (a product principle, independent of any store).
+3.  The app must not allow paid post boosts through any payment path, on-platform or off (no pay-to-rank).
+4.  Wallet functionality is delivered through approved non-custodial connectors and is feature-flagged by jurisdiction and channel (Section 16A.10.2), not gated by app-store developer eligibility.
 5.  Any exchange, purchase, custody, or transmission flow must be offered only where licensed or through a properly approved provider.
-6.  Google Play financial/blockchain declarations must be completed before releases containing financial or tokenized-asset functionality.
-7.  UGC moderation, reporting, blocking, filtering, and contact flows remain mandatory and cannot be weakened by room governance.
-8.  App-review notes must explain the no-pay-to-rank design, crypto feature scope, demo credentials, moderation controls, jurisdiction gating, and disabled states.
+6.  The iOS EU build must pass Apple **notarization**, and F-Droid builds must satisfy F-Droid's inclusion policy; neither is content approval, but both are real gates (Section 19A.9). Channel-independent **financial-risk disclosures and content ratings** are published by Licio directly.
+7.  UGC moderation, reporting, blocking, filtering, and contact flows remain mandatory in every channel and cannot be weakened by room governance — these are legal obligations (for example under the EU DSA), not store-specific demands.
+8.  Each distribution channel maintains a review/integrity dossier (notarization notes for iOS EU, F-Droid metadata, reproducible-build and signing attestations) explaining the no-pay-to-rank design, crypto feature scope, moderation controls, jurisdiction gating, and disabled states.
 
 ### 16A.10.4 AML, fraud, sanctions, and abuse controls
 
@@ -2185,16 +2213,16 @@ Wallet addresses can reveal sensitive social interests. Licio should therefore d
 5. Data subject rights workflows must cover off-chain wallet-linking records; on-chain immutability must be explained before any transaction.
 6. Staff tooling must separate financial compliance visibility from ordinary moderation visibility unless a case requires escalation.
 
-### 16A.18.6 App-store-safe crypto boundaries
+### 16A.18.6 Distribution-safe crypto boundaries
 
-The mobile apps must be designed so they can be reviewed and operated with feature flags:
+Every build, on every channel (Section 19A), must be operable with feature flags so crypto can be disabled cleanly:
 
-- iOS and Android builds can disable wallet, treasury, or payment flows by region, app-storefront, app version, account age, room risk, or compliance status.
-- Crypto is never used to unlock in-app digital functionality that app-store rules require to go through native in-app purchase.
+- PWA, Android (F-Droid/direct), iOS (EU alternative distribution/sideload), and desktop builds can disable wallet, treasury, or payment flows by region, channel, build version, account age, room risk, or compliance status.
+- Crypto is never used to unlock digital functionality, and Licio sells no digital content that would require app-store in-app purchase, so the IAP conflict is avoided by design rather than by store negotiation.
 - Tips, grants, and contributions are voluntary and not exchanged for ranking, badges, stickers, premium comments, visibility, or exclusive in-app social features.
 - The app does not run device cryptomining and does not encourage financial speculation, gambling, or chance-based tokenized rewards.
 - The app includes UGC reporting, blocking, moderation, and contact mechanisms even in wallet-enabled rooms.
-- The app-store review package must explain wallet optionality, no-pay-to-rank controls, UGC moderation controls, financial declarations, and disabled-region behavior.
+- Each channel's release dossier (Section 19A.9) explains wallet optionality, no-pay-to-rank controls, UGC moderation controls, financial-risk disclosures, and disabled-region behavior.
 
 ### 16A.18.7 Knomosis observability and reconciliation
 
@@ -2306,15 +2334,15 @@ For jurisdictions where applicable, and as a global best practice where feasible
 5.  Provide non-personalized or less-personalized feed options.
 6.  Maintain internal risk assessment for systemic risks.
 
-## 17.5 App store UGC requirements
+## 17.5 User-generated-content safety requirements (channel-independent)
 
-For mobile distribution, the app must include:
+These UGC safety capabilities are mandatory in every distribution channel (Section 19A). They are required by law for a user-content platform (for example under the EU DSA) and are product principles in their own right; they do not depend on Apple or Google review. The app must include:
 
 1.  A mechanism to report offensive or harmful content.
 2.  Timely moderation response processes.
 3.  User blocking.
 4.  Filtering or default hiding of objectionable material as required.
-5.  Age rating and age-restriction mechanisms where applicable.
+5.  Age assurance and age-restriction mechanisms, including Licio's own self-declared content rating since no app store supplies one.
 6.  Policies against bullying, threats, and abuse.
 
 
@@ -2402,20 +2430,19 @@ Rules:
 
 # 19. Mobile client architecture
 
-## 19.1 Native-first recommendation
+## 19.1 Client strategy: PWA-universal, native where it adds depth
 
-Build native iOS and Android applications for the core experience.
+Licio ships an installable Progressive Web App as the universal surface and native clients where they add real depth, distributed through the independent channels of Section 19A rather than through app-store review. The PWA guarantees reach on every platform (and is the primary iOS surface); native Android and native iOS builds are enhancements for users who want them.
 
-Rationale:
+Rationale for retaining native builds alongside the PWA:
 
-1.  Better accessibility integration.
-2.  Better offline storage and background sync control.
-3.  Safer handling of local attention features.
+1.  Better accessibility integration with platform assistive technologies.
+2.  Better offline storage and background sync control than the PWA can guarantee, especially on iOS where web storage may be evicted.
+3.  Safer, fully on-device handling of local attention features.
 4.  Better platform-native notifications and privacy permissions.
 5.  Better performance for long threads and context maps.
-6.  Better compliance with platform review expectations.
 
-A cross-platform UI layer can be considered only if it meets performance, accessibility, privacy, and platform-convention requirements.
+The PWA must nonetheless meet the same accessibility, privacy, and performance targets (Sections 19.4, 19.5, 25), because for many iOS users it is the only available surface. A shared API, design system, event schema, and business rules keep the PWA and native builds behaviorally identical in identity, ranking, and safety; only packaging and capability differ.
 
 ## 19.2 Client components
 
@@ -2498,6 +2525,95 @@ Mobile implementation requirements:
 8.  Make cancellation easy until the wallet hands off the signed action.
 9.  Cache no sensitive compliance outcome beyond what is required for UX and audit.
 10. Ensure all wallet/governance flows work with dynamic type, reduced motion, voiceover/talkback, and poor connectivity.
+
+# 19A. Independent distribution and update architecture
+
+## 19A.1 Distribution premise and design goals
+
+Licio does not distribute through the Apple App Store or Google Play. The GPL-3.0 licensing conflict (Section 16A.10.5) and the crypto-feature restrictions in Apple Guideline 3.1.5 and Google Play's Financial Services / Blockchain-based Content policies make those channels structurally unavailable for the full product, and contorting the product to qualify would sacrifice the open-source and no-pay-to-rank commitments. The distribution architecture is therefore designed for **independent, multi-channel delivery** with these goals:
+
+1.  **Universal reach without a gatekeeper.** Any user on any modern device can use Licio without an app-store account.
+2.  **Open-source alignment.** Distribution honors GPL/AGPL obligations rather than fighting them.
+3.  **Crypto without policy chokepoints.** Wallet, treasury, and governance features are delivered without app-store crypto restrictions, while remaining fully subject to law and the compliance engine (Section 16A.10).
+4.  **Self-owned trust.** Because no store reviews builds, Licio provides the integrity guarantees a store would otherwise nominally provide: reproducible builds, published keys, binary transparency, and secure updates.
+5.  **Graceful capability tiers.** Each channel degrades gracefully; the PWA guarantees a baseline experience everywhere, and native builds add depth where available.
+
+## 19A.2 Channel architecture
+
+Licio is a single codebase with a shared API and design system (Section 29A.5); channels differ in packaging and capability, not in identity, ranking, or safety behavior.
+
+| Tier | Channel | Platforms | Role | Gatekeeper |
+|---|---|---|---|---|
+| 0 | Installable PWA from the Licio domain | iOS, Android, desktop | Universal baseline; primary reach | None |
+| 1 | F-Droid (main repo plus self-hosted Licio repo) | Android | Primary native Android; FOSS-aligned, reproducible | F-Droid inclusion policy (light) |
+| 1 | Direct signed APK plus in-app updater | Android | Fast-channel native Android | None (Licio-signed) |
+| 2 | EU alternative distribution: alternative marketplace and Web Distribution (DMA) | iOS (EU) | Native iOS where the DMA applies | Apple notarization (light) |
+| 2 | Sideloading (self-signed) | iOS (non-EU) | Native iOS for committed users | None (user-signed) |
+| 3 | Signed desktop build (Tauri) plus Flathub/AppImage | macOS, Windows, Linux | Desktop native | None / Flathub review |
+
+Optional and explicitly non-load-bearing: a reduced-feature "reader" build with crypto disabled could in principle be submitted to Google Play to widen casual Android reach, but the plan does not depend on it and it is not built unless a clear, separately reviewed reason arises.
+
+## 19A.3 Tier 0: Progressive Web App (universal surface)
+
+The PWA is the primary cross-platform surface and the iOS fallback.
+
+1.  Served from Licio's own domain over TLS; installable via the browser ("Add to Home Screen" on iOS, WebAPK install on Android, install on desktop browsers).
+2.  Offline support through a service worker: cached stories, source snapshots where permitted, thread summaries, and locally autosaved drafts (mirroring Section 19.3).
+3.  Push notifications via the Web Push API on Android and desktop, and on iOS for web apps added to the Home Screen (iOS 16.4+), within the limited, explainable notification policy of Section 6.7.
+4.  Wallet connectivity via WalletConnect v2, injected browser-extension providers on desktop, and mobile-wallet deep links — no native wallet SDK and no seed-phrase handling (Section 16A.3.1).
+5.  Known iOS PWA limits are designed around: web storage may be evicted under pressure, background execution is constrained, and some native APIs are unavailable. The app must detect eviction, resync from server state, and never lose a queued contribution or a pending transaction record.
+6.  Accessibility parity with native is a release gate: the PWA must meet the same WCAG 2.2 targets (Section 25), because for many iOS users it is the only surface.
+
+## 19A.4 Tier 1: native Android via F-Droid and direct download
+
+1.  **F-Droid** is the primary native Android channel: it builds from source, supports reproducible builds, welcomes GPL-3.0, and imposes no crypto restriction (it may apply a neutral "anti-feature" label noting network/financial use, which is acceptable and disclosed).
+2.  Licio also operates a **self-hosted F-Droid repository** (users add the Licio repo URL) for faster release cadence and full control over the update channel, independent of the main F-Droid review queue.
+3.  **Direct signed APKs** are offered from the Licio website for users who prefer manual install, with a signature-verified in-app updater that refuses to install any build not signed by the published Licio key.
+4.  APK signing uses the modern Android signing scheme with key-rotation support; the signing-key fingerprint is published (Section 19A.6) so users and F-Droid can verify provenance.
+5.  **Accrescent** is supported as an additional security-focused channel where its policies fit.
+
+## 19A.5 Tier 2: native iOS via DMA alternative distribution and sideloading
+
+1.  **EU (Digital Markets Act).** Where the DMA applies, Licio distributes a native iOS build through an **alternative app marketplace** and/or **Web Distribution** (direct from Licio's website). These paths require Apple **notarization** — an automated security-and-functionality check that is far narrower than full App Review and does not enforce the Guideline 3.1.5 crypto-content rules — rather than content approval. Counsel must confirm that the alternative-terms addendum and notarization agreement are compatible with GPL-3.0 (a user-installable, user-distributable build materially reduces the anti-Tivoization conflict that blocks the main App Store) and must evaluate the Core Technology Fee economics.
+2.  **Outside the EU**, native iOS is available by **sideloading** (for example through a self-signing installer): users install with their own Apple ID, accepting the re-signing cadence that free (7-day) or paid (1-year) Apple developer credentials impose. This is a deliberately higher-friction path for committed users.
+3.  The **PWA (Tier 0) is the universal iOS path** everywhere and the recommended default for most iOS users; native iOS is an enhancement, not a requirement.
+4.  The Apple Developer **Enterprise** Program is explicitly **prohibited** as a distribution method: it is for an organization's internal apps only, using it for public distribution violates Apple's terms, and it risks certificate revocation. Ad-hoc and TestFlight distribution are used only for internal testing, never as production channels.
+
+## 19A.6 Trust, integrity, and update security
+
+Because no app store reviews or vouches for builds, Licio assumes the store's integrity role explicitly. This is a security requirement, not a nicety — a social product with wallet signing is a prime target for malicious repackaged builds and wallet-drainer clones (Sections 17.6, 24.6).
+
+1.  **Reproducible builds.** All client and server artifacts build deterministically from pinned source so that anyone — F-Droid, auditors, or users — can verify that a published binary matches the public source. This extends the Knomosis dependency-manifest discipline (Section 16A.18.1) to Licio's own artifacts.
+2.  **Published signing keys.** Licio publishes its code-signing key fingerprints through multiple independent channels and pins them; install flows and the in-app updater verify signatures against these keys and refuse unsigned or mismatched builds.
+3.  **Binary transparency.** Releases are recorded with signed provenance attestations (for example a Sigstore/cosign signature plus an in-toto build attestation) in an append-only transparency log, so a backdoored or targeted build cannot be served to a subset of users without public evidence.
+4.  **Secure auto-update.** Each native channel has a signature-verified update mechanism (F-Droid client, direct-APK updater, iOS channel updater); updates fail closed if signature or transparency verification fails.
+5.  **Version and commit pinning.** Released builds record their exact commit, dependency manifest, and Knomosis pin, consistent with Sections 16A.11 and 16A.18.1.
+6.  **Anti-impersonation.** Licio publishes the canonical domain, repository, and signing keys prominently; onboarding and the wallet risk interstitial (Section 19.6) warn users to install only from verified channels and to distrust repackaged builds, fake "Licio" listings, and unofficial mirrors — a direct defense against wallet-drainer distribution.
+
+## 19A.7 Discovery, onboarding, and age assurance without a store
+
+1.  **Discovery.** Without store search, Licio invests in web discovery (its own site, shareable story/thread links that render as installable web pages), per-platform install guides, and QR-code install hand-offs. Civic-partner and newsroom referrals (Section 29.14) substitute for store ranking.
+2.  **Onboarding.** First-run flows explain, per platform, how to install safely, how to verify the signing key, and how to enable notifications, with explicit "this is the official source" cues.
+3.  **Age assurance.** Without store age ratings, Licio performs its own age gating (Section 18.5) and publishes a self-declared content rating; minors remain excluded from wallet, payment, treasury, and governance-signing features by default.
+4.  **Payments.** Not using app-store in-app purchase removes the 15-30% commission and the IAP rule that digital content must use IAP; voluntary crypto contributions and treasury flows occur directly (Section 16A.3.2), still fully subject to the compliance engine, consumer-protection law, and the no-pay-to-rank boundary.
+
+## 19A.8 Licensing posture for distribution
+
+1.  **Server and web (network-served) code: AGPL-3.0-or-later.** Because the PWA and backend are delivered over a network, GPL-3.0 alone would not require sharing modifications with remote users (the network/SaaS gap); AGPL-3.0 closes that gap and matches the project's open-source values. AGPL-3.0 is explicitly compatible with GPL-3.0 and with Knomosis's GPL-3.0-or-later terms.
+2.  **Native and desktop clients: GPL-3.0-or-later**, distributed through channels (F-Droid, direct, DMA alternative distribution, sideloading, Flathub) whose terms do not impose the further restrictions that conflict with copyleft. The Apple App Store path is avoided precisely because its terms do.
+3.  The license decision is recorded alongside the copyleft analysis of Section 16A.10.5 and re-reviewed whenever the dependency graph or distribution channels change.
+
+## 19A.9 Distribution acceptance gates
+
+A build cannot be published on any channel unless:
+
+1.  It is produced by a reproducible build from a pinned commit, and the artifact hash is reproduced independently.
+2.  It is signed by the published Licio key and recorded in the binary-transparency log.
+3.  The license posture (Section 19A.8) is satisfied for that channel, with the GPL/app-store analysis (Section 16A.10.5) signed off.
+4.  Channel-specific review passes where it applies (Apple notarization for the iOS EU build; F-Droid inclusion policy for the F-Droid build).
+5.  The compliance engine's per-channel and per-jurisdiction feature flags (crypto on/off, asset allowlist, age gate) are verified for that build.
+6.  User-safety features (reporting, blocking, moderation, contact, DSA notices) are present and functional in that build.
+7.  The in-app updater and rollback path for that channel are tested.
 
 # 20. Backend architecture
 
@@ -3547,7 +3663,7 @@ The optimized dependency rule is: **PWA and MERI must exist before public beta; 
 
 ### Workstream C: Native mobile clients
 
-**Architecture choice:** Build native iOS and Android clients for core UX quality. Use SwiftUI/UIKit where needed on iOS and Jetpack Compose on Android. Share API contracts, design tokens, event schemas, and business rules, but avoid a fully shared cross-platform UI for the first release because accessibility, reader performance, offline drafts, and OS-level privacy controls are central to the product.
+**Architecture choice:** Build native iOS and Android clients for core UX quality. Use SwiftUI/UIKit where needed on iOS and Jetpack Compose on Android. Share API contracts, design tokens, event schemas, and business rules, but avoid a fully shared cross-platform UI for the first release because accessibility, reader performance, offline drafts, and OS-level privacy controls are central to the product. (Updated in v0.5: the installable PWA is the universal surface and the primary iOS path, and native clients ship through the independent channels of Section 19A rather than app-store review; see Sections 19.1 and 29A.5.)
 
 **Units of work:**
 
@@ -4387,7 +4503,7 @@ Acceptance gates:
 
 ## 29A.5 Workstream C: native mobile clients
 
-Objective: build performant, secure iOS and Android apps that treat mobile as the primary surface.
+Objective: build performant, secure clients — the universal PWA plus native iOS and Android builds — distributed through the independent channels of Section 19A, treating mobile as the primary surface.
 
 Efficient units of work:
 
@@ -4401,12 +4517,12 @@ Efficient units of work:
 8. Implement explanation cards for ranking and invariant outputs.
 9. Implement wallet module behind flags: connect, sign, preview, receipt, errors, export, disconnect.
 10. Implement governance module behind flags: proposal list, proposal detail, deliberation, vote/approval, delegation, treasury, disputes.
-11. Implement app-store-specific behavior for IAP boundaries, crypto-disabled regions, and financial disclosures.
+11. Implement channel-specific behavior (Section 19A): PWA install/offline/eviction handling, F-Droid and direct-APK signing with in-app update, iOS EU alternative-distribution/sideload packaging, per-channel crypto feature flags, and Licio-published financial disclosures.
 12. Run mobile performance profiling, battery/network tests, crash tests, accessibility tests, and security tests.
 
 Outputs:
 
-- iOS and Android alpha builds.
+- PWA plus native iOS/Android alpha builds.
 - Automated UI tests for core and safety flows.
 - Feature-flag matrix.
 - Mobile security and accessibility reports.
@@ -4783,27 +4899,27 @@ Acceptance gates:
 - Global policy overrides are technically enforceable and audit logged.
 - Governance capture tests are run before real-funds pilot.
 
-## 29A.16 Workstream N: compliance, finance, and app-store readiness
+## 29A.16 Workstream N: compliance, finance, and distribution readiness
 
-Objective: prevent accidental launch of regulated or app-store-incompatible financial features.
+Objective: prevent accidental launch of regulated or distribution-incompatible financial features, and prepare each independent distribution channel (Section 19A).
 
 Efficient units of work:
 
-1. Build region and storefront policy engine for crypto, wallet, treasury, payments, bounties, grants, tips, and governance signing.
+1. Build region and channel policy engine for crypto, wallet, treasury, payments, bounties, grants, tips, and governance signing across the PWA, F-Droid, direct-APK, iOS-EU-alternative, and sideload channels.
 2. Decide custody model and identify whether a regulated partner is needed.
 3. Map supported jurisdictions, prohibited jurisdictions, asset allowlists, sanctions controls, and tax/accounting requirements.
-4. Prepare Apple review notes for UGC, crypto, no-reward-for-posting, wallet optionality, and disabled-region behavior.
-5. Prepare Google Play declarations for UGC, financial services, blockchain-based content, and AI-generated content where applicable.
+4. Prepare the iOS EU notarization submission and the GPL/app-store license analysis (Section 16A.10.5) confirming each build is shippable on its channel.
+5. Prepare F-Droid inclusion metadata, reproducible-build attestations, published signing keys, and Licio's own public financial-risk disclosures and content rating.
 6. Draft user risk disclosures for wallets, volatility, irreversible transactions, fees, public-chain privacy, and scam risks.
 7. Build compliance case-management workflow.
 8. Build suspicious activity escalation and hold/freeze workflow where legally appropriate.
 9. Build treasury accounting export and finance reconciliation.
-10. Run pre-submission app-store compliance review.
+10. Run pre-release channel-compliance review (notarization, F-Droid policy, reproducible-build verification) and the distribution acceptance gates of Section 19A.9.
 
 Outputs:
 
 - Compliance feature matrix.
-- App-store review package.
+- Per-channel release dossiers (notarization, F-Droid, reproducible-build and signing attestations).
 - Financial operations runbook.
 - User disclosures.
 
@@ -5256,7 +5372,7 @@ Public beta can launch only when:
 4. GWEI experiment review is operational.
 5. Moderation and support teams meet SLAs.
 6. AI summaries, if enabled, are provenance-preserving and reportable.
-7. App-store UGC requirements are met.
+7. Channel-independent UGC safety requirements (Section 17.5) are met on every shipped channel, and the distribution acceptance gates (Section 19A.9) pass for each.
 8. No-pay-to-rank tests pass even though crypto remains disabled or simulated.
 
 ## 29C.3 Knomosis testnet gate
@@ -5269,7 +5385,7 @@ Knomosis testnet can launch only when:
 4. Gateway simulation, submission, receipt, indexer, and reconciliation work.
 5. Law-pack registry and proposal state machine are implemented.
 6. Test assets cannot be mistaken for real funds.
-7. App-store builds can disable wallet features if required.
+7. Every channel build (PWA, F-Droid, direct, iOS-EU-alternative, sideload) can disable wallet features by flag if required.
 8. Support has testnet wallet/payment runbooks.
 
 ## 29C.4 Capped real-funds pilot gate
@@ -5277,7 +5393,7 @@ Knomosis testnet can launch only when:
 A capped real-funds pilot can launch only when:
 
 1. Legal and compliance approval covers the target jurisdictions, assets, custody model, room purposes, and payout types.
-2. Apple and Google review/declaration packages are complete for the relevant builds.
+2. Distribution readiness is complete for the relevant builds: iOS EU notarization, F-Droid inclusion, reproducible-build and signing attestations, and the GPL/app-store license analysis (Sections 16A.10.5, 19A.9).
 3. External security review covers mobile wallet flows, backend gateway, smart-contract/L2 interactions, indexer, reconciliation, and treasury operations.
 4. Production assets, contracts, chains, law packs, rooms, and limits are allowlisted.
 5. Treasury caps, timelocks, conflict disclosures, challenge windows, emergency holds, and accounting exports are live.
@@ -5326,7 +5442,7 @@ General availability can launch only when:
 |---|---|---|
 | Pay-to-rank leakage | Payments indirectly influence visibility through funded activity. | Hard ranking separation, GWEI audits, pay-to-rank leakage metric, manual review. |
 | Regulatory noncompliance | Crypto payments may trigger MSB, VASP, CASP, money-transmission, tax, securities, or consumer-protection obligations. | Counsel review, jurisdiction policy engine, licensed partners, limited rollout. |
-| App-store rejection | Native app crypto flows may violate IAP, wallet, exchange, or UGC rules. | App-review notes, disabled states, no crypto unlocks, no reward-for-posting, declarations. |
+| Distribution friction and notarization risk | No app-store reach means sideloading friction, weaker discovery, dependence on Apple notarization (EU), and risk of repackaged-build impersonation. | PWA universal baseline, F-Droid plus self-hosted repo, EU alternative distribution, reproducible builds, published keys, binary transparency, anti-impersonation onboarding (Section 19A). |
 | Wallet compromise | Users sign malicious transactions or lose keys. | Education, typed previews, allowlists, warnings, support, no seed handling. |
 | Smart-contract/bridge bug | Contract or bridge defect causes loss or stuck funds. | External audits, caps, bug bounty, timelocks, emergency freezes, staged rollout. |
 | Governance capture | Wealthy or coordinated actors seize room treasury or rules. | Capped voting, role quorums, MFCI monitoring, fork/exit, challenge windows. |
@@ -5762,11 +5878,19 @@ The following sources should be reviewed by product, engineering, security, priv
 - California Attorney General, **California Consumer Privacy Act (CCPA)**: https://oag.ca.gov/privacy/ccpa
 - California Privacy Protection Agency, **Regulations and rulemaking**: https://cppa.ca.gov/regulations/
 
-## 36.4 Online platform accountability and app-store UGC
+## 36.4 Online platform accountability, independent distribution, and UGC
 
 - European Commission, **Digital Services Act**: https://digital-strategy.ec.europa.eu/en/policies/digital-services-act
-- Apple, **App Review Guidelines, Guideline 1.2 User-Generated Content**: https://developer.apple.com/app-store/review/guidelines/#user-generated-content
-- Google Play, **User Generated Content policy**: https://support.google.com/googleplay/android-developer/answer/9876937
+- European Commission, **Digital Markets Act (alternative app distribution on gatekeeper platforms)**: https://digital-markets-act.ec.europa.eu/
+- Apple, **Alternative app distribution in the EU (notarization, alternative marketplaces, Web Distribution)**: https://developer.apple.com/support/alternative-distribution/
+- F-Droid, **Inclusion policy and reproducible builds**: https://f-droid.org/docs/Inclusion_Policy/
+- W3C, **Web Application Manifest / installable Progressive Web Apps**: https://www.w3.org/TR/appmanifest/
+- Reproducible Builds project, **Verifiable builds for software integrity**: https://reproducible-builds.org/
+- Sigstore, **Signing, transparency, and verification for software artifacts**: https://www.sigstore.dev/
+- GNU, **Affero General Public License v3 (AGPL-3.0) for network-served software**: https://www.gnu.org/licenses/agpl-3.0.html
+- GNU, **General Public License v3 (GPL-3.0)**: https://www.gnu.org/licenses/gpl-3.0.html
+- Apple, **App Review Guidelines, Guideline 1.2 User-Generated Content** (UGC moderation baseline; applies to any optional store build): https://developer.apple.com/app-store/review/guidelines/#user-generated-content
+- Google Play, **User Generated Content policy** (moderation baseline; applies to any optional store build): https://support.google.com/googleplay/android-developer/answer/9876937
 - Google Play, **Understanding moderation requirements for UGC apps**: https://support.google.com/googleplay/android-developer/answer/12923286
 
 ## 36.5 AI governance and recommender governance
@@ -5837,7 +5961,7 @@ This document is a product and technical specification. It is not legal advice, 
 
 ## 37.2 Mobile-first quality
 
-- Native iOS and Android are primary surfaces.
+- The installable PWA is the universal surface; native iOS and Android builds add depth and are distributed independently of the app stores (Section 19A).
 - Key actions fit one-handed use but irreversible actions require deliberate friction.
 - Offline states, bad-network states, and feature-disabled states are designed, not accidental.
 - Wallet, governance, and reporting flows are accessible from small screens without hiding material information.
@@ -5909,7 +6033,7 @@ Before any production launch, reviewers should confirm:
 4. The platform can explain ranking and invariant decisions.
 5. The platform can reconcile every financial action.
 6. The platform can disable crypto by region/build/room/account state.
-7. The platform can satisfy app-store UGC and blockchain/financial declarations.
+7. The platform can satisfy channel-independent UGC safety and its own published financial/content disclosures, and can meet each distribution channel's integrity gate (Section 19A).
 8. The platform can support accessibility, privacy, data rights, security, and incident response.
 9. The platform can avoid optimizing for speculation, outrage, or vanity engagement.
 10. The platform can publish transparency reports that users, auditors, and stewards can understand.
