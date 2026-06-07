@@ -425,6 +425,169 @@ Targets are expressed in web terms and enforced as release gates:
 
 PWA-only delivery trades some native control for universal, gatekeeper-free reach. The design accounts for: (1) **iOS storage eviction** — Cache/IndexedDB data is best-effort; design for resync and request persistent storage where the API exists. (2) **Background execution limits** — attention aggregation and sync run opportunistically; the server treats client aggregates as hints, never as the sole source of truth. (3) **Push on iOS** — only for installed home-screen web apps (iOS 16.4+); the onboarding flow guides install before relying on push. (4) **Wallet integration** — via WalletConnect v2 (mobile wallets over QR/deep link) and injected EIP-1193 providers discovered through EIP-6963 (desktop extensions); there is no native wallet SDK and Licio never handles seed phrases. (5) **No device attestation** — abuse defense relies on server-side behavioral analysis, proof-of-work/turnstile-style challenges, account-age and trust tiers, and WebAuthn, not native attestation APIs.
 
+## 6.12 Client and full-stack TypeScript technology stack
+
+This section specifies the TypeScript-based development stack for the Licio PWA and its backend-for-frontend (BFF). Every choice is evaluated primarily on **security posture** — minimizing attack surface, dependency count, and default-unsafe behavior — followed by TypeScript type safety, PWA capability, performance, and accessibility support. For a UGC platform that connects wallets, a single XSS injection can drain funds (Section 25.2); the stack is chosen so the secure path is the default path at every layer.
+
+### 6.12.1 Design principles for stack selection
+
+1. **Minimize XSS attack surface.** The dominant threat for a UGC + wallet platform is script injection (Section 25.2). Every rendering layer must auto-escape by default; unsafe rendering must require an explicit, reviewable opt-in.
+2. **Enable strict CSP and Trusted Types without workarounds.** The build toolchain must emit no inline scripts and no inline styles, so that `default-src 'self'`, `script-src` with nonces or hashes, and `require-trusted-types-for 'script'` work out of the box — not as afterthoughts requiring patches or escape hatches.
+3. **Reduce supply-chain risk.** Fewer transitive dependencies means fewer packages to audit, fewer maintainers to trust, and fewer vectors for dependency-confusion or install-script attacks. The stack targets the smallest auditable dependency tree that meets requirements.
+4. **Support reproducible builds.** The build pipeline must produce deterministic output suitable for Subresource Integrity hashes, signed provenance attestations, and a transparency log (Section 20.2).
+5. **Maintain explicit client-server boundaries.** No framework magic should blur which code runs in the browser and which runs on the server. Blurred boundaries create accidental data-exposure and privilege-escalation risks that are difficult to audit.
+6. **Provide end-to-end TypeScript type safety.** A type error at any point from database schema to UI rendering is a compile-time failure, eliminating entire classes of data-handling bugs (missing fields, wrong types, null dereference) that in weaker stacks become runtime vulnerabilities.
+
+### 6.12.2 Language, package manager, and build tooling
+
+**TypeScript 5.x in strict mode** (`strict: true`, `noUncheckedIndexedAccess: true`, `exactOptionalPropertyTypes: true`) is the project language. Strict mode catches null-safety violations, type-coercion bugs, and unchecked property access at compile time; it is non-negotiable for a security-critical application.
+
+**pnpm** is the package manager. pnpm enforces strict dependency resolution: a package cannot `import` a transitive dependency it did not explicitly declare (phantom dependencies). This closes a supply-chain attack vector that npm and Yarn classic leave open. pnpm's content-addressable store deduplicates disk usage and its lockfile is integrity-enforced. **lockfile-lint** validates the pnpm lockfile against declared registries on every CI run, preventing lockfile-poisoning attacks.
+
+**Vite 6** (Rollup-based production builds) is the build tool. Vite is chosen over Next.js, Webpack, and other bundlers for specific security reasons:
+
+- **No inline scripts.** Vite produces clean JavaScript files with no injected inline `<script>` blocks, fully compatible with the strict CSP (`default-src 'self'`, no `'unsafe-inline'`) and `require-trusted-types-for 'script'` required by Section 25.2. No nonce or hash workaround is needed for framework-injected hydration data.
+- **Small, auditable dependency tree.** Vite's transitive dependency count is an order of magnitude smaller than Next.js, directly reducing supply-chain attack surface. Fewer packages means each can be reviewed, and the risk of a compromised transitive dependency reaching the production bundle is proportionally lower.
+- **Deterministic output.** Rollup produces stable, content-hashed output suitable for reproducible builds, Subresource Integrity, and signed provenance (Section 20.2).
+- **Explicit client-server boundary.** Vite builds the client; the BFF is a separate process with its own entry point. There is no framework-level blurring of which code runs where, preventing accidental data exposure across security domains.
+- **Route-level code splitting and tree-shaking** support the initial JS payload budget and lazy-loading requirements (Section 6.10).
+
+### 6.12.3 UI framework
+
+**React 19 with TypeScript** is the UI framework. React is chosen for security and ecosystem maturity:
+
+- **JSX auto-escaping.** React's JSX interpolation auto-escapes all values by default. A developer must explicitly invoke `dangerouslySetInnerHTML` to render raw HTML, making unsafe rendering a visible, reviewable decision in every code review. This is the strongest built-in XSS defense of any major UI framework.
+- **Trusted Types compatibility.** React's internal DOM rendering pipeline is compatible with Trusted Types policies; when `require-trusted-types-for 'script'` is enforced, React does not trigger violations for its own DOM mutations.
+- **Largest security-audit community.** React is deployed on more security-critical surfaces than any other frontend framework. Vulnerabilities are discovered and patched rapidly by a large, attentive community and a dedicated security team.
+- **Well-understood DOM model.** React's reconciliation model has well-documented, predictable DOM interaction patterns. There is no template-compilation step that could introduce injection vectors, and no implicit two-way data binding that could cause unexpected state mutations.
+- **Mature accessibility primitives.** React's component model supports ARIA patterns, ref-based focus management for SPA route changes (Section 26.2), and integration with `@axe-core/playwright` for automated accessibility regression testing.
+
+### 6.12.4 Routing, state management, and data fetching
+
+**TanStack Router** provides fully type-safe file-based routing with built-in code splitting. Route parameters, search params, and route loaders are type-checked end-to-end, eliminating parameter-injection and type-confusion bugs at the routing layer. There is no server-side routing complexity.
+
+**TanStack Query v5** manages server state with built-in offline support (critical for PWA offline behavior, Section 6.9), request deduplication, stale-while-revalidate caching, and background refetching. Every API response is validated through `zod` schemas before entering the query cache, ensuring malformed or injected data from the server or a compromised network path is rejected at the boundary.
+
+**Zustand** manages client-side state. At approximately 1 KB, it has the smallest footprint of any production-quality state library. There is no proxy magic, no implicit reactivity system, and no middleware attack surface; state is explicit and predictable.
+
+### 6.12.5 PWA infrastructure
+
+**vite-plugin-pwa** (Workbox 7) provides mature, well-audited service worker lifecycle management:
+
+- **Precaching** with revision-hashed manifests for app-shell assets (cache-first strategy for static assets).
+- **Runtime caching** with network-first-with-cached-fallback for API data and stale-while-revalidate for non-critical assets.
+- **Background sync** for queued contributions, drafts, and pending submissions (Section 6.9).
+- **Web App Manifest generation** with maskable icons, splash screens, theme color, and standalone display mode (Section 20.1).
+- **Update lifecycle** management with user-facing activation prompts for new versions.
+
+The service worker scope is locked down per Section 25.2; no remote code evaluation occurs within the worker; cache partitioning prevents cross-origin data poisoning.
+
+### 6.12.6 Styling
+
+**Tailwind CSS 4** is the styling solution. It is chosen over CSS-in-JS alternatives for a specific security reason: Tailwind compiles entirely to static CSS files at build time, producing **zero JavaScript runtime** for styling.
+
+- **No CSS-in-JS attack surface.** Libraries like styled-components and Emotion inject `<style>` tags at runtime, requiring `'unsafe-inline'` in the CSP `style-src` directive or complex SSR extraction. Tailwind eliminates this attack surface entirely — there is no runtime style evaluation, no dynamic `style` tag injection, and no `'unsafe-inline'` requirement.
+- **Strict CSP compatibility.** All styles are static CSS loaded via `<link>` tags with integrity hashes, fully compatible with the strictest CSP configuration.
+- **Design-token-based theming** supports high-contrast, dark, and reduced-motion modes (Section 26.2) through CSS custom properties and media-query variants.
+- **Responsive utility classes** support the mobile-first, thumb-zone-reachable layout (Section 6.1) without writing per-breakpoint CSS that drifts from the design system.
+
+### 6.12.7 UGC sanitization and schema validation
+
+**DOMPurify** is the HTML sanitizer for all user-generated content. It is the most battle-tested sanitizer in the JavaScript ecosystem, Trusted Types compatible (`DOMPurify.sanitize()` returns a `TrustedHTML` value when configured with `RETURN_TRUSTED_TYPE: true`), and allow-list-based: only permitted tags, attributes, and URL schemes pass; `javascript:`, `data:` URLs, event-handler attributes, and raw HTML are stripped by default. UGC Markdown-lite (Section 15.5) is parsed to a safe AST by a strict parser, then passed through DOMPurify before rendering — defense in depth so that a bug in either layer alone cannot produce an injection.
+
+**zod** provides runtime schema validation at every system boundary:
+
+- API responses are validated before entering the client, catching malformed or injected payloads.
+- Form inputs are validated before submission, producing type-safe error states for the accessible composer (Section 26.2).
+- Environment variables and configuration are validated at startup.
+- Schemas are co-located with TypeScript types, so runtime and compile-time contracts cannot silently diverge.
+
+### 6.12.8 Backend-for-frontend (BFF)
+
+The BFF is the thin, security-critical gateway between the PWA and internal services (Sections 21.1, 23.1). It is a separate TypeScript process — not a framework-embedded server layer — with its own deployment, scaling, and security boundary.
+
+**Hono** is the BFF framework. It is chosen for its minimal attack surface and TypeScript-native design:
+
+- **Ultra-lightweight (~14 KB).** Hono's small codebase is auditable by a single engineer. This contrasts with Express (effectively unmaintained; minimal security updates; no built-in TypeScript support; middleware ordering is error-prone for security headers) and NestJS (large decorator-based surface area with many implicit behaviors).
+- **Built-in security middleware** for security headers (CSP, HSTS, X-Content-Type-Options, X-Frame-Options, Permissions-Policy), CORS, rate limiting, IP restrictions, CSRF protection, and request-size limits — configured once at the application root, not scattered across middleware files.
+- **Web Standards based** (Request/Response API) — portable across Node.js LTS, Bun, and Deno runtimes without runtime-specific adapter code.
+- **Hono RPC** provides end-to-end type-safe client-server communication without code generation: the PWA client imports route types directly from the BFF, so API calls are compile-time checked against server contracts. A mismatched request shape, missing field, or wrong parameter type is a build failure, not a runtime bug.
+
+**Drizzle ORM** is the relational database layer. It is SQL-first: queries map directly and transparently to SQL statements, making them auditable for injection, performance, and access-control correctness. There is no implicit query generation, lazy loading, or magic relation traversal that could produce unexpected database access patterns. Schema-as-code with migration generation ensures the database schema and TypeScript types stay synchronized.
+
+**Node.js LTS** is the production runtime, with the `--experimental-permission` flag for filesystem and network permission restrictions where the deployment supports it. Structured logging (pino) supports the audit-trail requirements of Section 21.4.
+
+### 6.12.9 End-to-end type-safe data path
+
+The full data path from database schema to rendered UI is type-checked at compile time:
+
+    Drizzle schema (DB) → Hono route handler → zod response schema → Hono RPC client → TanStack Query → React component props
+
+A type error at any point in this chain is a compile-time failure. This eliminates entire classes of data-handling bugs — missing fields, wrong types, null dereference, shape mismatches — that in loosely-typed or runtime-validated stacks become production vulnerabilities.
+
+### 6.12.10 Testing and quality infrastructure
+
+| Tool | Role | Security relevance |
+|---|---|---|
+| **Vitest** | Vite-native unit and integration test runner; TypeScript-first with no separate compilation step. | Tests run against the same build pipeline as production, ensuring CSP and Trusted Types behavior is tested, not mocked. |
+| **Playwright** | Cross-browser end-to-end testing including PWA install, offline, service-worker lifecycle, and wallet-flow scenarios. | Tests verify that strict CSP is enforced in real browsers; accessibility regression tests use `@axe-core/playwright` against WCAG 2.2 AA. |
+| **Biome** | Fast linter and formatter with security-focused rules. | Flags `eval`, `dangerouslySetInnerHTML`, `innerHTML` assignment, `document.write`, and other injection-risk patterns; violations block CI. |
+| **lockfile-lint** | Validates pnpm lockfile integrity against declared registries. | Prevents lockfile-poisoning supply-chain attacks where a dependency is silently redirected to a malicious registry. |
+| **Dependency scanning** | Automated PR checks for known vulnerabilities and suspicious package behavior. | Detects install scripts, obfuscated code, unexpected network access, and known CVEs in direct and transitive dependencies. |
+
+### 6.12.11 Security properties of the chosen stack
+
+| Threat (Section 25) | Stack defense |
+|---|---|
+| XSS → wallet drain | React JSX auto-escaping (default) + DOMPurify with Trusted Types + strict CSP with no inline scripts (Vite) + no CSS-in-JS runtime (Tailwind) + Biome lint rules blocking unsafe DOM access. |
+| Supply-chain compromise | pnpm strict resolution (no phantom deps) + minimal dependency tree (Vite ~80 vs Next.js ~300+ transitive deps; Hono ~14 KB vs Express ecosystem) + lockfile-lint + SRI on all assets + reproducible builds with signed provenance. |
+| CSP bypass | Vite emits no inline scripts or styles; Tailwind compiles to static CSS; React hydration works without inline data scripts; Hono sets CSP headers at the BFF, not in client-side meta tags. |
+| Trusted Types violation | React DOM pipeline is Trusted Types compatible; DOMPurify returns `TrustedHTML`; no other code path creates DOM nodes from strings; Biome flags `innerHTML` and `document.write`. |
+| Serialization / type confusion | End-to-end TypeScript strict mode + zod runtime validation at API boundaries + Hono RPC compile-time route contracts + Drizzle type-safe SQL. |
+| Clickjacking | Hono security-headers middleware (`frame-ancestors 'self'`); wallet and signing flows set `X-Frame-Options: DENY`. |
+| Service-worker poisoning | vite-plugin-pwa revision-hashed precache manifest; locked scope; integrity-verified updates; no `importScripts` from external origins; no remote code evaluation within the worker. |
+| Phishing / blind signing | Typed-data previews rendered by React with auto-escaping; contract-address allowlists enforced at the BFF before any signing request reaches the client. |
+| CSRF | Hono CSRF middleware with `SameSite=Strict` cookies for session tokens; anti-replay nonces on state-changing requests; wallet-signing requests use EIP-712 domain separation with chain ID, contract address, and expiration. |
+| SQL injection | Drizzle ORM parameterized queries — all user input is bound as parameters, never interpolated into SQL strings. |
+
+### 6.12.12 Dependency budget
+
+The client bundle targets fewer than **15 direct production dependencies**. The BFF targets fewer than **20 direct production dependencies**. Every addition requires a security review covering: maintainer trust and track record, transitive dependency count, install scripts (must have none), license compatibility with AGPL-3.0-or-later, and whether the functionality can be achieved with platform Web APIs or existing dependencies. Additions that exceed the budget require sign-off from the security owner and an explanation of why the existing stack is insufficient.
+
+### 6.12.13 Stack summary
+
+| Layer | Technology | Primary security rationale |
+|---|---|---|
+| Language | TypeScript 5.x strict | Compile-time null safety, type safety, and unchecked-access prevention. |
+| Package manager | pnpm | Strict resolution prevents phantom dependencies; lockfile integrity. |
+| Build | Vite 6 (Rollup) | No inline scripts; small dep tree; deterministic output; explicit client-server boundary. |
+| UI framework | React 19 | JSX auto-escaping; Trusted Types compatible; largest security-audit community. |
+| Routing | TanStack Router | Type-safe route params; no server-side routing complexity. |
+| Server state | TanStack Query v5 | Offline support; zod-validated responses at API boundary. |
+| Client state | Zustand | ~1 KB; no implicit reactivity; minimal attack surface. |
+| PWA | vite-plugin-pwa (Workbox 7) | Mature SW lifecycle; revision-hashed precache; locked scope. |
+| Styling | Tailwind CSS 4 | Zero JS runtime; no `'unsafe-inline'` styles; static CSS output. |
+| UGC sanitization | DOMPurify | Trusted Types compatible; allow-list sanitizer; defense-in-depth with Markdown AST. |
+| Validation | zod | Runtime schema enforcement at every system boundary. |
+| BFF framework | Hono | ~14 KB; built-in security headers; Hono RPC type-safe contracts. |
+| ORM | Drizzle | SQL-first; parameterized queries; no implicit behaviors; type-safe schema. |
+| Runtime | Node.js LTS | Permission model; structured logging; LTS security patches. |
+| Test runner | Vitest | Vite-native; tests run against production build pipeline. |
+| E2E testing | Playwright | Real-browser CSP/Trusted Types/accessibility/PWA verification. |
+| Linter | Biome | Security-focused rules blocking injection-risk patterns. |
+
+### 6.12.14 Rejected alternatives and rationale
+
+| Alternative | Rejection rationale |
+|---|---|
+| **Next.js** | Injects inline scripts for hydration data (`__NEXT_DATA__`, flight data), breaking strict CSP and Trusted Types without per-request nonce workarounds; large transitive dependency tree (~300+ packages) widens supply-chain surface; Server Components and Server Actions blur the client-server security boundary, making accidental data exposure difficult to audit; historical security vulnerabilities (e.g., middleware-bypass CVE-2025-29927) demonstrate the risk of a large framework surface; its built-in SSR is redundant given the separate BFF architecture. |
+| **Angular** | Smaller security-audit community for wallet-connected UGC platforms; heavier framework with more internal surface area; zone.js monkey-patches browser APIs (timers, events, promises), widening the trusted-code surface; decorator-based patterns add runtime metadata complexity; strict CSP requires specific Angular CLI configuration and a custom webpack builder. |
+| **SvelteKit** | Compiler-based approach has a smaller security-audit community; Svelte's template syntax uses `{@html ...}` for raw HTML, which is less obviously dangerous than React's `dangerouslySetInnerHTML` and easier to misuse in review; fewer battle-tested security libraries in the ecosystem; SSR complexity is redundant with the BFF. |
+| **Express.js** | Effectively unmaintained with minimal security updates; no built-in TypeScript support; middleware ordering is error-prone for security-critical headers (a misordered middleware can silently skip CSRF or CSP enforcement); large middleware ecosystem with inconsistent security posture and many abandoned packages. |
+| **Prisma** | Larger runtime footprint (requires a separate query-engine binary); the engine binary increases supply-chain surface and complicates reproducible builds; implicit behaviors (auto-include, lazy loading) can produce unexpected data access patterns that are hard to audit; less SQL-auditable than Drizzle's direct SQL mapping. |
+| **CSS-in-JS (styled-components, Emotion, Stitches)** | Requires `'unsafe-inline'` in `style-src` or complex SSR style extraction to avoid FOUC; runtime style injection is an additional attack surface; conflicts with the strict CSP required by Section 25.2; adds JavaScript bundle weight for functionality that static CSS handles with zero runtime cost. |
+| **Webpack** | Larger, more complex configuration surface than Vite; slower builds reduce security-iteration velocity; output is less deterministic by default; HMR implementation is more complex with more edge cases; Vite's Rollup-based production pipeline produces cleaner, more auditable output. |
+
 # 7. Core invariant 1: Matroid Exposure Rank Invariant (MERI)
 
 ## 7.1 Purpose
@@ -1203,7 +1366,7 @@ Key edges: User contributed to Thread; Story cites Source; Claim supported-by / 
 
 ## 23.1 Style
 
-A web BFF with typed contracts. Internally, services use gRPC or event streams; the PWA calls stable REST/GraphQL endpoints through the BFF over HTTPS, with short-lived tokens, secure `SameSite` cookies or token-bound sessions, CSRF protection for state-changing requests, and object-/action-level authorization.
+A web BFF (Hono, Section 6.12.8) with end-to-end type-safe contracts (Hono RPC for the PWA client; OpenAPI for external consumers). Internally, services use gRPC or event streams; the PWA calls stable endpoints through the BFF over HTTPS, with short-lived tokens, secure `SameSite=Strict` cookies with CSRF protection (Hono CSRF middleware), and object-/action-level authorization. Every request and response payload is validated at runtime by `zod` schemas that are co-located with the TypeScript route types, so compile-time and runtime contracts cannot silently diverge (Section 6.12.9).
 
 ## 23.2 Core endpoints
 
