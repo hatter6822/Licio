@@ -8,6 +8,26 @@
 
 All 11 invariants run in shadow before affecting ranking. Each output carries confidence, coverage, reason codes, and fallback behavior (Sections 21.4, 30.4). The five core invariants -- MERI, MFCI, GWEI, SCOI, PHI -- provide the primary mathematical guardrails for ranking, fairness, context integrity, coordination detection, and path-dependent steering. Six supporting invariants -- Hodge, Tropical, Braid, Reeb, CID, and Path-signature -- add complementary signals without overcomplicating the user experience. Every invariant ships as a confidence-bearing service with the same discipline: versioned outputs, invariant cards, graceful fallback, and regression testing on synthetic datasets.
 
+### Cross-cutting invariant contracts
+
+Every task in this workstream upholds the following non-negotiable contracts. They are restated here so each task can reference them rather than repeat them, and they are enforced by the platform tasks in WS-H.1.
+
+- **Shadow before enforcement.** No invariant influences ranking, moderation, or wellbeing intervention until it has run in shadow, accumulated drift-free regression history, and passed the explicit promotion gate (WS-H.1.2e). In shadow mode an invariant computes and logs only; it carries zero enforcement authority.
+- **Confidence, coverage, reason codes, fallback on every output.** Each `InvariantOutput` carries a `confidence` in `[0, 1]`, a `coverage` in `[0, 1]`, a machine-readable `reason_codes` array, and a `fallback_used` indicator. An invariant that cannot meet its minimum coverage emits a low-confidence output with an explanatory reason code rather than a misleading score.
+- **Graceful fallback, never silent failure.** A failed or low-coverage invariant degrades gracefully: ranking proceeds without its contribution (features omitted, never defaulted to a biasing value), the gap is logged, and a monitoring event is emitted.
+- **Privacy by construction.** PHI, path-signature, and any session-derived invariant operate on topic-cluster IDs, event types, and timing only -- never raw content or other users' identities. GWEI and MFCI operate on aggregates and conditioned margins, never individual user histories exposed to analysts beyond role-gated, audited access.
+- **Gauge / approximation honesty.** Any invariant using an approximation (MERI similarity-graph fallback, GWEI entropic regularization, MFCI MCMC sampling, PHI matrix-log fallback, SCOI normalization) records the approximation, its guarantee, and its confidence interval in the invariant card and per-output metadata.
+
+### Versioned staging across all core invariants (Section 30.4)
+
+| Invariant | v0 (shadow) | v1 (analyst-gated effect) | v2 (full method) |
+|---|---|---|---|
+| MERI | URL/text-similarity dedup | Multi-dimensional independence | Matroid rank with learned constraints + explainable labels |
+| MFCI | Shadow anomaly reports with fixed margins | Analyst-reviewed dampening for high-confidence coordination | Markov-basis/SMC sampling of conditional fiber + adversarial-adaptation tests |
+| GWEI | Descriptive cohort dashboards | Entropic-regularized GW with seed-stability | Release-gating + mitigation recommendations |
+| SCOI | Lens-summary disagreement labels + steward reports | Sheaf-Laplacian Dirichlet-energy obstruction + bridge/context routing | Cohomological obstruction classes (`H1`, harmonic representative) |
+| PHI | Narrow-loop/compulsive-session detection | Orthogonal transport estimation + high-risk-loop dampening | Gauge-invariant holonomy diagnostics |
+
 ---
 
 ## WS-H.1 Invariant computation platform
@@ -35,6 +55,8 @@ Define `InvariantOutput` in Drizzle: `invariant_output_id` (UUID PK), `invariant
 - Integration: insert and query by each index path.
 - Migration: up and down migrations are idempotent.
 
+**Dependencies:** WS-A (schema tooling), WS-E (event pipeline for invariant run events).
+
 ---
 
 ### WS-H.1.1b InvariantOutput versioning
@@ -55,6 +77,73 @@ Version column on `InvariantOutput` enables A/B comparison of invariant algorith
 - Unit: version format validation accepts valid semver, rejects invalid.
 - Integration: insert two versions of MERI for the same story; comparison query returns both.
 - Integration: filtering by time window returns only outputs within range.
+
+**Dependencies:** WS-H.1.1a.
+
+---
+
+### WS-H.1.1c Reason-code and coverage schema
+**ID:** WS-H.1.1c
+**Ref:** Sections 30.4, 21.4
+
+**Description:**
+Add first-class modeling of reason codes and coverage to `InvariantOutput`, satisfying the SPEC requirement that every output carries "confidence, coverage, reason codes, and fallback behavior." Define a `reason_codes` JSONB array column and a shared `ReasonCode` enum/registry (e.g., `INSUFFICIENT_COVERAGE`, `APPROXIMATION_FALLBACK`, `NULL_CALIBRATION_STALE`, `MATROID_FALLBACK`, `MATRIX_LOG_FALLBACK`, `SAMPLER_NONCONVERGENCE`, `SAFETY_GATE_REQUIRED`). Define a shared coverage convention: coverage is the fraction of required inputs that were available and fresh for the target (per-invariant numerator/denominator documented in each invariant card). The `fallback_used` boolean and a `degraded` boolean are derivable from reason codes.
+
+**Acceptance criteria:**
+- `reason_codes` column added as JSONB array; values validated against a versioned `ReasonCode` registry.
+- A shared TypeScript type `InvariantOutputEnvelope` exposes `{ score_vector, confidence, coverage, reason_codes, fallback_used, version }`.
+- Coverage convention documented: each invariant declares what counts toward coverage in its card (WS-H.1.2b).
+- Every emitted output includes at least an empty `reason_codes` array; degraded outputs include the specific code(s).
+- Reason codes are queryable for operational dashboards (index or generated column as needed).
+
+**Testing:**
+- Unit: reason-code validation rejects codes not in the registry.
+- Unit: degraded output includes the correct reason code(s) and `fallback_used = true`.
+- Unit: coverage in `[0, 1]`; output with no available inputs reports coverage 0 with `INSUFFICIENT_COVERAGE`.
+- Integration: dashboard query filters outputs by reason code.
+
+**Dependencies:** WS-H.1.1a.
+
+---
+
+### WS-H.1.1d Per-invariant score_vector schemas
+**ID:** WS-H.1.1d
+**Ref:** Sections 22.1, 30.4
+
+**Description:**
+Define the per-invariant-type zod schemas validating the `score_vector` JSONB, so each invariant's output shape is explicit, testable, and versioned. The schemas live in `packages/invariants/src/schemas/scoreVectors.ts`. Representative shapes:
+
+```ts
+// MERI
+interface MeriScoreVector { meri: number; marginal_gains: Record<string, number>;
+  approximation: boolean; per_class_bounds: Record<string, number>; group_ids: string[]; }
+// MFCI
+interface MfciScoreVector { mfci: number; p_hat: number; statistic: 'synchrony'|'target_concentration'|'phrase_repetition';
+  sample_count: number; fixed_margins_ref: string; risk_state: 'normal'|'elevated'|'high'|'severe'; }
+// GWEI
+interface GweiScoreVector { gw2: number; ci_low: number; ci_high: number; seed_count: number;
+  regularization: number; cohort_a: string; cohort_b: string; metric_breakdown: Record<string, number>; }
+// SCOI
+interface ScoiScoreVector { scoi: number; normalizer: number; overlap_count: number; lens_count: number;
+  context_state: 'coherent'|'ambiguous'|'split'|'obstructed'|'weaponized'; per_overlap_energy: Record<string, number>; }
+// PHI
+interface PhiScoreVector { phi: number; rotation_angles: number[]; loop_path: string[];
+  fallback_log: boolean; sensitive: boolean; }
+```
+
+**Acceptance criteria:**
+- A zod schema exists per invariant type; the union discriminates on `invariant_type`.
+- Each schema mirrors the mathematical output (e.g., MFCI carries `p_hat` and `mfci = -log p_hat`; PHI carries `rotation_angles`).
+- Application-layer validation in WS-H.1.1a calls the matching schema before insert.
+- Schemas are exported for use by invariant implementations and the regression harness.
+- Schema changes are versioned and snapshot-tested.
+
+**Testing:**
+- Unit: each schema accepts a valid score_vector and rejects malformed ones.
+- Unit: discriminated union routes by `invariant_type`.
+- Snapshot: score_vector schemas are snapshot-tested to flag unreviewed shape changes.
+
+**Dependencies:** WS-H.1.1a, WS-H.1.1c.
 
 ---
 
@@ -78,6 +167,8 @@ Define the `InvariantService` interface in `packages/invariants/`. Every invaria
 - Unit: type errors when a method is missing or has wrong signature.
 - Integration: a concrete invariant passes the interface conformance check.
 
+**Dependencies:** WS-H.1.1a.
+
 ---
 
 ### WS-H.1.2b Invariant card schema
@@ -85,7 +176,7 @@ Define the `InvariantService` interface in `packages/invariants/`. Every invaria
 **Ref:** Sections 21.4, 30.4
 
 **Description:**
-Define the `InvariantCard` schema (zod + TypeScript type) documenting each invariant's operational profile. Fields: `invariant_type` (enum), `owner` (team or individual responsible), `version` (semver), `input_schema` (JSON Schema reference describing expected inputs), `output_schema` (JSON Schema reference describing score_vector structure), `confidence_bounds` (object with `min`, `typical`, `max` numeric values), `coverage_bounds` (object with `min_acceptable`, `typical`), `known_failure_modes` (array of `{ mode: string, impact: string, mitigation: string }`), `fallback_behavior` (description of what happens when computation fails), `approximation_notes` (description of any mathematical approximation, e.g., greedy vs exact, entropic regularization), `shadow_status` (enum: shadow, soft_constraint, hard_constraint), `dependencies` (array of upstream service names).
+Define the `InvariantCard` schema (zod + TypeScript type) documenting each invariant's operational profile. Fields: `invariant_type` (enum), `owner` (team or individual responsible), `version` (semver), `input_schema` (JSON Schema reference describing expected inputs), `output_schema` (JSON Schema reference describing score_vector structure), `confidence_bounds` (object with `min`, `typical`, `max` numeric values), `coverage_bounds` (object with `min_acceptable`, `typical`), `coverage_definition` (text: what counts toward coverage), `known_failure_modes` (array of `{ mode: string, impact: string, mitigation: string }`), `fallback_behavior` (description of what happens when computation fails), `approximation_notes` (description of any mathematical approximation, e.g., greedy vs exact, entropic regularization), `shadow_status` (enum: shadow, soft_constraint, hard_constraint), `dependencies` (array of upstream service names).
 
 **Acceptance criteria:**
 - Card schema defined as zod schema in `packages/invariants/src/schemas/card.ts`.
@@ -93,62 +184,185 @@ Define the `InvariantCard` schema (zod + TypeScript type) documenting each invar
 - Cards include all required fields; no field is empty or placeholder.
 - `known_failure_modes` is non-empty for every invariant (every invariant has at least one).
 - `approximation_notes` is non-empty for invariants using approximations (MERI general fallback, GWEI entropic regularization, MFCI MCMC sampling, PHI matrix log fallback).
+- `coverage_definition` is non-empty and matches the convention in WS-H.1.1c.
+- `shadow_status` defaults to `shadow` and is only advanced by the promotion gate (WS-H.1.2e).
 - Cards are version-controlled and updated when the algorithm changes.
 
 **Testing:**
 - Unit: zod schema parses valid cards, rejects cards with missing fields.
 - Unit: each invariant's `getCard()` output passes zod validation.
+- Unit: `shadow_status` cannot be set to a constraint mode without a corresponding promotion record.
 - Snapshot: card contents are snapshot-tested to detect unreviewed changes.
+
+**Dependencies:** WS-H.1.2a.
 
 ---
 
-### WS-H.1.2c Fallback framework
+### WS-H.1.2c Fallback execution wrapper
 **ID:** WS-H.1.2c
 **Ref:** Sections 21.4, 30.4
 
 **Description:**
-If an invariant computation fails (timeout, error, insufficient data), ranking proceeds without that invariant's contribution. The framework logs the gap (invariant type, target, reason, timestamp), emits a monitoring event, and uses the fallback behavior documented in the invariant card. No invariant failure blocks ranking entirely. The gap log feeds operational dashboards and alerting.
+Execution wrapper that invokes each invariant with a timeout and try/catch. If an invariant computation fails (timeout, error, insufficient data), the wrapper returns a degraded envelope and ensures ranking proceeds without that invariant's contribution -- features omitted, never defaulted to zero or any value that could bias ranking. The wrapper attaches the correct reason code (`INSUFFICIENT_COVERAGE`, `APPROXIMATION_FALLBACK`, etc.) and emits a gap event. This task covers only the wrapper and gap-event emission; dashboards and alerting are WS-H.1.2c-2.
 
 **Acceptance criteria:**
-- Ranking pipeline wraps each invariant call with try/catch and timeout.
-- On failure: ranking continues with remaining invariants; the failed invariant's features are omitted (not defaulted to zero or any value that could bias ranking).
-- Gap event emitted with `invariant_type`, `target_id`, `failure_reason`, `timestamp`, `fallback_used`.
-- Gap events feed a monitoring dashboard showing per-invariant failure rate and coverage.
-- Alerting triggers when any invariant's failure rate exceeds a configurable threshold.
+- Ranking pipeline wraps each invariant call with try/catch and a configurable timeout.
+- On failure: ranking continues with remaining invariants; the failed invariant's features are omitted (not defaulted).
+- Gap event emitted with `invariant_type`, `target_id`, `failure_reason`, `timestamp`, `fallback_used`, and `reason_codes`.
 - Fallback behavior matches what is documented in the invariant card.
+- No invariant failure blocks ranking entirely (verified by integration test with all invariants failing).
 
 **Testing:**
 - Unit: simulated invariant failure does not crash the ranking pipeline.
 - Unit: gap event is emitted with correct fields on failure.
+- Unit: timeout triggers fallback path and a `TIMEOUT` reason code.
 - Integration: ranking produces valid output when one, two, or all invariants fail.
-- Integration: monitoring dashboard receives gap events.
+
+**Dependencies:** WS-H.1.2a, WS-H.1.1c.
 
 ---
 
-### WS-H.1.2d Regression harness
+### WS-H.1.2c-2 Gap monitoring and alerting
+**ID:** WS-H.1.2c-2
+**Ref:** Sections 21.4, 30.4
+
+**Description:**
+Consume gap events from the fallback wrapper into a monitoring dashboard and alerting pipeline. The dashboard shows per-invariant failure rate, coverage, and fallback rate over time; alerting triggers when any invariant's failure rate or fallback rate exceeds a configurable threshold. This is the operational complement to WS-H.1.2c.
+
+**Acceptance criteria:**
+- Gap events feed a monitoring dashboard showing per-invariant failure rate, coverage, and fallback rate.
+- Alerting triggers when any invariant's failure rate exceeds a configurable threshold.
+- Dashboard distinguishes hard failures (errors/timeouts) from soft degradations (low coverage).
+- Alert routing is configurable per invariant owner (from the invariant card `owner`).
+
+**Testing:**
+- Integration: monitoring dashboard receives and aggregates gap events.
+- Integration: alert fires when synthetic failure rate exceeds threshold.
+- Integration: dashboard separates hard failures from low-coverage degradations.
+
+**Dependencies:** WS-H.1.2c.
+
+---
+
+### WS-H.1.2d Synthetic dataset generator
 **ID:** WS-H.1.2d
 **Ref:** Section 21.4
 
 **Description:**
-Regression test harness for invariant services. Synthetic datasets with deterministic seeds produce reproducible outputs. Drift detection compares current outputs against baseline snapshots and flags deviations beyond tolerance. The harness runs in CI and as a scheduled job.
+Deterministic synthetic dataset generator for invariant services. Given a seed, the generator produces reproducible inputs for each invariant (candidate exposures for MERI, contingency tables for MFCI, cohort spaces for GWEI, lens interpretations for SCOI, topic paths for PHI, and supporting-invariant inputs). Each dataset has known or analytically derivable expected outputs used as regression baselines.
 
 **Acceptance criteria:**
 - Synthetic dataset generator produces deterministic data given a seed.
-- Each invariant has at least one synthetic dataset with known expected outputs.
-- Regression harness runs all invariants against their datasets, compares outputs to baselines, and reports pass/fail with deviation magnitude.
-- Drift detection uses configurable tolerance per invariant (e.g., MERI score within 0.01, MFCI p-value within 0.05).
-- Harness runs in CI on every PR that touches `packages/invariants/`.
-- Scheduled nightly run against production algorithm versions detects gradual drift.
-- Baseline snapshots are version-controlled alongside algorithm code.
+- Each of the 11 invariants has at least one synthetic dataset with known expected outputs.
+- Datasets include edge cases (empty input, single item, maximally redundant, maximally diverse) per invariant.
+- Generator output is serializable and version-controlled alongside algorithm code.
 
 **Testing:**
 - Unit: deterministic seed produces identical synthetic data across runs.
+- Unit: each invariant's dataset produces the documented expected output under the reference implementation.
+- Unit: edge-case datasets are present for every invariant.
+
+**Dependencies:** WS-H.1.1d.
+
+---
+
+### WS-H.1.2d-2 Regression harness and drift detection
+**ID:** WS-H.1.2d-2
+**Ref:** Section 21.4
+
+**Description:**
+Regression test harness that runs each invariant against its synthetic datasets, compares outputs against baseline snapshots, and flags deviations beyond per-invariant tolerance. Drift detection runs in CI on every PR touching `packages/invariants/` and as a scheduled nightly job against production algorithm versions.
+
+**Acceptance criteria:**
+- Harness runs all invariants against their datasets, compares outputs to baselines, and reports pass/fail with deviation magnitude.
+- Drift detection uses configurable tolerance per invariant (e.g., MERI score within 0.01, MFCI p-value within 0.05, GWEI distance within its reported CI, PHI within 0.01).
+- Harness runs in CI on every PR that touches `packages/invariants/`.
+- Scheduled nightly run against production algorithm versions detects gradual drift and emits a report.
+- Baseline snapshots are version-controlled; updating a baseline requires explicit review.
+
+**Testing:**
 - Unit: harness detects intentional drift (modify algorithm, verify harness flags it).
+- Unit: harness passes when outputs are within tolerance.
 - CI: harness runs and reports results in PR checks.
+- Scheduled: nightly job runs and reports drift over time.
+
+**Dependencies:** WS-H.1.2d.
+
+---
+
+### WS-H.1.2e Shadow-to-enforcement promotion gate
+**ID:** WS-H.1.2e
+**Ref:** Sections 30.4, 21.4
+
+**Description:**
+Implement the mechanism that enforces "shadow before enforcement." An invariant's `shadow_status` (shadow -> soft_constraint -> hard_constraint) can only advance via a recorded promotion that satisfies a checklist: minimum shadow duration, drift-free regression history, coverage and confidence above documented bounds, and a named owner sign-off. The ranking integration reads `shadow_status` and applies an invariant's effect only when status is a constraint mode. This is the single control point guaranteeing no invariant grants enforcement authority while in shadow.
+
+**Acceptance criteria:**
+- A `PromotionRecord` captures invariant_type, from-status, to-status, evidence (shadow duration, drift report ref, coverage/confidence stats), owner, and timestamp.
+- `shadow_status` cannot advance without a valid `PromotionRecord`.
+- Ranking and moderation integrations apply an invariant's effect only when `shadow_status` is `soft_constraint` or `hard_constraint`.
+- Promotion is reversible: demotion back to shadow is supported and logged (a kill-switch path).
+- M2 milestone gate "No hidden sanctions" is satisfied: in shadow, invariants report reason codes and fallback but never sanction.
+
+**Testing:**
+- Unit: status cannot advance without a promotion record.
+- Unit: an invariant in shadow contributes no enforcement effect even if its output is extreme.
+- Integration: promotion enables effect; demotion disables it.
+- Integration: demotion (kill switch) takes effect without redeploy.
+
+**Dependencies:** WS-H.1.2b, WS-H.1.2c.
+
+---
+
+### WS-H.1.2f Compute-tier scheduling and orchestration
+**ID:** WS-H.1.2f
+**Ref:** Section 21.4
+
+**Description:**
+Wire invariants into the tiered computation platform: a real-time tier (cheap approximations for ranking, e.g., MFCI cheap stats, PHI loop detection, MERI marginal gain), a near-real-time tier (sampled approximations), and a batch tier (audits, backfills, full fiber tests, GW computation). Define scheduling, concurrency limits, and back-pressure so batch jobs do not starve real-time computation. Persist run metadata (tier, duration, target count) for observability.
+
+**Acceptance criteria:**
+- Each invariant declares which methods run in which tier; the scheduler routes accordingly.
+- Real-time tier enforces per-call latency budgets; near-real-time and batch tiers run on a schedule or queue.
+- Concurrency limits and back-pressure prevent batch jobs from degrading real-time latency.
+- Run metadata (tier, target count, duration, success) persisted and exposed to `getHealthMetrics`.
+- Scheduling configuration is version-controlled and auditable.
+
+**Testing:**
+- Unit: scheduler routes a method to the correct tier.
+- Integration: batch backlog does not push real-time latency past budget (load test).
+- Integration: run metadata recorded for each tier.
+
+**Dependencies:** WS-H.1.2a, WS-E (event pipeline).
+
+---
+
+### WS-H.1.2g Invariant observability metrics
+**ID:** WS-H.1.2g
+**Ref:** Section 21.4
+
+**Description:**
+Standardized observability for every invariant: emit metrics for confidence distribution, coverage distribution, compute time (per tier), output volume, fallback rate, and drift (deviation from rolling baseline). These feed a per-invariant health dashboard and the regression nightly report. Observability is uniform across all 11 invariants so an on-call engineer can reason about any invariant the same way.
+
+**Acceptance criteria:**
+- Each invariant emits: confidence histogram, coverage histogram, compute-time percentiles per tier, output count, fallback rate, and drift gauge.
+- A per-invariant health dashboard renders these metrics with time ranges.
+- Drift gauge compares current output distribution to a rolling baseline and surfaces anomalies.
+- Metrics are tagged by `invariant_type` and `version` for A/B comparison.
+- Dashboards are access-controlled to invariant owners and on-call.
+
+**Testing:**
+- Unit: metric emission produces expected series for a synthetic run.
+- Integration: dashboard renders metrics for at least one real invariant.
+- Integration: drift gauge moves when output distribution shifts.
+
+**Dependencies:** WS-H.1.2a, WS-H.1.2d-2.
 
 ---
 
 ## WS-H.2 MERI -- Matroid Exposure Rank Invariant
+
+> **Mathematical model (Section 7.2).** For a candidate set `E` and subset `S`, nonredundancy is a matroid `M = (E, I)` whose rank `r(S) = max{ |T| : T subset of S, T in I }` returns the largest nonredundant subset. The invariant is the normalized rank `MERI(S) = r(S) / |S|`, with `0 < MERI(S) <= 1`. Matroid rank is monotone and submodular, so the greedy procedure is exact and the marginal gain `r(S union {x}) - r(S)` is a diminishing-returns ranking feature. Where production must fall back to a general similarity-graph view, MERI is a greedy *approximation* of rank, recorded as such.
 
 ### WS-H.2.1a URL/text deduplication
 **ID:** WS-H.2.1a
@@ -168,6 +382,8 @@ Exact URL duplicate detection after canonicalization (from WS-F URL canonicaliza
 - Unit: URL pairs that differ in substantive path are not grouped.
 - Integration: submitting a duplicate URL produces marginal gain of 0 in MERI output.
 
+**Dependencies:** WS-H.1.2a, WS-F.1 (URL canonicalization).
+
 ---
 
 ### WS-H.2.1b Near-duplicate grouping
@@ -175,7 +391,7 @@ Exact URL duplicate detection after canonicalization (from WS-F URL canonicaliza
 **Ref:** Section 7.5 (steps 2-3), 30.4
 
 **Description:**
-Text similarity via shingling (w-shingling with configurable shingle size) and MinHash for near-duplicate grouping. Near-duplicates (syndicated copies, minor rewrites) receive epsilon marginal exposure gain -- above zero to acknowledge the source exists, but too low to meaningfully increase rank. Group membership is stored and exposed for topic-page lineage display.
+Text similarity via shingling (w-shingling with configurable shingle size) and MinHash for near-duplicate grouping. Near-duplicates (syndicated copies, minor rewrites) receive epsilon marginal exposure gain -- above zero to acknowledge the source exists, but too low to meaningfully increase rank. Group membership is stored and exposed for topic-page lineage display. Embeddings from WS-F.3.2 supply the semantic features used for candidate selection before MinHash.
 
 **Acceptance criteria:**
 - Shingling/MinHash pipeline produces similarity scores for candidate pairs.
@@ -190,6 +406,8 @@ Text similarity via shingling (w-shingling with configurable shingle size) and M
 - Unit: articles on the same topic with substantially different content are not grouped.
 - Integration: near-duplicate group produces epsilon gain in MERI output.
 - Performance: grouping 1000 candidates completes within latency budget.
+
+**Dependencies:** WS-H.2.1a, WS-F.3.2 (embeddings).
 
 ---
 
@@ -224,6 +442,8 @@ Implement the six independence dimensions for MERI multi-dimensional independenc
 - Unit: combined assessment produces expected independence scores for synthetic scenarios from Section 7.4.
 - Integration: independence dimensions feed into partition matroid construction (WS-H.2.2b).
 
+**Dependencies:** WS-H.2.1b, WS-F.1 (source profiles, claim extraction), WS-G.2 (rooms/lenses).
+
 ---
 
 ### WS-H.2.2b Partition matroid construction
@@ -231,7 +451,7 @@ Implement the six independence dimensions for MERI multi-dimensional independenc
 **Ref:** Section 7.5 (steps 3-5), Spec correctness note on matroid model
 
 **Description:**
-Construct a partition matroid from the independence dimensions. Partition exposures into classes: near-duplicate class, shared-source-lineage class, shared-primary-evidence class. A subset is independent if it takes at most a bounded number of items from each class (the per-class bound is configurable). The rank equals the number of classes represented, up to the per-class bound. This guarantees that greedy rank computation is exact (matroid property).
+Construct a partition matroid from the independence dimensions. Partition exposures into classes: near-duplicate class, shared-source-lineage class, shared-primary-evidence class. A subset is independent if it takes at most a bounded number of items from each class (the per-class bound is configurable). The rank equals the number of classes represented, up to the per-class bound. This guarantees that greedy rank computation is exact (matroid property). For the partition matroid the independence oracle is `forall classes c: |S cap c| <= b_c`, and `r(S) = sum_c min(|S cap c|, b_c)`.
 
 **Acceptance criteria:**
 - Partition classes constructed from near-duplicate groups (WS-H.2.1b), source lineage groups, and evidence lineage groups.
@@ -246,6 +466,8 @@ Construct a partition matroid from the independence dimensions. Partition exposu
 - Unit: per-class bounds correctly limit items from each partition class.
 - Integration: matroid feeds into greedy rank computation (WS-H.2.2c).
 
+**Dependencies:** WS-H.2.2a.
+
 ---
 
 ### WS-H.2.2c Greedy rank computation
@@ -253,13 +475,13 @@ Construct a partition matroid from the independence dimensions. Partition exposu
 **Ref:** Section 7.5 (step 6), Spec correctness note
 
 **Description:**
-Compute the greedy rank for the candidate set. Because the independence system is a matroid, the greedy algorithm is exact -- it produces the true rank, not an approximation. Marginal rank gain `r(S union {x}) - r(S)` is computed per candidate and used as a ranking feature. The pseudo-code from Section 7.5 is implemented: duplicate_url returns 0, same_claim_same_source_lineage returns epsilon, adds_new_evidence_basis returns high_gain, adds_new_lens_without_misinformation returns medium_gain, otherwise returns marginal matroid rank gain.
+Compute the greedy rank for the candidate set. Because the independence system is a matroid, the greedy algorithm is exact -- it produces the true rank, not an approximation. Marginal rank gain `r(S union {x}) - r(S)` is computed per candidate and used as a ranking feature. The pseudo-code from Section 7.5 is implemented: `duplicate_url` returns 0, `same_claim_same_source_lineage` returns epsilon, `adds_new_evidence_basis` returns high_gain, `adds_new_lens_without_misinformation` returns medium_gain, otherwise returns marginal matroid rank gain.
 
 **Acceptance criteria:**
 - Greedy algorithm produces exact rank for partition matroid inputs.
 - Marginal rank gain computed per candidate matches the Section 7.5 pseudo-code logic.
 - MERI-2 satisfied: a primary document adds more independent exposure value than ten posts quoting one another.
-- Marginal gains are recorded in `InvariantOutput.score_vector` for downstream ranking.
+- Marginal gains are recorded in `InvariantOutput.score_vector` (`marginal_gains` map) for downstream ranking.
 - Computation completes within latency budget for typical feed sizes (hundreds of candidates).
 
 **Testing:**
@@ -268,6 +490,8 @@ Compute the greedy rank for the candidate set. Because the independence system i
 - Unit: epsilon gain for same-claim/same-source correctly smaller than high gain for new evidence.
 - Performance: 500-candidate feed ranked within 100ms.
 
+**Dependencies:** WS-H.2.2b.
+
 ---
 
 ### WS-H.2.2d Approximation flagging
@@ -275,19 +499,21 @@ Compute the greedy rank for the candidate set. Because the independence system i
 **Ref:** Section 7.5 correctness note, Section 21.4
 
 **Description:**
-When production must fall back from the matroid model to a general similarity-graph view (because the independence structure does not cleanly partition into a matroid), MERI is reported as a greedy approximation of rank. The approximation flag is recorded in the invariant card and in the per-output metadata. The standard 1 - 1/e cardinality guarantee and 1/2 matroid-constraint guarantee are documented.
+When production must fall back from the matroid model to a general similarity-graph view (because the independence structure does not cleanly partition into a matroid), MERI is reported as a greedy approximation of rank. The approximation flag is recorded in the invariant card and in the per-output metadata. The standard `1 - 1/e` cardinality guarantee and `1/2` matroid-constraint guarantee are documented. The output carries reason code `MATROID_FALLBACK`.
 
 **Acceptance criteria:**
-- Outputs from the general similarity-graph fallback include `approximation: true` in `score_vector`.
-- Invariant card `approximation_notes` documents the fallback and its guarantees.
+- Outputs from the general similarity-graph fallback include `approximation: true` in `score_vector` and reason code `MATROID_FALLBACK`.
+- Invariant card `approximation_notes` documents the fallback and its `1 - 1/e` / `1/2` guarantees.
 - Approximation flag is visible in analyst dashboards and ranking decision logs.
 - The system prefers the exact matroid path; fallback triggers only when partition construction fails validation.
 - MERI-4 satisfied: ranking experiments report MERI distribution before launch (including approximation rate).
 
 **Testing:**
 - Unit: matroid construction failure triggers fallback path.
-- Unit: fallback output includes approximation flag.
+- Unit: fallback output includes approximation flag and reason code.
 - Integration: approximation rate is reported in MERI distribution metrics.
+
+**Dependencies:** WS-H.2.2c.
 
 ---
 
@@ -310,6 +536,8 @@ Feed cards display MERI-derived labels: "New angle," "Independent source," "Dupl
 - Accessibility: labels have aria-label text.
 - Content: no label text implies that repetition equals truth.
 
+**Dependencies:** WS-H.2.2c, WS-B.2 (design system).
+
 ---
 
 ### WS-H.2.3b Independent sources drawer
@@ -330,6 +558,8 @@ Topic pages include an "independent sources" drawer that displays source lineage
 - Unit: drawer component renders source groups correctly from mock MERI data.
 - Integration: drawer loads MERI data from API and displays current groupings.
 - Accessibility: drawer is keyboard-navigable and screen-reader compatible.
+
+**Dependencies:** WS-H.2.2c, WS-B.2.
 
 ---
 
@@ -353,9 +583,35 @@ Users can choose "show fewer repeats" or "show all updates" per topic. This pref
 - Integration: feed with "fewer repeats" shows fewer near-duplicates than "show all" for the same topic.
 - E2E: preference toggle persists and affects subsequent feed loads.
 
+**Dependencies:** WS-H.2.3a, WS-D.1 (user settings).
+
+---
+
+### WS-H.2.4a MERI coverage and confidence
+**ID:** WS-H.2.4a
+**Ref:** Sections 7.2, 30.4
+
+**Description:**
+Define MERI's coverage and confidence semantics. Coverage reflects how many candidates have the inputs needed for independence assessment (canonical URL, claim extraction, source lineage, evidence cards, embeddings). Confidence reflects the reliability of the independence signals (e.g., low when claim extraction is uncertain, when the matroid fallback is used, or when group sizes are small). These envelope fields are populated on every MERI output.
+
+**Acceptance criteria:**
+- Coverage = fraction of candidates with all required independence inputs available and fresh.
+- Confidence reduced when matroid fallback is used (`MATROID_FALLBACK`), when claim/source data is missing, or when near-duplicate groups are below a size threshold.
+- Outputs below `coverage_bounds.min_acceptable` emit `INSUFFICIENT_COVERAGE` and are not used for enforcement.
+- Coverage/confidence definitions recorded in the MERI invariant card.
+
+**Testing:**
+- Unit: missing claim extraction lowers coverage as documented.
+- Unit: matroid fallback lowers confidence and sets the reason code.
+- Unit: below-threshold coverage emits `INSUFFICIENT_COVERAGE`.
+
+**Dependencies:** WS-H.2.2d, WS-H.1.1c.
+
 ---
 
 ## WS-H.3 MFCI -- Markov-Fiber Coordination Invariant
+
+> **Mathematical model (Section 8.2).** Build a contingency table over `user_group x topic x time_bucket x action_type x target`. Fix selected margins (sufficient statistics under a log-linear null). The set of nonnegative integer tables sharing those margins is the **fiber** of the observed table `X`. A Markov basis (Diaconis-Sturmfels) connects every table in the fiber by integer moves that preserve the margins; a Metropolis-Hastings sampler accepts those moves so its stationary distribution is the conditional distribution on the fiber (the generalized hypergeometric induced by the null). Then `MFCI(X) = -log p_hat` with `p_hat = (1 + #{ sampled X' : T(X') >= T(X) }) / (N + 1)` -- the add-one estimator keeps `p_hat > 0` and `MFCI` finite. `T` may measure synchrony, repeated co-action, target concentration, same-phrase repetition, or simultaneous reporting. The sub-minute freeze path (MFCI-3) uses cheap synchrony/target-concentration statistics with precomputed null calibrations; the exact fiber test then confirms or clears.
 
 ### WS-H.3.1a Target-concentration score
 **ID:** WS-H.3.1a
@@ -370,13 +626,15 @@ Lightweight target-concentration statistic for the sub-minute freeze path. Measu
 - Score computation completes within 100ms for real-time use.
 - Score is a numeric value with higher values indicating more unusual concentration.
 - Null calibrations are versioned and updated on a configurable schedule (default: daily).
-- Output includes confidence based on the amount of baseline data available.
+- Output includes confidence based on the amount of baseline data available; stale calibrations emit `NULL_CALIBRATION_STALE`.
 
 **Testing:**
 - Unit: known concentrated action pattern produces high score.
 - Unit: diffuse action pattern produces low score.
 - Unit: score computation meets latency target.
 - Integration: null calibrations load correctly and version-match.
+
+**Dependencies:** WS-H.1.2a, WS-E (event pipeline).
 
 ---
 
@@ -398,6 +656,8 @@ Lightweight synchrony statistic detecting sub-minute timing coordination. Measur
 - Unit: simulated bot-like simultaneous actions produce high synchrony score.
 - Unit: simulated organic arrival times produce low synchrony score.
 - Unit: base-rate conditioning prevents false positives for active communities.
+
+**Dependencies:** WS-H.3.1a.
 
 ---
 
@@ -421,6 +681,8 @@ Dashboard for analysts showing MFCI v0 shadow anomaly reports. Displays target-c
 - Integration: access control enforced -- non-analyst users cannot access.
 - Visual: anomaly highlighting is clear and distinguishable.
 
+**Dependencies:** WS-H.3.1a, WS-H.3.1b.
+
 ---
 
 ### WS-H.3.2a Contingency table construction
@@ -442,6 +704,8 @@ Construct the full contingency table over dimensions: user_group x topic x time_
 - Unit: sparse representation correctly handles high-dimensional tables.
 - Performance: table construction from 1M events completes within batch budget.
 
+**Dependencies:** WS-H.1.2a, WS-E (event pipeline).
+
 ---
 
 ### WS-H.3.2b Fixed-margin computation
@@ -456,12 +720,14 @@ Compute fixed margins from the contingency table: total activity per group, per 
 - Margins include: row sums (per user_group), column sums (per topic, per time_bucket, per action_type), and target-popularity marginals.
 - MFCI-1 satisfied: large normal communities are not penalized solely for volume (their base-rate margins are conditioned on).
 - MFCI-4 satisfied: every automated coordination action logs fixed margins and the statistic used.
-- Margins are persisted alongside contingency tables for audit.
+- Margins are persisted alongside contingency tables for audit (`fixed_margins_ref` in score_vector).
 
 **Testing:**
 - Unit: margin sums match expected values for hand-crafted tables.
 - Unit: margins correctly capture group size, topic popularity, and temporal patterns.
 - Integration: margins feed into Markov-basis fiber test (WS-H.3.3a).
+
+**Dependencies:** WS-H.3.2a.
 
 ---
 
@@ -485,6 +751,8 @@ Analyst dashboard showing contingency tables, preserved margins, and baseline co
 - Visual: baseline comparison is clear and interpretable.
 - Integration: drill-down navigation works across all dimensions.
 
+**Dependencies:** WS-H.3.2b, WS-H.3.1c.
+
 ---
 
 ### WS-H.3.3a Markov-basis generation
@@ -507,6 +775,8 @@ Generate a Markov basis for the fiber of the observed contingency table. The Mar
 - Unit: basis connectivity verified on small tables (brute-force enumeration of fiber).
 - Integration: basis feeds into Metropolis-Hastings sampler (WS-H.3.3b).
 
+**Dependencies:** WS-H.3.2b.
+
 ---
 
 ### WS-H.3.3b Metropolis-Hastings sampler
@@ -523,13 +793,15 @@ Metropolis-Hastings sampler over the conditional fiber distribution. Proposes mo
 - Sampler produces configurable `N` samples (default: 10,000).
 - All sampled tables have nonnegative integer entries and share the fixed margins.
 - Burn-in period is configurable; thinning is applied to reduce autocorrelation.
-- Sampler diagnostics (acceptance rate, effective sample size) are logged.
+- Sampler diagnostics (acceptance rate, effective sample size) are logged; non-convergence emits `SAMPLER_NONCONVERGENCE`.
 
 **Testing:**
 - Unit: all sampled tables preserve fixed margins.
 - Unit: sampled tables have nonnegative integer entries.
 - Unit: acceptance rate is within a reasonable range (neither too high nor too low).
 - Statistical: on synthetic data with known distribution, sampler estimates match known statistics.
+
+**Dependencies:** WS-H.3.3a.
 
 ---
 
@@ -546,12 +818,15 @@ Compute the one-sided conditional p-value and MFCI score. For coordination stati
 - Multiple coordination statistics `T` are supported (synchrony, target-concentration, phrase-repetition).
 - MFCI score stored in `InvariantOutput.score_vector` with the statistic used, p-value, and sample count.
 - Higher MFCI means stronger evidence of coordination beyond conditioned base rates.
+- Confidence reduced and `SAMPLER_NONCONVERGENCE` set when effective sample size is below threshold.
 
 **Testing:**
 - Unit: add-one estimator produces correct p-value for known sampled exceedance counts.
 - Unit: MFCI is finite for all valid inputs including zero exceedances.
 - Unit: MFCI ordering is correct (more extreme observations produce higher scores).
 - Integration: full pipeline from contingency table through sampling to MFCI score.
+
+**Dependencies:** WS-H.3.3b.
 
 ---
 
@@ -575,6 +850,32 @@ Integrate the cheap synchrony and target-concentration statistics (WS-H.3.1a, WS
 - Integration: fiber test confirmation escalates per risk-state rules.
 - Unit: freeze-to-resolution time tracking is accurate.
 
+**Dependencies:** WS-H.3.1a, WS-H.3.1b, WS-H.3.3c.
+
+---
+
+### WS-H.3.3e Adversarial-adaptation tests
+**ID:** WS-H.3.3e
+**Ref:** Section 30.4 (MFCI v2 gate)
+
+**Description:**
+MFCI v2 requires adversarial-adaptation testing: synthetic adversaries that attempt to evade the fiber test by spreading actions across targets, jittering timing to defeat the synchrony statistic, rotating phrasing, or staying just under thresholds. The suite measures detection rate and false-negative rate against an evolving red-team strategy set, and feeds findings back into statistic selection and threshold calibration. This is the gate evidence that MFCI flags coordination conditional on base rates without treating normal activity as abuse.
+
+**Acceptance criteria:**
+- A library of adversarial strategies (timing jitter, target spreading, phrase rotation, threshold hugging) generates synthetic coordinated campaigns.
+- The suite reports detection rate, false-negative rate, and the statistic that caught each campaign.
+- Adversarial cases are versioned; new evasion strategies are added as discovered.
+- The suite runs as part of the MFCI v2 promotion evidence (WS-H.1.2e) and nightly thereafter.
+- Findings are summarized for the integrity owner with recommended threshold/statistic changes.
+
+**Testing:**
+- Unit: each adversarial strategy generates a campaign with the intended evasion property.
+- Statistical: detection rate for known-coordinated campaigns exceeds the documented floor.
+- Statistical: organic control campaigns are not flagged (false-positive rate below ceiling).
+- Regression: adding a new evasion strategy is reflected in the suite report.
+
+**Dependencies:** WS-H.3.3c, WS-H.1.2d.
+
 ---
 
 ### WS-H.3.4a Risk states
@@ -595,14 +896,41 @@ Implement MFCI risk states with associated ranking and moderator effects.
 - Risk state derived from MFCI score thresholds (configurable per target type).
 - State transitions logged with MFCI score, statistic used, and margins.
 - Each state triggers the correct ranking and moderation effects.
-- State is stored per target and updated as MFCI scores change.
+- State is stored per target (`risk_state` in score_vector) and updated as MFCI scores change.
 - Downward transitions (e.g., high -> normal) require either fiber test clearing or analyst override.
+- While MFCI is in shadow, risk states are computed and logged but produce no ranking/moderation effect (enforced by WS-H.1.2e).
 
 **Testing:**
 - Unit: MFCI score thresholds produce correct risk states.
-- Unit: each risk state triggers correct ranking effects.
+- Unit: each risk state triggers correct ranking effects (when promoted).
 - Integration: state transitions logged correctly with full context.
 - Integration: downward transition requires clearing or override.
+
+**Dependencies:** WS-H.3.3c.
+
+---
+
+### WS-H.3.4a-2 Risk-state ranking and moderation effects
+**ID:** WS-H.3.4a-2
+**Ref:** Section 8.5
+
+**Description:**
+Implement the concrete ranking and moderation effects attached to each risk state, separated from state derivation so each effect is independently reviewable and reversible: Elevated -> distribution dampening; High -> freeze trend acceleration + review-queue entry; Severe -> limit cross-community spread + immediate review. Each effect is gated by the promotion mechanism and is individually kill-switchable.
+
+**Acceptance criteria:**
+- Distribution dampening (Elevated) reduces amplification by a configurable factor.
+- Freeze trend acceleration (High) halts velocity-based promotion for the target.
+- Cross-community spread limit (Severe) restricts amplification beyond origin communities until reviewed.
+- Each effect is independently feature-flagged and reversible.
+- Effects apply only when MFCI `shadow_status` is a constraint mode.
+- MFCI-2 supported: coordinated reporting has delayed enforcement impact (effects pair with the review queue, WS-H.3.4b).
+
+**Testing:**
+- Unit: each effect modifies ranking/distribution as documented when enabled.
+- Unit: each effect is a no-op when disabled or while in shadow.
+- Integration: severe state limits cross-community spread in a simulated feed.
+
+**Dependencies:** WS-H.3.4a, WS-H.1.2e.
 
 ---
 
@@ -626,6 +954,8 @@ Review queue for integrity analysts showing MFCI cases at high or severe risk st
 - Integration: analyst actions (confirm, clear, escalate) update risk state and freeze status.
 - Visual: case summaries are readable and include all required information.
 
+**Dependencies:** WS-H.3.4a, WS-J (trust and safety queues).
+
 ---
 
 ### WS-H.3.4c Appeal support
@@ -647,9 +977,13 @@ Users affected by MFCI-driven enforcement can inspect a human-readable summary o
 - Unit: summary does not contain user identifiers or raw logs.
 - Integration: appeal creates a linked record in the MFCI case and moderation system.
 
+**Dependencies:** WS-H.3.4b, WS-J (appeals system).
+
 ---
 
 ## WS-H.4 SCOI -- Sheaf Context Obstruction Invariant
+
+> **Mathematical model (Section 10.2).** Communities/lenses are cells of a cellular sheaf over the nerve of their overlaps. Each lens `U_i` carries a stalk and a local interpretation `s_i` (semantic summary, stance, assumed background as a vector); `s = (s_i)` is a 0-cochain. On each overlap, restriction maps give the coboundary `(d0 s)_ij = rho_i(s_i) - rho_j(s_j)`. The score is the **normalized Dirichlet energy** under the sheaf Laplacian `L0 = d0^T d0`: `SCOI = (s^T L0 s) / normalizer = (sum over overlaps ij of || rho_i(s_i) - rho_j(s_j) ||^2) / normalizer`, normalized to `[0, 1]`. `SCOI = 0` iff the local readings glue into a global section (`s in ker d0`). The genuinely cohomological obstruction (nontrivial `H1`) is the target of SCOI v2.
 
 ### WS-H.4.1a Lens interpretation capture
 **ID:** WS-H.4.1a
@@ -669,6 +1003,8 @@ Capture community interpretations per lens per story. Each lens `U_i` carries a 
 - Unit: interpretation capture produces valid vectors from mock discussion data.
 - Unit: multiple lenses produce distinct interpretation vectors for a story with divergent community readings.
 - Integration: interpretations feed into disagreement scoring (WS-H.4.1b).
+
+**Dependencies:** WS-H.1.2a, WS-G.2.2 (lens definitions).
 
 ---
 
@@ -699,6 +1035,8 @@ Score disagreement between lens interpretations and assign context states. State
 - Unit: "weaponized" state requires safety signal in addition to high disagreement.
 - Integration: context states feed into SCOI UI (WS-H.4.3a) and ranking integration.
 
+**Dependencies:** WS-H.4.1a.
+
 ---
 
 ### WS-H.4.1c Steward reports
@@ -720,6 +1058,8 @@ Generate reports for room stewards showing SCOI context state, interpretation di
 - Integration: access control restricts reports to relevant stewards.
 - Visual: reports are readable and include actionable recommendations.
 
+**Dependencies:** WS-H.4.1b, WS-G.2.3 (steward roles).
+
 ---
 
 ### WS-H.4.2a Restriction maps
@@ -727,7 +1067,7 @@ Generate reports for room stewards showing SCOI context state, interpretation di
 **Ref:** Section 10.2
 
 **Description:**
-Define restriction maps between overlapping communities. For each overlap `U_i cap U_j`, restriction maps `rho_i` and `rho_j` carry the local interpretations `s_i` and `s_j` into a shared comparison space. The maps encode how interpretations from different communities should be compared -- accounting for different vocabulary, norms, and assumed context.
+Define restriction maps between overlapping communities. For each overlap `U_i cap U_j`, restriction maps `rho_i` and `rho_j` carry the local interpretations `s_i` and `s_j` into a shared comparison space. The maps encode how interpretations from different communities should be compared -- accounting for different vocabulary, norms, and assumed context. The overlap structure is the nerve of community overlaps, computed from room/lens membership.
 
 **Acceptance criteria:**
 - Restriction maps defined for all pairs of overlapping lenses/communities on a given story.
@@ -740,6 +1080,8 @@ Define restriction maps between overlapping communities. For each overlap `U_i c
 - Unit: restriction maps correctly project interpretation vectors into shared space.
 - Unit: identity-like maps produce zero disagreement for identical interpretations.
 - Integration: restriction maps feed into coboundary operator (WS-H.4.2b).
+
+**Dependencies:** WS-H.4.1a.
 
 ---
 
@@ -763,6 +1105,8 @@ Implement the coboundary operator `d0` and sheaf Laplacian `L0 = d0^T d0`. On ea
 - Unit: zero disagreement (coherent interpretations) produces `d0 s = 0` and `s^T L0 s = 0`.
 - Performance: computation for 20 overlapping communities completes within batch budget.
 
+**Dependencies:** WS-H.4.2a.
+
 ---
 
 ### WS-H.4.2c Normalized Dirichlet energy (SCOI score)
@@ -770,7 +1114,7 @@ Implement the coboundary operator `d0` and sheaf Laplacian `L0 = d0^T d0`. On ea
 **Ref:** Section 10.2
 
 **Description:**
-Compute the normalized Dirichlet energy: `SCOI(content) = (s^T L0 s) / normalizer`, normalized to `[0, 1]` by the energy of a maximally-disagreeing configuration on the same overlap graph. `SCOI = 0` means the local interpretations already agree on all overlaps and glue into a global section; higher SCOI means the local readings cannot be reconciled without added context.
+Compute the normalized Dirichlet energy: `SCOI(content) = (s^T L0 s) / normalizer`, normalized to `[0, 1]` by the energy of a maximally-disagreeing configuration on the same overlap graph. `SCOI = 0` means the local interpretations already agree on all overlaps and glue into a global section; higher SCOI means the local readings cannot be reconciled without added context. Equivalently, SCOI is the squared distance of `s` from `H0 = ker d0`.
 
 **Acceptance criteria:**
 - SCOI score normalized to `[0, 1]`.
@@ -784,6 +1128,8 @@ Compute the normalized Dirichlet energy: `SCOI(content) = (s^T L0 s) / normalize
 - Unit: maximally disagreeing interpretations produce SCOI = 1.
 - Unit: intermediate disagreement produces SCOI in (0, 1).
 - Validation: scores correlate with human-labeled context-collapse cases.
+
+**Dependencies:** WS-H.4.2b.
 
 ---
 
@@ -806,6 +1152,55 @@ When SCOI is elevated, route bridge requests and context invitations to users wh
 - Integration: bridge contribution triggers SCOI re-computation.
 - Integration: SCOI decrease results in participation credit.
 
+**Dependencies:** WS-H.4.2c, WS-G.1 (contribution system).
+
+---
+
+### WS-H.4.2e SCOI ranking integration
+**ID:** WS-H.4.2e
+**Ref:** Section 10.6
+
+**Description:**
+Wire SCOI levels into ranking actions per Section 10.6: Low -> normal ranking; Medium -> require context card in feed; High -> reduce cross-community amplification until context improves; Very high -> prioritize bridge requests, expert context, or moderator review. High SCOI never means "bad content" -- it means the content should travel with context. Effects are gated by the promotion mechanism and individually reversible.
+
+**Acceptance criteria:**
+- SCOI-to-ranking-action mapping implemented per the four levels in Section 10.6.
+- Medium triggers a required context card in feed (pairs with WS-H.4.3a/WS-H.4.3b).
+- High reduces cross-community amplification until context improves (re-evaluated on re-computation).
+- Very high prioritizes bridge/expert/moderator routing rather than suppression.
+- Effects apply only when SCOI `shadow_status` is a constraint mode; each level is individually feature-flagged.
+- SCOI-1 supported: cross-community distribution includes context when SCOI is elevated.
+
+**Testing:**
+- Unit: each SCOI level maps to the documented ranking action.
+- Unit: effects are no-ops while in shadow.
+- Integration: high SCOI reduces cross-community amplification in a simulated feed; dropping below threshold restores it.
+
+**Dependencies:** WS-H.4.2c, WS-H.1.2e.
+
+---
+
+### WS-H.4.2f Cohomological obstruction (SCOI v2)
+**ID:** WS-H.4.2f
+**Ref:** Section 10.2 correctness note, 30.4 (SCOI v2)
+
+**Description:**
+SCOI v2 targets the structural, genuinely cohomological obstruction. The Dirichlet-energy score (v1) measures the magnitude of a coboundary for a given set of readings; a structural obstruction arises only when the restriction maps admit no consistent global gluing for any choice of local readings -- i.e., when the first sheaf cohomology `H1` of the overlap diagram is nontrivial. Compute the obstruction class and summarize persistent cross-community interpretation failures by the norm of the harmonic representative (the Hodge-minimal cochain) of the nontrivial class. This is a research-grade, batch-only diagnostic that complements (does not replace) v1.
+
+**Acceptance criteria:**
+- Compute `H1` of the overlap diagram from the restriction maps (structural, independent of a specific `s`).
+- When `H1` is nontrivial, compute the harmonic representative and report its norm as the structural-obstruction summary.
+- Output distinguishes "high energy for these readings" (v1) from "structural obstruction for any readings" (v2) via reason codes.
+- v2 runs batch-only and is clearly marked as a diagnostic; it does not by itself drive enforcement until promoted.
+- Approximation/limits documented in the invariant card.
+
+**Testing:**
+- Unit: overlap diagram with trivial `H1` reports no structural obstruction.
+- Unit: hand-constructed diagram with nontrivial `H1` yields a nonzero harmonic-representative norm.
+- Unit: v1 and v2 outputs are distinguished by reason code and score_vector fields.
+
+**Dependencies:** WS-H.4.2c.
+
 ---
 
 ### WS-H.4.3a "Needs Context" label
@@ -827,6 +1222,8 @@ Feed-card label "Needs Context" displayed when SCOI is elevated. This label mean
 - Accessibility: label has appropriate aria attributes and tooltip.
 - Content: label text does not imply falsity or prohibition.
 
+**Dependencies:** WS-H.4.1b, WS-B.2 (design system).
+
 ---
 
 ### WS-H.4.3b "Where interpretations differ" section
@@ -847,6 +1244,8 @@ Context-card section showing "Where interpretations differ" for stories with ele
 - Unit: section renders correctly from mock SCOI data.
 - Integration: section shows current interpretation summaries from live SCOI data.
 - Content: no framing implies one interpretation is correct.
+
+**Dependencies:** WS-H.4.2c, WS-B.2.
 
 ---
 
@@ -870,9 +1269,38 @@ Composer warning when a user is replying to content with elevated SCOI: "People 
 - E2E: user can dismiss warning and proceed.
 - Accessibility: warning is announced by screen readers.
 
+**Dependencies:** WS-H.4.1b, WS-B.2, WS-G.3 (composer).
+
+---
+
+### WS-H.4.3d Moderator context-state tools
+**ID:** WS-H.4.3d
+**Ref:** Section 10.5, 10.7 (SCOI-4)
+
+**Description:**
+Moderator tools to act on context state: merge threads that are fragments of one conversation, annotate a thread with context, or separate threads whose communities are reading an item incompatibly. These tools satisfy SCOI-4, which was otherwise uncovered. Actions are recorded with reason codes, are appealable per moderation policy, and feed SCOI re-computation (e.g., adding an annotation can reduce obstruction). Tools surface the "Bridge attempts" thread branch from Section 10.5.
+
+**Acceptance criteria:**
+- SCOI-4 satisfied: moderators can merge, annotate, or separate threads based on context state.
+- Merge/annotate/separate actions are available from the steward report and the thread-health surface.
+- Each action records actor, reason code, affected threads, and timestamp (audit + appealable per WS-J).
+- "Bridge attempts" branch is shown for split/obstructed threads.
+- Annotation/merge triggers SCOI re-computation; resulting change is reflected in context state.
+- Actions respect steward scope (only on rooms/threads the moderator governs).
+
+**Testing:**
+- Unit: merge/annotate/separate produce the expected thread structure changes.
+- Unit: each action writes an audit record with reason code.
+- Integration: annotation reduces SCOI on re-computation in a synthetic split case.
+- Integration: action permissions enforced by steward scope.
+
+**Dependencies:** WS-H.4.1b, WS-G.1 (thread structure), WS-J (moderation actions/appeals).
+
 ---
 
 ## WS-H.5 GWEI -- Gromov-Wasserstein Experience Isometry
+
+> **Mathematical model (Section 9.2).** For cohort `A`, build a metric-measure space `(X_A, d_A, mu_A)`: items shown, a pairwise pseudometric over semantic/source/evidence/community relations, and a normalized measure. The order-2 Gromov-Wasserstein distance `GWEI(A,B) = GW_2((X_A,d_A,mu_A),(X_B,d_B,mu_B)) = (inf over pi in Pi(mu_A,mu_B) sum_{i,j,k,l} |d_A(i,k) - d_B(j,l)|^2 pi(i,j) pi(k,l))^{1/2}` compares relational structure without requiring identical items. `GWEI = 0` iff the experiences are measure-preserving isometric. Exact GW is NP-hard, so production uses sampled cohort windows and **entropic-regularized** GW with seed- and regularization-stability reporting and a confidence interval.
 
 ### WS-H.5.1a Cohort definitions
 **ID:** WS-H.5.1a
@@ -892,6 +1320,8 @@ Define cohort categories for GWEI comparison: language, region, age band, new vs
 - Unit: cohort assignment produces expected memberships from mock user data.
 - Unit: users with unknown age band are not assigned to age-based cohorts.
 - Unit: minimum cohort size threshold enforced.
+
+**Dependencies:** WS-H.1.2a, WS-D.1 (user metadata).
 
 ---
 
@@ -915,6 +1345,30 @@ Define experience metrics per cohort per Section 9.4: source diversity, topic di
 - Unit: metrics are within expected ranges (e.g., diversity between 0 and max entropy).
 - Integration: metrics feed into GWEI dashboards (WS-H.5.1c) and GW computation (WS-H.5.2a).
 
+**Dependencies:** WS-H.5.1a, WS-E (event pipeline for attention data).
+
+---
+
+### WS-H.5.1b-2 Experience-metric privacy and k-anonymity
+**ID:** WS-H.5.1b-2
+**Ref:** Sections 9.6, 9.7
+
+**Description:**
+Enforce privacy thresholds on cohort experience metrics so no metric can be traced to a small group or individual. Metrics are suppressed or coarsened when a cohort (or a cell within a cohort breakdown) falls below a k-anonymity threshold. This is the privacy backbone that lets GWEI dashboards and transparency reports exist without exposing sensitive cohort details.
+
+**Acceptance criteria:**
+- Metrics for cohorts/cells below a configurable k-anonymity threshold are suppressed or coarsened (not displayed raw).
+- Suppression is recorded with a reason code so downstream consumers know a value is withheld, not zero.
+- Small cohorts are protected (Section 30.4 GWEI gate): they are never degraded below threshold without review, and their metrics are not over-exposed.
+- Privacy thresholds are version-controlled and auditable.
+
+**Testing:**
+- Unit: below-threshold cohort metric is suppressed/coarsened.
+- Unit: suppression is distinguishable from a true-zero value.
+- Integration: dashboard and transparency export both honor suppression.
+
+**Dependencies:** WS-H.5.1b.
+
 ---
 
 ### WS-H.5.1c Privacy-protected dashboards
@@ -926,15 +1380,17 @@ GWEI dashboards showing cohort experience comparisons. Dashboards are privacy-pr
 
 **Acceptance criteria:**
 - Dashboards display experience metrics per cohort with side-by-side comparison.
-- No individual user data displayed; all metrics are aggregate.
+- No individual user data displayed; all metrics are aggregate and respect k-anonymity suppression (WS-H.5.1b-2).
 - Access restricted to authorized roles (ranking team, fairness auditors).
 - Dashboards include cohort size and confidence intervals for each metric.
-- GWEI-5 satisfied: transparency reports can publish aggregate experience-parity summaries (anonymized view).
+- GWEI-5 supported: aggregate experience-parity summaries can be exported for transparency (see WS-H.5.2d).
 
 **Testing:**
 - Integration: dashboards load and display cohort comparison data.
 - Integration: access control enforced.
-- Privacy: no individual user identifiers appear in dashboard data.
+- Privacy: no individual user identifiers appear in dashboard data; suppressed cells render as withheld.
+
+**Dependencies:** WS-H.5.1b, WS-H.5.1b-2.
 
 ---
 
@@ -958,6 +1414,8 @@ For each cohort, construct a metric-measure space: `X_A` = items shown to cohort
 - Unit: space construction produces valid inputs for GW computation.
 - Performance: construction from sampled cohort (5000 items) completes within batch budget.
 
+**Dependencies:** WS-H.5.1b.
+
 ---
 
 ### WS-H.5.2b Entropic-regularized GW distance
@@ -971,7 +1429,7 @@ Compute the entropic-regularized order-2 Gromov-Wasserstein distance `GW_2` betw
 - `GW_2` computed using entropic regularization for tractability.
 - Seed stability reported: distance computed for multiple random initializations, variance reported.
 - Regularization sensitivity reported: distance computed for multiple regularization strengths.
-- Confidence interval derived from seed and regularization stability.
+- Confidence interval derived from seed and regularization stability (`ci_low`, `ci_high` in score_vector).
 - GWEI-2 satisfied: audits compare relational structure, not only item overlap.
 - Output stored in `InvariantOutput.score_vector` with distance, confidence interval, seed count, and regularization parameters.
 
@@ -980,6 +1438,8 @@ Compute the entropic-regularized order-2 Gromov-Wasserstein distance `GW_2` betw
 - Unit: highly dissimilar spaces produce large `GW_2`.
 - Unit: seed stability variance is below configurable threshold for production inputs.
 - Statistical: regularization sensitivity within acceptable bounds.
+
+**Dependencies:** WS-H.5.2a.
 
 ---
 
@@ -1002,9 +1462,36 @@ Integrate GWEI into the algorithm release gate. A new algorithm cannot launch if
 - Integration: sign-off override allows launch with documentation.
 - Integration: gate passes when no cohort degrades beyond threshold.
 
+**Dependencies:** WS-H.5.2b, WS-P (experiment framework).
+
+---
+
+### WS-H.5.2d Transparency-report export
+**ID:** WS-H.5.2d
+**Ref:** Section 9.6, 9.7 (GWEI-5)
+
+**Description:**
+Generate the anonymized aggregate experience-parity summaries published in transparency reports. The export turns GWEI metrics into a public-safe view: aggregate parity statements, no sensitive cohort details, k-anonymity enforced. This is the concrete deliverable behind GWEI-5, which previously had only a dashboard.
+
+**Acceptance criteria:**
+- GWEI-5 satisfied: transparency reports publish aggregate experience-parity summaries.
+- Export contains only aggregate, k-anonymized parity statistics (no individual or small-cohort detail).
+- Export distinguishes "parity within threshold" from "degradation under review" without exposing manipulation defenses.
+- Export is reproducible from logged GWEI outputs (ties to WS-P transparency reporting).
+- Export format is reviewed before publication; suppressed values are marked as withheld.
+
+**Testing:**
+- Unit: export omits any below-k cohort detail.
+- Unit: export reproduces from stored GWEI outputs deterministically.
+- Integration: export integrates with the WS-P transparency pipeline.
+
+**Dependencies:** WS-H.5.2b, WS-H.5.1b-2, WS-P (transparency reporting).
+
 ---
 
 ## WS-H.6 PHI -- Preference Holonomy Invariant
+
+> **Mathematical model (Section 11.2).** Each topic context has a local frame for the user's latent-preference space; moving from `x` to `y` applies an orthogonal transport `A_xy in O(n)` (a metric connection). Around a closed loop `x0 -> x1 -> ... -> xk = x0` the holonomy is the ordered product `H(gamma) = A_{x_{k-1}, x_k} ... A_{x_1, x_2} A_{x_0, x_1}`. The risk score is `PHI(gamma) = || log( H(gamma) ) ||_F`; for `H in SO(n)`, `log(H)` is real skew-symmetric and `|| log(H) ||_F = sqrt(2 sum_k theta_k^2)` in the rotation angles. `PHI = 0` iff `H = I`. Near rotation-by-pi the robust fallback `|| H - I ||_F` is used. PHI must use only conjugation-invariant summaries (gauge invariance) -- never coordinate-specific embedding values. **Privacy:** PHI operates on topic-cluster IDs and timing, never raw content.
 
 ### WS-H.6.1a Session topic-sequence tracking
 **ID:** WS-H.6.1a
@@ -1024,6 +1511,8 @@ Track the sequence of topics a user visits within a session. The topic sequence 
 - Unit: topic transitions correctly appended to session sequence.
 - Unit: sequence cap enforced (oldest transitions dropped when cap reached).
 - Privacy: sequence contains only topic cluster IDs and timestamps, no content.
+
+**Dependencies:** WS-H.1.2a, WS-E (event pipeline).
 
 ---
 
@@ -1047,29 +1536,53 @@ Detect narrow loops (same topic cluster visited repeatedly in short succession) 
 - Unit: compulsive-session pattern (rapid exit-return) triggers detection.
 - Integration: detection results feed into wellbeing prompts (WS-H.6.1c).
 
+**Dependencies:** WS-H.6.1a.
+
 ---
 
-### WS-H.6.1c Wellbeing prompts and user controls
+### WS-H.6.1c Wellbeing prompts
 **ID:** WS-H.6.1c
 **Ref:** Sections 11.5, 11.6
 
 **Description:**
-When narrow-loop or compulsive-session detection triggers, display wellbeing prompts: "Your recent feed has become narrow around this topic. See broader context?" User controls: reset topic history, reduce personalization, feed-mode switch (Balanced, Chronological, Source-diverse, Local, Low personalization). PHI-4 satisfied: users can reset or reduce personalization without deleting their account.
+When narrow-loop or compulsive-session detection triggers, display a non-blocking wellbeing prompt: "Your recent feed has become narrow around this topic. See broader context?" The prompt is dismissible and uses the same prompt framework shared with path-signature stopping cues. This task covers the prompt surface; feed-mode controls and reset/reduce actions are WS-H.6.1c-2.
 
 **Acceptance criteria:**
 - Wellbeing prompt displayed when loop/compulsive detection triggers; prompt is non-blocking and dismissible.
-- Feed-mode switch accessible from prompt and from feed settings.
-- Available modes: Balanced, Chronological, Source-diverse, Local, Low personalization.
-- "Reset topic history" clears the user's topic-sequence state without affecting account or contributions.
-- "Reduce personalization" adjusts the personalization weight without full reset.
+- Prompt copy is supportive, not accusatory, and offers a path to broader context.
 - Quiet notification policy for high-holonomy topics (no push notifications that reinforce the loop).
+- Prompt uses design system components and passes accessibility checks.
 
 **Testing:**
 - Unit: prompt appears when detection triggers; absent otherwise.
+- E2E: prompt is dismissible and a "see broader context" action exists.
+- Accessibility: prompt is announced by screen readers.
+
+**Dependencies:** WS-H.6.1b, WS-B.2 (design system).
+
+---
+
+### WS-H.6.1c-2 Feed-mode controls and personalization reset
+**ID:** WS-H.6.1c-2
+**Ref:** Sections 11.5, 11.6
+
+**Description:**
+User controls reachable from the wellbeing prompt and feed settings: feed-mode switch (Balanced, Chronological, Source-diverse, Local, Low personalization), "reset topic history," and "reduce personalization." PHI-4 satisfied: users can reset or reduce personalization without deleting their account.
+
+**Acceptance criteria:**
+- Feed-mode switch accessible from prompt and from feed settings; modes: Balanced, Chronological, Source-diverse, Local, Low personalization.
+- "Reset topic history" clears the user's topic-sequence state without affecting account or contributions.
+- "Reduce personalization" adjusts the personalization weight without full reset.
+- PHI-4 satisfied: reset/reduce personalization is available and does not require account deletion.
+- Settings persist across sessions and devices.
+
+**Testing:**
 - E2E: feed-mode switch changes feed behavior.
-- E2E: reset topic history clears sequence state.
+- E2E: reset topic history clears sequence state without affecting contributions.
 - E2E: reduce personalization changes subsequent feed composition.
-- Accessibility: prompts and controls pass accessibility checks.
+- Accessibility: controls pass accessibility checks.
+
+**Dependencies:** WS-H.6.1c, WS-D.1 (user settings).
 
 ---
 
@@ -1091,6 +1604,8 @@ Each topic context has a local coordinate system (a frame) for the user's latent
 - Unit: computed frames are orthonormal (within numerical tolerance).
 - Unit: different topic contexts produce different frames.
 - Integration: frames feed into transport map computation (WS-H.6.2b).
+
+**Dependencies:** WS-H.6.1a.
 
 ---
 
@@ -1114,6 +1629,8 @@ Compute orthogonal transport maps `A_xy in O(n)` between topic context frames. F
 - Unit: holonomy of a non-trivial loop produces H != I.
 - Unit: gauge-invariant summaries are invariant under conjugation (Q H Q^T produces same summary).
 
+**Dependencies:** WS-H.6.2a.
+
 ---
 
 ### WS-H.6.2c PHI score computation
@@ -1121,11 +1638,11 @@ Compute orthogonal transport maps `A_xy in O(n)` between topic context frames. F
 **Ref:** Section 11.2
 
 **Description:**
-Compute `PHI(gamma) = ||log(H(gamma))||_F`. For `H in SO(n)`, the principal matrix logarithm `log(H)` is a real skew-symmetric matrix whose Frobenius norm equals `sqrt(2 * sum_k theta_k^2)` in the loop's rotation angles `theta_k`. Fallback: when `H` has eigenvalues near the negative real axis (rotation-by-pi edge case), use `||H - I||_F` instead.
+Compute `PHI(gamma) = ||log(H(gamma))||_F`. For `H in SO(n)`, the principal matrix logarithm `log(H)` is a real skew-symmetric matrix whose Frobenius norm equals `sqrt(2 * sum_k theta_k^2)` in the loop's rotation angles `theta_k`. Fallback: when `H` has eigenvalues near the negative real axis (rotation-by-pi edge case), use `||H - I||_F` instead, with reason code `MATRIX_LOG_FALLBACK`.
 
 **Acceptance criteria:**
 - PHI computed via matrix logarithm when well-defined (no eigenvalue on negative real axis).
-- Fallback `||H - I||_F` used when matrix logarithm is ill-conditioned.
+- Fallback `||H - I||_F` used when matrix logarithm is ill-conditioned; `MATRIX_LOG_FALLBACK` reason code set.
 - `PHI(gamma) = 0` when `H(gamma) = I` (flat transport).
 - PHI score stored in `InvariantOutput.score_vector` with loop path, rotation angles, and fallback flag.
 - PHI-1 satisfied: ranking computes path-risk features for recommendation sequences.
@@ -1136,6 +1653,30 @@ Compute `PHI(gamma) = ||log(H(gamma))||_F`. For `H in SO(n)`, the principal matr
 - Unit: known rotation produces expected PHI value.
 - Unit: near-pi rotation triggers fallback and produces finite PHI.
 - Unit: PHI ordering correct (larger rotations produce larger PHI).
+
+**Dependencies:** WS-H.6.2b.
+
+---
+
+### WS-H.6.2c-2 Gauge-invariance verification (PHI v2)
+**ID:** WS-H.6.2c-2
+**Ref:** Section 11.2 correctness note, 30.4 (PHI v2)
+
+**Description:**
+PHI v2 is "gauge-invariant holonomy diagnostics." Add an explicit verification layer ensuring every PHI summary used downstream is conjugation-invariant and basepoint/frame independent. The check randomly conjugates `H` by orthogonal `Q` and asserts the summary is unchanged within tolerance; it also asserts no coordinate-specific embedding value ever leaves the invariant boundary. This is the gate evidence that PHI uses gauge-invariant summaries (Section 30.4 PHI gate) and protects against accidental leakage of frame-dependent quantities.
+
+**Acceptance criteria:**
+- A verification routine conjugates `H -> Q H Q^T` for random orthogonal `Q` and asserts the PHI summary (Frobenius norm of `log H`, rotation angles, trace) is invariant within tolerance.
+- The PHI output boundary is checked to contain only gauge-invariant fields (no raw matrix entries or embedding coordinates).
+- The verification runs as part of PHI v2 promotion evidence (WS-H.1.2e) and in CI.
+- Any frame-dependent value detected at the boundary fails the build.
+
+**Testing:**
+- Unit: conjugation by random `Q` leaves the summary invariant.
+- Unit: a deliberately frame-dependent summary fails the gauge check.
+- Unit: output-boundary scan rejects raw matrix entries.
+
+**Dependencies:** WS-H.6.2c.
 
 ---
 
@@ -1158,9 +1699,36 @@ Sensitive topics (self-harm, eating disorders, medical misinformation, extremist
 - Unit: minor user thresholds are stricter than adult thresholds.
 - Integration: threshold changes propagate correctly to loop detection and wellbeing prompts.
 
+**Dependencies:** WS-H.6.2c, WS-F.1 (sensitivity labels).
+
+---
+
+### WS-H.6.2e High-holonomy loop dampening
+**ID:** WS-H.6.2e
+**Ref:** Sections 11.5, 30.4 (PHI v1)
+
+**Description:**
+Wire PHI into ranking constraints (PHI v1): no sequence should repeatedly route a user through high-risk loops without deliberate user choice; high-holonomy transitions are dampened or diversified. This is the ranking-side effect that pairs with v0 wellbeing prompts. The gate requires dampening manipulative loops without blocking intentional deep research, so deliberate user choice (e.g., explicit "show more on this") overrides dampening, and effects are reversible and logged with reason codes.
+
+**Acceptance criteria:**
+- High-holonomy transitions are dampened or diversified in ranking when PHI exceeds threshold.
+- Deliberate user choice overrides dampening (intentional deep research is not blocked).
+- Effects apply only when PHI `shadow_status` is a constraint mode; individually feature-flagged and reversible.
+- Reason codes and reversible-gate records logged per Section 30.4 PHI gate.
+- PHI-2 supported at the ranking level (complements v0 detection).
+
+**Testing:**
+- Unit: high-holonomy transition is dampened when enabled; no-op while in shadow.
+- Unit: explicit user override disables dampening for that choice.
+- Integration: repeated high-risk loop is diversified in a simulated sequence; logged with reason code.
+
+**Dependencies:** WS-H.6.2c, WS-H.1.2e, WS-I (ranking).
+
 ---
 
 ## WS-H.7 Supporting invariants
+
+> The five core invariants suffice for the primary platform. These supporting invariants add value without overcomplicating the user experience; each ships as a confidence-bearing service with the same discipline (Section 21.4): versioned outputs, invariant cards, confidence/coverage/reason-codes, graceful fallback, and shadow-before-enforcement.
 
 ### WS-H.7.1a Hodge -- simplicial complex construction
 **ID:** WS-H.7.1a
@@ -1181,29 +1749,55 @@ Represent a conversation as a simplicial complex of users, claims, and replies. 
 - Unit: edge flows correctly labeled from contribution types.
 - Performance: complex construction for 500-participant conversation within budget.
 
+**Dependencies:** WS-H.1.2a, WS-G.1 (thread/contribution data).
+
 ---
 
-### WS-H.7.1b Hodge -- decomposition, labels, and routing
+### WS-H.7.1b Hodge -- Helmholtz decomposition
 **ID:** WS-H.7.1b
 **Ref:** Section 12.1
 
 **Description:**
-Discrete Hodge (Helmholtz) decomposition splits the flow into orthogonal components: gradient (globally consistent ranking), curl (local cyclic inconsistency), and harmonic (global, irreducible cyclic conflict). Thread labels: "High disagreement, low hostility" vs "Global unresolved conflict." Moderator routing for high harmonic tension. `HarmfulTensionRisk` in PWAtt combines harmonic tension with safety classifiers -- harmonic tension alone never penalizes legitimate sustained disagreement.
+Discrete Hodge (Helmholtz) decomposition splitting the edge flow into orthogonal components: `flow = gradient + curl + harmonic`. The gradient part is a globally consistent ranking/ordering; curl is local cyclic inconsistency; harmonic is global, irreducible cyclic conflict. This task covers the decomposition and orthogonality guarantees; labels, routing, and the PWAtt penalty are WS-H.7.1c.
 
 **Acceptance criteria:**
 - Decomposition produces gradient, curl, and harmonic components.
-- Components are orthogonal (dot products near zero within numerical tolerance).
-- Thread labels assigned from component magnitudes and safety classifier outputs.
-- Moderator queue receives threads with high harmonic tension.
-- `HarmfulTensionRisk` requires both high harmonic tension AND hostility/safety signals.
-- Legitimate disagreement with low hostility is not penalized.
+- Components are orthogonal (pairwise inner products near zero within numerical tolerance).
+- Harmonic component magnitude is reported as the structural-conflict measure.
+- Decomposition handles the sparse structure of conversation complexes.
+- Output stored in score_vector with the three component magnitudes.
 
 **Testing:**
-- Unit: decomposition of known flow produces expected gradient, curl, harmonic.
+- Unit: decomposition of a known flow produces expected gradient, curl, harmonic.
 - Unit: components are orthogonal.
-- Unit: high harmonic + low hostility produces "High disagreement, low hostility" label.
-- Unit: high harmonic + high hostility produces "Global unresolved conflict" label and moderator routing.
+- Unit: a pure-gradient flow has zero curl and harmonic; a pure cycle has nonzero curl/harmonic.
+
+**Dependencies:** WS-H.7.1a.
+
+---
+
+### WS-H.7.1c Hodge -- labels, routing, and HarmfulTensionRisk
+**ID:** WS-H.7.1c
+**Ref:** Section 12.1
+
+**Description:**
+Use the decomposition to label threads and route moderators: "High disagreement, low hostility" vs "Global unresolved conflict." Moderator routing for high harmonic tension. The `HarmfulTensionRisk` penalty in PWAtt combines harmonic tension with hostility/safety classifiers -- harmonic tension alone never penalizes legitimate sustained disagreement.
+
+**Acceptance criteria:**
+- Thread labels assigned from component magnitudes and safety classifier outputs.
+- High harmonic + low hostility -> "High disagreement, low hostility" (no penalty).
+- High harmonic + high hostility -> "Global unresolved conflict" + moderator routing.
+- `HarmfulTensionRisk` requires both high harmonic tension AND hostility/safety signals.
+- Legitimate disagreement with low hostility is not penalized (verified explicitly).
+- Moderator queue receives threads with high harmonic tension and hostility.
+
+**Testing:**
+- Unit: high harmonic + low hostility produces the non-penalizing label.
+- Unit: high harmonic + high hostility produces the conflict label and routing.
+- Unit: `HarmfulTensionRisk` is zero without hostility signal even at high harmonic tension.
 - Integration: moderator queue receives routed threads.
+
+**Dependencies:** WS-H.7.1b, WS-J (moderator queue).
 
 ---
 
@@ -1217,13 +1811,15 @@ Use the min-plus (tropical) semiring to compute earliest-arrival times along spr
 **Acceptance criteria:**
 - Min-plus computation correctly produces earliest-arrival times.
 - Timing matrix constructed from cascade spread events.
-- Cascade structure summarized by tropical-rank-style features of the timing matrix (feature choice documented in invariant card).
+- Cascade structure summarized by tropical-rank-style features of the timing matrix (feature choice documented in invariant card, since several inequivalent notions of tropical rank exist).
 - Computation handles the sparse structure of typical cascade graphs.
 
 **Testing:**
 - Unit: known cascade graph produces expected earliest-arrival times.
 - Unit: min-plus algebra operations (addition = min, multiplication = plus) are correct.
 - Integration: timing matrix feeds into synchronized cascade detection (WS-H.7.2b).
+
+**Dependencies:** WS-H.1.2a, WS-E (cascade event data).
 
 ---
 
@@ -1246,6 +1842,8 @@ Detect coordinated link drops and unnatural trend timing from tropical cascade f
 - Unit: organic cascade with natural timing variance does not trigger.
 - Integration: detected cascades produce MFCI-supplementary features.
 
+**Dependencies:** WS-H.7.2a.
+
 ---
 
 ### WS-H.7.3a Braid -- strand tracking and crossing detection
@@ -1266,6 +1864,8 @@ Trending topics trace strands over time. As strands swap rank positions, crossin
 - Unit: known rank-swap sequence produces expected braid word.
 - Unit: stable rankings (no swaps) produce trivial braid.
 - Performance: tracking 50 strands over 24 hours within budget.
+
+**Dependencies:** WS-H.1.2a, WS-I (ranking position data).
 
 ---
 
@@ -1289,6 +1889,8 @@ Compute crossing number and braid (topological) entropy from the braid word. Hig
 - Unit: synthetic gaming pattern (rapid oscillation) produces high entropy and flag.
 - Integration: flags appear in steward dashboard.
 
+**Dependencies:** WS-H.7.3a.
+
 ---
 
 ### WS-H.7.4a Reeb -- scalar function and level-set construction
@@ -1308,6 +1910,8 @@ Define a scalar function over content space (e.g., engagement velocity or contro
 - Unit: known content distribution produces expected level-set components.
 - Unit: single peak produces single component at each level.
 - Unit: bimodal distribution produces two components that merge.
+
+**Dependencies:** WS-H.1.2a, WS-E (engagement data).
 
 ---
 
@@ -1331,6 +1935,8 @@ Compute the Reeb graph tracking how level-set components merge and split as the 
 - Unit: saddle point detection identifies fragile connections.
 - Integration: bridge prompts triggered at saddle points.
 
+**Dependencies:** WS-H.7.4a.
+
 ---
 
 ### WS-H.7.5a CID -- transformation group definition
@@ -1351,6 +1957,8 @@ Define the transformation group `G` for protected attributes that should not cha
 - Unit: transformations satisfy group axioms (closure, associativity, identity, inverse).
 - Unit: identity transformation produces no change.
 - Unit: transformations correctly modify the target attributes without side effects.
+
+**Dependencies:** WS-H.1.2a, WS-D.1 (user attributes).
 
 ---
 
@@ -1375,6 +1983,8 @@ Compute `CID(x,u) = E_g |R(g.x, g.u) - R(x,u)|` for each transformation group el
 - Integration: CID above threshold triggers release-gate block.
 - Integration: CID results appear in model evaluation reports.
 
+**Dependencies:** WS-H.7.5a, WS-I (ranking function), WS-P (release gate).
+
 ---
 
 ### WS-H.7.6a Path-signature -- session path and iterated integrals
@@ -1396,6 +2006,8 @@ Model session events as a path in a multi-dimensional space (dimensions: topic, 
 - Unit: identical event sets in different orders produce different signatures.
 - Privacy: signature computation input contains no content text or user-generated data.
 - Performance: signature for 200-event session computed within 50ms.
+
+**Dependencies:** WS-H.1.2a, WS-E (session event data).
 
 ---
 
@@ -1420,20 +2032,29 @@ Use path-signature features to detect unhealthy loops and improve stopping cues.
 - Integration: unhealthy classification triggers stopping cue.
 - Privacy: classification pipeline input verified to contain no content text.
 
+**Dependencies:** WS-H.7.6a.
+
 ---
 
-## Dependency Summary
+## Task dependency summary
 
 | Task | Depends on |
 |---|---|
 | WS-H.1.1a | WS-A (schema tooling), WS-E (event pipeline for invariant run events) |
 | WS-H.1.1b | WS-H.1.1a |
+| WS-H.1.1c | WS-H.1.1a |
+| WS-H.1.1d | WS-H.1.1a, WS-H.1.1c |
 | WS-H.1.2a | WS-H.1.1a |
 | WS-H.1.2b | WS-H.1.2a |
-| WS-H.1.2c | WS-H.1.2a |
-| WS-H.1.2d | WS-H.1.2a, WS-H.1.1a |
+| WS-H.1.2c | WS-H.1.2a, WS-H.1.1c |
+| WS-H.1.2c-2 | WS-H.1.2c |
+| WS-H.1.2d | WS-H.1.1d |
+| WS-H.1.2d-2 | WS-H.1.2d |
+| WS-H.1.2e | WS-H.1.2b, WS-H.1.2c |
+| WS-H.1.2f | WS-H.1.2a, WS-E (event pipeline) |
+| WS-H.1.2g | WS-H.1.2a, WS-H.1.2d-2 |
 | WS-H.2.1a | WS-H.1.2a, WS-F.1 (URL canonicalization) |
-| WS-H.2.1b | WS-H.2.1a |
+| WS-H.2.1b | WS-H.2.1a, WS-F.3.2 (embeddings) |
 | WS-H.2.2a | WS-H.2.1b, WS-F.1 (source profiles, claim extraction), WS-G.2 (rooms/lenses) |
 | WS-H.2.2b | WS-H.2.2a |
 | WS-H.2.2c | WS-H.2.2b |
@@ -1441,6 +2062,7 @@ Use path-signature features to detect unhealthy loops and improve stopping cues.
 | WS-H.2.3a | WS-H.2.2c, WS-B.2 (design system) |
 | WS-H.2.3b | WS-H.2.2c, WS-B.2 |
 | WS-H.2.3c | WS-H.2.3a, WS-D.1 (user settings) |
+| WS-H.2.4a | WS-H.2.2d, WS-H.1.1c |
 | WS-H.3.1a | WS-H.1.2a, WS-E (event pipeline) |
 | WS-H.3.1b | WS-H.3.1a |
 | WS-H.3.1c | WS-H.3.1a, WS-H.3.1b |
@@ -1451,7 +2073,9 @@ Use path-signature features to detect unhealthy loops and improve stopping cues.
 | WS-H.3.3b | WS-H.3.3a |
 | WS-H.3.3c | WS-H.3.3b |
 | WS-H.3.3d | WS-H.3.1a, WS-H.3.1b, WS-H.3.3c |
+| WS-H.3.3e | WS-H.3.3c, WS-H.1.2d |
 | WS-H.3.4a | WS-H.3.3c |
+| WS-H.3.4a-2 | WS-H.3.4a, WS-H.1.2e |
 | WS-H.3.4b | WS-H.3.4a, WS-J (trust and safety queues) |
 | WS-H.3.4c | WS-H.3.4b, WS-J (appeals system) |
 | WS-H.4.1a | WS-H.1.2a, WS-G.2.2 (lens definitions) |
@@ -1461,24 +2085,33 @@ Use path-signature features to detect unhealthy loops and improve stopping cues.
 | WS-H.4.2b | WS-H.4.2a |
 | WS-H.4.2c | WS-H.4.2b |
 | WS-H.4.2d | WS-H.4.2c, WS-G.1 (contribution system) |
+| WS-H.4.2e | WS-H.4.2c, WS-H.1.2e |
+| WS-H.4.2f | WS-H.4.2c |
 | WS-H.4.3a | WS-H.4.1b, WS-B.2 (design system) |
 | WS-H.4.3b | WS-H.4.2c, WS-B.2 |
 | WS-H.4.3c | WS-H.4.1b, WS-B.2, WS-G.3 (composer) |
+| WS-H.4.3d | WS-H.4.1b, WS-G.1 (thread structure), WS-J (moderation actions/appeals) |
 | WS-H.5.1a | WS-H.1.2a, WS-D.1 (user metadata) |
 | WS-H.5.1b | WS-H.5.1a, WS-E (event pipeline for attention data) |
-| WS-H.5.1c | WS-H.5.1b |
+| WS-H.5.1b-2 | WS-H.5.1b |
+| WS-H.5.1c | WS-H.5.1b, WS-H.5.1b-2 |
 | WS-H.5.2a | WS-H.5.1b |
 | WS-H.5.2b | WS-H.5.2a |
 | WS-H.5.2c | WS-H.5.2b, WS-P (experiment framework) |
+| WS-H.5.2d | WS-H.5.2b, WS-H.5.1b-2, WS-P (transparency reporting) |
 | WS-H.6.1a | WS-H.1.2a, WS-E (event pipeline) |
 | WS-H.6.1b | WS-H.6.1a |
-| WS-H.6.1c | WS-H.6.1b, WS-B.2 (design system), WS-D.1 (user settings) |
+| WS-H.6.1c | WS-H.6.1b, WS-B.2 (design system) |
+| WS-H.6.1c-2 | WS-H.6.1c, WS-D.1 (user settings) |
 | WS-H.6.2a | WS-H.6.1a |
 | WS-H.6.2b | WS-H.6.2a |
 | WS-H.6.2c | WS-H.6.2b |
+| WS-H.6.2c-2 | WS-H.6.2c |
 | WS-H.6.2d | WS-H.6.2c, WS-F.1 (sensitivity labels) |
+| WS-H.6.2e | WS-H.6.2c, WS-H.1.2e, WS-I (ranking) |
 | WS-H.7.1a | WS-H.1.2a, WS-G.1 (thread/contribution data) |
 | WS-H.7.1b | WS-H.7.1a |
+| WS-H.7.1c | WS-H.7.1b, WS-J (moderator queue) |
 | WS-H.7.2a | WS-H.1.2a, WS-E (cascade event data) |
 | WS-H.7.2b | WS-H.7.2a |
 | WS-H.7.3a | WS-H.1.2a, WS-I (ranking position data) |
@@ -1492,22 +2125,59 @@ Use path-signature features to detect unhealthy loops and improve stopping cues.
 
 ---
 
+## Acceptance-criterion coverage map
+
+Every SPEC invariant acceptance criterion maps to at least one task here. This table is the audit trail used at milestone review.
+
+| Criterion | Requirement (abbrev.) | Satisfying task(s) |
+|---|---|---|
+| MERI-1 | Syndicated near-duplicates do not each raise rank | WS-H.2.1a, WS-H.2.1b |
+| MERI-2 | Primary document > ten cross-quoting posts | WS-H.2.2c |
+| MERI-3 | Topic pages expose source/evidence lineage | WS-H.2.3b |
+| MERI-4 | Experiments report MERI distribution (incl. approximation rate) | WS-H.2.2d |
+| MERI-5 | MERI features explainable in user terms | WS-H.2.3a |
+| MFCI-1 | Large normal communities not penalized for volume | WS-H.3.2b |
+| MFCI-2 | Coordinated reporting delayed until reviewed | WS-H.3.4a-2, WS-H.3.4b |
+| MFCI-3 | Severe synchronization freezes within one minute | WS-H.3.1a, WS-H.3.1b, WS-H.3.3d |
+| MFCI-4 | Every action logs fixed margins + statistic | WS-H.3.2b |
+| MFCI-5 | Appeals inspect human-readable rationale | WS-H.3.4c |
+| GWEI-1 | Major launches require isometry audits | WS-H.5.2c |
+| GWEI-2 | Compare relational structure, not item overlap | WS-H.5.2b |
+| GWEI-3 | Degradation above threshold requires mitigation/sign-off | WS-H.5.2c |
+| GWEI-4 | Dashboards privacy-protected, access-controlled | WS-H.5.1c, WS-H.5.1b-2 |
+| GWEI-5 | Transparency reports publish aggregate parity | WS-H.5.2d |
+| SCOI-1 | Cross-community distribution includes context | WS-H.4.2e, WS-H.4.3a |
+| SCOI-2 | Bridge comments credited when obstruction drops | WS-H.4.2d |
+| SCOI-3 | Users inspect interpretation differences in plain language | WS-H.4.3b |
+| SCOI-4 | Moderators merge/annotate/separate by context state | WS-H.4.3d |
+| SCOI-5 | SCOI validated against human-labeled cases | WS-H.4.2c |
+| PHI-1 | Ranking computes path-risk features | WS-H.6.2c |
+| PHI-2 | High-holonomy loops dampened before dominant | WS-H.6.1b, WS-H.6.2e |
+| PHI-3 | Sensitive topics use stricter thresholds | WS-H.6.2d |
+| PHI-4 | Users reset/reduce personalization without deleting account | WS-H.6.1c-2 |
+| PHI-5 | Experiments report holonomy-risk distribution | WS-H.6.2c |
+
+---
+
 ## Workstream definition of done
 
 WS-H is complete when:
 
-1. **All 11 invariants** (MERI, MFCI, GWEI, SCOI, PHI, Hodge, Tropical, Braid, Reeb, CID, Path-signature) are implemented, conform to the `InvariantService` interface, and produce outputs stored in the `InvariantOutput` table.
-2. **Every invariant** has a complete, validated invariant card with owner, version, I/O schema, confidence bounds, known failure modes, fallback behavior, and approximation notes.
-3. **All invariants run in shadow** -- computing and logging outputs without affecting ranking. Promotion to ranking input is gated by the M3 milestone review.
-4. **Fallback framework** is operational: any invariant failure results in graceful degradation (ranking continues without it) with gap logging and monitoring alerts.
-5. **Regression harness** runs in CI and nightly, with synthetic datasets and drift detection for all invariants.
-6. **MERI acceptance criteria** MERI-1 through MERI-5 are satisfied: duplicate dampening, primary-document independence, topic-page lineage, distribution reporting, and user-facing explainability.
-7. **MFCI acceptance criteria** MFCI-1 through MFCI-5 are satisfied: base-rate conditioning, delayed enforcement, sub-minute freeze, margin logging, and appeal inspection.
-8. **SCOI acceptance criteria** SCOI-1 through SCOI-5 are satisfied: cross-community context, bridge credit, interpretation inspection, moderator tools, and human-label validation.
-9. **GWEI acceptance criteria** GWEI-1 through GWEI-5 are satisfied: launch audits, relational comparison, degradation mitigation, privacy-protected dashboards, and transparency reporting.
-10. **PHI acceptance criteria** PHI-1 through PHI-5 are satisfied: path-risk features, loop dampening, sensitive-topic thresholds, personalization reset, and experiment reporting.
-11. **Supporting invariants** produce stable outputs with confidence/coverage and feed downstream services (MFCI, ranking, moderation, wellbeing prompts) as specified.
-12. **All UI elements** (feed labels, drawers, prompts, warnings, composer interstitials) render correctly, pass accessibility checks, and use design system components.
-13. **Analyst dashboards** for MFCI, GWEI, and SCOI are operational with appropriate access controls.
-14. **Version comparison** enables A/B evaluation of invariant algorithm versions.
-15. **No invariant output carries enforcement authority in shadow mode** -- outputs are observational until explicitly promoted by milestone gate.
+1. **All 11 invariants** (MERI, MFCI, GWEI, SCOI, PHI, Hodge, Tropical, Braid, Reeb, CID, Path-signature) are implemented, conform to the `InvariantService` interface, and produce outputs stored in the `InvariantOutput` table with validated per-type `score_vector` schemas.
+2. **Every invariant** has a complete, validated invariant card with owner, version, I/O schema, confidence bounds, coverage definition, known failure modes, fallback behavior, and approximation notes.
+3. **Every output carries** confidence, coverage, reason codes, and a fallback indicator, per the cross-cutting invariant contracts.
+4. **All invariants run in shadow** -- computing and logging outputs without affecting ranking. Promotion to any constraint mode is gated by WS-H.1.2e and the M3 milestone review; no invariant carries enforcement authority while in shadow.
+5. **Fallback framework** is operational: any invariant failure results in graceful degradation (ranking continues without it) with gap logging, monitoring, and alerting.
+6. **Compute-tier orchestration** routes real-time, near-real-time, and batch methods correctly, with back-pressure protecting real-time latency.
+7. **Observability** is uniform across all invariants: confidence, coverage, compute time, fallback rate, and drift are emitted and dashboarded.
+8. **Regression harness** runs in CI and nightly, with deterministic synthetic datasets, edge cases, and drift detection for all invariants.
+9. **MERI acceptance criteria** MERI-1 through MERI-5 are satisfied: duplicate dampening, primary-document independence, topic-page lineage, distribution reporting (incl. approximation rate), and user-facing explainability.
+10. **MFCI acceptance criteria** MFCI-1 through MFCI-5 are satisfied: base-rate conditioning, delayed enforcement, sub-minute freeze, margin logging, and appeal inspection; v2 adversarial-adaptation tests pass.
+11. **SCOI acceptance criteria** SCOI-1 through SCOI-5 are satisfied: cross-community context, bridge credit, interpretation inspection, moderator merge/annotate/separate tools, and human-label validation; the v2 cohomological diagnostic is available.
+12. **GWEI acceptance criteria** GWEI-1 through GWEI-5 are satisfied: launch audits, relational comparison, degradation mitigation, privacy-protected/k-anonymized dashboards, and transparency-report export.
+13. **PHI acceptance criteria** PHI-1 through PHI-5 are satisfied: path-risk features, loop dampening (v0 prompts + v1 ranking), sensitive-topic thresholds, personalization reset, and experiment reporting; v2 gauge-invariance verification passes.
+14. **Supporting invariants** produce stable outputs with confidence/coverage and feed downstream services (MFCI, ranking, moderation, wellbeing prompts) as specified; `HarmfulTensionRisk` never penalizes low-hostility disagreement.
+15. **All UI elements** (feed labels, drawers, prompts, warnings, composer interstitials, moderator tools) render correctly, pass accessibility checks, and use design system components.
+16. **Analyst dashboards** for MFCI, GWEI, and SCOI are operational with appropriate access controls.
+17. **Version comparison** enables A/B evaluation of invariant algorithm versions, and the acceptance-criterion coverage map is verified at milestone review.
+18. **No invariant output carries enforcement authority in shadow mode** -- outputs are observational until explicitly promoted by the milestone gate, and any promoted effect is independently reversible (kill-switchable).
