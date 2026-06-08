@@ -44,6 +44,9 @@ pre-commit:
     dep-budget:
       glob: "**/package.json"
       run: pnpm check:deps
+    policy-doctrine:
+      glob: "docs/policy/*.md"
+      run: pnpm check:policy
 
 pre-push:
   parallel: true
@@ -52,3 +55,5 @@ pre-push:
       run: pnpm typecheck
     lockfile-lint:
       run: pnpm lint:lockfile
+    policy-doctrine:
+      run: pnpm check:policy

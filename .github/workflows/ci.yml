@@ -28,6 +28,7 @@ jobs:
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm biome check .
       - run: pnpm lint:security
+      - run: pnpm check:policy
 
   typecheck:
     name: Type Check
