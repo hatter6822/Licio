@@ -12,7 +12,7 @@
 | **Version** | 1.0.0 |
 | **Owner** | Licio Maintainers — Doctrine & Policy Working Group |
 | **Effective date** | 2026-06-08 |
-| **Status** | Ratified (M0 doctrine gate) |
+| **Status** | Ratified by maintainer (hatter6822) — 2026-06-08 (M0 doctrine gate) |
 | **SPEC references** | §16.3, §16.4, §25.3, §25.4 |
 | **Primary consumers** | WS-J.2 (console authz), WS-D.1 (role grants, MFA), WS-O (audit) |
 
@@ -155,4 +155,4 @@ escalation is handled by the safety lead + counsel.
 
 | Version | Date | Author | Change | Sign-off |
 |---|---|---|---|---|
-| 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified roles: 5 steward roles with role IDs, capabilities, access levels, accountability, audit fields, and a capability→action/queue mapping consistent with the WS-J console and WS-A.1.2c appeal eligibility. MFA, least-privilege, training, and irreversible-action co-approval mandated. | Reviewed and approved by Licio maintainer (M0 doctrine gate) |
+| 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified roles: 5 steward roles with role IDs, capabilities, access levels, accountability, audit fields, and a capability→action/queue mapping consistent with the WS-J console and WS-A.1.2c appeal eligibility. MFA, least-privilege, training, and irreversible-action co-approval mandated; role set cross-validated against SPEC §16.3. | Reviewed and ratified by hatter6822 (maintainer), 2026-06-08 |

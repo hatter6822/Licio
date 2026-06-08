@@ -14,7 +14,7 @@
 // scripts/policy/__tests__/validate.test.ts.
 
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 // --- Shared shapes ---------------------------------------------------------------------
 
@@ -372,6 +372,22 @@ function validateModerationTaxonomy(doc: PolicyDoc, push: Push): void {
     }
   }
 
+  // Moderation layers (WS-A.1.2b)
+  const layers = records(getArray(doc.json, 'layers'));
+  const layerNames = layers.map((l) => getString(l, 'layer'));
+  if (layerNames.length !== 6) {
+    push(`MODERATION_TAXONOMY: expected 6 moderation layers, found ${layerNames.length}`);
+  }
+  for (const l of layers) {
+    if (getStringArray(l, 'operated_by').length === 0) {
+      push(`MODERATION_TAXONOMY: layer "${getString(l, 'layer')}" has no operated_by role(s)`);
+    }
+    if (getString(l, 'escalation_trigger') === '') {
+      push(`MODERATION_TAXONOMY: layer "${getString(l, 'layer')}" has no escalation_trigger`);
+    }
+  }
+  checkProsePresence(doc, layerNames, push);
+
   // Appeal eligibility
   const appeals = records(getArray(doc.json, 'appeal_eligibility'));
   let hasNonAppealable = false;
@@ -410,6 +426,9 @@ function validateTransparencyDictionary(doc: PolicyDoc, push: Push): void {
     if (getString(m, 'privacy_threshold') === '') {
       push(`TRANSPARENCY_DICTIONARY: metric "${id}" missing privacy_threshold`);
     }
+    if (getString(m, 'aggregation') === '') {
+      push(`TRANSPARENCY_DICTIONARY: metric "${id}" missing aggregation method`);
+    }
   }
   for (const m of knomosis) {
     const id = getString(m, 'metric_id');
@@ -418,6 +437,9 @@ function validateTransparencyDictionary(doc: PolicyDoc, push: Push): void {
       push(`TRANSPARENCY_DICTIONARY: malformed Knomosis metric id "${id}"`);
     if (getString(m, 'guards_against') === '') {
       push(`TRANSPARENCY_DICTIONARY: metric "${id}" missing guards_against`);
+    }
+    if (getString(m, 'aggregation') === '') {
+      push(`TRANSPARENCY_DICTIONARY: metric "${id}" missing aggregation method`);
     }
   }
   for (const blocker of ['KM-P2RLEAK', 'KM-RECONGAP']) {
@@ -608,6 +630,33 @@ function validateJurisdictionMatrix(doc: PolicyDoc, push: Push): void {
     if (!states.includes(s)) push(`JURISDICTION_MATRIX: missing legal_review_state "${s}"`);
   }
   for (const v of expectedVocab) checkProsePresence(doc, [v], push);
+
+  // Exemplar-row composition: fail-closed + no crypto cell enabled without legal approval.
+  const vocabSet = new Set(vocab);
+  const cryptoCells = new Set(getStringArray(doc.json, 'crypto_feature_cells'));
+  for (const row of records(getArray(doc.json, 'exemplar_rows'))) {
+    const region = getString(row, 'region_code');
+    const legalStatus = getString(row, 'legal_review_status');
+    const cells = isRecord(row.cells) ? row.cells : {};
+    if (getString(cells, 'core_social') !== 'enabled') {
+      push(
+        `JURISDICTION_MATRIX: exemplar row "${region}" must keep core_social enabled (invariant 8)`,
+      );
+    }
+    for (const [feature, raw] of Object.entries(cells)) {
+      const value = typeof raw === 'string' ? raw : '';
+      if (!vocabSet.has(value)) {
+        push(
+          `JURISDICTION_MATRIX: exemplar row "${region}" cell "${feature}" value "${value}" not in vocabulary`,
+        );
+      }
+      if (cryptoCells.has(feature) && value === 'enabled' && legalStatus !== 'approved') {
+        push(
+          `JURISDICTION_MATRIX: exemplar row "${region}" enables crypto cell "${feature}" without approved legal review (fail-closed violation)`,
+        );
+      }
+    }
+  }
 }
 
 function validatePrivacyMap(doc: PolicyDoc, push: Push): void {
@@ -637,6 +686,19 @@ function validatePrivacyMap(doc: PolicyDoc, push: Push): void {
   ]) {
     if (!rightLabels.includes(required))
       push(`PRIVACY_REGULATION_MAP: missing user right "${required}"`);
+  }
+
+  // SPEC §19.2 attention-signal handling rows must each carry a default handling.
+  const handling = records(getArray(doc.json, 'attention_signal_handling'));
+  if (handling.length !== 7) {
+    push(`PRIVACY_REGULATION_MAP: expected 7 SPEC §19.2 handling rows, found ${handling.length}`);
+  }
+  for (const h of handling) {
+    if (getString(h, 'default_handling') === '') {
+      push(
+        `PRIVACY_REGULATION_MAP: handling row "${getString(h, 'data')}" missing default_handling`,
+      );
+    }
   }
 }
 
@@ -700,11 +762,12 @@ function validateCrossDoc(docs: Map<string, PolicyDoc>, push: Push): void {
       records(getArray(steward, 'roles')).map((r) => getString(r, 'role_id')),
     );
     for (const a of records(getArray(moderation.json, 'appeal_eligibility'))) {
-      const roleId = getString(a, 'role_id');
-      if (roleId !== '' && !roleIds.has(roleId)) {
-        push(
-          `CROSS: appeal action "${getString(a, 'action_type')}" reviewer "${roleId}" is not a defined steward role`,
-        );
+      const action = getString(a, 'action_type');
+      for (const key of ['role_id', 'then_role_id']) {
+        const roleId = getString(a, key);
+        if (roleId !== '' && !roleIds.has(roleId)) {
+          push(`CROSS: appeal action "${action}" ${key} "${roleId}" is not a defined steward role`);
+        }
       }
     }
     for (const match of moderation.prose.matchAll(/ROLE_[A-Z]+/g)) {
@@ -735,9 +798,306 @@ function validateCrossDoc(docs: Map<string, PolicyDoc>, push: Push): void {
   }
 }
 
+// --- SPEC cross-validation -------------------------------------------------------------
+//
+// The WS-A plan's "Testing" sections are mostly SPEC cross-references. These helpers parse
+// docs/SPEC.md so the policy documents are pinned to their authoritative source, not just
+// to hard-coded constants. SPEC v0.6 duplicates some headings/tables; the parsers dedupe.
+
+function specSection(spec: string, idLabel: string): string {
+  const lines = spec.split('\n');
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    if (line === `## ${idLabel}` || line.startsWith(`## ${idLabel} `)) {
+      start = i;
+      break;
+    }
+  }
+  if (start === -1) return '';
+  const startLine = lines[start] ?? '';
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    // Stop at the next distinct level-1/2 heading (skip duplicated headings).
+    if (/^#{1,2} /.test(line) && line !== startLine) {
+      end = i;
+      break;
+    }
+  }
+  return lines.slice(start, end).join('\n');
+}
+
+function specSubsection(sectionText: string, titleIncludes: string): string {
+  for (const chunk of sectionText.split('\n### ')) {
+    if (chunk.includes(titleIncludes)) return chunk;
+  }
+  return '';
+}
+
+function tableFirstColumn(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line.startsWith('|')) continue;
+    if (/^\|[\s:|-]+\|?$/.test(line)) continue;
+    const first = (line.split('|')[1] ?? '').trim();
+    if (first) out.push(first);
+  }
+  if (out.length === 0) return [];
+  const header = out[0];
+  return [...new Set(out.filter((v) => v !== header))];
+}
+
+function setEqual(a: string[], b: string[]): boolean {
+  const sb = new Set(b);
+  const sa = new Set(a);
+  if (sa.size !== sb.size) return false;
+  for (const v of sa) if (!sb.has(v)) return false;
+  return true;
+}
+
+function setDiff(a: string[], b: string[]): string[] {
+  const sb = new Set(b);
+  return [...new Set(a)].filter((v) => !sb.has(v));
+}
+
+function jsonNames(doc: PolicyDoc | undefined, key: string, field: string): string[] {
+  if (!doc?.json) return [];
+  return records(getArray(doc.json, key)).map((r) => getString(r, field));
+}
+
+function checkSpecSetEqual(
+  label: string,
+  docNames: string[],
+  specNames: string[],
+  push: Push,
+): void {
+  if (specNames.length === 0) {
+    push(`SPEC ${label}: could not extract the reference set from SPEC.md`);
+    return;
+  }
+  if (!setEqual(docNames, specNames)) {
+    const missing = setDiff(specNames, docNames);
+    const extra = setDiff(docNames, specNames);
+    const missingMsg = missing.length
+      ? ` | in SPEC, missing from doc: [${missing.join(', ')}]`
+      : '';
+    const extraMsg = extra.length ? ` | in doc, not in SPEC: [${extra.join(', ')}]` : '';
+    push(`SPEC ${label}: doc and SPEC disagree${missingMsg}${extraMsg}`);
+  }
+}
+
+function requireSpecKeywords(spec: string, idLabel: string, keywords: string[], push: Push): void {
+  const body = specSection(spec, idLabel).toLowerCase();
+  if (body === '') {
+    push(`SPEC §${idLabel}: section not found`);
+    return;
+  }
+  for (const kw of keywords) {
+    if (!body.includes(kw.toLowerCase())) {
+      push(`SPEC §${idLabel}: expected anchor term "${kw}" is absent (doc/SPEC drift?)`);
+    }
+  }
+}
+
+function validateAgainstSpec(docs: Map<string, PolicyDoc>, spec: string, push: Push): void {
+  // §5.3 signal categories — names must match SPEC tables exactly.
+  const s53 = specSection(spec, '5.3');
+  const sm = docs.get('SIGNAL_MATRIX')?.json;
+  if (sm) {
+    const signals = records(getArray(sm, 'signals'));
+    const namesByKind = (kind: string): string[] =>
+      signals.filter((x) => getString(x, 'kind') === kind).map((x) => getString(x, 'name'));
+    checkSpecSetEqual(
+      '§5.3 attention',
+      namesByKind('attention'),
+      tableFirstColumn(specSubsection(s53, 'Attention signals')),
+      push,
+    );
+    checkSpecSetEqual(
+      '§5.3 participation',
+      namesByKind('participation'),
+      tableFirstColumn(specSubsection(s53, 'Participation signals')),
+      push,
+    );
+    checkSpecSetEqual(
+      '§5.3 anti-signals',
+      namesByKind('anti'),
+      tableFirstColumn(specSubsection(s53, 'Anti-signals')),
+      push,
+    );
+  }
+
+  // §13.6 ranking prohibitions — anchor the prohibited-signal list.
+  requireSpecKeywords(
+    spec,
+    '13.6',
+    [
+      'likes',
+      'upvotes',
+      'wallet connection',
+      'token balance',
+      'donation amount',
+      'treasury contribution',
+      'payment receipt',
+      'governance vote',
+      'paid membership',
+    ],
+    push,
+  );
+
+  // §16.3 steward roles — set equality.
+  checkSpecSetEqual(
+    '§16.3 steward roles',
+    jsonNames(docs.get('STEWARD_ROLES'), 'roles', 'name'),
+    tableFirstColumn(specSection(spec, '16.3')),
+    push,
+  );
+
+  // §18.1 categories (anchor), §18.2 layers (set equal), §18.5 crypto modes (anchor).
+  requireSpecKeywords(
+    spec,
+    '18.1',
+    [
+      'illegal content',
+      'threats',
+      'harassment',
+      'hate',
+      'sexual exploitation',
+      'graphic',
+      'misinformation',
+      'impersonation',
+      'spam',
+      'privacy violations',
+      'synthetic-media',
+      'intellectual-property',
+    ],
+    push,
+  );
+  checkSpecSetEqual(
+    '§18.2 moderation layers',
+    jsonNames(docs.get('MODERATION_TAXONOMY'), 'layers', 'layer'),
+    tableFirstColumn(specSection(spec, '18.2')),
+    push,
+  );
+  requireSpecKeywords(
+    spec,
+    '18.5',
+    [
+      'wallet-drainer',
+      'signature prompts',
+      'impersonation',
+      'bounty collusion',
+      'vote buying',
+      'bribery',
+      'treasury capture',
+      'sanctions evasion',
+      'report-abuse',
+      'disinformation',
+      'investment claims',
+      'fraudulent grants',
+      'fabricated invoices',
+      'dao votes to reveal',
+    ],
+    push,
+  );
+
+  // §28.1 product metrics (anchor), §28.3 Knomosis (set equal), §28.2/§28.3 anti-metrics.
+  requireSpecKeywords(
+    spec,
+    '28.1',
+    [
+      'constructive-participation rate',
+      'source-open rate',
+      'evidence-addition rate',
+      'question-resolution rate',
+      'meri distribution',
+      'scoi reduction',
+      'mfci incidents',
+      'gwei cohort',
+      'phi steering-risk',
+      'harassment-protection latency',
+      'appeal-overturn rate',
+      'accessibility-defect rate',
+      'core web vitals',
+    ],
+    push,
+  );
+  checkSpecSetEqual(
+    '§28.3 Knomosis metrics',
+    jsonNames(docs.get('TRANSPARENCY_DICTIONARY'), 'knomosis_metrics', 'name'),
+    tableFirstColumn(specSection(spec, '28.3')),
+    push,
+  );
+  requireSpecKeywords(
+    spec,
+    '28.2',
+    ['likes, upvotes', 'follower leaderboards', 'rollback', 'invariant versions', 'engagement'],
+    push,
+  );
+  requireSpecKeywords(
+    spec,
+    '28.3',
+    [
+      'total value locked',
+      'tokens traded',
+      'wallet connects',
+      'speculative price',
+      'treasury size',
+    ],
+    push,
+  );
+
+  // §30.6 neutrality suite — anchor the suite-level tests.
+  requireSpecKeywords(
+    spec,
+    '30.6',
+    [
+      'feed replay',
+      'payment amount',
+      'paid membership',
+      'sponsored',
+      'ml feature audit',
+      'dashboards separate',
+      'public explanations',
+    ],
+    push,
+  );
+
+  // §17.11 crypto tiers/gates.
+  requireSpecKeywords(
+    spec,
+    '17.11',
+    ['simulated', 'testnet', 'capped', 'external audit', 'legal sign-off'],
+    push,
+  );
+
+  // §19.2 attention-signal handling — set equality.
+  checkSpecSetEqual(
+    '§19.2 attention-signal handling',
+    jsonNames(docs.get('PRIVACY_REGULATION_MAP'), 'attention_signal_handling', 'data'),
+    tableFirstColumn(specSection(spec, '19.2')),
+    push,
+  );
+
+  // §23.2 core endpoints — every cited endpoint must exist in the SPEC API list.
+  const s232 = specSection(spec, '23.2');
+  const privacy = docs.get('PRIVACY_REGULATION_MAP');
+  if (privacy?.json) {
+    for (const r of records(getArray(privacy.json, 'user_rights_endpoints'))) {
+      const ep = getString(r, 'endpoint');
+      const path = ep.replace(/^(?:GET|POST|PATCH|PUT|DELETE)\s+/, '');
+      if (path !== '' && !s232.includes(path)) {
+        push(`SPEC §23.2: endpoint "${ep}" is not in the SPEC core-endpoints list`);
+      }
+    }
+  }
+}
+
 // --- Entry point -----------------------------------------------------------------------
 
-export function validatePolicyDocs(dir: string): string[] {
+export function validatePolicyDocs(dir: string, specPath?: string): string[] {
   const errors: string[] = [];
   const push: Push = (msg) => errors.push(msg);
   const docs = loadDocs(dir);
@@ -768,6 +1128,16 @@ export function validatePolicyDocs(dir: string): string[] {
   if (privacy) validatePrivacyMap(privacy, push);
 
   validateCrossDoc(docs, push);
+
+  // SPEC cross-validation: pin the documents to docs/SPEC.md, not just internal constants.
+  const resolvedSpec = specPath ?? resolve(dir, '..', 'SPEC.md');
+  let spec = '';
+  try {
+    spec = readFileSync(resolvedSpec, 'utf-8');
+  } catch {
+    push(`SPEC: could not read ${resolvedSpec} for cross-validation`);
+  }
+  if (spec !== '') validateAgainstSpec(docs, spec, push);
 
   return errors;
 }

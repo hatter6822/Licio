@@ -13,7 +13,7 @@
 | **Version** | 1.0.0 |
 | **Owner** | Licio Maintainers — Doctrine & Policy Working Group |
 | **Effective date** | 2026-06-08 |
-| **Status** | Ratified (M0 doctrine gate) |
+| **Status** | Ratified by maintainer (hatter6822) — 2026-06-08 (M0 doctrine gate) |
 | **SPEC references** | §16.3, §16.4, §17.10, §18.1–§18.5, §25.6, §29.3 |
 | **Primary consumers** | WS-J (T&S), WS-G.4 (UGC safety), WS-P (transparency), WS-N (compliance) |
 
@@ -41,20 +41,20 @@ severity drawn from this table and inherits that severity's SLA.
 
 ### The 12 policy categories (SPEC §18.1)
 
-| # | Category ID | Category | Severity range | Required evidence | Escalation trigger |
-|---|---|---|---|---|---|
-| 1 | `MOD_ILLEGAL` | Illegal content | severe – critical | Identification of the violated law and the viewer/poster jurisdiction | Routes to external escalation; law-enforcement or court order |
-| 2 | `MOD_THREAT` | Credible threats and incitement | critical | The threatening statement and its target; assessment of credibility/imminence | Imminent danger → external escalation; safety lead + counsel |
-| 3 | `MOD_HARASS` | Harassment and targeted abuse | minor – severe | Pattern of targeting, target identification, prior-warning history | Sustained pattern or cross-room targeting → professional moderation |
-| 4 | `MOD_HATE` | Hate and dehumanization | moderate – critical | The attacking content and the protected characteristic targeted | Incitement to violence → external escalation |
-| 5 | `MOD_CSE` | Sexual exploitation and child safety | critical | Reviewer confirmation under strict handling; no copies retained beyond legal need | **Immediate** external escalation (child-safety + law enforcement) |
-| 6 | `MOD_GRAPHIC` | Graphic or shocking content | moderate – severe | The content and context (gratuitous vs. newsworthy); self-harm intent | Self-harm instruction/promotion → professional moderation + safety resources |
-| 7 | `MOD_MISINFO` | Medical, civic, and crisis misinformation | moderate – severe | The false claim, the authoritative counter-source, and an imminent-harm assessment | Imminent-harm criteria met → professional moderation; crisis protocol |
-| 8 | `MOD_IMPERS` | Impersonation and deceptive identity | moderate – severe | Comparison to the impersonated person/organization/official entity | Official-entity or high-risk impersonation → professional moderation |
-| 9 | `MOD_SPAM` | Spam and platform manipulation | minor – severe | Volume/velocity/similarity signals; coordination evidence | Coordinated inauthentic behavior → integrity review (MFCI) |
-| 10 | `MOD_PRIVACY` | Privacy violations and doxxing | moderate – critical | The published private information and absence of consent | Sensitive data (medical, minor, security) → severe/critical, professional moderation |
-| 11 | `MOD_SYNTH` | Synthetic-media disclosure | minor – severe | The media, the absence of disclosure, and deceptive/harmful intent | Non-consensual synthetic intimate imagery → severe, professional moderation |
-| 12 | `MOD_IP` | Intellectual-property reports | minor – moderate | A rights claim and identification of the protected work | Repeat infringement or counter-notice dispute → professional moderation |
+| # | Category ID | Category | Description | Severity range | Required evidence | Escalation trigger | Illustrative examples |
+|---|---|---|---|---|---|---|---|
+| 1 | `MOD_ILLEGAL` | Illegal content | Content violating applicable law in the jurisdiction of viewer or poster | severe – critical | Identification of the violated law and the viewer/poster jurisdiction | Routes to external escalation; law-enforcement or court order | Sale of contraband; sanctioned-party transactions; content under a valid court-removal order |
+| 2 | `MOD_THREAT` | Credible threats and incitement | Direct threats of violence; incitement to imminent lawless action | critical | The threatening statement and its target; assessment of credibility/imminence | Imminent danger → external escalation; safety lead + counsel | "I will kill you at \<address\>"; calls to storm a venue now |
+| 3 | `MOD_HARASS` | Harassment and targeted abuse | Targeted, sustained hostility against individuals or small groups | minor – severe | Pattern of targeting, target identification, prior-warning history | Sustained pattern or cross-room targeting → professional moderation | Coordinated pile-on; repeated unwanted contact; off-platform-organized targeting |
+| 4 | `MOD_HATE` | Hate and dehumanization | Attacks on people based on protected characteristics | moderate – critical | The attacking content and the protected characteristic targeted | Incitement to violence → external escalation | Dehumanizing slurs; "\<group\> are vermin"; calls for violence against a protected class |
+| 5 | `MOD_CSE` | Sexual exploitation and child safety | CSAM, grooming, sextortion, non-consensual intimate imagery | critical | Reviewer confirmation under strict handling; no copies retained beyond legal need | **Immediate** external escalation (child-safety + law enforcement) | Child sexual abuse material; grooming messages; sextortion |
+| 6 | `MOD_GRAPHIC` | Graphic or shocking content | Gratuitous violence, gore, self-harm instruction or promotion | moderate – severe | The content and context (gratuitous vs. newsworthy); self-harm intent | Self-harm instruction/promotion → professional moderation + safety resources | Gratuitous gore; pro-self-harm content; self-harm method instructions |
+| 7 | `MOD_MISINFO` | Medical, civic, and crisis misinformation | Provably false claims about health, voting, emergencies causing imminent harm | moderate – severe | The false claim, the authoritative counter-source, and an imminent-harm assessment | Imminent-harm criteria met → professional moderation; crisis protocol | "Bleach cures X"; false polling-place closures during an election; fake evacuation orders |
+| 8 | `MOD_IMPERS` | Impersonation and deceptive identity | Pretending to be another person, organization, or official entity | moderate – severe | Comparison to the impersonated person/organization/official entity | Official-entity or high-risk impersonation → professional moderation | Fake "official" account; cloned journalist profile; spoofed support handle |
+| 9 | `MOD_SPAM` | Spam and platform manipulation | Automated posting, fake engagement, coordinated inauthentic behavior | minor – severe | Volume/velocity/similarity signals; coordination evidence | Coordinated inauthentic behavior → integrity review (MFCI) | Bot-posted link floods; purchased fake activity; sock-puppet rings |
+| 10 | `MOD_PRIVACY` | Privacy violations and doxxing | Publishing private information without consent | moderate – critical | The published private information and absence of consent | Sensitive data (medical, minor, security) → severe/critical, professional moderation | Posting someone's home address; leaking medical records; non-consensual contact details |
+| 11 | `MOD_SYNTH` | Synthetic-media disclosure | AI-generated/manipulated media presented without disclosure | minor – severe | The media, the absence of disclosure, and deceptive/harmful intent | Non-consensual synthetic intimate imagery → severe, professional moderation | Undisclosed deepfake; manipulated video presented as real; synthetic "quote" |
+| 12 | `MOD_IP` | Intellectual-property reports | Copyright, trademark, or other IP infringement claims | minor – moderate | A rights claim and identification of the protected work | Repeat infringement or counter-notice dispute → professional moderation | DMCA-style copyright claim; trademark misuse; repeat infringement |
 
 ### Representative reason codes per namespace (≥ 3 per category)
 
@@ -289,17 +289,25 @@ Representative reason codes (one per mode shown; namespaces extend as needed):
     { "mode_id": "MOD_CRYPTO_INVOICE", "name": "Fabricated invoices" },
     { "mode_id": "MOD_CRYPTO_DAOREVEAL", "name": "DAO vote to reveal private info" }
   ],
+  "layers": [
+    { "layer": "User controls", "operated_by": ["end-user"], "escalation_trigger": "User initiates report" },
+    { "layer": "Automated pre-checks", "operated_by": ["system"], "escalation_trigger": "Automated flag exceeds threshold; policy-risk routes to a human (never auto-removed)" },
+    { "layer": "Community stewardship", "operated_by": ["ROLE_COMMUNITY", "ROLE_EVIDENCE"], "escalation_trigger": "Steward cannot resolve; policy violation suspected" },
+    { "layer": "Professional moderation", "operated_by": ["ROLE_SAFETY", "ROLE_APPEALS"], "escalation_trigger": "Severity >= severe; legal risk; cross-room pattern" },
+    { "layer": "Integrity review", "operated_by": ["ROLE_INTEGRITY"], "escalation_trigger": "MFCI flag; multi-account pattern; financial-fraud signal" },
+    { "layer": "External escalation", "operated_by": ["safety-lead", "counsel"], "escalation_trigger": "Imminent physical danger; CSAM; law-enforcement request" }
+  ],
   "appeal_eligibility": [
     { "action_type": "Warn", "appealable": true, "role_id": "ROLE_APPEALS" },
     { "action_type": "Hide (content)", "appealable": true, "role_id": "ROLE_APPEALS" },
-    { "action_type": "Remove (content)", "appealable": true, "role_id": "ROLE_APPEALS" },
+    { "action_type": "Remove (content)", "appealable": true, "role_id": "ROLE_APPEALS", "exceptions": ["MOD_CSE", "imminent-threat"] },
     { "action_type": "Restrict (account, temporary)", "appealable": true, "role_id": "ROLE_APPEALS" },
-    { "action_type": "Shadow action (reduced distribution)", "appealable": true, "role_id": "ROLE_APPEALS" },
+    { "action_type": "Shadow action (reduced distribution)", "appealable": true, "role_id": "ROLE_APPEALS", "requires_user_notice": true },
     { "action_type": "Temporary suspension", "appealable": true, "role_id": "ROLE_APPEALS" },
-    { "action_type": "Permanent ban", "appealable": true, "role_id": "ROLE_APPEALS" },
-    { "action_type": "Emergency restriction", "appealable": false, "role_id": "ROLE_SAFETY" },
+    { "action_type": "Permanent ban", "appealable": true, "role_id": "ROLE_APPEALS", "senior": true },
+    { "action_type": "Emergency restriction", "appealable": false, "role_id": "ROLE_SAFETY", "then_role_id": "ROLE_APPEALS", "deferred": true },
     { "action_type": "Room governance freeze", "appealable": true, "role_id": "ROLE_INTEGRITY" },
-    { "action_type": "Treasury freeze", "appealable": true, "role_id": "ROLE_INTEGRITY" }
+    { "action_type": "Treasury freeze", "appealable": true, "role_id": "ROLE_INTEGRITY", "co_approver": "counsel" }
   ]
 }
 ```
@@ -310,4 +318,4 @@ Representative reason codes (one per mode shown; namespaces extend as needed):
 
 | Version | Date | Author | Change | Sign-off |
 |---|---|---|---|---|
-| 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified taxonomy: 12 policy categories with severity/SLA/evidence/escalation/reason codes (WS-A.1.2a), 6 moderation layers and SPEC §29.3-aligned escalation path (WS-A.1.2b), 10-row appeal-eligibility matrix (WS-A.1.2c), 15 crypto abuse modes with the DAO-reveal privacy override (WS-A.1.2d). Machine-readable enumeration with 51 reason codes. | Reviewed and approved by Licio maintainer (M0 doctrine gate) |
+| 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified taxonomy: 12 policy categories with description/examples/severity/SLA/evidence/escalation/reason codes (WS-A.1.2a), 6 moderation layers and SPEC §29.3-aligned escalation path (WS-A.1.2b), 10-row appeal-eligibility matrix (WS-A.1.2c), 15 crypto abuse modes with the DAO-reveal privacy override (WS-A.1.2d). Machine-readable enumeration with 51 reason codes plus layers; categories, layers, and crypto modes cross-validated against SPEC §18.1/§18.2/§18.5. | Reviewed and ratified by hatter6822 (maintainer), 2026-06-08 |

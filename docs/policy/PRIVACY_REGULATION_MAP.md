@@ -13,7 +13,7 @@
 | **Version** | 1.0.0 |
 | **Owner** | Licio Maintainers — Doctrine & Policy Working Group |
 | **Effective date** | 2026-06-08 |
-| **Status** | Drafted — **pending legal-counsel review** |
+| **Status** | Ratified by maintainer (hatter6822) — 2026-06-08; **pending legal-counsel review** |
 | **SPEC references** | §17.10, §19.1, §19.2, §19.3, §19.4, §19.5 |
 | **Primary consumers** | WS-D.2 (privacy controls), WS-E.1 (event retention), WS-N (compliance) |
 
@@ -70,6 +70,23 @@ matrix and user-rights mapping.
 
 ---
 
+## Attention-signal handling (SPEC §19.2)
+
+The default handling for each raw attention-signal type. This table reproduces SPEC §19.2
+verbatim so the privacy controls (WS-D.2) and event-retention jobs (WS-E.1) implement
+exactly the documented minimization posture. It is **consistent with** — and more granular
+than — the per-jurisdiction matrix below, whose "Attention signals" row aggregates these.
+
+| Data | Default handling |
+|---|---|
+| Raw scroll/touch events | Process in the browser; discard after feature extraction |
+| Active dwell estimate | Upload aggregated per item/session with caps |
+| Source opens | Upload event with item/source ID; no full browsing history outside the app |
+| Context opens | Upload aggregate; used for ranking and UI improvement |
+| Draft text | Stored locally (IndexedDB); synced encrypted if the user enables sync |
+| Private saves | Private; low/no ranking effect unless the user opts into an aggregate signal |
+| Sensitive-topic interest | Protected; shorter retention and stricter use limits |
+
 ## Per-jurisdiction data-handling matrix
 
 | Data category | GDPR handling | CCPA/CPRA handling | COPPA handling |
@@ -124,6 +141,15 @@ retention schedule; raw event logs use the shortest feasible tier.
   "version": "1.0.0",
   "legal_review_status": "pending",
   "regulations": ["GDPR", "CCPA/CPRA", "COPPA"],
+  "attention_signal_handling": [
+    { "data": "Raw scroll/touch events", "default_handling": "Process in the browser; discard after feature extraction" },
+    { "data": "Active dwell estimate", "default_handling": "Upload aggregated per item/session with caps" },
+    { "data": "Source opens", "default_handling": "Upload event with item/source ID; no full browsing history outside the app" },
+    { "data": "Context opens", "default_handling": "Upload aggregate; used for ranking and UI improvement" },
+    { "data": "Draft text", "default_handling": "Stored locally (IndexedDB); synced encrypted if the user enables sync" },
+    { "data": "Private saves", "default_handling": "Private; low/no ranking effect unless the user opts into an aggregate signal" },
+    { "data": "Sensitive-topic interest", "default_handling": "Protected; shorter retention and stricter use limits" }
+  ],
   "data_categories": [
     { "category": "Attention signals (dwell, scroll)" },
     { "category": "Participation signals (contributions)" },
@@ -150,4 +176,4 @@ retention schedule; raw event logs use the shortest feasible tier.
 
 | Version | Date | Author | Change | Sign-off |
 |---|---|---|---|---|
-| 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial draft: GDPR, CCPA/CPRA, COPPA mapped to 6 data categories; per-jurisdiction data-handling matrix; legal basis per activity; minor exclusion from financial features; user rights mapped to endpoints; SPEC §19.5 on-chain minimization restated and cross-referenced to the DAO-reveal override. | **Pending legal-counsel review** (per WS-A.2.3 acceptance criteria) |
+| 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial version: GDPR, CCPA/CPRA, COPPA mapped to 6 data categories; SPEC §19.2 attention-signal handling table (7 rows) reproduced and cross-validated; per-jurisdiction data-handling matrix; legal basis per activity; minor exclusion from financial features; user rights mapped to endpoints cross-validated against SPEC §23.2; SPEC §19.5 on-chain minimization restated and cross-referenced to the DAO-reveal override. | Ratified by hatter6822 (maintainer), 2026-06-08; **pending legal-counsel review** (per WS-A.2.3 acceptance criteria) |

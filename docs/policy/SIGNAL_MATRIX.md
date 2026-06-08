@@ -14,7 +14,7 @@
 | **Version** | 1.0.0 |
 | **Owner** | Licio Maintainers — Doctrine & Policy Working Group |
 | **Effective date** | 2026-06-08 |
-| **Status** | Ratified (M0 doctrine gate) |
+| **Status** | Ratified by maintainer (hatter6822) — 2026-06-08 (M0 doctrine gate) |
 | **SPEC references** | §2.4, §5.2, §5.3, §13.6, §19.3, §30.6 |
 | **Primary consumers** | WS-E.2 (PWAtt), WS-H (invariants), WS-I.2 (feature store), WS-I.3 (neutrality suite) |
 
@@ -216,4 +216,4 @@ ambiguous cases.
 
 | Version | Date | Author | Change | Sign-off |
 |---|---|---|---|---|
-| 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified Signal Matrix: 7 attention + 8 participation allowlist signals (WS-A.1.1a), 14 prohibited signals with RNT→suite mapping (WS-A.1.1b), 7 base-rate-conditioned anti-signals (WS-A.1.1c). Signal-ID classes verified disjoint. | Reviewed and approved by Licio maintainer (M0 doctrine gate) |
+| 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified Signal Matrix: 7 attention + 8 participation allowlist signals (WS-A.1.1a), 14 prohibited signals with RNT→suite mapping (WS-A.1.1b), 7 base-rate-conditioned anti-signals (WS-A.1.1c). Signal-ID classes verified disjoint; signal names cross-validated against SPEC §5.3. | Reviewed and ratified by hatter6822 (maintainer), 2026-06-08 |

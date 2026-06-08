@@ -41,9 +41,23 @@ Every document upholds these non-negotiable invariants (SPEC references in each 
 
 These documents are **continuously validated** by `scripts/check-policy.ts` (pure logic
 in `scripts/policy/validate.ts`), which enforces the "Testing" assertions from the WS-A
-plan: coverage counts, ID disjointness and naming, severity↔SLA consistency, the bijective
-`RNT ↔ signal ↔ suite` mapping, closed cell vocabularies, cross-document reference
-integrity, and prose↔machine-readable consistency.
+plan at three levels:
+
+1. **Intra-document** — coverage counts, ID disjointness and naming, severity↔SLA
+   consistency, reason-code namespacing, the 6 moderation layers, aggregation-method
+   presence, and prose↔machine-readable consistency (every ID in the canonical JSON block
+   appears in prose, and vice versa).
+2. **Cross-document** — the bijective `RNT ↔ signal ↔ suite` mapping between the signal
+   matrix and the test map; appeal reviewers and moderation-layer roles resolving to
+   defined steward roles; crypto-tier default states drawn from the jurisdiction cell
+   vocabulary; jurisdiction exemplar rows respecting the fail-closed crypto gates.
+3. **Against `SPEC.md`** — signal names (§5.3), steward roles (§16.3), moderation layers
+   (§18.2), Knomosis metrics (§28.3), and attention-signal handling (§19.2) are checked for
+   **set-equality** with the authoritative SPEC tables; policy categories (§18.1), crypto
+   abuse modes (§18.5), product metrics (§28.1), prohibitions (§13.6), anti-metrics (§28.2/
+   §28.3), the neutrality suite (§30.6), and crypto tiers (§17.11) are anchored by keyword;
+   and cited API endpoints are verified to exist in §23.2. This pins the documents to their
+   source of truth so doc-vs-SPEC drift fails the gate.
 
 ```sh
 pnpm check:policy   # CLI gate (also runs in CI lint job + lefthook hooks)

@@ -14,7 +14,7 @@
 | **Version** | 1.0.0 |
 | **Owner** | Licio Maintainers — Doctrine & Policy Working Group |
 | **Effective date** | 2026-06-08 |
-| **Status** | Template ratified (populated rows require legal review) |
+| **Status** | Template ratified by maintainer (hatter6822) — 2026-06-08; populated rows require legal review |
 | **SPEC references** | §17.10, §30.3-N |
 | **Primary consumers** | WS-N (jurisdiction engine), WS-L/WS-M (feature gating), WS-D.1.7 (age gating) |
 
@@ -142,6 +142,51 @@ social `enabled`, all crypto features `disabled`. No exemplar cell enables a fea
     "consumer_risk_disclosure_requirement",
     "disabled_region_fallback_ux_ref",
     "notes"
+  ],
+  "crypto_feature_cells": [
+    "wallet_connection",
+    "testnet_transactions",
+    "production_payments",
+    "treasury_operations",
+    "governance"
+  ],
+  "exemplar_rows": [
+    {
+      "region_code": "US-CA",
+      "legal_review_status": "pending",
+      "cells": {
+        "core_social": "enabled",
+        "wallet_connection": "pending-legal",
+        "testnet_transactions": "disabled",
+        "production_payments": "pending-legal",
+        "treasury_operations": "disabled",
+        "governance": "disabled"
+      }
+    },
+    {
+      "region_code": "EU",
+      "legal_review_status": "in-progress",
+      "cells": {
+        "core_social": "enabled",
+        "wallet_connection": "pending-legal",
+        "testnet_transactions": "testnet",
+        "production_payments": "pending-legal",
+        "treasury_operations": "disabled",
+        "governance": "disabled"
+      }
+    },
+    {
+      "region_code": "XX",
+      "legal_review_status": "pending",
+      "cells": {
+        "core_social": "enabled",
+        "wallet_connection": "disabled",
+        "testnet_transactions": "disabled",
+        "production_payments": "disabled",
+        "treasury_operations": "disabled",
+        "governance": "disabled"
+      }
+    }
   ]
 }
 ```
@@ -152,4 +197,4 @@ social `enabled`, all crypto features `disabled`. No exemplar cell enables a fea
 
 | Version | Date | Author | Change | Sign-off |
 |---|---|---|---|---|
-| 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified template: 8 feature-category columns, 12 jurisdiction-row fields, closed 6-value cell vocabulary, crypto-disabled fail-closed default, and exemplar rows. Composes without contradiction with `CRYPTO_FEATURE_MATRIX.md`. **Populated jurisdiction rows require legal-counsel review before activation.** | Template approved by Licio maintainer (M0 doctrine gate); populated rows pending legal review |
+| 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified template: 8 feature-category columns, 12 jurisdiction-row fields, closed 6-value cell vocabulary, crypto-disabled fail-closed default, and machine-readable exemplar rows whose composition is validated against the crypto-tier gates (no crypto cell `enabled` without `approved` legal review; core social always `enabled`). Composes without contradiction with `CRYPTO_FEATURE_MATRIX.md`. **Populated jurisdiction rows require legal-counsel review before activation.** | Template ratified by hatter6822 (maintainer), 2026-06-08; populated rows pending legal-counsel review |

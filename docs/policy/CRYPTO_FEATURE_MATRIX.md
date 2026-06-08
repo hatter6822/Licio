@@ -12,7 +12,7 @@
 | **Version** | 1.0.0 |
 | **Owner** | Licio Maintainers — Doctrine & Policy Working Group |
 | **Effective date** | 2026-06-08 |
-| **Status** | Ratified (M0 doctrine gate) |
+| **Status** | Ratified by maintainer (hatter6822) — 2026-06-08 (M0 doctrine gate) |
 | **SPEC references** | §17.10, §17.11, §25.6, §30.3-N |
 | **Primary consumers** | WS-L/WS-M (Knomosis), WS-N (jurisdiction engine), WS-C.1.3 (default-off flags) |
 
@@ -141,4 +141,4 @@ all of them.
 
 | Version | Date | Author | Change | Sign-off |
 |---|---|---|---|---|
-| 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified matrix: 5 tiers (`CRYPTO_T0`–`T4`) with fail-closed defaults, 10 per-tier requirements, SPEC §17.11 production-gate checklist blocking unmet promotions, and fail-closed behavior including kill-switch engagement with core-social independence. Default states drawn from the `JURISDICTION_MATRIX.md` cell vocabulary. | Reviewed and approved by Licio maintainer (M0 doctrine gate) |
+| 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified matrix: 5 tiers (`CRYPTO_T0`–`T4`) with fail-closed defaults, 10 per-tier requirements, SPEC §17.11 production-gate checklist blocking unmet promotions, and fail-closed behavior including kill-switch engagement with core-social independence. Default states drawn from the `JURISDICTION_MATRIX.md` cell vocabulary; tiers anchored to SPEC §17.11. | Reviewed and ratified by hatter6822 (maintainer), 2026-06-08 |

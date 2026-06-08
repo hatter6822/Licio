@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { POLICY_FILES, loadDocs, validatePolicyDocs } from '../validate.ts';
 
 const POLICY_DIR = resolve(import.meta.dirname, '../../../docs/policy');
+const SPEC_PATH = resolve(POLICY_DIR, '..', 'SPEC.md');
 
 /** Copy the real policy docs into a throwaway dir and apply a single mutation. */
 function withMutatedDocs(file: string, mutate: (raw: string) => string): string[] {
@@ -14,7 +15,8 @@ function withMutatedDocs(file: string, mutate: (raw: string) => string): string[
     cpSync(POLICY_DIR, tmp, { recursive: true });
     const target = join(tmp, file);
     writeFileSync(target, mutate(readFileSync(target, 'utf-8')), 'utf-8');
-    return validatePolicyDocs(tmp);
+    // Cross-validate against the real SPEC so mutations are tested under full rules.
+    return validatePolicyDocs(tmp, SPEC_PATH);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -105,5 +107,51 @@ describe('validator catches regressions', () => {
       raw.replace(/"role_id": "ROLE_INTEGRITY"/g, '"role_id": "ROLE_INTEGRITYX"'),
     );
     expect(errors.some((e) => e.includes('ROLE_INTEGRITY'))).toBe(true);
+  });
+
+  it('flags a transparency metric missing its aggregation method', () => {
+    const errors = withMutatedDocs(POLICY_FILES.TRANSPARENCY_DICTIONARY, (raw) =>
+      raw.replace('"aggregation": "Ratio (source opens / views)", ', ''),
+    );
+    expect(errors.some((e) => e.includes('missing aggregation method'))).toBe(true);
+  });
+
+  it('flags a moderation layer dropped from the enumeration', () => {
+    const errors = withMutatedDocs(POLICY_FILES.MODERATION_TAXONOMY, (raw) =>
+      raw.replace(
+        '    { "layer": "Integrity review", "operated_by": ["ROLE_INTEGRITY"], "escalation_trigger": "MFCI flag; multi-account pattern; financial-fraud signal" },\n',
+        '',
+      ),
+    );
+    expect(errors.some((e) => e.includes('6 moderation layers'))).toBe(true);
+  });
+
+  it('flags an exemplar jurisdiction row that enables a crypto cell without legal approval', () => {
+    const errors = withMutatedDocs(POLICY_FILES.JURISDICTION_MATRIX, (raw) =>
+      raw.replace(
+        '"region_code": "US-CA",\n      "legal_review_status": "pending",\n      "cells": {\n        "core_social": "enabled",\n        "wallet_connection": "pending-legal"',
+        '"region_code": "US-CA",\n      "legal_review_status": "pending",\n      "cells": {\n        "core_social": "enabled",\n        "wallet_connection": "enabled"',
+      ),
+    );
+    expect(errors.some((e) => e.includes('fail-closed violation'))).toBe(true);
+  });
+
+  it('flags doc/SPEC drift when a signal name no longer matches SPEC §5.3', () => {
+    const errors = withMutatedDocs(POLICY_FILES.SIGNAL_MATRIX, (raw) =>
+      raw.replace('"name": "Active dwell"', '"name": "Passive dwell"'),
+    );
+    expect(errors.some((e) => e.includes('SPEC §5.3 attention'))).toBe(true);
+  });
+
+  it('flags a privacy doc missing a SPEC §19.2 handling row', () => {
+    const errors = withMutatedDocs(POLICY_FILES.PRIVACY_REGULATION_MAP, (raw) =>
+      raw.replace(
+        '    { "data": "Context opens", "default_handling": "Upload aggregate; used for ranking and UI improvement" },\n',
+        '',
+      ),
+    );
+    expect(
+      errors.some((e) => e.includes('§19.2') && (e.includes('7') || e.includes('disagree'))),
+    ).toBe(true);
   });
 });

@@ -14,7 +14,7 @@
 | **Version** | 1.0.0 |
 | **Owner** | Licio Maintainers — Doctrine & Policy Working Group |
 | **Effective date** | 2026-06-08 |
-| **Status** | Ratified (M0 doctrine gate) |
+| **Status** | Ratified by maintainer (hatter6822) — 2026-06-08 (M0 doctrine gate) |
 | **SPEC references** | §13.6, §30.6 |
 | **Primary consumer** | WS-I.3 (ranking-neutrality verification suite) |
 
@@ -139,4 +139,4 @@ Test methods are one of: *feed replay*, *schema audit*, *feature inspection*, or
 
 | Version | Date | Author | Change | Sign-off |
 |---|---|---|---|---|
-| 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified map: 14 signal-level neutrality tests (`RNT-001`–`RNT-014`) bijectively reconciled with `SIGNAL_MATRIX.md` prohibited signals and `WS-I.3.1*` suite tests, plus 4 suite-level tests (`WS-I.3.1g`–`j`). Per-test method/setup/assertion/frequency/failure-action specified. | Reviewed and approved by Licio maintainer (M0 doctrine gate) |
+| 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified map: 14 signal-level neutrality tests (`RNT-001`–`RNT-014`) bijectively reconciled with `SIGNAL_MATRIX.md` prohibited signals and `WS-I.3.1*` suite tests, plus 4 suite-level tests (`WS-I.3.1g`–`j`). Per-test method/setup/assertion/frequency/failure-action specified; suite anchored to SPEC §30.6. | Reviewed and ratified by hatter6822 (maintainer), 2026-06-08 |
