@@ -16,6 +16,7 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "lint:security": "tsx scripts/lint-security.ts",
+    "check:no-applause": "tsx scripts/check-no-applause.ts",
     "lint:lockfile": "tsx scripts/check-lockfile.ts",
     "typecheck": "tsc -b",
     "check:deps": "tsx scripts/check-dep-budget.ts",
