@@ -24,8 +24,9 @@ docs/           # Specification and planning documents
 
 - `pnpm dev` — start web and api dev servers concurrently
 - `pnpm build` — build all workspaces in dependency order
-- `pnpm test` — run unit tests (Vitest) across all workspaces
-- `pnpm test:e2e` — run Playwright E2E tests
+- `pnpm test` — run unit tests (Vitest) across all workspaces (80% coverage threshold enforced)
+- `pnpm test -- --coverage` — run unit tests with coverage report
+- `pnpm test:e2e` — run Playwright E2E tests (Chromium, Firefox, WebKit) with axe-core a11y checks
 - `pnpm lint` — run Biome check across all workspaces
 - `pnpm lint:fix` — auto-fix lint issues
 - `pnpm lint:lockfile` — validate lockfile integrity

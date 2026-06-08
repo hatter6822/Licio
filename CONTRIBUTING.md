@@ -42,8 +42,9 @@ No PR merges with a failing CI gate. The following jobs must all pass:
 - **typecheck**: TypeScript strict mode across all workspaces
 - **lockfile-lint**: Lockfile integrity (registry and integrity hash validation)
 - **dep-budget**: Dependency budget enforcement (`apps/web` < 15, `apps/api` < 20)
-- **test**: Unit tests with 80% coverage threshold
+- **test**: Unit tests with 80% coverage threshold (lines, functions, branches, statements)
 - **build-and-size**: Build validation (zero inline scripts/styles) and bundle-size budget
+- **e2e**: Playwright E2E tests across Chromium, Firefox, WebKit with axe-core WCAG 2.2 AA checks
 - **security**: Dependency audit, secret scan, SBOM generation
 
 ## Adding Dependencies
