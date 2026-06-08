@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { afterEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
-import { getTokenStore, setSessionCookie } from '../middleware/csrf.js';
+import {
+  type TokenStore,
+  getTokenStore,
+  setSessionCookie,
+  setTokenStore,
+} from '../middleware/csrf.js';
 
 describe('CSRF protection', () => {
   afterEach(async () => {
@@ -171,5 +176,86 @@ describe('CSRF protection', () => {
     expect(res.status).toBe(401);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('No session');
+  });
+
+  it('rejects an expired CSRF token', async () => {
+    const store = getTokenStore();
+    await store.set('session-expired', {
+      token: 'b'.repeat(64),
+      expiresAt: Date.now() - 1000,
+    });
+
+    const app = createApp();
+    const res = await app.request('/api/csrf-token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: '__Host-session=session-expired',
+        'X-CSRF-Token': 'b'.repeat(64),
+      },
+      body: '{}',
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('CSRF token expired');
+  });
+
+  it('rejects a token with different length via constant-time compare', async () => {
+    const store = getTokenStore();
+    await store.set('session-len', {
+      token: 'c'.repeat(64),
+      expiresAt: Date.now() + 60_000,
+    });
+
+    const app = createApp();
+    const res = await app.request('/api/csrf-token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: '__Host-session=session-len',
+        'X-CSRF-Token': 'short',
+      },
+      body: '{}',
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('supports setTokenStore to swap store implementation', async () => {
+    const customStore: TokenStore = {
+      async get() {
+        return { token: 'x'.repeat(64), expiresAt: Date.now() + 60_000 };
+      },
+      async set() {},
+      async delete() {},
+      async clear() {},
+    };
+    setTokenStore(customStore);
+
+    const app = createApp();
+    const res = await app.request('/api/csrf-token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: '__Host-session=custom-session',
+        'X-CSRF-Token': 'x'.repeat(64),
+      },
+      body: '{}',
+    });
+    expect(res.status).not.toBe(403);
+  });
+
+  it('handles PATCH and DELETE as state-changing methods', async () => {
+    const app = createApp();
+    for (const method of ['PATCH', 'DELETE']) {
+      const res = await app.request('/api/csrf-token', {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: '__Host-session=test-methods',
+        },
+        body: method === 'DELETE' ? undefined : '{}',
+      });
+      expect(res.status).toBe(403);
+    }
   });
 });
