@@ -25,7 +25,7 @@ pre-commit:
 
         # Scan staged content for secret patterns
         CONTENT=$(git diff --cached -U0 --diff-filter=ACM -- $FILES 2>/dev/null || true)
-        if echo "$CONTENT" | grep -qE '-----BEGIN[[:space:]]+(RSA|EC|DSA|OPENSSH|PGP)?[[:space:]]*PRIVATE KEY-----'; then
+        if echo "$CONTENT" | grep -qE -- '-----BEGIN[[:space:]]+(RSA|EC|DSA|OPENSSH|PGP)?[[:space:]]*PRIVATE KEY-----'; then
           ERRORS="${ERRORS}Private key header detected in staged content.\n"
         fi
         if echo "$CONTENT" | grep -qE 'AKIA[0-9A-Z]{16}'; then
