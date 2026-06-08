@@ -1,0 +1,61 @@
+{
+  "name": "licio",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "packageManager": "pnpm@10.28.1",
+  "engines": {
+    "node": ">=22 <25",
+    "pnpm": ">=10 <11"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter web --filter api dev",
+    "build": "pnpm --filter @licio/shared build && pnpm --filter @licio/db --filter @licio/invariants build && pnpm --filter web --filter api build && pnpm sbom",
+    "test": "vitest run --coverage",
+    "test:e2e": "env -u NO_COLOR playwright test",
+    "lint": "biome check . && tsx scripts/check-security-patterns.ts && tsx scripts/check-secrets.ts",
+    "format": "biome format --write .",
+    "typecheck": "tsc -b --pretty false",
+    "check:deps": "tsx scripts/check-dep-budget.ts && tsx scripts/check-boundaries.ts",
+    "check:lockfile": "tsx scripts/check-lockfile.ts",
+    "check:sbom": "tsx scripts/generate-sbom.ts --check",
+    "security:audit": "pnpm audit --audit-level moderate",
+    "clean": "tsx scripts/clean.ts",
+    "prepare": "husky",
+    "sbom": "tsx scripts/generate-sbom.ts",
+    "db:up": "docker compose up -d postgres redis",
+    "db:down": "docker compose down",
+    "db:logs": "docker compose logs -f postgres redis",
+    "cert:local": "tsx scripts/generate-local-cert.ts",
+    "dev:https": "pnpm cert:local && LOCAL_HTTPS=1 pnpm --filter web dev"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.11.3",
+    "@biomejs/biome": "^2.2.5",
+    "@playwright/test": "^1.53.0",
+    "@tailwindcss/vite": "^4.1.8",
+    "@types/jsdom": "^28.0.3",
+    "@types/node": "^22.15.29",
+    "@types/react": "^19.1.6",
+    "@types/react-dom": "^19.1.5",
+    "@vitejs/plugin-react": "^4.5.1",
+    "@vitest/coverage-v8": "^4.1.8",
+    "axe-core": "^4.10.3",
+    "concurrently": "^9.1.2",
+    "husky": "^9.1.7",
+    "jsdom": "^26.1.0",
+    "parse5": "^7.3.0",
+    "terser": "^5.48.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^4.1.8",
+    "yaml": "^2.9.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

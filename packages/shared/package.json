@@ -1,0 +1,45 @@
+{
+  "name": "@licio/shared",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./env": {
+      "types": "./dist/env/index.d.ts",
+      "import": "./dist/env/index.js"
+    },
+    "./logging": {
+      "types": "./dist/logging/index.d.ts",
+      "import": "./dist/logging/index.js"
+    },
+    "./env/client": {
+      "types": "./dist/env/client.d.ts",
+      "import": "./dist/env/client.js"
+    },
+    "./env/server": {
+      "types": "./dist/env/server.d.ts",
+      "import": "./dist/env/server.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --root ../.. packages/shared/src"
+  },
+  "dependencies": {
+    "pino": "^9.7.0",
+    "zod": "^3.25.56"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.20",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.8"
+  }
+}

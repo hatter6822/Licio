@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "useUnknownInCatchVariables": true,
+    "allowUnusedLabels": false,
+    "allowUnreachableCode": false,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": false,
+    "composite": true,
+    "baseUrl": ".",
+    "paths": {
+      "@licio/shared": ["packages/shared/src/index.ts"],
+      "@licio/shared/*": ["packages/shared/src/*"],
+      "@licio/db": ["packages/db/src/index.ts"],
+      "@licio/db/*": ["packages/db/src/*"],
+      "@licio/invariants": ["packages/invariants/src/index.ts"],
+      "@licio/invariants/*": ["packages/invariants/src/*"]
+    }
+  },
+  "exclude": ["node_modules", "dist", "build", "coverage", "playwright-report", "test-results"]
+}
