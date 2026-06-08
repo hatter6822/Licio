@@ -9,7 +9,7 @@
     "build": "vite build && tsx ../../scripts/validate-build.ts && tsx ../../scripts/generate-sri.ts && tsx ../../scripts/check-bundle-size.ts && tsx ../../scripts/check-service-worker.ts && tsx ../../scripts/check-client-secrets.ts",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --root ../.. apps/web/src"
   },
   "dependencies": {
     "@licio/shared": "workspace:*",
