@@ -13,32 +13,24 @@ test.describe('Content Security Policy', () => {
     expect(csp).toContain("require-trusted-types-for 'script'");
   });
 
-  test('inline script injection is blocked by CSP', async ({ page }) => {
-    const cspViolations: string[] = [];
-
-    page.on('console', (msg) => {
-      if (msg.text().includes('securitypolicyviolation')) {
-        cspViolations.push(msg.text());
-      }
-    });
-
+  test('inline script injection is blocked', async ({ page }) => {
     await page.goto('/');
 
-    const blocked = await page.evaluate(() => {
-      return new Promise<boolean>((resolve) => {
-        document.addEventListener('securitypolicyviolation', () => {
-          resolve(true);
-        });
-
-        const script = document.createElement('script');
-        script.textContent = 'window.__csp_test_executed = true';
-        document.body.appendChild(script);
-
-        setTimeout(() => resolve(false), 500);
+    // Attempt inline script injection — blocked by Trusted Types (throws on
+    // script.textContent assignment) or CSP (blocks execution after append).
+    await page
+      .evaluate(() => {
+        try {
+          const script = document.createElement('script');
+          script.textContent = 'window.__csp_test_executed = true';
+          document.body.appendChild(script);
+        } catch {
+          // Trusted Types policy blocked the assignment — expected
+        }
+      })
+      .catch(() => {
+        // Some browsers propagate the Trusted Types error to page.evaluate
       });
-    });
-
-    expect(blocked).toBe(true);
 
     const wasExecuted = await page.evaluate(
       () => (window as Record<string, unknown>)['__csp_test_executed'],
