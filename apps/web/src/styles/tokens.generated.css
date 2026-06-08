@@ -33,6 +33,7 @@
   --licio-warning-on-soft: #6E4800;
   --licio-error: #B3261E;
   --licio-error-fg: #FFFFFF;
+  --licio-error-hover: #9B2019;
   --licio-error-soft: #FBE7E5;
   --licio-error-on-soft: #8F1D17;
   --licio-info: #1F5FD6;
@@ -130,6 +131,7 @@
     --licio-success-on-soft: #7FD49B;
     --licio-warning-soft: #2A2008;
     --licio-warning-on-soft: #E6C078;
+    --licio-error-hover: #B03029;
     --licio-error-soft: #2E1311;
     --licio-error-on-soft: #F1A8A2;
     --licio-info-soft: #16243E;
@@ -162,6 +164,7 @@
   --licio-success-on-soft: #7FD49B;
   --licio-warning-soft: #2A2008;
   --licio-warning-on-soft: #E6C078;
+  --licio-error-hover: #B03029;
   --licio-error-soft: #2E1311;
   --licio-error-on-soft: #F1A8A2;
   --licio-info-soft: #16243E;
@@ -292,6 +295,7 @@
   --color-warning-on-soft: var(--licio-warning-on-soft);
   --color-error: var(--licio-error);
   --color-error-fg: var(--licio-error-fg);
+  --color-error-hover: var(--licio-error-hover);
   --color-error-soft: var(--licio-error-soft);
   --color-error-on-soft: var(--licio-error-on-soft);
   --color-info: var(--licio-info);

@@ -12,6 +12,16 @@ import { afterEach, expect } from 'vitest';
 
 expect.extend(toHaveNoViolations);
 
+// jsdom has no layout/scroll engine and ships `scrollTo` as a stub that logs
+// "Not implemented" and throws. Components that restore scroll position
+// (useScrollLock) call it as a safety net; replace it with a no-op so tests
+// stay free of that noise. Real browsers keep the genuine implementation.
+Object.defineProperty(window, 'scrollTo', {
+  value: () => undefined,
+  writable: true,
+  configurable: true,
+});
+
 afterEach(() => {
   cleanup();
 });

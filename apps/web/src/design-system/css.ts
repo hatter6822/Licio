@@ -58,6 +58,7 @@ export const tailwindColorMap: Record<string, ColorToken> = {
   'warning-on-soft': 'warning-on-soft',
   error: 'error',
   'error-fg': 'error-fg',
+  'error-hover': 'error-hover',
   'error-soft': 'error-soft',
   'error-on-soft': 'error-on-soft',
   info: 'info',

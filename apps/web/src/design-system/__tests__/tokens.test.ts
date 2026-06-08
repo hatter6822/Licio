@@ -133,6 +133,14 @@ describe.each(modes)('colour mode: %s', (mode) => {
       expect(ratio(mode, `${group}-on-soft`, `${group}-soft`)).toBeGreaterThanOrEqual(bodyMin);
     }
   });
+
+  it('semantic on-soft text is also ≥ 4.5:1 directly on the canvas (toneTextClasses)', () => {
+    for (const hue of hues) {
+      expect(ratio(mode, `${hue}-on-soft`, 'bg-default')).toBeGreaterThanOrEqual(
+        WCAG.AA_NORMAL_TEXT,
+      );
+    }
+  });
 });
 
 describe('typography scale (WS-B.1.1b)', () => {

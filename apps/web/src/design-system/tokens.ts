@@ -46,6 +46,7 @@ export type ColorToken =
   | 'warning-on-soft'
   | 'error'
   | 'error-fg'
+  | 'error-hover'
   | 'error-soft'
   | 'error-on-soft'
   | 'info'
@@ -101,6 +102,7 @@ export const lightColors: ColorPalette = {
   // Error
   error: '#B3261E',
   'error-fg': '#FFFFFF',
+  'error-hover': '#9B2019',
   'error-soft': '#FBE7E5',
   'error-on-soft': '#8F1D17',
   // Info (shares the primary hue per the WS-B.1.1a table)
@@ -143,6 +145,7 @@ export const darkColors: ColorOverrides = {
   'success-on-soft': '#7FD49B',
   'warning-soft': '#2A2008',
   'warning-on-soft': '#E6C078',
+  'error-hover': '#B03029',
   'error-soft': '#2E1311',
   'error-on-soft': '#F1A8A2',
   'info-soft': '#16243E',

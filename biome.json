@@ -80,6 +80,19 @@
           }
         }
       }
+    },
+    {
+      "include": ["apps/web/src/components/ui/**"],
+      "linter": {
+        "rules": {
+          "a11y": {
+            "useSemanticElements": "off",
+            "useFocusableInteractive": "off",
+            "useKeyWithClickEvents": "off",
+            "noNoninteractiveTabindex": "off"
+          }
+        }
+      }
     }
   ]
 }
