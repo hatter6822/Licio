@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node"],
+    "paths": {
+      "@licio/shared": ["../../packages/shared/src"],
+      "@licio/shared/*": ["../../packages/shared/src/*"],
+      "@licio/db": ["../../packages/db/src"],
+      "@licio/db/*": ["../../packages/db/src/*"],
+      "@licio/invariants": ["../../packages/invariants/src"],
+      "@licio/invariants/*": ["../../packages/invariants/src/*"]
+    }
+  },
+  "include": ["src/**/*"],
+  "references": [
+    { "path": "../../packages/shared" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/invariants" }
+  ]
+}

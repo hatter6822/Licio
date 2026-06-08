@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    # Patch updates are auto-merge candidates when all CI checks pass.
+    # Auto-merge is enforced by the branch protection required-check set
+    # (WS-0.6.1f), so a malicious patch cannot merge without green security jobs.
+    # To enable: gh api repos/OWNER/REPO/pulls/{id}/merge or configure
+    # a GitHub Actions auto-merge workflow gated on the security job.
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "ci"

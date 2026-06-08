@@ -1,0 +1,228 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm biome check .
+      - run: pnpm lint:security
+
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm typecheck
+
+  lockfile-lint:
+    name: Lockfile Integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm lint:lockfile
+
+  dep-budget:
+    name: Dependency Budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm check:deps
+
+  test:
+    name: Test & Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test -- --coverage --reporter=default --reporter=junit --outputFile=test-results/junit.xml
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
+        if: always()
+        with:
+          name: test-results
+          path: test-results/
+
+  build-and-size:
+    name: Build & Size Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
+        with:
+          name: build-artifacts
+          path: |
+            apps/web/dist/
+
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: [build-and-size]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: build-artifacts
+          path: apps/web/dist/
+      - name: Cache Playwright browsers
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('apps/web/node_modules/@playwright/test/package.json') }}
+      - run: pnpm --filter web exec playwright install --with-deps chromium firefox webkit
+      - run: pnpm --filter web test:e2e
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
+        if: always()
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report/
+
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    needs: [build-and-size]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: Audit dependencies
+        run: pnpm audit --audit-level=high
+      - name: Lockfile integrity
+        run: pnpm lint:lockfile
+      - name: Check workspace boundaries
+        run: pnpm check:workspace-deps
+      - name: Security lint
+        run: pnpm lint:security
+      - name: Generate SBOM
+        run: pnpm sbom
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: build-artifacts
+          path: apps/web/dist/
+      - name: Validate build output
+        run: pnpm exec tsx scripts/validate-build.ts
+      - name: Verify AGPL license headers
+        run: |
+          MISSING=$(find apps/*/src packages/*/src -name '*.ts' -o -name '*.tsx' | while read f; do
+            head -1 "$f" | grep -qF 'SPDX-License-Identifier' || echo "$f"
+          done)
+          if [ -n "$MISSING" ]; then
+            echo "ERROR: Missing SPDX license headers:"
+            echo "$MISSING"
+            exit 1
+          fi
+      - name: Secret scan (tracked files)
+        run: |
+          SECRETS=$(git ls-files | grep -E '\.(env|pem|key|p12|pfx)$' | grep -v '.env.example' || true)
+          if [ -n "$SECRETS" ]; then
+            echo "ERROR: Potential secret files committed:"
+            echo "$SECRETS"
+            exit 1
+          fi
+      - name: Secret scan (file content)
+        run: |
+          ERRORS=""
+          if git grep -lE -- '-----BEGIN[[:space:]]+(RSA|EC|DSA|OPENSSH|PGP)?[[:space:]]*PRIVATE KEY-----' -- ':!*.md' ':!lefthook.yml' 2>/dev/null; then
+            ERRORS="${ERRORS}Private key header found in tracked files.\n"
+          fi
+          if git grep -lE 'AKIA[0-9A-Z]{16}' 2>/dev/null; then
+            ERRORS="${ERRORS}AWS access key pattern found in tracked files.\n"
+          fi
+          if git grep -lEI '[A-Za-z0-9+/]{40,}={0,2}' -- '*.ts' '*.tsx' '*.js' -- ':!*.test.*' ':!pnpm-lock.yaml' ':!*.snap' 2>/dev/null | head -5; then
+            echo "WARNING: Potential high-entropy strings detected (manual review recommended)"
+          fi
+          if [ -n "$ERRORS" ]; then
+            echo "ERROR: Secret patterns detected:"
+            echo -e "$ERRORS"
+            exit 1
+          fi
+      - name: Check for install scripts
+        run: |
+          SCRIPTS=$(pnpm ls --json --depth 0 2>/dev/null | node -e "
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8'));
+            const entries = Array.isArray(data) ? data : [data];
+            for (const pkg of entries) {
+              for (const [name, info] of Object.entries(pkg.dependencies || {})) {
+                try {
+                  const pkgJson = JSON.parse(fs.readFileSync('node_modules/.pnpm/node_modules/' + name + '/package.json', 'utf8'));
+                  const scripts = pkgJson.scripts || {};
+                  const hasInstallScripts = scripts.preinstall || scripts.install || scripts.postinstall;
+                  if (hasInstallScripts) console.log(name + ': ' + JSON.stringify({preinstall: scripts.preinstall, install: scripts.install, postinstall: scripts.postinstall}));
+                } catch {}
+              }
+            }
+          " || true)
+          if [ -n "$SCRIPTS" ]; then
+            echo "WARNING: Packages with install scripts detected (review required):"
+            echo "$SCRIPTS"
+          fi
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
+        with:
+          name: sbom
+          path: sbom.cdx.json

@@ -1,0 +1,39 @@
+services:
+  postgres:
+    # Pin to digest in production for reproducibility: docker pull postgres:16-alpine && docker inspect --format='{{index .RepoDigests 0}}' postgres:16-alpine
+    image: postgres:16-alpine@sha256:de3d8034ba7d698dea0e29f5ea11bf3e05ab08e52f055a42e3840da78df7fe08
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: licio
+      POSTGRES_PASSWORD: licio_dev
+      POSTGRES_DB: licio_dev
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U licio -d licio_dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  redis:
+    # Pin to digest in production for reproducibility: docker pull redis:7-alpine && docker inspect --format='{{index .RepoDigests 0}}' redis:7-alpine
+    image: redis:7-alpine@sha256:de78a1421f2e3564e1f9b7e4aad1f7decb0a5d9a45fbb61c1b21817dc105ab8e
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:

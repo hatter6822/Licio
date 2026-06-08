@@ -1,0 +1,54 @@
+pre-commit:
+  parallel: true
+  commands:
+    biome-check:
+      glob: "*.{ts,tsx,js,jsx,json,css}"
+      run: pnpm biome check --no-errors-on-unmatched {staged_files}
+    secret-scan:
+      run: |
+        FILES=$(git diff --cached --name-only --diff-filter=ACM)
+        if [ -z "$FILES" ]; then exit 0; fi
+
+        ERRORS=""
+
+        # Block .env files (except .env.example)
+        ENV_FILES=$(echo "$FILES" | grep -E '\.env($|\.)' | grep -v '\.env\.example$' || true)
+        if [ -n "$ENV_FILES" ]; then
+          ERRORS="${ERRORS}Blocked .env files:\n${ENV_FILES}\n\n"
+        fi
+
+        # Block certificate/key files
+        KEY_FILES=$(echo "$FILES" | grep -E '\.(pem|key|p12|pfx|crt)$' || true)
+        if [ -n "$KEY_FILES" ]; then
+          ERRORS="${ERRORS}Blocked certificate/key files:\n${KEY_FILES}\n\n"
+        fi
+
+        # Scan staged content for secret patterns
+        CONTENT=$(git diff --cached -U0 --diff-filter=ACM -- $FILES 2>/dev/null || true)
+        if echo "$CONTENT" | grep -qE -- '-----BEGIN[[:space:]]+(RSA|EC|DSA|OPENSSH|PGP)?[[:space:]]*PRIVATE KEY-----'; then
+          ERRORS="${ERRORS}Private key header detected in staged content.\n"
+        fi
+        if echo "$CONTENT" | grep -qE 'AKIA[0-9A-Z]{16}'; then
+          ERRORS="${ERRORS}AWS access key pattern detected in staged content.\n"
+        fi
+        if echo "$CONTENT" | grep -qiE '(api_key|apikey|secret_key|private_key|access_token)\s*[:=]\s*["\x27][A-Za-z0-9+/=_-]{20,}'; then
+          ERRORS="${ERRORS}Potential secret assignment detected in staged content.\n"
+        fi
+
+        if [ -n "$ERRORS" ]; then
+          echo "ERROR: Secret patterns detected in staged files:"
+          echo -e "$ERRORS"
+          echo "If this is a false positive, use git commit --no-verify (CI will still check)."
+          exit 1
+        fi
+    dep-budget:
+      glob: "**/package.json"
+      run: pnpm check:deps
+
+pre-push:
+  parallel: true
+  commands:
+    typecheck:
+      run: pnpm typecheck
+    lockfile-lint:
+      run: pnpm lint:lockfile

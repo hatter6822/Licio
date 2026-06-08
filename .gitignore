@@ -1,0 +1,54 @@
+# Build artifacts
+node_modules/
+dist/
+build/
+.cache/
+.vite/
+
+# Secrets and environment
+.env
+.env.local
+.env.*.local
+
+# Allow .env.example (secret-free template)
+!.env.example
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Test output
+coverage/
+test-results/
+playwright-report/
+.playwright/
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Logs
+*.log
+
+# Certificates and keys
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+
+# Database migrations metadata
+drizzle/meta/
+
+# Docker data volumes
+.docker-data/
+
+# Supply-chain/build artifacts
+*.sbom.json
+sbom.cdx.json
+*.intoto.jsonl
+provenance/
