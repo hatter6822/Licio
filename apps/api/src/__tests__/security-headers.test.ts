@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { describe, expect, it } from 'vitest';
+import { createApp } from '../app.js';
+
+describe('Security headers', () => {
+  const app = createApp();
+
+  it('should set Content-Security-Policy', async () => {
+    const res = await app.request('/health');
+    const csp = res.headers.get('Content-Security-Policy');
+    expect(csp).toBeDefined();
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("script-src 'self'");
+    expect(csp).toContain("require-trusted-types-for 'script'");
+    expect(csp).not.toContain('unsafe-inline');
+    expect(csp).not.toContain('unsafe-eval');
+  });
+
+  it('should set Strict-Transport-Security', async () => {
+    const res = await app.request('/health');
+    const hsts = res.headers.get('Strict-Transport-Security');
+    expect(hsts).toContain('max-age=63072000');
+    expect(hsts).toContain('includeSubDomains');
+    expect(hsts).toContain('preload');
+  });
+
+  it('should set X-Content-Type-Options', async () => {
+    const res = await app.request('/health');
+    expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
+  });
+
+  it('should set X-Frame-Options', async () => {
+    const res = await app.request('/health');
+    expect(res.headers.get('X-Frame-Options')).toBe('SAMEORIGIN');
+  });
+
+  it('should set Referrer-Policy', async () => {
+    const res = await app.request('/health');
+    expect(res.headers.get('Referrer-Policy')).toBe('strict-origin-when-cross-origin');
+  });
+
+  it('should set COOP and CORP', async () => {
+    const res = await app.request('/health');
+    expect(res.headers.get('Cross-Origin-Opener-Policy')).toBe('same-origin');
+    expect(res.headers.get('Cross-Origin-Resource-Policy')).toBe('same-origin');
+  });
+
+  it('should set Permissions-Policy', async () => {
+    const res = await app.request('/health');
+    const pp = res.headers.get('Permissions-Policy');
+    expect(pp).toContain('camera=()');
+    expect(pp).toContain('microphone=()');
+    expect(pp).toContain('geolocation=()');
+    expect(pp).toContain('payment=()');
+  });
+});

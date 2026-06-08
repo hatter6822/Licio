@@ -1,0 +1,22 @@
+pre-commit:
+  parallel: true
+  commands:
+    biome-check:
+      glob: "*.{ts,tsx,js,jsx,json,css}"
+      run: pnpm biome check --no-errors-on-unmatched {staged_files}
+    secret-scan:
+      glob: "*.env"
+      run: |
+        echo "ERROR: .env file staged for commit. Secrets must not be committed."
+        exit 1
+    dep-budget:
+      glob: "**/package.json"
+      run: pnpm check:deps
+
+pre-push:
+  parallel: true
+  commands:
+    typecheck:
+      run: pnpm typecheck
+    lockfile-lint:
+      run: pnpm lint:lockfile

@@ -1,0 +1,35 @@
+{
+  "name": "licio",
+  "version": "0.6.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=9"
+  },
+  "scripts": {
+    "dev": "pnpm --filter web dev & pnpm --filter api dev",
+    "build": "pnpm --filter @licio/shared build && pnpm --filter @licio/db build && pnpm --filter @licio/invariants build && pnpm --filter web build && pnpm --filter api build",
+    "test": "vitest run",
+    "test:e2e": "pnpm --filter web test:e2e",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "lint:lockfile": "tsx scripts/check-lockfile.ts",
+    "typecheck": "tsc -b",
+    "check:deps": "tsx scripts/check-dep-budget.ts",
+    "check:workspace-deps": "tsx scripts/check-workspace-deps.ts",
+    "sbom": "tsx scripts/generate-sbom.ts",
+    "db:generate": "pnpm --filter @licio/db drizzle-kit generate",
+    "db:migrate": "pnpm --filter @licio/db drizzle-kit migrate",
+    "db:push": "pnpm --filter @licio/db drizzle-kit push",
+    "clean": "rm -rf apps/*/dist apps/*/build packages/*/dist coverage test-results playwright-report .tsbuildinfo apps/*/.tsbuildinfo packages/*/.tsbuildinfo node_modules/.cache"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.0",
+    "lefthook": "^1.11.0"
+  }
+}

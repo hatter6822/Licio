@@ -1,0 +1,6 @@
+{
+  "path": "pnpm-lock.yaml",
+  "allowed-hosts": ["registry.npmjs.org"],
+  "allowed-schemes": ["https:"],
+  "validate-integrity": true
+}

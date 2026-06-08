@@ -1,0 +1,20 @@
+# Normalize line endings to LF on checkout
+* text=auto eol=lf
+
+# Binary assets - do not normalize
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.mp4 binary
+*.webm binary
+*.webp binary
+*.avif binary
+
+# Keep lockfile diffs readable
+pnpm-lock.yaml -diff linguist-generated
