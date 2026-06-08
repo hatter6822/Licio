@@ -49,5 +49,6 @@ drizzle/meta/
 
 # Supply-chain/build artifacts
 *.sbom.json
+sbom.cdx.json
 *.intoto.jsonl
 provenance/
