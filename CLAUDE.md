@@ -36,6 +36,7 @@ docs/           # Specification and planning documents
 - `pnpm typecheck` — TypeScript strict-mode check across all workspaces
 - `pnpm check:deps` — dependency-budget enforcement
 - `pnpm check:workspace-deps` — workspace boundary enforcement (package.json + source imports)
+- `pnpm check:policy` — WS-A doctrine/policy document validation (`docs/policy/`: counts, ID disjointness, severity↔SLA, bijective RNT↔suite mapping, closed vocabularies, cross-document references, prose↔machine-readable consistency)
 - `pnpm sbom` — generate CycloneDX SBOM (includes transitive dependencies)
 - `pnpm db:generate` — generate Drizzle migrations
 - `pnpm db:migrate` — run Drizzle migrations

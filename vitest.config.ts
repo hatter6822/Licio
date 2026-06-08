@@ -72,6 +72,14 @@ export default defineConfig({
           environment: 'jsdom',
         },
       },
+      {
+        test: {
+          name: 'policy',
+          root: 'scripts',
+          include: ['**/*.test.ts'],
+          environment: 'node',
+        },
+      },
     ],
   },
 });
