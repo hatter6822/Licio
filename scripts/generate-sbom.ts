@@ -106,7 +106,7 @@ function generate(): void {
       type: 'library',
       name,
       version,
-      purl: `pkg:npm/${name.startsWith('@') ? name.replace('/', '%2F') : name}@${version}`,
+      purl: `pkg:npm/${name.startsWith('@') ? name.replaceAll('/', '%2F') : name}@${version}`,
       licenses: [{ license: { id: license } }],
     });
 

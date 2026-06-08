@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { gzipSync } from 'node:zlib';
 
@@ -33,20 +33,19 @@ function check(): void {
 
   for (const file of files) {
     const filePath = join(ASSETS_DIR, file);
-    const stat = statSync(filePath);
     const content = readFileSync(filePath);
     const gzipped = gzipSync(content);
 
-    assets.push({ name: file, raw: stat.size, gzipped: gzipped.length });
+    assets.push({ name: file, raw: content.length, gzipped: gzipped.length });
 
     if (file.endsWith('.js')) {
-      totalJsRaw += stat.size;
+      totalJsRaw += content.length;
       totalJsGzipped += gzipped.length;
       if (gzipped.length > largestChunk.gzipped) {
-        largestChunk = { name: file, raw: stat.size, gzipped: gzipped.length };
+        largestChunk = { name: file, raw: content.length, gzipped: gzipped.length };
       }
     } else if (file.endsWith('.css')) {
-      totalCssRaw += stat.size;
+      totalCssRaw += content.length;
       totalCssGzipped += gzipped.length;
     }
   }

@@ -38,12 +38,13 @@ function generate(): void {
     console.log(`  ${file}: ${integrity.slice(0, 20)}...`);
   }
 
-  if (!existsSync(INDEX_HTML)) {
+  let html: string;
+  try {
+    html = readFileSync(INDEX_HTML, 'utf-8');
+  } catch {
     console.log('No index.html found. Skipping SRI injection.');
     return;
   }
-
-  const html = readFileSync(INDEX_HTML, 'utf-8');
   const root = parse(html);
   let injected = 0;
 

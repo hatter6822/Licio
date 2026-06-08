@@ -103,8 +103,6 @@ jobs:
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - name: Validate build output
-        run: tsx scripts/validate-build.ts
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
         with:
           name: build-artifacts
@@ -167,7 +165,7 @@ jobs:
           name: build-artifacts
           path: apps/web/dist/
       - name: Validate build output
-        run: tsx scripts/validate-build.ts
+        run: pnpm exec tsx scripts/validate-build.ts
       - name: Verify AGPL license headers
         run: |
           MISSING=$(find apps/*/src packages/*/src -name '*.ts' -o -name '*.tsx' | while read f; do

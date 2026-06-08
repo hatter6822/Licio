@@ -72,10 +72,15 @@ function validate(): void {
     }
   }
 
+  const DANGEROUS_SCHEMES = ['javascript:', 'data:', 'vbscript:'];
+
   for (const a of root.querySelectorAll('a[href]')) {
     const href = a.getAttribute('href') ?? '';
-    if (href.toLowerCase().startsWith('javascript:')) {
-      errors.push(`javascript: URL found in <a>: ${href.slice(0, 80)}`);
+    const hrefLower = href.toLowerCase().trimStart();
+    for (const scheme of DANGEROUS_SCHEMES) {
+      if (hrefLower.startsWith(scheme)) {
+        errors.push(`${scheme} URL found in <a>: ${href.slice(0, 80)}`);
+      }
     }
   }
 
