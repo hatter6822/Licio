@@ -27,7 +27,7 @@
     "clean": "rm -rf apps/*/dist apps/*/build packages/*/dist coverage test-results playwright-report .tsbuildinfo apps/*/.tsbuildinfo packages/*/.tsbuildinfo node_modules/.cache"
   },
   "devDependencies": {
-    "@biomejs/biome": "^1.9.0",
+    "@biomejs/biome": "^2.4.16",
     "@vitest/coverage-v8": "^4.1.0",
     "lefthook": "^1.11.0",
     "node-html-parser": "^7.1.0",
