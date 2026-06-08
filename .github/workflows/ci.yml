@@ -130,7 +130,7 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ hashFiles('apps/web/node_modules/@playwright/test/package.json') }}
-      - run: pnpm exec playwright install --with-deps chromium firefox webkit
+      - run: pnpm --filter web exec playwright install --with-deps chromium firefox webkit
       - run: pnpm --filter web test:e2e
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
         if: always()
