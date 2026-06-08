@@ -2,6 +2,18 @@
 
 **Milestone:** M0-M1 | **Priority:** 0-1 | **Dependencies:** WS-0.3 | **Wave:** 2-3 | **Estimated duration:** 3-4 weeks
 
+> **Implementation status:** Implemented in `apps/web/src` (tokens in
+> `design-system/`, primitives in `components/ui/`, application components in
+> `components/{story,feed,wellbeing,profile,reader,composer,thread,cognitive}/`,
+> i18n in `i18n/`, SPA focus management in `components/a11y/`). See
+> `docs/design-system/README.md` for the implementation reference and component
+> catalogue. One documented correction: the WS-B.1.1a `--licio-border` contrast
+> figure of 3.1:1 for `#C4C8CE` is arithmetically unachievable (a light-grey
+> hairline on white is ~1.68:1); the WCAG 1.4.11 intent is carried by
+> `--licio-border-strong` (verified ≥3:1 on every surface), and the decorative
+> `--licio-border` is exempt. Verified by `pnpm test`, `pnpm typecheck`,
+> `pnpm lint`, `pnpm check:no-applause`, and the strict-CSP build.
+
 ## Overview
 
 All components are built to WCAG 2.2 AA from the start. Accessibility is a release gate -- for many iOS users, the PWA is the only surface (Section 26.1). The entire design system enforces a no-applause UI: zero likes, upvotes, hearts, reactions, karma badges, follower counts, or public scores anywhere in the component library or application layer. Every component must be keyboard-operable, screen-reader-compatible, zoom-safe to 200%, and pass axe-core automated checks.

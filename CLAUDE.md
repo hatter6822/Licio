@@ -37,6 +37,7 @@ docs/           # Specification and planning documents
 - `pnpm check:deps` — dependency-budget enforcement
 - `pnpm check:workspace-deps` — workspace boundary enforcement (package.json + source imports)
 - `pnpm check:policy` — WS-A doctrine/policy document validation (`docs/policy/`: counts, ID disjointness, severity↔SLA, bijective RNT↔suite mapping, closed vocabularies, cross-document references, prose↔machine-readable consistency)
+- `pnpm check:no-applause` — WS-B no-applause static scan over `apps/web/src/components` (no likes/votes/karma/follower counts/reaction bars; defense in depth with the type-level and runtime guards)
 - `pnpm sbom` — generate CycloneDX SBOM (includes transitive dependencies)
 - `pnpm db:generate` — generate Drizzle migrations
 - `pnpm db:migrate` — run Drizzle migrations
@@ -47,6 +48,7 @@ docs/           # Specification and planning documents
 
 - `pnpm --filter web dev` — start Vite dev server (port 5173)
 - `pnpm --filter api dev` — start Hono BFF dev server (port 3001)
+- `pnpm --filter web gen:tokens` — regenerate `styles/tokens.generated.css` from the design-token SSOT (`design-system/tokens.ts`); also runs at the start of the web build
 - `pnpm --filter web build` — build web app
 - `pnpm --filter api build` — build API server
 - `pnpm --filter web test:e2e` — run Playwright E2E tests
