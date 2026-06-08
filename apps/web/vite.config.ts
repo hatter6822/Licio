@@ -24,6 +24,7 @@ export default defineConfig({
       injectRegister: null,
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+        navigateFallback: '/index.html',
       },
       manifest: {
         name: 'Licio',
@@ -31,12 +32,14 @@ export default defineConfig({
         display: 'standalone',
         theme_color: '#1a1a2e',
         background_color: '#0f0f23',
+        scope: '/',
         start_url: '/',
         icons: [
           {
             src: '/icon-192.png',
             sizes: '192x192',
             type: 'image/png',
+            purpose: 'any maskable',
           },
           {
             src: '/icon-512.png',

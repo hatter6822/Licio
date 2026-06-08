@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -28,6 +28,31 @@ const PACKAGE_PATHS: Record<string, string> = {
   api: resolve(ROOT, 'apps/api/package.json'),
 };
 
+const SOURCE_DIRS: Record<string, string> = {
+  '@licio/shared': resolve(ROOT, 'packages/shared/src'),
+  '@licio/db': resolve(ROOT, 'packages/db/src'),
+  '@licio/invariants': resolve(ROOT, 'packages/invariants/src'),
+  web: resolve(ROOT, 'apps/web/src'),
+  api: resolve(ROOT, 'apps/api/src'),
+};
+
+const IMPORT_PATTERN = /(?:import|from|require\()\s*['"](@licio\/[^'"\/]+)/g;
+
+function collectSourceFiles(dir: string): string[] {
+  const results: string[] = [];
+  if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) return results;
+
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = join(dir, entry.name);
+    if (entry.isDirectory() && entry.name !== 'node_modules') {
+      results.push(...collectSourceFiles(fullPath));
+    } else if (entry.isFile() && /\.(ts|tsx|js|jsx)$/.test(entry.name)) {
+      results.push(fullPath);
+    }
+  }
+  return results;
+}
+
 function check(): void {
   const errors: string[] = [];
 
@@ -49,8 +74,25 @@ function check(): void {
     for (const dep of workspaceDeps) {
       if (!allowed.includes(dep)) {
         errors.push(
-          `${name} imports ${dep}, which is not in its allow-list: [${allowed.join(', ')}]`,
+          `${name} declares ${dep} in package.json, which is not in its allow-list: [${allowed.join(', ')}]`,
         );
+      }
+    }
+
+    const srcDir = SOURCE_DIRS[name];
+    if (!srcDir) continue;
+    const sourceFiles = collectSourceFiles(srcDir);
+
+    for (const filePath of sourceFiles) {
+      const content = readFileSync(filePath, 'utf-8');
+      for (const match of content.matchAll(IMPORT_PATTERN)) {
+        const dep = match[1];
+        if (dep && WORKSPACE_PACKAGES.includes(dep) && !allowed.includes(dep)) {
+          const relative = filePath.replace(ROOT, '');
+          errors.push(
+            `${name} imports ${dep} in ${relative}, which is not in its allow-list: [${allowed.join(', ')}]`,
+          );
+        }
       }
     }
   }

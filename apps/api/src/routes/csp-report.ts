@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { Hono } from 'hono';
+import { z } from 'zod';
 import { createLogger } from '../lib/logger.js';
 
 const logger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
@@ -9,17 +10,19 @@ const RATE_LIMIT = 100;
 const RATE_WINDOW_MS = 60_000;
 const MAX_BODY_SIZE = 10_240;
 
-interface CspReport {
-  'csp-report'?: {
-    'document-uri'?: string;
-    'violated-directive'?: string;
-    'blocked-uri'?: string;
-    'original-policy'?: string;
-    'source-file'?: string;
-    'line-number'?: number;
-    'column-number'?: number;
-  };
-}
+const cspReportSchema = z.object({
+  'csp-report': z
+    .object({
+      'document-uri': z.string().optional(),
+      'violated-directive': z.string().optional(),
+      'blocked-uri': z.string().optional(),
+      'original-policy': z.string().optional(),
+      'source-file': z.string().optional(),
+      'line-number': z.number().optional(),
+      'column-number': z.number().optional(),
+    })
+    .optional(),
+});
 
 export const cspReportRoute = new Hono();
 
@@ -57,15 +60,14 @@ cspReportRoute.post('/', async (c) => {
     return c.json({ error: 'Invalid JSON' }, 400);
   }
 
-  if (typeof body !== 'object' || body === null) {
+  const parsed = cspReportSchema.safeParse(body);
+  if (!parsed.success) {
     return c.json({ error: 'Invalid report format' }, 400);
   }
 
-  const report = body as CspReport;
-
   logger.info({
     auditAction: 'csp_violation',
-    report: report['csp-report'],
+    report: parsed.data['csp-report'],
   });
 
   return c.json({ received: true });

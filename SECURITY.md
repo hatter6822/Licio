@@ -43,5 +43,7 @@ regardless of CVSS score.
 
 ## Security Architecture
 
-See `docs/SPEC.md` Sections 25 and 6.12 for the complete security architecture,
-threat model, and defense-in-depth strategy.
+See `docs/SPEC.md` for the complete security architecture:
+- **Section 25** — threat model and defense-in-depth strategy
+- **Section 25.6** — incident response and vulnerability handling procedures
+- **Section 6.12** — CI/CD security gates and supply-chain controls

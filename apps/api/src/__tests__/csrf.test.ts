@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { afterEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
-import { _tokenStore, setSessionCookie } from '../middleware/csrf.js';
+import { getTokenStore, setSessionCookie } from '../middleware/csrf.js';
 
 describe('CSRF protection', () => {
-  afterEach(() => {
-    _tokenStore.clear();
+  afterEach(async () => {
+    await getTokenStore().clear();
   });
 
   it('allows GET requests without a CSRF token', async () => {

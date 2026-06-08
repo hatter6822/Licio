@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -21,6 +21,7 @@ interface SbomComponent {
 
 const AGPL_COMPATIBLE_LICENSES = new Set([
   'MIT',
+  'MIT-0',
   'ISC',
   'BSD-2-Clause',
   'BSD-3-Clause',
@@ -33,37 +34,55 @@ const AGPL_COMPATIBLE_LICENSES = new Set([
   'AGPL-3.0-only',
   'GPL-3.0-or-later',
   'GPL-3.0-only',
+  'GPL-2.0-or-later',
   'LGPL-3.0-or-later',
   'LGPL-3.0-only',
+  'LGPL-2.1-or-later',
   'MPL-2.0',
   'WTFPL',
   'Zlib',
   'CC-BY-4.0',
+  'Python-2.0',
 ]);
 
-function resolvePackageLicense(name: string): string {
-  try {
-    const paths = [
-      resolve(ROOT, 'node_modules', '.pnpm', 'node_modules', name, 'package.json'),
-      resolve(ROOT, 'node_modules', name, 'package.json'),
-    ];
-    for (const p of paths) {
-      if (existsSync(p)) {
-        const raw = readFileSync(p, 'utf-8');
-        const pkg: PackageJson = JSON.parse(raw);
-        return pkg.license ?? 'UNKNOWN';
-      }
+function isLicenseCompatible(license: string): boolean {
+  if (AGPL_COMPATIBLE_LICENSES.has(license)) return true;
+  const parts = license.split(/\s+OR\s+/).map((p) => p.replace(/^\(|\)$/g, '').trim());
+  return parts.some((p) => AGPL_COMPATIBLE_LICENSES.has(p));
+}
+
+function resolvePackageJson(name: string): PackageJson | undefined {
+  const paths = [
+    resolve(ROOT, 'node_modules', '.pnpm', 'node_modules', name, 'package.json'),
+    resolve(ROOT, 'node_modules', name, 'package.json'),
+  ];
+  for (const p of paths) {
+    if (existsSync(p)) {
+      const raw = readFileSync(p, 'utf-8');
+      return JSON.parse(raw) as PackageJson;
     }
-  } catch {
-    // ignore resolution failures
   }
-  return 'UNKNOWN';
+  return undefined;
+}
+
+function collectTransitiveDeps(name: string, visited: Set<string>): void {
+  if (visited.has(name)) return;
+  visited.add(name);
+
+  const pkg = resolvePackageJson(name);
+  if (!pkg?.dependencies) return;
+
+  for (const dep of Object.keys(pkg.dependencies)) {
+    collectTransitiveDeps(dep, visited);
+  }
 }
 
 function generate(): void {
   const apps = ['apps/web', 'apps/api'];
   const components: SbomComponent[] = [];
   const licenseWarnings: string[] = [];
+  const unknownLicenses: string[] = [];
+  const allDeps = new Set<string>();
 
   for (const appPath of apps) {
     const pkgPath = resolve(ROOT, appPath, 'package.json');
@@ -72,30 +91,37 @@ function generate(): void {
     const deps = pkg.dependencies ?? {};
 
     for (const [name, version] of Object.entries(deps)) {
-      if (version.startsWith('workspace:')) {
-        continue;
-      }
+      if (version.startsWith('workspace:')) continue;
+      allDeps.add(name);
+      collectTransitiveDeps(name, allDeps);
+    }
+  }
 
-      const cleanVersion = version.replace(/^[\^~>=<]+/, '');
-      const license = resolvePackageLicense(name);
+  for (const name of allDeps) {
+    const pkg = resolvePackageJson(name);
+    const version = pkg?.version ?? '0.0.0';
+    const license = pkg?.license ?? 'UNKNOWN';
 
-      components.push({
-        type: 'library',
-        name,
-        version: cleanVersion,
-        purl: `pkg:npm/${name}@${cleanVersion}`,
-        licenses: [{ license: { id: license } }],
-      });
+    components.push({
+      type: 'library',
+      name,
+      version,
+      purl: `pkg:npm/${name.startsWith('@') ? name.replace('/', '%2F') : name}@${version}`,
+      licenses: [{ license: { id: license } }],
+    });
 
-      if (license !== 'UNKNOWN' && !AGPL_COMPATIBLE_LICENSES.has(license)) {
-        licenseWarnings.push(
-          `${name}@${cleanVersion}: ${license} (may be incompatible with AGPL-3.0-or-later)`,
-        );
-      }
+    if (license === 'UNKNOWN') {
+      unknownLicenses.push(`${name}@${version}: license could not be determined`);
+    } else if (!isLicenseCompatible(license)) {
+      licenseWarnings.push(
+        `${name}@${version}: ${license} (may be incompatible with AGPL-3.0-or-later)`,
+      );
     }
   }
 
   const uniqueComponents = Array.from(new Map(components.map((c) => [c.purl, c])).values());
+
+  const rootPkg: PackageJson = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8'));
 
   const sbom = {
     bomFormat: 'CycloneDX',
@@ -106,7 +132,7 @@ function generate(): void {
       component: {
         type: 'application',
         name: 'licio',
-        version: '0.6.0',
+        version: rootPkg.version,
       },
     },
     components: uniqueComponents,
@@ -114,12 +140,19 @@ function generate(): void {
 
   const outputPath = resolve(ROOT, 'sbom.cdx.json');
   writeFileSync(outputPath, `${JSON.stringify(sbom, null, 2)}\n`);
-  console.log(`SBOM generated: ${uniqueComponents.length} components`);
+  console.log(`SBOM generated: ${uniqueComponents.length} components (including transitive deps)`);
+
+  if (unknownLicenses.length > 0) {
+    console.warn(`\nUnknown licenses (${unknownLicenses.length}):`);
+    for (const warning of unknownLicenses) {
+      console.warn(`  - ${warning}`);
+    }
+  }
 
   if (licenseWarnings.length > 0) {
-    console.warn('\nLicense compatibility warnings:');
+    console.error('\nIncompatible license warnings:');
     for (const warning of licenseWarnings) {
-      console.warn(`  - ${warning}`);
+      console.error(`  - ${warning}`);
     }
     process.exit(1);
   }

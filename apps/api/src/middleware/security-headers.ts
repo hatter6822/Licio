@@ -22,12 +22,19 @@ const CSP = [
 
 const REPORTING_ENDPOINTS = 'csp-endpoint="/api/security/csp-report"';
 
+const REPORT_TO = JSON.stringify({
+  group: 'csp-endpoint',
+  max_age: 86400,
+  endpoints: [{ url: '/api/security/csp-report' }],
+});
+
 export function securityHeadersMiddleware(): MiddlewareHandler {
   return async (c, next) => {
     await next();
 
     c.res.headers.set('Content-Security-Policy', CSP);
     c.res.headers.set('Reporting-Endpoints', REPORTING_ENDPOINTS);
+    c.res.headers.set('Report-To', REPORT_TO);
     c.res.headers.set('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');
     c.res.headers.set('X-Content-Type-Options', 'nosniff');
     c.res.headers.set('X-Frame-Options', 'SAMEORIGIN');

@@ -9,12 +9,13 @@
     "pnpm": ">=9"
   },
   "scripts": {
-    "dev": "pnpm --filter web dev & pnpm --filter api dev",
-    "build": "pnpm --filter @licio/shared build && pnpm --filter @licio/db build && pnpm --filter @licio/invariants build && pnpm --filter web build && pnpm --filter api build",
+    "dev": "pnpm --parallel --filter web --filter api dev",
+    "build": "pnpm --filter @licio/shared build && pnpm --filter @licio/db --filter @licio/invariants build && pnpm --filter web --filter api build",
     "test": "vitest run",
     "test:e2e": "pnpm --filter web test:e2e",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
+    "lint:security": "tsx scripts/lint-security.ts",
     "lint:lockfile": "tsx scripts/check-lockfile.ts",
     "typecheck": "tsc -b",
     "check:deps": "tsx scripts/check-dep-budget.ts",
@@ -29,6 +30,7 @@
     "@biomejs/biome": "^1.9.0",
     "@vitest/coverage-v8": "^3.2.6",
     "lefthook": "^1.11.0",
+    "node-html-parser": "^7.1.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.2.0"

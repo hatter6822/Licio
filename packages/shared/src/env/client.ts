@@ -24,12 +24,5 @@ export function validateClientEnv(env: Record<string, string | undefined>): Clie
     );
   }
 
-  const result = clientEnvSchema.safeParse(env);
-  if (!result.success) {
-    const formatted = result.error.issues
-      .map((issue) => `  - ${issue.path.join('.')}: ${issue.message}`)
-      .join('\n');
-    throw new Error(`Client environment validation failed:\n${formatted}`);
-  }
-  return result.data;
+  return clientEnvSchema.parse(env);
 }

@@ -25,6 +25,20 @@ describe('Security headers', () => {
     expect(endpoints).toBe('csp-endpoint="/api/security/csp-report"');
   });
 
+  it('should set Report-To header', async () => {
+    const res = await app.request('/health');
+    const reportTo = res.headers.get('Report-To');
+    expect(reportTo).toBeDefined();
+    const parsed = JSON.parse(reportTo ?? '') as {
+      group: string;
+      max_age: number;
+      endpoints: Array<{ url: string }>;
+    };
+    expect(parsed.group).toBe('csp-endpoint');
+    expect(parsed.max_age).toBe(86400);
+    expect(parsed.endpoints[0]?.url).toBe('/api/security/csp-report');
+  });
+
   it('should set Strict-Transport-Security', async () => {
     const res = await app.request('/health');
     const hsts = res.headers.get('Strict-Transport-Security');

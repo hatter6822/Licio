@@ -14,12 +14,5 @@ export const serverEnvSchema = z.object({
 export type ServerEnv = z.infer<typeof serverEnvSchema>;
 
 export function validateServerEnv(env: Record<string, string | undefined>): ServerEnv {
-  const result = serverEnvSchema.safeParse(env);
-  if (!result.success) {
-    const formatted = result.error.issues
-      .map((issue) => `  - ${issue.path.join('.')}: ${issue.message}`)
-      .join('\n');
-    throw new Error(`Server environment validation failed:\n${formatted}`);
-  }
-  return result.data;
+  return serverEnvSchema.parse(env);
 }

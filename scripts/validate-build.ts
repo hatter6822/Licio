@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parse } from 'node-html-parser';
 
 const DIST_DIR = resolve(import.meta.dirname, '..', 'apps', 'web', 'dist');
 const INDEX_HTML = resolve(DIST_DIR, 'index.html');
 
-const EVENT_HANDLER_ATTRS = [
+const EVENT_HANDLER_ATTRS = new Set([
   'onclick',
   'onload',
   'onerror',
@@ -31,7 +32,7 @@ const EVENT_HANDLER_ATTRS = [
   'ontouchstart',
   'ontouchend',
   'ontouchmove',
-];
+]);
 
 function validate(): void {
   if (!existsSync(INDEX_HTML)) {
@@ -40,45 +41,41 @@ function validate(): void {
   }
 
   const html = readFileSync(INDEX_HTML, 'utf-8');
+  const root = parse(html);
   const errors: string[] = [];
 
-  // Check for inline <script> tags (those without src attribute)
-  // Match <script> tags and check if they have src
-  const scriptRegex = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
-  for (const match of html.matchAll(scriptRegex)) {
-    const attrs = match[1] ?? '';
-    const content = match[2] ?? '';
-    if (!attrs.includes('src=') && content.trim().length > 0) {
-      errors.push(`Inline <script> found: ${content.trim().slice(0, 80)}...`);
+  for (const script of root.querySelectorAll('script')) {
+    if (!script.getAttribute('src') && script.textContent.trim().length > 0) {
+      errors.push(`Inline <script> found: ${script.textContent.trim().slice(0, 80)}...`);
     }
   }
 
-  // Check for <style> tags
-  const styleTagRegex = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
-  const styleMatches = html.match(styleTagRegex);
-  if (styleMatches) {
-    for (const styleMatch of styleMatches) {
-      errors.push(`Inline <style> found: ${styleMatch.slice(0, 80)}...`);
+  for (const style of root.querySelectorAll('style')) {
+    if (style.textContent.trim().length > 0) {
+      errors.push(`Inline <style> found: ${style.textContent.trim().slice(0, 80)}...`);
     }
   }
 
-  // Check for inline style= attributes
-  const inlineStyleRegex = /\bstyle\s*=\s*["'][^"']*["']/gi;
-  const styleAttrMatches = html.match(inlineStyleRegex);
-  if (styleAttrMatches) {
-    for (const attr of styleAttrMatches) {
-      errors.push(`Inline style attribute found: ${attr}`);
+  for (const el of root.querySelectorAll('*')) {
+    if (el.getAttribute('style')) {
+      errors.push(
+        `Inline style attribute on <${el.tagName.toLowerCase()}>: style="${el.getAttribute('style')}"`,
+      );
     }
-  }
 
-  // Check for event handler attributes
-  for (const handler of EVENT_HANDLER_ATTRS) {
-    const handlerRegex = new RegExp(`\\b${handler}\\s*=\\s*["']`, 'gi');
-    const handlerMatches = html.match(handlerRegex);
-    if (handlerMatches) {
-      for (const h of handlerMatches) {
-        errors.push(`Event handler attribute found: ${h}`);
+    for (const attr of Object.keys(el.attributes)) {
+      if (EVENT_HANDLER_ATTRS.has(attr.toLowerCase())) {
+        errors.push(
+          `Event handler attribute on <${el.tagName.toLowerCase()}>: ${attr}="${el.getAttribute(attr)}"`,
+        );
       }
+    }
+  }
+
+  for (const a of root.querySelectorAll('a[href]')) {
+    const href = a.getAttribute('href') ?? '';
+    if (href.toLowerCase().startsWith('javascript:')) {
+      errors.push(`javascript: URL found in <a>: ${href.slice(0, 80)}`);
     }
   }
 
@@ -90,7 +87,9 @@ function validate(): void {
     process.exit(1);
   }
 
-  console.log('Build validation passed: zero inline scripts, styles, or event handlers.');
+  console.log(
+    'Build validation passed: zero inline scripts, styles, event handlers, or javascript: URLs.',
+  );
 }
 
 validate();

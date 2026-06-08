@@ -12,8 +12,6 @@ function check(): void {
   const errors: string[] = [];
   let tarballCount = 0;
 
-  // In pnpm lockfiles, tarball URLs appear in "resolution:" blocks as "tarball:" values
-  // and in the package path keys that reference registry URLs
   const tarballPattern = /tarball:\s*(https?:\/\/[^\s'"]+)/g;
   for (const match of content.matchAll(tarballPattern)) {
     const url = match[1];
@@ -35,11 +33,26 @@ function check(): void {
     }
   }
 
-  // Also check for integrity hashes existence
   const integrityPattern = /integrity:\s*(sha\d+-[A-Za-z0-9+/=]+)/g;
   let integrityCount = 0;
   for (const _match of content.matchAll(integrityPattern)) {
     integrityCount++;
+  }
+
+  const packagePattern = /^\s+'?([^'\s:][^':]*@[^':]+)'?:/gm;
+  let packageCount = 0;
+  for (const _match of content.matchAll(packagePattern)) {
+    packageCount++;
+  }
+
+  if (packageCount > 0 && integrityCount === 0) {
+    errors.push(
+      `Lockfile contains ${packageCount} package entries but zero integrity hashes — lockfile may be corrupted or generated without integrity`,
+    );
+  } else if (packageCount > 0 && integrityCount < packageCount * 0.5) {
+    errors.push(
+      `Only ${integrityCount} integrity hashes for ${packageCount} packages — expected near-full coverage`,
+    );
   }
 
   if (errors.length > 0) {
@@ -51,7 +64,7 @@ function check(): void {
   }
 
   console.log(
-    `Lockfile validation passed: ${tarballCount} tarball URLs checked, ${integrityCount} integrity hashes present.`,
+    `Lockfile validation passed: ${tarballCount} tarball URLs checked, ${integrityCount} integrity hashes present across ~${packageCount} packages.`,
   );
 }
 

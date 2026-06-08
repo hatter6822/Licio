@@ -1,23 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { RouterProvider, createRouter } from '@tanstack/react-router';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { createAppQueryClient } from './lib/query-client.js';
 import { routeTree } from './routes/root.js';
 import { initTrustedTypes } from './security/trusted-types.js';
 import './styles/app.css';
 
 initTrustedTypes();
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 1000 * 60,
-      retry: 1,
-      refetchOnWindowFocus: false,
-    },
-  },
-});
+const queryClient = createAppQueryClient();
 
 const router = createRouter({ routeTree });
 
@@ -39,3 +32,9 @@ createRoot(rootElement).render(
     </QueryClientProvider>
   </StrictMode>,
 );
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js', { scope: '/' });
+  });
+}

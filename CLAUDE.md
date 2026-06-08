@@ -22,21 +22,36 @@ docs/           # Specification and planning documents
 
 ## Commands
 
-- `pnpm dev` — start web and api dev servers concurrently
-- `pnpm build` — build all workspaces in dependency order
+### Root (monorepo)
+
+- `pnpm dev` — start web and api dev servers concurrently (via `--parallel`)
+- `pnpm build` — build all workspaces in dependency order (shared first, then db/invariants, then web/api)
 - `pnpm test` — run unit tests (Vitest) across all workspaces (80% coverage threshold enforced)
 - `pnpm test -- --coverage` — run unit tests with coverage report
 - `pnpm test:e2e` — run Playwright E2E tests (Chromium, Firefox, WebKit) with axe-core a11y checks
 - `pnpm lint` — run Biome check across all workspaces
 - `pnpm lint:fix` — auto-fix lint issues
+- `pnpm lint:security` — supplementary security lint (innerHTML, eval, javascript: URLs)
 - `pnpm lint:lockfile` — validate lockfile integrity
 - `pnpm typecheck` — TypeScript strict-mode check across all workspaces
 - `pnpm check:deps` — dependency-budget enforcement
-- `pnpm check:workspace-deps` — workspace boundary enforcement
-- `pnpm sbom` — generate CycloneDX SBOM
+- `pnpm check:workspace-deps` — workspace boundary enforcement (package.json + source imports)
+- `pnpm sbom` — generate CycloneDX SBOM (includes transitive dependencies)
 - `pnpm db:generate` — generate Drizzle migrations
 - `pnpm db:migrate` — run Drizzle migrations
+- `pnpm db:push` — push Drizzle schema directly to database (development only)
 - `pnpm clean` — remove build artifacts
+
+### Per-workspace
+
+- `pnpm --filter web dev` — start Vite dev server (port 5173)
+- `pnpm --filter api dev` — start Hono BFF dev server (port 3001)
+- `pnpm --filter web build` — build web app
+- `pnpm --filter api build` — build API server
+- `pnpm --filter web test:e2e` — run Playwright E2E tests
+- `pnpm --filter @licio/shared build` — build shared package
+- `pnpm --filter @licio/db build` — build database package
+- `pnpm --filter @licio/invariants build` — build invariants package
 
 ## Coding Conventions
 
@@ -108,6 +123,13 @@ useQuery({
 - **XSS defense layers**: React JSX auto-escaping + DOMPurify + Trusted Types + strict CSP
 - **CSP violation reporting**: `report-uri` and `report-to` directives send violations to `/api/security/csp-report`
 - **Permissions-Policy**: camera, microphone, geolocation, payment, and sensor APIs disabled by default
+
+## Linting Limitations
+
+Biome 1.9.x does not support:
+- `noConsole` / `noConsoleLog` — console usage is not blocked by the linter; use pino for server-side logging
+- `noRestrictedSyntax` — cannot block `innerHTML`, `outerHTML`, or `document.write()` at the AST level; these are caught by `pnpm lint:security` instead
+- `javascript:` URL blocking — caught by `pnpm lint:security` and `scripts/validate-build.ts`
 
 ## Commit Message Convention
 

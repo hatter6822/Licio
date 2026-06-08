@@ -92,6 +92,22 @@ Types: feat, fix, refactor, docs, test, chore, security, perf
 Scope: web, api, shared, db, invariants, ci, docs
 ```
 
+### Signed Commits (Recommended)
+
+We recommend signing commits with GPG or SSH keys. Signed commits provide
+cryptographic proof of authorship and are required for verified badges on GitHub.
+
+```bash
+# Configure GPG signing
+git config --global commit.gpgsign true
+git config --global user.signingkey YOUR_GPG_KEY_ID
+
+# Or use SSH signing (Git 2.34+)
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub
+git config --global commit.gpgsign true
+```
+
 ## SPDX License Headers
 
 All new source files must include:
