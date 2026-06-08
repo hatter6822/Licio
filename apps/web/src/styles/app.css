@@ -129,9 +129,9 @@
   --spacing-16: 4rem;
 }
 
-/* Dark mode */
+/* Dark mode — plain CSS variables (not @theme) so media queries scope correctly */
 @media (prefers-color-scheme: dark) {
-  @theme {
+  :root {
     --color-surface-base: #0f0f23;
     --color-surface-raised: #1a1a2e;
     --color-surface-overlay: #25253d;
@@ -143,10 +143,8 @@
     --color-border-default: #374151;
     --color-border-strong: #4b5563;
 
-    /* Background alias — dark */
     --color-background: #0f0f23;
 
-    /* Secondary colors — dark overrides */
     --color-secondary-50: #042f2e;
     --color-secondary-100: #134e4a;
     --color-secondary-200: #115e59;
@@ -159,7 +157,6 @@
     --color-secondary-900: #ccfbf1;
     --color-secondary-950: #f0fdfa;
 
-    /* Accent colors — dark overrides */
     --color-accent-50: #451a03;
     --color-accent-100: #78350f;
     --color-accent-200: #92400e;
@@ -176,11 +173,21 @@
 
 /* Dark mode + high contrast */
 @media (prefers-color-scheme: dark) and (prefers-contrast: more) {
-  @theme {
+  :root {
     --color-text-primary: #ffffff;
     --color-text-secondary: #e5e7eb;
     --color-border-default: #ffffff;
     --color-border-strong: #ffffff;
+  }
+}
+
+/* Light mode + high contrast */
+@media (prefers-color-scheme: light) and (prefers-contrast: more) {
+  :root {
+    --color-text-primary: #000000;
+    --color-text-secondary: #1f2937;
+    --color-border-default: #000000;
+    --color-border-strong: #000000;
   }
 }
 
@@ -193,16 +200,6 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
-  }
-}
-
-/* High contrast */
-@media (prefers-contrast: more) {
-  @theme {
-    --color-text-primary: #000000;
-    --color-text-secondary: #1f2937;
-    --color-border-default: #000000;
-    --color-border-strong: #000000;
   }
 }
 

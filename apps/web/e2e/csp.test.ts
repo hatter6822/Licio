@@ -2,8 +2,8 @@
 import { expect, test } from '@playwright/test';
 
 test.describe('Content Security Policy', () => {
-  test('serves strict CSP header via API proxy', async ({ request }) => {
-    const response = await request.get('http://localhost:3001/health');
+  test('serves strict CSP header', async ({ request }) => {
+    const response = await request.get('/');
     const csp = response.headers()['content-security-policy'];
 
     expect(csp).toBeDefined();

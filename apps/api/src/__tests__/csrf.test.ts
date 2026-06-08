@@ -246,16 +246,23 @@ describe('CSRF protection', () => {
 
   it('handles PATCH and DELETE as state-changing methods', async () => {
     const app = createApp();
-    for (const method of ['PATCH', 'DELETE']) {
-      const res = await app.request('/api/csrf-token', {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          Cookie: '__Host-session=test-methods',
-        },
-        body: method === 'DELETE' ? undefined : '{}',
-      });
-      expect(res.status).toBe(403);
-    }
+
+    const patchRes = await app.request('/api/csrf-token', {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: '__Host-session=test-methods',
+      },
+      body: '{}',
+    });
+    expect(patchRes.status).toBe(403);
+
+    const deleteRes = await app.request('/api/csrf-token', {
+      method: 'DELETE',
+      headers: {
+        Cookie: '__Host-session=test-methods',
+      },
+    });
+    expect(deleteRes.status).toBe(403);
   });
 });
