@@ -6,6 +6,7 @@
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
     "noPropertyAccessFromIndexSignature": true,
+    "noUncheckedSideEffectImports": true,
     "esModuleInterop": true,
     "moduleResolution": "bundler",
     "module": "ESNext",

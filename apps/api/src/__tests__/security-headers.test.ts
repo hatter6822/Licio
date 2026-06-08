@@ -5,15 +5,24 @@ import { createApp } from '../app.js';
 describe('Security headers', () => {
   const app = createApp();
 
-  it('should set Content-Security-Policy', async () => {
+  it('should set Content-Security-Policy with all directives', async () => {
     const res = await app.request('/health');
     const csp = res.headers.get('Content-Security-Policy');
     expect(csp).toBeDefined();
     expect(csp).toContain("default-src 'self'");
     expect(csp).toContain("script-src 'self'");
     expect(csp).toContain("require-trusted-types-for 'script'");
+    expect(csp).toContain('trusted-types default dompurify');
+    expect(csp).toContain('report-uri /api/security/csp-report');
+    expect(csp).toContain('report-to csp-endpoint');
     expect(csp).not.toContain('unsafe-inline');
     expect(csp).not.toContain('unsafe-eval');
+  });
+
+  it('should set Reporting-Endpoints header', async () => {
+    const res = await app.request('/health');
+    const endpoints = res.headers.get('Reporting-Endpoints');
+    expect(endpoints).toBe('csp-endpoint="/api/security/csp-report"');
   });
 
   it('should set Strict-Transport-Security', async () => {

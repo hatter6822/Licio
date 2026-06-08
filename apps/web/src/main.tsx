@@ -4,7 +4,10 @@ import { RouterProvider, createRouter } from '@tanstack/react-router';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { routeTree } from './routes/root.js';
+import { initTrustedTypes } from './security/trusted-types.js';
 import './styles/app.css';
+
+initTrustedTypes();
 
 const queryClient = new QueryClient({
   defaultOptions: {

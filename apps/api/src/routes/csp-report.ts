@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { Hono } from 'hono';
-import pino from 'pino';
+import { createLogger } from '../lib/logger.js';
 
-const logger = pino({ level: process.env['LOG_LEVEL'] ?? 'info' });
+const logger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
 
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT = 100;

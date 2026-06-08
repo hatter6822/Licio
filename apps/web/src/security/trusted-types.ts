@@ -1,4 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import DOMPurify from 'dompurify';
+
+interface TrustedTypePolicyFactory {
+  createPolicy(
+    name: string,
+    policy: {
+      createHTML?: (input: string) => string;
+      createScript?: (input: string) => string;
+      createScriptURL?: (input: string) => string;
+    },
+  ): unknown;
+}
 
 export function initTrustedTypes(): void {
   if (typeof window === 'undefined') {
@@ -24,15 +36,10 @@ export function initTrustedTypes(): void {
       throw new Error(`Blocked script URL from external origin: ${url}`);
     },
   });
-}
 
-interface TrustedTypePolicyFactory {
-  createPolicy(
-    name: string,
-    policy: {
-      createHTML?: (input: string) => string;
-      createScript?: (input: string) => string;
-      createScriptURL?: (input: string) => string;
-    },
-  ): unknown;
+  tt.createPolicy('dompurify', {
+    createHTML: (input: string) => input,
+  });
+
+  DOMPurify.setConfig({ RETURN_TRUSTED_TYPE: true });
 }

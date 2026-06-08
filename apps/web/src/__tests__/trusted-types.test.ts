@@ -2,6 +2,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { initTrustedTypes } from '../security/trusted-types.js';
 
+type PolicyHandlers = Record<string, (...args: string[]) => string>;
+
+function createMockTT() {
+  const policies = new Map<string, PolicyHandlers>();
+  return {
+    mock: {
+      createPolicy: (name: string, policy: PolicyHandlers) => {
+        policies.set(name, policy);
+      },
+    },
+    policies,
+  };
+}
+
 describe('initTrustedTypes', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -18,78 +32,83 @@ describe('initTrustedTypes', () => {
     expect(() => initTrustedTypes()).not.toThrow();
   });
 
-  it('creates a default policy that blocks HTML assignment', () => {
-    let capturedPolicy: Record<string, (...args: string[]) => string> = {};
-    const mockTT = {
-      createPolicy: (_name: string, policy: Record<string, (...args: string[]) => string>) => {
-        capturedPolicy = policy;
-      },
-    };
-    vi.stubGlobal('window', { ...window, trustedTypes: mockTT });
+  it('creates both default and dompurify policies', () => {
+    const { mock, policies } = createMockTT();
+    vi.stubGlobal('window', { ...window, trustedTypes: mock });
 
     initTrustedTypes();
 
-    expect(capturedPolicy['createHTML']).toBeDefined();
-    expect(() => capturedPolicy['createHTML']?.('<div>xss</div>')).toThrow(
+    expect(policies.has('default')).toBe(true);
+    expect(policies.has('dompurify')).toBe(true);
+  });
+
+  it('default policy blocks HTML assignment', () => {
+    const { mock, policies } = createMockTT();
+    vi.stubGlobal('window', { ...window, trustedTypes: mock });
+
+    initTrustedTypes();
+
+    const defaultPolicy = policies.get('default');
+    expect(defaultPolicy?.['createHTML']).toBeDefined();
+    expect(() => defaultPolicy?.['createHTML']?.('<div>xss</div>')).toThrow(
       'Direct HTML assignment is blocked by Trusted Types policy',
     );
   });
 
-  it('creates a default policy that blocks script creation', () => {
-    let capturedPolicy: Record<string, (...args: string[]) => string> = {};
-    const mockTT = {
-      createPolicy: (_name: string, policy: Record<string, (...args: string[]) => string>) => {
-        capturedPolicy = policy;
-      },
-    };
-    vi.stubGlobal('window', { ...window, trustedTypes: mockTT });
+  it('default policy blocks script creation', () => {
+    const { mock, policies } = createMockTT();
+    vi.stubGlobal('window', { ...window, trustedTypes: mock });
 
     initTrustedTypes();
 
-    expect(capturedPolicy['createScript']).toBeDefined();
-    expect(() => capturedPolicy['createScript']?.('alert(1)')).toThrow(
+    const defaultPolicy = policies.get('default');
+    expect(defaultPolicy?.['createScript']).toBeDefined();
+    expect(() => defaultPolicy?.['createScript']?.('alert(1)')).toThrow(
       'Direct script creation is blocked by Trusted Types policy',
     );
   });
 
-  it('allows same-origin script URLs', () => {
-    let capturedPolicy: Record<string, (...args: string[]) => string> = {};
-    const mockTT = {
-      createPolicy: (_name: string, policy: Record<string, (...args: string[]) => string>) => {
-        capturedPolicy = policy;
-      },
-    };
+  it('default policy allows same-origin script URLs', () => {
+    const { mock, policies } = createMockTT();
     vi.stubGlobal('window', {
       ...window,
-      trustedTypes: mockTT,
+      trustedTypes: mock,
       location: { origin: 'http://localhost:5173' },
     });
 
     initTrustedTypes();
 
-    expect(capturedPolicy['createScriptURL']?.('http://localhost:5173/script.js')).toBe(
+    const defaultPolicy = policies.get('default');
+    expect(defaultPolicy?.['createScriptURL']?.('http://localhost:5173/script.js')).toBe(
       'http://localhost:5173/script.js',
     );
-    expect(capturedPolicy['createScriptURL']?.('/relative/path.js')).toBe('/relative/path.js');
+    expect(defaultPolicy?.['createScriptURL']?.('/relative/path.js')).toBe('/relative/path.js');
   });
 
-  it('blocks external-origin script URLs', () => {
-    let capturedPolicy: Record<string, (...args: string[]) => string> = {};
-    const mockTT = {
-      createPolicy: (_name: string, policy: Record<string, (...args: string[]) => string>) => {
-        capturedPolicy = policy;
-      },
-    };
+  it('default policy blocks external-origin script URLs', () => {
+    const { mock, policies } = createMockTT();
     vi.stubGlobal('window', {
       ...window,
-      trustedTypes: mockTT,
+      trustedTypes: mock,
       location: { origin: 'http://localhost:5173' },
     });
 
     initTrustedTypes();
 
-    expect(() => capturedPolicy['createScriptURL']?.('https://evil.com/script.js')).toThrow(
+    const defaultPolicy = policies.get('default');
+    expect(() => defaultPolicy?.['createScriptURL']?.('https://evil.com/script.js')).toThrow(
       'Blocked script URL from external origin',
     );
+  });
+
+  it('dompurify policy allows HTML passthrough for sanitized content', () => {
+    const { mock, policies } = createMockTT();
+    vi.stubGlobal('window', { ...window, trustedTypes: mock });
+
+    initTrustedTypes();
+
+    const dpPolicy = policies.get('dompurify');
+    expect(dpPolicy?.['createHTML']).toBeDefined();
+    expect(dpPolicy?.['createHTML']?.('<p>safe</p>')).toBe('<p>safe</p>');
   });
 });

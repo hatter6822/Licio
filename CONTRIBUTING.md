@@ -34,6 +34,32 @@ pnpm dev
 5. All CI checks must pass before merge
 6. At least one approving review is required
 
+## Branch Protection (`main`)
+
+The `main` branch is protected with the following settings to ensure the CI
+security gates are mandatory, not advisory:
+
+**Required status checks (all must pass):**
+- `Lint & Format` — Biome formatting and security lint rules
+- `Type Check` — TypeScript strict-mode across all workspaces
+- `Lockfile Integrity` — registry and integrity hash validation
+- `Dependency Budget` — production dependency count enforcement
+- `Test & Coverage` — unit tests with 80% coverage threshold
+- `Build & Size Check` — zero inline scripts/styles, SRI, bundle-size budgets
+- `E2E Tests` — Playwright across Chromium/Firefox/WebKit with axe-core a11y
+- `Security Audit` — dependency audit, secret scan, SBOM generation
+
+**Merge constraints:**
+- Require at least one approving review; stale approvals are dismissed on new pushes
+- Require branches to be up to date with `main` before merging
+- Require linear history (squash-merge or rebase-merge only)
+- Force-pushes to `main` are blocked
+- Deletion of `main` is blocked
+- Direct pushes to `main` are blocked — all changes require a PR
+
+These settings ensure that no code reaches `main` without passing every security
+gate and receiving human review.
+
 ## CI Gates (Required for Merge)
 
 No PR merges with a failing CI gate. The following jobs must all pass:
@@ -73,10 +99,62 @@ All new source files must include:
 // SPDX-License-Identifier: AGPL-3.0-or-later
 ```
 
+## Local HTTPS Development (Optional)
+
+Several security mechanisms require HTTPS or a secure context: `Secure` and
+`__Host-` cookies, Service Workers (beyond `localhost`), HSTS, and some Trusted
+Types behaviors. An optional local HTTPS workflow lets you develop and test
+these faithfully.
+
+### Setup with mkcert
+
+```bash
+# Install mkcert (macOS)
+brew install mkcert
+mkcert -install
+
+# Install mkcert (Linux)
+# See https://github.com/FiloSottile/mkcert#installation
+
+# Generate dev certificates (from the repo root)
+mkcert -cert-file localhost.pem -key-file localhost-key.pem localhost 127.0.0.1 ::1
+```
+
+The generated `*.pem` files are gitignored (WS-0.1.1). Never commit certificates.
+
+### Running with HTTPS
+
+Set the `DEV_HTTPS` environment variable to enable HTTPS on the dev servers:
+
+```bash
+DEV_HTTPS=true pnpm dev
+```
+
+- **Vite dev server**: reads `localhost.pem`/`localhost-key.pem` from the repo root
+  and serves on `https://localhost:5173`
+- **Hono BFF**: reads the same certs and serves on `https://localhost:3001`
+
+### What changes with HTTPS
+
+- `__Host-session` cookies are fully functional (browsers require `Secure` flag)
+- The service worker registers and operates over a secure origin
+- HSTS headers are respected by the browser
+- CSP and security headers behave identically to production
+
+### HMR WebSocket
+
+Vite's HMR WebSocket connection may need a `wss://` upgrade when using HTTPS.
+This is handled automatically by Vite when the `server.https` config is present.
+No CSP relaxation is needed for HMR — it uses same-origin WebSocket which is
+covered by `connect-src 'self'`.
+
 ## Security
 
 - See `SECURITY.md` for vulnerability reporting
 - Never commit secrets, keys, or `.env` files
-- All user-generated content must be sanitized via DOMPurify
+- All user-generated content must be sanitized via DOMPurify with Trusted Types
+  (`RETURN_TRUSTED_TYPE: true`)
 - SQL queries must use Drizzle parameterized queries only
+- CSRF tokens are required for all state-changing requests (POST/PATCH/DELETE)
+- Session cookies use `HttpOnly`, `Secure`, `SameSite=Strict`, `__Host-` prefix
 - Follow the security constraints documented in `CLAUDE.md`

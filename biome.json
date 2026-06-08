@@ -33,7 +33,8 @@
       "suspicious": {
         "noExplicitAny": "error",
         "noGlobalAssign": "error",
-        "useValidTypeof": "error"
+        "useValidTypeof": "error",
+        "noDoubleEquals": "error"
       },
       "correctness": {
         "noUnusedVariables": "error",

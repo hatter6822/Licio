@@ -1,8 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
+
+function getHttpsConfig(): { key: Buffer; cert: Buffer } | undefined {
+  if (process.env['DEV_HTTPS'] !== 'true') return undefined;
+  const keyPath = resolve(__dirname, '../../localhost-key.pem');
+  const certPath = resolve(__dirname, '../../localhost.pem');
+  if (!existsSync(keyPath) || !existsSync(certPath)) return undefined;
+  return { key: readFileSync(keyPath), cert: readFileSync(certPath) };
+}
 
 export default defineConfig({
   base: '/',
@@ -55,8 +65,14 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    https: getHttpsConfig(),
     proxy: {
-      '/api': { target: 'http://localhost:3001', changeOrigin: true },
+      '/api': {
+        target:
+          process.env['DEV_HTTPS'] === 'true' ? 'https://localhost:3001' : 'http://localhost:3001',
+        changeOrigin: true,
+        secure: false,
+      },
     },
   },
 });

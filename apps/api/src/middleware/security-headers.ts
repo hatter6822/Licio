@@ -14,14 +14,20 @@ const CSP = [
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
+  'trusted-types default dompurify',
   "require-trusted-types-for 'script'",
+  'report-uri /api/security/csp-report',
+  'report-to csp-endpoint',
 ].join('; ');
+
+const REPORTING_ENDPOINTS = 'csp-endpoint="/api/security/csp-report"';
 
 export function securityHeadersMiddleware(): MiddlewareHandler {
   return async (c, next) => {
     await next();
 
     c.res.headers.set('Content-Security-Policy', CSP);
+    c.res.headers.set('Reporting-Endpoints', REPORTING_ENDPOINTS);
     c.res.headers.set('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');
     c.res.headers.set('X-Content-Type-Options', 'nosniff');
     c.res.headers.set('X-Frame-Options', 'SAMEORIGIN');

@@ -73,16 +73,41 @@ Before adding any new production dependency:
 4. License — must be AGPL-3.0-or-later compatible (MIT, ISC, BSD, Apache-2.0, etc.)
 5. Web-API alternative — can a built-in browser/Node.js API replace the dependency?
 
+## Data Fetching Convention
+
+All TanStack Query responses must be validated through a zod schema before
+entering the cache. This ensures malformed or injected server/network data
+is rejected at the boundary.
+
+```typescript
+import { z } from 'zod';
+import { useQuery } from '@tanstack/react-query';
+
+const responseSchema = z.object({ id: z.string(), name: z.string() });
+
+useQuery({
+  queryKey: ['example'],
+  queryFn: async () => {
+    const res = await fetch('/api/example');
+    const data: unknown = await res.json();
+    return responseSchema.parse(data);
+  },
+});
+```
+
 ## Security Constraints
 
 - **Strict CSP**: `script-src 'self'` — no `'unsafe-inline'` or `'unsafe-eval'`
-- **Trusted Types**: `require-trusted-types-for 'script'` enforced
+- **Trusted Types**: `require-trusted-types-for 'script'` with named policies `default` and `dompurify`
+- **DOMPurify**: configured with `RETURN_TRUSTED_TYPE: true` for Trusted Types integration
 - **No inline scripts or styles** in build output (validated by `scripts/validate-build.ts`)
-- **CORS**: exact-match origin validation, never `*` with credentials
-- **CSRF**: per-session nonces with constant-time comparison
+- **CORS**: exact-match set membership origin validation, never `*` with credentials
+- **CSRF**: per-session single-use nonces with constant-time comparison (`crypto.timingSafeEqual`)
 - **Cookies**: `HttpOnly`, `Secure`, `SameSite=Strict`, `__Host-` prefix
 - **SQL injection prevention**: Drizzle parameterized queries only
 - **XSS defense layers**: React JSX auto-escaping + DOMPurify + Trusted Types + strict CSP
+- **CSP violation reporting**: `report-uri` and `report-to` directives send violations to `/api/security/csp-report`
+- **Permissions-Policy**: camera, microphone, geolocation, payment, and sensor APIs disabled by default
 
 ## Commit Message Convention
 

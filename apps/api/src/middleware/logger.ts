@@ -1,30 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { randomUUID } from 'node:crypto';
 import type { MiddlewareHandler } from 'hono';
-import pino from 'pino';
+import { createLogger } from '../lib/logger.js';
 
-const logger = pino({
-  level: process.env['LOG_LEVEL'] ?? 'info',
-  redact: {
-    paths: [
-      'req.headers.authorization',
-      'req.headers.cookie',
-      'password',
-      '*.password',
-      'token',
-      '*.token',
-      'secret',
-      '*.secret',
-      'seedPhrase',
-      '*.seedPhrase',
-      'mnemonic',
-      '*.mnemonic',
-      'privateKey',
-      '*.privateKey',
-    ],
-    censor: '[REDACTED]',
-  },
-});
+const logger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
 
 export function loggerMiddleware(): MiddlewareHandler {
   return async (c, next) => {

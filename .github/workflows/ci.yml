@@ -25,7 +25,7 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm biome check .
 
   typecheck:
@@ -38,7 +38,7 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm typecheck
 
   lockfile-lint:
@@ -51,7 +51,7 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm lint:lockfile
 
   dep-budget:
@@ -64,7 +64,7 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm check:deps
 
   test:
@@ -78,12 +78,17 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test -- --coverage
+      - run: pnpm test -- --coverage --reporter=default --reporter=junit --outputFile=test-results/junit.xml
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
         if: always()
         with:
           name: coverage-report
           path: coverage/
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
+        if: always()
+        with:
+          name: test-results
+          path: test-results/
 
   build-and-size:
     name: Build & Size Check
@@ -116,6 +121,11 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
+      - name: Cache Playwright browsers
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('apps/web/node_modules/@playwright/test/package.json') }}
       - run: pnpm build
       - run: pnpm exec playwright install --with-deps chromium firefox webkit
       - run: pnpm --filter web test:e2e
@@ -151,6 +161,41 @@ jobs:
             echo "ERROR: Potential secret files committed:"
             echo "$SECRETS"
             exit 1
+          fi
+      - name: Secret scan (file content)
+        run: |
+          ERRORS=""
+          if git grep -lE '-----BEGIN[[:space:]]+(RSA|EC|DSA|OPENSSH|PGP)?[[:space:]]*PRIVATE KEY-----' -- ':!*.md' ':!lefthook.yml' 2>/dev/null; then
+            ERRORS="${ERRORS}Private key header found in tracked files.\n"
+          fi
+          if git grep -lE 'AKIA[0-9A-Z]{16}' 2>/dev/null; then
+            ERRORS="${ERRORS}AWS access key pattern found in tracked files.\n"
+          fi
+          if [ -n "$ERRORS" ]; then
+            echo "ERROR: Secret patterns detected:"
+            echo -e "$ERRORS"
+            exit 1
+          fi
+      - name: Check for install scripts
+        run: |
+          SCRIPTS=$(pnpm ls --json --depth 0 2>/dev/null | node -e "
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8'));
+            const entries = Array.isArray(data) ? data : [data];
+            for (const pkg of entries) {
+              for (const [name, info] of Object.entries(pkg.dependencies || {})) {
+                try {
+                  const pkgJson = JSON.parse(fs.readFileSync('node_modules/.pnpm/node_modules/' + name + '/package.json', 'utf8'));
+                  const scripts = pkgJson.scripts || {};
+                  const hasInstallScripts = scripts.preinstall || scripts.install || scripts.postinstall;
+                  if (hasInstallScripts) console.log(name + ': ' + JSON.stringify({preinstall: scripts.preinstall, install: scripts.install, postinstall: scripts.postinstall}));
+                } catch {}
+              }
+            }
+          " || true)
+          if [ -n "$SCRIPTS" ]; then
+            echo "WARNING: Packages with install scripts detected (review required):"
+            echo "$SCRIPTS"
           fi
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
         with:
