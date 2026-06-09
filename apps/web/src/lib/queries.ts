@@ -13,6 +13,7 @@ import type {
   UserSettings,
 } from '@licio/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { readNotificationsUsedToday } from '../offline/notification-meter.js';
 import {
   cacheSignalLedger,
   cacheThreadSnapshot,
@@ -122,6 +123,15 @@ export function useNotificationPreferencesQuery() {
   return useQuery({
     queryKey: queryKeys.notificationPreferences(),
     queryFn: () => api.fetchNotificationPreferences(),
+    ...cachePolicy.profile,
+  });
+}
+
+/** Today's notification volume for the budget indicator (read locally, WS-C.2.4c). */
+export function useNotificationBudgetQuery() {
+  return useQuery({
+    queryKey: queryKeys.notificationBudget(),
+    queryFn: () => readNotificationsUsedToday(),
     ...cachePolicy.profile,
   });
 }

@@ -28,6 +28,7 @@ export {
   requestPersistentStorage,
   snapshotStorage,
 } from './eviction.js';
+export { readNotificationsUsedToday, recordNotificationShown } from './notification-meter.js';
 export * as queue from './queue.js';
 export {
   cacheSignalLedger,

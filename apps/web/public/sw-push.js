@@ -15,6 +15,40 @@ self.addEventListener('message', (event) => {
   }
 });
 
+// Notification budget meter (WS-C.2.4c): a per-UTC-day count of notifications
+// shown, kept in a tiny dedicated IndexedDB the settings UI reads. Counts only —
+// never contents. Mirrors offline/notification-meter.ts.
+function openMeterDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('licio-meter', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('counts', { keyPath: 'day' });
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function meterRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function recordNotificationShown() {
+  try {
+    const db = await openMeterDb();
+    const day = new Date().toISOString().slice(0, 10);
+    const existing = await meterRequest(db.transaction('counts').objectStore('counts').get(day));
+    const count = (existing && typeof existing.count === 'number' ? existing.count : 0) + 1;
+    await meterRequest(
+      db.transaction('counts', 'readwrite').objectStore('counts').put({ day, count }),
+    );
+    db.close();
+  } catch {
+    // Non-fatal: the budget indicator is best-effort.
+  }
+}
+
 self.addEventListener('push', (event) => {
   let payload = {};
   if (event.data) {
@@ -33,7 +67,9 @@ self.addEventListener('push', (event) => {
     badge: '/icon-192.png',
     data: { url: typeof payload.url === 'string' ? payload.url : '/' },
   };
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil(
+    Promise.all([self.registration.showNotification(title, options), recordNotificationShown()]),
+  );
 });
 
 // Convert a base64url VAPID key to the Uint8Array `applicationServerKey` wants.

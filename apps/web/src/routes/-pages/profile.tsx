@@ -26,7 +26,9 @@ import { NotificationBudget } from '../../components/wellbeing/NotificationBudge
 import { QuietHoursSetting } from '../../components/wellbeing/QuietHoursSetting/index.js';
 import { useT } from '../../i18n/index.js';
 import {
+  useNotificationBudgetQuery,
   useNotificationPreferencesQuery,
+  useRoomsQuery,
   useSavedStoriesQuery,
   useSettingsQuery,
   useSignalLedgerQuery,
@@ -153,6 +155,44 @@ export function ProfilePage(): React.ReactElement {
   );
 }
 
+/** Per-room notification controls (WS-C.2.4c muted_topics). */
+function MutedTopicsSection(): React.ReactElement {
+  const t = useT();
+  const rooms = useRoomsQuery();
+  const prefs = useNotificationPreferencesQuery();
+  const updatePrefs = useUpdateNotificationPreferencesMutation();
+  const muted = new Set(prefs.data?.muted_topics ?? []);
+  const setMuted = (roomId: string, mute: boolean): void => {
+    const next = new Set(muted);
+    if (mute) next.add(roomId);
+    else next.delete(roomId);
+    updatePrefs.mutate({ muted_topics: [...next] });
+  };
+  return (
+    <Section title={t('settings.perRoom', 'Per-room notifications')}>
+      {rooms.data && rooms.data.items.length > 0 ? (
+        <ul className="flex flex-col gap-3">
+          {rooms.data.items.map((room) => (
+            <li key={room.room_id}>
+              <Switch
+                label={room.name}
+                description={t('settings.perRoom.desc', 'Notify me about this room.')}
+                checked={!muted.has(room.room_id)}
+                disabled={!prefs.data || updatePrefs.isPending}
+                onCheckedChange={(on) => setMuted(room.room_id, !on)}
+              />
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-sm text-ink-muted">
+          {t('settings.perRoom.empty', 'Rooms you join will appear here.')}
+        </p>
+      )}
+    </Section>
+  );
+}
+
 export function SettingsPage(): React.ReactElement {
   const t = useT();
   usePageFocus(t('profile.settings', 'Settings'));
@@ -167,6 +207,7 @@ export function SettingsPage(): React.ReactElement {
 
   const prefs = useNotificationPreferencesQuery();
   const updatePrefs = useUpdateNotificationPreferencesMutation();
+  const budget = useNotificationBudgetQuery();
 
   return (
     <>
@@ -235,8 +276,9 @@ export function SettingsPage(): React.ReactElement {
               />
             );
           })()}
-          <NotificationBudget used={0} limit={prefs.data?.budget_limit ?? 20} />
+          <NotificationBudget used={budget.data ?? 0} limit={prefs.data?.budget_limit ?? 20} />
         </Section>
+        <MutedTopicsSection />
         <PushNotificationsSection />
       </div>
     </>
