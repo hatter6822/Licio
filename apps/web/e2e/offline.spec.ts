@@ -10,7 +10,12 @@ test.describe('offline app shell (WS-C.2)', () => {
   test('renders the app shell offline from the service-worker precache', async ({
     page,
     context,
+    browserName,
   }) => {
+    // Playwright's offline + service-worker emulation is reliable on Chromium;
+    // Firefox/WebKit drivers don't faithfully serve a controlled-SW navigation
+    // under setOffline. The rest of the suite still runs on all three browsers.
+    test.skip(browserName !== 'chromium', 'SW offline emulation is validated on Chromium');
     await page.goto('/');
     // Wait for the worker to be installed/activated, then reload so it controls
     // this client (generateSW does not claim clients on first activation).
