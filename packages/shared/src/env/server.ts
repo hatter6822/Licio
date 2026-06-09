@@ -9,6 +9,17 @@ export const serverEnvSchema = z.object({
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   CORS_ORIGIN: z.string().url({ message: 'CORS_ORIGIN must be a valid URL' }),
   SESSION_SECRET: z.string().min(32, { message: 'SESSION_SECRET must be at least 32 characters' }),
+  // Web Push / VAPID (WS-C.2.4a). All optional: when unset, push is disabled and
+  // the push endpoints report unconfigured rather than failing. The private key
+  // lives ONLY here (server env), never in the client bundle (SPEC §6.8, §21.2).
+  VAPID_PUBLIC_KEY: z.string().optional(),
+  VAPID_PRIVATE_KEY: z.string().optional(),
+  VAPID_SUBJECT: z
+    .string()
+    .regex(/^(mailto:|https:\/\/)/, {
+      message: 'VAPID_SUBJECT must be a mailto: or https:// URI',
+    })
+    .optional(),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;

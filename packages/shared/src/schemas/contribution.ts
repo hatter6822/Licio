@@ -61,3 +61,10 @@ export const createReportRequestSchema = z.object({
   local_operation_id: z.string().min(1),
 });
 export type CreateReportRequest = z.infer<typeof createReportRequestSchema>;
+
+/** Acknowledgement that a safety report was received (queued for review). */
+export const reportAckSchema = z.object({
+  status: z.literal('received'),
+  local_operation_id: z.string().min(1),
+});
+export type ReportAck = z.infer<typeof reportAckSchema>;

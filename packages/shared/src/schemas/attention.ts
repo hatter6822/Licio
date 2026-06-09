@@ -152,3 +152,7 @@ export const attentionAggregateBatchSchema = z.object({
   aggregates: z.array(attentionAggregateSchema).max(200),
 });
 export type AttentionAggregateBatch = z.infer<typeof attentionAggregateBatchSchema>;
+
+/** Server acknowledgement of an ingested batch (count accepted as hints, §6.11). */
+export const attentionIngestAckSchema = z.object({ accepted: z.number().int().nonnegative() });
+export type AttentionIngestAck = z.infer<typeof attentionIngestAckSchema>;

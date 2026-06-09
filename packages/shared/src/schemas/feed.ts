@@ -5,7 +5,7 @@
 // It is no-applause BY CONSTRUCTION: there is deliberately no like/vote/score/
 // reaction/follower field — only descriptive conversation-state signals.
 import { z } from 'zod';
-import { paginatedSchema, uuidSchema } from './common.js';
+import { cursorSchema, paginatedSchema, uuidSchema } from './common.js';
 
 /** Feed ranking/personalization modes (SPEC §6.4; WS-B.2.9 switcher). */
 export const FEED_MODES = [
@@ -65,3 +65,17 @@ export type FeedItem = z.infer<typeof feedItemSchema>;
 /** Keyset-paginated feed page (read-only-offline cacheable, WS-C.1.2 table). */
 export const feedResponseSchema = paginatedSchema(feedItemSchema);
 export type FeedResponse = z.infer<typeof feedResponseSchema>;
+
+/** Query params for the feed (mode switcher + keyset cursor). */
+export const feedQuerySchema = z.object({
+  mode: feedModeSchema.optional(),
+  cursor: cursorSchema.optional(),
+});
+export type FeedQuery = z.infer<typeof feedQuerySchema>;
+
+/** Story detail (SPEC §23.2 GET /stories/{id}). FeedItem plus a thread link. */
+export const storyDetailSchema = feedItemSchema.extend({
+  body_summary: z.string(),
+  thread_id: uuidSchema.nullable(),
+});
+export type StoryDetail = z.infer<typeof storyDetailSchema>;

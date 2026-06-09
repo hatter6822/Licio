@@ -43,6 +43,15 @@ export const userSettingsSchema = z.object({
 });
 export type UserSettings = z.infer<typeof userSettingsSchema>;
 
+/** Defaults a fresh account starts from (personalization on, standard privacy). */
+export const DEFAULT_USER_SETTINGS: UserSettings = {
+  feed_mode: 'balanced',
+  personalization_enabled: true,
+  privacy_level: 'standard',
+  theme: 'system',
+  reduced_motion: 'system',
+};
+
 /** Auth status response: who the session belongs to (or unauthenticated). */
 export const authStatusResponseSchema = z.discriminatedUnion('authenticated', [
   z.object({ authenticated: z.literal(true), user: userContextSchema }),

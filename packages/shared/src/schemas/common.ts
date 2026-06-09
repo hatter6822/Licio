@@ -42,3 +42,7 @@ export const apiErrorSchema = z.object({
   }),
 });
 export type ApiError = z.infer<typeof apiErrorSchema>;
+
+/** Minimal acknowledgement for state-changing endpoints with no body to return. */
+export const okAckSchema = z.object({ ok: z.boolean() });
+export type OkAck = z.infer<typeof okAckSchema>;
