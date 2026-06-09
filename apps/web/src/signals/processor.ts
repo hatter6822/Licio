@@ -22,10 +22,22 @@ const COLLECTION_OFF: CollectionPolicy = {
   identifier: 'privacy-bucket',
 };
 
+/** Default batched-upload cadence (WS-C.4.4: batched at intervals, not per-event). */
+const DEFAULT_FLUSH_INTERVAL_MS = 30_000;
+
+/** Detach a timer from the event loop where supported (Node tests). */
+function unref(handle: ReturnType<typeof setInterval>): void {
+  if (typeof handle === 'object' && handle !== null && 'unref' in handle) {
+    (handle as { unref: () => void }).unref();
+  }
+}
+
 export interface SignalProcessorOptions {
   uploader?: AggregateUploader;
   engagement?: EngagementTracker;
   cadence?: CadenceTracker;
+  /** Return tracker (injected with localStorage persistence in production). */
+  returnTracker?: ReturnTracker;
   capMs?: number;
   /** Monotonic clock for dwell (ms). */
   now?: Clock;
@@ -34,6 +46,8 @@ export interface SignalProcessorOptions {
   sessionWindowMs?: number;
   /** Tick cadence for the dwell/idle poll (ms, default 1s). */
   tickMs?: number;
+  /** Batched-upload cadence (ms, default 30s). Configurable per WS-C.4.4. */
+  flushIntervalMs?: number;
 }
 
 export class SignalProcessor {
@@ -43,12 +57,13 @@ export class SignalProcessor {
   private readonly dwell: DwellAccumulator;
   private readonly cap: DwellCapTracker;
   private readonly opens = new OpenTracker();
-  private readonly returns = new ReturnTracker();
+  private readonly returns: ReturnTracker;
   private readonly traversal = new TraversalTracker();
   private readonly now: Clock;
   private readonly wallClock: () => number;
   private readonly sessionWindowMs: number;
   private readonly tickMs: number;
+  private readonly flushIntervalMs: number;
 
   private policy: CollectionPolicy = COLLECTION_OFF;
   private currentItemId: string | null = null;
@@ -59,34 +74,48 @@ export class SignalProcessor {
     this.uploader = options.uploader ?? new AggregateUploader();
     this.engagement = options.engagement ?? new EngagementTracker();
     this.cadence = options.cadence ?? new CadenceTracker();
+    this.returns = options.returnTracker ?? new ReturnTracker();
     this.now =
       options.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
     this.wallClock = options.wallClock ?? (() => Date.now());
     this.sessionWindowMs = options.sessionWindowMs ?? SESSION_BUCKET_WINDOW_MS;
     this.tickMs = options.tickMs ?? 1_000;
+    this.flushIntervalMs = options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
     this.dwell = new DwellAccumulator(this.now);
     this.cap = new DwellCapTracker(options.capMs ?? DEFAULT_DWELL_CAP_MS);
     this.sessionBucketLabel = sessionBucket(this.wallClock(), this.sessionWindowMs);
   }
 
-  /** Set the collection policy. Turning collection off discards in-flight dwell. */
+  /**
+   * Set the collection policy. Turning collection off discards in-flight dwell
+   * AND the locally-persisted return history, so opting out leaves no on-device
+   * signal state behind (WS-C.4.1d privacy gate).
+   */
   setCollectionPolicy(policy: CollectionPolicy): void {
     this.policy = policy;
     if (!policy.collect) {
       this.dwell.setEngaged(false);
       this.dwell.reset();
       this.lastDwellMs = 0;
+      this.returns.resetSession();
     }
   }
 
-  /** The story currently in view. Switching captures the previous item's dwell. */
+  /**
+   * The story currently in view. Switching away is the "done attending" boundary:
+   * the outgoing item's final dwell is accrued and its §22.1 aggregate is snapshot
+   * (so per-item attention is buffered on navigation, not only at session end), then
+   * the new item — if any — records a (possibly returning) visit.
+   */
   setActiveStory(storyId: string | null): void {
     if (storyId === this.currentItemId) return;
-    this.accrueDwell();
+    this.captureCurrent();
     this.currentItemId = storyId;
     this.dwell.reset();
     this.lastDwellMs = 0;
-    if (storyId) this.returns.visit(storyId, this.wallClock());
+    // Personalization gates the return tracker too (WS-C.4.1d): no visit is
+    // recorded — or persisted — while collection is off.
+    if (storyId && this.policy.collect) this.returns.visit(storyId, this.wallClock());
   }
 
   recordSourceOpen(openId: string, storyId: string): void {
@@ -116,14 +145,36 @@ export class SignalProcessor {
     if (delta > 0) this.cap.add(this.currentItemId, delta);
   }
 
+  /** Whether an item accrued any attention this session (worth an aggregate). */
+  private hasSignal(itemId: string): boolean {
+    return (
+      this.cap.get(itemId) > 0 ||
+      this.opens.wasSourceOpened(itemId) ||
+      this.opens.wasContextOpened(itemId) ||
+      this.traversal.distinctBranches(itemId) > 0 ||
+      this.returns.returnCount(itemId) > 0
+    );
+  }
+
+  /**
+   * Accrue the current item's pending dwell and, if it carries any signal, buffer
+   * its aggregate. A no-op when there is no current item or collection is off, and
+   * it never emits an empty (signal-free) aggregate. Re-captures across hide/switch
+   * within a session are acceptable hints (dwell is monotonic; server-as-hint §6.11).
+   */
+  private captureCurrent(): void {
+    if (!this.currentItemId) return;
+    this.accrueDwell();
+    if (this.policy.collect && this.hasSignal(this.currentItemId)) {
+      this.captureAggregate(this.currentItemId);
+    }
+  }
+
   private maybeRolloverSession(wallNow: number): void {
     const next = sessionBucket(wallNow, this.sessionWindowMs);
     if (next === this.sessionBucketLabel) return;
     // Capture the closing session's aggregate before the caps/opens reset.
-    if (this.currentItemId) {
-      this.accrueDwell();
-      this.captureAggregate(this.currentItemId);
-    }
+    this.captureCurrent();
     this.cap.resetSession();
     this.opens.resetSession();
     this.traversal.resetSession();
@@ -176,35 +227,58 @@ export class SignalProcessor {
 
   /** Durable flush for page-hide: enqueue the batch so it survives a close. */
   async flushDurable(): Promise<void> {
-    if (this.currentItemId && this.policy.collect) {
-      this.accrueDwell();
-      this.captureAggregate(this.currentItemId);
-    }
+    this.captureCurrent();
     await this.uploader.flushDurable();
   }
 
-  /** Wire DOM listeners + the tick interval + page-hide durable flush. */
+  /**
+   * Wire DOM listeners, the dwell tick, the batched-upload interval, and the
+   * page-hide durable flush. While the page is hidden the 1 Hz dwell tick is
+   * paused (no active dwell accrues when not visible+focused anyway), and the
+   * final batch is durably enqueued so it survives the page closing. Returns
+   * teardown.
+   */
   start(): () => void {
     const teardownEngagement = this.engagement.start();
     const teardownCadence = this.cadence.start();
-    const interval = setInterval(() => this.tick(), this.tickMs);
-    if (typeof interval === 'object' && 'unref' in interval) {
-      (interval as { unref: () => void }).unref();
-    }
-    const onHide = (): void => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+
+    let tickInterval: ReturnType<typeof setInterval> | null = null;
+    const startTick = (): void => {
+      if (tickInterval !== null) return;
+      tickInterval = setInterval(() => this.tick(), this.tickMs);
+      unref(tickInterval);
+    };
+    const stopTick = (): void => {
+      if (tickInterval === null) return;
+      clearInterval(tickInterval);
+      tickInterval = null;
+    };
+    startTick();
+
+    // Batched upload (WS-C.4.4): drain the buffer on a cadence, not per-event.
+    const flushInterval = setInterval(() => void this.flush(), this.flushIntervalMs);
+    unref(flushInterval);
+
+    const onVisibility = (): void => {
+      if (typeof document === 'undefined') return;
+      if (document.visibilityState === 'hidden') {
         void this.flushDurable();
+        stopTick();
+      } else {
+        startTick();
       }
     };
     if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', onHide);
+      document.addEventListener('visibilitychange', onVisibility);
     }
+
     return () => {
       teardownEngagement();
       teardownCadence();
-      clearInterval(interval);
+      stopTick();
+      clearInterval(flushInterval);
       if (typeof document !== 'undefined') {
-        document.removeEventListener('visibilitychange', onHide);
+        document.removeEventListener('visibilitychange', onVisibility);
       }
     };
   }

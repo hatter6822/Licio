@@ -6,14 +6,40 @@
 // hostile/compulsive loop never increases positive attention (SIG-ANTI-RAGELOOP,
 // §6.7). Thread traversal counts DISTINCT branches visited, so nonredundant
 // exploration is weighted above re-reading the same branch.
+//
+// Return state is persisted LOCALLY (never uploaded) through an injectable store
+// so that a genuine return after the app was closed — and a rage-loop spanning a
+// reload — are detected across sessions. Only the bucketed count reaches the
+// §22.1 aggregate; the per-visit timestamp series stays on the device.
+
+/** A persistable snapshot of one item's return state (local-only). */
+export interface ReturnSnapshot {
+  id: string;
+  lastVisitAt: number;
+  returnCount: number;
+  /** Genuine-return timestamps, pruned to the rage window. */
+  returnTimes: number[];
+}
+
+/** Local persistence port for return state (no-op by default; localStorage in prod). */
+export interface ReturnTrackerStore {
+  load(): ReturnSnapshot[] | null;
+  save(snapshots: ReturnSnapshot[]): void;
+}
+
+const NOOP_STORE: ReturnTrackerStore = { load: () => null, save: () => undefined };
 
 export interface ReturnTrackerConfig {
   /** Minimum time away before a revisit counts as a return (default 30 min). */
   returnThresholdMs: number;
-  /** Window over which returns are tallied for rage-loop detection (default 1h). */
+  /** Window over which returns are tallied for rage-loop detection (default 90 min). */
   rageWindowMs: number;
   /** Returns within the window at/above which the loop is dampened to 0. */
   rageCount: number;
+  /** Drop items untouched for longer than this; bounds local storage (default 30 days). */
+  retentionMs: number;
+  /** Max distinct items retained, evicting least-recently-visited (default 500). */
+  maxItems: number;
 }
 
 const DEFAULT_CONFIG: ReturnTrackerConfig = {
@@ -22,6 +48,8 @@ const DEFAULT_CONFIG: ReturnTrackerConfig = {
   // that max-rate obsessive pattern while a genuine occasional return does not.
   rageWindowMs: 90 * 60_000,
   rageCount: 3,
+  retentionMs: 30 * 24 * 60 * 60_000,
+  maxItems: 500,
 };
 
 interface ItemReturns {
@@ -33,10 +61,26 @@ interface ItemReturns {
 
 export class ReturnTracker {
   private readonly config: ReturnTrackerConfig;
+  private readonly store: ReturnTrackerStore;
   private readonly items = new Map<string, ItemReturns>();
 
-  constructor(config: Partial<ReturnTrackerConfig> = {}) {
+  constructor(config: Partial<ReturnTrackerConfig> = {}, store: ReturnTrackerStore = NOOP_STORE) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+    this.store = store;
+    this.hydrate();
+  }
+
+  /** Load persisted return state (validated upstream by the store). */
+  private hydrate(): void {
+    const snapshots = this.store.load();
+    if (!snapshots) return;
+    for (const snap of snapshots) {
+      this.items.set(snap.id, {
+        lastVisitAt: snap.lastVisitAt,
+        returnCount: snap.returnCount,
+        returnTimes: [...snap.returnTimes],
+      });
+    }
   }
 
   /** Record a visit. A visit ≥ threshold after the previous one is a return. */
@@ -56,6 +100,7 @@ export class ReturnTracker {
     state.returnTimes = state.returnTimes.filter((t) => now - t < this.config.rageWindowMs);
     state.lastVisitAt = now;
     this.items.set(itemId, state);
+    this.persist(now);
   }
 
   /** True when returns within the window have reached the rage threshold. */
@@ -73,8 +118,33 @@ export class ReturnTracker {
     return this.isRageLoop(itemId) ? 0 : state.returnCount;
   }
 
+  /** Clear all return state, including the local persistence. */
   resetSession(): void {
     this.items.clear();
+    this.store.save([]);
+  }
+
+  /** Prune stale/over-cap items (bounding local storage) and persist. */
+  private persist(now: number): void {
+    // Drop items untouched beyond the retention window.
+    for (const [id, state] of this.items) {
+      if (now - state.lastVisitAt >= this.config.retentionMs) this.items.delete(id);
+    }
+    // LRU cap: keep only the most-recently-visited maxItems.
+    if (this.items.size > this.config.maxItems) {
+      const keep = [...this.items.entries()]
+        .sort((a, b) => b[1].lastVisitAt - a[1].lastVisitAt)
+        .slice(0, this.config.maxItems);
+      this.items.clear();
+      for (const [id, state] of keep) this.items.set(id, state);
+    }
+    const snapshots: ReturnSnapshot[] = [...this.items.entries()].map(([id, state]) => ({
+      id,
+      lastVisitAt: state.lastVisitAt,
+      returnCount: state.returnCount,
+      returnTimes: state.returnTimes,
+    }));
+    this.store.save(snapshots);
   }
 }
 

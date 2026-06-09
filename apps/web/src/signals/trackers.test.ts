@@ -1,7 +1,28 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
-import { ReturnTracker, TraversalTracker } from './return-tracker.js';
+import {
+  type ReturnSnapshot,
+  ReturnTracker,
+  type ReturnTrackerStore,
+  TraversalTracker,
+} from './return-tracker.js';
 import { OpenTracker } from './source-tracker.js';
+
+/** An in-memory return-tracker store (deep-copies so the tracker can't alias it). */
+function fakeStore(): { store: ReturnTrackerStore; current: () => ReturnSnapshot[] | null } {
+  let data: ReturnSnapshot[] | null = null;
+  const copy = (s: ReturnSnapshot[]): ReturnSnapshot[] =>
+    s.map((x) => ({ ...x, returnTimes: [...x.returnTimes] }));
+  return {
+    store: {
+      load: () => (data ? copy(data) : null),
+      save: (snaps) => {
+        data = copy(snaps);
+      },
+    },
+    current: () => data,
+  };
+}
 
 describe('OpenTracker', () => {
   it('counts an open that persists past the minimum duration', () => {
@@ -78,6 +99,55 @@ describe('ReturnTracker', () => {
     tracker.visit('item-1', 45 * 60_000); // 45 min later
     expect(tracker.isRageLoop('item-1')).toBe(false);
     expect(tracker.returnCount('item-1')).toBe(1);
+  });
+
+  it('detects a genuine return across sessions via persistence', () => {
+    const backing = fakeStore();
+    new ReturnTracker({}, backing.store).visit('item-1', 0); // session 1, persisted
+    const next = new ReturnTracker({}, backing.store); // session 2 hydrates state
+    next.visit('item-1', MIN + 1); // ≥ threshold after the persisted visit
+    expect(next.returnCount('item-1')).toBe(1);
+  });
+
+  it('detects a rage loop spanning a reload via persistence', () => {
+    const backing = fakeStore();
+    const before = new ReturnTracker({}, backing.store);
+    before.visit('x', 0);
+    before.visit('x', MIN); // return 1
+    const after = new ReturnTracker({}, backing.store); // reload
+    after.visit('x', 2 * MIN); // return 2
+    after.visit('x', 3 * MIN); // return 3 → rage threshold
+    expect(after.isRageLoop('x')).toBe(true);
+    expect(after.returnCount('x')).toBe(0);
+  });
+
+  it('clears persisted state on reset', () => {
+    const backing = fakeStore();
+    const tracker = new ReturnTracker({}, backing.store);
+    tracker.visit('x', 0);
+    expect(backing.current()).not.toBeNull();
+    tracker.resetSession();
+    expect(backing.current()).toEqual([]);
+  });
+
+  it('prunes items untouched beyond the retention window', () => {
+    const backing = fakeStore();
+    const tracker = new ReturnTracker({ retentionMs: 1_000 }, backing.store);
+    tracker.visit('old', 0);
+    tracker.visit('fresh', 5_000); // 'old' is now 5s stale > 1s retention
+    expect((backing.current() ?? []).map((s) => s.id)).toEqual(['fresh']);
+  });
+
+  it('evicts least-recently-visited items beyond the cap', () => {
+    const backing = fakeStore();
+    const tracker = new ReturnTracker({ maxItems: 2 }, backing.store);
+    tracker.visit('a', 0);
+    tracker.visit('b', 1);
+    tracker.visit('c', 2); // exceeds cap → evict the oldest ('a')
+    expect((backing.current() ?? []).map((s) => s.id).sort((p, q) => p.localeCompare(q))).toEqual([
+      'b',
+      'c',
+    ]);
   });
 });
 

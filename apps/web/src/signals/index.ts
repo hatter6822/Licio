@@ -15,6 +15,12 @@ export {
   resolveIdentifier,
 } from './privacy.js';
 export { SignalProcessor, type SignalProcessorOptions } from './processor.js';
-export { ReturnTracker, TraversalTracker } from './return-tracker.js';
+export { createReturnStore } from './return-store.js';
+export {
+  type ReturnSnapshot,
+  ReturnTracker,
+  type ReturnTrackerStore,
+  TraversalTracker,
+} from './return-tracker.js';
 export { type OpenKind, OpenTracker } from './source-tracker.js';
 export { EngagementTracker, type VisibilityReaders } from './visibility.js';
