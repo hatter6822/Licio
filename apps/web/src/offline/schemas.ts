@@ -29,7 +29,18 @@ export const savedStoryRecordSchema = z.object({
 });
 export type SavedStoryRecord = z.infer<typeof savedStoryRecordSchema>;
 
-/** An autosaved composer draft (key: draftId). Body lives in `values`. */
+/** AES-GCM ciphertext envelope for an encrypted draft (base64 iv + data). */
+export const draftCipherSchema = z.object({
+  iv: z.string().min(1),
+  data: z.string().min(1),
+});
+export type DraftCipherRecord = z.infer<typeof draftCipherSchema>;
+
+/**
+ * An autosaved composer draft (key: draftId). When `encrypted` is true the body
+ * lives in `cipher` (AES-256-GCM at rest, §6.8) and `values` is empty; otherwise
+ * the plaintext body is in `values` (the fallback where Web Crypto is absent).
+ */
 export const draftContributionRecordSchema = z.object({
   schemaVersion,
   draftId: z.string().min(1),
@@ -39,8 +50,10 @@ export const draftContributionRecordSchema = z.object({
   contributionType: contributionTypeSchema,
   values: z.record(z.string(), z.string()),
   updatedAt: z.number().int().nonnegative(),
-  /** True when the draft is encrypted at rest (cross-device sync on, §6.8). */
+  /** True when the draft body is encrypted at rest in `cipher` (§6.8). */
   encrypted: z.boolean(),
+  /** Present iff `encrypted`: the AES-GCM ciphertext of the draft values. */
+  cipher: draftCipherSchema.optional(),
 });
 export type DraftContributionRecord = z.infer<typeof draftContributionRecordSchema>;
 

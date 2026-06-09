@@ -13,6 +13,13 @@ export {
   type StoreName,
 } from './db.js';
 export {
+  type DraftCipher,
+  decryptDraftValues,
+  encryptDraftValues,
+  resetDraftKeyCache,
+} from './draft-crypto.js';
+export { type DraftInput, loadDraft, saveDraft } from './drafts.js';
+export {
   type EvictionCallbacks,
   type IntegrityVerdict,
   initEvictionDetection,

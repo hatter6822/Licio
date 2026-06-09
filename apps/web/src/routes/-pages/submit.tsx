@@ -15,7 +15,7 @@ import {
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { useToast } from '../../components/ui/Toast/index.js';
 import { useT } from '../../i18n/index.js';
-import { draftContributions, queue } from '../../offline/index.js';
+import { queue, saveDraft } from '../../offline/index.js';
 import { processPendingQueue } from '../../offline/sync.js';
 import { markInteractionStart, measureInteraction } from '../../perf/marks.js';
 import { usePageFocus } from './usePageFocus.js';
@@ -49,21 +49,17 @@ export function SubmitPage(): React.ReactElement {
   }, []);
 
   const onDraftChange = (mode: ComposerMode, values: ComposerValues): void => {
-    // Offline-draft-save budget (≤100ms local ack).
+    // Offline-draft-save budget (≤100ms local ack). The body is encrypted at rest
+    // (§6.8) inside saveDraft before it reaches IndexedDB.
     markInteractionStart('draft-save');
-    void draftContributions
-      .put({
-        schemaVersion: 1,
-        draftId: draftId.current,
-        storyId: null,
-        threadId: threadId ?? null,
-        branch: threadId ? activeBranch : null,
-        contributionType: mode,
-        values,
-        updatedAt: Date.now(),
-        encrypted: false,
-      })
-      .then(() => measureInteraction('draft-save'));
+    void saveDraft({
+      draftId: draftId.current,
+      storyId: null,
+      threadId: threadId ?? null,
+      branch: threadId ? activeBranch : null,
+      contributionType: mode,
+      values,
+    }).then(() => measureInteraction('draft-save'));
   };
 
   const onSubmit = (mode: ComposerMode, values: ComposerValues): void => {
