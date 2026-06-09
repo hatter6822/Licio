@@ -12,6 +12,7 @@ import {
   requestPersistentStorage,
 } from '../offline/eviction.js';
 import { initForegroundSync, processPendingQueue } from '../offline/sync.js';
+import { initWebVitals } from '../perf/vitals.js';
 import { resolveCollectionPolicy } from '../signals/privacy.js';
 import { getSignalProcessor } from '../signals/runtime.js';
 import { initAuthSync, useAuthStore } from '../stores/auth.js';
@@ -76,6 +77,13 @@ export function startRuntime(): () => void {
   const teardownProcessor = getSignalProcessor().start();
   const teardownSync = initForegroundSync();
   const teardownEviction = initEvictionDetection({ onEvicted });
+  // Core Web Vitals RUM — privacy-safe (metric name/value/rating only, never a
+  // URL or identifier). Lab measurement remains the authoritative release gate.
+  const teardownVitals = initWebVitals((vital) => {
+    if (import.meta.env.DEV) {
+      console.debug(`[cwv] ${vital.name} ${Math.round(vital.value)} (${vital.rating})`);
+    }
+  });
   void requestPersistentStorage();
 
   void hydrateFeatureFlags();
@@ -86,5 +94,6 @@ export function startRuntime(): () => void {
     teardownProcessor();
     teardownSync();
     teardownEviction();
+    teardownVitals();
   };
 }

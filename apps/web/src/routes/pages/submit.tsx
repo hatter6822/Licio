@@ -6,7 +6,7 @@
 // flushes it (WS-C.2.3) — offline-safe, with a terminal failure surfaced to the
 // user and the draft preserved.
 import { useSearch } from '@tanstack/react-router';
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import {
   type ComposerMode,
   type ComposerValues,
@@ -17,6 +17,7 @@ import { useToast } from '../../components/ui/Toast/index.js';
 import { useT } from '../../i18n/index.js';
 import { draftContributions, queue } from '../../offline/index.js';
 import { processPendingQueue } from '../../offline/sync.js';
+import { markInteractionStart, measureInteraction } from '../../perf/marks.js';
 import { usePageFocus } from '../usePageFocus.js';
 
 function newDraftId(): string {
@@ -40,18 +41,29 @@ export function SubmitPage(): React.ReactElement {
   const { toast } = useToast();
   const draftId = useRef(newDraftId());
 
+  // Composer-open budget (≤300ms): mark on mount, measure on first paint.
+  useEffect(() => {
+    markInteractionStart('composer-open');
+    const raf = requestAnimationFrame(() => measureInteraction('composer-open'));
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
   const onDraftChange = (mode: ComposerMode, values: ComposerValues): void => {
-    void draftContributions.put({
-      schemaVersion: 1,
-      draftId: draftId.current,
-      storyId: null,
-      threadId: threadId ?? null,
-      branch: threadId ? activeBranch : null,
-      contributionType: mode,
-      values,
-      updatedAt: Date.now(),
-      encrypted: false,
-    });
+    // Offline-draft-save budget (≤100ms local ack).
+    markInteractionStart('draft-save');
+    void draftContributions
+      .put({
+        schemaVersion: 1,
+        draftId: draftId.current,
+        storyId: null,
+        threadId: threadId ?? null,
+        branch: threadId ? activeBranch : null,
+        contributionType: mode,
+        values,
+        updatedAt: Date.now(),
+        encrypted: false,
+      })
+      .then(() => measureInteraction('draft-save'));
   };
 
   const onSubmit = (mode: ComposerMode, values: ComposerValues): void => {

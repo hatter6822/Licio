@@ -14,6 +14,7 @@ import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { Skeleton } from '../../components/ui/Skeleton/index.js';
 import { useT } from '../../i18n/index.js';
 import { useThreadBranchQuery, useThreadQuery } from '../../lib/queries.js';
+import { markInteractionStart, measureInteraction } from '../../perf/marks.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
 import { PageScaffold } from '../PageScaffold.js';
@@ -48,6 +49,10 @@ function BranchPanel({
 }): React.ReactElement {
   const t = useT();
   const query = useThreadBranchQuery(threadId, branch);
+  // Branch-open budget (≤500ms cached): measure when the branch content resolves.
+  useEffect(() => {
+    if (query.data) measureInteraction('branch-open');
+  }, [query.data]);
   if (query.isLoading) {
     return <Skeleton className="h-4 w-full" count={4} />;
   }
@@ -88,6 +93,7 @@ function ThreadDetailContent({ threadId }: { threadId: string }): React.ReactEle
   }, [threadId, branch]);
 
   const onBranchChange = (next: BranchId): void => {
+    markInteractionStart('branch-open');
     getSignalProcessor().recordBranchVisit(threadId, next);
     void navigate({ to: '/threads/$threadId', params: { threadId }, search: { branch: next } });
   };
