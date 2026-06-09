@@ -1,0 +1,129 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import type { UserContext } from '@licio/shared';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('./api.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./api.js')>();
+  return {
+    ...actual,
+    fetchFeatureFlags: vi.fn(),
+    fetchAuthStatus: vi.fn(),
+    fetchSettings: vi.fn(),
+  };
+});
+
+const api = await import('./api.js');
+const { applySignalPolicy, confirmSession, hydrateFeatureFlags, startRuntime } = await import(
+  './bootstrap.js'
+);
+const { useFeatureFlagStore } = await import('../stores/feature-flags.js');
+const { useAuthStore } = await import('../stores/auth.js');
+const { setSignalProcessor } = await import('../signals/runtime.js');
+const { SignalProcessor } = await import('../signals/processor.js');
+
+const USER: UserContext = {
+  id: '11111111-1111-4111-8111-111111111111',
+  handle: 'ada',
+  display_name: 'Ada',
+  account_state: 'active',
+  locale: 'en',
+};
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  useFeatureFlagStore.getState().reset();
+  useAuthStore.getState().logout();
+  setSignalProcessor(new SignalProcessor());
+});
+
+afterEach(() => {
+  setSignalProcessor(null);
+});
+
+describe('hydrateFeatureFlags', () => {
+  it('enables flags from a valid server response', async () => {
+    vi.mocked(api.fetchFeatureFlags).mockResolvedValue({
+      cryptoEnabled: true,
+      governanceEnabled: false,
+      regionFlags: {},
+    });
+    await hydrateFeatureFlags();
+    expect(useFeatureFlagStore.getState().flags.cryptoEnabled).toBe(true);
+  });
+
+  it('fails closed when the flag endpoint errors', async () => {
+    vi.mocked(api.fetchFeatureFlags).mockRejectedValue(new Error('offline'));
+    await hydrateFeatureFlags();
+    expect(useFeatureFlagStore.getState().flags.cryptoEnabled).toBe(false);
+    expect(useFeatureFlagStore.getState().hydrated).toBe(true);
+  });
+});
+
+describe('confirmSession', () => {
+  it('sets the user when authenticated', async () => {
+    vi.mocked(api.fetchAuthStatus).mockResolvedValue({ authenticated: true, user: USER });
+    await confirmSession();
+    expect(useAuthStore.getState().user).toEqual(USER);
+  });
+
+  it('expires an optimistic session when the server says unauthenticated', async () => {
+    useAuthStore.getState().setAuthenticated(USER);
+    vi.mocked(api.fetchAuthStatus).mockResolvedValue({ authenticated: false });
+    await confirmSession();
+    expect(useAuthStore.getState().status).toBe('session-expired');
+  });
+
+  it('keeps optimistic state when the check fails (offline)', async () => {
+    useAuthStore.getState().setAuthenticated(USER);
+    vi.mocked(api.fetchAuthStatus).mockRejectedValue(new Error('offline'));
+    await confirmSession();
+    expect(useAuthStore.getState().status).toBe('authenticated');
+  });
+});
+
+describe('applySignalPolicy', () => {
+  it('disables collection when personalization is off', async () => {
+    const processor = new SignalProcessor();
+    const spy = vi.spyOn(processor, 'setCollectionPolicy');
+    setSignalProcessor(processor);
+    vi.mocked(api.fetchSettings).mockResolvedValue({
+      feed_mode: 'balanced',
+      personalization_enabled: false,
+      privacy_level: 'standard',
+      theme: 'system',
+      reduced_motion: 'system',
+    });
+    await applySignalPolicy();
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ collect: false }));
+  });
+
+  it('falls back to defaults when settings fail to load', async () => {
+    const processor = new SignalProcessor();
+    const spy = vi.spyOn(processor, 'setCollectionPolicy');
+    setSignalProcessor(processor);
+    vi.mocked(api.fetchSettings).mockRejectedValue(new Error('offline'));
+    await applySignalPolicy();
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ collect: true }));
+  });
+});
+
+describe('startRuntime', () => {
+  it('wires the runtime and returns a teardown that does not throw', () => {
+    vi.mocked(api.fetchFeatureFlags).mockResolvedValue({
+      cryptoEnabled: false,
+      governanceEnabled: false,
+      regionFlags: {},
+    });
+    vi.mocked(api.fetchAuthStatus).mockResolvedValue({ authenticated: false });
+    vi.mocked(api.fetchSettings).mockResolvedValue({
+      feed_mode: 'balanced',
+      personalization_enabled: true,
+      privacy_level: 'standard',
+      theme: 'system',
+      reduced_motion: 'system',
+    });
+    const teardown = startRuntime();
+    expect(typeof teardown).toBe('function');
+    expect(() => teardown()).not.toThrow();
+  });
+});
