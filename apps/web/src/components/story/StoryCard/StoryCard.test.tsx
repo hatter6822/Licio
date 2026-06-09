@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { render, screen, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { checkA11y } from '../../../test/axe.js';
 import type { StoryCardData } from '../types.js';
 import { StoryCard } from './StoryCard.js';
@@ -109,5 +109,23 @@ describe('StoryCard screen-reader order (WS-B.2.1c / WCAG 1.3.2)', () => {
     const html = container.innerHTML;
     expect(html).not.toContain('flex-row-reverse');
     expect(html).not.toMatch(/\border-\d/);
+  });
+});
+
+describe('StoryCard distribution-reason guard (no-applause)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('warns in development when the distribution reason looks like a raw score', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    render(<StoryCard {...sample} distributionReason="Ranked 87 points this hour" />);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it('does not warn for a human-readable distribution reason', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    render(<StoryCard {...sample} distributionReason="Rising from independent source opens" />);
+    expect(warn).not.toHaveBeenCalled();
   });
 });

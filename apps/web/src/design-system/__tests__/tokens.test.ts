@@ -117,16 +117,7 @@ describe.each(modes)('colour mode: %s', (mode) => {
     }
   });
 
-  const softGroups = [
-    'primary',
-    'success',
-    'warning',
-    'error',
-    'info',
-    'review',
-    'resolved',
-    'bridge',
-  ] as const;
+  const softGroups = ['primary', 'success', 'warning', 'error', 'info'] as const;
 
   it(`soft-tinted label text (on-soft) ≥ ${bodyMin}:1 on its soft background`, () => {
     for (const group of softGroups) {

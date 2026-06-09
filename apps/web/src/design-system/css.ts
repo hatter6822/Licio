@@ -65,12 +65,6 @@ export const tailwindColorMap: Record<string, ColorToken> = {
   'info-fg': 'info-fg',
   'info-soft': 'info-soft',
   'info-on-soft': 'info-on-soft',
-  'review-soft': 'review-soft',
-  'review-on-soft': 'review-on-soft',
-  'resolved-soft': 'resolved-soft',
-  'resolved-on-soft': 'resolved-on-soft',
-  'bridge-soft': 'bridge-soft',
-  'bridge-on-soft': 'bridge-on-soft',
 };
 
 const INDENT = '  ';

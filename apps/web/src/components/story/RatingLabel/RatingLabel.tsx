@@ -51,20 +51,23 @@ export const ratingLabels: Record<RatingLabelKind, RatingLabelDescriptor> = {
     messageKey: 'rating.needsContext',
     defaultText: 'Needs Context',
   },
+  // The three "distinct shade" labels share a base hue with a sibling but use a
+  // SOLID fill (vs the sibling's soft tint), so the two chips are ≥3:1 distinct
+  // in lightness for low-vision users (WS-B.2.3) — verified in RatingLabel.test.
   'under-review': {
-    classes: 'bg-review-soft text-review-on-soft',
+    classes: 'bg-warning text-warning-fg',
     icon: 'eye',
     messageKey: 'rating.underReview',
     defaultText: 'Under Review',
   },
   'resolved-context': {
-    classes: 'bg-resolved-soft text-resolved-on-soft',
+    classes: 'bg-success text-success-fg',
     icon: 'check-badge',
     messageKey: 'rating.resolvedContext',
     defaultText: 'Resolved Context',
   },
   'bridge-active': {
-    classes: 'bg-bridge-soft text-bridge-on-soft',
+    classes: 'bg-info text-info-fg',
     icon: 'bridge',
     messageKey: 'rating.bridgeActive',
     defaultText: 'Bridge Active',

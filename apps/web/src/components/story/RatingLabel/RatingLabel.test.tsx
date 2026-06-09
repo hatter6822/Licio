@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
+import { contrastRatio } from '../../../design-system/contrast.js';
+import { effectivePalettes } from '../../../design-system/tokens.js';
 import { I18nProvider } from '../../../i18n/index.js';
 import { checkA11y } from '../../../test/axe.js';
 import { RatingLabel, ratingLabelKinds, ratingLabels } from './RatingLabel.js';
@@ -28,6 +30,19 @@ describe('RatingLabel', () => {
     const texts = new Set(ratingLabelKinds.map((k) => ratingLabels[k].defaultText));
     expect(icons.size).toBe(7);
     expect(texts.size).toBe(7);
+  });
+
+  it('makes same-hue label pairs ≥3:1 distinct (solid vs soft chip lightness)', () => {
+    const c = effectivePalettes.light;
+    // Distinct-shade label (solid base hue) vs its soft sibling of the same hue.
+    const samehue: [string, string][] = [
+      [c.warning, c['warning-soft']], // Under Review vs Needs Context
+      [c.success, c['success-soft']], // Resolved Context vs Well-Sourced
+      [c.info, c['info-soft']], // Bridge Active vs Getting Attention
+    ];
+    for (const [solid, soft] of samehue) {
+      expect(contrastRatio(solid, soft)).toBeGreaterThanOrEqual(3);
+    }
   });
 
   it('routes copy through the localization layer', () => {

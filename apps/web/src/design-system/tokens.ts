@@ -52,13 +52,7 @@ export type ColorToken =
   | 'info'
   | 'info-fg'
   | 'info-soft'
-  | 'info-on-soft'
-  | 'review-soft'
-  | 'review-on-soft'
-  | 'resolved-soft'
-  | 'resolved-on-soft'
-  | 'bridge-soft'
-  | 'bridge-on-soft';
+  | 'info-on-soft';
 
 export type ColorPalette = Record<ColorToken, string>;
 export type ColorOverrides = Partial<ColorPalette>;
@@ -110,14 +104,6 @@ export const lightColors: ColorPalette = {
   'info-fg': '#FFFFFF',
   'info-soft': '#E7EEFB',
   'info-on-soft': '#194A9F',
-  // Rating-label distinct shades (WS-B.2.3): disambiguated primarily by icon +
-  // text, with their own soft/on-soft tints so they read distinctly.
-  'review-soft': '#EFEADF',
-  'review-on-soft': '#6A4A14',
-  'resolved-soft': '#DCEFE8',
-  'resolved-on-soft': '#0F5D45',
-  'bridge-soft': '#DCEEF4',
-  'bridge-on-soft': '#0E5E78',
 };
 
 /** Dark mode overrides (applied on top of {@link lightColors}). */
@@ -150,12 +136,6 @@ export const darkColors: ColorOverrides = {
   'error-on-soft': '#F1A8A2',
   'info-soft': '#16243E',
   'info-on-soft': '#AEC6F2',
-  'review-soft': '#25210F',
-  'review-on-soft': '#D9C28C',
-  'resolved-soft': '#0E2620',
-  'resolved-on-soft': '#74D2B4',
-  'bridge-soft': '#0E2630',
-  'bridge-on-soft': '#79C8E0',
 };
 
 /**
@@ -175,9 +155,6 @@ export const lightHighContrast: ColorOverrides = {
   'warning-on-soft': '#573800',
   'error-on-soft': '#6E1611',
   'info-on-soft': '#0E3A82',
-  'review-on-soft': '#4F3700',
-  'resolved-on-soft': '#0A4836',
-  'bridge-on-soft': '#0A4A60',
 };
 
 /**
@@ -197,9 +174,6 @@ export const darkHighContrast: ColorOverrides = {
   'warning-on-soft': '#F2D39A',
   'error-on-soft': '#F6C5C0',
   'info-on-soft': '#CFE0FA',
-  'review-on-soft': '#ECD9A8',
-  'resolved-on-soft': '#98E0C6',
-  'bridge-on-soft': '#9CD8EC',
 };
 
 /** The four effective colour modes, fully resolved (overrides flattened). */

@@ -40,12 +40,6 @@
   --licio-info-fg: #FFFFFF;
   --licio-info-soft: #E7EEFB;
   --licio-info-on-soft: #194A9F;
-  --licio-review-soft: #EFEADF;
-  --licio-review-on-soft: #6A4A14;
-  --licio-resolved-soft: #DCEFE8;
-  --licio-resolved-on-soft: #0F5D45;
-  --licio-bridge-soft: #DCEEF4;
-  --licio-bridge-on-soft: #0E5E78;
   /* Typography (WS-B.1.1b) */
   --licio-text-xs: 0.75rem;
   --licio-leading-xs: 1.5;
@@ -136,12 +130,6 @@
     --licio-error-on-soft: #F1A8A2;
     --licio-info-soft: #16243E;
     --licio-info-on-soft: #AEC6F2;
-    --licio-review-soft: #25210F;
-    --licio-review-on-soft: #D9C28C;
-    --licio-resolved-soft: #0E2620;
-    --licio-resolved-on-soft: #74D2B4;
-    --licio-bridge-soft: #0E2630;
-    --licio-bridge-on-soft: #79C8E0;
   }
 }
 
@@ -169,12 +157,6 @@
   --licio-error-on-soft: #F1A8A2;
   --licio-info-soft: #16243E;
   --licio-info-on-soft: #AEC6F2;
-  --licio-review-soft: #25210F;
-  --licio-review-on-soft: #D9C28C;
-  --licio-resolved-soft: #0E2620;
-  --licio-resolved-on-soft: #74D2B4;
-  --licio-bridge-soft: #0E2630;
-  --licio-bridge-on-soft: #79C8E0;
 }
 
 @media (prefers-color-scheme: light) and (prefers-contrast: more) {
@@ -190,9 +172,6 @@
     --licio-warning-on-soft: #573800;
     --licio-error-on-soft: #6E1611;
     --licio-info-on-soft: #0E3A82;
-    --licio-review-on-soft: #4F3700;
-    --licio-resolved-on-soft: #0A4836;
-    --licio-bridge-on-soft: #0A4A60;
   }
 }
 @media (prefers-contrast: more) {
@@ -208,9 +187,6 @@
     --licio-warning-on-soft: #573800;
     --licio-error-on-soft: #6E1611;
     --licio-info-on-soft: #0E3A82;
-    --licio-review-on-soft: #4F3700;
-    --licio-resolved-on-soft: #0A4836;
-    --licio-bridge-on-soft: #0A4A60;
   }
 }
 
@@ -227,9 +203,6 @@
     --licio-warning-on-soft: #F2D39A;
     --licio-error-on-soft: #F6C5C0;
     --licio-info-on-soft: #CFE0FA;
-    --licio-review-on-soft: #ECD9A8;
-    --licio-resolved-on-soft: #98E0C6;
-    --licio-bridge-on-soft: #9CD8EC;
   }
 }
 @media (prefers-contrast: more) {
@@ -245,9 +218,6 @@
     --licio-warning-on-soft: #F2D39A;
     --licio-error-on-soft: #F6C5C0;
     --licio-info-on-soft: #CFE0FA;
-    --licio-review-on-soft: #ECD9A8;
-    --licio-resolved-on-soft: #98E0C6;
-    --licio-bridge-on-soft: #9CD8EC;
   }
 }
 
@@ -302,12 +272,6 @@
   --color-info-fg: var(--licio-info-fg);
   --color-info-soft: var(--licio-info-soft);
   --color-info-on-soft: var(--licio-info-on-soft);
-  --color-review-soft: var(--licio-review-soft);
-  --color-review-on-soft: var(--licio-review-on-soft);
-  --color-resolved-soft: var(--licio-resolved-soft);
-  --color-resolved-on-soft: var(--licio-resolved-on-soft);
-  --color-bridge-soft: var(--licio-bridge-soft);
-  --color-bridge-on-soft: var(--licio-bridge-on-soft);
   /* Typography */
   --text-xs: var(--licio-text-xs);
   --text-xs--line-height: var(--licio-leading-xs);
