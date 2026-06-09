@@ -10,20 +10,33 @@
 
 ## Overview
 
-WS-D establishes Licio's identity foundation. Authentication is WebAuthn-first with email/password as a fallback -- phishing-resistant credentials are the default, not an afterthought. Privacy controls are user-facing capabilities (Signal Ledger, attention deletion, data export, personalization toggles), not compliance checkboxes buried in settings. Wallet identity is schema-isolated from ranking and attention data at the database level: no SQL join path may exist between wallet tables and ranking/attention tables (Section 21.5). This isolation is the structural enforcement of the "no pay-to-rank" invariant (Section 17.1).
+WS-D establishes Licio's identity foundation. Authentication is **WebAuthn-first** -- passkeys are the default, phishing-resistant credential, not an afterthought. The fallback, for devices/browsers without a platform authenticator or for users who prefer it, is **passwordless**: a one-time code sent to a verified email address, and -- for adults who opt in -- **Sign-In with Ethereum (EIP-4361)** proving control of a crypto wallet. **Traditional passwords are never used**: there is no password column, no password hashing, and no password-reset flow anywhere in the system (aligning with Section 25.3, which specifies WebAuthn-preferred authentication with a verification-based fallback and never a shared-secret password). Privacy controls are user-facing capabilities (Signal Ledger, attention deletion, data export, personalization toggles), not compliance checkboxes buried in settings. Wallet identity is schema-isolated from ranking and attention data at the database level: no SQL join path may exist between wallet tables and ranking/attention tables (Section 21.5). This isolation is the structural enforcement of the "no pay-to-rank" invariant (Section 17.1).
 
-This workstream is decomposed into four functional groups: **WS-D.1 (account and authentication)** covering the user data model, the WebAuthn registration and authentication ceremonies, secure session lifecycle, email/password fallback, rate limiting, steward MFA, and the authentication/authorization middleware; **WS-D.2 (privacy controls)** covering privacy settings, the DSAR export pipeline, attention-history deletion, and account deletion; **WS-D.3 (wallet identity, isolated)** covering the schema-isolated `WalletAccount` model and the automated isolation-verification test; and **WS-D.1.7 (age gating)** covering under-13 blocking, teen defaults, and financial-feature exclusion. Every task below is sized to 0.5-2 engineering days and is independently reviewable, testable, and reversible per Section 30.8.
+This workstream is decomposed into four functional groups: **WS-D.1 (account and authentication)** covering the user data model, the WebAuthn registration and authentication ceremonies, the secure session lifecycle, the passwordless email-OTP and Sign-In-with-wallet fallback methods, rate limiting, steward MFA, and the authentication/authorization middleware; **WS-D.2 (privacy controls)** covering privacy settings, the DSAR export pipeline, attention-history deletion, and account deletion; **WS-D.3 (wallet identity, isolated)** covering the schema-isolated `WalletAccount` model and the automated isolation-verification test; and **WS-D.1.7 (age gating)** covering under-13 blocking, teen defaults, and financial-feature exclusion. Every task below is sized to 0.5-2 engineering days and is independently reviewable, testable, and reversible per Section 30.8.
+
+> **A note on the two kinds of "wallet" in this workstream.** Sign-In with a wallet (WS-D.1.4c) is an *authentication credential* that proves control of a keypair; it lives in the **identity/auth** bounded context. The financial `WalletAccount` (WS-D.3, Knomosis payments/governance) is a *separate* entity in the isolated **wallet/Knomosis** bounded context. They are deliberately decoupled: the auth-wallet address and the financial-wallet address are hashed under **domain-separated HMAC keys**, so the same address produces different, non-correlatable hashes in the two contexts, and signing in with a wallet never auto-creates a financial link. This preserves Section 19.5's "keep civic identity separate from wallet identity by default" even when a wallet is used to log in.
 
 ### Design invariants for this workstream
 
 These cross-cutting invariants constrain every task in WS-D and are restated in individual tasks where load-bearing:
 
-1. **WebAuthn-first.** Passkeys are the primary credential. Email/password exists only as a fallback for devices/browsers without a platform authenticator (Section 25.3). The UI presents passkeys as primary whenever a platform authenticator is available.
+1. **WebAuthn-first, passwordless always.** Passkeys are the primary credential. The only fallbacks are a one-time code sent to a verified email and, for adults, Sign-In with Ethereum (EIP-4361) (Section 25.3). **No passwords exist** -- no password column, no password hashing, no password reset. The UI presents passkeys as primary whenever a platform authenticator is available and offers the passwordless fallbacks otherwise.
 2. **Secure sessions by construction.** Server-side sessions only; opaque session IDs in `__Host-`-prefixed, `HttpOnly`, `Secure`, `SameSite=Strict` cookies; no JWTs in the browser; Redis-backed revocation.
 3. **Privacy by default.** Personalization is user-controllable including full opt-out; the most privacy-protective defaults are applied for new accounts and for teens (Sections 19.1, 19.3, 19.4). Sensitive-topic inferences get shorter retention and stricter use limits.
-4. **Wallet isolation.** Wallet/Knomosis tables and ranking/attention tables share no foreign-key or view join path (Sections 21.5, 17.1). This is enforced by an automated CI test (WS-D.3.2).
-5. **Minor protection.** Under-13 accounts are blocked; teens get stricter privacy and reduced personalization; minors are excluded from wallet, payment, treasury, and governance-signing features (Section 19.4).
+4. **Wallet isolation, and auth/financial wallet separation.** Wallet/Knomosis tables and ranking/attention tables share no foreign-key or view join path (Sections 21.5, 17.1), enforced by an automated CI test (WS-D.3.2). Independently, the *authentication* wallet credential (WS-D.1.4c) lives in the identity context and is domain-separated (a distinct HMAC key namespace) from the *financial* `WalletAccount` (WS-D.3), so logging in with a wallet never links it to payments/governance and never reaches ranking/attention -- honoring Section 19.5's "civic identity separate from wallet identity by default."
+5. **Minor protection.** Under-13 accounts are blocked; teens get stricter privacy and reduced personalization; minors are excluded from wallet, payment, treasury, and governance-signing features (Section 19.4). Wallet *sign-in* (WS-D.1.4c) is likewise adult-only, so minors authenticate via passkey or email one-time code only -- they never establish a wallet credential of any kind.
 6. **Fail-closed.** When an authentication, authorization, age-gate, or isolation check cannot be conclusively satisfied, the system denies rather than allows. Ambiguity resolves to the safer state.
+
+### Authentication methods at a glance
+
+| Method | Role | Availability | `auth_method` | Phishing resistance | Key tasks |
+|---|---|---|---|---|---|
+| Passkey (WebAuthn/FIDO2) | **Primary** | Any device with a platform/roaming authenticator | `webauthn` | Strong (origin-bound, UV-required) | WS-D.1.2, WS-D.1.3a |
+| Email one-time code | Fallback (universal) | Any account with a verified email | `email_otp` | Moderate (single-use, browser-bound, attempt-capped) | WS-D.1.4a, WS-D.1.4b |
+| Sign-In with Ethereum (EIP-4361) | Fallback (opt-in) | **Adults only** with a crypto wallet | `wallet` | Strong (canonical-origin domain binding, single-use nonce) | WS-D.1.4c |
+| ~~Password~~ | **Never used** | — | — | — | — |
+
+Every account holds **at least one** of the above at all times (the `countAuthMethods` last-method guard, WS-D.1.2c). Email is optional, so a passkey-only or wallet-only account is valid and carries no email PII. Stewards/moderators layer **TOTP MFA** (WS-D.1.5) on top of whichever primary method they use. The auth-wallet (`wallet_auth_credentials`, identity context) is deliberately distinct from -- and domain-separated from -- the financial `WalletAccount` (WS-D.3, Knomosis context).
 
 ### Conventions
 
@@ -38,7 +51,7 @@ Every task carries a unique **ID**, a spec **Ref**, a **Description**, **Accepta
 **Ref:** Section 22.1
 
 **Description:**
-Define the `User` entity in Drizzle ORM with all core fields: `user_id` (UUID PK, generated), `handle` (text, unique, non-null), `display_name` (text, non-null), `email` (text, unique, non-null), `account_state` (enum: `active`, `suspended`, `deactivated`, `deleted`), `created_at` (timestamp with timezone, default now), `updated_at` (timestamp with timezone, auto-updated), `locale` (text, nullable, BCP 47), `age_band_if_known` (enum: `adult`, `teen_16_17`, `teen_13_15`, nullable). The migration creates the table with appropriate column types and defaults.
+Define the `User` entity in Drizzle ORM with all core fields: `user_id` (UUID PK, generated), `handle` (text, unique, non-null), `display_name` (text, non-null), `email` (text, **nullable**, unique when present), `account_state` (enum: `active`, `suspended`, `deactivated`, `deleted`), `created_at` (timestamp with timezone, default now), `updated_at` (timestamp with timezone, auto-updated), `locale` (text, nullable, BCP 47), `age_band_if_known` (enum: `adult`, `teen_16_17`, `teen_13_15`, nullable). The migration creates the table with appropriate column types and defaults. Email is nullable because, in a WebAuthn-first/passwordless model, a passkey-only or wallet-only account need not have an email at all (data minimization, Section 19.1; the canonical `User` entity in Section 22.1 lists no email field). Every account must instead retain at least one working *authentication method* (passkey, verified email, or wallet) -- a separate invariant enforced in WS-D.1.2c, not a column constraint.
 
 The Drizzle definition is the canonical shape consumed by every downstream task. Concretely:
 
@@ -63,7 +76,7 @@ export const users = pgTable("users", {
   userId: uuid("user_id").primaryKey().defaultRandom(),
   handle: text("handle").notNull(),
   displayName: text("display_name").notNull(),
-  email: text("email").notNull(),
+  email: text("email"), // nullable; unique when present (partial unique index in WS-D.1.1c)
   accountState: accountStateEnum("account_state").notNull().default("active"),
   locale: text("locale"), // BCP 47, nullable
   ageBandIfKnown: ageBandEnum("age_band_if_known"), // nullable
@@ -78,7 +91,7 @@ The `updated_at` auto-update is implemented with a Postgres trigger (`BEFORE UPD
 
 **Acceptance criteria:**
 - Migration applies cleanly against an empty database and rolls back without data loss.
-- All column types match the spec: UUID for `user_id`, text for `handle`/`display_name`/`email`/`locale`, enum for `account_state` and `age_band_if_known`, timestamptz for temporal fields.
+- All column types match the spec: UUID for `user_id`, text for `handle`/`display_name`/`email`/`locale`, enum for `account_state` and `age_band_if_known`, timestamptz for temporal fields. `email` is nullable.
 - `account_state` defaults to `active` on insert.
 - `created_at` defaults to `now()` on insert.
 - `updated_at` updates automatically on row modification via the trigger.
@@ -92,7 +105,7 @@ The `updated_at` auto-update is implemented with a Postgres trigger (`BEFORE UPD
 **Dependencies:** WS-0 (repository foundation, migration tooling), packages/db (Drizzle ORM bootstrap).
 
 **Security/Privacy:**
-- Email is stored in plaintext for login lookup but is never exposed via public API responses (enforced by `UserPublic` zod schema in WS-D.1.1d).
+- Email, when present, is stored in plaintext for login lookup but is never exposed via public API responses (enforced by `UserPublic` zod schema in WS-D.1.1d). Email is optional: passkey-only and wallet-only accounts may carry no email at all, minimizing stored PII (Section 19.1).
 - `account_state` transitions are validated server-side; clients cannot set arbitrary states. The enum deliberately has no `pending`/`unverified` value -- verification status lives in a separate column (WS-D.1.4a) so an unverified account is still `active` with reduced capabilities, never a distinct deletable state.
 
 ---
@@ -146,11 +159,11 @@ export const ReputationSummaryPrivate = z.object({
 **Ref:** Section 22.1
 
 **Description:**
-Create database indexes and constraints on the `User` table: unique index on `handle` (case-insensitive via `LOWER(handle)`), unique index on `email` (case-insensitive via `LOWER(email)`), B-tree index on `account_state` for filtering active users, composite index on `(account_state, created_at)` for admin queries. Add CHECK constraint that `handle` matches the allowed pattern (alphanumeric, underscores, 3-30 characters). Create parameterized query helpers in `packages/db/` for common operations: `findUserByHandle`, `findUserByEmail`, `findUserById`, `updateUser`, `updatePrivacySettings`.
+Create database indexes and constraints on the `User` table: unique index on `handle` (case-insensitive via `LOWER(handle)`), **partial** unique index on `email` (case-insensitive via `LOWER(email)`, `WHERE email IS NOT NULL` -- email is optional, so multiple `NULL`-email accounts must coexist while non-null emails stay unique), B-tree index on `account_state` for filtering active users, composite index on `(account_state, created_at)` for admin queries. Add CHECK constraint that `handle` matches the allowed pattern (alphanumeric, underscores, 3-30 characters). Create parameterized query helpers in `packages/db/` for common operations: `findUserByHandle`, `findUserByEmail`, `findUserById`, `updateUser`, `updatePrivacySettings`.
 
 **Acceptance criteria:**
 - Duplicate handles (case-insensitive) are rejected at the database level.
-- Duplicate emails (case-insensitive) are rejected at the database level.
+- Duplicate non-null emails (case-insensitive) are rejected at the database level; multiple accounts with `NULL` email coexist (the unique index is partial).
 - Handles violating the character/length pattern are rejected by the CHECK constraint.
 - Query helpers use parameterized queries (no string interpolation of user input into SQL).
 - EXPLAIN on `findUserByHandle` and `findUserByEmail` shows index usage.
@@ -172,11 +185,11 @@ Create database indexes and constraints on the `User` table: unique index on `ha
 **Ref:** Section 22.1, Section 6.12.9
 
 **Description:**
-Define and export four zod schemas in `packages/shared/src/schemas/user.ts`: `UserCreate` (fields needed for registration: handle, display_name, email, password or passkey attestation), `UserUpdate` (partial fields allowed for profile updates: display_name, locale, privacy_settings, personalization_settings), `UserPublic` (fields safe for other users to see: user_id, handle, display_name, locale, account_state, created_at -- explicitly excludes email, privacy_settings, personalization_settings, reputation_summary_private), `UserPrivate` (full user record for the authenticated user's own profile). Each schema includes TypeScript type inference (`z.infer<typeof UserCreate>` etc.) exported alongside the schema.
+Define and export four zod schemas in `packages/shared/src/schemas/user.ts`: `UserCreate` (fields needed for registration: handle, display_name, **optional** email, and a primary-credential proof that is one of a passkey attestation (WS-D.1.2b), a verified email one-time code (WS-D.1.4a), or a wallet assertion (WS-D.1.4c) -- **never a password; the schema has no password field**), `UserUpdate` (partial fields allowed for profile updates: display_name, locale, privacy_settings, personalization_settings), `UserPublic` (fields safe for other users to see: user_id, handle, display_name, locale, account_state, created_at -- explicitly excludes email, privacy_settings, personalization_settings, reputation_summary_private), `UserPrivate` (full user record for the authenticated user's own profile). Each schema includes TypeScript type inference (`z.infer<typeof UserCreate>` etc.) exported alongside the schema.
 
 **Acceptance criteria:**
 - `UserPublic` schema strips email, privacy_settings, personalization_settings, and reputation_summary_private when parsing a full user record.
-- `UserCreate` validates handle pattern, email format, and required fields.
+- `UserCreate` validates the handle pattern, email format when an email is supplied (email is optional), and the presence of exactly one primary-credential proof (passkey, email-OTP, or wallet); it has no password field.
 - `UserUpdate` accepts partial updates without requiring all fields.
 - `UserPrivate` includes all fields including private ones.
 - All schemas are importable from `packages/shared` in both client and server packages.
@@ -201,20 +214,21 @@ Define and export four zod schemas in `packages/shared/src/schemas/user.ts`: `Us
 **Description:**
 Define the persistent identity-adjacent tables and their zod mirrors that the authentication ceremonies depend on. Session *state* lives in Redis (WS-D.1.3b), but a durable device-list/audit projection of sessions is kept in Postgres for the active-sessions UI and for forensic review after Redis eviction. Create:
 
-- `sessions` table (Postgres projection): `session_id` (text PK -- the opaque ID, stored hashed with SHA-256 so a database leak does not yield live session tokens), `user_id` (UUID FK), `credential_id` (bytea, nullable, FK to webauthn_credentials), `auth_method` (enum: `webauthn`, `password`), `created_at`, `last_active_at`, `ip_hash` (bytea -- keyed hash of IP, not plaintext), `user_agent_truncated` (text), `device_label` (text), `revoked_at` (timestamptz, nullable), `remember_me` (boolean).
+- `sessions` table (Postgres projection): `session_id` (text PK -- the opaque ID, stored hashed with SHA-256 so a database leak does not yield live session tokens), `user_id` (UUID FK), `credential_ref` (bytea, nullable -- references the WebAuthn credential (`auth_method = webauthn`) or the auth-wallet credential (`auth_method = wallet`); null for `email_otp`), `auth_method` (enum: `webauthn`, `email_otp`, `wallet`), `created_at`, `last_active_at`, `ip_hash` (bytea -- keyed hash of IP, not plaintext), `user_agent_truncated` (text), `device_label` (text), `revoked_at` (timestamptz, nullable), `remember_me` (boolean).
 - `webauthn_credentials` table: see WS-D.1.2c for the authoritative DDL; this task references it as a foreign key.
-- `email_verification_tokens` / `password_reset_tokens` are NOT tabled here -- they live in Redis (WS-D.1.4a, WS-D.1.4d) -- but a `user_auth` companion table holds `email_verified` (boolean, default false), `email_verified_at` (timestamptz, nullable), `password_hash` (text, nullable -- PHC string, null for passkey-only accounts), `password_updated_at`, and `mfa_totp_secret_encrypted` (bytea, nullable, steward MFA, WS-D.1.5).
+- `wallet_auth_credentials` table: see WS-D.1.4c for the authoritative DDL (auth-wallet credentials live in the identity context, separate from the financial `WalletAccount`); this task references it as a foreign key.
+- Short-lived authentication secrets -- email one-time codes (WS-D.1.4a/b) and wallet sign-in nonces (WS-D.1.4c) -- are NOT tabled here; they live in Redis with short TTLs. A `user_auth` companion table holds `email_verified` (boolean, default false), `email_verified_at` (timestamptz, nullable), and `mfa_totp_secret_encrypted` (bytea, nullable, steward MFA, WS-D.1.5). There is **no** `password_hash` column and no other password material anywhere in the schema -- the system stores no passwords by construction.
 
 Export zod mirrors (`SessionRecord`, `UserAuthRecord`) from `packages/shared/`.
 
 ```ts
 // packages/db/src/schema/session.ts
-export const authMethodEnum = pgEnum("auth_method", ["webauthn", "password"]);
+export const authMethodEnum = pgEnum("auth_method", ["webauthn", "email_otp", "wallet"]);
 
 export const sessions = pgTable("sessions", {
   sessionId: text("session_id").primaryKey(), // SHA-256(opaque token), hex
   userId: uuid("user_id").notNull().references(() => users.userId, { onDelete: "cascade" }),
-  credentialId: bytea("credential_id"), // FK to webauthn_credentials, nullable
+  credentialRef: bytea("credential_ref"), // nullable: WebAuthn or auth-wallet credential id, per authMethod
   authMethod: authMethodEnum("auth_method").notNull(),
   ipHash: bytea("ip_hash").notNull(), // HMAC(serverKey, ip)
   userAgentTruncated: text("user_agent_truncated"),
@@ -227,23 +241,24 @@ export const sessions = pgTable("sessions", {
 ```
 
 **Acceptance criteria:**
-- `sessions`, `user_auth`, and the FK to `webauthn_credentials` are created by a migration that applies and rolls back cleanly.
+- `sessions`, `user_auth`, and the FKs to `webauthn_credentials` and `wallet_auth_credentials` are created by a migration that applies and rolls back cleanly.
 - The stored `session_id` is a hash, never the live token: writing a session writes `sha256(token)`, and lookup hashes the presented token before comparison.
 - `ip_hash` is a keyed hash (HMAC with a server-side secret), so two different servers cannot rainbow-table common IPs from the column.
-- `password_hash` is nullable; a passkey-only account has `password_hash = null` and cannot be password-authenticated.
-- Deleting a user cascades to `sessions` and `user_auth`.
+- No `password_hash` (or any password-material) column exists; the schema cannot store a password, so no password-authentication path can ever be built against it.
+- Deleting a user cascades to `sessions`, `user_auth`, `webauthn_credentials`, and `wallet_auth_credentials`.
 - zod mirrors parse round-tripped rows.
 
 **Testing:**
-- Integration: insert a session with a known token, verify the stored column equals `sha256(token)`. Insert a passkey-only `user_auth` row (null password_hash), confirm password login path rejects it. Cascade-delete a user, confirm sessions/user_auth rows are gone.
+- Integration: insert a session with a known token, verify the stored column equals `sha256(token)`. Assert the migration emits no `password`-named column on `user_auth` (a schema-introspection check, so no password login path can exist). Cascade-delete a user, confirm sessions/user_auth/credential rows are gone.
 - Unit: zod mirrors reject malformed rows.
 
-**Dependencies:** WS-D.1.1a (User), WS-D.1.2c (webauthn_credentials DDL for the FK -- may be co-developed; the FK is added once both tables exist).
+**Dependencies:** WS-D.1.1a (User), WS-D.1.2c (webauthn_credentials DDL for the FK), WS-D.1.4c (wallet_auth_credentials DDL for the FK) -- the credential tables may be co-developed; each FK is added once both tables exist.
 
 **Security/Privacy:**
 - Session tokens are stored hashed so a read-only DB compromise does not yield usable session cookies (defense in depth alongside the Redis store, which holds the live state).
 - IP is never stored in plaintext; only a keyed hash for "same device?" comparison (Section 19 minimization; Section 19.5 forbids IPs on-chain and this keeps them out of durable plaintext storage too).
 - `mfa_totp_secret_encrypted` is stored encrypted with a KMS-managed key (Section 25.4 encryption at rest), never plaintext.
+- No password material is stored anywhere (no password column by construction), eliminating an entire class of offline-cracking risk after a database compromise -- the single largest credential-leak surface simply does not exist.
 
 ---
 
@@ -342,12 +357,12 @@ export const webauthnCredentials = pgTable("webauthn_credentials", {
 - Credential lookup by credential ID is fast (PK lookup); lookup by user ID is indexed.
 - Credential lookup by user ID returns all credentials for that user (used to build `allowCredentials` and `excludeCredentials`).
 - Deleting a credential does not delete the user. Deleting a user cascades to credentials.
-- A user cannot delete their only remaining credential if it is also their only authentication method (no password set) -- the delete endpoint refuses, returning a "set a fallback first" error, to prevent self-lockout.
+- A user cannot remove their last remaining authentication method. The delete endpoint consults a central `countAuthMethods(userId)` helper -- counting active passkeys, a verified email (email-OTP capability), and linked auth-wallets -- and refuses (returning a "set up another way to sign in first" error) when removal would leave zero. This is the single "at least one auth method" invariant referenced by WS-D.1.1a, and it is enforced identically by the email-disable (WS-D.1.4a) and wallet-unlink (WS-D.1.4c) paths.
 
 **Testing:**
 - Integration: Store two credentials for one user. Look up by credential ID. Look up by user ID. Delete one credential, verify the other remains. Attempt to delete the last credential on a passkey-only account -- verify rejection. Cascade-delete a user, verify credentials removed.
 
-**Dependencies:** WS-D.1.1a (User), WS-D.1.2b (provides verified credential to store), WS-D.1.1e (auth companion table to know whether a password fallback exists for the self-lockout guard).
+**Dependencies:** WS-D.1.1a (User), WS-D.1.2b (provides verified credential to store), WS-D.1.1e (auth companion table) and WS-D.1.4a/WS-D.1.4c (so `countAuthMethods` can see verified-email and auth-wallet methods for the last-method guard).
 
 **Security/Privacy:**
 - Public keys are stored as raw bytes, never confusable with private keys; Licio never possesses any private key material (Section 25.6 prohibition extends the spirit here -- only public keys are stored).
@@ -362,7 +377,7 @@ export const webauthnCredentials = pgTable("webauthn_credentials", {
 **Ref:** Section 25.3, Section 26
 
 **Description:**
-Implement the client-side WebAuthn registration UI in React. Detect platform authenticator availability via `PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()` and conditional-mediation support via `PublicKeyCredential.isConditionalMediationAvailable()`. If available, show a primary CTA (e.g., "Register with Touch ID" / "Register with Windows Hello" / "Register with passkey") with a device-appropriate label. If unavailable, show the email/password registration form (WS-D.1.4a) as the primary option with an explanation that passkeys are not supported on this device/browser. Handle the `navigator.credentials.create()` promise: loading state during biometric prompt, success state, and error states (user cancelled = `NotAllowedError`, timeout, `InvalidStateError` for already-registered authenticator). The UI is accessible: ARIA live regions for status changes, keyboard-navigable, screen-reader-compatible labels.
+Implement the client-side WebAuthn registration UI in React. Detect platform authenticator availability via `PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()` and conditional-mediation support via `PublicKeyCredential.isConditionalMediationAvailable()`. If available, show a primary CTA (e.g., "Register with Touch ID" / "Register with Windows Hello" / "Register with passkey") with a device-appropriate label. If unavailable, present the passwordless fallback as the primary option -- email one-time-code registration (WS-D.1.4a), plus a Sign-In-with-wallet option for adults (WS-D.1.4c) -- with an explanation that passkeys are not supported on this device/browser. Handle the `navigator.credentials.create()` promise: loading state during biometric prompt, success state, and error states (user cancelled = `NotAllowedError`, timeout, `InvalidStateError` for already-registered authenticator). The UI is accessible: ARIA live regions for status changes, keyboard-navigable, screen-reader-compatible labels.
 
 **Acceptance criteria:**
 - Platform authenticator availability is correctly detected; the appropriate registration method is presented as primary based on detection.
@@ -370,7 +385,7 @@ Implement the client-side WebAuthn registration UI in React. Detect platform aut
 - User cancellation (`NotAllowedError`) is handled gracefully (not treated as a hard error, shows "Try again").
 - Timeout is handled with a clear message and retry option.
 - `InvalidStateError` (this authenticator already holds a Licio passkey) shows a friendly "This device already has a passkey for your account" message.
-- Unsupported browser shows the email/password form with an explanation.
+- Unsupported browser shows the passwordless fallback (email one-time code, plus wallet sign-in for adults) with an explanation.
 - All interactive elements meet WCAG 2.2 AA: keyboard accessible, sufficient contrast, focus visible, target size.
 
 **Testing:**
@@ -413,7 +428,7 @@ Implement WebAuthn authentication flow. Server generates an authentication chall
 - Counter regression check is the primary defense against cloned authenticators (Section 25.5 bot/sock + cloned-key concern).
 - Challenge is single-use and TTL-bounded (same as registration).
 - Signature verification uses the stored public key -- never trust a client-supplied key.
-- A cloned-authenticator rejection emits a security alert email to the account owner (reuses WS-D.1.4c alert plumbing) so the user can revoke credentials.
+- A cloned-authenticator rejection emits a multi-channel security alert to the account owner (via `sendSecurityAlert`, WS-D.1.4d) so the user can revoke credentials.
 
 ---
 
@@ -422,7 +437,7 @@ Implement WebAuthn authentication flow. Server generates an authentication chall
 **Ref:** Section 25.3
 
 **Description:**
-On successful authentication (WebAuthn or email/password), create a server-side session. Generate a cryptographically random session ID (minimum 32 bytes, hex-encoded). Store session data in Redis under `session:{sha256(token)}`: `user_id`, `credential_id` (if WebAuthn), `auth_method`, `created_at`, `last_active_at`, `ip_hash` (keyed hash, not plaintext), `user_agent` (truncated), `device_label`, `remember_me`, and `auth_assurance` (a level used by privilege-change re-auth, WS-D.1.3e). Set a TTL on the Redis key (configurable, default 30 days for "remember me", 24 hours otherwise; the TTL is a sliding window refreshed on activity up to an absolute 90-day cap). Write the durable projection row (WS-D.1.1e). Return the session ID as an `HttpOnly`, `Secure`, `SameSite=Strict` cookie with path `/`, the `__Host-` prefix, and an appropriate `Max-Age`. The cookie name is `__Host-sid`.
+On successful authentication (WebAuthn, email one-time code, or wallet sign-in), create a server-side session. Generate a cryptographically random session ID (minimum 32 bytes, hex-encoded). Store session data in Redis under `session:{sha256(token)}`: `user_id`, `credential_ref` (the WebAuthn or auth-wallet credential id, per `auth_method`; null for `email_otp`), `auth_method`, `created_at`, `last_active_at`, `ip_hash` (keyed hash, not plaintext), `user_agent` (truncated), `device_label`, `remember_me`, and `auth_assurance` (a level used by privilege-change re-auth, WS-D.1.3e). Set a TTL on the Redis key (configurable, default 30 days for "remember me", 24 hours otherwise; the TTL is a sliding window refreshed on activity up to an absolute 90-day cap). Write the durable projection row (WS-D.1.1e). Return the session ID as an `HttpOnly`, `Secure`, `SameSite=Strict` cookie with path `/`, the `__Host-` prefix, and an appropriate `Max-Age`. The cookie name is `__Host-sid`.
 
 The cookie stores the *raw* opaque token; Redis and the projection store only its `sha256`. Lookups hash the presented cookie before reading Redis.
 
@@ -440,7 +455,7 @@ The cookie stores the *raw* opaque token; Redis and the projection store only it
 - Integration: Authenticate, verify cookie attributes (HttpOnly, Secure, SameSite=Strict, `__Host-` prefix, no Domain). Verify Redis holds `sha256(token)` not the token. Verify TTL and the absolute cap.
 - E2E: Full authentication-to-session flow; subsequent requests carry the cookie and are authenticated.
 
-**Dependencies:** WS-D.1.3a (WebAuthn success) and/or WS-D.1.4c (password success), WS-D.1.1e (projection table), WS-0 (Redis).
+**Dependencies:** WS-D.1.3a (WebAuthn success) and/or WS-D.1.4b (email-OTP success) and/or WS-D.1.4c (wallet success), WS-D.1.1e (projection table), WS-0 (Redis).
 
 **Security/Privacy:**
 - `__Host-` prefix prevents subdomain cookie-injection/fixation.
@@ -455,7 +470,7 @@ The cookie stores the *raw* opaque token; Redis and the projection store only it
 **Ref:** Section 25.3
 
 **Description:**
-Implement `GET /v1/auth/sessions` (list active sessions for the authenticated user) and `DELETE /v1/auth/sessions/:sessionId` (revoke a specific session). The session list includes: a non-reversible display reference (truncated hash), device label, last active timestamp, creation timestamp, approximate location (country only, derived from the keyed `ip_hash` via the same local geo lookup as WS-D.1.4c at creation time -- stored as a country code, not recomputed from a stored IP), and whether it is the current session. Revoking a session deletes its Redis key immediately and stamps `revoked_at` on the projection row. Revoking the current session also clears the session cookie. Add `last_active_at` updates on each authenticated request (throttled to once per 5 minutes to reduce Redis/DB writes). Implement "revoke all other sessions" as a convenience action.
+Implement `GET /v1/auth/sessions` (list active sessions for the authenticated user) and `DELETE /v1/auth/sessions/:sessionId` (revoke a specific session). The session list includes: a non-reversible display reference (truncated hash), device label, last active timestamp, creation timestamp, approximate location (country only, derived via the same local geo lookup as WS-D.1.4d at creation time and stored as a country code, not recomputed from a stored IP), and whether it is the current session. Revoking a session deletes its Redis key immediately and stamps `revoked_at` on the projection row. Revoking the current session also clears the session cookie. Add `last_active_at` updates on each authenticated request (throttled to once per 5 minutes to reduce Redis/DB writes). Implement "revoke all other sessions" as a convenience action.
 
 **Acceptance criteria:**
 - `GET /v1/auth/sessions` returns only the authenticated user's sessions.
@@ -486,7 +501,7 @@ Implement `GET /v1/auth/sessions` (list active sessions for the authenticated us
 **Description:**
 Implement progressive rate limiting on authentication attempts. Track failed attempts per account (by email/handle) and per IP address in Redis. Thresholds: after 5 failed attempts per account in 15 minutes, add a 30-second delay; after 10, add a 2-minute delay; after 20, lock the account for 30 minutes and send an email notification to the account owner. Per-IP: after 50 failed attempts across any accounts in 15 minutes, block the IP for 15 minutes. Successful authentication resets the per-account counter. Rate-limit responses return `429 Too Many Requests` with a `Retry-After` header. Do not reveal whether the account exists in rate-limit responses.
 
-Counters use Redis with TTL'd sliding windows; the per-account key is `authfail:acct:{sha256(lower(email))}` and the per-IP key is `authfail:ip:{ip_hash}`. The lockout flag is a separate key `authlock:acct:{...}` with a 30-minute TTL so it auto-clears. WebAuthn assertion failures count toward the per-account/per-IP limits too, so a passkey account is not exempt from brute-force throttling.
+Counters use Redis with TTL'd sliding windows; the per-account key is `authfail:acct:{accountRef}` -- where `accountRef` is `sha256(lower(email))` for email-OTP, the auth-wallet `address_hash` for wallet sign-in, or the resolved `user_id` for discoverable WebAuthn -- and the per-IP key is `authfail:ip:{ip_hash}`. The lockout flag is a separate key `authlock:acct:{...}` with a 30-minute TTL so it auto-clears. Failures on **every** method -- WebAuthn assertion, email one-time code, and wallet signature -- count toward the per-account/per-IP limits, so no method is exempt from brute-force throttling. (Email-OTP additionally caps attempts per issued code; see WS-D.1.4b.)
 
 **Acceptance criteria:**
 - Failed attempts are tracked per account and per IP.
@@ -496,13 +511,13 @@ Counters use Redis with TTL'd sliding windows; the per-account key is `authfail:
 - Rate-limit responses include a `Retry-After` header.
 - Rate-limit responses do not reveal account existence (identical body/status for existing vs nonexistent accounts).
 - Per-IP blocking prevents distributed attacks spread across many accounts.
-- Both password and WebAuthn failures increment the counters.
+- Failures on every method -- WebAuthn assertion, email one-time code, and wallet signature -- increment the counters.
 
 **Testing:**
 - Integration: Simulate 5/10/20 failed attempts -- verify delays and lockout and the notification email (mocked). Verify successful auth resets the counter. Verify per-IP block at 50.
 - Load: Rate limiting holds under concurrent requests (no race that lets the 21st attempt through).
 
-**Dependencies:** WS-0 (Redis), WS-D.1.3a (WebAuthn path) and WS-D.1.4c (password path) both call the limiter, WS-D.1.4c (email alert plumbing).
+**Dependencies:** WS-0 (Redis); WS-D.1.3a (WebAuthn), WS-D.1.4b (email-OTP), and WS-D.1.4c (wallet) all call the limiter; WS-D.1.4d (security-alert plumbing for the lockout notification).
 
 **Security/Privacy:**
 - Account enumeration is prevented: identical responses for nonexistent and existing accounts.
@@ -517,17 +532,17 @@ Counters use Redis with TTL'd sliding windows; the per-account key is `authfail:
 **Ref:** Section 25.3
 
 **Description:**
-Implement session rotation on privilege change and step-up (re-)authentication for sensitive actions. Whenever a user's privilege level changes (email verified, password changed, MFA enrolled, role elevated to steward) or a session crosses a trust boundary, rotate the session ID: issue a new opaque token, write a new Redis key, delete the old one, and re-set the `__Host-sid` cookie. This defeats session-fixation across privilege transitions. Separately, define a step-up policy: sensitive actions (account deletion, changing email, removing the last credential, disabling MFA, linking/unlinking a wallet, viewing the full export) require a *fresh* authentication assertion within a short window (default 5 minutes) recorded as `auth_assurance.last_verified_at` in the session. If the assertion is stale, the API returns `401` with a `step_up_required` code and the client re-prompts WebAuthn (or password) without losing the in-progress action.
+Implement session rotation on privilege change and step-up (re-)authentication for sensitive actions. Whenever a user's privilege level changes (email verified, an authentication method added or removed, MFA enrolled, role elevated to steward) or a session crosses a trust boundary, rotate the session ID: issue a new opaque token, write a new Redis key, delete the old one, and re-set the `__Host-sid` cookie. This defeats session-fixation across privilege transitions. Separately, define a step-up policy: sensitive actions (account deletion, changing email, removing the last credential, disabling MFA, linking/unlinking a wallet, viewing the full export) require a *fresh* authentication assertion within a short window (default 5 minutes) recorded as `auth_assurance.last_verified_at` in the session. If the assertion is stale, the API returns `401` with a `step_up_required` code and the client re-prompts WebAuthn (or the user's available passwordless fallback: email one-time code or wallet signature) without losing the in-progress action.
 
 **Acceptance criteria:**
-- On password change, MFA enrollment, email verification, and role elevation, the session ID is rotated (old Redis key deleted, new cookie set).
+- On any authentication-method change (passkey/email/wallet added or removed), MFA enrollment, email verification, and role elevation, the session ID is rotated (old Redis key deleted, new cookie set).
 - Step-up policy is enforced for the enumerated sensitive actions; stale assurance yields `401 step_up_required`.
 - A successful step-up updates `auth_assurance.last_verified_at` and lets the original action proceed.
 - Rotation preserves the user's other concurrent sessions (only the current session's ID changes).
 - The step-up window is configurable; default 5 minutes.
 
 **Testing:**
-- Integration: Change password mid-session -- verify old token rejected, new cookie works. Attempt a sensitive action with stale assurance -- verify `step_up_required`; complete step-up -- verify action proceeds.
+- Integration: Add or remove an authentication method mid-session -- verify the old token is rejected and the new cookie works. Attempt a sensitive action with stale assurance -- verify `step_up_required`; complete step-up -- verify action proceeds.
 - E2E: Account-deletion flow forces a fresh WebAuthn assertion.
 
 **Dependencies:** WS-D.1.3b (session model with `auth_assurance`), WS-D.1.3a/D.1.4c (assertion paths for step-up), WS-D.1.6a (middleware enforces the policy).
@@ -539,121 +554,161 @@ Implement session rotation on privilege change and step-up (re-)authentication f
 
 ---
 
-### WS-D.1.4a Registration with email verification
+### WS-D.1.4a Passwordless email registration and email-factor enrollment
 **ID:** WS-D.1.4a
 **Ref:** Section 25.3
 
 **Description:**
-Implement email/password registration as the fallback when WebAuthn is unavailable. `POST /v1/auth/register` accepts handle, display_name, email, and password (validated against `UserCreate` zod schema). If the email is not already registered, create the user with `account_state: active` but `user_auth.email_verified = false`. Generate a verification token (cryptographically random, 32 bytes, hex-encoded), store `sha256(token)` in Redis with a 24-hour TTL bound to the user ID (`emailverify:{userId}` → hashed token), and send a verification email with a link containing the raw token. `POST /v1/auth/verify-email` accepts the token, hashes it, compares, marks the email verified, deletes the key, and rotates the session (WS-D.1.3e). Unverified accounts have reduced capabilities (cannot submit stories or contributions until verified). Implement a resend endpoint with a 60-second cooldown per account.
+Implement **passwordless** email registration -- the fallback when WebAuthn is unavailable -- and the reusable "verify control of an email" flow. `POST /v1/auth/register` accepts handle, display_name, an optional email, and the derived age band (WS-D.1.7a), validated against `UserCreate`. **No password is collected or stored.** If an email is supplied and not already verified-registered, create the user (`account_state: active`, `user_auth.email_verified = false`), generate a single-use email **one-time code** (a high-entropy value -- the same primitive as login, WS-D.1.4b), store `sha256(code)` in Redis with a 10-minute TTL bound to the user ID and a per-code attempt counter (`emailverify:{userId}` → `{hash, attempts}`), and email the code. `POST /v1/auth/email/verify` accepts the code, hashes and constant-time-compares it, enforces a max of 5 attempts per code (then invalidates), marks `email_verified = true`, deletes the key, and rotates the session (WS-D.1.3e). The **same** verify flow is reused to *add* an email to a passkey-only or wallet-only account later (email becomes an additional fallback factor and a notification channel). Unverified-email accounts have reduced capabilities (cannot submit stories or contributions until a verified factor exists). A resend endpoint enforces a 60-second per-account cooldown.
+
+Registering with a passkey (the primary path, WS-D.1.2) or a wallet (WS-D.1.4c) does **not** require an email; the email factor is optional and additive. Whatever the path, registration still runs the age gate (WS-D.1.7a).
 
 **Acceptance criteria:**
-- Registration creates a user and sends a verification email.
-- Verification token is single-use and expires after 24 hours; Redis stores the hash, not the raw token.
-- Clicking the verification link marks the email as verified and rotates the session.
-- Expired or already-used tokens are rejected with a clear, generic message.
+- Registration creates a user with no password material; `UserCreate` is accepted without a password field.
+- When an email is supplied, a one-time code is sent; `sha256(code)` (never the raw code) is stored in Redis with a 10-minute TTL and a per-code attempt counter.
+- The code is single-use, expires after 10 minutes, and is invalidated after 5 failed attempts.
+- Verifying the code marks the email verified and rotates the session.
+- Expired, exhausted, or already-used codes are rejected with a clear, generic message.
+- The verify flow also works to add an email factor to an existing passkey-only/wallet-only account.
 - Resend respects the 60-second cooldown (per-account Redis key).
-- Unverified accounts cannot submit stories or contributions (enforced by middleware capability check, WS-D.1.6a).
-- Registration with an already-registered email returns a generic "check your email" message (no account enumeration) and sends a "someone tried to register with your email" notice to the existing owner instead of a new verification link.
+- Unverified accounts cannot submit stories or contributions (middleware capability check, WS-D.1.6a).
+- Registration with an already-verified email returns a generic "check your email" message (no account enumeration) and sends a "someone tried to register with your email" notice to the existing owner instead of a new code.
 
 **Testing:**
-- Integration: Register, verify the hashed token exists in Redis, verify email, confirm verified state and session rotation. Test expired token. Test resend cooldown. Test duplicate-email path (generic response + owner notice).
-- E2E: Full registration-to-verification flow with email interception.
+- Integration: register (no password) → hashed code in Redis → verify → verified state + session rotation. Expired code rejected; 6th attempt rejected and code invalidated. Add-email-to-passkey-account path. Resend cooldown. Duplicate-email path (generic response + owner notice).
+- Unit: `UserCreate` parses without a password; code generation entropy and single-use semantics.
+- E2E: full registration-to-verification flow with email interception.
 
-**Dependencies:** WS-D.1.1a/b/c/d (user model + `UserCreate`), WS-D.1.1e (`user_auth.email_verified`), WS-D.1.4b (password hashing), WS-D.1.3e (rotation on verify), email transport (WS-0/WS-C notifications).
+**Dependencies:** WS-D.1.1a/b/c/d (user model + `UserCreate`), WS-D.1.1e (`user_auth.email_verified`), WS-D.1.4b (shared one-time-code primitive), WS-D.1.3e (rotation on verify), WS-D.1.4d (owner-notice via `sendSecurityAlert`), email transport (WS-0/WS-C notifications).
 
 **Security/Privacy:**
+- No password is ever collected, so there is no password to phish, reuse, breach-replay, or leak from a database.
 - Generic response on duplicate email prevents account enumeration; the owner notice turns an enumeration attempt into a security signal for the real owner.
-- Tokens are single-use, TTL-bounded, and stored hashed (a Redis read does not yield a usable verification link).
+- Codes are single-use, TTL-bounded, attempt-capped, and stored hashed (a Redis read does not yield a usable code).
+- Email is optional (Section 19.1 minimization): a user may run entirely on a passkey and/or wallet with no email on file.
 - Resend cooldown prevents email flooding / using Licio as a spam relay.
 
 ---
 
-### WS-D.1.4b Password hashing with Argon2id
+### WS-D.1.4b Email one-time-code (OTP) login
 **ID:** WS-D.1.4b
 **Ref:** Section 25.3
 
 **Description:**
-Implement password hashing using Argon2id with secure parameters: memory cost 64 MB (65536 KiB), iterations (time cost) 3, parallelism 4, output length 32 bytes, salt length 16 bytes. Use a well-maintained Node.js Argon2 library (e.g., the `argon2` npm package). Passwords are hashed on registration and password change. Login verifies the password against the stored hash. The hash output is the PHC string format (`$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>`) so parameters can be upgraded without rehashing existing passwords. On login, if the stored hash uses older parameters (`argon2.needsRehash`), rehash with current parameters after successful verification (transparent upgrade).
+Implement passwordless email login via a single-use one-time code, bound to the originating browser. `POST /v1/auth/email/start` accepts an email and **always** returns `202` with a generic "if that email is registered, a sign-in code is on its way" (anti-enumeration). When a verified account exists, mint a high-entropy code -- **8 Crockford-base32 characters (~41 bits)**, chosen over a 6-digit numeric so the online-guessing space is far larger while remaining easy to type -- and a fresh `login_attempt_id`. Set `login_attempt_id` as a short-lived (10-minute) `__Host-`-prefixed, `HttpOnly`, `Secure`, `SameSite=Strict` cookie on the requesting browser. Store `emaillogin:{login_attempt_id}` → `{ userId, sha256(code), attempts: 0 }` in Redis with a 10-minute TTL, and email the code. `POST /v1/auth/email/verify-login` reads the `login_attempt_id` cookie, constant-time-compares `sha256(submitted)` against the stored hash, increments `attempts` (max 5, then the code is invalidated), and on success deletes the Redis key, clears the attempt cookie, and creates a session (WS-D.1.3b, `auth_method = email_otp`). Every start/verify call passes through the auth rate limiter (WS-D.1.3d). The same one-time-code primitive backs WS-D.1.4a's email-factor verification.
+
+A magic link MAY be offered as a convenience, but only one that opens the canonical-origin app and then *POSTs* the code under the attempt binding -- never a bare `GET` that consumes the code on click (so email-scanner prefetch and link-forwarding cannot burn or hijack a login). Binding every code to the initiating browser's `login_attempt_id` means a code phished or forwarded to another device cannot complete a sign-in there.
 
 **Acceptance criteria:**
-- Passwords are hashed with Argon2id at the specified parameters (m=65536 KiB, t=3, p=4, 32-byte output, 16-byte salt).
-- Stored hashes are PHC strings including algorithm, version, and parameters.
-- Login verifies passwords correctly against stored hashes (constant-time compare provided by the library).
-- Transparent parameter upgrade: a login against an older-parameter hash rehashes after successful verification and persists the new hash.
-- Plaintext passwords are never logged, stored, or returned.
-- Minimum password length 10 characters; maximum 128 (prevents hash-DoS via huge inputs). A breached-password check against a local k-anonymity corpus (or HaveIBeenPwned range API with only a SHA-1 prefix sent) rejects known-compromised passwords.
+- `start` returns an identical generic response whether or not the email maps to an account (no enumeration), with identical timing characteristics.
+- A verified account receives a single-use 8-character (~41-bit) code; `sha256(code)` (never the raw code) is stored, bound to a `login_attempt_id`.
+- `verify-login` succeeds only when the submitted code matches AND the request carries the matching `login_attempt_id` cookie (browser binding).
+- The code is single-use, expires in 10 minutes, and is invalidated after 5 failed attempts.
+- Comparison is constant-time; the code is never logged.
+- Success creates a session with `auth_method = email_otp` and clears the attempt cookie.
+- Start and verify increment the WS-D.1.3d rate-limit counters.
 
 **Testing:**
-- Unit: Hash/verify round-trip; verify PHC format and parameters; reject below-min/above-max lengths; `needsRehash` triggers on a deliberately old-parameter hash. Breached-password check rejects a known-bad password and passes a strong one.
-- Integration: Register with password, login correct (succeeds), login wrong (fails), parameter upgrade on login persists.
+- Unit: code entropy/charset; constant-time compare; attempt-cap invalidation; binding logic rejects a correct code presented without the matching attempt cookie.
+- Integration: start → code in Redis (hashed, bound) → verify on the same browser succeeds; verify from a different browser (no/foreign attempt cookie) fails; expired code fails; 6th attempt fails and invalidates; rate-limit counters increment.
+- E2E: full email-OTP sign-in with email interception.
 
-**Dependencies:** WS-D.1.1e (`user_auth.password_hash`), WS-0 (config for parameters + breached-password corpus).
+**Dependencies:** WS-D.1.1e (`user_auth.email_verified`), WS-D.1.3b (session creation), WS-D.1.3d (rate limit), WS-0 (Redis), email transport.
 
 **Security/Privacy:**
-- 64 MB memory cost makes GPU/ASIC brute-force expensive; Argon2id resists both side-channel and GPU attacks.
-- Maximum length caps hashing cost (hash-DoS).
-- The breached-password check sends only a hash prefix (k-anonymity) -- no plaintext or full hash leaves the server (privacy-preserving).
-- Passwords are zeroed from buffers after hashing where the runtime permits.
+- No shared long-lived secret (no password); each code is ephemeral, single-use, and bound to one browser session -- defeating relayed/forwarded-code phishing and remote brute force.
+- Anti-enumeration on `start` (uniform response + timing) keeps the endpoint from confirming which emails are registered.
+- Codes are stored hashed with short TTLs and strict attempt caps; a Redis read yields nothing replayable.
+- Codes are never written to logs; the magic-link variant never auto-consumes on `GET`.
 
 ---
 
-### WS-D.1.4c Login flow with suspicious-login detection
+### WS-D.1.4c Sign-In with wallet (EIP-4361) and auth-wallet credential storage
 **ID:** WS-D.1.4c
-**Ref:** Section 25.3
+**Ref:** Sections 25.3, 25.6, 19.5, 17.3.1
 
 **Description:**
-Implement email/password login with suspicious-login detection. `POST /v1/auth/login` accepts email and password, verifies credentials (WS-D.1.4b), applies rate limiting (WS-D.1.3d), and creates a session (WS-D.1.3b). After successful login, compare the request's IP geolocation (country-level only, via a local MaxMind/IP-to-country database -- no external API call carrying the user's IP) and a coarse user-agent profile against the user's recent login history (the projection rows). If the login is from a new country or a significantly different device profile, flag it as suspicious: send an email alert ("New login from [country] on [device type]"), log a security event, but do not block the login (the user can revoke the session via WS-D.1.3c if it was not them). This task also provides the reusable `sendSecurityAlertEmail` helper consumed by D.1.3a, D.1.3d, D.1.4a, and D.1.4d.
+Implement **Sign-In with Ethereum (EIP-4361 / SIWE)** as a passwordless fallback credential, and the storage for auth-wallet credentials. This is an **adult-only, opt-in** method (`requireAdult`, WS-D.1.7c) -- wallet sign-in is never required and never offered to minors. Define `wallet_auth_credentials` in the **identity** bounded context (NOT the Knomosis `wallet` schema; this is an authentication credential, not a financial `WalletAccount`):
+
+```ts
+// packages/db/src/schema/wallet-auth-credential.ts  (identity context, public schema)
+export const walletAuthTypeEnum = pgEnum("wallet_auth_type", ["eoa", "contract"]);
+
+export const walletAuthCredentials = pgTable("wallet_auth_credentials", {
+  credentialId: uuid("credential_id").primaryKey().defaultRandom(),
+  userId: uuid("user_id").notNull().references(() => users.userId, { onDelete: "cascade" }),
+  addressHash: bytea("address_hash").notNull(),        // HMAC(AUTH_WALLET_KEY, lower(caip10Address)) — domain-separated from the financial wallet key
+  addressTruncated: text("address_truncated").notNull(), // display only, e.g. "0x12ab…cd34"
+  chainId: integer("chain_id").notNull(),
+  walletType: walletAuthTypeEnum("wallet_auth_type").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+}, (t) => ({
+  byAddress: uniqueIndex("wallet_auth_addr_idx").on(t.addressHash), // login resolution; one auth-wallet → one account
+  byUser: index("wallet_auth_user_idx").on(t.userId),
+}));
+```
+
+Flow: `POST /v1/auth/wallet/nonce` issues a single-use, high-entropy nonce stored in Redis (`authsiwe:nonce:{login_attempt_id}`, 5-minute TTL) bound to a fresh `__Host-`-prefixed `login_attempt_id` cookie. The client builds an EIP-4361 message and the user signs it in their wallet. `POST /v1/auth/wallet/verify` validates the message and signature via a vetted library (`siwe` / viem `verifySiweMessage`): the **`domain` and `uri` MUST equal Licio's canonical origin** (the anti-phishing analog of the WebAuthn RP ID -- it binds the signature to Licio and defeats look-alike-domain relay, Section 25.5); the `nonce` matches the issued single-use nonce and is consumed; `issued-at`/`expiration-time` are within bounds; `chain-id` is on the allowlist. The signer is recovered, **never trusted from client input**: EOAs via ECDSA `ecrecover` (EIP-191), contract wallets/multisigs via **EIP-1271** `isValidSignature`, and counterfactual (not-yet-deployed) smart accounts via **EIP-6492** (Section 25.6). On success, hash the verified address under the **auth-domain HMAC key** and look up `wallet_auth_credentials`: an existing row resolves the user and creates a session (`auth_method = wallet`); for a new signup, run the age gate (adult-only) and collect handle/display_name before creating the user + credential; for an already-authenticated user adding a wallet, require fresh step-up (WS-D.1.3e) + `requireAdult`. Removing an auth-wallet is step-up-protected and subject to the `countAuthMethods` last-method guard (WS-D.1.2c). Licio **never** asks for, stores, transmits, logs, or recovers a private key or seed phrase (Sections 25.6, 17.3.1).
+
+This task shares the SIWE verification primitive (nonce store, message parse, signature verification) with the *financial* wallet-linking tasks WS-L.2.3a-c, but maintains a **separate Redis nonce namespace** and writes only to the identity-context `wallet_auth_credentials` -- it never creates a financial `WalletAccount` as a side effect, and uses a distinct HMAC key so the auth-wallet hash cannot be correlated with the financial-wallet hash (Section 19.5 separation).
 
 **Acceptance criteria:**
-- Valid credentials create a session and return the cookie.
-- Invalid credentials return a generic error (no account enumeration) and increment rate-limit counters.
-- Login from a new country triggers an alert email.
-- Login from a new device profile triggers an alert email.
-- Geolocation uses a local database only -- no external API call with the user's IP.
-- Alert emails include device type and country but not the full IP address.
-- Login is not blocked by suspicious-login detection (alert only).
+- Nonces are single-use, high-entropy, TTL-bounded, and bound to the initiating browser's `login_attempt_id`; a reused or expired nonce is rejected.
+- Verification rejects any message whose `domain`/`uri` is not Licio's canonical origin, whose `chain-id` is off-allowlist, or whose `issued-at`/`expiration-time` is out of bounds.
+- Signatures verify for EOAs (`ecrecover`), contract wallets/multisigs (EIP-1271), and counterfactual smart accounts (EIP-6492); the recovered address is derived from the signature, never taken from client input.
+- An existing auth-wallet resolves to its user and creates a `wallet` session; a new wallet signup runs the adult age gate; adding a wallet to an existing account requires step-up + `requireAdult`.
+- Minors (and unknown-age accounts) cannot use or enroll wallet sign-in (`requireAdult` fails closed).
+- `address_hash` is keyed under the auth-domain HMAC key; only the truncated address is stored for display; the full address is never persisted in plaintext.
+- No financial `WalletAccount` row is created by this flow; the credential lives in the identity context with no FK to ranking/attention.
+- Verification failures increment the WS-D.1.3d rate-limit counters (keyed by `address_hash`).
+- No private key or seed phrase is ever requested, stored, transmitted, logged, or recovered.
 
 **Testing:**
-- Integration: Login from two mocked geolocations -- alert on the second; same location -- no alert. Wrong password -- generic error + counter increment.
-- Unit: Suspicious-login decision logic with mocked geo/UA data; `sendSecurityAlertEmail` formats without leaking the IP.
+- Unit: EIP-4361 field validation (domain/uri/chain/nonce/expiry); signature verification for EOA, EIP-1271 contract, and EIP-6492 counterfactual fixtures; rejection of a tampered/replayed nonce; rejection of a wrong-domain message; `requireAdult` denies teen/unknown age.
+- Integration: nonce → sign (test wallet) → verify → `wallet` session; second use of the same nonce rejected; adding a wallet to an existing account requires step-up; a financial-context introspection confirms no `WalletAccount` row was written.
+- E2E: full wallet sign-in with a Playwright-injected test provider.
 
-**Dependencies:** WS-D.1.4b (verify), WS-D.1.3b (session), WS-D.1.3d (rate limit), WS-D.1.1e (history projection), local geo DB (WS-0).
+**Dependencies:** WS-D.1.1a (User), WS-D.1.1e (credential FK + session projection), WS-D.1.3b (session), WS-D.1.3d (rate limit), WS-D.1.3e (step-up for add/remove), WS-D.1.7c (`requireAdult`), WS-0 (Redis); shares the SIWE primitive with WS-L.2.3a-c (co-developed; distinct nonce namespace and HMAC key).
 
 **Security/Privacy:**
-- Country-level geolocation only -- no precise location tracking (Section 19.1: avoid precise location unless explicitly needed and consented).
-- Local DB keeps the user's IP off third-party services.
-- Alert-only (non-blocking) avoids false-positive lockouts for legitimate VPN/travel users while still surfacing takeover attempts.
+- Domain/URI binding is the anti-phishing backbone: a signature minted for a look-alike domain will not validate against Licio's canonical origin (Section 25.5 phishing-PWA row), mirroring WebAuthn's RP-ID guarantee.
+- Every wallet signature is treated as a high-risk action (Section 25.1): single-use nonce, expiry, chain allowlist, browser binding, and step-up on add/remove.
+- The auth-wallet is domain-separated from the financial wallet (distinct HMAC key, distinct schema, no FK to attention/ranking), so wallet sign-in cannot leak into payments/governance or ranking and cannot resurrect a "civic = wallet" linkage (Sections 19.5, 21.5).
+- Adult-only and opt-in: minors never establish a wallet credential (Section 19.4); the universal fallback for everyone else is email-OTP, so excluding minors from wallet auth never locks anyone out.
+- Private keys / seed phrases are never handled (Sections 25.6, 17.3.1); the address is stored only as a keyed hash plus a truncated display form (Section 19.5 treats addresses as personal data).
 
 ---
 
-### WS-D.1.4d Password reset
+### WS-D.1.4d Suspicious-login detection, security alerts, and account-recovery posture
 **ID:** WS-D.1.4d
 **Ref:** Section 25.3
 
 **Description:**
-Implement password reset (abuse-resistant account recovery, Section 25.3). `POST /v1/auth/forgot-password` accepts an email. If it exists, generate a reset token (32 bytes, hex), store `sha256(token)` in Redis with a 1-hour TTL bound to the user ID (`pwreset:{userId}`), and email a reset link with the raw token. If the email does not exist, return the same success response (anti-enumeration). `POST /v1/auth/reset-password` accepts token + new password, hashes and compares the token, validates and hashes the new password (WS-D.1.4b), updates the stored hash, invalidates the token, revokes all existing sessions (WS-D.1.3c), and sends a confirmation email. The reset token is one-time use; only one active reset token per user at a time (generating a new one overwrites the old key). Reset requests are themselves rate-limited (reuse WS-D.1.3d per-account/IP windows) to prevent reset-email flooding.
+Provide cross-cutting login-safety primitives and define the passwordless account-recovery posture (Section 25.3 "suspicious-login alerts" and "abuse-resistant account recovery"). This task ships the reusable `sendSecurityAlert(userId, event)` helper -- **multi-channel** because email is now optional: it delivers via email when one is on file, otherwise via Web Push (WS-C), and **always** appends to the in-app security-activity log (WS-D.1.6c) so an alert is never silently lost for a passkey-/wallet-only account. It also implements suspicious-login detection invoked by every successful sign-in path (WebAuthn WS-D.1.3a, email-OTP WS-D.1.4b, wallet WS-D.1.4c): compare the request's country-level geolocation (local MaxMind/IP-to-country DB -- no external API call carrying the user's IP) and a coarse user-agent profile against the user's recent login history (projection rows). A new country or materially different device profile raises a non-blocking alert ("New sign-in from [country] on [device type] via [method]") and logs a security event; the login is **not** blocked (the user revokes the session via WS-D.1.3c if it was not them).
+
+**Account-recovery posture (no passwords).** Because no password exists, there is no password-reset attack surface at all. Recovery is "sign in with any remaining enrolled method" (another passkey, the verified-email one-time code, or the wallet). The `countAuthMethods` last-method guard (WS-D.1.2c) plus an onboarding nudge to enroll a second factor minimize lockouts. Loss of **all** factors routes to support-mediated, identity-proofing-based recovery (deliberately out of scope here; flagged for WS-J/WS-N policy and WS-O operations) -- never a single emailed link that grants full access. This is the abuse-resistant recovery posture: no low-friction reset path for an attacker to hijack.
 
 **Acceptance criteria:**
-- Reset request always returns success regardless of email existence.
-- Reset token is single-use, expires after 1 hour, and is stored hashed in Redis.
-- A valid reset token updates the password and revokes ALL existing sessions.
-- Expired/used tokens are rejected with a generic message.
-- A confirmation email is sent after a successful reset.
-- Only one reset token is active per user at a time.
-- The new password is validated against the same constraints as registration (min 10, max 128, breached-password check).
-- Reset requests are rate-limited.
+- `sendSecurityAlert` delivers via email when present, else Web Push, and always writes the in-app security-activity entry.
+- Suspicious-login detection runs on WebAuthn, email-OTP, and wallet sign-ins.
+- A new-country or new-device sign-in raises a non-blocking alert and a security-log event; a familiar context raises none.
+- Geolocation uses a local database only -- no external API call with the user's IP; alerts include country + device type + method, never the full IP.
+- No password-reset endpoint exists anywhere in the API surface.
+- The recovery posture is documented: remaining-factor sign-in is the path; all-factor loss escalates to support; the second-factor nudge appears in onboarding.
 
 **Testing:**
-- Integration: Request reset, use token, verify password updated and all sessions revoked. Test expired token, used token, and that a second request invalidates the first. Verify reset-request rate limiting.
-- E2E: Full forgot-password-to-reset flow.
+- Unit: `sendSecurityAlert` channel selection (email present/absent → push → always-log); suspicious-login decision with mocked geo/UA; alert payload never contains the raw IP.
+- Integration: sign in from two mocked geolocations (alert on the second, none on a repeat); confirm a passkey-only account with no email still receives a push + log alert; assert no `forgot-password`/`reset-password` route is registered.
 
-**Dependencies:** WS-D.1.4b (hashing), WS-D.1.3c (session revocation), WS-D.1.3d (rate limit), WS-D.1.4c (`sendSecurityAlertEmail`), email transport.
+**Dependencies:** WS-D.1.3a/WS-D.1.4b/WS-D.1.4c (the sign-in paths it instruments), WS-D.1.3c (session revocation link in alerts), WS-D.1.1e (history projection), WS-D.1.6c (security-activity log), WS-C (Web Push), local geo DB (WS-0).
 
 **Security/Privacy:**
-- Generic response prevents email enumeration.
-- Revoking all sessions on reset evicts an attacker who already holds a stolen session.
-- One-hour TTL limits the interception window; hashed storage means a Redis read does not yield a usable link.
-- Confirmation email alerts the real owner to an unauthorized reset.
+- Country-level geolocation only -- no precise location tracking (Section 19.1).
+- Local geo DB keeps the user's IP off third-party services; alerts never carry the full IP.
+- Alert-only (non-blocking) avoids false-positive lockouts for VPN/travel users while still surfacing takeover.
+- Eliminating the password-reset flow removes the single most-abused account-takeover vector (reset-link phishing/interception); recovery requires proving control of an enrolled factor.
+- Multi-channel delivery guarantees a passkey-/wallet-only user (no email) still receives security alerts.
 
 ---
 
@@ -707,7 +762,7 @@ Enforce TOTP as a second factor for steward/moderator logins and for steward-onl
 
 **Security/Privacy:**
 - Replay prevention closes the "shoulder-surfed code reused immediately" gap.
-- Reduced-assurance-until-MFA means a stolen steward password alone cannot wield moderation power -- fail-closed on the privileged path.
+- Reduced-assurance-until-MFA means a stolen steward primary credential alone (a phished email code, or a single compromised passkey/wallet) cannot wield moderation power -- fail-closed on the privileged path.
 - MFA-attempt rate limiting prevents brute-forcing the 6-digit space.
 
 ---
@@ -717,14 +772,14 @@ Enforce TOTP as a second factor for steward/moderator logins and for steward-onl
 **Ref:** Sections 25.3, 25.4
 
 **Description:**
-Implement the Hono authentication middleware that runs ahead of protected routes. It: extracts the `__Host-sid` cookie, hashes it, loads the session from Redis, rejects (`401`) if absent/expired/revoked, refreshes `last_active_at` (throttled), attaches a typed `AuthContext` (`userId`, `accountState`, `roles`, `authMethod`, `authAssurance`, `emailVerified`, `ageBand`) to the request, and enforces account-state gating (a `suspended`/`deactivated`/`deleted` account is denied with the appropriate code). It also exposes capability guards used by routes: `requireVerifiedEmail`, `requireStepUp`, `requireSteward`, and `requireAdult` (the last delegates to WS-D.1.7). The middleware fails closed: any error loading or validating the session results in denial, never a default-allow.
+Implement the Hono authentication middleware that runs ahead of protected routes. It: extracts the `__Host-sid` cookie, hashes it, loads the session from Redis, rejects (`401`) if absent/expired/revoked, refreshes `last_active_at` (throttled), attaches a typed `AuthContext` (`userId`, `accountState`, `roles`, `authMethod`, `authAssurance`, `accountVerified`, `emailVerified`, `ageBand`) to the request, and enforces account-state gating (a `suspended`/`deactivated`/`deleted` account is denied with the appropriate code). It also exposes capability guards used by routes: `requireVerifiedAccount`, `requireStepUp`, `requireSteward`, and `requireAdult` (the last delegates to WS-D.1.7). `requireVerifiedAccount` passes when the account holds **any** verified credential -- a registered passkey or auth-wallet (both inherently prove control at registration) or a verified email -- so passkey-only and wallet-only accounts are full-capability without an email; only an email-registration that has not yet confirmed its one-time code is gated. The middleware fails closed: any error loading or validating the session results in denial, never a default-allow.
 
 **Acceptance criteria:**
 - Requests without a valid session cookie are rejected `401`.
 - Expired/revoked sessions are rejected even if the cookie is syntactically valid.
 - `AuthContext` is correctly populated and typed for downstream handlers.
 - Suspended/deactivated/deleted accounts are denied with distinct internal codes (generic external message).
-- Capability guards (`requireVerifiedEmail`, `requireStepUp`, `requireSteward`, `requireAdult`) gate correctly.
+- Capability guards (`requireVerifiedAccount`, `requireStepUp`, `requireSteward`, `requireAdult`) gate correctly; `requireVerifiedAccount` passes for a passkey-only or wallet-only account (no email) and blocks only an unconfirmed email-registration.
 - Any internal error in the middleware results in denial (fail-closed), with the error logged but not leaked.
 - `last_active_at` refresh is throttled to once per 5 minutes.
 
@@ -773,7 +828,7 @@ Implement role-based access control (RBAC) and object-level authorization helper
 **Ref:** Sections 25.4, 19.3
 
 **Description:**
-Implement an append-only audit log for security- and privacy-relevant events: login success/failure (without credentials), session create/revoke, password change/reset, MFA enroll/verify/disable, privacy-setting change (old→new flag values), export request/download, deletion request/cancel/complete, wallet link/unlink, and role change. Each entry records `event_id`, `actor_user_id` (or `system`), `event_type`, `target_ref` (hashed where it is a token/session), `metadata` (minimized, no secrets, no plaintext IP -- country-level only), and `created_at`. The log is write-once (no update/delete via the application; retention/rotation handled by WS-O). A user-facing subset ("recent security activity") is exposed read-only to the account owner.
+Implement an append-only audit log for security- and privacy-relevant events: login success/failure (without credentials, recording the `auth_method`), session create/revoke, authentication-method add/remove (passkey, email, auth-wallet), MFA enroll/verify/disable, privacy-setting change (old→new flag values), export request/download, deletion request/cancel/complete, financial wallet link/unlink, and role change. Each entry records `event_id`, `actor_user_id` (or `system`), `event_type`, `target_ref` (hashed where it is a token/session), `metadata` (minimized, no secrets, no plaintext IP -- country-level only), and `created_at`. The log is write-once (no update/delete via the application; retention/rotation handled by WS-O). A user-facing subset ("recent security activity") is exposed read-only to the account owner.
 
 **Acceptance criteria:**
 - All enumerated event types produce an audit entry.
@@ -994,7 +1049,7 @@ Implement `POST /v1/privacy/export` to initiate a data export (DSAR) request. Th
 **Ref:** Sections 19.3, 21.5
 
 **Description:**
-Implement the worker that assembles export contents. It gathers: account info (profile, handle, display_name, email, locale, age band, created_at), privacy settings, personalization settings, all contributions (with thread-context references), attention aggregates (non-expired), moderation notices received (actions and reasons), wallet links if any (address *truncated* only, never the address hash), and the private reputation summary. It explicitly excludes: other users' data, internal model weights, invariant computation internals, raw system logs, reporter identities, and anything from the ranking/attention internals beyond the user's own aggregates. Output is structured JSON with section labels and a `schema_version`. Assembly is streaming to handle large accounts without timeout. Because of isolation (WS-D.3.2), the wallet section is populated through the *privacy* service's own read of the wallet context (truncated display form), never via a join from attention/ranking data.
+Implement the worker that assembles export contents. It gathers: account info (profile, handle, display_name, email *if present*, locale, age band, created_at), the list of enrolled authentication methods (passkey device labels, whether an email factor is verified, auth-wallet truncated addresses -- never key material), privacy settings, personalization settings, all contributions (with thread-context references), attention aggregates (non-expired), moderation notices received (actions and reasons), wallet links if any (address *truncated* only, never the address hash), and the private reputation summary. It explicitly excludes: other users' data, internal model weights, invariant computation internals, raw system logs, reporter identities, and anything from the ranking/attention internals beyond the user's own aggregates. Output is structured JSON with section labels and a `schema_version`. Assembly is streaming to handle large accounts without timeout. Because of isolation (WS-D.3.2), the wallet section is populated through the *privacy* service's own read of the wallet context (truncated display form), never via a join from attention/ranking data.
 
 **Acceptance criteria:**
 - Export contains all specified categories for the requesting user.
@@ -1103,11 +1158,11 @@ When an account transitions `deactivated` → `deleted` (after the grace period)
 **Ref:** Sections 19.3, 19.5
 
 **Description:**
-After anonymization (WS-D.2.4b), remove all personal data for the deleted account. Delete or null: the user record's personal fields (retain only `user_id` + `account_state = deleted` for FK integrity), all sessions (Redis + projection), all WebAuthn credentials, `user_auth` (password hash, MFA secret, recovery codes), all attention aggregates and derived affinities, privacy/personalization settings, reputation data, email-verification and reset tokens (Redis), export jobs and stored files (object storage). Unlink any connected wallets (WS-D.3.1) and remove wallet-link records. Write an audit entry recording completion with the timestamp and a *hash* of the user ID (not the ID), containing no personal data. Because wallet identity is isolated, removing wallet links is a discrete step with no ranking/attention coupling.
+After anonymization (WS-D.2.4b), remove all personal data for the deleted account. Delete or null: the user record's personal fields (retain only `user_id` + `account_state = deleted` for FK integrity), all sessions (Redis + projection), all WebAuthn credentials, all auth-wallet credentials, `user_auth` (MFA secret, recovery codes -- there is no password material to remove), all attention aggregates and derived affinities, privacy/personalization settings, reputation data, transient auth secrets in Redis (email one-time codes, wallet sign-in nonces, any pending email-verification codes), export jobs and stored files (object storage). Unlink any connected wallets (WS-D.3.1) and remove wallet-link records. Write an audit entry recording completion with the timestamp and a *hash* of the user ID (not the ID), containing no personal data. Because wallet identity is isolated, removing wallet links is a discrete step with no ranking/attention coupling.
 
 **Acceptance criteria:**
 - All personal data removed across PostgreSQL, Redis, and object storage.
-- WebAuthn credentials, `user_auth` secrets, and MFA/recovery data deleted.
+- WebAuthn credentials, auth-wallet credentials, and `user_auth` MFA/recovery secrets deleted (there is no password material).
 - Wallet links removed (WS-D.3.1 unlink), with no residual financial-identity linkage.
 - Attention aggregates and derived affinities deleted.
 - An audit entry records completion with a hashed user ID and no personal data.
@@ -1117,7 +1172,7 @@ After anonymization (WS-D.2.4b), remove all personal data for the deleted accoun
 **Testing:**
 - Integration: full pipeline; assert each category removed; audit entry has hashed ID and no PII; FK integrity holds (anonymized contributions still reference the stub `user_id`); Redis tokens/sessions gone; object-storage export files gone.
 
-**Dependencies:** WS-D.2.4b (anonymization precedes removal), WS-D.1.1e (sessions/user_auth), WS-D.1.2c (credentials), WS-D.3.1 (wallet unlink), WS-E (attention), WS-D.2.2 (export artifacts), WS-D.1.6c (audit).
+**Dependencies:** WS-D.2.4b (anonymization precedes removal), WS-D.1.1e (sessions/user_auth), WS-D.1.2c (WebAuthn credentials), WS-D.1.4c (auth-wallet credentials), WS-D.3.1 (financial wallet unlink), WS-E (attention), WS-D.2.2 (export artifacts), WS-D.1.6c (audit).
 
 **Security/Privacy:**
 - The audit entry uses a hashed user ID -- compliance proof of deletion without retaining personal data.
@@ -1133,7 +1188,7 @@ After anonymization (WS-D.2.4b), remove all personal data for the deleted accoun
 **Ref:** Sections 22.2, 21.5, 19.5
 
 **Description:**
-Define the `WalletAccount` entity in Drizzle in a *separate schema/bounded context* (`wallet`/`knomosis`) from ranking/attention, and implement its link/unlink lifecycle scaffolding (full connect/SIWE verification UX is WS-L.2; this task lands the schema, the state machine, and the privacy-side guarantees). Fields per Section 22.2: `wallet_account_id` (UUID PK), `user_id` (UUID -- references the user, see isolation note), `address_hash` (bytea -- keyed hash of the address; the address itself is personal data per 19.5), `address_truncated` (text -- display form, e.g., `0x12ab…cd34`), `chain_id` (integer), `wallet_type` (enum: `eoa`, `contract`), `linked_at` (timestamptz), `unlink_state` (enum: `linked`, `unlink_requested`, `unlinked`), `risk_state` (enum, default `none`), `last_used_at` (timestamptz, nullable). Linking is `requireAdult` (WS-D.1.7c) and step-up-protected (WS-D.1.3e). Unlinking sets `unlink_state` and removes the link per WS-D.2.4c on deletion.
+Define the `WalletAccount` entity -- the **financial** wallet for Knomosis payments and governance, which is distinct from the **authentication** `wallet_auth_credentials` of WS-D.1.4c (different bounded context, different HMAC key namespace; see the overview's "two kinds of wallet" note) -- in Drizzle in a *separate schema/bounded context* (`wallet`/`knomosis`) from ranking/attention, and implement its link/unlink lifecycle scaffolding (full connect/SIWE verification UX is WS-L.2; this task lands the schema, the state machine, and the privacy-side guarantees). Fields per Section 22.2: `wallet_account_id` (UUID PK), `user_id` (UUID -- references the user, see isolation note), `address_hash` (bytea -- keyed hash of the address; the address itself is personal data per 19.5), `address_truncated` (text -- display form, e.g., `0x12ab…cd34`), `chain_id` (integer), `wallet_type` (enum: `eoa`, `contract`), `linked_at` (timestamptz), `unlink_state` (enum: `linked`, `unlink_requested`, `unlinked`), `risk_state` (enum, default `none`), `last_used_at` (timestamptz, nullable). Linking is `requireAdult` (WS-D.1.7c) and step-up-protected (WS-D.1.3e). Unlinking sets `unlink_state` and removes the link per WS-D.2.4c on deletion.
 
 Critical isolation rule: the `user_id` reference from `WalletAccount` to `User` is the ONLY edge between the wallet context and the rest of the model, and it points at the identity root (`User`), NOT at any attention/ranking table. No wallet column references `AttentionAggregate`, `InvariantOutput`, or any ranking feature-store table, and no such table references `WalletAccount`. This is the property asserted by WS-D.3.2.
 
@@ -1220,20 +1275,20 @@ The BFS treats the FK graph as undirected (an attacker can traverse a join in ei
 | WS-D.1.1b | WS-D.1.1a, WS-D.2.1a |
 | WS-D.1.1c | WS-D.1.1a |
 | WS-D.1.1d | WS-D.1.1a, WS-D.1.1b |
-| WS-D.1.1e | WS-D.1.1a, WS-D.1.2c |
+| WS-D.1.1e | WS-D.1.1a, WS-D.1.2c, WS-D.1.4c |
 | WS-D.1.2a | WS-0 (Redis), WS-D.1.1e |
 | WS-D.1.2b | WS-D.1.2a, WS-D.1.2c |
-| WS-D.1.2c | WS-D.1.1a, WS-D.1.2b, WS-D.1.1e |
-| WS-D.1.2d | WS-B.1, WS-C.1, WS-D.1.2a, WS-D.1.2b, WS-D.1.2c |
+| WS-D.1.2c | WS-D.1.1a, WS-D.1.2b, WS-D.1.1e, WS-D.1.4a, WS-D.1.4c |
+| WS-D.1.2d | WS-B.1, WS-C.1, WS-D.1.2a, WS-D.1.2b, WS-D.1.2c, WS-D.1.4a, WS-D.1.4c |
 | WS-D.1.3a | WS-D.1.2a, WS-D.1.2b, WS-D.1.2c, WS-D.1.3b |
-| WS-D.1.3b | WS-D.1.3a, WS-D.1.4c, WS-D.1.1e, WS-0 (Redis) |
+| WS-D.1.3b | WS-D.1.3a, WS-D.1.4b, WS-D.1.4c, WS-D.1.1e, WS-0 (Redis) |
 | WS-D.1.3c | WS-D.1.3b, WS-D.1.1e, WS-D.1.6b |
-| WS-D.1.3d | WS-0 (Redis), WS-D.1.3a, WS-D.1.4c |
-| WS-D.1.3e | WS-D.1.3b, WS-D.1.3a, WS-D.1.4c, WS-D.1.6a |
-| WS-D.1.4a | WS-D.1.1a-d, WS-D.1.1e, WS-D.1.4b, WS-D.1.3e |
-| WS-D.1.4b | WS-D.1.1e, WS-0 |
-| WS-D.1.4c | WS-D.1.4b, WS-D.1.3b, WS-D.1.3d, WS-D.1.1e |
-| WS-D.1.4d | WS-D.1.4b, WS-D.1.3c, WS-D.1.3d, WS-D.1.4c |
+| WS-D.1.3d | WS-0 (Redis), WS-D.1.3a, WS-D.1.4b, WS-D.1.4c |
+| WS-D.1.3e | WS-D.1.3b, WS-D.1.3a, WS-D.1.4b, WS-D.1.4c, WS-D.1.6a |
+| WS-D.1.4a | WS-D.1.1a-e, WS-D.1.4b, WS-D.1.3e, WS-D.1.4d |
+| WS-D.1.4b | WS-D.1.1e, WS-D.1.3b, WS-D.1.3d, WS-0 (Redis) |
+| WS-D.1.4c | WS-D.1.1a, WS-D.1.1e, WS-D.1.3b, WS-D.1.3d, WS-D.1.3e, WS-D.1.7c, WS-0 (Redis); shares SIWE with WS-L.2.3 |
+| WS-D.1.4d | WS-D.1.3a, WS-D.1.3b, WS-D.1.3c, WS-D.1.4b, WS-D.1.4c, WS-D.1.1e, WS-D.1.6c, WS-C |
 | WS-D.1.5a | WS-D.1.1e, WS-D.1.3e, WS-0 (KMS) |
 | WS-D.1.5b | WS-D.1.5a, WS-D.1.3b, WS-D.1.3d, WS-A |
 | WS-D.1.6a | WS-D.1.3b, WS-D.1.1e, WS-D.1.3e, WS-D.1.7, WS-D.1.6b |
@@ -1246,15 +1301,15 @@ The BFS treats the FK graph as undirected (an attacker can traverse a join in ei
 | WS-D.2.1b | WS-D.2.1a, WS-D.1.1b, WS-D.1.6a, WS-D.1.6b, WS-D.1.6c, WS-D.1.7b, WS-E |
 | WS-D.2.3a | WS-E, WS-D.1.6a, WS-D.1.6b, WS-D.1.6c, WS-D.3.2 |
 | WS-D.2.2a | WS-D.1.3e, WS-0 (BullMQ), WS-D.1.6a, WS-D.1.6b |
-| WS-D.2.2b | WS-D.2.2a, WS-D.3.1a, WS-G, WS-J, WS-E |
+| WS-D.2.2b | WS-D.2.2a, WS-D.1.2c, WS-D.1.4c, WS-D.3.1a, WS-G, WS-J, WS-E |
 | WS-D.2.2c | WS-D.2.2b, WS-D.1.3e, WS-0 (object storage/KMS), WS-D.2.2a |
 | WS-D.2.4a | WS-D.1.3e, WS-D.1.3c, WS-D.1.6c |
 | WS-D.2.4b | WS-D.2.4a, WS-G, WS-D.1.6c |
-| WS-D.2.4c | WS-D.2.4b, WS-D.1.1e, WS-D.1.2c, WS-D.3.1a, WS-E, WS-D.2.2, WS-D.1.6c |
+| WS-D.2.4c | WS-D.2.4b, WS-D.1.1e, WS-D.1.2c, WS-D.1.4c, WS-D.3.1a, WS-E, WS-D.2.2, WS-D.1.6c |
 | WS-D.3.1a | WS-D.1.1a, WS-D.1.7c, WS-D.1.3e, WS-D.3.2 |
 | WS-D.3.2 | WS-D.3.1a, WS-E, WS-0 (CI) |
 
-Note: WS-D.1.1e ↔ WS-D.1.2c and WS-D.3.1a ↔ WS-D.3.2 are intentionally co-developed pairs (one defines the table, the sibling references/validates it). They merge together or in immediate succession; the FK/assertion side lands once both tables exist.
+Note: WS-D.1.1e ↔ WS-D.1.2c, WS-D.1.1e ↔ WS-D.1.4c, and WS-D.3.1a ↔ WS-D.3.2 are intentionally co-developed pairs (one defines the table, the sibling references/validates it). They merge together or in immediate succession; the FK/assertion side lands once both tables exist. WS-D.1.4c additionally shares the SIWE verification primitive with WS-L.2.3a-c (financial wallet linking) -- one library, two callers, separate nonce namespaces and HMAC keys.
 
 ---
 
@@ -1262,7 +1317,7 @@ Note: WS-D.1.1e ↔ WS-D.1.2c and WS-D.3.1a ↔ WS-D.3.2 are intentionally co-de
 
 WS-D is complete when ALL of the following conditions hold:
 
-1. **Authentication (WebAuthn-first).** WebAuthn (passkey) registration and authentication work end-to-end, including the full registration ceremony (challenge generation with TTL'd single-use storage, attestation verification with origin/RP-ID validation, public-key + signCount storage, multi-credential support) and the authentication ceremony (assertion verification with counter-regression / cloned-authenticator detection). Email/password authentication works as a fallback with email verification, Argon2id hashing at the specified parameters, one-time reset tokens, and suspicious-login alerts. Both flows produce valid sessions. Passkeys are presented as primary wherever a platform authenticator is available.
+1. **Authentication (WebAuthn-first, passwordless).** WebAuthn (passkey) registration and authentication work end-to-end, including the full registration ceremony (challenge generation with TTL'd single-use storage, attestation verification with origin/RP-ID validation, public-key + signCount storage, multi-credential support) and the authentication ceremony (assertion verification with counter-regression / cloned-authenticator detection). Two **passwordless** fallbacks work: email one-time-code sign-in (single-use, browser-bound, attempt-capped, anti-enumeration) and -- for adults who opt in -- Sign-In with Ethereum (EIP-4361) with canonical-origin domain binding, single-use nonces, and `ecrecover`/EIP-1271/EIP-6492 signature verification. **No password exists anywhere** in the schema, code, or API surface, and there is no password-reset flow. Suspicious-login alerts fire on every path and reach the user even with no email on file (multi-channel). All paths produce valid sessions. Passkeys are presented as primary wherever a platform authenticator is available; the auth-wallet is domain-separated from the financial `WalletAccount` and never available to minors.
 
 2. **Session security.** Session cookies are set `HttpOnly`, `Secure`, `SameSite=Strict`, with the `__Host-` prefix; session state lives in a Redis store with hashed tokens; sessions rotate on privilege change and can be revoked individually or in bulk; an active-device list is available to the user; sensitive actions require fresh step-up re-authentication. Concurrent sessions are supported and bounded by an absolute cap. Authentication middleware validates sessions and fails closed.
 
