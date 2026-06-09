@@ -20,6 +20,7 @@ import {
   createReport,
   uploadAttentionAggregates,
 } from '../lib/api.js';
+import { track } from '../lib/telemetry.js';
 import * as queue from './queue.js';
 import type { PendingOperationRecord } from './schemas.js';
 
@@ -112,6 +113,13 @@ export async function processPendingQueue(options: SyncOptions = {}): Promise<Sy
   } finally {
     processing = false;
   }
+  // Observability: report the remaining queue depth + the terminal-failure count
+  // (no payloads) so a backend outage or a class of rejected writes is visible.
+  track({
+    name: 'queue_status',
+    count: await queue.count(),
+    ...(result.failed > 0 ? { metric: 'failed', value: result.failed } : {}),
+  });
   return result;
 }
 

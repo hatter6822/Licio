@@ -17,4 +17,5 @@ export * from './notifications.js';
 export * from './profile.js';
 export * from './room.js';
 export * from './signal-ledger.js';
+export * from './telemetry.js';
 export * from './thread.js';

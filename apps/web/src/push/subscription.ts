@@ -12,6 +12,7 @@ import {
   registerPushSubscription,
   removePushSubscription,
 } from '../lib/api.js';
+import { track } from '../lib/telemetry.js';
 
 /** Where the reader is in the push-enablement flow (drives the explainer UI). */
 export type PushReadiness = 'unsupported' | 'needs-install' | 'denied' | 'ready' | 'subscribed';
@@ -73,7 +74,10 @@ export async function subscribeToPush(): Promise<PushSubscriptionJson | null> {
   if (!isPushSupported()) return null;
   if (isIOS() && !isStandalone()) return null; // never prompt in iOS Safari
   const permission = await Notification.requestPermission();
-  if (permission !== 'granted') return null;
+  if (permission !== 'granted') {
+    track({ name: 'push_lifecycle', metric: 'denied' });
+    return null;
+  }
 
   const registration = await navigator.serviceWorker.ready;
   const existing = await registration.pushManager.getSubscription();
@@ -86,6 +90,7 @@ export async function subscribeToPush(): Promise<PushSubscriptionJson | null> {
 
   const json = subscription.toJSON() as PushSubscriptionJson;
   await registerPushSubscription(json);
+  track({ name: 'push_lifecycle', metric: 'subscribed' });
   return json;
 }
 
@@ -99,6 +104,7 @@ export async function renewSubscription(): Promise<PushSubscriptionJson | null> 
   });
   const json = subscription.toJSON() as PushSubscriptionJson;
   await registerPushSubscription(json);
+  track({ name: 'push_lifecycle', metric: 'renewed' });
   return json;
 }
 
@@ -110,4 +116,5 @@ export async function unsubscribeFromPush(): Promise<void> {
   if (!subscription) return;
   await removePushSubscription(subscription.endpoint);
   await subscription.unsubscribe();
+  track({ name: 'push_lifecycle', metric: 'unsubscribed' });
 }

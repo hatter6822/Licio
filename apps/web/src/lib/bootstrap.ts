@@ -19,6 +19,7 @@ import { initAuthSync, useAuthStore } from '../stores/auth.js';
 import { useFeatureFlagStore } from '../stores/feature-flags.js';
 import { initUIStore } from '../stores/ui.js';
 import { fetchAuthStatus, fetchFeatureFlags, fetchSettings } from './api.js';
+import { initTelemetry, track } from './telemetry.js';
 
 /** Event dispatched on detected eviction so the UI can notify the reader. */
 export const EVICTION_EVENT = 'licio:storage-evicted';
@@ -31,6 +32,13 @@ export async function hydrateFeatureFlags(): Promise<void> {
     // Network/parse failure ⇒ keep the fail-closed defaults (hydrate null).
     useFeatureFlagStore.getState().hydrate(null);
   }
+  // Observability: record the resolved flag set so accidental enablement is
+  // visible (no PII — just the booleans). SPEC §0.5 / Risk Mitigation.
+  const { flags } = useFeatureFlagStore.getState();
+  track({
+    name: 'feature_flags',
+    bucket: `crypto-${flags.cryptoEnabled ? 'on' : 'off'},gov-${flags.governanceEnabled ? 'on' : 'off'}`,
+  });
 }
 
 /** Confirm the session; downgrade an optimistic rehydration on a 401/absence. */
@@ -62,8 +70,25 @@ export async function applySignalPolicy(): Promise<void> {
 function onEvicted(result: ProbeResult): void {
   // Resync surviving queue items and surface a notice (esp. if the queue was lost).
   void processPendingQueue();
+  track({
+    name: 'eviction',
+    count: (result.lostPending ? 1 : 0) + (result.lostLedger ? 1 : 0),
+    ...(result.estimateBytes !== null ? { value: result.estimateBytes } : {}),
+  });
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent<ProbeResult>(EVICTION_EVENT, { detail: result }));
+  }
+}
+
+/** Sample storage quota usage for the cache-stats observability channel. */
+async function reportStorageEstimate(): Promise<void> {
+  try {
+    const estimate = await globalThis.navigator?.storage?.estimate?.();
+    if (estimate?.usage !== undefined) {
+      track({ name: 'cache_stats', value: estimate.usage });
+    }
+  } catch {
+    // Storage estimate unavailable; skip.
   }
 }
 
@@ -73,23 +98,24 @@ function onEvicted(result: ProbeResult): void {
  */
 export function startRuntime(): () => void {
   initUIStore();
+  const teardownTelemetry = initTelemetry();
   const teardownAuthSync = initAuthSync();
   const teardownProcessor = getSignalProcessor().start();
   const teardownSync = initForegroundSync();
   const teardownEviction = initEvictionDetection({ onEvicted });
-  // Core Web Vitals RUM — privacy-safe (metric name/value/rating only, never a
-  // URL or identifier). Lab measurement remains the authoritative release gate.
+  // Core Web Vitals RUM → privacy-safe telemetry (metric name/value/rating only,
+  // never a URL or identifier). Lab measurement remains the authoritative gate.
   const teardownVitals = initWebVitals((vital) => {
-    if (import.meta.env.DEV) {
-      console.debug(`[cwv] ${vital.name} ${Math.round(vital.value)} (${vital.rating})`);
-    }
+    track({ name: 'web_vital', metric: vital.name, value: vital.value, rating: vital.rating });
   });
   void requestPersistentStorage();
+  void reportStorageEstimate();
 
   void hydrateFeatureFlags();
   void confirmSession().then(applySignalPolicy);
 
   return () => {
+    teardownTelemetry();
     teardownAuthSync();
     teardownProcessor();
     teardownSync();

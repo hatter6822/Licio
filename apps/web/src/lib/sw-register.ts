@@ -8,6 +8,8 @@
 // against a reload loop, WS-C.2.1c edge case). Registration failure is non-fatal
 // — the app degrades to online-only.
 
+import { track } from './telemetry.js';
+
 /** Window event carrying the registration whose `waiting` worker can activate. */
 export const SW_UPDATE_EVENT = 'licio:sw-update';
 
@@ -58,7 +60,18 @@ export function registerServiceWorker(): void {
   const register = (): void => {
     container
       .register('/sw.js', { scope: '/' })
-      .then((registration) => watchForUpdate(registration))
+      .then((registration) => {
+        watchForUpdate(registration);
+        // SW-health beacon: scope PATH only (no origin/PII), confirms a correctly
+        // scoped worker in production (WS-C.2.1d observability).
+        let scopePath = '/';
+        try {
+          scopePath = new URL(registration.scope).pathname;
+        } catch {
+          // keep default
+        }
+        track({ name: 'sw_health', metric: 'activated', bucket: scopePath });
+      })
       .catch(() => undefined); // Non-fatal: degrade to online-only.
   };
 

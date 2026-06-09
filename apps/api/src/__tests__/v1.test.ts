@@ -154,6 +154,36 @@ describe('v1 writes', () => {
     );
     expect(await res.json()).toEqual({ accepted: 1 });
   });
+
+  it('ingests a privacy-safe telemetry batch and acks the accepted count', async () => {
+    const events = [
+      {
+        name: 'navigation',
+        bucket: '/stories/$storyId',
+        value: 12.5,
+        at: '2026-06-09T13:30:00.000Z',
+      },
+      {
+        name: 'web_vital',
+        metric: 'LCP',
+        value: 980,
+        rating: 'good',
+        at: '2026-06-09T13:30:01.000Z',
+      },
+    ];
+    const res = await app().request(jsonRequest('/v1/telemetry', 'POST', { events }));
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ accepted: 2 });
+  });
+
+  it('rejects a malformed telemetry event (unknown name) with 400', async () => {
+    const res = await app().request(
+      jsonRequest('/v1/telemetry', 'POST', {
+        events: [{ name: 'not-an-event', at: '2026-06-09T13:30:00.000Z' }],
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
 });
 
 describe('v1 push + notifications', () => {

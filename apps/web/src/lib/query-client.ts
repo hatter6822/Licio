@@ -6,8 +6,15 @@
 // — they queue via background sync when offline (WS-C.2.3). Per-query overrides
 // (longer stale for profile/thread, zero for feature flags) are applied at the
 // hook layer.
-import { QueryClient } from '@tanstack/react-query';
+import { MutationCache, QueryCache, QueryClient } from '@tanstack/react-query';
 import { ApiClientError } from './api.js';
+import { track } from './telemetry.js';
+
+/** Record a query/mutation failure by error CODE (never the message) for RUM. */
+function trackError(error: unknown): void {
+  const code = error instanceof ApiClientError ? error.code : 'unknown';
+  track({ name: 'query_error', metric: code.slice(0, 64) });
+}
 
 /** Retry base (1s), doubling per attempt, capped — WS-C.1.2 retry policy. */
 const RETRY_BASE_MS = 1_000;
@@ -28,6 +35,8 @@ function shouldRetry(failureCount: number, error: unknown): boolean {
 
 export function createAppQueryClient(): QueryClient {
   return new QueryClient({
+    queryCache: new QueryCache({ onError: trackError }),
+    mutationCache: new MutationCache({ onError: trackError }),
     defaultOptions: {
       queries: {
         // Feed-leaning default (30s). Longer-lived data overrides per query.

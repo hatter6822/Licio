@@ -3,7 +3,9 @@
 // Interaction-budget performance marks (WS-C.5.1, SPEC §6.10). The PWA interaction
 // budgets — thread branch open ≤500ms (cached), composer open ≤300ms, offline
 // draft save ≤100ms — are emitted as User Timing marks/measures so Playwright
-// traces can assert them in CI as release gates, and so RUM can sample them.
+// traces can assert them in CI as release gates, and each measurement is sampled
+// to privacy-safe RUM (metric + ms + good/poor rating).
+import { track } from '../lib/telemetry.js';
 
 export const INTERACTION_BUDGETS = {
   'branch-open': 500,
@@ -37,6 +39,12 @@ export function measureInteraction(name: InteractionName): number | null {
   if (!supported()) return null;
   try {
     const measure = performance.measure(`licio:${name}`, startMark(name));
+    track({
+      name: 'interaction',
+      metric: name,
+      value: measure.duration,
+      rating: isWithinBudget(name, measure.duration) ? 'good' : 'poor',
+    });
     return measure.duration;
   } catch {
     return null;

@@ -6,11 +6,13 @@
 // contract mismatch becomes a `tsc` build failure.
 //
 // Ownership: push (WS-C.2.4a), notification preferences (WS-C.2.4c), attention
-// ingestion (WS-C.4.4), feature flags (WS-C.1.3c), and settings sync are
-// implemented here. The read-model data endpoints (feed, story, thread, room,
-// signal-ledger) are typed CONTRACTS whose data layer is owned by later
-// workstreams (WS-G/H/J); until then they return honest empty/not-found results
-// — never fabricated content.
+// ingestion (WS-C.4.4), telemetry/RUM ingest (WS-C observability), feature flags
+// (WS-C.1.3c), and settings sync are implemented here. The read-model data
+// endpoints (feed, story, thread, room, signal-ledger) are typed CONTRACTS whose
+// production data layer is owned by later workstreams (WS-G/H/J); until then they
+// serve a deterministic in-memory demo dataset (see `lib/demo-data.ts`) so the PWA
+// has stable, structurally honest content to render — clearly fixture data, never
+// a fabricated production source of truth.
 import { randomUUID } from 'node:crypto';
 import { zValidator } from '@hono/zod-validator';
 import {
@@ -31,6 +33,9 @@ import {
   pushRegisterRequestSchema,
   type RoomListResponse,
   type SignalLedgerResponse,
+  type TelemetryIngestAck,
+  telemetryBatchSchema,
+  telemetryIngestAckSchema,
   userSettingsSchema,
   uuidSchema,
   vapidPublicKeyResponseSchema,
@@ -170,6 +175,17 @@ export function createV1Routes() {
           accepted: aggregates.length,
         });
         return c.json(ack);
+      })
+
+      // --- Telemetry / RUM ingest (WS-C observability; CSRF-exempt beacon) ---
+      .post('/telemetry', zValidator('json', telemetryBatchSchema), (c) => {
+        const { events } = c.req.valid('json');
+        // Privacy-safe by schema (no URLs/PII, ≤100 events). The analytics pipeline
+        // (WS-P) consumes these; here we validate and acknowledge the accepted count.
+        const ack: TelemetryIngestAck = telemetryIngestAckSchema.parse({
+          accepted: events.length,
+        });
+        return c.json(ack, { status: 202 });
       })
 
       // --- Push (WS-C.2.4a) -------------------------------------------------
