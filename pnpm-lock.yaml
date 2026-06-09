@@ -90,6 +90,9 @@ importers:
       dompurify:
         specifier: ^3.4.8
         version: 3.4.8
+      hono:
+        specifier: ^4.7.0
+        version: 4.12.23
       react:
         specifier: ^19.0.0
         version: 19.2.7

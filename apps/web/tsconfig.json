@@ -11,9 +11,14 @@
       "@licio/shared": ["../../packages/shared/src"],
       "@licio/shared/*": ["../../packages/shared/src/*"],
       "@licio/invariants": ["../../packages/invariants/src"],
-      "@licio/invariants/*": ["../../packages/invariants/src/*"]
+      "@licio/invariants/*": ["../../packages/invariants/src/*"],
+      "api": ["../api/src/app.ts"]
     }
   },
   "include": ["src/**/*"],
-  "references": [{ "path": "../../packages/shared" }, { "path": "../../packages/invariants" }]
+  "references": [
+    { "path": "../../packages/shared" },
+    { "path": "../../packages/invariants" },
+    { "path": "../api" }
+  ]
 }
