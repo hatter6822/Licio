@@ -8,7 +8,7 @@
 import type { PrivacyLevel, SignalLedgerEntry } from '@licio/shared';
 import { DEFAULT_NOTIFICATION_PREFERENCES } from '@licio/shared';
 import { Link } from '@tanstack/react-router';
-import type { ReactNode } from 'react';
+import { type ReactNode, useEffect } from 'react';
 import { FeedModeSwitcher } from '../../components/feed/FeedModeSwitcher/index.js';
 import {
   type SignalKind,
@@ -34,6 +34,7 @@ import {
   useUpdateNotificationPreferencesMutation,
   useUpdateSettingsMutation,
 } from '../../lib/queries.js';
+import { track } from '../../lib/telemetry.js';
 import { hhmmToMinutes, minutesToHHMM } from '../../lib/time.js';
 import { usePushControls } from '../../push/index.js';
 import { resolveCollectionPolicy } from '../../signals/privacy.js';
@@ -404,6 +405,11 @@ export function WalletPage(): React.ReactElement {
   const t = useT();
   usePageFocus(t('profile.wallet', 'Wallet'));
   const cryptoEnabled = useFeatureFlagStore(selectCryptoEnabled);
+  // Reaching a flag-gated page is a fail-closed restriction worth observing
+  // (route PATTERN only, no PII) so accidental enablement/lockout is visible.
+  useEffect(() => {
+    track({ name: 'route_guard', metric: 'restricted', bucket: '/profile/wallet' });
+  }, []);
   return (
     <>
       <PageHeader title={t('profile.wallet', 'Wallet')} />

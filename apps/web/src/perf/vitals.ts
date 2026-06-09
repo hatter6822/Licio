@@ -35,6 +35,11 @@ interface LayoutShiftEntry extends PerformanceEntry {
   hadRecentInput: boolean;
 }
 
+interface EventTimingEntry extends PerformanceEntry {
+  /** Set (> 0) only for entries tied to a discrete user interaction. */
+  interactionId?: number;
+}
+
 function observe(
   type: string,
   callback: (entries: PerformanceEntryList) => void,
@@ -76,8 +81,11 @@ export function initWebVitals(report: (vital: WebVital) => void): () => void {
   const inp = observe(
     'event',
     (entries) => {
-      for (const entry of entries) {
-        if (entry.duration > inpValue) {
+      for (const entry of entries as EventTimingEntry[]) {
+        // INP measures discrete INTERACTIONS only: entries with an interactionId
+        // (> 0). Continuous events (pointermove, scroll) carry none and must not
+        // inflate the metric.
+        if ((entry.interactionId ?? 0) > 0 && entry.duration > inpValue) {
           inpValue = entry.duration;
           report({ name: 'INP', value: inpValue, rating: rateMetric('INP', inpValue) });
         }

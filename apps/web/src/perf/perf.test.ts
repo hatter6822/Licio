@@ -75,4 +75,29 @@ describe('initWebVitals', () => {
     const teardown = initWebVitals(vi.fn());
     expect(() => teardown()).not.toThrow();
   });
+
+  it('counts INP only for entries with a discrete interactionId', () => {
+    type Listener = (list: { getEntries: () => unknown[] }) => void;
+    const handlers: Record<string, Listener> = {};
+    class MockPO {
+      constructor(private readonly cb: Listener) {}
+      observe(opts: { type: string }): void {
+        handlers[opts.type] = this.cb;
+      }
+      disconnect(): void {}
+    }
+    vi.stubGlobal('PerformanceObserver', MockPO);
+    const report = vi.fn();
+    const teardown = initWebVitals(report);
+
+    // A continuous event (no interactionId) must NOT register as INP…
+    handlers['event']?.({ getEntries: () => [{ duration: 300, interactionId: 0 }] });
+    expect(report).not.toHaveBeenCalled();
+
+    // …but a real interaction does.
+    handlers['event']?.({ getEntries: () => [{ duration: 250, interactionId: 7 }] });
+    expect(report).toHaveBeenCalledWith({ name: 'INP', value: 250, rating: 'needs-improvement' });
+
+    teardown();
+  });
 });

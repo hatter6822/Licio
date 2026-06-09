@@ -5,10 +5,12 @@
 // sub-route that renders RestrictedState when `governanceEnabled` is off
 // (fail-closed, WS-C.1.1d) — the URL stays shareable but inert.
 import { Link, useParams } from '@tanstack/react-router';
+import { useEffect } from 'react';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { RestrictedState } from '../../components/ui/RestrictedState/index.js';
 import { useT } from '../../i18n/index.js';
 import { useRoomQuery, useRoomsQuery } from '../../lib/queries.js';
+import { track } from '../../lib/telemetry.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { selectGovernanceEnabled, useFeatureFlagStore } from '../../stores/index.js';
 import { PageScaffold } from './PageScaffold.js';
@@ -92,6 +94,10 @@ export function RoomGovernancePage(): React.ReactElement {
   const t = useT();
   usePageFocus(t('room.governance.title', 'Room governance'));
   const governanceEnabled = useFeatureFlagStore(selectGovernanceEnabled);
+  // Observe reaching the flag-gated governance page (route PATTERN only, no PII).
+  useEffect(() => {
+    track({ name: 'route_guard', metric: 'restricted', bucket: '/rooms/$roomId/governance' });
+  }, []);
 
   return (
     <>
