@@ -73,6 +73,23 @@ describe('Tabs', () => {
     expect(screen.getByRole('tabpanel')).toHaveTextContent('Panel: evidence');
   });
 
+  it('keeps the roving tabindex on the selected tab when controlled value changes externally', () => {
+    const { rerender } = renderTabs({ value: 'overview' });
+    const tabbableName = () =>
+      screen.getAllByRole('tab').find((t) => t.getAttribute('tabindex') === '0')?.textContent;
+    expect(tabbableName()).toBe('Overview');
+
+    // Parent changes the selection programmatically.
+    rerender(
+      <Tabs tabs={tabs} label="Thread branches" value="evidence">
+        {(active) => <div data-testid="panel">Panel: {active}</div>}
+      </Tabs>,
+    );
+    // The newly-selected tab is now the single tabbable one (not the old tab).
+    expect(screen.getByRole('tab', { name: 'Evidence' })).toHaveAttribute('aria-selected', 'true');
+    expect(tabbableName()).toBe('Evidence');
+  });
+
   it('has no axe violations', async () => {
     const { container } = renderTabs();
     expect(await checkA11y(container)).toHaveNoViolations();

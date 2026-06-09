@@ -28,15 +28,18 @@ export function VoiceDictation({
   const t = useT();
   const noteId = useId();
 
-  // Resolve the constructor once on mount so the first render is deterministic
-  // (SSR-safe) and re-renders don't re-probe the global.
-  const [supported, setSupported] = useState(false);
+  // Resolve support during the first render via a lazy initializer. This is
+  // SSR-safe — `getSpeechRecognition()` returns undefined when there is no
+  // `window` — and, on the client, it means a supporting browser shows the live
+  // control immediately instead of flashing the "unavailable" note for one frame
+  // before a mount effect corrects it.
+  const [supported] = useState(() => getSpeechRecognition() !== undefined);
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState('');
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
 
+  // Abort any in-flight recognition if the component unmounts mid-session.
   useEffect(() => {
-    setSupported(getSpeechRecognition() !== undefined);
     return () => {
       recognitionRef.current?.abort();
       recognitionRef.current = null;
@@ -53,7 +56,9 @@ export function VoiceDictation({
       return;
     }
     const recognition = new Recognition();
-    recognition.lang = lang ?? document.documentElement.lang ?? 'en';
+    // Truthy fallbacks: `document.documentElement.lang` is '' (not null) when
+    // unset, so `??` would leave recognition with an empty language.
+    recognition.lang = lang || document.documentElement.lang || 'en';
     recognition.continuous = true;
     recognition.interimResults = true;
 

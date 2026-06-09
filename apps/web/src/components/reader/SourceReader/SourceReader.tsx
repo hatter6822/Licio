@@ -21,6 +21,7 @@
 // focus to whatever element opened the reader (the thread).
 import DOMPurify from 'dompurify';
 import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useFocusTrap } from '../../../hooks/useFocusTrap.js';
 import { useT } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
@@ -178,7 +179,7 @@ export function SourceReader({
   sourceHtml,
   readabilityHtml,
   className,
-}: SourceReaderProps): React.ReactElement {
+}: SourceReaderProps): React.ReactPortal | null {
   const t = useT();
   const titleId = useId();
   const draftId = useId();
@@ -229,7 +230,13 @@ export function SourceReader({
     setDraft('');
   };
 
-  return (
+  if (typeof document === 'undefined') return null;
+
+  // Portal to <body> (like Dialog/Sheet) so the focus trap's "inert every other
+  // body child" logic actually inerts the app root behind this full-screen modal.
+  // Rendered inline in #root it would be a child of the root and the background
+  // thread would stay reachable by pointer and assistive tech.
+  return createPortal(
     <div
       ref={trapRef}
       role="dialog"
@@ -298,6 +305,13 @@ export function SourceReader({
           <iframe
             // EMPTY sandbox = maximally restrictive: no scripts, no same-origin,
             // no forms, no popups, no top-navigation. Do NOT add allow-* tokens.
+            //
+            // Deployment dependency (WS-C/server): the app ships a strict
+            // `default-src 'self'` CSP, which also bounds `frame-src`. To actually
+            // load remote sources, the server must add a `frame-src` (or
+            // `child-src`) allowance for the permitted source origins. Until then
+            // this frame is correct but inert under CSP; readability mode (text
+            // extraction) needs no such allowance and always works.
             sandbox=""
             src={url}
             title={t('reader.frame.title', 'External source: {title}', { title })}
@@ -339,6 +353,7 @@ export function SourceReader({
           </div>
         </div>
       ) : null}
-    </div>
+    </div>,
+    document.body,
   );
 }

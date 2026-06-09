@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitForElementToBeRemoved } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useRef, useState } from 'react';
 import { describe, expect, it } from 'vitest';
@@ -55,8 +55,10 @@ describe('Sheet', () => {
     const trigger = screen.getByRole('button', { name: 'Open sheet' });
     await user.click(trigger);
     await user.keyboard('{Escape}');
-    expect(screen.queryByRole('dialog')).toBeNull();
+    // Focus returns to the opener immediately (keyed to `open`), even while the
+    // panel is still sliding away.
     expect(trigger).toHaveFocus();
+    await waitForElementToBeRemoved(() => screen.queryByRole('dialog'));
   });
 
   it('dismisses on a downward pointer drag past the threshold', async () => {
@@ -67,7 +69,7 @@ describe('Sheet', () => {
     fireEvent.pointerDown(handle, { pointerId: 1, clientY: 100, button: 0 });
     fireEvent.pointerMove(handle, { pointerId: 1, clientY: 320 }); // 220px down
     fireEvent.pointerUp(handle, { pointerId: 1, clientY: 320 });
-    expect(screen.queryByRole('dialog')).toBeNull();
+    await waitForElementToBeRemoved(() => screen.queryByRole('dialog'));
   });
 
   it('ignores a small drag that does not cross the threshold', async () => {
@@ -86,7 +88,49 @@ describe('Sheet', () => {
     render(<Harness />);
     await user.click(screen.getByRole('button', { name: 'Open sheet' }));
     await user.click(screen.getByRole('button', { name: 'Close' }));
-    expect(screen.queryByRole('dialog')).toBeNull();
+    await waitForElementToBeRemoved(() => screen.queryByRole('dialog'));
+  });
+
+  it('plays an exit animation: stays mounted briefly on close, then unmounts', async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    await user.click(screen.getByRole('button', { name: 'Open sheet' }));
+    await user.keyboard('{Escape}');
+    // Immediately after close the panel is still in the DOM — sliding out, not
+    // removed — which is the whole point of an exit animation…
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    // …and it unmounts once the transition (or its fallback timer) completes.
+    await waitForElementToBeRemoved(() => screen.queryByRole('dialog'));
+  });
+
+  it('unmounts immediately under reduced motion (no exit animation)', async () => {
+    const original = Object.getOwnPropertyDescriptor(window, 'matchMedia');
+    // matchMedia is absent in jsdom; provide one that reports reduced motion.
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: (query: string) => ({
+        matches: query.includes('reduce'),
+        media: query,
+        onchange: null,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        addListener: () => undefined,
+        removeListener: () => undefined,
+        dispatchEvent: () => false,
+      }),
+    });
+    try {
+      const user = userEvent.setup();
+      render(<Harness />);
+      await user.click(screen.getByRole('button', { name: 'Open sheet' }));
+      await user.keyboard('{Escape}');
+      // No animation to wait on — the dialog is gone synchronously with the close.
+      expect(screen.queryByRole('dialog')).toBeNull();
+    } finally {
+      if (original) Object.defineProperty(window, 'matchMedia', original);
+      else Reflect.deleteProperty(window, 'matchMedia');
+    }
   });
 
   it('has no axe violations when open', async () => {

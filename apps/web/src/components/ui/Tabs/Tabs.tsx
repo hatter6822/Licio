@@ -40,6 +40,15 @@ export function Tabs({
   const [focusedId, setFocusedId] = useState(selectedId);
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
 
+  // Keep the roving tabindex on the selected tab when selection changes from
+  // outside (controlled `value`), so the tab in the page tab-sequence is always
+  // the selected one. (Adjusting state during render is the supported pattern.)
+  const lastSelected = useRef(selectedId);
+  if (lastSelected.current !== selectedId) {
+    lastSelected.current = selectedId;
+    setFocusedId(selectedId);
+  }
+
   const tabId = (id: string): string => `${baseId}-tab-${id}`;
   const panelId = (id: string): string => `${baseId}-panel-${id}`;
 

@@ -160,7 +160,13 @@ export function VirtualList<T>({
         className,
       )}
     >
-      <div ref={innerRef} className="pt-[var(--licio-vlist-top)] pb-[var(--licio-vlist-bottom)]">
+      {/* role="presentation" so the spacer wrapper is transparent to AT and the
+          listitem rows remain owned by the role="list" viewport above. */}
+      <div
+        ref={innerRef}
+        role="presentation"
+        className="pt-[var(--licio-vlist-top)] pb-[var(--licio-vlist-bottom)]"
+      >
         {rows}
       </div>
     </div>

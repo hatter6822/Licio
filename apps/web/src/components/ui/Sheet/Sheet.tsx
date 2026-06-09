@@ -11,10 +11,23 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useFocusTrap } from '../../../hooks/useFocusTrap.js';
+import { useReducedMotion } from '../../../hooks/useReducedMotion.js';
 import { useScrollLock } from '../../../hooks/useScrollLock.js';
 import { cn } from '../../../lib/cn.js';
 import { Button } from '../Button/index.js';
 import { Icon } from '../Icon/index.js';
+
+/**
+ * Fallback (ms) for unmounting after the exit animation if `transitionend` never
+ * fires (interrupted/unsupported transition). Comfortably exceeds the panel's
+ * --licio-duration-normal (200ms) so it only acts as a safety net.
+ */
+const EXIT_FALLBACK_MS = 320;
+
+/** Off-screen travel distance (px) for the slide animation. */
+function sheetTravel(): number {
+  return typeof window === 'undefined' ? 800 : window.innerHeight;
+}
 
 export interface SheetProps {
   open: boolean;
@@ -44,13 +57,20 @@ export function Sheet({
   });
   useScrollLock(open);
 
-  // `entered` drives the slide-up / backdrop fade. The panel's vertical offset is
-  // a CSS custom property set imperatively so a drag follows the finger without a
-  // re-render per frame. The slide transition is neutralised at the token/base
-  // layer under prefers-reduced-motion, so no JS branch is needed for it.
+  // `entered` drives the backdrop fade. The panel's vertical offset is a CSS
+  // custom property set imperatively so a drag follows the finger without a
+  // re-render per frame. `shouldRender` keeps the portal in the DOM through the
+  // exit animation; it is raised SYNCHRONOUSLY when `open` becomes true so the
+  // portal — and the focus trap above — mount on the same commit, and lowered only
+  // once the exit completes. Focus return and scroll-unlock are keyed to `open`,
+  // so they happen immediately on close while the panel slides away.
+  const reduced = useReducedMotion();
+  const [shouldRender, setShouldRender] = useState(open);
   const [entered, setEntered] = useState(false);
   const dragStartY = useRef<number | null>(null);
   const dragOffset = useRef(0);
+  const wasOpen = useRef(open);
+  if (open && !shouldRender) setShouldRender(true);
 
   const setOffset = useCallback(
     (px: number, animate: boolean): void => {
@@ -62,25 +82,60 @@ export function Sheet({
     [trapRef],
   );
 
+  // Drive the enter and exit animations off `open`.
   useEffect(() => {
-    if (!open) {
-      setEntered(false);
+    const previouslyOpen = wasOpen.current;
+    wasOpen.current = open;
+
+    if (open) {
+      // Enter: start off-screen, then animate up on the next frame.
+      setOffset(sheetTravel(), false);
+      const raf = requestAnimationFrame(() => {
+        setEntered(true);
+        setOffset(0, true);
+      });
+      return () => cancelAnimationFrame(raf);
+    }
+
+    // Initial closed mount (never opened): nothing to animate or unmount.
+    if (!previouslyOpen) return;
+
+    // Close: fade the backdrop and slide the panel down, then unmount. Reduced
+    // motion skips the animation and unmounts immediately. `transitionend` drives
+    // the unmount, with a timer fallback in case it never fires.
+    setEntered(false);
+    if (reduced) {
+      setShouldRender(false);
       return;
     }
-    setOffset(typeof window === 'undefined' ? 800 : window.innerHeight, false);
-    const raf = requestAnimationFrame(() => {
-      setEntered(true);
-      setOffset(0, true);
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [open, setOffset]);
+    const el = trapRef.current;
+    setOffset(sheetTravel(), true);
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      setShouldRender(false);
+    };
+    const onTransitionEnd = (event: TransitionEvent): void => {
+      if (event.propertyName === 'transform') finish();
+    };
+    el?.addEventListener('transitionend', onTransitionEnd);
+    const timer = window.setTimeout(finish, EXIT_FALLBACK_MS);
+    return () => {
+      el?.removeEventListener('transitionend', onTransitionEnd);
+      window.clearTimeout(timer);
+    };
+  }, [open, reduced, setOffset, trapRef]);
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>): void => {
     if (event.pointerType === 'mouse' && event.button !== 0) return;
     dragStartY.current = event.clientY;
     dragOffset.current = 0;
     setOffset(0, false);
-    trapRef.current?.setPointerCapture?.(event.pointerId);
+    // Capture on the handle (the element these listeners are bound to), so the
+    // drag keeps tracking even if the pointer slides off the small handle box.
+    // Capturing on the parent panel would retarget events away from the handle.
+    event.currentTarget.setPointerCapture?.(event.pointerId);
   };
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
     if (dragStartY.current === null) return;
@@ -92,7 +147,7 @@ export function Sheet({
     if (dragStartY.current === null) return;
     const dy = dragOffset.current;
     dragStartY.current = null;
-    trapRef.current?.releasePointerCapture?.(event.pointerId);
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
     if (dy > swipeDismissThreshold) {
       onClose();
     } else {
@@ -100,7 +155,7 @@ export function Sheet({
     }
   };
 
-  if (!open || typeof document === 'undefined') return null;
+  if (!shouldRender || typeof document === 'undefined') return null;
 
   return createPortal(
     <div className="fixed inset-0 z-modal flex items-end justify-center">

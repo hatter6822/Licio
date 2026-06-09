@@ -24,6 +24,7 @@ import { EmptyState } from '../components/ui/EmptyState/index.js';
 import { ErrorState } from '../components/ui/ErrorState/index.js';
 import { Input } from '../components/ui/Input/index.js';
 import { RadioGroup } from '../components/ui/RadioGroup/index.js';
+import { ReadingEstimate } from '../components/ui/ReadingEstimate/index.js';
 import { Select } from '../components/ui/Select/index.js';
 import { Separator } from '../components/ui/Separator/index.js';
 import { Sheet } from '../components/ui/Sheet/index.js';
@@ -140,6 +141,7 @@ function Gallery(): React.ReactElement {
             <Avatar name="Ada Lovelace" />
             <Separator orientation="vertical" className="h-8" decorative={false} />
             <Skeleton className="h-6 w-32" />
+            <ReadingEstimate minutes={6} />
           </div>
           <Card>
             <h3 className="text-lg font-semibold text-ink">A card</h3>

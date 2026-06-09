@@ -2,6 +2,7 @@
 import { type ReactNode, type RefObject, useId } from 'react';
 import { createPortal } from 'react-dom';
 import { useFocusTrap } from '../../../hooks/useFocusTrap.js';
+import { useScrollLock } from '../../../hooks/useScrollLock.js';
 import { cn } from '../../../lib/cn.js';
 import { Button } from '../Button/index.js';
 import { Icon } from '../Icon/index.js';
@@ -36,6 +37,9 @@ export function Dialog({
     onEscape: onClose,
     ...(initialFocusRef ? { initialFocusRef } : {}),
   });
+  // Lock background scroll while the modal is open (parity with Sheet) so a
+  // wheel/touch gesture over the backdrop can't scroll the page behind it.
+  useScrollLock(open);
 
   if (!open || typeof document === 'undefined') return null;
 

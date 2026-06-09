@@ -3,7 +3,11 @@ import {
   type ChangeEvent,
   type ReactNode,
   type TextareaHTMLAttributes,
+  useCallback,
+  useEffect,
   useId,
+  useMemo,
+  useRef,
   useState,
 } from 'react';
 import { useT } from '../../../i18n/index.js';
@@ -28,8 +32,9 @@ export interface TextAreaProps
 const APPROACHING = 0.9;
 
 const textareaBase =
-  // `field-sizing: content` grows the textarea with its content (no JS, no CLS);
-  // browsers without support degrade to a normal scrollable textarea.
+  // `field-sizing: content` grows the textarea with its content (no JS, no CLS).
+  // Browsers without support get the `autosize` JS fallback below; either way
+  // `max-h-80` + `overflow-auto` cap the growth and then scroll.
   'block min-h-touch w-full resize-none rounded-md border bg-canvas px-3 py-2 text-base text-ink transition-colors [field-sizing:content] max-h-80 overflow-auto focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
 
 export function TextArea({
@@ -59,9 +64,39 @@ export function TextArea({
   const [count, setCount] = useState(initial);
   const current = value !== undefined ? String(value).length : count;
 
+  // Progressive enhancement: where the browser supports CSS `field-sizing`, it
+  // handles content-based growth with zero JS. Where it does not (e.g. Firefox at
+  // time of writing), fall back to a `scrollHeight`-driven auto-grow so the field
+  // still expands with its content. CSSOM height assignment is CSP-safe (no JSX
+  // inline styles), and `max-h-80`/`overflow-auto` still bound the height.
+  const supportsFieldSizing = useMemo(
+    () =>
+      typeof CSS !== 'undefined' &&
+      typeof CSS.supports === 'function' &&
+      CSS.supports('field-sizing', 'content'),
+    [],
+  );
+  const fieldRef = useRef<HTMLTextAreaElement>(null);
+
+  const autosize = useCallback((): void => {
+    if (supportsFieldSizing) return;
+    const el = fieldRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  }, [supportsFieldSizing]);
+
+  // Size on mount and whenever a controlled `value` changes from outside. `value`
+  // is a re-run trigger (the content changed), not read inside the effect.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `value` re-runs the measure on controlled updates
+  useEffect(() => {
+    autosize();
+  }, [autosize, value]);
+
   const handleChange = (event: ChangeEvent<HTMLTextAreaElement>): void => {
     setCount(event.target.value.length);
     onChange?.(event);
+    autosize();
   };
 
   // Threshold phase drives the live region so announcements fire only when the
@@ -105,6 +140,7 @@ export function TextArea({
 
       <textarea
         {...rest}
+        ref={fieldRef}
         id={fieldId}
         rows={rows}
         required={required}

@@ -37,9 +37,13 @@ function renderReader(props: Partial<SourceReaderProps> = {}) {
   );
 }
 
-/** The reader uses no real <iframe> rendering in jsdom; read it from the DOM. */
-function getFrame(container: HTMLElement): HTMLIFrameElement {
-  const frame = container.querySelector('iframe');
+// The reader portals to <body> (so its focus trap can inert the app root), so we
+// query the document rather than the render container.
+function queryFrame(): HTMLIFrameElement | null {
+  return document.querySelector('iframe');
+}
+function getFrame(): HTMLIFrameElement {
+  const frame = queryFrame();
   if (!frame) throw new Error('expected an iframe');
   return frame;
 }
@@ -50,8 +54,8 @@ afterEach(() => {
 
 describe('SourceReader (WS-B.2.7)', () => {
   it('loads the source in an iframe sandboxed with NONE of the dangerous tokens', () => {
-    const { container } = renderReader();
-    const frame = getFrame(container);
+    renderReader();
+    const frame = getFrame();
 
     // The sandbox attribute is present and EMPTY (maximally restrictive).
     expect(frame).toHaveAttribute('sandbox');
@@ -66,11 +70,17 @@ describe('SourceReader (WS-B.2.7)', () => {
   });
 
   it('gives the iframe an accessible title naming the source', () => {
-    const { container } = renderReader();
-    const frame = getFrame(container);
+    renderReader();
+    const frame = getFrame();
     expect(frame).toHaveAttribute('title');
     expect(frame.getAttribute('title')).toContain('Upstream Coordination Report');
     expect(frame).toHaveAttribute('src', 'https://example.org/article');
+  });
+
+  it('portals the modal reader to <body> (so the focus trap can inert the app root)', () => {
+    renderReader();
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.parentElement).toBe(document.body);
   });
 
   it('fires onClose from the Back button (returning focus to the thread)', async () => {
@@ -93,39 +103,39 @@ describe('SourceReader (WS-B.2.7)', () => {
 
   it('toggles readability mode, swapping the iframe for safe text paragraphs', async () => {
     const user = userEvent.setup();
-    const { container } = renderReader({
+    renderReader({
       readabilityHtml: 'First paragraph of the story.\n\nSecond paragraph with detail.',
     });
 
     // Starts on the iframe.
-    expect(container.querySelector('iframe')).not.toBeNull();
+    expect(queryFrame()).not.toBeNull();
     const toggle = screen.getByRole('button', { name: 'Reader view' });
     expect(toggle).toHaveAttribute('aria-pressed', 'false');
 
     await user.click(toggle);
 
     // Iframe gone; content rendered as text, NOT as injected HTML.
-    expect(container.querySelector('iframe')).toBeNull();
+    expect(queryFrame()).toBeNull();
     expect(toggle).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByText('First paragraph of the story.')).toBeInTheDocument();
     expect(screen.getByText('Second paragraph with detail.')).toBeInTheDocument();
 
     // Toggling back restores the iframe.
     await user.click(toggle);
-    expect(container.querySelector('iframe')).not.toBeNull();
+    expect(queryFrame()).not.toBeNull();
     expect(toggle).toHaveAttribute('aria-pressed', 'false');
   });
 
   it('renders readability text as plain text and never as live markup', async () => {
     const user = userEvent.setup();
-    const { container } = renderReader({
+    renderReader({
       // Even if upstream sanitization regressed, this string is rendered as text.
       readabilityHtml: 'Safe lead.\n\n<img src=x onerror=alert(1)> still text.',
     });
     await user.click(screen.getByRole('button', { name: 'Reader view' }));
 
     // No <img> element was created from the string — it is literal text content.
-    expect(container.querySelector('img')).toBeNull();
+    expect(document.querySelector('img')).toBeNull();
     expect(screen.getByText('<img src=x onerror=alert(1)> still text.')).toBeInTheDocument();
   });
 
@@ -180,17 +190,18 @@ describe('SourceReader (WS-B.2.7)', () => {
 
   it('has no axe violations', async () => {
     const user = userEvent.setup();
-    const { container } = renderReader({
+    renderReader({
       onCaptureCitation: () => undefined,
       readabilityHtml: 'Lead paragraph.\n\nSupporting paragraph.',
     });
     // Audit in readability mode: axe-core cannot descend into a jsdom <iframe>
     // (its content window is not a real frame), and the sandboxed frame has no
     // a11y surface of its own. Reader view exercises the full structural shell
-    // — dialog, toolbar, labelled controls and the citation form.
+    // — dialog, toolbar, labelled controls and the citation form. Audit the
+    // dialog subtree (the reader portals to <body>).
     await user.click(screen.getByRole('button', { name: 'Reader view' }));
-    expect(container.querySelector('iframe')).toBeNull();
-    expect(await checkA11y(container)).toHaveNoViolations();
+    expect(queryFrame()).toBeNull();
+    expect(await checkA11y(screen.getByRole('dialog'))).toHaveNoViolations();
   });
 
   it('sanitizes and extracts readable content from sourceHtml (no remote markup)', async () => {
@@ -242,8 +253,8 @@ describe('SourceReader worker extraction path (WS-B.2.7)', () => {
 
 describe('SourceReader URL scheme guard (WS-B.2.7 / Section 25.2)', () => {
   it('frames an http(s) source', () => {
-    const { container } = renderReader({ url: 'https://example.org/a' });
-    expect(container.querySelector('iframe')).not.toBeNull();
+    renderReader({ url: 'https://example.org/a' });
+    expect(queryFrame()).not.toBeNull();
   });
 
   it('refuses to frame a non-http(s) URL (javascript:/data:)', () => {
@@ -253,8 +264,8 @@ describe('SourceReader URL scheme guard (WS-B.2.7 / Section 25.2)', () => {
       '//evil.example',
       '/relative',
     ]) {
-      const { container, unmount } = renderReader({ url });
-      expect(container.querySelector('iframe')).toBeNull();
+      const { unmount } = renderReader({ url });
+      expect(queryFrame()).toBeNull();
       expect(screen.getByText('This source cannot be opened in the reader.')).toBeInTheDocument();
       unmount();
     }

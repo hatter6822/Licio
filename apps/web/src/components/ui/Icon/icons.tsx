@@ -239,6 +239,12 @@ export const iconPaths = {
       <path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z" />
     </>
   ),
+  clock: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </>
+  ),
 } satisfies Record<string, ReactElement>;
 
 export type IconName = keyof typeof iconPaths;

@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { checkA11y } from '../../../test/axe.js';
 import { TextArea } from './TextArea.js';
 
 describe('TextArea', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('associates the label and matches the Input error pattern', () => {
     render(<TextArea label="Summary" error="Required" required />);
     const field = screen.getByLabelText(/Summary/);
@@ -18,12 +22,31 @@ describe('TextArea', () => {
     );
   });
 
-  it('uses content-based auto-resize with a max height (no JS, no CLS)', () => {
+  it('uses native content-based auto-resize, capped at a max height', () => {
     render(<TextArea label="Note" />);
     const field = screen.getByLabelText('Note');
     expect(field).toHaveClass('[field-sizing:content]');
     expect(field).toHaveClass('max-h-80');
     expect(field).toHaveClass('overflow-auto');
+  });
+
+  it('defers to native field-sizing when supported (sets no inline height)', async () => {
+    vi.stubGlobal('CSS', { supports: () => true });
+    const user = userEvent.setup();
+    render(<TextArea label="Note" />);
+    const field = screen.getByLabelText('Note') as HTMLTextAreaElement;
+    await user.type(field, 'some content');
+    expect(field.style.height).toBe('');
+  });
+
+  it('auto-grows via a JS fallback when field-sizing is unsupported', async () => {
+    vi.stubGlobal('CSS', { supports: () => false });
+    const user = userEvent.setup();
+    render(<TextArea label="Note" />);
+    const field = screen.getByLabelText('Note') as HTMLTextAreaElement;
+    await user.type(field, 'some content');
+    // The fallback assigns an explicit pixel height driven by scrollHeight.
+    expect(field.style.height).toMatch(/px$/);
   });
 
   it('shows a live character count and stays silent below 90%', async () => {

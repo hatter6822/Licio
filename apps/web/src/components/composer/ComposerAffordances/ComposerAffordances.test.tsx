@@ -6,14 +6,18 @@
 // Web Speech is not in jsdom, so we install a minimal fake constructor on
 // `window` only for the "supported" path and delete it for the "unsupported"
 // one.
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { checkA11y } from '../../../test/axe.js';
 import { Attachment } from './Attachment.js';
 import { CitationCapture } from './CitationCapture.js';
 import { VoiceDictation } from './VoiceDictation.js';
-import type { SpeechRecognitionEventLike, SpeechRecognitionLike } from './speech.js';
+import type {
+  SpeechRecognitionErrorEventLike,
+  SpeechRecognitionEventLike,
+  SpeechRecognitionLike,
+} from './speech.js';
 
 /** A controllable fake SpeechRecognition for the supported path. */
 class FakeSpeechRecognition implements SpeechRecognitionLike {
@@ -39,6 +43,12 @@ class FakeSpeechRecognition implements SpeechRecognitionLike {
   }
   abort(): void {
     this.started = false;
+  }
+
+  /** Drive the recognition `error` event (e.g. network / no-speech). */
+  error(name = 'no-speech'): void {
+    this.started = false;
+    this.onerror?.({ error: name } as SpeechRecognitionErrorEventLike);
   }
 
   /** Push a transcript result through the `onresult` handler. */
@@ -132,6 +142,56 @@ describe('VoiceDictation (WS-B.2.11) — graceful degradation', () => {
     await waitFor(() => expect(screen.getByText(/Transcribing: hello world/i)).toBeInTheDocument());
     recognition?.emit('hello world.', true);
     expect(onTranscript).toHaveBeenCalledWith('hello world.');
+  });
+
+  it('shows the live control on the first render when supported (no unavailable-note flash)', () => {
+    installSpeech();
+    render(<VoiceDictation />);
+    // Resolved synchronously by the lazy initializer — the active toggle is
+    // present from the first commit, and the "unavailable" note never renders.
+    const button = screen.getByRole('button', { name: /dictate/i });
+    expect(button).toHaveAttribute('aria-pressed', 'false');
+    expect(button).not.toHaveAttribute('aria-disabled', 'true');
+    expect(screen.queryByText(/not available in this browser/i)).toBeNull();
+  });
+
+  it('returns to the idle label when recognition ends (onend)', async () => {
+    installSpeech();
+    const user = userEvent.setup();
+    render(<VoiceDictation />);
+    await user.click(screen.getByRole('button', { name: /dictate/i }));
+    const recognition = FakeSpeechRecognition.instances.at(-1);
+    expect(recognition?.started).toBe(true);
+
+    // A second activation stops recognition; the engine's `onend` resets state.
+    await user.click(screen.getByRole('button', { name: /stop dictation/i }));
+    expect(recognition?.started).toBe(false);
+    expect(screen.getByRole('button', { name: /dictate/i })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+  });
+
+  it('resets to idle and clears the interim transcript when recognition errors (onerror)', async () => {
+    installSpeech();
+    const user = userEvent.setup();
+    render(<VoiceDictation />);
+    await user.click(screen.getByRole('button', { name: /dictate/i }));
+    const recognition = FakeSpeechRecognition.instances.at(-1);
+
+    recognition?.emit('partial words', false);
+    await waitFor(() =>
+      expect(screen.getByText(/Transcribing: partial words/i)).toBeInTheDocument(),
+    );
+
+    // A recognition error (network, no-speech, …) must not strand the UI in the
+    // listening state, and the interim transcript is cleared.
+    act(() => recognition?.error('network'));
+    expect(screen.getByRole('button', { name: /dictate/i })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+    expect(screen.queryByText(/Transcribing:/i)).toBeNull();
   });
 
   it('has no axe violations in the unsupported state', async () => {

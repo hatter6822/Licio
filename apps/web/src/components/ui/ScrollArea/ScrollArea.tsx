@@ -13,9 +13,14 @@ export interface ScrollAreaProps {
 
 /**
  * Accessible scrolling container (WS-B.1.5). A labelled scroll region is
- * focusable so keyboard users can scroll it. Row virtualization for very long
- * lists is wired by WS-C (e.g. TanStack Virtual) on top of this region; this
- * primitive owns the accessible scroll semantics and overflow behaviour.
+ * focusable so keyboard users can scroll it. This primitive owns the accessible
+ * scroll semantics and overflow behaviour for ordinary (non-windowed) content.
+ *
+ * Windowing for very long lists is a deliberately separate concern: the sibling
+ * `VirtualList` primitive owns its own scroll viewport plus roving-tabindex
+ * keyboard navigation and focus retention across recycled rows. Keeping the two
+ * apart preserves single responsibility — reach for `ScrollArea` to scroll a
+ * bounded region, and `VirtualList` when the row count demands recycling.
  */
 export function ScrollArea({
   children,
