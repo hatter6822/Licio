@@ -1,6 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-// SPDX-License-Identifier: AGPL-3.0-or-later
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { checkA11y } from '../../../test/axe.js';

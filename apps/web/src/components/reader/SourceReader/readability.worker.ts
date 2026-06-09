@@ -8,5 +8,12 @@
 import { extractReadable } from './readability.js';
 
 self.addEventListener('message', (event: MessageEvent<string>) => {
+  // A dedicated worker only receives messages from its same-origin owner document
+  // (cross-origin pages cannot postMessage to another origin's worker), but verify
+  // the origin explicitly anyway — `event.origin` is empty for in-process worker
+  // messages, so this rejects only an unexpected cross-origin sender. The payload
+  // is then validated to be the expected string before use.
+  if (event.origin && event.origin !== self.location.origin) return;
+  if (typeof event.data !== 'string') return;
   (self as DedicatedWorkerGlobalScope).postMessage(extractReadable(event.data));
 });
