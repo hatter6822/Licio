@@ -36,6 +36,48 @@ self.addEventListener('push', (event) => {
   event.waitUntil(self.registration.showNotification(title, options));
 });
 
+// Convert a base64url VAPID key to the Uint8Array `applicationServerKey` wants.
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const output = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) {
+    output[i] = raw.charCodeAt(i);
+  }
+  return output;
+}
+
+// Silent re-subscription when the browser rotates/expires the subscription
+// (WS-C.2.4b edge case). Same-origin only; mirrors the client's single-use CSRF
+// flow. Best-effort: the client renew-on-load is the fallback if this fails.
+async function resubscribeAndRegister() {
+  try {
+    const keyRes = await fetch('/v1/push/vapid-public-key', { credentials: 'include' });
+    if (!keyRes.ok) return;
+    const { publicKey } = await keyRes.json();
+    const subscription = await self.registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(publicKey),
+    });
+    const csrfRes = await fetch('/api/csrf-token', { credentials: 'include' });
+    if (!csrfRes.ok) return;
+    const { token } = await csrfRes.json();
+    await fetch('/v1/push/subscriptions', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json', 'x-csrf-token': token },
+      body: JSON.stringify({ subscription: subscription.toJSON() }),
+    });
+  } catch {
+    // Network failure or unsupported — the foreground renew-on-load recovers.
+  }
+}
+
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(resubscribeAndRegister());
+});
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const target = event.notification.data?.url || '/';

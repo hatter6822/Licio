@@ -13,6 +13,7 @@ vi.mock('../lib/api.js', async (importOriginal) => {
 
 const api = await import('../lib/api.js');
 const {
+  ensurePushSubscription,
   getPushReadiness,
   isIOS,
   isPushSupported,
@@ -148,6 +149,35 @@ describe('subscribeToPush', () => {
     const { NotificationStub } = stubEnv({ ios: true, standalone: false });
     expect(await subscribeToPush()).toBeNull();
     expect(NotificationStub.requestPermission).not.toHaveBeenCalled();
+  });
+});
+
+describe('ensurePushSubscription (renew-on-load)', () => {
+  it('re-registers an existing subscription without re-subscribing', async () => {
+    const { subscribe } = stubEnv({
+      permission: 'granted',
+      subscription: {
+        endpoint: 'https://push.example/abc',
+        toJSON: () => ({ endpoint: 'https://push.example/abc', keys: { p256dh: 'x', auth: 'y' } }),
+        unsubscribe: async () => true,
+      },
+    });
+    await ensurePushSubscription();
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(api.registerPushSubscription).toHaveBeenCalledOnce();
+  });
+
+  it('re-creates and registers the subscription when the browser dropped it', async () => {
+    const { subscribe } = stubEnv({ permission: 'granted', subscription: null });
+    await ensurePushSubscription();
+    expect(subscribe).toHaveBeenCalledOnce();
+    expect(api.registerPushSubscription).toHaveBeenCalledOnce();
+  });
+
+  it('does nothing when permission has not been granted (never prompts)', async () => {
+    stubEnv({ permission: 'default', subscription: null });
+    await ensurePushSubscription();
+    expect(api.registerPushSubscription).not.toHaveBeenCalled();
   });
 });
 

@@ -13,6 +13,7 @@ import {
 } from '../offline/eviction.js';
 import { initForegroundSync, processPendingQueue } from '../offline/sync.js';
 import { initWebVitals } from '../perf/vitals.js';
+import { ensurePushSubscription } from '../push/subscription.js';
 import { resolveCollectionPolicy } from '../signals/privacy.js';
 import { getSignalProcessor } from '../signals/runtime.js';
 import { initAuthSync, useAuthStore } from '../stores/auth.js';
@@ -110,6 +111,9 @@ export function startRuntime(): () => void {
   });
   void requestPersistentStorage();
   void reportStorageEstimate();
+  // Renew-on-load: re-register an existing push subscription (no prompt). The SW
+  // 'pushsubscriptionchange' handler covers re-creation when the app is closed.
+  void ensurePushSubscription();
 
   void hydrateFeatureFlags();
   void confirmSession().then(applySignalPolicy);

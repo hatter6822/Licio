@@ -35,6 +35,7 @@ import {
   useUpdateSettingsMutation,
 } from '../../lib/queries.js';
 import { hhmmToMinutes, minutesToHHMM } from '../../lib/time.js';
+import { usePushControls } from '../../push/index.js';
 import { resolveCollectionPolicy } from '../../signals/privacy.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
 import {
@@ -52,6 +53,61 @@ function Section({ title, children }: { title: string; children: ReactNode }): R
       <h2 className="text-base font-semibold text-ink">{title}</h2>
       {children}
     </section>
+  );
+}
+
+/**
+ * Push enablement (WS-C.2.4b). Renders guidance — never a permission prompt — for
+ * the unsupported / iOS-install / previously-denied states, and an explicit
+ * enable/disable action only where a prompt is appropriate.
+ */
+function PushNotificationsSection(): React.ReactElement {
+  const t = useT();
+  const { readiness, busy, enable, disable } = usePushControls();
+  return (
+    <Section title={t('settings.push', 'Push notifications')}>
+      <p className="text-sm text-ink-muted">
+        {t(
+          'settings.push.desc',
+          'Get notified about replies and threads you follow — grouped, and quiet-hours aware.',
+        )}
+      </p>
+      {readiness === 'unsupported' ? (
+        <p className="text-sm text-ink-muted">
+          {t('settings.push.unsupported', 'Notifications are not supported on this device.')}
+        </p>
+      ) : null}
+      {readiness === 'needs-install' ? (
+        <p className="text-sm text-ink-muted">
+          {t(
+            'settings.push.needsInstall',
+            'Add Licio to your Home Screen first (Share → “Add to Home Screen”), then enable notifications from the installed app.',
+          )}
+        </p>
+      ) : null}
+      {readiness === 'denied' ? (
+        <p className="text-sm text-ink-muted">
+          {t(
+            'settings.push.denied',
+            'Notifications are blocked. Enable them for Licio in your device or browser settings.',
+          )}
+        </p>
+      ) : null}
+      {readiness === 'ready' ? (
+        <div>
+          <Button variant="primary" disabled={busy} onClick={() => void enable()}>
+            {t('settings.push.enable', 'Enable notifications')}
+          </Button>
+        </div>
+      ) : null}
+      {readiness === 'subscribed' ? (
+        <div>
+          <Button variant="secondary" disabled={busy} onClick={() => void disable()}>
+            {t('settings.push.disable', 'Turn off notifications')}
+          </Button>
+        </div>
+      ) : null}
+    </Section>
   );
 }
 
@@ -180,6 +236,7 @@ export function SettingsPage(): React.ReactElement {
           })()}
           <NotificationBudget used={0} limit={prefs.data?.budget_limit ?? 20} />
         </Section>
+        <PushNotificationsSection />
       </div>
     </>
   );

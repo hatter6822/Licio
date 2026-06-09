@@ -108,6 +108,26 @@ export async function renewSubscription(): Promise<PushSubscriptionJson | null> 
   return json;
 }
 
+/**
+ * On app load: if permission is ALREADY granted, ensure the server has the
+ * current subscription — re-registering the existing one, or silently
+ * re-creating it if the browser dropped it (renew-on-load). Never prompts: a
+ * 'default' permission is left untouched so the contextual ask still happens.
+ */
+export async function ensurePushSubscription(): Promise<void> {
+  if (!isPushSupported() || Notification.permission !== 'granted') return;
+  const registration = await navigator.serviceWorker.ready;
+  const existing = await registration.pushManager.getSubscription();
+  const subscription =
+    existing ??
+    (await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(await fetchVapidPublicKey()),
+    }));
+  await registerPushSubscription(subscription.toJSON() as PushSubscriptionJson);
+  if (!existing) track({ name: 'push_lifecycle', metric: 'renewed' });
+}
+
 /** Unsubscribe locally and on the server. */
 export async function unsubscribeFromPush(): Promise<void> {
   if (!isPushSupported()) return;
