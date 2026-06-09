@@ -10,7 +10,7 @@ Licensed under AGPL-3.0-or-later.
 
 ```
 apps/
-  web/          # React 19 PWA (Vite 6, TanStack Router/Query, Zustand, Tailwind CSS 4)
+  web/          # React 19 PWA (Vite 8, TanStack Router/Query, Zustand, Tailwind CSS 4)
   api/          # Hono BFF server (pino logging, Drizzle ORM via @licio/db)
 packages/
   shared/       # Shared zod schemas, types, constants, enums (leaf package — no workspace deps)
@@ -129,10 +129,24 @@ useQuery({
 
 ## Linting Limitations
 
-Biome 1.9.x does not support:
+Biome 2.x does not support:
 - `noConsole` / `noConsoleLog` — console usage is not blocked by the linter; use pino for server-side logging
 - `noRestrictedSyntax` — cannot block `innerHTML`, `outerHTML`, or `document.write()` at the AST level; these are caught by `pnpm lint:security` instead
 - `javascript:` URL blocking — caught by `pnpm lint:security` and `scripts/validate-build.ts`
+
+## TypeScript 6 Notes
+
+- TypeScript 6 defaults `types` to `[]` — ambient `@types/*` packages must be
+  explicitly listed in each workspace `tsconfig.json` via `"types": ["node"]`
+- `esModuleInterop` is always enabled and cannot be set to `false`
+- `moduleResolution: "classic"` has been removed (this project uses `"bundler"`)
+
+## Vite 8 Notes
+
+- Vite 8 uses Rolldown as the bundler; `rollupOptions.output.manualChunks` must
+  be a function (object form is no longer supported)
+- Biome v2 config uses `css.parser.tailwindDirectives: true` for Tailwind CSS v4
+  `@utility` / `@import "tailwindcss"` directives
 
 ## Commit Message Convention
 

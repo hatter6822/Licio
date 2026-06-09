@@ -117,7 +117,6 @@ function renderReadabilityParagraphs(text: string): ReactNode {
   if (paragraphs.length === 0) return null;
 
   return paragraphs.map((paragraph, index) => (
-    // biome-ignore lint/suspicious/noArrayIndexKey: paragraphs are positional, identity-less text blocks
     <p key={index} className="text-base text-ink">
       {paragraph}
     </p>

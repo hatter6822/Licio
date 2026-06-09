@@ -8,7 +8,19 @@ const logger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT = 100;
 const RATE_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_ENTRIES = 10_000;
 const MAX_BODY_SIZE = 10_240;
+
+function evictExpiredEntries(): void {
+  const now = Date.now();
+  for (const [ip, entry] of rateLimitMap) {
+    if (now >= entry.resetAt) {
+      rateLimitMap.delete(ip);
+    }
+  }
+}
+
+setInterval(evictExpiredEntries, RATE_WINDOW_MS).unref();
 
 const cspReportSchema = z.object({
   'csp-report': z
@@ -37,6 +49,12 @@ cspReportRoute.post('/', async (c) => {
     }
     entry.count++;
   } else {
+    if (rateLimitMap.size >= RATE_LIMIT_MAX_ENTRIES) {
+      evictExpiredEntries();
+    }
+    if (rateLimitMap.size >= RATE_LIMIT_MAX_ENTRIES) {
+      return c.json({ error: 'Rate limit exceeded' }, 429);
+    }
     rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
   }
 

@@ -45,7 +45,6 @@ export function Skeleton({
       className={cn(as === 'span' ? 'inline-flex' : 'flex', 'flex-col gap-2')}
     >
       {Array.from({ length: lines }, (_, index) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: placeholder lines are static and identity-less
         <span key={index} className={cn(blockClasses, className)} />
       ))}
     </Tag>

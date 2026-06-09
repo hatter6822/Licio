@@ -45,7 +45,6 @@ export function LoadingState({
     <div aria-busy="true" className={cn('flex flex-col gap-3', className)}>
       <span className="sr-only">{label ?? t('loadingstate.status', 'Loading…')}</span>
       {Array.from({ length: count }, (_, index) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: placeholder rows are static and identity-less
         <LoadingRow key={index} />
       ))}
     </div>
