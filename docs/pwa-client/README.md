@@ -181,11 +181,13 @@ A thin typed Promise wrapper over **raw IndexedDB** (no `idb` dependency).
   that fails read validation is **quarantined** (counted, excluded, left in place
   for recovery), never silently deleted.
 - **Draft encryption (2.2c, §6.8):** composer drafts are encrypted at rest with
-  AES-256-GCM (`offline/drafts.ts` + `offline/draft-crypto.ts`). The per-device
-  key is persisted as a JWK in a separate `licio-keys` store and re-imported
-  **non-extractable** for use; plaintext never reaches the draft store. Best-effort
-  — where Web Crypto is absent the draft is stored plaintext so it is never lost. A
-  transient key-store failure never permanently downgrades the session to plaintext.
+  AES-256-GCM (`offline/drafts.ts` + `offline/draft-crypto.ts`). The per-device key
+  is a **non-extractable `CryptoKey` persisted directly** in a separate `licio-keys`
+  store (browsers structured-clone CryptoKeys) — its raw bytes are never serialized,
+  exportable, or at rest in any readable form (no JWK to dump), and plaintext never
+  reaches the draft store. Best-effort — where Web Crypto is absent the draft is
+  stored plaintext so it is never lost; a transient key-store failure never
+  permanently downgrades the session to plaintext.
 - **Pending queue + sync (2.3):** the single source of truth for unsynced writes.
   Server-wins conflict policy — a 4xx rejection (e.g. a locked thread) is terminal
   (notify + preserve the draft); transient failures retry up to 5 times; an
@@ -323,8 +325,8 @@ acknowledges the accepted count.
   to the owning session (no cross-user unsubscribe). Push-payload navigation URLs are
   coerced to same-origin in the SW.
 - Crypto/governance flags fail closed and are never persisted. Drafts are encrypted
-  at rest (AES-256-GCM), with an honest threat model (defends casual/partial-dump
-  inspection, not same-origin XSS — see `offline/draft-crypto.ts`).
+  at rest (AES-256-GCM) under a **non-extractable** key persisted directly — no
+  exportable key material is ever at rest (`offline/draft-crypto.ts`).
 - No raw attention trace ever leaves the browser (`assertNoRawEgress` + the §22.1
   schema admit only buckets; the `check:no-raw-egress` CI gate).
 

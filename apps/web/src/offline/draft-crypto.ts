@@ -4,13 +4,14 @@
 // Composer drafts are encrypted AT REST with AES-256-GCM so plaintext never sits
 // in the draft store, in a SEPARATE key store (`licio-keys`) from the ciphertext.
 //
-// Threat model (honest): this defends against CASUAL inspection, a shared device,
-// a partial/blob-level disk leak, and an other-origin storage bug. It is NOT an
-// XSS control — the key is persisted as a JWK so it survives reloads, which means
-// same-origin script (XSS) with IndexedDB access can read the JWK and decrypt; the
-// re-imported NON-EXTRACTABLE runtime handle only stops accidental re-export of the
-// live key, it is not a confidentiality boundary against script execution. (The raw
-// key never reaches the network and the decrypted payload is shape-validated.)
+// The key is a NON-EXTRACTABLE CryptoKey persisted DIRECTLY in IndexedDB (browsers
+// structured-clone CryptoKeys): its raw bytes are never serialized, exportable, or
+// at rest in any readable form — `exportKey` rejects, and there is no JWK to dump.
+// So a casual inspection, a shared device, a partial/blob-level disk leak, or an
+// other-origin storage bug yields ciphertext + an opaque, non-exfiltratable key.
+// (The key never reaches the network; the decrypted payload is shape-validated.)
+// Same-origin script can of course still *use* the key to decrypt in-page — that is
+// inherent to ANY transparent client-side encryption, not a property of this design.
 //
 // Everything is best-effort: where Web Crypto is unavailable the caller falls back
 // to plaintext so a draft is never lost (availability > confidentiality, §6.9
@@ -33,7 +34,8 @@ export interface DraftCipher {
 
 interface StoredKey {
   id: string;
-  jwk: JsonWebKey;
+  /** The non-extractable AES-GCM key itself (structured-cloned by IndexedDB). */
+  key: CryptoKey;
 }
 
 function cryptoUnavailable(): boolean {
@@ -75,11 +77,6 @@ function idbRequest<T>(request: IDBRequest<T>): Promise<T> {
   });
 }
 
-/** Import a stored JWK as a non-extractable AES-GCM runtime handle. */
-function importKey(jwk: JsonWebKey): Promise<CryptoKey> {
-  return crypto.subtle.importKey('jwk', jwk, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
-}
-
 async function loadOrCreateKey(): Promise<CryptoKey | null> {
   if (cryptoUnavailable()) return null;
   const db = await openKeyDb().catch(() => null);
@@ -88,18 +85,17 @@ async function loadOrCreateKey(): Promise<CryptoKey | null> {
     const existing = await idbRequest<StoredKey | undefined>(
       db.transaction(KEY_STORE, 'readonly').objectStore(KEY_STORE).get(KEY_ID),
     );
-    if (existing?.jwk) return await importKey(existing.jwk);
-    // Generate extractable only long enough to persist the JWK, then use a
-    // non-extractable handle for runtime encryption/decryption.
-    const generated = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, [
+    if (existing?.key instanceof CryptoKey) return existing.key;
+    // NON-EXTRACTABLE (false): the raw key bytes can never be exported, and the
+    // CryptoKey is persisted directly — no JWK/serialized key material at rest.
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, [
       'encrypt',
       'decrypt',
     ]);
-    const jwk = await crypto.subtle.exportKey('jwk', generated);
     await idbRequest(
-      db.transaction(KEY_STORE, 'readwrite').objectStore(KEY_STORE).put({ id: KEY_ID, jwk }),
+      db.transaction(KEY_STORE, 'readwrite').objectStore(KEY_STORE).put({ id: KEY_ID, key }),
     );
-    return await importKey(jwk);
+    return key;
   } catch {
     return null;
   } finally {

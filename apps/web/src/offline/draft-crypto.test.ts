@@ -58,4 +58,28 @@ describe('draft-crypto', () => {
     await deleteDatabase('licio-keys');
     expect(await decryptDraftValues(cipher)).toBeNull();
   });
+
+  it('persists a NON-EXTRACTABLE key — no exportable key material at rest', async () => {
+    await encryptDraftValues({ a: 'b' }); // creates + persists the key
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const r = indexedDB.open('licio-keys', 1);
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = () => reject(r.error);
+    });
+    const record = await new Promise<{ id: string; key: CryptoKey } | undefined>(
+      (resolve, reject) => {
+        const rq = db.transaction('keys').objectStore('keys').get('draft-aes-gcm');
+        rq.onsuccess = () => resolve(rq.result);
+        rq.onerror = () => reject(rq.error);
+      },
+    );
+    db.close();
+    // The stored value is the CryptoKey itself (not a JWK / raw bytes)…
+    expect(record?.key).toBeInstanceOf(CryptoKey);
+    expect(record?.key.extractable).toBe(false);
+    // …and its bytes can never be exported.
+    if (record) {
+      await expect(crypto.subtle.exportKey('raw', record.key)).rejects.toThrow();
+    }
+  });
 });
