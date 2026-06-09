@@ -142,7 +142,9 @@ function getSessionId(cookieHeader: string | undefined): string | undefined {
   return match?.[1];
 }
 
-const EXEMPT_PATHS = new Set(['/health', '/api/security/csp-report']);
+// Telemetry/RUM ingest is non-state-changing analytics delivered by `sendBeacon`
+// (which cannot set a CSRF header); it is exempt like the CSP report endpoint.
+const EXEMPT_PATHS = new Set(['/health', '/api/security/csp-report', '/v1/telemetry']);
 const STATE_CHANGING_METHODS = new Set(['POST', 'PATCH', 'DELETE', 'PUT']);
 
 export function csrfTokenRoute(): MiddlewareHandler {

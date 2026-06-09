@@ -101,6 +101,27 @@ describe('initTrustedTypes', () => {
     );
   });
 
+  it('blocks cross-origin URLs that a naive startsWith check would allow (bypass regression)', () => {
+    const { mock, policies } = createMockTT();
+    vi.stubGlobal('window', {
+      ...window,
+      trustedTypes: mock,
+      location: { origin: 'http://localhost:5173' },
+    });
+    initTrustedTypes();
+    const createScriptURL = policies.get('default')?.['createScriptURL'];
+
+    // Each of these starts with the origin string or '/', yet resolves cross-origin.
+    for (const bypass of [
+      'http://localhost:5173.evil.com/x.js', // origin-suffix
+      'http://localhost:5173@evil.com/x.js', // userinfo trick
+      '//evil.com/x.js', // protocol-relative
+      'https://evil.com/x.js',
+    ]) {
+      expect(() => createScriptURL?.(bypass)).toThrow();
+    }
+  });
+
   it('dompurify policy allows HTML passthrough for sanitized content', () => {
     const { mock, policies } = createMockTT();
     vi.stubGlobal('window', { ...window, trustedTypes: mock });

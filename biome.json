@@ -73,7 +73,8 @@
       "!**/playwright-report",
       "!**/.vite",
       "!**/*.d.ts",
-      "!**/*.generated.css"
+      "!**/*.generated.css",
+      "!**/routeTree.gen.ts"
     ]
   },
   "overrides": [
