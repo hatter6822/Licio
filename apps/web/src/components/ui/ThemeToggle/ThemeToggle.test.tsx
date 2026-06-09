@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { checkA11y } from '../../../test/axe.js';
-import { type ColorScheme, ThemeToggle, applyColorScheme } from './ThemeToggle.js';
+import { applyColorScheme, type ColorScheme, ThemeToggle } from './ThemeToggle.js';
 
 function Harness() {
   const [scheme, setScheme] = useState<ColorScheme>('system');

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 export {
-  ThreadBranchNav,
-  type ThreadBranchNavProps,
+  BRANCH_IDS,
   type BranchContent,
   type BranchId,
-  BRANCH_IDS,
+  ThreadBranchNav,
+  type ThreadBranchNavProps,
 } from './ThreadBranchNav.js';

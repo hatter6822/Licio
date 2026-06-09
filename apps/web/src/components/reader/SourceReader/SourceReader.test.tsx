@@ -3,8 +3,8 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { checkA11y } from '../../../test/axe.js';
-import { SourceReader, type SourceReaderProps } from './SourceReader.js';
 import { extractReadable } from './readability.js';
+import { SourceReader, type SourceReaderProps } from './SourceReader.js';
 
 // A Worker stand-in that runs the real extractor and posts the result back, so
 // the worker offload branch (absent in jsdom) is exercised.

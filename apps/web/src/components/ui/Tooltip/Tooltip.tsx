@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import {
+  cloneElement,
   type FocusEvent,
+  isValidElement,
   type KeyboardEvent,
   type ReactElement,
   type ReactNode,
-  cloneElement,
-  isValidElement,
   useCallback,
   useEffect,
   useId,

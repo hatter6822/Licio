@@ -3,7 +3,7 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { POLICY_FILES, loadDocs, validatePolicyDocs } from '../validate.ts';
+import { loadDocs, POLICY_FILES, validatePolicyDocs } from '../validate.ts';
 
 const POLICY_DIR = resolve(import.meta.dirname, '../../../docs/policy');
 const SPEC_PATH = resolve(POLICY_DIR, '..', 'SPEC.md');

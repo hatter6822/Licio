@@ -1,2 +1,2 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-export { BottomNav, defaultNavItems, type BottomNavProps, type NavItem } from './BottomNav.js';
+export { BottomNav, type BottomNavProps, defaultNavItems, type NavItem } from './BottomNav.js';

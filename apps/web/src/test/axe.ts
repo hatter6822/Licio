@@ -11,7 +11,7 @@
 //      browsers (Chromium, Firefox, WebKit).
 // Disabling it here keeps unit-level a11y assertions deterministic and focused
 // on structure, roles, names, and ARIA — which jsdom *can* evaluate correctly.
-import { type AxeResults, type JestAxeConfigureOptions, axe } from 'jest-axe';
+import { type AxeResults, axe, type JestAxeConfigureOptions } from 'jest-axe';
 
 export function checkA11y(
   container: Element | string,

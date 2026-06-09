@@ -2,10 +2,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
 import {
-  type TokenStore,
   getTokenStore,
   setSessionCookie,
   setTokenStore,
+  type TokenStore,
 } from '../middleware/csrf.js';
 
 describe('CSRF protection', () => {

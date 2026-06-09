@@ -12,12 +12,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { checkA11y } from '../../../test/axe.js';
 import { Attachment } from './Attachment.js';
 import { CitationCapture } from './CitationCapture.js';
-import { VoiceDictation } from './VoiceDictation.js';
 import type {
   SpeechRecognitionErrorEventLike,
   SpeechRecognitionEventLike,
   SpeechRecognitionLike,
 } from './speech.js';
+import { VoiceDictation } from './VoiceDictation.js';
 
 /** A controllable fake SpeechRecognition for the supported path. */
 class FakeSpeechRecognition implements SpeechRecognitionLike {

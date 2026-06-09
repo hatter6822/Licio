@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 export {
   RatingLabel,
-  type RatingLabelProps,
   type RatingLabelKind,
-  ratingLabels,
+  type RatingLabelProps,
   ratingLabelKinds,
+  ratingLabels,
 } from './RatingLabel.js';

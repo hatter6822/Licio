@@ -27,7 +27,7 @@ import { useT } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
 import { Button } from '../../ui/Button/index.js';
 import { Icon } from '../../ui/Icon/index.js';
-import { type ReadableContent, extractReadable } from './readability.js';
+import { extractReadable, type ReadableContent } from './readability.js';
 
 /**
  * Extract readable content from sanitized HTML, off the main thread where a Web

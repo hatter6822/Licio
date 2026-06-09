@@ -7,8 +7,8 @@
 // description, action label) is supplied — and localised — by the caller.
 import { cn } from '../../../lib/cn.js';
 import { Button } from '../Button/index.js';
-import { Icon } from '../Icon/index.js';
 import type { IconName } from '../Icon/index.js';
+import { Icon } from '../Icon/index.js';
 
 export interface EmptyStateAction {
   /** Visible, descriptive button label. */

@@ -25,9 +25,9 @@ import { PrivacyWarning } from '../ComposerAffordances/index.js';
 import {
   type ComposerMode,
   type ComposerValues,
-  type ModeField,
   composerModes,
   getModeDefinition,
+  type ModeField,
 } from './modes.js';
 
 /** Per-mode field errors: field name → message. */

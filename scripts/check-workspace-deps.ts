@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -36,7 +36,7 @@ const SOURCE_DIRS: Record<string, string> = {
   api: resolve(ROOT, 'apps/api/src'),
 };
 
-const IMPORT_PATTERN = /(?:import|from|require\()\s*['"](@licio\/[^'"\/]+)/g;
+const IMPORT_PATTERN = /(?:import|from|require\()\s*['"](@licio\/[^'"/]+)/g;
 
 function collectSourceFiles(dir: string): string[] {
   const results: string[] = [];

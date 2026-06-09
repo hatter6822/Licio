@@ -1,2 +1,2 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-export { EmptyState, type EmptyStateProps, type EmptyStateAction } from './EmptyState.js';
+export { EmptyState, type EmptyStateAction, type EmptyStateProps } from './EmptyState.js';
