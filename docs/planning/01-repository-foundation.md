@@ -902,7 +902,7 @@ redact: {
 The wildcard (`*.field`) paths catch nested occurrences. Wallet-specific paths (`privateKey`, `seedPhrase`, `mnemonic`) are included now so the logger is safe before WS-L introduces wallet flows -- it must be impossible to ever log a seed phrase (Section 25.6).
 
 **Audit-sensitive action categories (dedicated log fields):**
-- Authentication: login, logout, token refresh, password reset, passkey registration
+- Authentication: login, logout, session rotation, email-OTP verification, wallet sign-in, passkey registration
 - Moderation: content removal, account action, appeal decision
 - Financial: payment intent, treasury action, wallet link/unlink
 - Security: rate limit triggered, CSRF failure, CSP violation report

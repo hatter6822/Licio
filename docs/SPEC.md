@@ -1482,7 +1482,7 @@ XSS is the dominant risk for a UGC platform that also connects wallets — a sin
 
 ## 25.3 Account security
 
-WebAuthn/passkeys as preferred, phishing-resistant authentication; email/phone verification fallback depending on jurisdiction and risk; multi-factor for stewards and moderators; session management and device list; suspicious-login alerts; rate limits for credential attacks; abuse-resistant account recovery.
+WebAuthn/passkeys as the preferred, phishing-resistant authentication. **Authentication is passwordless: Licio uses no passwords and has no password-reset flow.** The fallbacks -- for devices/browsers without a platform authenticator, and offered depending on jurisdiction and risk -- are a single-use one-time code sent to a verified email and, for adults who opt in, Sign-In with Ethereum (EIP-4361, verified per Section 25.6); SMS/phone codes are deliberately not used as a factor (SIM-swap and privacy concerns). The authentication-wallet credential is kept domain-separated from the financial wallet identity so logging in with a wallet does not link it to payments/governance (Section 19.5). Multi-factor (TOTP) for stewards and moderators; session management and device list; suspicious-login alerts; rate limits for credential attacks; abuse-resistant account recovery via remaining enrolled factors rather than any resettable shared secret.
 
 ## 25.4 Backend security
 

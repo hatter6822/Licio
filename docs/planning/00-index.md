@@ -21,7 +21,7 @@ This plan decomposes the Licio specification into 17 workstream documents housed
 | `02-doctrine-and-policy.md` | WS-A | M0 | P0 | 1 | 18 | No-applause doctrine, moderation taxonomy, jurisdiction, steward roles |
 | `03-design-system.md` | WS-B | M0-M1 | P0-1 | 2-3 | 35 | Design tokens, WCAG 2.2 AA primitives, app-specific components |
 | `04-pwa-client.md` | WS-C | M1 | P0-1 | 2-4 | 28 | Routing, state, service worker, offline, push, signal processing, CWV budgets |
-| `05-identity-and-privacy.md` | WS-D | M1 | P0-1 | 2-3 | 37 | WebAuthn, accounts, MFA, age gating, privacy controls, wallet identity |
+| `05-identity-and-privacy.md` | WS-D | M1 | P0-1 | 2-3 | 37 | WebAuthn-first passwordless auth (email-OTP + wallet/EIP-4361 fallback), MFA, age gating, privacy controls, wallet identity |
 | `06-event-pipeline-and-pwatt.md` | WS-E | M1-M2 | P1 | 4-5 | 30 | Event schemas, storage/retention, ingestion, PWAtt v0/v1 scoring |
 | `07-ingestion-and-search.md` | WS-F | M1 | P1 | 3-4 | 30 | Story/claim/source schemas, lifecycle, search, embeddings |
 | `08-forum-and-conversation.md` | WS-G | M1 | P1 | 4 | 38 | Threads, contributions, rooms, lenses, composer, UGC safety |
@@ -91,7 +91,7 @@ Note: WS-L.1 (due diligence, document-only) starts in Wave 1 alongside WS-A. See
 |---|---|---|
 | No-applause UI | WS-B | Zero likes/upvotes/hearts/reactions/karma/follower counts |
 | PWA shell | WS-C | Installable, offline-tolerant, service worker, update prompt |
-| Accounts | WS-D.1 | Registration, auth (WebAuthn + email), age gating |
+| Accounts | WS-D.1 | Registration, passwordless auth (WebAuthn + email-OTP + wallet), age gating |
 | Privacy | WS-D.2 | Export, deletion, attention controls, settings |
 | Story submission | WS-F | Link/original submission with dedup |
 | Threads | WS-G | Thread reading, structured contributions, composer |
@@ -198,7 +198,7 @@ Note: WS-L.1 (due diligence, document-only) starts in Wave 1 alongside WS-A. See
 - WS-B.1 (design tokens, primitive components, layout, focus management) -- `03-design-system.md`
 - WS-C.1 (TanStack Router, Query, Zustand) -- `04-pwa-client.md`
 - WS-D.1.1 (User schema) -- `05-identity-and-privacy.md`
-- WS-D.1.2-D.1.4 (WebAuthn + email auth) -- `05-identity-and-privacy.md`
+- WS-D.1.2-D.1.4 (WebAuthn + passwordless email-OTP/wallet auth) -- `05-identity-and-privacy.md`
 - WS-O.1 (security test framework) -- `16-security-and-reliability.md`
 
 ### Wave 3 (Week 4-8): Core social product

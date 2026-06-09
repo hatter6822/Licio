@@ -130,7 +130,7 @@ Implement a test that verifies progressive delays and account lockout for creden
 **Testing:**
 - Integration: Attempt 15 failed logins against a test account. Verify progressive delays after attempt 5. Verify lockout after attempt 10. Wait for lockout expiry, verify successful login. Repeat with a nonexistent account, verify identical responses.
 
-**Dependencies:** WS-D.1.3d (auth rate limiting/lockout), WS-D.1.4c (login flow), WS-O.4.1 (turnstile/PoW for repeated abuse).
+**Dependencies:** WS-D.1.3d (auth rate limiting/lockout), WS-D.1.4b (email-OTP login -- the brute-forceable fallback path), WS-O.4.1 (turnstile/PoW for repeated abuse).
 
 ---
 
@@ -145,7 +145,7 @@ Implement a test that verifies session ID regeneration after authentication. The
 - Session ID changes after successful authentication.
 - The pre-authentication session ID is invalidated after authentication.
 - Attempting to use the old session ID returns 401/403.
-- The test covers both WebAuthn and email/password authentication paths.
+- The test covers all authentication paths: WebAuthn, email-OTP, and wallet (EIP-4361).
 
 **Testing:**
 - Integration: Record session ID before login. Authenticate. Verify new session ID. Use old session ID to access a protected endpoint -- verify rejection.
@@ -165,7 +165,7 @@ Implement a test that verifies session cookie security attributes. The test insp
 - Session cookies have `HttpOnly`, `Secure`, and `SameSite=Strict` (or `Lax` with CSRF).
 - Cookie uses the `__Host-` prefix and is scoped appropriately.
 - Session tokens are not present in URLs, localStorage, or non-HttpOnly cookies.
-- All assertions pass on both WebAuthn and email/password auth flows.
+- All assertions pass on every auth flow: WebAuthn, email-OTP, and wallet (EIP-4361).
 
 **Testing:**
 - Integration: Authenticate and inspect response headers. Verify all cookie attributes. Attempt to read the session cookie from JavaScript (Playwright `page.evaluate`) -- verify failure (HttpOnly). Check localStorage and URL for session tokens -- verify absent.
@@ -1038,7 +1038,7 @@ Operationalize external security assurance. Components: (1) scope and schedule e
 | WS-O.1.1b | Trusted Types violation detection | WS-0.5.1/5.4, WS-G.4.2a |
 | WS-O.1.1c | CSP bypass testing | WS-0.5.1a/b, WS-G.4.2 |
 | WS-O.1.1d | Code audit (unsafe DOM) | WS-0.4.1b, WS-0.6.1e |
-| WS-O.1.2a | Credential brute-force test | WS-D.1.3d, WS-D.1.4c, WS-O.4.1 |
+| WS-O.1.2a | Credential brute-force test | WS-D.1.3d, WS-D.1.4b, WS-O.4.1 |
 | WS-O.1.2b | Session fixation test | WS-D.1.3b, WS-D.1.3e |
 | WS-O.1.2c | Session hijacking prevention | WS-D.1.3b, WS-0.5.1 |
 | WS-O.1.2d | Token replay test | WS-0.5.2b, WS-D.1.2a, WS-L.2.3a |
