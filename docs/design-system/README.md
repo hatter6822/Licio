@@ -66,7 +66,8 @@ dark / high-contrast / reduced-motion media queries.
 Tailwind utility names map to tokens via `tailwindColorMap` in `css.ts`
 (`canvas`, `surface`, `ink`, `ink-muted`, `line`, `line-strong`, `focus`,
 `primary`/`success`/`warning`/`error`/`info` with `-fg`/`-soft`/`-on-soft`
-variants, plus the rating-label shades `review`/`resolved`/`bridge`). The named
+variants). Rating labels reuse the status palette (solid vs `-soft` chips for
+≥3:1 distinctness) rather than dedicated shade tokens. The named
 z-index utilities (`z-dropdown`…`z-toast`) are the only source of stacking
 values; touch targets are exposed as `min-h-touch` / `min-w-touch` (48px).
 
