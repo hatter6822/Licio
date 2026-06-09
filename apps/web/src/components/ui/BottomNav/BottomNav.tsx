@@ -44,8 +44,11 @@ export function BottomNav({ items, activeId, className }: BottomNavProps): React
                 aria-current={isActive ? 'page' : undefined}
                 className={cn(
                   'flex min-h-touch flex-col items-center justify-center gap-0.5 rounded-md px-2 py-1 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus lg:flex-row lg:justify-start lg:gap-3 lg:py-2 lg:text-base',
-                  isActive ? 'text-primary-on-soft' : 'text-ink-muted hover:text-ink',
-                  item.prominent && 'text-primary',
+                  // `text-primary-on-soft` is ≥4.5:1 on the canvas in light AND dark
+                  // (the solid `text-primary` is only ~3.3:1 on the dark canvas).
+                  isActive || item.prominent
+                    ? 'text-primary-on-soft'
+                    : 'text-ink-muted hover:text-ink',
                 )}
               >
                 <Icon name={item.icon} className={cn('size-6', item.prominent && 'size-7')} />

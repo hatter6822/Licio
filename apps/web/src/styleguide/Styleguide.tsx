@@ -5,7 +5,7 @@
 // by Playwright (real-browser axe, target-size, zoom/reflow, scroll-preservation,
 // dark / high-contrast). It is code-split so it never weighs down the app bundle.
 import { type ReactNode, useId, useState } from 'react';
-import { RouteAnnouncer, SkipToContent } from '../components/a11y/index.js';
+import { RouteAnnouncer } from '../components/a11y/index.js';
 import { DefinedTerm } from '../components/cognitive/DefinedTerm/index.js';
 import { ExplainLikeNewLens } from '../components/cognitive/ExplainLikeNewLens/index.js';
 import { ProgressiveDisclosure } from '../components/cognitive/ProgressiveDisclosure/index.js';
@@ -239,7 +239,7 @@ export function Styleguide(): React.ReactElement {
   return (
     <I18nProvider>
       <RouteAnnouncer>
-        <SkipToContent />
+        {/* The skip link is provided by AppShell (inside Gallery). */}
         <ToastProvider>
           <Gallery />
         </ToastProvider>

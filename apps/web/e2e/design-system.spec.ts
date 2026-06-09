@@ -66,10 +66,14 @@ test.describe('design system — landmarks & skip link (WS-B.1.5/1.6)', () => {
 test.describe('design system — target size (WS-B.1.1e)', () => {
   test('buttons and form controls meet the 48×48 house standard', async ({ page }) => {
     await gotoStyleguide(page);
-    // Exclude the intentionally-small inline DefinedTerm (covered by tap-target
-    // hit-slop, which getBoundingClientRect does not measure).
+    // Measure controls whose own box IS the activation target. Excluded:
+    //  - inline DefinedTerm (its 48×48 area comes from the `tap-target` hit-slop
+    //    ::before, which getBoundingClientRect does not measure);
+    //  - checkbox/radio inputs — their visible box is 24px (WCAG 2.5.8 AA) and the
+    //    48px activation target is the associated <label> row (clicking it toggles).
     const controls = page.locator(
-      'button:visible:not([class*="tap-target"]), [role="switch"], input:not([type="hidden"]), select',
+      'button:visible:not([class*="tap-target"]), [role="switch"], textarea, ' +
+        'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), select',
     );
     const count = await controls.count();
     expect(count).toBeGreaterThan(0);
@@ -106,15 +110,20 @@ test.describe('design system — zoom & reflow (WS-B.1.1b)', () => {
 test.describe('design system — Sheet reading-position (WS-B.1.3b / Section 6.5)', () => {
   test('preserves scroll position across an open/close cycle', async ({ page }) => {
     await gotoStyleguide(page);
-    await page.evaluate(() => window.scrollTo(0, 600));
+    // Bring the trigger into view first, THEN record the position — otherwise
+    // Playwright's auto-scroll-to-click would move the page before we measure.
+    const openButton = page.getByRole('button', { name: 'Open sheet' });
+    await openButton.scrollIntoViewIfNeeded();
     const before = await page.evaluate(() => window.scrollY);
     expect(before).toBeGreaterThan(0);
 
-    await page.getByRole('button', { name: 'Open sheet' }).click();
+    await openButton.click();
     await expect(page.getByRole('dialog', { name: 'Bottom sheet' })).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog', { name: 'Bottom sheet' })).toHaveCount(0);
 
+    // The open/close cycle (scroll-lock + focus return) leaves the reading
+    // position exactly where it was (Section 6.5).
     const after = await page.evaluate(() => window.scrollY);
     expect(after).toBe(before);
   });

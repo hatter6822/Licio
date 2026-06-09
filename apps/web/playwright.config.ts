@@ -3,6 +3,10 @@ import { defineConfig, devices } from '@playwright/test';
 
 const isCI = !!process.env['CI'];
 
+// Escape hatch: run Chromium from a custom binary (e.g. a pre-provisioned
+// browser) when the managed download is unavailable. Unset in CI → default.
+const chromiumExecutable = process.env['PLAYWRIGHT_CHROMIUM_EXECUTABLE'];
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
@@ -19,7 +23,10 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use: {
+        ...devices['Desktop Chrome'],
+        ...(chromiumExecutable ? { launchOptions: { executablePath: chromiumExecutable } } : {}),
+      },
     },
     {
       name: 'firefox',

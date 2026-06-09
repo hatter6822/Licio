@@ -131,6 +131,12 @@ target size, narrow-viewport reflow and 200% zoom, and Sheet reading-position
 preservation. The component workbench (`src/styleguide/`) is code-split, so it
 never weighs down the app bundle.
 
+The suite has been executed in Chromium (14/14 passing). The dark-mode axe run
+caught a real bug — the prominent BottomNav "Submit" tab used `text-primary`
+(~3.3:1 on the dark canvas); it now uses `text-primary-on-soft` (≥4.5:1 in both
+modes), guarded by a unit test. To run e2e against a pre-provisioned browser
+when the managed download is unavailable, set `PLAYWRIGHT_CHROMIUM_EXECUTABLE`.
+
 ### Biome a11y rule deferral
 
 `useSemanticElements` is disabled for `apps/web/src/components/**`, and

@@ -33,6 +33,16 @@ describe('BottomNav (WS-B.1.5)', () => {
     expect(screen.getByRole('link', { name: /Rooms/ })).toHaveAttribute('aria-current', 'page');
     expect(screen.getByRole('link', { name: /Profile/ })).not.toHaveAttribute('aria-current');
   });
+
+  it('colours the prominent Submit tab with a canvas-accessible token (≥4.5:1 in dark mode)', () => {
+    render(<Nav />);
+    // `text-primary` is only ~3.3:1 on the dark canvas; the prominent tab must use
+    // `text-primary-on-soft` (verified ≥4.5:1 on the canvas in both modes).
+    const submit = screen.getByRole('link', { name: /Submit/ });
+    const classes = submit.className.split(/\s+/);
+    expect(classes).toContain('text-primary-on-soft');
+    expect(classes).not.toContain('text-primary');
+  });
 });
 
 describe('AppShell (WS-B.1.5)', () => {
