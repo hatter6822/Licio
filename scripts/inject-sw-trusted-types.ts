@@ -11,7 +11,7 @@
 // no DOM so its HTML/script sinks are inert. The `default` name is already
 // permitted by the `trusted-types default dompurify` CSP directive. Runs in the
 // web build chain right after `vite build`, before the SW security scan.
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const SW_PATH = resolve(import.meta.dirname, '..', 'apps', 'web', 'dist', 'sw.js');
@@ -26,11 +26,13 @@ export function withTrustedTypesPolicy(source: string): string {
 }
 
 function main(): void {
-  if (!existsSync(SW_PATH)) {
+  let source: string;
+  try {
+    source = readFileSync(SW_PATH, 'utf-8');
+  } catch {
     console.error(`Service worker not found at ${SW_PATH} — run the build first.`);
     process.exit(1);
   }
-  const source = readFileSync(SW_PATH, 'utf-8');
   const next = withTrustedTypesPolicy(source);
   if (next === source) {
     console.log('Service worker already carries the Trusted Types default policy.');

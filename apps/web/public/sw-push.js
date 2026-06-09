@@ -9,7 +9,9 @@
 /* global self, clients */
 
 // Update lifecycle: activate the waiting worker when the client confirms.
+// Origin check: reject messages from cross-origin sources (defence in depth).
 self.addEventListener('message', (event) => {
+  if (event.origin && event.origin !== self.location.origin) return;
   if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
   }
