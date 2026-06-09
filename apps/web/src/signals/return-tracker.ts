@@ -2,10 +2,13 @@
 //
 // Return-visit + thread-traversal tracker (WS-C.4.3, SPEC §5.3/§6.7). A return
 // visit is a revisit after a time-away threshold (sustained interest). A
-// RAGE-LOOP — too many returns inside a short window — is dampened to ZERO so a
-// hostile/compulsive loop never increases positive attention (SIG-ANTI-RAGELOOP,
-// §6.7). Thread traversal counts DISTINCT branches visited, so nonredundant
-// exploration is weighted above re-reading the same branch.
+// RAGE-LOOP — too many returns inside a short window — PERMANENTLY forfeits the
+// returns counted during the burst, so a hostile/compulsive loop never increases
+// positive attention even after the window ages out (SIG-ANTI-RAGELOOP, §6.7).
+// (A windowed-only suppression would let the burst's returns resurrect into the
+// count later — the exact gaming vector this rule closes.) Thread traversal counts
+// DISTINCT branches visited, so nonredundant exploration is weighted above
+// re-reading the same branch.
 //
 // Return state is persisted LOCALLY (never uploaded) through an injectable store
 // so that a genuine return after the app was closed — and a rage-loop spanning a
@@ -19,6 +22,8 @@ export interface ReturnSnapshot {
   returnCount: number;
   /** Genuine-return timestamps, pruned to the rage window. */
   returnTimes: number[];
+  /** Returns permanently forfeited because they occurred inside a rage loop. */
+  forfeited: number;
 }
 
 /** Local persistence port for return state (no-op by default; localStorage in prod). */
@@ -57,6 +62,8 @@ interface ItemReturns {
   returnCount: number;
   /** Timestamps of genuine returns, pruned to the rage window. */
   returnTimes: number[];
+  /** Cumulative returns forfeited by rage-loop detection (never decremented). */
+  forfeited: number;
 }
 
 export class ReturnTracker {
@@ -79,6 +86,7 @@ export class ReturnTracker {
         lastVisitAt: snap.lastVisitAt,
         returnCount: snap.returnCount,
         returnTimes: [...snap.returnTimes],
+        forfeited: snap.forfeited ?? 0,
       });
     }
   }
@@ -89,6 +97,7 @@ export class ReturnTracker {
       lastVisitAt: Number.NEGATIVE_INFINITY,
       returnCount: 0,
       returnTimes: [],
+      forfeited: 0,
     };
     if (
       state.lastVisitAt !== Number.NEGATIVE_INFINITY &&
@@ -98,24 +107,32 @@ export class ReturnTracker {
       state.returnTimes.push(now);
     }
     state.returnTimes = state.returnTimes.filter((t) => now - t < this.config.rageWindowMs);
+    // Rage loop within the window ⇒ PERMANENTLY forfeit every return counted so
+    // far for this item. Forfeited never decreases, so once a burst is detected
+    // those returns can never resurrect into the genuine count, even after the
+    // window ages out and `returnTimes` shrinks (§6.7 anti-gaming).
+    if (state.returnTimes.length >= this.config.rageCount) {
+      state.forfeited = state.returnCount;
+    }
     state.lastVisitAt = now;
     this.items.set(itemId, state);
     this.persist(now);
   }
 
-  /** True when returns within the window have reached the rage threshold. */
+  /** True when returns within the window currently exceed the rage threshold. */
   isRageLoop(itemId: string): boolean {
     return (this.items.get(itemId)?.returnTimes.length ?? 0) >= this.config.rageCount;
   }
 
   /**
-   * Genuine return count for the aggregate: the raw count, but ZERO when the
-   * item is in a rage loop (compulsive returns are not rewarded, §6.7).
+   * Genuine return count for the aggregate: the cumulative count minus the
+   * returns permanently forfeited to rage-loop dampening. Zero during a burst
+   * (all-so-far forfeited) and never credits a past burst's returns (§6.7).
    */
   returnCount(itemId: string): number {
     const state = this.items.get(itemId);
     if (!state) return 0;
-    return this.isRageLoop(itemId) ? 0 : state.returnCount;
+    return Math.max(0, state.returnCount - state.forfeited);
   }
 
   /** Clear all return state, including the local persistence. */
@@ -143,6 +160,7 @@ export class ReturnTracker {
       lastVisitAt: state.lastVisitAt,
       returnCount: state.returnCount,
       returnTimes: state.returnTimes,
+      forfeited: state.forfeited,
     }));
     this.store.save(snapshots);
   }

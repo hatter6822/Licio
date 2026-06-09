@@ -21,7 +21,10 @@ async function bestEffort(op: () => Promise<unknown>): Promise<void> {
   }
 }
 
-// --- Signal Ledger (private; non-lossy round-trip) ------------------------
+// --- Signal Ledger (private) ----------------------------------------------
+// The load-bearing fields — the buckets + flags — round-trip EXACTLY; only
+// `recorded_at` is normalized (ISO → epoch ms → ISO), i.e. coerced to UTC at
+// millisecond precision. Acceptable for a private, read-only ledger snapshot.
 
 function entryToLedgerRecord(entry: SignalLedgerEntry): SignalLedgerRecord {
   return {

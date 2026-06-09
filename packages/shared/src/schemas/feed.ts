@@ -5,7 +5,7 @@
 // It is no-applause BY CONSTRUCTION: there is deliberately no like/vote/score/
 // reaction/follower field — only descriptive conversation-state signals.
 import { z } from 'zod';
-import { cursorSchema, paginatedSchema, uuidSchema } from './common.js';
+import { cursorSchema, httpUrlSchema, paginatedSchema, uuidSchema } from './common.js';
 
 /** Feed ranking/personalization modes (SPEC §6.4; WS-B.2.9 switcher). */
 export const FEED_MODES = [
@@ -52,7 +52,7 @@ export const feedItemSchema = z.object({
   title: z.string().min(1),
   source: z.string().min(1),
   origin: storyOriginSchema,
-  url: z.string().url().optional(),
+  url: httpUrlSchema.optional(),
   reading_minutes: z.number().int().nonnegative(),
   rating_label: ratingLabelKindSchema,
   /** Human-readable distribution reason; never a raw numeric score. */

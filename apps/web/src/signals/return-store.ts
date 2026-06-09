@@ -14,6 +14,8 @@ const snapshotSchema = z.object({
   returnCount: z.number().int().nonnegative(),
   // Pruned to the rage window on write; the cap defends against corrupt input.
   returnTimes: z.array(z.number().finite()).max(64),
+  // Back-compatible: snapshots written before forfeit-tracking default to 0.
+  forfeited: z.number().int().nonnegative().default(0),
 }) satisfies z.ZodType<ReturnSnapshot>;
 
 // Generous ceiling; the tracker itself caps live entries to its `maxItems`.

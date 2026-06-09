@@ -18,6 +18,8 @@ const SNAPSHOT_KEY = 'licio:storage-snapshot';
 interface StorageSnapshot {
   pending: number;
   ledger: number;
+  /** Acked-removal count at snapshot time, to discount legitimate drains. */
+  removed: number;
   at: number;
 }
 
@@ -39,7 +41,12 @@ function readSnapshot(): StorageSnapshot | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<StorageSnapshot>;
     if (typeof parsed.pending !== 'number' || typeof parsed.ledger !== 'number') return null;
-    return { pending: parsed.pending, ledger: parsed.ledger, at: parsed.at ?? 0 };
+    return {
+      pending: parsed.pending,
+      ledger: parsed.ledger,
+      removed: typeof parsed.removed === 'number' ? parsed.removed : 0,
+      at: parsed.at ?? 0,
+    };
   } catch {
     return null;
   }
@@ -61,7 +68,7 @@ async function currentCounts(): Promise<{ pending: number; ledger: number }> {
 /** Snapshot current counts. Call when the app is backgrounded (visibility hidden). */
 export async function snapshotStorage(): Promise<void> {
   const counts = await currentCounts();
-  writeSnapshot({ ...counts, at: Date.now() });
+  writeSnapshot({ ...counts, removed: queue.acknowledgedRemovalCount(), at: Date.now() });
 }
 
 async function estimateBytes(): Promise<number | null> {
@@ -83,11 +90,15 @@ export async function probeStorageIntegrity(): Promise<ProbeResult> {
   if (!snapshot) {
     return { verdict: 'first-run', lostPending: false, lostLedger: false, estimateBytes: estimate };
   }
-  const lostPending = counts.pending < snapshot.pending;
+  // A pending-queue drop is eviction ONLY beyond what was legitimately acked-and-
+  // removed since the snapshot (a background-sync flush while hidden drains the
+  // queue but is not data loss). New enqueues raise the count and never trip this.
+  const removedDelta = Math.max(0, queue.acknowledgedRemovalCount() - snapshot.removed);
+  const lostPending = counts.pending < snapshot.pending - removedDelta;
   const lostLedger = counts.ledger < snapshot.ledger;
   const evicted = lostPending || lostLedger;
   // Re-baseline so a single eviction is not re-reported on the next resume.
-  writeSnapshot({ ...counts, at: Date.now() });
+  writeSnapshot({ ...counts, removed: queue.acknowledgedRemovalCount(), at: Date.now() });
   return {
     verdict: evicted ? 'evicted' : 'ok',
     lostPending,

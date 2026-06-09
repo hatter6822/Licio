@@ -30,7 +30,16 @@ export function initTrustedTypes(): void {
       throw new Error('Direct script creation is blocked by Trusted Types policy.');
     },
     createScriptURL: (url: string) => {
-      if (url.startsWith(window.location.origin) || url.startsWith('/')) {
+      // Resolve against this origin and compare ORIGINS — a prefix/startsWith check
+      // is bypassable (`https://app.example.evil.com`, `https://app.example@evil`,
+      // protocol-relative `//evil`). Same-origin only; everything else throws.
+      let resolved: URL;
+      try {
+        resolved = new URL(url, window.location.origin);
+      } catch {
+        throw new Error(`Blocked invalid script URL: ${url}`);
+      }
+      if (resolved.origin === window.location.origin) {
         return url;
       }
       throw new Error(`Blocked script URL from external origin: ${url}`);

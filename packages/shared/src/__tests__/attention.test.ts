@@ -59,6 +59,11 @@ describe('branchDepthBucket', () => {
     expect(branchDepthBucket(-3)).toBe('none');
     expect(branchDepthBucket(Number.NaN)).toBe('none');
   });
+
+  it('maps +Infinity to the TOP bucket (monotone), -Infinity to none', () => {
+    expect(branchDepthBucket(Number.POSITIVE_INFINITY)).toBe('deep');
+    expect(branchDepthBucket(Number.NEGATIVE_INFINITY)).toBe('none');
+  });
 });
 
 describe('returnVisitCountBucket', () => {
@@ -69,6 +74,12 @@ describe('returnVisitCountBucket', () => {
     expect(returnVisitCountBucket(5)).toBe('several');
     expect(returnVisitCountBucket(6)).toBe('many');
     expect(returnVisitCountBucket(1000)).toBe('many');
+  });
+
+  it('maps +Infinity to the TOP bucket (monotone), NaN/-Infinity to none', () => {
+    expect(returnVisitCountBucket(Number.POSITIVE_INFINITY)).toBe('many');
+    expect(returnVisitCountBucket(Number.NEGATIVE_INFINITY)).toBe('none');
+    expect(returnVisitCountBucket(Number.NaN)).toBe('none');
   });
 });
 
@@ -86,6 +97,13 @@ describe('sessionBucket', () => {
     expect(sessionBucket(Number.NaN)).toBe('1970-01-01T00:00:00.000Z');
     // A non-positive window falls back to the default rather than dividing by 0.
     expect(() => sessionBucket(Date.now(), 0)).not.toThrow();
+  });
+
+  it('stays total for extreme finite epochs (clamps to the valid Date range, no throw)', () => {
+    // Beyond ±8.64e15 ms, Date#toISOString throws — the clamp keeps it total.
+    expect(() => sessionBucket(1e16)).not.toThrow();
+    expect(() => sessionBucket(-1e16)).not.toThrow();
+    expect(typeof sessionBucket(1e16)).toBe('string');
   });
 });
 

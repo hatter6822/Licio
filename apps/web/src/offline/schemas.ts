@@ -41,20 +41,27 @@ export type DraftCipherRecord = z.infer<typeof draftCipherSchema>;
  * lives in `cipher` (AES-256-GCM at rest, §6.8) and `values` is empty; otherwise
  * the plaintext body is in `values` (the fallback where Web Crypto is absent).
  */
-export const draftContributionRecordSchema = z.object({
-  schemaVersion,
-  draftId: z.string().min(1),
-  storyId: z.string().uuid().nullable(),
-  threadId: z.string().uuid().nullable(),
-  branch: branchIdSchema.nullable(),
-  contributionType: contributionTypeSchema,
-  values: z.record(z.string(), z.string()),
-  updatedAt: z.number().int().nonnegative(),
-  /** True when the draft body is encrypted at rest in `cipher` (§6.8). */
-  encrypted: z.boolean(),
-  /** Present iff `encrypted`: the AES-GCM ciphertext of the draft values. */
-  cipher: draftCipherSchema.optional(),
-});
+export const draftContributionRecordSchema = z
+  .object({
+    schemaVersion,
+    draftId: z.string().min(1),
+    storyId: z.string().uuid().nullable(),
+    threadId: z.string().uuid().nullable(),
+    branch: branchIdSchema.nullable(),
+    contributionType: contributionTypeSchema,
+    values: z.record(z.string(), z.string()),
+    updatedAt: z.number().int().nonnegative(),
+    /** True when the draft body is encrypted at rest in `cipher` (§6.8). */
+    encrypted: z.boolean(),
+    /** Present iff `encrypted`: the AES-GCM ciphertext of the draft values. */
+    cipher: draftCipherSchema.optional(),
+  })
+  // Enforce the invariant: `cipher` present iff `encrypted`. A record claiming
+  // encryption but missing the ciphertext (or vice versa) is corrupt — quarantine
+  // it on read rather than silently loading an empty draft.
+  .refine((record) => record.encrypted === (record.cipher !== undefined), {
+    message: 'encrypted and cipher must agree (cipher present iff encrypted)',
+  });
 export type DraftContributionRecord = z.infer<typeof draftContributionRecordSchema>;
 
 /** A cached thread summary for offline reading (key: threadId). */

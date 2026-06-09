@@ -49,6 +49,22 @@ async function recordNotificationShown() {
   }
 }
 
+// Coerce a push-payload URL to a SAME-ORIGIN in-app path; anything cross-origin,
+// non-http(s), or malformed (e.g. a `javascript:` URL in a future encrypted
+// payload) collapses to '/'. The result drives notificationclick navigation.
+function safeNavigationUrl(value) {
+  if (typeof value !== 'string') return '/';
+  try {
+    const u = new URL(value, self.location.href);
+    if (u.origin === self.location.origin && (u.protocol === 'https:' || u.protocol === 'http:')) {
+      return u.pathname + u.search + u.hash;
+    }
+  } catch {
+    // fall through to the safe default
+  }
+  return '/';
+}
+
 self.addEventListener('push', (event) => {
   let payload = {};
   if (event.data) {
@@ -65,7 +81,7 @@ self.addEventListener('push', (event) => {
     tag: typeof payload.tag === 'string' ? payload.tag : 'licio-notification',
     icon: '/icon-192.png',
     badge: '/icon-192.png',
-    data: { url: typeof payload.url === 'string' ? payload.url : '/' },
+    data: { url: safeNavigationUrl(payload.url) },
   };
   event.waitUntil(
     Promise.all([self.registration.showNotification(title, options), recordNotificationShown()]),

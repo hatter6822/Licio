@@ -113,9 +113,20 @@ export function markFailed(operationId: string, reason: string): Promise<void> {
   return update(operationId, { status: 'failed', lastError: reason });
 }
 
+// Monotonic count of operations removed after a CONFIRMED ack. Eviction
+// detection reconciles a pending-count drop against this so a legitimate drain
+// (incl. a background-sync flush while hidden) is not misread as data loss.
+let acknowledgedRemovals = 0;
+
 /** Remove an operation — ONLY after a confirmed server acknowledgement. */
 export function remove(operationId: string): Promise<void> {
+  acknowledgedRemovals += 1;
   return rawDelete(STORE.pendingQueue, operationId);
+}
+
+/** Cumulative count of acked removals (for eviction reconciliation). */
+export function acknowledgedRemovalCount(): number {
+  return acknowledgedRemovals;
 }
 
 export function count(): Promise<number> {

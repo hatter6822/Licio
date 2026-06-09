@@ -18,7 +18,7 @@ const SW_PATH = resolve(import.meta.dirname, '..', 'apps', 'web', 'dist', 'sw.js
 
 /** The policy IIFE prepended to the worker (kept minimal; no eval/Function). */
 export const TRUSTED_TYPES_POLICY =
-  "(()=>{try{if(self.trustedTypes&&self.trustedTypes.createPolicy){self.trustedTypes.createPolicy('default',{createScriptURL:(u)=>{const p=new URL(u,self.location.href);if(p.origin!==self.location.origin)throw new TypeError('cross-origin script blocked');return u;},createHTML:(s)=>s,createScript:(s)=>s});}}catch(e){}})();\n";
+  "(()=>{try{if(self.trustedTypes&&self.trustedTypes.createPolicy){self.trustedTypes.createPolicy('default',{createScriptURL:(u)=>{const p=new URL(u,self.location.href);if(p.origin!==self.location.origin)throw new TypeError('cross-origin script blocked');return u;},createHTML:()=>{throw new TypeError('HTML is not allowed in the service worker');},createScript:()=>{throw new TypeError('script strings are not allowed in the service worker');}});}}catch(e){}})();\n";
 
 /** Prepend the policy to the worker source unless it is already present. Pure. */
 export function withTrustedTypesPolicy(source: string): string {

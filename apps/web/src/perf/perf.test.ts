@@ -100,4 +100,41 @@ describe('initWebVitals', () => {
 
     teardown();
   });
+
+  it('reports LCP from the last entry and CLS from the non-recent-input sum', () => {
+    type Listener = (list: { getEntries: () => unknown[] }) => void;
+    const handlers: Record<string, Listener> = {};
+    class MockPO {
+      constructor(private readonly cb: Listener) {}
+      observe(opts: { type: string }): void {
+        handlers[opts.type] = this.cb;
+      }
+      disconnect(): void {}
+    }
+    vi.stubGlobal('PerformanceObserver', MockPO);
+    const report = vi.fn();
+    const teardown = initWebVitals(report);
+
+    // LCP: the last entry wins.
+    handlers['largest-contentful-paint']?.({
+      getEntries: () => [{ startTime: 1000 }, { startTime: 2400 }],
+    });
+    expect(report).toHaveBeenCalledWith({ name: 'LCP', value: 2400, rating: 'good' });
+
+    // CLS: sum shifts, EXCLUDING those flagged hadRecentInput.
+    handlers['layout-shift']?.({
+      getEntries: () => [
+        { value: 0.05, hadRecentInput: false },
+        { value: 0.5, hadRecentInput: true }, // user-initiated → excluded
+        { value: 0.03, hadRecentInput: false },
+      ],
+    });
+    expect(report).toHaveBeenLastCalledWith({
+      name: 'CLS',
+      value: expect.closeTo(0.08, 5),
+      rating: 'good',
+    });
+
+    teardown();
+  });
 });

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { DB_NAME, resetDbConnection } from './db.js';
+import { DB_NAME, rawClear, resetDbConnection, STORE } from './db.js';
 import { probeStorageIntegrity, requestPersistentStorage, snapshotStorage } from './eviction.js';
 import * as queue from './queue.js';
 
@@ -39,19 +39,34 @@ describe('probeStorageIntegrity', () => {
     await queue.enqueue('report', { b: 2 }, 'op-2');
     await snapshotStorage(); // snapshot: pending = 2
 
-    // Simulate eviction: the queue is wiped while the app is backgrounded.
-    await queue.remove('op-1');
-    await queue.remove('op-2');
+    // REAL eviction: records vanish WITHOUT a confirmed ack (raw store wipe),
+    // unlike queue.remove() which is a legitimate acknowledged removal.
+    await rawClear(STORE.pendingQueue);
 
     const result = await probeStorageIntegrity();
     expect(result.verdict).toBe('evicted');
     expect(result.lostPending).toBe(true);
   });
 
+  it('does not flag a legitimate acked drain (e.g. background sync) as eviction', async () => {
+    await queue.enqueue('contribution', { a: 1 }, 'op-1');
+    await queue.enqueue('report', { b: 2 }, 'op-2');
+    await snapshotStorage(); // snapshot: pending = 2
+
+    // The queue drains via confirmed acks (could be a background-sync flush while
+    // hidden) — pending drops to 0 but every removal was acknowledged.
+    await queue.remove('op-1');
+    await queue.remove('op-2');
+
+    const result = await probeStorageIntegrity();
+    expect(result.verdict).toBe('ok');
+    expect(result.lostPending).toBe(false);
+  });
+
   it('re-baselines after an eviction so it is not re-reported', async () => {
     await queue.enqueue('contribution', { a: 1 }, 'op-1');
     await snapshotStorage();
-    await queue.remove('op-1');
+    await rawClear(STORE.pendingQueue);
 
     expect((await probeStorageIntegrity()).verdict).toBe('evicted');
     expect((await probeStorageIntegrity()).verdict).toBe('ok');

@@ -5,6 +5,7 @@ import { flushTelemetry, resetTelemetry, setTelemetrySink, track } from './telem
 
 afterEach(() => {
   resetTelemetry();
+  vi.unstubAllGlobals();
 });
 
 describe('telemetry', () => {
@@ -46,5 +47,29 @@ describe('telemetry', () => {
     const [event] = sink.mock.calls[0]?.[0] ?? [];
     expect(event.name).toBe('route_guard');
     expect(event.metric).toBe('redirected');
+  });
+
+  it('delivers a re-validated batch via sendBeacon (the real default sink)', () => {
+    const beacon = vi.fn().mockReturnValue(true);
+    vi.stubGlobal('navigator', { sendBeacon: beacon });
+    setTelemetrySink(null); // restore the real beacon sink
+    track({ name: 'navigation', bucket: '/stories/$storyId', value: 12 });
+    flushTelemetry();
+    expect(beacon).toHaveBeenCalledTimes(1);
+    expect(String(beacon.mock.calls[0]?.[0])).toContain('/v1/telemetry');
+    expect(beacon.mock.calls[0]?.[1]).toBeInstanceOf(Blob);
+  });
+
+  it('falls back to a keepalive fetch when sendBeacon is unavailable', () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
+    vi.stubGlobal('navigator', {}); // no sendBeacon
+    vi.stubGlobal('fetch', fetchMock);
+    setTelemetrySink(null);
+    track({ name: 'web_vital', metric: 'LCP', value: 100, rating: 'good' });
+    flushTelemetry();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.keepalive).toBe(true);
+    expect(init.method).toBe('POST');
   });
 });

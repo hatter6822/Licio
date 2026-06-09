@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import {
   attentionAggregateSchema,
+  branchContentSchema,
   contributionSchema,
   DEFAULT_USER_SETTINGS,
   feedResponseSchema,
   notificationPreferencesSchema,
+  roomDetailSchema,
+  roomListResponseSchema,
+  signalLedgerResponseSchema,
+  storyDetailSchema,
+  threadDetailSchema,
   userSettingsSchema,
 } from '@licio/shared';
 import { Hono } from 'hono';
@@ -54,8 +60,23 @@ describe('v1 read models', () => {
   it('returns a known demo story', async () => {
     const res = await app().request('/v1/stories/5f5e1000-0000-4000-8000-000000000001');
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { story_id: string; thread_id: string | null };
+    const body = storyDetailSchema.parse(await res.json());
     expect(body.story_id).toBe('5f5e1000-0000-4000-8000-000000000001');
+  });
+
+  it('serves schema-valid thread / branch / room / signal-ledger bodies', async () => {
+    const a = app();
+    const thread = '5f5e2000-0000-4000-8000-000000000001';
+    const room = '5f5e3000-0000-4000-8000-000000000001';
+    // Each body must satisfy its shared schema (fixture-drift guard, matching the
+    // server-side re-validation now done in the routes).
+    threadDetailSchema.parse(await (await a.request(`/v1/threads/${thread}`)).json());
+    branchContentSchema.parse(
+      await (await a.request(`/v1/threads/${thread}/branches/overview`)).json(),
+    );
+    roomListResponseSchema.parse(await (await a.request('/v1/rooms')).json());
+    roomDetailSchema.parse(await (await a.request(`/v1/rooms/${room}`)).json());
+    signalLedgerResponseSchema.parse(await (await a.request('/v1/signal-ledger')).json());
   });
 
   it('returns 404 for a valid-but-unknown story id', async () => {

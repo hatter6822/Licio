@@ -2,14 +2,19 @@
 //
 // Local draft encryption (WS-C.2.2c, SPEC §6.8 "local encryption of drafts").
 // Composer drafts are encrypted AT REST with AES-256-GCM so plaintext never sits
-// in the draft store (defence against casual inspection, a shared device, or an
-// other-origin storage bug — the same posture as the §6.8 cross-device-sync case,
-// applied unconditionally). The key material lives in a SEPARATE key store
-// (`licio-keys`), persisted as a JWK so it survives reloads; the runtime handle is
-// re-imported NON-EXTRACTABLE so the live key cannot be re-exported. Everything is
-// best-effort: where Web Crypto is unavailable the caller falls back to plaintext
-// so a draft is never lost (availability > confidentiality, §6.9 "never silently
-// lose a queued contribution").
+// in the draft store, in a SEPARATE key store (`licio-keys`) from the ciphertext.
+//
+// Threat model (honest): this defends against CASUAL inspection, a shared device,
+// a partial/blob-level disk leak, and an other-origin storage bug. It is NOT an
+// XSS control — the key is persisted as a JWK so it survives reloads, which means
+// same-origin script (XSS) with IndexedDB access can read the JWK and decrypt; the
+// re-imported NON-EXTRACTABLE runtime handle only stops accidental re-export of the
+// live key, it is not a confidentiality boundary against script execution. (The raw
+// key never reaches the network and the decrypted payload is shape-validated.)
+//
+// Everything is best-effort: where Web Crypto is unavailable the caller falls back
+// to plaintext so a draft is never lost (availability > confidentiality, §6.9
+// "never silently lose a queued contribution").
 import { z } from 'zod';
 
 const KEY_DB = 'licio-keys';
@@ -106,7 +111,16 @@ async function loadOrCreateKey(): Promise<CryptoKey | null> {
 let keyPromise: Promise<CryptoKey | null> | null = null;
 
 function getKey(): Promise<CryptoKey | null> {
-  if (!keyPromise) keyPromise = loadOrCreateKey();
+  if (!keyPromise) {
+    // Cache only a SUCCESSFUL key handle. A transient failure (key-store open
+    // race, quota, aborted tx) must not permanently memoize `null` — that would
+    // silently downgrade every draft this session to plaintext. Clear the cache
+    // on null so the next saveDraft retries acquisition.
+    keyPromise = loadOrCreateKey().then((key) => {
+      if (!key) keyPromise = null;
+      return key;
+    });
+  }
   return keyPromise;
 }
 

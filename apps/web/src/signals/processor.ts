@@ -243,29 +243,39 @@ export class SignalProcessor {
     const teardownCadence = this.cadence.start();
 
     let tickInterval: ReturnType<typeof setInterval> | null = null;
-    const startTick = (): void => {
-      if (tickInterval !== null) return;
-      tickInterval = setInterval(() => this.tick(), this.tickMs);
-      unref(tickInterval);
+    let flushInterval: ReturnType<typeof setInterval> | null = null;
+    // Both the 1 Hz dwell tick and the batched-upload interval (WS-C.4.4) run only
+    // while visible; both pause when hidden so there is no continuous background
+    // work (WS-C.5.1 battery budget). The page-hide path durably flushes first.
+    const startTimers = (): void => {
+      if (tickInterval === null) {
+        tickInterval = setInterval(() => this.tick(), this.tickMs);
+        unref(tickInterval);
+      }
+      if (flushInterval === null) {
+        flushInterval = setInterval(() => void this.flush(), this.flushIntervalMs);
+        unref(flushInterval);
+      }
     };
-    const stopTick = (): void => {
-      if (tickInterval === null) return;
-      clearInterval(tickInterval);
-      tickInterval = null;
+    const stopTimers = (): void => {
+      if (tickInterval !== null) {
+        clearInterval(tickInterval);
+        tickInterval = null;
+      }
+      if (flushInterval !== null) {
+        clearInterval(flushInterval);
+        flushInterval = null;
+      }
     };
-    startTick();
-
-    // Batched upload (WS-C.4.4): drain the buffer on a cadence, not per-event.
-    const flushInterval = setInterval(() => void this.flush(), this.flushIntervalMs);
-    unref(flushInterval);
+    startTimers();
 
     const onVisibility = (): void => {
       if (typeof document === 'undefined') return;
       if (document.visibilityState === 'hidden') {
         void this.flushDurable();
-        stopTick();
+        stopTimers();
       } else {
-        startTick();
+        startTimers();
       }
     };
     if (typeof document !== 'undefined') {
@@ -275,8 +285,7 @@ export class SignalProcessor {
     return () => {
       teardownEngagement();
       teardownCadence();
-      stopTick();
-      clearInterval(flushInterval);
+      stopTimers();
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', onVisibility);
       }

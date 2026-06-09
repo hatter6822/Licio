@@ -107,12 +107,22 @@ export function sessionBucket(
   const safeWindow = windowMs > 0 ? windowMs : SESSION_BUCKET_WINDOW_MS;
   const instant = Number.isFinite(epochMs) ? epochMs : 0;
   const floored = Math.floor(instant / safeWindow) * safeWindow;
-  return new Date(floored).toISOString();
+  // Clamp to the valid ECMAScript Date range (±8.64e15 ms); beyond it
+  // `toISOString` throws, which would break the function's totality guarantee.
+  const MAX_TIME_MS = 8.64e15;
+  const clamped = Math.min(MAX_TIME_MS, Math.max(-MAX_TIME_MS, floored));
+  return new Date(clamped).toISOString();
 }
 
-/** Coerce arbitrary numeric input to a safe non-negative integer count. */
+/**
+ * Coerce arbitrary numeric input to a safe non-negative integer count. NaN,
+ * negatives, and -Infinity collapse to 0; +Infinity maps to the maximum count so
+ * it lands in the TOP bucket (monotone with `activeDwellBucket`, not an earlier
+ * bucket).
+ */
 function toCount(value: number): number {
-  if (!Number.isFinite(value) || value <= 0) return 0;
+  if (Number.isNaN(value) || value <= 0) return 0;
+  if (!Number.isFinite(value)) return Number.MAX_SAFE_INTEGER;
   return Math.floor(value);
 }
 

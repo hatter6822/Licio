@@ -15,11 +15,12 @@ const SW_FILES = ['sw.js', 'sw-push.js'];
 /**
  * Strip comments so doctrine may be DISCUSSED in prose (e.g. "no eval") while a
  * real call still trips the scan. Removes block + line comments; the line-comment
- * rule ignores `://` so URLs inside string literals survive for the importScripts
- * check.
+ * rule ignores `//` preceded by `:` or a quote, so both `https://…` and a
+ * protocol-relative `"//…"` URL inside a string literal survive for the
+ * importScripts check (a `// comment` still strips).
  */
 function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:'"])\/\/.*$/gm, '$1');
 }
 
 /** Find SW security violations in one file's source. Pure (testable). */
@@ -27,7 +28,9 @@ export function findSwSecurityIssues(filename: string, content: string): string[
   const code = stripComments(content);
   const issues: string[] = [];
   for (const call of code.match(/importScripts\s*\([^)]*\)/g) ?? []) {
-    if (/https?:\/\//i.test(call)) {
+    // Flag absolute (`https://…`) AND protocol-relative (`"//evil/x.js"`) remote
+    // loads — both fetch cross-origin code; only same-origin/relative is allowed.
+    if (/https?:\/\//i.test(call) || /['"]\s*\/\//.test(call)) {
       issues.push(`${filename}: external importScripts (remote code): ${call}`);
     }
   }

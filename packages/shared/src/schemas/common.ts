@@ -15,6 +15,17 @@ export const isoTimestampSchema = z.string().datetime();
 export type IsoTimestamp = z.infer<typeof isoTimestampSchema>;
 
 /**
+ * An http(s) URL. `z.string().url()` alone accepts script-bearing schemes
+ * (`javascript`, `data`, `vbscript`), which must never enter the cache and reach a
+ * renderer/href (XSS). This narrows the trust boundary to web URLs only — defence
+ * in depth with the reader's own sandbox + the strict CSP.
+ */
+export const httpUrlSchema = z
+  .string()
+  .url()
+  .refine((value) => /^https?:\/\//i.test(value), { message: 'URL must be http(s)' });
+
+/**
  * Cursor for keyset pagination. Opaque to the client — it is echoed back to the
  * server verbatim, never parsed or constructed locally.
  */

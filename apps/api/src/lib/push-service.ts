@@ -37,8 +37,14 @@ export function registerSubscription(subscription: PushSubscriptionJson, session
   subscriptions.set(subscription.endpoint, { subscription, sessionId, createdAt: Date.now() });
 }
 
-/** Remove a subscription by endpoint. Returns whether one existed. */
-export function removeSubscription(endpoint: string): boolean {
+/**
+ * Remove a subscription by endpoint, but ONLY if it belongs to the requesting
+ * session (authorization — a session must not unsubscribe another user's
+ * endpoint). Returns whether a matching subscription was removed.
+ */
+export function removeSubscription(endpoint: string, sessionId: string): boolean {
+  const stored = subscriptions.get(endpoint);
+  if (!stored || stored.sessionId !== sessionId) return false;
   return subscriptions.delete(endpoint);
 }
 

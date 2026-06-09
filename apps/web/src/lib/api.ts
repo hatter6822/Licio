@@ -71,11 +71,16 @@ export class ApiClientError extends Error {
 }
 
 // --- Anti-CSRF token (single-use; §6.12.11) -------------------------------
+// The server issues ONE single-use nonce per session (a later GET overwrites the
+// prior). So mutations must be SERIALIZED — each fetches its own fresh token and
+// uses it immediately, one at a time — otherwise two concurrent mutations would
+// share/clobber a nonce and the loser would 403. (Caching across mutations would
+// reintroduce exactly that race.)
 const csrfTokenResponseSchema = z.object({ token: z.string().min(1) });
-let cachedCsrfToken: string | null = null;
+let mutationQueue: Promise<unknown> = Promise.resolve();
 
-async function ensureCsrfToken(): Promise<string | null> {
-  if (cachedCsrfToken) return cachedCsrfToken;
+/** Fetch a fresh single-use CSRF token, or null on any failure (fails closed). */
+async function fetchCsrfToken(): Promise<string | null> {
   try {
     const response = await fetch(`${API_BASE}/api/csrf-token`, {
       method: 'GET',
@@ -83,41 +88,57 @@ async function ensureCsrfToken(): Promise<string | null> {
     });
     if (!response.ok) return null;
     const parsed = csrfTokenResponseSchema.safeParse(await response.json());
-    cachedCsrfToken = parsed.success ? parsed.data.token : null;
-    return cachedCsrfToken;
+    return parsed.success ? parsed.data.token : null;
   } catch {
     return null;
   }
 }
 
-/** Reset cached client state (CSRF token). Test/maintenance helper. */
+/** Reset client request state (the mutation serialization chain). Test helper. */
 export function resetApiClientState(): void {
-  cachedCsrfToken = null;
+  mutationQueue = Promise.resolve();
 }
 
-/**
- * The single fetch interceptor: attaches credentials + CSRF, gates dev logging
- * to development, transitions auth to session-expired on a 401 from the API, and
- * invalidates the single-use CSRF token after each mutation.
- */
-async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  const method = (init?.method ?? 'GET').toUpperCase();
+/** Send one request, attaching credentials (+ a CSRF token for mutations). */
+async function sendRequest(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  method: string,
+  token: string | null,
+): Promise<Response> {
   const headers = new Headers(init?.headers);
-
-  if (STATE_CHANGING.has(method)) {
-    const token = await ensureCsrfToken();
-    if (token) headers.set('x-csrf-token', token);
-  }
+  if (token) headers.set('x-csrf-token', token);
 
   if (IS_DEV) console.debug(`[api] → ${method} ${String(input)}`);
   const response = await fetch(input, { ...init, headers, credentials: 'include' });
   if (IS_DEV) console.debug(`[api] ← ${response.status} ${method} ${String(input)}`);
 
-  if (STATE_CHANGING.has(method)) cachedCsrfToken = null;
   if (response.status === 401 && String(input).includes('/v1/')) {
     useAuthStore.getState().expireSession();
   }
   return response;
+}
+
+/**
+ * The single fetch interceptor. GETs go straight through (parallel-safe).
+ * State-changing requests are serialized through a promise chain, each acquiring
+ * its own fresh single-use CSRF token immediately before sending.
+ */
+async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const method = (init?.method ?? 'GET').toUpperCase();
+  if (!STATE_CHANGING.has(method)) {
+    return sendRequest(input, init, method, null);
+  }
+  const run = mutationQueue.then(async () => {
+    const token = await fetchCsrfToken();
+    return sendRequest(input, init, method, token);
+  });
+  // Keep the chain alive regardless of this request's outcome.
+  mutationQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
 }
 
 /** The typed RPC client. All app calls go through {@link apiFetch}. */

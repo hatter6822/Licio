@@ -123,6 +123,55 @@ describe('request interceptor', () => {
     expect(headers.get('x-csrf-token')).toBe('tok-123');
   });
 
+  it('fetches a fresh token for each sequential mutation (no stale cache reuse)', async () => {
+    let seq = 0;
+    const tokenGets: number[] = [];
+    mockFetch(async (url) => {
+      if (url.includes('/api/csrf-token')) {
+        seq += 1;
+        tokenGets.push(seq);
+        return jsonResponse({ token: `t-${seq}` });
+      }
+      return jsonResponse(VALID_CONTRIBUTION, 201);
+    });
+    const body = {
+      thread_id: '33333333-3333-4333-8333-333333333333',
+      branch: 'evidence' as const,
+      type: 'evidence' as const,
+      body: 'x',
+      citations: [],
+      local_draft_id: 'd',
+    };
+    await createContribution(body);
+    await createContribution(body);
+    expect(tokenGets).toHaveLength(2); // one fresh token per mutation
+  });
+
+  it('serializes concurrent mutations so each carries a DISTINCT single-use token', async () => {
+    let seq = 0;
+    const postTokens: (string | null)[] = [];
+    mockFetch(async (url, init) => {
+      if (url.includes('/api/csrf-token')) {
+        seq += 1;
+        return jsonResponse({ token: `tok-${seq}` });
+      }
+      postTokens.push(new Headers(init?.headers).get('x-csrf-token'));
+      return jsonResponse(VALID_CONTRIBUTION, 201);
+    });
+    const body = {
+      thread_id: '33333333-3333-4333-8333-333333333333',
+      branch: 'evidence' as const,
+      type: 'evidence' as const,
+      body: 'x',
+      citations: [],
+      local_draft_id: 'd',
+    };
+    await Promise.all([createContribution(body), createContribution(body)]);
+    expect(postTokens).toHaveLength(2);
+    // No shared/clobbered nonce across concurrent mutations (the race this fixes).
+    expect(new Set(postTokens).size).toBe(2);
+  });
+
   it('does not fetch a CSRF token for GET requests', async () => {
     const urls: string[] = [];
     mockFetch(async (url) => {

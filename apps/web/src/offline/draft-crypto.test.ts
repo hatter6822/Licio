@@ -40,4 +40,22 @@ describe('draft-crypto', () => {
     resetDraftKeyCache(); // drop the in-memory handle; key reloads from the key store
     expect(await decryptDraftValues(cipher)).toEqual({ x: '1' });
   });
+
+  it('rejects a flipped ciphertext byte (GCM auth tag)', async () => {
+    const cipher = await encryptDraftValues({ a: 'b' });
+    if (!cipher) throw new Error('expected a cipher');
+    // Flip the first base64 char of the ciphertext (changes a byte; tag fails).
+    const data = cipher.data;
+    const flipped = (data[0] === 'A' ? 'B' : 'A') + data.slice(1);
+    expect(await decryptDraftValues({ iv: cipher.iv, data: flipped })).toBeNull();
+  });
+
+  it('rejects decryption under a different key (wrong-key)', async () => {
+    const cipher = await encryptDraftValues({ secret: 'x' });
+    if (!cipher) throw new Error('expected a cipher');
+    // Replace the key store so a NEW, unrelated key is generated.
+    resetDraftKeyCache();
+    await deleteDatabase('licio-keys');
+    expect(await decryptDraftValues(cipher)).toBeNull();
+  });
 });

@@ -20,6 +20,7 @@ import {
   attentionAggregateBatchSchema,
   attentionIngestAckSchema,
   authStatusResponseSchema,
+  branchContentSchema,
   branchIdSchema,
   contributionSchema,
   createContributionRequestSchema,
@@ -28,19 +29,26 @@ import {
   FAIL_CLOSED_FLAGS,
   type FeedResponse,
   feedQuerySchema,
+  feedResponseSchema,
   notificationPreferencesSchema,
   okAckSchema,
   pushRegisterRequestSchema,
   type RoomListResponse,
+  roomDetailSchema,
+  roomListResponseSchema,
   type SignalLedgerResponse,
+  signalLedgerResponseSchema,
+  storyDetailSchema,
   type TelemetryIngestAck,
   telemetryBatchSchema,
   telemetryIngestAckSchema,
+  threadDetailSchema,
   userSettingsSchema,
   uuidSchema,
   vapidPublicKeyResponseSchema,
 } from '@licio/shared';
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import type { AppEnv } from '../app.js';
 import {
@@ -59,6 +67,7 @@ import {
   removeSubscription,
   setPreferences,
 } from '../lib/push-service.js';
+import { rateLimit } from '../lib/rate-limit.js';
 
 /** Read the session id from the `__Host-session` cookie (or undefined). */
 function sessionIdOf(cookieHeader: string | undefined): string | undefined {
@@ -84,37 +93,40 @@ export function createV1Routes() {
   return (
     new Hono<AppEnv>()
       // --- Read models (in-memory demo fixture; durable data owned by WS-G/H/J) ---
+      // Responses are re-validated against the shared schema before they leave the
+      // BFF (the stated boundary guarantee, WS-C.1.2) — so fixture drift fails loudly
+      // here, not silently at the client.
       .get('/feed', zValidator('query', feedQuerySchema), (c) => {
         const response: FeedResponse = { items: DEMO_FEED, nextCursor: null };
-        return c.json(response);
+        return c.json(feedResponseSchema.parse(response));
       })
       .get('/stories/:storyId', zValidator('param', z.object({ storyId: uuidSchema })), (c) => {
         const story = demoStory(c.req.valid('param').storyId);
-        return story ? c.json(story) : c.json(notFound, 404);
+        return story ? c.json(storyDetailSchema.parse(story)) : c.json(notFound, 404);
       })
       .get('/threads/:threadId', zValidator('param', z.object({ threadId: uuidSchema })), (c) => {
         const thread = demoThread(c.req.valid('param').threadId);
-        return thread ? c.json(thread) : c.json(notFound, 404);
+        return thread ? c.json(threadDetailSchema.parse(thread)) : c.json(notFound, 404);
       })
       .get(
         '/threads/:threadId/branches/:branch',
         zValidator('param', z.object({ threadId: uuidSchema, branch: branchIdSchema })),
         (c) => {
           const { threadId, branch } = c.req.valid('param');
-          return c.json(demoBranch(threadId, branch));
+          return c.json(branchContentSchema.parse(demoBranch(threadId, branch)));
         },
       )
       .get('/rooms', zValidator('query', z.object({ cursor: z.string().optional() })), (c) => {
         const response: RoomListResponse = { items: DEMO_ROOMS, nextCursor: null };
-        return c.json(response);
+        return c.json(roomListResponseSchema.parse(response));
       })
       .get('/rooms/:roomId', zValidator('param', z.object({ roomId: uuidSchema })), (c) => {
         const room = demoRoom(c.req.valid('param').roomId);
-        return room ? c.json(room) : c.json(notFound, 404);
+        return room ? c.json(roomDetailSchema.parse(room)) : c.json(notFound, 404);
       })
       .get('/signal-ledger', (c) => {
         const response: SignalLedgerResponse = { items: DEMO_LEDGER, nextCursor: null };
-        return c.json(response);
+        return c.json(signalLedgerResponseSchema.parse(response));
       })
 
       // --- Auth status (session validation wired by WS-D) -------------------
@@ -178,15 +190,27 @@ export function createV1Routes() {
       })
 
       // --- Telemetry / RUM ingest (WS-C observability; CSRF-exempt beacon) ---
-      .post('/telemetry', zValidator('json', telemetryBatchSchema), (c) => {
-        const { events } = c.req.valid('json');
-        // Privacy-safe by schema (no URLs/PII, ≤100 events). The analytics pipeline
-        // (WS-P) consumes these; here we validate and acknowledge the accepted count.
-        const ack: TelemetryIngestAck = telemetryIngestAckSchema.parse({
-          accepted: events.length,
-        });
-        return c.json(ack, { status: 202 });
-      })
+      // CSRF-exempt + unauthenticated (sendBeacon), so it carries its own DoS
+      // bounds like the CSP-report endpoint: a per-IP rate limit and a small body
+      // cap, in addition to the ≤100-event schema bound.
+      .post(
+        '/telemetry',
+        rateLimit({ limit: 120, windowMs: 60_000 }),
+        bodyLimit({
+          maxSize: 64 * 1024,
+          onError: (c) => c.json({ error: 'Payload too large' }, 413),
+        }),
+        zValidator('json', telemetryBatchSchema),
+        (c) => {
+          const { events } = c.req.valid('json');
+          // Privacy-safe by schema (no URLs/PII, ≤100 events). The analytics
+          // pipeline (WS-P) consumes these; here we validate and ack the count.
+          const ack: TelemetryIngestAck = telemetryIngestAckSchema.parse({
+            accepted: events.length,
+          });
+          return c.json(ack, { status: 202 });
+        },
+      )
 
       // --- Push (WS-C.2.4a) -------------------------------------------------
       .get('/push/vapid-public-key', (c) => {
@@ -208,7 +232,9 @@ export function createV1Routes() {
         '/push/subscriptions',
         zValidator('json', z.object({ endpoint: z.string().url() })),
         (c) => {
-          removeSubscription(c.req.valid('json').endpoint);
+          // Scoped to the requesting session — a session cannot unsubscribe
+          // another user's endpoint (authorization, not just existence).
+          removeSubscription(c.req.valid('json').endpoint, stateKey(c.req.header('cookie')));
           return c.json(okAckSchema.parse({ ok: true }));
         },
       )

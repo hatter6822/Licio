@@ -101,6 +101,22 @@ describe('ReturnTracker', () => {
     expect(tracker.returnCount('item-1')).toBe(1);
   });
 
+  it('PERMANENTLY forfeits rage-loop returns — they never resurrect after the window ages out', () => {
+    const tracker = new ReturnTracker({ rageWindowMs: 90 * 60_000, rageCount: 3 });
+    tracker.visit('item-1', 0);
+    tracker.visit('item-1', MIN); // return 1
+    tracker.visit('item-1', 2 * MIN); // return 2
+    tracker.visit('item-1', 3 * MIN); // return 3 → rage; all forfeited
+    expect(tracker.returnCount('item-1')).toBe(0);
+
+    // A genuine return long after the burst (window aged out, no longer a rage loop).
+    tracker.visit('item-1', 3 * MIN + 10 * 60 * 60_000); // +10h
+    expect(tracker.isRageLoop('item-1')).toBe(false);
+    // Only the single post-burst genuine return counts; the 3 hostile returns stay
+    // forfeited forever (regression guard for the resurrection bug).
+    expect(tracker.returnCount('item-1')).toBe(1);
+  });
+
   it('detects a genuine return across sessions via persistence', () => {
     const backing = fakeStore();
     new ReturnTracker({}, backing.store).visit('item-1', 0); // session 1, persisted
