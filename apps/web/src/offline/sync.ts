@@ -27,6 +27,32 @@ import type { PendingOperationRecord } from './schemas.js';
 /** Max send attempts before an operation is parked as `failed` (WS-C.2.3). */
 export const MAX_QUEUE_ATTEMPTS = 5;
 
+/** Background Sync tag the service worker listens for (one queue, one tag). */
+export const SYNC_TAG = 'licio-pending-queue';
+/** Message the SW posts to clients to trigger a validated foreground flush. */
+export const SYNC_FLUSH_MESSAGE = 'licio-sync-flush';
+
+interface SyncRegistration extends ServiceWorkerRegistration {
+  sync?: { register(tag: string): Promise<void> };
+}
+
+/**
+ * Register a Background Sync so the browser fires a `sync` event when
+ * connectivity returns; the SW then wakes a client to run the (validated) flush.
+ * Feature-detected and best-effort — unavailable on iOS Safari, where the
+ * online/app-open foreground path (initForegroundSync) is the fallback.
+ */
+export async function requestBackgroundSync(): Promise<void> {
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+  if (typeof window === 'undefined' || !('SyncManager' in window)) return;
+  try {
+    const registration = (await navigator.serviceWorker.ready) as SyncRegistration;
+    await registration.sync?.register(SYNC_TAG);
+  } catch {
+    // Permission denied or Background Sync unsupported — non-fatal.
+  }
+}
+
 export interface SyncResult {
   sent: number;
   retried: number;
@@ -115,11 +141,15 @@ export async function processPendingQueue(options: SyncOptions = {}): Promise<Sy
   }
   // Observability: report the remaining queue depth + the terminal-failure count
   // (no payloads) so a backend outage or a class of rejected writes is visible.
+  const remaining = await queue.count();
   track({
     name: 'queue_status',
-    count: await queue.count(),
+    count: remaining,
     ...(result.failed > 0 ? { metric: 'failed', value: result.failed } : {}),
   });
+  // Work remains (offline/transient): ask the browser to retry via Background
+  // Sync when connectivity returns, even if the app is backgrounded.
+  if (remaining > 0) void requestBackgroundSync();
   return result;
 }
 
@@ -135,10 +165,19 @@ export function initForegroundSync(options: SyncOptions = {}): () => void {
   const onVisible = (): void => {
     if (document.visibilityState === 'visible') flush();
   };
+  // The SW posts this from its `sync` handler so the validated replay runs in the
+  // client — no duplicated trust-boundary (zod) logic in the worker.
+  const onMessage = (event: MessageEvent): void => {
+    if ((event.data as { type?: string } | undefined)?.type === SYNC_FLUSH_MESSAGE) flush();
+  };
   window.addEventListener('online', flush);
   document.addEventListener('visibilitychange', onVisible);
+  navigator.serviceWorker?.addEventListener('message', onMessage);
+  // Request a sync on startup in case a queue survived the last session.
+  void requestBackgroundSync();
   return () => {
     window.removeEventListener('online', flush);
     document.removeEventListener('visibilitychange', onVisible);
+    navigator.serviceWorker?.removeEventListener('message', onMessage);
   };
 }

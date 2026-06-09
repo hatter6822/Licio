@@ -78,6 +78,22 @@ self.addEventListener('pushsubscriptionchange', (event) => {
   event.waitUntil(resubscribeAndRegister());
 });
 
+// Background Sync (WS-C.2.3): when the browser fires a sync for the pending
+// queue, wake any open client to run the VALIDATED replay (the queue's zod
+// trust-boundary logic lives in the client, not duplicated in the worker).
+async function notifyClientsToFlush() {
+  const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  for (const client of windows) {
+    client.postMessage({ type: 'licio-sync-flush' });
+  }
+}
+
+self.addEventListener('sync', (event) => {
+  if (event.tag === 'licio-pending-queue') {
+    event.waitUntil(notifyClientsToFlush());
+  }
+});
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const target = event.notification.data?.url || '/';

@@ -16,7 +16,9 @@ vi.mock('../lib/api.js', async (importOriginal) => {
 });
 
 const api = await import('../lib/api.js');
-const { MAX_QUEUE_ATTEMPTS, processPendingQueue } = await import('./sync.js');
+const { MAX_QUEUE_ATTEMPTS, processPendingQueue, requestBackgroundSync, SYNC_TAG } = await import(
+  './sync.js'
+);
 
 const CONTRIBUTION_PAYLOAD = {
   thread_id: '11111111-1111-4111-8111-111111111111',
@@ -44,6 +46,30 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+/** Stub a Background-Sync-capable environment and return the register spy. */
+function stubSyncEnv() {
+  const register = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal('navigator', {
+    serviceWorker: { ready: Promise.resolve({ sync: { register } }) },
+  });
+  vi.stubGlobal('window', { SyncManager: class {} });
+  return register;
+}
+
+describe('requestBackgroundSync', () => {
+  it('registers the queue sync tag when Background Sync is available', async () => {
+    const register = stubSyncEnv();
+    await requestBackgroundSync();
+    expect(register).toHaveBeenCalledWith(SYNC_TAG);
+  });
+
+  it('is a no-op when Background Sync is unavailable', async () => {
+    vi.stubGlobal('window', {}); // no SyncManager
+    await expect(requestBackgroundSync()).resolves.toBeUndefined();
+  });
 });
 
 describe('processPendingQueue', () => {
@@ -118,5 +144,25 @@ describe('processPendingQueue', () => {
     const result = await processPendingQueue();
     expect(result).toEqual({ sent: 0, retried: 0, failed: 0 });
     expect((await queue.get('op-6'))?.status).toBe('pending');
+  });
+
+  it('requests a background sync when work remains after a transient failure', async () => {
+    const register = stubSyncEnv();
+    vi.mocked(api.createContribution).mockRejectedValue(
+      new ApiClientError('http_503', 'Service unavailable', 503),
+    );
+    await queue.enqueue('contribution', CONTRIBUTION_PAYLOAD, 'op-7');
+    await processPendingQueue();
+    // requestBackgroundSync is fire-and-forget; wait for the register microtask.
+    await vi.waitFor(() => expect(register).toHaveBeenCalledWith(SYNC_TAG));
+  });
+
+  it('does not request a background sync when the queue is fully drained', async () => {
+    const register = stubSyncEnv();
+    vi.mocked(api.createContribution).mockResolvedValue({} as never);
+    await queue.enqueue('contribution', CONTRIBUTION_PAYLOAD, 'op-8');
+    await processPendingQueue();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(register).not.toHaveBeenCalled();
   });
 });
