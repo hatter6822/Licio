@@ -1,0 +1,320 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+/*
+ * GENERATED FILE — DO NOT EDIT BY HAND.
+ * Source of truth: apps/web/src/design-system/tokens.ts
+ * Regenerate with: pnpm --filter web gen:tokens
+ */
+
+:root {
+  --licio-bg-default: #FFFFFF;
+  --licio-bg-subtle: #F4F5F7;
+  --licio-bg-muted: #E7E9EE;
+  --licio-bg-inverse: #16181C;
+  --licio-fg-default: #16181C;
+  --licio-fg-muted: #5B6168;
+  --licio-fg-inverse: #FFFFFF;
+  --licio-fg-placeholder: #5B6168;
+  --licio-border: #C4C8CE;
+  --licio-border-strong: #7E848D;
+  --licio-focus-ring: #0B4FCB;
+  --licio-primary: #1F5FD6;
+  --licio-primary-fg: #FFFFFF;
+  --licio-primary-hover: #1A52BC;
+  --licio-primary-active: #16459E;
+  --licio-primary-soft: #E7EEFB;
+  --licio-primary-on-soft: #194A9F;
+  --licio-success: #1B7A3D;
+  --licio-success-fg: #FFFFFF;
+  --licio-success-soft: #E2F2E8;
+  --licio-success-on-soft: #15622F;
+  --licio-warning: #8A5A00;
+  --licio-warning-fg: #FFFFFF;
+  --licio-warning-soft: #FBF1DC;
+  --licio-warning-on-soft: #6E4800;
+  --licio-error: #B3261E;
+  --licio-error-fg: #FFFFFF;
+  --licio-error-hover: #9B2019;
+  --licio-error-soft: #FBE7E5;
+  --licio-error-on-soft: #8F1D17;
+  --licio-info: #1F5FD6;
+  --licio-info-fg: #FFFFFF;
+  --licio-info-soft: #E7EEFB;
+  --licio-info-on-soft: #194A9F;
+  /* Typography (WS-B.1.1b) */
+  --licio-text-xs: 0.75rem;
+  --licio-leading-xs: 1.5;
+  --licio-text-sm: 0.875rem;
+  --licio-leading-sm: 1.5;
+  --licio-text-base: 1rem;
+  --licio-leading-base: 1.6;
+  --licio-text-lg: 1.125rem;
+  --licio-leading-lg: 1.55;
+  --licio-text-xl: 1.25rem;
+  --licio-leading-xl: 1.4;
+  --licio-text-2xl: 1.5rem;
+  --licio-leading-2xl: 1.35;
+  --licio-text-3xl: 1.875rem;
+  --licio-leading-3xl: 1.3;
+  --licio-text-4xl: 2.25rem;
+  --licio-leading-4xl: 1.2;
+  --licio-weight-regular: 400;
+  --licio-weight-medium: 500;
+  --licio-weight-semibold: 600;
+  --licio-weight-bold: 700;
+  --licio-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --licio-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  /* Spacing (WS-B.1.1c) */
+  --licio-space-0: 0;
+  --licio-space-1: 0.25rem;
+  --licio-space-2: 0.5rem;
+  --licio-space-3: 0.75rem;
+  --licio-space-4: 1rem;
+  --licio-space-5: 1.25rem;
+  --licio-space-6: 1.5rem;
+  --licio-space-8: 2rem;
+  --licio-space-10: 2.5rem;
+  --licio-space-12: 3rem;
+  --licio-space-16: 4rem;
+  /* Radius, elevation, z-index (WS-B.1.1c) */
+  --licio-radius-none: 0;
+  --licio-radius-sm: 0.25rem;
+  --licio-radius-md: 0.5rem;
+  --licio-radius-lg: 1rem;
+  --licio-radius-full: 9999px;
+  --licio-shadow-sm: 0 1px 2px 0 rgb(16 24 40 / 0.05);
+  --licio-shadow-md: 0 4px 8px -2px rgb(16 24 40 / 0.10), 0 2px 4px -2px rgb(16 24 40 / 0.06);
+  --licio-shadow-lg: 0 12px 16px -4px rgb(16 24 40 / 0.10), 0 4px 6px -2px rgb(16 24 40 / 0.05);
+  --licio-z-base: 0;
+  --licio-z-dropdown: 100;
+  --licio-z-sticky: 200;
+  --licio-z-overlay: 300;
+  --licio-z-modal: 400;
+  --licio-z-toast: 500;
+  /* Motion (WS-B.1.1d) */
+  --licio-duration-fast: 100ms;
+  --licio-duration-normal: 200ms;
+  --licio-duration-slow: 300ms;
+  --licio-duration-deliberate: 500ms;
+  --licio-ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --licio-ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --licio-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --licio-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Touch targets (WS-B.1.1e) */
+  --licio-target-min: 48px;
+  --licio-target-gap: 8px;
+  --licio-target-hit-pad: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --licio-bg-default: #101216;
+    --licio-bg-subtle: #181B21;
+    --licio-bg-muted: #23272F;
+    --licio-bg-inverse: #F4F5F7;
+    --licio-fg-default: #F2F3F5;
+    --licio-fg-muted: #ABB1B9;
+    --licio-fg-inverse: #16181C;
+    --licio-fg-placeholder: #ABB1B9;
+    --licio-border: #363B43;
+    --licio-border-strong: #6A727D;
+    --licio-focus-ring: #6FA3FF;
+    --licio-error: #C5362C;
+    --licio-primary-soft: #16243E;
+    --licio-primary-on-soft: #AEC6F2;
+    --licio-success-soft: #11281A;
+    --licio-success-on-soft: #7FD49B;
+    --licio-warning-soft: #2A2008;
+    --licio-warning-on-soft: #E6C078;
+    --licio-error-hover: #B03029;
+    --licio-error-soft: #2E1311;
+    --licio-error-on-soft: #F1A8A2;
+    --licio-info-soft: #16243E;
+    --licio-info-on-soft: #AEC6F2;
+  }
+}
+
+:root[data-theme="dark"] {
+  --licio-bg-default: #101216;
+  --licio-bg-subtle: #181B21;
+  --licio-bg-muted: #23272F;
+  --licio-bg-inverse: #F4F5F7;
+  --licio-fg-default: #F2F3F5;
+  --licio-fg-muted: #ABB1B9;
+  --licio-fg-inverse: #16181C;
+  --licio-fg-placeholder: #ABB1B9;
+  --licio-border: #363B43;
+  --licio-border-strong: #6A727D;
+  --licio-focus-ring: #6FA3FF;
+  --licio-error: #C5362C;
+  --licio-primary-soft: #16243E;
+  --licio-primary-on-soft: #AEC6F2;
+  --licio-success-soft: #11281A;
+  --licio-success-on-soft: #7FD49B;
+  --licio-warning-soft: #2A2008;
+  --licio-warning-on-soft: #E6C078;
+  --licio-error-hover: #B03029;
+  --licio-error-soft: #2E1311;
+  --licio-error-on-soft: #F1A8A2;
+  --licio-info-soft: #16243E;
+  --licio-info-on-soft: #AEC6F2;
+}
+
+@media (prefers-color-scheme: light) and (prefers-contrast: more) {
+  :root:not([data-theme="dark"]) {
+    --licio-fg-default: #000000;
+    --licio-fg-muted: #2A2F36;
+    --licio-fg-placeholder: #2A2F36;
+    --licio-border: #000000;
+    --licio-border-strong: #000000;
+    --licio-focus-ring: #00308F;
+    --licio-primary-on-soft: #0E3A82;
+    --licio-success-on-soft: #0C4D24;
+    --licio-warning-on-soft: #573800;
+    --licio-error-on-soft: #6E1611;
+    --licio-info-on-soft: #0E3A82;
+  }
+}
+@media (prefers-contrast: more) {
+  :root[data-theme="light"] {
+    --licio-fg-default: #000000;
+    --licio-fg-muted: #2A2F36;
+    --licio-fg-placeholder: #2A2F36;
+    --licio-border: #000000;
+    --licio-border-strong: #000000;
+    --licio-focus-ring: #00308F;
+    --licio-primary-on-soft: #0E3A82;
+    --licio-success-on-soft: #0C4D24;
+    --licio-warning-on-soft: #573800;
+    --licio-error-on-soft: #6E1611;
+    --licio-info-on-soft: #0E3A82;
+  }
+}
+
+@media (prefers-color-scheme: dark) and (prefers-contrast: more) {
+  :root:not([data-theme="light"]) {
+    --licio-fg-default: #FFFFFF;
+    --licio-fg-muted: #E6E8EB;
+    --licio-fg-placeholder: #E6E8EB;
+    --licio-border: #FFFFFF;
+    --licio-border-strong: #FFFFFF;
+    --licio-focus-ring: #A9C9FF;
+    --licio-primary-on-soft: #CFE0FA;
+    --licio-success-on-soft: #A6E4BC;
+    --licio-warning-on-soft: #F2D39A;
+    --licio-error-on-soft: #F6C5C0;
+    --licio-info-on-soft: #CFE0FA;
+  }
+}
+@media (prefers-contrast: more) {
+  :root[data-theme="dark"] {
+    --licio-fg-default: #FFFFFF;
+    --licio-fg-muted: #E6E8EB;
+    --licio-fg-placeholder: #E6E8EB;
+    --licio-border: #FFFFFF;
+    --licio-border-strong: #FFFFFF;
+    --licio-focus-ring: #A9C9FF;
+    --licio-primary-on-soft: #CFE0FA;
+    --licio-success-on-soft: #A6E4BC;
+    --licio-warning-on-soft: #F2D39A;
+    --licio-error-on-soft: #F6C5C0;
+    --licio-info-on-soft: #CFE0FA;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) {
+    --licio-duration-fast: 0ms;
+    --licio-duration-normal: 0ms;
+    --licio-duration-slow: 0ms;
+    --licio-duration-deliberate: 0ms;
+  }
+}
+:root[data-motion="reduce"] {
+  --licio-duration-fast: 0ms;
+  --licio-duration-normal: 0ms;
+  --licio-duration-slow: 0ms;
+  --licio-duration-deliberate: 0ms;
+}
+
+@theme inline {
+  /* Colours → --licio-* (single source of truth) */
+  --color-canvas: var(--licio-bg-default);
+  --color-surface: var(--licio-bg-subtle);
+  --color-surface-strong: var(--licio-bg-muted);
+  --color-inverse: var(--licio-bg-inverse);
+  --color-ink: var(--licio-fg-default);
+  --color-ink-muted: var(--licio-fg-muted);
+  --color-ink-inverse: var(--licio-fg-inverse);
+  --color-ink-placeholder: var(--licio-fg-placeholder);
+  --color-line: var(--licio-border);
+  --color-line-strong: var(--licio-border-strong);
+  --color-focus: var(--licio-focus-ring);
+  --color-primary: var(--licio-primary);
+  --color-primary-fg: var(--licio-primary-fg);
+  --color-primary-hover: var(--licio-primary-hover);
+  --color-primary-active: var(--licio-primary-active);
+  --color-primary-soft: var(--licio-primary-soft);
+  --color-primary-on-soft: var(--licio-primary-on-soft);
+  --color-success: var(--licio-success);
+  --color-success-fg: var(--licio-success-fg);
+  --color-success-soft: var(--licio-success-soft);
+  --color-success-on-soft: var(--licio-success-on-soft);
+  --color-warning: var(--licio-warning);
+  --color-warning-fg: var(--licio-warning-fg);
+  --color-warning-soft: var(--licio-warning-soft);
+  --color-warning-on-soft: var(--licio-warning-on-soft);
+  --color-error: var(--licio-error);
+  --color-error-fg: var(--licio-error-fg);
+  --color-error-hover: var(--licio-error-hover);
+  --color-error-soft: var(--licio-error-soft);
+  --color-error-on-soft: var(--licio-error-on-soft);
+  --color-info: var(--licio-info);
+  --color-info-fg: var(--licio-info-fg);
+  --color-info-soft: var(--licio-info-soft);
+  --color-info-on-soft: var(--licio-info-on-soft);
+  /* Typography */
+  --text-xs: var(--licio-text-xs);
+  --text-xs--line-height: var(--licio-leading-xs);
+  --text-sm: var(--licio-text-sm);
+  --text-sm--line-height: var(--licio-leading-sm);
+  --text-base: var(--licio-text-base);
+  --text-base--line-height: var(--licio-leading-base);
+  --text-lg: var(--licio-text-lg);
+  --text-lg--line-height: var(--licio-leading-lg);
+  --text-xl: var(--licio-text-xl);
+  --text-xl--line-height: var(--licio-leading-xl);
+  --text-2xl: var(--licio-text-2xl);
+  --text-2xl--line-height: var(--licio-leading-2xl);
+  --text-3xl: var(--licio-text-3xl);
+  --text-3xl--line-height: var(--licio-leading-3xl);
+  --text-4xl: var(--licio-text-4xl);
+  --text-4xl--line-height: var(--licio-leading-4xl);
+  --font-weight-normal: var(--licio-weight-regular);
+  --font-weight-medium: var(--licio-weight-medium);
+  --font-weight-semibold: var(--licio-weight-semibold);
+  --font-weight-bold: var(--licio-weight-bold);
+  --font-sans: var(--licio-font-sans);
+  --font-mono: var(--licio-font-mono);
+  /* Touch-target sizes available as spacing utilities */
+  --spacing-touch: var(--licio-target-min);
+  --spacing-touch-gap: var(--licio-target-gap);
+  --spacing-hit: var(--licio-target-hit-pad);
+  /* Radius & elevation */
+  --radius-none: var(--licio-radius-none);
+  --radius-sm: var(--licio-radius-sm);
+  --radius-md: var(--licio-radius-md);
+  --radius-lg: var(--licio-radius-lg);
+  --radius-full: var(--licio-radius-full);
+  --shadow-sm: var(--licio-shadow-sm);
+  --shadow-md: var(--licio-shadow-md);
+  --shadow-lg: var(--licio-shadow-lg);
+  /* Motion easings */
+  --ease-out: var(--licio-ease-out);
+  --ease-in: var(--licio-ease-in);
+  --ease-in-out: var(--licio-ease-in-out);
+  /* Breakpoints (mobile-first, min-width) */
+  --breakpoint-sm: 640px;
+  --breakpoint-md: 768px;
+  --breakpoint-lg: 1024px;
+  --breakpoint-xl: 1280px;
+}

@@ -21,6 +21,7 @@ export default defineConfig({
         'apps/web/src/main.tsx',
         'apps/web/src/App.tsx',
         'apps/web/src/routes/**',
+        'apps/web/src/test/**',
         'packages/db/src/client.ts',
         'packages/db/src/schema/**',
       ],
@@ -70,6 +71,7 @@ export default defineConfig({
           root: 'apps/web',
           include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
           environment: 'jsdom',
+          setupFiles: ['./src/test/setup.ts'],
         },
       },
       {

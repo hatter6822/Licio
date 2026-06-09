@@ -1,197 +1,91 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
 @import "tailwindcss";
 
-@theme {
-  /* Primary colors */
-  --color-primary-50: #eef2ff;
-  --color-primary-100: #e0e7ff;
-  --color-primary-200: #c7d2fe;
-  --color-primary-300: #a5b4fc;
-  --color-primary-400: #818cf8;
-  --color-primary-500: #6366f1;
-  --color-primary-600: #4f46e5;
-  --color-primary-700: #4338ca;
-  --color-primary-800: #3730a3;
-  --color-primary-900: #312e81;
-  --color-primary-950: #1e1b4b;
+/* Design tokens — the --licio-* single source of truth plus the Tailwind
+ * @theme mapping. Generated from apps/web/src/design-system/tokens.ts.
+ * Regenerate with: pnpm --filter web gen:tokens */
+@import "./tokens.generated.css";
 
-  /* Surface colors */
-  --color-surface-base: #ffffff;
-  --color-surface-raised: #f9fafb;
-  --color-surface-overlay: #f3f4f6;
+/* ===================================================================== *
+ * Base layer
+ * ===================================================================== */
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
 
-  /* Text colors */
-  --color-text-primary: #111827;
-  --color-text-secondary: #6b7280;
-  --color-text-muted: #9ca3af;
+  body {
+    margin: 0;
+    min-height: 100dvh;
+    background-color: var(--licio-bg-default);
+    color: var(--licio-fg-default);
+    font-family: var(--licio-font-sans);
+    font-size: var(--licio-text-base);
+    line-height: var(--licio-leading-base);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizelegibility;
+  }
 
-  /* Border colors */
-  --color-border-default: #e5e7eb;
-  --color-border-strong: #d1d5db;
+  /* Focus appearance — WCAG 2.4.13 (new in 2.2): a 2px ring offset from the
+   * control, drawn in the focus-ring token (verified ≥3:1 against the canvas).
+   * Components may layer their own ring; this is the system-wide safety net. */
+  :focus-visible {
+    outline: 2px solid var(--licio-focus-ring);
+    outline-offset: 2px;
+  }
 
-  /* Semantic colors */
-  --color-error: #dc2626;
-  --color-warning: #f59e0b;
-  --color-success: #16a34a;
-  --color-info: #2563eb;
-
-  /* Border radius */
-  --radius-sm: 0.25rem;
-  --radius-md: 0.375rem;
-  --radius-lg: 0.5rem;
-  --radius-xl: 0.75rem;
-  --radius-2xl: 1rem;
-  --radius-full: 9999px;
-
-  /* Z-index scale */
-  --z-base: 0;
-  --z-dropdown: 10;
-  --z-modal: 50;
-  --z-toast: 60;
-  --z-overlay: 70;
-
-  /* Shadows */
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-
-  /* Secondary colors (teal/cyan palette) */
-  --color-secondary-50: #f0fdfa;
-  --color-secondary-100: #ccfbf1;
-  --color-secondary-200: #99f6e4;
-  --color-secondary-300: #5eead4;
-  --color-secondary-400: #2dd4bf;
-  --color-secondary-500: #14b8a6;
-  --color-secondary-600: #0d9488;
-  --color-secondary-700: #0f766e;
-  --color-secondary-800: #115e59;
-  --color-secondary-900: #134e4a;
-  --color-secondary-950: #042f2e;
-
-  /* Accent colors (amber/gold palette) */
-  --color-accent-50: #fffbeb;
-  --color-accent-100: #fef3c7;
-  --color-accent-200: #fde68a;
-  --color-accent-300: #fcd34d;
-  --color-accent-400: #fbbf24;
-  --color-accent-500: #f59e0b;
-  --color-accent-600: #d97706;
-  --color-accent-700: #b45309;
-  --color-accent-800: #92400e;
-  --color-accent-900: #78350f;
-  --color-accent-950: #451a03;
-
-  /* Background alias */
-  --color-background: #ffffff;
-
-  /* Font families - system stack, no external fonts */
-  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
-    monospace;
-
-  /* Font sizes */
-  --font-size-xs: 0.75rem;
-  --font-size-sm: 0.875rem;
-  --font-size-base: 1rem;
-  --font-size-lg: 1.125rem;
-  --font-size-xl: 1.25rem;
-  --font-size-2xl: 1.5rem;
-  --font-size-3xl: 1.875rem;
-  --font-size-4xl: 2.25rem;
-
-  /* Line heights */
-  --line-height-tight: 1.25;
-  --line-height-normal: 1.5;
-  --line-height-relaxed: 1.75;
-
-  /* Letter spacing */
-  --letter-spacing-tight: -0.025em;
-  --letter-spacing-normal: 0;
-  --letter-spacing-wide: 0.025em;
-
-  /* Transition durations */
-  --duration-fast: 100ms;
-  --duration-normal: 200ms;
-  --duration-slow: 300ms;
-
-  /* Spacing scale */
-  --spacing-0: 0;
-  --spacing-px: 1px;
-  --spacing-1: 0.25rem;
-  --spacing-2: 0.5rem;
-  --spacing-3: 0.75rem;
-  --spacing-4: 1rem;
-  --spacing-5: 1.25rem;
-  --spacing-6: 1.5rem;
-  --spacing-8: 2rem;
-  --spacing-10: 2.5rem;
-  --spacing-12: 3rem;
-  --spacing-16: 4rem;
-}
-
-/* Dark mode — plain CSS variables (not @theme) so media queries scope correctly */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-surface-base: #0f0f23;
-    --color-surface-raised: #1a1a2e;
-    --color-surface-overlay: #25253d;
-
-    --color-text-primary: #f9fafb;
-    --color-text-secondary: #9ca3af;
-    --color-text-muted: #6b7280;
-
-    --color-border-default: #374151;
-    --color-border-strong: #4b5563;
-
-    --color-background: #0f0f23;
-
-    --color-secondary-50: #042f2e;
-    --color-secondary-100: #134e4a;
-    --color-secondary-200: #115e59;
-    --color-secondary-300: #0f766e;
-    --color-secondary-400: #0d9488;
-    --color-secondary-500: #14b8a6;
-    --color-secondary-600: #2dd4bf;
-    --color-secondary-700: #5eead4;
-    --color-secondary-800: #99f6e4;
-    --color-secondary-900: #ccfbf1;
-    --color-secondary-950: #f0fdfa;
-
-    --color-accent-50: #451a03;
-    --color-accent-100: #78350f;
-    --color-accent-200: #92400e;
-    --color-accent-300: #b45309;
-    --color-accent-400: #d97706;
-    --color-accent-500: #f59e0b;
-    --color-accent-600: #fbbf24;
-    --color-accent-700: #fcd34d;
-    --color-accent-800: #fde68a;
-    --color-accent-900: #fef3c7;
-    --color-accent-950: #fffbeb;
+  /* Honour the user's font-size: never shrink body copy below the base step. */
+  ::placeholder {
+    color: var(--licio-fg-placeholder);
+    opacity: 1;
   }
 }
 
-/* Dark mode + high contrast */
-@media (prefers-color-scheme: dark) and (prefers-contrast: more) {
-  :root {
-    --color-text-primary: #ffffff;
-    --color-text-secondary: #e5e7eb;
-    --color-border-default: #ffffff;
-    --color-border-strong: #ffffff;
+/* ===================================================================== *
+ * Named z-index utilities — the z-index scale is the ONLY source of
+ * stacking values (WS-B.1.1c); components never set an arbitrary z-index.
+ * ===================================================================== */
+@utility z-dropdown {
+  z-index: var(--licio-z-dropdown);
+}
+@utility z-sticky {
+  z-index: var(--licio-z-sticky);
+}
+@utility z-overlay {
+  z-index: var(--licio-z-overlay);
+}
+@utility z-modal {
+  z-index: var(--licio-z-modal);
+}
+@utility z-toast {
+  z-index: var(--licio-z-toast);
+}
+
+/* ===================================================================== *
+ * Hit-slop (WS-B.1.1e). For an intentionally-small visual control, `tap-target`
+ * expands the *activation* area to at least 48×48 (the control + the hit-pad on
+ * each side, floored at the minimum target) via an invisible centred ::before,
+ * without enlarging the visual. Clicks on the ::before activate the element.
+ * ===================================================================== */
+@utility tap-target {
+  position: relative;
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 50%;
+    block-size: max(calc(100% + 2 * var(--licio-target-hit-pad)), var(--licio-target-min));
+    inline-size: max(calc(100% + 2 * var(--licio-target-hit-pad)), var(--licio-target-min));
+    translate: -50% -50%;
   }
 }
 
-/* Light mode + high contrast */
-@media (prefers-color-scheme: light) and (prefers-contrast: more) {
-  :root {
-    --color-text-primary: #000000;
-    --color-text-secondary: #1f2937;
-    --color-border-default: #000000;
-    --color-border-strong: #000000;
-  }
-}
-
-/* Reduced motion */
+/* ===================================================================== *
+ * Reduced motion — defense in depth. The token layer already zeroes
+ * --licio-duration-*; this also neutralises Tailwind utility transitions
+ * and any animation, keeping only instantaneous (0ms) state changes.
+ * Essential opacity/focus changes still occur, just without duration.
+ * ===================================================================== */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -203,14 +97,11 @@
   }
 }
 
-/* Focus ring styles */
-*:focus-visible {
-  outline: 2px solid var(--color-primary-500);
-  outline-offset: 2px;
-}
-
-@media (prefers-color-scheme: dark) {
-  *:focus-visible {
-    outline-color: var(--color-primary-400);
-  }
+:root[data-motion="reduce"] *,
+:root[data-motion="reduce"] *::before,
+:root[data-motion="reduce"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
 }

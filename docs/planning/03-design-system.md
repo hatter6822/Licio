@@ -2,6 +2,33 @@
 
 **Milestone:** M0-M1 | **Priority:** 0-1 | **Dependencies:** WS-0.3 | **Wave:** 2-3 | **Estimated duration:** 3-4 weeks
 
+> **Implementation status:** Fully implemented in `apps/web/src` (tokens in
+> `design-system/`, primitives in `components/ui/`, application components in
+> `components/{story,feed,wellbeing,profile,reader,composer,thread,cognitive,i18n}/`,
+> localization in `i18n/`, SPA focus management in `components/a11y/`, and a
+> code-split component workbench in `styleguide/` served at `/styleguide`). This
+> includes the layout/virtualization (`VirtualList`, with arrow-key roving +
+> focus retention), the sandboxed reader's DOMPurify-sanitized, Web-Worker
+> readability extraction, the manual dark-mode `ThemeToggle`, and the
+> `tap-target` hit-slop. Localization is a full minimal-ICU pipeline (plural /
+> select / selectordinal + apostrophe escaping) with lazy per-locale catalogs
+> (`loadCatalog`) and an `en-XA` pseudo-locale that proves it end-to-end; the
+> `Sheet` animates both in and out (reduced-motion-aware); `TextArea` auto-grows
+> via CSS `field-sizing` with a `scrollHeight` JS fallback; and a localized
+> `ReadingEstimate` affordance renders a descriptive "N min read" (never a
+> score). Real-browser verification (axe color-contrast/target-size including the
+> `tap-target` hit-slop, dark/high-contrast/reduced-motion, reflow, 200% zoom,
+> scroll preservation) lives in `apps/web/e2e/design-system.spec.ts`. See
+> `docs/design-system/README.md` for the implementation reference and component
+> catalogue.
+>
+> One documented correction: the WS-B.1.1a `--licio-border` contrast figure of
+> 3.1:1 for `#C4C8CE` is arithmetically unachievable (a light-grey hairline on
+> white is ~1.68:1); the WCAG 1.4.11 intent is carried by `--licio-border-strong`
+> (verified ≥3:1 on every surface), and the decorative `--licio-border` is
+> exempt. Verified by `pnpm test`, `pnpm typecheck`, `pnpm lint`,
+> `pnpm check:no-applause`, and the strict-CSP build.
+
 ## Overview
 
 All components are built to WCAG 2.2 AA from the start. Accessibility is a release gate -- for many iOS users, the PWA is the only surface (Section 26.1). The entire design system enforces a no-applause UI: zero likes, upvotes, hearts, reactions, karma badges, follower counts, or public scores anywhere in the component library or application layer. Every component must be keyboard-operable, screen-reader-compatible, zoom-safe to 200%, and pass axe-core automated checks.
