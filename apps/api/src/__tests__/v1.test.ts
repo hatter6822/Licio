@@ -39,16 +39,23 @@ afterEach(() => {
 });
 
 describe('v1 read models', () => {
-  it('returns an empty, schema-valid feed page', async () => {
+  it('returns a schema-valid feed page with demo items', async () => {
     const res = await app().request('/v1/feed');
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(() => feedResponseSchema.parse(body)).not.toThrow();
+    const body = feedResponseSchema.parse(await res.json());
+    expect(body.items.length).toBeGreaterThan(0);
   });
 
   it('rejects a non-uuid story id with 400', async () => {
     const res = await app().request('/v1/stories/not-a-uuid');
     expect(res.status).toBe(400);
+  });
+
+  it('returns a known demo story', async () => {
+    const res = await app().request('/v1/stories/5f5e1000-0000-4000-8000-000000000001');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { story_id: string; thread_id: string | null };
+    expect(body.story_id).toBe('5f5e1000-0000-4000-8000-000000000001');
   });
 
   it('returns 404 for a valid-but-unknown story id', async () => {

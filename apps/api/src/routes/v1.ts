@@ -39,6 +39,15 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppEnv } from '../app.js';
 import {
+  DEMO_FEED,
+  DEMO_LEDGER,
+  DEMO_ROOMS,
+  demoBranch,
+  demoRoom,
+  demoStory,
+  demoThread,
+} from '../lib/demo-data.js';
+import {
   getPreferences,
   getVapidConfig,
   registerSubscription,
@@ -57,8 +66,6 @@ function stateKey(cookieHeader: string | undefined): string {
   return sessionIdOf(cookieHeader) ?? 'anonymous';
 }
 
-const EMPTY_PAGE = { items: [] as never[], nextCursor: null };
-
 // In-memory settings store (BFF contract; durable store is a later concern).
 const settingsBySession = new Map<string, z.infer<typeof userSettingsSchema>>();
 
@@ -71,31 +78,37 @@ const notFound = { error: { code: 'not_found', message: 'Resource not found' } }
 export function createV1Routes() {
   return (
     new Hono<AppEnv>()
-      // --- Read models (contract stubs; data owned by WS-G/H/J) -------------
+      // --- Read models (in-memory demo fixture; durable data owned by WS-G/H/J) ---
       .get('/feed', zValidator('query', feedQuerySchema), (c) => {
-        const response: FeedResponse = EMPTY_PAGE;
+        const response: FeedResponse = { items: DEMO_FEED, nextCursor: null };
         return c.json(response);
       })
-      .get('/stories/:storyId', zValidator('param', z.object({ storyId: uuidSchema })), (c) =>
-        c.json(notFound, 404),
-      )
-      .get('/threads/:threadId', zValidator('param', z.object({ threadId: uuidSchema })), (c) =>
-        c.json(notFound, 404),
-      )
+      .get('/stories/:storyId', zValidator('param', z.object({ storyId: uuidSchema })), (c) => {
+        const story = demoStory(c.req.valid('param').storyId);
+        return story ? c.json(story) : c.json(notFound, 404);
+      })
+      .get('/threads/:threadId', zValidator('param', z.object({ threadId: uuidSchema })), (c) => {
+        const thread = demoThread(c.req.valid('param').threadId);
+        return thread ? c.json(thread) : c.json(notFound, 404);
+      })
       .get(
         '/threads/:threadId/branches/:branch',
         zValidator('param', z.object({ threadId: uuidSchema, branch: branchIdSchema })),
-        (c) => c.json(notFound, 404),
+        (c) => {
+          const { threadId, branch } = c.req.valid('param');
+          return c.json(demoBranch(threadId, branch));
+        },
       )
       .get('/rooms', zValidator('query', z.object({ cursor: z.string().optional() })), (c) => {
-        const response: RoomListResponse = EMPTY_PAGE;
+        const response: RoomListResponse = { items: DEMO_ROOMS, nextCursor: null };
         return c.json(response);
       })
-      .get('/rooms/:roomId', zValidator('param', z.object({ roomId: uuidSchema })), (c) =>
-        c.json(notFound, 404),
-      )
+      .get('/rooms/:roomId', zValidator('param', z.object({ roomId: uuidSchema })), (c) => {
+        const room = demoRoom(c.req.valid('param').roomId);
+        return room ? c.json(room) : c.json(notFound, 404);
+      })
       .get('/signal-ledger', (c) => {
-        const response: SignalLedgerResponse = EMPTY_PAGE;
+        const response: SignalLedgerResponse = { items: DEMO_LEDGER, nextCursor: null };
         return c.json(response);
       })
 
