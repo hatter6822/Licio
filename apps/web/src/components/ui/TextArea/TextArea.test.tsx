@@ -44,7 +44,7 @@ describe('TextArea', () => {
     const live = document.querySelector('[aria-live="polite"]') as HTMLElement;
 
     await user.type(field, 'aaaaaaaaa'); // 9 / 10 → 90%
-    expect(live).toHaveTextContent('1 characters remaining.');
+    expect(live).toHaveTextContent('1 character remaining.'); // singular, pluralized correctly
 
     await user.type(field, 'a'); // 10 / 10 → 100%
     expect(live).toHaveTextContent('Character limit reached.');

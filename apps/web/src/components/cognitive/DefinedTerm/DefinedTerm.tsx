@@ -22,7 +22,9 @@ export function DefinedTerm({ term, definition, className }: DefinedTermProps): 
       <button
         type="button"
         className={cn(
-          'cursor-help rounded-sm underline decoration-dotted decoration-from-font underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
+          // tap-target gives this small inline control a ≥48×48 activation area
+          // (WS-B.1.1e) without enlarging the visual text.
+          'tap-target cursor-help rounded-sm underline decoration-dotted decoration-from-font underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
           className,
         )}
       >

@@ -15,3 +15,4 @@ export {
   formatList,
   formatReadingEstimate,
 } from './format.js';
+export { formatMessage, type MessageParams } from './message.js';

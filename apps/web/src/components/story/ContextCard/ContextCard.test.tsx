@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../../i18n/index.js';
@@ -147,6 +147,27 @@ describe('ContextCard user controls (WS-B.2.4b, no-applause)', () => {
     expect(screen.getByRole('button', { name: 'See less' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Mute topic' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Signal problem' })).toBeNull();
+  });
+
+  it('pages between sections on a horizontal swipe (pager is the alternative)', () => {
+    render(<ContextCard open onClose={() => undefined} data={makeData()} />);
+    const container = screen.getByRole('heading', { name: 'What happened' }).closest('section')
+      ?.parentElement as HTMLElement;
+
+    // Swipe left (dx negative, mostly horizontal) → next section heading focused.
+    fireEvent.touchStart(container, { touches: [{ clientX: 240, clientY: 100 }] });
+    fireEvent.touchEnd(container, { changedTouches: [{ clientX: 90, clientY: 110 }] });
+    expect(screen.getByRole('heading', { name: 'Why it matters' })).toHaveFocus();
+
+    // Swipe right → previous section.
+    fireEvent.touchStart(container, { touches: [{ clientX: 90, clientY: 100 }] });
+    fireEvent.touchEnd(container, { changedTouches: [{ clientX: 240, clientY: 105 }] });
+    expect(screen.getByRole('heading', { name: 'What happened' })).toHaveFocus();
+
+    // A mostly-vertical swipe does NOT page (left to scroll / Sheet dismiss).
+    fireEvent.touchStart(container, { touches: [{ clientX: 100, clientY: 100 }] });
+    fireEvent.touchEnd(container, { changedTouches: [{ clientX: 110, clientY: 260 }] });
+    expect(screen.getByRole('heading', { name: 'What happened' })).toHaveFocus();
   });
 
   it('exposes NO applause affordance (no like / vote / upvote / score control)', () => {

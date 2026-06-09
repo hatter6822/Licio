@@ -7,6 +7,7 @@
 // remain self-contained. `dir`/`lang` are reflected onto <html> for RTL and
 // WCAG 3.1.1 (Language of Page).
 import { type ReactNode, createContext, useContext, useEffect, useMemo } from 'react';
+import { formatMessage } from './message.js';
 
 export type Direction = 'ltr' | 'rtl';
 
@@ -31,13 +32,6 @@ const RTL_LANGUAGES = new Set(['ar', 'he', 'fa', 'ur', 'ps', 'sd', 'yi', 'dv', '
 export function resolveDirection(locale: string): Direction {
   const language = locale.toLowerCase().split('-')[0] ?? '';
   return RTL_LANGUAGES.has(language) ? 'rtl' : 'ltr';
-}
-
-function interpolate(message: string, params?: Record<string, string | number>): string {
-  if (!params) return message;
-  return message.replace(/\{(\w+)\}/g, (match, name: string) =>
-    name in params ? String(params[name]) : match,
-  );
 }
 
 export interface I18nProviderProps {
@@ -73,7 +67,8 @@ export function I18nProvider({
     () => ({
       locale,
       dir: direction,
-      t: (key, defaultMessage, params) => interpolate(messages[key] ?? defaultMessage, params),
+      t: (key, defaultMessage, params) =>
+        formatMessage(messages[key] ?? defaultMessage, params, locale),
     }),
     [locale, direction, messages],
   );
@@ -90,7 +85,7 @@ export function useI18n(): I18nContextValue {
     useContext(I18nContext) ?? {
       locale: 'en',
       dir: 'ltr',
-      t: (_key, defaultMessage, params) => interpolate(defaultMessage, params),
+      t: (_key, defaultMessage, params) => formatMessage(defaultMessage, params, 'en'),
     }
   );
 }

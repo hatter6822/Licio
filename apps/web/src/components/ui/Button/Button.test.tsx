@@ -54,6 +54,8 @@ describe('Button', () => {
     const button = screen.getByRole('button', { name: /Submit/ });
     expect(button).toHaveAttribute('aria-busy', 'true');
     expect(button).toHaveAttribute('aria-disabled', 'true');
+    // A visually-hidden status label is announced alongside aria-busy.
+    expect(button).toHaveAccessibleName(/Loading/);
     await user.click(button);
     expect(onClick).not.toHaveBeenCalled();
   });

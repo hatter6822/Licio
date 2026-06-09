@@ -6,6 +6,7 @@ import {
   useId,
   useState,
 } from 'react';
+import { useT } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
 import { Icon } from '../Icon/index.js';
 
@@ -47,6 +48,7 @@ export function TextArea({
   textareaClassName,
   ...rest
 }: TextAreaProps): React.ReactElement {
+  const t = useT();
   const generatedId = useId();
   const fieldId = id ?? generatedId;
   const errorId = `${fieldId}-error`;
@@ -68,10 +70,14 @@ export function TextArea({
   let nearLimit = false;
   if (maxLength !== undefined) {
     if (current >= maxLength) {
-      liveMessage = 'Character limit reached.';
+      liveMessage = t('textarea.limitReached', 'Character limit reached.');
       nearLimit = true;
     } else if (current >= Math.floor(maxLength * APPROACHING)) {
-      liveMessage = `${maxLength - current} characters remaining.`;
+      liveMessage = t(
+        'textarea.charactersRemaining',
+        '{count, plural, one {# character remaining.} other {# characters remaining.}}',
+        { count: maxLength - current },
+      );
       nearLimit = true;
     }
   }

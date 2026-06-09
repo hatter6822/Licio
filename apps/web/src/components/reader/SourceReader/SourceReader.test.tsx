@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { checkA11y } from '../../../test/axe.js';
@@ -178,5 +178,34 @@ describe('SourceReader (WS-B.2.7)', () => {
     await user.click(screen.getByRole('button', { name: 'Reader view' }));
     expect(container.querySelector('iframe')).toBeNull();
     expect(await checkA11y(container)).toHaveNoViolations();
+  });
+
+  it('sanitizes and extracts readable content from sourceHtml (no remote markup)', async () => {
+    const user = userEvent.setup();
+    renderReader({
+      sourceHtml: `<html><head><title>Ignored</title></head><body>
+        <script>window.__pwned = true;</script>
+        <article>
+          <h2>Upstream coordination</h2>
+          <p>Operators released water in stages.</p>
+          <ul><li>Gauge A held</li><li>Gauge B held</li></ul>
+        </article>
+      </body></html>`,
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Reader view' }));
+
+    // The extraction is async (worker where available, main thread here).
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'Upstream coordination' })).toBeInTheDocument(),
+    );
+    expect(screen.getByText('Operators released water in stages.')).toBeInTheDocument();
+    expect(screen.getByRole('list')).toBeInTheDocument();
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
+
+    // The script never ran and its text is not surfaced.
+    expect((window as unknown as Record<string, unknown>)['__pwned']).toBeUndefined();
+    expect(screen.queryByText(/__pwned/)).toBeNull();
+    expect(screen.queryByText(/window\./)).toBeNull();
   });
 });

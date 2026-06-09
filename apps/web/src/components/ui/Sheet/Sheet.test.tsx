@@ -22,6 +22,13 @@ function Harness() {
   );
 }
 
+/** The decorative drag-handle region carries the pointer-drag listeners. */
+function dragHandle(): HTMLElement {
+  const handle = document.querySelector('.cursor-grab');
+  if (!handle) throw new Error('drag handle not found');
+  return handle as HTMLElement;
+}
+
 describe('Sheet', () => {
   it('renders as a labelled modal and traps focus on open', async () => {
     const user = userEvent.setup();
@@ -52,23 +59,25 @@ describe('Sheet', () => {
     expect(trigger).toHaveFocus();
   });
 
-  it('dismisses on a downward swipe past the threshold', async () => {
+  it('dismisses on a downward pointer drag past the threshold', async () => {
     const user = userEvent.setup();
     render(<Harness />);
     await user.click(screen.getByRole('button', { name: 'Open sheet' }));
-    const sheet = screen.getByRole('dialog');
-    fireEvent.touchStart(sheet, { touches: [{ clientY: 100 }] });
-    fireEvent.touchEnd(sheet, { changedTouches: [{ clientY: 300 }] });
+    const handle = dragHandle();
+    fireEvent.pointerDown(handle, { pointerId: 1, clientY: 100, button: 0 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientY: 320 }); // 220px down
+    fireEvent.pointerUp(handle, { pointerId: 1, clientY: 320 });
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
-  it('ignores a small swipe that does not cross the threshold', async () => {
+  it('ignores a small drag that does not cross the threshold', async () => {
     const user = userEvent.setup();
     render(<Harness />);
     await user.click(screen.getByRole('button', { name: 'Open sheet' }));
-    const sheet = screen.getByRole('dialog');
-    fireEvent.touchStart(sheet, { touches: [{ clientY: 100 }] });
-    fireEvent.touchEnd(sheet, { changedTouches: [{ clientY: 130 }] });
+    const handle = dragHandle();
+    fireEvent.pointerDown(handle, { pointerId: 1, clientY: 100, button: 0 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientY: 130 }); // 30px down
+    fireEvent.pointerUp(handle, { pointerId: 1, clientY: 130 });
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 

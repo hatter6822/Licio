@@ -15,7 +15,14 @@
 // collapsible) inside a labelled region, with an <h2> heading. A non-swipe
 // section navigator (prev/next Buttons, WCAG 2.5.1) moves focus between the
 // section headings; the Sheet's own swipe-down handles dismissal.
-import { type ReactElement, type ReactNode, useId, useRef } from 'react';
+import {
+  type ReactElement,
+  type ReactNode,
+  type TouchEvent as ReactTouchEvent,
+  useId,
+  useRef,
+  useState,
+} from 'react';
 import { useT } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
 import { Button } from '../../ui/Button/index.js';
@@ -54,6 +61,9 @@ export function ContextCard({
   const baseId = useId();
   // One focusable handle per section heading for prev/next navigation.
   const headingRefs = useRef<(HTMLHeadingElement | null)[]>([]);
+  // The section the user last navigated to (drives swipe + pager paging).
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const touchStart = useRef<{ x: number; y: number } | null>(null);
 
   warnIfScoreLike(data.distributionReason);
 
@@ -166,13 +176,37 @@ export function ContextCard({
 
   const sectionHeadingId = (key: string): string => `${baseId}-${key}-heading`;
 
-  // Non-swipe section navigation (WCAG 2.5.1): move focus to a section heading.
+  // Move focus to a section heading and remember it as the current section.
+  // Used by BOTH the prev/next pager (the WCAG 2.5.1 non-swipe alternative) and
+  // the horizontal swipe gesture below.
   const focusSection = (index: number): void => {
     const clamped = Math.max(0, Math.min(sections.length - 1, index));
+    setCurrentIndex(clamped);
     const target = headingRefs.current[clamped];
     target?.focus();
     // `scrollIntoView` is a progressive enhancement (and absent under jsdom).
     target?.scrollIntoView?.({ block: 'nearest' });
+  };
+
+  // Horizontal swipe paging (WS-B.2.4b). A near-horizontal swipe moves to the
+  // next (left) or previous (right) section; the pager is the required
+  // single-pointer/keyboard alternative (WCAG 2.5.1). Vertical swipes are left
+  // to the Sheet (swipe-down dismiss) and normal scrolling.
+  const SWIPE_THRESHOLD = 48;
+  const onTouchStart = (event: ReactTouchEvent<HTMLDivElement>): void => {
+    const point = event.touches[0];
+    touchStart.current = point ? { x: point.clientX, y: point.clientY } : null;
+  };
+  const onTouchEnd = (event: ReactTouchEvent<HTMLDivElement>): void => {
+    const start = touchStart.current;
+    const end = event.changedTouches[0];
+    touchStart.current = null;
+    if (!start || !end) return;
+    const dx = end.clientX - start.x;
+    const dy = end.clientY - start.y;
+    if (Math.abs(dx) > SWIPE_THRESHOLD && Math.abs(dx) > Math.abs(dy)) {
+      focusSection(currentIndex + (dx < 0 ? 1 : -1));
+    }
   };
 
   return (
@@ -204,7 +238,7 @@ export function ContextCard({
         </Button>
       </nav>
 
-      <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-3" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
         {sections.map((section, index) => (
           <section
             key={section.key}

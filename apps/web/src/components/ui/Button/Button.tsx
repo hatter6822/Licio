@@ -13,6 +13,8 @@ interface ButtonBaseProps {
   iconOnly?: boolean;
   /** Shows a spinner, sets `aria-busy`, and blocks activation (no double submit). */
   loading?: boolean;
+  /** Visually-hidden text announced while loading (default "Loading…"). */
+  loadingLabel?: string;
   /** Disables activation via `aria-disabled` (stays focusable & announced). */
   disabled?: boolean;
   className?: string;
@@ -59,6 +61,7 @@ export function Button(props: ButtonProps): React.ReactElement {
     size = 'md',
     iconOnly = false,
     loading = false,
+    loadingLabel = 'Loading…',
     disabled = false,
     className,
     children,
@@ -100,7 +103,12 @@ export function Button(props: ButtonProps): React.ReactElement {
 
   const content = (
     <>
-      {loading ? <Icon name="refresh" className="size-5 animate-spin" /> : null}
+      {loading ? (
+        <>
+          <Icon name="refresh" className="size-5 animate-spin" />
+          <span className="sr-only">{loadingLabel}</span>
+        </>
+      ) : null}
       {loading && iconOnly ? null : children}
     </>
   );

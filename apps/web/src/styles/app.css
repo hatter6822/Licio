@@ -63,6 +63,24 @@
 }
 
 /* ===================================================================== *
+ * Hit-slop (WS-B.1.1e). For an intentionally-small visual control, `tap-target`
+ * expands the *activation* area to at least 48×48 (the control + the hit-pad on
+ * each side, floored at the minimum target) via an invisible centred ::before,
+ * without enlarging the visual. Clicks on the ::before activate the element.
+ * ===================================================================== */
+@utility tap-target {
+  position: relative;
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 50%;
+    block-size: max(calc(100% + 2 * var(--licio-target-hit-pad)), var(--licio-target-min));
+    inline-size: max(calc(100% + 2 * var(--licio-target-hit-pad)), var(--licio-target-min));
+    translate: -50% -50%;
+  }
+}
+
+/* ===================================================================== *
  * Reduced motion — defense in depth. The token layer already zeroes
  * --licio-duration-*; this also neutralises Tailwind utility transitions
  * and any animation, keeping only instantaneous (0ms) state changes.

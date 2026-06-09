@@ -19,12 +19,41 @@
 // Focus management: while open the reader is a focus trap (shared
 // `useFocusTrap`), so Tab stays within it and Escape / the Back button restore
 // focus to whatever element opened the reader (the thread).
-import { type ReactNode, useId, useRef, useState } from 'react';
+import DOMPurify from 'dompurify';
+import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { useFocusTrap } from '../../../hooks/useFocusTrap.js';
 import { useT } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
 import { Button } from '../../ui/Button/index.js';
 import { Icon } from '../../ui/Icon/index.js';
+import { type ReadableContent, extractReadable } from './readability.js';
+
+/**
+ * Extract readable content from sanitized HTML, off the main thread where a Web
+ * Worker is available (browsers) and on the main thread otherwise (tests/SSR).
+ * Both paths run the same pure `extractReadable`.
+ */
+async function runReadability(safeHtml: string): Promise<ReadableContent> {
+  if (typeof Worker !== 'undefined') {
+    try {
+      const worker = new Worker(new URL('./readability.worker.ts', import.meta.url), {
+        type: 'module',
+      });
+      const result = await new Promise<ReadableContent>((resolve, reject) => {
+        worker.addEventListener('message', (event: MessageEvent<ReadableContent>) =>
+          resolve(event.data),
+        );
+        worker.addEventListener('error', () => reject(new Error('readability worker failed')));
+        worker.postMessage(safeHtml);
+      });
+      worker.terminate();
+      return result;
+    } catch {
+      // Fall back to the main thread.
+    }
+  }
+  return extractReadable(safeHtml);
+}
 
 export interface SourceCitation {
   /** The source URL the excerpt was captured from. */
@@ -43,8 +72,15 @@ export interface SourceReaderProps {
   /** Receive a captured, edited citation. Omit to hide the capture affordance. */
   onCaptureCitation?: (citation: SourceCitation) => void;
   /**
-   * Pre-sanitized main content for readability mode. Rendered as TEXT split into
-   * paragraphs — never as raw HTML. When absent, readability mode is unavailable.
+   * Raw source HTML for readability mode. It is DOMPurify-sanitized and then the
+   * main content is extracted (in a Web Worker where available) into structured
+   * TEXT, rendered through React — never injected as markup.
+   */
+  sourceHtml?: string;
+  /**
+   * Pre-extracted plain text for readability mode (alternative to `sourceHtml`).
+   * Rendered as TEXT split into paragraphs. When neither is set, readability mode
+   * is unavailable.
    */
   readabilityHtml?: string;
   className?: string;
@@ -71,11 +107,59 @@ function renderReadabilityParagraphs(text: string): ReactNode {
   ));
 }
 
+/** Render extracted readable blocks as safe React text, grouping list items. */
+function renderReadableContent(content: ReadableContent): ReactNode {
+  const nodes: ReactNode[] = [];
+  let listBuffer: { key: string; text: string }[] = [];
+
+  const flushList = (): void => {
+    if (listBuffer.length === 0) return;
+    const buffered = listBuffer;
+    nodes.push(
+      <ul
+        key={`ul-${nodes.length}`}
+        className="flex list-disc flex-col gap-1 ps-5 text-base text-ink"
+      >
+        {buffered.map((entry) => (
+          <li key={entry.key}>{entry.text}</li>
+        ))}
+      </ul>,
+    );
+    listBuffer = [];
+  };
+
+  content.blocks.forEach((block, index) => {
+    const key = `${block.type}-${index}`;
+    if (block.type === 'listitem') {
+      listBuffer.push({ key, text: block.text });
+      return;
+    }
+    flushList();
+    if (block.type === 'heading') {
+      const Tag = (block.level === 2 ? 'h3' : 'h4') as 'h3' | 'h4';
+      nodes.push(
+        <Tag key={key} className="font-semibold text-ink">
+          {block.text}
+        </Tag>,
+      );
+    } else {
+      nodes.push(
+        <p key={key} className="text-base text-ink">
+          {block.text}
+        </p>,
+      );
+    }
+  });
+  flushList();
+  return nodes;
+}
+
 export function SourceReader({
   url,
   title,
   onClose,
   onCaptureCitation,
+  sourceHtml,
   readabilityHtml,
   className,
 }: SourceReaderProps): React.ReactElement {
@@ -86,9 +170,27 @@ export function SourceReader({
   // Escape and the focus trap both return focus to the opener (the thread).
   const trapRef = useFocusTrap<HTMLDivElement>(true, { onEscape: onClose });
 
-  const canReadability = typeof readabilityHtml === 'string' && readabilityHtml.length > 0;
+  const hasSourceHtml = typeof sourceHtml === 'string' && sourceHtml.length > 0;
+  const canReadability =
+    hasSourceHtml || (typeof readabilityHtml === 'string' && readabilityHtml.length > 0);
   const [readabilityOn, setReadabilityOn] = useState(false);
   const showReadability = readabilityOn && canReadability;
+
+  // Extracted, sanitized readable content (when driven by `sourceHtml`).
+  const [content, setContent] = useState<ReadableContent | null>(null);
+  useEffect(() => {
+    if (!showReadability || !hasSourceHtml || sourceHtml === undefined) return;
+    let cancelled = false;
+    // DOMPurify removes scripts/handlers (Section 6.12.7) BEFORE extraction; the
+    // result is rendered as React text, so no remote markup can execute.
+    const safe = String(DOMPurify.sanitize(sourceHtml));
+    void runReadability(safe).then((extracted) => {
+      if (!cancelled) setContent(extracted);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [showReadability, hasSourceHtml, sourceHtml]);
 
   // Editable citation draft. Empty until the user captures or types a selection.
   const [draft, setDraft] = useState('');
@@ -154,7 +256,23 @@ export function SourceReader({
       <div className="min-h-0 flex-1 overflow-auto">
         {showReadability ? (
           <article className="mx-auto flex max-w-prose flex-col gap-4 p-4">
-            {renderReadabilityParagraphs(readabilityHtml)}
+            {hasSourceHtml ? (
+              content ? (
+                content.blocks.length > 0 ? (
+                  renderReadableContent(content)
+                ) : (
+                  <p className="text-base text-ink-muted">
+                    {t('reader.readability.empty', 'No readable content could be extracted.')}
+                  </p>
+                )
+              ) : (
+                <p className="text-base text-ink-muted" aria-live="polite">
+                  {t('reader.readability.loading', 'Extracting readable content…')}
+                </p>
+              )
+            ) : (
+              renderReadabilityParagraphs(readabilityHtml ?? '')
+            )}
           </article>
         ) : (
           <iframe
