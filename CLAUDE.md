@@ -38,6 +38,7 @@ docs/           # Specification and planning documents
 - `pnpm check:workspace-deps` — workspace boundary enforcement (package.json + source imports)
 - `pnpm check:policy` — WS-A doctrine/policy document validation (`docs/policy/`: counts, ID disjointness, severity↔SLA, bijective RNT↔suite mapping, closed vocabularies, cross-document references, prose↔machine-readable consistency)
 - `pnpm check:no-applause` — WS-B no-applause static scan over `apps/web/src/components` (no likes/votes/karma/follower counts/reaction bars; defense in depth with the type-level and runtime guards)
+- `pnpm check:no-raw-egress` — WS-C no-raw-egress static gate over `apps/web/src/signals` (no network-egress primitive or BFF import but the bucketed aggregate uploader; the `assertNoRawEgress` guard and the §22.1 schema admit only buckets)
 - `pnpm check:sw` — WS-C service-worker security scan over the built SW output (no remote `importScripts`, no `eval`, no `new Function`; run after `pnpm --filter web build`)
 - `pnpm sbom` — generate CycloneDX SBOM (includes transitive dependencies)
 - `pnpm db:generate` — generate Drizzle migrations
