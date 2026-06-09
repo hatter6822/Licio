@@ -83,6 +83,21 @@ test.describe('design system — target size (WS-B.1.1e)', () => {
       expect(box.height).toBeGreaterThanOrEqual(47.5);
     }
   });
+
+  test('the tap-target hit-slop expands an inline control to ≥48×48', async ({ page }) => {
+    await gotoStyleguide(page);
+    // The DefinedTerm trigger is an intentionally small inline button; its 48×48
+    // activation area comes from the `tap-target` ::before, which getBoundingClientRect
+    // does not see. Measure the pseudo-element's used size directly (real layout).
+    const term = page.locator('button[class*="tap-target"]').first();
+    await expect(term).toBeVisible();
+    const slop = await term.evaluate((el) => {
+      const before = getComputedStyle(el, '::before');
+      return { width: Number.parseFloat(before.width), height: Number.parseFloat(before.height) };
+    });
+    expect(slop.width).toBeGreaterThanOrEqual(47.5);
+    expect(slop.height).toBeGreaterThanOrEqual(47.5);
+  });
 });
 
 test.describe('design system — zoom & reflow (WS-B.1.1b)', () => {
