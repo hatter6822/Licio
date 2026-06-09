@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import type { ReactNode } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
 import { Icon, type IconName } from '../Icon/index.js';
@@ -12,10 +13,25 @@ export interface NavItem {
   prominent?: boolean;
 }
 
+/** Args passed to a custom link renderer so WS-C can inject a client-side link. */
+export interface NavLinkRenderProps {
+  item: NavItem;
+  isActive: boolean;
+  className: string;
+  children: ReactNode;
+}
+
 export interface BottomNavProps {
   items: NavItem[];
   /** id of the active route; gets aria-current="page". */
   activeId?: string;
+  /**
+   * Render each item's link. Defaults to a plain `<a href>` (full navigation);
+   * WS-C passes a renderer using the router's Link for client-side navigation
+   * with no full-page reload. The renderer must apply `className` and set
+   * `aria-current="page"` when `isActive`.
+   */
+  renderLink?: (props: NavLinkRenderProps) => ReactNode;
   className?: string;
 }
 
@@ -24,7 +40,12 @@ export interface BottomNavProps {
  * lg+. Icons are ALWAYS paired with text labels (never icon-only). The Submit
  * tab is a contribution entry point — never a "post for applause" prompt.
  */
-export function BottomNav({ items, activeId, className }: BottomNavProps): React.ReactElement {
+export function BottomNav({
+  items,
+  activeId,
+  renderLink,
+  className,
+}: BottomNavProps): React.ReactElement {
   const t = useT();
   return (
     <nav
@@ -37,23 +58,31 @@ export function BottomNav({ items, activeId, className }: BottomNavProps): React
       <ul className="flex items-stretch justify-around lg:flex-col lg:gap-1 lg:p-2">
         {items.map((item) => {
           const isActive = item.id === activeId;
+          const linkClassName = cn(
+            'flex min-h-touch flex-col items-center justify-center gap-0.5 rounded-md px-2 py-1 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus lg:flex-row lg:justify-start lg:gap-3 lg:py-2 lg:text-base',
+            // `text-primary-on-soft` is ≥4.5:1 on the canvas in light AND dark
+            // (the solid `text-primary` is only ~3.3:1 on the dark canvas).
+            isActive || item.prominent ? 'text-primary-on-soft' : 'text-ink-muted hover:text-ink',
+          );
+          const content = (
+            <>
+              <Icon name={item.icon} className={cn('size-6', item.prominent && 'size-7')} />
+              <span>{item.label}</span>
+            </>
+          );
           return (
             <li key={item.id} className="flex-1 lg:flex-none">
-              <a
-                href={item.href}
-                aria-current={isActive ? 'page' : undefined}
-                className={cn(
-                  'flex min-h-touch flex-col items-center justify-center gap-0.5 rounded-md px-2 py-1 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus lg:flex-row lg:justify-start lg:gap-3 lg:py-2 lg:text-base',
-                  // `text-primary-on-soft` is ≥4.5:1 on the canvas in light AND dark
-                  // (the solid `text-primary` is only ~3.3:1 on the dark canvas).
-                  isActive || item.prominent
-                    ? 'text-primary-on-soft'
-                    : 'text-ink-muted hover:text-ink',
-                )}
-              >
-                <Icon name={item.icon} className={cn('size-6', item.prominent && 'size-7')} />
-                <span>{item.label}</span>
-              </a>
+              {renderLink ? (
+                renderLink({ item, isActive, className: linkClassName, children: content })
+              ) : (
+                <a
+                  href={item.href}
+                  aria-current={isActive ? 'page' : undefined}
+                  className={linkClassName}
+                >
+                  {content}
+                </a>
+              )}
             </li>
           );
         })}

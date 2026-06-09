@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// Type-safe search-param schemas (WS-C.1.1b). Invalid values are rejected and
+// coerced to the route default via `.catch(...)` — never silently accepted as
+// arbitrary input. These drive the feed-mode switcher and the thread branch tab
+// from shareable URLs.
+import { branchIdSchema, feedModeSchema, uuidSchema } from '@licio/shared';
+import { z } from 'zod';
+
+/**
+ * Front-page feed search: `?mode=` ∈ feed modes. Optional so visiting `/` with no
+ * param uses the reader's saved mode; an invalid value coerces to undefined (the
+ * front page then falls back to the UI store), never silently accepted.
+ */
+export const feedSearchSchema = z.object({
+  mode: feedModeSchema.optional().catch(undefined),
+});
+export type FeedSearch = z.infer<typeof feedSearchSchema>;
+
+/** Thread search: `?branch=` ∈ branch ids (invalid ⇒ overview). */
+export const threadSearchSchema = z.object({
+  branch: branchIdSchema.catch('overview'),
+});
+export type ThreadSearch = z.infer<typeof threadSearchSchema>;
+
+/** Post-login redirect target, preserved across the login flow. */
+export const loginSearchSchema = z.object({
+  redirect: z.string().optional().catch(undefined),
+});
+export type LoginSearch = z.infer<typeof loginSearchSchema>;
+
+/** Submit composer: optional thread to contribute to, and its branch. */
+export const submitSearchSchema = z.object({
+  threadId: uuidSchema.optional().catch(undefined),
+  branch: branchIdSchema.optional().catch(undefined),
+});
+export type SubmitSearch = z.infer<typeof submitSearchSchema>;
+
+/** Validate (and coerce) the feed search params. Never throws. */
+export function parseFeedSearch(search: Record<string, unknown>): FeedSearch {
+  return feedSearchSchema.parse(search);
+}
+
+/** Validate (and coerce) the thread search params. Never throws. */
+export function parseThreadSearch(search: Record<string, unknown>): ThreadSearch {
+  return threadSearchSchema.parse(search);
+}
