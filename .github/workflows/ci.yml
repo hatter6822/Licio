@@ -29,6 +29,7 @@ jobs:
       - run: pnpm biome check .
       - run: pnpm lint:security
       - run: pnpm check:policy
+      - run: pnpm check:no-raw-egress
 
   typecheck:
     name: Type Check
