@@ -32,8 +32,8 @@ test.describe('routing (WS-C.1.1)', () => {
 
   test('renders RestrictedState for a flag-gated route (fail-closed)', async ({ page }) => {
     await page.goto('/rooms/11111111-1111-4111-8111-111111111111/governance');
-    await expect(page.getByRole('heading', { name: /Room governance/i })).toBeVisible();
-    await expect(page.getByText(/not enabled/i)).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1, name: /Room governance/i })).toBeVisible();
+    await expect(page.getByText(/Governance features are not enabled/i)).toBeVisible();
   });
 
   test('renders a not-found state inside the shell for an unknown path', async ({ page }) => {

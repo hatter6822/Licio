@@ -90,6 +90,10 @@ function RootLayout(): React.ReactElement {
   const t = useT();
   useRuntimeToasts();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  // The component workbench renders its own AppShell; never double-wrap it.
+  if (pathname.startsWith('/styleguide')) {
+    return <Outlet />;
+  }
   const items = defaultNavItems(t);
   const activeId = activeTabId(pathname);
   return (

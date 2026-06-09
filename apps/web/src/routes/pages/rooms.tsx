@@ -98,7 +98,7 @@ export function RoomGovernancePage(): React.ReactElement {
       <PageHeader title={t('room.governance.title', 'Room governance')} />
       <div className="mx-auto w-full max-w-2xl p-4">
         <RestrictedState
-          title={t('room.governance.title', 'Room governance')}
+          title={t('room.governance.unavailable', 'Governance unavailable')}
           reason={
             governanceEnabled
               ? t('room.governance.soon', 'Room governance is not yet available here.')

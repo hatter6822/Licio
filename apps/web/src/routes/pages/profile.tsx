@@ -304,7 +304,7 @@ export function WalletPage(): React.ReactElement {
       <PageHeader title={t('profile.wallet', 'Wallet')} />
       <div className="mx-auto w-full max-w-2xl p-4">
         <RestrictedState
-          title={t('wallet.title', 'Wallet')}
+          title={t('wallet.unavailable', 'Wallet unavailable')}
           reason={
             cryptoEnabled
               ? t('wallet.soon', 'Wallet features are not yet available here.')
