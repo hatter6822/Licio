@@ -119,10 +119,17 @@ reproducing an impossible figure.
 |---|---|---|
 | Unit / component | jest-axe (`test/axe.ts`) | roles, names, ARIA, structure (jsdom) |
 | Contrast | token maths (`contrast.test.ts`) | every documented pair, all modes |
-| End-to-end | `@axe-core/playwright` | full ruleset incl. color-contrast, real browsers |
+| End-to-end | `@axe-core/playwright` | full ruleset incl. color-contrast + target-size, real browsers |
 
 jsdom has no layout engine, so the unit-level axe helper disables
 `color-contrast` (validated by the maths + e2e instead) — see `test/axe.ts`.
+
+`apps/web/e2e/design-system.spec.ts` runs against the workbench (`/styleguide`)
+and covers what jsdom cannot: real-browser axe (color-contrast, target-size) in
+light/dark/high-contrast/reduced-motion, landmarks, the skip link, the 48×48
+target size, narrow-viewport reflow and 200% zoom, and Sheet reading-position
+preservation. The component workbench (`src/styleguide/`) is code-split, so it
+never weighs down the app bundle.
 
 ### Biome a11y rule deferral
 
@@ -143,30 +150,33 @@ and in the e2e suite, which is the stronger guarantee.
 | 1.1f | `Icon`, `status.ts` | inline SVG, `currentColor`, status vocabulary |
 | 1.2a–d | `Button`, `Input`, `TextArea`, `Select`, `Checkbox`, `RadioGroup` | |
 | 1.3a–c | `Dialog`, `Sheet`, `Toast`, `Tooltip` + `useFocusTrap`/`useScrollLock` | |
+| 1.1a | `ThemeToggle` + `applyColorScheme` | manual System/Light/Dark (sets `data-theme`) |
+| 1.1e | `tap-target` utility | 48×48 hit-slop from the hit-pad/target-min tokens |
 | 1.4 | `Skeleton`, `Badge`, `Card`, `Tabs`, `Avatar`, `Separator`, `Switch` | |
-| 1.5 | `AppShell`, `BottomNav`, `PageHeader`, `ScrollArea`, `SafeArea` | |
+| 1.5 | `AppShell`, `BottomNav`, `PageHeader`, `ScrollArea`, `SafeArea`, `VirtualList` | `VirtualList` windows long lists with arrow-key roving + focus retention |
 | 1.6 | `SkipToContent`, `RouteAnnouncer`, `useSpaFocus` | router integration for WS-C |
 | 2.1a–c | `StoryCard` + no-applause + SR-order suites | |
 | 2.2 | `SwipeableStoryCard`, `useStoryCardSwipe` | gesture layer over StoryCard |
-| 2.3 | `RatingLabel` | seven labels, colour + icon + text |
-| 2.4a–b | `ContextCard` | seven sections in a `Sheet` |
+| 2.3 | `RatingLabel` | seven labels, colour + icon + text; same-hue pairs ≥3:1 distinct (solid vs soft) |
+| 2.4a–b | `ContextCard` | seven sections in a `Sheet`, horizontal swipe + pager |
 | 2.5 | `EmptyState`, `LoadingState`, `ErrorState`, `OfflineState`, `RestrictedState` | |
 | 2.6 | `SignalLedger` | private, read-only, no numeric score |
-| 2.7 | `SourceReader` | `sandbox=""` iframe, readability as plain text |
+| 2.7 | `SourceReader` + `readability.ts`/`.worker.ts` | `sandbox=""` iframe; DOMPurify-sanitized, worker-extracted readable text |
 | 2.8a–c | `SectionEndpoint`, `DiminishingReturnsPrompt`, wellbeing controls | |
 | 2.9 | `FeedModeSwitcher` | |
 | 2.10–11 | `ParticipationComposer`, composer affordances | 8 modes, voice/citation/attachment |
 | 2.12 | `ThreadBranchNav` | Overview-first, lazy + Skeleton |
-| 2.13 | `ProgressiveDisclosure`, `DefinedTerm`, `ExplainLikeNewLens` | |
-| 2.14 | `i18n/`, translation disclosure | localization, RTL, Intl formatting |
+| 2.13 | `ProgressiveDisclosure`, `DefinedTerm`, `ExplainLikeNewLens`, `jargon.ts` | progressive disclosure, defined terms, plain-language lens + jargon audit |
+| 2.14 | `i18n/` (`t()` ICU plural/select), `TranslationDisclosure` | localization, RTL, Intl formatting, view-original |
+| workbench | `styleguide/` (`/styleguide` route) | mounts the whole system; the Playwright e2e target |
 
 ## Working with the design system
 
 ```bash
 pnpm --filter web gen:tokens     # regenerate tokens.generated.css from tokens.ts
-pnpm --filter web dev            # Vite dev server
+pnpm --filter web dev            # Vite dev server — open /styleguide for the workbench
 pnpm test                        # unit/component tests (Vitest + jest-axe)
-pnpm --filter web test:e2e       # Playwright + axe-core (real browsers)
+pnpm --filter web test:e2e       # Playwright + axe-core (real browsers) — incl. /styleguide
 pnpm typecheck && pnpm lint      # strict TS + Biome
 pnpm check:no-applause           # static no-applause scan
 ```

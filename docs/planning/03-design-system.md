@@ -2,17 +2,26 @@
 
 **Milestone:** M0-M1 | **Priority:** 0-1 | **Dependencies:** WS-0.3 | **Wave:** 2-3 | **Estimated duration:** 3-4 weeks
 
-> **Implementation status:** Implemented in `apps/web/src` (tokens in
+> **Implementation status:** Fully implemented in `apps/web/src` (tokens in
 > `design-system/`, primitives in `components/ui/`, application components in
-> `components/{story,feed,wellbeing,profile,reader,composer,thread,cognitive}/`,
-> i18n in `i18n/`, SPA focus management in `components/a11y/`). See
-> `docs/design-system/README.md` for the implementation reference and component
-> catalogue. One documented correction: the WS-B.1.1a `--licio-border` contrast
-> figure of 3.1:1 for `#C4C8CE` is arithmetically unachievable (a light-grey
-> hairline on white is ~1.68:1); the WCAG 1.4.11 intent is carried by
-> `--licio-border-strong` (verified ≥3:1 on every surface), and the decorative
-> `--licio-border` is exempt. Verified by `pnpm test`, `pnpm typecheck`,
-> `pnpm lint`, `pnpm check:no-applause`, and the strict-CSP build.
+> `components/{story,feed,wellbeing,profile,reader,composer,thread,cognitive,i18n}/`,
+> localization in `i18n/`, SPA focus management in `components/a11y/`, and a
+> code-split component workbench in `styleguide/` served at `/styleguide`). This
+> includes the layout/virtualization (`VirtualList`, with arrow-key roving +
+> focus retention), the sandboxed reader's DOMPurify-sanitized, Web-Worker
+> readability extraction, ICU-plural localization, the manual dark-mode
+> `ThemeToggle`, and the `tap-target` hit-slop. Real-browser verification
+> (axe color-contrast/target-size, dark/high-contrast/reduced-motion, reflow,
+> 200% zoom, scroll preservation) lives in `apps/web/e2e/design-system.spec.ts`.
+> See `docs/design-system/README.md` for the implementation reference and
+> component catalogue.
+>
+> One documented correction: the WS-B.1.1a `--licio-border` contrast figure of
+> 3.1:1 for `#C4C8CE` is arithmetically unachievable (a light-grey hairline on
+> white is ~1.68:1); the WCAG 1.4.11 intent is carried by `--licio-border-strong`
+> (verified ≥3:1 on every surface), and the decorative `--licio-border` is
+> exempt. Verified by `pnpm test`, `pnpm typecheck`, `pnpm lint`,
+> `pnpm check:no-applause`, and the strict-CSP build.
 
 ## Overview
 
