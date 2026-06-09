@@ -64,8 +64,16 @@ function stripBoilerplate(html: string): string {
  * `<article>` / `<main>` region when present, then collects headings,
  * paragraphs, and list items in document order.
  */
+/**
+ * Hard cap on the HTML we will parse. Bounds memory and the worst-case work of
+ * the lazy-quantifier block regexes on pathological/malicious sources (e.g. a
+ * page made of millions of unclosed tags), which run in a worker.
+ */
+const MAX_INPUT_BYTES = 2_000_000;
+
 export function extractReadable(rawHtml: string): ReadableContent {
-  const html = stripBoilerplate(rawHtml);
+  const bounded = rawHtml.length > MAX_INPUT_BYTES ? rawHtml.slice(0, MAX_INPUT_BYTES) : rawHtml;
+  const html = stripBoilerplate(bounded);
 
   const titleMatch =
     /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html) ?? /<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html);

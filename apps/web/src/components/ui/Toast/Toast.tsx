@@ -189,7 +189,7 @@ function ToastItem({ entry, onDismiss }: ToastItemProps): React.ReactElement {
         type="button"
         aria-label="Dismiss"
         onClick={dismiss}
-        className="-mr-1 -mt-1 inline-flex min-h-touch min-w-touch shrink-0 items-center justify-center rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+        className="-me-1 -mt-1 inline-flex min-h-touch min-w-touch shrink-0 items-center justify-center rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
       >
         <Icon name="x" className="size-5" />
       </button>

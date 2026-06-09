@@ -3,7 +3,13 @@ import { render, renderHook, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { describe, expect, it } from 'vitest';
 import { I18nProvider, useI18n, useT } from './I18nProvider.js';
-import { formatList, formatNumber, formatReadingEstimate, resolveDirection } from './index.js';
+import {
+  formatDate,
+  formatList,
+  formatNumber,
+  formatReadingEstimate,
+  resolveDirection,
+} from './index.js';
 
 describe('resolveDirection', () => {
   it('returns rtl for RTL languages and ltr otherwise', () => {
@@ -60,6 +66,29 @@ describe('Intl formatters', () => {
 
   it('formats conjunction lists', () => {
     expect(formatList(['lenses', 'sources', 'context'], 'en-US')).toContain('and');
+  });
+
+  it('falls back to a comma join when Intl.ListFormat is unavailable', () => {
+    const intl = Intl as { ListFormat?: unknown };
+    const original = intl.ListFormat;
+    intl.ListFormat = undefined;
+    try {
+      expect(formatList(['a', 'b', 'c'], 'en-US')).toBe('a, b, c');
+    } finally {
+      intl.ListFormat = original;
+    }
+  });
+
+  it('formats dates per locale', () => {
+    const date = new Date(Date.UTC(2026, 5, 9));
+    const opts: Intl.DateTimeFormatOptions = {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      timeZone: 'UTC',
+    };
+    expect(formatDate(date, 'en-US', opts)).toBe('Jun 9, 2026');
+    expect(formatDate(date.getTime(), 'en-GB', opts)).toBe('9 Jun 2026');
   });
 
   it('rounds reading estimates to at least one minute and uses the template', () => {

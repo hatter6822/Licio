@@ -121,7 +121,7 @@ export function Checkbox({
         <span>
           {label}
           {required ? (
-            <span className="ml-0.5 text-error-on-soft" aria-hidden="true">
+            <span className="ms-0.5 text-error-on-soft" aria-hidden="true">
               *
             </span>
           ) : null}

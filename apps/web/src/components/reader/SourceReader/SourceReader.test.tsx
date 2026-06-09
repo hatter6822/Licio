@@ -4,6 +4,19 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { checkA11y } from '../../../test/axe.js';
 import { SourceReader, type SourceReaderProps } from './SourceReader.js';
+import { extractReadable } from './readability.js';
+
+// A Worker stand-in that runs the real extractor and posts the result back, so
+// the worker offload branch (absent in jsdom) is exercised.
+class FakeWorker extends EventTarget {
+  postMessage(data: string): void {
+    const result = extractReadable(data);
+    queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', { data: result })));
+  }
+  terminate(): void {
+    /* no-op */
+  }
+}
 
 const DANGEROUS_SANDBOX_TOKENS = [
   'allow-scripts',
@@ -207,5 +220,43 @@ describe('SourceReader (WS-B.2.7)', () => {
     expect((window as unknown as Record<string, unknown>)['__pwned']).toBeUndefined();
     expect(screen.queryByText(/__pwned/)).toBeNull();
     expect(screen.queryByText(/window\./)).toBeNull();
+  });
+});
+
+describe('SourceReader worker extraction path (WS-B.2.7)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('extracts off the main thread when a Worker is available', async () => {
+    vi.stubGlobal('Worker', FakeWorker);
+    const user = userEvent.setup();
+    renderReader({ sourceHtml: '<article><h2>From the worker</h2><p>Body.</p></article>' });
+    await user.click(screen.getByRole('button', { name: 'Reader view' }));
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'From the worker' })).toBeInTheDocument(),
+    );
+    expect(screen.getByText('Body.')).toBeInTheDocument();
+  });
+});
+
+describe('SourceReader URL scheme guard (WS-B.2.7 / Section 25.2)', () => {
+  it('frames an http(s) source', () => {
+    const { container } = renderReader({ url: 'https://example.org/a' });
+    expect(container.querySelector('iframe')).not.toBeNull();
+  });
+
+  it('refuses to frame a non-http(s) URL (javascript:/data:)', () => {
+    for (const url of [
+      'javascript:alert(1)',
+      'data:text/html,<x>',
+      '//evil.example',
+      '/relative',
+    ]) {
+      const { container, unmount } = renderReader({ url });
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(screen.getByText('This source cannot be opened in the reader.')).toBeInTheDocument();
+      unmount();
+    }
   });
 });

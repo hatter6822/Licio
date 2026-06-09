@@ -23,7 +23,7 @@ const base = 'block rounded-lg border border-line bg-canvas';
 // Interactive surfaces get a hover affordance and the system focus ring. The
 // focus ring matches the other primitives (Button/Input) for consistency.
 const interactiveClasses =
-  'text-left transition-colors hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
+  'text-start transition-colors hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
 
 /**
  * Semantic container (WS-B.1.4). Renders the chosen element (`article` by

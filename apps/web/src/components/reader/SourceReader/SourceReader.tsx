@@ -55,6 +55,22 @@ async function runReadability(safeHtml: string): Promise<ReadableContent> {
   return extractReadable(safeHtml);
 }
 
+/**
+ * Only absolute http(s) sources are framed. The empty sandbox already blocks
+ * script execution, but rejecting non-http(s) schemes (script, data, and blob
+ * URLs) and relative/protocol-relative URLs at this boundary is defense in depth
+ * for a UGC + wallet app where an injected script could drain funds
+ * (Section 25.2).
+ */
+function isHttpUrl(value: string): boolean {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 export interface SourceCitation {
   /** The source URL the excerpt was captured from. */
   url: string;
@@ -274,6 +290,10 @@ export function SourceReader({
               renderReadabilityParagraphs(readabilityHtml ?? '')
             )}
           </article>
+        ) : !isHttpUrl(url) ? (
+          <p className="p-4 text-base text-ink-muted">
+            {t('reader.unsafeUrl', 'This source cannot be opened in the reader.')}
+          </p>
         ) : (
           <iframe
             // EMPTY sandbox = maximally restrictive: no scripts, no same-origin,

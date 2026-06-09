@@ -104,12 +104,15 @@ reproducing an impossible figure.
   `const t = useT(); t('key', 'Default English', params?)`. Dates/numbers/reading
   estimates use the `Intl` helpers in `i18n/format.ts`.
 - **RTL.** Components use logical Tailwind utilities (`ms-`/`me-`/`ps-`/`pe-`/
-  `start-`/`end-`/`text-start`) rather than physical `ml`/`mr`/`left`/`right`.
-  The one exception is `SafeArea`, where device insets are physical.
-  `I18nProvider` reflects `dir`/`lang` onto `<html>`.
+  `start-`/`end-`/`text-start`) rather than physical `ml`/`mr`/`left`/`right`
+  (audited — the only physical exception is `SafeArea`, where device insets are
+  physical). `I18nProvider` reflects `dir`/`lang` onto `<html>`.
 - **Strict TS / security.** No `any`, `exactOptionalPropertyTypes`; no inline
   styles, no `dangerouslySetInnerHTML`, no `innerHTML`/`eval`. The build asserts
-  zero inline scripts/styles (strict CSP).
+  zero inline scripts/styles (strict CSP). The in-app reader (WS-B.2.7) layers
+  defenses: an empty `sandbox`, an http(s)-only `src` guard, DOMPurify on the
+  source before extraction, an input-size cap, and rendering extracted content
+  as React-escaped text — never as markup.
 - **Touch & focus.** 48×48 minimum targets; a visible 2px offset focus ring
   (`focus-visible:outline-focus`, WCAG 2.4.13) on every interactive element.
 
@@ -167,7 +170,7 @@ and in the e2e suite, which is the stronger guarantee.
 | 2.4a–b | `ContextCard` | seven sections in a `Sheet`, horizontal swipe + pager |
 | 2.5 | `EmptyState`, `LoadingState`, `ErrorState`, `OfflineState`, `RestrictedState` | |
 | 2.6 | `SignalLedger` | private, read-only, no numeric score |
-| 2.7 | `SourceReader` + `readability.ts`/`.worker.ts` | `sandbox=""` iframe; DOMPurify-sanitized, worker-extracted readable text |
+| 2.7 | `SourceReader` + `readability.ts`/`.worker.ts` | `sandbox=""` iframe restricted to http(s) `src`; DOMPurify-sanitized, worker-extracted readable text (input-capped) |
 | 2.8a–c | `SectionEndpoint`, `DiminishingReturnsPrompt`, wellbeing controls | |
 | 2.9 | `FeedModeSwitcher` | |
 | 2.10–11 | `ParticipationComposer`, composer affordances | 8 modes, voice/citation/attachment |

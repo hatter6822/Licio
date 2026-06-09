@@ -41,7 +41,7 @@ export interface SelectProps {
 }
 
 const triggerBase =
-  'flex min-h-touch w-full items-center justify-between gap-2 rounded-md border bg-canvas px-3 py-2 text-left text-base text-ink transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
+  'flex min-h-touch w-full items-center justify-between gap-2 rounded-md border bg-canvas px-3 py-2 text-start text-base text-ink transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
 
 const optionBase =
   'flex min-h-touch cursor-pointer items-center justify-between gap-2 px-3 py-2 text-base text-ink';
@@ -250,7 +250,7 @@ export function Select({
       <span id={labelId} className={cn('text-sm font-medium text-ink', hideLabel && 'sr-only')}>
         {label}
         {required ? (
-          <span className="ml-0.5 text-error-on-soft" aria-hidden="true">
+          <span className="ms-0.5 text-error-on-soft" aria-hidden="true">
             *
           </span>
         ) : null}
@@ -294,7 +294,7 @@ export function Select({
             role="listbox"
             aria-labelledby={labelId}
             tabIndex={-1}
-            className="z-dropdown absolute left-0 right-0 top-full mt-1 max-h-64 overflow-auto rounded-md border border-line-strong bg-surface py-1 shadow-md"
+            className="z-dropdown absolute inset-x-0 top-full mt-1 max-h-64 overflow-auto rounded-md border border-line-strong bg-surface py-1 shadow-md"
           >
             {options.map((option, index) => {
               const isSelected = option.value === selectedValue;
