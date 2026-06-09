@@ -9,12 +9,18 @@
 > code-split component workbench in `styleguide/` served at `/styleguide`). This
 > includes the layout/virtualization (`VirtualList`, with arrow-key roving +
 > focus retention), the sandboxed reader's DOMPurify-sanitized, Web-Worker
-> readability extraction, ICU-plural localization, the manual dark-mode
-> `ThemeToggle`, and the `tap-target` hit-slop. Real-browser verification
-> (axe color-contrast/target-size, dark/high-contrast/reduced-motion, reflow,
-> 200% zoom, scroll preservation) lives in `apps/web/e2e/design-system.spec.ts`.
-> See `docs/design-system/README.md` for the implementation reference and
-> component catalogue.
+> readability extraction, the manual dark-mode `ThemeToggle`, and the
+> `tap-target` hit-slop. Localization is a full minimal-ICU pipeline (plural /
+> select / selectordinal + apostrophe escaping) with lazy per-locale catalogs
+> (`loadCatalog`) and an `en-XA` pseudo-locale that proves it end-to-end; the
+> `Sheet` animates both in and out (reduced-motion-aware); `TextArea` auto-grows
+> via CSS `field-sizing` with a `scrollHeight` JS fallback; and a localized
+> `ReadingEstimate` affordance renders a descriptive "N min read" (never a
+> score). Real-browser verification (axe color-contrast/target-size including the
+> `tap-target` hit-slop, dark/high-contrast/reduced-motion, reflow, 200% zoom,
+> scroll preservation) lives in `apps/web/e2e/design-system.spec.ts`. See
+> `docs/design-system/README.md` for the implementation reference and component
+> catalogue.
 >
 > One documented correction: the WS-B.1.1a `--licio-border` contrast figure of
 > 3.1:1 for `#C4C8CE` is arithmetically unachievable (a light-grey hairline on

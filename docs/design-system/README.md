@@ -19,8 +19,8 @@ scores.
 apps/web/src/
   design-system/     Tokens (SSOT) + WCAG contrast maths + CSS generator   (WS-B.1.1)
   styles/            app.css → tokens.generated.css (the --licio-* layer)
-  i18n/              I18nProvider, t(), Intl formatters, RTL direction      (WS-B.2.14)
-  hooks/             useFocusTrap, useScrollLock                            (WS-B.1.3)
+  i18n/              I18nProvider, t() + ICU, Intl, RTL, pseudo-locale, catalogs (WS-B.2.14)
+  hooks/             useFocusTrap, useScrollLock, useReducedMotion          (WS-B.1.3)
   components/
     ui/              Primitives: Icon, Button, Input, …, Tabs, AppShell     (WS-B.1.x)
     a11y/            SkipToContent, RouteAnnouncer, useSpaFocus             (WS-B.1.6)
@@ -102,8 +102,13 @@ reproducing an impossible figure.
   forbidden-pattern matrix at the DOM and type level (runtime), and
   `pnpm check:no-applause` greps the component tree in CI (static).
 - **Localized copy.** All user-facing strings flow through
-  `const t = useT(); t('key', 'Default English', params?)`. Dates/numbers/reading
-  estimates use the `Intl` helpers in `i18n/format.ts`.
+  `const t = useT(); t('key', 'Default English', params?)`. The default carries a
+  minimal ICU MessageFormat (plural / select / selectordinal via `Intl.PluralRules`,
+  `#`, and apostrophe escaping). Dates/numbers/reading estimates use the `Intl`
+  helpers in `i18n/format.ts`. Real per-locale catalogs load lazily via
+  `loadCatalog(locale)`; the pseudo-locale `en-XA` (`pseudo.ts`) accents and
+  expands every resolved string to prove the pipeline end-to-end with no
+  translation-accuracy risk.
 - **RTL.** Components use logical Tailwind utilities (`ms-`/`me-`/`ps-`/`pe-`/
   `start-`/`end-`/`text-start`) rather than physical `ml`/`mr`/`left`/`right`
   (audited — the only physical exception is `SafeArea`, where device insets are
@@ -131,8 +136,9 @@ jsdom has no layout engine, so the unit-level axe helper disables
 `apps/web/e2e/design-system.spec.ts` runs against the workbench (`/styleguide`)
 and covers what jsdom cannot: real-browser axe (color-contrast, target-size) in
 light/dark/high-contrast/reduced-motion, landmarks, the skip link, the 48×48
-target size, narrow-viewport reflow and 200% zoom, and Sheet reading-position
-preservation. The component workbench (`src/styleguide/`) is code-split, so it
+target size (including the `tap-target` hit-slop, measured from its `::before`
+since `getBoundingClientRect` cannot see it), narrow-viewport reflow and 200%
+zoom, and Sheet reading-position preservation. The component workbench (`src/styleguide/`) is code-split, so it
 never weighs down the app bundle.
 
 The suite has been executed in Chromium (14/14 passing). The dark-mode axe run
@@ -158,11 +164,11 @@ and in the e2e suite, which is the stronger guarantee.
 |---|---|---|
 | 1.1a–e | design tokens | colour, type, spacing, motion, touch target |
 | 1.1f | `Icon`, `status.ts` | inline SVG, `currentColor`, status vocabulary |
-| 1.2a–d | `Button`, `Input`, `TextArea`, `Select`, `Checkbox`, `RadioGroup` | |
-| 1.3a–c | `Dialog`, `Sheet`, `Toast`, `Tooltip` + `useFocusTrap`/`useScrollLock` | |
+| 1.2a–d | `Button`, `Input`, `TextArea`, `Select`, `Checkbox`, `RadioGroup` | `TextArea` auto-grows via CSS `field-sizing` with a `scrollHeight` JS fallback |
+| 1.3a–c | `Dialog`, `Sheet`, `Toast`, `Tooltip` + `useFocusTrap`/`useScrollLock`/`useReducedMotion` | `Sheet` animates in **and** out (reduced-motion-aware; immediate unmount when reduced) |
 | 1.1a | `ThemeToggle` + `applyColorScheme` | manual System/Light/Dark (sets `data-theme`) |
-| 1.1e | `tap-target` utility | 48×48 hit-slop from the hit-pad/target-min tokens |
-| 1.4 | `Skeleton`, `Badge`, `Card`, `Tabs`, `Avatar`, `Separator`, `Switch` | |
+| 1.1e | `tap-target` utility | 48×48 hit-slop from the hit-pad/target-min tokens (e2e-measured) |
+| 1.4 | `Skeleton`, `Badge`, `Card`, `Tabs`, `Avatar`, `Separator`, `Switch`, `ReadingEstimate` | `ReadingEstimate`: localized "N min read", descriptive — never a score |
 | 1.5 | `AppShell`, `BottomNav`, `PageHeader`, `ScrollArea`, `SafeArea`, `VirtualList` | `VirtualList` windows long lists with arrow-key roving + focus retention |
 | 1.6 | `SkipToContent`, `RouteAnnouncer`, `useSpaFocus` | router integration for WS-C |
 | 2.1a–c | `StoryCard` + no-applause + SR-order suites | |
@@ -171,13 +177,13 @@ and in the e2e suite, which is the stronger guarantee.
 | 2.4a–b | `ContextCard` | seven sections in a `Sheet`, horizontal swipe + pager |
 | 2.5 | `EmptyState`, `LoadingState`, `ErrorState`, `OfflineState`, `RestrictedState` | |
 | 2.6 | `SignalLedger` | private, read-only, no numeric score |
-| 2.7 | `SourceReader` + `readability.ts`/`.worker.ts` | `sandbox=""` iframe restricted to http(s) `src`; DOMPurify-sanitized, worker-extracted readable text (input-capped) |
+| 2.7 | `SourceReader` + `readability.ts`/`.worker.ts` | `sandbox=""` iframe restricted to http(s) `src`; DOMPurify-sanitized, worker-extracted readable text (input-capped); framing remote sources needs a deployment `frame-src` (WS-C) |
 | 2.8a–c | `SectionEndpoint`, `DiminishingReturnsPrompt`, wellbeing controls | |
 | 2.9 | `FeedModeSwitcher` | |
 | 2.10–11 | `ParticipationComposer`, composer affordances | 8 modes, voice/citation/attachment |
 | 2.12 | `ThreadBranchNav` | Overview-first, lazy + Skeleton |
 | 2.13 | `ProgressiveDisclosure`, `DefinedTerm`, `ExplainLikeNewLens`, `jargon.ts` | progressive disclosure, defined terms, plain-language lens + jargon audit |
-| 2.14 | `i18n/` (`t()` ICU plural/select), `TranslationDisclosure` | localization, RTL, Intl formatting, view-original |
+| 2.14 | `i18n/` (`t()` ICU plural/select + apostrophe escaping, pseudo-locale `en-XA`, lazy `loadCatalog`), `TranslationDisclosure` | localization, RTL, Intl formatting, view-original |
 | workbench | `styleguide/` (`/styleguide` route) | mounts the whole system; the Playwright e2e target |
 
 ## Working with the design system

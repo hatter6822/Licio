@@ -28,8 +28,8 @@ pnpm test                      # unit/component tests (Vitest + jest-axe)
 src/
   design-system/   design tokens (SSOT), WCAG contrast maths, CSS generator
   styles/          app.css + generated --licio-* token layer
-  i18n/            localization (t()), Intl formatting, RTL direction
-  hooks/           useFocusTrap, useScrollLock
+  i18n/            localization (t() + ICU), Intl formatting, RTL, pseudo-locale, lazy catalogs
+  hooks/           useFocusTrap, useScrollLock, useReducedMotion
   components/
     ui/            design-system primitives
     a11y/          skip link, route announcer, SPA focus management
