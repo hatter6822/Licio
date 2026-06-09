@@ -2,6 +2,11 @@
 
 **Milestone:** M1 | **Priority:** 0-1 | **Dependencies:** WS-0 (complete), WS-B.1 | **Wave:** 2-4 | **Estimated duration:** 4-5 weeks
 
+> **Implementation status:** implemented. The as-built architecture, file map,
+> caching/strategy tables, bucket definitions, and security posture are documented
+> in the implementation reference [`docs/pwa-client/README.md`](../pwa-client/README.md).
+> This document remains the authoritative specification.
+
 ## Overview
 
 Core PWA infrastructure: routing, state management, service worker lifecycle, offline support, push notifications, and in-browser signal processing. This workstream builds the application skeleton that the design system components (WS-B) populate. Every architectural decision prioritizes security (strict CSP, Trusted Types, no inline scripts), offline resilience (IndexedDB, background sync, iOS eviction detection), and privacy (raw attention events processed and discarded in-browser, never uploaded).

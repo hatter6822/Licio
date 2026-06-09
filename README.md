@@ -1,6 +1,13 @@
 # Licio
 
-Licio is a mobile-first Progressive Web App for social news and forum discussion. It intentionally has no likes, upvotes, public karma, pay-to-rank mechanics, or wallet-based visibility boosts. This repository currently implements **WS-0: Repository Foundation and Secure Development Environment**.
+Licio is a mobile-first Progressive Web App for social news and forum discussion. It intentionally has no likes, upvotes, public karma, pay-to-rank mechanics, or wallet-based visibility boosts.
+
+Implemented workstreams:
+
+- **WS-0** — Repository Foundation and Secure Development Environment (below).
+- **WS-A** — Doctrine and policy documents ([`docs/policy/`](docs/policy/)).
+- **WS-B** — PWA UX and design system ([`docs/design-system/README.md`](docs/design-system/README.md)).
+- **WS-C** — PWA client application: routing, client state, type-safe data path, service worker/offline store, push notifications, in-browser signal processing, and performance budgets ([`docs/pwa-client/README.md`](docs/pwa-client/README.md)).
 
 ## What is included in WS-0
 
