@@ -46,6 +46,15 @@ describe('I18nProvider + t()', () => {
     expect(result.current.t('x', 'Default {n}', { n: 2 })).toBe('Default 2');
   });
 
+  it('pseudo-localizes every resolved string while preserving interpolation', () => {
+    const { result } = renderHook(() => useT(), { wrapper: wrapper({ locale: 'en-XA' }) });
+    const out = result.current('greeting', 'Hello, {name}', { name: 'Ada' });
+    expect(out.startsWith('⟦')).toBe(true); // bracketed + expanded
+    expect(out.endsWith('⟧')).toBe(true);
+    expect(out).toContain('Ada'); // dynamic value preserved
+    expect(out).not.toContain('Hello'); // surrounding copy is accented
+  });
+
   it('reflects locale and direction onto <html>', () => {
     render(
       <I18nProvider locale="ar">

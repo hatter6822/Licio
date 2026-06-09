@@ -15,4 +15,12 @@ export {
   formatList,
   formatReadingEstimate,
 } from './format.js';
-export { formatMessage, type MessageParams } from './message.js';
+export { formatMessage, type MessageParams, type MessageFormatOptions } from './message.js';
+export { PSEUDO_LOCALE, isPseudoLocale, pseudoFormat } from './pseudo.js';
+export {
+  loadCatalog,
+  catalogs,
+  type CatalogModule,
+  type CatalogLoader,
+  type CatalogRegistry,
+} from './catalog.js';

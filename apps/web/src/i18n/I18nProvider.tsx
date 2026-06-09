@@ -8,6 +8,7 @@
 // WCAG 3.1.1 (Language of Page).
 import { type ReactNode, createContext, useContext, useEffect, useMemo } from 'react';
 import { formatMessage } from './message.js';
+import { isPseudoLocale, pseudoFormat } from './pseudo.js';
 
 export type Direction = 'ltr' | 'rtl';
 
@@ -63,15 +64,22 @@ export function I18nProvider({
     };
   }, [locale, direction]);
 
-  const value = useMemo<I18nContextValue>(
-    () => ({
+  const value = useMemo<I18nContextValue>(() => {
+    const pseudo = isPseudoLocale(locale);
+    return {
       locale,
       dir: direction,
-      t: (key, defaultMessage, params) =>
-        formatMessage(messages[key] ?? defaultMessage, params, locale),
-    }),
-    [locale, direction, messages],
-  );
+      // A catalog override wins; otherwise the component's inline English default
+      // is used. Under the pseudo-locale every resolved string is transformed, so
+      // gaps in localization (and layout that breaks on longer text) are visible.
+      t: (key, defaultMessage, params) => {
+        const template = messages[key] ?? defaultMessage;
+        return pseudo
+          ? pseudoFormat(template, params, locale)
+          : formatMessage(template, params, locale);
+      },
+    };
+  }, [locale, direction, messages]);
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }

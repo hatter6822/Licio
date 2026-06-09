@@ -25,6 +25,15 @@ describe('formatMessage (ICU MessageFormat)', () => {
     expect(formatMessage(msg, { n: 1 }, 'en')).toBe('1 left');
   });
 
+  it('selects ordinal categories for selectordinal', () => {
+    const msg = '{rank, selectordinal, one {#st} two {#nd} few {#rd} other {#th}}';
+    expect(formatMessage(msg, { rank: 1 }, 'en')).toBe('1st');
+    expect(formatMessage(msg, { rank: 2 }, 'en')).toBe('2nd');
+    expect(formatMessage(msg, { rank: 3 }, 'en')).toBe('3rd');
+    expect(formatMessage(msg, { rank: 4 }, 'en')).toBe('4th');
+    expect(formatMessage(msg, { rank: 11 }, 'en')).toBe('11th');
+  });
+
   it('applies locale-specific plural rules', () => {
     // Polish uses a distinct "few"/"many" split; 1 is "one", 2 is "few".
     const msg = '{n, plural, one {jeden} few {kilka} many {wiele} other {inne}}';
@@ -44,5 +53,33 @@ describe('formatMessage (ICU MessageFormat)', () => {
     const msg = '{n, plural, other {# items}}';
     expect(formatMessage(msg, { n: 1234 }, 'en-US')).toBe('1,234 items');
     expect(formatMessage(msg, { n: 1234 }, 'de-DE')).toBe('1.234 items');
+  });
+
+  describe('ICU apostrophe escaping', () => {
+    it('treats a doubled apostrophe as a literal apostrophe', () => {
+      expect(formatMessage("It''s ready", undefined, 'en')).toBe("It's ready");
+    });
+
+    it('quotes braces so escaped syntax renders literally and does not interpolate', () => {
+      expect(formatMessage("Use '{' and '}'", undefined, 'en')).toBe('Use { and }');
+      // An escaped placeholder is NOT substituted even when the param exists.
+      expect(formatMessage("'{'name'}'", { name: 'Ada' }, 'en')).toBe('{name}');
+    });
+
+    it('quotes a literal # inside a plural arm', () => {
+      const msg = "{n, plural, other {# of '#'tags}}";
+      expect(formatMessage(msg, { n: 3 }, 'en')).toBe('3 of #tags');
+    });
+
+    it('leaves a lone apostrophe (not before a syntax char) as itself', () => {
+      expect(formatMessage("the user's draft", undefined, 'en')).toBe("the user's draft");
+    });
+
+    it('skips quoted braces when matching the bounds of a nested plural arm', () => {
+      // The quoted braces inside the arm must not change brace depth while the
+      // parser locates the placeholder's (and the arm's) closing brace.
+      const msg = "{n, plural, other {set '{'x'}'}}";
+      expect(formatMessage(msg, { n: 2 }, 'en')).toBe('set {x}');
+    });
   });
 });
