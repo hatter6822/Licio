@@ -184,19 +184,24 @@ A thin typed Promise wrapper over **raw IndexedDB** (no `idb` dependency).
   AES-256-GCM (`offline/drafts.ts` + `offline/draft-crypto.ts`). The per-device
   key is persisted as a JWK in a separate `licio-keys` store and re-imported
   **non-extractable** for use; plaintext never reaches the draft store. Best-effort
-  — where Web Crypto is absent the draft is stored plaintext so it is never lost.
+  — where Web Crypto is absent the draft is stored plaintext so it is never lost. A
+  transient key-store failure never permanently downgrades the session to plaintext.
 - **Pending queue + sync (2.3):** the single source of truth for unsynced writes.
   Server-wins conflict policy — a 4xx rejection (e.g. a locked thread) is terminal
   (notify + preserve the draft); transient failures retry up to 5 times; an
-  operation is **never dropped**, only parked as `failed` for manual retry.
+  operation is **never dropped**, only parked as `failed` for manual retry. Retries
+  are **trigger-driven** (re-attempted on `online` / app-open / background sync,
+  which provide natural spacing) rather than on a timed exponential-backoff schedule.
 - **Background Sync (2.3):** when work remains, a `licio-pending-queue` sync tag is
   registered; the SW's `sync` handler wakes a client to run the **validated**
   replay (the zod trust-boundary logic stays in the client, never duplicated in the
   worker). iOS lacks Background Sync, so the queue also flushes on `online` /
   app-open — the always-present fallback.
 - **iOS eviction detection (2.2b):** counts are snapshotted on background and
-  compared on resume; a drop while hidden is eviction → resync + a notice if the
-  queue was lost. Persistent storage is requested but never assumed.
+  compared on resume; a pending drop is eviction **only beyond what was legitimately
+  acked-and-removed** since the snapshot, so a background-sync flush while hidden is
+  not misread as data loss → resync + a notice only on a real loss. Persistent
+  storage is requested but never assumed.
 
 ## Push notifications (WS-C.2.4)
 
@@ -235,8 +240,11 @@ uploaded (to `attention.aggregate`).
   between sessions; the cap-reached flag surfaces in the Signal Ledger.
 - **Source/context opens (4.2):** counted once per meaningful session, gated by a
   minimum duration. **Returns + traversal (4.3):** genuine returns past a
-  threshold, with **rage-loop dampening to zero**; distinct-branch traversal.
-  Return/rage-loop state **persists across sessions** (`signals/return-store.ts`,
+  threshold; a rage loop **permanently forfeits** the returns counted during the
+  burst (a `forfeited` counter that never decreases), so those hostile returns
+  cannot resurrect into the count even after the rage window ages out (§6.7
+  anti-gaming). Distinct-branch traversal weights nonredundant exploration.
+  Return/forfeit state **persists across sessions** (`signals/return-store.ts`,
   zod-validated localStorage, bounded by retention + LRU) so a genuine return after
   the app was closed — and a rage-loop spanning a reload — are detected; it is
   local-only (never uploaded) and cleared when personalization is disabled.
@@ -244,8 +252,8 @@ uploaded (to `attention.aggregate`).
   attending" boundary (switching away, session rollover, or durable page-hide), so
   per-item attention is buffered as the reader navigates. The buffer is uploaded in
   **batches on a configurable interval** (not per-event); a failed or page-hide
-  flush durably enqueues to the pending queue. The 1 Hz dwell tick pauses while the
-  page is hidden.
+  flush durably enqueues to the pending queue. The dwell tick AND the flush interval
+  both pause while the page is hidden.
 - **Privacy (4.1d):** personalization-off stops collection (and the return tracker)
   entirely; minimum privacy replaces the user id with a coarse bucket.
   `assertNoRawEgress` is the **runtime** half of the no-raw-egress guarantee — every
@@ -257,15 +265,16 @@ uploaded (to `attention.aggregate`).
 ### The §22.1 bucketing core
 
 `packages/shared/src/schemas/attention.ts`. Each mapping is **total** (defined for
-every numeric input), **monotone** (a larger input never maps to an earlier
-bucket), and **deterministic** (no clock/randomness inside), asserted
-exhaustively in tests.
+every numeric input — NaN/−∞ collapse to the lowest bucket, **+∞ maps to the top
+bucket**, and `sessionBucket` clamps to the valid `Date` range so it can never
+throw), **monotone** (a larger input never maps to an earlier bucket), and
+**deterministic** (no clock/randomness inside), asserted exhaustively in tests.
 
 | Field | Mapping |
 |---|---|
 | `active_dwell_bucket` | none / glance (<10s) / short (<30s) / medium (<2m) / long (<5m) / extended |
 | `branch_depth_bucket` | none (0) / shallow (1) / moderate (2–3) / deep (4+) distinct branches |
-| `return_visit_count_bucket` | none / few (1–2) / several (3–5) / many (6+), rage-loops zeroed |
+| `return_visit_count_bucket` | none / few (1–2) / several (3–5) / many (6+), rage-loops forfeited |
 | `session_bucket` | coarse UTC window label (default 1h) |
 | `privacy_level` | standard / reduced / minimum |
 
@@ -284,24 +293,40 @@ exhaustively in tests.
 
 ## Observability (privacy-safe telemetry)
 
-`lib/telemetry.ts` buffers a **closed vocabulary** of coarse, PII-free events
-(route patterns, error codes, Web-Vital ratings, queue depth, push lifecycle, SW
-health, feature-flag resolution — never URLs, ids, or free text), re-validates the
-batch against the shared zod schema, and delivers it via `navigator.sendBeacon`
-(keepalive-fetch fallback), flushing on a timer, at capacity, and on page-hide. The
-BFF ingest route (`/v1/telemetry`, CSRF-exempt like the CSP report endpoint)
-validates the batch and acknowledges the accepted count.
+`lib/telemetry.ts` buffers PII-free events whose **event names are a closed enum**
+and whose `metric`/`bucket` labels are coarse, **length-bounded** (≤64-char) strings
+(route PATTERNS, error codes, Web-Vital ratings, queue depth, push lifecycle, SW
+health, feature-flag resolution — never URLs, concrete paths, ids, or free text;
+the navigation breadcrumb falls back to a constant, never the live path). The batch
+is re-validated against the shared zod schema before egress and delivered via
+`navigator.sendBeacon` (keepalive-fetch fallback), flushing on a timer, at capacity,
+and on page-hide. The BFF ingest route (`/v1/telemetry`, CSRF-exempt like the CSP
+report endpoint, with its own per-IP rate limit + body cap) validates the batch and
+acknowledges the accepted count.
 
 ## Security posture
 
-- Credentials in an HttpOnly cookie, never in JS; single-use CSRF on mutations.
-- Zod at every trust boundary: API responses, IndexedDB reads/writes, store
-  rehydration, search params, the attention aggregate.
-- Service worker: locked scope `/`, no remote `importScripts`, no `eval` —
-  enforced by `pnpm check:sw` after every build.
-- Crypto/governance flags fail closed and are never persisted.
+- Credentials in an HttpOnly cookie, never in JS. CSRF: per-session single-use
+  nonces with constant-time compare; the client **serializes mutations**, each
+  acquiring its own fresh token, so concurrent mutations never share/clobber a nonce.
+- Zod at every trust boundary: API responses (incl. the BFF re-validating its own
+  read-model responses), IndexedDB reads/writes, store rehydration, search params,
+  the attention aggregate. `url` fields are constrained to **http(s)** so
+  `javascript:`/`data:` URLs cannot enter the cache.
+- Trusted Types `default` policy (page **and** service worker) vouchsafes script
+  URLs by **same-origin comparison** (`new URL(...).origin`), not a bypassable
+  prefix check; HTML/script sinks throw. Service worker: locked scope `/`, no remote
+  `importScripts` (incl. protocol-relative), no `eval`/`new Function` — enforced by
+  `pnpm check:sw` after every build.
+- CSRF-exempt unauthenticated ingest endpoints (CSP report, telemetry) carry per-IP
+  rate limits + body caps (`lib/rate-limit.ts`). Push subscription delete is scoped
+  to the owning session (no cross-user unsubscribe). Push-payload navigation URLs are
+  coerced to same-origin in the SW.
+- Crypto/governance flags fail closed and are never persisted. Drafts are encrypted
+  at rest (AES-256-GCM), with an honest threat model (defends casual/partial-dump
+  inspection, not same-origin XSS — see `offline/draft-crypto.ts`).
 - No raw attention trace ever leaves the browser (`assertNoRawEgress` + the §22.1
-  schema admit only buckets).
+  schema admit only buckets; the `check:no-raw-egress` CI gate).
 
 ## Testing
 
