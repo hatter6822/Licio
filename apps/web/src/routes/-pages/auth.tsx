@@ -10,7 +10,7 @@ import { EmptyState } from '../../components/ui/EmptyState/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { useT } from '../../i18n/index.js';
 import { sanitizeRedirect } from '../../routing/guards.js';
-import { usePageFocus } from '../usePageFocus.js';
+import { usePageFocus } from './usePageFocus.js';
 
 export function LoginPage(): React.ReactElement {
   const t = useT();

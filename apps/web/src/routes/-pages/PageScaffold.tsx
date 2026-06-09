@@ -5,11 +5,11 @@
 // components: LoadingState while fetching, ErrorState (with retry) on failure or
 // a zod-rejected response, EmptyState when there is nothing, else the content.
 import type { ReactNode } from 'react';
-import { EmptyState } from '../components/ui/EmptyState/index.js';
-import { ErrorState } from '../components/ui/ErrorState/index.js';
-import { LoadingState } from '../components/ui/LoadingState/index.js';
-import { PageHeader } from '../components/ui/PageHeader/index.js';
-import { useT } from '../i18n/index.js';
+import { EmptyState } from '../../components/ui/EmptyState/index.js';
+import { ErrorState } from '../../components/ui/ErrorState/index.js';
+import { LoadingState } from '../../components/ui/LoadingState/index.js';
+import { PageHeader } from '../../components/ui/PageHeader/index.js';
+import { useT } from '../../i18n/index.js';
 
 interface QueryLike<T> {
   data: T | undefined;

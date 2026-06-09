@@ -14,8 +14,8 @@ import { useT } from '../../i18n/index.js';
 import { useStoryQuery } from '../../lib/queries.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
-import { PageScaffold } from '../PageScaffold.js';
-import { usePageFocus } from '../usePageFocus.js';
+import { PageScaffold } from './PageScaffold.js';
+import { usePageFocus } from './usePageFocus.js';
 
 function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElement {
   const t = useT();

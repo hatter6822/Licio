@@ -18,7 +18,7 @@ import { useT } from '../../i18n/index.js';
 import { draftContributions, queue } from '../../offline/index.js';
 import { processPendingQueue } from '../../offline/sync.js';
 import { markInteractionStart, measureInteraction } from '../../perf/marks.js';
-import { usePageFocus } from '../usePageFocus.js';
+import { usePageFocus } from './usePageFocus.js';
 
 function newDraftId(): string {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto

@@ -17,8 +17,8 @@ import { useThreadBranchQuery, useThreadQuery } from '../../lib/queries.js';
 import { markInteractionStart, measureInteraction } from '../../perf/marks.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
-import { PageScaffold } from '../PageScaffold.js';
-import { usePageFocus } from '../usePageFocus.js';
+import { PageScaffold } from './PageScaffold.js';
+import { usePageFocus } from './usePageFocus.js';
 
 export function ThreadsPage(): React.ReactElement {
   const t = useT();
@@ -79,7 +79,7 @@ function BranchPanel({
 function ThreadDetailContent({ threadId }: { threadId: string }): React.ReactElement {
   const t = useT();
   const navigate = useNavigate();
-  const { branch } = useSearch({ from: '/threads/$threadId' });
+  const { branch } = useSearch({ from: '/threads_/$threadId' });
   const thread = useThreadQuery(threadId);
 
   useEffect(() => {
@@ -114,7 +114,7 @@ function ThreadDetailContent({ threadId }: { threadId: string }): React.ReactEle
 
 export function ThreadDetailPage(): React.ReactElement {
   const t = useT();
-  const { threadId } = useParams({ from: '/threads/$threadId' });
+  const { threadId } = useParams({ from: '/threads_/$threadId' });
   usePageFocus(t('thread.title', 'Thread'));
 
   if (!isValidUuidParam(threadId)) {

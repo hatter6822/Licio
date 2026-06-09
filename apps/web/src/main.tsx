@@ -9,7 +9,7 @@ import { I18nProvider } from './i18n/index.js';
 import { startRuntime } from './lib/bootstrap.js';
 import { createAppQueryClient } from './lib/query-client.js';
 import { registerServiceWorker } from './lib/sw-register.js';
-import { NotFound, routeTree } from './routes/root.js';
+import { routeTree } from './routeTree.gen';
 import { initTrustedTypes } from './security/trusted-types.js';
 import './styles/app.css';
 
@@ -17,7 +17,9 @@ initTrustedTypes();
 
 const queryClient = createAppQueryClient();
 
-const router = createRouter({ routeTree, defaultNotFoundComponent: NotFound });
+// The route tree is generated from the file-based routes (src/routes/) by the
+// TanStack Router plugin. The not-found component is set on the root route.
+const router = createRouter({ routeTree });
 
 declare module '@tanstack/react-router' {
   interface Register {

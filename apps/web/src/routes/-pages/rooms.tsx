@@ -11,8 +11,8 @@ import { useT } from '../../i18n/index.js';
 import { useRoomQuery, useRoomsQuery } from '../../lib/queries.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { selectGovernanceEnabled, useFeatureFlagStore } from '../../stores/index.js';
-import { PageScaffold } from '../PageScaffold.js';
-import { usePageFocus } from '../usePageFocus.js';
+import { PageScaffold } from './PageScaffold.js';
+import { usePageFocus } from './usePageFocus.js';
 
 export function RoomsPage(): React.ReactElement {
   const t = useT();
@@ -50,7 +50,7 @@ export function RoomsPage(): React.ReactElement {
 
 export function RoomDetailPage(): React.ReactElement {
   const t = useT();
-  const { roomId } = useParams({ from: '/rooms/$roomId' });
+  const { roomId } = useParams({ from: '/rooms_/$roomId' });
   usePageFocus(t('room.title', 'Room'));
   const room = useRoomQuery(roomId);
 

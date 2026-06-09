@@ -2,6 +2,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import tailwindcss from '@tailwindcss/vite';
+import { tanstackRouter } from '@tanstack/router-plugin/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
@@ -17,6 +18,22 @@ function getHttpsConfig(): { key: Buffer; cert: Buffer } | undefined {
 export default defineConfig({
   base: '/',
   plugins: [
+    // File-based routing (WS-C.1.1a). Generates src/routeTree.gen.ts from the
+    // route files and auto-code-splits each route's component. Must precede react().
+    tanstackRouter({
+      target: 'react',
+      autoCodeSplitting: true,
+      routesDirectory: 'src/routes',
+      generatedRouteTree: 'src/routeTree.gen.ts',
+      // First line carries the SPDX header so the generated file passes the CI
+      // license-header check; the rest mirror the plugin defaults.
+      routeTreeFileHeader: [
+        '// SPDX-License-Identifier: AGPL-3.0-or-later',
+        '/* eslint-disable */',
+        '// @ts-nocheck',
+        '// biome-ignore-all lint: generated file',
+      ],
+    }),
     react(),
     tailwindcss(),
     VitePWA({

@@ -41,8 +41,8 @@ import {
   useFeatureFlagStore,
   useUIStore,
 } from '../../stores/index.js';
-import { PageScaffold } from '../PageScaffold.js';
-import { usePageFocus } from '../usePageFocus.js';
+import { PageScaffold } from './PageScaffold.js';
+import { usePageFocus } from './usePageFocus.js';
 
 function Section({ title, children }: { title: string; children: ReactNode }): React.ReactElement {
   return (

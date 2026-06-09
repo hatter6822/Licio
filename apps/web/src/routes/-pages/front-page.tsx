@@ -12,8 +12,8 @@ import { type IconName, iconNames } from '../../components/ui/Icon/index.js';
 import { useT } from '../../i18n/index.js';
 import { useFeedQuery } from '../../lib/queries.js';
 import { useUIStore } from '../../stores/index.js';
-import { PageScaffold } from '../PageScaffold.js';
-import { usePageFocus } from '../usePageFocus.js';
+import { PageScaffold } from './PageScaffold.js';
+import { usePageFocus } from './usePageFocus.js';
 
 function asIconName(value: string | undefined): IconName | undefined {
   return value && (iconNames as readonly string[]).includes(value)
