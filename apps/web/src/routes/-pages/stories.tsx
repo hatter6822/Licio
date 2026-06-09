@@ -4,6 +4,7 @@
 // error state rather than fetching). Mounting the story marks it the active item
 // for the signal processor; opening the in-app reader records a source-open
 // (WS-C.4.2). Source content is rendered by the sandboxed WS-B.2.7 reader.
+import type { StoryDetail } from '@licio/shared';
 import { useParams } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
@@ -11,11 +12,37 @@ import { Button } from '../../components/ui/Button/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { useT } from '../../i18n/index.js';
-import { useStoryQuery } from '../../lib/queries.js';
+import {
+  useSavedStoriesQuery,
+  useStoryQuery,
+  useToggleSavedStoryMutation,
+} from '../../lib/queries.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
 import { PageScaffold } from './PageScaffold.js';
 import { usePageFocus } from './usePageFocus.js';
+
+/** Toggle whether a story is saved for offline reading (WS-C.2.2a). */
+function SaveStoryButton({ story }: { story: StoryDetail }): React.ReactElement {
+  const t = useT();
+  const saved = useSavedStoriesQuery();
+  const toggle = useToggleSavedStoryMutation();
+  const isSaved = saved.data?.some((record) => record.storyId === story.story_id) ?? false;
+  return (
+    <Button
+      variant="secondary"
+      aria-pressed={isSaved}
+      disabled={toggle.isPending}
+      onClick={() =>
+        toggle.mutate(
+          isSaved ? { action: 'unsave', storyId: story.story_id } : { action: 'save', story },
+        )
+      }
+    >
+      {isSaved ? t('story.saved', 'Saved for offline') : t('story.save', 'Save for offline')}
+    </Button>
+  );
+}
 
 function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElement {
   const t = useT();
@@ -51,13 +78,14 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
           <article className="flex flex-col gap-4">
             <p className="text-sm text-ink-muted">{data.source}</p>
             <p className="text-base text-ink">{data.body_summary}</p>
-            {data.url ? (
-              <div>
+            <div className="flex flex-wrap gap-2">
+              {data.url ? (
                 <Button variant="primary" onClick={openReader}>
                   {t('story.readSource', 'Read source')}
                 </Button>
-              </div>
-            ) : null}
+              ) : null}
+              <SaveStoryButton story={data} />
+            </div>
           </article>
         )
       }

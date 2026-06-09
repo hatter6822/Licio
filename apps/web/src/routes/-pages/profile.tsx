@@ -27,8 +27,10 @@ import { QuietHoursSetting } from '../../components/wellbeing/QuietHoursSetting/
 import { useT } from '../../i18n/index.js';
 import {
   useNotificationPreferencesQuery,
+  useSavedStoriesQuery,
   useSettingsQuery,
   useSignalLedgerQuery,
+  useToggleSavedStoryMutation,
   useUpdateNotificationPreferencesMutation,
   useUpdateSettingsMutation,
 } from '../../lib/queries.js';
@@ -61,6 +63,7 @@ export function ProfilePage(): React.ReactElement {
 
   const links: Array<{ to: string; label: string }> = [
     { to: '/profile/signal-ledger', label: t('profile.signalLedger', 'Signal Ledger') },
+    { to: '/profile/saved', label: t('profile.saved', 'Saved stories') },
     { to: '/profile/settings', label: t('profile.settings', 'Settings') },
     { to: '/profile/privacy', label: t('profile.privacy', 'Privacy') },
     { to: '/profile/wallet', label: t('profile.wallet', 'Wallet') },
@@ -291,6 +294,51 @@ export function SignalLedgerPage(): React.ReactElement {
       )}
     >
       {(data) => <SignalLedger items={data.items.map(toLedgerItem)} />}
+    </PageScaffold>
+  );
+}
+
+export function SavedStoriesPage(): React.ReactElement {
+  const t = useT();
+  usePageFocus(t('profile.saved', 'Saved stories'));
+  const saved = useSavedStoriesQuery();
+  const toggle = useToggleSavedStoryMutation();
+  return (
+    <PageScaffold
+      title={t('profile.saved', 'Saved stories')}
+      query={saved}
+      isEmpty={(data) => data.length === 0}
+      emptyTitle={t('saved.empty.title', 'No saved stories yet')}
+      emptyDescription={t(
+        'saved.empty.description',
+        'Save a story to keep reading it offline. Saved stories appear here.',
+      )}
+    >
+      {(data) => (
+        <ul className="flex flex-col gap-2">
+          {data.map((record) => (
+            <li
+              key={record.storyId}
+              className="flex items-center justify-between gap-3 rounded-lg border border-line p-4"
+            >
+              <Link
+                to="/stories/$storyId"
+                params={{ storyId: record.storyId }}
+                className="min-w-0 flex-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+              >
+                <span className="block truncate text-ink">{record.title}</span>
+                <span className="block truncate text-sm text-ink-muted">{record.source}</span>
+              </Link>
+              <Button
+                variant="secondary"
+                onClick={() => toggle.mutate({ action: 'unsave', storyId: record.storyId })}
+              >
+                {t('saved.remove', 'Remove')}
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
     </PageScaffold>
   );
 }

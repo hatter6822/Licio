@@ -24,6 +24,7 @@ import { Route as RoomsRoomIdRouteImport } from './routes/rooms_.$roomId'
 import { Route as ProfileWalletRouteImport } from './routes/profile_.wallet'
 import { Route as ProfileSignalLedgerRouteImport } from './routes/profile_.signal-ledger'
 import { Route as ProfileSettingsRouteImport } from './routes/profile_.settings'
+import { Route as ProfileSavedRouteImport } from './routes/profile_.saved'
 import { Route as ProfilePrivacyRouteImport } from './routes/profile_.privacy'
 import { Route as RoomsRoomIdGovernanceRouteImport } from './routes/rooms_.$roomId_.governance'
 import { Route as ThreadsThreadIdBranchesBranchIdRouteImport } from './routes/threads_.$threadId_.branches.$branchId'
@@ -93,6 +94,11 @@ const ProfileSettingsRoute = ProfileSettingsRouteImport.update({
   path: '/profile/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProfileSavedRoute = ProfileSavedRouteImport.update({
+  id: '/profile_/saved',
+  path: '/profile/saved',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ProfilePrivacyRoute = ProfilePrivacyRouteImport.update({
   id: '/profile_/privacy',
   path: '/profile/privacy',
@@ -119,6 +125,7 @@ export interface FileRoutesByFullPath {
   '/submit': typeof SubmitRoute
   '/threads': typeof ThreadsRoute
   '/profile/privacy': typeof ProfilePrivacyRoute
+  '/profile/saved': typeof ProfileSavedRoute
   '/profile/settings': typeof ProfileSettingsRoute
   '/profile/signal-ledger': typeof ProfileSignalLedgerRoute
   '/profile/wallet': typeof ProfileWalletRoute
@@ -137,6 +144,7 @@ export interface FileRoutesByTo {
   '/submit': typeof SubmitRoute
   '/threads': typeof ThreadsRoute
   '/profile/privacy': typeof ProfilePrivacyRoute
+  '/profile/saved': typeof ProfileSavedRoute
   '/profile/settings': typeof ProfileSettingsRoute
   '/profile/signal-ledger': typeof ProfileSignalLedgerRoute
   '/profile/wallet': typeof ProfileWalletRoute
@@ -156,6 +164,7 @@ export interface FileRoutesById {
   '/submit': typeof SubmitRoute
   '/threads': typeof ThreadsRoute
   '/profile_/privacy': typeof ProfilePrivacyRoute
+  '/profile_/saved': typeof ProfileSavedRoute
   '/profile_/settings': typeof ProfileSettingsRoute
   '/profile_/signal-ledger': typeof ProfileSignalLedgerRoute
   '/profile_/wallet': typeof ProfileWalletRoute
@@ -176,6 +185,7 @@ export interface FileRouteTypes {
     | '/submit'
     | '/threads'
     | '/profile/privacy'
+    | '/profile/saved'
     | '/profile/settings'
     | '/profile/signal-ledger'
     | '/profile/wallet'
@@ -194,6 +204,7 @@ export interface FileRouteTypes {
     | '/submit'
     | '/threads'
     | '/profile/privacy'
+    | '/profile/saved'
     | '/profile/settings'
     | '/profile/signal-ledger'
     | '/profile/wallet'
@@ -212,6 +223,7 @@ export interface FileRouteTypes {
     | '/submit'
     | '/threads'
     | '/profile_/privacy'
+    | '/profile_/saved'
     | '/profile_/settings'
     | '/profile_/signal-ledger'
     | '/profile_/wallet'
@@ -231,6 +243,7 @@ export interface RootRouteChildren {
   SubmitRoute: typeof SubmitRoute
   ThreadsRoute: typeof ThreadsRoute
   ProfilePrivacyRoute: typeof ProfilePrivacyRoute
+  ProfileSavedRoute: typeof ProfileSavedRoute
   ProfileSettingsRoute: typeof ProfileSettingsRoute
   ProfileSignalLedgerRoute: typeof ProfileSignalLedgerRoute
   ProfileWalletRoute: typeof ProfileWalletRoute
@@ -334,6 +347,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProfileSettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/profile_/saved': {
+      id: '/profile_/saved'
+      path: '/profile/saved'
+      fullPath: '/profile/saved'
+      preLoaderRoute: typeof ProfileSavedRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/profile_/privacy': {
       id: '/profile_/privacy'
       path: '/profile/privacy'
@@ -367,6 +387,7 @@ const rootRouteChildren: RootRouteChildren = {
   SubmitRoute: SubmitRoute,
   ThreadsRoute: ThreadsRoute,
   ProfilePrivacyRoute: ProfilePrivacyRoute,
+  ProfileSavedRoute: ProfileSavedRoute,
   ProfileSettingsRoute: ProfileSettingsRoute,
   ProfileSignalLedgerRoute: ProfileSignalLedgerRoute,
   ProfileWalletRoute: ProfileWalletRoute,

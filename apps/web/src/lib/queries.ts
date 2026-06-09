@@ -4,8 +4,23 @@
 // apply the per-data-class cache policy and a reusable optimistic-update +
 // rollback pattern for mutations. Every queryFn returns zod-validated data
 // (validated inside the RPC client), so nothing unvalidated reaches the cache.
-import type { BranchId, FeedMode, NotificationPreferences, UserSettings } from '@licio/shared';
+import type {
+  BranchId,
+  FeedMode,
+  NotificationPreferences,
+  SignalLedgerResponse,
+  StoryDetail,
+  UserSettings,
+} from '@licio/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  cacheSignalLedger,
+  cacheThreadSnapshot,
+  listSavedStories,
+  readCachedSignalLedger,
+  saveStory,
+  unsaveStory,
+} from '../offline/read-through.js';
 import * as api from './api.js';
 import { cachePolicy } from './query-client.js';
 import { queryKeys } from './query-keys.js';
@@ -31,7 +46,13 @@ export function useStoryQuery(storyId: string) {
 export function useThreadQuery(threadId: string) {
   return useQuery({
     queryKey: queryKeys.thread(threadId),
-    queryFn: () => api.fetchThread(threadId),
+    // Write-through: a successful fetch refreshes the offline thread summary
+    // (read back by the thread page when the network is unavailable, WS-C.2.2a).
+    queryFn: async () => {
+      const detail = await api.fetchThread(threadId);
+      await cacheThreadSnapshot(detail);
+      return detail;
+    },
     ...cachePolicy.thread,
   });
 }
@@ -71,8 +92,29 @@ export function useSettingsQuery() {
 export function useSignalLedgerQuery() {
   return useQuery({
     queryKey: queryKeys.signalLedger(),
-    queryFn: () => api.fetchSignalLedger(),
+    // Network-first with offline read-through: cache the private ledger on a
+    // successful fetch; fall back to the cached snapshot when offline (WS-C.2.2a).
+    queryFn: async (): Promise<SignalLedgerResponse> => {
+      try {
+        const response = await api.fetchSignalLedger();
+        await cacheSignalLedger(response.items);
+        return response;
+      } catch (error) {
+        const cached = await readCachedSignalLedger();
+        if (cached.length > 0) return { items: cached, nextCursor: null };
+        throw error;
+      }
+    },
     ...cachePolicy.signalLedger,
+  });
+}
+
+/** Saved-for-offline stories (read straight from IndexedDB; works offline). */
+export function useSavedStoriesQuery() {
+  return useQuery({
+    queryKey: queryKeys.savedStories(),
+    queryFn: () => listSavedStories(),
+    ...cachePolicy.profile,
   });
 }
 
@@ -109,6 +151,26 @@ export function useUpdateSettingsMutation() {
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.settings() });
+    },
+  });
+}
+
+/** Save or unsave input: saving needs the story; unsaving needs only its id. */
+export type SaveStoryInput =
+  | { action: 'save'; story: StoryDetail }
+  | { action: 'unsave'; storyId: string };
+
+/**
+ * Save/unsave a story for offline reading. Writes through to IndexedDB and
+ * invalidates the saved-stories list so the UI reflects the change immediately.
+ */
+export function useToggleSavedStoryMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: SaveStoryInput) =>
+      input.action === 'save' ? saveStory(input.story) : unsaveStory(input.storyId),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.savedStories() });
     },
   });
 }

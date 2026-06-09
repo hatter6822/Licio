@@ -16,6 +16,7 @@ export const queryKeys = {
   authStatus: () => ['auth-status'] as const,
   settings: () => ['settings'] as const,
   signalLedger: () => ['signal-ledger'] as const,
+  savedStories: () => ['saved-stories'] as const,
   featureFlags: () => ['feature-flags'] as const,
   notificationPreferences: () => ['notification-preferences'] as const,
 } as const;

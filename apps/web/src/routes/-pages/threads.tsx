@@ -6,7 +6,7 @@
 // branch records nonredundant traversal (WS-C.4.3).
 import type { BranchId } from '@licio/shared';
 import { useNavigate, useParams, useSearch } from '@tanstack/react-router';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { ThreadBranchNav } from '../../components/thread/ThreadBranchNav/index.js';
 import { EmptyState } from '../../components/ui/EmptyState/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
@@ -14,11 +14,52 @@ import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { Skeleton } from '../../components/ui/Skeleton/index.js';
 import { useT } from '../../i18n/index.js';
 import { useThreadBranchQuery, useThreadQuery } from '../../lib/queries.js';
+import { readThreadSnapshot } from '../../offline/read-through.js';
+import type { ThreadSnapshotRecord } from '../../offline/schemas.js';
 import { markInteractionStart, measureInteraction } from '../../perf/marks.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
 import { PageScaffold } from './PageScaffold.js';
 import { usePageFocus } from './usePageFocus.js';
+
+/** Read a cached thread summary once the live query has failed (offline). */
+function useThreadSnapshot(threadId: string, enabled: boolean): ThreadSnapshotRecord | undefined {
+  const [snapshot, setSnapshot] = useState<ThreadSnapshotRecord | undefined>(undefined);
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    void readThreadSnapshot(threadId).then((record) => {
+      if (!cancelled) setSnapshot(record);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [threadId, enabled]);
+  return snapshot;
+}
+
+/** Degraded offline view: the cached thread title + summary with an offline notice. */
+function OfflineThreadSummary({ record }: { record: ThreadSnapshotRecord }): React.ReactElement {
+  const t = useT();
+  return (
+    <>
+      <PageHeader title={record.title} />
+      <div className="mx-auto w-full max-w-2xl p-4">
+        <p role="status" className="mb-3 rounded-lg border border-line p-3 text-sm text-ink-muted">
+          {t('thread.offline.banner', 'You are offline — showing a saved summary.')}
+        </p>
+        {record.summary ? (
+          <p className="text-base text-ink">{record.summary}</p>
+        ) : (
+          <EmptyState
+            headingLevel={2}
+            title={t('thread.offline.noSummary', 'No saved summary is available for this thread.')}
+          />
+        )}
+      </div>
+    </>
+  );
+}
 
 export function ThreadsPage(): React.ReactElement {
   const t = useT();
@@ -81,6 +122,8 @@ function ThreadDetailContent({ threadId }: { threadId: string }): React.ReactEle
   const navigate = useNavigate();
   const { branch } = useSearch({ from: '/threads_/$threadId' });
   const thread = useThreadQuery(threadId);
+  // When the live thread fetch fails (offline), fall back to a cached summary.
+  const offlineSnapshot = useThreadSnapshot(threadId, thread.isError);
 
   useEffect(() => {
     const processor = getSignalProcessor();
@@ -97,6 +140,10 @@ function ThreadDetailContent({ threadId }: { threadId: string }): React.ReactEle
     getSignalProcessor().recordBranchVisit(threadId, next);
     void navigate({ to: '/threads/$threadId', params: { threadId }, search: { branch: next } });
   };
+
+  if (thread.isError && offlineSnapshot) {
+    return <OfflineThreadSummary record={offlineSnapshot} />;
+  }
 
   return (
     <PageScaffold title={thread.data?.title ?? t('thread.title', 'Thread')} query={thread}>
