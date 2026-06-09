@@ -10,7 +10,7 @@ import { useT } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
 import { Button } from '../../ui/Button/index.js';
 import { Icon } from '../../ui/Icon/index.js';
-import { type SpeechRecognitionLike, getSpeechRecognition } from './speech.js';
+import { getSpeechRecognition, type SpeechRecognitionLike } from './speech.js';
 
 export interface VoiceDictationProps {
   /** Receives each finalized transcript chunk to append to the target field. */

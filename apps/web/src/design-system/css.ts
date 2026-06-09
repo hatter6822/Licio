@@ -7,9 +7,9 @@
 // in-sync in CI (`__tests__/tokens.test.ts`).
 
 import {
+  breakpoints,
   type ColorOverrides,
   type ColorToken,
-  breakpoints,
   darkColors,
   darkHighContrast,
   fontFamilies,

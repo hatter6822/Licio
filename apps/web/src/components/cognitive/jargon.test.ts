@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
-import { JARGON_TERMS, findJargon, hasJargon } from './jargon.js';
+import { findJargon, hasJargon, JARGON_TERMS } from './jargon.js';
 
 describe('jargon audit (WS-B.2.13)', () => {
   it('detects domain jargon (whole word, case-insensitive)', () => {

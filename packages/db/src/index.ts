@@ -1,3 +1,4 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-export * from './schema/index.js';
+
 export { createDbClient } from './client.js';
+export * from './schema/index.js';

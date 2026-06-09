@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
 import { formatMessage } from './message.js';
-import { PSEUDO_LOCALE, isPseudoLocale, pseudoFormat } from './pseudo.js';
+import { isPseudoLocale, PSEUDO_LOCALE, pseudoFormat } from './pseudo.js';
 
 describe('isPseudoLocale', () => {
   it('matches the pseudo-locale tag (and extensions) but not real locales', () => {

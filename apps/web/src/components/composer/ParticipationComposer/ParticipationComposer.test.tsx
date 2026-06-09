@@ -9,8 +9,8 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { checkA11y } from '../../../test/axe.js';
-import { ParticipationComposer } from './ParticipationComposer.js';
 import { composerModes } from './modes.js';
+import { ParticipationComposer } from './ParticipationComposer.js';
 
 /** Click the chooser button for a mode by its visible name. */
 async function chooseMode(user: ReturnType<typeof userEvent.setup>, name: RegExp): Promise<void> {

@@ -16,7 +16,7 @@
 // so it only touches literal text: ICU placeholders, plural/select keywords and
 // substituted values are preserved (e.g. `{count, plural, …}` still selects the
 // right category and "{name}" still interpolates).
-import { type MessageParams, formatMessage } from './message.js';
+import { formatMessage, type MessageParams } from './message.js';
 
 /** BCP-47 tag for the pseudo-locale (`XA` is a user-assigned region code). */
 export const PSEUDO_LOCALE = 'en-XA';

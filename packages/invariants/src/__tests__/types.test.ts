@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
-import { InvariantType } from '../types.js';
 import type { InvariantOutput, InvariantVersion } from '../types.js';
+import { InvariantType } from '../types.js';
 
 describe('InvariantType', () => {
   it('should have all five core invariant types', () => {

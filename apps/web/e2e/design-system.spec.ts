@@ -5,7 +5,7 @@
 // color-contrast and target-size rules with real layout, zoom/reflow safety, and
 // the dark / high-contrast / reduced-motion colour modes.
 import AxeBuilder from '@axe-core/playwright';
-import { type Page, expect, test } from '@playwright/test';
+import { expect, type Page, test } from '@playwright/test';
 
 const WCAG_TAGS = ['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'];
 

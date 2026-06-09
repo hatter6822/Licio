@@ -29,12 +29,12 @@
     "clean": "rm -rf apps/*/dist apps/*/build packages/*/dist coverage test-results playwright-report .tsbuildinfo apps/*/.tsbuildinfo packages/*/.tsbuildinfo node_modules/.cache"
   },
   "devDependencies": {
-    "@biomejs/biome": "^1.9.0",
+    "@biomejs/biome": "^2.4.16",
     "@vitest/coverage-v8": "^4.1.0",
-    "lefthook": "^1.11.0",
+    "lefthook": "^2.1.9",
     "node-html-parser": "^7.1.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0",
+    "typescript": "^6.0.3",
     "vitest": "^4.1.0"
   }
 }

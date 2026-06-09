@@ -27,7 +27,7 @@ import { useT } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
 import { Button } from '../../ui/Button/index.js';
 import { Icon } from '../../ui/Icon/index.js';
-import { type ReadableContent, extractReadable } from './readability.js';
+import { extractReadable, type ReadableContent } from './readability.js';
 
 /**
  * Extract readable content from sanitized HTML, off the main thread where a Web
@@ -117,7 +117,6 @@ function renderReadabilityParagraphs(text: string): ReactNode {
   if (paragraphs.length === 0) return null;
 
   return paragraphs.map((paragraph, index) => (
-    // biome-ignore lint/suspicious/noArrayIndexKey: paragraphs are positional, identity-less text blocks
     <p key={index} className="text-base text-ink">
       {paragraph}
     </p>

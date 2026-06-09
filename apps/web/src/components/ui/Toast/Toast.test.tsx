@@ -12,7 +12,9 @@ import { type ToastOptions, ToastProvider, useToast } from './Toast.js';
  */
 function ToastCapture({
   onReady,
-}: { onReady: (toast: (o: ToastOptions) => void) => void }): ReactElement {
+}: {
+  onReady: (toast: (o: ToastOptions) => void) => void;
+}): ReactElement {
   const { toast } = useToast();
   useEffect(() => {
     onReady(toast);

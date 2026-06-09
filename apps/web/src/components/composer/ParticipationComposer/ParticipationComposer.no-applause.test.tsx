@@ -8,8 +8,8 @@
 import { render } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
-import { ParticipationComposer } from './ParticipationComposer.js';
 import { composerModes } from './modes.js';
+import { ParticipationComposer } from './ParticipationComposer.js';
 
 // Word-boundary matched so legitimate words ("source", "read") never false-positive.
 const FORBIDDEN_TEXT =

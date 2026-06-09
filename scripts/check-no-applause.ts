@@ -5,7 +5,7 @@
 // reintroduce likes, votes, karma, follower counts, or reaction bars. This is
 // defense in depth alongside the type-level and runtime tests in
 // StoryCard.no-applause.test.tsx.
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');

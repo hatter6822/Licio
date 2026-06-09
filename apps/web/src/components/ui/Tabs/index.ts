@@ -1,2 +1,2 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-export { Tabs, type TabsProps, type TabDescriptor } from './Tabs.js';
+export { type TabDescriptor, Tabs, type TabsProps } from './Tabs.js';

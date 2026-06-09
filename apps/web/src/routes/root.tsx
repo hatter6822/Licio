@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { Outlet, createRootRoute, createRoute } from '@tanstack/react-router';
-import { Suspense, lazy } from 'react';
+import { createRootRoute, createRoute, Outlet } from '@tanstack/react-router';
+import { lazy, Suspense } from 'react';
 import { App } from '../App.js';
 
 // The component workbench is code-split so it never weighs down the app bundle.

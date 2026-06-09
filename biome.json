@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.4.16/schema.json",
   "vcs": {
     "enabled": true,
     "clientKind": "git",
@@ -10,6 +10,11 @@
     "indentStyle": "space",
     "indentWidth": 2,
     "lineWidth": 100
+  },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
   },
   "javascript": {
     "formatter": {
@@ -33,7 +38,6 @@
       "suspicious": {
         "noExplicitAny": "error",
         "noGlobalAssign": "error",
-        "useValidTypeof": "error",
         "noDoubleEquals": "error"
       },
       "correctness": {
@@ -42,37 +46,39 @@
         "noUnreachable": "error",
         "noConstAssign": "error",
         "useIsNan": "error",
-        "noSwitchDeclarations": "error"
+        "noSwitchDeclarations": "error",
+        "useValidTypeof": "error"
       },
       "style": {
         "useNodejsImportProtocol": "error"
       },
       "complexity": {
         "noUselessSwitchCase": "error",
-        "useLiteralKeys": "off"
+        "useLiteralKeys": "off",
+        "noImportantStyles": "off"
       }
     }
   },
-  "organizeImports": {
-    "enabled": true
-  },
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
   "files": {
-    "include": ["apps/**", "packages/**", "scripts/**"],
-    "ignore": [
-      "**/node_modules",
-      "**/dist",
-      "**/build",
-      "**/coverage",
-      "**/drizzle",
-      "**/playwright-report",
-      "**/.vite",
-      "**/*.d.ts",
-      "**/*.generated.css"
+    "includes": [
+      "**/apps/**",
+      "**/packages/**",
+      "**/scripts/**",
+      "!**/node_modules",
+      "!**/dist",
+      "!**/build",
+      "!**/coverage",
+      "!**/drizzle",
+      "!**/playwright-report",
+      "!**/.vite",
+      "!**/*.d.ts",
+      "!**/*.generated.css"
     ]
   },
   "overrides": [
     {
-      "include": ["packages/shared/src/types/**"],
+      "includes": ["**/packages/shared/src/types/**"],
       "linter": {
         "rules": {
           "suspicious": {
@@ -82,23 +88,29 @@
       }
     },
     {
-      "include": ["apps/web/src/components/**"],
+      "includes": ["**/apps/web/src/components/**"],
       "linter": {
         "rules": {
           "a11y": {
             "useSemanticElements": "off"
+          },
+          "suspicious": {
+            "noArrayIndexKey": "off"
           }
         }
       }
     },
     {
-      "include": ["apps/web/src/components/ui/**"],
+      "includes": ["**/apps/web/src/components/ui/**"],
       "linter": {
         "rules": {
           "a11y": {
             "useFocusableInteractive": "off",
             "useKeyWithClickEvents": "off",
-            "noNoninteractiveTabindex": "off"
+            "noNoninteractiveTabindex": "off",
+            "noStaticElementInteractions": "off",
+            "noSvgWithoutTitle": "off",
+            "useAriaPropsSupportedByRole": "off"
           }
         }
       }

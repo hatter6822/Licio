@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { ReactNode } from 'react';
 import { cn } from '../../../lib/cn.js';
-import { Icon } from '../Icon/index.js';
 import type { IconName } from '../Icon/index.js';
+import { Icon } from '../Icon/index.js';
 import { type Tone, toneIcons, toneSoftClasses } from '../status.js';
 
 export type BadgeTone = Tone | 'neutral';

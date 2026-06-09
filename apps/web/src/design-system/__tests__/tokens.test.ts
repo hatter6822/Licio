@@ -2,7 +2,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { WCAG, contrastRatio, roundRatio } from '../contrast.js';
+import { contrastRatio, roundRatio, WCAG } from '../contrast.js';
 import { renderTokensCss } from '../css.js';
 import {
   type ColorMode,

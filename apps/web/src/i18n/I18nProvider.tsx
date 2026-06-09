@@ -6,7 +6,7 @@
 // English is used — so copy is centralized and translatable while components
 // remain self-contained. `dir`/`lang` are reflected onto <html> for RTL and
 // WCAG 3.1.1 (Language of Page).
-import { type ReactNode, createContext, useContext, useEffect, useMemo } from 'react';
+import { createContext, type ReactNode, useContext, useEffect, useMemo } from 'react';
 import { formatMessage } from './message.js';
 import { isPseudoLocale, pseudoFormat } from './pseudo.js';
 
