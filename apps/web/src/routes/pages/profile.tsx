@@ -6,6 +6,7 @@
 // (WS-C.4.1d) and are pushed to the signal processor immediately; the Signal
 // Ledger is the private, no-applause account of attention; Wallet is flag-gated.
 import type { PrivacyLevel, SignalLedgerEntry } from '@licio/shared';
+import { DEFAULT_NOTIFICATION_PREFERENCES } from '@licio/shared';
 import { Link } from '@tanstack/react-router';
 import type { ReactNode } from 'react';
 import { FeedModeSwitcher } from '../../components/feed/FeedModeSwitcher/index.js';
@@ -21,6 +22,8 @@ import { RestrictedState } from '../../components/ui/RestrictedState/index.js';
 import { Switch } from '../../components/ui/Switch/index.js';
 import { ThemeToggle } from '../../components/ui/ThemeToggle/index.js';
 import { useToast } from '../../components/ui/Toast/index.js';
+import { NotificationBudget } from '../../components/wellbeing/NotificationBudget/index.js';
+import { QuietHoursSetting } from '../../components/wellbeing/QuietHoursSetting/index.js';
 import { useT } from '../../i18n/index.js';
 import {
   useNotificationPreferencesQuery,
@@ -29,6 +32,7 @@ import {
   useUpdateNotificationPreferencesMutation,
   useUpdateSettingsMutation,
 } from '../../lib/queries.js';
+import { hhmmToMinutes, minutesToHHMM } from '../../lib/time.js';
 import { resolveCollectionPolicy } from '../../signals/privacy.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
 import {
@@ -147,6 +151,31 @@ export function SettingsPage(): React.ReactElement {
             disabled={!prefs.data}
             onCheckedChange={(checked) => updatePrefs.mutate({ daily_digest: checked })}
           />
+          {(() => {
+            const quietHours =
+              prefs.data?.quiet_hours ?? DEFAULT_NOTIFICATION_PREFERENCES.quiet_hours;
+            return (
+              <QuietHoursSetting
+                enabled={quietHours.enabled}
+                start={minutesToHHMM(quietHours.start_minute)}
+                end={minutesToHHMM(quietHours.end_minute)}
+                onEnabledChange={(enabled) =>
+                  updatePrefs.mutate({ quiet_hours: { ...quietHours, enabled } })
+                }
+                onStartChange={(value) =>
+                  updatePrefs.mutate({
+                    quiet_hours: { ...quietHours, start_minute: hhmmToMinutes(value) },
+                  })
+                }
+                onEndChange={(value) =>
+                  updatePrefs.mutate({
+                    quiet_hours: { ...quietHours, end_minute: hhmmToMinutes(value) },
+                  })
+                }
+              />
+            );
+          })()}
+          <NotificationBudget used={0} limit={prefs.data?.budget_limit ?? 20} />
         </Section>
       </div>
     </>
