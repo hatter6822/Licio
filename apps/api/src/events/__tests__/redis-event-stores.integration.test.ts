@@ -40,6 +40,18 @@ describe.skipIf(!REDIS_URL)('Redis event-pipeline adapters integration (WS-E)', 
       await new Promise((resolve) => setTimeout(resolve, 300));
       expect(await store.putIfAbsent(short, 150)).toBe(true); // expired
     });
+
+    it('stays within the WS-E.1.3b latency budget (< 5ms average per check)', async () => {
+      if (!redis) return;
+      const store = new RedisReplayNonceStore(redis, `${prefix}noncebench:`);
+      const rounds = 200;
+      const startedAt = process.hrtime.bigint();
+      for (let i = 0; i < rounds; i += 1) {
+        await store.putIfAbsent(`bench:${i}`, 60_000);
+      }
+      const averageMs = Number(process.hrtime.bigint() - startedAt) / 1e6 / rounds;
+      expect(averageMs).toBeLessThan(5);
+    });
   });
 
   describe('sliding-window rate limiting (WS-E.1.3c)', () => {

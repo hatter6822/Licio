@@ -401,3 +401,24 @@ describe('rate limiter degradation (WS-E.1.3c fail-closed)', () => {
     expect(OFFLINE_SYNC_ACCEPTANCE.maxFutureMs).toBe(ONLINE_ACCEPTANCE.maxFutureMs);
   });
 });
+
+describe('endpoint load smoke (WS-E.1.3a)', () => {
+  it('sustains a 300-request burst through the full guard chain', async () => {
+    fixture = freshWsEServices({ limits: { perMinute: 1_000, perHour: 10_000 } });
+    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    const a = app();
+    const startedAt = Date.now();
+    for (let i = 0; i < 300; i += 1) {
+      const res = await a.request(post('/v1/events/attention', attentionEvent(userId), cookie));
+      expect(res.status).toBe(202);
+    }
+    const elapsedMs = Date.now() - startedAt;
+    // Generous in-process bound: the chain (auth + limiter + schema +
+    // ownership + replay + privacy + store + publish) must not degrade
+    // super-linearly. ~<20ms/request average on CI hardware.
+    expect(elapsedMs).toBeLessThan(6_000);
+    expect(fixture.events.metrics.counter('events_attention_accepted')).toBe(300);
+    const { latency } = fixture.events.metrics.snapshot();
+    expect(latency.count).toBe(300);
+  }, 20_000);
+});
