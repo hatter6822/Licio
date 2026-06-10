@@ -258,3 +258,139 @@ describe('step-up satisfaction', () => {
     expect(ok.status).toBe(202);
   });
 });
+
+describe('account-state login gate (fail closed at the session mint)', () => {
+  it('denies a SUSPENDED account a session even with a valid passkey', async () => {
+    const { app, authenticator } = await passkeySignup('suspendme');
+    const user = services.store.getUserByHandle('suspendme');
+    services.store.updateUser(user?.userId as string, { accountState: 'suspended' });
+    const sessionsBefore = (await services.sessions.listForUser(user?.userId as string)).length;
+
+    const opt = await app.request('/v1/auth/webauthn/authenticate/options', {
+      method: 'POST',
+      headers: headers(),
+    });
+    const attempt = cookie(opt, '__Host-wa');
+    const options = await readJson<{ challenge: string }>(opt);
+    const verify = await app.request('/v1/auth/webauthn/authenticate/verify', {
+      method: 'POST',
+      headers: headers(attempt),
+      body: JSON.stringify({
+        response: authenticator.authenticate(options.challenge, RP, ORIGIN, 5),
+      }),
+    });
+    expect(verify.status).toBe(403);
+    expect((await readJson<{ error: { code: string } }>(verify)).error.code).toBe(
+      'account_suspended',
+    );
+    // No session cookie was minted and no NEW session row exists (the prior
+    // signup session is untouched — suspension enforcement on existing sessions
+    // is the middleware's job, which 403s non-active accounts on every request).
+    expect(cookie(verify, '__Host-sid')).toBe('');
+    expect(await services.sessions.listForUser(user?.userId as string)).toHaveLength(
+      sessionsBefore,
+    );
+  });
+
+  it('denies a suspended account the email path too (post-credential proof)', async () => {
+    const app = createApp();
+    const user = services.store.createUser({
+      handle: 'susmail',
+      displayName: 'S',
+      email: 'sus@example.com',
+      accountState: 'suspended',
+      locale: null,
+      ageBand: 'adult',
+      privacySettings: (await import('@licio/shared')).defaultPrivacySettings(),
+      personalizationSettings: (await import('@licio/shared')).defaultPersonalizationSettings(),
+      reputationSummary: (await import('@licio/shared')).emptyReputationSummary(),
+      roles: ['user'],
+    });
+    services.store.setAuth(user.userId, { emailVerified: true });
+    const start = await app.request('/v1/auth/email/start', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({ email: 'sus@example.com' }),
+    });
+    const attempt = cookie(start, '__Host-otp');
+    const code = (services.mailer as RecordingMailer).codes.at(-1)?.code as string;
+    const verify = await app.request('/v1/auth/email/verify-login', {
+      method: 'POST',
+      headers: headers(attempt),
+      body: JSON.stringify({ code }),
+    });
+    expect(verify.status).toBe(403);
+    expect((await readJson<{ error: { code: string } }>(verify)).error.code).toBe(
+      'account_suspended',
+    );
+  });
+});
+
+describe('email issuance cooldown (anti-mail-bombing, §19.1-aligned)', () => {
+  it('sends at most ONE login code per mailbox per window, with identical 202s', async () => {
+    const app = createApp();
+    const user = services.store.createUser({
+      handle: 'bombme',
+      displayName: 'B',
+      email: 'bomb@example.com',
+      accountState: 'active',
+      locale: null,
+      ageBand: 'adult',
+      privacySettings: (await import('@licio/shared')).defaultPrivacySettings(),
+      personalizationSettings: (await import('@licio/shared')).defaultPersonalizationSettings(),
+      reputationSummary: (await import('@licio/shared')).emptyReputationSummary(),
+      roles: ['user'],
+    });
+    services.store.setAuth(user.userId, { emailVerified: true });
+
+    const mailer = services.mailer as RecordingMailer;
+    const responses: number[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const res = await app.request('/v1/auth/email/start', {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({ email: 'bomb@example.com' }),
+      });
+      responses.push(res.status);
+    }
+    // Five identical 202s (no observable difference)…
+    expect(responses).toEqual([202, 202, 202, 202, 202]);
+    // …but exactly ONE email left the building.
+    expect(mailer.codes.filter((c2) => c2.to === 'bomb@example.com')).toHaveLength(1);
+  });
+
+  it('coalesces duplicate-registration notices under the same cooldown', async () => {
+    const app = createApp();
+    services.store.createUser({
+      handle: 'dupowner',
+      displayName: 'D',
+      email: 'dup@example.com',
+      accountState: 'active',
+      locale: null,
+      ageBand: 'adult',
+      privacySettings: (await import('@licio/shared')).defaultPrivacySettings(),
+      personalizationSettings: (await import('@licio/shared')).defaultPersonalizationSettings(),
+      reputationSummary: (await import('@licio/shared')).emptyReputationSummary(),
+      roles: ['user'],
+    });
+    const mailer = services.mailer as RecordingMailer;
+    for (let i = 0; i < 4; i += 1) {
+      const res = await app.request('/v1/auth/register', {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({
+          handle: `duptry${i}`,
+          display_name: 'Dup',
+          email: 'dup@example.com',
+          date_of_birth: '1990-01-01',
+        }),
+      });
+      expect(res.status).toBe(200); // generic success — no enumeration
+    }
+    expect(
+      mailer.notices.filter(
+        (n) => n.to === 'dup@example.com' && n.kind === 'duplicate_registration',
+      ),
+    ).toHaveLength(1);
+  });
+});

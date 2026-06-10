@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { validateServerEnv } from '@licio/shared/env';
 import { createApp } from './app.js';
+import { startPrivacyScheduler } from './identity/privacy-jobs.js';
 import { AuthRateLimiter } from './identity/rate-limit-auth.js';
 import {
   RedisAuthRateLimitStore,
@@ -40,6 +41,14 @@ const identityServices = buildIdentityServicesFromEnv(env, {
   identityServices.rateLimit = new AuthRateLimiter(new RedisAuthRateLimitStore(redis));
 }
 setIdentityServices(identityServices);
+
+// Hourly privacy jobs: the 72h export sweep and the 30-day deletion purge
+// (WS-D.2.2c / WS-D.2.4a).  Expiry is ALSO enforced at read time, so a missed
+// tick can never extend retention; a durable distributed runner replaces this
+// behind the same two functions in multi-process production.
+startPrivacyScheduler(identityServices, (err, task) =>
+  logger.error({ err, task }, 'privacy scheduler task failed'),
+);
 
 const app = createApp();
 

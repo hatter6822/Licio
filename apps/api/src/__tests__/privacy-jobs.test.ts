@@ -27,8 +27,10 @@ import {
   EXPORT_SCHEMA_VERSION,
   exportObjectKey,
   MAX_EXPORT_ATTEMPTS,
+  mintExportDownloadToken,
   processExportJob,
   runDeletionPurge,
+  startPrivacyScheduler,
   sweepExpiredExports,
 } from '../identity/privacy-jobs.js';
 import {
@@ -36,6 +38,7 @@ import {
   type IdentityConfig,
   type IdentityServices,
 } from '../identity/services.js';
+import { createSession } from '../identity/sessions.js';
 
 const CONFIG: IdentityConfig = {
   masterSecret: 'test-master-secret-at-least-32-characters-long',
@@ -174,10 +177,18 @@ describe('object store (encrypt-at-rest + signed tokens)', () => {
   it('round-trips through encryption and 404s a missing key', async () => {
     const store = new InMemoryObjectStore(services.secretBox);
     await store.put('k1', 'super-secret-payload', 'application/json', 10_000);
-    const got = await store.get('k1');
+    const got = await store.get('k1', 5_000);
     expect(got?.bytes.toString('utf8')).toBe('super-secret-payload');
     expect(got?.contentType).toBe('application/json');
-    expect(await store.get('missing')).toBeNull();
+    expect(await store.get('missing', 5_000)).toBeNull();
+  });
+
+  it('enforces expiry AT READ TIME — an expired object is gone without a sweep', async () => {
+    const store = new InMemoryObjectStore(services.secretBox);
+    await store.put('k1', 'payload', 'application/json', 10_000);
+    expect(await store.get('k1', 9_999)).not.toBeNull();
+    // One ms past expiry: unreadable even though no sweeper has run.
+    expect(await store.get('k1', 10_000)).toBeNull();
   });
 
   it('reports expired keys and deletes', async () => {
@@ -186,7 +197,7 @@ describe('object store (encrypt-at-rest + signed tokens)', () => {
     await store.put('stale', 'y', 'application/json', 1_000);
     expect(await store.expiredKeys(5_000)).toEqual(['stale']);
     await store.delete('stale');
-    expect(await store.get('stale')).toBeNull();
+    expect(await store.get('stale', 0)).toBeNull();
   });
 
   it('mints and verifies a signed download token; rejects tamper/expiry/wrong-subject', () => {
@@ -206,6 +217,76 @@ describe('object store (encrypt-at-rest + signed tokens)', () => {
       false,
     );
   });
+
+  it('rejects non-canonical token forms (extra segments, non-decimal expiry)', () => {
+    const exp = 10_000;
+    const token = mintDownloadToken(CONFIG.masterSecret, 'job1', 'user1', exp);
+    // Strict 2-part form: a valid token with trailing junk is malformed.
+    expect(
+      verifyDownloadToken(CONFIG.masterSecret, `${token}.junk`, 'job1', 'user1', exp - 1),
+    ).toBe(false);
+    // Scientific/hex/negative expiry encodings never verify.
+    const sig = token.split('.')[1] as string;
+    expect(verifyDownloadToken(CONFIG.masterSecret, `1e4.${sig}`, 'job1', 'user1', 1)).toBe(false);
+    expect(verifyDownloadToken(CONFIG.masterSecret, `0x10.${sig}`, 'job1', 'user1', 1)).toBe(false);
+    expect(verifyDownloadToken(CONFIG.masterSecret, `-1.${sig}`, 'job1', 'user1', -5)).toBe(false);
+  });
+
+  it('caps a freshly minted export token at the archive expiry (never outlives it)', async () => {
+    const user = seedFullUser();
+    const job = services.store.createExportJob(user.userId);
+    const t0 = 1_000_000;
+    await processExportJob(services, job.jobId, t0);
+    const jobExpiry = t0 + EXPORT_DOWNLOAD_TTL_MS;
+    // Minted one millisecond before the archive expires: still valid right then…
+    const token = mintExportDownloadToken(services, job.jobId, user.userId, jobExpiry - 1);
+    expect(
+      verifyDownloadToken(CONFIG.masterSecret, token, job.jobId, user.userId, jobExpiry - 1),
+    ).toBe(true);
+    // …but dead AT the archive expiry — an uncapped token would have lived
+    // another 72 hours past the archive itself.
+    expect(verifyDownloadToken(CONFIG.masterSecret, token, job.jobId, user.userId, jobExpiry)).toBe(
+      false,
+    );
+  });
+});
+
+describe('startPrivacyScheduler', () => {
+  it('runs an immediate tick (sweep + purge) and stops cleanly', async () => {
+    const user = seedFullUser();
+    const job = services.store.createExportJob(user.userId);
+    // Complete an export far enough in the past that it is already expired.
+    const past = Date.now() - EXPORT_DOWNLOAD_TTL_MS - 1_000;
+    await processExportJob(services, job.jobId, past);
+    services.store.setDeletion({
+      userId: user.userId,
+      state: 'grace_period',
+      requestedAt: new Date(past).toISOString(),
+      purgeAt: new Date(Date.now() - 1).toISOString(),
+      cancelledAt: null,
+      completedAt: null,
+    });
+
+    const stop = startPrivacyScheduler(services);
+    // The startup tick is asynchronous; yield until it lands.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    stop();
+
+    expect(services.store.getDeletion(user.userId)?.state).toBe('deleted');
+    expect(services.store.getUser(user.userId)?.accountState).toBe('deleted');
+    expect(await services.objectStore.get(exportObjectKey(job.jobId), Date.now())).toBeNull();
+  });
+
+  it('reports task errors through onError without dying', async () => {
+    const failures: Array<'sweep' | 'purge'> = [];
+    services.objectStore.expiredKeys = async () => {
+      throw new Error('boom');
+    };
+    const stop = startPrivacyScheduler(services, (_err, task) => failures.push(task));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    stop();
+    expect(failures).toContain('sweep');
+  });
 });
 
 describe('processExportJob', () => {
@@ -220,7 +301,7 @@ describe('processExportJob', () => {
     expect(done?.downloadUrlRef).toBe(exportObjectKey(job.jobId));
     expect(done?.expiresAt).toBe(new Date(1_000 + EXPORT_DOWNLOAD_TTL_MS).toISOString());
 
-    const obj = await services.objectStore.get(exportObjectKey(job.jobId));
+    const obj = await services.objectStore.get(exportObjectKey(job.jobId), 2_000);
     expect(obj).not.toBeNull();
     if (!obj) throw new Error('archive missing');
     const parsed = JSON.parse(obj.bytes.toString('utf8')) as Record<string, unknown>;
@@ -300,10 +381,17 @@ describe('runDeletionPurge', () => {
     expect(tomb?.accountState).toBe('deleted');
     expect(tomb?.email).toBeNull();
     expect(tomb?.displayName).toBe('[deleted]');
-    expect(tomb?.handle.startsWith('deleted_')).toBe(true);
+    // Collision-safe, data-free tombstone handle: deleted_ + 22 hex of
+    // sha256(user_id) — exactly 30 chars, inside the DB handle CHECK.
+    expect(tomb?.handle).toBe(`deleted_${sha256Hex(user.userId).slice(0, 22)}`);
+    expect(tomb?.handle).toHaveLength(30);
     expect(services.store.getAuth(user.userId)).toBeNull();
     expect(services.store.listWebauthn(user.userId)).toEqual([]);
     expect(services.store.listWalletAuth(user.userId)).toEqual([]);
+    // Settings + reputation are personal data: reset to pristine defaults.
+    expect(tomb?.privacySettings).toEqual(defaultPrivacySettings());
+    expect(tomb?.personalizationSettings).toEqual(defaultPersonalizationSettings());
+    expect(tomb?.reputationSummary).toEqual(emptyReputationSummary());
 
     expect(anonymized).toBe(user.userId);
     expect(purged).toEqual({ id: user.userId, mode: 'delete' });
@@ -312,6 +400,39 @@ describe('runDeletionPurge', () => {
     const complete = audit.inputs.find((e) => e.eventType === 'deletion_complete');
     expect(complete?.actorUserId).toBeNull();
     expect(complete?.targetRef).toBe(sha256Hex(user.userId));
+  });
+
+  it('removes COMPLETED export archives and revokes every session at purge (D.2.4c)', async () => {
+    const user = seedFullUser();
+    // A completed export whose 72h window is still open at purge time…
+    const job = services.store.createExportJob(user.userId);
+    const t0 = Date.now();
+    await processExportJob(services, job.jobId, t0);
+    expect(await services.objectStore.get(exportObjectKey(job.jobId), t0 + 1)).not.toBeNull();
+    // …and a live session (e.g. a cancel-only re-login during the grace period).
+    const session = await createSession(services.sessions, {
+      userId: user.userId,
+      authMethod: 'email_otp',
+      deviceLabel: 'macOS/Chrome',
+      rememberMe: false,
+    });
+    services.store.setDeletion({
+      userId: user.userId,
+      state: 'grace_period',
+      requestedAt: new Date(t0 - 2).toISOString(),
+      purgeAt: new Date(t0 - 1).toISOString(),
+      cancelledAt: null,
+      completedAt: null,
+    });
+
+    expect(await runDeletionPurge(services, t0)).toBe(1);
+
+    // The archive is gone from object storage and the session store is empty.
+    expect(await services.objectStore.get(exportObjectKey(job.jobId), t0 + 1)).toBeNull();
+    expect(await services.sessions.get(session.tokenHash)).toBeNull();
+    expect(await services.sessions.listForUser(user.userId)).toEqual([]);
+    // The job rows themselves are dropped by the tombstone.
+    expect(services.store.listExportJobs(user.userId)).toEqual([]);
   });
 
   it('does not purge a deletion whose grace period has not elapsed', async () => {

@@ -2,7 +2,8 @@
 //
 // Audit-log event taxonomy and the user-facing "recent security activity" view
 // (WS-D.1.6c).  The log is append-only and minimized: entries never carry
-// credentials, session tokens, or plaintext IPs — country-level location only.
+// credentials, session tokens, IPs, or location of ANY granularity (§19.1) —
+// a coarse device descriptor is the most context an entry may hold.
 import { z } from 'zod';
 import { isoTimestampSchema, uuidSchema } from './common.js';
 import { authMethodSchema } from './identity-records.js';
@@ -36,8 +37,8 @@ export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
 export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);
 
 /**
- * Minimized event context.  No raw IP, no secrets — country code, a coarse
- * device label, and the auth method are the most that is ever recorded.
+ * Minimized event context.  No IP, no location, no secrets — a coarse device
+ * label and the auth method are the most that is ever recorded (§19.1).
  */
 export const auditContextSchema = z
   .object({

@@ -1155,13 +1155,19 @@ Knomosis-enabled rooms introduce new abuse modes. T&S policy explicitly covers: 
 **Absolute data-minimization default (project-wide).** Licio collects the
 absolute minimum information necessary to operate, and this is the default for
 **every** workstream — not only attention handling. In particular, the platform
-**never records, persists, or logs user IP addresses or any geolocation**,
-including coarse country-level location. An IP address may be used only
-*transiently in memory* — hashed under a server key, with a short TTL, and never
-written to durable storage, an audit entry, a session record, an analytics
-record, or any log — solely for abuse and rate-limiting defense, and is
-discarded immediately afterward. No persisted data structure contains an IP or a
-location field. There is no geolocation lookup of any kind (no MaxMind or
+**never records, persists, logs, or even reads user IP addresses or any
+geolocation**, including coarse country-level location. The application layer
+does not read the client network address at all — not transiently, not hashed:
+no code path reads the forwarded-address headers or the socket remote address
+(enforced by a static test). Abuse and rate-limiting defense is therefore
+**identity-free by construction**: per-account progressive lockouts (keyed by a
+non-reversible ref of the account under attack — first-party data), per-target
+cooldowns (e.g. at most one email per mailbox per window, keyed by the protected
+resource), and global per-endpoint budgets (one process-wide counter that
+distinguishes no one). Connection-level flood fairness is the edge/gateway's
+concern, where packet routing already requires addresses; that information stays
+outside the application boundary. No persisted data structure contains an IP or
+a location field. There is no geolocation lookup of any kind (no MaxMind or
 equivalent IP-to-country database). "Local" content features, where offered, are
 driven by an explicit user-chosen region preference (a content topic), never by
 detecting or inferring where the user physically is. This default may not be
@@ -1506,7 +1512,7 @@ XSS is the dominant risk for a UGC platform that also connects wallets — a sin
 
 ## 25.3 Account security
 
-WebAuthn/passkeys as the preferred, phishing-resistant authentication. **Authentication is passwordless: Licio uses no passwords and has no password-reset flow.** The fallbacks -- for devices/browsers without a platform authenticator, and offered depending on jurisdiction and risk -- are a single-use one-time code sent to a verified email and, for adults who opt in, Sign-In with Ethereum (EIP-4361, verified per Section 25.6); SMS/phone codes are deliberately not used as a factor (SIM-swap and privacy concerns). The authentication-wallet credential is kept domain-separated from the financial wallet identity so logging in with a wallet does not link it to payments/governance (Section 19.5). Multi-factor (TOTP) for stewards and moderators; session management and a device list labelled by a coarse device descriptor only (never an IP or location, Section 19.1); **new-device sign-in alerts** (the security-alert feature compares only a coarse device descriptor, never an IP, country, or any geolocation — there is no geo-IP lookup); rate limits for credential attacks (IP used transiently and hashed for the limiter only, never recorded); abuse-resistant account recovery via remaining enrolled factors rather than any resettable shared secret.
+WebAuthn/passkeys as the preferred, phishing-resistant authentication. **Authentication is passwordless: Licio uses no passwords and has no password-reset flow.** The fallbacks -- for devices/browsers without a platform authenticator, and offered depending on jurisdiction and risk -- are a single-use one-time code sent to a verified email and, for adults who opt in, Sign-In with Ethereum (EIP-4361, verified per Section 25.6); SMS/phone codes are deliberately not used as a factor (SIM-swap and privacy concerns). The authentication-wallet credential is kept domain-separated from the financial wallet identity so logging in with a wallet does not link it to payments/governance (Section 19.5). Multi-factor (TOTP) for stewards and moderators; session management and a device list labelled by a coarse device descriptor only (never an IP or location, Section 19.1); **new-device sign-in alerts** (the security-alert feature compares only a coarse device descriptor, never an IP, country, or any geolocation — there is no geo-IP lookup); rate limits for credential attacks that are identity-free by construction (per-account lockouts, per-target cooldowns, and global budgets — the application never reads the client address, Section 19.1); abuse-resistant account recovery via remaining enrolled factors rather than any resettable shared secret.
 
 ## 25.4 Backend security
 
@@ -1784,7 +1790,7 @@ The PWA is the universal surface; it is installable, offline-tolerant, and updat
 
 ## 32.4 Privacy and data protection
 
-Data minimization before collection; **no IP or location is ever recorded, persisted, or logged** (IPs are used only transiently and hashed for rate limiting; there is no geo-IP lookup — Section 19.1); in-browser aggregation reduces raw traces; attention-derived signals are visible and controllable; retention tiers are enforced by jobs; DSAR/export/deletion are tested before public beta; anti-abuse data is protected from unnecessary internal access; research exports use aggregation thresholds and small-cell suppression; minors get protective defaults; wallet identity is separated from social identity; sensitive social/moderation/minors/inference data and private messages never go on-chain; staff tools are role-scoped and audit-logged.
+Data minimization before collection; **no IP or location is ever recorded, persisted, logged, or read** (the application never reads the client address — rate limiting is per-account, per-target, and global identity-free budgets; there is no geo-IP lookup — Section 19.1); in-browser aggregation reduces raw traces; attention-derived signals are visible and controllable; retention tiers are enforced by jobs; DSAR/export/deletion are tested before public beta; anti-abuse data is protected from unnecessary internal access; research exports use aggregation thresholds and small-cell suppression; minors get protective defaults; wallet identity is separated from social identity; sensitive social/moderation/minors/inference data and private messages never go on-chain; staff tools are role-scoped and audit-logged.
 
 ## 32.5 Trust, safety, and UGC governance
 

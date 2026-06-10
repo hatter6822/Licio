@@ -31,6 +31,7 @@ import {
 import { privateOwnershipOutcome } from '../identity/rbac.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { readSessionToken, revokeAllForUser, validateSession } from '../identity/sessions.js';
+import { rateLimit } from '../lib/rate-limit.js';
 import {
   type AuthEnv,
   authMiddleware,
@@ -210,12 +211,13 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
           if (!job || privateOwnershipOutcome(auth.userId, job.userId) === 'not_found') {
             return c.json({ error: { code: 'not_found', message: 'Export not found.' } }, 404);
           }
+          const now = Date.now();
           const ok = verifyDownloadToken(
             services.config.masterSecret,
             c.req.valid('query').t,
             jobId,
             auth.userId,
-            Date.now(),
+            now,
           );
           if (!ok || job.status !== 'completed') {
             return c.json(
@@ -223,7 +225,12 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
               403,
             );
           }
-          const obj = await services.objectStore.get(exportObjectKey(jobId));
+          // The 72-hour archive window is enforced HERE too (not only by the
+          // sweeper): a job past its expiry is gone even if the sweep has not run.
+          if (job.expiresAt && Date.parse(job.expiresAt) <= now) {
+            return c.json({ error: { code: 'gone', message: 'Export no longer available.' } }, 410);
+          }
+          const obj = await services.objectStore.get(exportObjectKey(jobId), now);
           if (!obj)
             return c.json({ error: { code: 'gone', message: 'Export no longer available.' } }, 410);
           await services.audit.append({
@@ -233,12 +240,14 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
           });
           // Return a plain `Response` (not `c.body`) so the handler's inferred
           // return type stays portable (avoids a TS2883 reference to Hono's
-          // internal `Data` type) and the decrypted bytes stream verbatim.
+          // internal `Data` type) and the decrypted bytes stream verbatim.  The
+          // archive is a concentrated PII bundle: never cached anywhere.
           return new Response(Uint8Array.from(obj.bytes), {
             status: 200,
             headers: {
               'Content-Type': 'application/json',
               'Content-Disposition': 'attachment; filename="licio-export.json"',
+              'Cache-Control': 'no-store',
             },
           });
         },
@@ -264,19 +273,21 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
             cancelledAt: null,
             completedAt: null,
           });
-          // A single-use cancellation token (for the emailed link); also cancellable
-          // by re-login for accounts with no email on file.
-          const token = randomToken(24);
-          await services.otp.set(cancelTokenKey(token), auth.userId, GRACE_PERIOD_MS);
           await revokeAllForUser(services.sessions, auth.userId);
           await services.audit.append({
             actorUserId: auth.userId,
             eventType: 'deletion_request',
             context: {},
           });
+          // A single-use cancellation token for the emailed link — minted ONLY
+          // when an email exists (no orphaned 30-day secret otherwise).  A
+          // no-email account cancels by re-logging in with a remaining method.
           const email = services.store.getUser(auth.userId)?.email;
-          if (email)
+          if (email) {
+            const token = randomToken(24);
+            await services.otp.set(cancelTokenKey(token), auth.userId, GRACE_PERIOD_MS);
             await services.mailer.sendNotice(email, 'deletion_requested', { cancel_token: token });
+          }
           c.header('Set-Cookie', clearSidCookie(), { append: true });
           return c.json(toDeletionStatus(services, auth.userId));
         },
@@ -296,8 +307,10 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
       // Cancel via an emailed TOKEN (unauthenticated) OR a remaining-method
       // re-login.  The body is parsed defensively: a session-based cancel sends
       // no body at all, so an empty/invalid body must NOT 400 — it falls through
-      // to the session path.
-      .post('/delete-account/cancel', async (c) => {
+      // to the session path.  Unauthenticated + token-bearing ⇒ a GLOBAL
+      // identity-free budget bounds flooding (the 192-bit token is unguessable;
+      // nothing about the requester is read, §19.1).
+      .post('/delete-account/cancel', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) => {
         const services = resolve();
         const token = await readCancelToken(c);
         let userId: string | null = null;
@@ -362,8 +375,13 @@ async function toExportStatus(
   services: IdentityServices,
   job: NonNullable<ReturnType<IdentityServices['store']['getExportJob']>>,
   userId: string,
+  now: number = Date.now(),
 ) {
-  const available = job.status === 'completed';
+  // Available only while completed AND inside the 72-hour window — the read
+  // path never advertises (or signs a token for) an archive past its expiry,
+  // independent of whether the sweeper has run (WS-D.2.2c).
+  const available =
+    job.status === 'completed' && (!job.expiresAt || Date.parse(job.expiresAt) > now);
   return exportJobStatusSchema.parse({
     job_id: job.jobId,
     status: job.status,
@@ -373,7 +391,7 @@ async function toExportStatus(
     expires_at: job.expiresAt,
     download_available: available,
     // A FRESH signed token is minted per request, never persisted (WS-D.2.2c).
-    download_token: available ? mintExportDownloadToken(services, job.jobId, userId) : null,
+    download_token: available ? mintExportDownloadToken(services, job.jobId, userId, now) : null,
   });
 }
 

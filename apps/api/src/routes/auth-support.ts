@@ -4,12 +4,15 @@
 // the canonical rate-limit keying (WS-D.1.3d), session finalization with a
 // new-device alert, and the contract-wallet verifier.
 //
-// Privacy amendment (§19.1): the client IP is used ONLY as a transient, hashed
-// rate-limit counter key — never stored in a session/audit/log.
+// Privacy amendment (§19.1): the application NEVER reads the client network
+// address — there is no per-IP key, hashed or otherwise, anywhere.  Rate
+// limiting is per-account (a non-reversible ref of the account under attack)
+// plus a global identity-free backstop; a static test enforces that no source
+// file reads the forwarded-address header.
 import type { AuthMethod } from '@licio/shared';
 import { accountRef, sessionRef as deriveSessionRef } from '../identity/crypto.js';
 import { assessLogin, deviceProfile, sendSecurityAlert } from '../identity/security-alerts.js';
-import { hashIp, type IdentityServices } from '../identity/services.js';
+import type { IdentityServices } from '../identity/services.js';
 import { type CreatedSession, createSession } from '../identity/sessions.js';
 import { type ContractSignatureVerifier, createContractVerifier } from '../identity/siwe.js';
 
@@ -45,14 +48,6 @@ export interface HeaderCtx {
   req: { header: (k: string) => string | undefined };
 }
 
-/** Transient client IP — hashed for the rate-limit key only, never persisted (§19.1). */
-export function clientIp(c: HeaderCtx): string {
-  return c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
-}
-export function rateLimitIpKey(services: IdentityServices, c: HeaderCtx): string {
-  return hashIp(services.config.masterSecret, clientIp(c));
-}
-
 // --- Canonical per-account rate-limit keys (WS-D.1.3d) ---------------------
 export function accountRefForUser(services: IdentityServices, userId: string): string {
   return accountRef(services.config.masterSecret, `user:${userId}`);
@@ -69,29 +64,24 @@ export interface RateGate {
   retryAfterSec: number;
 }
 
-/** Pre-attempt gate: blocked when the account is locked or the IP is blocked. */
+/** Pre-attempt gate: blocked when the account is locked or the global backstop is on. */
 export async function checkRateLimit(
   services: IdentityServices,
-  c: HeaderCtx,
   accountKey: string,
 ): Promise<RateGate> {
-  return services.rateLimit.check(accountKey, rateLimitIpKey(services, c));
+  return services.rateLimit.check(accountKey);
 }
 
 /**
- * Record one auth failure (account + IP counters) and, on the transition into the
- * 30-minute hard lock, fire the owner account-lockout alert (WS-D.1.3d).
- * `accountKey` is null for unattributable attempts (only the IP counter moves).
+ * Record one auth failure (account + global counters) and, on the transition into
+ * the 30-minute hard lock, fire the owner account-lockout alert (WS-D.1.3d).
+ * `accountKey` is null for unattributable attempts (only the global counter moves).
  */
 export async function recordAuthFailure(
   services: IdentityServices,
-  c: HeaderCtx,
   opts: { accountKey: string | null; alertUserId?: string; authMethod?: AuthMethod },
 ): Promise<void> {
-  const outcome = await services.rateLimit.recordFailure(
-    opts.accountKey,
-    rateLimitIpKey(services, c),
-  );
+  const outcome = await services.rateLimit.recordFailure(opts.accountKey);
   await services.audit.append({
     actorUserId: opts.alertUserId ?? null,
     eventType: 'login_failure',
@@ -112,9 +102,41 @@ export async function recordAuthFailure(
   }
 }
 
+export type LoginFinalization =
+  | { ok: true; session: CreatedSession }
+  | { ok: false; code: 'account_suspended' | 'account_unavailable' };
+
+/**
+ * Account-state gate at the session-mint chokepoint (fail closed).  A session is
+ * created ONLY for an `active` account or a `deactivated` one inside its deletion
+ * grace period (that session is restricted by the middleware to the deletion
+ * status/cancel routes — the recovery path for a no-email account).  A suspended,
+ * deleted, or otherwise non-active account never mints a session, even with a
+ * valid credential.
+ */
+function loginDenial(
+  services: IdentityServices,
+  userId: string,
+): Extract<LoginFinalization, { ok: false }> | null {
+  const user = services.store.getUser(userId);
+  if (!user) return { ok: false, code: 'account_unavailable' };
+  if (user.accountState === 'active') return null;
+  if (
+    user.accountState === 'deactivated' &&
+    services.store.getDeletion(userId)?.state === 'grace_period'
+  ) {
+    return null;
+  }
+  return {
+    ok: false,
+    code: user.accountState === 'suspended' ? 'account_suspended' : 'account_unavailable',
+  };
+}
+
 /**
  * Create a session on successful auth and raise a NEW-DEVICE alert if warranted.
  * No IP, no location is recorded — only a coarse device descriptor (§19.1).
+ * Denies (without minting a session) when the account state forbids login.
  */
 export async function finalizeLogin(
   services: IdentityServices,
@@ -126,7 +148,17 @@ export async function finalizeLogin(
     rememberMe: boolean;
     mfaVerified?: boolean;
   },
-): Promise<CreatedSession> {
+): Promise<LoginFinalization> {
+  const denial = loginDenial(services, params.userId);
+  if (denial) {
+    await services.audit.append({
+      actorUserId: params.userId,
+      eventType: 'login_failure',
+      context: { auth_method: params.authMethod },
+    });
+    return denial;
+  }
+
   const profile = deviceProfile(c.req.header('user-agent') ?? '');
   const existing = await services.sessions.listForUser(params.userId);
   const history = existing.map((s) => ({ deviceProfile: s.stored.record.device_label }));
@@ -158,7 +190,12 @@ export async function finalizeLogin(
       event: { type: 'new_signin', device: profile, authMethod: params.authMethod },
     });
   }
-  return created;
+  return { ok: true, session: created };
+}
+
+/** The uniform 403 body for a state-denied login (post-credential-proof). */
+export function loginDenialResponse(code: 'account_suspended' | 'account_unavailable') {
+  return err(code, 'This account is not available.');
 }
 
 // --- Misc -----------------------------------------------------------------

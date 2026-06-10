@@ -7,6 +7,7 @@
 // not by unit tests, and are therefore excluded from the coverage threshold like
 // `packages/db/src/client.ts` — the logic they bind to is already fully covered.
 import { randomBytes } from 'node:crypto';
+import { sessionRecordSchema } from '@licio/shared';
 import type Redis from 'ioredis';
 import type { EphemeralStore } from './ephemeral-store.js';
 import type { AuthRateLimitStore } from './rate-limit-auth.js';
@@ -67,19 +68,40 @@ export class RedisSessionStore implements SessionStore {
   }
 
   async put(tokenHash: string, stored: StoredSession): Promise<void> {
-    const ttlMs = Math.max(1, stored.expiresAt - Date.now());
+    const ttlMs = String(Math.max(1, Math.ceil(stored.expiresAt - Date.now())));
+    const userKey = this.#userKey(stored.record.user_id);
+    // The per-user index carries MAX(member TTLs): writing a short-lived session
+    // after a long-lived one must never SHORTEN the index expiry, or the long
+    // session would vanish from the device list / bulk revocation.  Redis ≥ 7:
+    // PEXPIRE…NX arms a TTL on a fresh (persistent) key — GT alone would skip it,
+    // because "no TTL" compares as infinite — then PEXPIRE…GT only ever extends.
     await this.#redis
       .multi()
-      .set(this.#key(tokenHash), JSON.stringify(stored), 'PX', Math.ceil(ttlMs))
-      .sadd(this.#userKey(stored.record.user_id), tokenHash)
-      // Keep the index alive at least as long as the longest possible session.
-      .pexpire(this.#userKey(stored.record.user_id), Math.ceil(ttlMs))
+      .set(this.#key(tokenHash), JSON.stringify(stored), 'PX', Number(ttlMs))
+      .sadd(userKey, tokenHash)
+      .call('PEXPIRE', userKey, ttlMs, 'NX')
+      .call('PEXPIRE', userKey, ttlMs, 'GT')
       .exec();
   }
 
   async get(tokenHash: string): Promise<StoredSession | null> {
     const raw = await this.#redis.get(this.#key(tokenHash));
-    return raw ? (JSON.parse(raw) as StoredSession) : null;
+    if (!raw) return null;
+    // Validate at the trust boundary (zod on every boundary): a corrupt or
+    // tampered row is DELETED and treated as no session — fail closed to
+    // unauthenticated, never a crash loop or a malformed record downstream.
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      const candidate = parsed as { record?: unknown; expiresAt?: unknown };
+      const record = sessionRecordSchema.parse(candidate.record);
+      if (typeof candidate.expiresAt !== 'number' || !Number.isFinite(candidate.expiresAt)) {
+        throw new Error('bad expiresAt');
+      }
+      return { record, expiresAt: candidate.expiresAt };
+    } catch {
+      await this.#redis.del(this.#key(tokenHash));
+      return null;
+    }
   }
 
   async delete(tokenHash: string): Promise<void> {
@@ -109,8 +131,9 @@ export class RedisSessionStore implements SessionStore {
 /**
  * Redis-backed progressive auth rate-limit store.  Failure windows are Redis
  * sorted sets pruned to the sliding window (ZREMRANGEBYSCORE + ZCARD); locks are
- * short-lived keys.  Keys hold only NON-reversible hashes (account ref, hashed
- * IP) — never a plaintext IP or email (§19.1 / §19.5).
+ * short-lived keys.  Keys hold only NON-reversible account refs and the global
+ * backstop key — never an IP (the application does not read client addresses,
+ * §19.1) and never a plaintext email (§19.5).
  */
 export class RedisAuthRateLimitStore implements AuthRateLimitStore {
   readonly #redis: Redis;

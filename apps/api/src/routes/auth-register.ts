@@ -27,13 +27,16 @@ import { canResend, startEmailVerification, verifyEmailFactor } from '../identit
 import type { IdentityServices } from '../identity/services.js';
 import { buildSessionCookie, readSessionToken, rotateSession } from '../identity/sessions.js';
 import { createRegistrationOptions, verifyRegistration } from '../identity/webauthn.js';
+import { rateLimit } from '../lib/rate-limit.js';
 import { type AuthEnv, authMiddleware, requireStepUp } from '../middleware/auth.js';
 import {
   ATTEMPT_COOKIES,
+  accountRefForEmail,
   buildAttemptCookie,
   clearAttemptCookie,
   err,
   finalizeLogin,
+  loginDenialResponse,
   publicUser,
   readAttempt,
 } from './auth-support.js';
@@ -58,11 +61,16 @@ interface PendingSignup {
 }
 
 export function createRegisterRoutes(resolve: () => IdentityServices) {
+  // GLOBAL (identity-free) budget on unauthenticated account creation: bounds
+  // signup spam per process without reading anything about the requester (§19.1).
+  // The duplicate-email notice additionally sits under a per-mailbox cooldown.
+  const signupLimit = rateLimit({ limit: 120, windowMs: 60_000 });
   return (
     new Hono<AuthEnv>()
       // --- Passkey-FIRST signup (WebAuthn primary) --------------------------
       .post(
         '/webauthn/signup/options',
+        signupLimit,
         zValidator('json', passkeySignupRequestSchema),
         async (c) => {
           const services = resolve();
@@ -157,12 +165,14 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
             eventType: 'auth_method_add',
             context: { auth_method: 'webauthn' },
           });
-          const created = await finalizeLogin(services, c, {
+          const fin = await finalizeLogin(services, c, {
             userId: user.userId,
             authMethod: 'webauthn',
             credentialRef: result.credential.credentialId,
             rememberMe: true,
           });
+          if (!fin.ok) return c.json(loginDenialResponse(fin.code), 403);
+          const created = fin.session;
           c.header('Set-Cookie', clearAttemptCookie(ATTEMPT_COOKIES.passkeySignup), {
             append: true,
           });
@@ -176,7 +186,7 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
       )
 
       // --- Passwordless email registration (age-gated; logs in, reduced cap) -
-      .post('/register', zValidator('json', emailRegisterRequestSchema), async (c) => {
+      .post('/register', signupLimit, zValidator('json', emailRegisterRequestSchema), async (c) => {
         const services = resolve();
         const body = c.req.valid('json');
         const gate = deriveAgeBand(body.date_of_birth);
@@ -184,9 +194,13 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           return c.json(err('age_restricted', 'We are unable to create an account.'), 403);
         }
         // Anti-enumeration: a duplicate email returns the same generic response and
-        // notifies the existing owner instead of creating a second account.
+        // notifies the existing owner instead of creating a second account.  The
+        // notice is under the same per-mailbox cooldown as code issuance, so
+        // repeated duplicate registrations cannot bomb the owner's inbox.
         if (services.store.getUserByEmail(body.email)) {
-          await services.mailer.sendNotice(body.email, 'duplicate_registration');
+          if (await canResend(services.otp, `notice:${accountRefForEmail(services, body.email)}`)) {
+            await services.mailer.sendNotice(body.email, 'duplicate_registration');
+          }
           return c.json(registeredAgeBandSchema.parse({ age_band: gate.band }));
         }
         if (services.store.getUserByHandle(body.handle)) {
@@ -208,13 +222,14 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
         const { code } = await startEmailVerification(services.otp, user.userId);
         await services.mailer.sendCode(body.email, code, 'verify');
         // The account is active (reduced capability until the email is verified).
-        const created = await finalizeLogin(services, c, {
+        const fin = await finalizeLogin(services, c, {
           userId: user.userId,
           authMethod: 'email_otp',
           credentialRef: null,
           rememberMe: false,
         });
-        c.header('Set-Cookie', buildSessionCookie(created.token, created.maxAgeSec), {
+        if (!fin.ok) return c.json(loginDenialResponse(fin.code), 403);
+        c.header('Set-Cookie', buildSessionCookie(fin.session.token, fin.session.maxAgeSec), {
           append: true,
         });
         return c.json(registeredAgeBandSchema.parse({ age_band: gate.band }));
@@ -283,9 +298,12 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           const auth = c.get('auth');
           if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
           const { email } = c.req.valid('json');
-          // Generic response on a taken email (no enumeration); notify the owner.
+          // Generic response on a taken email (no enumeration); notify the owner —
+          // under the per-mailbox cooldown so repeats cannot bomb their inbox.
           if (services.store.getUserByEmail(email)) {
-            await services.mailer.sendNotice(email, 'duplicate_email_add');
+            if (await canResend(services.otp, `notice:${accountRefForEmail(services, email)}`)) {
+              await services.mailer.sendNotice(email, 'duplicate_email_add');
+            }
             return c.json({ status: 'sent' as const });
           }
           services.store.updateUser(auth.userId, { email });

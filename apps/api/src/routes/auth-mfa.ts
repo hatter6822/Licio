@@ -85,6 +85,10 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
           if (!userAuth?.mfaSecret || !userAuth.mfaPending) {
             return c.json(err('not_enrolling', 'No pending MFA enrollment.'), 400);
           }
+          // The same attempt cap as /verify: a confirm code is equally guessable.
+          if (!(await attemptAllowed(services, auth.userId))) {
+            return c.json(err('rate_limited', 'Too many attempts. Try again later.'), 429);
+          }
           const secret = services.secretBox.open(userAuth.mfaSecret);
           if (!verifyTotp(secret, c.req.valid('json').code).valid) {
             return c.json(err('invalid_code', 'Invalid code.'), 400);
@@ -96,6 +100,7 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
             mfaEnrolledAt: new Date().toISOString(),
             recoveryCodeHashes: recoveryCodes.map(hashRecoveryCode),
           });
+          await services.otp.delete(attemptsKey(auth.userId));
           await services.audit.append({
             actorUserId: auth.userId,
             eventType: 'mfa_enroll',

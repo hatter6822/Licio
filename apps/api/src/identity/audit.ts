@@ -4,7 +4,9 @@
 // append + read; there is no update/delete path.  Every entry passes through a
 // redactor that enforces the minimized context allowlist and masks any IP- or
 // token-like value that slips in (defense in depth — the log must never become a
-// secondary surveillance store; §19.3/§25.4).
+// secondary surveillance store; §19.3/§25.4).  No IP and no location of any
+// granularity is ever recorded (§19.1) — a coarse device descriptor is the most
+// location-like value an entry may carry.
 import { randomUUID } from 'node:crypto';
 import {
   type AuditContext,

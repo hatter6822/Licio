@@ -9,14 +9,18 @@
 // in WS-D.1.1c).  Email is optional throughout.
 
 import { randomUUID } from 'node:crypto';
-import type {
-  AgeBand,
-  ExportJobState,
-  PersonalizationSettings,
-  PrivacySettings,
-  ReputationSummaryPrivate,
-  UserAccountState,
+import {
+  type AgeBand,
+  defaultPersonalizationSettings,
+  defaultPrivacySettings,
+  type ExportJobState,
+  emptyReputationSummary,
+  type PersonalizationSettings,
+  type PrivacySettings,
+  type ReputationSummaryPrivate,
+  type UserAccountState,
 } from '@licio/shared';
+import { sha256Hex } from './crypto.js';
 import type { Role } from './rbac.js';
 
 export interface StoredUser {
@@ -227,6 +231,11 @@ export class IdentityStore {
     return this.#exportJobs.get(jobId) ?? null;
   }
 
+  /** Every export job for a user, regardless of state (deletion purge sweep). */
+  listExportJobs(userId: string): StoredExportJob[] {
+    return [...this.#exportJobs.values()].filter((j) => j.userId === userId);
+  }
+
   updateExportJob(jobId: string, patch: Partial<StoredExportJob>): StoredExportJob | null {
     const job = this.#exportJobs.get(jobId);
     if (!job) return null;
@@ -261,9 +270,13 @@ export class IdentityStore {
   }
 
   /**
-   * Complete deletion (WS-D.2.4c): remove all personal data + credentials +
-   * sessions-adjacent records, but keep a minimal `user_id` + `account_state =
-   * deleted` tombstone so anonymized contributions retain FK integrity.
+   * Complete deletion (WS-D.2.4c): remove ALL personal data — credentials,
+   * user_auth (MFA secret + recovery codes), export jobs, settings, reputation —
+   * keeping only a minimal `user_id` + `account_state = deleted` tombstone so
+   * anonymized contributions retain FK integrity.  The tombstone handle is
+   * derived from sha256(user_id) (22 hex chars ⇒ 88 bits), so it fits the 30-char
+   * handle CHECK, collides with negligible probability under the unique
+   * lower(handle) index, and carries no personal data.
    */
   tombstoneUser(userId: string, now: number = Date.now()): void {
     this.#auth.delete(userId);
@@ -274,15 +287,17 @@ export class IdentityStore {
     if (user) {
       this.#users.set(userId, {
         ...user,
-        handle: `deleted_${userId.slice(0, 8)}`,
+        handle: `deleted_${sha256Hex(userId).slice(0, 22)}`,
         displayName: '[deleted]',
         email: null,
         accountState: 'deleted',
         locale: null,
         ageBand: null,
-        privacySettings: user.privacySettings,
-        personalizationSettings: user.personalizationSettings,
-        reputationSummary: user.reputationSummary,
+        // Settings and reputation are PERSONAL data (topic preferences, scores):
+        // reset to pristine defaults — nothing user-derived survives (WS-D.2.4c).
+        privacySettings: defaultPrivacySettings(),
+        personalizationSettings: defaultPersonalizationSettings(),
+        reputationSummary: emptyReputationSummary(),
         updatedAt: new Date(now).toISOString(),
       });
     }

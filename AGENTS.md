@@ -43,7 +43,7 @@ signed-URL archive, and account deletion with a 30-day grace + hard
 purge), steward TOTP MFA, and database-level wallet isolation are
 implemented and tested (`docs/identity/README.md`); the remaining leaves
 are production cloud adapters (S3 export-archive delivery, a durable
-export/purge job runner, and the Drizzle-backed identity store).
+distributed job runner, and the Drizzle-backed identity store).
 Workstreams WS-E through WS-P are planned (planning documents
 exist under `docs/planning/`; implementation not yet started).  See
 "Implementation roadmap" below for the full status table.
@@ -269,7 +269,7 @@ licio/
 │           │   ├── auth-methods.ts      --   countAuthMethods last-method guard
 │           │   ├── rbac.ts              --   role policy + object-level authz
 │           │   ├── audit.ts             --   append-only audit store + redactor
-│           │   ├── rate-limit-auth.ts   --   progressive per-account/per-IP limiter
+│           │   ├── rate-limit-auth.ts   --   per-account + global limiter (no IP, §19.1)
 │           │   ├── sessions.ts          --   session lifecycle, rotation, step-up, cookie
 │           │   ├── ephemeral-store.ts   --   TTL'd single-use store (take = get+delete)
 │           │   ├── webauthn.ts          --   @simplewebauthn ceremonies
@@ -283,7 +283,7 @@ licio/
 │           │   ├── services.ts          --   injectable service container + config
 │           │   └── redis-stores.ts      --   production Redis adapters (gated)
 │           ├── lib/
-│           │   ├── rate-limit.ts        --   per-IP fixed-window limiter
+│           │   ├── rate-limit.ts        --   global fixed-window budget (no client keying)
 │           │   ├── push-service.ts      --   VAPID push (session-scoped delete)
 │           │   ├── vapid.ts             --   VAPID key management
 │           │   ├── logger.ts            --   pino logger setup
@@ -637,11 +637,16 @@ Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(),
   usb=(), bluetooth=(), accelerometer=(), gyroscope=(), magnetometer=()
 ```
 
-### Rate limiting
+### Rate limiting (identity-free, SPEC §19.1)
 
-Per-IP fixed-window rate limiter for unauthenticated ingest endpoints
-(`/v1/telemetry`, `/api/security/csp-report`).  In-memory map with
-10,000-entry cap; overload → 429 rather than unbounded growth.
+The application never reads the client network address — no per-IP state
+of any kind, enforced by a static test (`no-client-address.test.ts`).
+Abuse control is layered as: per-account progressive lockouts (keyed by a
+non-reversible account ref), per-target cooldowns (one email per mailbox
+per window), and global per-endpoint fixed-window budgets
+(`/v1/telemetry`, `/api/security/csp-report`, auth minting/signup,
+deletion-cancel).  Overload → 429 + Retry-After.  Connection-level flood
+fairness is the edge/gateway's concern.
 
 ## Linting limitations
 
@@ -872,14 +877,14 @@ password column, hashing, or reset flow anywhere.
 | Sub-area | Key surface | Status |
 |----------|-------------|--------|
 | Schemas | User/privacy/session/credential/wallet zod + Drizzle, migration with partial indexes/CHECK/triggers | Complete |
-| Auth | WebAuthn (`@simplewebauthn`), email-OTP, SIWE (viem); sessions, rotation, step-up, rate limiting | Complete |
+| Auth | WebAuthn (`@simplewebauthn`), email-OTP, SIWE (viem); sessions, rotation, step-up, rate limiting; account-state gate at the session mint (suspended accounts never get a session) | Complete |
 | Authorization | RBAC + object-level (404-over-403), append-only audit log, fail-closed middleware | Complete |
 | Age gating | Under-13 block, teen privacy floor (server-clamped), `requireAdult` fail-closed | Complete |
-| Privacy controls | Settings get/patch (clamped/audited/propagated), attention delete, DSAR export (assemble → encrypt → signed-URL → 72h sweep), account deletion + 30-day grace + hard purge (anonymize/tombstone) | Complete |
+| Privacy controls | Settings get/patch (clamped/audited/propagated), attention delete, DSAR export (assemble → encrypt → expiry-capped signed token → read-time expiry + hourly sweep), account deletion + 30-day grace + hard purge (anonymize/tombstone/revoke; all archives removed) | Complete |
 | Steward MFA | TOTP enroll/verify/disable, per-session `mfa_verified`, reduced-assurance-until-MFA steward guard | Complete |
 | Wallet isolation | `wallet.wallet_accounts` schema + undirected-BFS isolation test (WS-D.3.2) | Complete |
-| Privacy | **No IP and no location are ever recorded** (SPEC §19.1); new-device alerts use a coarse device descriptor only; IPs are transient + hashed for rate limiting, never persisted | Complete |
-| Deferred | Production cloud adapters: S3 export-archive delivery, a durable export/purge job runner, and the Drizzle-backed identity-store projection | Pending |
+| Privacy | **No IP and no location are ever recorded — or even read** (SPEC §19.1): no code path reads the client address (statically tested); rate limiting is per-account + per-target-mailbox + global identity-free budgets; new-device alerts and request logs carry a coarse device descriptor only (never the full user-agent) | Complete |
+| Deferred | Production cloud adapters: S3 export-archive delivery, a durable distributed job runner (an in-process hourly scheduler runs the sweep/purge today, and expiry is also enforced at read time), and the Drizzle-backed identity-store projection | Pending |
 
 Pure crypto is mathematically validated: TOTP against the RFC 6238
 Appendix B vectors, real WebAuthn attestation/assertion via a pure-crypto

@@ -1,24 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Low-level identity crypto primitives (WS-D).  Every value that would otherwise
-// sit in plaintext — session tokens, IP addresses, wallet addresses — is reduced
-// here to a one-way hash before it touches durable storage.
+// sit in plaintext — session tokens, wallet addresses — is reduced here to a
+// one-way hash before it touches durable storage.  There is deliberately NO key
+// domain for client network addresses: the application never reads, hashes, or
+// keys anything on an IP (SPEC §19.1).
 //
 // Domain separation: all keyed hashes derive a per-purpose subkey from a single
 // master secret (SESSION_SECRET) via HKDF-SHA256 with a distinct `info` label, so
 // the auth-wallet hash and the financial-wallet hash of the SAME address are
-// non-correlatable (WS-D.1.4c / §19.5), and an IP hash key can never be confused
-// with a wallet key.
+// non-correlatable (WS-D.1.4c / §19.5), and a session-ref key can never be
+// confused with a wallet key.
 import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'node:crypto';
 
 /** Distinct HKDF `info` labels — the domain-separation namespaces. */
 export const KEY_DOMAINS = {
-  ipHash: 'licio:ip-hash:v1',
   authWallet: 'licio:auth-wallet:v1',
   financialWallet: 'licio:financial-wallet:v1',
   sessionRef: 'licio:session-ref:v1',
   accountRef: 'licio:account-ref:v1',
   secretBox: 'licio:secret-box:v1',
+  downloadToken: 'licio:download-token:v1',
 } as const;
 export type KeyDomain = (typeof KEY_DOMAINS)[keyof typeof KEY_DOMAINS];
 

@@ -30,7 +30,9 @@ describe('sha256Hex', () => {
 
 describe('deriveKey domain separation', () => {
   it('is deterministic per (secret, domain)', () => {
-    expect(deriveKey(SECRET, KEY_DOMAINS.ipHash)).toEqual(deriveKey(SECRET, KEY_DOMAINS.ipHash));
+    expect(deriveKey(SECRET, KEY_DOMAINS.accountRef)).toEqual(
+      deriveKey(SECRET, KEY_DOMAINS.accountRef),
+    );
   });
 
   it('yields INDEPENDENT keys across domains (auth-wallet ≠ financial-wallet)', () => {
@@ -49,16 +51,18 @@ describe('deriveKey domain separation', () => {
 
   it('a different master secret yields a different key', () => {
     expect(
-      deriveKey(SECRET, KEY_DOMAINS.ipHash).equals(deriveKey('b'.repeat(48), KEY_DOMAINS.ipHash)),
+      deriveKey(SECRET, KEY_DOMAINS.accountRef).equals(
+        deriveKey('b'.repeat(48), KEY_DOMAINS.accountRef),
+      ),
     ).toBe(false);
   });
 });
 
 describe('hmacHex', () => {
   it('is deterministic and keyed', () => {
-    const k1 = deriveKey(SECRET, KEY_DOMAINS.ipHash);
-    expect(hmacHex(k1, '1.2.3.4')).toBe(hmacHex(k1, '1.2.3.4'));
-    expect(hmacHex(k1, '1.2.3.4')).not.toBe(hmacHex(k1, '1.2.3.5'));
+    const k1 = deriveKey(SECRET, KEY_DOMAINS.accountRef);
+    expect(hmacHex(k1, 'input-a')).toBe(hmacHex(k1, 'input-a'));
+    expect(hmacHex(k1, 'input-a')).not.toBe(hmacHex(k1, 'input-b'));
   });
 });
 

@@ -8,7 +8,6 @@
 
 import { type AuditStore, InMemoryAuditStore } from './audit.js';
 import type { AuthMethodInventory } from './auth-methods.js';
-import { deriveKey, hmacHex, KEY_DOMAINS } from './crypto.js';
 import { type EphemeralStore, InMemoryEphemeralStore } from './ephemeral-store.js';
 import { InMemoryObjectStore, type ObjectStore } from './object-store.js';
 import { AuthRateLimiter, InMemoryAuthRateLimitStore } from './rate-limit-auth.js';
@@ -209,11 +208,6 @@ export function buildIdentityServicesFromEnv(
 ): IdentityServices {
   const base = createInMemoryIdentityServices(identityConfigFromEnv(env));
   return { ...base, ...adapters };
-}
-
-/** Keyed, non-reversible IP hash (never a plaintext IP in storage, §19.5). */
-export function hashIp(masterSecret: string, ip: string): string {
-  return hmacHex(deriveKey(masterSecret, KEY_DOMAINS.ipHash), ip);
 }
 
 /** Build the auth-method inventory for the last-method guard / verified check. */

@@ -9,6 +9,7 @@
 import { sha256Hex } from './crypto.js';
 import { EXPORT_DOWNLOAD_TTL_MS, mintDownloadToken } from './object-store.js';
 import type { IdentityServices } from './services.js';
+import { revokeAllForUser } from './sessions.js';
 
 export const EXPORT_SCHEMA_VERSION = 1;
 const exportKey = (jobId: string) => `export/${jobId}`;
@@ -104,19 +105,21 @@ export async function processExportJob(
   }
 }
 
-/** Mint a fresh signed download token for a completed export (per-request, §WS-D.2.2c). */
+/**
+ * Mint a fresh signed download token for a completed export (per-request,
+ * WS-D.2.2c).  The token's expiry is CAPPED at the archive's own 72-hour expiry,
+ * so a token minted late in the window can never outlive the object it unlocks.
+ */
 export function mintExportDownloadToken(
   services: IdentityServices,
   jobId: string,
   userId: string,
   now: number = Date.now(),
 ): string {
-  return mintDownloadToken(
-    services.config.masterSecret,
-    jobId,
-    userId,
-    now + EXPORT_DOWNLOAD_TTL_MS,
-  );
+  const job = services.store.getExportJob(jobId);
+  const jobExpiry = job?.expiresAt ? Date.parse(job.expiresAt) : Number.POSITIVE_INFINITY;
+  const expiresAt = Math.min(now + EXPORT_DOWNLOAD_TTL_MS, jobExpiry);
+  return mintDownloadToken(services.config.masterSecret, jobId, userId, expiresAt);
 }
 
 export function exportObjectKey(jobId: string): string {
@@ -141,9 +144,12 @@ export async function sweepExpiredExports(
 
 /**
  * Run the scheduled hard-deletion (WS-D.2.4b/c): for each grace-period deletion
- * whose purge instant has passed, anonymize contributions (WS-G hook), tombstone
- * the user (remove all personal data, keep a FK stub), and write a deletion_complete
- * audit entry that carries only a HASHED user id — no personal data.
+ * whose purge instant has passed —
+ *   anonymize contributions (WS-G hook) → purge attention (WS-E hook) → delete
+ *   EVERY export archive the user has in object storage → revoke every session
+ *   (incl. any cancel-only session created during the grace period) → tombstone
+ *   the user (all personal data removed, FK stub kept) → write a
+ *   deletion_complete audit entry carrying only a HASHED user id.
  */
 export async function runDeletionPurge(
   services: IdentityServices,
@@ -153,9 +159,12 @@ export async function runDeletionPurge(
   for (const req of due) {
     await services.anonymizeContributions?.(req.userId);
     await services.purgeAttention?.(req.userId, 'delete');
-    // Remove any export archives for the user before tombstoning.
-    const job = services.store.activeExportJob(req.userId);
-    if (job) await services.objectStore.delete(exportKey(job.jobId));
+    // ALL export archives for the user (completed ones included) are removed
+    // from object storage before the job rows are dropped by the tombstone.
+    for (const job of services.store.listExportJobs(req.userId)) {
+      await services.objectStore.delete(exportKey(job.jobId));
+    }
+    await revokeAllForUser(services.sessions, req.userId);
     services.store.tombstoneUser(req.userId, now);
     services.store.setDeletion({
       ...req,
@@ -171,4 +180,38 @@ export async function runDeletionPurge(
     });
   }
   return due.length;
+}
+
+export const PRIVACY_SCHEDULER_INTERVAL_MS = 60 * 60_000; // hourly
+
+/**
+ * Start the in-process privacy scheduler: an hourly tick running the 72-hour
+ * export sweep (WS-D.2.2c) and the 30-day deletion purge (WS-D.2.4a).  Both
+ * functions are idempotent, and expiry is ALSO enforced at read time, so a
+ * missed tick can never extend data retention — the scheduler bounds it.  A
+ * durable distributed runner replaces this behind the same two functions in
+ * multi-process production; the timer is unref'd so it never holds the process.
+ * Returns a stop function.
+ */
+export function startPrivacyScheduler(
+  services: IdentityServices,
+  onError: (err: unknown, task: 'sweep' | 'purge') => void = () => {},
+  intervalMs: number = PRIVACY_SCHEDULER_INTERVAL_MS,
+): () => void {
+  const tick = async (): Promise<void> => {
+    try {
+      await sweepExpiredExports(services);
+    } catch (err) {
+      onError(err, 'sweep');
+    }
+    try {
+      await runDeletionPurge(services);
+    } catch (err) {
+      onError(err, 'purge');
+    }
+  };
+  const timer = setInterval(() => void tick(), intervalMs);
+  if (typeof timer === 'object' && 'unref' in timer) timer.unref();
+  void tick(); // run once at startup so overdue work is not deferred a full interval
+  return () => clearInterval(timer);
 }

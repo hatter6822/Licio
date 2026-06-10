@@ -304,6 +304,8 @@ describe('account deletion lifecycle', () => {
     // A pending-deletion account may RE-LOGIN with a remaining method solely to
     // cancel (the session is otherwise restricted by the middleware).  No manual
     // re-activation: this exercises the real recovery path for a no-email user.
+    // (Clear the 60s per-mailbox issuance cooldown the first login armed.)
+    await services.otp.clear();
     const sid2 = await login(app, 'del@example.com');
     const cancel = await app.request('/v1/privacy/delete-account/cancel', {
       method: 'POST',

@@ -70,7 +70,7 @@ interfaces.
 | `auth-methods.ts` | `countAuthMethods`, last-method guard, verified-credential check |
 | `rbac.ts` | role→action policy table, `assertOwns`, 404-over-403 for private resources |
 | `audit.ts` | append-only audit store + context redactor (masks IP/secrets) |
-| `rate-limit-auth.ts` | progressive per-account/per-IP limiter (5→30s, 10→2m, 20→30m lock; 50 IP→15m) |
+| `rate-limit-auth.ts` | identity-free progressive limiter: per-account 5→30s, 10→2m, 20→30m lock, plus a global spray backstop — NO per-IP dimension (§19.1) |
 | `sessions.ts` | session lifecycle: hashed tokens, sliding TTL under a 90-day cap, rotation, step-up, `__Host-sid` cookie |
 | `ephemeral-store.ts` | TTL'd single-use store (`take` = atomic get+delete) |
 | `webauthn.ts` | `@simplewebauthn/server` ceremonies (UV required, attestation `none`, counter-regression detection) |
@@ -110,11 +110,16 @@ double-submit token).
 
 - **No password anywhere** — structural tests assert no `password*` field on any
   schema, and the gated DB test asserts `user_auth` has no password column.
-- **No IP and no location, ever** (SPEC §19.1) — sessions, the audit log, and
-  alerts record no IP and no country/geolocation; there is no geo-IP lookup. An IP
-  is used only transiently and hashed as a rate-limit counter key, never persisted
-  or logged. New-device alerts compare a coarse device descriptor only. Schema and
-  redactor tests assert no `ip_hash`/`country` field can be stored.
+- **No IP and no location — never even read** (SPEC §19.1) — no code path in the
+  API reads the client network address: not for logs, not for sessions, not for
+  rate limiting (no hashed-IP key exists; there is no `ipHash` key domain at all).
+  A static test (`no-client-address.test.ts`) sweeps every source file for the
+  forwarded-address headers and the socket remote address, so a regression fails
+  CI. Abuse control is identity-free: per-account lockouts + per-mailbox issuance
+  cooldowns + global per-endpoint budgets. There is no geo-IP lookup. New-device
+  alerts and the request log carry only a coarse OS/browser device descriptor
+  (never the full user-agent). Schema and redactor tests assert no
+  `ip_hash`/`country` field can be stored.
 - **Tokens/PII never plaintext** — session tokens stored as `sha256`; wallet
   addresses as domain-separated HMACs; the auth-wallet and financial-wallet hashes
   of the same address are non-correlatable.
@@ -127,11 +132,25 @@ double-submit token).
 - **Export = own data, encrypted, expiring** — the DSAR archive includes only the
   requesting user's own data (never an address hash, reporter identity, IP, or
   location); it is encrypted at rest and reachable only via a step-up-protected,
-  subject-bound, expiring signed URL. Unit tests assert the address hash never
-  appears in the archive and that a tampered/expired/wrong-subject token is rejected.
-- **Deletion really deletes** — hard purge tombstones the row (keeping only a bare
-  FK stub), drops every credential/auth record, and writes a `deletion_complete`
-  audit carrying only a **hashed** user id (proof of deletion without retaining it).
+  subject-bound signed token under its own HKDF key domain, capped at the
+  archive's 72-hour expiry. Expiry is enforced AT READ TIME (status, token
+  verification, and the object store itself) and by an hourly sweep, so the
+  72-hour bound never depends on a background job having run. Unit tests assert
+  the address hash never appears in the archive and that a
+  tampered/expired/wrong-subject/non-canonical token is rejected.
+- **Deletion really deletes** — the hourly purge job anonymizes contributions,
+  deletes EVERY export archive from object storage, revokes every session
+  (including a grace-period cancel-only re-login), tombstones the row to a bare
+  FK stub (collision-safe `deleted_` + 22-hex handle; settings and reputation
+  reset to pristine defaults), and writes a `deletion_complete` audit carrying
+  only a **hashed** user id (proof of deletion without retaining it).
+- **Suspended ⇒ no session, ever** — the account-state gate at the session-mint
+  chokepoint denies a suspended/deleted account a session even after a valid
+  credential proof; a deactivated-in-grace account gets a session restricted to
+  the deletion status/cancel routes (the no-email recovery path).
+- **No mail bombing** — every email-sending path (login codes, duplicate
+  registration/add notices) sits behind a uniform per-mailbox issuance cooldown
+  with byte-identical responses, preserving anti-enumeration.
 - **Wallet isolation** — the schema-isolation BFS proves no wallet↔ranking join
   can be written.
 
@@ -142,15 +161,19 @@ in-memory/local adapters; only the production cloud bindings — behind the same
 interfaces — land later:
 
 - **Export delivery adapter** — assembly (own data only), AES-256-GCM
-  encryption-at-rest, the step-up-protected signed/expiring download URL, and the
-  72h sweep are implemented and tested with the in-memory object store; the
-  S3+KMS `ObjectStore` adapter and a durable background worker (today the job is
-  assembled in-process on first poll) are the remaining bindings (WS-D.2.2b/c).
-- **Deletion purge scheduler** — the hard-purge job (`runDeletionPurge`:
-  anonymize → tombstone → hashed-id `deletion_complete` audit) and the 30-day
-  grace/cancel flow are implemented and tested; the cron that invokes the job on
-  schedule, and the WS-G `anonymizeContributions` implementation behind the
-  injected hook, land later (WS-D.2.4b/c).
+  encryption-at-rest, the step-up-protected signed/expiring download URL,
+  read-time expiry enforcement, and the hourly sweep are implemented and tested
+  with the in-memory object store; the S3+KMS `ObjectStore` adapter and a durable
+  distributed worker (today the job is assembled in-process on first poll, and
+  `startPrivacyScheduler` runs the sweep hourly in-process) are the remaining
+  bindings (WS-D.2.2b/c).
+- **Deletion purge** — fully running: the hard-purge job (`runDeletionPurge`:
+  anonymize → delete all export archives → revoke all sessions → tombstone →
+  hashed-id `deletion_complete` audit) and the 30-day grace/cancel flow are
+  implemented, tested, and invoked hourly by the in-process scheduler wired in
+  `index.ts`; a durable distributed runner (replacing the in-process timer behind
+  the same two functions) and the WS-G `anonymizeContributions` implementation
+  behind the injected hook land later (WS-D.2.4b/c).
 - **Drizzle-backed identity store** — `store.ts` is the in-memory adapter
   mirroring the Drizzle schema; the Postgres-backed `IdentityStore`/`AuditStore`
   projection is the remaining durable binding (sessions, rate-limit, and the

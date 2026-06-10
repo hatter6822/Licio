@@ -30,7 +30,12 @@ import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { generateOneTimeCode, hashOneTimeCode } from '../identity/codes.js';
-import { peekEmailLoginUserId, startEmailLogin, verifyEmailLogin } from '../identity/email-otp.js';
+import {
+  canResend,
+  peekEmailLoginUserId,
+  startEmailLogin,
+  verifyEmailLogin,
+} from '../identity/email-otp.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import {
   buildSessionCookie,
@@ -42,6 +47,7 @@ import {
 } from '../identity/sessions.js';
 import { hashAuthWalletAddress, issueSiweNonce, verifySiwe } from '../identity/siwe.js';
 import { createAuthenticationOptions, verifyAuthentication } from '../identity/webauthn.js';
+import { rateLimit } from '../lib/rate-limit.js';
 import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
 import { createCredentialRoutes } from './auth-credentials.js';
 import { createMfaRoutes } from './auth-mfa.js';
@@ -58,12 +64,19 @@ import {
   deriveSessionRef,
   err,
   finalizeLogin,
+  loginDenialResponse,
   publicUser,
   readAttempt,
   recordAuthFailure,
 } from './auth-support.js';
 
 function createLoginRoutes(resolve: () => IdentityServices) {
+  // GLOBAL (identity-free) budget for the unauthenticated secret-minting
+  // endpoints (codes, challenges, nonces): a pure per-process cost ceiling that
+  // reads nothing about the requester — no IP, hashed or otherwise (§19.1).
+  // Per-mailbox cooldowns + the per-account limiter do the targeted work;
+  // connection-level flood fairness belongs to the edge.
+  const mintLimit = rateLimit({ limit: 600, windowMs: 60_000 });
   return (
     new Hono<AuthEnv>()
       // --- Session status (parsed through the shared contract) --------------
@@ -91,16 +104,21 @@ function createLoginRoutes(resolve: () => IdentityServices) {
       })
 
       // --- Email one-time-code login (anti-enumeration, rate-limited) --------
-      .post('/email/start', zValidator('json', emailStartRequestSchema), async (c) => {
+      .post('/email/start', mintLimit, zValidator('json', emailStartRequestSchema), async (c) => {
         const services = resolve();
         const { email } = c.req.valid('json');
         // Canonical per-account key by email (WS-D.1.3d).
         const accountKey = accountRefForEmail(services, email);
-        const gate = await checkRateLimit(services, c, accountKey);
+        const gate = await checkRateLimit(services, accountKey);
         if (!gate.allowed) {
           c.header('Retry-After', String(gate.retryAfterSec));
           return c.json({ status: 'accepted' as const }, 202);
         }
+
+        // Per-mailbox issuance cooldown (60s), applied UNIFORMLY to existing and
+        // non-existing accounts: a flood of starts cannot bomb a victim's inbox,
+        // and the identical 202 keeps account existence unobservable.
+        const sendable = await canResend(services.otp, `login:${accountKey}`);
 
         // Timing equalization: always do the code-hash work so the response time
         // does not reveal whether the account exists.
@@ -108,7 +126,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
 
         const user = services.store.getUserByEmail(email);
         const attemptId = randomUUID();
-        if (user && services.store.getAuth(user.userId)?.emailVerified) {
+        if (sendable && user && services.store.getAuth(user.userId)?.emailVerified) {
           const { code } = await startEmailLogin(services.otp, attemptId, user.userId);
           await services.mailer.sendCode(email, code, 'login');
         }
@@ -127,7 +145,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
         const userId = await peekEmailLoginUserId(services.otp, attemptId);
         const accountKey = userId ? accountRefForUser(services, userId) : null;
         if (accountKey) {
-          const gate = await checkRateLimit(services, c, accountKey);
+          const gate = await checkRateLimit(services, accountKey);
           if (!gate.allowed) {
             c.header('Retry-After', String(gate.retryAfterSec));
             return c.json(err('rate_limited', 'Too many attempts. Try again later.'), 429);
@@ -136,19 +154,21 @@ function createLoginRoutes(resolve: () => IdentityServices) {
 
         const result = await verifyEmailLogin(services.otp, attemptId, code);
         if (!result.ok) {
-          await recordAuthFailure(services, c, {
+          await recordAuthFailure(services, {
             accountKey,
             ...(userId ? { alertUserId: userId } : {}),
             authMethod: 'email_otp',
           });
           return c.json(err('invalid_code', 'Invalid or expired code.'), 400);
         }
-        const created = await finalizeLogin(services, c, {
+        const fin = await finalizeLogin(services, c, {
           userId: result.userId,
           authMethod: 'email_otp',
           credentialRef: null,
           rememberMe: false,
         });
+        if (!fin.ok) return c.json(loginDenialResponse(fin.code), 403);
+        const created = fin.session;
         c.header('Set-Cookie', clearAttemptCookie(ATTEMPT_COOKIES.emailLogin), { append: true });
         c.header('Set-Cookie', buildSessionCookie(created.token, created.maxAgeSec), {
           append: true,
@@ -162,7 +182,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
       })
 
       // --- WebAuthn passkey login -------------------------------------------
-      .post('/webauthn/authenticate/options', async (c) => {
+      .post('/webauthn/authenticate/options', mintLimit, async (c) => {
         const services = resolve();
         const attemptId = randomUUID();
         const options = await createAuthenticationOptions(
@@ -190,14 +210,14 @@ function createLoginRoutes(resolve: () => IdentityServices) {
           const userId = stored?.userId;
           const accountKey = userId ? accountRefForUser(services, userId) : null;
           if (accountKey) {
-            const gate = await checkRateLimit(services, c, accountKey);
+            const gate = await checkRateLimit(services, accountKey);
             if (!gate.allowed) {
               c.header('Retry-After', String(gate.retryAfterSec));
               return c.json(err('rate_limited', 'Too many attempts. Try again later.'), 429);
             }
           }
           if (!stored) {
-            await recordAuthFailure(services, c, { accountKey: null, authMethod: 'webauthn' });
+            await recordAuthFailure(services, { accountKey: null, authMethod: 'webauthn' });
             return c.json(err('auth_failed', 'Authentication failed.'), 400);
           }
 
@@ -223,7 +243,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
                 event: { type: 'cloned_authenticator', authMethod: 'webauthn' },
               });
             }
-            await recordAuthFailure(services, c, {
+            await recordAuthFailure(services, {
               accountKey,
               ...(userId ? { alertUserId: userId } : {}),
               authMethod: 'webauthn',
@@ -235,12 +255,14 @@ function createLoginRoutes(resolve: () => IdentityServices) {
             counter: result.newCounter,
             lastUsedAt: new Date().toISOString(),
           });
-          const created = await finalizeLogin(services, c, {
+          const fin = await finalizeLogin(services, c, {
             userId: stored.userId,
             authMethod: 'webauthn',
             credentialRef: stored.credentialId,
             rememberMe: true,
           });
+          if (!fin.ok) return c.json(loginDenialResponse(fin.code), 403);
+          const created = fin.session;
           c.header('Set-Cookie', clearAttemptCookie(ATTEMPT_COOKIES.webauthnLogin), {
             append: true,
           });
@@ -257,7 +279,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
       )
 
       // --- Sign-In with Ethereum (adult-only; EOA + contract wallets) -------
-      .post('/wallet/nonce', async (c) => {
+      .post('/wallet/nonce', mintLimit, async (c) => {
         const services = resolve();
         const attemptId = randomUUID();
         const nonce = await issueSiweNonce(services.challenges, attemptId);
@@ -283,7 +305,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
         });
         if (!result.ok) {
           // An invalid signature is unattributable ⇒ null account key (IP only).
-          await recordAuthFailure(services, c, { accountKey: null, authMethod: 'wallet' });
+          await recordAuthFailure(services, { accountKey: null, authMethod: 'wallet' });
           return c.json(err('auth_failed', 'Authentication failed.'), 400);
         }
         const addressHash = hashAuthWalletAddress(
@@ -293,21 +315,19 @@ function createLoginRoutes(resolve: () => IdentityServices) {
         const existing = services.store.findWalletAuthByHash(addressHash);
 
         if (existing) {
-          const gate = await checkRateLimit(
-            services,
-            c,
-            accountRefForWallet(services, addressHash),
-          );
+          const gate = await checkRateLimit(services, accountRefForWallet(services, addressHash));
           if (!gate.allowed) {
             c.header('Retry-After', String(gate.retryAfterSec));
             return c.json(err('rate_limited', 'Too many attempts. Try again later.'), 429);
           }
-          const created = await finalizeLogin(services, c, {
+          const fin = await finalizeLogin(services, c, {
             userId: existing.userId,
             authMethod: 'wallet',
             credentialRef: addressHash,
             rememberMe: true,
           });
+          if (!fin.ok) return c.json(loginDenialResponse(fin.code), 403);
+          const created = fin.session;
           c.header('Set-Cookie', clearAttemptCookie(ATTEMPT_COOKIES.walletLogin), { append: true });
           c.header('Set-Cookie', buildSessionCookie(created.token, created.maxAgeSec), {
             append: true,
@@ -358,12 +378,14 @@ function createLoginRoutes(resolve: () => IdentityServices) {
           eventType: 'auth_method_add',
           context: { auth_method: 'wallet' },
         });
-        const created = await finalizeLogin(services, c, {
+        const fin = await finalizeLogin(services, c, {
           userId: user.userId,
           authMethod: 'wallet',
           credentialRef: addressHash,
           rememberMe: true,
         });
+        if (!fin.ok) return c.json(loginDenialResponse(fin.code), 403);
+        const created = fin.session;
         c.header('Set-Cookie', clearAttemptCookie(ATTEMPT_COOKIES.walletLogin), { append: true });
         c.header('Set-Cookie', buildSessionCookie(created.token, created.maxAgeSec), {
           append: true,

@@ -1,62 +1,48 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// A small per-IP fixed-window rate limiter for unauthenticated ingest endpoints
-// (CSP reports, telemetry beacons). These are CSRF-exempt and can be POSTed
-// cross-origin, so they need their own DoS bound. In-memory and best-effort —
-// production fronts the BFF with an edge/gateway limiter; this is defence in
-// depth. The entry map is capped and swept so it cannot grow unbounded.
+// A GLOBAL fixed-window budget for unauthenticated endpoints (CSP reports,
+// telemetry beacons, auth challenge/code minting, deletion-cancel).  This is
+// deliberate privacy architecture, not a simplification (SPEC §19.1):
+//
+//   The application never reads, hashes, or keys ANY behavior on the client
+//   network address — there is no per-IP state of any kind, so no network
+//   identity ever enters the application boundary.  Abuse control is layered
+//   instead as:
+//     1. per-TARGET cooldowns (e.g. one email per mailbox per minute) keyed by
+//        first-party resources we already hold,
+//     2. per-ACCOUNT progressive lockouts for credential failures, and
+//     3. this global per-endpoint budget — a pure, identity-free cost ceiling
+//        that bounds what one process will spend on an endpoint per window.
+//   Connection-level flood fairness (telling one flooding client apart from
+//   everyone else) is the EDGE/gateway's job, where packet routing already
+//   requires addresses; the application stays address-blind.
 import type { MiddlewareHandler } from 'hono';
 
 export interface RateLimitOptions {
-  /** Max requests per IP per window. */
+  /** Max requests served per window, process-wide (load shedding, not fairness). */
   limit: number;
   /** Window length in milliseconds. */
   windowMs: number;
-  /** Max distinct IPs tracked before eviction kicks in (memory bound). */
-  maxEntries?: number;
 }
 
-interface Bucket {
-  count: number;
-  resetAt: number;
-}
-
-/** Create a per-IP fixed-window rate-limit middleware (429 when exceeded). */
+/** Create a global fixed-window budget middleware (429 when exhausted). */
 export function rateLimit(options: RateLimitOptions): MiddlewareHandler {
-  const { limit, windowMs, maxEntries = 10_000 } = options;
-  const buckets = new Map<string, Bucket>();
-
-  const evictExpired = (now: number): void => {
-    for (const [ip, bucket] of buckets) {
-      if (now >= bucket.resetAt) buckets.delete(ip);
-    }
-  };
-
-  const timer = setInterval(() => evictExpired(Date.now()), windowMs);
-  // Don't keep the event loop alive for the sweeper (tests/CLI).
-  if (typeof timer === 'object' && 'unref' in timer) timer.unref();
+  const { limit, windowMs } = options;
+  let count = 0;
+  let resetAt = 0;
 
   return async (c, next) => {
-    const ip = c.req.header('x-forwarded-for') ?? 'unknown';
     const now = Date.now();
-    const bucket = buckets.get(ip);
-
-    if (bucket && now < bucket.resetAt) {
-      if (bucket.count >= limit) {
-        return c.json({ error: 'Rate limit exceeded' }, 429);
-      }
-      bucket.count += 1;
-    } else {
-      if (buckets.size >= maxEntries) {
-        evictExpired(now);
-        if (buckets.size >= maxEntries) {
-          // Still full of live entries — shed load rather than grow unbounded.
-          return c.json({ error: 'Rate limit exceeded' }, 429);
-        }
-      }
-      buckets.set(ip, { count: 1, resetAt: now + windowMs });
+    if (now >= resetAt) {
+      count = 0;
+      resetAt = now + windowMs;
     }
-
+    if (count >= limit) {
+      c.header('Retry-After', String(Math.max(1, Math.ceil((resetAt - now) / 1000))));
+      return c.json({ error: 'Rate limit exceeded' }, 429);
+    }
+    count += 1;
     await next();
+    return;
   };
 }

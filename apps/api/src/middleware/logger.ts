@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// Request logging, minimized (SPEC §19.1): no IP, no location, and no full
+// user-agent string (a fingerprinting vector) — only the coarse OS/browser
+// device profile the identity layer also uses.
 import { randomUUID } from 'node:crypto';
 import type { MiddlewareHandler } from 'hono';
+import { deviceProfile } from '../identity/security-alerts.js';
 import { createLogger } from '../lib/logger.js';
 
 const logger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
@@ -16,7 +21,7 @@ export function loggerMiddleware(): MiddlewareHandler {
     const start = Date.now();
     const method = c.req.method;
     const path = c.req.path;
-    const userAgent = c.req.header('user-agent');
+    const device = deviceProfile(c.req.header('user-agent') ?? '');
     const contentLength = c.req.header('content-length');
 
     await next();
@@ -30,7 +35,7 @@ export function loggerMiddleware(): MiddlewareHandler {
       path,
       status,
       duration,
-      userAgent,
+      device,
       contentLength: contentLength ? Number.parseInt(contentLength, 10) : undefined,
     });
 

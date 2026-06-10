@@ -65,4 +65,38 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
     expect(await store.listForUser(userId)).toHaveLength(1);
     expect((await store.listForUser(userId))[0]?.tokenHash).toBe(b.tokenHash);
   });
+
+  it('RedisSessionStore: a short session after a long one never SHORTENS the index TTL', async () => {
+    const store = new RedisSessionStore(redis as IORedis, 'test-session:');
+    const userId = '22222222-2222-4222-8222-222222222222';
+    // Long-lived session first (rememberMe: 30 days)…
+    await createSession(store, {
+      userId,
+      authMethod: 'webauthn',
+      credentialRef: 'c',
+      deviceLabel: 'laptop',
+      rememberMe: true,
+    });
+    const longTtl = await (redis as IORedis).pttl(`test-session:user:${userId}`);
+    // …then a short-lived one (24h).  PEXPIRE…GT must leave the index TTL at the
+    // longer value, or the long session would vanish from the device list.
+    await createSession(store, {
+      userId,
+      authMethod: 'email_otp',
+      credentialRef: null,
+      deviceLabel: 'phone',
+      rememberMe: false,
+    });
+    const afterTtl = await (redis as IORedis).pttl(`test-session:user:${userId}`);
+    expect(afterTtl).toBeGreaterThan(23 * 60 * 60_000); // sanity: index alive
+    expect(afterTtl).toBeGreaterThanOrEqual(longTtl - 5_000); // NOT shortened to 24h
+    expect(await store.listForUser(userId)).toHaveLength(2);
+  });
+
+  it('RedisSessionStore: a corrupt row is deleted and treated as no session (fail closed)', async () => {
+    const store = new RedisSessionStore(redis as IORedis, 'test-session:');
+    await (redis as IORedis).set('test-session:deadbeef', '{"not":"a session"}');
+    expect(await store.get('deadbeef')).toBeNull();
+    expect(await (redis as IORedis).get('test-session:deadbeef')).toBeNull(); // purged
+  });
 });

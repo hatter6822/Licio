@@ -2,18 +2,41 @@
 //
 // Progressive auth-attempt rate limiting (WS-D.1.3d).  Failures on EVERY method
 // (WebAuthn assertion, email one-time code, wallet signature) feed the same
-// per-account and per-IP counters, so no method is exempt from brute-force
-// throttling.  Keys are non-reversible: the account key is a keyed hash and the
-// IP key is a keyed hash — no plaintext IP is retained.
+// counters, so no method is exempt from brute-force throttling.
 //
-//   per-account:  5 fails → 30s cooldown, 10 → 2m, 20 → 30m lock (+ owner alert)
-//   per-IP:       50 fails → 15m block
+// PRIVACY (SPEC §19.1): there is NO per-IP (or any client-network-identity)
+// dimension — the application never reads the client address.  The two
+// dimensions are both identity-free or first-party:
+//   per-account:  5 fails → 30s cooldown, 10 → 2m, 20 → 30m lock (+ owner
+//                 alert), keyed by a non-reversible account ref — protects the
+//                 account under attack.
+//   global:       every failure (attributed or not) also feeds ONE process-wide
+//                 counter; past the threshold the auth surface throttles for a
+//                 cooling-off period.  This is the backstop against credential
+//                 spraying and junk-signature brute force at scale, costing the
+//                 attacker the endpoint rather than tracking who they are.
 //   success resets the per-account counter.
 //
 // The clock is injected so the sliding windows and cooldowns are deterministically
 // testable without real time.
 
-export const AUTH_RATE_LIMITS = {
+export interface AuthRateLimits {
+  windowMs: number;
+  account: {
+    softDelayAt: number;
+    softDelayMs: number;
+    hardDelayAt: number;
+    hardDelayMs: number;
+    lockAt: number;
+    lockMs: number;
+  };
+  global: {
+    throttleAt: number;
+    throttleMs: number;
+  };
+}
+
+export const AUTH_RATE_LIMITS: AuthRateLimits = {
   windowMs: 15 * 60_000,
   account: {
     softDelayAt: 5,
@@ -23,11 +46,11 @@ export const AUTH_RATE_LIMITS = {
     lockAt: 20,
     lockMs: 30 * 60_000,
   },
-  ip: {
-    blockAt: 50,
-    blockMs: 15 * 60_000,
+  global: {
+    throttleAt: 1_000,
+    throttleMs: 5 * 60_000,
   },
-} as const;
+};
 
 export interface AuthRateLimitStore {
   /** Record one failure in the sliding window for `key`; return the in-window count. */
@@ -86,8 +109,8 @@ export interface FailureOutcome {
   retryAfterSec: number;
   /** True exactly once when the account crosses into the 30-minute hard lock. */
   lockoutTriggered: boolean;
-  /** True when the per-IP block engaged. */
-  ipBlocked: boolean;
+  /** True when the process-wide failure backstop engaged. */
+  globalThrottled: boolean;
 }
 
 const acctFailKey = (k: string) => `authfail:acct:${k}`;
@@ -96,29 +119,35 @@ const acctFailKey = (k: string) => `authfail:acct:${k}`;
 // lock — the owner alert must fire exactly once when the hard lock engages.
 const acctCooldownKey = (k: string) => `authcooldown:acct:${k}`;
 const acctLockKey = (k: string) => `authlock:acct:${k}`;
-const ipFailKey = (k: string) => `authfail:ip:${k}`;
-const ipLockKey = (k: string) => `authlock:ip:${k}`;
+const GLOBAL_FAIL_KEY = 'authfail:global';
+const GLOBAL_LOCK_KEY = 'authlock:global';
 
 export class AuthRateLimiter {
   readonly #store: AuthRateLimitStore;
   readonly #now: () => number;
+  readonly #limits: AuthRateLimits;
 
-  constructor(store: AuthRateLimitStore, now: () => number = () => Date.now()) {
+  constructor(
+    store: AuthRateLimitStore,
+    now: () => number = () => Date.now(),
+    limits: AuthRateLimits = AUTH_RATE_LIMITS,
+  ) {
     this.#store = store;
     this.#now = now;
+    this.#limits = limits;
   }
 
   /**
    * Pre-attempt gate.  Returns `allowed: false` with a `Retry-After` when the
-   * account is in cooldown/lock or the IP is blocked.  Identical shape regardless
-   * of whether the account exists (no enumeration).
+   * account is in cooldown/lock or the global backstop is throttling.  Identical
+   * shape regardless of whether the account exists (no enumeration).
    */
-  async check(accountKey: string, ipKey: string): Promise<RateLimitDecision> {
+  async check(accountKey: string): Promise<RateLimitDecision> {
     const now = this.#now();
     const cooldown = (await this.#store.getLock(acctCooldownKey(accountKey), now)) ?? 0;
     const lock = (await this.#store.getLock(acctLockKey(accountKey), now)) ?? 0;
-    const ipBlock = (await this.#store.getLock(ipLockKey(ipKey), now)) ?? 0;
-    const remaining = Math.max(cooldown, lock, ipBlock);
+    const globalThrottle = (await this.#store.getLock(GLOBAL_LOCK_KEY, now)) ?? 0;
+    const remaining = Math.max(cooldown, lock, globalThrottle);
     return remaining > 0
       ? { allowed: false, retryAfterSec: Math.ceil(remaining / 1000) }
       : { allowed: true, retryAfterSec: 0 };
@@ -127,13 +156,14 @@ export class AuthRateLimiter {
   /**
    * Record one authentication failure and apply escalation.  `accountKey` is null
    * when the attempt cannot be safely attributed to an account (e.g. an invalid
-   * wallet signature with no trustworthy signer) — then only the per-IP counter
-   * increments, so an attacker cannot evade the per-account limit with junk
-   * identifiers nor poison a victim's account counter.
+   * wallet signature with no trustworthy signer) — then only the global counter
+   * moves, so junk identifiers cannot poison a victim's account counter.  EVERY
+   * failure feeds the global window, so a spray across many accounts (each below
+   * its per-account threshold) still trips the backstop.
    */
-  async recordFailure(accountKey: string | null, ipKey: string): Promise<FailureOutcome> {
+  async recordFailure(accountKey: string | null): Promise<FailureOutcome> {
     const now = this.#now();
-    const { windowMs, account, ip } = AUTH_RATE_LIMITS;
+    const { windowMs, account, global } = this.#limits;
 
     let cooldownMs = 0;
     let lockoutTriggered = false;
@@ -153,14 +183,14 @@ export class AuthRateLimiter {
       }
     }
 
-    const ipCount = await this.#store.recordFailure(ipFailKey(ipKey), now, windowMs);
-    let ipBlocked = false;
-    if (ipCount >= ip.blockAt) {
-      await this.#store.setLock(ipLockKey(ipKey), now + ip.blockMs);
-      ipBlocked = true;
+    const globalCount = await this.#store.recordFailure(GLOBAL_FAIL_KEY, now, windowMs);
+    let globalThrottled = false;
+    if (globalCount >= global.throttleAt) {
+      await this.#store.setLock(GLOBAL_LOCK_KEY, now + global.throttleMs);
+      globalThrottled = true;
     }
 
-    return { retryAfterSec: Math.ceil(cooldownMs / 1000), lockoutTriggered, ipBlocked };
+    return { retryAfterSec: Math.ceil(cooldownMs / 1000), lockoutTriggered, globalThrottled };
   }
 
   /** Successful auth clears the per-account failure counter (WS-D.1.3d). */

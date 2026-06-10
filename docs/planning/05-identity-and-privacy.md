@@ -26,9 +26,16 @@
 >   detector compare a coarse device descriptor (e.g. "iOS/Safari"), never a
 >   country, location, or IP. Alerts read "New sign-in on [device type] via
 >   [method]".
-> - **Rate limiting** may use an IP only *transiently*: hashed under a server key,
->   in a TTL'd counter, **never persisted to Postgres and never logged**, and
->   discarded immediately. No durable structure contains an IP.
+> - **Rate limiting is identity-free — the application never reads the client
+>   address at all** (strengthened: not even transiently/hashed; no code path
+>   reads the forwarded-address headers or socket address, enforced by a static
+>   test). The per-IP limiter dimensions in the task texts below (e.g. "50 IP →
+>   15m" in WS-D.1.3d, `authfail:ip:{ip_hash}` keys) are REPLACED by: per-account
+>   progressive lockouts, per-target-mailbox issuance cooldowns (one email per
+>   mailbox per window — the anti-mail-bombing defense), and a GLOBAL per-process
+>   failure backstop + per-endpoint budgets that distinguish no one.
+>   Connection-level flood fairness belongs to the edge/gateway, outside the
+>   application boundary.
 > - **Audit metadata** carries a coarse device descriptor + method + setting
 >   diffs only — no IP, no location.
 > - **The under-13 retry deterrent is client-side only** (a short cooldown); there
