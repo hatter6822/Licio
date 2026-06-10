@@ -2,7 +2,7 @@
 
 # @licio/web
 
-The Licio Progressive Web App: a React 19 + Vite 6 + Tailwind CSS 4 client built
+The Licio Progressive Web App: a React 19 + Vite 8 + Tailwind CSS 4 client built
 to WCAG 2.2 AA with a no-applause UI (no likes, votes, scores, or follower
 counts anywhere).
 
