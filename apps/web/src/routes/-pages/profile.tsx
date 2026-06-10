@@ -25,6 +25,7 @@ import { useToast } from '../../components/ui/Toast/index.js';
 import { NotificationBudget } from '../../components/wellbeing/NotificationBudget/index.js';
 import { QuietHoursSetting } from '../../components/wellbeing/QuietHoursSetting/index.js';
 import { useT } from '../../i18n/index.js';
+import { revokeCurrentSession } from '../../lib/auth-api.js';
 import {
   useNotificationBudgetQuery,
   useNotificationPreferencesQuery,
@@ -146,7 +147,15 @@ export function ProfilePage(): React.ReactElement {
           ))}
         </ul>
         <div className="mt-6">
-          <Button variant="secondary" onClick={() => logout()}>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              // Best-effort server-side revocation (WS-D.1.3c); local state is
+              // cleared regardless so an unreachable server can't trap the UI.
+              void revokeCurrentSession().catch(() => undefined);
+              logout();
+            }}
+          >
             {t('profile.signOut', 'Sign out')}
           </Button>
         </div>

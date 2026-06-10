@@ -47,8 +47,11 @@ Postgres (Drizzle) identity/audit stores, Redis
 session/ephemeral/rate-limit stores, a leased distributed privacy
 scheduler (Postgres job lease — at most one instance executes per
 window), and an S3-compatible export-archive store (SigV4 over fetch,
-client-side sealed).  The remaining WS-D work is the **client auth UI**
-(the web login page is still the WS-C contract stub).
+client-side sealed).  The client login/registration flows are
+implemented (passkey-first sign-in/signup with the emailed one-time code
+as fallback, `lib/auth-api.ts` + `lib/webauthn.ts`); the remaining WS-D
+work is the **account-security management UI** (sessions, credentials,
+step-up, and steward-MFA screens).
 Workstreams WS-E through WS-P are planned (planning documents
 exist under `docs/planning/`; implementation not yet started).  See
 "Implementation roadmap" below for the full status table.
@@ -190,6 +193,8 @@ licio/
 │   │       │   └── dom-sync.ts          --   DOM synchronization
 │   │       ├── lib/                     -- core utilities
 │   │       │   ├── api.ts               --   typed RPC client + CSRF serialization
+│   │       │   ├── auth-api.ts          --   WS-D auth flows (passkey/email login, signup)
+│   │       │   ├── webauthn.ts          --   WebAuthn JSON↔ArrayBuffer plumbing
 │   │       │   ├── queries.ts           --   TanStack Query hooks
 │   │       │   ├── query-keys.ts        --   query-key factory
 │   │       │   ├── query-client.ts      --   SWR defaults (30s stale, 5min gc)
@@ -793,7 +798,7 @@ file counts at current state:
 
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
-| apps/web | ~48 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
+| apps/web | ~50 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
 | apps/api | ~32 (incl. WS-D identity + routes) | node | `pnpm --filter api test` |
 | packages/shared | ~7 (incl. WS-D schemas) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~2 (isolation + gated integration) | node | via root `pnpm test` (db project) |
@@ -896,7 +901,8 @@ password column, hashing, or reset flow anywhere.
 | Durable stores | `DrizzleIdentityStore`/`DrizzleAuditStore` Postgres adapters behind the same interfaces as the in-memory adapters, wired in production alongside the Redis session/ephemeral/rate-limit stores; gated integration tests run the real migration chain | Complete |
 | Job scheduler | Durable distributed privacy scheduler: every instance ticks hourly, a Postgres job lease (`job_leases`, atomic insert-or-steal) grants at most one executor per window, crashed holders self-heal via lease expiry, lease outage fails closed (read-time expiry still bounds retention) | Complete |
 | Export delivery | S3-compatible `ObjectStore` (AWS/R2/MinIO; SigV4 on `node:crypto`, pinned to the official AWS vectors — no SDK dep): bucket bodies are client-side SecretBox ciphertext, expiry enforced at read time, paginated sweep; all-or-none `S3_*` env group (partial fails boot; absent falls back in-memory with a production warning) | Complete |
-| Deferred | Client auth UI (passkey/email/wallet sign-in + account management screens against `/v1/auth/*`; the login route is still the WS-C stub) | Pending |
+| Client auth | Login/registration page: passkey-first sign-in + signup (WebAuthn L3 JSON with manual fallback, no client webauthn dep), email-code fallback, enumeration-safe registration outcome, allowlisted post-login redirect, best-effort server-side sign-out | Complete |
+| Deferred | Account-security management UI (sessions list/revoke, credential rename/remove, step-up prompts, steward TOTP screens against the existing `/v1/auth/*` surface) | Pending |
 
 Pure crypto is mathematically validated: TOTP against the RFC 6238
 Appendix B vectors, real WebAuthn attestation/assertion via a pure-crypto

@@ -190,9 +190,13 @@ Interface-level hooks wired to follow-up workstreams:
   implementation behind the injected hook (WS-D.2.4b).
 - **Attention-history purge** and the **settings-change downstream consumer** are
   injected hooks (`purgeAttention`, `onPrivacyChange`) that WS-E implements.
-- **Client auth UI** — the web login page is still the WS-C contract stub; the
-  passkey/email/wallet sign-in and account-management screens against
-  `/v1/auth/*` are the remaining WS-D client work.
+- **Client auth UI** — the login/registration page is implemented: passkey-first
+  sign-in and signup (WebAuthn L3 JSON methods with a manual fallback — no
+  client-side webauthn dependency; `apps/web/src/lib/webauthn.ts`), the emailed
+  one-time code as the universal fallback, an enumeration-safe registration
+  outcome, and best-effort server-side sign-out (`lib/auth-api.ts`).  The
+  remaining client work is the account-security management UI (sessions
+  list/revoke, credential rename/remove, step-up prompts, steward TOTP screens).
 - **No geo lookup at all** — per SPEC §19.1 the platform records no IP and no
   location, so there is no MaxMind/geo-IP dependency; suspicious-login detection is
   coarse new-device only.
