@@ -17,7 +17,7 @@ import type { AuthenticationResponseJSON, RegistrationResponseJSON } from '@simp
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { isLastMethodRemoval } from '../identity/auth-methods.js';
-import { startEmailVerification, verifyEmailFactor } from '../identity/email-otp.js';
+import { canResend, startEmailVerification, verifyEmailFactor } from '../identity/email-otp.js';
 import { authMethodInventory, type IdentityServices } from '../identity/services.js';
 import {
   buildSessionCookie,
@@ -308,6 +308,12 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
         const user = services.store.getUser(auth.userId);
         if (!user?.email || !services.store.getAuth(auth.userId)?.emailVerified) {
           return c.json(err('not_applicable', 'No verified email for step-up.'), 400);
+        }
+        // Per-account issuance cooldown (matches every other email-send path): a
+        // stolen/open session cannot spam the mailbox or keep overwriting the live
+        // step-up code, which would otherwise lock the user out of an earlier code.
+        if (!(await canResend(services.otp, `stepup:${auth.userId}`))) {
+          return c.json(err('cooldown', 'Please wait before requesting another code.'), 429);
         }
         const { code } = await startEmailVerification(services.otp, auth.userId);
         await services.mailer.sendCode(user.email, code, 'verify');

@@ -10,6 +10,7 @@ import {
   type RecordingMailer,
   setIdentityServices,
 } from '../identity/services.js';
+import { createSession } from '../identity/sessions.js';
 
 const CONFIG: IdentityConfig = {
   masterSecret: 'test-master-secret-at-least-32-characters-long',
@@ -392,6 +393,48 @@ describe('email issuance cooldown (anti-mail-bombing, §19.1-aligned)', () => {
       mailer.notices.filter(
         (n) => n.to === 'dup@example.com' && n.kind === 'duplicate_registration',
       ),
+    ).toHaveLength(1);
+  });
+});
+
+describe('step-up email send cooldown', () => {
+  it('rate-limits step-up email code sends to one per cooldown window', async () => {
+    const app = createApp();
+    const shared = await import('@licio/shared');
+    const user = services.store.createUser({
+      handle: 'stepupmail',
+      displayName: 'S',
+      email: 'su@example.com',
+      accountState: 'active',
+      locale: null,
+      ageBand: 'adult',
+      privacySettings: shared.defaultPrivacySettings(),
+      personalizationSettings: shared.defaultPersonalizationSettings(),
+      reputationSummary: shared.emptyReputationSummary(),
+      roles: ['user'],
+    });
+    services.store.setAuth(user.userId, { emailVerified: true });
+    const session = await createSession(services.sessions, {
+      userId: user.userId,
+      authMethod: 'email_otp',
+      deviceLabel: 'device',
+      rememberMe: false,
+    });
+    const sid = `__Host-sid=${session.token}`;
+
+    const first = await app.request('/v1/auth/step-up/email/start', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    expect(first.status).toBe(200);
+    const second = await app.request('/v1/auth/step-up/email/start', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    expect(second.status).toBe(429);
+    // Exactly one code left the building.
+    expect(
+      (services.mailer as RecordingMailer).codes.filter((c) => c.to === 'su@example.com'),
     ).toHaveLength(1);
   });
 });

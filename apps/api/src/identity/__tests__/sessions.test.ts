@@ -238,3 +238,23 @@ describe('cookie helpers', () => {
     expect(readSessionToken(undefined)).toBeUndefined();
   });
 });
+
+describe('concurrency cap', () => {
+  it('caps concurrent sessions, evicting the oldest (deletions are awaited)', async () => {
+    const store = new InMemorySessionStore();
+    let t = 1_000;
+    const hashes: string[] = [];
+    for (let i = 0; i < SESSION_POLICY.maxConcurrent + 3; i += 1) {
+      // Strictly increasing created_at so the eviction order is deterministic.
+      hashes.push((await createSession(store, input(), t)).tokenHash);
+      t += 1;
+    }
+    // Immediately after the final createSession resolves (its eviction awaited),
+    // exactly the cap remains — the three OLDEST were evicted, newest retained.
+    const live = await store.listForUser(USER);
+    expect(live).toHaveLength(SESSION_POLICY.maxConcurrent);
+    const liveHashes = new Set(live.map((s) => s.tokenHash));
+    expect(hashes.slice(0, 3).some((h) => liveHashes.has(h))).toBe(false);
+    expect(hashes.slice(3).every((h) => liveHashes.has(h))).toBe(true);
+  });
+});

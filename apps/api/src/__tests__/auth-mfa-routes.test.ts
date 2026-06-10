@@ -13,6 +13,7 @@ import {
   type IdentityServices,
   setIdentityServices,
 } from '../identity/services.js';
+import { createSession } from '../identity/sessions.js';
 import { base32Decode, totp } from '../identity/totp.js';
 
 const CONFIG: IdentityConfig = {
@@ -165,6 +166,53 @@ describe('TOTP MFA enroll → confirm → verify', () => {
       body: JSON.stringify({ code: recovery }),
     });
     expect(reuse.status).toBe(400);
+  });
+
+  it('refuses to re-enroll over active MFA without the current factor', async () => {
+    const { app, sid } = await signup('reenroll');
+    const userId = services.store.getUserByHandle('reenroll')?.userId as string;
+    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
+    const sid2 = cookie(
+      await app.request('/v1/auth/mfa/totp/confirm', {
+        method: 'POST',
+        headers: headers(sid),
+        body: JSON.stringify({ code: totp(secret) }),
+      }),
+      '__Host-sid',
+    );
+    expect(services.store.getAuth(userId)?.mfaEnabled).toBe(true);
+    const activeSecret = services.store.getAuth(userId)?.mfaSecret;
+
+    // The attacker case: a FRESH session satisfies primary step-up but has NOT
+    // cleared the current TOTP (mfaVerified=false).  Re-enrollment is refused, and
+    // the active secret is left intact — the bypass is closed (WS-D.1.5b).
+    const fresh = await createSession(services.sessions, {
+      userId,
+      authMethod: 'webauthn',
+      deviceLabel: 'attacker-device',
+      rememberMe: false,
+    });
+    const blocked = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(`__Host-sid=${fresh.token}`),
+    });
+    expect(blocked.status).toBe(403);
+    expect((await readJson<{ error: { code: string } }>(blocked)).error.code).toBe(
+      'mfa_reverify_required',
+    );
+    expect(services.store.getAuth(userId)?.mfaSecret).toBe(activeSecret);
+    expect(services.store.getAuth(userId)?.mfaEnabled).toBe(true);
+
+    // The legitimate owner (the confirm session is mfaVerified) CAN re-enroll.
+    const reenroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid2),
+    });
+    expect(reenroll.status).toBe(200);
   });
 
   it('disables MFA (clears the secret and recovery codes)', async () => {

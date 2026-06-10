@@ -57,6 +57,16 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
         const services = resolve();
         const auth = c.get('auth');
         if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
+        // Re-enrolling OVER an already-active TOTP is a sensitive action: it must
+        // require the CURRENT factor (this session has cleared the existing TOTP,
+        // `mfaVerified`), not merely a primary step-up.  Otherwise a session opened
+        // with a compromised primary credential could swap in an attacker-chosen
+        // secret and regain steward MFA without knowing the victim's code (the
+        // §WS-D.1.5b "primary compromise ≠ steward power" guarantee).  Initial
+        // enrollment (no active MFA yet) is unaffected.
+        if (services.store.getAuth(auth.userId)?.mfaEnabled && !auth.mfaVerified) {
+          return c.json(err('mfa_reverify_required', 'Verify your current code first.'), 403);
+        }
         const secret = generateTotpSecret();
         const user = services.store.getUser(auth.userId);
         services.store.setAuth(auth.userId, {

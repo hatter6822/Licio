@@ -134,10 +134,13 @@ async function enforceConcurrencyCap(
 ): Promise<void> {
   const sessions = (await store.listForUser(userId)).filter((s) => s.stored.expiresAt > now);
   if (sessions.length <= SESSION_POLICY.maxConcurrent) return;
-  sessions
+  const toEvict = sessions
     .sort((a, b) => Date.parse(a.stored.record.created_at) - Date.parse(b.stored.record.created_at))
-    .slice(0, sessions.length - SESSION_POLICY.maxConcurrent)
-    .forEach((s) => void store.delete(s.tokenHash));
+    .slice(0, sessions.length - SESSION_POLICY.maxConcurrent);
+  // Await the deletions (the store is async/Redis-backed): a login must not
+  // resolve while the user is still above the advertised cap, and a backing-store
+  // error must surface rather than become an unhandled rejection.
+  await Promise.all(toEvict.map((s) => store.delete(s.tokenHash)));
 }
 
 export interface ValidatedSession {
