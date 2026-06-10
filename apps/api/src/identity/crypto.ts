@@ -18,6 +18,7 @@ export const KEY_DOMAINS = {
   financialWallet: 'licio:financial-wallet:v1',
   sessionRef: 'licio:session-ref:v1',
   accountRef: 'licio:account-ref:v1',
+  secretBox: 'licio:secret-box:v1',
 } as const;
 export type KeyDomain = (typeof KEY_DOMAINS)[keyof typeof KEY_DOMAINS];
 

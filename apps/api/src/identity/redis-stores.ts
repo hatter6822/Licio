@@ -6,8 +6,10 @@
 // by the gated live-Redis integration test (`redis-stores.integration.test.ts`),
 // not by unit tests, and are therefore excluded from the coverage threshold like
 // `packages/db/src/client.ts` — the logic they bind to is already fully covered.
+import { randomBytes } from 'node:crypto';
 import type Redis from 'ioredis';
 import type { EphemeralStore } from './ephemeral-store.js';
+import type { AuthRateLimitStore } from './rate-limit-auth.js';
 import type { SessionStore, StoredSession } from './sessions.js';
 
 /** Redis-backed single-use ephemeral store (challenges, SIWE nonces, email OTPs). */
@@ -96,6 +98,66 @@ export class RedisSessionStore implements SessionStore {
       else await this.#redis.srem(this.#userKey(userId), tokenHash); // prune expired index entry
     }
     return out;
+  }
+
+  async clear(): Promise<void> {
+    const keys = await this.#redis.keys(`${this.#prefix}*`);
+    if (keys.length > 0) await this.#redis.del(...keys);
+  }
+}
+
+/**
+ * Redis-backed progressive auth rate-limit store.  Failure windows are Redis
+ * sorted sets pruned to the sliding window (ZREMRANGEBYSCORE + ZCARD); locks are
+ * short-lived keys.  Keys hold only NON-reversible hashes (account ref, hashed
+ * IP) — never a plaintext IP or email (§19.1 / §19.5).
+ */
+export class RedisAuthRateLimitStore implements AuthRateLimitStore {
+  readonly #redis: Redis;
+  readonly #prefix: string;
+
+  constructor(redis: Redis, prefix = 'authrl:') {
+    this.#redis = redis;
+    this.#prefix = prefix;
+  }
+
+  async recordFailure(key: string, now: number, windowMs: number): Promise<number> {
+    const k = `${this.#prefix}${key}`;
+    const member = `${now}-${randomBytes(6).toString('hex')}`;
+    const results = await this.#redis
+      .multi()
+      .zremrangebyscore(k, 0, now - windowMs)
+      .zadd(k, now, member)
+      .zcard(k)
+      .pexpire(k, windowMs)
+      .exec();
+    // ZCARD is the third command; its reply is [err, count].
+    const count = results?.[2]?.[1];
+    return typeof count === 'number' ? count : Number(count ?? 0);
+  }
+
+  async reset(key: string): Promise<void> {
+    await this.#redis.del(`${this.#prefix}${key}`);
+  }
+
+  async setLock(key: string, untilMs: number): Promise<void> {
+    const k = `${this.#prefix}${key}`;
+    if (untilMs <= Date.now()) {
+      await this.#redis.del(k);
+      return;
+    }
+    await this.#redis.set(k, String(untilMs), 'PXAT', untilMs);
+  }
+
+  async getLock(key: string, now: number): Promise<number | null> {
+    const raw = await this.#redis.get(`${this.#prefix}${key}`);
+    if (raw === null) return null;
+    const until = Number(raw);
+    if (until <= now) {
+      await this.#redis.del(`${this.#prefix}${key}`);
+      return null;
+    }
+    return until - now;
   }
 
   async clear(): Promise<void> {

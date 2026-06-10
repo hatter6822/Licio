@@ -7,6 +7,7 @@ import {
   clearSessionCookie,
   createSession,
   InMemorySessionStore,
+  markMfaVerified,
   markStepUp,
   needsStepUp,
   readSessionToken,
@@ -148,6 +149,15 @@ describe('step-up', () => {
     await markStepUp(store, created.tokenHash, later);
     const record = (await store.get(created.tokenHash))?.record;
     expect(record && needsStepUp(record, later)).toBe(false);
+  });
+
+  it('markMfaVerified flips the session mfa_verified flag', async () => {
+    const store = new InMemorySessionStore();
+    const t0 = 1_700_000_000_000;
+    const created = await createSession(store, input(), t0);
+    expect(created.record.mfa_verified).toBe(false);
+    await markMfaVerified(store, created.tokenHash, t0 + 1000);
+    expect((await store.get(created.tokenHash))?.record.mfa_verified).toBe(true);
   });
 });
 

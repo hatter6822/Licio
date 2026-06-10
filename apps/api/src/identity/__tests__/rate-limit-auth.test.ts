@@ -84,4 +84,23 @@ describe('AuthRateLimiter progressive thresholds', () => {
   it('returns an identical (allowed) decision before any failures', async () => {
     expect(await limiter.check('unknown', 'ip')).toEqual({ allowed: true, retryAfterSec: 0 });
   });
+
+  it('with a null account key, only the per-IP counter accumulates (no account lock)', async () => {
+    // 10 unattributable failures from one IP: the per-account cooldown never fires…
+    for (let i = 0; i < 10; i += 1) {
+      const out = await limiter.recordFailure(null, 'badip');
+      expect(out.retryAfterSec).toBe(0);
+    }
+    // …but the IP counter still climbs toward its own block threshold.
+    for (let i = 0; i < 40; i += 1) await limiter.recordFailure(null, 'badip');
+    const last = await limiter.recordFailure(null, 'badip');
+    expect(last.ipBlocked).toBe(true);
+  });
+
+  it('a success clears a pending cooldown immediately (not just the counter)', async () => {
+    await fail(5); // sets a 30s cooldown
+    expect((await limiter.check('acct1', 'ip1')).allowed).toBe(false);
+    await limiter.recordSuccess('acct1');
+    expect((await limiter.check('acct1', 'ip1')).allowed).toBe(true);
+  });
 });

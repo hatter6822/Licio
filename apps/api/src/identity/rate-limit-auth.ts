@@ -124,29 +124,36 @@ export class AuthRateLimiter {
       : { allowed: true, retryAfterSec: 0 };
   }
 
-  /** Record one authentication failure across both counters and apply escalation. */
-  async recordFailure(accountKey: string, ipKey: string): Promise<FailureOutcome> {
+  /**
+   * Record one authentication failure and apply escalation.  `accountKey` is null
+   * when the attempt cannot be safely attributed to an account (e.g. an invalid
+   * wallet signature with no trustworthy signer) — then only the per-IP counter
+   * increments, so an attacker cannot evade the per-account limit with junk
+   * identifiers nor poison a victim's account counter.
+   */
+  async recordFailure(accountKey: string | null, ipKey: string): Promise<FailureOutcome> {
     const now = this.#now();
     const { windowMs, account, ip } = AUTH_RATE_LIMITS;
 
-    const wasHardLocked = (await this.#store.getLock(acctLockKey(accountKey), now)) !== null;
-    const acctCount = await this.#store.recordFailure(acctFailKey(accountKey), now, windowMs);
-    const ipCount = await this.#store.recordFailure(ipFailKey(ipKey), now, windowMs);
-
     let cooldownMs = 0;
     let lockoutTriggered = false;
-    if (acctCount >= account.lockAt) {
-      await this.#store.setLock(acctLockKey(accountKey), now + account.lockMs);
-      cooldownMs = account.lockMs;
-      lockoutTriggered = !wasHardLocked; // exactly once, on the transition into lock
-    } else if (acctCount >= account.hardDelayAt) {
-      await this.#store.setLock(acctCooldownKey(accountKey), now + account.hardDelayMs);
-      cooldownMs = account.hardDelayMs;
-    } else if (acctCount >= account.softDelayAt) {
-      await this.#store.setLock(acctCooldownKey(accountKey), now + account.softDelayMs);
-      cooldownMs = account.softDelayMs;
+    if (accountKey !== null) {
+      const wasHardLocked = (await this.#store.getLock(acctLockKey(accountKey), now)) !== null;
+      const acctCount = await this.#store.recordFailure(acctFailKey(accountKey), now, windowMs);
+      if (acctCount >= account.lockAt) {
+        await this.#store.setLock(acctLockKey(accountKey), now + account.lockMs);
+        cooldownMs = account.lockMs;
+        lockoutTriggered = !wasHardLocked; // exactly once, on the transition into lock
+      } else if (acctCount >= account.hardDelayAt) {
+        await this.#store.setLock(acctCooldownKey(accountKey), now + account.hardDelayMs);
+        cooldownMs = account.hardDelayMs;
+      } else if (acctCount >= account.softDelayAt) {
+        await this.#store.setLock(acctCooldownKey(accountKey), now + account.softDelayMs);
+        cooldownMs = account.softDelayMs;
+      }
     }
 
+    const ipCount = await this.#store.recordFailure(ipFailKey(ipKey), now, windowMs);
     let ipBlocked = false;
     if (ipCount >= ip.blockAt) {
       await this.#store.setLock(ipLockKey(ipKey), now + ip.blockMs);
@@ -159,5 +166,7 @@ export class AuthRateLimiter {
   /** Successful auth clears the per-account failure counter (WS-D.1.3d). */
   async recordSuccess(accountKey: string): Promise<void> {
     await this.#store.reset(acctFailKey(accountKey));
+    await this.#store.setLock(acctCooldownKey(accountKey), 0);
+    await this.#store.setLock(acctLockKey(accountKey), 0);
   }
 }

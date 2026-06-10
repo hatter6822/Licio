@@ -235,6 +235,28 @@ export async function markStepUp(
   });
 }
 
+/**
+ * Mark the CURRENT session as having cleared steward TOTP MFA (WS-D.1.5b).  A
+ * steward session is reduced-capability until this is set; it grants steward
+ * capabilities only afterwards.  Also refreshes the step-up clock.
+ */
+export async function markMfaVerified(
+  store: SessionStore,
+  tokenHash: string,
+  now: number = Date.now(),
+): Promise<void> {
+  const stored = await store.get(tokenHash);
+  if (!stored) return;
+  await store.put(tokenHash, {
+    ...stored,
+    record: {
+      ...stored.record,
+      mfa_verified: true,
+      auth_assurance: { level: 'full', last_verified_at: iso(now) },
+    },
+  });
+}
+
 /** Revoke all of a user's sessions except `exceptHash`; returns the revoked count. */
 export async function revokeOthersForUser(
   store: SessionStore,
