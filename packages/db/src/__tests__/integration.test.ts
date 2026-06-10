@@ -120,7 +120,7 @@ describe.skipIf(!DB_URL)('WS-D Postgres integration', () => {
       sessionId: randomUUID(),
       userId: uid,
       authMethod: 'webauthn',
-      ipHash: Buffer.from('iphash'),
+      deviceLabel: 'iOS/Safari',
     });
     await db.insert(webauthnCredentials).values({
       credentialId: Buffer.from(`cred-${uid}`),

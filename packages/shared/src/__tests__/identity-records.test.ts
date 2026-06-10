@@ -48,17 +48,24 @@ describe('sessionRecordSchema', () => {
     credential_ref: 'abcd',
     created_at: TS,
     last_active_at: TS,
-    ip_hash: 'deadbeef',
-    user_agent_truncated: 'Mozilla/5.0',
     device_label: 'MacBook',
-    country: 'US',
     remember_me: true,
+    mfa_verified: false,
     auth_assurance: { level: 'full' as const, last_verified_at: TS },
     absolute_expires_at: TS,
   };
 
   it('round-trips a valid record', () => {
     expect(() => sessionRecordSchema.parse(base)).not.toThrow();
+  });
+
+  it('records NO ip_hash, country, or raw user-agent (privacy amendment §19.1)', () => {
+    const parsed = sessionRecordSchema.parse(base);
+    for (const forbidden of ['ip_hash', 'country', 'user_agent_truncated']) {
+      expect(forbidden in parsed).toBe(false);
+    }
+    expect(() => sessionRecordSchema.parse({ ...base, ip_hash: 'x' })).toThrow();
+    expect(() => sessionRecordSchema.parse({ ...base, country: 'US' })).toThrow();
   });
 
   it('allows a null credential_ref (email_otp sessions)', () => {
@@ -86,19 +93,19 @@ describe('authAssuranceSchema', () => {
 });
 
 describe('sessionSummarySchema', () => {
-  it('exposes only a non-reversible ref and country-level location', () => {
+  it('exposes only a non-reversible ref + coarse device descriptor (no IP, no location)', () => {
     const summary = sessionSummarySchema.parse({
       session_ref: 'a1b2c3',
       device_label: 'iPhone',
       auth_method: 'email_otp',
-      country: 'GB',
       created_at: TS,
       last_active_at: TS,
       current: true,
     });
     expect(summary.session_ref).toBe('a1b2c3');
-    // The summary shape has no token or IP field.
+    // The summary shape has no token, IP, or location field.
     expect('ip_hash' in summary).toBe(false);
+    expect('country' in summary).toBe(false);
     expect('token' in summary).toBe(false);
   });
 });

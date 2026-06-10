@@ -27,10 +27,7 @@ function input(overrides: Partial<CreateSessionInput> = {}): CreateSessionInput 
     userId: USER,
     authMethod: 'webauthn',
     credentialRef: 'cred-1',
-    ipHash: 'iphash',
-    userAgent: 'Mozilla/5.0',
     deviceLabel: 'Test Device',
-    country: 'US',
     rememberMe: false,
     ...overrides,
   };
@@ -178,7 +175,7 @@ describe('revocation', () => {
 });
 
 describe('sessionSummaries', () => {
-  it('exposes a non-reversible ref + country, flags the current session, and leaks no token/IP', async () => {
+  it('exposes a non-reversible ref + device descriptor, flags current, and leaks no token/IP/location', async () => {
     const store = new InMemorySessionStore();
     const t0 = 1_700_000_000_000;
     const current = await createSession(store, input(), t0);
@@ -187,10 +184,11 @@ describe('sessionSummaries', () => {
     const summaries = await sessionSummaries(store, USER, current.tokenHash, SECRET, t0 + 2000);
     expect(summaries).toHaveLength(2);
     const currentSummary = summaries.find((s) => s.current);
-    expect(currentSummary?.country).toBe('US');
+    expect(currentSummary?.device_label).toBe('Test Device');
+    // No location field exists on the summary (§19.1).
+    expect('country' in (currentSummary ?? {})).toBe(false);
     expect(currentSummary?.session_ref).not.toContain(current.token);
     for (const s of summaries) {
-      expect(JSON.stringify(s)).not.toContain('iphash');
       expect(JSON.stringify(s)).not.toContain(current.token);
     }
   });

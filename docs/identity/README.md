@@ -46,7 +46,8 @@ interfaces.
 
 - Tables: `users` (+ JSONB `privacy_settings`/`personalization_settings`/
   `reputation_summary_private`), `user_auth` (**no password column**), `sessions`
-  (token stored as `sha256`, IP as keyed hash), `webauthn_credentials`,
+  (token stored as `sha256`; NO IP, NO location — only a coarse device descriptor),
+  `webauthn_credentials`,
   `wallet_auth_credentials` (identity context), `audit_log`, `export_jobs`,
   `deletion_requests`, `mfa_recovery_codes`, and **`wallet.wallet_accounts`** in a
   dedicated isolated schema.
@@ -101,9 +102,14 @@ double-submit token).
 
 - **No password anywhere** — structural tests assert no `password*` field on any
   schema, and the gated DB test asserts `user_auth` has no password column.
-- **Tokens/PII never plaintext** — session tokens stored as `sha256`, IPs and
-  wallet addresses as domain-separated HMACs; the auth-wallet and financial-wallet
-  hashes of the same address are non-correlatable.
+- **No IP and no location, ever** (SPEC §19.1) — sessions, the audit log, and
+  alerts record no IP and no country/geolocation; there is no geo-IP lookup. An IP
+  is used only transiently and hashed as a rate-limit counter key, never persisted
+  or logged. New-device alerts compare a coarse device descriptor only. Schema and
+  redactor tests assert no `ip_hash`/`country` field can be stored.
+- **Tokens/PII never plaintext** — session tokens stored as `sha256`; wallet
+  addresses as domain-separated HMACs; the auth-wallet and financial-wallet hashes
+  of the same address are non-correlatable.
 - **Phishing resistance** — WebAuthn RP-ID/origin binding and SIWE domain/URI
   binding both reject look-alike origins.
 - **Cloned-authenticator detection** — WebAuthn counter regression is surfaced and
@@ -127,8 +133,9 @@ their infrastructure bindings land later:
   hard-purge job (WS-D.2.4b/c) are deferred.
 - **Attention-history purge** and the **settings-change downstream consumer** are
   injected hooks (`purgeAttention`, `onPrivacyChange`) that WS-E implements.
-- **Geo lookup** uses an edge-provided country header; the local MaxMind DB is a
-  WS-0 operational concern.
+- **No geo lookup at all** — per SPEC §19.1 the platform records no IP and no
+  location, so there is no MaxMind/geo-IP dependency; suspicious-login detection is
+  coarse new-device only.
 
 ## Running the gated integration tests
 

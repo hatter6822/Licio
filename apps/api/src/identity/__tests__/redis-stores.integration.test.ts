@@ -43,20 +43,14 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
       userId,
       authMethod: 'webauthn',
       credentialRef: 'c',
-      ipHash: 'h',
-      userAgent: 'ua',
       deviceLabel: 'dev',
-      country: 'US',
       rememberMe: false,
     });
     const b = await createSession(store, {
       userId,
       authMethod: 'email_otp',
       credentialRef: null,
-      ipHash: 'h',
-      userAgent: 'ua',
       deviceLabel: 'dev2',
-      country: 'GB',
       rememberMe: true,
     });
 

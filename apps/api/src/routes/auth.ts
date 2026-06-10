@@ -58,16 +58,16 @@ const clearAttemptCookie = (): string =>
 const readAttempt = (cookie: string | undefined): string | undefined =>
   cookie?.match(/(?:^|;\s*)__Host-otp=([^;]+)/)?.[1];
 
+// The client IP is used ONLY transiently as a rate-limit counter key (hashed by
+// the limiter); it is NEVER stored in a session, audit entry, or log (§19.1).
 const clientIp = (c: { req: { header: (k: string) => string | undefined } }): string =>
   c.req.header('x-forwarded-for') ?? 'unknown';
-const clientCountry = (c: {
-  req: { header: (k: string) => string | undefined };
-}): string | null => {
-  const country = c.req.header('cf-ipcountry') ?? c.req.header('x-country');
-  return country && /^[A-Za-z]{2}$/.test(country) ? country.toUpperCase() : null;
-};
 
-/** Create a session on successful auth, raising a suspicious-login alert if warranted. */
+/**
+ * Create a session on successful auth, raising a NEW-DEVICE alert if warranted.
+ * Per the privacy amendment (§19.1) no IP and no location are recorded — only a
+ * coarse device descriptor derived from the user-agent.
+ */
 async function finalizeLogin(
   services: IdentityServices,
   c: { req: { header: (k: string) => string | undefined } },
@@ -76,40 +76,32 @@ async function finalizeLogin(
     authMethod: 'webauthn' | 'email_otp' | 'wallet';
     credentialRef: string | null;
     rememberMe: boolean;
+    mfaVerified?: boolean;
   },
 ) {
-  const userAgent = c.req.header('user-agent') ?? '';
-  const country = clientCountry(c);
-  const profile = deviceProfile(userAgent);
+  const profile = deviceProfile(c.req.header('user-agent') ?? '');
 
+  // History is the device descriptors of the user's OTHER active sessions.
   const existing = await services.sessions.listForUser(params.userId);
-  const history = existing.map((s) => ({
-    country: s.stored.record.country,
-    deviceProfile: deviceProfile(s.stored.record.user_agent_truncated),
-  }));
+  const history = existing.map((s) => ({ deviceProfile: s.stored.record.device_label }));
 
   const created = await createSession(services.sessions, {
     userId: params.userId,
     authMethod: params.authMethod,
     credentialRef: params.credentialRef,
-    ipHash: hashIp(services.config.masterSecret, clientIp(c)),
-    userAgent,
     deviceLabel: profile,
-    country,
     rememberMe: params.rememberMe,
+    mfaVerified: params.mfaVerified ?? false,
   });
 
-  await services.rateLimit.recordSuccess(accountRef(services.config.masterSecret, params.userId));
+  await services.rateLimit.recordSuccess(accountRefForUser(services, params.userId));
   await services.audit.append({
     actorUserId: params.userId,
     eventType: 'login_success',
-    context: { country, device: profile, auth_method: params.authMethod },
+    context: { device: profile, auth_method: params.authMethod },
   });
 
-  const decision = assessLogin(
-    { country, deviceProfile: profile, authMethod: params.authMethod },
-    history,
-  );
+  const decision = assessLogin({ deviceProfile: profile, authMethod: params.authMethod }, history);
   if (decision.suspicious) {
     const user = services.store.getUser(params.userId);
     await sendSecurityAlert({
@@ -117,11 +109,20 @@ async function finalizeLogin(
       hasEmail: !!user?.email,
       hasPush: false,
       audit: services.audit,
-      event: { type: 'new_signin', country, device: profile, authMethod: params.authMethod },
+      event: { type: 'new_signin', device: profile, authMethod: params.authMethod },
     });
   }
 
   return created;
+}
+
+/**
+ * The canonical per-account rate-limit key (WS-D.1.3d): keyed by the resolved
+ * user id so failures across rotating attempt-ids accumulate and a success on the
+ * same account resets them.  Returned hashed (no plaintext id in the keyspace).
+ */
+function accountRefForUser(services: IdentityServices, userId: string): string {
+  return accountRef(services.config.masterSecret, `user:${userId}`);
 }
 
 export function createAuthRoutes(resolve: () => IdentityServices = getIdentityServices) {

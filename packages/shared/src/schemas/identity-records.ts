@@ -47,11 +47,13 @@ export const sessionRecordSchema = z
     credential_ref: z.string().nullable(),
     created_at: isoTimestampSchema,
     last_active_at: isoTimestampSchema,
-    ip_hash: z.string(),
-    user_agent_truncated: z.string().max(256),
+    // Privacy amendment (SPEC §19.1): sessions record NO IP and NO location. Only
+    // a coarse, derived device descriptor is kept (e.g. "iOS/Safari"), used for
+    // the device list and new-device alerts. No raw user-agent is stored.
     device_label: z.string().max(128),
-    country: z.string().length(2).nullable(),
     remember_me: z.boolean(),
+    /** True once this session is a steward who has cleared TOTP MFA (WS-D.1.5b). */
+    mfa_verified: z.boolean(),
     auth_assurance: authAssuranceSchema,
     /** Absolute expiry cap (90-day ceiling); sliding refresh may not exceed it. */
     absolute_expires_at: isoTimestampSchema,
@@ -61,15 +63,14 @@ export type SessionRecord = z.infer<typeof sessionRecordSchema>;
 
 /**
  * A session as presented in the active-sessions UI (WS-D.1.3c).  Exposes only a
- * NON-reversible display reference and country-level location — never the token
- * or a plaintext IP.
+ * NON-reversible display reference and a coarse device descriptor — never the
+ * token, an IP, or a location (privacy amendment, SPEC §19.1).
  */
 export const sessionSummarySchema = z
   .object({
     session_ref: z.string().min(1),
     device_label: z.string(),
     auth_method: authMethodSchema,
-    country: z.string().length(2).nullable(),
     created_at: isoTimestampSchema,
     last_active_at: isoTimestampSchema,
     current: z.boolean(),

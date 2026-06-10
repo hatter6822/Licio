@@ -1,43 +1,41 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Suspicious-login detection + multi-channel security alerts (WS-D.1.4d).  Because
+// New-device login detection + multi-channel security alerts (WS-D.1.4d).  Because
 // email is optional, alerts are multi-channel: email when one is on file, else Web
 // Push, and ALWAYS an in-app security-activity log entry (so a passkey-/wallet-only
-// account never silently loses an alert).  Detection is country- and device-coarse
-// only (a local geo DB; never the raw IP, §19.1).
+// account never silently loses an alert).
+//
+// PRIVACY AMENDMENT (SPEC §19.1): detection uses ONLY a coarse device descriptor.
+// There is NO geolocation, NO country, NO IP, and NO geo-IP lookup of any kind.
 import type { AuditEventType, AuthMethod } from '@licio/shared';
 import type { AuditStore } from './audit.js';
 
 export interface LoginContext {
-  /** ISO country code from a LOCAL geo lookup (no external API), or null. */
-  country: string | null;
-  /** Coarse device profile (OS/browser family), never the full user agent. */
+  /** Coarse device descriptor (OS/browser family), never the full user agent. */
   deviceProfile: string;
   authMethod: AuthMethod;
 }
 
-export type LoginHistoryEntry = Pick<LoginContext, 'country' | 'deviceProfile'>;
+export type LoginHistoryEntry = Pick<LoginContext, 'deviceProfile'>;
 
 export interface SuspiciousLoginDecision {
   suspicious: boolean;
-  reasons: Array<'new_country' | 'new_device'>;
+  reasons: Array<'new_device'>;
 }
 
 /**
- * Decide whether a sign-in is suspicious vs. the user's recent history.  The first
- * sign-in (empty history) is never suspicious.  A new country or a materially
- * different device profile raises a NON-blocking alert (the login still succeeds;
- * the user revokes the session if it was not them).
+ * Decide whether a sign-in is from a device descriptor not seen among the user's
+ * other active sessions.  The first sign-in (empty history) is never flagged.  A
+ * new device raises a NON-blocking alert (the login still succeeds; the user
+ * revokes the session if it was not them).  No location/IP is consulted (§19.1).
  */
 export function assessLogin(
   current: LoginContext,
   history: readonly LoginHistoryEntry[],
 ): SuspiciousLoginDecision {
   if (history.length === 0) return { suspicious: false, reasons: [] };
-  const knownCountries = new Set(history.map((h) => h.country));
   const knownDevices = new Set(history.map((h) => h.deviceProfile));
-  const reasons: Array<'new_country' | 'new_device'> = [];
-  if (current.country !== null && !knownCountries.has(current.country)) reasons.push('new_country');
+  const reasons: Array<'new_device'> = [];
   if (!knownDevices.has(current.deviceProfile)) reasons.push('new_device');
   return { suspicious: reasons.length > 0, reasons };
 }
@@ -92,8 +90,7 @@ const ALERT_AUDIT_EVENT: Record<SecurityAlertType, AuditEventType> = {
 
 export interface SecurityAlertEvent {
   type: SecurityAlertType;
-  /** Minimized context — country/device/method only, never a raw IP. */
-  country?: string | null;
+  /** Minimized context — coarse device descriptor + method only. NO IP, NO location. */
   device?: string | null;
   authMethod?: AuthMethod | null;
 }
@@ -107,7 +104,7 @@ export interface AlertTransports {
  * Deliver a security alert across the selected channels and always write the
  * audit-log entry.  The audit redactor strips any IP/secret from the context, so
  * the persisted record (and, by construction here, the email/push payloads) carry
- * country/device/method only.
+ * a coarse device descriptor + method only — never an IP or location (§19.1).
  */
 export async function sendSecurityAlert(opts: {
   userId: string;
@@ -126,7 +123,6 @@ export async function sendSecurityAlert(opts: {
         actorUserId: opts.userId,
         eventType: ALERT_AUDIT_EVENT[opts.event.type],
         context: {
-          country: opts.event.country ?? null,
           device: opts.event.device ?? null,
           auth_method: opts.event.authMethod ?? null,
         },

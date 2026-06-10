@@ -867,7 +867,8 @@ password column, hashing, or reset flow anywhere.
 | Age gating | Under-13 block, teen privacy floor (server-clamped), `requireAdult` fail-closed | Complete |
 | Privacy controls | Settings get/patch (clamped/audited/propagated), attention delete, export job, account deletion + grace | Core complete |
 | Wallet isolation | `wallet.wallet_accounts` schema + undirected-BFS isolation test (WS-D.3.2) | Complete |
-| Deferred | Export worker/S3 delivery, deletion purge job, steward MFA routes, MaxMind geo | Pending |
+| Privacy | **No IP and no location are ever recorded** (SPEC §19.1); new-device alerts use a coarse device descriptor only; IPs are transient + hashed for rate limiting, never persisted | Complete |
+| Deferred | Export worker/S3 delivery, deletion purge job, steward MFA routes | Pending |
 
 Pure crypto is mathematically validated: TOTP against the RFC 6238
 Appendix B vectors, real WebAuthn attestation/assertion via a pure-crypto

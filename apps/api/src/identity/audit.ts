@@ -15,8 +15,9 @@ import {
 } from '@licio/shared';
 
 /** The closed allowlist of context keys that may be persisted. */
+// Privacy amendment (SPEC §19.1): NO `country`/location key. The most
+// location-like value ever recorded is a coarse `device` descriptor.
 const ALLOWED_CONTEXT_KEYS: ReadonlyArray<keyof AuditContext> = [
-  'country',
   'device',
   'auth_method',
   'setting',
@@ -43,7 +44,6 @@ function maskIfSensitive(value: string | null): string | null {
  */
 export function redactContext(raw: Record<string, unknown> | undefined): AuditContext {
   const base: AuditContext = {
-    country: null,
     device: null,
     auth_method: null,
     setting: null,
@@ -59,9 +59,6 @@ export function redactContext(raw: Record<string, unknown> | undefined): AuditCo
         typeof value === 'string' && AUTH_METHODS.has(value)
           ? (value as AuditContext['auth_method'])
           : null;
-    } else if (key === 'country') {
-      base.country =
-        typeof value === 'string' && /^[A-Za-z]{2}$/.test(value) ? value.toUpperCase() : null;
     } else if (typeof value === 'string') {
       base[key] = maskIfSensitive(value.slice(0, 256));
     }

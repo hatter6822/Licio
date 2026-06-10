@@ -8,15 +8,15 @@ import {
 } from '../audit.js';
 
 describe('redactContext', () => {
-  it('keeps only allowlisted keys and drops the rest', () => {
+  it('keeps only allowlisted keys and drops the rest (incl. any country/location)', () => {
     const ctx = redactContext({
-      country: 'us',
+      country: 'us', // location is NOT an allowed key (§19.1) — dropped
       device: 'iPhone',
       auth_method: 'webauthn',
       injected: 'evil',
       session_token: 'super-secret',
     } as Record<string, unknown>);
-    expect(ctx.country).toBe('US'); // upper-cased
+    expect('country' in ctx).toBe(false);
     expect(ctx.device).toBe('iPhone');
     expect(ctx.auth_method).toBe('webauthn');
     expect('injected' in ctx).toBe(false);
@@ -28,9 +28,8 @@ describe('redactContext', () => {
     expect(redactContext({ new_value: '2001:db8::1' }).new_value).toBeNull();
   });
 
-  it('rejects an invalid auth_method and a non-2-letter country', () => {
+  it('rejects an invalid auth_method', () => {
     expect(redactContext({ auth_method: 'password' }).auth_method).toBeNull();
-    expect(redactContext({ country: 'USA' }).country).toBeNull();
   });
 
   it('records a privacy-setting diff (previous → new)', () => {
@@ -46,7 +45,6 @@ describe('redactContext', () => {
 
   it('returns an all-null context for no input', () => {
     expect(redactContext(undefined)).toEqual({
-      country: null,
       device: null,
       auth_method: null,
       setting: null,
@@ -63,12 +61,12 @@ describe('buildAuditEntry', () => {
       {
         actorUserId: '11111111-1111-4111-8111-111111111111',
         eventType: 'login_success',
-        context: { country: 'GB' },
+        context: { device: 'iOS/Safari' },
       },
       at,
     );
     expect(entry.event_type).toBe('login_success');
-    expect(entry.context.country).toBe('GB');
+    expect(entry.context.device).toBe('iOS/Safari');
     expect(entry.created_at).toBe(at.toISOString());
     expect(entry.event_id).toMatch(/^[0-9a-f-]{36}$/);
   });

@@ -41,7 +41,8 @@ export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);
  */
 export const auditContextSchema = z
   .object({
-    country: z.string().length(2).nullable(),
+    // Privacy amendment (SPEC §19.1): NO country/location and NO IP. A coarse
+    // device descriptor is the most location-like value ever recorded.
     device: z.string().max(128).nullable(),
     auth_method: authMethodSchema.nullable(),
     /** For privacy_setting_change: the changed flag and its old→new values. */

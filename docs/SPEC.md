@@ -1152,7 +1152,31 @@ Knomosis-enabled rooms introduce new abuse modes. T&S policy explicitly covers: 
 
 ## 19.1 Posture and data minimization
 
-Attention signals are sensitive, so attention measurement is privacy-preserving, bounded, transparent, and controllable. Collect only attention events needed for PWAtt and safety; prefer in-browser feature extraction over raw event upload; upload aggregated attention features rather than raw scroll traces where possible; avoid precise location unless needed for explicit local features and consented; never sell attention data or use it for behavioral advertising; retain raw event logs for the shortest feasible period; provide account export and deletion.
+**Absolute data-minimization default (project-wide).** Licio collects the
+absolute minimum information necessary to operate, and this is the default for
+**every** workstream — not only attention handling. In particular, the platform
+**never records, persists, or logs user IP addresses or any geolocation**,
+including coarse country-level location. An IP address may be used only
+*transiently in memory* — hashed under a server key, with a short TTL, and never
+written to durable storage, an audit entry, a session record, an analytics
+record, or any log — solely for abuse and rate-limiting defense, and is
+discarded immediately afterward. No persisted data structure contains an IP or a
+location field. There is no geolocation lookup of any kind (no MaxMind or
+equivalent IP-to-country database). "Local" content features, where offered, are
+driven by an explicit user-chosen region preference (a content topic), never by
+detecting or inferring where the user physically is. This default may not be
+weakened by a later feature without an explicit, documented privacy-review
+exception (Section 32.4).
+
+Attention signals are sensitive, so attention measurement is privacy-preserving,
+bounded, transparent, and controllable. Collect only attention events needed for
+PWAtt and safety; prefer in-browser feature extraction over raw event upload;
+upload aggregated attention features rather than raw scroll traces where
+possible; **never collect a user's geolocation** (a story may carry a *content*
+location describing where a news event happened — a property of the event, not
+of the reader); never sell attention data or use it for behavioral advertising;
+retain raw event logs for the shortest feasible period; provide account export
+and deletion.
 
 ## 19.2 Attention-signal handling
 
@@ -1482,7 +1506,7 @@ XSS is the dominant risk for a UGC platform that also connects wallets — a sin
 
 ## 25.3 Account security
 
-WebAuthn/passkeys as the preferred, phishing-resistant authentication. **Authentication is passwordless: Licio uses no passwords and has no password-reset flow.** The fallbacks -- for devices/browsers without a platform authenticator, and offered depending on jurisdiction and risk -- are a single-use one-time code sent to a verified email and, for adults who opt in, Sign-In with Ethereum (EIP-4361, verified per Section 25.6); SMS/phone codes are deliberately not used as a factor (SIM-swap and privacy concerns). The authentication-wallet credential is kept domain-separated from the financial wallet identity so logging in with a wallet does not link it to payments/governance (Section 19.5). Multi-factor (TOTP) for stewards and moderators; session management and device list; suspicious-login alerts; rate limits for credential attacks; abuse-resistant account recovery via remaining enrolled factors rather than any resettable shared secret.
+WebAuthn/passkeys as the preferred, phishing-resistant authentication. **Authentication is passwordless: Licio uses no passwords and has no password-reset flow.** The fallbacks -- for devices/browsers without a platform authenticator, and offered depending on jurisdiction and risk -- are a single-use one-time code sent to a verified email and, for adults who opt in, Sign-In with Ethereum (EIP-4361, verified per Section 25.6); SMS/phone codes are deliberately not used as a factor (SIM-swap and privacy concerns). The authentication-wallet credential is kept domain-separated from the financial wallet identity so logging in with a wallet does not link it to payments/governance (Section 19.5). Multi-factor (TOTP) for stewards and moderators; session management and a device list labelled by a coarse device descriptor only (never an IP or location, Section 19.1); **new-device sign-in alerts** (the security-alert feature compares only a coarse device descriptor, never an IP, country, or any geolocation — there is no geo-IP lookup); rate limits for credential attacks (IP used transiently and hashed for the limiter only, never recorded); abuse-resistant account recovery via remaining enrolled factors rather than any resettable shared secret.
 
 ## 25.4 Backend security
 
@@ -1635,7 +1659,7 @@ No crypto task blocks steps 1–9. The rule is: **PWAtt and MERI exist before pu
 - **A — Doctrine, policy, governance:** no-applause doctrine; allowed/prohibited signal matrix (prohibited: money, wallet connection, token holdings, payment amount, paid membership, treasury status, follower count); policy hierarchy; charter templates; moderation-escalation taxonomy; transparency-report data dictionary; jurisdiction/feature matrix.
 - **B — PWA UX and design system:** information architecture; story cards with no applause affordances; ranking explanations; contribution chips; context cards; two-tap report/block/mute; AI-summary disclosure; wallet/governance screens; empty/loading/offline/error/restricted states; accessibility specs; usability testing.
 - **C — PWA client:** app shell, routing, service worker, install, feature flags; auth/passkeys; core surfaces; UGC reporting/blocking/appeals; offline cache and background sync; in-browser attention aggregation; composer; explanation cards; optional wallet/governance modules behind flags; performance, accessibility, and security testing.
-- **D — Identity, accounts, privacy:** identity states; minimal-profile account service; age gate (minors excluded from wallet/governance); consent and privacy settings; wallet-link table isolated from profile/attention/ranking; retention/deletion/export jobs; staff access controls and audit logs; privacy-review workflow.
+- **D — Identity, accounts, privacy:** identity states; minimal-profile account service that records **no IP address and no location** (Section 19.1); age gate (minors excluded from wallet/governance); consent and privacy settings; new-device sign-in alerts using a coarse device descriptor only (no IP, no geolocation, no geo-IP lookup); wallet-link table isolated from profile/attention/ranking; retention/deletion/export jobs; staff access controls and audit logs that contain no IPs or locations; privacy-review workflow.
 - **E — Event pipeline and PWAtt:** event schema and classification; in-browser buffering with privacy filters; server ingestion/validation/replay protection/retention; PWAtt v0 shadow; participation-quality weighting; anti-signals; explanation logs; offline manipulation simulations; promotion to bounded ranking only after safety review.
 - **F — Ingestion, source, search:** URL canonicalization and duplicate detection; source profiles; claim extraction and evidence linking; search indexing; freshness/correction/merge workflows; crawler safety and copyright handling; MERI and SCOI hooks.
 - **G — Forum and conversation:** thread/branch/quote/evidence models; contribution taxonomy and composer; branch-quality scoring separate from popularity; moderation annotations and context patches; provenance-bearing summaries; rooms/lenses/steward roles; conversation-health metrics; Hodge and SCOI hooks; governance-discussion threads.
@@ -1760,7 +1784,7 @@ The PWA is the universal surface; it is installable, offline-tolerant, and updat
 
 ## 32.4 Privacy and data protection
 
-Data minimization before collection; in-browser aggregation reduces raw traces; attention-derived signals are visible and controllable; retention tiers are enforced by jobs; DSAR/export/deletion are tested before public beta; anti-abuse data is protected from unnecessary internal access; research exports use aggregation thresholds and small-cell suppression; minors get protective defaults; wallet identity is separated from social identity; sensitive social/moderation/minors/inference data and private messages never go on-chain; staff tools are role-scoped and audit-logged.
+Data minimization before collection; **no IP or location is ever recorded, persisted, or logged** (IPs are used only transiently and hashed for rate limiting; there is no geo-IP lookup — Section 19.1); in-browser aggregation reduces raw traces; attention-derived signals are visible and controllable; retention tiers are enforced by jobs; DSAR/export/deletion are tested before public beta; anti-abuse data is protected from unnecessary internal access; research exports use aggregation thresholds and small-cell suppression; minors get protective defaults; wallet identity is separated from social identity; sensitive social/moderation/minors/inference data and private messages never go on-chain; staff tools are role-scoped and audit-logged.
 
 ## 32.5 Trust, safety, and UGC governance
 

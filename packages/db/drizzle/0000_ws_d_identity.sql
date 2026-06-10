@@ -6,10 +6,10 @@ CREATE TYPE "public"."export_job_state" AS ENUM('queued', 'processing', 'complet
 CREATE TYPE "public"."auth_method" AS ENUM('webauthn', 'email_otp', 'wallet');--> statement-breakpoint
 CREATE TYPE "public"."account_state" AS ENUM('active', 'suspended', 'deactivated', 'deleted');--> statement-breakpoint
 CREATE TYPE "public"."age_band_if_known" AS ENUM('adult', 'teen_16_17', 'teen_13_15');--> statement-breakpoint
-CREATE TYPE "public"."wallet_auth_type" AS ENUM('eoa', 'contract');--> statement-breakpoint
 CREATE TYPE "wallet"."unlink_state" AS ENUM('linked', 'unlink_requested', 'unlinked');--> statement-breakpoint
 CREATE TYPE "wallet"."wallet_risk_state" AS ENUM('none', 'flagged', 'blocked');--> statement-breakpoint
 CREATE TYPE "wallet"."wallet_type" AS ENUM('eoa', 'contract');--> statement-breakpoint
+CREATE TYPE "public"."wallet_auth_type" AS ENUM('eoa', 'contract');--> statement-breakpoint
 CREATE TABLE "audit_log" (
 	"event_id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"actor_user_id" uuid,
@@ -53,10 +53,7 @@ CREATE TABLE "sessions" (
 	"user_id" uuid NOT NULL,
 	"credential_ref" "bytea",
 	"auth_method" "auth_method" NOT NULL,
-	"ip_hash" "bytea" NOT NULL,
-	"user_agent_truncated" text,
 	"device_label" text,
-	"country" text,
 	"remember_me" boolean DEFAULT false NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"last_active_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -90,17 +87,6 @@ CREATE TABLE "users" (
 	CONSTRAINT "users_handle_pattern" CHECK ("users"."handle" ~ '^[A-Za-z0-9_]{3,30}$')
 );
 --> statement-breakpoint
-CREATE TABLE "wallet_auth_credentials" (
-	"credential_id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-	"user_id" uuid NOT NULL,
-	"address_hash" "bytea" NOT NULL,
-	"address_truncated" text NOT NULL,
-	"chain_id" integer NOT NULL,
-	"wallet_auth_type" "wallet_auth_type" NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"last_used_at" timestamp with time zone
-);
---> statement-breakpoint
 CREATE TABLE "wallet"."wallet_accounts" (
 	"wallet_account_id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"user_id" uuid NOT NULL,
@@ -111,6 +97,17 @@ CREATE TABLE "wallet"."wallet_accounts" (
 	"unlink_state" "wallet"."unlink_state" DEFAULT 'linked' NOT NULL,
 	"risk_state" "wallet"."wallet_risk_state" DEFAULT 'none' NOT NULL,
 	"linked_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"last_used_at" timestamp with time zone
+);
+--> statement-breakpoint
+CREATE TABLE "wallet_auth_credentials" (
+	"credential_id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"user_id" uuid NOT NULL,
+	"address_hash" "bytea" NOT NULL,
+	"address_truncated" text NOT NULL,
+	"chain_id" integer NOT NULL,
+	"wallet_auth_type" "wallet_auth_type" NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"last_used_at" timestamp with time zone
 );
 --> statement-breakpoint
@@ -133,8 +130,8 @@ ALTER TABLE "export_jobs" ADD CONSTRAINT "export_jobs_user_id_users_user_id_fk" 
 ALTER TABLE "mfa_recovery_codes" ADD CONSTRAINT "mfa_recovery_codes_user_id_users_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("user_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "sessions" ADD CONSTRAINT "sessions_user_id_users_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("user_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "user_auth" ADD CONSTRAINT "user_auth_user_id_users_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("user_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wallet_auth_credentials" ADD CONSTRAINT "wallet_auth_credentials_user_id_users_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("user_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wallet"."wallet_accounts" ADD CONSTRAINT "wallet_accounts_user_id_users_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("user_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wallet_auth_credentials" ADD CONSTRAINT "wallet_auth_credentials_user_id_users_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("user_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "webauthn_credentials" ADD CONSTRAINT "webauthn_credentials_user_id_users_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("user_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "audit_log_actor_idx" ON "audit_log" USING btree ("actor_user_id");--> statement-breakpoint
 CREATE INDEX "audit_log_actor_created_idx" ON "audit_log" USING btree ("actor_user_id","created_at");--> statement-breakpoint
@@ -147,10 +144,10 @@ CREATE UNIQUE INDEX "users_handle_lower_idx" ON "users" USING btree (lower("hand
 CREATE UNIQUE INDEX "users_email_lower_idx" ON "users" USING btree (lower("email")) WHERE "users"."email" is not null;--> statement-breakpoint
 CREATE INDEX "users_account_state_idx" ON "users" USING btree ("account_state");--> statement-breakpoint
 CREATE INDEX "users_state_created_idx" ON "users" USING btree ("account_state","created_at");--> statement-breakpoint
-CREATE UNIQUE INDEX "wallet_auth_addr_idx" ON "wallet_auth_credentials" USING btree ("address_hash");--> statement-breakpoint
-CREATE INDEX "wallet_auth_user_idx" ON "wallet_auth_credentials" USING btree ("user_id");--> statement-breakpoint
 CREATE INDEX "wallet_accounts_user_idx" ON "wallet"."wallet_accounts" USING btree ("user_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "wallet_accounts_addr_idx" ON "wallet"."wallet_accounts" USING btree ("address_hash");--> statement-breakpoint
+CREATE UNIQUE INDEX "wallet_auth_addr_idx" ON "wallet_auth_credentials" USING btree ("address_hash");--> statement-breakpoint
+CREATE INDEX "wallet_auth_user_idx" ON "wallet_auth_credentials" USING btree ("user_id");--> statement-breakpoint
 CREATE INDEX "webauthn_cred_user_idx" ON "webauthn_credentials" USING btree ("user_id");--> statement-breakpoint
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$
 BEGIN

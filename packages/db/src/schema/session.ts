@@ -24,10 +24,9 @@ export const sessions = pgTable(
       .references(() => users.userId, { onDelete: 'cascade' }),
     credentialRef: bytea('credential_ref'), // null for email_otp
     authMethod: authMethodEnum('auth_method').notNull(),
-    ipHash: bytea('ip_hash').notNull(), // HMAC(serverKey, ip)
-    userAgentTruncated: text('user_agent_truncated'),
+    // Privacy amendment (SPEC §19.1): NO ip_hash, NO country/location, NO raw
+    // user-agent. Only a coarse device descriptor is recorded.
     deviceLabel: text('device_label'),
-    country: text('country'), // ISO-3166-1 alpha-2, derived at creation, nullable
     rememberMe: boolean('remember_me').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     lastActiveAt: timestamp('last_active_at', { withTimezone: true }).notNull().defaultNow(),

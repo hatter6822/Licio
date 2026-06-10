@@ -8,43 +8,25 @@ import {
   sendSecurityAlert,
 } from '../security-alerts.js';
 
-describe('assessLogin', () => {
-  const history = [
-    { country: 'US', deviceProfile: 'macOS/Chrome' },
-    { country: 'US', deviceProfile: 'iOS/Safari' },
-  ];
+describe('assessLogin (device-only; no location/IP per §19.1)', () => {
+  const history = [{ deviceProfile: 'macOS/Chrome' }, { deviceProfile: 'iOS/Safari' }];
 
   it('never flags the first sign-in (empty history)', () => {
-    expect(
-      assessLogin({ country: 'GB', deviceProfile: 'X/Y', authMethod: 'webauthn' }, []),
-    ).toEqual({
+    expect(assessLogin({ deviceProfile: 'X/Y', authMethod: 'webauthn' }, [])).toEqual({
       suspicious: false,
       reasons: [],
     });
   });
 
-  it('flags a new country', () => {
-    const d = assessLogin(
-      { country: 'FR', deviceProfile: 'macOS/Chrome', authMethod: 'webauthn' },
-      history,
-    );
-    expect(d.suspicious).toBe(true);
-    expect(d.reasons).toContain('new_country');
-  });
-
-  it('flags a new device', () => {
-    const d = assessLogin(
-      { country: 'US', deviceProfile: 'Windows/Edge', authMethod: 'email_otp' },
-      history,
-    );
+  it('flags a new device descriptor', () => {
+    const d = assessLogin({ deviceProfile: 'Windows/Edge', authMethod: 'email_otp' }, history);
     expect(d.suspicious).toBe(true);
     expect(d.reasons).toContain('new_device');
   });
 
-  it('does not flag a familiar country+device', () => {
+  it('does not flag a familiar device', () => {
     expect(
-      assessLogin({ country: 'US', deviceProfile: 'macOS/Chrome', authMethod: 'webauthn' }, history)
-        .suspicious,
+      assessLogin({ deviceProfile: 'macOS/Chrome', authMethod: 'webauthn' }, history).suspicious,
     ).toBe(false);
   });
 });
@@ -79,7 +61,7 @@ describe('sendSecurityAlert', () => {
       hasPush: true,
       audit,
       transports: { sendEmail, sendPush },
-      event: { type: 'new_signin', country: 'FR', device: 'macOS/Chrome', authMethod: 'webauthn' },
+      event: { type: 'new_signin', device: 'macOS/Chrome', authMethod: 'webauthn' },
     });
 
     expect(channels).toEqual(['email', 'log']);
@@ -87,7 +69,9 @@ describe('sendSecurityAlert', () => {
     expect(sendPush).not.toHaveBeenCalled();
     const activity = await audit.securityActivityForUser(userId);
     expect(activity[0]?.event_type).toBe('suspicious_login');
-    expect(activity[0]?.context.country).toBe('FR');
+    expect(activity[0]?.context.device).toBe('macOS/Chrome');
+    // No location/IP is ever recorded (§19.1): no country key, no IPv4.
+    expect('country' in (activity[0]?.context ?? {})).toBe(false);
     expect(JSON.stringify(activity[0])).not.toMatch(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/);
   });
 

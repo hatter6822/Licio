@@ -83,11 +83,11 @@ export interface CreateSessionInput {
   userId: string;
   authMethod: AuthMethod;
   credentialRef?: string | null;
-  ipHash: string;
-  userAgent: string;
+  /** Coarse device descriptor (e.g. "iOS/Safari"). NO IP, NO location are accepted. */
   deviceLabel: string;
-  country?: string | null;
   rememberMe: boolean;
+  /** True for a steward session that has already cleared TOTP MFA (WS-D.1.5b). */
+  mfaVerified?: boolean;
 }
 
 export interface CreatedSession {
@@ -115,11 +115,9 @@ export async function createSession(
     credential_ref: input.credentialRef ?? null,
     created_at: iso(now),
     last_active_at: iso(now),
-    ip_hash: input.ipHash,
-    user_agent_truncated: truncate(input.userAgent, 256),
     device_label: truncate(input.deviceLabel, 128),
-    country: input.country ?? null,
     remember_me: input.rememberMe,
+    mfa_verified: input.mfaVerified ?? false,
     auth_assurance: { level: 'full', last_verified_at: iso(now) },
     absolute_expires_at: iso(absolute),
   });
@@ -276,7 +274,6 @@ export async function sessionSummaries(
       session_ref: deriveSessionRef(masterSecret, tokenHash),
       device_label: stored.record.device_label,
       auth_method: stored.record.auth_method,
-      country: stored.record.country,
       created_at: stored.record.created_at,
       last_active_at: stored.record.last_active_at,
       current: tokenHash === currentHash,
