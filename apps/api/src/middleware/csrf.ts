@@ -2,6 +2,7 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import type { MiddlewareHandler } from 'hono';
 import { createLogger } from '../lib/logger.js';
+import { getAllowedOrigins } from './cors.js';
 
 const logger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
 
@@ -153,8 +154,32 @@ const EXEMPT_PATHS = new Set(['/health', '/api/security/csp-report', '/v1/teleme
 const EXEMPT_PREFIXES = ['/v1/auth/', '/v1/privacy/'];
 const STATE_CHANGING_METHODS = new Set(['POST', 'PATCH', 'DELETE', 'PUT']);
 
-function isCsrfExempt(path: string): boolean {
-  return EXEMPT_PATHS.has(path) || EXEMPT_PREFIXES.some((prefix) => path.startsWith(prefix));
+function isTokenExemptPrefix(path: string): boolean {
+  return EXEMPT_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
+/**
+ * Defense-in-depth against SAME-SITE CSRF (a malicious sibling subdomain).
+ * `SameSite=Strict` still sends the session cookie on same-site requests, so for
+ * every credentialed state-changing request we additionally require that a
+ * present `Origin` (or, failing that, `Referer`) is the canonical app origin.
+ * Browsers always send `Origin` on cross-origin POST/PATCH/DELETE, so a
+ * cross-subdomain form POST is rejected; a header-less non-browser client is not
+ * a CSRF vector and is allowed.  Returns true when the request must be REJECTED.
+ */
+function originMismatch(c: { req: { header: (k: string) => string | undefined } }): boolean {
+  const allowed = getAllowedOrigins();
+  const origin = c.req.header('origin');
+  if (origin !== undefined) return !allowed.has(origin);
+  const referer = c.req.header('referer');
+  if (referer !== undefined) {
+    try {
+      return !allowed.has(new URL(referer).origin);
+    } catch {
+      return true; // a malformed Referer on a state-changing request → reject
+    }
+  }
+  return false; // neither header present → not a browser-driven CSRF vector
 }
 
 export function csrfTokenRoute(): MiddlewareHandler {
@@ -182,7 +207,26 @@ export function csrfMiddleware(): MiddlewareHandler {
       return;
     }
 
-    if (isCsrfExempt(c.req.path)) {
+    // sendBeacon/report ingest is cross-origin BY DESIGN and header-less (it
+    // cannot set a CSRF header); it carries no credentials and keeps its own
+    // per-endpoint budget, so it is fully exempt — including from the Origin check.
+    if (EXEMPT_PATHS.has(c.req.path)) {
+      await next();
+      return;
+    }
+
+    // Origin/Referer allowlist applies to EVERY remaining state-changing request,
+    // including the SameSite-only WS-D identity/privacy endpoints (closes the
+    // same-site sibling-subdomain CSRF gap).
+    if (originMismatch(c)) {
+      logger.warn({ auditAction: 'csrf_failure', reason: 'origin_mismatch', path: c.req.path });
+      return c.json({ error: 'Forbidden' }, 403);
+    }
+
+    // WS-D identity/privacy endpoints rely on SameSite=Strict + the Origin check
+    // above + a per-flow `login_attempt_id` binding instead of the WS-C
+    // double-submit token (no session exists yet for the pre-auth flows).
+    if (isTokenExemptPrefix(c.req.path)) {
       await next();
       return;
     }

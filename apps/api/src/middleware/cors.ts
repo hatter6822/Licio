@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { MiddlewareHandler } from 'hono';
 
-function getAllowedOrigins(): Set<string> {
+export function getAllowedOrigins(): Set<string> {
   const origins = new Set<string>();
 
   const corsOrigin = process.env['CORS_ORIGIN'];

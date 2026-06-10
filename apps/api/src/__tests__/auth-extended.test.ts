@@ -438,3 +438,96 @@ describe('step-up email send cooldown', () => {
     ).toHaveLength(1);
   });
 });
+
+describe('email account recovery + pending email change', () => {
+  it('recovers a stranded unverified signup via OTP login (verifying on success)', async () => {
+    const app = createApp();
+    // Register but NEVER verify, and discard the session (simulate a lost cookie).
+    await app.request('/v1/auth/register', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        handle: 'stranded',
+        display_name: 'S',
+        email: 'stranded@example.com',
+        date_of_birth: '1990-01-01',
+      }),
+    });
+    const userId = services.store.getUserByEmail('stranded@example.com')?.userId as string;
+    expect(services.store.getAuth(userId)?.emailVerified).toBe(false);
+
+    // email/start now sends a LOGIN code to the unverified-but-registered email.
+    const start = await app.request('/v1/auth/email/start', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({ email: 'stranded@example.com' }),
+    });
+    const attempt = cookie(start, '__Host-otp');
+    const loginCode = (services.mailer as RecordingMailer).codes
+      .filter((c) => c.kind === 'login')
+      .at(-1)?.code as string;
+    expect(loginCode).toBeTruthy();
+
+    const verify = await app.request('/v1/auth/email/verify-login', {
+      method: 'POST',
+      headers: headers(attempt),
+      body: JSON.stringify({ code: loginCode }),
+    });
+    expect(verify.status).toBe(200);
+    // Completing the OTP proved mailbox control → the email is now verified.
+    expect(services.store.getAuth(userId)?.emailVerified).toBe(true);
+  });
+
+  it('stages an email change as pending, keeping the current email verified until confirmed', async () => {
+    const app = createApp();
+    const reg = await app.request('/v1/auth/register', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        handle: 'changer',
+        display_name: 'C',
+        email: 'old@example.com',
+        date_of_birth: '1990-01-01',
+      }),
+    });
+    let sid = cookie(reg, '__Host-sid');
+    const regCode = (services.mailer as RecordingMailer).codes
+      .filter((c) => c.kind === 'verify')
+      .at(-1)?.code as string;
+    sid =
+      cookie(
+        await app.request('/v1/auth/email/verify', {
+          method: 'POST',
+          headers: headers(sid),
+          body: JSON.stringify({ code: regCode }),
+        }),
+        '__Host-sid',
+      ) || sid;
+    const userId = services.store.getUserByEmail('old@example.com')?.userId as string;
+    expect(services.store.getAuth(userId)?.emailVerified).toBe(true);
+
+    // Add a NEW email → staged as pending; the current verified email is untouched.
+    const add = await app.request('/v1/auth/email/add', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ email: 'new@example.com' }),
+    });
+    expect(add.status).toBe(200);
+    expect(services.store.getUser(userId)?.email).toBe('old@example.com'); // still the old one
+    expect(services.store.getAuth(userId)?.emailVerified).toBe(true); // still verified
+    expect(services.store.getAuth(userId)?.pendingEmail).toBe('new@example.com');
+
+    // Confirm the new address → promoted; pending cleared.
+    const newCode = (services.mailer as RecordingMailer).codes
+      .filter((c) => c.kind === 'verify')
+      .at(-1)?.code as string;
+    const confirm = await app.request('/v1/auth/email/verify', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ code: newCode }),
+    });
+    expect(confirm.status).toBe(200);
+    expect(services.store.getUser(userId)?.email).toBe('new@example.com');
+    expect(services.store.getAuth(userId)?.pendingEmail).toBeNull();
+  });
+});

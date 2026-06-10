@@ -126,7 +126,12 @@ function createLoginRoutes(resolve: () => IdentityServices) {
 
         const user = services.store.getUserByEmail(email);
         const attemptId = randomUUID();
-        if (sendable && user && services.store.getAuth(user.userId)?.emailVerified) {
+        // Send a login code to ANY account whose email matches — verified OR not.
+        // Completing the code proves mailbox control and verifies the email on
+        // success (below), so a signup that lost its session before verifying can
+        // still recover instead of being permanently stranded.  Identical 202
+        // either way keeps account existence unobservable.
+        if (sendable && user) {
           const { code } = await startEmailLogin(services.otp, attemptId, user.userId);
           await services.mailer.sendCode(email, code, 'login');
         }
@@ -169,6 +174,14 @@ function createLoginRoutes(resolve: () => IdentityServices) {
         });
         if (!fin.ok) return c.json(loginDenialResponse(fin.code), 403);
         const created = fin.session;
+        // Completing the OTP proves mailbox control: verify the email if it was
+        // still unverified (the stranded-signup recovery path).
+        if (!services.store.getAuth(result.userId)?.emailVerified) {
+          services.store.setAuth(result.userId, {
+            emailVerified: true,
+            emailVerifiedAt: new Date().toISOString(),
+          });
+        }
         c.header('Set-Cookie', clearAttemptCookie(ATTEMPT_COOKIES.emailLogin), { append: true });
         c.header('Set-Cookie', buildSessionCookie(created.token, created.maxAgeSec), {
           append: true,

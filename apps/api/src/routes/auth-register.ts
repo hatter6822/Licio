@@ -250,10 +250,25 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
             c.req.valid('json').code,
           );
           if (!result.ok) return c.json(err('invalid_code', 'Invalid or expired code.'), 400);
-          services.store.setAuth(auth.userId, {
-            emailVerified: true,
-            emailVerifiedAt: new Date().toISOString(),
-          });
+          const now = new Date().toISOString();
+          const pending = services.store.getAuth(auth.userId)?.pendingEmail ?? null;
+          if (pending) {
+            // Promote the staged address.  Re-check uniqueness at confirm time so a
+            // concurrent claim of the same email can't be force-promoted past the
+            // unique index (the in-memory store does not enforce it on write).
+            if (services.store.getUserByEmail(pending)) {
+              services.store.setAuth(auth.userId, { pendingEmail: null });
+              return c.json(err('email_taken', 'That email is no longer available.'), 409);
+            }
+            services.store.updateUser(auth.userId, { email: pending });
+            services.store.setAuth(auth.userId, {
+              emailVerified: true,
+              emailVerifiedAt: now,
+              pendingEmail: null,
+            });
+          } else {
+            services.store.setAuth(auth.userId, { emailVerified: true, emailVerifiedAt: now });
+          }
           await services.audit.append({
             actorUserId: auth.userId,
             eventType: 'auth_method_add',
@@ -306,8 +321,11 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
             }
             return c.json({ status: 'sent' as const });
           }
-          services.store.updateUser(auth.userId, { email });
-          services.store.setAuth(auth.userId, { emailVerified: false, emailVerifiedAt: null });
+          // STAGE the new address as pending — do NOT touch the current (possibly
+          // only) verified email until the new one proves control on /email/verify.
+          // This keeps an email-only account from being stranded by a typo (the
+          // last-verified-method invariant the removal endpoints already enforce).
+          services.store.setAuth(auth.userId, { pendingEmail: email });
           const { code } = await startEmailVerification(services.otp, auth.userId);
           await services.mailer.sendCode(email, code, 'verify');
           return c.json({ status: 'sent' as const });

@@ -43,6 +43,12 @@ export interface StoredUserAuth {
   userId: string;
   emailVerified: boolean;
   emailVerifiedAt: string | null;
+  /**
+   * An email-change in flight: the NEW address, staged until it proves control
+   * (WS-D.1.4a).  The current verified `email` stays live until confirmation, so
+   * a typo can never strand an email-only account with zero verified methods.
+   */
+  pendingEmail: string | null;
   mfaEnabled: boolean;
   /** Pending or active TOTP secret (base32); KMS-encrypted at rest in production. */
   mfaSecret: string | null;
@@ -118,6 +124,7 @@ export class IdentityStore {
       userId,
       emailVerified: false,
       emailVerifiedAt: null,
+      pendingEmail: null,
       mfaEnabled: false,
       mfaSecret: null,
       mfaPending: false,

@@ -234,7 +234,11 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
           return c.json(err('last_method', 'Set up another way to sign in first.'), 409);
         }
         services.store.updateUser(auth.userId, { email: null });
-        services.store.setAuth(auth.userId, { emailVerified: false, emailVerifiedAt: null });
+        services.store.setAuth(auth.userId, {
+          emailVerified: false,
+          emailVerifiedAt: null,
+          pendingEmail: null,
+        });
         await services.audit.append({
           actorUserId: auth.userId,
           eventType: 'auth_method_remove',

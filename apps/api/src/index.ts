@@ -15,7 +15,7 @@ import {
 } from './identity/redis-stores.js';
 import {
   buildIdentityServicesFromEnv,
-  createLoggingMailer,
+  selectMailer,
   setIdentityServices,
 } from './identity/services.js';
 import { createLogger } from './lib/logger.js';
@@ -26,10 +26,17 @@ const logger = createLogger(env.LOG_LEVEL);
 // Wire identity services from the VALIDATED env — the master secret and RP-ID /
 // SIWE bindings come from SESSION_SECRET/CORS_ORIGIN, never a hardcoded value
 // (WS-D.1.6a). The live session, ephemeral-secret, and rate-limit stores are
-// Redis-backed (durable across restarts); the email mailer logs observability
-// only and never the code/recipient (§19.1) — production swaps a real provider.
+// Redis-backed (durable across restarts). The mailer FAILS CLOSED in production
+// (selectMailer) so an email flow never silently "succeeds" without a real
+// provider; dev/CI use the logging mailer that records observability only and
+// never the code/recipient (§19.1).
 const identityServices = buildIdentityServicesFromEnv(env, {
-  mailer: createLoggingMailer((event, meta) => logger.info(meta, event)),
+  mailer: selectMailer({
+    nodeEnv: env.NODE_ENV,
+    allowNullMailer: process.env['ALLOW_INSECURE_NULL_MAILER'] === 'true',
+    log: (event, meta) => logger.info(meta, event),
+    warn: (msg) => logger.warn(msg),
+  }),
 });
 {
   const IORedis = (await import('ioredis')).default;

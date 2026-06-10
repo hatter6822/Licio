@@ -51,6 +51,39 @@ export function createLoggingMailer(
   };
 }
 
+/**
+ * Select the production mailer, FAILING CLOSED.  The real SMTP/provider mailer is
+ * a deferred cloud adapter; until it lands, the only implementation is the
+ * dev/CI logging mailer (which sends nothing).  Returning that in production would
+ * let email login/verification/deletion-cancel flows report success while no mail
+ * is ever delivered — a silent, dangerous no-op.  So in production we refuse to
+ * boot unless the operator EXPLICITLY opts into a mail-less deployment
+ * (`ALLOW_INSECURE_NULL_MAILER=true`, e.g. a passkey/wallet-only instance), in
+ * which case we log a prominent warning.  Dev/test always use the logging mailer.
+ */
+export function selectMailer(opts: {
+  nodeEnv: string;
+  allowNullMailer: boolean;
+  log: (event: string, meta: Record<string, unknown>) => void;
+  warn: (msg: string) => void;
+}): Mailer {
+  if (opts.nodeEnv === 'production' && !opts.allowNullMailer) {
+    throw new Error(
+      'No email provider is configured: email login codes, verification, and ' +
+        'deletion-cancellation links cannot be delivered. Configure a real mailer ' +
+        'before production, or set ALLOW_INSECURE_NULL_MAILER=true to run an ' +
+        'email-less (passkey/wallet-only) deployment.',
+    );
+  }
+  if (opts.allowNullMailer) {
+    opts.warn(
+      'Email delivery is DISABLED (ALLOW_INSECURE_NULL_MAILER): email-based ' +
+        'login/verification/deletion links will NOT be sent.',
+    );
+  }
+  return createLoggingMailer(opts.log);
+}
+
 /** A no-op mailer that records every send, for assertions in tests. */
 export class RecordingMailer implements Mailer {
   readonly codes: Array<{ to: string; code: string; kind: 'login' | 'verify' }> = [];
