@@ -6,7 +6,9 @@
 // attention aggregates, contributions, and moderation notices).  It EXCLUDES other
 // users' data, reporter identities, address hashes (truncated display only), model
 // weights, and any IP/location (none is ever stored, §19.1).
+import { hostname } from 'node:os';
 import { sha256Hex } from './crypto.js';
+import type { JobLeaseStore } from './job-lease.js';
 import { EXPORT_DOWNLOAD_TTL_MS, mintDownloadToken } from './object-store.js';
 import type { IdentityServices } from './services.js';
 import { revokeAllForUser } from './sessions.js';
@@ -184,21 +186,42 @@ export async function runDeletionPurge(
 
 export const PRIVACY_SCHEDULER_INTERVAL_MS = 60 * 60_000; // hourly
 
+/** The single lease name guarding a whole privacy tick (sweep + purge). */
+export const PRIVACY_JOB_LEASE = 'privacy_hourly';
+
 /**
- * Start the in-process privacy scheduler: an hourly tick running the 72-hour
- * export sweep (WS-D.2.2c) and the 30-day deletion purge (WS-D.2.4a).  Both
- * functions are idempotent, and expiry is ALSO enforced at read time, so a
- * missed tick can never extend data retention — the scheduler bounds it.  A
- * durable distributed runner replaces this behind the same two functions in
- * multi-process production; the timer is unref'd so it never holds the process.
- * Returns a stop function.
+ * Start the privacy scheduler: an hourly tick running the 72-hour export sweep
+ * (WS-D.2.2c) and the 30-day deletion purge (WS-D.2.4a).  Both functions are
+ * idempotent, and expiry is ALSO enforced at read time, so a missed tick can
+ * never extend data retention — the scheduler bounds it.
+ *
+ * With a `runner.lease` (production: the Postgres-backed DrizzleJobLeaseStore)
+ * this is the DURABLE DISTRIBUTED runner: every instance ticks, but at most one
+ * claims the window's lease and executes; a crashed holder's lease expires and
+ * the next tick anywhere claims it.  The lease TTL is 90% of the interval so
+ * ownership lapses before the next window — no instance can hold the job
+ * forever, and a lease-store outage skips the tick (fail closed; read-time
+ * expiry still bounds retention).  Without a lease the tick always runs
+ * (single-process dev/test semantics).  The timer is unref'd so it never holds
+ * the process.  Returns a stop function.
  */
 export function startPrivacyScheduler(
   services: IdentityServices,
-  onError: (err: unknown, task: 'sweep' | 'purge') => void = () => {},
+  onError: (err: unknown, task: 'sweep' | 'purge' | 'lease') => void = () => {},
   intervalMs: number = PRIVACY_SCHEDULER_INTERVAL_MS,
+  runner?: { lease: JobLeaseStore; holder?: string },
 ): () => void {
+  const holder = runner?.holder ?? `${hostname()}:${process.pid}`;
+  const leaseTtlMs = Math.max(1, Math.floor(intervalMs * 0.9));
   const tick = async (): Promise<void> => {
+    if (runner) {
+      try {
+        if (!(await runner.lease.tryAcquire(PRIVACY_JOB_LEASE, leaseTtlMs, holder))) return;
+      } catch (err) {
+        onError(err, 'lease');
+        return;
+      }
+    }
     try {
       await sweepExpiredExports(services);
     } catch (err) {

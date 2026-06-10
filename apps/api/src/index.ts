@@ -7,8 +7,12 @@ import { serve } from '@hono/node-server';
 import { createDbClient } from '@licio/db';
 import { validateServerEnv } from '@licio/shared/env';
 import { createApp } from './app.js';
-import { DrizzleAuditStore, DrizzleIdentityStore } from './identity/drizzle-store.js';
-import { startPrivacyScheduler } from './identity/privacy-jobs.js';
+import {
+  DrizzleAuditStore,
+  DrizzleIdentityStore,
+  DrizzleJobLeaseStore,
+} from './identity/drizzle-store.js';
+import { PRIVACY_SCHEDULER_INTERVAL_MS, startPrivacyScheduler } from './identity/privacy-jobs.js';
 import { AuthRateLimiter } from './identity/rate-limit-auth.js';
 import {
   RedisAuthRateLimitStore,
@@ -49,22 +53,24 @@ const identityServices = buildIdentityServicesFromEnv(env, {
   identityServices.otp = new RedisEphemeralStore(redis, 'otp:');
   identityServices.rateLimit = new AuthRateLimiter(new RedisAuthRateLimitStore(redis));
 }
-{
-  // Durable identity + audit projection (WS-D): Postgres-backed behind the same
-  // IdentityStore/AuditStore interfaces the in-memory adapters satisfy.  The
-  // schema must be migrated (`pnpm db:migrate`) before serving traffic.
-  const db = createDbClient(env.DATABASE_URL);
-  identityServices.store = new DrizzleIdentityStore(db);
-  identityServices.audit = new DrizzleAuditStore(db);
-}
+// Durable identity + audit projection (WS-D): Postgres-backed behind the same
+// IdentityStore/AuditStore interfaces the in-memory adapters satisfy.  The
+// schema must be migrated (`pnpm db:migrate`) before serving traffic.
+const db = createDbClient(env.DATABASE_URL);
+identityServices.store = new DrizzleIdentityStore(db);
+identityServices.audit = new DrizzleAuditStore(db);
 setIdentityServices(identityServices);
 
 // Hourly privacy jobs: the 72h export sweep and the 30-day deletion purge
 // (WS-D.2.2c / WS-D.2.4a).  Expiry is ALSO enforced at read time, so a missed
-// tick can never extend retention; a durable distributed runner replaces this
-// behind the same two functions in multi-process production.
-startPrivacyScheduler(identityServices, (err, task) =>
-  logger.error({ err, task }, 'privacy scheduler task failed'),
+// tick can never extend retention.  The Postgres job lease makes this the
+// durable distributed runner: every instance ticks, at most one executes per
+// window, and a crashed holder's lease expires for the next claimant.
+startPrivacyScheduler(
+  identityServices,
+  (err, task) => logger.error({ err, task }, 'privacy scheduler task failed'),
+  PRIVACY_SCHEDULER_INTERVAL_MS,
+  { lease: new DrizzleJobLeaseStore(db) },
 );
 
 const app = createApp();

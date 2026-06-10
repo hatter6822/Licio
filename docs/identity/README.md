@@ -82,8 +82,9 @@ interfaces.
 | `privacy-jobs.ts` | DSAR export assembly (own data only), export job process/retry/sweep, deletion hard-purge (anonymize/tombstone) |
 | `store.ts` | the `IdentityStore` interface + in-memory adapter (mirrors the Drizzle schema) |
 | `services.ts` | injectable service container + config derivation |
+| `job-lease.ts` | `JobLeaseStore` interface + in-memory adapter (distributed-scheduler window claim) |
 | `redis-stores.ts` | production Redis adapters (gated integration test) |
-| `drizzle-store.ts` | production Postgres adapters: `DrizzleIdentityStore` + `DrizzleAuditStore` (gated integration test) |
+| `drizzle-store.ts` | production Postgres adapters: `DrizzleIdentityStore`, `DrizzleAuditStore`, `DrizzleJobLeaseStore` (gated integration test) |
 
 ### `apps/api/src/middleware/auth.ts` + `routes/{auth,privacy}.ts`
 
@@ -167,17 +168,19 @@ in-memory/local adapters; the durable stores are bound (Postgres-backed
 - **Export delivery adapter** — assembly (own data only), AES-256-GCM
   encryption-at-rest, the step-up-protected signed/expiring download URL,
   read-time expiry enforcement, and the hourly sweep are implemented and tested
-  with the in-memory object store; the S3+KMS `ObjectStore` adapter and a durable
-  distributed worker (today the job is assembled in-process on first poll, and
-  `startPrivacyScheduler` runs the sweep hourly in-process) are the remaining
-  bindings (WS-D.2.2b/c).
-- **Deletion purge** — fully running: the hard-purge job (`runDeletionPurge`:
-  anonymize → delete all export archives → revoke all sessions → tombstone →
-  hashed-id `deletion_complete` audit) and the 30-day grace/cancel flow are
-  implemented, tested, and invoked hourly by the in-process scheduler wired in
-  `index.ts`; a durable distributed runner (replacing the in-process timer behind
-  the same two functions) and the WS-G `anonymizeContributions` implementation
-  behind the injected hook land later (WS-D.2.4b/c).
+  with the in-memory object store; the S3+KMS `ObjectStore` adapter (and moving
+  assembly off the first-poll path onto the scheduler) is the remaining binding
+  (WS-D.2.2c).
+- **Deletion purge** — fully running as the durable distributed runner: the
+  hard-purge job (`runDeletionPurge`: anonymize → delete all export archives →
+  revoke all sessions → tombstone → hashed-id `deletion_complete` audit) and the
+  30-day grace/cancel flow are invoked hourly by `startPrivacyScheduler`, which
+  in production is gated by the Postgres job lease (`DrizzleJobLeaseStore`,
+  `job_leases`): every instance ticks, at most one atomically claims the window
+  and executes, a crashed holder's lease expires for the next claimant, and a
+  lease-store outage fails closed (read-time expiry still bounds retention).
+  Only the WS-G `anonymizeContributions` implementation behind the injected hook
+  lands later (WS-D.2.4b).
 - **Attention-history purge** and the **settings-change downstream consumer** are
   injected hooks (`purgeAttention`, `onPrivacyChange`) that WS-E implements.
 - **No geo lookup at all** — per SPEC §19.1 the platform records no IP and no
@@ -200,6 +203,8 @@ These exercise the migration, constraints, trigger, cascades, **live** schema
 isolation introspection, the Redis session/ephemeral adapters, and the full
 `DrizzleIdentityStore`/`DrizzleAuditStore` contract (round-trips, upserts,
 case-insensitive lookups, recovery-code single-use forensics, tombstone/purge,
-audit redaction/ordering).  The Drizzle-store suite creates and migrates its
-own scratch database (`licio_drizzle_store_it`) so its destructive checks never
+audit redaction/ordering) plus the `DrizzleJobLeaseStore` claim semantics
+(deny-while-live, steal-after-expiry, and exactly one winner among many
+concurrent claimants).  The Drizzle-store suite creates and migrates its own
+scratch database (`licio_drizzle_store_it`) so its destructive checks never
 collide with the other gated tests sharing `DATABASE_URL`.

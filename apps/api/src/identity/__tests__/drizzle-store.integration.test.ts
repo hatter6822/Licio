@@ -22,7 +22,7 @@ import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { sha256Hex } from '../crypto.js';
-import { DrizzleAuditStore, DrizzleIdentityStore } from '../drizzle-store.js';
+import { DrizzleAuditStore, DrizzleIdentityStore, DrizzleJobLeaseStore } from '../drizzle-store.js';
 import type { StoredUser } from '../store.js';
 
 const DB_URL = process.env['DATABASE_URL'];
@@ -51,8 +51,8 @@ describe.skipIf(!DB_URL)('Drizzle identity/audit store integration (WS-D)', () =
   let audit: DrizzleAuditStore;
 
   beforeAll(async () => {
-    // A dedicated database, recreated from scratch and migrated by the real
-    // migration chain (0000 + 0001) — proving the migrations apply cleanly.
+    // A dedicated database, recreated from scratch and migrated by the real,
+    // full migration chain — proving the migrations apply cleanly in order.
     const admin = postgres(DB_URL as string, { max: 1 });
     await admin.unsafe(`DROP DATABASE IF EXISTS ${IT_DB} WITH (FORCE)`);
     await admin.unsafe(`CREATE DATABASE ${IT_DB}`);
@@ -403,5 +403,28 @@ describe.skipIf(!DB_URL)('Drizzle identity/audit store integration (WS-D)', () =
 
     expect(await audit.securityActivityForUser(userId, 1)).toHaveLength(1);
     expect(await audit.securityActivityForUser(randomUUID())).toHaveLength(0);
+  });
+
+  // --- Job lease (distributed scheduler binding) -------------------------------
+  it('grants a lease once per window and lets another holder steal it on expiry', async () => {
+    const lease = new DrizzleJobLeaseStore(db);
+    const job = `it_${randomUUID().slice(0, 8)}`;
+    const t0 = Date.now();
+    expect(await lease.tryAcquire(job, 1000, 'instance-a', t0)).toBe(true);
+    expect(await lease.tryAcquire(job, 1000, 'instance-b', t0 + 500)).toBe(false);
+    expect(await lease.tryAcquire(job, 1000, 'instance-a', t0 + 500)).toBe(false); // even the holder
+    expect(await lease.tryAcquire(job, 1000, 'instance-b', t0 + 1000)).toBe(true); // expired ⇒ stolen
+    const row = await db.execute(sql`SELECT holder FROM job_leases WHERE job_name = ${job}`);
+    expect(row[0]).toMatchObject({ holder: 'instance-b' });
+  });
+
+  it('grants EXACTLY ONE of many concurrent claims (atomic insert-or-steal)', async () => {
+    const lease = new DrizzleJobLeaseStore(db);
+    const job = `it_${randomUUID().slice(0, 8)}`;
+    const now = Date.now();
+    const results = await Promise.all(
+      Array.from({ length: 10 }, (_, i) => lease.tryAcquire(job, 60_000, `instance-${i}`, now)),
+    );
+    expect(results.filter(Boolean)).toHaveLength(1);
   });
 });

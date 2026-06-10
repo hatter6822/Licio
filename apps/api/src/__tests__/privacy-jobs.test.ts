@@ -278,7 +278,7 @@ describe('startPrivacyScheduler', () => {
   });
 
   it('reports task errors through onError without dying', async () => {
-    const failures: Array<'sweep' | 'purge'> = [];
+    const failures: Array<'sweep' | 'purge' | 'lease'> = [];
     services.objectStore.expiredKeys = async () => {
       throw new Error('boom');
     };

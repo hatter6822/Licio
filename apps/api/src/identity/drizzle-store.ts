@@ -22,6 +22,7 @@ import {
   type createDbClient,
   deletionRequests,
   exportJobs,
+  jobLeases,
   mfaRecoveryCodes,
   userAuth,
   users,
@@ -44,6 +45,7 @@ import {
   toSecurityActivity,
 } from './audit.js';
 import { sha256Hex } from './crypto.js';
+import type { JobLeaseStore } from './job-lease.js';
 import { ROLES, type Role } from './rbac.js';
 import type {
   IdentityStore,
@@ -614,5 +616,42 @@ export class DrizzleAuditStore implements AuditStore {
 
   async clear(): Promise<void> {
     await this.#db.delete(auditLog);
+  }
+}
+
+/**
+ * Postgres-backed distributed job lease (WS-D.2.2c/2.4a scheduler binding).
+ * The claim is a SINGLE statement — insert, or steal an expired lease — so of N
+ * concurrent claimants exactly one gets a row back.  A live lease held by
+ * anyone (including the caller) is never re-granted; holders re-claim only
+ * after expiry, which is what an hourly tick under a sub-hour TTL wants.
+ */
+export class DrizzleJobLeaseStore implements JobLeaseStore {
+  readonly #db: Db;
+
+  constructor(db: Db) {
+    this.#db = db;
+  }
+
+  async tryAcquire(
+    jobName: string,
+    ttlMs: number,
+    holder: string,
+    now: number = Date.now(),
+  ): Promise<boolean> {
+    const at = new Date(now);
+    const until = new Date(now + ttlMs);
+    const rows = await this.#db
+      .insert(jobLeases)
+      .values({ jobName, lockedUntil: until, holder, acquiredAt: at })
+      .onConflictDoUpdate({
+        target: jobLeases.jobName,
+        set: { lockedUntil: until, holder, acquiredAt: at },
+        // Raw sql params skip the column's Date serializer — bind the ISO
+        // string and cast, so postgres-js can encode it.
+        setWhere: sql`${jobLeases.lockedUntil} <= ${at.toISOString()}::timestamptz`,
+      })
+      .returning({ jobName: jobLeases.jobName });
+    return rows.length > 0;
   }
 }
