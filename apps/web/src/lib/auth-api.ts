@@ -15,9 +15,17 @@
 import {
   type AuthSessionResult,
   authSessionResultSchema,
+  type CredentialListResponse,
+  credentialListResponseSchema,
   genericAckSchema,
   registeredAgeBandSchema,
+  type SecurityActivityEntry,
+  type SessionSummary,
+  securityActivityResponseSchema,
   sessionListResponseSchema,
+  stepUpRequiredSchema,
+  totpConfirmResponseSchema,
+  totpEnrollResponseSchema,
   type UserContext,
   userContextSchema,
   webauthnAuthenticationResponseSchema,
@@ -139,4 +147,191 @@ export async function revokeCurrentSession(): Promise<void> {
   const current = sessions.find((s) => s.current);
   if (!current) return;
   await client.v1.auth.sessions[':ref'].$delete({ param: { ref: current.session_ref } });
+}
+
+// --- Step-up (WS-D.1.3e) --------------------------------------------------------
+
+/** A sensitive action was refused pending a fresh authentication assertion. */
+export class StepUpRequiredError extends Error {
+  readonly methods: readonly string[];
+  constructor(methods: readonly string[]) {
+    super('step_up_required');
+    this.name = 'StepUpRequiredError';
+    this.methods = methods;
+  }
+}
+
+/**
+ * Like {@link parseResponse}, but a 401 step-up challenge becomes a typed
+ * {@link StepUpRequiredError} the UI can catch to open the step-up dialog and
+ * retry the action.
+ */
+export async function parseWithStepUp<T>(response: Response, schema: z.ZodType<T>): Promise<T> {
+  if (response.status === 401) {
+    const body: unknown = await response
+      .clone()
+      .json()
+      .catch(() => null);
+    const challenge = stepUpRequiredSchema.safeParse(body);
+    if (challenge.success) throw new StepUpRequiredError(challenge.data.methods);
+  }
+  return parseResponse(response, schema);
+}
+
+const okSchema = z.object({ ok: z.literal(true) }).passthrough();
+const sentSchema = z.object({ status: z.literal('sent') }).strict();
+const steppedUpSchema = z.object({ status: z.literal('stepped_up') }).strict();
+
+/** Satisfy a step-up with a passkey assertion. */
+export async function stepUpWithPasskey(): Promise<void> {
+  const optionsRes = await client.v1.auth['step-up'].webauthn.options.$post();
+  const options = await parseResponse(optionsRes, requestOptionsSchema);
+  const assertion = await getPasskeyAssertion(
+    options as unknown as PublicKeyCredentialRequestOptionsJSON,
+  );
+  const verifyRes = await client.v1.auth['step-up'].webauthn.verify.$post({
+    json: { response: webauthnAuthenticationResponseSchema.parse(assertion) },
+  });
+  await parseResponse(verifyRes, steppedUpSchema);
+}
+
+/** Send a step-up code to the account's verified email. */
+export async function stepUpEmailStart(): Promise<void> {
+  const res = await client.v1.auth['step-up'].email.start.$post();
+  await parseResponse(res, sentSchema);
+}
+
+/** Satisfy a step-up with the emailed code. */
+export async function stepUpEmailVerify(code: string): Promise<void> {
+  const res = await client.v1.auth['step-up'].email.verify.$post({
+    json: { code: code.trim().toUpperCase() },
+  });
+  await parseResponse(res, steppedUpSchema);
+}
+
+// --- Active sessions (WS-D.1.3c) --------------------------------------------------
+
+export async function fetchSessions(): Promise<SessionSummary[]> {
+  const res = await client.v1.auth.sessions.$get();
+  return (await parseResponse(res, sessionListResponseSchema)).sessions;
+}
+
+export async function revokeSession(ref: string): Promise<void> {
+  const res = await client.v1.auth.sessions[':ref'].$delete({ param: { ref } });
+  await parseResponse(res, okSchema);
+}
+
+/** Revoke every session except the current one; returns the count revoked. */
+export async function revokeOtherSessions(): Promise<number> {
+  const res = await client.v1.auth.sessions['revoke-others'].$post();
+  const parsed = await parseResponse(
+    res,
+    z.object({ ok: z.literal(true), revoked: z.number().int().nonnegative() }).strict(),
+  );
+  return parsed.revoked;
+}
+
+export async function fetchSecurityActivity(): Promise<SecurityActivityEntry[]> {
+  const res = await client.v1.auth['security-activity'].$get();
+  return (await parseResponse(res, securityActivityResponseSchema)).activity;
+}
+
+// --- Credential management (WS-D.1.2c) ----------------------------------------------
+
+export async function fetchCredentials(): Promise<CredentialListResponse> {
+  const res = await client.v1.auth.credentials.$get();
+  return parseResponse(res, credentialListResponseSchema);
+}
+
+/** Enrol an ADDITIONAL passkey on the signed-in account (step-up protected). */
+export async function addPasskey(deviceName?: string): Promise<void> {
+  const optionsRes = await client.v1.auth.webauthn.register.options.$post();
+  const options = await parseWithStepUp(optionsRes, creationOptionsSchema);
+  const attestation = await createPasskey(
+    options as unknown as PublicKeyCredentialCreationOptionsJSON,
+  );
+  const verifyRes = await client.v1.auth.webauthn.register.verify.$post({
+    json: {
+      response: webauthnRegistrationResponseSchema.parse(attestation),
+      ...(deviceName ? { device_name: deviceName } : {}),
+    },
+  });
+  await parseWithStepUp(verifyRes, z.object({ status: z.literal('registered') }).strict());
+}
+
+export async function renamePasskey(credentialId: string, deviceName: string): Promise<void> {
+  const res = await client.v1.auth.credentials.webauthn[':credentialId'].$patch({
+    param: { credentialId },
+    json: { device_name: deviceName },
+  });
+  await parseResponse(res, okSchema);
+}
+
+/** Remove a passkey (step-up + the server's last-method guard). */
+export async function removePasskey(credentialId: string): Promise<void> {
+  const res = await client.v1.auth.credentials.webauthn[':credentialId'].$delete({
+    param: { credentialId },
+  });
+  await parseWithStepUp(res, okSchema);
+}
+
+/** Unlink an auth wallet (step-up + the server's last-method guard). */
+export async function removeWallet(credentialId: string): Promise<void> {
+  const res = await client.v1.auth.credentials.wallet[':credentialId'].$delete({
+    param: { credentialId },
+  });
+  await parseWithStepUp(res, okSchema);
+}
+
+// --- Email factor management (WS-D.1.4a) ----------------------------------------------
+
+/** Stage a new (or first) email on the account (step-up protected). */
+export async function addEmail(email: string): Promise<void> {
+  const res = await client.v1.auth.email.add.$post({ json: { email } });
+  await parseWithStepUp(res, sentSchema);
+}
+
+/** Confirm the emailed verification code (also promotes a staged address). */
+export async function verifyEmail(code: string): Promise<void> {
+  const res = await client.v1.auth.email.verify.$post({
+    json: { code: code.trim().toUpperCase() },
+  });
+  await parseResponse(res, z.object({ status: z.literal('verified') }).strict());
+}
+
+export async function resendEmailCode(): Promise<void> {
+  const res = await client.v1.auth.email.resend.$post();
+  await parseResponse(res, sentSchema);
+}
+
+/** Disable the email factor (step-up + the server's last-method guard). */
+export async function disableEmail(): Promise<void> {
+  const res = await client.v1.auth.email.disable.$post();
+  await parseWithStepUp(res, okSchema);
+}
+
+// --- TOTP two-factor (WS-D.1.5) ----------------------------------------------------------
+
+/** Begin TOTP enrolment (step-up protected); returns the otpauth:// URI. */
+export async function enrollTotp(): Promise<string> {
+  const res = await client.v1.auth.mfa.totp.enroll.$post();
+  return (await parseWithStepUp(res, totpEnrollResponseSchema)).otpauth_uri;
+}
+
+/** Confirm enrolment with a first code; returns the 10 recovery codes. */
+export async function confirmTotp(code: string): Promise<string[]> {
+  const res = await client.v1.auth.mfa.totp.confirm.$post({ json: { code: code.trim() } });
+  return (await parseWithStepUp(res, totpConfirmResponseSchema)).recovery_codes;
+}
+
+/** Per-session TOTP verification (steward assurance, WS-D.1.5b). */
+export async function verifyTotp(code: string): Promise<void> {
+  const res = await client.v1.auth.mfa.totp.verify.$post({ json: { code: code.trim() } });
+  await parseResponse(res, z.object({ status: z.literal('mfa_verified') }).passthrough());
+}
+
+/** Disable TOTP (step-up protected). */
+export async function disableTotp(): Promise<void> {
+  const res = await client.v1.auth.mfa.totp.disable.$post();
+  await parseWithStepUp(res, okSchema);
 }

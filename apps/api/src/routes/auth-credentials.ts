@@ -88,6 +88,10 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
               present: !!(await services.store.getUser(auth.userId))?.email,
               verified: userAuth?.emailVerified ?? false,
             },
+            totp: {
+              enabled: userAuth?.mfaEnabled ?? false,
+              pending: userAuth?.mfaPending ?? false,
+            },
           }),
         );
       })

@@ -190,13 +190,24 @@ Interface-level hooks wired to follow-up workstreams:
   implementation behind the injected hook (WS-D.2.4b).
 - **Attention-history purge** and the **settings-change downstream consumer** are
   injected hooks (`purgeAttention`, `onPrivacyChange`) that WS-E implements.
-- **Client auth UI** — the login/registration page is implemented: passkey-first
-  sign-in and signup (WebAuthn L3 JSON methods with a manual fallback — no
-  client-side webauthn dependency; `apps/web/src/lib/webauthn.ts`), the emailed
-  one-time code as the universal fallback, an enumeration-safe registration
-  outcome, and best-effort server-side sign-out (`lib/auth-api.ts`).  The
-  remaining client work is the account-security management UI (sessions
-  list/revoke, credential rename/remove, step-up prompts, steward TOTP screens).
+- **Client auth UI** — complete: passkey-first login/registration (WebAuthn L3
+  JSON methods with a manual fallback — no client-side webauthn dependency;
+  `apps/web/src/lib/webauthn.ts`), the emailed one-time code as the universal
+  fallback, an enumeration-safe registration outcome, and best-effort
+  server-side sign-out (`lib/auth-api.ts`).  The `/profile/security` page
+  manages sessions (list/revoke/revoke-others), passkeys (add/rename/remove),
+  the email factor (add/verify/change/disable with the staged-address copy),
+  wallet unlinks, TOTP (enroll → recovery codes → disable), and the owner
+  activity feed.  Sensitive actions run through the step-up retry gate
+  (`components/security/StepUpDialog`): a server challenge opens the dialog and
+  the SAME action retries on success, and a step-up 401 never flips the client
+  to session-expired.  The privacy page drives the REAL data-rights endpoints:
+  export request → poll → step-up-gated download (`lib/privacy-api.ts`),
+  attention deletion, and account deletion — with grace-period cancellation on
+  the login page via the emailed `?cancel_token=` link or a deactivated
+  re-login.  Browser-level auth E2E needs a BFF-in-the-loop Playwright harness
+  (today's harness serves only the static preview) and lands with WS-P launch
+  testing.
 - **No geo lookup at all** — per SPEC §19.1 the platform records no IP and no
   location, so there is no MaxMind/geo-IP dependency; suspicious-login detection is
   coarse new-device only.

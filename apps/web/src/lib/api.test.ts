@@ -188,4 +188,13 @@ describe('request interceptor', () => {
     await expect(fetchFeed()).rejects.toBeInstanceOf(ApiClientError);
     expect(useAuthStore.getState().status).toBe('session-expired');
   });
+
+  it('does NOT expire the session on a 401 step-up challenge (WS-D.1.3e)', async () => {
+    useAuthStore.getState().setAuthenticated(ACTIVE_USER);
+    mockFetch(async () =>
+      jsonResponse({ status: 'step_up_required', methods: ['webauthn', 'email_otp'] }, 401),
+    );
+    await expect(fetchFeed()).rejects.toBeInstanceOf(ApiClientError);
+    expect(useAuthStore.getState().status).toBe('authenticated');
+  });
 });

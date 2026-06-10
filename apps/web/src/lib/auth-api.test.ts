@@ -7,11 +7,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetApiClientState } from './api.js';
 import {
+  addEmail,
+  confirmTotp,
+  enrollTotp,
+  fetchCredentials,
+  fetchSecurityActivity,
   loginWithPasskey,
   registerWithEmail,
+  removePasskey,
+  renamePasskey,
   revokeCurrentSession,
+  revokeOtherSessions,
+  StepUpRequiredError,
   startEmailLogin,
   toUserContext,
+  verifyEmail,
   verifyEmailLogin,
 } from './auth-api.js';
 
@@ -187,5 +197,118 @@ describe('revokeCurrentSession', () => {
     mockRoutes({ 'GET /v1/auth/sessions': () => jsonResponse({ sessions: [] }) });
     await revokeCurrentSession();
     expect(calls.filter((c) => c.method === 'DELETE')).toHaveLength(0);
+  });
+});
+
+describe('security management flows (WS-D.1.2c/1.4a/1.5)', () => {
+  const CRED_ID = 'AQIDBA';
+  const CREDENTIALS = {
+    passkeys: [
+      {
+        credential_id: CRED_ID,
+        device_name: 'iPhone',
+        device_type: 'platform',
+        backed_up: true,
+        created_at: '2026-06-10T00:00:00.000Z',
+        last_used_at: null,
+      },
+    ],
+    wallets: [],
+    email: { present: true, verified: true },
+    totp: { enabled: false, pending: false },
+  };
+
+  it('fetches the credential inventory including TOTP state', async () => {
+    mockRoutes({ 'GET /v1/auth/credentials': () => jsonResponse(CREDENTIALS) });
+    const creds = await fetchCredentials();
+    expect(creds.passkeys[0]?.device_name).toBe('iPhone');
+    expect(creds.totp).toEqual({ enabled: false, pending: false });
+  });
+
+  it('surfaces a step-up challenge on passkey removal as a typed error', async () => {
+    mockRoutes({
+      [`DELETE /v1/auth/credentials/webauthn/${CRED_ID}`]: () =>
+        jsonResponse({ status: 'step_up_required', methods: ['webauthn', 'email_otp'] }, 401),
+    });
+    await expect(removePasskey(CRED_ID)).rejects.toBeInstanceOf(StepUpRequiredError);
+
+    mockRoutes({
+      [`DELETE /v1/auth/credentials/webauthn/${CRED_ID}`]: () => jsonResponse({ ok: true }),
+    });
+    await expect(removePasskey(CRED_ID)).resolves.toBeUndefined();
+  });
+
+  it('keeps the last-method refusal as a normal typed error (not step-up)', async () => {
+    mockRoutes({
+      [`DELETE /v1/auth/credentials/webauthn/${CRED_ID}`]: () =>
+        jsonResponse(
+          { error: { code: 'last_method', message: 'Set up another way to sign in first.' } },
+          409,
+        ),
+    });
+    await expect(removePasskey(CRED_ID)).rejects.toMatchObject({ code: 'last_method' });
+  });
+
+  it('renames a passkey', async () => {
+    mockRoutes({
+      [`PATCH /v1/auth/credentials/webauthn/${CRED_ID}`]: () => jsonResponse({ ok: true }),
+    });
+    await renamePasskey(CRED_ID, 'Work laptop');
+    expect(calls[0]?.body).toEqual({ device_name: 'Work laptop' });
+  });
+
+  it('revokes other sessions and returns the count', async () => {
+    mockRoutes({
+      'POST /v1/auth/sessions/revoke-others': () => jsonResponse({ ok: true, revoked: 3 }),
+    });
+    await expect(revokeOtherSessions()).resolves.toBe(3);
+  });
+
+  it('drives the email-factor add → verify lifecycle', async () => {
+    mockRoutes({
+      'POST /v1/auth/email/add': () => jsonResponse({ status: 'sent' }),
+      'POST /v1/auth/email/verify': () => jsonResponse({ status: 'verified' }),
+    });
+    await addEmail('new@example.com');
+    expect(calls[0]?.body).toEqual({ email: 'new@example.com' });
+    await verifyEmail('  abcd1234 ');
+    expect(calls[1]?.body).toEqual({ code: 'ABCD1234' });
+  });
+
+  it('drives TOTP enrolment: enroll returns the URI, confirm returns 10 codes', async () => {
+    const codes = Array.from({ length: 10 }, (_, i) => `RECOVERY${i}`);
+    mockRoutes({
+      'POST /v1/auth/mfa/totp/enroll': () =>
+        jsonResponse({ otpauth_uri: 'otpauth://totp/Licio:ada?secret=ABC&issuer=Licio' }),
+      'POST /v1/auth/mfa/totp/confirm': () => jsonResponse({ recovery_codes: codes }),
+    });
+    const uri = await enrollTotp();
+    expect(uri).toContain('otpauth://');
+    await expect(confirmTotp(' 123456 ')).resolves.toEqual(codes);
+    expect(calls[1]?.body).toEqual({ code: '123456' });
+  });
+
+  it('fetches owner-scoped security activity', async () => {
+    mockRoutes({
+      'GET /v1/auth/security-activity': () =>
+        jsonResponse({
+          activity: [
+            {
+              event_id: '44444444-4444-4444-8444-444444444444',
+              event_type: 'login_success',
+              context: {
+                device: 'iOS/Safari',
+                auth_method: 'webauthn',
+                setting: null,
+                previous_value: null,
+                new_value: null,
+              },
+              created_at: '2026-06-10T00:00:00.000Z',
+            },
+          ],
+        }),
+    });
+    const activity = await fetchSecurityActivity();
+    expect(activity[0]?.event_type).toBe('login_success');
   });
 });

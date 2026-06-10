@@ -20,4 +20,9 @@ export const queryKeys = {
   featureFlags: () => ['feature-flags'] as const,
   notificationPreferences: () => ['notification-preferences'] as const,
   notificationBudget: () => ['notification-budget'] as const,
+  authSessions: () => ['auth-sessions'] as const,
+  authCredentials: () => ['auth-credentials'] as const,
+  securityActivity: () => ['security-activity'] as const,
+  exportStatus: (jobId: string) => ['export-status', jobId] as const,
+  deletionStatus: () => ['deletion-status'] as const,
 } as const;

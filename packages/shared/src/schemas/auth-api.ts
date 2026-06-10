@@ -217,6 +217,8 @@ export const credentialListResponseSchema = z
         .strict(),
     ),
     email: z.object({ present: z.boolean(), verified: z.boolean() }).strict(),
+    /** TOTP enrolment state (drives the two-factor management UI, WS-D.1.5). */
+    totp: z.object({ enabled: z.boolean(), pending: z.boolean() }).strict(),
   })
   .strict();
 export type CredentialListResponse = z.infer<typeof credentialListResponseSchema>;

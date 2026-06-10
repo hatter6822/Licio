@@ -21,7 +21,6 @@ import { RadioGroup } from '../../components/ui/RadioGroup/index.js';
 import { RestrictedState } from '../../components/ui/RestrictedState/index.js';
 import { Switch } from '../../components/ui/Switch/index.js';
 import { ThemeToggle } from '../../components/ui/ThemeToggle/index.js';
-import { useToast } from '../../components/ui/Toast/index.js';
 import { NotificationBudget } from '../../components/wellbeing/NotificationBudget/index.js';
 import { QuietHoursSetting } from '../../components/wellbeing/QuietHoursSetting/index.js';
 import { useT } from '../../i18n/index.js';
@@ -49,6 +48,7 @@ import {
   useUIStore,
 } from '../../stores/index.js';
 import { PageScaffold } from './PageScaffold.js';
+import { DangerZoneSection, DataRightsSection } from './privacy-data.js';
 import { usePageFocus } from './usePageFocus.js';
 
 function Section({ title, children }: { title: string; children: ReactNode }): React.ReactElement {
@@ -126,6 +126,7 @@ export function ProfilePage(): React.ReactElement {
     { to: '/profile/saved', label: t('profile.saved', 'Saved stories') },
     { to: '/profile/settings', label: t('profile.settings', 'Settings') },
     { to: '/profile/privacy', label: t('profile.privacy', 'Privacy') },
+    { to: '/profile/security', label: t('profile.security', 'Security') },
     { to: '/profile/wallet', label: t('profile.wallet', 'Wallet') },
   ];
 
@@ -297,7 +298,6 @@ export function SettingsPage(): React.ReactElement {
 export function PrivacyPage(): React.ReactElement {
   const t = useT();
   usePageFocus(t('profile.privacy', 'Privacy'));
-  const { toast } = useToast();
   const settings = useSettingsQuery();
   const updateSettings = useUpdateSettingsMutation();
   const userId = useAuthStore((state) => state.user?.id ?? null);
@@ -348,24 +348,10 @@ export function PrivacyPage(): React.ReactElement {
             />
           </Section>
           <Section title={t('privacy.data', 'Your data')}>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                variant="secondary"
-                onClick={() => toast({ message: t('privacy.export.queued', 'Export requested.') })}
-              >
-                {t('privacy.export', 'Export my data')}
-              </Button>
-              <Button
-                variant="secondary"
-                onClick={() =>
-                  toast({
-                    message: t('privacy.delete.queued', 'Attention history deletion requested.'),
-                  })
-                }
-              >
-                {t('privacy.delete', 'Delete attention history')}
-              </Button>
-            </div>
+            <DataRightsSection />
+          </Section>
+          <Section title={t('privacy.dangerZone', 'Delete account')}>
+            <DangerZoneSection />
           </Section>
         </div>
       )}

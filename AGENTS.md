@@ -34,24 +34,22 @@ karma scores, follower counts, or reaction bars — enforced at the
 type level, runtime, and CI (the no-applause static gate).
 
 **Current status.**  Workstreams WS-0 (repository foundation), WS-A
-(doctrine and policy), WS-B (design system), and WS-C (PWA client
-application) are complete.  WS-D (identity, accounts, and privacy) is
-**in progress**: the WebAuthn-first/passwordless authentication
+(doctrine and policy), WS-B (design system), WS-C (PWA client
+application), and WS-D (identity, accounts, and privacy) are
+**complete**.  WS-D ships the WebAuthn-first/passwordless authentication
 foundation, secure server-side sessions, RBAC + audit log, age gating,
 user-facing privacy controls (settings, DSAR export with an encrypted
 signed-URL archive, and account deletion with a 30-day grace + hard
-purge), steward TOTP MFA, and database-level wallet isolation are
-implemented and tested (`docs/identity/README.md`).  The WS-D
-**server-side surface is complete including its production bindings**:
-Postgres (Drizzle) identity/audit stores, Redis
-session/ephemeral/rate-limit stores, a leased distributed privacy
-scheduler (Postgres job lease — at most one instance executes per
-window), and an S3-compatible export-archive store (SigV4 over fetch,
-client-side sealed).  The client login/registration flows are
-implemented (passkey-first sign-in/signup with the emailed one-time code
-as fallback, `lib/auth-api.ts` + `lib/webauthn.ts`); the remaining WS-D
-work is the **account-security management UI** (sessions, credentials,
-step-up, and steward-MFA screens).
+purge), steward TOTP MFA, and database-level wallet isolation
+(`docs/identity/README.md`) — with production bindings (Postgres/Drizzle
+identity/audit stores, Redis session/ephemeral/rate-limit stores, a
+leased distributed privacy scheduler, an S3-compatible export-archive
+store) and the full client surface (passkey-first login/registration,
+the `/profile/security` management page, and real data-rights flows with
+step-up gating).  WS-D residuals tracked elsewhere: WS-E/WS-G injected
+hooks, the deployment email-provider binding behind the fail-closed
+`Mailer` interface, and browser-level auth E2E (needs a BFF-in-the-loop
+harness; WS-P).
 Workstreams WS-E through WS-P are planned (planning documents
 exist under `docs/planning/`; implementation not yet started).  See
 "Implementation roadmap" below for the full status table.
@@ -183,6 +181,7 @@ licio/
 │   │       │   ├── thread/              -- ThreadBranchNav
 │   │       │   ├── reader/              -- SourceReader + readability worker
 │   │       │   ├── profile/             -- SignalLedger
+│   │       │   ├── security/            -- StepUpDialog + step-up retry gate
 │   │       │   ├── i18n/                -- TranslationDisclosure
 │   │       │   └── wellbeing/           -- FocusModeToggle, NotificationBudget
 │   │       ├── stores/                  -- Zustand state (3 stores)
@@ -195,6 +194,7 @@ licio/
 │   │       │   ├── api.ts               --   typed RPC client + CSRF serialization
 │   │       │   ├── auth-api.ts          --   WS-D auth flows (passkey/email login, signup)
 │   │       │   ├── webauthn.ts          --   WebAuthn JSON↔ArrayBuffer plumbing
+│   │       │   ├── privacy-api.ts       --   WS-D data-rights flows (export, deletion)
 │   │       │   ├── queries.ts           --   TanStack Query hooks
 │   │       │   ├── query-keys.ts        --   query-key factory
 │   │       │   ├── query-client.ts      --   SWR defaults (30s stale, 5min gc)
@@ -236,7 +236,7 @@ licio/
 │   │       │   ├── stories.$storyId.tsx --   story detail
 │   │       │   ├── threads*.tsx         --   thread views + branches
 │   │       │   ├── rooms*.tsx           --   room views + governance
-│   │       │   ├── profile*.tsx         --   profile, settings, privacy, saved
+│   │       │   ├── profile*.tsx         --   profile, settings, privacy, security, saved
 │   │       │   ├── submit.tsx           --   content submission (auth-guarded)
 │   │       │   └── -pages/              --   internal page components
 │   │       ├── design-system/           -- design-token SSOT
@@ -721,7 +721,7 @@ Status:
 | WS-A | Doctrine and policy | Complete |
 | WS-B | Design system | Complete |
 | WS-C | PWA client application | Complete |
-| WS-D | Identity and privacy | In progress |
+| WS-D | Identity and privacy | Complete |
 | WS-E | Event pipeline and PWAtt scoring | Planned |
 | WS-F | Ingestion and search | Planned |
 | WS-G | Forum and conversation | Planned |
@@ -798,7 +798,7 @@ file counts at current state:
 
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
-| apps/web | ~50 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
+| apps/web | ~53 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
 | apps/api | ~32 (incl. WS-D identity + routes) | node | `pnpm --filter api test` |
 | packages/shared | ~7 (incl. WS-D schemas) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~2 (isolation + gated integration) | node | via root `pnpm test` (db project) |
@@ -902,7 +902,9 @@ password column, hashing, or reset flow anywhere.
 | Job scheduler | Durable distributed privacy scheduler: every instance ticks hourly, a Postgres job lease (`job_leases`, atomic insert-or-steal) grants at most one executor per window, crashed holders self-heal via lease expiry, lease outage fails closed (read-time expiry still bounds retention) | Complete |
 | Export delivery | S3-compatible `ObjectStore` (AWS/R2/MinIO; SigV4 on `node:crypto`, pinned to the official AWS vectors — no SDK dep): bucket bodies are client-side SecretBox ciphertext, expiry enforced at read time, paginated sweep; all-or-none `S3_*` env group (partial fails boot; absent falls back in-memory with a production warning) | Complete |
 | Client auth | Login/registration page: passkey-first sign-in + signup (WebAuthn L3 JSON with manual fallback, no client webauthn dep), email-code fallback, enumeration-safe registration outcome, allowlisted post-login redirect, best-effort server-side sign-out | Complete |
-| Deferred | Account-security management UI (sessions list/revoke, credential rename/remove, step-up prompts, steward TOTP screens against the existing `/v1/auth/*` surface) | Pending |
+| Client security | `/profile/security`: sessions list/revoke/revoke-others, passkey add/rename/remove, email-factor add/verify/change/disable, wallet unlink, TOTP enroll → recovery codes → disable, owner activity feed; sensitive actions run through the step-up retry gate (challenge → dialog → SAME action retries) and a step-up 401 never expires the session | Complete |
+| Client data rights | Privacy page wired to the real `/v1/privacy/*`: export request → poll → step-up-gated archive download, attention-history deletion, account deletion (confirm → step-up → sign-out) with grace-period cancel on the login page (emailed `?cancel_token=` link AND deactivated re-login path) | Complete |
+| Residuals | WS-E/WS-G injected hooks (`purgeAttention`, `onPrivacyChange`, `anonymizeContributions`); the deployment email-provider binding behind the fail-closed `Mailer` interface; browser-level auth E2E scenarios (the Playwright harness serves only the static preview — a BFF-in-the-loop harness lands with WS-P launch testing) | Tracked elsewhere |
 
 Pure crypto is mathematically validated: TOTP against the RFC 6238
 Appendix B vectors, real WebAuthn attestation/assertion via a pure-crypto
