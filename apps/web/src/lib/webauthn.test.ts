@@ -127,8 +127,8 @@ describe('manual response converters', () => {
 
 describe('ceremonies against a stubbed credential API', () => {
   function stubCredentialApi(overrides: {
-    create?: () => Promise<unknown>;
-    get?: () => Promise<unknown>;
+    create?: (options: never) => Promise<unknown>;
+    get?: (options: never) => Promise<unknown>;
     statics?: Record<string, unknown>;
   }): void {
     vi.stubGlobal('PublicKeyCredential', Object.assign(class {}, overrides.statics ?? {}));
@@ -145,7 +145,9 @@ describe('ceremonies against a stubbed credential API', () => {
   });
 
   it('createPasskey uses the manual path when no JSON statics exist', async () => {
-    const create = vi.fn(async () => fakeAttestationCredential());
+    const create = vi.fn(async (_options: { publicKey: PublicKeyCredentialCreationOptions }) =>
+      fakeAttestationCredential(),
+    );
     stubCredentialApi({ create });
     const json = await createPasskey({
       challenge: bytesToBase64url(bytes(1)),
@@ -154,8 +156,8 @@ describe('ceremonies against a stubbed credential API', () => {
       pubKeyCredParams: [],
     });
     expect(create).toHaveBeenCalledOnce();
-    const arg = create.mock.calls[0]?.[0] as { publicKey: PublicKeyCredentialCreationOptions };
-    expect([...new Uint8Array(arg.publicKey.challenge as ArrayBuffer)]).toEqual([1]);
+    const arg = create.mock.calls[0]?.[0];
+    expect([...new Uint8Array(arg?.publicKey.challenge as ArrayBuffer)]).toEqual([1]);
     expect(json.response.attestationObject).toBe(bytesToBase64url(bytes(4)));
   });
 
