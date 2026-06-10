@@ -1,0 +1,1 @@
+ALTER TYPE "public"."audit_event_type" ADD VALUE 'pwatt_config_change';

@@ -296,7 +296,12 @@ export const eventDeadLetters = pgTable(
     attempts: integer('attempts').notNull(),
     failedAt: timestamp('failed_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('event_dead_letters_consumer_idx').on(t.consumerName, t.failedAt)],
+  (t) => [
+    index('event_dead_letters_consumer_idx').on(t.consumerName, t.failedAt),
+    // At most ONE letter per (consumer, event): repeated failures update the
+    // letter (accumulating attempts) instead of duplicating it.
+    uniqueIndex('event_dead_letters_consumer_event_idx').on(t.consumerName, t.eventId),
+  ],
 );
 
 /** Durable consumer replay checkpoints (WS-E.1.5 at-least-once recovery). */

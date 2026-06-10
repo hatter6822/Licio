@@ -56,10 +56,11 @@ interface ActorFold {
   branchDepthBucket: BranchDepthBucket;
   returnVisitBucket: ReturnVisitBucket;
   sawMeaningfulSourceOpen: boolean;
-  sawBounce: boolean;
+  /** Bounce-adjacent evidence only: bounce=true, or a `brief` source dwell. */
+  sawBounceAdjacentOpen: boolean;
   contextOpened: boolean;
   contributions: Partial<Record<EventContributionType, number>>;
-  uncitedAccusations: number;
+  uncitedAccusationsByType: Partial<Record<EventContributionType, number>>;
 }
 
 export interface ItemAggregation {
@@ -75,7 +76,7 @@ export interface WindowAggregationResult {
   items: Map<string, ItemAggregation>;
 }
 
-const SCORING_TOPICS = [
+export const SCORING_TOPICS = [
   'attention.aggregate',
   'source.opened.aggregate',
   'contribution.created',
@@ -89,10 +90,10 @@ function emptyActor(): ActorFold {
     branchDepthBucket: 'none',
     returnVisitBucket: 'none',
     sawMeaningfulSourceOpen: false,
-    sawBounce: false,
+    sawBounceAdjacentOpen: false,
     contextOpened: false,
     contributions: {},
-    uncitedAccusations: 0,
+    uncitedAccusationsByType: {},
   };
 }
 
@@ -156,7 +157,10 @@ export async function computeAggregationWindow(
       const item = itemOf(event.story_id);
       item.eventCount += 1;
       const actor = actorOf(item, actorKeyOfPayload(row.payload));
-      if (event.bounce) actor.sawBounce = true;
+      // The §5.3 clickbait guardrail (WS-E.1.1b): a bounce, AND the
+      // bounce-adjacent `brief` dwell bucket, earn zero source weight — only
+      // a moderate/extended non-bounce visit is a meaningful open.
+      if (event.bounce || event.dwell_bucket === 'brief') actor.sawBounceAdjacentOpen = true;
       else actor.sawMeaningfulSourceOpen = true;
     } else if (row.topic === 'contribution.created') {
       const payload = row.payload as {
@@ -172,9 +176,12 @@ export async function computeAggregationWindow(
       actor.contributions[payload.contribution_type] =
         (actor.contributions[payload.contribution_type] ?? 0) + 1;
       // Source-free accusation (WS-E.2.2b): a direct accusation with no
-      // citation. (Linked evidence.added correlation is a WS-G refinement.)
+      // citation, tracked at its own contribution type so the v1 hierarchy
+      // downweights it at the accusing type's weight. (Linked evidence.added
+      // correlation is a WS-G refinement.)
       if (payload.accusation_flag && !payload.has_citation) {
-        actor.uncitedAccusations += 1;
+        actor.uncitedAccusationsByType[payload.contribution_type] =
+          (actor.uncitedAccusationsByType[payload.contribution_type] ?? 0) + 1;
       }
     } else if (row.topic === 'evidence.added') {
       // Evidence cards count toward window volume; the participation credit
@@ -241,12 +248,12 @@ export function toActorSummary(actorKey: string, fold: ActorFold): ActorItemSumm
   return {
     actor: actorKey,
     dwellBucket: fold.dwellBucket,
-    sourceOpened: fold.sawMeaningfulSourceOpen || fold.sawBounce,
-    sourceBounceOnly: fold.sawBounce && !fold.sawMeaningfulSourceOpen,
+    sourceOpened: fold.sawMeaningfulSourceOpen || fold.sawBounceAdjacentOpen,
+    sourceBounceOnly: fold.sawBounceAdjacentOpen && !fold.sawMeaningfulSourceOpen,
     contextOpened: fold.contextOpened,
     returnVisitBucket: fold.returnVisitBucket,
     contributions: fold.contributions,
-    uncitedAccusations: fold.uncitedAccusations,
+    uncitedAccusationsByType: fold.uncitedAccusationsByType,
     savedForLater: 0,
   };
 }

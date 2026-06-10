@@ -83,6 +83,10 @@ export function registerDefaultConsumers(
     topics: ['integrity.signal.detected'],
     accessClassifications: ['restricted'],
     scoring: false,
+    // Durable: missed integrity signals are replayed from the event log at
+    // startup (events/recovery.ts) — the MFCI/review hooks must not lose
+    // detections to a crash between store and publish.
+    durable: true,
     handle: async (event) => {
       const signal = event as IntegritySignalDetectedEvent;
       await events.hooks.mfci?.(signal);

@@ -100,8 +100,12 @@ every request (a mid-session change applies to the next event):
 `personalization_enabled: false` ⇒ silent discard (204);
 `attention_retention_preference: 'none'` ⇒ real-time only (the event row gets
 a ranking-window purge deadline; no durable §22.1 row); `'minimal'` ⇒ the
-90-day tier minimum; default ⇒ the 180-day maximum. Enforcement decisions are
-compliance-logged (user id + action, never payloads).
+90-day tier minimum; default ⇒ the 180-day maximum. EVERY enforcement decision
+is compliance-logged — discards and the `none`/`minimal` retention modes alike
+(user id + action, never payloads). On the client, collection itself requires
+an authenticated session (the policy tracks login/logout live): signed-out
+readers generate no attention data at all, so nothing is ever queued toward a
+401.
 
 Logs and metrics carry event ids, the user id, and counts ONLY — a
 log-redaction test asserts no dwell/bucket/per-item field ever appears.
@@ -129,7 +133,9 @@ native PFADD/PFCOUNT). Every key expires after 2× the window — Redis can neve
 become a long-term attention store, which also closes the `none`-preference
 loophole. Hourly reconciliation compares estimates against the durable
 PostgreSQL aggregation within ~3σ of the HLL bound and logs discrepancies.
-A rebuild-from-store function proves the layer holds no unique state.
+The layer holds no unique state: startup recovery rebuilds the live + previous
+windows exactly from the durable log, and its volume counter drives the
+production early-scoring trigger..
 
 ## Consumer router and the pay-to-rank firewall (WS-E.1.5, WS-E.1.2)
 
@@ -145,13 +151,23 @@ invariants are enforced at BOTH subscription and delivery time:
 2. **Classification-based delivery** — a topic is deliverable only to
    consumers holding its privacy classification.
 
+A THIRD invariant gates the crypto plane: while the fail-closed
+`cryptoEnabled` flag is off (SPEC §17.1), Knomosis topics are withheld from
+EVERY consumer, however authorized (withheld deliveries are metered).
+
 Delivery is at-least-once with consumer-side idempotency (per-consumer
-event-id LRU; durable consumers checkpoint), bounded retries, dead-lettering
-for poisoned events (`event_dead_letters`), and per-consumer lag/health
-metrics. Default consumers: `realtime-aggregation` (scoring; counters + the
-volume-threshold trigger for early aggregation) and `integrity-intake`
-(restricted-authorized, non-scoring; forwards integrity signals to the
-MFCI/review-queue hooks).
+event-id LRU), bounded retries, dead-lettering for poisoned events
+(`event_dead_letters`, at most ONE letter per consumer+event with accumulating
+attempts), and per-consumer lag/health metrics. DURABLE consumers checkpoint
+the newest delivered event time; `recoverEventPipeline` (run at boot, and
+exposed to stewards) replays them from the durable log across the
+crash-between-store-and-publish window, and rebuilds the real-time layer
+exactly from the log. `redriveDeadLetters` retries poisoned events after the
+cause is fixed and clears the queue on success. Default consumers:
+`realtime-aggregation` (scoring; counters + the volume-threshold trigger,
+wired in production boot to score a hot item's current 1h window early) and
+`integrity-intake` (restricted-authorized, non-scoring, durable; forwards
+integrity signals to the MFCI/review-queue hooks).
 
 ## Retention and anonymization (WS-E.1.4)
 
@@ -165,13 +181,16 @@ Hourly sweeps (idempotent, batched, lease-guarded):
 | `ranking_log` | Delete events/invariant outputs/windows past 365 days |
 | `moderation review` | FLAG `moderation_legal` rows older than a year for annual human review — never auto-delete |
 
-Jurisdiction overrides (the WS-N hook) only ever SHORTEN windows. Every sweep
-emits a counts-only audit record (`retention_sweep`), and
+Jurisdiction overrides (the WS-N hook) only ever SHORTEN windows. Per-owner
+settings are read in batches (`getUsersByIds`), every sweep emits a
+counts-only audit record (`retention_sweep`), and
 `retentionComplianceReport` is the audit query proving zero over-retained
-rows — a WS-P.2 transparency artifact. The WS-D hooks are now real:
-`purgeAttention` deletes events + aggregates + ledger, `exportAttention`
-returns the user's own rows for DSAR export, and `onPrivacyChange` tightens
-(never extends) existing purge deadlines when the preference changes.
+rows — a WS-P.2 transparency artifact. The WS-D hooks are real:
+`purgeAttention` deletes events + aggregates + ledger; `exportAttention`
+returns the user's COMPLETE attention data — every §22.1 aggregate row, every
+ledger entry (paginated, never truncated), and the owned attention events
+including source-open reports; `onPrivacyChange` tightens (never extends)
+existing purge deadlines when the preference changes.
 
 ## PWAtt scoring (WS-E.2)
 
@@ -226,6 +245,17 @@ randomness):
   window re-run converges instead of re-opening cases or overriding a
   moderation clearance; a NEW window's cascade freezes again.
 
+**System-event producers (WS-E.1.1e)**: the scoring job emits
+`invariant.run.completed` once per item/window (deterministic v5 id ⇒
+idempotent re-runs never duplicate it; carries the score vector, confidence,
+and computation time); every safety-state transition — cascade freezes and
+steward resolutions alike — emits the §21.3 `thread.state.changed`
+safety-dimension event; and the WS-D privacy routes emit
+`privacy.request.created` for export requests, deletion requests and
+cancellations, and attention resets. `notification.sent` remains schema-only:
+no in-repo code dispatches notifications yet (the WS-C push surface stores
+subscriptions; sending arrives with its owning workstream).
+
 **Safety state (WS-E.2.3e)**: `normal → frozen → (normal | removed)`,
 `removed` terminal (reinstatement is WS-J appeal scope). Frozen pins the
 stored score at its freeze-time value while raw scores and Signal Ledger
@@ -233,32 +263,45 @@ entries keep recording (transparency without distribution); removed scores 0.
 All transitions are audit-logged (`safety_state_change`).
 `resolveItemSafetyState` is the WS-J moderation-resolution hook.
 
-**v1 (WS-E.2.3a-d)** — implemented and stored (still shadow until the §30.5
-review with WS-I): configurable saturation curves (logarithmic with an exact
-cap, and tanh — both total, monotone, concave; properties tested), integer-
-percent dimension weights with the 50% dominance cap and an exact sum-to-100
-check; ranking profiles validated against the §5.5 guardrails (defaults
-`breaking_news` 30/25/15/15/15 and `evergreen_science` 20/40/15/15/10; the
-selection context carries no payment/wallet field — a type-level firewall);
-the contribution hierarchy (evidence > correction > synthesis > question >
-counterexample > explanation > low_info_reply=0, bridge comments strong,
-steward actions thread-health); and penalties as separate nonnegative
-coefficients OUTSIDE the convex combination — they can drive the total below
-zero; pM uses the burst detector's confidence, pR the MERI redundancy hook
-(0 until WS-H.2), pH/pT pinned-zero placeholders (WS-H.6/H.7). All thresholds,
-weights, and coefficients are tunable through the `pwatt_config` store, read
-each tick, validated key-by-key, FAILING CLOSED to reviewed defaults.
+**v1 (WS-E.2.3a-d)** — INTEGRATED into the live scoring job and stored (still
+shadow until the §30.5 review with WS-I). `computePwattV1Components` is the
+pipeline stage: each actor's per-type contribution counts pass through a
+per-user diminishing-returns curve at the contribution hierarchy's weights
+(evidence > correction > synthesis > question > counterexample > explanation >
+low_info_reply=0; bridge comments strong, steward actions thread-health; the
+source-free downweight applies at the accusing type's own weight), then item
+dimensions compose through `applySaturation` — configurable curves
+(logarithmic with an exact cap, and tanh — both total, monotone, concave;
+property-tested), integer-percent weights with the 50% dominance cap and an
+exact sum-to-100 check. Ranking profiles are validated against the §5.5
+guardrails (defaults `breaking_news` 30/25/15/15/15 and `evergreen_science`
+20/40/15/15/10; the selection context carries no payment/wallet field — a
+type-level firewall); penalties are separate nonnegative coefficients OUTSIDE
+the convex combination — they can drive the total below zero; pM uses the
+burst detector's confidence, pR the MERI redundancy hook (0 until WS-H.2),
+pH/pT pinned-zero placeholders (WS-H.6/H.7). EVERYTHING is runtime-tunable
+through the `pwatt_config` store — the v0 component weights, the full v1
+stage (`v0`/`v1` keys), detector thresholds, penalty coefficients, profiles,
+and the trigger threshold — read each tick, validated key-by-key, FAILING
+CLOSED to reviewed defaults, and writable only through the steward admin
+endpoint, which REJECTS invalid values at configuration time (422) and
+audit-logs the actor.
 
 **Signal Ledger (WS-E.2.1d)**: strictly owner-only (`GET /v1/signal-ledger`,
 authenticated; the endpoint takes no user parameter, so another user's ledger
-is unreachable), populated per (owner, item, window) with the bucketed signal
+is unreachable), populated from the 1-HOUR window ONLY — one canonical entry
+per (owner, item, hour); the larger windows' scores live in
+`invariant_outputs`, their actual audience — with the bucketed signal
 breakdown, applied anti-signals, the shadow score, and a deterministic
 plain-language summary ("You read this for a moderate duration, opened the
 source, and returned to it. Your question was counted as constructive
-participation."). Entries carry purge deadlines coupled to the owner's
-retention preference; pseudonymous actors get no ledger rows (nothing to link
-to). The web profile page renders the summary verbatim — qualitative wording
-only, never a number.
+participation."). Cap status is honestly OMITTED from server-generated
+entries (it is knowable only on the client: the §22.1 wire carries buckets,
+whose ceilings are the cap expression — `cap_reached` is optional on the wire
+schema for a future client-emitted canonical event). Entries carry purge
+deadlines coupled to the owner's retention preference; pseudonymous actors
+get no ledger rows (nothing to link to). The web profile page renders the
+summary verbatim — qualitative wording only, never a number.
 
 ## Scheduler
 
@@ -266,10 +309,28 @@ only, never a number.
 ticks on every instance, a Postgres job lease (`events_hourly`) grants at most
 one executor per window, a crashed holder self-heals via lease expiry, and a
 lease-store outage skips the tick (fail closed — idempotent re-runs catch up).
-Each tick scores the completed windows (recomputing the larger windows also
-folds in late offline-sync events), runs the retention sweeps, and reconciles
-the real-time layer. The volume-threshold trigger requests early aggregation
-for hot items (debounced per item-window).
+Each tick computes ONLY the windows that need it (`windowsNeedingCompute`):
+a completed window is due when any event in its range was RECEIVED after the
+window's last computedAt — so a fresh window computes once, a late
+offline-sync arrival re-opens its windows, and unchanged windows are skipped
+(no hourly full recomputes of the 7-day window). The freshness lookback per
+size (~26h/36h/8d/14d) means deep lates beyond a size's lookback fold into the
+larger sizes only. Each tick also runs the retention sweeps and reconciles the
+real-time layer. The volume-threshold trigger (wired in production boot)
+scores a hot item's current 1h window early, debounced per item-window.
+
+## Steward operations (`/v1/events/admin`)
+
+The operational surface for the pipeline, gated by `requireSteward`
+(authenticated steward with per-session TOTP, WS-D.1.5b):
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /safety-state` | Clear/remove an item (WS-E.2.3e resolution; actor-attributed audit + `thread.state.changed`) |
+| `PUT /pwatt-config` | Validated runtime-config writes — invalid values rejected with 422 at configuration time, never stored; `pwatt_config_change` audit |
+| `GET /dead-letters` | DLQ visibility (per consumer) |
+| `POST /dead-letters/redrive` | Retry poisoned events after a fix |
+| `POST /recover` | Manual checkpoint replay + real-time rebuild (automatic at boot) |
 
 ## Production bindings
 
@@ -311,11 +372,22 @@ REDIS_URL=redis://localhost:6379 pnpm test
 - **WS-N** — jurisdiction retention overrides via
   `EventPipelineServices.retention.overrides` (shorten-only).
 - **Client `source.opened.aggregate` emission** — the server path (schema,
-  guards, scoring bounce handling) is complete; the client signal processor
-  still reports source opens through the per-item aggregate booleans, and a
-  dedicated client emitter with dwell-bucket/bounce measurement can land
-  without server changes.
+  guards, brief/bounce zero-weighting in scoring) is complete; the client
+  signal processor still reports source opens through the per-item aggregate
+  booleans, and a dedicated client emitter with dwell-bucket/bounce
+  measurement can land without server changes. The same applies to a
+  client-emitted `cap_reached` on canonical events (optional on the wire).
+- **`low_info_reply` classification** — the type is registered, weighted (0),
+  and anti-signal-tracked, but nothing classifies real contributions as
+  low-information yet: the conversation model (WS-G) or the reviewed AI
+  classifier (WS-K) owns that judgment. Until then the cascade detector's
+  hostile share draws on `flag` contributions.
+- **Burst-conditioning covariates** — base rates condition on the item's own
+  trailing windows; time-of-day/topic/community covariates need WS-F/WS-G
+  metadata and land with WS-H's MFCI.
 - **Cross-instance streaming** — the router is in-process over the durable
-  Postgres log (replayable by topic+timestamp with consumer checkpoints); a
+  Postgres log, with real per-consumer checkpoints and startup replay; a
   Redis Streams/broker binding can replace delivery behind the same
-  `EventRouter` surface when WS-O scales out.
+  `EventRouter` surface when WS-O scales out (with multiple instances the
+  real-time layer is advisory and hourly-reconciled; the durable aggregation
+  stays authoritative).

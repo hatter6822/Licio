@@ -35,6 +35,8 @@ export const auditEventTypeEnum = pgEnum('audit_event_type', [
   // (mirrors AUDIT_EVENT_TYPES in @licio/shared).
   'retention_sweep',
   'safety_state_change',
+  // WS-E steward surface: validated PWAtt runtime-config writes.
+  'pwatt_config_change',
 ]);
 
 export const auditLog = pgTable(

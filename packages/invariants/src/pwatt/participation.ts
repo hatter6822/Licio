@@ -122,7 +122,7 @@ export interface ActorParticipationResult {
 
 type ActorParticipationInput = Pick<
   ActorItemSummary,
-  'returnVisitBucket' | 'contributions' | 'uncitedAccusations' | 'savedForLater'
+  'returnVisitBucket' | 'contributions' | 'uncitedAccusationsByType' | 'savedForLater'
 >;
 
 /** One actor's bounded participation contribution, with annotations. */
@@ -133,20 +133,23 @@ export function actorParticipation(
   const annotations: string[] = [];
 
   // Constructive units, with the source-free-accusation downweight: an uncited
-  // accusation keeps only `accusationDownweight` of its unit weight. Uncited
-  // accusations can never exceed the constructive unit total (defensive min).
+  // accusation keeps only `accusationDownweight` of its own type's weight.
+  // Per-type uncited counts are clamped to the type's contribution count
+  // (defensive: the input invariant is enforced even against a buggy fold).
   let units = 0;
   let totalContributions = 0;
+  let uncitedTotal = 0;
   for (const [type, count] of Object.entries(actor.contributions) as Array<
     [EventContributionType, number | undefined]
   >) {
     const n = toNonNegative(count ?? 0);
     totalContributions += n;
-    units += (V0_CONTRIBUTION_WEIGHTS[type] ?? 0) * n;
+    const typeWeight = V0_CONTRIBUTION_WEIGHTS[type] ?? 0;
+    const uncited = Math.min(toNonNegative(actor.uncitedAccusationsByType[type] ?? 0), n);
+    uncitedTotal += uncited;
+    units += typeWeight * (n - uncited) + typeWeight * config.accusationDownweight * uncited;
   }
-  const uncited = Math.min(toNonNegative(actor.uncitedAccusations), units);
-  if (uncited > 0) {
-    units -= uncited * (1 - config.accusationDownweight);
+  if (uncitedTotal > 0) {
     annotations.push('source_free_accusation_downweight');
   }
 

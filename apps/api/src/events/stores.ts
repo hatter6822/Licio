@@ -38,6 +38,8 @@ export interface EventStore {
   insertMany(
     events: readonly NewStoredEvent[],
   ): Promise<{ inserted: number; duplicateIds: string[] }>;
+  /** One event by id, or null (dead-letter re-drive, diagnostics). */
+  getById(eventId: string): Promise<StoredEvent | null>;
   /** Events for topics within [fromIso, toIsoExclusive), oldest first. */
   listByTopicsBetween(
     topics: readonly string[],
@@ -59,6 +61,17 @@ export interface EventStore {
   countTierOlderThan(tier: RetentionTier, cutoffIso: string): Promise<number>;
   /** Distinct owners holding rows of a tier (preference-aware sweeps). */
   listOwnersWithTier(tier: RetentionTier): Promise<string[]>;
+  /**
+   * The newest server-receipt instant (created_at) among events of `topics`
+   * whose event time falls in [fromIso, toIsoExclusive) — the freshness marker
+   * the scheduler compares against a window's computedAt so late-arriving
+   * offline-sync events trigger a recompute and unchanged windows are skipped.
+   */
+  latestCreatedAtBetween(
+    topics: readonly string[],
+    fromIso: string,
+    toIsoExclusive: string,
+  ): Promise<string | null>;
   clear(): Promise<void>;
 }
 
@@ -83,6 +96,10 @@ export class InMemoryEventStore implements EventStore {
       inserted += 1;
     }
     return { inserted, duplicateIds };
+  }
+
+  async getById(eventId: string): Promise<StoredEvent | null> {
+    return this.#rows.get(eventId) ?? null;
   }
 
   async listByTopicsBetween(
@@ -197,6 +214,25 @@ export class InMemoryEventStore implements EventStore {
       if (row.retentionTier === tier && row.ownerUserId !== null) owners.add(row.ownerUserId);
     }
     return [...owners];
+  }
+
+  async latestCreatedAtBetween(
+    topics: readonly string[],
+    fromIso: string,
+    toIsoExclusive: string,
+  ): Promise<string | null> {
+    const topicSet = new Set(topics);
+    const from = Date.parse(fromIso);
+    const to = Date.parse(toIsoExclusive);
+    let latest: string | null = null;
+    for (const row of this.#rows.values()) {
+      const at = Date.parse(row.timestamp);
+      if (!topicSet.has(row.topic) || at < from || at >= to) continue;
+      if (latest === null || Date.parse(row.createdAt) > Date.parse(latest)) {
+        latest = row.createdAt;
+      }
+    }
+    return latest;
   }
 
   async clear(): Promise<void> {
@@ -375,6 +411,12 @@ export interface AggregationWindowStore {
     limit: number,
   ): Promise<AggregationWindowRecord[]>;
   deleteOlderThan(cutoffIso: string): Promise<number>;
+  /**
+   * The computedAt of the window's stored rows (all rows of one window run
+   * share it), or null when the window has never been computed — compared
+   * against the event store's freshness marker by the scheduler.
+   */
+  latestComputedAt(windowStart: string, windowSize: AggregationWindowSize): Promise<string | null>;
   clear(): Promise<void>;
 }
 
@@ -423,6 +465,21 @@ export class InMemoryAggregationWindowStore implements AggregationWindowStore {
       }
     }
     return removed;
+  }
+
+  async latestComputedAt(
+    windowStart: string,
+    windowSize: AggregationWindowSize,
+  ): Promise<string | null> {
+    const start = Date.parse(windowStart);
+    let latest: string | null = null;
+    for (const row of this.#rows.values()) {
+      if (Date.parse(row.windowStart) !== start || row.windowSize !== windowSize) continue;
+      if (latest === null || Date.parse(row.computedAt) > Date.parse(latest)) {
+        latest = row.computedAt;
+      }
+    }
+    return latest;
   }
 
   async clear(): Promise<void> {
@@ -715,8 +772,15 @@ export interface DeadLetterRecord {
 }
 
 export interface DeadLetterStore {
+  /**
+   * Record a dead letter. AT MOST ONE letter exists per (consumer, event):
+   * a repeated failure updates the letter and ACCUMULATES `attempts` instead
+   * of duplicating the row.
+   */
   append(record: DeadLetterRecord): Promise<void>;
   list(consumerName?: string): Promise<DeadLetterRecord[]>;
+  /** Remove one dead letter (after a successful re-drive). */
+  delete(consumerName: string, eventId: string): Promise<void>;
   clear(): Promise<void>;
 }
 
@@ -724,6 +788,15 @@ export class InMemoryDeadLetterStore implements DeadLetterStore {
   readonly #rows: DeadLetterRecord[] = [];
 
   async append(record: DeadLetterRecord): Promise<void> {
+    const existing = this.#rows.find(
+      (r) => r.consumerName === record.consumerName && r.eventId === record.eventId,
+    );
+    if (existing) {
+      existing.error = record.error;
+      existing.failedAt = record.failedAt;
+      existing.attempts += record.attempts;
+      return;
+    }
     this.#rows.push({ ...record });
   }
 
@@ -731,6 +804,13 @@ export class InMemoryDeadLetterStore implements DeadLetterStore {
     return consumerName
       ? this.#rows.filter((r) => r.consumerName === consumerName)
       : [...this.#rows];
+  }
+
+  async delete(consumerName: string, eventId: string): Promise<void> {
+    const index = this.#rows.findIndex(
+      (r) => r.consumerName === consumerName && r.eventId === eventId,
+    );
+    if (index !== -1) this.#rows.splice(index, 1);
   }
 
   async clear(): Promise<void> {

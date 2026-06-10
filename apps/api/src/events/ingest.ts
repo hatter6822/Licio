@@ -111,6 +111,17 @@ export async function ingestAttentionEvents(
   const user = await identity.store.getUser(sessionUserId);
   const settings: PrivacySettings | null = user?.privacySettings ?? null;
   const decision = settings ? evaluateAttentionPrivacy(settings) : null;
+  // Compliance log (WS-E.1.3d): the retention-mode enforcement DECISION is
+  // recorded once per request — user id + action only, never event data.
+  if (decision?.action === 'accept' && decision.preference !== 'default') {
+    events.log('events.attention.privacy_enforced', {
+      user_id: sessionUserId,
+      enforcement_action:
+        decision.preference === 'none'
+          ? 'retention_none_realtime_only'
+          : 'retention_minimal_window',
+    });
+  }
   const userRef = accountRef(identity.config.masterSecret, sessionUserId);
 
   for (const event of batch) {
@@ -168,6 +179,9 @@ export async function ingestAttentionEvents(
       privacyClassification: registryEntry.privacy_classification,
       retentionTier: registryEntry.retention_tier,
       payload: storedPayload,
+      // Server-receipt instant from the injectable clock (one clock source:
+      // the scheduler's freshness comparison depends on it).
+      createdAt: new Date(now).toISOString(),
       // Pseudonymized rows carry no owner: they are already de-linked, which
       // is strictly stronger than deletion-on-request (SPEC §19.2).
       ownerUserId: pseudonymous ? null : sessionUserId,

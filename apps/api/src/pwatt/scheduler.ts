@@ -18,7 +18,7 @@ import type { EventPipelineServices } from '../events/services.js';
 import type { JobLeaseStore } from '../identity/job-lease.js';
 import type { IdentityServices } from '../identity/services.js';
 import { loadPwattRuntimeConfig } from './config.js';
-import { dueWindows, runPwattWindow } from './scoring.js';
+import { runPwattWindow, windowsNeedingCompute } from './scoring.js';
 
 export const EVENT_PIPELINE_SCHEDULER_INTERVAL_MS = 60 * 60_000; // hourly
 export const EVENT_PIPELINE_JOB_LEASE = 'events_hourly';
@@ -69,7 +69,7 @@ export async function runEventPipelineTick(
 ): Promise<void> {
   try {
     const config = await loadPwattRuntimeConfig(events);
-    for (const window of dueWindows(nowMs)) {
+    for (const window of await windowsNeedingCompute(events, nowMs)) {
       await runPwattWindow(events, identity, window.startMs, window.size, config);
     }
   } catch (err) {

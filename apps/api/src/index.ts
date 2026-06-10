@@ -20,6 +20,7 @@ import {
   DrizzleSignalLedgerStore,
 } from './events/drizzle-event-stores.js';
 import { IngestRateLimiter } from './events/ingest-limiter.js';
+import { recoverEventPipeline } from './events/recovery.js';
 import {
   RedisRealtimeAggregator,
   RedisReplayNonceStore,
@@ -55,10 +56,12 @@ import {
 } from './identity/services.js';
 import { demoStory } from './lib/demo-data.js';
 import { createLogger } from './lib/logger.js';
+import { loadPwattRuntimeConfig } from './pwatt/config.js';
 import {
   EVENT_PIPELINE_SCHEDULER_INTERVAL_MS,
   startEventPipelineScheduler,
 } from './pwatt/scheduler.js';
+import { runPwattWindow } from './pwatt/scoring.js';
 
 const env = validateServerEnv(process.env);
 const logger = createLogger(env.LOG_LEVEL);
@@ -124,7 +127,21 @@ eventServices.safetyStore = new DrizzleItemSafetyStateStore(db);
 eventServices.configStore = new DrizzlePwattConfigStore(db);
 eventServices.deadLetters = new DrizzleDeadLetterStore(db);
 eventServices.checkpoints = new DrizzleConsumerCheckpointStore(db);
-registerDefaultConsumers(eventServices);
+// The production volume-threshold trigger (WS-E.2.1a "triggered computation"):
+// when an item's real-time volume crosses the configured threshold, the
+// CURRENT 1h window is scored early (fire-and-forget; the scheduled boundary
+// run remains the idempotent safety net). The threshold itself is read from
+// the validated runtime config.
+const bootConfig = await loadPwattRuntimeConfig(eventServices);
+registerDefaultConsumers(eventServices, {
+  triggerThreshold: bootConfig.triggerThreshold,
+  onVolumeTrigger: (itemId, windowStartMs) => {
+    logger.info({ itemId, windowStartMs }, 'volume threshold reached: early PWAtt run');
+    void runPwattWindow(eventServices, identityServices, windowStartMs, '1h').catch((err) =>
+      logger.error({ err, itemId }, 'triggered PWAtt window run failed'),
+    );
+  },
+});
 setEventPipelineServices(eventServices);
 // Close the WS-D residual hooks with their real WS-E implementations: DSAR
 // export and deletion now cover attention data, and a retention-preference
@@ -162,6 +179,16 @@ startPrivacyScheduler(
   PRIVACY_SCHEDULER_INTERVAL_MS,
   { lease: new DrizzleJobLeaseStore(db) },
 );
+
+// Startup recovery (WS-E.1.5 at-least-once): replay durable consumers from
+// their checkpoints and rebuild the real-time windows from the durable log —
+// closes the crash window between store-insert and in-process delivery.
+try {
+  const recovered = await recoverEventPipeline(eventServices);
+  logger.info(recovered, 'event pipeline recovery complete');
+} catch (err) {
+  logger.error({ err }, 'event pipeline recovery failed (idempotent; next boot retries)');
+}
 
 // Hourly WS-E pipeline: aggregation windows + PWAtt shadow scoring
 // (WS-E.2.1), retention/anonymization sweeps (WS-E.1.4), and real-time

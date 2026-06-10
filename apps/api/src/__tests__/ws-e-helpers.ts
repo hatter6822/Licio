@@ -58,7 +58,12 @@ export interface SeededUser {
 /** Seed an active, verified user and return a live session cookie. */
 export async function seedUserWithSession(
   identity: IdentityServices,
-  opts: { privacySettings?: PrivacySettings; handle?: string } = {},
+  opts: {
+    privacySettings?: PrivacySettings;
+    handle?: string;
+    /** Seed a TOTP-cleared steward (the WS-E admin-surface bar, WS-D.1.5b). */
+    steward?: boolean;
+  } = {},
 ): Promise<SeededUser> {
   const user = await identity.store.createUser({
     handle: opts.handle ?? `reader${randomUUID().slice(0, 8)}`,
@@ -70,8 +75,11 @@ export async function seedUserWithSession(
     privacySettings: opts.privacySettings ?? defaultPrivacySettings(),
     personalizationSettings: defaultPersonalizationSettings(),
     reputationSummary: emptyReputationSummary(),
-    roles: ['user'],
+    roles: opts.steward ? ['user', 'steward'] : ['user'],
   });
+  if (opts.steward) {
+    await identity.store.setAuth(user.userId, { mfaEnabled: true });
+  }
   await identity.store.addWebauthn({
     credentialId: `cred-${user.userId}`,
     userId: user.userId,
@@ -90,7 +98,7 @@ export async function seedUserWithSession(
     credentialRef: `cred-${user.userId}`,
     deviceLabel: 'test',
     rememberMe: false,
-    mfaVerified: false,
+    mfaVerified: opts.steward ?? false,
   });
   const cookie = buildSessionCookie(created.token, created.maxAgeSec).split(';')[0] as string;
   return { userId: user.userId, cookie };

@@ -48,10 +48,12 @@ export interface ActorItemSummary {
   /** Contribution counts by type within the window. */
   contributions: Partial<Record<EventContributionType, number>>;
   /**
-   * How many of the actor's constructive contributions are accusations
-   * WITHOUT a citation (WS-E.2.2b). Always <= the constructive count.
+   * The actor's accusations WITHOUT a citation, by contribution type
+   * (WS-E.2.2b). Per-type counts never exceed `contributions[type]` — the
+   * scoring functions clamp defensively. Typed so the v1 hierarchy can apply
+   * the downweight at the accusing contribution's own weight.
    */
-  uncitedAccusations: number;
+  uncitedAccusationsByType: Partial<Record<EventContributionType, number>>;
   /** Private saves within the window (0 until a save topic exists; low weight). */
   savedForLater: number;
 }

@@ -20,6 +20,7 @@ import { type EventPipelineServices, getEventPipelineServices } from '../events/
 import { accountRef } from '../identity/crypto.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
+import { createEventsAdminRoutes } from './events-admin.js';
 
 const attentionIngestBodySchema = z.discriminatedUnion('event_type', [
   attentionAggregateEventSchema,
@@ -32,61 +33,63 @@ export function createEventsRoutes(
   resolveIdentity: () => IdentityServices = getIdentityServices,
   resolveEvents: () => EventPipelineServices = getEventPipelineServices,
 ) {
-  return new Hono<AuthEnv>().post(
-    '/attention',
-    authMiddleware(resolveIdentity),
-    zValidator('json', attentionIngestBodySchema),
-    async (c) => {
-      const startedAt = Date.now();
-      const events = resolveEvents();
-      const identity = resolveIdentity();
-      const auth = getAuth(c);
-      if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+  return new Hono<AuthEnv>()
+    .route('/admin', createEventsAdminRoutes(resolveIdentity, resolveEvents))
+    .post(
+      '/attention',
+      authMiddleware(resolveIdentity),
+      zValidator('json', attentionIngestBodySchema),
+      async (c) => {
+        const startedAt = Date.now();
+        const events = resolveEvents();
+        const identity = resolveIdentity();
+        const auth = getAuth(c);
+        if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
 
-      // Per-user sliding-window rate limit (WS-E.1.3c): keyed by a
-      // NON-REVERSIBLE account ref — never the user id, never any address.
-      const decision = await events.ingestLimiter.hit(
-        accountRef(identity.config.masterSecret, auth.userId),
-        events.now(),
-      );
-      if (!decision.allowed) {
-        events.metrics.increment('events_attention_rejected_rate_limited', 1);
-        c.header('Retry-After', String(decision.retryAfterSec));
-        return c.json(deny('rate_limited', 'Too many attention events'), 429);
-      }
+        // Per-user sliding-window rate limit (WS-E.1.3c): keyed by a
+        // NON-REVERSIBLE account ref — never the user id, never any address.
+        const decision = await events.ingestLimiter.hit(
+          accountRef(identity.config.masterSecret, auth.userId),
+          events.now(),
+        );
+        if (!decision.allowed) {
+          events.metrics.increment('events_attention_rejected_rate_limited', 1);
+          c.header('Retry-After', String(decision.retryAfterSec));
+          return c.json(deny('rate_limited', 'Too many attention events'), 429);
+        }
 
-      const event = c.req.valid('json');
-      const result = await ingestAttentionEvents(
-        events,
-        identity,
-        auth.userId,
-        [event],
-        ONLINE_ACCEPTANCE,
-      );
-      events.metrics.observeLatencyMs(Date.now() - startedAt);
+        const event = c.req.valid('json');
+        const result = await ingestAttentionEvents(
+          events,
+          identity,
+          auth.userId,
+          [event],
+          ONLINE_ACCEPTANCE,
+        );
+        events.metrics.observeLatencyMs(Date.now() - startedAt);
 
-      switch (result.outcomes[0]) {
-        case 'accepted':
-          return c.json({ receipt_id: event.event_id, status: 'accepted' as const }, 202);
-        case 'discarded_privacy':
-          // Server-side privacy enforcement (WS-E.1.3d): silently discarded.
-          return c.body(null, 204);
-        case 'replay':
-          return c.json(deny('replay', 'Event nonce was already used'), 409);
-        case 'stale_timestamp':
-          return c.json(
-            deny('stale_timestamp', 'Event timestamp is outside the acceptance window'),
-            400,
-          );
-        case 'future_timestamp':
-          return c.json(deny('future_timestamp', 'Event timestamp is in the future'), 400);
-        case 'ownership_mismatch':
-          return c.json(deny('forbidden', 'Event user does not match the session'), 403);
-        default:
-          return c.json(deny('internal', 'Ingestion produced no outcome'), 500);
-      }
-    },
-  );
+        switch (result.outcomes[0]) {
+          case 'accepted':
+            return c.json({ receipt_id: event.event_id, status: 'accepted' as const }, 202);
+          case 'discarded_privacy':
+            // Server-side privacy enforcement (WS-E.1.3d): silently discarded.
+            return c.body(null, 204);
+          case 'replay':
+            return c.json(deny('replay', 'Event nonce was already used'), 409);
+          case 'stale_timestamp':
+            return c.json(
+              deny('stale_timestamp', 'Event timestamp is outside the acceptance window'),
+              400,
+            );
+          case 'future_timestamp':
+            return c.json(deny('future_timestamp', 'Event timestamp is in the future'), 400);
+          case 'ownership_mismatch':
+            return c.json(deny('forbidden', 'Event user does not match the session'), 403);
+          default:
+            return c.json(deny('internal', 'Ingestion produced no outcome'), 500);
+        }
+      },
+    );
 }
 
 export type EventsRoutes = ReturnType<typeof createEventsRoutes>;

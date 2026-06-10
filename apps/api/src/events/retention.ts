@@ -122,11 +122,18 @@ export async function runRetentionSweeps(
 
   // 4. §22.1 aggregate rows: per-owner anonymize-or-delete at the CURRENT
   //    preference's window (a preference change mid-life is honored here).
+  //    Settings are read in BATCHES (one query per 500 owners, not per owner).
   const aggregatedWindow = getRetentionDays('attention_aggregated');
   const tierMaxDays = effectiveMaxDays(events, 'attention_aggregated');
-  for (const owner of await events.attentionStore.listIdentifiableOwners()) {
-    const user = await identity.store.getUser(owner);
-    const preference = user?.privacySettings.attention_retention_preference ?? 'default';
+  const owners = await events.attentionStore.listIdentifiableOwners();
+  const preferenceByOwner = new Map<string, string>();
+  for (let offset = 0; offset < owners.length; offset += 500) {
+    for (const user of await identity.store.getUsersByIds(owners.slice(offset, offset + 500))) {
+      preferenceByOwner.set(user.userId, user.privacySettings.attention_retention_preference);
+    }
+  }
+  for (const owner of owners) {
+    const preference = preferenceByOwner.get(owner) ?? 'default';
     if (preference === 'none') {
       report.aggregatesDeleted += await events.attentionStore.deleteOwnedOlderThan(
         owner,
@@ -166,10 +173,18 @@ export async function runRetentionSweeps(
     batch,
   );
 
-  // Audit record: counts only, no payloads (WS-E.1.4 acceptance).
-  const summary = Object.entries(report)
-    .map(([key, value]) => `${key}=${value}`)
-    .join(' ');
+  // Audit record: counts only, no payloads (WS-E.1.4 acceptance). Short keys,
+  // privacy-critical counts first, so the bounded context field never loses
+  // the numbers that matter (the full report is also structured-logged below).
+  const summary = [
+    `raw=${report.attentionRawDeleted}`,
+    `evt=${report.attentionEventsDeleted}`,
+    `agg(a=${report.aggregatesAnonymized},d=${report.aggregatesDeleted},h=${report.anonymizedHardCapDeleted})`,
+    `purge=${report.purgeDueDeleted}`,
+    `ledger=${report.ledgerDeleted}`,
+    `rank(e=${report.rankingLogDeleted},i=${report.invariantOutputsDeleted},w=${report.aggregationWindowsDeleted})`,
+    `modflag=${report.moderationFlaggedForReview}`,
+  ].join(' ');
   await identity.audit.append({
     actorUserId: null,
     eventType: 'retention_sweep',
@@ -252,18 +267,37 @@ export async function purgeUserAttention(
   return eventsDeleted + aggregatesDeleted + ledgerDeleted;
 }
 
+/** Attention-bearing topics included in the DSAR attention export. */
+const ATTENTION_EXPORT_TOPICS = ['attention.aggregate', 'source.opened.aggregate'] as const;
+
 /**
- * The WS-D `exportAttention` binding (SPEC §19.3 DSAR export): the user's own
- * §22.1 aggregate rows and Signal Ledger entries.
+ * The WS-D `exportAttention` binding (SPEC §19.3 DSAR export): the COMPLETE
+ * set of the user's own attention data — every §22.1 aggregate row, every
+ * Signal Ledger entry (paginated through, never truncated), and the user's
+ * owned attention EVENTS (including source-open reports, which have no §22.1
+ * projection). Pseudonymized (minimum-privacy) rows are already de-linked and
+ * therefore not attributable to the export.
  */
 export async function exportUserAttention(
   events: EventPipelineServices,
   userId: string,
 ): Promise<unknown[]> {
   const aggregates = await events.attentionStore.listByUser(userId);
-  const ledger = await events.ledgerStore.listForUser(userId, 1_000);
+  const ledger: unknown[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await events.ledgerStore.listForUser(userId, 500, cursor);
+    ledger.push(...page.entries);
+    if (page.nextCursor === null) break;
+    cursor = page.nextCursor;
+  }
+  const attentionTopics = new Set<string>(ATTENTION_EXPORT_TOPICS);
+  const attentionEvents = (await events.eventStore.listByOwner(userId))
+    .filter((row) => attentionTopics.has(row.topic))
+    .map((row) => ({ topic: row.topic, timestamp: row.timestamp, payload: row.payload }));
   return [
     { kind: 'attention_aggregates', rows: aggregates },
-    { kind: 'signal_ledger', rows: ledger.entries },
+    { kind: 'signal_ledger', rows: ledger },
+    { kind: 'attention_events', rows: attentionEvents },
   ];
 }

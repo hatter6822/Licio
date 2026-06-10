@@ -37,8 +37,14 @@ export const signalLedgerEntrySchema = z.object({
   context_opened: z.boolean(),
   branch_depth_bucket: branchDepthBucketSchema,
   return_visit_count_bucket: returnVisitBucketSchema,
-  /** True when the per-item cap was reached and counting stopped (WS-C.4.1c). */
-  cap_reached: z.boolean(),
+  /**
+   * True when the per-item cap was reached and counting stopped (WS-C.4.1c).
+   * OPTIONAL because cap state is known only on the client (the §22.1 wire
+   * deliberately carries buckets, not the cap flag — the bucket ceiling IS the
+   * cap expression). Server-generated WS-E entries omit it rather than guess;
+   * a client-emitted canonical event can carry it in the future.
+   */
+  cap_reached: z.boolean().optional(),
   // --- WS-E.2.1d additions (optional: pre-WS-E entries omit them) -----------
   /** Anti-signals applied to this item/window, shown for transparency (§5.3). */
   anti_signals: z.array(ledgerAntiSignalSchema).max(8).optional(),

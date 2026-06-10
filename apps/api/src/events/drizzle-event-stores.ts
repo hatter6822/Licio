@@ -101,6 +101,15 @@ export class DrizzleEventStore implements EventStore {
     };
   }
 
+  async getById(eventId: string): Promise<StoredEvent | null> {
+    const [row] = await this.#db
+      .select()
+      .from(eventsTable)
+      .where(eq(eventsTable.eventId, eventId))
+      .limit(1);
+    return row ? this.#toStored(row) : null;
+  }
+
   async listByTopicsBetween(
     topics: readonly string[],
     fromIso: string,
@@ -230,6 +239,25 @@ export class DrizzleEventStore implements EventStore {
       .from(eventsTable)
       .where(and(eq(eventsTable.retentionTier, tier), isNotNull(eventsTable.ownerUserId)));
     return rows.map((r) => r.owner).filter((owner): owner is string => owner !== null);
+  }
+
+  async latestCreatedAtBetween(
+    topics: readonly string[],
+    fromIso: string,
+    toIsoExclusive: string,
+  ): Promise<string | null> {
+    if (topics.length === 0) return null;
+    const [row] = await this.#db
+      .select({ latest: sql<Date | null>`max(${eventsTable.createdAt})` })
+      .from(eventsTable)
+      .where(
+        and(
+          inArray(eventsTable.topic, [...topics]),
+          sql`${eventsTable.timestamp} >= ${fromIso}::timestamptz`,
+          sql`${eventsTable.timestamp} < ${toIsoExclusive}::timestamptz`,
+        ),
+      );
+    return row?.latest ? new Date(row.latest).toISOString() : null;
   }
 
   async clear(): Promise<void> {
@@ -464,6 +492,22 @@ export class DrizzleAggregationWindowStore implements AggregationWindowStore {
     return removed.length;
   }
 
+  async latestComputedAt(
+    windowStart: string,
+    windowSize: AggregationWindowSize,
+  ): Promise<string | null> {
+    const [row] = await this.#db
+      .select({ latest: sql<Date | null>`max(${aggregationWindows.computedAt})` })
+      .from(aggregationWindows)
+      .where(
+        and(
+          eq(aggregationWindows.windowStart, new Date(windowStart)),
+          eq(aggregationWindows.windowSize, windowSize),
+        ),
+      );
+    return row?.latest ? new Date(row.latest).toISOString() : null;
+  }
+
   async clear(): Promise<void> {
     await this.#db.delete(aggregationWindows);
   }
@@ -593,25 +637,29 @@ export class DrizzleSignalLedgerStore implements SignalLedgerStore {
   }
 
   async upsertMany(entries: readonly SignalLedgerRecord[]): Promise<void> {
-    for (const entry of entries) {
-      const values = {
-        entryId: entry.entryId,
-        ownerUserId: entry.ownerUserId,
-        itemId: entry.itemId,
-        storyTitle: entry.storyTitle,
-        windowStart: new Date(entry.windowStart),
-        windowSize: entry.windowSize,
-        signals: entry.signals,
-        antiSignals: entry.antiSignals,
-        pwattScore: entry.pwattScore,
-        summary: entry.summary,
-        recordedAt: new Date(entry.recordedAt),
-        purgeAfter: new Date(entry.purgeAfter),
-      };
-      const { entryId: _newId, ...update } = values;
+    // Batched multi-VALUES upsert (chunked): one round trip per 500 entries
+    // instead of one per entry.
+    const CHUNK = 500;
+    for (let offset = 0; offset < entries.length; offset += CHUNK) {
+      const chunk = entries.slice(offset, offset + CHUNK);
       await this.#db
         .insert(signalLedgerEntries)
-        .values(values)
+        .values(
+          chunk.map((entry) => ({
+            entryId: entry.entryId,
+            ownerUserId: entry.ownerUserId,
+            itemId: entry.itemId,
+            storyTitle: entry.storyTitle,
+            windowStart: new Date(entry.windowStart),
+            windowSize: entry.windowSize,
+            signals: entry.signals,
+            antiSignals: entry.antiSignals,
+            pwattScore: entry.pwattScore,
+            summary: entry.summary,
+            recordedAt: new Date(entry.recordedAt),
+            purgeAfter: new Date(entry.purgeAfter),
+          })),
+        )
         .onConflictDoUpdate({
           target: [
             signalLedgerEntries.ownerUserId,
@@ -619,7 +667,15 @@ export class DrizzleSignalLedgerStore implements SignalLedgerStore {
             signalLedgerEntries.windowStart,
             signalLedgerEntries.windowSize,
           ],
-          set: update,
+          set: {
+            storyTitle: sql`excluded.story_title`,
+            signals: sql`excluded.signals`,
+            antiSignals: sql`excluded.anti_signals`,
+            pwattScore: sql`excluded.pwatt_score`,
+            summary: sql`excluded.summary`,
+            recordedAt: sql`excluded.recorded_at`,
+            purgeAfter: sql`excluded.purge_after`,
+          },
         });
     }
   }
@@ -778,14 +834,32 @@ export class DrizzleDeadLetterStore implements DeadLetterStore {
   }
 
   async append(record: DeadLetterRecord): Promise<void> {
-    await this.#db.insert(eventDeadLetters).values({
-      consumerName: record.consumerName,
-      eventId: record.eventId,
-      topic: record.topic,
-      error: record.error,
-      attempts: record.attempts,
-      failedAt: new Date(record.failedAt),
-    });
+    await this.#db
+      .insert(eventDeadLetters)
+      .values({
+        consumerName: record.consumerName,
+        eventId: record.eventId,
+        topic: record.topic,
+        error: record.error,
+        attempts: record.attempts,
+        failedAt: new Date(record.failedAt),
+      })
+      .onConflictDoUpdate({
+        target: [eventDeadLetters.consumerName, eventDeadLetters.eventId],
+        set: {
+          error: record.error,
+          failedAt: new Date(record.failedAt),
+          attempts: sql`${eventDeadLetters.attempts} + ${record.attempts}`,
+        },
+      });
+  }
+
+  async delete(consumerName: string, eventId: string): Promise<void> {
+    await this.#db
+      .delete(eventDeadLetters)
+      .where(
+        and(eq(eventDeadLetters.consumerName, consumerName), eq(eventDeadLetters.eventId, eventId)),
+      );
   }
 
   async list(consumerName?: string): Promise<DeadLetterRecord[]> {

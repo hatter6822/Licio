@@ -118,6 +118,8 @@ export interface IdentityStore {
   getUser(userId: string): Promise<StoredUser | null>;
   getUserByHandle(handle: string): Promise<StoredUser | null>;
   getUserByEmail(email: string): Promise<StoredUser | null>;
+  /** Batch read (WS-E retention sweeps); unknown ids are simply absent. */
+  getUsersByIds(userIds: readonly string[]): Promise<StoredUser[]>;
   updateUser(userId: string, patch: Partial<StoredUser>, now?: number): Promise<StoredUser | null>;
   // --- User auth ---
   getAuth(userId: string): Promise<StoredUserAuth | null>;
@@ -200,6 +202,15 @@ export class InMemoryIdentityStore implements IdentityStore {
     const lower = email.toLowerCase();
     for (const u of this.#users.values()) if (u.email?.toLowerCase() === lower) return u;
     return null;
+  }
+
+  async getUsersByIds(userIds: readonly string[]): Promise<StoredUser[]> {
+    const found: StoredUser[] = [];
+    for (const id of userIds) {
+      const user = this.#users.get(id);
+      if (user) found.push(user);
+    }
+    return found;
   }
 
   async updateUser(

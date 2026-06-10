@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "event_dead_letters_consumer_event_idx" ON "event_dead_letters" USING btree ("consumer_name","event_id");

@@ -36,6 +36,8 @@ export const AUDIT_EVENT_TYPES = [
   // safety-state freeze/unfreeze/remove transitions (WS-E.1.4 / WS-E.2.3e).
   'retention_sweep',
   'safety_state_change',
+  // WS-E steward surface: validated PWAtt runtime-config writes.
+  'pwatt_config_change',
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
 export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);

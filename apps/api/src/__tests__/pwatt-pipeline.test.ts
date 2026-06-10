@@ -16,13 +16,14 @@ import type { NewStoredEvent } from '../events/stores.js';
 import { computeAggregationWindow, windowStartMs } from '../pwatt/aggregation.js';
 import { rankFrontPageV0 } from '../pwatt/ranking-v0.js';
 import { runEventPipelineTick } from '../pwatt/scheduler.js';
-import { dueWindows, resolveItemSafetyState, runPwattWindow } from '../pwatt/scoring.js';
+import { resolveItemSafetyState, runPwattWindow, windowsNeedingCompute } from '../pwatt/scoring.js';
 import { assertRankingInputAllowed, RankingBoundaryViolation } from '../pwatt/shadow.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
   attentionEvent,
   freshWsEServices,
   seedUserWithSession,
+  sourceOpenEvent,
   type WsEFixture,
 } from './ws-e-helpers.js';
 
@@ -521,15 +522,47 @@ describe('shadow-mode verification (WS-E.2.1e, CI-gated)', () => {
 });
 
 describe('scheduler windows (WS-E.2.1a scheduling)', () => {
-  it('computes the previous complete window for every configured size', () => {
-    const now = Date.UTC(2026, 5, 10, 13, 0, 0);
-    const due = dueWindows(now);
-    expect(due.map((w) => w.size).sort()).toEqual(['1h', '24h', '6h', '7d']);
-    for (const window of due) {
-      expect(window.startMs).toBeLessThan(now);
-    }
+  it('computes only windows with new arrivals; skips empty and unchanged ones', async () => {
+    // A controllable clock drives BOTH ingestion receipt (created_at) and
+    // window computedAt, so the freshness comparison is deterministic.
+    let clock = T0 + 2 * HOUR; // the [T0, T0+1h) window completed an hour ago
+    fixture = freshWsEServices({ now: () => clock });
+    const now = clock;
+    // Nothing ingested: nothing is due (no empty-window churn).
+    expect(await windowsNeedingCompute(fixture.events, now)).toEqual([]);
+
+    const { userId } = await seedUserWithSession(fixture.identity);
+    await ingestAttention(userId, randomUUID());
+    const due = await windowsNeedingCompute(fixture.events, now);
+    // Only the COMPLETED windows covering the event are due: its 1h and 6h
+    // windows closed by now; its 24h/7d windows are still open.
+    expect(due.map((w) => w.size).sort()).toEqual(['1h', '6h']);
     const oneHour = due.find((w) => w.size === '1h');
-    expect(oneHour?.startMs).toBe(Date.UTC(2026, 5, 10, 12, 0, 0));
+    expect(oneHour?.startMs).toBe(T0);
+
+    // After computing (one clock tick later), nothing is due (skip unchanged).
+    clock += 1;
+    for (const window of due) {
+      await runPwattWindow(fixture.events, fixture.identity, window.startMs, window.size);
+    }
+    expect(await windowsNeedingCompute(fixture.events, now)).toEqual([]);
+
+    // …and a LATE arrival into the already-computed window re-opens it.
+    clock += 1;
+    await ingestAttention(userId, randomUUID());
+    const reopened = await windowsNeedingCompute(fixture.events, now);
+    expect(reopened.map((w) => w.size)).toContain('1h');
+
+    // Once the larger windows close, the (uncomputed) 24h/7d windows of the
+    // events become due — while the 1h/6h windows have aged out of their
+    // trailing lookback (the documented deep-late bound).
+    const muchLater = T0 + 8 * 24 * HOUR;
+    const lateDue = await windowsNeedingCompute(fixture.events, muchLater);
+    const sizes = lateDue.map((w) => w.size);
+    expect(sizes).toContain('24h');
+    expect(sizes).toContain('7d');
+    expect(sizes).not.toContain('1h');
+    expect(sizes).not.toContain('6h');
   });
 
   it('a full pipeline tick scores, sweeps, and reconciles without error', async () => {
@@ -543,5 +576,189 @@ describe('scheduler windows (WS-E.2.1a scheduling)', () => {
       T0 + HOUR,
     );
     expect(errors).toEqual([]);
+  });
+});
+
+describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
+  it('the contribution hierarchy affects the STORED v1 output', async () => {
+    // Two items with identical volume; only the contribution TYPE differs.
+    // v0 weighs both constructive types uniformly, so the difference in the
+    // stored v1 totals is attributable to the hierarchy alone.
+    const evidenceItem = randomUUID();
+    const questionItem = randomUUID();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    await fixture.events.eventStore.insertMany([
+      contributionRow(evidenceItem, userId, 'evidence', { hasCitation: true }),
+      contributionRow(questionItem, userId, 'question'),
+    ]);
+    await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
+    const evidenceV1 = await fixture.events.invariantStore.latest('PWAtt', evidenceItem);
+    const questionV1 = await fixture.events.invariantStore.latest('PWAtt', questionItem);
+    expect(evidenceV1?.scoreVector['participation']).toBeGreaterThan(
+      questionV1?.scoreVector['participation'] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(evidenceV1?.scoreVector['total']).toBeGreaterThan(
+      questionV1?.scoreVector['total'] ?? Number.POSITIVE_INFINITY,
+    );
+    // v0 (uniform weights) sees them identically — the control assertion.
+    const evidenceV0 = await fixture.events.invariantStore.latest('PWAtt_v0', evidenceItem);
+    const questionV0 = await fixture.events.invariantStore.latest('PWAtt_v0', questionItem);
+    expect(evidenceV0?.scoreVector['score']).toBe(questionV0?.scoreVector['score']);
+  });
+
+  it('v1 runtime config from the store changes the stored v1 output', async () => {
+    const itemId = randomUUID();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    await fixture.events.eventStore.insertMany([contributionRow(itemId, userId, 'evidence')]);
+    await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
+    const before = await fixture.events.invariantStore.latest('PWAtt', itemId);
+
+    // Tune the participation contributions dimension DOWN via the store.
+    const curve = { kind: 'logarithmic', scale: 4, saturationPoint: 25 };
+    await fixture.events.configStore.set('v1', {
+      contributionWeights: {
+        question: 0.7,
+        evidence: 1,
+        correction: 0.9,
+        synthesis: 0.8,
+        counterexample: 0.6,
+        explanation: 0.5,
+        experience: 0.5,
+        bridge_comment: 0.85,
+        steward_action: 0.5,
+        flag: 0,
+        low_info_reply: 0,
+      },
+      contributionCurve: { kind: 'logarithmic', scale: 1, saturationPoint: 6 },
+      attentionDimensions: {
+        dwell: { weightPct: 50, curve },
+        source: { weightPct: 30, curve },
+        context: { weightPct: 20, curve },
+      },
+      participationDimensions: {
+        returns: { weightPct: 45, curve },
+        saves: { weightPct: 45, curve },
+        contributions: { weightPct: 10, curve },
+      },
+      accusationDownweight: 0.25,
+      rapidThreshold: 5,
+      rapidDampening: 0.3,
+    });
+    await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
+    const after = await fixture.events.invariantStore.latest('PWAtt', itemId);
+    expect(after?.scoreVector['participation']).toBeLessThan(
+      before?.scoreVector['participation'] ?? 0,
+    );
+  });
+});
+
+describe('system-event producers (WS-E.1.1e closures)', () => {
+  it('emits invariant.run.completed once per item/window (idempotent re-runs)', async () => {
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const storyId = randomUUID();
+    await ingestAttention(userId, storyId);
+    await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
+    await runPwattWindow(fixture.events, fixture.identity, T0, '1h'); // re-run
+    const emitted = await fixture.events.eventStore.listByTopicsBetween(
+      ['invariant.run.completed'],
+      new Date(Date.now() - 60_000).toISOString(),
+      new Date(Date.now() + 60_000).toISOString(),
+    );
+    expect(emitted).toHaveLength(1); // deterministic id => no duplicates
+    const payload = emitted[0]?.payload as {
+      invariant_type: string;
+      time_window: string;
+      computation_time_ms: number;
+      score_vector: Record<string, number>;
+    };
+    expect(payload.invariant_type).toBe('PWAtt');
+    expect(payload.time_window).toBe(`${new Date(T0).toISOString()}/1h`);
+    expect(payload.computation_time_ms).toBeGreaterThanOrEqual(0);
+    expect(payload.score_vector['v0_score']).toBeGreaterThan(0);
+  });
+
+  it('emits thread.state.changed (safety dimension) on a cascade freeze', async () => {
+    const storyId = randomUUID();
+    for (let i = 0; i < 6; i += 1) {
+      const { userId } = await seedUserWithSession(fixture.identity, { handle: `hostile${i}x` });
+      await fixture.events.eventStore.insertMany([
+        contributionRow(storyId, userId, 'low_info_reply'),
+        contributionRow(storyId, userId, 'flag'),
+      ]);
+    }
+    await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
+    const emitted = await fixture.events.eventStore.listByTopicsBetween(
+      ['thread.state.changed'],
+      new Date(Date.now() - 60_000).toISOString(),
+      new Date(Date.now() + 60_000).toISOString(),
+    );
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.payload).toMatchObject({
+      state_dimension: 'safety',
+      old_state: 'normal',
+      new_state: 'frozen',
+      changed_by: 'system',
+    });
+  });
+});
+
+describe('ledger scoping + source-dwell semantics', () => {
+  it('writes ledger entries from the 1h window ONLY (no per-size duplicates)', async () => {
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const storyId = randomUUID();
+    await ingestAttention(userId, storyId);
+    for (const size of ['1h', '6h', '24h', '7d'] as const) {
+      await runPwattWindow(fixture.events, fixture.identity, windowStartMs(T0, size), size);
+    }
+    const ledger = await fixture.events.ledgerStore.listForUser(userId, 50);
+    expect(ledger.entries).toHaveLength(1); // one canonical entry, not four
+    expect(ledger.entries[0]?.windowSize).toBe('1h');
+    // Cap status is honestly absent (knowable only on the client).
+    expect(ledger.entries[0]?.signals['cap_reached']).toBeUndefined();
+  });
+
+  it('a brief non-bounce source visit earns zero weight (bounce-adjacent)', async () => {
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const storyId = randomUUID();
+    await ingestAttentionEvents(
+      fixture.events,
+      fixture.identity,
+      userId,
+      [
+        sourceOpenEvent(userId, {
+          story_id: storyId,
+          dwell_bucket: 'brief',
+          bounce: false,
+          timestamp: IN_WINDOW,
+        }),
+      ],
+      { maxPastMs: Number.MAX_SAFE_INTEGER, maxFutureMs: Number.MAX_SAFE_INTEGER },
+    );
+    await computeAggregationWindow(fixture.events, T0, '1h');
+    const row = await fixture.events.windowStore.get(storyId, new Date(T0).toISOString(), '1h');
+    expect(row?.sourceOpens).toBe(0); // brief = bounce-adjacent, not meaningful
+    // A moderate visit IS meaningful.
+    const other = randomUUID();
+    await ingestAttentionEvents(
+      fixture.events,
+      fixture.identity,
+      userId,
+      [
+        sourceOpenEvent(userId, {
+          story_id: other,
+          dwell_bucket: 'moderate',
+          bounce: false,
+          timestamp: IN_WINDOW,
+        }),
+      ],
+      { maxPastMs: Number.MAX_SAFE_INTEGER, maxFutureMs: Number.MAX_SAFE_INTEGER },
+    );
+    await computeAggregationWindow(fixture.events, T0, '1h');
+    const meaningful = await fixture.events.windowStore.get(
+      other,
+      new Date(T0).toISOString(),
+      '1h',
+    );
+    expect(meaningful?.sourceOpens).toBe(1);
   });
 });

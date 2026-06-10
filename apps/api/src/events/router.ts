@@ -3,8 +3,8 @@
 // Event publisher + consumer router (WS-E.1.5, SPEC §21.3/§21.5). Events are
 // stored durably FIRST (the PostgreSQL event store is the log of record;
 // replay-by-topic recovers a crashed consumer), then routed in-process to
-// named consumers. Two invariants are enforced at BOTH subscription and
-// delivery time (defense in depth — the flag is never trusted from one check):
+// named consumers. THREE invariants are enforced at BOTH subscription and
+// delivery time (defense in depth — a flag is never trusted from one check):
 //
 //   1. THE PAY-TO-RANK FIREWALL — a Knomosis topic can never be delivered to a
 //      scoring (PWAtt/ranking) consumer, and a scoring consumer may hold only
@@ -12,13 +12,18 @@
 //      structurally out of reach of any scoring input path, SPEC §13.6/§30.6).
 //   2. CLASSIFICATION-BASED DELIVERY — a topic is deliverable only to
 //      consumers holding its privacy classification.
+//   3. THE CRYPTO FEATURE FLAG (WS-E.1.2 / SPEC §17.1) — while the flag is off
+//      (the fail-closed default), Knomosis topics are not delivered to ANY
+//      consumer, however authorized.
 //
 // Delivery is at-least-once with consumer-side idempotency: the router skips
-// event_ids it has already delivered to a consumer (bounded LRU), and durable
-// consumers checkpoint via ConsumerCheckpointStore. Repeatedly failing events
-// dead-letter after `maxAttempts` instead of looping. Per-consumer lag/health
-// metrics are exposed for observability — no attention values appear in any
-// metric label.
+// event_ids it has already delivered to a consumer (bounded LRU), and DURABLE
+// consumers checkpoint the newest delivered event time so `replayConsumer`
+// (events/recovery.ts) can re-drive them from the durable log after a crash.
+// Repeatedly failing events dead-letter after `maxAttempts` instead of
+// looping; `redrive` retries a dead letter once after the cause is fixed.
+// Per-consumer lag/health metrics are exposed for observability — no attention
+// values appear in any metric label.
 import {
   type EventTopic,
   isKnomosisTopic,
@@ -27,7 +32,7 @@ import {
   type PrivacyClassification,
   TOPIC_REGISTRY,
 } from '@licio/shared';
-import type { DeadLetterStore } from './stores.js';
+import type { ConsumerCheckpointStore, DeadLetterStore } from './stores.js';
 
 export interface EventConsumer {
   name: string;
@@ -36,6 +41,13 @@ export interface EventConsumer {
   accessClassifications: readonly PrivacyClassification[];
   /** True for PWAtt/ranking consumers — the firewall subjects (WS-E.1.2). */
   scoring: boolean;
+  /**
+   * True ⇒ the router persists a per-consumer checkpoint (the newest delivered
+   * event timestamp) so startup recovery can replay missed events from the
+   * durable log. Consumers whose state is rebuildable (e.g. the real-time
+   * counters) stay non-durable and recover by rebuild instead.
+   */
+  durable?: boolean;
   handle(event: LicioEvent): Promise<void>;
 }
 
@@ -46,6 +58,8 @@ export interface ConsumerMetrics {
   duplicatesSkipped: number;
   failed: number;
   deadLettered: number;
+  /** Knomosis events withheld because the crypto flag is off (observability). */
+  withheldByCryptoFlag: number;
   /** ISO timestamp of the newest event delivered (lag observability). */
   lastDeliveredEventAt: string | null;
 }
@@ -79,17 +93,25 @@ export class EventRouter {
   /** Per-consumer recently-delivered event ids (bounded idempotency LRU). */
   readonly #seen = new Map<string, Set<string>>();
   readonly #deadLetters: DeadLetterStore;
+  readonly #checkpoints: ConsumerCheckpointStore | null;
+  readonly #knomosisEnabled: () => boolean;
   readonly #maxAttempts: number;
   readonly #seenCapacity: number;
   readonly #onError: (consumer: string, eventId: string, error: unknown) => void;
 
   constructor(options: {
     deadLetters: DeadLetterStore;
+    /** Enables durable-consumer checkpointing + startup replay. */
+    checkpoints?: ConsumerCheckpointStore;
+    /** The crypto feature flag (SPEC §17.1); fail-closed false when absent. */
+    knomosisEnabled?: () => boolean;
     maxAttempts?: number;
     seenCapacity?: number;
     onError?: (consumer: string, eventId: string, error: unknown) => void;
   }) {
     this.#deadLetters = options.deadLetters;
+    this.#checkpoints = options.checkpoints ?? null;
+    this.#knomosisEnabled = options.knomosisEnabled ?? (() => false);
     this.#maxAttempts = options.maxAttempts ?? 3;
     this.#seenCapacity = options.seenCapacity ?? 10_000;
     this.#onError = options.onError ?? (() => {});
@@ -123,6 +145,7 @@ export class EventRouter {
       duplicatesSkipped: 0,
       failed: 0,
       deadLettered: 0,
+      withheldByCryptoFlag: 0,
       lastDeliveredEventAt: null,
     });
   }
@@ -134,8 +157,54 @@ export class EventRouter {
       // Delivery-time re-check (defense in depth; never trust registration
       // alone — a registry change between boot and now must still hold).
       assertDeliverable(consumer, event.event_type);
+      // Crypto-flag gate (WS-E.1.2): with the fail-closed flag off, Knomosis
+      // events are withheld from EVERY consumer, however authorized.
+      if (isKnomosisTopic(event.event_type) && !this.#knomosisEnabled()) {
+        const metrics = this.#metrics.get(consumer.name);
+        if (metrics) metrics.withheldByCryptoFlag += 1;
+        continue;
+      }
       await this.#deliver(consumer, event);
     }
+  }
+
+  /**
+   * Re-deliver durable-log events to ONE named consumer (startup recovery,
+   * events/recovery.ts). The normal policy guards and idempotency apply; the
+   * consumer's checkpoint advances as usual.
+   */
+  async replayConsumer(consumerName: string, events: readonly LicioEvent[]): Promise<number> {
+    const consumer = this.#consumers.get(consumerName);
+    if (!consumer) throw new RouterPolicyViolation(`unknown consumer "${consumerName}"`);
+    let delivered = 0;
+    for (const event of events) {
+      if (!consumer.topics.includes(event.event_type)) continue;
+      assertDeliverable(consumer, event.event_type);
+      if (isKnomosisTopic(event.event_type) && !this.#knomosisEnabled()) continue;
+      const before = this.#metrics.get(consumerName)?.delivered ?? 0;
+      await this.#deliver(consumer, event);
+      if ((this.#metrics.get(consumerName)?.delivered ?? 0) > before) delivered += 1;
+    }
+    return delivered;
+  }
+
+  /**
+   * Retry ONE dead-lettered event after its cause has been fixed: clears the
+   * consumer's seen-mark, attempts a single delivery cycle, and removes the
+   * dead letter on success. Returns whether the re-drive succeeded.
+   */
+  async redrive(consumerName: string, event: LicioEvent): Promise<boolean> {
+    const consumer = this.#consumers.get(consumerName);
+    if (!consumer) throw new RouterPolicyViolation(`unknown consumer "${consumerName}"`);
+    assertDeliverable(consumer, event.event_type);
+    if (isKnomosisTopic(event.event_type) && !this.#knomosisEnabled()) return false;
+    this.#seen.get(consumerName)?.delete(event.event_id);
+    const before = this.#metrics.get(consumerName)?.deadLettered ?? 0;
+    await this.#deliver(consumer, event);
+    const after = this.#metrics.get(consumerName)?.deadLettered ?? 0;
+    if (after > before) return false; // dead-lettered again (still poisoned)
+    await this.#deadLetters.delete(consumerName, event.event_id);
+    return true;
   }
 
   async #deliver(consumer: EventConsumer, event: LicioEvent): Promise<void> {
@@ -158,6 +227,7 @@ export class EventRouter {
           const oldest = seen.values().next().value;
           if (oldest !== undefined) seen.delete(oldest);
         }
+        await this.#advanceCheckpoint(consumer, event.timestamp);
         return;
       } catch (error) {
         lastError = error;
@@ -178,6 +248,15 @@ export class EventRouter {
     });
   }
 
+  /** Persist the newest delivered event time for durable consumers. */
+  async #advanceCheckpoint(consumer: EventConsumer, eventTimestamp: string): Promise<void> {
+    if (!consumer.durable || !this.#checkpoints) return;
+    const current = await this.#checkpoints.get(consumer.name);
+    if (current === null || Date.parse(eventTimestamp) > Date.parse(current)) {
+      await this.#checkpoints.set(consumer.name, eventTimestamp);
+    }
+  }
+
   metrics(): ReadonlyMap<string, ConsumerMetrics> {
     return this.#metrics;
   }
@@ -185,5 +264,10 @@ export class EventRouter {
   /** Registered consumer names (diagnostics). */
   consumerNames(): string[] {
     return [...this.#consumers.keys()];
+  }
+
+  /** Registered consumers (read-only; used by startup recovery). */
+  consumers(): readonly EventConsumer[] {
+    return [...this.#consumers.values()];
   }
 }

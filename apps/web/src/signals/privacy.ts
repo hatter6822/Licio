@@ -28,13 +28,21 @@ export function resolveIdentifier(userId: string | null, level: PrivacyLevel): s
   return userId;
 }
 
-/** Derive the collection policy from the user's settings + (optional) id. */
+/**
+ * Derive the collection policy from the user's settings + (optional) id.
+ * Collection requires BOTH personalization AND an authenticated session: the
+ * WS-E ingestion boundary authenticates every upload (ownership + replay
+ * protection, SPEC §25.5), so an anonymous session has nowhere to send
+ * aggregates — collecting them would only fill the offline queue with
+ * uploads destined to fail. Signed-out readers therefore generate no
+ * attention data at all (also the more private default).
+ */
 export function resolveCollectionPolicy(
   settings: Pick<UserSettings, 'personalization_enabled' | 'privacy_level'>,
   userId: string | null,
 ): CollectionPolicy {
   return {
-    collect: settings.personalization_enabled,
+    collect: settings.personalization_enabled && userId !== null,
     privacyLevel: settings.privacy_level,
     identifier: resolveIdentifier(userId, settings.privacy_level),
   };

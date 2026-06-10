@@ -26,7 +26,12 @@ import {
 } from '../events/stores.js';
 import { InMemoryJobLeaseStore } from '../identity/job-lease.js';
 import { computeAggregationWindow } from '../pwatt/aggregation.js';
-import { DEFAULT_PWATT_RUNTIME_CONFIG, loadPwattRuntimeConfig } from '../pwatt/config.js';
+import {
+  DEFAULT_PWATT_RUNTIME_CONFIG,
+  loadPwattRuntimeConfig,
+  type PwattConfigKey,
+  validatePwattConfigValue,
+} from '../pwatt/config.js';
 import { rankFrontPageV0 } from '../pwatt/ranking-v0.js';
 import { startEventPipelineScheduler } from '../pwatt/scheduler.js';
 import { deterministicEventId } from '../pwatt/scoring.js';
@@ -356,13 +361,14 @@ describe('aggregation fold: evidence + integrity branches (WS-E.2.1a)', () => {
 });
 
 describe('small pure helpers', () => {
-  it('deterministicEventId is stable, distinct, and uuid-shaped', () => {
+  it('deterministicEventId is a stable, distinct RFC 4122 v5 UUID', () => {
     const a = deterministicEventId('integrity:x:1');
     const b = deterministicEventId('integrity:x:1');
     const c = deterministicEventId('integrity:x:2');
     expect(a).toBe(b);
     expect(a).not.toBe(c);
-    expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    // Version nibble 5 (name-based SHA-1), RFC variant 10xx.
+    expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 
   it('isShadowOutput admits a genuine non-shadow invariant output', () => {
@@ -510,5 +516,148 @@ describe('remaining in-memory store surfaces (coverage headroom)', () => {
     expect(await store.deleteAnonymizedOlderThan(new Date(T0).toISOString())).toBe(1);
     expect(await store.deleteOwnedOlderThan(owner, new Date(T0).toISOString())).toBe(0);
     await store.clear();
+  });
+});
+
+describe('validatePwattConfigValue (write-time rejection, all keys)', () => {
+  const validCurve = { kind: 'logarithmic', scale: 4, saturationPoint: 25 };
+  const validV0 = {
+    activeAttention: {
+      weights: { dwellPct: 50, sourcePct: 30, contextPct: 20 },
+      halfSaturationActors: 8,
+    },
+    participation: {
+      weights: { returnPct: 40, savePct: 10, contributionPct: 50 },
+      contribSaturation: 3,
+      rapidThreshold: 5,
+      rapidDampening: 0.3,
+      accusationDownweight: 0.25,
+      burstPlaceholderDampening: 0.9,
+      halfSaturationActors: 5,
+    },
+    confidenceHalfSaturation: 3,
+  };
+  const validV1 = {
+    contributionWeights: {
+      question: 0.7,
+      evidence: 1,
+      correction: 0.9,
+      synthesis: 0.8,
+      counterexample: 0.6,
+      explanation: 0.5,
+      experience: 0.5,
+      bridge_comment: 0.85,
+      steward_action: 0.5,
+      flag: 0,
+      low_info_reply: 0,
+    },
+    contributionCurve: { kind: 'logarithmic', scale: 1, saturationPoint: 6 },
+    attentionDimensions: {
+      dwell: { weightPct: 50, curve: validCurve },
+      source: { weightPct: 30, curve: validCurve },
+      context: { weightPct: 20, curve: validCurve },
+    },
+    participationDimensions: {
+      returns: { weightPct: 40, curve: validCurve },
+      saves: { weightPct: 10, curve: validCurve },
+      contributions: { weightPct: 50, curve: validCurve },
+    },
+    accusationDownweight: 0.25,
+    rapidThreshold: 5,
+    rapidDampening: 0.3,
+  };
+
+  it('accepts a valid value for every key', () => {
+    const valid: Array<[PwattConfigKey, Record<string, unknown>]> = [
+      ['v0', validV0],
+      ['v1', validV1],
+      ['burst', { minVolume: 10, minDistinctActors: 5, burstMultiplier: 4, baseRateFloor: 3 }],
+      [
+        'cascade',
+        {
+          minDistinctActors: 5,
+          minContributions: 8,
+          hostileShareThreshold: 0.6,
+          volumeMultiplier: 2,
+          baseRateFloor: 3,
+        },
+      ],
+      ['penalty_coefficients', { pM: 1, pH: 1, pT: 1, pR: 0.5 }],
+      [
+        'ranking_profiles',
+        {
+          profiles: [
+            { name: 'breaking_news', weights: { wA: 30, wP: 25, wE: 15, wS: 15, wC: 15 } },
+          ],
+        },
+      ],
+      ['trigger_threshold', { value: 500 }],
+    ];
+    for (const [key, value] of valid) {
+      expect(validatePwattConfigValue(key, value), key).toBeNull();
+    }
+  });
+
+  it('rejects an invalid value for every key with a named problem', () => {
+    const invalid: Array<[PwattConfigKey, Record<string, unknown>, RegExp]> = [
+      // Shape-valid but semantically broken: weights do not sum to 100.
+      [
+        'v0',
+        {
+          ...validV0,
+          activeAttention: {
+            ...validV0.activeAttention,
+            weights: { dwellPct: 50, sourcePct: 30, contextPct: 10 },
+          },
+        },
+        /sum to exactly 100/,
+      ],
+      // Shape-valid but hierarchy-breaking: low_info_reply gains weight.
+      [
+        'v1',
+        {
+          ...validV1,
+          contributionWeights: { ...validV1.contributionWeights, low_info_reply: 0.5 },
+        },
+        /low_info_reply/,
+      ],
+      ['burst', { minVolume: 0 }, /./],
+      ['cascade', { hostileShareThreshold: 2 }, /./],
+      ['penalty_coefficients', { pM: -1, pH: 0, pT: 0, pR: 0 }, /./],
+      [
+        'ranking_profiles',
+        { profiles: [{ name: 'bad', weights: { wA: 45, wP: 25, wE: 10, wS: 10, wC: 10 } }] },
+        /guardrail/,
+      ],
+      ['trigger_threshold', { value: 0 }, /./],
+    ];
+    for (const [key, value, pattern] of invalid) {
+      const problem = validatePwattConfigValue(key, value);
+      expect(problem, key).not.toBeNull();
+      expect(problem ?? '', key).toMatch(pattern);
+    }
+  });
+
+  it('the loader applies valid stored v0/v1 values and rejects invalid ones', async () => {
+    await fixture.events.configStore.set('v0', validV0);
+    await fixture.events.configStore.set('v1', validV1);
+    const applied = await loadPwattRuntimeConfig(fixture.events);
+    expect(applied.v0.participation.weights.returnPct).toBe(40);
+    expect(applied.v1.contributionWeights.evidence).toBe(1);
+    expect(rejections).toHaveLength(0);
+
+    await fixture.events.configStore.set('v0', { broken: true });
+    await fixture.events.configStore.set('v1', {
+      ...validV1,
+      attentionDimensions: {
+        dwell: { weightPct: 60, curve: validCurve },
+        source: { weightPct: 20, curve: validCurve },
+        context: { weightPct: 20, curve: validCurve },
+      },
+    });
+    const fallback = await loadPwattRuntimeConfig(fixture.events);
+    expect(fallback.v0).toEqual(DEFAULT_PWATT_RUNTIME_CONFIG.v0);
+    expect(fallback.v1).toEqual(DEFAULT_PWATT_RUNTIME_CONFIG.v1);
+    expect(rejections.map((r) => r['key']).sort()).toEqual(['v0', 'v1']);
   });
 });

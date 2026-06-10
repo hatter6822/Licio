@@ -117,6 +117,17 @@ export function startRuntime(): () => void {
 
   void hydrateFeatureFlags();
   void confirmSession().then(applySignalPolicy);
+  // Re-apply the collection policy whenever the SESSION USER changes (login,
+  // logout, expiry): collection requires an authenticated session (the WS-E
+  // ingestion boundary authenticates every upload), so the policy must track
+  // auth state live — not only at startup.
+  let lastPolicyUserId = useAuthStore.getState().user?.id ?? null;
+  const teardownPolicySync = useAuthStore.subscribe((state) => {
+    const userId = state.user?.id ?? null;
+    if (userId === lastPolicyUserId) return;
+    lastPolicyUserId = userId;
+    void applySignalPolicy();
+  });
 
   return () => {
     teardownTelemetry();
@@ -125,5 +136,6 @@ export function startRuntime(): () => void {
     teardownSync();
     teardownEviction();
     teardownVitals();
+    teardownPolicySync();
   };
 }

@@ -34,7 +34,7 @@ function actor(overrides: Partial<ActorItemSummary> = {}): ActorItemSummary {
     contextOpened: false,
     returnVisitBucket: 'none',
     contributions: {},
-    uncitedAccusations: 0,
+    uncitedAccusationsByType: {},
     savedForLater: 0,
     ...overrides,
   };
@@ -222,7 +222,7 @@ describe('participation (WS-E.2.1c)', () => {
   it('downweights uncited accusations and annotates (WS-E.2.2b)', () => {
     const cited = actorParticipation(actor({ contributions: { correction: 1 } }));
     const uncited = actorParticipation(
-      actor({ contributions: { correction: 1 }, uncitedAccusations: 1 }),
+      actor({ contributions: { correction: 1 }, uncitedAccusationsByType: { correction: 1 } }),
     );
     expect(uncited.value).toBeLessThan(cited.value);
     expect(uncited.annotations).toContain('source_free_accusation_downweight');

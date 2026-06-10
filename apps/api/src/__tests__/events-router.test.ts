@@ -145,6 +145,12 @@ describe('pay-to-rank firewall (WS-E.1.2 / WS-E.1.5)', () => {
   });
 
   it('allows a non-scoring, restricted-authorized consumer to receive Knomosis topics', async () => {
+    // The crypto flag must be ON for any Knomosis delivery at all (the
+    // fail-closed default withholds it; events-recovery.test.ts covers that).
+    router = new EventRouter({
+      deadLetters,
+      knomosisEnabled: () => true,
+    });
     const received: string[] = [];
     router.register(
       consumer({

@@ -23,6 +23,7 @@ import {
   attentionEvent,
   freshWsEServices,
   seedUserWithSession,
+  sourceOpenEvent,
   type WsEFixture,
 } from './ws-e-helpers.js';
 
@@ -344,7 +345,11 @@ describe('WS-D hook bindings (SPEC §19.3)', () => {
       kind: string;
       rows: unknown[];
     }>;
-    expect(exported.map((e) => e.kind)).toEqual(['attention_aggregates', 'signal_ledger']);
+    expect(exported.map((e) => e.kind)).toEqual([
+      'attention_aggregates',
+      'signal_ledger',
+      'attention_events',
+    ]);
     expect(exported[0]?.rows).toHaveLength(1);
   });
 
@@ -368,5 +373,73 @@ describe('WS-D hook bindings (SPEC §19.3)', () => {
     await applyRetentionPreferenceChange(fixture.events, userId, 'default');
     const unchanged = await fixture.events.eventStore.listByOwner(userId);
     expect(Date.parse(unchanged[0]?.purgeAfter ?? '')).toBe(afterDeadline);
+  });
+});
+
+describe('DSAR export completeness (WS-D hook, SPEC §19.3)', () => {
+  it('exports EVERY ledger entry (paginating past the page size, no truncation)', async () => {
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const entries = Array.from({ length: 503 }, (_, i) => ({
+      entryId: randomUUID(),
+      ownerUserId: userId,
+      itemId: randomUUID(),
+      storyTitle: `Story ${i}`,
+      windowStart: new Date(Date.UTC(2026, 5, 10, 10)).toISOString(),
+      windowSize: '1h' as const,
+      signals: {},
+      antiSignals: [],
+      pwattScore: 0.1,
+      summary: 'You read this for a short while.',
+      recordedAt: new Date(Date.UTC(2026, 5, 1) + i * 60_000).toISOString(),
+      purgeAfter: new Date(Date.now() + 30 * DAY).toISOString(),
+    }));
+    await fixture.events.ledgerStore.upsertMany(entries);
+    const exported = (await exportUserAttention(fixture.events, userId)) as Array<{
+      kind: string;
+      rows: unknown[];
+    }>;
+    const ledger = exported.find((e) => e.kind === 'signal_ledger');
+    expect(ledger?.rows).toHaveLength(503);
+  });
+
+  it('includes the user’s owned attention EVENTS (source-open reports too)', async () => {
+    const { userId } = await seedUserWithSession(fixture.identity);
+    await ingestAttentionEvents(
+      fixture.events,
+      fixture.identity,
+      userId,
+      [attentionEvent(userId), sourceOpenEvent(userId)],
+      ONLINE_ACCEPTANCE,
+    );
+    // An owned NON-attention event must NOT leak into the attention export
+    // (contributions are the WS-G export hook's responsibility).
+    await fixture.events.eventStore.insertMany([
+      {
+        eventId: randomUUID(),
+        eventType: 'contribution.created',
+        topic: 'contribution.created',
+        timestamp: new Date().toISOString(),
+        privacyClassification: 'public',
+        retentionTier: 'public_contribution',
+        payload: {},
+        ownerUserId: userId,
+        purgeAfter: null,
+      },
+    ]);
+    const exported = (await exportUserAttention(fixture.events, userId)) as Array<{
+      kind: string;
+      rows: Array<{ topic?: string }>;
+    }>;
+    expect(exported.map((e) => e.kind)).toEqual([
+      'attention_aggregates',
+      'signal_ledger',
+      'attention_events',
+    ]);
+    const events = exported.find((e) => e.kind === 'attention_events');
+    expect(events?.rows).toHaveLength(2);
+    expect(events?.rows.map((r) => r.topic).sort()).toEqual([
+      'attention.aggregate',
+      'source.opened.aggregate',
+    ]);
   });
 });

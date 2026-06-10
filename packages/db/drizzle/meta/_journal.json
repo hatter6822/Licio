@@ -36,6 +36,20 @@
       "when": 1781125959980,
       "tag": "0004_ws_e_audit_types",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1781130573447,
+      "tag": "0005_ws_e_admin_audit",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1781131641173,
+      "tag": "0006_ws_e_dlq_unique",
+      "breakpoints": true
     }
   ]
 }

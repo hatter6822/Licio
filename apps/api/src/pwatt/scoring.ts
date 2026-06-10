@@ -17,6 +17,7 @@ import {
   buildLedgerSummary,
   computePwattV0,
   computePwattV1,
+  computePwattV1Components,
   type ItemWindowInput,
   PWATT_V0_SHADOW_MODE,
   PWATT_V0_VERSION,
@@ -26,11 +27,12 @@ import {
   V1_PLACEHOLDER_PENALTY_INPUTS,
 } from '@licio/invariants';
 import {
-  type IntegritySignalDetectedEvent,
   integritySignalDetectedEventSchema,
-  type ModerationCaseCreatedEvent,
+  invariantRunCompletedEventSchema,
+  type LicioEvent,
   moderationCaseCreatedEventSchema,
   TOPIC_REGISTRY,
+  threadStateChangedEventSchema,
 } from '@licio/shared';
 import { attentionPurgeAfterIso } from '../events/privacy-gate.js';
 import type { EventPipelineServices } from '../events/services.js';
@@ -39,6 +41,7 @@ import { PRIVACY_BUCKET, type SignalLedgerRecord } from '../events/stores.js';
 import type { IdentityServices } from '../identity/services.js';
 import {
   computeAggregationWindow,
+  SCORING_TOPICS,
   toActorSummary,
   WINDOW_SIZES_MS,
   type WindowAggregationResult,
@@ -60,19 +63,31 @@ export interface WindowScoringReport {
 }
 
 /**
- * A deterministic UUID (RFC 4122 shape, version nibble 8) derived from a
- * name. Anti-signal side effects key on (signal, item, window), so a window
- * RE-RUN converges instead of emitting duplicate integrity events, opening
- * duplicate safety cases, or re-freezing content moderation already cleared —
- * while a NEW window's detection still acts in full.
+ * The fixed WS-E name-based UUID namespace (itself a v4 constant). Generated
+ * once for this codebase; deterministic ids are stable as long as it is.
+ */
+const WS_E_UUID_NAMESPACE = '6f1c1ce4-8c6f-4a3e-9b51-2d3f4a5b6c7d';
+
+/**
+ * A standard RFC 4122 version-5 (name-based, SHA-1) UUID. Anti-signal and
+ * system-event side effects key on (kind, item, window), so a window RE-RUN
+ * converges instead of emitting duplicate integrity events, opening duplicate
+ * safety cases, or re-freezing content moderation already cleared — while a
+ * NEW window's detection still acts in full. (SHA-1 here is name derivation
+ * per the RFC, not a security boundary.)
  */
 export function deterministicEventId(name: string): string {
-  const hex = createHash('sha256').update(name).digest('hex');
-  return (
-    `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-` +
-    `${((Number.parseInt(hex.slice(16, 17), 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-` +
-    hex.slice(20, 32)
-  );
+  const namespaceBytes = Buffer.from(WS_E_UUID_NAMESPACE.replaceAll('-', ''), 'hex');
+  const digest = createHash('sha1')
+    .update(namespaceBytes)
+    .update(Buffer.from(name, 'utf8'))
+    .digest();
+  const bytes = Buffer.from(digest.subarray(0, 16));
+  // RFC 4122 §4.3: set the version (5) and variant (10xx) bits.
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 /**
@@ -80,10 +95,7 @@ export function deterministicEventId(name: string): string {
  * Returns false when the event id already existed (an idempotent re-run):
  * the caller must then skip its once-per-detection side effects.
  */
-async function emitSystemEvent(
-  events: EventPipelineServices,
-  event: IntegritySignalDetectedEvent | ModerationCaseCreatedEvent,
-): Promise<boolean> {
+async function emitSystemEvent(events: EventPipelineServices, event: LicioEvent): Promise<boolean> {
   const registryEntry = TOPIC_REGISTRY[event.event_type];
   const { inserted } = await events.eventStore.insertMany([
     {
@@ -95,6 +107,7 @@ async function emitSystemEvent(
       retentionTier: registryEntry.retention_tier,
       payload: event as unknown as Record<string, unknown>,
       ownerUserId: null,
+      createdAt: new Date(events.now()).toISOString(),
       purgeAfter: null,
     },
   ]);
@@ -124,13 +137,47 @@ async function freezeItem(
     updatedBy: 'system:harassment_cascade',
     updatedAt: nowIso,
   });
-  // Freeze/unfreeze transitions are audit-logged (WS-E.2.3e acceptance).
+  // Freeze/unfreeze transitions are audit-logged (WS-E.2.3e acceptance) AND
+  // emitted as the §21.3 `thread.state.changed` safety-dimension event
+  // (WS-E.1.1e acceptance: "defined and emitted on safety transitions").
   await identity.audit.append({
     actorUserId: null,
     eventType: 'safety_state_change',
     targetRef: itemId,
     context: { setting: 'safety_state', previous_value: state, new_value: transition.next },
   });
+  await emitThreadSafetyStateChanged(events, itemId, state, transition.next, nowIso);
+}
+
+/**
+ * Emit the safety-dimension `thread.state.changed` event for an item. The
+ * item is the story; the v0 demo content model maps threads 1:1 onto stories
+ * (the distinct thread id arrives with WS-G), so both ids carry the item id.
+ */
+async function emitThreadSafetyStateChanged(
+  events: EventPipelineServices,
+  itemId: string,
+  oldState: string,
+  newState: string,
+  nowIso: string,
+): Promise<void> {
+  await emitSystemEvent(
+    events,
+    threadStateChangedEventSchema.parse({
+      event_id: randomUUID(),
+      event_type: 'thread.state.changed',
+      timestamp: nowIso,
+      schema_version: '1',
+      thread_id: itemId,
+      story_id: itemId,
+      state_dimension: 'safety',
+      old_state: oldState,
+      new_state: newState,
+      changed_by: 'system',
+      privacy_classification: 'sensitive',
+      retention_tier: 'ranking_log',
+    }),
+  );
 }
 
 /**
@@ -266,6 +313,7 @@ export async function runPwattWindow(
     }
 
     // --- Pure scoring (v0 + v1, both SHADOW per SPEC §30.5) ---------------
+    const computeStartedAt = Date.now();
     const input: ItemWindowInput = {
       itemId: item.itemId,
       actors: [...item.actors.entries()].map(([actorKey, fold]) => toActorSummary(actorKey, fold)),
@@ -285,13 +333,17 @@ export async function runPwattWindow(
       },
       config.profiles,
     );
+    // The INTEGRATED v1 stage (WS-E.2.3a/b): the contribution-type hierarchy
+    // and per-user/per-dimension saturation curves compute the v1 components —
+    // not a reuse of the v0 values.
+    const v1Components = computePwattV1Components(input.actors, config.v1);
     const v1 = computePwattV1({
       // The freshness baseline B is supplied by the ranking layer (WS-I) at
       // decision time; stored v1 outputs carry the content-signal part only.
       baseline: 0,
       components: {
-        activeAttention: v0.activeAttention,
-        participation: v0.participation,
+        activeAttention: v1Components.activeAttention,
+        participation: v1Components.participation,
         exposureIndependence: 0, // WS-H.2 (MERI) provider integration point
         evidenceCompleteness: 0, // WS-F provider integration point
         contextCoherence: 0, // WS-H.4 (SCOI) provider integration point
@@ -304,6 +356,7 @@ export async function runPwattWindow(
         ...V1_PLACEHOLDER_PENALTY_INPUTS,
       },
     });
+    const computationTimeMs = Math.max(0, Date.now() - computeStartedAt);
     // Penalty application is logged for audit + "Under Review" surfaces.
     if (v1.penalties.applied.some((p) => p.delta > 0)) {
       events.log('pwatt.penalties.applied', {
@@ -346,6 +399,8 @@ export async function runPwattWindow(
       timeWindow: label,
       version: PWATT_V1_VERSION,
       scoreVector: {
+        active_attention: v1Components.activeAttention,
+        participation: v1Components.participation,
         positive: v1.positive,
         total: v1Stored,
         raw_total: v1.total,
@@ -359,8 +414,44 @@ export async function runPwattWindow(
       createdAt: nowIso,
     });
 
+    // WS-E.1.1e: `invariant.run.completed` marks the FIRST completion of this
+    // item/window computation (deterministic id ⇒ idempotent re-runs do not
+    // duplicate it; the InvariantOutput rows above remain the current truth).
+    await emitSystemEvent(
+      events,
+      invariantRunCompletedEventSchema.parse({
+        event_id: deterministicEventId(`invariant:PWAtt:${item.itemId}:${label}`),
+        event_type: 'invariant.run.completed',
+        timestamp: nowIso,
+        schema_version: '1',
+        invariant_type: 'PWAtt',
+        target_type: 'story',
+        target_id: item.itemId,
+        time_window: label,
+        version: PWATT_V0_VERSION,
+        score_vector: {
+          v0_score: v0Stored,
+          v0_raw: v0.score,
+          v1_total: v1Stored,
+          v1_raw: v1.total,
+        },
+        confidence: v0.confidence,
+        computation_time_ms: computationTimeMs,
+        privacy_classification: 'sensitive',
+        retention_tier: 'ranking_log',
+      }),
+    );
+
     // --- Signal Ledger population (WS-E.2.1d): identifiable actors only ----
+    // ONE canonical entry per (user, item, hour): only the 1h window writes
+    // ledger rows — the 6h/24h/7d windows would otherwise produce
+    // near-duplicate entries for the same activity. (Scores for the larger
+    // windows remain in invariant_outputs, which is their audience.)
     const ledgerEntries: SignalLedgerRecord[] = [];
+    if (size !== '1h') {
+      report.itemsScored += 1;
+      continue;
+    }
     for (const [actorKey, fold] of item.actors) {
       if (actorKey === PRIVACY_BUCKET) continue; // pseudonymous: no ledger link
       const summaryInput = toActorSummary(actorKey, fold);
@@ -384,7 +475,9 @@ export async function runPwattWindow(
           branch_depth_bucket: fold.branchDepthBucket,
           return_visit_count_bucket: summaryInput.returnVisitBucket,
           contributions: summaryInput.contributions,
-          cap_reached: summaryInput.dwellBucket === 'extended',
+          // Cap status is knowable only on the client (the §22.1 wire carries
+          // buckets, whose ceilings ARE the cap expression) — the ledger entry
+          // honestly omits it rather than guessing.
         },
         antiSignals: annotations,
         pwattScore: v0Stored,
@@ -444,17 +537,65 @@ export async function resolveItemSafetyState(
     targetRef: itemId,
     context: { setting: 'safety_state', previous_value: state, new_value: transition.next },
   });
+  await emitThreadSafetyStateChanged(
+    events,
+    itemId,
+    state,
+    transition.next,
+    new Date(events.now()).toISOString(),
+  );
   return { ok: true };
 }
 
-/** Compute every window size whose boundary completed at `nowMs`. */
-export function dueWindows(nowMs: number): Array<{ startMs: number; size: AggregationWindowSize }> {
+/**
+ * How many completed trailing windows per size the scheduler checks for
+ * freshness each tick. Coverage: ~26h of hourly windows, ~36h of 6-hour
+ * windows, ~8 days of daily windows, and ~14 days of weekly windows — so an
+ * offline-sync event up to the 7-day acceptance ceiling re-opens at least its
+ * daily and weekly windows (deeper lates fold into the larger sizes only;
+ * documented in docs/events/README.md).
+ */
+export const TRAILING_RECOMPUTE_WINDOWS: Readonly<Record<AggregationWindowSize, number>> = {
+  '1h': 26,
+  '6h': 6,
+  '24h': 8,
+  '7d': 2,
+};
+
+/**
+ * The completed windows that actually NEED (re)computation at `nowMs`: a
+ * window is due when any event in its range was RECEIVED (created_at) after
+ * the window's last computedAt — so a freshly completed window computes once,
+ * a late-arriving offline event re-opens its windows, and an unchanged window
+ * is skipped (no more hourly full recomputes of the 7-day window). Deletions
+ * do not retro-shrink already-computed anonymous aggregates by design.
+ */
+export async function windowsNeedingCompute(
+  events: EventPipelineServices,
+  nowMs: number,
+): Promise<Array<{ startMs: number; size: AggregationWindowSize }>> {
   const due: Array<{ startMs: number; size: AggregationWindowSize }> = [];
   for (const size of Object.keys(WINDOW_SIZES_MS) as AggregationWindowSize[]) {
     const sizeMs = WINDOW_SIZES_MS[size];
     const currentStart = Math.floor(nowMs / sizeMs) * sizeMs;
-    // The previous window is complete; recompute it (idempotent upserts).
-    due.push({ startMs: currentStart - sizeMs, size });
+    for (let back = 1; back <= TRAILING_RECOMPUTE_WINDOWS[size]; back += 1) {
+      const startMs = currentStart - back * sizeMs;
+      const fromIso = new Date(startMs).toISOString();
+      const toIso = new Date(startMs + sizeMs).toISOString();
+      const latestArrival = await events.eventStore.latestCreatedAtBetween(
+        SCORING_TOPICS,
+        fromIso,
+        toIso,
+      );
+      if (latestArrival === null) continue; // empty window: nothing to compute
+      const computedAt = await events.windowStore.latestComputedAt(fromIso, size);
+      // >= (not >): an arrival in the SAME millisecond as the last compute
+      // must still trigger one more (idempotent) recompute — the next
+      // computedAt is strictly later, so the loop settles immediately.
+      if (computedAt === null || Date.parse(latestArrival) >= Date.parse(computedAt)) {
+        due.push({ startMs, size });
+      }
+    }
   }
   return due;
 }

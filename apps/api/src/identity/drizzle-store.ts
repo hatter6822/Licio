@@ -206,6 +206,13 @@ export class DrizzleIdentityStore implements IdentityStore {
     return rows[0] ? rowToUser(rows[0]) : null;
   }
 
+  async getUsersByIds(userIds: readonly string[]): Promise<StoredUser[]> {
+    const validIds = userIds.filter((id) => isUuid(id));
+    if (validIds.length === 0) return [];
+    const rows = await this.#db.select().from(users).where(inArray(users.userId, validIds));
+    return rows.map((row) => rowToUser(row));
+  }
+
   async updateUser(
     userId: string,
     patch: Partial<StoredUser>,

@@ -118,7 +118,11 @@ export function createInMemoryEventPipelineServices(
   options: InMemoryEventServicesOptions = {},
 ): EventPipelineServices {
   const deadLetters = new InMemoryDeadLetterStore();
+  const checkpoints = new InMemoryConsumerCheckpointStore();
   const now = options.now ?? Date.now;
+  // Fail-closed default (SPEC §17.1): the router withholds Knomosis topics
+  // from every consumer until the crypto flag provider says otherwise.
+  const cryptoFlagEnabled = options.cryptoFlagEnabled ?? (() => false);
   return {
     eventStore: new InMemoryEventStore(),
     attentionStore: new InMemoryAttentionAggregateStore(),
@@ -127,7 +131,7 @@ export function createInMemoryEventPipelineServices(
     ledgerStore: new InMemorySignalLedgerStore(),
     safetyStore: new InMemoryItemSafetyStateStore(),
     configStore: new InMemoryPwattConfigStore(),
-    checkpoints: new InMemoryConsumerCheckpointStore(),
+    checkpoints,
     deadLetters,
     replay: new InMemoryReplayNonceStore(),
     ingestLimiter: new IngestRateLimiter(
@@ -135,11 +139,11 @@ export function createInMemoryEventPipelineServices(
       options.limits ?? { perMinute: 10, perHour: 120 },
     ),
     realtime: new InMemoryRealtimeAggregator(now),
-    router: new EventRouter({ deadLetters }),
+    router: new EventRouter({ deadLetters, checkpoints, knomosisEnabled: cryptoFlagEnabled }),
     metrics: new PipelineMetrics(),
     hooks: options.hooks ?? {},
     retention: { ...DEFAULT_RETENTION_POLICY, ...options.retention },
-    cryptoFlagEnabled: options.cryptoFlagEnabled ?? (() => false),
+    cryptoFlagEnabled,
     storyTitle: options.storyTitle ?? (() => null),
     log: options.log ?? (() => {}),
     now,
