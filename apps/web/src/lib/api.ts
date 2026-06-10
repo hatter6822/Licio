@@ -244,8 +244,11 @@ export async function updateSettings(patch: Partial<UserSettings>): Promise<User
   return parseResponse(response, userSettingsSchema);
 }
 
-export async function fetchSignalLedger(): Promise<SignalLedgerResponse> {
-  const response = await client.v1['signal-ledger'].$get();
+export async function fetchSignalLedger(cursor?: string): Promise<SignalLedgerResponse> {
+  // Owner-only (WS-E.2.1d): the server returns the session user's entries.
+  const response = await client.v1['signal-ledger'].$get({
+    query: cursor ? { cursor } : {},
+  });
   return parseResponse(response, signalLedgerResponseSchema);
 }
 

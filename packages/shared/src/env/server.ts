@@ -80,6 +80,10 @@ export const serverEnvSchema = z.object({
   SES_SECRET_ACCESS_KEY: z.string().min(1).optional(),
   SES_FROM_ADDRESS: z.string().min(3).optional(),
   SES_ENDPOINT: z.string().url({ message: 'SES_ENDPOINT must be a valid URL' }).optional(),
+  // Attention-ingestion per-user rate limits (WS-E.1.3c): env-driven so the
+  // budgets are changeable without a redeploy. Defaults per the WS-E plan.
+  EVENTS_RATE_PER_MINUTE: z.coerce.number().int().positive().default(10),
+  EVENTS_RATE_PER_HOUR: z.coerce.number().int().positive().default(120),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;

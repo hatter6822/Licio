@@ -45,18 +45,33 @@ export interface IsolationResult {
 const DEFAULT_ARTICULATION: ReadonlySet<Relation> = new Set(['public.users']);
 
 // ---------------------------------------------------------------------------
-// The explicit per-context allowlists (WS-D.3.2).  WS-E extends RANKING_CONTEXT_
-// TABLES (AttentionAggregate, InvariantOutput, ranking feature store) and may add
-// a `ranking`/`attention` schema; until then the ranking context is empty and the
-// isolation check passes trivially.  Adding a wallet/ranking table without listing
-// it here fails `assertContextsClassified` (fail-closed).
+// The explicit per-context allowlists (WS-D.3.2 / WS-E.3.1).  The ranking
+// context now lists every WS-E event/attention/scoring table, so the BFS proof
+// actively verifies the wallet↔ranking separation rather than passing
+// trivially.  Adding a wallet/ranking table without listing it here fails
+// `assertContextsClassified` (fail-closed).
 // ---------------------------------------------------------------------------
 
 /** Wallet/Knomosis bounded-context tables (financial wallet only). */
 export const WALLET_CONTEXT_TABLES: ReadonlySet<Relation> = new Set(['wallet.wallet_accounts']);
 
-/** Ranking/attention bounded-context tables (populated by WS-E). */
-export const RANKING_CONTEXT_TABLES: ReadonlySet<Relation> = new Set<Relation>([]);
+/**
+ * Ranking/attention bounded-context tables (WS-E.3.1).  These are the BFS
+ * targets of the pay-to-rank isolation proof: no FK/view join path may connect
+ * them to the wallet context (transiting `public.users` does not count — it is
+ * an articulation node that may be reached but never crossed).
+ */
+export const RANKING_CONTEXT_TABLES: ReadonlySet<Relation> = new Set<Relation>([
+  'public.events',
+  'public.attention_aggregates',
+  'public.aggregation_windows',
+  'public.invariant_outputs',
+  'public.signal_ledger_entries',
+  'public.item_safety_states',
+  'public.pwatt_config',
+  'public.event_dead_letters',
+  'public.consumer_checkpoints',
+]);
 
 /** Schemas whose every table must be classified into a context (fail-closed). */
 export const CONTEXT_SCHEMAS: readonly string[] = ['wallet'];

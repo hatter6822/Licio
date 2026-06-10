@@ -189,8 +189,12 @@ Interface-level hooks wired to follow-up workstreams:
 
 - **Contribution anonymization** — the WS-G `anonymizeContributions`
   implementation behind the injected hook (WS-D.2.4b).
-- **Attention-history purge** and the **settings-change downstream consumer** are
-  injected hooks (`purgeAttention`, `onPrivacyChange`) that WS-E implements.
+- **Attention-history purge**, **attention export**, and the **settings-change
+  downstream consumer** — CLOSED by WS-E (`docs/events/README.md`): production
+  boot wires `purgeAttention` (deletes the user's events, §22.1 aggregate rows,
+  and Signal Ledger entries), `exportAttention` (the user's own attention data
+  for the DSAR archive), and `onPrivacyChange` (a retention-preference change
+  tightens existing purge deadlines, never extends them).
 - **Client auth UI** — complete: passkey-first login/registration (WebAuthn L3
   JSON methods with a manual fallback — no client-side webauthn dependency;
   `apps/web/src/lib/webauthn.ts`), the emailed one-time code as the universal

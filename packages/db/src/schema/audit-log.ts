@@ -31,6 +31,10 @@ export const auditEventTypeEnum = pgEnum('audit_event_type', [
   'suspicious_login',
   'account_lockout',
   'authz_denied',
+  // WS-E: retention-sweep summaries and PWAtt safety-state transitions
+  // (mirrors AUDIT_EVENT_TYPES in @licio/shared).
+  'retention_sweep',
+  'safety_state_change',
 ]);
 
 export const auditLog = pgTable(

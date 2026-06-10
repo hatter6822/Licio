@@ -370,6 +370,9 @@ function toLedgerItem(entry: SignalLedgerEntry): SignalLedgerItem {
     title: entry.story_title,
     signals,
     ...(entry.cap_reached ? { capReached: true } : {}),
+    // WS-E.2.1d: the server-generated plain-language explanation (qualitative
+    // wording only — never a number).
+    ...(entry.summary ? { summary: entry.summary } : {}),
   };
 }
 

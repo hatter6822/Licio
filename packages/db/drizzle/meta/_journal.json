@@ -22,6 +22,20 @@
       "when": 1781076469274,
       "tag": "0002_job_leases",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1781124122144,
+      "tag": "0003_ws_e_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1781125959980,
+      "tag": "0004_ws_e_audit_types",
+      "breakpoints": true
     }
   ]
 }

@@ -13,6 +13,7 @@ export * from './audit.js';
 export * from './auth-api.js';
 export * from './common.js';
 export * from './contribution.js';
+export * from './events/index.js';
 export * from './feature-flags.js';
 export * from './feed.js';
 export * from './identity-records.js';

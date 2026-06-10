@@ -26,6 +26,11 @@ export interface SignalLedgerItem {
   signals: SignalKind[];
   /** The per-item attention cap was hit; counting stopped (no number shown). */
   capReached?: boolean;
+  /**
+   * Server-generated plain-language explanation of how the signals were
+   * counted (WS-E.2.1d) — qualitative wording only, never a number or score.
+   */
+  summary?: string;
 }
 
 export interface SignalLedgerProps {
@@ -98,6 +103,7 @@ export function SignalLedger({
                 <ItemHeading id={itemTitleId} className="text-base font-medium text-ink">
                   {item.title}
                 </ItemHeading>
+                {item.summary ? <p className="text-sm text-ink-muted">{item.summary}</p> : null}
                 <ul className="flex flex-col gap-1">
                   {item.signals.map((signal) => {
                     const copy = SIGNAL_COPY[signal];
