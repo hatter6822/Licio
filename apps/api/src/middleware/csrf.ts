@@ -138,14 +138,24 @@ function constantTimeCompare(a: string, b: string): boolean {
 
 function getSessionId(cookieHeader: string | undefined): string | undefined {
   if (!cookieHeader) return undefined;
-  const match = cookieHeader.match(/(?:^|;\s*)__Host-session=([^;]+)/);
+  // Prefer the WS-D session cookie (`__Host-sid`); fall back to the WS-C name.
+  const match = cookieHeader.match(/(?:^|;\s*)__Host-(?:sid|session)=([^;]+)/);
   return match?.[1];
 }
 
 // Telemetry/RUM ingest is non-state-changing analytics delivered by `sendBeacon`
 // (which cannot set a CSRF header); it is exempt like the CSP report endpoint.
 const EXEMPT_PATHS = new Set(['/health', '/api/security/csp-report', '/v1/telemetry']);
+// WS-D identity/privacy endpoints rely on `SameSite=Strict` + the opaque session
+// model (and a per-flow `login_attempt_id` binding) as the CSRF defense, so they do
+// not use the WS-C double-submit token (WS-D.1.3b). Pre-auth flows (login/register)
+// have no session to scope a token against in any case.
+const EXEMPT_PREFIXES = ['/v1/auth/', '/v1/privacy/'];
 const STATE_CHANGING_METHODS = new Set(['POST', 'PATCH', 'DELETE', 'PUT']);
+
+function isCsrfExempt(path: string): boolean {
+  return EXEMPT_PATHS.has(path) || EXEMPT_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
 
 export function csrfTokenRoute(): MiddlewareHandler {
   return async (c) => {
@@ -172,7 +182,7 @@ export function csrfMiddleware(): MiddlewareHandler {
       return;
     }
 
-    if (EXEMPT_PATHS.has(c.req.path)) {
+    if (isCsrfExempt(c.req.path)) {
       await next();
       return;
     }
