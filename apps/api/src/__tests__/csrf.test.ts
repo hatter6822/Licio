@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
 import {
   getTokenStore,
@@ -264,5 +264,113 @@ describe('CSRF protection', () => {
       },
     });
     expect(deleteRes.status).toBe(403);
+  });
+});
+
+// The WS-D identity/privacy endpoints are exempt from the double-submit token
+// (they rely on SameSite=Strict + the opaque session). SameSite=Strict still
+// sends the session cookie on SAME-SITE requests, so a malicious sibling
+// subdomain could otherwise form-POST to a token-exempt endpoint with the
+// victim's cookie attached. The Origin/Referer allowlist closes that gap: it
+// runs for EVERY state-changing request, including the token-exempt ones, and
+// rejects any present-but-non-canonical Origin/Referer. These tests lock that
+// defense in (regression guard for PR #26's same-site CSRF review).
+describe('same-site CSRF: Origin/Referer allowlist on token-exempt WS-D endpoints', () => {
+  const ORIGIN_REJECTION = { error: 'Forbidden' };
+  let priorCorsOrigin: string | undefined;
+
+  beforeEach(() => {
+    priorCorsOrigin = process.env['CORS_ORIGIN'];
+    process.env['CORS_ORIGIN'] = 'https://licio.app';
+  });
+
+  afterEach(async () => {
+    if (priorCorsOrigin === undefined) delete process.env['CORS_ORIGIN'];
+    else process.env['CORS_ORIGIN'] = priorCorsOrigin;
+    await getTokenStore().clear();
+  });
+
+  it('rejects a token-exempt POST carrying a sibling-subdomain Origin', async () => {
+    const app = createApp();
+    const res = await app.request('/v1/auth/email/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'https://evil.licio.app' },
+      body: JSON.stringify({ email: 'a@example.com' }),
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual(ORIGIN_REJECTION);
+  });
+
+  it('rejects an authenticated WS-D action (export creation) from a sibling subdomain BEFORE auth', async () => {
+    // The reviewer's example: a no-body authenticated POST. The Origin gate
+    // runs ahead of the route's auth middleware, so the request is refused at
+    // the CSRF layer (403 Forbidden), never reaching the handler.
+    const app = createApp();
+    const res = await app.request('/v1/privacy/export', {
+      method: 'POST',
+      headers: { Origin: 'https://evil.licio.app', Cookie: '__Host-sid=stolen-cookie' },
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual(ORIGIN_REJECTION);
+  });
+
+  it('rejects a sibling-subdomain Referer when the Origin header is absent', async () => {
+    const app = createApp();
+    const res = await app.request('/v1/auth/email/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Referer: 'https://evil.licio.app/page' },
+      body: JSON.stringify({ email: 'a@example.com' }),
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual(ORIGIN_REJECTION);
+  });
+
+  it('rejects a malformed Referer on a state-changing request (fail closed)', async () => {
+    const app = createApp();
+    const res = await app.request('/v1/auth/email/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Referer: 'not-a-valid-url' },
+      body: JSON.stringify({ email: 'a@example.com' }),
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual(ORIGIN_REJECTION);
+  });
+
+  it('lets the canonical Origin through the gate to the handler', async () => {
+    const app = createApp();
+    const res = await app.request('/v1/auth/email/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'https://licio.app' },
+      body: JSON.stringify({ email: 'a@example.com' }),
+    });
+    // Passed the Origin gate — the response is the handler's, NOT the gate's 403.
+    expect(res.status).not.toBe(403);
+    expect(await res.json()).not.toEqual(ORIGIN_REJECTION);
+  });
+
+  it('lets a canonical Origin reach auth on an authenticated endpoint (401, not an origin 403)', async () => {
+    const app = createApp();
+    const res = await app.request('/v1/privacy/export', {
+      method: 'POST',
+      headers: { Origin: 'https://licio.app' },
+    });
+    // The Origin gate passed; auth then rejects the unauthenticated request.
+    expect(res.status).toBe(401);
+    expect(await res.json()).not.toEqual(ORIGIN_REJECTION);
+  });
+
+  it('allows a header-less token-exempt request (non-browser client is not a CSRF vector)', async () => {
+    // A browser ALWAYS sends Origin on a cross-origin POST, so the only way to
+    // reach here with neither header is a non-browser client, which cannot be a
+    // CSRF vector (it would already need the cookie). Allowing it avoids
+    // breaking server-to-server callers without opening a CSRF hole.
+    const app = createApp();
+    const res = await app.request('/v1/auth/email/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'a@example.com' }),
+    });
+    expect(res.status).not.toBe(403);
+    expect(await res.json()).not.toEqual(ORIGIN_REJECTION);
   });
 });

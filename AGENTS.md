@@ -34,11 +34,26 @@ karma scores, follower counts, or reaction bars — enforced at the
 type level, runtime, and CI (the no-applause static gate).
 
 **Current status.**  Workstreams WS-0 (repository foundation), WS-A
-(doctrine and policy), WS-B (design system), and WS-C (PWA client
-application) are complete.  Workstreams WS-D through WS-P are planned
-(planning documents exist under `docs/planning/`; implementation not
-yet started).  See "Implementation roadmap" below for the full status
-table.
+(doctrine and policy), WS-B (design system), WS-C (PWA client
+application), and WS-D (identity, accounts, and privacy) are
+**complete**.  WS-D ships the WebAuthn-first/passwordless authentication
+foundation, secure server-side sessions, RBAC + audit log, age gating,
+user-facing privacy controls (settings, DSAR export with an encrypted
+signed-URL archive, and account deletion with a 30-day grace + hard
+purge), steward TOTP MFA, and database-level wallet isolation
+(`docs/identity/README.md`) — with production bindings (Postgres/Drizzle
+identity/audit stores, Redis session/ephemeral/rate-limit stores, a
+leased distributed privacy scheduler, an S3-compatible export-archive
+store) and the full client surface (passkey-first login/registration,
+the `/profile/security` management page, and real data-rights flows with
+step-up gating).  Email delivery has a production SES binding (SigV4
+over fetch, all-or-none `SES_*` env group) behind the fail-closed
+`Mailer` selection.  WS-D residuals tracked elsewhere: WS-E/WS-G
+injected hooks and browser-level auth E2E (needs a BFF-in-the-loop
+harness; WS-P).
+Workstreams WS-E through WS-P are planned (planning documents
+exist under `docs/planning/`; implementation not yet started).  See
+"Implementation roadmap" below for the full status table.
 
 ## Build and run
 
@@ -136,7 +151,8 @@ licio/
 ├── pnpm-workspace.yaml          -- pnpm workspace definition
 ├── tsconfig.json                -- root TypeScript config
 ├── tsconfig.base.json           -- base TypeScript config (shared settings)
-├── vitest.config.ts             -- Vitest multi-project config (6 projects)
+├── vitest.config.ts             -- Vitest root run + cross-workspace coverage gate
+├── vitest.shared.ts             -- per-project test settings SSOT (root + per-workspace)
 ├── biome.json                   -- Biome linter/formatter (2.4.16)
 ├── lefthook.yml                 -- Git hooks
 ├── docker-compose.yml           -- local dev services (PostgreSQL, Redis)
@@ -166,6 +182,7 @@ licio/
 │   │       │   ├── thread/              -- ThreadBranchNav
 │   │       │   ├── reader/              -- SourceReader + readability worker
 │   │       │   ├── profile/             -- SignalLedger
+│   │       │   ├── security/            -- StepUpDialog + step-up retry gate
 │   │       │   ├── i18n/                -- TranslationDisclosure
 │   │       │   └── wellbeing/           -- FocusModeToggle, NotificationBudget
 │   │       ├── stores/                  -- Zustand state (3 stores)
@@ -176,6 +193,9 @@ licio/
 │   │       │   └── dom-sync.ts          --   DOM synchronization
 │   │       ├── lib/                     -- core utilities
 │   │       │   ├── api.ts               --   typed RPC client + CSRF serialization
+│   │       │   ├── auth-api.ts          --   WS-D auth flows (passkey/email login, signup)
+│   │       │   ├── webauthn.ts          --   WebAuthn JSON↔ArrayBuffer plumbing
+│   │       │   ├── privacy-api.ts       --   WS-D data-rights flows (export, deletion)
 │   │       │   ├── queries.ts           --   TanStack Query hooks
 │   │       │   ├── query-keys.ts        --   query-key factory
 │   │       │   ├── query-client.ts      --   SWR defaults (30s stale, 5min gc)
@@ -217,7 +237,7 @@ licio/
 │   │       │   ├── stories.$storyId.tsx --   story detail
 │   │       │   ├── threads*.tsx         --   thread views + branches
 │   │       │   ├── rooms*.tsx           --   room views + governance
-│   │       │   ├── profile*.tsx         --   profile, settings, privacy, saved
+│   │       │   ├── profile*.tsx         --   profile, settings, privacy, security, saved
 │   │       │   ├── submit.tsx           --   content submission (auth-guarded)
 │   │       │   └── -pages/              --   internal page components
 │   │       ├── design-system/           -- design-token SSOT
@@ -243,20 +263,48 @@ licio/
 │           ├── index.ts                 -- server entry point
 │           ├── routes/
 │           │   ├── v1.ts                --   /v1/* API routes
+│           │   ├── auth.ts              --   /v1/auth/* (WS-D auth surface)
+│           │   ├── privacy.ts           --   /v1/privacy/* (WS-D privacy controls)
 │           │   ├── health.ts            --   /health endpoint
 │           │   └── csp-report.ts        --   CSP violation ingest
 │           ├── middleware/
 │           │   ├── security-headers.ts  --   CSP, HSTS, Permissions-Policy
 │           │   ├── csrf.ts              --   single-use nonce + timingSafeEqual
 │           │   ├── cors.ts              --   exact-match origin validation
+│           │   ├── auth.ts              --   session validation + capability guards (WS-D.1.6a)
 │           │   └── logger.ts            --   pino request logging
+│           ├── identity/                -- WS-D identity layer (primitives + services)
+│           │   ├── crypto.ts            --   HKDF keyed hashing, token hashing, constant-time
+│           │   ├── codes.ts             --   Crockford-base32 one-time codes
+│           │   ├── totp.ts              --   RFC 6238 TOTP + recovery codes
+│           │   ├── auth-methods.ts      --   countAuthMethods last-method guard
+│           │   ├── rbac.ts              --   role policy + object-level authz
+│           │   ├── audit.ts             --   append-only audit store + redactor
+│           │   ├── rate-limit-auth.ts   --   per-account + global limiter (no IP, §19.1)
+│           │   ├── sessions.ts          --   session lifecycle, rotation, step-up, cookie
+│           │   ├── ephemeral-store.ts   --   TTL'd single-use store (take = get+delete)
+│           │   ├── webauthn.ts          --   @simplewebauthn ceremonies
+│           │   ├── siwe.ts              --   viem EIP-4361 verification
+│           │   ├── email-otp.ts         --   passwordless email login/factor
+│           │   ├── security-alerts.ts   --   suspicious-login + multi-channel alerts
+│           │   ├── secrets.ts           --   AES-256-GCM SecretBox (encrypt-at-rest)
+│           │   ├── object-store.ts      --   encrypted DSAR archive store + signed URL tokens
+│           │   ├── privacy-jobs.ts      --   DSAR export assembly + deletion-purge/sweep jobs
+│           │   ├── store.ts             --   in-memory identity data store
+│           │   ├── services.ts          --   injectable service container + config
+│           │   ├── job-lease.ts         --   distributed scheduler window claim
+│           │   ├── sigv4.ts             --   AWS SigV4 signer (node:crypto, no SDK)
+│           │   ├── object-store-s3.ts   --   S3-compatible export-archive store
+│           │   ├── mailer-ses.ts        --   production SES mailer (SigV4 over fetch)
+│           │   ├── redis-stores.ts      --   production Redis adapters (gated)
+│           │   └── drizzle-store.ts     --   production Postgres identity/audit/lease adapters (gated)
 │           ├── lib/
-│           │   ├── rate-limit.ts        --   per-IP fixed-window limiter
+│           │   ├── rate-limit.ts        --   global fixed-window budget (no client keying)
 │           │   ├── push-service.ts      --   VAPID push (session-scoped delete)
 │           │   ├── vapid.ts             --   VAPID key management
 │           │   ├── logger.ts            --   pino logger setup
 │           │   └── demo-data.ts         --   demo/seed data
-│           └── __tests__/               -- 10 test files
+│           └── __tests__/               -- WS-C + WS-D route/middleware tests
 ├── packages/
 │   ├── shared/                  -- shared schemas, types, constants (leaf)
 │   │   └── src/
@@ -271,14 +319,29 @@ licio/
 │   │       │   ├── signal-ledger.ts     --   SignalLedgerEntry
 │   │       │   ├── notifications.ts     --   Notification schemas
 │   │       │   ├── telemetry.ts         --   telemetryBatchSchema
-│   │       │   └── feature-flags.ts     --   FeatureFlagSet
+│   │       │   ├── feature-flags.ts     --   FeatureFlagSet
+│   │       │   ├── user.ts              --   User entity + age-gate (WS-D.1.1/1.7)
+│   │       │   ├── privacy-settings.ts  --   PrivacySettings + teen-floor clamp
+│   │       │   ├── identity-records.ts  --   session/credential/wallet zod mirrors
+│   │       │   ├── auth-api.ts          --   auth endpoint wire contracts
+│   │       │   ├── privacy-api.ts       --   privacy endpoint wire contracts
+│   │       │   └── audit.ts             --   audit event taxonomy
 │   │       ├── types/                   --   TypeScript type exports
 │   │       ├── enums/                   --   enumeration constants
 │   │       ├── constants/               --   shared constants
 │   │       └── env/                     --   environment variable validation
 │   ├── db/                      -- Drizzle ORM schema + migrations
+│   │   ├── drizzle/                     --   generated SQL migrations (WS-D)
 │   │   └── src/
 │   │       ├── schema/                  --   PostgreSQL table definitions
+│   │       │   ├── user.ts              --     users + JSONB + indexes/CHECK (WS-D.1.1)
+│   │       │   ├── session.ts           --     sessions, user_auth (no password), recovery codes
+│   │       │   ├── webauthn-credential.ts --   WebAuthn credentials
+│   │       │   ├── wallet-auth-credential.ts -- auth-wallet (identity context)
+│   │       │   ├── audit-log.ts         --     append-only audit log
+│   │       │   ├── privacy.ts           --     export_jobs, deletion_requests
+│   │       │   └── wallet/wallet-account.ts -- isolated financial WalletAccount
+│   │       ├── isolation.ts             --   wallet↔ranking BFS isolation (WS-D.3.2)
 │   │       ├── client.ts                --   database client initialization
 │   │       └── drizzle.config.ts        --   Drizzle configuration
 │   └── invariants/              -- invariant computation modules
@@ -590,11 +653,16 @@ Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(),
   usb=(), bluetooth=(), accelerometer=(), gyroscope=(), magnetometer=()
 ```
 
-### Rate limiting
+### Rate limiting (identity-free, SPEC §19.1)
 
-Per-IP fixed-window rate limiter for unauthenticated ingest endpoints
-(`/v1/telemetry`, `/api/security/csp-report`).  In-memory map with
-10,000-entry cap; overload → 429 rather than unbounded growth.
+The application never reads the client network address — no per-IP state
+of any kind, enforced by a static test (`no-client-address.test.ts`).
+Abuse control is layered as: per-account progressive lockouts (keyed by a
+non-reversible account ref), per-target cooldowns (one email per mailbox
+per window), and global per-endpoint fixed-window budgets
+(`/v1/telemetry`, `/api/security/csp-report`, auth minting/signup,
+deletion-cancel).  Overload → 429 + Retry-After.  Connection-level flood
+fairness is the edge/gateway's concern.
 
 ## Linting limitations
 
@@ -639,6 +707,8 @@ Biome 2.x does not support:
 | `drizzle-orm` ^0.45 | db | type-safe SQL (parameterized queries only) |
 | `pino` ^10.3 | api | structured logging (redaction-aware) |
 | `ioredis` ^5.11 | api | Redis client (CSRF token store, sessions) |
+| `@simplewebauthn/server` ^13.3 | api | WebAuthn attestation/assertion verification (WS-D) |
+| `viem` ^2.52 | api | EIP-4361 / SIWE signature verification (WS-D wallet sign-in) |
 
 No Lean or Rust toolchains.  This is a pure TypeScript monorepo.
 
@@ -653,7 +723,7 @@ Status:
 | WS-A | Doctrine and policy | Complete |
 | WS-B | Design system | Complete |
 | WS-C | PWA client application | Complete |
-| WS-D | Identity and privacy | Planned |
+| WS-D | Identity and privacy | Complete |
 | WS-E | Event pipeline and PWAtt scoring | Planned |
 | WS-F | Ingestion and search | Planned |
 | WS-G | Forum and conversation | Planned |
@@ -716,9 +786,12 @@ every match.
 
 ## Current development status
 
-**Vitest configuration.**  Six test projects configured in
-`vitest.config.ts`: shared (node), db (node), invariants (node),
-api (node), web (jsdom), policy (node).  Coverage provider: V8.
+**Vitest configuration.**  Six test projects: shared (node), db (node),
+invariants (node), api (node), web (jsdom), policy (node).  Their
+settings live once in `vitest.shared.ts`; the root `vitest.config.ts`
+composes them into the unified `pnpm test` run + the cross-workspace V8
+coverage gate, and each workspace has a thin local `vitest.config.ts`
+re-using the same settings so `pnpm --filter <ws> test` runs standalone.
 Coverage threshold: 80% minimum for lines, functions, branches,
 and statements.
 
@@ -727,11 +800,16 @@ file counts at current state:
 
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
-| apps/web | ~48 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~10 | node | `pnpm --filter api test` |
-| packages/shared | ~4 | node | `pnpm --filter @licio/shared test` |
+| apps/web | ~53 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
+| apps/api | ~33 (incl. WS-D identity + routes) | node | `pnpm --filter api test` |
+| packages/shared | ~7 (incl. WS-D schemas) | node | `pnpm --filter @licio/shared test` |
+| packages/db | ~2 (isolation + gated integration) | node | via root `pnpm test` (db project) |
 | packages/invariants | ~1 | node | `pnpm --filter @licio/invariants test` |
 | scripts | ~2 | node | via root `pnpm test` (policy project) |
+
+WS-D adds **gated** integration tests (Postgres + Redis) that run only
+when `DATABASE_URL` / `REDIS_URL` are set; they are skipped in CI, which
+has no database service.  See `docs/identity/README.md`.
 
 Only monotonic growth is enforced — no global gate pins the count.
 
@@ -804,9 +882,40 @@ Documentation: `docs/pwa-client/README.md`
 | Security | Trusted Types, CSP, CSRF serialization, SW TT injection, rate limiting | Complete |
 | Performance | JS < 200 KB gz, CSS < 50 KB gz, Core Web Vitals targets, performance marks | Complete |
 
-### WS-D through WS-P
+### WS-D: Identity, accounts, and privacy
 
-Plans: `docs/planning/05-identity-and-privacy.md` through
+Plan: `docs/planning/05-identity-and-privacy.md`
+Documentation: `docs/identity/README.md`
+
+In progress.  WebAuthn-first, **passwordless always** — there is no
+password column, hashing, or reset flow anywhere.
+
+| Sub-area | Key surface | Status |
+|----------|-------------|--------|
+| Schemas | User/privacy/session/credential/wallet zod + Drizzle, migration with partial indexes/CHECK/triggers | Complete |
+| Auth | WebAuthn (`@simplewebauthn`), email-OTP, SIWE (viem); sessions, rotation, step-up, rate limiting; account-state gate at the session mint (suspended accounts never get a session) | Complete |
+| Authorization | RBAC + object-level (404-over-403), append-only audit log, fail-closed middleware | Complete |
+| Age gating | Under-13 block, teen privacy floor (server-clamped), `requireAdult` fail-closed | Complete |
+| Privacy controls | Settings get/patch (clamped/audited/propagated), attention delete, DSAR export (assemble → encrypt → expiry-capped signed token → read-time expiry + hourly sweep), account deletion + 30-day grace + hard purge (anonymize/tombstone/revoke; all archives removed) | Complete |
+| Steward MFA | TOTP enroll/verify/disable, per-session `mfa_verified`, reduced-assurance-until-MFA steward guard | Complete |
+| Wallet isolation | `wallet.wallet_accounts` schema + undirected-BFS isolation test (WS-D.3.2) | Complete |
+| Privacy | **No IP and no location are ever recorded — or even read** (SPEC §19.1): no code path reads the client address (statically tested); rate limiting is per-account + per-target-mailbox + global identity-free budgets; new-device alerts and request logs carry a coarse device descriptor only (never the full user-agent) | Complete |
+| Durable stores | `DrizzleIdentityStore`/`DrizzleAuditStore` Postgres adapters behind the same interfaces as the in-memory adapters, wired in production alongside the Redis session/ephemeral/rate-limit stores; gated integration tests run the real migration chain | Complete |
+| Job scheduler | Durable distributed privacy scheduler: every instance ticks hourly, a Postgres job lease (`job_leases`, atomic insert-or-steal) grants at most one executor per window, crashed holders self-heal via lease expiry, lease outage fails closed (read-time expiry still bounds retention) | Complete |
+| Export delivery | S3-compatible `ObjectStore` (AWS/R2/MinIO; SigV4 on `node:crypto`, pinned to the official AWS vectors — no SDK dep): bucket bodies are client-side SecretBox ciphertext, expiry enforced at read time, paginated sweep; all-or-none `S3_*` env group (partial fails boot; absent falls back in-memory with a production warning) | Complete |
+| Client auth | Login/registration page: passkey-first sign-in + signup (WebAuthn L3 JSON with manual fallback, no client webauthn dep), email-code fallback, enumeration-safe registration outcome, allowlisted post-login redirect, best-effort server-side sign-out | Complete |
+| Client security | `/profile/security`: sessions list/revoke/revoke-others, passkey add/rename/remove, email-factor add/verify/change/disable, wallet unlink, TOTP enroll → recovery codes → disable, owner activity feed; sensitive actions run through the step-up retry gate (challenge → dialog → SAME action retries) and a step-up 401 never expires the session | Complete |
+| Client data rights | Privacy page wired to the real `/v1/privacy/*`: export request → poll → step-up-gated archive download, attention-history deletion, account deletion (confirm → step-up → sign-out) with grace-period cancel on the login page (emailed `?cancel_token=` link AND deactivated re-login path) | Complete |
+| Email delivery | Production `Mailer` over the SES v2 HTTP API (SigV4 on `node:crypto`, no SDK dep; all-or-none `SES_*` env group, partial fails boot): login/verify code templates and the WS-D.2.4a deletion notice (grace window, `/login?cancel_token=…` link, irreversibility); never logs recipient/code; without SES, production still fails closed unless `ALLOW_INSECURE_NULL_MAILER=true` | Complete |
+| Residuals | WS-E/WS-G injected hooks (`purgeAttention`, `onPrivacyChange`, `anonymizeContributions`); browser-level auth E2E scenarios (the Playwright harness serves only the static preview — a BFF-in-the-loop harness lands with WS-P launch testing) | Tracked elsewhere |
+
+Pure crypto is mathematically validated: TOTP against the RFC 6238
+Appendix B vectors, real WebAuthn attestation/assertion via a pure-crypto
+software authenticator, real SIWE EOA signatures via viem.
+
+### WS-E through WS-P
+
+Plans: `docs/planning/06-event-pipeline-and-pwatt.md` through
 `docs/planning/17-experimentation-and-launch.md`
 
 Not yet started.  Read the relevant planning document and the

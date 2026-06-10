@@ -25,9 +25,9 @@
     "check:workspace-deps": "tsx scripts/check-workspace-deps.ts",
     "check:policy": "tsx scripts/check-policy.ts",
     "sbom": "tsx scripts/generate-sbom.ts",
-    "db:generate": "pnpm --filter @licio/db drizzle-kit generate",
-    "db:migrate": "pnpm --filter @licio/db drizzle-kit migrate",
-    "db:push": "pnpm --filter @licio/db drizzle-kit push",
+    "db:generate": "pnpm --filter @licio/db exec drizzle-kit generate",
+    "db:migrate": "pnpm --filter @licio/db exec drizzle-kit migrate",
+    "db:push": "pnpm --filter @licio/db exec drizzle-kit push",
     "clean": "rm -rf apps/*/dist apps/*/build packages/*/dist coverage test-results playwright-report .tsbuildinfo apps/*/.tsbuildinfo packages/*/.tsbuildinfo node_modules/.cache"
   },
   "devDependencies": {

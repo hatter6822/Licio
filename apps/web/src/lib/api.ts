@@ -114,7 +114,16 @@ async function sendRequest(
   if (IS_DEV) console.debug(`[api] ← ${response.status} ${method} ${String(input)}`);
 
   if (response.status === 401 && String(input).includes('/v1/')) {
-    useAuthStore.getState().expireSession();
+    // A step-up challenge (WS-D.1.3e) is ALSO a 401, but the session is alive —
+    // only a true authentication failure may flip the store to session-expired.
+    let stepUp = false;
+    try {
+      const body: unknown = await response.clone().json();
+      stepUp = (body as { status?: unknown } | null)?.status === 'step_up_required';
+    } catch {
+      // Non-JSON 401 body: treat as an authentication failure.
+    }
+    if (!stepUp) useAuthStore.getState().expireSession();
   }
   return response;
 }

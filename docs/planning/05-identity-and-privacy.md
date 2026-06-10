@@ -6,6 +6,43 @@
 **Wave:** 2-3
 **Estimated duration:** 3-4 weeks
 
+> **Status: in progress (completion pass).** The identity foundation, the full
+> authentication surface (passkey-first signup, email-OTP, SIWE incl. contract
+> wallets), credential management with the last-method guard, per-session steward
+> TOTP MFA, session rotation + a real step-up endpoint, rate limiting, the export
+> and deletion pipelines, durable Postgres/Redis adapters, and the PWA identity UI
+> are implemented and tested. See `docs/identity/README.md` for the reference.
+>
+> **⚠ PRIVACY AMENDMENT (overrides every task below).** Per a project-wide
+> data-minimization mandate (SPEC Section 19.1), Licio **never records, persists,
+> or logs user IP addresses or any geolocation** — including coarse country-level
+> location. Therefore, throughout this document:
+> - **Remove `ip_hash`** from the `sessions` table/projection and the Redis
+>   session record. Sessions store no IP in any form.
+> - **Remove all geolocation / country / MaxMind / IP-to-country** behavior. The
+>   active-sessions list shows a coarse **device descriptor** and timestamps only,
+>   never a location. There is no geo-IP database or dependency.
+> - **Suspicious-login → new-device alerts only.** `sendSecurityAlert` and the
+>   detector compare a coarse device descriptor (e.g. "iOS/Safari"), never a
+>   country, location, or IP. Alerts read "New sign-in on [device type] via
+>   [method]".
+> - **Rate limiting is identity-free — the application never reads the client
+>   address at all** (strengthened: not even transiently/hashed; no code path
+>   reads the forwarded-address headers or socket address, enforced by a static
+>   test). The per-IP limiter dimensions in the task texts below (e.g. "50 IP →
+>   15m" in WS-D.1.3d, `authfail:ip:{ip_hash}` keys) are REPLACED by: per-account
+>   progressive lockouts, per-target-mailbox issuance cooldowns (one email per
+>   mailbox per window — the anti-mail-bombing defense), and a GLOBAL per-process
+>   failure backstop + per-endpoint budgets that distinguish no one.
+>   Connection-level flood fairness belongs to the edge/gateway, outside the
+>   application boundary.
+> - **Audit metadata** carries a coarse device descriptor + method + setting
+>   diffs only — no IP, no location.
+> - **The under-13 retry deterrent is client-side only** (a short cooldown); there
+>   is no server-side per-IP soft signal.
+> - **`user_agent_truncated` is not stored;** only a coarse, derived device
+>   descriptor is kept (minimal data).
+
 ---
 
 ## Overview
@@ -230,9 +267,9 @@ export const sessions = pgTable("sessions", {
   userId: uuid("user_id").notNull().references(() => users.userId, { onDelete: "cascade" }),
   credentialRef: bytea("credential_ref"), // nullable: WebAuthn or auth-wallet credential id, per authMethod
   authMethod: authMethodEnum("auth_method").notNull(),
-  ipHash: bytea("ip_hash").notNull(), // HMAC(serverKey, ip)
-  userAgentTruncated: text("user_agent_truncated"),
-  deviceLabel: text("device_label"),
+  // NO ip_hash and NO user_agent_truncated (privacy amendment): sessions record
+  // no IP in any form, and only a coarse derived device descriptor.
+  deviceLabel: text("device_label"), // coarse descriptor only, e.g. "iOS/Safari"
   rememberMe: boolean("remember_me").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   lastActiveAt: timestamp("last_active_at", { withTimezone: true }).notNull().defaultNow(),
@@ -470,11 +507,11 @@ The cookie stores the *raw* opaque token; Redis and the projection store only it
 **Ref:** Section 25.3
 
 **Description:**
-Implement `GET /v1/auth/sessions` (list active sessions for the authenticated user) and `DELETE /v1/auth/sessions/:sessionId` (revoke a specific session). The session list includes: a non-reversible display reference (truncated hash), device label, last active timestamp, creation timestamp, approximate location (country only, derived via the same local geo lookup as WS-D.1.4d at creation time and stored as a country code, not recomputed from a stored IP), and whether it is the current session. Revoking a session deletes its Redis key immediately and stamps `revoked_at` on the projection row. Revoking the current session also clears the session cookie. Add `last_active_at` updates on each authenticated request (throttled to once per 5 minutes to reduce Redis/DB writes). Implement "revoke all other sessions" as a convenience action.
+Implement `GET /v1/auth/sessions` (list active sessions for the authenticated user) and `DELETE /v1/auth/sessions/:sessionId` (revoke a specific session). The session list includes: a non-reversible display reference (truncated hash), a coarse device descriptor, last active timestamp, creation timestamp, and whether it is the current session. **Per the privacy amendment there is NO location field** — no country, no geo lookup, no IP. Revoking a session deletes its Redis key immediately and stamps `revoked_at` on the projection row. Revoking the current session also clears the session cookie. Add `last_active_at` updates on each authenticated request (throttled to once per 5 minutes to reduce Redis/DB writes). Implement "revoke all other sessions" as a convenience action.
 
 **Acceptance criteria:**
 - `GET /v1/auth/sessions` returns only the authenticated user's sessions.
-- Each session shows a device label, last-active time, and country-level location.
+- Each session shows a coarse device descriptor and last-active time (no location, per the privacy amendment).
 - Revoking a session immediately invalidates it (subsequent requests with that session are rejected within one request cycle -- the Redis key is gone).
 - Revoking the current session clears the cookie and the client redirects to login.
 - "Revoke all other sessions" invalidates all sessions except the current one.
@@ -490,7 +527,7 @@ Implement `GET /v1/auth/sessions` (list active sessions for the authenticated us
 **Security/Privacy:**
 - Object-level authorization: a user manages only their own sessions; cross-user references return 404.
 - Revocation is immediate (Redis delete), not deferred to TTL.
-- The session list exposes no full token, no plaintext IP -- only a non-reversible reference and country-level location (Section 19 minimization).
+- The session list exposes no full token, no IP, and no location — only a non-reversible reference and a coarse device descriptor (Section 19.1 minimization).
 
 ---
 
@@ -685,7 +722,7 @@ This task shares the SIWE verification primitive (nonce store, message parse, si
 **Ref:** Section 25.3
 
 **Description:**
-Provide cross-cutting login-safety primitives and define the passwordless account-recovery posture (Section 25.3 "suspicious-login alerts" and "abuse-resistant account recovery"). This task ships the reusable `sendSecurityAlert(userId, event)` helper -- **multi-channel** because email is now optional: it delivers via email when one is on file, otherwise via Web Push (WS-C), and **always** appends to the in-app security-activity log (WS-D.1.6c) so an alert is never silently lost for a passkey-/wallet-only account. It also implements suspicious-login detection invoked by every successful sign-in path (WebAuthn WS-D.1.3a, email-OTP WS-D.1.4b, wallet WS-D.1.4c): compare the request's country-level geolocation (local MaxMind/IP-to-country DB -- no external API call carrying the user's IP) and a coarse user-agent profile against the user's recent login history (projection rows). A new country or materially different device profile raises a non-blocking alert ("New sign-in from [country] on [device type] via [method]") and logs a security event; the login is **not** blocked (the user revokes the session via WS-D.1.3c if it was not them).
+Provide cross-cutting login-safety primitives and define the passwordless account-recovery posture (Section 25.3 "suspicious-login alerts" and "abuse-resistant account recovery"). This task ships the reusable `sendSecurityAlert(userId, event)` helper -- **multi-channel** because email is now optional: it delivers via email when one is on file, otherwise via Web Push (WS-C), and **always** appends to the in-app security-activity log (WS-D.1.6c) so an alert is never silently lost for a passkey-/wallet-only account. It also implements new-device-login detection invoked by every successful sign-in path (WebAuthn WS-D.1.3a, email-OTP WS-D.1.4b, wallet WS-D.1.4c). **Per the privacy amendment, NO geolocation is used: there is no MaxMind/IP-to-country lookup, no country, and no IP.** Detection compares only a coarse device descriptor (e.g. "iOS/Safari", derived from the user-agent at sign-in, never stored as a raw UA) against the descriptors of the user's other active sessions. A device descriptor not already present raises a non-blocking alert ("New sign-in on [device type] via [method]") and logs a security event; the login is **not** blocked (the user revokes the session via WS-D.1.3c if it was not them).
 
 **Account-recovery posture (no passwords).** Because no password exists, there is no password-reset attack surface at all. Recovery is "sign in with any remaining enrolled method" (another passkey, the verified-email one-time code, or the wallet). The `countAuthMethods` last-method guard (WS-D.1.2c) plus an onboarding nudge to enroll a second factor minimize lockouts. Loss of **all** factors routes to support-mediated, identity-proofing-based recovery (deliberately out of scope here; flagged for WS-J/WS-N policy and WS-O operations) -- never a single emailed link that grants full access. This is the abuse-resistant recovery posture: no low-friction reset path for an attacker to hijack.
 
@@ -828,7 +865,7 @@ Implement role-based access control (RBAC) and object-level authorization helper
 **Ref:** Sections 25.4, 19.3
 
 **Description:**
-Implement an append-only audit log for security- and privacy-relevant events: login success/failure (without credentials, recording the `auth_method`), session create/revoke, authentication-method add/remove (passkey, email, auth-wallet), MFA enroll/verify/disable, privacy-setting change (old→new flag values), export request/download, deletion request/cancel/complete, financial wallet link/unlink, and role change. Each entry records `event_id`, `actor_user_id` (or `system`), `event_type`, `target_ref` (hashed where it is a token/session), `metadata` (minimized, no secrets, no plaintext IP -- country-level only), and `created_at`. The log is write-once (no update/delete via the application; retention/rotation handled by WS-O). A user-facing subset ("recent security activity") is exposed read-only to the account owner.
+Implement an append-only audit log for security- and privacy-relevant events: login success/failure (without credentials, recording the `auth_method`), session create/revoke, authentication-method add/remove (passkey, email, auth-wallet), MFA enroll/verify/disable, privacy-setting change (old→new flag values), export request/download, deletion request/cancel/complete, financial wallet link/unlink, and role change. Each entry records `event_id`, `actor_user_id` (or `system`), `event_type`, `target_ref` (hashed where it is a token/session), `metadata` (minimized: coarse device descriptor + auth method + setting diffs only; no secrets, no IP, no location), and `created_at`. The log is write-once (no update/delete via the application; retention/rotation handled by WS-O). A user-facing subset ("recent security activity") is exposed read-only to the account owner.
 
 **Acceptance criteria:**
 - All enumerated event types produce an audit entry.
@@ -846,7 +883,7 @@ Implement an append-only audit log for security- and privacy-relevant events: lo
 
 **Security/Privacy:**
 - Privacy-change auditability lets a user (and support) reconstruct who changed a consent flag and when (19.3 transparency).
-- Minimization in metadata keeps the audit log from becoming a secondary surveillance store (no IPs, no content, country-level location only).
+- Minimization in metadata keeps the audit log from becoming a secondary surveillance store (no IPs, no location, no content; coarse device descriptor + method only).
 - Append-only semantics support incident forensics and tamper-evidence (Section 25.4 audit logging).
 
 ---
@@ -856,14 +893,14 @@ Implement an append-only audit log for security- and privacy-relevant events: lo
 **Ref:** Section 19.4
 
 **Description:**
-Implement age gating at registration. Collect a date of birth (or a neutral age-screen that does not encourage a specific answer) before account creation completes. Derive an age band and persist only the *band* (`adult`, `teen_16_17`, `teen_13_15`) in `users.age_band_if_known` -- the raw date of birth is NOT stored long-term; it is used transiently to compute the band and then discarded (data minimization, 19.4). If the computed age is under 13, block account creation: do not create a `User` row, show an age-appropriate message, and set a short-lived client-side cooldown plus a server-side per-IP soft signal to deter trivial retry (without storing the child's data). The age screen is neutral (no hint that "13+" unlocks the product) to reduce incentive to lie.
+Implement age gating at registration. Collect a date of birth (or a neutral age-screen that does not encourage a specific answer) before account creation completes. Derive an age band and persist only the *band* (`adult`, `teen_16_17`, `teen_13_15`) in `users.age_band_if_known` -- the raw date of birth is NOT stored long-term; it is used transiently to compute the band and then discarded (data minimization, 19.4). If the computed age is under 13, block account creation: do not create a `User` row, show an age-appropriate message, and set a short-lived client-side cooldown to deter trivial retry (no server-side per-IP signal — the privacy amendment forbids IP use — and without storing the child's data). The age screen is neutral (no hint that "13+" unlocks the product) to reduce incentive to lie.
 
 **Acceptance criteria:**
 - Registration collects DOB/age before completion; only the derived band is persisted.
 - Raw DOB is not stored in the database after band derivation (verified by schema + code review; no DOB column exists).
 - Under-13 input blocks account creation -- no `User` row is created.
 - The under-13 message is age-appropriate and does not reveal the exact threshold in a way that invites immediate retry with a different date.
-- A trivial retry deterrent exists (client cooldown + per-IP soft signal) without persisting the minor's data.
+- A trivial retry deterrent exists (client-side cooldown only; no per-IP signal) without persisting the minor's data.
 - The age band is available to `requireAdult`/teen-default logic (D.1.7b/D.1.7c).
 
 **Testing:**

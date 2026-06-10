@@ -23,6 +23,8 @@ import {
   unsaveStory,
 } from '../offline/read-through.js';
 import * as api from './api.js';
+import { fetchCredentials, fetchSecurityActivity, fetchSessions } from './auth-api.js';
+import { fetchDeletionStatus, fetchExportStatus } from './privacy-api.js';
 import { cachePolicy } from './query-client.js';
 import { queryKeys } from './query-keys.js';
 
@@ -205,5 +207,55 @@ export function useUpdateNotificationPreferencesMutation() {
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: key });
     },
+  });
+}
+
+// --- WS-D account security + data rights -----------------------------------
+
+export function useAuthSessionsQuery() {
+  return useQuery({
+    queryKey: queryKeys.authSessions(),
+    queryFn: () => fetchSessions(),
+    ...cachePolicy.profile,
+  });
+}
+
+export function useAuthCredentialsQuery() {
+  return useQuery({
+    queryKey: queryKeys.authCredentials(),
+    queryFn: () => fetchCredentials(),
+    ...cachePolicy.profile,
+  });
+}
+
+export function useSecurityActivityQuery() {
+  return useQuery({
+    queryKey: queryKeys.securityActivity(),
+    queryFn: () => fetchSecurityActivity(),
+    ...cachePolicy.profile,
+  });
+}
+
+/**
+ * DSAR export-job status (WS-D.2.2): polls while the job is in flight, then
+ * stops — the signed download token in the response is minted per fetch.
+ */
+export function useExportStatusQuery(jobId: string | null) {
+  return useQuery({
+    queryKey: queryKeys.exportStatus(jobId ?? 'none'),
+    queryFn: () => fetchExportStatus(jobId as string),
+    enabled: jobId !== null,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === 'queued' || status === 'processing' ? 2_000 : false;
+    },
+  });
+}
+
+export function useDeletionStatusQuery() {
+  return useQuery({
+    queryKey: queryKeys.deletionStatus(),
+    queryFn: () => fetchDeletionStatus(),
+    ...cachePolicy.profile,
   });
 }

@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+//
+// Drizzle schema barrel.  Identity/auth/privacy tables (WS-D) live in the public
+// schema; the financial WalletAccount lives in a dedicated, isolated `wallet`
+// schema (WS-D.3).  The schema-isolation test (WS-D.3.2) proves no FK/view join
+// path bridges the wallet context and the ranking/attention context.
 
-export const placeholder = pgTable('_placeholder', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  note: text('note'),
-});
+export * from './audit-log.js';
+export * from './job-lease.js';
+export * from './privacy.js';
+export * from './session.js';
+export * from './user.js';
+export * from './wallet/wallet-account.js';
+export * from './wallet-auth-credential.js';
+export * from './webauthn-credential.js';

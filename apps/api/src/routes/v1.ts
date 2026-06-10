@@ -19,7 +19,6 @@ import {
   type AttentionIngestAck,
   attentionAggregateBatchSchema,
   attentionIngestAckSchema,
-  authStatusResponseSchema,
   branchContentSchema,
   branchIdSchema,
   contributionSchema,
@@ -68,6 +67,8 @@ import {
   setPreferences,
 } from '../lib/push-service.js';
 import { rateLimit } from '../lib/rate-limit.js';
+import { createAuthRoutes } from './auth.js';
+import { createPrivacyRoutes } from './privacy.js';
 
 /** Read the session id from the `__Host-session` cookie (or undefined). */
 function sessionIdOf(cookieHeader: string | undefined): string | undefined {
@@ -129,12 +130,9 @@ export function createV1Routes() {
         return c.json(signalLedgerResponseSchema.parse(response));
       })
 
-      // --- Auth status (session validation wired by WS-D) -------------------
-      .get('/auth/status', (c) => {
-        // No session-validation backend yet ⇒ unauthenticated. WS-D fills this in.
-        const response = authStatusResponseSchema.parse({ authenticated: false });
-        return c.json(response);
-      })
+      // --- Identity & privacy (WS-D) ----------------------------------------
+      .route('/auth', createAuthRoutes())
+      .route('/privacy', createPrivacyRoutes())
 
       // --- Settings sync (SPEC §23.2 /feed/preferences) ---------------------
       .get('/settings', (c) => {

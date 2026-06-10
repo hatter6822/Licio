@@ -2,25 +2,11 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { createLogger } from '../lib/logger.js';
+import { rateLimit } from '../lib/rate-limit.js';
 
 const logger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
 
-const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
-const RATE_LIMIT = 100;
-const RATE_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX_ENTRIES = 10_000;
 const MAX_BODY_SIZE = 10_240;
-
-function evictExpiredEntries(): void {
-  const now = Date.now();
-  for (const [ip, entry] of rateLimitMap) {
-    if (now >= entry.resetAt) {
-      rateLimitMap.delete(ip);
-    }
-  }
-}
-
-setInterval(evictExpiredEntries, RATE_WINDOW_MS).unref();
 
 const cspReportSchema = z.object({
   'csp-report': z
@@ -38,26 +24,9 @@ const cspReportSchema = z.object({
 
 export const cspReportRoute = new Hono();
 
-cspReportRoute.post('/', async (c) => {
-  const ip = c.req.header('x-forwarded-for') ?? 'unknown';
-  const now = Date.now();
-
-  const entry = rateLimitMap.get(ip);
-  if (entry && now < entry.resetAt) {
-    if (entry.count >= RATE_LIMIT) {
-      return c.json({ error: 'Rate limit exceeded' }, 429);
-    }
-    entry.count++;
-  } else {
-    if (rateLimitMap.size >= RATE_LIMIT_MAX_ENTRIES) {
-      evictExpiredEntries();
-    }
-    if (rateLimitMap.size >= RATE_LIMIT_MAX_ENTRIES) {
-      return c.json({ error: 'Rate limit exceeded' }, 429);
-    }
-    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
-  }
-
+// GLOBAL (identity-free) ingest budget — nothing about the requester is read
+// or keyed on (SPEC §19.1); the edge owns connection-level flood fairness.
+cspReportRoute.post('/', rateLimit({ limit: 100, windowMs: 60_000 }), async (c) => {
   const contentType = c.req.header('content-type') ?? '';
   if (
     !contentType.includes('application/csp-report') &&

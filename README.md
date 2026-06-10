@@ -8,6 +8,7 @@ Implemented workstreams:
 - **WS-A** — Doctrine and policy documents ([`docs/policy/`](docs/policy/)).
 - **WS-B** — PWA UX and design system ([`docs/design-system/README.md`](docs/design-system/README.md)).
 - **WS-C** — PWA client application: routing, client state, type-safe data path, service worker/offline store, push notifications, in-browser signal processing, and performance budgets ([`docs/pwa-client/README.md`](docs/pwa-client/README.md)).
+- **WS-D** — Identity, accounts, and privacy: WebAuthn-first passwordless authentication (passkeys, email one-time codes, adult-only Sign-In with Ethereum), secure server-side sessions, RBAC and an append-only audit log, age gating with teen privacy floors, user-facing privacy controls (DSAR export, attention deletion, account deletion with a 30-day grace), database-level wallet isolation, production Postgres/Redis/S3 bindings, and the client login + account-security surface ([`docs/identity/README.md`](docs/identity/README.md)).
 
 ## What is included in WS-0
 

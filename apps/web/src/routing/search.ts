@@ -23,9 +23,12 @@ export const threadSearchSchema = z.object({
 });
 export type ThreadSearch = z.infer<typeof threadSearchSchema>;
 
-/** Post-login redirect target, preserved across the login flow. */
+/** Post-login redirect target, preserved across the login flow.  The optional
+ *  `cancel_token` carries the emailed single-use deletion-cancellation token
+ *  (WS-D.2.4a) — the email's link lands on /login?cancel_token=… . */
 export const loginSearchSchema = z.object({
   redirect: z.string().optional().catch(undefined),
+  cancel_token: z.string().optional().catch(undefined),
 });
 export type LoginSearch = z.infer<typeof loginSearchSchema>;
 
