@@ -14,7 +14,7 @@ import { AuthRateLimiter, InMemoryAuthRateLimitStore } from './rate-limit-auth.j
 import { createLocalSecretBox, type SecretBox } from './secrets.js';
 import { InMemorySessionStore, type SessionStore } from './sessions.js';
 import type { SiweConfig } from './siwe.js';
-import { IdentityStore } from './store.js';
+import { type IdentityStore, InMemoryIdentityStore } from './store.js';
 import type { WebAuthnConfig } from './webauthn.js';
 
 export interface IdentityConfig {
@@ -184,7 +184,7 @@ export function identityConfigFromEnv(env: {
 export function createInMemoryIdentityServices(config: IdentityConfig): IdentityServices {
   return {
     config,
-    store: new IdentityStore(),
+    store: new InMemoryIdentityStore(),
     sessions: new InMemorySessionStore(),
     challenges: new InMemoryEphemeralStore(),
     otp: new InMemoryEphemeralStore(),
@@ -244,14 +244,14 @@ export function buildIdentityServicesFromEnv(
 }
 
 /** Build the auth-method inventory for the last-method guard / verified check. */
-export function authMethodInventory(
+export async function authMethodInventory(
   services: IdentityServices,
   userId: string,
-): AuthMethodInventory {
-  const auth = services.store.getAuth(userId);
+): Promise<AuthMethodInventory> {
+  const auth = await services.store.getAuth(userId);
   return {
-    passkeys: services.store.listWebauthn(userId).length,
+    passkeys: (await services.store.listWebauthn(userId)).length,
     emailVerified: auth?.emailVerified ?? false,
-    authWallets: services.store.listWalletAuth(userId).length,
+    authWallets: (await services.store.listWalletAuth(userId)).length,
   };
 }

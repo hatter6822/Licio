@@ -79,7 +79,7 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           if (!gate.allowed) {
             return c.json(err('age_restricted', 'We are unable to create an account.'), 403);
           }
-          if (services.store.getUserByHandle(body.handle)) {
+          if (await services.store.getUserByHandle(body.handle)) {
             return c.json(err('handle_taken', 'That handle is unavailable.'), 409);
           }
           // A temporary id binds the WebAuthn challenge to this signup attempt; the
@@ -123,7 +123,7 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           const rawPending = await services.challenges.take(pendingKey(attemptId));
           if (!rawPending) return c.json(err('registration_failed', 'Signup expired.'), 400);
           const pending = JSON.parse(rawPending) as PendingSignup;
-          if (services.store.getUserByHandle(pending.handle)) {
+          if (await services.store.getUserByHandle(pending.handle)) {
             return c.json(err('handle_taken', 'That handle is unavailable.'), 409);
           }
 
@@ -136,7 +136,7 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
             return c.json(err('registration_failed', 'Could not register passkey.'), 400);
 
           const teen = isMinorBand(pending.ageBand);
-          const user = services.store.createUser({
+          const user = await services.store.createUser({
             handle: pending.handle,
             displayName: pending.displayName,
             email: null,
@@ -148,7 +148,7 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
             reputationSummary: emptyReputationSummary(),
             roles: ['user'],
           });
-          services.store.addWebauthn({
+          await services.store.addWebauthn({
             credentialId: result.credential.credentialId,
             userId: user.userId,
             publicKey: result.credential.publicKey,
@@ -197,17 +197,17 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
         // notifies the existing owner instead of creating a second account.  The
         // notice is under the same per-mailbox cooldown as code issuance, so
         // repeated duplicate registrations cannot bomb the owner's inbox.
-        if (services.store.getUserByEmail(body.email)) {
+        if (await services.store.getUserByEmail(body.email)) {
           if (await canResend(services.otp, `notice:${accountRefForEmail(services, body.email)}`)) {
             await services.mailer.sendNotice(body.email, 'duplicate_registration');
           }
           return c.json(registeredAgeBandSchema.parse({ age_band: gate.band }));
         }
-        if (services.store.getUserByHandle(body.handle)) {
+        if (await services.store.getUserByHandle(body.handle)) {
           return c.json(err('handle_taken', 'That handle is unavailable.'), 409);
         }
         const teen = isMinorBand(gate.band);
-        const user = services.store.createUser({
+        const user = await services.store.createUser({
           handle: body.handle,
           displayName: body.display_name,
           email: body.email,
@@ -251,23 +251,26 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           );
           if (!result.ok) return c.json(err('invalid_code', 'Invalid or expired code.'), 400);
           const now = new Date().toISOString();
-          const pending = services.store.getAuth(auth.userId)?.pendingEmail ?? null;
+          const pending = (await services.store.getAuth(auth.userId))?.pendingEmail ?? null;
           if (pending) {
             // Promote the staged address.  Re-check uniqueness at confirm time so a
             // concurrent claim of the same email can't be force-promoted past the
             // unique index (the in-memory store does not enforce it on write).
-            if (services.store.getUserByEmail(pending)) {
-              services.store.setAuth(auth.userId, { pendingEmail: null });
+            if (await services.store.getUserByEmail(pending)) {
+              await services.store.setAuth(auth.userId, { pendingEmail: null });
               return c.json(err('email_taken', 'That email is no longer available.'), 409);
             }
-            services.store.updateUser(auth.userId, { email: pending });
-            services.store.setAuth(auth.userId, {
+            await services.store.updateUser(auth.userId, { email: pending });
+            await services.store.setAuth(auth.userId, {
               emailVerified: true,
               emailVerifiedAt: now,
               pendingEmail: null,
             });
           } else {
-            services.store.setAuth(auth.userId, { emailVerified: true, emailVerifiedAt: now });
+            await services.store.setAuth(auth.userId, {
+              emailVerified: true,
+              emailVerifiedAt: now,
+            });
           }
           await services.audit.append({
             actorUserId: auth.userId,
@@ -290,8 +293,8 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
         const services = resolve();
         const auth = c.get('auth');
         if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
-        const user = services.store.getUser(auth.userId);
-        if (!user?.email || services.store.getAuth(auth.userId)?.emailVerified) {
+        const user = await services.store.getUser(auth.userId);
+        if (!user?.email || (await services.store.getAuth(auth.userId))?.emailVerified) {
           return c.json(err('not_applicable', 'No unverified email on file.'), 400);
         }
         const accountRef = `resend:${auth.userId}`;
@@ -315,7 +318,7 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           const { email } = c.req.valid('json');
           // Generic response on a taken email (no enumeration); notify the owner —
           // under the per-mailbox cooldown so repeats cannot bomb their inbox.
-          if (services.store.getUserByEmail(email)) {
+          if (await services.store.getUserByEmail(email)) {
             if (await canResend(services.otp, `notice:${accountRefForEmail(services, email)}`)) {
               await services.mailer.sendNotice(email, 'duplicate_email_add');
             }
@@ -325,7 +328,7 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           // only) verified email until the new one proves control on /email/verify.
           // This keeps an email-only account from being stranded by a typo (the
           // last-verified-method invariant the removal endpoints already enforce).
-          services.store.setAuth(auth.userId, { pendingEmail: email });
+          await services.store.setAuth(auth.userId, { pendingEmail: email });
           const { code } = await startEmailVerification(services.otp, auth.userId);
           await services.mailer.sendCode(email, code, 'verify');
           return c.json({ status: 'sent' as const });

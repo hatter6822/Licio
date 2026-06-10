@@ -62,14 +62,14 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
   return (
     new Hono<AuthEnv>()
       // --- List enrolled credentials ----------------------------------------
-      .get('/credentials', authMiddleware(resolve), (c) => {
+      .get('/credentials', authMiddleware(resolve), async (c) => {
         const services = resolve();
         const auth = c.get('auth');
         if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
-        const userAuth = services.store.getAuth(auth.userId);
+        const userAuth = await services.store.getAuth(auth.userId);
         return c.json(
           credentialListResponseSchema.parse({
-            passkeys: services.store.listWebauthn(auth.userId).map((p) => ({
+            passkeys: (await services.store.listWebauthn(auth.userId)).map((p) => ({
               credential_id: p.credentialId,
               device_name: p.deviceName,
               device_type: p.deviceType,
@@ -77,7 +77,7 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
               created_at: p.createdAt,
               last_used_at: p.lastUsedAt,
             })),
-            wallets: services.store.listWalletAuth(auth.userId).map((w) => ({
+            wallets: (await services.store.listWalletAuth(auth.userId)).map((w) => ({
               credential_id: w.credentialId,
               address_truncated: w.addressTruncated,
               chain_id: w.chainId,
@@ -85,7 +85,7 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
               last_used_at: w.lastUsedAt,
             })),
             email: {
-              present: !!services.store.getUser(auth.userId)?.email,
+              present: !!(await services.store.getUser(auth.userId))?.email,
               verified: userAuth?.emailVerified ?? false,
             },
           }),
@@ -97,7 +97,7 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
         const services = resolve();
         const auth = c.get('auth');
         if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
-        const user = services.store.getUser(auth.userId);
+        const user = await services.store.getUser(auth.userId);
         const options = await createRegistrationOptions(
           services.challenges,
           services.config.webauthn,
@@ -105,9 +105,10 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
             userId: auth.userId,
             userName: user?.email ?? user?.handle ?? auth.userId,
             userDisplayName: user?.displayName ?? 'Licio user',
-            existingCredentials: services.store
-              .listWebauthn(auth.userId)
-              .map((c2) => ({ id: c2.credentialId, transports: c2.transports as never })),
+            existingCredentials: (await services.store.listWebauthn(auth.userId)).map((c2) => ({
+              id: c2.credentialId,
+              transports: c2.transports as never,
+            })),
           },
         );
         return c.json(options);
@@ -129,7 +130,7 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
           });
           if (!result.ok)
             return c.json(err('registration_failed', 'Could not register passkey.'), 400);
-          services.store.addWebauthn({
+          await services.store.addWebauthn({
             credentialId: result.credential.credentialId,
             userId: auth.userId,
             publicKey: result.credential.publicKey,
@@ -157,15 +158,18 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
         authMiddleware(resolve),
         zValidator('param', z.object({ credentialId: z.string().min(1) })),
         zValidator('json', z.object({ device_name: z.string().min(1).max(128) })),
-        (c) => {
+        async (c) => {
           const services = resolve();
           const auth = c.get('auth');
           if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
-          const cred = services.store.getWebauthn(c.req.valid('param').credentialId);
+          const cred = await services.store.getWebauthn(c.req.valid('param').credentialId);
           // Cross-user / missing → 404 (no existence oracle).
           if (!cred || cred.userId !== auth.userId)
             return c.json(err('not_found', 'Not found.'), 404);
-          services.store.addWebauthn({ ...cred, deviceName: c.req.valid('json').device_name });
+          await services.store.addWebauthn({
+            ...cred,
+            deviceName: c.req.valid('json').device_name,
+          });
           return c.json({ ok: true });
         },
       )
@@ -180,13 +184,13 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
           const services = resolve();
           const auth = c.get('auth');
           if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
-          const cred = services.store.getWebauthn(c.req.valid('param').credentialId);
+          const cred = await services.store.getWebauthn(c.req.valid('param').credentialId);
           if (!cred || cred.userId !== auth.userId)
             return c.json(err('not_found', 'Not found.'), 404);
-          if (isLastMethodRemoval(authMethodInventory(services, auth.userId), 'passkey')) {
+          if (isLastMethodRemoval(await authMethodInventory(services, auth.userId), 'passkey')) {
             return c.json(err('last_method', 'Set up another way to sign in first.'), 409);
           }
-          services.store.deleteWebauthn(cred.credentialId);
+          await services.store.deleteWebauthn(cred.credentialId);
           await services.audit.append({
             actorUserId: auth.userId,
             eventType: 'auth_method_remove',
@@ -207,14 +211,14 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
           const services = resolve();
           const auth = c.get('auth');
           if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
-          const cred = services.store
-            .listWalletAuth(auth.userId)
-            .find((w) => w.credentialId === c.req.valid('param').credentialId);
+          const cred = (await services.store.listWalletAuth(auth.userId)).find(
+            (w) => w.credentialId === c.req.valid('param').credentialId,
+          );
           if (!cred) return c.json(err('not_found', 'Not found.'), 404);
-          if (isLastMethodRemoval(authMethodInventory(services, auth.userId), 'wallet')) {
+          if (isLastMethodRemoval(await authMethodInventory(services, auth.userId), 'wallet')) {
             return c.json(err('last_method', 'Set up another way to sign in first.'), 409);
           }
-          services.store.deleteWalletAuth(cred.credentialId);
+          await services.store.deleteWalletAuth(cred.credentialId);
           await services.audit.append({
             actorUserId: auth.userId,
             eventType: 'auth_method_remove',
@@ -230,11 +234,11 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
         const services = resolve();
         const auth = c.get('auth');
         if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
-        if (isLastMethodRemoval(authMethodInventory(services, auth.userId), 'email')) {
+        if (isLastMethodRemoval(await authMethodInventory(services, auth.userId), 'email')) {
           return c.json(err('last_method', 'Set up another way to sign in first.'), 409);
         }
-        services.store.updateUser(auth.userId, { email: null });
-        services.store.setAuth(auth.userId, {
+        await services.store.updateUser(auth.userId, { email: null });
+        await services.store.setAuth(auth.userId, {
           emailVerified: false,
           emailVerifiedAt: null,
           pendingEmail: null,
@@ -259,9 +263,10 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
           services.config.webauthn,
           {
             challengeRef: attemptId,
-            allowCredentials: services.store
-              .listWebauthn(auth.userId)
-              .map((p) => ({ id: p.credentialId, transports: p.transports as never })),
+            allowCredentials: (await services.store.listWebauthn(auth.userId)).map((p) => ({
+              id: p.credentialId,
+              transports: p.transports as never,
+            })),
           },
         );
         c.header('Set-Cookie', buildAttemptCookie(ATTEMPT_COOKIES.stepUp, attemptId), {
@@ -281,7 +286,7 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
           const attemptId = readAttempt(c.req.header('cookie'), ATTEMPT_COOKIES.stepUp);
           if (!attemptId) return c.json(err('step_up_failed', 'Step-up failed.'), 400);
           const { response } = c.req.valid('json');
-          const cred = services.store.getWebauthn(response.id);
+          const cred = await services.store.getWebauthn(response.id);
           // The credential must belong to the CURRENT user.
           if (!cred || cred.userId !== auth.userId) {
             return c.json(err('step_up_failed', 'Step-up failed.'), 400);
@@ -297,7 +302,7 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
             },
           });
           if (!result.ok) return c.json(err('step_up_failed', 'Step-up failed.'), 400);
-          services.store.addWebauthn({ ...cred, counter: result.newCounter });
+          await services.store.addWebauthn({ ...cred, counter: result.newCounter });
           await markStepUp(services.sessions, auth.tokenHash);
           c.header('Set-Cookie', clearAttemptCookie(ATTEMPT_COOKIES.stepUp), { append: true });
           return c.json({ status: 'stepped_up' as const });
@@ -309,8 +314,8 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
         const services = resolve();
         const auth = c.get('auth');
         if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
-        const user = services.store.getUser(auth.userId);
-        if (!user?.email || !services.store.getAuth(auth.userId)?.emailVerified) {
+        const user = await services.store.getUser(auth.userId);
+        if (!user?.email || !(await services.store.getAuth(auth.userId))?.emailVerified) {
           return c.json(err('not_applicable', 'No verified email for step-up.'), 400);
         }
         // Per-account issuance cooldown (matches every other email-send path): a
@@ -387,9 +392,9 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
             services.config.masterSecret,
             result.addressLower,
           );
-          const owns = services.store
-            .listWalletAuth(auth.userId)
-            .some((w) => w.addressHash === addressHash);
+          const owns = (await services.store.listWalletAuth(auth.userId)).some(
+            (w) => w.addressHash === addressHash,
+          );
           if (!owns) return c.json(err('step_up_failed', 'Step-up failed.'), 400);
           await markStepUp(services.sessions, auth.tokenHash);
           c.header('Set-Cookie', clearAttemptCookie(ATTEMPT_COOKIES.stepUp), { append: true });

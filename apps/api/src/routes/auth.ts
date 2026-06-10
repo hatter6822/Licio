@@ -87,7 +87,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
         if (!token) return c.json(unauth);
         const validated = await validateSession(services.sessions, token);
         if (!validated) return c.json(unauth);
-        const user = services.store.getUser(validated.record.user_id);
+        const user = await services.store.getUser(validated.record.user_id);
         if (user?.accountState !== 'active') return c.json(unauth);
         return c.json(
           authStatusResponseSchema.parse({
@@ -124,7 +124,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
         // does not reveal whether the account exists.
         hashOneTimeCode(generateOneTimeCode());
 
-        const user = services.store.getUserByEmail(email);
+        const user = await services.store.getUserByEmail(email);
         const attemptId = randomUUID();
         // Send a login code to ANY account whose email matches — verified OR not.
         // Completing the code proves mailbox control and verifies the email on
@@ -176,8 +176,8 @@ function createLoginRoutes(resolve: () => IdentityServices) {
         const created = fin.session;
         // Completing the OTP proves mailbox control: verify the email if it was
         // still unverified (the stranded-signup recovery path).
-        if (!services.store.getAuth(result.userId)?.emailVerified) {
-          services.store.setAuth(result.userId, {
+        if (!(await services.store.getAuth(result.userId))?.emailVerified) {
+          await services.store.setAuth(result.userId, {
             emailVerified: true,
             emailVerifiedAt: new Date().toISOString(),
           });
@@ -189,7 +189,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
         return c.json(
           authSessionResultSchema.parse({
             status: 'authenticated',
-            user: publicUser(services.store.getUser(result.userId)),
+            user: publicUser(await services.store.getUser(result.userId)),
           }),
         );
       })
@@ -219,7 +219,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
           const attemptId = readAttempt(c.req.header('cookie'), ATTEMPT_COOKIES.webauthnLogin);
           if (!attemptId) return c.json(err('auth_failed', 'Authentication failed.'), 400);
           const { response } = c.req.valid('json');
-          const stored = services.store.getWebauthn(response.id);
+          const stored = await services.store.getWebauthn(response.id);
           const userId = stored?.userId;
           const accountKey = userId ? accountRefForUser(services, userId) : null;
           if (accountKey) {
@@ -247,7 +247,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
           if (!result.ok) {
             if (result.reason === 'counter_regression') {
               const { sendSecurityAlert } = await import('../identity/security-alerts.js');
-              const user = services.store.getUser(stored.userId);
+              const user = await services.store.getUser(stored.userId);
               await sendSecurityAlert({
                 userId: stored.userId,
                 hasEmail: !!user?.email,
@@ -263,7 +263,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
             });
             return c.json(err('auth_failed', 'Authentication failed.'), 400);
           }
-          services.store.addWebauthn({
+          await services.store.addWebauthn({
             ...stored,
             counter: result.newCounter,
             lastUsedAt: new Date().toISOString(),
@@ -285,7 +285,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
           return c.json(
             authSessionResultSchema.parse({
               status: 'authenticated',
-              user: publicUser(services.store.getUser(stored.userId)),
+              user: publicUser(await services.store.getUser(stored.userId)),
             }),
           );
         },
@@ -325,7 +325,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
           services.config.masterSecret,
           result.addressLower,
         );
-        const existing = services.store.findWalletAuthByHash(addressHash);
+        const existing = await services.store.findWalletAuthByHash(addressHash);
 
         if (existing) {
           const gate = await checkRateLimit(services, accountRefForWallet(services, addressHash));
@@ -348,7 +348,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
           return c.json(
             authSessionResultSchema.parse({
               status: 'authenticated',
-              user: publicUser(services.store.getUser(existing.userId)),
+              user: publicUser(await services.store.getUser(existing.userId)),
             }),
           );
         }
@@ -361,10 +361,10 @@ function createLoginRoutes(resolve: () => IdentityServices) {
         if (!gate.allowed || isMinorBand(gate.band)) {
           return c.json(err('adult_required', 'Wallet sign-in is adults only.'), 403);
         }
-        if (services.store.getUserByHandle(body.handle)) {
+        if (await services.store.getUserByHandle(body.handle)) {
           return c.json(err('handle_taken', 'That handle is unavailable.'), 409);
         }
-        const user = services.store.createUser({
+        const user = await services.store.createUser({
           handle: body.handle,
           displayName: body.display_name,
           email: null,
@@ -376,7 +376,7 @@ function createLoginRoutes(resolve: () => IdentityServices) {
           reputationSummary: emptyReputationSummary(),
           roles: ['user'],
         });
-        services.store.addWalletAuth({
+        await services.store.addWalletAuth({
           credentialId: randomUUID(),
           userId: user.userId,
           addressHash,

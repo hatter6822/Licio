@@ -70,7 +70,7 @@ async function ageAssurance(sid: string, ms: number) {
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   services = createInMemoryIdentityServices(CONFIG);
   setIdentityServices(services);
 });
@@ -81,9 +81,9 @@ describe('passkey-first signup', () => {
     const { verify, sid } = await passkeySignup('passkeyuser');
     expect(verify.status).toBe(200);
     expect((await readJson<{ status: string }>(verify)).status).toBe('authenticated');
-    const user = services.store.getUserByHandle('passkeyuser');
+    const user = await services.store.getUserByHandle('passkeyuser');
     expect(user?.email).toBeNull();
-    expect(services.store.listWebauthn(user?.userId as string)).toHaveLength(1);
+    expect(await services.store.listWebauthn(user?.userId as string)).toHaveLength(1);
     expect(sid.startsWith('__Host-sid=')).toBe(true);
   });
 
@@ -159,7 +159,7 @@ describe('email factor verify/resend gating', () => {
 describe('credential management + last-method guard', () => {
   it('lists, adds, renames, and removes passkeys with the last-method guard', async () => {
     const { app, sid } = await passkeySignup('creduser');
-    const userId = services.store.getUserByHandle('creduser')?.userId as string;
+    const userId = (await services.store.getUserByHandle('creduser'))?.userId as string;
 
     const list1 = await readJson<{ passkeys: unknown[] }>(
       await app.request('/v1/auth/credentials', { headers: { cookie: sid } }),
@@ -187,10 +187,10 @@ describe('credential management + last-method guard', () => {
     });
     expect(add.status).toBe(200);
     session = cookie(add, '__Host-sid') || session; // session rotated
-    expect(services.store.listWebauthn(userId)).toHaveLength(2);
+    expect(await services.store.listWebauthn(userId)).toHaveLength(2);
 
     // Rename a passkey (no rotation).
-    const first = services.store.listWebauthn(userId)[0];
+    const first = (await services.store.listWebauthn(userId))[0];
     const rename = await app.request(`/v1/auth/credentials/webauthn/${first?.credentialId}`, {
       method: 'PATCH',
       headers: headers(session),
@@ -205,16 +205,16 @@ describe('credential management + last-method guard', () => {
     });
     expect(del.status).toBe(200);
     session = cookie(del, '__Host-sid') || session;
-    expect(services.store.listWebauthn(userId)).toHaveLength(1);
+    expect(await services.store.listWebauthn(userId)).toHaveLength(1);
 
     // Removing the LAST credential is refused (last-method guard).
-    const last = services.store.listWebauthn(userId)[0];
+    const last = (await services.store.listWebauthn(userId))[0];
     const delLast = await app.request(`/v1/auth/credentials/webauthn/${last?.credentialId}`, {
       method: 'DELETE',
       headers: headers(session),
     });
     expect(delLast.status).toBe(409);
-    expect(services.store.listWebauthn(userId)).toHaveLength(1);
+    expect(await services.store.listWebauthn(userId)).toHaveLength(1);
   });
 
   it('404s a cross-user credential reference (no oracle)', async () => {
@@ -264,8 +264,8 @@ describe('step-up satisfaction', () => {
 describe('account-state login gate (fail closed at the session mint)', () => {
   it('denies a SUSPENDED account a session even with a valid passkey', async () => {
     const { app, authenticator } = await passkeySignup('suspendme');
-    const user = services.store.getUserByHandle('suspendme');
-    services.store.updateUser(user?.userId as string, { accountState: 'suspended' });
+    const user = await services.store.getUserByHandle('suspendme');
+    await services.store.updateUser(user?.userId as string, { accountState: 'suspended' });
     const sessionsBefore = (await services.sessions.listForUser(user?.userId as string)).length;
 
     const opt = await app.request('/v1/auth/webauthn/authenticate/options', {
@@ -296,7 +296,7 @@ describe('account-state login gate (fail closed at the session mint)', () => {
 
   it('denies a suspended account the email path too (post-credential proof)', async () => {
     const app = createApp();
-    const user = services.store.createUser({
+    const user = await services.store.createUser({
       handle: 'susmail',
       displayName: 'S',
       email: 'sus@example.com',
@@ -308,7 +308,7 @@ describe('account-state login gate (fail closed at the session mint)', () => {
       reputationSummary: (await import('@licio/shared')).emptyReputationSummary(),
       roles: ['user'],
     });
-    services.store.setAuth(user.userId, { emailVerified: true });
+    await services.store.setAuth(user.userId, { emailVerified: true });
     const start = await app.request('/v1/auth/email/start', {
       method: 'POST',
       headers: headers(),
@@ -331,7 +331,7 @@ describe('account-state login gate (fail closed at the session mint)', () => {
 describe('email issuance cooldown (anti-mail-bombing, §19.1-aligned)', () => {
   it('sends at most ONE login code per mailbox per window, with identical 202s', async () => {
     const app = createApp();
-    const user = services.store.createUser({
+    const user = await services.store.createUser({
       handle: 'bombme',
       displayName: 'B',
       email: 'bomb@example.com',
@@ -343,7 +343,7 @@ describe('email issuance cooldown (anti-mail-bombing, §19.1-aligned)', () => {
       reputationSummary: (await import('@licio/shared')).emptyReputationSummary(),
       roles: ['user'],
     });
-    services.store.setAuth(user.userId, { emailVerified: true });
+    await services.store.setAuth(user.userId, { emailVerified: true });
 
     const mailer = services.mailer as RecordingMailer;
     const responses: number[] = [];
@@ -363,7 +363,7 @@ describe('email issuance cooldown (anti-mail-bombing, §19.1-aligned)', () => {
 
   it('coalesces duplicate-registration notices under the same cooldown', async () => {
     const app = createApp();
-    services.store.createUser({
+    await services.store.createUser({
       handle: 'dupowner',
       displayName: 'D',
       email: 'dup@example.com',
@@ -401,7 +401,7 @@ describe('step-up email send cooldown', () => {
   it('rate-limits step-up email code sends to one per cooldown window', async () => {
     const app = createApp();
     const shared = await import('@licio/shared');
-    const user = services.store.createUser({
+    const user = await services.store.createUser({
       handle: 'stepupmail',
       displayName: 'S',
       email: 'su@example.com',
@@ -413,7 +413,7 @@ describe('step-up email send cooldown', () => {
       reputationSummary: shared.emptyReputationSummary(),
       roles: ['user'],
     });
-    services.store.setAuth(user.userId, { emailVerified: true });
+    await services.store.setAuth(user.userId, { emailVerified: true });
     const session = await createSession(services.sessions, {
       userId: user.userId,
       authMethod: 'email_otp',
@@ -453,8 +453,8 @@ describe('email account recovery + pending email change', () => {
         date_of_birth: '1990-01-01',
       }),
     });
-    const userId = services.store.getUserByEmail('stranded@example.com')?.userId as string;
-    expect(services.store.getAuth(userId)?.emailVerified).toBe(false);
+    const userId = (await services.store.getUserByEmail('stranded@example.com'))?.userId as string;
+    expect((await services.store.getAuth(userId))?.emailVerified).toBe(false);
 
     // email/start now sends a LOGIN code to the unverified-but-registered email.
     const start = await app.request('/v1/auth/email/start', {
@@ -475,7 +475,7 @@ describe('email account recovery + pending email change', () => {
     });
     expect(verify.status).toBe(200);
     // Completing the OTP proved mailbox control → the email is now verified.
-    expect(services.store.getAuth(userId)?.emailVerified).toBe(true);
+    expect((await services.store.getAuth(userId))?.emailVerified).toBe(true);
   });
 
   it('stages an email change as pending, keeping the current email verified until confirmed', async () => {
@@ -503,8 +503,8 @@ describe('email account recovery + pending email change', () => {
         }),
         '__Host-sid',
       ) || sid;
-    const userId = services.store.getUserByEmail('old@example.com')?.userId as string;
-    expect(services.store.getAuth(userId)?.emailVerified).toBe(true);
+    const userId = (await services.store.getUserByEmail('old@example.com'))?.userId as string;
+    expect((await services.store.getAuth(userId))?.emailVerified).toBe(true);
 
     // Add a NEW email → staged as pending; the current verified email is untouched.
     const add = await app.request('/v1/auth/email/add', {
@@ -513,9 +513,9 @@ describe('email account recovery + pending email change', () => {
       body: JSON.stringify({ email: 'new@example.com' }),
     });
     expect(add.status).toBe(200);
-    expect(services.store.getUser(userId)?.email).toBe('old@example.com'); // still the old one
-    expect(services.store.getAuth(userId)?.emailVerified).toBe(true); // still verified
-    expect(services.store.getAuth(userId)?.pendingEmail).toBe('new@example.com');
+    expect((await services.store.getUser(userId))?.email).toBe('old@example.com'); // still the old one
+    expect((await services.store.getAuth(userId))?.emailVerified).toBe(true); // still verified
+    expect((await services.store.getAuth(userId))?.pendingEmail).toBe('new@example.com');
 
     // Confirm the new address → promoted; pending cleared.
     const newCode = (services.mailer as RecordingMailer).codes
@@ -527,7 +527,7 @@ describe('email account recovery + pending email change', () => {
       body: JSON.stringify({ code: newCode }),
     });
     expect(confirm.status).toBe(200);
-    expect(services.store.getUser(userId)?.email).toBe('new@example.com');
-    expect(services.store.getAuth(userId)?.pendingEmail).toBeNull();
+    expect((await services.store.getUser(userId))?.email).toBe('new@example.com');
+    expect((await services.store.getAuth(userId))?.pendingEmail).toBeNull();
   });
 });

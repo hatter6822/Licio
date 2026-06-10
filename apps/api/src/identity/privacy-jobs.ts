@@ -19,9 +19,9 @@ export async function assembleExport(
   services: IdentityServices,
   userId: string,
 ): Promise<Record<string, unknown>> {
-  const user = services.store.getUser(userId);
+  const user = await services.store.getUser(userId);
   if (!user) throw new Error('export: user not found');
-  const auth = services.store.getAuth(userId);
+  const auth = await services.store.getAuth(userId);
 
   return {
     schema_version: EXPORT_SCHEMA_VERSION,
@@ -37,14 +37,14 @@ export async function assembleExport(
       created_at: user.createdAt,
     },
     authentication_methods: {
-      passkeys: services.store.listWebauthn(userId).map((p) => ({
+      passkeys: (await services.store.listWebauthn(userId)).map((p) => ({
         device_name: p.deviceName,
         device_type: p.deviceType,
         created_at: p.createdAt,
       })),
       email_factor: { present: !!user.email, verified: auth?.emailVerified ?? false },
       // Wallet links: truncated display address only — never the address hash.
-      wallets: services.store.listWalletAuth(userId).map((w) => ({
+      wallets: (await services.store.listWalletAuth(userId)).map((w) => ({
         address: w.addressTruncated,
         chain_id: w.chainId,
         created_at: w.createdAt,
@@ -73,13 +73,13 @@ export async function processExportJob(
   jobId: string,
   now: number = Date.now(),
 ): Promise<void> {
-  const job = services.store.getExportJob(jobId);
+  const job = await services.store.getExportJob(jobId);
   // Terminal states are never reprocessed; a `queued` job (incl. one bounced
   // back after a transient failure) is the only retryable input.
   if (!job || job.status === 'completed' || job.status === 'expired' || job.status === 'failed') {
     return;
   }
-  services.store.updateExportJob(jobId, { status: 'processing', progressPct: 10 });
+  await services.store.updateExportJob(jobId, { status: 'processing', progressPct: 10 });
   try {
     const archive = await assembleExport(services, job.userId);
     const expiresAt = now + EXPORT_DOWNLOAD_TTL_MS;
@@ -89,7 +89,7 @@ export async function processExportJob(
       'application/json',
       expiresAt,
     );
-    services.store.updateExportJob(jobId, {
+    await services.store.updateExportJob(jobId, {
       status: 'completed',
       progressPct: 100,
       completedAt: new Date(now).toISOString(),
@@ -98,7 +98,7 @@ export async function processExportJob(
     });
   } catch {
     const attempts = job.attempts + 1;
-    services.store.updateExportJob(jobId, {
+    await services.store.updateExportJob(jobId, {
       attempts,
       status: attempts >= MAX_EXPORT_ATTEMPTS ? 'failed' : 'queued',
     });
@@ -110,13 +110,13 @@ export async function processExportJob(
  * WS-D.2.2c).  The token's expiry is CAPPED at the archive's own 72-hour expiry,
  * so a token minted late in the window can never outlive the object it unlocks.
  */
-export function mintExportDownloadToken(
+export async function mintExportDownloadToken(
   services: IdentityServices,
   jobId: string,
   userId: string,
   now: number = Date.now(),
-): string {
-  const job = services.store.getExportJob(jobId);
+): Promise<string> {
+  const job = await services.store.getExportJob(jobId);
   const jobExpiry = job?.expiresAt ? Date.parse(job.expiresAt) : Number.POSITIVE_INFINITY;
   const expiresAt = Math.min(now + EXPORT_DOWNLOAD_TTL_MS, jobExpiry);
   return mintDownloadToken(services.config.masterSecret, jobId, userId, expiresAt);
@@ -135,8 +135,8 @@ export async function sweepExpiredExports(
   for (const key of keys) {
     await services.objectStore.delete(key);
     const jobId = key.replace(/^export\//, '');
-    if (services.store.getExportJob(jobId)) {
-      services.store.updateExportJob(jobId, { status: 'expired' });
+    if (await services.store.getExportJob(jobId)) {
+      await services.store.updateExportJob(jobId, { status: 'expired' });
     }
   }
   return keys.length;
@@ -155,18 +155,18 @@ export async function runDeletionPurge(
   services: IdentityServices,
   now: number = Date.now(),
 ): Promise<number> {
-  const due = services.store.duePurgeDeletions(now);
+  const due = await services.store.duePurgeDeletions(now);
   for (const req of due) {
     await services.anonymizeContributions?.(req.userId);
     await services.purgeAttention?.(req.userId, 'delete');
     // ALL export archives for the user (completed ones included) are removed
     // from object storage before the job rows are dropped by the tombstone.
-    for (const job of services.store.listExportJobs(req.userId)) {
+    for (const job of await services.store.listExportJobs(req.userId)) {
       await services.objectStore.delete(exportKey(job.jobId));
     }
     await revokeAllForUser(services.sessions, req.userId);
-    services.store.tombstoneUser(req.userId, now);
-    services.store.setDeletion({
+    await services.store.tombstoneUser(req.userId, now);
+    await services.store.setDeletion({
       ...req,
       state: 'deleted',
       completedAt: new Date(now).toISOString(),

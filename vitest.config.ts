@@ -31,10 +31,12 @@ export default defineConfig({
         'apps/web/src/test/**',
         'packages/db/src/client.ts',
         'packages/db/src/schema/**',
-        // Infrastructure adapters bound to live Redis: exercised by the gated
-        // integration test (REDIS_URL), not unit tests. Same precedent as
-        // `packages/db/src/client.ts`. The logic they bind to is fully covered.
+        // Infrastructure adapters bound to live Redis/Postgres: exercised by the
+        // gated integration tests (REDIS_URL / DATABASE_URL), not unit tests.
+        // Same precedent as `packages/db/src/client.ts`. The logic they bind to
+        // is fully covered.
         'apps/api/src/identity/redis-stores.ts',
+        'apps/api/src/identity/drizzle-store.ts',
       ],
       thresholds: {
         lines: 80,

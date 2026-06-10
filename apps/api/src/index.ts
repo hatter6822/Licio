@@ -4,8 +4,10 @@ import { createServer as createHttpsServer } from 'node:https';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
+import { createDbClient } from '@licio/db';
 import { validateServerEnv } from '@licio/shared/env';
 import { createApp } from './app.js';
+import { DrizzleAuditStore, DrizzleIdentityStore } from './identity/drizzle-store.js';
 import { startPrivacyScheduler } from './identity/privacy-jobs.js';
 import { AuthRateLimiter } from './identity/rate-limit-auth.js';
 import {
@@ -46,6 +48,14 @@ const identityServices = buildIdentityServicesFromEnv(env, {
   identityServices.challenges = new RedisEphemeralStore(redis, 'wachal:');
   identityServices.otp = new RedisEphemeralStore(redis, 'otp:');
   identityServices.rateLimit = new AuthRateLimiter(new RedisAuthRateLimitStore(redis));
+}
+{
+  // Durable identity + audit projection (WS-D): Postgres-backed behind the same
+  // IdentityStore/AuditStore interfaces the in-memory adapters satisfy.  The
+  // schema must be migrated (`pnpm db:migrate`) before serving traffic.
+  const db = createDbClient(env.DATABASE_URL);
+  identityServices.store = new DrizzleIdentityStore(db);
+  identityServices.audit = new DrizzleAuditStore(db);
 }
 setIdentityServices(identityServices);
 

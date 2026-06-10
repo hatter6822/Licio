@@ -6,10 +6,13 @@ import {
 } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import { identityConfigFromEnv } from '../services.js';
-import { IdentityStore } from '../store.js';
+import { type IdentityStore, InMemoryIdentityStore } from '../store.js';
 
-function newUser(store: IdentityStore, over: { handle?: string; email?: string | null } = {}) {
-  return store.createUser({
+async function newUser(
+  store: IdentityStore,
+  over: { handle?: string; email?: string | null } = {},
+) {
+  return await store.createUser({
     handle: over.handle ?? 'u',
     displayName: 'U',
     email: over.email === undefined ? 'u@example.com' : over.email,
@@ -24,44 +27,44 @@ function newUser(store: IdentityStore, over: { handle?: string; email?: string |
 }
 
 describe('IdentityStore users', () => {
-  it('creates and looks up by id, handle (case-insensitive), and email', () => {
-    const store = new IdentityStore();
-    const user = newUser(store, { handle: 'Alice', email: 'Alice@Example.com' });
-    expect(store.getUser(user.userId)?.handle).toBe('Alice');
-    expect(store.getUserByHandle('alice')?.userId).toBe(user.userId);
-    expect(store.getUserByEmail('alice@example.com')?.userId).toBe(user.userId);
-    expect(store.getUserByHandle('missing')).toBeNull();
-    expect(store.getUserByEmail('missing@example.com')).toBeNull();
+  it('creates and looks up by id, handle (case-insensitive), and email', async () => {
+    const store = new InMemoryIdentityStore();
+    const user = await newUser(store, { handle: 'Alice', email: 'Alice@Example.com' });
+    expect((await store.getUser(user.userId))?.handle).toBe('Alice');
+    expect((await store.getUserByHandle('alice'))?.userId).toBe(user.userId);
+    expect((await store.getUserByEmail('alice@example.com'))?.userId).toBe(user.userId);
+    expect(await store.getUserByHandle('missing')).toBeNull();
+    expect(await store.getUserByEmail('missing@example.com')).toBeNull();
   });
 
-  it('updates a user and bumps updatedAt; returns null for a missing user', () => {
-    const store = new IdentityStore();
-    const user = newUser(store);
-    const updated = store.updateUser(
+  it('updates a user and bumps updatedAt; returns null for a missing user', async () => {
+    const store = new InMemoryIdentityStore();
+    const user = await newUser(store);
+    const updated = await store.updateUser(
       user.userId,
       { displayName: 'Renamed' },
       Date.parse(user.createdAt) + 1000,
     );
     expect(updated?.displayName).toBe('Renamed');
     expect(updated?.updatedAt).not.toBe(user.createdAt);
-    expect(store.updateUser('missing', {})).toBeNull();
+    expect(await store.updateUser('missing', {})).toBeNull();
   });
 
-  it('seeds an empty user_auth row and updates it; setAuth on a missing user is null', () => {
-    const store = new IdentityStore();
-    const user = newUser(store);
-    expect(store.getAuth(user.userId)?.emailVerified).toBe(false);
-    store.setAuth(user.userId, { emailVerified: true });
-    expect(store.getAuth(user.userId)?.emailVerified).toBe(true);
-    expect(store.setAuth('missing', { emailVerified: true })).toBeNull();
+  it('seeds an empty user_auth row and updates it; setAuth on a missing user is null', async () => {
+    const store = new InMemoryIdentityStore();
+    const user = await newUser(store);
+    expect((await store.getAuth(user.userId))?.emailVerified).toBe(false);
+    await store.setAuth(user.userId, { emailVerified: true });
+    expect((await store.getAuth(user.userId))?.emailVerified).toBe(true);
+    expect(await store.setAuth('missing', { emailVerified: true })).toBeNull();
   });
 });
 
 describe('IdentityStore credentials', () => {
-  it('adds/lists/gets/deletes webauthn credentials', () => {
-    const store = new IdentityStore();
-    const user = newUser(store);
-    store.addWebauthn({
+  it('adds/lists/gets/deletes webauthn credentials', async () => {
+    const store = new InMemoryIdentityStore();
+    const user = await newUser(store);
+    await store.addWebauthn({
       credentialId: 'c1',
       userId: user.userId,
       publicKey: new Uint8Array([1]),
@@ -73,17 +76,17 @@ describe('IdentityStore credentials', () => {
       createdAt: new Date().toISOString(),
       lastUsedAt: null,
     });
-    expect(store.listWebauthn(user.userId)).toHaveLength(1);
-    expect(store.getWebauthn('c1')?.userId).toBe(user.userId);
-    store.deleteWebauthn('c1');
-    expect(store.listWebauthn(user.userId)).toHaveLength(0);
-    expect(store.getWebauthn('c1')).toBeNull();
+    expect(await store.listWebauthn(user.userId)).toHaveLength(1);
+    expect((await store.getWebauthn('c1'))?.userId).toBe(user.userId);
+    await store.deleteWebauthn('c1');
+    expect(await store.listWebauthn(user.userId)).toHaveLength(0);
+    expect(await store.getWebauthn('c1')).toBeNull();
   });
 
-  it('adds/finds/lists/deletes auth-wallet credentials by hash', () => {
-    const store = new IdentityStore();
-    const user = newUser(store);
-    store.addWalletAuth({
+  it('adds/finds/lists/deletes auth-wallet credentials by hash', async () => {
+    const store = new InMemoryIdentityStore();
+    const user = await newUser(store);
+    await store.addWalletAuth({
       credentialId: 'w1',
       userId: user.userId,
       addressHash: 'hash-abc',
@@ -93,35 +96,35 @@ describe('IdentityStore credentials', () => {
       createdAt: new Date().toISOString(),
       lastUsedAt: null,
     });
-    expect(store.findWalletAuthByHash('hash-abc')?.userId).toBe(user.userId);
-    expect(store.findWalletAuthByHash('nope')).toBeNull();
-    expect(store.listWalletAuth(user.userId)).toHaveLength(1);
-    store.deleteWalletAuth('w1');
-    expect(store.listWalletAuth(user.userId)).toHaveLength(0);
+    expect((await store.findWalletAuthByHash('hash-abc'))?.userId).toBe(user.userId);
+    expect(await store.findWalletAuthByHash('nope')).toBeNull();
+    expect(await store.listWalletAuth(user.userId)).toHaveLength(1);
+    await store.deleteWalletAuth('w1');
+    expect(await store.listWalletAuth(user.userId)).toHaveLength(0);
   });
 });
 
 describe('IdentityStore export jobs + deletions', () => {
-  it('tracks one active job, updates it, and returns null for missing', () => {
-    const store = new IdentityStore();
-    const user = newUser(store);
-    expect(store.activeExportJob(user.userId)).toBeNull();
-    const job = store.createExportJob(user.userId);
-    expect(store.activeExportJob(user.userId)?.jobId).toBe(job.jobId);
-    const done = store.updateExportJob(job.jobId, { status: 'completed', progressPct: 100 });
+  it('tracks one active job, updates it, and returns null for missing', async () => {
+    const store = new InMemoryIdentityStore();
+    const user = await newUser(store);
+    expect(await store.activeExportJob(user.userId)).toBeNull();
+    const job = await store.createExportJob(user.userId);
+    expect((await store.activeExportJob(user.userId))?.jobId).toBe(job.jobId);
+    const done = await store.updateExportJob(job.jobId, { status: 'completed', progressPct: 100 });
     expect(done?.status).toBe('completed');
     // A completed job is no longer "active".
-    expect(store.activeExportJob(user.userId)).toBeNull();
-    expect(store.getExportJob(job.jobId)?.progressPct).toBe(100);
-    expect(store.updateExportJob('missing', {})).toBeNull();
-    expect(store.getExportJob('missing')).toBeNull();
+    expect(await store.activeExportJob(user.userId)).toBeNull();
+    expect((await store.getExportJob(job.jobId))?.progressPct).toBe(100);
+    expect(await store.updateExportJob('missing', {})).toBeNull();
+    expect(await store.getExportJob('missing')).toBeNull();
   });
 
-  it('stores and reads deletion requests', () => {
-    const store = new IdentityStore();
-    const user = newUser(store);
-    expect(store.getDeletion(user.userId)).toBeNull();
-    store.setDeletion({
+  it('stores and reads deletion requests', async () => {
+    const store = new InMemoryIdentityStore();
+    const user = await newUser(store);
+    expect(await store.getDeletion(user.userId)).toBeNull();
+    await store.setDeletion({
       userId: user.userId,
       state: 'grace_period',
       requestedAt: new Date().toISOString(),
@@ -129,15 +132,15 @@ describe('IdentityStore export jobs + deletions', () => {
       cancelledAt: null,
       completedAt: null,
     });
-    expect(store.getDeletion(user.userId)?.state).toBe('grace_period');
+    expect((await store.getDeletion(user.userId))?.state).toBe('grace_period');
   });
 });
 
 describe('IdentityStore.purgeUser', () => {
-  it('removes the user and every dependent record (complete removal)', () => {
-    const store = new IdentityStore();
-    const user = newUser(store);
-    store.addWebauthn({
+  it('removes the user and every dependent record (complete removal)', async () => {
+    const store = new InMemoryIdentityStore();
+    const user = await newUser(store);
+    await store.addWebauthn({
       credentialId: 'c1',
       userId: user.userId,
       publicKey: new Uint8Array([1]),
@@ -149,7 +152,7 @@ describe('IdentityStore.purgeUser', () => {
       createdAt: new Date().toISOString(),
       lastUsedAt: null,
     });
-    store.addWalletAuth({
+    await store.addWalletAuth({
       credentialId: 'w1',
       userId: user.userId,
       addressHash: 'h',
@@ -159,19 +162,19 @@ describe('IdentityStore.purgeUser', () => {
       createdAt: new Date().toISOString(),
       lastUsedAt: null,
     });
-    store.createExportJob(user.userId);
+    await store.createExportJob(user.userId);
 
-    store.purgeUser(user.userId);
-    expect(store.getUser(user.userId)).toBeNull();
-    expect(store.getAuth(user.userId)).toBeNull();
-    expect(store.listWebauthn(user.userId)).toHaveLength(0);
-    expect(store.listWalletAuth(user.userId)).toHaveLength(0);
-    expect(store.activeExportJob(user.userId)).toBeNull();
+    await store.purgeUser(user.userId);
+    expect(await store.getUser(user.userId)).toBeNull();
+    expect(await store.getAuth(user.userId)).toBeNull();
+    expect(await store.listWebauthn(user.userId)).toHaveLength(0);
+    expect(await store.listWalletAuth(user.userId)).toHaveLength(0);
+    expect(await store.activeExportJob(user.userId)).toBeNull();
   });
 });
 
 describe('identityConfigFromEnv', () => {
-  it('derives rpID/domain/uri from the canonical origin', () => {
+  it('derives rpID/domain/uri from the canonical origin', async () => {
     const config = identityConfigFromEnv({
       SESSION_SECRET: 'x'.repeat(40),
       CORS_ORIGIN: 'https://licio.app/',
@@ -183,7 +186,7 @@ describe('identityConfigFromEnv', () => {
     expect(config.masterSecret).toBe('x'.repeat(40));
   });
 
-  it('strips a port from the rpID but keeps it in the domain binding', () => {
+  it('strips a port from the rpID but keeps it in the domain binding', async () => {
     const config = identityConfigFromEnv({
       SESSION_SECRET: 'x'.repeat(40),
       CORS_ORIGIN: 'http://localhost:5173',
@@ -192,7 +195,7 @@ describe('identityConfigFromEnv', () => {
     expect(config.siwe.domain).toBe('localhost:5173');
   });
 
-  it('tolerates a non-URL origin without throwing', () => {
+  it('tolerates a non-URL origin without throwing', async () => {
     const config = identityConfigFromEnv({
       SESSION_SECRET: 'x'.repeat(40),
       CORS_ORIGIN: 'not-a-url',

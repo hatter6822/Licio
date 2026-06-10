@@ -33,7 +33,7 @@ const CONFIG: IdentityConfig = {
 
 let services: IdentityServices;
 
-beforeEach(() => {
+beforeEach(async () => {
   services = createInMemoryIdentityServices(CONFIG);
 });
 
@@ -48,7 +48,7 @@ interface SeedOpts {
 }
 
 async function seedSessionCookie(opts: SeedOpts = {}): Promise<string> {
-  const user = services.store.createUser({
+  const user = await services.store.createUser({
     handle: 'guarduser',
     displayName: 'Guard',
     email: opts.verified === false ? 'g@example.com' : null,
@@ -62,7 +62,7 @@ async function seedSessionCookie(opts: SeedOpts = {}): Promise<string> {
   });
   // A "verified" account needs a credential; simulate a passkey unless verified===false.
   if (opts.verified !== false) {
-    services.store.addWebauthn({
+    await services.store.addWebauthn({
       credentialId: 'cred-guard',
       userId: user.userId,
       publicKey: new Uint8Array([1, 2, 3]),
@@ -75,7 +75,7 @@ async function seedSessionCookie(opts: SeedOpts = {}): Promise<string> {
       lastUsedAt: null,
     });
   }
-  if (opts.mfa) services.store.setAuth(user.userId, { mfaEnabled: true });
+  if (opts.mfa) await services.store.setAuth(user.userId, { mfaEnabled: true });
   const created = await createSession(
     services.sessions,
     {
@@ -103,7 +103,7 @@ function guardedApp() {
 }
 
 describe('assuranceStale', () => {
-  it('is false within the window and true beyond it', () => {
+  it('is false within the window and true beyond it', async () => {
     const now = 1_700_000_000_000;
     expect(
       assuranceStale({ level: 'full', last_verified_at: new Date(now).toISOString() }, now),

@@ -88,7 +88,7 @@ export async function recordAuthFailure(
     context: opts.authMethod ? { auth_method: opts.authMethod } : {},
   });
   if (outcome.lockoutTriggered && opts.alertUserId) {
-    const user = services.store.getUser(opts.alertUserId);
+    const user = await services.store.getUser(opts.alertUserId);
     await sendSecurityAlert({
       userId: opts.alertUserId,
       hasEmail: !!user?.email,
@@ -114,16 +114,16 @@ export type LoginFinalization =
  * deleted, or otherwise non-active account never mints a session, even with a
  * valid credential.
  */
-function loginDenial(
+async function loginDenial(
   services: IdentityServices,
   userId: string,
-): Extract<LoginFinalization, { ok: false }> | null {
-  const user = services.store.getUser(userId);
+): Promise<Extract<LoginFinalization, { ok: false }> | null> {
+  const user = await services.store.getUser(userId);
   if (!user) return { ok: false, code: 'account_unavailable' };
   if (user.accountState === 'active') return null;
   if (
     user.accountState === 'deactivated' &&
-    services.store.getDeletion(userId)?.state === 'grace_period'
+    (await services.store.getDeletion(userId))?.state === 'grace_period'
   ) {
     return null;
   }
@@ -149,7 +149,7 @@ export async function finalizeLogin(
     mfaVerified?: boolean;
   },
 ): Promise<LoginFinalization> {
-  const denial = loginDenial(services, params.userId);
+  const denial = await loginDenial(services, params.userId);
   if (denial) {
     await services.audit.append({
       actorUserId: params.userId,
@@ -181,7 +181,7 @@ export async function finalizeLogin(
 
   const decision = assessLogin({ deviceProfile: profile, authMethod: params.authMethod }, history);
   if (decision.suspicious) {
-    const user = services.store.getUser(params.userId);
+    const user = await services.store.getUser(params.userId);
     await sendSecurityAlert({
       userId: params.userId,
       hasEmail: !!user?.email,

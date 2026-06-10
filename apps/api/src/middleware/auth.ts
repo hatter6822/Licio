@@ -66,7 +66,7 @@ export function authMiddleware(
     }
     if (!validated) return c.json(deny('unauthenticated', 'Authentication required'), 401);
 
-    const user = services.store.getUser(validated.record.user_id);
+    const user = await services.store.getUser(validated.record.user_id);
     if (!user) return c.json(deny('unauthenticated', 'Authentication required'), 401);
     if (user.accountState !== 'active') {
       // A deactivated account in its deletion grace period may reach ONLY the
@@ -74,14 +74,14 @@ export function authMiddleware(
       const inGrace =
         opts.allowDeletionPending &&
         user.accountState === 'deactivated' &&
-        services.store.getDeletion(user.userId)?.state === 'grace_period';
+        (await services.store.getDeletion(user.userId))?.state === 'grace_period';
       if (!inGrace) {
         return c.json(deny(`account_${user.accountState}`, 'Account is not active'), 403);
       }
     }
 
-    const inv = authMethodInventory(services, user.userId);
-    const auth = services.store.getAuth(user.userId);
+    const inv = await authMethodInventory(services, user.userId);
+    const auth = await services.store.getAuth(user.userId);
     c.set('auth', {
       userId: user.userId,
       accountState: user.accountState,

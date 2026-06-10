@@ -41,9 +41,11 @@ foundation, secure server-side sessions, RBAC + audit log, age gating,
 user-facing privacy controls (settings, DSAR export with an encrypted
 signed-URL archive, and account deletion with a 30-day grace + hard
 purge), steward TOTP MFA, and database-level wallet isolation are
-implemented and tested (`docs/identity/README.md`); the remaining leaves
-are production cloud adapters (S3 export-archive delivery, a durable
-distributed job runner, and the Drizzle-backed identity store).
+implemented and tested (`docs/identity/README.md`), and the identity and
+audit stores have production Postgres (Drizzle) adapters alongside the
+Redis session/ephemeral/rate-limit adapters; the remaining leaves are
+production cloud adapters (S3 export-archive delivery and a durable
+distributed job runner).
 Workstreams WS-E through WS-P are planned (planning documents
 exist under `docs/planning/`; implementation not yet started).  See
 "Implementation roadmap" below for the full status table.
@@ -281,7 +283,8 @@ licio/
 │           │   ├── privacy-jobs.ts      --   DSAR export assembly + deletion-purge/sweep jobs
 │           │   ├── store.ts             --   in-memory identity data store
 │           │   ├── services.ts          --   injectable service container + config
-│           │   └── redis-stores.ts      --   production Redis adapters (gated)
+│           │   ├── redis-stores.ts      --   production Redis adapters (gated)
+│           │   └── drizzle-store.ts     --   production Postgres identity/audit adapters (gated)
 │           ├── lib/
 │           │   ├── rate-limit.ts        --   global fixed-window budget (no client keying)
 │           │   ├── push-service.ts      --   VAPID push (session-scoped delete)
@@ -785,7 +788,7 @@ file counts at current state:
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
 | apps/web | ~48 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~28 (incl. WS-D identity + routes) | node | `pnpm --filter api test` |
+| apps/api | ~29 (incl. WS-D identity + routes) | node | `pnpm --filter api test` |
 | packages/shared | ~7 (incl. WS-D schemas) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~2 (isolation + gated integration) | node | via root `pnpm test` (db project) |
 | packages/invariants | ~1 | node | `pnpm --filter @licio/invariants test` |
@@ -884,7 +887,8 @@ password column, hashing, or reset flow anywhere.
 | Steward MFA | TOTP enroll/verify/disable, per-session `mfa_verified`, reduced-assurance-until-MFA steward guard | Complete |
 | Wallet isolation | `wallet.wallet_accounts` schema + undirected-BFS isolation test (WS-D.3.2) | Complete |
 | Privacy | **No IP and no location are ever recorded — or even read** (SPEC §19.1): no code path reads the client address (statically tested); rate limiting is per-account + per-target-mailbox + global identity-free budgets; new-device alerts and request logs carry a coarse device descriptor only (never the full user-agent) | Complete |
-| Deferred | Production cloud adapters: S3 export-archive delivery, a durable distributed job runner (an in-process hourly scheduler runs the sweep/purge today, and expiry is also enforced at read time), and the Drizzle-backed identity-store projection | Pending |
+| Durable stores | `DrizzleIdentityStore`/`DrizzleAuditStore` Postgres adapters behind the same interfaces as the in-memory adapters, wired in production alongside the Redis session/ephemeral/rate-limit stores; gated integration tests run the real migration chain | Complete |
+| Deferred | Production cloud adapters: S3 export-archive delivery and a durable distributed job runner (an in-process hourly scheduler runs the sweep/purge today, and expiry is also enforced at read time) | Pending |
 
 Pure crypto is mathematically validated: TOTP against the RFC 6238
 Appendix B vectors, real WebAuthn attestation/assertion via a pure-crypto

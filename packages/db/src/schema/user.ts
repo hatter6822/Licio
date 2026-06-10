@@ -48,6 +48,9 @@ export const users = pgTable(
     accountState: accountStateEnum('account_state').notNull().default('active'),
     locale: text('locale'), // BCP 47, nullable
     ageBandIfKnown: ageBandEnum('age_band_if_known'), // nullable; raw DOB never stored
+    // RBAC roles (WS-D.1.6a/b).  Values are drawn from the closed application
+    // policy table (user/moderator/steward/admin); the app validates membership.
+    roles: text('roles').array().notNull().default(sql`'{user}'::text[]`),
     privacySettings: jsonb('privacy_settings').$type<PrivacySettings>().notNull(),
     personalizationSettings: jsonb('personalization_settings')
       .$type<PersonalizationSettings>()

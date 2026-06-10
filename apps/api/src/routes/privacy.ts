@@ -47,11 +47,11 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
   return (
     new Hono<AuthEnv>()
       // --- Settings ---------------------------------------------------------
-      .get('/settings', authMiddleware(resolve), requireVerifiedAccount(), (c) => {
+      .get('/settings', authMiddleware(resolve), requireVerifiedAccount(), async (c) => {
         const services = resolve();
         const auth = c.get('auth');
         if (!auth) return c.json(u, 401);
-        const user = services.store.getUser(auth.userId);
+        const user = await services.store.getUser(auth.userId);
         if (!user) return c.json(u, 401);
         return c.json(
           privacySettingsResponseSchema.parse({
@@ -71,7 +71,7 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
           const services = resolve();
           const auth = c.get('auth');
           if (!auth) return c.json(u, 401);
-          const user = services.store.getUser(auth.userId);
+          const user = await services.store.getUser(auth.userId);
           if (!user) return c.json(u, 401);
           const patch = c.req.valid('json');
 
@@ -97,7 +97,7 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
             for (const key of Object.keys(patch.personalization_settings)) changed.push(key);
           }
 
-          services.store.updateUser(auth.userId, {
+          await services.store.updateUser(auth.userId, {
             privacySettings: nextPrivacy,
             personalizationSettings: nextPersonalization,
           });
@@ -159,8 +159,8 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
           const auth = c.get('auth');
           if (!auth) return c.json(u, 401);
           // One active export per user: a second request returns the existing job.
-          const existing = services.store.activeExportJob(auth.userId);
-          const job = existing ?? services.store.createExportJob(auth.userId);
+          const existing = await services.store.activeExportJob(auth.userId);
+          const job = existing ?? (await services.store.createExportJob(auth.userId));
           if (!existing) {
             await services.audit.append({
               actorUserId: auth.userId,
@@ -181,14 +181,14 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
           const services = resolve();
           const auth = c.get('auth');
           if (!auth) return c.json(u, 401);
-          let job = services.store.getExportJob(c.req.valid('param').jobId);
+          let job = await services.store.getExportJob(c.req.valid('param').jobId);
           if (!job || privateOwnershipOutcome(auth.userId, job.userId) === 'not_found') {
             return c.json({ error: { code: 'not_found', message: 'Export not found.' } }, 404);
           }
           // In-process worker substitute: a queued job is assembled on first poll.
           if (job.status === 'queued') {
             await processExportJob(services, job.jobId);
-            job = services.store.getExportJob(job.jobId) ?? job;
+            job = (await services.store.getExportJob(job.jobId)) ?? job;
           }
           return c.json(await toExportStatus(services, job, auth.userId));
         },
@@ -207,7 +207,7 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
           const auth = c.get('auth');
           if (!auth) return c.json(u, 401);
           const { jobId } = c.req.valid('param');
-          const job = services.store.getExportJob(jobId);
+          const job = await services.store.getExportJob(jobId);
           if (!job || privateOwnershipOutcome(auth.userId, job.userId) === 'not_found') {
             return c.json({ error: { code: 'not_found', message: 'Export not found.' } }, 404);
           }
@@ -264,8 +264,8 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
           const auth = c.get('auth');
           if (!auth) return c.json(u, 401);
           const now = Date.now();
-          services.store.updateUser(auth.userId, { accountState: 'deactivated' }, now);
-          services.store.setDeletion({
+          await services.store.updateUser(auth.userId, { accountState: 'deactivated' }, now);
+          await services.store.setDeletion({
             userId: auth.userId,
             state: 'grace_period',
             requestedAt: new Date(now).toISOString(),
@@ -282,25 +282,25 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
           // A single-use cancellation token for the emailed link — minted ONLY
           // when an email exists (no orphaned 30-day secret otherwise).  A
           // no-email account cancels by re-logging in with a remaining method.
-          const email = services.store.getUser(auth.userId)?.email;
+          const email = (await services.store.getUser(auth.userId))?.email;
           if (email) {
             const token = randomToken(24);
             await services.otp.set(cancelTokenKey(token), auth.userId, GRACE_PERIOD_MS);
             await services.mailer.sendNotice(email, 'deletion_requested', { cancel_token: token });
           }
           c.header('Set-Cookie', clearSidCookie(), { append: true });
-          return c.json(toDeletionStatus(services, auth.userId));
+          return c.json(await toDeletionStatus(services, auth.userId));
         },
       )
 
       .get(
         '/delete-account/status',
         authMiddleware(resolve, { allowDeletionPending: true }),
-        (c) => {
+        async (c) => {
           const services = resolve();
           const auth = c.get('auth');
           if (!auth) return c.json(u, 401);
-          return c.json(toDeletionStatus(services, auth.userId));
+          return c.json(await toDeletionStatus(services, auth.userId));
         },
       )
 
@@ -326,22 +326,22 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
         if (!userId) {
           return c.json({ error: { code: 'not_found', message: 'No cancellable deletion.' } }, 404);
         }
-        const req = services.store.getDeletion(userId);
+        const req = await services.store.getDeletion(userId);
         if (req?.state !== 'grace_period') {
           return c.json({ error: { code: 'not_found', message: 'No cancellable deletion.' } }, 404);
         }
-        services.store.setDeletion({
+        await services.store.setDeletion({
           ...req,
           state: 'cancelled',
           cancelledAt: new Date().toISOString(),
         });
-        services.store.updateUser(userId, { accountState: 'active' });
+        await services.store.updateUser(userId, { accountState: 'active' });
         await services.audit.append({
           actorUserId: userId,
           eventType: 'deletion_cancel',
           context: {},
         });
-        return c.json(toDeletionStatus(services, userId));
+        return c.json(await toDeletionStatus(services, userId));
       })
   );
 }
@@ -373,7 +373,7 @@ async function readCancelToken(c: {
 
 async function toExportStatus(
   services: IdentityServices,
-  job: NonNullable<ReturnType<IdentityServices['store']['getExportJob']>>,
+  job: NonNullable<Awaited<ReturnType<IdentityServices['store']['getExportJob']>>>,
   userId: string,
   now: number = Date.now(),
 ) {
@@ -391,12 +391,14 @@ async function toExportStatus(
     expires_at: job.expiresAt,
     download_available: available,
     // A FRESH signed token is minted per request, never persisted (WS-D.2.2c).
-    download_token: available ? mintExportDownloadToken(services, job.jobId, userId, now) : null,
+    download_token: available
+      ? await mintExportDownloadToken(services, job.jobId, userId, now)
+      : null,
   });
 }
 
-function toDeletionStatus(services: IdentityServices, userId: string) {
-  const req = services.store.getDeletion(userId);
+async function toDeletionStatus(services: IdentityServices, userId: string) {
+  const req = await services.store.getDeletion(userId);
   if (!req || req.state === 'cancelled') {
     return deletionStatusSchema.parse({
       state: 'none',

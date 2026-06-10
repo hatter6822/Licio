@@ -53,7 +53,7 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
   return (
     new Hono<AuthEnv>()
       // --- Enroll: generate + seal a pending secret -------------------------
-      .post('/mfa/totp/enroll', authMiddleware(resolve), requireStepUp(), (c) => {
+      .post('/mfa/totp/enroll', authMiddleware(resolve), requireStepUp(), async (c) => {
         const services = resolve();
         const auth = c.get('auth');
         if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
@@ -64,12 +64,12 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
         // secret and regain steward MFA without knowing the victim's code (the
         // §WS-D.1.5b "primary compromise ≠ steward power" guarantee).  Initial
         // enrollment (no active MFA yet) is unaffected.
-        if (services.store.getAuth(auth.userId)?.mfaEnabled && !auth.mfaVerified) {
+        if ((await services.store.getAuth(auth.userId))?.mfaEnabled && !auth.mfaVerified) {
           return c.json(err('mfa_reverify_required', 'Verify your current code first.'), 403);
         }
         const secret = generateTotpSecret();
-        const user = services.store.getUser(auth.userId);
-        services.store.setAuth(auth.userId, {
+        const user = await services.store.getUser(auth.userId);
+        await services.store.setAuth(auth.userId, {
           mfaSecret: services.secretBox.seal(secret), // AES-256-GCM at rest
           mfaPending: true,
           mfaEnabled: false,
@@ -91,7 +91,7 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
           const services = resolve();
           const auth = c.get('auth');
           if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
-          const userAuth = services.store.getAuth(auth.userId);
+          const userAuth = await services.store.getAuth(auth.userId);
           if (!userAuth?.mfaSecret || !userAuth.mfaPending) {
             return c.json(err('not_enrolling', 'No pending MFA enrollment.'), 400);
           }
@@ -104,7 +104,7 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
             return c.json(err('invalid_code', 'Invalid code.'), 400);
           }
           const recoveryCodes = generateRecoveryCodes();
-          services.store.setAuth(auth.userId, {
+          await services.store.setAuth(auth.userId, {
             mfaEnabled: true,
             mfaPending: false,
             mfaEnrolledAt: new Date().toISOString(),
@@ -138,7 +138,7 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
           const services = resolve();
           const auth = c.get('auth');
           if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
-          const userAuth = services.store.getAuth(auth.userId);
+          const userAuth = await services.store.getAuth(auth.userId);
           if (!userAuth?.mfaEnabled || !userAuth.mfaSecret) {
             return c.json(err('mfa_not_enabled', 'MFA is not enabled.'), 400);
           }
@@ -171,7 +171,7 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
           );
           if (idx >= 0) {
             const remaining = userAuth.recoveryCodeHashes.filter((_, i) => i !== idx);
-            services.store.setAuth(auth.userId, { recoveryCodeHashes: remaining });
+            await services.store.setAuth(auth.userId, { recoveryCodeHashes: remaining });
             await finishMfa(services, auth.userId, auth.tokenHash);
             return c.json({
               status: 'mfa_verified' as const,
@@ -194,7 +194,7 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
         const services = resolve();
         const auth = c.get('auth');
         if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
-        services.store.setAuth(auth.userId, {
+        await services.store.setAuth(auth.userId, {
           mfaEnabled: false,
           mfaPending: false,
           mfaSecret: null,

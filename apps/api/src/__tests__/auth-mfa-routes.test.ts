@@ -67,7 +67,7 @@ async function sessionMfaVerified(sid: string): Promise<boolean> {
   return (await services.sessions.get(sha256Hex(token)))?.record.mfa_verified ?? false;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   services = createInMemoryIdentityServices(CONFIG);
   setIdentityServices(services);
 });
@@ -85,8 +85,12 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     const { otpauth_uri } = await readJson<{ otpauth_uri: string }>(enroll);
     expect(otpauth_uri).toContain('issuer=Licio');
     // The secret is sealed at rest — never plaintext in the stored auth row.
-    const sealed = services.store.getAuth(
-      services.store.getUserByHandle('mfauser')?.userId as string,
+    const sealed = (
+      await services.store.getAuth(
+        (
+          await services.store.getUserByHandle('mfauser')
+        )?.userId as string,
+      )
     )?.mfaSecret;
     expect(sealed?.startsWith('v1.')).toBe(true);
 
@@ -170,7 +174,7 @@ describe('TOTP MFA enroll → confirm → verify', () => {
 
   it('refuses to re-enroll over active MFA without the current factor', async () => {
     const { app, sid } = await signup('reenroll');
-    const userId = services.store.getUserByHandle('reenroll')?.userId as string;
+    const userId = (await services.store.getUserByHandle('reenroll'))?.userId as string;
     const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
       method: 'POST',
       headers: headers(sid),
@@ -184,8 +188,8 @@ describe('TOTP MFA enroll → confirm → verify', () => {
       }),
       '__Host-sid',
     );
-    expect(services.store.getAuth(userId)?.mfaEnabled).toBe(true);
-    const activeSecret = services.store.getAuth(userId)?.mfaSecret;
+    expect((await services.store.getAuth(userId))?.mfaEnabled).toBe(true);
+    const activeSecret = (await services.store.getAuth(userId))?.mfaSecret;
 
     // The attacker case: a FRESH session satisfies primary step-up but has NOT
     // cleared the current TOTP (mfaVerified=false).  Re-enrollment is refused, and
@@ -204,8 +208,8 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     expect((await readJson<{ error: { code: string } }>(blocked)).error.code).toBe(
       'mfa_reverify_required',
     );
-    expect(services.store.getAuth(userId)?.mfaSecret).toBe(activeSecret);
-    expect(services.store.getAuth(userId)?.mfaEnabled).toBe(true);
+    expect((await services.store.getAuth(userId))?.mfaSecret).toBe(activeSecret);
+    expect((await services.store.getAuth(userId))?.mfaEnabled).toBe(true);
 
     // The legitimate owner (the confirm session is mfaVerified) CAN re-enroll.
     const reenroll = await app.request('/v1/auth/mfa/totp/enroll', {
@@ -217,7 +221,7 @@ describe('TOTP MFA enroll → confirm → verify', () => {
 
   it('disables MFA (clears the secret and recovery codes)', async () => {
     const { app, sid } = await signup('disableuser');
-    const userId = services.store.getUserByHandle('disableuser')?.userId as string;
+    const userId = (await services.store.getUserByHandle('disableuser'))?.userId as string;
     const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
       method: 'POST',
       headers: headers(sid),
@@ -231,14 +235,14 @@ describe('TOTP MFA enroll → confirm → verify', () => {
       }),
       '__Host-sid',
     );
-    expect(services.store.getAuth(userId)?.mfaEnabled).toBe(true);
+    expect((await services.store.getAuth(userId))?.mfaEnabled).toBe(true);
 
     const disable = await app.request('/v1/auth/mfa/totp/disable', {
       method: 'POST',
       headers: headers(sid2),
     });
     expect(disable.status).toBe(200);
-    expect(services.store.getAuth(userId)?.mfaEnabled).toBe(false);
-    expect(services.store.getAuth(userId)?.mfaSecret).toBeNull();
+    expect((await services.store.getAuth(userId))?.mfaEnabled).toBe(false);
+    expect((await services.store.getAuth(userId))?.mfaSecret).toBeNull();
   });
 });

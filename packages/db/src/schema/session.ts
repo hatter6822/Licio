@@ -44,9 +44,15 @@ export const userAuth = pgTable('user_auth', {
     .references(() => users.userId, { onDelete: 'cascade' }),
   emailVerified: boolean('email_verified').notNull().default(false),
   emailVerifiedAt: timestamp('email_verified_at', { withTimezone: true }),
+  // An email-change in flight: the NEW address, staged until it proves control
+  // (WS-D.1.4a).  The current verified email stays live until confirmation, so a
+  // typo can never strand an email-only account with zero verified methods.
+  pendingEmail: text('pending_email'),
   // KMS-encrypted TOTP secret (steward MFA, WS-D.1.5).  Nullable, never plaintext.
   mfaTotpSecretEncrypted: bytea('mfa_totp_secret_encrypted'),
   mfaEnabled: boolean('mfa_enabled').notNull().default(false),
+  // Enrolment started (secret staged) but not yet proven with a first TOTP code.
+  mfaPending: boolean('mfa_pending').notNull().default(false),
   mfaEnrolledAt: timestamp('mfa_enrolled_at', { withTimezone: true }),
   // NOTE: there is deliberately NO password_hash column.  See WS-D overview.
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

@@ -80,9 +80,10 @@ interfaces.
 | `secrets.ts` | AES-256-GCM `SecretBox` (HKDF-derived, domain-separated key) for secrets at rest (steward TOTP secret) |
 | `object-store.ts` | encrypted DSAR archive store + HMAC-signed, subject-bound, expiring download tokens |
 | `privacy-jobs.ts` | DSAR export assembly (own data only), export job process/retry/sweep, deletion hard-purge (anonymize/tombstone) |
-| `store.ts` | in-memory identity data store (mirrors the Drizzle schema) |
+| `store.ts` | the `IdentityStore` interface + in-memory adapter (mirrors the Drizzle schema) |
 | `services.ts` | injectable service container + config derivation |
 | `redis-stores.ts` | production Redis adapters (gated integration test) |
+| `drizzle-store.ts` | production Postgres adapters: `DrizzleIdentityStore` + `DrizzleAuditStore` (gated integration test) |
 
 ### `apps/api/src/middleware/auth.ts` + `routes/{auth,privacy}.ts`
 
@@ -157,8 +158,11 @@ double-submit token).
 ## Deferred / interface-level (wired to follow-up workstreams)
 
 The privacy-control and steward-MFA **logic** is implemented and tested against
-in-memory/local adapters; only the production cloud bindings — behind the same
-interfaces — land later:
+in-memory/local adapters; the durable stores are bound (Postgres-backed
+`DrizzleIdentityStore`/`DrizzleAuditStore` in `drizzle-store.ts`, wired in
+`index.ts` next to the Redis session/ephemeral/rate-limit adapters — run
+`pnpm db:migrate` before serving traffic); only the production cloud bindings
+— behind the same interfaces — land later:
 
 - **Export delivery adapter** — assembly (own data only), AES-256-GCM
   encryption-at-rest, the step-up-protected signed/expiring download URL,
@@ -174,10 +178,6 @@ interfaces — land later:
   `index.ts`; a durable distributed runner (replacing the in-process timer behind
   the same two functions) and the WS-G `anonymizeContributions` implementation
   behind the injected hook land later (WS-D.2.4b/c).
-- **Drizzle-backed identity store** — `store.ts` is the in-memory adapter
-  mirroring the Drizzle schema; the Postgres-backed `IdentityStore`/`AuditStore`
-  projection is the remaining durable binding (sessions, rate-limit, and the
-  ephemeral secret store already have Redis adapters).
 - **Attention-history purge** and the **settings-change downstream consumer** are
   injected hooks (`purgeAttention`, `onPrivacyChange`) that WS-E implements.
 - **No geo lookup at all** — per SPEC §19.1 the platform records no IP and no
@@ -197,4 +197,9 @@ REDIS_URL=redis://localhost:6379 \
 ```
 
 These exercise the migration, constraints, trigger, cascades, **live** schema
-isolation introspection, and the Redis session/ephemeral adapters.
+isolation introspection, the Redis session/ephemeral adapters, and the full
+`DrizzleIdentityStore`/`DrizzleAuditStore` contract (round-trips, upserts,
+case-insensitive lookups, recovery-code single-use forensics, tombstone/purge,
+audit redaction/ordering).  The Drizzle-store suite creates and migrates its
+own scratch database (`licio_drizzle_store_it`) so its destructive checks never
+collide with the other gated tests sharing `DATABASE_URL`.

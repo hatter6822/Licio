@@ -17,6 +17,7 @@
     "@licio/invariants": "workspace:*",
     "@licio/shared": "workspace:*",
     "@simplewebauthn/server": "^13.3.1",
+    "drizzle-orm": "^0.45.2",
     "hono": "^4.7.0",
     "ioredis": "^5.11.1",
     "pino": "^10.3.1",
@@ -26,6 +27,7 @@
   "devDependencies": {
     "@types/node": "^25.9.2",
     "pino-pretty": "^13.0.0",
+    "postgres": "^3.4.0",
     "tsx": "^4.19.0",
     "typescript": "^6.0.3"
   }

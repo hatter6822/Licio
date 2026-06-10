@@ -70,17 +70,17 @@ class RecordingAuditStore implements AuditStore {
 let services: IdentityServices;
 let audit: RecordingAuditStore;
 
-beforeEach(() => {
+beforeEach(async () => {
   services = createInMemoryIdentityServices(CONFIG);
   audit = new RecordingAuditStore();
   services.audit = audit;
 });
-afterEach(() => {
-  services.store.clear();
+afterEach(async () => {
+  await services.store.clear();
 });
 
-function seedFullUser(ageBand: AgeBand = 'adult') {
-  const user = services.store.createUser({
+async function seedFullUser(ageBand: AgeBand = 'adult') {
+  const user = await services.store.createUser({
     handle: 'exporter',
     displayName: 'Export User',
     email: 'export@example.com',
@@ -92,8 +92,8 @@ function seedFullUser(ageBand: AgeBand = 'adult') {
     reputationSummary: emptyReputationSummary(),
     roles: ['user'],
   });
-  services.store.setAuth(user.userId, { emailVerified: true, mfaEnabled: true });
-  services.store.addWebauthn({
+  await services.store.setAuth(user.userId, { emailVerified: true, mfaEnabled: true });
+  await services.store.addWebauthn({
     credentialId: 'cred-1',
     userId: user.userId,
     publicKey: new Uint8Array([1, 2, 3]),
@@ -105,7 +105,7 @@ function seedFullUser(ageBand: AgeBand = 'adult') {
     createdAt: new Date().toISOString(),
     lastUsedAt: null,
   });
-  services.store.addWalletAuth({
+  await services.store.addWalletAuth({
     credentialId: 'wallet-1',
     userId: user.userId,
     addressHash: 'SECRET_WALLET_HASH_NEVER_EXPORTED',
@@ -120,7 +120,7 @@ function seedFullUser(ageBand: AgeBand = 'adult') {
 
 describe('assembleExport', () => {
   it("gathers only the requesting user's own data, with a truncated wallet only", async () => {
-    const user = seedFullUser();
+    const user = await seedFullUser();
     services.exportAttention = async () => [{ bucket: 'topic:tech', weight: 3 }];
     services.exportContributions = async () => [{ id: 'c1', kind: 'post' }];
     services.exportModerationNotices = async () => [{ reason: 'spam', severity: 'low' }];
@@ -148,7 +148,7 @@ describe('assembleExport', () => {
   });
 
   it('omits the email for a passkey/wallet-only account and defaults absent hooks to []', async () => {
-    const user = services.store.createUser({
+    const user = await services.store.createUser({
       handle: 'nomail',
       displayName: 'No Mail',
       email: null,
@@ -200,7 +200,7 @@ describe('object store (encrypt-at-rest + signed tokens)', () => {
     expect(await store.get('stale', 0)).toBeNull();
   });
 
-  it('mints and verifies a signed download token; rejects tamper/expiry/wrong-subject', () => {
+  it('mints and verifies a signed download token; rejects tamper/expiry/wrong-subject', async () => {
     const exp = 10_000;
     const token = mintDownloadToken(CONFIG.masterSecret, 'job1', 'user1', exp);
     expect(verifyDownloadToken(CONFIG.masterSecret, token, 'job1', 'user1', exp - 1)).toBe(true);
@@ -218,7 +218,7 @@ describe('object store (encrypt-at-rest + signed tokens)', () => {
     );
   });
 
-  it('rejects non-canonical token forms (extra segments, non-decimal expiry)', () => {
+  it('rejects non-canonical token forms (extra segments, non-decimal expiry)', async () => {
     const exp = 10_000;
     const token = mintDownloadToken(CONFIG.masterSecret, 'job1', 'user1', exp);
     // Strict 2-part form: a valid token with trailing junk is malformed.
@@ -233,13 +233,13 @@ describe('object store (encrypt-at-rest + signed tokens)', () => {
   });
 
   it('caps a freshly minted export token at the archive expiry (never outlives it)', async () => {
-    const user = seedFullUser();
-    const job = services.store.createExportJob(user.userId);
+    const user = await seedFullUser();
+    const job = await services.store.createExportJob(user.userId);
     const t0 = 1_000_000;
     await processExportJob(services, job.jobId, t0);
     const jobExpiry = t0 + EXPORT_DOWNLOAD_TTL_MS;
     // Minted one millisecond before the archive expires: still valid right then…
-    const token = mintExportDownloadToken(services, job.jobId, user.userId, jobExpiry - 1);
+    const token = await mintExportDownloadToken(services, job.jobId, user.userId, jobExpiry - 1);
     expect(
       verifyDownloadToken(CONFIG.masterSecret, token, job.jobId, user.userId, jobExpiry - 1),
     ).toBe(true);
@@ -253,12 +253,12 @@ describe('object store (encrypt-at-rest + signed tokens)', () => {
 
 describe('startPrivacyScheduler', () => {
   it('runs an immediate tick (sweep + purge) and stops cleanly', async () => {
-    const user = seedFullUser();
-    const job = services.store.createExportJob(user.userId);
+    const user = await seedFullUser();
+    const job = await services.store.createExportJob(user.userId);
     // Complete an export far enough in the past that it is already expired.
     const past = Date.now() - EXPORT_DOWNLOAD_TTL_MS - 1_000;
     await processExportJob(services, job.jobId, past);
-    services.store.setDeletion({
+    await services.store.setDeletion({
       userId: user.userId,
       state: 'grace_period',
       requestedAt: new Date(past).toISOString(),
@@ -272,8 +272,8 @@ describe('startPrivacyScheduler', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     stop();
 
-    expect(services.store.getDeletion(user.userId)?.state).toBe('deleted');
-    expect(services.store.getUser(user.userId)?.accountState).toBe('deleted');
+    expect((await services.store.getDeletion(user.userId))?.state).toBe('deleted');
+    expect((await services.store.getUser(user.userId))?.accountState).toBe('deleted');
     expect(await services.objectStore.get(exportObjectKey(job.jobId), Date.now())).toBeNull();
   });
 
@@ -291,11 +291,11 @@ describe('startPrivacyScheduler', () => {
 
 describe('processExportJob', () => {
   it('completes a queued job: stores a decryptable archive with a 72h expiry', async () => {
-    const user = seedFullUser();
-    const job = services.store.createExportJob(user.userId);
+    const user = await seedFullUser();
+    const job = await services.store.createExportJob(user.userId);
     await processExportJob(services, job.jobId, 1_000);
 
-    const done = services.store.getExportJob(job.jobId);
+    const done = await services.store.getExportJob(job.jobId);
     expect(done?.status).toBe('completed');
     expect(done?.progressPct).toBe(100);
     expect(done?.downloadUrlRef).toBe(exportObjectKey(job.jobId));
@@ -310,52 +310,54 @@ describe('processExportJob', () => {
 
   it('retries a transient failure and surfaces `failed` after MAX attempts', async () => {
     // A job whose user does not exist makes assembleExport throw on each attempt.
-    const job = services.store.createExportJob('ghost-user');
+    const job = await services.store.createExportJob('ghost-user');
     for (let i = 0; i < MAX_EXPORT_ATTEMPTS; i++) {
       await processExportJob(services, job.jobId);
     }
-    const failed = services.store.getExportJob(job.jobId);
+    const failed = await services.store.getExportJob(job.jobId);
     expect(failed?.status).toBe('failed');
     expect(failed?.attempts).toBe(MAX_EXPORT_ATTEMPTS);
 
     // Terminal: a further poll does not reprocess or bump attempts.
     await processExportJob(services, job.jobId);
-    expect(services.store.getExportJob(job.jobId)?.attempts).toBe(MAX_EXPORT_ATTEMPTS);
+    expect((await services.store.getExportJob(job.jobId))?.attempts).toBe(MAX_EXPORT_ATTEMPTS);
   });
 
   it('is idempotent on an already-completed job', async () => {
-    const user = seedFullUser();
-    const job = services.store.createExportJob(user.userId);
+    const user = await seedFullUser();
+    const job = await services.store.createExportJob(user.userId);
     await processExportJob(services, job.jobId, 1_000);
     await processExportJob(services, job.jobId, 9_999); // no-op
-    expect(services.store.getExportJob(job.jobId)?.completedAt).toBe(new Date(1_000).toISOString());
+    expect((await services.store.getExportJob(job.jobId))?.completedAt).toBe(
+      new Date(1_000).toISOString(),
+    );
   });
 });
 
 describe('sweepExpiredExports', () => {
   it('deletes expired archives and marks their jobs expired', async () => {
-    const user = seedFullUser();
-    const job = services.store.createExportJob(user.userId);
+    const user = await seedFullUser();
+    const job = await services.store.createExportJob(user.userId);
     await processExportJob(services, job.jobId, 1_000);
 
     const swept = await sweepExpiredExports(services, 1_000 + EXPORT_DOWNLOAD_TTL_MS + 1);
     expect(swept).toBe(1);
-    expect(services.store.getExportJob(job.jobId)?.status).toBe('expired');
+    expect((await services.store.getExportJob(job.jobId))?.status).toBe('expired');
     expect(await services.objectStore.get(exportObjectKey(job.jobId))).toBeNull();
   });
 
   it('is a no-op when nothing has expired', async () => {
-    const user = seedFullUser();
-    const job = services.store.createExportJob(user.userId);
+    const user = await seedFullUser();
+    const job = await services.store.createExportJob(user.userId);
     await processExportJob(services, job.jobId, 1_000);
     expect(await sweepExpiredExports(services, 2_000)).toBe(0);
-    expect(services.store.getExportJob(job.jobId)?.status).toBe('completed');
+    expect((await services.store.getExportJob(job.jobId))?.status).toBe('completed');
   });
 });
 
 describe('runDeletionPurge', () => {
   it('anonymizes, tombstones, and writes a hashed-id deletion_complete audit', async () => {
-    const user = seedFullUser();
+    const user = await seedFullUser();
     let anonymized: string | null = null;
     services.anonymizeContributions = async (id) => {
       anonymized = id;
@@ -366,7 +368,7 @@ describe('runDeletionPurge', () => {
       return 7;
     };
     const now = 1_000_000;
-    services.store.setDeletion({
+    await services.store.setDeletion({
       userId: user.userId,
       state: 'grace_period',
       requestedAt: new Date(now - 1).toISOString(),
@@ -377,7 +379,7 @@ describe('runDeletionPurge', () => {
 
     expect(await runDeletionPurge(services, now)).toBe(1);
 
-    const tomb = services.store.getUser(user.userId);
+    const tomb = await services.store.getUser(user.userId);
     expect(tomb?.accountState).toBe('deleted');
     expect(tomb?.email).toBeNull();
     expect(tomb?.displayName).toBe('[deleted]');
@@ -385,9 +387,9 @@ describe('runDeletionPurge', () => {
     // sha256(user_id) — exactly 30 chars, inside the DB handle CHECK.
     expect(tomb?.handle).toBe(`deleted_${sha256Hex(user.userId).slice(0, 22)}`);
     expect(tomb?.handle).toHaveLength(30);
-    expect(services.store.getAuth(user.userId)).toBeNull();
-    expect(services.store.listWebauthn(user.userId)).toEqual([]);
-    expect(services.store.listWalletAuth(user.userId)).toEqual([]);
+    expect(await services.store.getAuth(user.userId)).toBeNull();
+    expect(await services.store.listWebauthn(user.userId)).toEqual([]);
+    expect(await services.store.listWalletAuth(user.userId)).toEqual([]);
     // Settings + reputation are personal data: reset to pristine defaults.
     expect(tomb?.privacySettings).toEqual(defaultPrivacySettings());
     expect(tomb?.personalizationSettings).toEqual(defaultPersonalizationSettings());
@@ -395,7 +397,7 @@ describe('runDeletionPurge', () => {
 
     expect(anonymized).toBe(user.userId);
     expect(purged).toEqual({ id: user.userId, mode: 'delete' });
-    expect(services.store.getDeletion(user.userId)?.state).toBe('deleted');
+    expect((await services.store.getDeletion(user.userId))?.state).toBe('deleted');
 
     const complete = audit.inputs.find((e) => e.eventType === 'deletion_complete');
     expect(complete?.actorUserId).toBeNull();
@@ -403,9 +405,9 @@ describe('runDeletionPurge', () => {
   });
 
   it('removes COMPLETED export archives and revokes every session at purge (D.2.4c)', async () => {
-    const user = seedFullUser();
+    const user = await seedFullUser();
     // A completed export whose 72h window is still open at purge time…
-    const job = services.store.createExportJob(user.userId);
+    const job = await services.store.createExportJob(user.userId);
     const t0 = Date.now();
     await processExportJob(services, job.jobId, t0);
     expect(await services.objectStore.get(exportObjectKey(job.jobId), t0 + 1)).not.toBeNull();
@@ -416,7 +418,7 @@ describe('runDeletionPurge', () => {
       deviceLabel: 'macOS/Chrome',
       rememberMe: false,
     });
-    services.store.setDeletion({
+    await services.store.setDeletion({
       userId: user.userId,
       state: 'grace_period',
       requestedAt: new Date(t0 - 2).toISOString(),
@@ -432,13 +434,13 @@ describe('runDeletionPurge', () => {
     expect(await services.sessions.get(session.tokenHash)).toBeNull();
     expect(await services.sessions.listForUser(user.userId)).toEqual([]);
     // The job rows themselves are dropped by the tombstone.
-    expect(services.store.listExportJobs(user.userId)).toEqual([]);
+    expect(await services.store.listExportJobs(user.userId)).toEqual([]);
   });
 
   it('does not purge a deletion whose grace period has not elapsed', async () => {
-    const user = seedFullUser();
+    const user = await seedFullUser();
     const now = 1_000_000;
-    services.store.setDeletion({
+    await services.store.setDeletion({
       userId: user.userId,
       state: 'grace_period',
       requestedAt: new Date(now).toISOString(),
@@ -447,6 +449,6 @@ describe('runDeletionPurge', () => {
       completedAt: null,
     });
     expect(await runDeletionPurge(services, now)).toBe(0);
-    expect(services.store.getUser(user.userId)?.accountState).toBe('active');
+    expect((await services.store.getUser(user.userId))?.accountState).toBe('active');
   });
 });

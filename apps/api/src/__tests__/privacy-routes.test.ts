@@ -43,8 +43,8 @@ function extractCookie(res: Response, name: string): string | undefined {
   return undefined;
 }
 
-function seedUser(ageBand: AgeBand, email = 'p@example.com', handle = 'puser') {
-  const user = services.store.createUser({
+async function seedUser(ageBand: AgeBand, email = 'p@example.com', handle = 'puser') {
+  const user = await services.store.createUser({
     handle,
     displayName: 'P User',
     email,
@@ -56,7 +56,7 @@ function seedUser(ageBand: AgeBand, email = 'p@example.com', handle = 'puser') {
     reputationSummary: emptyReputationSummary(),
     roles: ['user'],
   });
-  services.store.setAuth(user.userId, {
+  await services.store.setAuth(user.userId, {
     emailVerified: true,
     emailVerifiedAt: new Date().toISOString(),
   });
@@ -79,19 +79,19 @@ async function login(app: ReturnType<typeof createApp>, email: string): Promise<
   return extractCookie(verify, '__Host-sid') as string;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   services = createInMemoryIdentityServices(CONFIG);
   setIdentityServices(services);
 });
-afterEach(() => {
-  services.store.clear();
+afterEach(async () => {
+  await services.store.clear();
 });
 
 describe('GET/PATCH /v1/privacy/settings', () => {
   it('returns settings and persists a personalization opt-out (audited + propagated)', async () => {
     const propagated: Array<{ personalizationEnabled: boolean }> = [];
     services.onPrivacyChange = (change) => propagated.push(change);
-    seedUser('adult', 'set@example.com', 'setuser');
+    await seedUser('adult', 'set@example.com', 'setuser');
     const app = createApp();
     const sid = await login(app, 'set@example.com');
 
@@ -117,7 +117,7 @@ describe('GET/PATCH /v1/privacy/settings', () => {
   });
 
   it('clamps a teen attempt to weaken below the floor (server-side)', async () => {
-    seedUser('teen_13_15', 'teen@example.com', 'teenuser');
+    await seedUser('teen_13_15', 'teen@example.com', 'teenuser');
     const app = createApp();
     const sid = await login(app, 'teen@example.com');
     const patch = await app.request('/v1/privacy/settings', {
@@ -144,7 +144,7 @@ describe('GET/PATCH /v1/privacy/settings', () => {
   });
 
   it('patches the personalization settings blob (topic preferences)', async () => {
-    seedUser('adult', 'pers@example.com', 'persuser');
+    await seedUser('adult', 'pers@example.com', 'persuser');
     const app = createApp();
     const sid = await login(app, 'pers@example.com');
     const patch = await app.request('/v1/privacy/settings', {
@@ -167,7 +167,7 @@ describe('POST /v1/privacy/attention/delete', () => {
       purgedFor = userId;
       return 42;
     };
-    const user = seedUser('adult', 'att@example.com', 'attuser');
+    const user = await seedUser('adult', 'att@example.com', 'attuser');
     const app = createApp();
     const sid = await login(app, 'att@example.com');
     const res = await app.request('/v1/privacy/attention/delete', {
@@ -188,8 +188,8 @@ describe('POST /v1/privacy/attention/delete', () => {
 
 describe('DSAR export', () => {
   it('creates one job, dedupes a second request, and 404s a cross-user read', async () => {
-    seedUser('adult', 'exp@example.com', 'expuser');
-    const other = seedUser('adult', 'other@example.com', 'otheruser');
+    await seedUser('adult', 'exp@example.com', 'expuser');
+    const other = await seedUser('adult', 'other@example.com', 'otheruser');
     const app = createApp();
     const sid = await login(app, 'exp@example.com');
 
@@ -213,7 +213,7 @@ describe('DSAR export', () => {
     expect(status.status).toBe(200);
 
     // A job owned by another user is created directly; cross-user read → 404.
-    const otherJob = services.store.createExportJob(other.userId);
+    const otherJob = await services.store.createExportJob(other.userId);
     const cross = await app.request(`/v1/privacy/export/${otherJob.jobId}`, {
       headers: { cookie: sid },
     });
@@ -221,7 +221,7 @@ describe('DSAR export', () => {
   });
 
   it('processes on first poll, then serves the archive via a signed download token', async () => {
-    const user = seedUser('adult', 'dl@example.com', 'dluser');
+    const user = await seedUser('adult', 'dl@example.com', 'dluser');
     const app = createApp();
     const sid = await login(app, 'dl@example.com');
 
@@ -258,7 +258,7 @@ describe('DSAR export', () => {
   });
 
   it('returns 410 when a valid token outlives a swept archive', async () => {
-    seedUser('adult', 'gone@example.com', 'goneuser');
+    await seedUser('adult', 'gone@example.com', 'goneuser');
     const app = createApp();
     const sid = await login(app, 'gone@example.com');
     const create = await app.request('/v1/privacy/export', {
@@ -281,7 +281,7 @@ describe('DSAR export', () => {
 
 describe('account deletion lifecycle', () => {
   it('requests deletion (deactivate + revoke sessions), then cancels back to active', async () => {
-    const user = seedUser('adult', 'del@example.com', 'deluser');
+    const user = await seedUser('adult', 'del@example.com', 'deluser');
     const app = createApp();
     const sid = await login(app, 'del@example.com');
 
@@ -291,7 +291,7 @@ describe('account deletion lifecycle', () => {
     });
     expect(del.status).toBe(200);
     expect((await readJson<{ state: string }>(del)).state).toBe('grace_period');
-    expect(services.store.getUser(user.userId)?.accountState).toBe('deactivated');
+    expect((await services.store.getUser(user.userId))?.accountState).toBe('deactivated');
     // Sessions were revoked → the cookie no longer authenticates.
     const afterRevoke = await app.request('/v1/privacy/delete-account/status', {
       headers: { cookie: sid },
@@ -313,11 +313,11 @@ describe('account deletion lifecycle', () => {
     });
     expect(cancel.status).toBe(200);
     expect((await readJson<{ state: string }>(cancel)).state).toBe('none');
-    expect(services.store.getUser(user.userId)?.accountState).toBe('active');
+    expect((await services.store.getUser(user.userId))?.accountState).toBe('active');
   });
 
   it('cancels via the emailed single-use token (no session required)', async () => {
-    const user = seedUser('adult', 'tok@example.com', 'tokuser');
+    const user = await seedUser('adult', 'tok@example.com', 'tokuser');
     const app = createApp();
     const sid = await login(app, 'tok@example.com');
 
@@ -336,7 +336,7 @@ describe('account deletion lifecycle', () => {
     });
     expect(cancel.status).toBe(200);
     expect((await readJson<{ state: string }>(cancel)).state).toBe('none');
-    expect(services.store.getUser(user.userId)?.accountState).toBe('active');
+    expect((await services.store.getUser(user.userId))?.accountState).toBe('active');
 
     // The token is single-use: a replay finds no cancellable deletion.
     const replay = await app.request('/v1/privacy/delete-account/cancel', {

@@ -42,8 +42,8 @@ function extractCookie(res: Response, name: string): string | undefined {
   return undefined;
 }
 
-function seedVerifiedUser(overrides: { email?: string; handle?: string } = {}) {
-  const user = services.store.createUser({
+async function seedVerifiedUser(overrides: { email?: string; handle?: string } = {}) {
+  const user = await services.store.createUser({
     handle: overrides.handle ?? 'user1',
     displayName: 'User One',
     email: overrides.email ?? 'user@example.com',
@@ -55,7 +55,7 @@ function seedVerifiedUser(overrides: { email?: string; handle?: string } = {}) {
     reputationSummary: emptyReputationSummary(),
     roles: ['user'],
   });
-  services.store.setAuth(user.userId, {
+  await services.store.setAuth(user.userId, {
     emailVerified: true,
     emailVerifiedAt: new Date().toISOString(),
   });
@@ -80,12 +80,12 @@ async function loginViaEmail(app: ReturnType<typeof createApp>, email: string): 
   return extractCookie(verify, '__Host-sid') as string;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   services = createInMemoryIdentityServices(CONFIG);
   setIdentityServices(services);
 });
-afterEach(() => {
-  services.store.clear();
+afterEach(async () => {
+  await services.store.clear();
 });
 
 describe('POST /v1/auth/register (age gating)', () => {
@@ -103,7 +103,7 @@ describe('POST /v1/auth/register (age gating)', () => {
       }),
     });
     expect(res.status).toBe(403);
-    expect(services.store.getUserByHandle('kiddo')).toBeNull();
+    expect(await services.store.getUserByHandle('kiddo')).toBeNull();
   });
 
   it('creates an adult account and emails a verification code', async () => {
@@ -120,7 +120,7 @@ describe('POST /v1/auth/register (age gating)', () => {
     });
     expect(res.status).toBe(200);
     expect((await readJson<{ age_band: string }>(res)).age_band).toBe('adult');
-    expect(services.store.getUserByHandle('adult1')).not.toBeNull();
+    expect(await services.store.getUserByHandle('adult1')).not.toBeNull();
     expect((services.mailer as RecordingMailer).codes.some((c) => c.kind === 'verify')).toBe(true);
   });
 
@@ -137,13 +137,13 @@ describe('POST /v1/auth/register (age gating)', () => {
         date_of_birth: dob,
       }),
     });
-    const user = services.store.getUserByHandle('teen1');
+    const user = await services.store.getUserByHandle('teen1');
     expect(user?.ageBand).toBe('teen_13_15');
     expect(user?.privacySettings.attention_retention_preference).toBe('minimal');
   });
 
   it('returns a generic response on a duplicate email and notifies the owner (anti-enumeration)', async () => {
-    seedVerifiedUser({ email: 'dup@example.com', handle: 'owner' });
+    await seedVerifiedUser({ email: 'dup@example.com', handle: 'owner' });
     const app = createApp();
     const res = await app.request('/v1/auth/register', {
       method: 'POST',
@@ -156,7 +156,7 @@ describe('POST /v1/auth/register (age gating)', () => {
       }),
     });
     expect(res.status).toBe(200); // identical to the success shape
-    expect(services.store.getUserByHandle('attacker')).toBeNull(); // no second account
+    expect(await services.store.getUserByHandle('attacker')).toBeNull(); // no second account
     expect(
       (services.mailer as RecordingMailer).notices.some((n) => n.kind === 'duplicate_registration'),
     ).toBe(true);
@@ -178,7 +178,7 @@ describe('email-OTP login', () => {
   });
 
   it('logs a verified user in and sets the __Host-sid session cookie', async () => {
-    seedVerifiedUser({ email: 'login@example.com', handle: 'loginuser' });
+    await seedVerifiedUser({ email: 'login@example.com', handle: 'loginuser' });
     const app = createApp();
     const start = await app.request('/v1/auth/email/start', {
       method: 'POST',
@@ -200,7 +200,7 @@ describe('email-OTP login', () => {
   });
 
   it('rejects a correct code presented WITHOUT the matching attempt cookie (browser binding)', async () => {
-    seedVerifiedUser({ email: 'bind@example.com', handle: 'binduser' });
+    await seedVerifiedUser({ email: 'bind@example.com', handle: 'binduser' });
     const app = createApp();
     await app.request('/v1/auth/email/start', {
       method: 'POST',
@@ -219,7 +219,7 @@ describe('email-OTP login', () => {
 
 describe('GET /v1/auth/status', () => {
   it('is unauthenticated without a session and authenticated with one', async () => {
-    seedVerifiedUser({ email: 's@example.com', handle: 'statususer' });
+    await seedVerifiedUser({ email: 's@example.com', handle: 'statususer' });
     const app = createApp();
     const anon = await app.request('/v1/auth/status');
     expect((await readJson<{ authenticated: boolean }>(anon)).authenticated).toBe(false);
@@ -234,7 +234,7 @@ describe('GET /v1/auth/status', () => {
 
 describe('active sessions', () => {
   it('lists, revokes by ref, and 404s a cross-user ref', async () => {
-    seedVerifiedUser({ email: 'sess@example.com', handle: 'sessuser' });
+    await seedVerifiedUser({ email: 'sess@example.com', handle: 'sessuser' });
     const app = createApp();
     const sid = await loginViaEmail(app, 'sess@example.com');
 
@@ -271,10 +271,10 @@ describe('active sessions', () => {
   });
 
   it('denies a suspended account', async () => {
-    const user = seedVerifiedUser({ email: 'susp@example.com', handle: 'suspuser' });
+    const user = await seedVerifiedUser({ email: 'susp@example.com', handle: 'suspuser' });
     const app = createApp();
     const sid = await loginViaEmail(app, 'susp@example.com');
-    services.store.updateUser(user.userId, { accountState: 'suspended' });
+    await services.store.updateUser(user.userId, { accountState: 'suspended' });
     const res = await app.request('/v1/auth/sessions', { headers: { cookie: sid } });
     expect(res.status).toBe(403);
   });
@@ -282,7 +282,7 @@ describe('active sessions', () => {
 
 describe('WebAuthn passkey login (real assertion)', () => {
   it('authenticates a registered passkey end-to-end', async () => {
-    const user = seedVerifiedUser({ email: 'pk@example.com', handle: 'pkuser' });
+    const user = await seedVerifiedUser({ email: 'pk@example.com', handle: 'pkuser' });
     // Seed a credential by running the registration ceremony through the service.
     const authenticator = new SoftwareAuthenticator();
     const regOptions = await createRegistrationOptions(services.challenges, CONFIG.webauthn, {
@@ -300,7 +300,7 @@ describe('WebAuthn passkey login (real assertion)', () => {
       ),
     });
     if (!reg.ok) throw new Error('seed registration failed');
-    services.store.addWebauthn({
+    await services.store.addWebauthn({
       credentialId: reg.credential.credentialId,
       userId: user.userId,
       publicKey: reg.credential.publicKey,
@@ -375,7 +375,7 @@ describe('Sign-In with Ethereum (adult-only signup)', () => {
     const res = await walletAttempt(app, '1990-01-01');
     expect(res.status).toBe(200);
     expect((await readJson<{ status: string }>(res)).status).toBe('authenticated');
-    expect(services.store.getUserByHandle('walletuser')).not.toBeNull();
+    expect(await services.store.getUserByHandle('walletuser')).not.toBeNull();
   });
 
   it('refuses a minor wallet signup (adult-only)', async () => {
@@ -383,13 +383,13 @@ describe('Sign-In with Ethereum (adult-only signup)', () => {
     const dob = `${new Date().getUTCFullYear() - 15}-01-01`;
     const res = await walletAttempt(app, dob);
     expect(res.status).toBe(403);
-    expect(services.store.getUserByHandle('walletuser')).toBeNull();
+    expect(await services.store.getUserByHandle('walletuser')).toBeNull();
   });
 
   it('resolves an EXISTING auth-wallet on a second sign-in (no signup details needed)', async () => {
     const app = createApp();
     expect((await walletAttempt(app, '1990-01-01')).status).toBe(200);
-    const userId = services.store.getUserByHandle('walletuser')?.userId;
+    const userId = (await services.store.getUserByHandle('walletuser'))?.userId;
 
     // A second nonce+verify with the same wallet and NO profile fields resolves
     // the existing credential rather than creating a duplicate account.
@@ -416,14 +416,14 @@ describe('Sign-In with Ethereum (adult-only signup)', () => {
     });
     expect(res.status).toBe(200);
     // Same account — no second user created.
-    expect(services.store.getUserByHandle('walletuser')?.userId).toBe(userId);
-    expect(services.store.listWalletAuth(userId as string)).toHaveLength(1);
+    expect((await services.store.getUserByHandle('walletuser'))?.userId).toBe(userId);
+    expect(await services.store.listWalletAuth(userId as string)).toHaveLength(1);
   });
 });
 
 describe('cloned-authenticator detection (counter regression)', () => {
   it('rejects a regressed counter and records a cloned-authenticator alert', async () => {
-    const user = seedVerifiedUser({ email: 'clone@example.com', handle: 'cloneuser' });
+    const user = await seedVerifiedUser({ email: 'clone@example.com', handle: 'cloneuser' });
     const authenticator = new SoftwareAuthenticator();
     const regOptions = await createRegistrationOptions(services.challenges, CONFIG.webauthn, {
       userId: user.userId,
@@ -440,7 +440,7 @@ describe('cloned-authenticator detection (counter regression)', () => {
       ),
     });
     if (!reg.ok) throw new Error('seed failed');
-    services.store.addWebauthn({
+    await services.store.addWebauthn({
       credentialId: reg.credential.credentialId,
       userId: user.userId,
       publicKey: reg.credential.publicKey,

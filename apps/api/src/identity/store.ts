@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// In-memory identity data store backing the BFF auth/privacy routes (WS-D).  It is
-// the test/CI adapter mirroring the Drizzle schema in packages/db; a Drizzle-backed
-// implementation with the same surface is the gated-integration concern (the
-// established interface + in-memory pattern, e.g. TokenStore).
+// The identity data store backing the BFF auth/privacy routes (WS-D): the
+// {@link IdentityStore} interface plus the in-memory adapter used by tests/CI
+// (the established interface + in-memory pattern, e.g. TokenStore/SessionStore).
+// The production Postgres adapter with the same surface lives in
+// `drizzle-store.ts`, validated by the gated integration test (DATABASE_URL).
 //
 // Lookups by handle/email are case-insensitive (matching the partial/lower indexes
 // in WS-D.1.1c).  Email is optional throughout.
@@ -103,7 +104,58 @@ export interface StoredDeletionRequest {
   completedAt: string | null;
 }
 
-export class IdentityStore {
+/**
+ * The identity data surface the auth/privacy routes depend on.  Every method is
+ * async so a database-backed adapter can implement the same contract; the
+ * in-memory adapter resolves immediately.
+ */
+export interface IdentityStore {
+  // --- Users ---
+  createUser(
+    input: Omit<StoredUser, 'userId' | 'createdAt' | 'updatedAt'> & { userId?: string },
+    now?: number,
+  ): Promise<StoredUser>;
+  getUser(userId: string): Promise<StoredUser | null>;
+  getUserByHandle(handle: string): Promise<StoredUser | null>;
+  getUserByEmail(email: string): Promise<StoredUser | null>;
+  updateUser(userId: string, patch: Partial<StoredUser>, now?: number): Promise<StoredUser | null>;
+  // --- User auth ---
+  getAuth(userId: string): Promise<StoredUserAuth | null>;
+  setAuth(userId: string, patch: Partial<StoredUserAuth>): Promise<StoredUserAuth | null>;
+  // --- WebAuthn credentials ---
+  /** UPSERT by `credentialId` — counter/last-used updates re-add the credential. */
+  addWebauthn(cred: StoredWebauthnCredential): Promise<void>;
+  getWebauthn(credentialId: string): Promise<StoredWebauthnCredential | null>;
+  listWebauthn(userId: string): Promise<StoredWebauthnCredential[]>;
+  deleteWebauthn(credentialId: string): Promise<void>;
+  // --- Auth-wallet credentials ---
+  /** UPSERT by `credentialId`. */
+  addWalletAuth(cred: StoredWalletAuthCredential): Promise<void>;
+  findWalletAuthByHash(addressHash: string): Promise<StoredWalletAuthCredential | null>;
+  listWalletAuth(userId: string): Promise<StoredWalletAuthCredential[]>;
+  deleteWalletAuth(credentialId: string): Promise<void>;
+  // --- Export jobs ---
+  activeExportJob(userId: string): Promise<StoredExportJob | null>;
+  createExportJob(userId: string, now?: number): Promise<StoredExportJob>;
+  getExportJob(jobId: string): Promise<StoredExportJob | null>;
+  /** Every export job for a user, regardless of state (deletion purge sweep). */
+  listExportJobs(userId: string): Promise<StoredExportJob[]>;
+  updateExportJob(jobId: string, patch: Partial<StoredExportJob>): Promise<StoredExportJob | null>;
+  // --- Deletion requests ---
+  getDeletion(userId: string): Promise<StoredDeletionRequest | null>;
+  setDeletion(req: StoredDeletionRequest): Promise<void>;
+  /** Grace-period deletion requests whose purge instant has passed (scheduler). */
+  duePurgeDeletions(now: number): Promise<StoredDeletionRequest[]>;
+  // --- Lifecycle ---
+  /** Hard-remove every trace of a user (tests / hard purge). */
+  purgeUser(userId: string): Promise<void>;
+  /** Complete deletion (WS-D.2.4c): strip ALL personal data, keep an FK stub. */
+  tombstoneUser(userId: string, now?: number): Promise<void>;
+  /** Test support: wipe all rows (same surface as SessionStore/EphemeralStore). */
+  clear(): Promise<void>;
+}
+
+export class InMemoryIdentityStore implements IdentityStore {
   readonly #users = new Map<string, StoredUser>();
   readonly #auth = new Map<string, StoredUserAuth>();
   readonly #webauthn = new Map<string, StoredWebauthnCredential>();
@@ -112,10 +164,10 @@ export class IdentityStore {
   readonly #deletions = new Map<string, StoredDeletionRequest>();
 
   // --- Users ---------------------------------------------------------------
-  createUser(
+  async createUser(
     input: Omit<StoredUser, 'userId' | 'createdAt' | 'updatedAt'> & { userId?: string },
     now: number = Date.now(),
-  ): StoredUser {
+  ): Promise<StoredUser> {
     const userId = input.userId ?? randomUUID();
     const iso = new Date(now).toISOString();
     const user: StoredUser = { ...input, userId, createdAt: iso, updatedAt: iso };
@@ -134,27 +186,27 @@ export class IdentityStore {
     return user;
   }
 
-  getUser(userId: string): StoredUser | null {
+  async getUser(userId: string): Promise<StoredUser | null> {
     return this.#users.get(userId) ?? null;
   }
 
-  getUserByHandle(handle: string): StoredUser | null {
+  async getUserByHandle(handle: string): Promise<StoredUser | null> {
     const lower = handle.toLowerCase();
     for (const u of this.#users.values()) if (u.handle.toLowerCase() === lower) return u;
     return null;
   }
 
-  getUserByEmail(email: string): StoredUser | null {
+  async getUserByEmail(email: string): Promise<StoredUser | null> {
     const lower = email.toLowerCase();
     for (const u of this.#users.values()) if (u.email?.toLowerCase() === lower) return u;
     return null;
   }
 
-  updateUser(
+  async updateUser(
     userId: string,
     patch: Partial<StoredUser>,
     now: number = Date.now(),
-  ): StoredUser | null {
+  ): Promise<StoredUser | null> {
     const user = this.#users.get(userId);
     if (!user) return null;
     const updated = { ...user, ...patch, updatedAt: new Date(now).toISOString() };
@@ -163,11 +215,11 @@ export class IdentityStore {
   }
 
   // --- User auth -----------------------------------------------------------
-  getAuth(userId: string): StoredUserAuth | null {
+  async getAuth(userId: string): Promise<StoredUserAuth | null> {
     return this.#auth.get(userId) ?? null;
   }
 
-  setAuth(userId: string, patch: Partial<StoredUserAuth>): StoredUserAuth | null {
+  async setAuth(userId: string, patch: Partial<StoredUserAuth>): Promise<StoredUserAuth | null> {
     const auth = this.#auth.get(userId);
     if (!auth) return null;
     const updated = { ...auth, ...patch };
@@ -176,49 +228,49 @@ export class IdentityStore {
   }
 
   // --- WebAuthn credentials ------------------------------------------------
-  addWebauthn(cred: StoredWebauthnCredential): void {
+  async addWebauthn(cred: StoredWebauthnCredential): Promise<void> {
     this.#webauthn.set(cred.credentialId, cred);
   }
 
-  getWebauthn(credentialId: string): StoredWebauthnCredential | null {
+  async getWebauthn(credentialId: string): Promise<StoredWebauthnCredential | null> {
     return this.#webauthn.get(credentialId) ?? null;
   }
 
-  listWebauthn(userId: string): StoredWebauthnCredential[] {
+  async listWebauthn(userId: string): Promise<StoredWebauthnCredential[]> {
     return [...this.#webauthn.values()].filter((c) => c.userId === userId);
   }
 
-  deleteWebauthn(credentialId: string): void {
+  async deleteWebauthn(credentialId: string): Promise<void> {
     this.#webauthn.delete(credentialId);
   }
 
   // --- Auth-wallet credentials --------------------------------------------
-  addWalletAuth(cred: StoredWalletAuthCredential): void {
+  async addWalletAuth(cred: StoredWalletAuthCredential): Promise<void> {
     this.#walletAuth.set(cred.credentialId, cred);
   }
 
-  findWalletAuthByHash(addressHash: string): StoredWalletAuthCredential | null {
+  async findWalletAuthByHash(addressHash: string): Promise<StoredWalletAuthCredential | null> {
     for (const c of this.#walletAuth.values()) if (c.addressHash === addressHash) return c;
     return null;
   }
 
-  listWalletAuth(userId: string): StoredWalletAuthCredential[] {
+  async listWalletAuth(userId: string): Promise<StoredWalletAuthCredential[]> {
     return [...this.#walletAuth.values()].filter((c) => c.userId === userId);
   }
 
-  deleteWalletAuth(credentialId: string): void {
+  async deleteWalletAuth(credentialId: string): Promise<void> {
     this.#walletAuth.delete(credentialId);
   }
 
   // --- Export jobs ---------------------------------------------------------
-  activeExportJob(userId: string): StoredExportJob | null {
+  async activeExportJob(userId: string): Promise<StoredExportJob | null> {
     for (const j of this.#exportJobs.values()) {
       if (j.userId === userId && (j.status === 'queued' || j.status === 'processing')) return j;
     }
     return null;
   }
 
-  createExportJob(userId: string, now: number = Date.now()): StoredExportJob {
+  async createExportJob(userId: string, now: number = Date.now()): Promise<StoredExportJob> {
     const job: StoredExportJob = {
       jobId: randomUUID(),
       userId,
@@ -234,16 +286,19 @@ export class IdentityStore {
     return job;
   }
 
-  getExportJob(jobId: string): StoredExportJob | null {
+  async getExportJob(jobId: string): Promise<StoredExportJob | null> {
     return this.#exportJobs.get(jobId) ?? null;
   }
 
   /** Every export job for a user, regardless of state (deletion purge sweep). */
-  listExportJobs(userId: string): StoredExportJob[] {
+  async listExportJobs(userId: string): Promise<StoredExportJob[]> {
     return [...this.#exportJobs.values()].filter((j) => j.userId === userId);
   }
 
-  updateExportJob(jobId: string, patch: Partial<StoredExportJob>): StoredExportJob | null {
+  async updateExportJob(
+    jobId: string,
+    patch: Partial<StoredExportJob>,
+  ): Promise<StoredExportJob | null> {
     const job = this.#exportJobs.get(jobId);
     if (!job) return null;
     const updated = { ...job, ...patch };
@@ -252,25 +307,26 @@ export class IdentityStore {
   }
 
   // --- Deletion requests ---------------------------------------------------
-  getDeletion(userId: string): StoredDeletionRequest | null {
+  async getDeletion(userId: string): Promise<StoredDeletionRequest | null> {
     return this.#deletions.get(userId) ?? null;
   }
 
-  setDeletion(req: StoredDeletionRequest): void {
+  async setDeletion(req: StoredDeletionRequest): Promise<void> {
     this.#deletions.set(req.userId, req);
   }
 
   /** Grace-period deletion requests whose purge instant has passed (scheduler). */
-  duePurgeDeletions(now: number): StoredDeletionRequest[] {
+  async duePurgeDeletions(now: number): Promise<StoredDeletionRequest[]> {
     return [...this.#deletions.values()].filter(
       (d) => d.state === 'grace_period' && Date.parse(d.purgeAt) <= now,
     );
   }
 
   /** Hard-remove every trace of a user (used by tests / hard purge). */
-  purgeUser(userId: string): void {
+  async purgeUser(userId: string): Promise<void> {
     this.#users.delete(userId);
     this.#auth.delete(userId);
+    this.#deletions.delete(userId);
     for (const [id, c] of this.#webauthn) if (c.userId === userId) this.#webauthn.delete(id);
     for (const [id, c] of this.#walletAuth) if (c.userId === userId) this.#walletAuth.delete(id);
     for (const [id, j] of this.#exportJobs) if (j.userId === userId) this.#exportJobs.delete(id);
@@ -285,7 +341,7 @@ export class IdentityStore {
    * handle CHECK, collides with negligible probability under the unique
    * lower(handle) index, and carries no personal data.
    */
-  tombstoneUser(userId: string, now: number = Date.now()): void {
+  async tombstoneUser(userId: string, now: number = Date.now()): Promise<void> {
     this.#auth.delete(userId);
     for (const [id, c] of this.#webauthn) if (c.userId === userId) this.#webauthn.delete(id);
     for (const [id, c] of this.#walletAuth) if (c.userId === userId) this.#walletAuth.delete(id);
@@ -310,7 +366,7 @@ export class IdentityStore {
     }
   }
 
-  clear(): void {
+  async clear(): Promise<void> {
     this.#users.clear();
     this.#auth.clear();
     this.#webauthn.clear();
