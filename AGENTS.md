@@ -41,12 +41,14 @@ foundation, secure server-side sessions, RBAC + audit log, age gating,
 user-facing privacy controls (settings, DSAR export with an encrypted
 signed-URL archive, and account deletion with a 30-day grace + hard
 purge), steward TOTP MFA, and database-level wallet isolation are
-implemented and tested (`docs/identity/README.md`); the identity and
-audit stores have production Postgres (Drizzle) adapters alongside the
-Redis session/ephemeral/rate-limit adapters, and the hourly privacy jobs
-run as a durable distributed scheduler (Postgres job lease — at most one
-instance executes per window).  The remaining leaf is the S3
-export-archive delivery adapter.
+implemented and tested (`docs/identity/README.md`).  The WS-D
+**server-side surface is complete including its production bindings**:
+Postgres (Drizzle) identity/audit stores, Redis
+session/ephemeral/rate-limit stores, a leased distributed privacy
+scheduler (Postgres job lease — at most one instance executes per
+window), and an S3-compatible export-archive store (SigV4 over fetch,
+client-side sealed).  The remaining WS-D work is the **client auth UI**
+(the web login page is still the WS-C contract stub).
 Workstreams WS-E through WS-P are planned (planning documents
 exist under `docs/planning/`; implementation not yet started).  See
 "Implementation roadmap" below for the full status table.
@@ -285,6 +287,8 @@ licio/
 │           │   ├── store.ts             --   in-memory identity data store
 │           │   ├── services.ts          --   injectable service container + config
 │           │   ├── job-lease.ts         --   distributed scheduler window claim
+│           │   ├── sigv4.ts             --   AWS SigV4 signer (node:crypto, no SDK)
+│           │   ├── object-store-s3.ts   --   S3-compatible export-archive store
 │           │   ├── redis-stores.ts      --   production Redis adapters (gated)
 │           │   └── drizzle-store.ts     --   production Postgres identity/audit/lease adapters (gated)
 │           ├── lib/
@@ -790,7 +794,7 @@ file counts at current state:
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
 | apps/web | ~48 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~30 (incl. WS-D identity + routes) | node | `pnpm --filter api test` |
+| apps/api | ~32 (incl. WS-D identity + routes) | node | `pnpm --filter api test` |
 | packages/shared | ~7 (incl. WS-D schemas) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~2 (isolation + gated integration) | node | via root `pnpm test` (db project) |
 | packages/invariants | ~1 | node | `pnpm --filter @licio/invariants test` |
@@ -891,7 +895,8 @@ password column, hashing, or reset flow anywhere.
 | Privacy | **No IP and no location are ever recorded — or even read** (SPEC §19.1): no code path reads the client address (statically tested); rate limiting is per-account + per-target-mailbox + global identity-free budgets; new-device alerts and request logs carry a coarse device descriptor only (never the full user-agent) | Complete |
 | Durable stores | `DrizzleIdentityStore`/`DrizzleAuditStore` Postgres adapters behind the same interfaces as the in-memory adapters, wired in production alongside the Redis session/ephemeral/rate-limit stores; gated integration tests run the real migration chain | Complete |
 | Job scheduler | Durable distributed privacy scheduler: every instance ticks hourly, a Postgres job lease (`job_leases`, atomic insert-or-steal) grants at most one executor per window, crashed holders self-heal via lease expiry, lease outage fails closed (read-time expiry still bounds retention) | Complete |
-| Deferred | S3 export-archive delivery adapter (the `ObjectStore` interface's cloud binding; expiry is also enforced at read time) | Pending |
+| Export delivery | S3-compatible `ObjectStore` (AWS/R2/MinIO; SigV4 on `node:crypto`, pinned to the official AWS vectors — no SDK dep): bucket bodies are client-side SecretBox ciphertext, expiry enforced at read time, paginated sweep; all-or-none `S3_*` env group (partial fails boot; absent falls back in-memory with a production warning) | Complete |
+| Deferred | Client auth UI (passkey/email/wallet sign-in + account management screens against `/v1/auth/*`; the login route is still the WS-C stub) | Pending |
 
 Pure crypto is mathematically validated: TOTP against the RFC 6238
 Appendix B vectors, real WebAuthn attestation/assertion via a pure-crypto

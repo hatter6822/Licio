@@ -12,6 +12,7 @@ import {
   DrizzleIdentityStore,
   DrizzleJobLeaseStore,
 } from './identity/drizzle-store.js';
+import { S3ObjectStore, s3ConfigFromEnv } from './identity/object-store-s3.js';
 import { PRIVACY_SCHEDULER_INTERVAL_MS, startPrivacyScheduler } from './identity/privacy-jobs.js';
 import { AuthRateLimiter } from './identity/rate-limit-auth.js';
 import {
@@ -59,6 +60,19 @@ const identityServices = buildIdentityServicesFromEnv(env, {
 const db = createDbClient(env.DATABASE_URL);
 identityServices.store = new DrizzleIdentityStore(db);
 identityServices.audit = new DrizzleAuditStore(db);
+// DSAR export-archive storage (WS-D.2.2c): S3-compatible when the all-or-none
+// S3_* env group is set (a partial group fails validation at boot).  Archives
+// are SecretBox-sealed client-side either way; without S3 they are in-memory,
+// which production tolerates but is loudly warned about — they do not survive
+// a restart (the user simply re-requests the export).
+const s3Config = s3ConfigFromEnv(env);
+if (s3Config) {
+  identityServices.objectStore = new S3ObjectStore(identityServices.secretBox, s3Config);
+} else if (env.NODE_ENV === 'production') {
+  logger.warn(
+    'S3 is not configured (S3_* env group): DSAR export archives are in-memory and will NOT survive a restart.',
+  );
+}
 setIdentityServices(identityServices);
 
 // Hourly privacy jobs: the 72h export sweep and the 30-day deletion purge

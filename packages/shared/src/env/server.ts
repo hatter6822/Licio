@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { z } from 'zod';
 
+/** The S3 group is all-or-none; a partial group is a deployment mistake. */
+const S3_REQUIRED_KEYS = [
+  'S3_ENDPOINT',
+  'S3_REGION',
+  'S3_BUCKET',
+  'S3_ACCESS_KEY_ID',
+  'S3_SECRET_ACCESS_KEY',
+] as const;
+
 export const serverEnvSchema = z.object({
   DATABASE_URL: z.string().url({ message: 'DATABASE_URL must be a valid URL' }),
   REDIS_URL: z.string().url({ message: 'REDIS_URL must be a valid URL' }),
@@ -24,10 +33,35 @@ export const serverEnvSchema = z.object({
       message: 'VAPID_SUBJECT must be a mailto: or https:// URI',
     })
     .optional(),
+  // S3-compatible object storage for DSAR export archives (WS-D.2.2c): AWS
+  // S3, Cloudflare R2, or MinIO. ALL-OR-NONE (refined below): when the group
+  // is unset, exports use the in-memory store (dev/CI; warned in production —
+  // archives then do not survive a restart). Archives are SecretBox-encrypted
+  // client-side regardless, so confidentiality never depends on the bucket.
+  S3_ENDPOINT: z.string().url({ message: 'S3_ENDPOINT must be a valid URL' }).optional(),
+  S3_REGION: z.string().min(1).optional(),
+  S3_BUCKET: z.string().min(1).optional(),
+  S3_ACCESS_KEY_ID: z.string().min(1).optional(),
+  S3_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+  S3_PREFIX: z.string().optional(),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;
 
+/** Rejects a PARTIAL S3 group: silently falling back to the in-memory store
+ *  on a typo'd deployment would discard export archives on every restart. */
+export const serverEnvSchemaRefined = serverEnvSchema.superRefine((env, ctx) => {
+  const present = S3_REQUIRED_KEYS.filter((k) => env[k] !== undefined);
+  if (present.length > 0 && present.length < S3_REQUIRED_KEYS.length) {
+    const missing = S3_REQUIRED_KEYS.filter((k) => env[k] === undefined);
+    ctx.addIssue({
+      code: 'custom',
+      message: `Incomplete S3 configuration: missing ${missing.join(', ')} (set the whole S3_* group or none of it)`,
+      path: [missing[0] ?? 'S3_ENDPOINT'],
+    });
+  }
+});
+
 export function validateServerEnv(env: Record<string, string | undefined>): ServerEnv {
-  return serverEnvSchema.parse(env);
+  return serverEnvSchemaRefined.parse(env);
 }

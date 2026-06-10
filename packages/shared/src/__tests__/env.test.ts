@@ -39,6 +39,33 @@ describe('validateServerEnv', () => {
   it('should reject invalid NODE_ENV', () => {
     expect(() => validateServerEnv({ ...validEnv, NODE_ENV: 'staging' })).toThrow();
   });
+
+  it('accepts a COMPLETE S3 group (WS-D.2.2c export delivery)', () => {
+    const result = validateServerEnv({
+      ...validEnv,
+      S3_ENDPOINT: 'https://s3.eu-central-1.amazonaws.com',
+      S3_REGION: 'eu-central-1',
+      S3_BUCKET: 'licio-exports',
+      S3_ACCESS_KEY_ID: 'key',
+      S3_SECRET_ACCESS_KEY: 'secret',
+    });
+    expect(result.S3_BUCKET).toBe('licio-exports');
+  });
+
+  it('rejects a PARTIAL S3 group (a typo must not silently disable durable exports)', () => {
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        S3_ENDPOINT: 'https://s3.eu-central-1.amazonaws.com',
+        S3_BUCKET: 'licio-exports',
+      }),
+    ).toThrow(/Incomplete S3 configuration/);
+  });
+
+  it('accepts the S3 group being entirely absent (in-memory fallback)', () => {
+    const result = validateServerEnv(validEnv);
+    expect(result.S3_ENDPOINT).toBeUndefined();
+  });
 });
 
 describe('validateClientEnv', () => {

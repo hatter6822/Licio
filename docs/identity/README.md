@@ -79,6 +79,8 @@ interfaces.
 | `security-alerts.ts` | suspicious-login detection + multi-channel alerts (email→push→**always log**) |
 | `secrets.ts` | AES-256-GCM `SecretBox` (HKDF-derived, domain-separated key) for secrets at rest (steward TOTP secret) |
 | `object-store.ts` | encrypted DSAR archive store + HMAC-signed, subject-bound, expiring download tokens |
+| `sigv4.ts` | minimal AWS Signature V4 signer on `node:crypto` (no SDK dep; pinned to the official AWS vectors) |
+| `object-store-s3.ts` | S3-compatible `ObjectStore` (AWS/R2/MinIO, path-style, SigV4 over fetch): client-side sealed bodies, read-time expiry, paginated sweep |
 | `privacy-jobs.ts` | DSAR export assembly (own data only), export job process/retry/sweep, deletion hard-purge (anonymize/tombstone) |
 | `store.ts` | the `IdentityStore` interface + in-memory adapter (mirrors the Drizzle schema) |
 | `services.ts` | injectable service container + config derivation |
@@ -158,19 +160,21 @@ double-submit token).
 
 ## Deferred / interface-level (wired to follow-up workstreams)
 
-The privacy-control and steward-MFA **logic** is implemented and tested against
-in-memory/local adapters; the durable stores are bound (Postgres-backed
-`DrizzleIdentityStore`/`DrizzleAuditStore` in `drizzle-store.ts`, wired in
-`index.ts` next to the Redis session/ephemeral/rate-limit adapters — run
-`pnpm db:migrate` before serving traffic); only the production cloud bindings
-— behind the same interfaces — land later:
+The server-side WS-D surface is complete, including its production bindings:
+the Postgres-backed `DrizzleIdentityStore`/`DrizzleAuditStore`
+(`drizzle-store.ts`; run `pnpm db:migrate` before serving traffic), the Redis
+session/ephemeral/rate-limit adapters, the leased distributed scheduler, and
+the S3-compatible export-archive store.
 
-- **Export delivery adapter** — assembly (own data only), AES-256-GCM
-  encryption-at-rest, the step-up-protected signed/expiring download URL,
-  read-time expiry enforcement, and the hourly sweep are implemented and tested
-  with the in-memory object store; the S3+KMS `ObjectStore` adapter (and moving
-  assembly off the first-poll path onto the scheduler) is the remaining binding
-  (WS-D.2.2c).
+- **Export delivery** — assembly (own data only), AES-256-GCM client-side
+  sealing, the step-up-protected signed/expiring download URL, read-time expiry
+  enforcement, and the hourly sweep run against either object store; in
+  production the all-or-none `S3_*` env group selects the S3 adapter (a partial
+  group fails boot validation; an absent group falls back to in-memory with a
+  loud warning — archives then don't survive a restart).  The archive body in
+  the bucket is SecretBox ciphertext, so confidentiality never depends on
+  bucket configuration; SSE-KMS on the bucket is recommended defense in depth.
+  Assembly happens in-process on the first status poll (fast and idempotent).
 - **Deletion purge** — fully running as the durable distributed runner: the
   hard-purge job (`runDeletionPurge`: anonymize → delete all export archives →
   revoke all sessions → tombstone → hashed-id `deletion_complete` audit) and the
@@ -179,10 +183,16 @@ in-memory/local adapters; the durable stores are bound (Postgres-backed
   `job_leases`): every instance ticks, at most one atomically claims the window
   and executes, a crashed holder's lease expires for the next claimant, and a
   lease-store outage fails closed (read-time expiry still bounds retention).
-  Only the WS-G `anonymizeContributions` implementation behind the injected hook
-  lands later (WS-D.2.4b).
+
+Interface-level hooks wired to follow-up workstreams:
+
+- **Contribution anonymization** — the WS-G `anonymizeContributions`
+  implementation behind the injected hook (WS-D.2.4b).
 - **Attention-history purge** and the **settings-change downstream consumer** are
   injected hooks (`purgeAttention`, `onPrivacyChange`) that WS-E implements.
+- **Client auth UI** — the web login page is still the WS-C contract stub; the
+  passkey/email/wallet sign-in and account-management screens against
+  `/v1/auth/*` are the remaining WS-D client work.
 - **No geo lookup at all** — per SPEC §19.1 the platform records no IP and no
   location, so there is no MaxMind/geo-IP dependency; suspicious-login detection is
   coarse new-device only.
@@ -208,3 +218,8 @@ audit redaction/ordering) plus the `DrizzleJobLeaseStore` claim semantics
 concurrent claimants).  The Drizzle-store suite creates and migrates its own
 scratch database (`licio_drizzle_store_it`) so its destructive checks never
 collide with the other gated tests sharing `DATABASE_URL`.
+
+The S3 adapter is NOT gated: the SigV4 signer is pinned to the official AWS
+worked example, and the store contract runs in CI against a faithful fake S3
+through the injected fetch seam (ciphertext-at-rest, read-time expiry,
+paginated list/sweep, signed requests with bound payload hashes).
