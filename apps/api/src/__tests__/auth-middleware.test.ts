@@ -41,6 +41,8 @@ interface SeedOpts {
   ageBand?: AgeBand | null;
   roles?: Role[];
   mfa?: boolean;
+  /** Whether the SESSION has cleared TOTP (per-session steward MFA, WS-D.1.5b). */
+  mfaVerified?: boolean;
   verified?: boolean;
   sessionAge?: number; // ms ago the session was created (for step-up staleness)
 }
@@ -82,6 +84,7 @@ async function seedSessionCookie(opts: SeedOpts = {}): Promise<string> {
       credentialRef: 'cred-guard',
       deviceLabel: 'test',
       rememberMe: false,
+      mfaVerified: opts.mfaVerified ?? false,
     },
     Date.now() - (opts.sessionAge ?? 0),
   );
@@ -169,8 +172,9 @@ describe('requireAdult (fails closed on teen/unknown)', () => {
   });
 });
 
-describe('requireSteward (role + active MFA)', () => {
-  it('requires both a steward role and active MFA', async () => {
+describe('requireSteward (role + MFA-verified session)', () => {
+  it('requires a steward role AND a session that has cleared TOTP', async () => {
+    // Non-steward → 403.
     expect(
       (
         await guardedApp().request('/steward', {
@@ -178,6 +182,7 @@ describe('requireSteward (role + active MFA)', () => {
         })
       ).status,
     ).toBe(403);
+    // Steward with no MFA enrolled → 403.
     expect(
       (
         await guardedApp().request('/steward', {
@@ -185,10 +190,23 @@ describe('requireSteward (role + active MFA)', () => {
         })
       ).status,
     ).toBe(403);
+    // Steward with MFA enrolled but session NOT yet MFA-verified → 403 (reduced assurance).
     expect(
       (
         await guardedApp().request('/steward', {
-          headers: { cookie: await seedSessionCookie({ roles: ['steward'], mfa: true }) },
+          headers: {
+            cookie: await seedSessionCookie({ roles: ['steward'], mfa: true, mfaVerified: false }),
+          },
+        })
+      ).status,
+    ).toBe(403);
+    // Steward with MFA enrolled AND a MFA-verified session → 200.
+    expect(
+      (
+        await guardedApp().request('/steward', {
+          headers: {
+            cookie: await seedSessionCookie({ roles: ['steward'], mfa: true, mfaVerified: true }),
+          },
         })
       ).status,
     ).toBe(200);

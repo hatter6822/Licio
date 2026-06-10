@@ -14,7 +14,7 @@
 // The verified address is hashed under the AUTH-domain HMAC key — domain-separated
 // from the financial-wallet key — so signing in with a wallet can never be
 // correlated with a financial WalletAccount (§19.5).
-import { recoverMessageAddress } from 'viem';
+import { createPublicClient, http, recoverMessageAddress } from 'viem';
 import { generateSiweNonce, parseSiweMessage } from 'viem/siwe';
 import { deriveKey, hmacHex, KEY_DOMAINS, truncateAddress } from './crypto.js';
 import type { EphemeralStore } from './ephemeral-store.js';
@@ -26,6 +26,12 @@ export interface SiweConfig {
   uri: string;
   /** Permitted chain ids. */
   chainAllowlist: readonly number[];
+  /**
+   * Optional per-chain JSON-RPC endpoints.  When a chain has an endpoint, contract
+   * wallets (EIP-1271) and counterfactual smart accounts (EIP-6492) can be verified
+   * on-chain; without one, only EOA (EIP-191) sign-in works for that chain.
+   */
+  chainRpcUrls?: Readonly<Record<number, string>>;
   nonceTtlMs?: number;
   maxClockSkewMs?: number;
 }
@@ -218,4 +224,27 @@ export function hashAuthWalletAddress(masterSecret: string, addressLower: string
 /** Hash a financial-wallet address under the FINANCIAL-domain key (WS-D.3 / WS-L). */
 export function hashFinancialWalletAddress(masterSecret: string, addressLower: string): string {
   return hmacHex(deriveKey(masterSecret, KEY_DOMAINS.financialWallet), addressLower);
+}
+
+/**
+ * Build the on-chain contract-signature verifier (EIP-1271 / EIP-6492) from the
+ * configured per-chain RPC endpoints, using viem's `publicClient.verifyMessage`
+ * (which transparently handles deployed contract wallets and counterfactual smart
+ * accounts).  Returns `undefined` when no RPC is configured — then only EOA
+ * sign-in works.  A chain with no endpoint, or any RPC error, verifies as false.
+ */
+export function createContractVerifier(
+  chainRpcUrls: Readonly<Record<number, string>> = {},
+): ContractSignatureVerifier | undefined {
+  if (Object.keys(chainRpcUrls).length === 0) return undefined;
+  return async ({ address, message, signature, chainId }) => {
+    const rpc = chainRpcUrls[chainId];
+    if (!rpc) return false;
+    try {
+      const client = createPublicClient({ transport: http(rpc) });
+      return await client.verifyMessage({ address: address as `0x${string}`, message, signature });
+    } catch {
+      return false;
+    }
+  };
 }

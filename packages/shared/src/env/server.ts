@@ -9,6 +9,10 @@ export const serverEnvSchema = z.object({
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   CORS_ORIGIN: z.string().url({ message: 'CORS_ORIGIN must be a valid URL' }),
   SESSION_SECRET: z.string().min(32, { message: 'SESSION_SECRET must be at least 32 characters' }),
+  // Optional per-chain JSON-RPC endpoints for contract-wallet (EIP-1271/6492)
+  // sign-in verification, as JSON: {"1":"https://...","8453":"https://..."}.
+  // When unset, only EOA wallet sign-in is available.
+  CHAIN_RPC_URLS: z.string().optional(),
   // Web Push / VAPID (WS-C.2.4a). All optional: when unset, push is disabled and
   // the push endpoints report unconfigured rather than failing. The private key
   // lives ONLY here (server env), never in the client bundle (SPEC §6.8, §21.2).

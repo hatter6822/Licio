@@ -318,7 +318,7 @@ describe('WebAuthn passkey login (real assertion)', () => {
       method: 'POST',
       headers: jsonHeaders(),
     });
-    const attempt = extractCookie(optRes, '__Host-otp') as string;
+    const attempt = extractCookie(optRes, '__Host-wa') as string;
     const options = await readJson<{ challenge: string }>(optRes);
     const assertion = authenticator.authenticate(
       options.challenge,
@@ -345,7 +345,7 @@ describe('Sign-In with Ethereum (adult-only signup)', () => {
       method: 'POST',
       headers: jsonHeaders(),
     });
-    const attempt = extractCookie(nonceRes, '__Host-otp') as string;
+    const attempt = extractCookie(nonceRes, '__Host-siwe') as string;
     const { nonce } = await readJson<{ nonce: string }>(nonceRes);
     const message = createSiweMessage({
       address: account.address,
@@ -397,7 +397,7 @@ describe('Sign-In with Ethereum (adult-only signup)', () => {
       method: 'POST',
       headers: jsonHeaders(),
     });
-    const attempt = extractCookie(nonceRes, '__Host-otp') as string;
+    const attempt = extractCookie(nonceRes, '__Host-siwe') as string;
     const { nonce } = await readJson<{ nonce: string }>(nonceRes);
     const message = createSiweMessage({
       address: account.address,
@@ -459,7 +459,7 @@ describe('cloned-authenticator detection (counter regression)', () => {
       method: 'POST',
       headers: jsonHeaders(),
     });
-    const attempt1 = extractCookie(opt1, '__Host-otp') as string;
+    const attempt1 = extractCookie(opt1, '__Host-wa') as string;
     const o1 = await readJson<{ challenge: string }>(opt1);
     await app.request('/v1/auth/webauthn/authenticate/verify', {
       method: 'POST',
@@ -479,7 +479,7 @@ describe('cloned-authenticator detection (counter regression)', () => {
       method: 'POST',
       headers: jsonHeaders(),
     });
-    const attempt2 = extractCookie(opt2, '__Host-otp') as string;
+    const attempt2 = extractCookie(opt2, '__Host-wa') as string;
     const o2 = await readJson<{ challenge: string }>(opt2);
     const cloned = await app.request('/v1/auth/webauthn/authenticate/verify', {
       method: 'POST',

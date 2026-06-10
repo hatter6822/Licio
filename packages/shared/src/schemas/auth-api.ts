@@ -190,6 +190,37 @@ export const totpVerifyRequestSchema = z
   .strict();
 export type TotpVerifyRequest = z.infer<typeof totpVerifyRequestSchema>;
 
+/** The authenticated user's enrolled credentials (WS-D.1.2c management surface). */
+export const credentialListResponseSchema = z
+  .object({
+    passkeys: z.array(
+      z
+        .object({
+          credential_id: z.string().min(1),
+          device_name: z.string().nullable(),
+          device_type: z.string(),
+          backed_up: z.boolean(),
+          created_at: z.string().datetime(),
+          last_used_at: z.string().datetime().nullable(),
+        })
+        .strict(),
+    ),
+    wallets: z.array(
+      z
+        .object({
+          credential_id: uuidSchema,
+          address_truncated: z.string(),
+          chain_id: z.number().int().positive(),
+          created_at: z.string().datetime(),
+          last_used_at: z.string().datetime().nullable(),
+        })
+        .strict(),
+    ),
+    email: z.object({ present: z.boolean(), verified: z.boolean() }).strict(),
+  })
+  .strict();
+export type CredentialListResponse = z.infer<typeof credentialListResponseSchema>;
+
 /** Age band echoed to the client after registration (drives UI gating, never DOB). */
 export const registeredAgeBandSchema = z.object({ age_band: ageBandSchema }).strict();
 

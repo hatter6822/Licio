@@ -31,7 +31,10 @@ export interface AuthContext {
   /** True when the account holds any verified credential (passkey/wallet/verified email). */
   accountVerified: boolean;
   ageBand: AgeBand | null;
+  /** Whether the account has TOTP MFA enrolled+active. */
   mfaActive: boolean;
+  /** Whether THIS session has cleared a TOTP code (per-session steward MFA). */
+  mfaVerified: boolean;
   tokenHash: string;
 }
 
@@ -80,6 +83,7 @@ export function authMiddleware(
       accountVerified: hasVerifiedCredential(inv),
       ageBand: user.ageBand,
       mfaActive: auth?.mfaEnabled ?? false,
+      mfaVerified: validated.record.mfa_verified,
       tokenHash: validated.tokenHash,
     });
 
@@ -138,12 +142,32 @@ export function requireSteward(): MiddlewareHandler<AuthEnv> {
   return async (c, next) => {
     const auth = c.get('auth');
     if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-    if (!isSteward(auth.roles)) return c.json(deny('forbidden', 'Steward role required'), 403);
-    if (!auth.mfaActive)
-      return c.json(deny('mfa_required', 'Active MFA required for steward actions'), 403);
+    if (!isSteward(auth.roles)) {
+      await denyAudit(auth.userId);
+      return c.json(deny('forbidden', 'Steward role required'), 403);
+    }
+    // Reduced-assurance-until-MFA: a steward session must have cleared TOTP
+    // (mfaVerified), not merely have MFA enrolled on the account (WS-D.1.5b).
+    if (!auth.mfaActive || !auth.mfaVerified) {
+      return c.json(deny('mfa_required', 'Verify MFA to perform steward actions'), 403);
+    }
     await next();
     return;
   };
+}
+
+/** Best-effort audit of a denied authorization attempt (WS-D.1.6b/6c). */
+async function denyAudit(actorUserId: string): Promise<void> {
+  try {
+    const { getIdentityServices } = await import('../identity/services.js');
+    await getIdentityServices().audit.append({
+      actorUserId,
+      eventType: 'authz_denied',
+      context: {},
+    });
+  } catch {
+    // Auditing must never block the deny path.
+  }
 }
 
 /** Require a confirmed adult.  Fails closed on teen OR unknown age (WS-D.1.7c). */

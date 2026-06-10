@@ -65,6 +65,24 @@ async function issueCode(
   return { code };
 }
 
+/**
+ * Read the user id bound to a login attempt WITHOUT consuming the code — used to
+ * key the per-account rate limiter before a verify attempt (WS-D.1.3d).  Returns
+ * null if the attempt is absent/expired/malformed.
+ */
+export async function peekEmailLoginUserId(
+  store: EphemeralStore,
+  attemptId: string,
+): Promise<string | null> {
+  const raw = await store.get(loginKey(attemptId));
+  if (!raw) return null;
+  try {
+    return (JSON.parse(raw) as OtpRecord).userId;
+  } catch {
+    return null;
+  }
+}
+
 /** Verify a login code presented under its `login_attempt_id` (browser binding). */
 export async function verifyEmailLogin(
   store: EphemeralStore,

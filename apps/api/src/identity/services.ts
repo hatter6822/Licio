@@ -11,6 +11,7 @@ import type { AuthMethodInventory } from './auth-methods.js';
 import { deriveKey, hmacHex, KEY_DOMAINS } from './crypto.js';
 import { type EphemeralStore, InMemoryEphemeralStore } from './ephemeral-store.js';
 import { AuthRateLimiter, InMemoryAuthRateLimitStore } from './rate-limit-auth.js';
+import { createLocalSecretBox, type SecretBox } from './secrets.js';
 import { InMemorySessionStore, type SessionStore } from './sessions.js';
 import type { SiweConfig } from './siwe.js';
 import { IdentityStore } from './store.js';
@@ -27,6 +28,25 @@ export interface IdentityConfig {
 export interface Mailer {
   sendCode(to: string, code: string, kind: 'login' | 'verify'): Promise<void>;
   sendNotice(to: string, kind: string): Promise<void>;
+}
+
+/**
+ * A mailer that only emits structured observability — it NEVER logs the code or
+ * the recipient address (§19.1 minimization).  Production swaps a real SMTP/email
+ * provider behind the {@link Mailer} interface; this keeps dev/observability honest
+ * without leaking secrets or PII into logs.
+ */
+export function createLoggingMailer(
+  log: (event: string, meta: Record<string, unknown>) => void,
+): Mailer {
+  return {
+    async sendCode(_to: string, _code: string, kind: 'login' | 'verify'): Promise<void> {
+      log('auth.mail.code_requested', { kind });
+    },
+    async sendNotice(_to: string, kind: string): Promise<void> {
+      log('auth.mail.notice_requested', { kind });
+    },
+  };
 }
 
 /** A no-op mailer that records every send, for assertions in tests. */
@@ -52,6 +72,8 @@ export interface IdentityServices {
   rateLimit: AuthRateLimiter;
   audit: AuditStore;
   mailer: Mailer;
+  /** Authenticated encryption for secrets at rest (the steward TOTP secret). */
+  secretBox: SecretBox;
   /**
    * Downstream propagation hook (WS-E): invoked when a settings change affects
    * collection, so disabling personalization / setting retention to `none`
@@ -68,10 +90,30 @@ export interface IdentityServices {
 
 const DEFAULT_CHAIN_ALLOWLIST = [1, 8453, 42161, 10] as const; // mainnet, Base, Arbitrum, Optimism
 
+/** Parse the optional per-chain RPC JSON map; tolerate malformed input → {}. */
+export function parseChainRpcUrls(raw: string | undefined): Record<number, string> {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return {};
+    const out: Record<number, string> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      const chainId = Number(k);
+      if (Number.isInteger(chainId) && typeof v === 'string' && /^https?:\/\//.test(v)) {
+        out[chainId] = v;
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 /** Derive identity config from the validated server env (origin → rpID/domain). */
 export function identityConfigFromEnv(env: {
   SESSION_SECRET: string;
   CORS_ORIGIN: string;
+  CHAIN_RPC_URLS?: string;
 }): IdentityConfig {
   const origin = env.CORS_ORIGIN.replace(/\/$/, '');
   const host = (() => {
@@ -84,7 +126,12 @@ export function identityConfigFromEnv(env: {
   return {
     masterSecret: env.SESSION_SECRET,
     webauthn: { rpName: 'Licio', rpID: host.split(':')[0] ?? host, origin },
-    siwe: { domain: host, uri: origin, chainAllowlist: [...DEFAULT_CHAIN_ALLOWLIST] },
+    siwe: {
+      domain: host,
+      uri: origin,
+      chainAllowlist: [...DEFAULT_CHAIN_ALLOWLIST],
+      chainRpcUrls: parseChainRpcUrls(env.CHAIN_RPC_URLS),
+    },
   };
 }
 
@@ -99,11 +146,16 @@ export function createInMemoryIdentityServices(config: IdentityConfig): Identity
     rateLimit: new AuthRateLimiter(new InMemoryAuthRateLimitStore()),
     audit: new InMemoryAuditStore(),
     mailer: new RecordingMailer(),
+    secretBox: createLocalSecretBox(config.masterSecret),
   };
 }
 
 let _services: IdentityServices | undefined;
 
+// A FIXED, NON-SECRET test config used ONLY under NODE_ENV=test, so unit tests
+// that touch an identity route without explicitly wiring services still run.
+// Production must call `setIdentityServices` with a real, env-derived config; the
+// getter throws otherwise (no hardcoded secret can ever reach production).
 const TEST_CONFIG: IdentityConfig = {
   masterSecret: 'test-master-secret-at-least-32-characters-long',
   webauthn: { rpName: 'Licio', rpID: 'localhost', origin: 'http://localhost' },
@@ -111,12 +163,38 @@ const TEST_CONFIG: IdentityConfig = {
 };
 
 export function getIdentityServices(): IdentityServices {
-  if (!_services) _services = createInMemoryIdentityServices(TEST_CONFIG);
-  return _services;
+  if (_services) return _services;
+  if (process.env['NODE_ENV'] === 'test') {
+    _services = createInMemoryIdentityServices(TEST_CONFIG);
+    return _services;
+  }
+  throw new Error(
+    'Identity services not configured — call setIdentityServices() at startup (apps/api/src/index.ts)',
+  );
 }
 
 export function setIdentityServices(services: IdentityServices): void {
   _services = services;
+}
+
+/**
+ * Build the identity services from the validated server env.  The master secret
+ * and RP-ID/SIWE bindings come from SESSION_SECRET/CORS_ORIGIN — never a hardcoded
+ * value.  When a Redis client is supplied, the live session, ephemeral-secret, and
+ * rate-limit stores are Redis-backed (durable across restarts); otherwise they are
+ * in-memory (suitable for local single-process dev).
+ */
+export function buildIdentityServicesFromEnv(
+  env: { SESSION_SECRET: string; CORS_ORIGIN: string },
+  adapters?: Partial<
+    Pick<
+      IdentityServices,
+      'sessions' | 'challenges' | 'otp' | 'rateLimit' | 'store' | 'audit' | 'mailer'
+    >
+  >,
+): IdentityServices {
+  const base = createInMemoryIdentityServices(identityConfigFromEnv(env));
+  return { ...base, ...adapters };
 }
 
 /** Keyed, non-reversible IP hash (never a plaintext IP in storage, §19.5). */
