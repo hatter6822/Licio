@@ -38,10 +38,13 @@ type level, runtime, and CI (the no-applause static gate).
 application) are complete.  WS-D (identity, accounts, and privacy) is
 **in progress**: the WebAuthn-first/passwordless authentication
 foundation, secure server-side sessions, RBAC + audit log, age gating,
-user-facing privacy controls, and database-level wallet isolation are
-implemented and tested (`docs/identity/README.md`); a few infrastructure
-leaves (export worker/delivery, deletion purge job, steward MFA routes)
-remain.  Workstreams WS-E through WS-P are planned (planning documents
+user-facing privacy controls (settings, DSAR export with an encrypted
+signed-URL archive, and account deletion with a 30-day grace + hard
+purge), steward TOTP MFA, and database-level wallet isolation are
+implemented and tested (`docs/identity/README.md`); the remaining leaves
+are production cloud adapters (S3 export-archive delivery, a durable
+export/purge job runner, and the Drizzle-backed identity store).
+Workstreams WS-E through WS-P are planned (planning documents
 exist under `docs/planning/`; implementation not yet started).  See
 "Implementation roadmap" below for the full status table.
 
@@ -141,7 +144,8 @@ licio/
 ├── pnpm-workspace.yaml          -- pnpm workspace definition
 ├── tsconfig.json                -- root TypeScript config
 ├── tsconfig.base.json           -- base TypeScript config (shared settings)
-├── vitest.config.ts             -- Vitest multi-project config (6 projects)
+├── vitest.config.ts             -- Vitest root run + cross-workspace coverage gate
+├── vitest.shared.ts             -- per-project test settings SSOT (root + per-workspace)
 ├── biome.json                   -- Biome linter/formatter (2.4.16)
 ├── lefthook.yml                 -- Git hooks
 ├── docker-compose.yml           -- local dev services (PostgreSQL, Redis)
@@ -272,6 +276,9 @@ licio/
 │           │   ├── siwe.ts              --   viem EIP-4361 verification
 │           │   ├── email-otp.ts         --   passwordless email login/factor
 │           │   ├── security-alerts.ts   --   suspicious-login + multi-channel alerts
+│           │   ├── secrets.ts           --   AES-256-GCM SecretBox (encrypt-at-rest)
+│           │   ├── object-store.ts      --   encrypted DSAR archive store + signed URL tokens
+│           │   ├── privacy-jobs.ts      --   DSAR export assembly + deletion-purge/sweep jobs
 │           │   ├── store.ts             --   in-memory identity data store
 │           │   ├── services.ts          --   injectable service container + config
 │           │   └── redis-stores.ts      --   production Redis adapters (gated)
@@ -758,9 +765,12 @@ every match.
 
 ## Current development status
 
-**Vitest configuration.**  Six test projects configured in
-`vitest.config.ts`: shared (node), db (node), invariants (node),
-api (node), web (jsdom), policy (node).  Coverage provider: V8.
+**Vitest configuration.**  Six test projects: shared (node), db (node),
+invariants (node), api (node), web (jsdom), policy (node).  Their
+settings live once in `vitest.shared.ts`; the root `vitest.config.ts`
+composes them into the unified `pnpm test` run + the cross-workspace V8
+coverage gate, and each workspace has a thin local `vitest.config.ts`
+re-using the same settings so `pnpm --filter <ws> test` runs standalone.
 Coverage threshold: 80% minimum for lines, functions, branches,
 and statements.
 
@@ -865,10 +875,11 @@ password column, hashing, or reset flow anywhere.
 | Auth | WebAuthn (`@simplewebauthn`), email-OTP, SIWE (viem); sessions, rotation, step-up, rate limiting | Complete |
 | Authorization | RBAC + object-level (404-over-403), append-only audit log, fail-closed middleware | Complete |
 | Age gating | Under-13 block, teen privacy floor (server-clamped), `requireAdult` fail-closed | Complete |
-| Privacy controls | Settings get/patch (clamped/audited/propagated), attention delete, export job, account deletion + grace | Core complete |
+| Privacy controls | Settings get/patch (clamped/audited/propagated), attention delete, DSAR export (assemble → encrypt → signed-URL → 72h sweep), account deletion + 30-day grace + hard purge (anonymize/tombstone) | Complete |
+| Steward MFA | TOTP enroll/verify/disable, per-session `mfa_verified`, reduced-assurance-until-MFA steward guard | Complete |
 | Wallet isolation | `wallet.wallet_accounts` schema + undirected-BFS isolation test (WS-D.3.2) | Complete |
 | Privacy | **No IP and no location are ever recorded** (SPEC §19.1); new-device alerts use a coarse device descriptor only; IPs are transient + hashed for rate limiting, never persisted | Complete |
-| Deferred | Export worker/S3 delivery, deletion purge job, steward MFA routes | Pending |
+| Deferred | Production cloud adapters: S3 export-archive delivery, a durable export/purge job runner, and the Drizzle-backed identity-store projection | Pending |
 
 Pure crypto is mathematically validated: TOTP against the RFC 6238
 Appendix B vectors, real WebAuthn attestation/assertion via a pure-crypto

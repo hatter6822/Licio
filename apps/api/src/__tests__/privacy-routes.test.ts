@@ -9,6 +9,7 @@ import {
 } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
+import { exportObjectKey } from '../identity/privacy-jobs.js';
 import {
   createInMemoryIdentityServices,
   type IdentityConfig,
@@ -141,6 +142,22 @@ describe('GET/PATCH /v1/privacy/settings', () => {
     expect(body.privacy_settings.data_sharing_preferences.analytics_opt_in).toBe(false);
     expect(body.teen_floor_applied).toBe(true);
   });
+
+  it('patches the personalization settings blob (topic preferences)', async () => {
+    seedUser('adult', 'pers@example.com', 'persuser');
+    const app = createApp();
+    const sid = await login(app, 'pers@example.com');
+    const patch = await app.request('/v1/privacy/settings', {
+      method: 'PATCH',
+      headers: jsonHeaders(sid),
+      body: JSON.stringify({ personalization_settings: { topic_preferences: ['technology'] } }),
+    });
+    expect(patch.status).toBe(200);
+    const body = await readJson<{ personalization_settings: { topic_preferences: string[] } }>(
+      patch,
+    );
+    expect(body.personalization_settings.topic_preferences).toEqual(['technology']);
+  });
 });
 
 describe('POST /v1/privacy/attention/delete', () => {
@@ -202,6 +219,64 @@ describe('DSAR export', () => {
     });
     expect(cross.status).toBe(404);
   });
+
+  it('processes on first poll, then serves the archive via a signed download token', async () => {
+    const user = seedUser('adult', 'dl@example.com', 'dluser');
+    const app = createApp();
+    const sid = await login(app, 'dl@example.com');
+
+    const create = await app.request('/v1/privacy/export', {
+      method: 'POST',
+      headers: jsonHeaders(sid),
+    });
+    const { job_id } = await readJson<{ job_id: string }>(create);
+
+    // First poll assembles the job (in-process worker substitute) → completed.
+    const poll = await app.request(`/v1/privacy/export/${job_id}`, { headers: { cookie: sid } });
+    const status = await readJson<{ status: string; download_token: string | null }>(poll);
+    expect(status.status).toBe('completed');
+    expect(status.download_token).toBeTruthy();
+
+    // The signed token unlocks the encrypted archive (own data only).
+    const download = await app.request(
+      `/v1/privacy/export/${job_id}/download?t=${status.download_token}`,
+      { headers: { cookie: sid } },
+    );
+    expect(download.status).toBe(200);
+    expect(download.headers.get('content-disposition')).toContain('licio-export.json');
+    const archive = await readJson<{ schema_version: number; account: { user_id: string } }>(
+      download,
+    );
+    expect(archive.schema_version).toBe(1);
+    expect(archive.account.user_id).toBe(user.userId);
+
+    // A forged/again-expired token is rejected (403), never serving bytes.
+    const forged = await app.request(`/v1/privacy/export/${job_id}/download?t=not-a-real-token`, {
+      headers: { cookie: sid },
+    });
+    expect(forged.status).toBe(403);
+  });
+
+  it('returns 410 when a valid token outlives a swept archive', async () => {
+    seedUser('adult', 'gone@example.com', 'goneuser');
+    const app = createApp();
+    const sid = await login(app, 'gone@example.com');
+    const create = await app.request('/v1/privacy/export', {
+      method: 'POST',
+      headers: jsonHeaders(sid),
+    });
+    const { job_id } = await readJson<{ job_id: string }>(create);
+    const poll = await app.request(`/v1/privacy/export/${job_id}`, { headers: { cookie: sid } });
+    const { download_token } = await readJson<{ download_token: string }>(poll);
+
+    // The 72h sweeper has removed the archive object, but the job is still
+    // 'completed' and the (unexpired) token still verifies → 410 Gone, not 200.
+    await services.objectStore.delete(exportObjectKey(job_id));
+    const res = await app.request(`/v1/privacy/export/${job_id}/download?t=${download_token}`, {
+      headers: { cookie: sid },
+    });
+    expect(res.status).toBe(410);
+  });
 });
 
 describe('account deletion lifecycle', () => {
@@ -226,8 +301,9 @@ describe('account deletion lifecycle', () => {
       (services.mailer as RecordingMailer).notices.some((n) => n.kind === 'deletion_requested'),
     ).toBe(true);
 
-    // Re-activate via the store (deactivated accounts cannot log in) then cancel.
-    services.store.updateUser(user.userId, { accountState: 'active' });
+    // A pending-deletion account may RE-LOGIN with a remaining method solely to
+    // cancel (the session is otherwise restricted by the middleware).  No manual
+    // re-activation: this exercises the real recovery path for a no-email user.
     const sid2 = await login(app, 'del@example.com');
     const cancel = await app.request('/v1/privacy/delete-account/cancel', {
       method: 'POST',
@@ -236,5 +312,36 @@ describe('account deletion lifecycle', () => {
     expect(cancel.status).toBe(200);
     expect((await readJson<{ state: string }>(cancel)).state).toBe('none');
     expect(services.store.getUser(user.userId)?.accountState).toBe('active');
+  });
+
+  it('cancels via the emailed single-use token (no session required)', async () => {
+    const user = seedUser('adult', 'tok@example.com', 'tokuser');
+    const app = createApp();
+    const sid = await login(app, 'tok@example.com');
+
+    await app.request('/v1/privacy/delete-account', { method: 'POST', headers: jsonHeaders(sid) });
+    const notice = (services.mailer as RecordingMailer).notices.find(
+      (n) => n.kind === 'deletion_requested',
+    );
+    const token = notice?.payload?.['cancel_token'];
+    expect(token).toBeTruthy();
+
+    // The token cancels WITHOUT any session cookie (the user clicked an email link).
+    const cancel = await app.request('/v1/privacy/delete-account/cancel', {
+      method: 'POST',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ token }),
+    });
+    expect(cancel.status).toBe(200);
+    expect((await readJson<{ state: string }>(cancel)).state).toBe('none');
+    expect(services.store.getUser(user.userId)?.accountState).toBe('active');
+
+    // The token is single-use: a replay finds no cancellable deletion.
+    const replay = await app.request('/v1/privacy/delete-account/cancel', {
+      method: 'POST',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ token }),
+    });
+    expect(replay.status).toBe(404);
   });
 });

@@ -74,6 +74,8 @@ export const exportJobStatusSchema = z
     expires_at: isoTimestampSchema.nullable(),
     /** Present only when status === 'completed' and the download is still live. */
     download_available: z.boolean(),
+    /** A fresh, time-limited signed token for the download URL (when available). */
+    download_token: z.string().nullable(),
   })
   .strict();
 export type ExportJobStatus = z.infer<typeof exportJobStatusSchema>;

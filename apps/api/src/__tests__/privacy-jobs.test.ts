@@ -1,0 +1,331 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// Unit coverage for the WS-D.2 privacy background pipeline: DSAR export assembly,
+// the encrypt-at-rest object store + signed download tokens, the export job state
+// machine (process / retry / sweep), and the account-deletion hard purge.  These
+// exercise the data-minimization guarantees directly — the archive carries only
+// the requesting user's own data, never an address hash, reporter identity, IP,
+// or location (§19.1/§19.5).
+
+import type { AgeBand, SecurityActivityEntry } from '@licio/shared';
+import {
+  defaultPersonalizationSettings,
+  defaultPrivacySettings,
+  emptyReputationSummary,
+} from '@licio/shared';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { type AuditEntryInput, type AuditStore, InMemoryAuditStore } from '../identity/audit.js';
+import { sha256Hex } from '../identity/crypto.js';
+import {
+  EXPORT_DOWNLOAD_TTL_MS,
+  InMemoryObjectStore,
+  mintDownloadToken,
+  verifyDownloadToken,
+} from '../identity/object-store.js';
+import {
+  assembleExport,
+  EXPORT_SCHEMA_VERSION,
+  exportObjectKey,
+  MAX_EXPORT_ATTEMPTS,
+  processExportJob,
+  runDeletionPurge,
+  sweepExpiredExports,
+} from '../identity/privacy-jobs.js';
+import {
+  createInMemoryIdentityServices,
+  type IdentityConfig,
+  type IdentityServices,
+} from '../identity/services.js';
+
+const CONFIG: IdentityConfig = {
+  masterSecret: 'test-master-secret-at-least-32-characters-long',
+  webauthn: { rpName: 'Licio', rpID: 'localhost', origin: 'http://localhost' },
+  siwe: { domain: 'localhost', uri: 'http://localhost', chainAllowlist: [1] },
+};
+
+/**
+ * Audit store that records every append.  `deletion_complete` is a system event
+ * with a null actor, which the owner-scoped `securityActivityForUser` filters
+ * out — so we capture raw inputs to assert on it.
+ */
+class RecordingAuditStore implements AuditStore {
+  readonly inputs: AuditEntryInput[] = [];
+  readonly #inner = new InMemoryAuditStore();
+  async append(input: AuditEntryInput, createdAt?: Date) {
+    this.inputs.push(input);
+    return this.#inner.append(input, createdAt);
+  }
+  securityActivityForUser(userId: string, limit?: number): Promise<SecurityActivityEntry[]> {
+    return this.#inner.securityActivityForUser(userId, limit);
+  }
+  async clear(): Promise<void> {
+    this.inputs.length = 0;
+    await this.#inner.clear();
+  }
+}
+
+let services: IdentityServices;
+let audit: RecordingAuditStore;
+
+beforeEach(() => {
+  services = createInMemoryIdentityServices(CONFIG);
+  audit = new RecordingAuditStore();
+  services.audit = audit;
+});
+afterEach(() => {
+  services.store.clear();
+});
+
+function seedFullUser(ageBand: AgeBand = 'adult') {
+  const user = services.store.createUser({
+    handle: 'exporter',
+    displayName: 'Export User',
+    email: 'export@example.com',
+    accountState: 'active',
+    locale: 'en-US',
+    ageBand,
+    privacySettings: defaultPrivacySettings(),
+    personalizationSettings: defaultPersonalizationSettings(),
+    reputationSummary: emptyReputationSummary(),
+    roles: ['user'],
+  });
+  services.store.setAuth(user.userId, { emailVerified: true, mfaEnabled: true });
+  services.store.addWebauthn({
+    credentialId: 'cred-1',
+    userId: user.userId,
+    publicKey: new Uint8Array([1, 2, 3]),
+    counter: 0,
+    deviceType: 'platform',
+    deviceName: 'iPhone',
+    transports: ['internal'],
+    backedUp: true,
+    createdAt: new Date().toISOString(),
+    lastUsedAt: null,
+  });
+  services.store.addWalletAuth({
+    credentialId: 'wallet-1',
+    userId: user.userId,
+    addressHash: 'SECRET_WALLET_HASH_NEVER_EXPORTED',
+    addressTruncated: '0x1234…abcd',
+    chainId: 1,
+    walletType: 'eoa',
+    createdAt: new Date().toISOString(),
+    lastUsedAt: null,
+  });
+  return user;
+}
+
+describe('assembleExport', () => {
+  it("gathers only the requesting user's own data, with a truncated wallet only", async () => {
+    const user = seedFullUser();
+    services.exportAttention = async () => [{ bucket: 'topic:tech', weight: 3 }];
+    services.exportContributions = async () => [{ id: 'c1', kind: 'post' }];
+    services.exportModerationNotices = async () => [{ reason: 'spam', severity: 'low' }];
+
+    const archive = await assembleExport(services, user.userId);
+    expect(archive['schema_version']).toBe(EXPORT_SCHEMA_VERSION);
+
+    const account = archive['account'] as Record<string, unknown>;
+    expect(account['user_id']).toBe(user.userId);
+    expect(account['email']).toBe('export@example.com');
+    expect(account['age_band']).toBe('adult');
+
+    const methods = archive['authentication_methods'] as Record<string, unknown>;
+    expect((methods['passkeys'] as unknown[]).length).toBe(1);
+    expect(methods['mfa_enabled']).toBe(true);
+    const wallets = methods['wallets'] as Array<Record<string, unknown>>;
+    expect(wallets[0]?.['address']).toBe('0x1234…abcd');
+
+    expect(archive['attention_aggregates']).toEqual([{ bucket: 'topic:tech', weight: 3 }]);
+    expect(archive['contributions']).toEqual([{ id: 'c1', kind: 'post' }]);
+    expect(archive['moderation_notices']).toEqual([{ reason: 'spam', severity: 'low' }]);
+
+    // The raw wallet address hash is NEVER present anywhere in the archive.
+    expect(JSON.stringify(archive)).not.toContain('SECRET_WALLET_HASH_NEVER_EXPORTED');
+  });
+
+  it('omits the email for a passkey/wallet-only account and defaults absent hooks to []', async () => {
+    const user = services.store.createUser({
+      handle: 'nomail',
+      displayName: 'No Mail',
+      email: null,
+      accountState: 'active',
+      locale: null,
+      ageBand: 'adult',
+      privacySettings: defaultPrivacySettings(),
+      personalizationSettings: defaultPersonalizationSettings(),
+      reputationSummary: emptyReputationSummary(),
+      roles: ['user'],
+    });
+    const archive = await assembleExport(services, user.userId);
+    const account = archive['account'] as Record<string, unknown>;
+    expect('email' in account).toBe(false);
+    expect(archive['attention_aggregates']).toEqual([]);
+    expect(archive['contributions']).toEqual([]);
+    expect(archive['moderation_notices']).toEqual([]);
+  });
+
+  it('throws for an unknown user', async () => {
+    await expect(assembleExport(services, 'ghost')).rejects.toThrow();
+  });
+});
+
+describe('object store (encrypt-at-rest + signed tokens)', () => {
+  it('round-trips through encryption and 404s a missing key', async () => {
+    const store = new InMemoryObjectStore(services.secretBox);
+    await store.put('k1', 'super-secret-payload', 'application/json', 10_000);
+    const got = await store.get('k1');
+    expect(got?.bytes.toString('utf8')).toBe('super-secret-payload');
+    expect(got?.contentType).toBe('application/json');
+    expect(await store.get('missing')).toBeNull();
+  });
+
+  it('reports expired keys and deletes', async () => {
+    const store = new InMemoryObjectStore(services.secretBox);
+    await store.put('fresh', 'x', 'application/json', 10_000);
+    await store.put('stale', 'y', 'application/json', 1_000);
+    expect(await store.expiredKeys(5_000)).toEqual(['stale']);
+    await store.delete('stale');
+    expect(await store.get('stale')).toBeNull();
+  });
+
+  it('mints and verifies a signed download token; rejects tamper/expiry/wrong-subject', () => {
+    const exp = 10_000;
+    const token = mintDownloadToken(CONFIG.masterSecret, 'job1', 'user1', exp);
+    expect(verifyDownloadToken(CONFIG.masterSecret, token, 'job1', 'user1', exp - 1)).toBe(true);
+    // Expired (now >= expiry).
+    expect(verifyDownloadToken(CONFIG.masterSecret, token, 'job1', 'user1', exp)).toBe(false);
+    // Wrong user / wrong job ⇒ signature mismatch.
+    expect(verifyDownloadToken(CONFIG.masterSecret, token, 'job1', 'user2', exp - 1)).toBe(false);
+    expect(verifyDownloadToken(CONFIG.masterSecret, token, 'jobX', 'user1', exp - 1)).toBe(false);
+    // Tampered signature / malformed token.
+    expect(
+      verifyDownloadToken(CONFIG.masterSecret, `${exp}.deadbeef`, 'job1', 'user1', exp - 1),
+    ).toBe(false);
+    expect(verifyDownloadToken(CONFIG.masterSecret, 'garbage', 'job1', 'user1', exp - 1)).toBe(
+      false,
+    );
+  });
+});
+
+describe('processExportJob', () => {
+  it('completes a queued job: stores a decryptable archive with a 72h expiry', async () => {
+    const user = seedFullUser();
+    const job = services.store.createExportJob(user.userId);
+    await processExportJob(services, job.jobId, 1_000);
+
+    const done = services.store.getExportJob(job.jobId);
+    expect(done?.status).toBe('completed');
+    expect(done?.progressPct).toBe(100);
+    expect(done?.downloadUrlRef).toBe(exportObjectKey(job.jobId));
+    expect(done?.expiresAt).toBe(new Date(1_000 + EXPORT_DOWNLOAD_TTL_MS).toISOString());
+
+    const obj = await services.objectStore.get(exportObjectKey(job.jobId));
+    expect(obj).not.toBeNull();
+    if (!obj) throw new Error('archive missing');
+    const parsed = JSON.parse(obj.bytes.toString('utf8')) as Record<string, unknown>;
+    expect(parsed['schema_version']).toBe(EXPORT_SCHEMA_VERSION);
+  });
+
+  it('retries a transient failure and surfaces `failed` after MAX attempts', async () => {
+    // A job whose user does not exist makes assembleExport throw on each attempt.
+    const job = services.store.createExportJob('ghost-user');
+    for (let i = 0; i < MAX_EXPORT_ATTEMPTS; i++) {
+      await processExportJob(services, job.jobId);
+    }
+    const failed = services.store.getExportJob(job.jobId);
+    expect(failed?.status).toBe('failed');
+    expect(failed?.attempts).toBe(MAX_EXPORT_ATTEMPTS);
+
+    // Terminal: a further poll does not reprocess or bump attempts.
+    await processExportJob(services, job.jobId);
+    expect(services.store.getExportJob(job.jobId)?.attempts).toBe(MAX_EXPORT_ATTEMPTS);
+  });
+
+  it('is idempotent on an already-completed job', async () => {
+    const user = seedFullUser();
+    const job = services.store.createExportJob(user.userId);
+    await processExportJob(services, job.jobId, 1_000);
+    await processExportJob(services, job.jobId, 9_999); // no-op
+    expect(services.store.getExportJob(job.jobId)?.completedAt).toBe(new Date(1_000).toISOString());
+  });
+});
+
+describe('sweepExpiredExports', () => {
+  it('deletes expired archives and marks their jobs expired', async () => {
+    const user = seedFullUser();
+    const job = services.store.createExportJob(user.userId);
+    await processExportJob(services, job.jobId, 1_000);
+
+    const swept = await sweepExpiredExports(services, 1_000 + EXPORT_DOWNLOAD_TTL_MS + 1);
+    expect(swept).toBe(1);
+    expect(services.store.getExportJob(job.jobId)?.status).toBe('expired');
+    expect(await services.objectStore.get(exportObjectKey(job.jobId))).toBeNull();
+  });
+
+  it('is a no-op when nothing has expired', async () => {
+    const user = seedFullUser();
+    const job = services.store.createExportJob(user.userId);
+    await processExportJob(services, job.jobId, 1_000);
+    expect(await sweepExpiredExports(services, 2_000)).toBe(0);
+    expect(services.store.getExportJob(job.jobId)?.status).toBe('completed');
+  });
+});
+
+describe('runDeletionPurge', () => {
+  it('anonymizes, tombstones, and writes a hashed-id deletion_complete audit', async () => {
+    const user = seedFullUser();
+    let anonymized: string | null = null;
+    services.anonymizeContributions = async (id) => {
+      anonymized = id;
+    };
+    let purged: { id: string; mode: string } | null = null;
+    services.purgeAttention = async (id, mode) => {
+      purged = { id, mode };
+      return 7;
+    };
+    const now = 1_000_000;
+    services.store.setDeletion({
+      userId: user.userId,
+      state: 'grace_period',
+      requestedAt: new Date(now - 1).toISOString(),
+      purgeAt: new Date(now - 1).toISOString(),
+      cancelledAt: null,
+      completedAt: null,
+    });
+
+    expect(await runDeletionPurge(services, now)).toBe(1);
+
+    const tomb = services.store.getUser(user.userId);
+    expect(tomb?.accountState).toBe('deleted');
+    expect(tomb?.email).toBeNull();
+    expect(tomb?.displayName).toBe('[deleted]');
+    expect(tomb?.handle.startsWith('deleted_')).toBe(true);
+    expect(services.store.getAuth(user.userId)).toBeNull();
+    expect(services.store.listWebauthn(user.userId)).toEqual([]);
+    expect(services.store.listWalletAuth(user.userId)).toEqual([]);
+
+    expect(anonymized).toBe(user.userId);
+    expect(purged).toEqual({ id: user.userId, mode: 'delete' });
+    expect(services.store.getDeletion(user.userId)?.state).toBe('deleted');
+
+    const complete = audit.inputs.find((e) => e.eventType === 'deletion_complete');
+    expect(complete?.actorUserId).toBeNull();
+    expect(complete?.targetRef).toBe(sha256Hex(user.userId));
+  });
+
+  it('does not purge a deletion whose grace period has not elapsed', async () => {
+    const user = seedFullUser();
+    const now = 1_000_000;
+    services.store.setDeletion({
+      userId: user.userId,
+      state: 'grace_period',
+      requestedAt: new Date(now).toISOString(),
+      purgeAt: new Date(now + 1_000).toISOString(), // future
+      cancelledAt: null,
+      completedAt: null,
+    });
+    expect(await runDeletionPurge(services, now)).toBe(0);
+    expect(services.store.getUser(user.userId)?.accountState).toBe('active');
+  });
+});

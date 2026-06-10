@@ -77,6 +77,8 @@ export interface StoredExportJob {
   status: ExportJobState;
   progressPct: number;
   attempts: number;
+  /** Indirect object-store reference; the signed URL is minted per request. */
+  downloadUrlRef: string | null;
   createdAt: string;
   completedAt: string | null;
   expiresAt: string | null;
@@ -212,6 +214,7 @@ export class IdentityStore {
       status: 'queued',
       progressPct: 0,
       attempts: 0,
+      downloadUrlRef: null,
       createdAt: new Date(now).toISOString(),
       completedAt: null,
       expiresAt: null,
@@ -241,13 +244,48 @@ export class IdentityStore {
     this.#deletions.set(req.userId, req);
   }
 
-  /** Hard-remove every trace of a user (WS-D.2.4c complete removal). */
+  /** Grace-period deletion requests whose purge instant has passed (scheduler). */
+  duePurgeDeletions(now: number): StoredDeletionRequest[] {
+    return [...this.#deletions.values()].filter(
+      (d) => d.state === 'grace_period' && Date.parse(d.purgeAt) <= now,
+    );
+  }
+
+  /** Hard-remove every trace of a user (used by tests / hard purge). */
   purgeUser(userId: string): void {
     this.#users.delete(userId);
     this.#auth.delete(userId);
     for (const [id, c] of this.#webauthn) if (c.userId === userId) this.#webauthn.delete(id);
     for (const [id, c] of this.#walletAuth) if (c.userId === userId) this.#walletAuth.delete(id);
     for (const [id, j] of this.#exportJobs) if (j.userId === userId) this.#exportJobs.delete(id);
+  }
+
+  /**
+   * Complete deletion (WS-D.2.4c): remove all personal data + credentials +
+   * sessions-adjacent records, but keep a minimal `user_id` + `account_state =
+   * deleted` tombstone so anonymized contributions retain FK integrity.
+   */
+  tombstoneUser(userId: string, now: number = Date.now()): void {
+    this.#auth.delete(userId);
+    for (const [id, c] of this.#webauthn) if (c.userId === userId) this.#webauthn.delete(id);
+    for (const [id, c] of this.#walletAuth) if (c.userId === userId) this.#walletAuth.delete(id);
+    for (const [id, j] of this.#exportJobs) if (j.userId === userId) this.#exportJobs.delete(id);
+    const user = this.#users.get(userId);
+    if (user) {
+      this.#users.set(userId, {
+        ...user,
+        handle: `deleted_${userId.slice(0, 8)}`,
+        displayName: '[deleted]',
+        email: null,
+        accountState: 'deleted',
+        locale: null,
+        ageBand: null,
+        privacySettings: user.privacySettings,
+        personalizationSettings: user.personalizationSettings,
+        reputationSummary: user.reputationSummary,
+        updatedAt: new Date(now).toISOString(),
+      });
+    }
   }
 
   clear(): void {

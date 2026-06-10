@@ -50,6 +50,7 @@ const deny = (code: string, message: string) => ({ error: { code, message } }) a
 /** Validate the session and attach AuthContext, or reject (fail-closed). */
 export function authMiddleware(
   resolve: () => IdentityServices = getIdentityServices,
+  opts: { allowDeletionPending?: boolean } = {},
 ): MiddlewareHandler<AuthEnv> {
   return async (c, next) => {
     const services = resolve();
@@ -68,7 +69,15 @@ export function authMiddleware(
     const user = services.store.getUser(validated.record.user_id);
     if (!user) return c.json(deny('unauthenticated', 'Authentication required'), 401);
     if (user.accountState !== 'active') {
-      return c.json(deny(`account_${user.accountState}`, 'Account is not active'), 403);
+      // A deactivated account in its deletion grace period may reach ONLY the
+      // deletion cancel/status routes (so a no-email account can still cancel).
+      const inGrace =
+        opts.allowDeletionPending &&
+        user.accountState === 'deactivated' &&
+        services.store.getDeletion(user.userId)?.state === 'grace_period';
+      if (!inGrace) {
+        return c.json(deny(`account_${user.accountState}`, 'Account is not active'), 403);
+      }
     }
 
     const inv = authMethodInventory(services, user.userId);

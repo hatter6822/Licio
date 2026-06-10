@@ -77,6 +77,9 @@ interfaces.
 | `siwe.ts` | viem EIP-4361 verification: EOA recover + injected EIP-1271/6492 contract verifier; domain/URI binding |
 | `email-otp.ts` | passwordless email login/factor verification (single-use, attempt-capped, browser-bound) |
 | `security-alerts.ts` | suspicious-login detection + multi-channel alerts (email→push→**always log**) |
+| `secrets.ts` | AES-256-GCM `SecretBox` (HKDF-derived, domain-separated key) for secrets at rest (steward TOTP secret) |
+| `object-store.ts` | encrypted DSAR archive store + HMAC-signed, subject-bound, expiring download tokens |
+| `privacy-jobs.ts` | DSAR export assembly (own data only), export job process/retry/sweep, deletion hard-purge (anonymize/tombstone) |
 | `store.ts` | in-memory identity data store (mirrors the Drizzle schema) |
 | `services.ts` | injectable service container + config derivation |
 | `redis-stores.ts` | production Redis adapters (gated integration test) |
@@ -91,8 +94,13 @@ interfaces.
   WebAuthn register/authenticate, wallet nonce/verify, session list/revoke,
   security-activity.
 - `/v1/privacy/*`: settings get/patch (teen-clamped, audited, propagated
-  downstream), attention deletion, DSAR export job, account deletion (grace
-  period + deactivate + session revocation) with cancel.
+  downstream), attention deletion, DSAR export (assembled → encrypted →
+  served via a step-up-protected, signed, 72h-expiring URL — own data only),
+  and account deletion (deactivate + 30-day grace + session revocation,
+  cancellable by a remaining-method re-login **or** an emailed single-use
+  token, then a scheduled hard purge that anonymizes + tombstones).
+- Steward MFA: `/v1/auth/mfa/totp/{enroll,verify,disable}` — TOTP enroll with an
+  encrypt-at-rest secret, per-session `mfa_verified`, recovery codes.
 
 WS-D endpoints rely on `SameSite=Strict` + the opaque session model + a per-flow
 `login_attempt_id` binding as the CSRF defense (so they are exempt from the WS-C
@@ -116,21 +124,37 @@ double-submit token).
   raises a security alert.
 - **Privacy by default** — analytics/aggregate-signal sharing off, local
   personalization, strictest sensitive-topic handling; teens clamped server-side.
+- **Export = own data, encrypted, expiring** — the DSAR archive includes only the
+  requesting user's own data (never an address hash, reporter identity, IP, or
+  location); it is encrypted at rest and reachable only via a step-up-protected,
+  subject-bound, expiring signed URL. Unit tests assert the address hash never
+  appears in the archive and that a tampered/expired/wrong-subject token is rejected.
+- **Deletion really deletes** — hard purge tombstones the row (keeping only a bare
+  FK stub), drops every credential/auth record, and writes a `deletion_complete`
+  audit carrying only a **hashed** user id (proof of deletion without retaining it).
 - **Wallet isolation** — the schema-isolation BFS proves no wallet↔ranking join
   can be written.
 
 ## Deferred / interface-level (wired to follow-up workstreams)
 
-The following leaves are implemented behind interfaces with tested logic, but
-their infrastructure bindings land later:
+The privacy-control and steward-MFA **logic** is implemented and tested against
+in-memory/local adapters; only the production cloud bindings — behind the same
+interfaces — land later:
 
-- Steward **TOTP MFA routes** (enroll/confirm/verify) — the RFC 6238 primitives and
-  recovery codes are implemented and tested; the route surface is pending.
-- **Export worker + delivery** — the job state machine exists; the BullMQ worker,
-  data assembly, and S3/KMS signed-URL delivery (WS-D.2.2b/c) are deferred.
-- **Account-deletion purge pipeline** — request/grace/deactivate/revoke is
-  implemented; contribution anonymization (couples to WS-G) and the scheduled
-  hard-purge job (WS-D.2.4b/c) are deferred.
+- **Export delivery adapter** — assembly (own data only), AES-256-GCM
+  encryption-at-rest, the step-up-protected signed/expiring download URL, and the
+  72h sweep are implemented and tested with the in-memory object store; the
+  S3+KMS `ObjectStore` adapter and a durable background worker (today the job is
+  assembled in-process on first poll) are the remaining bindings (WS-D.2.2b/c).
+- **Deletion purge scheduler** — the hard-purge job (`runDeletionPurge`:
+  anonymize → tombstone → hashed-id `deletion_complete` audit) and the 30-day
+  grace/cancel flow are implemented and tested; the cron that invokes the job on
+  schedule, and the WS-G `anonymizeContributions` implementation behind the
+  injected hook, land later (WS-D.2.4b/c).
+- **Drizzle-backed identity store** — `store.ts` is the in-memory adapter
+  mirroring the Drizzle schema; the Postgres-backed `IdentityStore`/`AuditStore`
+  projection is the remaining durable binding (sessions, rate-limit, and the
+  ephemeral secret store already have Redis adapters).
 - **Attention-history purge** and the **settings-change downstream consumer** are
   injected hooks (`purgeAttention`, `onPrivacyChange`) that WS-E implements.
 - **No geo lookup at all** — per SPEC §19.1 the platform records no IP and no

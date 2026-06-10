@@ -10,6 +10,7 @@ import { type AuditStore, InMemoryAuditStore } from './audit.js';
 import type { AuthMethodInventory } from './auth-methods.js';
 import { deriveKey, hmacHex, KEY_DOMAINS } from './crypto.js';
 import { type EphemeralStore, InMemoryEphemeralStore } from './ephemeral-store.js';
+import { InMemoryObjectStore, type ObjectStore } from './object-store.js';
 import { AuthRateLimiter, InMemoryAuthRateLimitStore } from './rate-limit-auth.js';
 import { createLocalSecretBox, type SecretBox } from './secrets.js';
 import { InMemorySessionStore, type SessionStore } from './sessions.js';
@@ -27,7 +28,8 @@ export interface IdentityConfig {
 /** Outbound code/alert delivery.  Production wires SMTP/push; tests record. */
 export interface Mailer {
   sendCode(to: string, code: string, kind: 'login' | 'verify'): Promise<void>;
-  sendNotice(to: string, kind: string): Promise<void>;
+  /** A notice (e.g. a deletion-cancellation link).  `payload` carries link tokens. */
+  sendNotice(to: string, kind: string, payload?: Record<string, string>): Promise<void>;
 }
 
 /**
@@ -43,6 +45,7 @@ export function createLoggingMailer(
     async sendCode(_to: string, _code: string, kind: 'login' | 'verify'): Promise<void> {
       log('auth.mail.code_requested', { kind });
     },
+    // The cancellation-link token in `payload` is NEVER logged (§19.1).
     async sendNotice(_to: string, kind: string): Promise<void> {
       log('auth.mail.notice_requested', { kind });
     },
@@ -52,12 +55,12 @@ export function createLoggingMailer(
 /** A no-op mailer that records every send, for assertions in tests. */
 export class RecordingMailer implements Mailer {
   readonly codes: Array<{ to: string; code: string; kind: 'login' | 'verify' }> = [];
-  readonly notices: Array<{ to: string; kind: string }> = [];
+  readonly notices: Array<{ to: string; kind: string; payload?: Record<string, string> }> = [];
   async sendCode(to: string, code: string, kind: 'login' | 'verify'): Promise<void> {
     this.codes.push({ to, code, kind });
   }
-  async sendNotice(to: string, kind: string): Promise<void> {
-    this.notices.push({ to, kind });
+  async sendNotice(to: string, kind: string, payload?: Record<string, string>): Promise<void> {
+    this.notices.push({ to, kind, ...(payload ? { payload } : {}) });
   }
 }
 
@@ -74,6 +77,16 @@ export interface IdentityServices {
   mailer: Mailer;
   /** Authenticated encryption for secrets at rest (the steward TOTP secret). */
   secretBox: SecretBox;
+  /** Encrypted object storage for DSAR export archives (WS-D.2.2c). */
+  objectStore: ObjectStore;
+  /** WS-E: the user's own attention aggregates for the export (default none). */
+  exportAttention?: (userId: string) => Promise<unknown[]>;
+  /** WS-G: the user's own contributions for the export (default none). */
+  exportContributions?: (userId: string) => Promise<unknown[]>;
+  /** WS-J: moderation notices received (reason only, never reporter identity). */
+  exportModerationNotices?: (userId: string) => Promise<unknown[]>;
+  /** WS-G: anonymize the user's contributions on hard deletion (default no-op). */
+  anonymizeContributions?: (userId: string) => Promise<void>;
   /**
    * Downstream propagation hook (WS-E): invoked when a settings change affects
    * collection, so disabling personalization / setting retention to `none`
@@ -147,6 +160,7 @@ export function createInMemoryIdentityServices(config: IdentityConfig): Identity
     audit: new InMemoryAuditStore(),
     mailer: new RecordingMailer(),
     secretBox: createLocalSecretBox(config.masterSecret),
+    objectStore: new InMemoryObjectStore(createLocalSecretBox(config.masterSecret)),
   };
 }
 

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// /v1/privacy/* — the WS-D.2 privacy controls.  These are REAL controls, not
-// placebo toggles (§19.3): a settings change is clamped to the teen floor,
-// audited old→new, and (for personalization/retention) flagged for the downstream
-// WS-E consumer so collection actually changes; attention history really deletes;
-// account deletion runs a grace period then removes all personal data.
+// /v1/privacy/* — the WS-D.2 privacy controls.  REAL controls, not placebo
+// toggles (§19.3): settings changes are clamped to the teen floor, audited
+// old→new, and propagated downstream so collection actually changes; attention
+// history really deletes; DSAR export assembles → encrypts → serves via a signed,
+// step-up-protected, expiring URL; account deletion runs a 30-day grace period
+// (cancellable by a remaining-method re-login OR an emailed token) then hard-purges.
 
 import { zValidator } from '@hono/zod-validator';
 import {
@@ -20,9 +21,16 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { randomToken } from '../identity/crypto.js';
+import { verifyDownloadToken } from '../identity/object-store.js';
+import {
+  exportObjectKey,
+  mintExportDownloadToken,
+  processExportJob,
+} from '../identity/privacy-jobs.js';
 import { privateOwnershipOutcome } from '../identity/rbac.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
-import { revokeAllForUser } from '../identity/sessions.js';
+import { readSessionToken, revokeAllForUser, validateSession } from '../identity/sessions.js';
 import {
   type AuthEnv,
   authMiddleware,
@@ -31,23 +39,19 @@ import {
 } from '../middleware/auth.js';
 
 const GRACE_PERIOD_MS = 30 * 24 * 60 * 60_000;
-
-const unauthenticated = {
-  error: { code: 'unauthenticated', message: 'Authentication required' },
-} as const;
+const cancelTokenKey = (token: string) => `delcancel:${token}`;
+const u = { error: { code: 'unauthenticated', message: 'Authentication required' } } as const;
 
 export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentityServices) {
   return (
     new Hono<AuthEnv>()
-      .use('*', authMiddleware(resolve))
-
       // --- Settings ---------------------------------------------------------
-      .get('/settings', requireVerifiedAccount(), (c) => {
+      .get('/settings', authMiddleware(resolve), requireVerifiedAccount(), (c) => {
         const services = resolve();
         const auth = c.get('auth');
-        if (!auth) return c.json(unauthenticated, 401);
+        if (!auth) return c.json(u, 401);
         const user = services.store.getUser(auth.userId);
-        if (!user) return c.json(unauthenticated, 401);
+        if (!user) return c.json(u, 401);
         return c.json(
           privacySettingsResponseSchema.parse({
             privacy_settings: user.privacySettings,
@@ -59,14 +63,15 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
 
       .patch(
         '/settings',
+        authMiddleware(resolve),
         requireVerifiedAccount(),
         zValidator('json', privacySettingsPatchSchema),
-        (c) => {
+        async (c) => {
           const services = resolve();
           const auth = c.get('auth');
-          if (!auth) return c.json(unauthenticated, 401);
+          if (!auth) return c.json(u, 401);
           const user = services.store.getUser(auth.userId);
-          if (!user) return c.json(unauthenticated, 401);
+          if (!user) return c.json(u, 401);
           const patch = c.req.valid('json');
 
           let nextPrivacy = user.privacySettings;
@@ -78,8 +83,6 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
               ...user.privacySettings,
               ...patch.privacy_settings,
             });
-            // Teen-floor clamping is server-side: a teen cannot weaken below the floor
-            // even via a direct API call (WS-D.1.7b, fail-closed).
             nextPrivacy = isMinorBand(user.ageBand)
               ? clampPrivacySettingsToTeenFloor(merged)
               : merged;
@@ -97,9 +100,7 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
             privacySettings: nextPrivacy,
             personalizationSettings: nextPersonalization,
           });
-
-          // Audit the consent change (old→new summary).
-          void services.audit.append({
+          await services.audit.append({
             actorUserId: auth.userId,
             eventType: 'privacy_setting_change',
             context: {
@@ -108,9 +109,7 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
               new_value: String(nextPrivacy.personalization_enabled),
             },
           });
-
-          // Downstream propagation hook: disabling personalization / setting retention
-          // to `none` must actually stop collection (WS-E consumes this).
+          // Disabling personalization / retention=none must actually stop collection.
           services.onPrivacyChange?.({
             userId: auth.userId,
             personalizationEnabled: nextPrivacy.personalization_enabled,
@@ -130,14 +129,14 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
       // --- Attention history deletion (touches NO wallet table) -------------
       .post(
         '/attention/delete',
+        authMiddleware(resolve),
         requireVerifiedAccount(),
         zValidator('json', attentionDeleteRequestSchema),
         async (c) => {
           const services = resolve();
           const auth = c.get('auth');
-          if (!auth) return c.json(unauthenticated, 401);
+          if (!auth) return c.json(u, 401);
           const { mode } = c.req.valid('json');
-          // Strictly user-scoped; the purge is delegated to WS-E (isolated from wallet).
           const removed = (await services.purgeAttention?.(auth.userId, mode)) ?? 0;
           await services.audit.append({
             actorUserId: auth.userId,
@@ -149,79 +148,172 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
       )
 
       // --- DSAR export (step-up protected) ----------------------------------
-      .post('/export', requireVerifiedAccount(), requireStepUp(), async (c) => {
-        const services = resolve();
-        const auth = c.get('auth');
-        if (!auth) return c.json(unauthenticated, 401);
-        // One active export per user: a second request returns the existing job.
-        const existing = services.store.activeExportJob(auth.userId);
-        const job = existing ?? services.store.createExportJob(auth.userId);
-        if (!existing) {
-          await services.audit.append({
-            actorUserId: auth.userId,
-            eventType: 'export_request',
-            context: {},
-          });
-        }
-        return c.json(toExportStatus(job), 202);
-      })
+      .post(
+        '/export',
+        authMiddleware(resolve),
+        requireVerifiedAccount(),
+        requireStepUp(),
+        async (c) => {
+          const services = resolve();
+          const auth = c.get('auth');
+          if (!auth) return c.json(u, 401);
+          // One active export per user: a second request returns the existing job.
+          const existing = services.store.activeExportJob(auth.userId);
+          const job = existing ?? services.store.createExportJob(auth.userId);
+          if (!existing) {
+            await services.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'export_request',
+              context: {},
+            });
+          }
+          return c.json(await toExportStatus(services, job, auth.userId), 202);
+        },
+      )
 
       .get(
         '/export/:jobId',
+        authMiddleware(resolve),
         requireVerifiedAccount(),
         zValidator('param', z.object({ jobId: z.string().uuid() })),
-        (c) => {
+        async (c) => {
           const services = resolve();
           const auth = c.get('auth');
-          if (!auth) return c.json(unauthenticated, 401);
-          const job = services.store.getExportJob(c.req.valid('param').jobId);
-          // Cross-user (or missing) → 404, never confirming existence.
+          if (!auth) return c.json(u, 401);
+          let job = services.store.getExportJob(c.req.valid('param').jobId);
           if (!job || privateOwnershipOutcome(auth.userId, job.userId) === 'not_found') {
             return c.json({ error: { code: 'not_found', message: 'Export not found.' } }, 404);
           }
-          return c.json(toExportStatus(job));
+          // In-process worker substitute: a queued job is assembled on first poll.
+          if (job.status === 'queued') {
+            await processExportJob(services, job.jobId);
+            job = services.store.getExportJob(job.jobId) ?? job;
+          }
+          return c.json(await toExportStatus(services, job, auth.userId));
+        },
+      )
+
+      // --- Export download (session + fresh step-up + signed token) ---------
+      .get(
+        '/export/:jobId/download',
+        authMiddleware(resolve),
+        requireVerifiedAccount(),
+        requireStepUp(),
+        zValidator('param', z.object({ jobId: z.string().uuid() })),
+        zValidator('query', z.object({ t: z.string().min(1) })),
+        async (c) => {
+          const services = resolve();
+          const auth = c.get('auth');
+          if (!auth) return c.json(u, 401);
+          const { jobId } = c.req.valid('param');
+          const job = services.store.getExportJob(jobId);
+          if (!job || privateOwnershipOutcome(auth.userId, job.userId) === 'not_found') {
+            return c.json({ error: { code: 'not_found', message: 'Export not found.' } }, 404);
+          }
+          const ok = verifyDownloadToken(
+            services.config.masterSecret,
+            c.req.valid('query').t,
+            jobId,
+            auth.userId,
+            Date.now(),
+          );
+          if (!ok || job.status !== 'completed') {
+            return c.json(
+              { error: { code: 'invalid_link', message: 'Download link invalid or expired.' } },
+              403,
+            );
+          }
+          const obj = await services.objectStore.get(exportObjectKey(jobId));
+          if (!obj)
+            return c.json({ error: { code: 'gone', message: 'Export no longer available.' } }, 410);
+          await services.audit.append({
+            actorUserId: auth.userId,
+            eventType: 'export_download',
+            context: {},
+          });
+          // Return a plain `Response` (not `c.body`) so the handler's inferred
+          // return type stays portable (avoids a TS2883 reference to Hono's
+          // internal `Data` type) and the decrypted bytes stream verbatim.
+          return new Response(Uint8Array.from(obj.bytes), {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Disposition': 'attachment; filename="licio-export.json"',
+            },
+          });
         },
       )
 
       // --- Account deletion (step-up; 30-day grace) -------------------------
-      .post('/delete-account', requireVerifiedAccount(), requireStepUp(), async (c) => {
-        const services = resolve();
-        const auth = c.get('auth');
-        if (!auth) return c.json(unauthenticated, 401);
-        const now = Date.now();
-        services.store.updateUser(auth.userId, { accountState: 'deactivated' }, now);
-        services.store.setDeletion({
-          userId: auth.userId,
-          state: 'grace_period',
-          requestedAt: new Date(now).toISOString(),
-          purgeAt: new Date(now + GRACE_PERIOD_MS).toISOString(),
-          cancelledAt: null,
-          completedAt: null,
-        });
-        await revokeAllForUser(services.sessions, auth.userId);
-        await services.audit.append({
-          actorUserId: auth.userId,
-          eventType: 'deletion_request',
-          context: {},
-        });
-        const user = services.store.getUser(auth.userId);
-        const email = user?.email;
-        if (email) await services.mailer.sendNotice(email, 'deletion_requested');
-        return c.json(toDeletionStatus(services, auth.userId));
-      })
+      .post(
+        '/delete-account',
+        authMiddleware(resolve),
+        requireVerifiedAccount(),
+        requireStepUp(),
+        async (c) => {
+          const services = resolve();
+          const auth = c.get('auth');
+          if (!auth) return c.json(u, 401);
+          const now = Date.now();
+          services.store.updateUser(auth.userId, { accountState: 'deactivated' }, now);
+          services.store.setDeletion({
+            userId: auth.userId,
+            state: 'grace_period',
+            requestedAt: new Date(now).toISOString(),
+            purgeAt: new Date(now + GRACE_PERIOD_MS).toISOString(),
+            cancelledAt: null,
+            completedAt: null,
+          });
+          // A single-use cancellation token (for the emailed link); also cancellable
+          // by re-login for accounts with no email on file.
+          const token = randomToken(24);
+          await services.otp.set(cancelTokenKey(token), auth.userId, GRACE_PERIOD_MS);
+          await revokeAllForUser(services.sessions, auth.userId);
+          await services.audit.append({
+            actorUserId: auth.userId,
+            eventType: 'deletion_request',
+            context: {},
+          });
+          const email = services.store.getUser(auth.userId)?.email;
+          if (email)
+            await services.mailer.sendNotice(email, 'deletion_requested', { cancel_token: token });
+          c.header('Set-Cookie', clearSidCookie(), { append: true });
+          return c.json(toDeletionStatus(services, auth.userId));
+        },
+      )
 
-      .get('/delete-account/status', (c) => {
-        const services = resolve();
-        const auth = c.get('auth');
-        if (!auth) return c.json(unauthenticated, 401);
-        return c.json(toDeletionStatus(services, auth.userId));
-      })
+      .get(
+        '/delete-account/status',
+        authMiddleware(resolve, { allowDeletionPending: true }),
+        (c) => {
+          const services = resolve();
+          const auth = c.get('auth');
+          if (!auth) return c.json(u, 401);
+          return c.json(toDeletionStatus(services, auth.userId));
+        },
+      )
 
+      // Cancel via an emailed TOKEN (unauthenticated) OR a remaining-method
+      // re-login.  The body is parsed defensively: a session-based cancel sends
+      // no body at all, so an empty/invalid body must NOT 400 — it falls through
+      // to the session path.
       .post('/delete-account/cancel', async (c) => {
         const services = resolve();
-        const auth = c.get('auth');
-        if (!auth) return c.json(unauthenticated, 401);
-        const req = services.store.getDeletion(auth.userId);
+        const token = await readCancelToken(c);
+        let userId: string | null = null;
+        if (token) {
+          userId = await services.otp.take(cancelTokenKey(token));
+        } else {
+          const sessionToken = readSessionToken(c.req.header('cookie'));
+          const validated = sessionToken
+            ? await validateSession(services.sessions, sessionToken)
+            : null;
+          userId = validated?.record.user_id ?? null;
+        }
+        if (!userId) {
+          return c.json({ error: { code: 'not_found', message: 'No cancellable deletion.' } }, 404);
+        }
+        const req = services.store.getDeletion(userId);
         if (req?.state !== 'grace_period') {
           return c.json({ error: { code: 'not_found', message: 'No cancellable deletion.' } }, 404);
         }
@@ -230,18 +322,48 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
           state: 'cancelled',
           cancelledAt: new Date().toISOString(),
         });
-        services.store.updateUser(auth.userId, { accountState: 'active' });
+        services.store.updateUser(userId, { accountState: 'active' });
         await services.audit.append({
-          actorUserId: auth.userId,
+          actorUserId: userId,
           eventType: 'deletion_cancel',
           context: {},
         });
-        return c.json(toDeletionStatus(services, auth.userId));
+        return c.json(toDeletionStatus(services, userId));
       })
   );
 }
 
-function toExportStatus(job: NonNullable<ReturnType<IdentityServices['store']['getExportJob']>>) {
+function clearSidCookie(): string {
+  return '__Host-sid=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0';
+}
+
+/**
+ * Read an optional cancellation token from the request body without ever
+ * throwing: an empty body (the session-based cancel) or a malformed one yields
+ * `undefined` rather than a 400, so the handler can fall through to the session
+ * path.
+ */
+async function readCancelToken(c: {
+  req: { json: () => Promise<unknown> };
+}): Promise<string | undefined> {
+  try {
+    const raw: unknown = await c.req.json();
+    if (raw && typeof raw === 'object' && 'token' in raw) {
+      const value = (raw as { token?: unknown }).token;
+      if (typeof value === 'string' && value.length > 0) return value;
+    }
+  } catch {
+    // No body / not JSON → session-based cancel.
+  }
+  return undefined;
+}
+
+async function toExportStatus(
+  services: IdentityServices,
+  job: NonNullable<ReturnType<IdentityServices['store']['getExportJob']>>,
+  userId: string,
+) {
+  const available = job.status === 'completed';
   return exportJobStatusSchema.parse({
     job_id: job.jobId,
     status: job.status,
@@ -249,7 +371,9 @@ function toExportStatus(job: NonNullable<ReturnType<IdentityServices['store']['g
     created_at: job.createdAt,
     completed_at: job.completedAt,
     expires_at: job.expiresAt,
-    download_available: job.status === 'completed',
+    download_available: available,
+    // A FRESH signed token is minted per request, never persisted (WS-D.2.2c).
+    download_token: available ? mintExportDownloadToken(services, job.jobId, userId) : null,
   });
 }
 
