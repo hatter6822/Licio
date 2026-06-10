@@ -6,6 +6,18 @@
 **Wave:** 2-3
 **Estimated duration:** 3-4 weeks
 
+> **Status: in progress.** The identity foundation is implemented and tested —
+> see `docs/identity/README.md` for the implementation reference. Done: the data
+> model and migration (WS-D.1.1, WS-D.3.1), WebAuthn registration/authentication
+> (WS-D.1.2/1.3), email-OTP and SIWE fallbacks (WS-D.1.4a-c), session lifecycle +
+> rate limiting + step-up (WS-D.1.3b-e), the authn middleware + RBAC + audit log
+> (WS-D.1.6), age gating + teen floor (WS-D.1.7), privacy settings + attention
+> deletion + export-job/account-deletion scaffolding (WS-D.2.1-2.4a), and the
+> schema-isolation test (WS-D.3.2). Deferred to follow-up passes: steward TOTP MFA
+> routes (WS-D.1.5; primitives done), the export worker/assembly/delivery
+> (WS-D.2.2b/c), and the contribution-anonymization + hard-purge pipeline
+> (WS-D.2.4b/c, which couples to WS-E/WS-G).
+
 ---
 
 ## Overview

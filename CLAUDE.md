@@ -35,10 +35,15 @@ type level, runtime, and CI (the no-applause static gate).
 
 **Current status.**  Workstreams WS-0 (repository foundation), WS-A
 (doctrine and policy), WS-B (design system), and WS-C (PWA client
-application) are complete.  Workstreams WS-D through WS-P are planned
-(planning documents exist under `docs/planning/`; implementation not
-yet started).  See "Implementation roadmap" below for the full status
-table.
+application) are complete.  WS-D (identity, accounts, and privacy) is
+**in progress**: the WebAuthn-first/passwordless authentication
+foundation, secure server-side sessions, RBAC + audit log, age gating,
+user-facing privacy controls, and database-level wallet isolation are
+implemented and tested (`docs/identity/README.md`); a few infrastructure
+leaves (export worker/delivery, deletion purge job, steward MFA routes)
+remain.  Workstreams WS-E through WS-P are planned (planning documents
+exist under `docs/planning/`; implementation not yet started).  See
+"Implementation roadmap" below for the full status table.
 
 ## Build and run
 
@@ -243,20 +248,40 @@ licio/
 │           ├── index.ts                 -- server entry point
 │           ├── routes/
 │           │   ├── v1.ts                --   /v1/* API routes
+│           │   ├── auth.ts              --   /v1/auth/* (WS-D auth surface)
+│           │   ├── privacy.ts           --   /v1/privacy/* (WS-D privacy controls)
 │           │   ├── health.ts            --   /health endpoint
 │           │   └── csp-report.ts        --   CSP violation ingest
 │           ├── middleware/
 │           │   ├── security-headers.ts  --   CSP, HSTS, Permissions-Policy
 │           │   ├── csrf.ts              --   single-use nonce + timingSafeEqual
 │           │   ├── cors.ts              --   exact-match origin validation
+│           │   ├── auth.ts              --   session validation + capability guards (WS-D.1.6a)
 │           │   └── logger.ts            --   pino request logging
+│           ├── identity/                -- WS-D identity layer (primitives + services)
+│           │   ├── crypto.ts            --   HKDF keyed hashing, token hashing, constant-time
+│           │   ├── codes.ts             --   Crockford-base32 one-time codes
+│           │   ├── totp.ts              --   RFC 6238 TOTP + recovery codes
+│           │   ├── auth-methods.ts      --   countAuthMethods last-method guard
+│           │   ├── rbac.ts              --   role policy + object-level authz
+│           │   ├── audit.ts             --   append-only audit store + redactor
+│           │   ├── rate-limit-auth.ts   --   progressive per-account/per-IP limiter
+│           │   ├── sessions.ts          --   session lifecycle, rotation, step-up, cookie
+│           │   ├── ephemeral-store.ts   --   TTL'd single-use store (take = get+delete)
+│           │   ├── webauthn.ts          --   @simplewebauthn ceremonies
+│           │   ├── siwe.ts              --   viem EIP-4361 verification
+│           │   ├── email-otp.ts         --   passwordless email login/factor
+│           │   ├── security-alerts.ts   --   suspicious-login + multi-channel alerts
+│           │   ├── store.ts             --   in-memory identity data store
+│           │   ├── services.ts          --   injectable service container + config
+│           │   └── redis-stores.ts      --   production Redis adapters (gated)
 │           ├── lib/
 │           │   ├── rate-limit.ts        --   per-IP fixed-window limiter
 │           │   ├── push-service.ts      --   VAPID push (session-scoped delete)
 │           │   ├── vapid.ts             --   VAPID key management
 │           │   ├── logger.ts            --   pino logger setup
 │           │   └── demo-data.ts         --   demo/seed data
-│           └── __tests__/               -- 10 test files
+│           └── __tests__/               -- WS-C + WS-D route/middleware tests
 ├── packages/
 │   ├── shared/                  -- shared schemas, types, constants (leaf)
 │   │   └── src/
@@ -271,14 +296,29 @@ licio/
 │   │       │   ├── signal-ledger.ts     --   SignalLedgerEntry
 │   │       │   ├── notifications.ts     --   Notification schemas
 │   │       │   ├── telemetry.ts         --   telemetryBatchSchema
-│   │       │   └── feature-flags.ts     --   FeatureFlagSet
+│   │       │   ├── feature-flags.ts     --   FeatureFlagSet
+│   │       │   ├── user.ts              --   User entity + age-gate (WS-D.1.1/1.7)
+│   │       │   ├── privacy-settings.ts  --   PrivacySettings + teen-floor clamp
+│   │       │   ├── identity-records.ts  --   session/credential/wallet zod mirrors
+│   │       │   ├── auth-api.ts          --   auth endpoint wire contracts
+│   │       │   ├── privacy-api.ts       --   privacy endpoint wire contracts
+│   │       │   └── audit.ts             --   audit event taxonomy
 │   │       ├── types/                   --   TypeScript type exports
 │   │       ├── enums/                   --   enumeration constants
 │   │       ├── constants/               --   shared constants
 │   │       └── env/                     --   environment variable validation
 │   ├── db/                      -- Drizzle ORM schema + migrations
+│   │   ├── drizzle/                     --   generated SQL migrations (WS-D)
 │   │   └── src/
 │   │       ├── schema/                  --   PostgreSQL table definitions
+│   │       │   ├── user.ts              --     users + JSONB + indexes/CHECK (WS-D.1.1)
+│   │       │   ├── session.ts           --     sessions, user_auth (no password), recovery codes
+│   │       │   ├── webauthn-credential.ts --   WebAuthn credentials
+│   │       │   ├── wallet-auth-credential.ts -- auth-wallet (identity context)
+│   │       │   ├── audit-log.ts         --     append-only audit log
+│   │       │   ├── privacy.ts           --     export_jobs, deletion_requests
+│   │       │   └── wallet/wallet-account.ts -- isolated financial WalletAccount
+│   │       ├── isolation.ts             --   wallet↔ranking BFS isolation (WS-D.3.2)
 │   │       ├── client.ts                --   database client initialization
 │   │       └── drizzle.config.ts        --   Drizzle configuration
 │   └── invariants/              -- invariant computation modules
@@ -639,6 +679,8 @@ Biome 2.x does not support:
 | `drizzle-orm` ^0.45 | db | type-safe SQL (parameterized queries only) |
 | `pino` ^10.3 | api | structured logging (redaction-aware) |
 | `ioredis` ^5.11 | api | Redis client (CSRF token store, sessions) |
+| `@simplewebauthn/server` ^13.3 | api | WebAuthn attestation/assertion verification (WS-D) |
+| `viem` ^2.52 | api | EIP-4361 / SIWE signature verification (WS-D wallet sign-in) |
 
 No Lean or Rust toolchains.  This is a pure TypeScript monorepo.
 
@@ -653,7 +695,7 @@ Status:
 | WS-A | Doctrine and policy | Complete |
 | WS-B | Design system | Complete |
 | WS-C | PWA client application | Complete |
-| WS-D | Identity and privacy | Planned |
+| WS-D | Identity and privacy | In progress |
 | WS-E | Event pipeline and PWAtt scoring | Planned |
 | WS-F | Ingestion and search | Planned |
 | WS-G | Forum and conversation | Planned |
@@ -728,10 +770,15 @@ file counts at current state:
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
 | apps/web | ~48 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~10 | node | `pnpm --filter api test` |
-| packages/shared | ~4 | node | `pnpm --filter @licio/shared test` |
+| apps/api | ~28 (incl. WS-D identity + routes) | node | `pnpm --filter api test` |
+| packages/shared | ~7 (incl. WS-D schemas) | node | `pnpm --filter @licio/shared test` |
+| packages/db | ~2 (isolation + gated integration) | node | via root `pnpm test` (db project) |
 | packages/invariants | ~1 | node | `pnpm --filter @licio/invariants test` |
 | scripts | ~2 | node | via root `pnpm test` (policy project) |
+
+WS-D adds **gated** integration tests (Postgres + Redis) that run only
+when `DATABASE_URL` / `REDIS_URL` are set; they are skipped in CI, which
+has no database service.  See `docs/identity/README.md`.
 
 Only monotonic growth is enforced — no global gate pins the count.
 
@@ -804,9 +851,31 @@ Documentation: `docs/pwa-client/README.md`
 | Security | Trusted Types, CSP, CSRF serialization, SW TT injection, rate limiting | Complete |
 | Performance | JS < 200 KB gz, CSS < 50 KB gz, Core Web Vitals targets, performance marks | Complete |
 
-### WS-D through WS-P
+### WS-D: Identity, accounts, and privacy
 
-Plans: `docs/planning/05-identity-and-privacy.md` through
+Plan: `docs/planning/05-identity-and-privacy.md`
+Documentation: `docs/identity/README.md`
+
+In progress.  WebAuthn-first, **passwordless always** — there is no
+password column, hashing, or reset flow anywhere.
+
+| Sub-area | Key surface | Status |
+|----------|-------------|--------|
+| Schemas | User/privacy/session/credential/wallet zod + Drizzle, migration with partial indexes/CHECK/triggers | Complete |
+| Auth | WebAuthn (`@simplewebauthn`), email-OTP, SIWE (viem); sessions, rotation, step-up, rate limiting | Complete |
+| Authorization | RBAC + object-level (404-over-403), append-only audit log, fail-closed middleware | Complete |
+| Age gating | Under-13 block, teen privacy floor (server-clamped), `requireAdult` fail-closed | Complete |
+| Privacy controls | Settings get/patch (clamped/audited/propagated), attention delete, export job, account deletion + grace | Core complete |
+| Wallet isolation | `wallet.wallet_accounts` schema + undirected-BFS isolation test (WS-D.3.2) | Complete |
+| Deferred | Export worker/S3 delivery, deletion purge job, steward MFA routes, MaxMind geo | Pending |
+
+Pure crypto is mathematically validated: TOTP against the RFC 6238
+Appendix B vectors, real WebAuthn attestation/assertion via a pure-crypto
+software authenticator, real SIWE EOA signatures via viem.
+
+### WS-E through WS-P
+
+Plans: `docs/planning/06-event-pipeline-and-pwatt.md` through
 `docs/planning/17-experimentation-and-launch.md`
 
 Not yet started.  Read the relevant planning document and the
