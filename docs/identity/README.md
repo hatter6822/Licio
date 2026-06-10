@@ -81,6 +81,7 @@ interfaces.
 | `object-store.ts` | encrypted DSAR archive store + HMAC-signed, subject-bound, expiring download tokens |
 | `sigv4.ts` | minimal AWS Signature V4 signer on `node:crypto` (no SDK dep; pinned to the official AWS vectors) |
 | `object-store-s3.ts` | S3-compatible `ObjectStore` (AWS/R2/MinIO, path-style, SigV4 over fetch): client-side sealed bodies, read-time expiry, paginated sweep |
+| `mailer-ses.ts` | production `Mailer` over the SES v2 HTTP API (SigV4 over fetch): code + notice templates incl. the WS-D.2.4a deletion notice with its `/login?cancel_token=…` link; never logs recipient/code; unknown notice kinds fail loud |
 | `privacy-jobs.ts` | DSAR export assembly (own data only), export job process/retry/sweep, deletion hard-purge (anonymize/tombstone) |
 | `store.ts` | the `IdentityStore` interface + in-memory adapter (mirrors the Drizzle schema) |
 | `services.ts` | injectable service container + config derivation |

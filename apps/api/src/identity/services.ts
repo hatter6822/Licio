@@ -9,6 +9,7 @@
 import { type AuditStore, InMemoryAuditStore } from './audit.js';
 import type { AuthMethodInventory } from './auth-methods.js';
 import { type EphemeralStore, InMemoryEphemeralStore } from './ephemeral-store.js';
+import { SesMailer, type SesMailerConfig } from './mailer-ses.js';
 import { InMemoryObjectStore, type ObjectStore } from './object-store.js';
 import { AuthRateLimiter, InMemoryAuthRateLimitStore } from './rate-limit-auth.js';
 import { createLocalSecretBox, type SecretBox } from './secrets.js';
@@ -52,27 +53,30 @@ export function createLoggingMailer(
 }
 
 /**
- * Select the production mailer, FAILING CLOSED.  The real SMTP/provider mailer is
- * a deferred cloud adapter; until it lands, the only implementation is the
- * dev/CI logging mailer (which sends nothing).  Returning that in production would
- * let email login/verification/deletion-cancel flows report success while no mail
- * is ever delivered — a silent, dangerous no-op.  So in production we refuse to
+ * Select the production mailer, FAILING CLOSED.  With an SES config (the
+ * all-or-none `SES_*` env group) the real provider binding is used in any
+ * environment.  Without one, the only implementation is the dev/CI logging
+ * mailer (which sends nothing) — returning that in production would let email
+ * login/verification/deletion-cancel flows report success while no mail is
+ * ever delivered, a silent, dangerous no-op.  So in production we refuse to
  * boot unless the operator EXPLICITLY opts into a mail-less deployment
  * (`ALLOW_INSECURE_NULL_MAILER=true`, e.g. a passkey/wallet-only instance), in
- * which case we log a prominent warning.  Dev/test always use the logging mailer.
+ * which case we log a prominent warning.
  */
 export function selectMailer(opts: {
   nodeEnv: string;
   allowNullMailer: boolean;
+  ses?: SesMailerConfig | null;
   log: (event: string, meta: Record<string, unknown>) => void;
   warn: (msg: string) => void;
 }): Mailer {
+  if (opts.ses) return new SesMailer(opts.ses);
   if (opts.nodeEnv === 'production' && !opts.allowNullMailer) {
     throw new Error(
       'No email provider is configured: email login codes, verification, and ' +
-        'deletion-cancellation links cannot be delivered. Configure a real mailer ' +
-        'before production, or set ALLOW_INSECURE_NULL_MAILER=true to run an ' +
-        'email-less (passkey/wallet-only) deployment.',
+        'deletion-cancellation links cannot be delivered. Set the SES_* env group, ' +
+        'or set ALLOW_INSECURE_NULL_MAILER=true to run an email-less ' +
+        '(passkey/wallet-only) deployment.',
     );
   }
   if (opts.allowNullMailer) {

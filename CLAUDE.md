@@ -46,9 +46,10 @@ identity/audit stores, Redis session/ephemeral/rate-limit stores, a
 leased distributed privacy scheduler, an S3-compatible export-archive
 store) and the full client surface (passkey-first login/registration,
 the `/profile/security` management page, and real data-rights flows with
-step-up gating).  WS-D residuals tracked elsewhere: WS-E/WS-G injected
-hooks, the deployment email-provider binding behind the fail-closed
-`Mailer` interface, and browser-level auth E2E (needs a BFF-in-the-loop
+step-up gating).  Email delivery has a production SES binding (SigV4
+over fetch, all-or-none `SES_*` env group) behind the fail-closed
+`Mailer` selection.  WS-D residuals tracked elsewhere: WS-E/WS-G
+injected hooks and browser-level auth E2E (needs a BFF-in-the-loop
 harness; WS-P).
 Workstreams WS-E through WS-P are planned (planning documents
 exist under `docs/planning/`; implementation not yet started).  See
@@ -294,6 +295,7 @@ licio/
 │           │   ├── job-lease.ts         --   distributed scheduler window claim
 │           │   ├── sigv4.ts             --   AWS SigV4 signer (node:crypto, no SDK)
 │           │   ├── object-store-s3.ts   --   S3-compatible export-archive store
+│           │   ├── mailer-ses.ts        --   production SES mailer (SigV4 over fetch)
 │           │   ├── redis-stores.ts      --   production Redis adapters (gated)
 │           │   └── drizzle-store.ts     --   production Postgres identity/audit/lease adapters (gated)
 │           ├── lib/
@@ -799,7 +801,7 @@ file counts at current state:
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
 | apps/web | ~53 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~32 (incl. WS-D identity + routes) | node | `pnpm --filter api test` |
+| apps/api | ~33 (incl. WS-D identity + routes) | node | `pnpm --filter api test` |
 | packages/shared | ~7 (incl. WS-D schemas) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~2 (isolation + gated integration) | node | via root `pnpm test` (db project) |
 | packages/invariants | ~1 | node | `pnpm --filter @licio/invariants test` |
@@ -904,7 +906,8 @@ password column, hashing, or reset flow anywhere.
 | Client auth | Login/registration page: passkey-first sign-in + signup (WebAuthn L3 JSON with manual fallback, no client webauthn dep), email-code fallback, enumeration-safe registration outcome, allowlisted post-login redirect, best-effort server-side sign-out | Complete |
 | Client security | `/profile/security`: sessions list/revoke/revoke-others, passkey add/rename/remove, email-factor add/verify/change/disable, wallet unlink, TOTP enroll → recovery codes → disable, owner activity feed; sensitive actions run through the step-up retry gate (challenge → dialog → SAME action retries) and a step-up 401 never expires the session | Complete |
 | Client data rights | Privacy page wired to the real `/v1/privacy/*`: export request → poll → step-up-gated archive download, attention-history deletion, account deletion (confirm → step-up → sign-out) with grace-period cancel on the login page (emailed `?cancel_token=` link AND deactivated re-login path) | Complete |
-| Residuals | WS-E/WS-G injected hooks (`purgeAttention`, `onPrivacyChange`, `anonymizeContributions`); the deployment email-provider binding behind the fail-closed `Mailer` interface; browser-level auth E2E scenarios (the Playwright harness serves only the static preview — a BFF-in-the-loop harness lands with WS-P launch testing) | Tracked elsewhere |
+| Email delivery | Production `Mailer` over the SES v2 HTTP API (SigV4 on `node:crypto`, no SDK dep; all-or-none `SES_*` env group, partial fails boot): login/verify code templates and the WS-D.2.4a deletion notice (grace window, `/login?cancel_token=…` link, irreversibility); never logs recipient/code; without SES, production still fails closed unless `ALLOW_INSECURE_NULL_MAILER=true` | Complete |
+| Residuals | WS-E/WS-G injected hooks (`purgeAttention`, `onPrivacyChange`, `anonymizeContributions`); browser-level auth E2E scenarios (the Playwright harness serves only the static preview — a BFF-in-the-loop harness lands with WS-P launch testing) | Tracked elsewhere |
 
 Pure crypto is mathematically validated: TOTP against the RFC 6238
 Appendix B vectors, real WebAuthn attestation/assertion via a pure-crypto

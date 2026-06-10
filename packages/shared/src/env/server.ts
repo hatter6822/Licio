@@ -10,6 +10,32 @@ const S3_REQUIRED_KEYS = [
   'S3_SECRET_ACCESS_KEY',
 ] as const;
 
+/** The SES mailer group is all-or-none for the same reason. */
+const SES_REQUIRED_KEYS = [
+  'SES_REGION',
+  'SES_ACCESS_KEY_ID',
+  'SES_SECRET_ACCESS_KEY',
+  'SES_FROM_ADDRESS',
+] as const;
+
+/** Report a partial all-or-none env group as a validation issue. */
+function refineGroup(
+  env: Record<string, unknown>,
+  ctx: z.RefinementCtx,
+  keys: readonly string[],
+  group: string,
+): void {
+  const present = keys.filter((k) => env[k] !== undefined);
+  if (present.length > 0 && present.length < keys.length) {
+    const missing = keys.filter((k) => env[k] === undefined);
+    ctx.addIssue({
+      code: 'custom',
+      message: `Incomplete ${group} configuration: missing ${missing.join(', ')} (set the whole group or none of it)`,
+      path: [missing[0] ?? group],
+    });
+  }
+}
+
 export const serverEnvSchema = z.object({
   DATABASE_URL: z.string().url({ message: 'DATABASE_URL must be a valid URL' }),
   REDIS_URL: z.string().url({ message: 'REDIS_URL must be a valid URL' }),
@@ -44,6 +70,16 @@ export const serverEnvSchema = z.object({
   S3_ACCESS_KEY_ID: z.string().min(1).optional(),
   S3_SECRET_ACCESS_KEY: z.string().min(1).optional(),
   S3_PREFIX: z.string().optional(),
+  // SES mailer (WS-D email delivery): the production binding behind the
+  // fail-closed Mailer interface. ALL-OR-NONE (refined below): when unset,
+  // production refuses to boot unless ALLOW_INSECURE_NULL_MAILER=true
+  // (passkey/wallet-only deployments). SES_ENDPOINT overrides the regional
+  // default for tests/local stacks.
+  SES_REGION: z.string().min(1).optional(),
+  SES_ACCESS_KEY_ID: z.string().min(1).optional(),
+  SES_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+  SES_FROM_ADDRESS: z.string().min(3).optional(),
+  SES_ENDPOINT: z.string().url({ message: 'SES_ENDPOINT must be a valid URL' }).optional(),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;
@@ -51,15 +87,8 @@ export type ServerEnv = z.infer<typeof serverEnvSchema>;
 /** Rejects a PARTIAL S3 group: silently falling back to the in-memory store
  *  on a typo'd deployment would discard export archives on every restart. */
 export const serverEnvSchemaRefined = serverEnvSchema.superRefine((env, ctx) => {
-  const present = S3_REQUIRED_KEYS.filter((k) => env[k] !== undefined);
-  if (present.length > 0 && present.length < S3_REQUIRED_KEYS.length) {
-    const missing = S3_REQUIRED_KEYS.filter((k) => env[k] === undefined);
-    ctx.addIssue({
-      code: 'custom',
-      message: `Incomplete S3 configuration: missing ${missing.join(', ')} (set the whole S3_* group or none of it)`,
-      path: [missing[0] ?? 'S3_ENDPOINT'],
-    });
-  }
+  refineGroup(env, ctx, S3_REQUIRED_KEYS, 'S3');
+  refineGroup(env, ctx, SES_REQUIRED_KEYS, 'SES');
 });
 
 export function validateServerEnv(env: Record<string, string | undefined>): ServerEnv {

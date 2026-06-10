@@ -12,6 +12,7 @@ import {
   DrizzleIdentityStore,
   DrizzleJobLeaseStore,
 } from './identity/drizzle-store.js';
+import { sesConfigFromEnv } from './identity/mailer-ses.js';
 import { S3ObjectStore, s3ConfigFromEnv } from './identity/object-store-s3.js';
 import { PRIVACY_SCHEDULER_INTERVAL_MS, startPrivacyScheduler } from './identity/privacy-jobs.js';
 import { AuthRateLimiter } from './identity/rate-limit-auth.js';
@@ -41,6 +42,7 @@ const identityServices = buildIdentityServicesFromEnv(env, {
   mailer: selectMailer({
     nodeEnv: env.NODE_ENV,
     allowNullMailer: process.env['ALLOW_INSECURE_NULL_MAILER'] === 'true',
+    ses: sesConfigFromEnv(env),
     log: (event, meta) => logger.info(meta, event),
     warn: (msg) => logger.warn(msg),
   }),

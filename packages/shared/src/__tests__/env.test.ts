@@ -66,6 +66,21 @@ describe('validateServerEnv', () => {
     const result = validateServerEnv(validEnv);
     expect(result.S3_ENDPOINT).toBeUndefined();
   });
+
+  it('accepts a COMPLETE SES group and rejects a PARTIAL one (WS-D mailer)', () => {
+    const result = validateServerEnv({
+      ...validEnv,
+      SES_REGION: 'eu-west-1',
+      SES_ACCESS_KEY_ID: 'key',
+      SES_SECRET_ACCESS_KEY: 'secret',
+      SES_FROM_ADDRESS: 'no-reply@licio.app',
+    });
+    expect(result.SES_REGION).toBe('eu-west-1');
+
+    expect(() => validateServerEnv({ ...validEnv, SES_REGION: 'eu-west-1' })).toThrow(
+      /Incomplete SES configuration/,
+    );
+  });
 });
 
 describe('validateClientEnv', () => {
