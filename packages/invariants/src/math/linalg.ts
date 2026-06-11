@@ -23,6 +23,8 @@
 // approximation parameter (sweep counts, tolerances) is an explicit argument
 // with a reviewed default, per the gauge/approximation-honesty contract.
 
+import { mulberry32 } from './rng.js';
+
 export type Matrix = number[][];
 
 export function zeros(rows: number, cols: number): Matrix {
@@ -378,4 +380,119 @@ export function randomOrthogonal(n: number, rng: () => number): Matrix {
     if (q) return q;
   }
   throw new Error('randomOrthogonal: repeated rank deficiency');
+}
+
+export interface SmallSvd {
+  /** Left singular vectors as COLUMNS of u (m×r). */
+  u: Matrix;
+  /** Singular values, descending, length r = min(m, n). */
+  sigma: number[];
+  /** Right singular vectors as COLUMNS of v (n×r). */
+  v: Matrix;
+}
+
+/**
+ * SVD of a small dense matrix via the symmetric eigenproblem on MᵀM
+ * (deterministic Jacobi): MᵀM = V Σ² Vᵀ, then u_k = M v_k / σ_k for
+ * σ_k above the rank tolerance. Left vectors for (numerically) zero
+ * singular values are not constructed — callers treat them as the rank
+ * boundary. Intended for the n ≤ 16 matrices the invariant services use.
+ */
+export function svdSmall(m: Matrix, tol = 1e-10): SmallSvd {
+  const rows = m.length;
+  const cols = m[0]?.length ?? 0;
+  if (rows === 0 || cols === 0) return { u: [], sigma: [], v: [] };
+  const mtm = matMul(transpose(m), m);
+  const { values, vectors } = jacobiEigSym(mtm);
+  const r = Math.min(rows, cols);
+  const sigma: number[] = [];
+  const uCols: number[][] = [];
+  const vCols: number[][] = [];
+  for (let k = 0; k < r; k += 1) {
+    const lambda = Math.max(0, values[k] ?? 0);
+    const s = Math.sqrt(lambda);
+    sigma.push(s);
+    const vk = vectors[k] ?? [];
+    vCols.push([...vk]);
+    if (s > tol) {
+      const mv = matVec(m, vk);
+      uCols.push(mv.map((x) => x / s));
+    } else {
+      // Rank boundary: a zero column documents the missing direction.
+      uCols.push(new Array<number>(rows).fill(0));
+    }
+  }
+  // Column-major assembly.
+  const u: Matrix = Array.from({ length: rows }, (_, i) => uCols.map((col) => col[i] ?? 0));
+  const v: Matrix = Array.from({ length: cols }, (_, i) => vCols.map((col) => col[i] ?? 0));
+  return { u, sigma, v };
+}
+
+export interface RotationFit {
+  /** The special-orthogonal (det = +1) alignment, n×n. */
+  rotation: Matrix;
+  /** σ_min of the cross matrix — near 0 ⇒ the fit is ill-determined. */
+  conditioning: number;
+  degenerate: boolean;
+}
+
+/**
+ * Kabsch / special-orthogonal Procrustes: the rotation R ∈ SO(n)
+ * maximizing tr(Rᵀ M) for a cross matrix M (equivalently the closest
+ * rotation to M). With M = U Σ Vᵀ:
+ *
+ *   R = U · diag(1, …, 1, det(U Vᵀ)) · Vᵀ
+ *
+ * The determinant correction keeps R orientation-preserving, so loop
+ * holonomies stay in SO(n) where the principal matrix logarithm is real
+ * (SPEC §11.2). `degenerate` flags σ_min ≤ tol — the alignment is not
+ * uniquely determined and callers must degrade with a reason code instead
+ * of trusting an arbitrary completion.
+ */
+export function kabschRotation(crossMatrix: Matrix, tol = 1e-9): RotationFit {
+  const n = crossMatrix.length;
+  if (n === 0 || crossMatrix.some((row) => row.length !== n)) {
+    throw new Error('kabschRotation requires a square cross matrix');
+  }
+  const { u, sigma, v } = svdSmall(crossMatrix, tol);
+  const sMin = sigma[sigma.length - 1] ?? 0;
+  const uvT = matMul(u, transpose(v));
+  const det = determinant(uvT);
+  // Flip the LAST column of u when det < 0 (the standard Kabsch correction
+  // applied to the smallest singular direction).
+  const uCorrected = det < 0 ? u.map((row) => row.map((x, j) => (j === n - 1 ? -x : x))) : u;
+  const rotation = matMul(uCorrected, transpose(v));
+  return { rotation, conditioning: sMin, degenerate: sMin <= tol };
+}
+
+/**
+ * Deterministic seeded random projection R ∈ R^{rows×cols} with entries
+ * scaled by 1/√rows (Johnson–Lindenstrauss style). Replaces the degenerate
+ * "take the first k embedding components" pattern: a dense projection
+ * preserves pairwise geometry in expectation regardless of how the
+ * provider distributes mass across coordinates.
+ */
+export function randomProjectionMatrix(seed: number, rows: number, cols: number): Matrix {
+  const rng = mulberry32(seed);
+  // Uniform on [−√3, √3]/√rows ⇒ per-entry variance 1/rows ⇒ E‖Rx‖² = ‖x‖².
+  const scale = Math.sqrt(3) / Math.sqrt(rows);
+  return Array.from({ length: rows }, () =>
+    Array.from({ length: cols }, () => (rng() * 2 - 1) * scale),
+  );
+}
+
+/**
+ * Deterministic sign convention for eigen/singular vectors: each ROW
+ * vector is flipped so its largest-magnitude entry is positive (ties by
+ * lowest index). Stabilizes downstream constructions against the sign
+ * ambiguity of eigendecompositions.
+ */
+export function signFixRows(vectors: Matrix): Matrix {
+  return vectors.map((row) => {
+    let best = 0;
+    for (let i = 1; i < row.length; i += 1) {
+      if (Math.abs(row[i] ?? 0) > Math.abs(row[best] ?? 0)) best = i;
+    }
+    return (row[best] ?? 0) < 0 ? row.map((x) => -x) : [...row];
+  });
 }

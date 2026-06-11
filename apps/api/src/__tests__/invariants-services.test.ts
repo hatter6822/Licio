@@ -8,6 +8,7 @@
 // the path-signature classifier on session sequences, supporting services
 // on seeded data, and the WS-E hook closures (redundancy, mfci).
 import { randomUUID } from 'node:crypto';
+import type { SensitivityLabel } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import { assembleMeriCandidates, sessionEventsFromSequence } from '../invariants/data.js';
 import { hourWindow } from '../invariants/runner.js';
@@ -254,21 +255,90 @@ describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
     expect(live[0]?.sessionKey).toMatch(/^[0-9a-f]{32}$/);
   });
 
-  it('batch PHI computes a holonomy score for the detected loop', async () => {
+  it('a ping-pong revisit walk scores PHI 0 honestly (no cycle content)', async () => {
     const fixture = freshWsHServices();
     await seedSession(fixture, 'topic-a', 'topic-b');
     const outputs = await fixture.invariants.phi.computeBatch([], hourWindow(Date.now()));
     expect(outputs.length).toBe(1);
     const output = outputs[0];
     expect(output?.target.targetType).toBe('session');
-    if (output?.reason_codes.includes('INSUFFICIENT_COVERAGE')) {
-      throw new Error('frames should be available from the deterministic provider');
+    // a → b → a → b → a bounds no area: under the symmetric Kabsch
+    // connection its holonomy is the identity BY GEOMETRY — full-coverage
+    // PHI 0, never a coverage gap.
+    expect(output?.reason_codes).toEqual([]);
+    expect(output?.score_vector['phi']).toBe(0);
+    expect(output?.score_vector['cycle_content']).toBe(false);
+    expect(output?.coverage).toBe(1);
+  });
+
+  /** Seed a genuine 3-topic cycle a → b → c → a → b → c → a with enough
+   * per-topic stories to estimate behavioral structures. */
+  async function seedCycleSession(
+    fixture: WsHFixture,
+    topics: readonly string[],
+    options: { structureStories?: number; sensitivityLabels?: SensitivityLabel[] } = {},
+  ): Promise<void> {
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const visited: string[] = [];
+    for (const topic of topics) {
+      const { storyId } = await seedStory(fixture, {
+        topicIds: [topic],
+        title: `Field report on ${topic} infrastructure and policy`,
+        ...(options.sensitivityLabels ? { sensitivityLabels: options.sensitivityLabels } : {}),
+      });
+      visited.push(storyId);
+      for (let i = 0; i < (options.structureStories ?? 4); i += 1) {
+        await seedStory(fixture, {
+          topicIds: [topic],
+          title: `${topic} perspective ${i}: community questions evidence analysis ${i * 7}`,
+        });
+      }
     }
-    expect(typeof output?.score_vector['phi']).toBe('number');
-    expect(Array.isArray(output?.score_vector['loop_path'])).toBe(true);
+    const base = Date.now() - 28 * 60_000;
+    const pattern = [0, 1, 2, 0, 1, 2, 0];
+    for (const [i, idx] of pattern.entries()) {
+      await fixture.events.router.publish(
+        attentionEvent(userId, {
+          storyId: visited[idx] ?? '',
+          timestamp: new Date(base + i * 4 * 60_000).toISOString(),
+        }),
+      );
+    }
+  }
+
+  it('a genuine 3-topic cycle yields pair-transport holonomy', async () => {
+    const fixture = freshWsHServices();
+    await seedCycleSession(fixture, ['cycle-a', 'cycle-b', 'cycle-c']);
+    const outputs = await fixture.invariants.phi.computeBatch([], hourWindow(Date.now()));
+    expect(outputs.length).toBe(1);
+    const output = outputs[0];
+    expect(output?.target.targetType).toBe('session');
+    if (output?.reason_codes.includes('INSUFFICIENT_COVERAGE')) {
+      throw new Error('structures should be estimable from the seeded per-topic stories');
+    }
+    expect(output?.coverage).toBe(1);
+    expect(output?.score_vector['cycle_content']).toBe(true);
+    // NON-VACUOUS: pair transports pick up genuine curvature on a real
+    // cycle (per-topic frames would force exactly 0 here — the
+    // flat-connection theorem, tested in @licio/invariants).
+    expect(output?.score_vector['phi']).toBeGreaterThan(0.001);
+    expect(Number.isFinite(output?.score_vector['phi'])).toBe(true);
+    expect(output?.score_vector['alignment_conditioning']).toBeGreaterThan(0);
+    // The reduced cycle, not the raw revisit walk, is the loop path.
+    expect(output?.score_vector['loop_path']).toEqual([
+      'cycle-a',
+      'cycle-b',
+      'cycle-c',
+      'cycle-a',
+      'cycle-b',
+      'cycle-c',
+      'cycle-a',
+    ]);
     // Gauge boundary: only invariant fields on the vector.
     expect(Object.keys(output?.score_vector ?? {}).sort()).toEqual(
       [
+        'alignment_conditioning',
+        'cycle_content',
         'fallback_log',
         'loop_length',
         'loop_path',
@@ -278,6 +348,47 @@ describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
         'trace',
       ].sort(),
     );
+  });
+
+  it('sensitive topics are detected at the stricter repeat threshold (PHI-3)', async () => {
+    const fixture = freshWsHServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    // The flagged cluster repeats only TWICE — under the base threshold (3),
+    // at the sensitive-adjusted threshold (2).
+    const seedPair = async (topic: string, labels: SensitivityLabel[]): Promise<string[]> => {
+      const { storyId: hub } = await seedStory(fixture, {
+        topicIds: [topic],
+        ...(labels.length > 0 ? { sensitivityLabels: labels } : {}),
+      });
+      const { storyId: spoke } = await seedStory(fixture, { topicIds: [`${topic}-other`] });
+      return [hub, spoke, hub];
+    };
+    const sensitiveVisits = await seedPair('sensitive-x', ['crisis']);
+    const ordinaryVisits = await seedPair('ordinary-y', []);
+    const base = Date.now() - 20 * 60_000;
+    for (const [i, storyId] of sensitiveVisits.entries()) {
+      await fixture.events.router.publish(
+        attentionEvent(userId, {
+          storyId,
+          timestamp: new Date(base + i * 4 * 60_000).toISOString(),
+        }),
+      );
+    }
+    const { userId: otherUser } = await seedUserWithSession(fixture.identity);
+    for (const [i, storyId] of ordinaryVisits.entries()) {
+      await fixture.events.router.publish(
+        attentionEvent(otherUser, {
+          storyId,
+          timestamp: new Date(base + i * 4 * 60_000).toISOString(),
+        }),
+      );
+    }
+    const outputs = await fixture.invariants.phi.computeBatch([], hourWindow(Date.now()));
+    // Only the SENSITIVE session is flagged at the stricter threshold; the
+    // ordinary session with the same shape stays below the base threshold.
+    expect(outputs.length).toBe(1);
+    expect(outputs[0]?.score_vector['sensitive']).toBe(true);
+    expect(outputs[0]?.score_vector['cycle_content']).toBe(false);
   });
 
   it('path-signature classifies the same session data without content', async () => {

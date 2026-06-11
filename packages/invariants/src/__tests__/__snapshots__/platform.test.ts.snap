@@ -28,6 +28,8 @@ exports[`score-vector schemas (WS-H.1.1d) > score-vector shapes are pinned by sn
     "statistic",
   ],
   "PHI": [
+    "alignment_conditioning",
+    "cycle_content",
     "fallback_log",
     "loop_length",
     "loop_path",

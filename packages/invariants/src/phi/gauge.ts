@@ -75,6 +75,11 @@ export const PHI_GAUGE_INVARIANT_FIELDS = new Set([
   'sensitive',
   'trace',
   'loop_length',
+  // σ_min of the loop's worst cross-Gram: singular values are invariant
+  // under the per-topic gauge T_x → T_x Q_xᵀ (M_xy → Q_y M_xy Q_xᵀ).
+  'alignment_conditioning',
+  // Path data (whether the reduced walk carried a multi-topic cycle).
+  'cycle_content',
 ]);
 
 const FRAME_DEPENDENT_PATTERN = /^(matrix|entry|coord|embedding|frame|basis|h_\d|transport)/i;

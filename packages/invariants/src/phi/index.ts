@@ -6,5 +6,6 @@ export * from './gauge.js';
 export * from './holonomy.js';
 export * from './loops.js';
 export * from './thresholds.js';
+export * from './transports.js';
 
 export const PHI_VERSION = '1.0.0';

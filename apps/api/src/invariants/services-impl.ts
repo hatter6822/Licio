@@ -32,29 +32,28 @@ import {
   detectGaming,
   detectNarrowLoop,
   detectSynchronizedCascade,
+  effectiveRepeatThreshold,
   experienceMetrics,
   fiberTest,
   generateGroup,
   gwDistanceWithStability,
   type HealthMetrics,
   helmholtzDecompose,
-  holonomy,
+  holonomyCycleFromWalk,
   type InvariantCard,
   type InvariantComputation,
   type InvariantService,
   type InvariantTarget,
   type InvariantTimeWindow,
   InvariantType,
+  loopHolonomy,
   MFCI_AXES,
-  mulberry32,
-  orthonormalFrame,
   phiScore,
   reebGraph,
   riskStateForScore,
   scoiEnergy,
   suppressBelowK,
   type TierDeclaration,
-  transportBetween,
 } from '@licio/invariants';
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
@@ -70,6 +69,7 @@ import {
   assembleEngagementLandscape,
   assembleMeriCandidates,
   assembleMfciActions,
+  assemblePhiTopicData,
   assembleScoiStructure,
   assembleTopicCascade,
   sessionEventsFromSequence,
@@ -494,49 +494,120 @@ export class PhiService extends BaseInvariantService {
     const config = this.deps.config();
     const nowMs = this.deps.now();
     const sequences = await this.deps.sessions.listLive(nowMs);
-    const out: InvariantComputation[] = [];
+
+    // Two detection passes (PHI-3, WS-H.6.2d): the stricter (lower) repeat
+    // threshold is honored when the flagged cluster turns out to be a
+    // sensitive topic. Minor strictness stays CLIENT-side by design — the
+    // server session store is keyed by opaque digest and carries no
+    // identity to resolve an age band against.
+    const strictRepeats = effectiveRepeatThreshold(
+      { sensitiveTopic: true, isMinor: false },
+      config.phiThresholds,
+    );
+    const candidates: Array<{
+      sessionKey: string;
+      base: ReturnType<typeof detectNarrowLoop>;
+      strict: ReturnType<typeof detectNarrowLoop>;
+    }> = [];
+    const clusterIds = new Set<string>();
     for (const { sessionKey, sequence } of sequences) {
-      const detection = detectNarrowLoop(sequence, nowMs, config.phiNarrowLoop);
+      const base = detectNarrowLoop(sequence, nowMs, config.phiNarrowLoop);
+      const strict =
+        strictRepeats < config.phiNarrowLoop.repeatThreshold
+          ? detectNarrowLoop(sequence, nowMs, {
+              ...config.phiNarrowLoop,
+              repeatThreshold: strictRepeats,
+            })
+          : base;
+      if (!base.detected && !strict.detected) continue;
+      candidates.push({ sessionKey, base, strict });
+      for (const id of [...base.loopPath, ...strict.loopPath]) clusterIds.add(id);
+    }
+    if (candidates.length === 0) return [];
+
+    // One assembly for every candidate cluster: behavioral structures from
+    // topic content (the PAIR-transport estimator — per-topic frames would
+    // telescope to the identity) + WS-F sensitivity labels.
+    const topicData = await assemblePhiTopicData(this.deps.ingestion, [...clusterIds]);
+
+    const out: InvariantComputation[] = [];
+    for (const { sessionKey, base, strict } of candidates) {
+      const strictIsSensitive =
+        strict.detected &&
+        strict.topicClusterId !== null &&
+        topicData.sensitive.get(strict.topicClusterId) === true;
+      const detection = strictIsSensitive ? strict : base;
       if (!detection.detected || detection.loopPath.length < 2) continue;
       const target: InvariantTarget = {
         targetType: 'session',
         targetId: deterministicEventId(`phi:${sessionKey}`),
       };
-      // Frames per topic context from embedding structure; the loop's
-      // transports compose to the holonomy.
-      const frames = new Map<string, number[][]>();
-      let framesAvailable = 0;
-      for (const cluster of new Set(detection.loopPath)) {
-        const frame = await this.frameFor(cluster);
-        if (frame) {
-          frames.set(cluster, frame);
-          framesAvailable += 1;
-        }
-      }
-      const clusters = [...new Set(detection.loopPath)];
-      const coverage = clusters.length === 0 ? 0 : framesAvailable / clusters.length;
-      if (coverage < 1) {
+      const sensitive = detection.loopPath.some(
+        (cluster) => topicData.sensitive.get(cluster) === true,
+      );
+
+      // Backtrack reduction: star-shaped revisit walks bound no area, so
+      // their holonomy is the identity for ANY symmetric connection — PHI 0
+      // with full confidence is the honest score, not a coverage gap.
+      const cycle = holonomyCycleFromWalk(detection.loopPath);
+      if (!cycle) {
+        const scoreVector = {
+          phi: 0,
+          rotation_angles: [],
+          loop_path: [...detection.loopPath],
+          fallback_log: false,
+          sensitive,
+          loop_length: detection.loopPath.length,
+          cycle_content: false,
+        };
+        assertGaugeInvariantBoundary(scoreVector);
         out.push(
-          this.computation(target, window, {}, 0, coverage, ['INSUFFICIENT_COVERAGE'], null),
+          this.computation(
+            target,
+            window,
+            scoreVector,
+            0.7,
+            1,
+            [],
+            `Revisit loop over ${new Set(detection.loopPath).size} topic contexts carries no multi-topic cycle; the preference frame is unchanged.`,
+          ),
         );
         continue;
       }
-      const transports: number[][][] = [];
-      for (let i = 1; i < detection.loopPath.length; i += 1) {
-        const from = frames.get(detection.loopPath[i - 1] ?? '');
-        const to = frames.get(detection.loopPath[i] ?? '');
-        if (from && to) transports.push(transportBetween(from, to));
+
+      const distinct = [...new Set(cycle.slice(0, -1))];
+      const structuresAvailable = distinct.filter((cluster) =>
+        topicData.structures.has(cluster),
+      ).length;
+      const coverage = distinct.length === 0 ? 0 : structuresAvailable / distinct.length;
+      const loop = coverage < 1 ? null : loopHolonomy(topicData.structures, cycle);
+      if (!loop) {
+        // Missing structures or a degenerate (rank-deficient) pair
+        // alignment: no transport is estimable — degrade, never invent.
+        out.push(
+          this.computation(
+            target,
+            window,
+            {},
+            0,
+            coverage < 1 ? coverage : Math.max(0, (distinct.length - 1) / distinct.length),
+            ['INSUFFICIENT_COVERAGE'],
+            null,
+          ),
+        );
+        continue;
       }
-      if (transports.length === 0) continue;
-      const score = phiScore(holonomy(transports));
+      const score = phiScore(loop.h);
       const scoreVector = {
         phi: score.phi,
         rotation_angles: score.rotationAngles,
-        loop_path: detection.loopPath,
+        loop_path: cycle,
         fallback_log: score.fallback,
-        sensitive: false,
+        sensitive,
         trace: score.trace,
         loop_length: detection.loopPath.length,
+        alignment_conditioning: loop.conditioning,
+        cycle_content: true,
       };
       assertGaugeInvariantBoundary(scoreVector);
       out.push(
@@ -544,40 +615,14 @@ export class PhiService extends BaseInvariantService {
           target,
           window,
           scoreVector,
-          score.fallback ? 0.5 : 0.8,
+          score.fallback ? 0.5 : 0.85,
           coverage,
           score.reasonCodes,
-          `Loop over ${clusters.length} topic contexts rotated the preference frame by PHI ${score.phi.toFixed(3)}.`,
+          `Cycle over ${distinct.length} topic contexts rotated the preference frame by PHI ${score.phi.toFixed(3)}.`,
         ),
       );
     }
     return out;
-  }
-
-  /**
-   * Orthonormal frame for a topic context, derived deterministically from
-   * the topic's embedding (the v1 estimation documented in the card): the
-   * full embedding seeds a PRNG whose 4×4 sample is Gram–Schmidt
-   * orthonormalized — a pure function of the topic's semantic position
-   * (model-versioned), full-rank except on a measure-zero retry set.
-   */
-  async frameFor(topicClusterId: string): Promise<number[][] | null> {
-    const dim = 4;
-    const embedding = await this.deps.ingestion.embeddingProvider.embed(`topic:${topicClusterId}`);
-    let seed = 0x811c9dc5;
-    for (let i = 0; i < embedding.length; i += 1) {
-      seed ^= Math.round(((embedding[i] ?? 0) + 1) * 1e6) >>> 0;
-      seed = Math.imul(seed, 0x01000193) >>> 0;
-    }
-    const rng = mulberry32(seed >>> 0);
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      const raw = Array.from({ length: dim }, () =>
-        Array.from({ length: dim }, () => rng() * 2 - 1),
-      );
-      const frame = orthonormalFrame(raw);
-      if (frame) return frame;
-    }
-    return null;
   }
 }
 

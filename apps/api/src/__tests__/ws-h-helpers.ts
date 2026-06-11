@@ -4,6 +4,7 @@
 // invariant platform (installed as the module singleton) with its consumers
 // and hook closures registered.
 import { randomUUID } from 'node:crypto';
+import type { SensitivityLabel } from '@licio/shared';
 import {
   createInMemoryInvariantServices,
   type InvariantPlatformServices,
@@ -50,6 +51,7 @@ export async function seedStory(
     title?: string;
     sourceId?: string | null;
     topicIds?: string[];
+    sensitivityLabels?: SensitivityLabel[];
   } = {},
 ): Promise<{ storyId: string; threadId: string }> {
   const storyId = options.storyId ?? randomUUID();
@@ -65,7 +67,7 @@ export async function seedStory(
       language: 'en',
       topicIds: options.topicIds ?? ['topic-default'],
       locationScope: null,
-      sensitivityLabels: [],
+      sensitivityLabels: options.sensitivityLabels ?? [],
       lifecycleState: 'gathering_attention',
       submissionType: 'original_brief',
       submissionMetadata: { submission_type: 'original_brief', body: 'Seed body.' },

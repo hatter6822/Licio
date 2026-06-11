@@ -85,6 +85,10 @@ export const phiScoreVectorSchema = z
     sensitive: z.boolean(),
     trace: z.number().optional(),
     loop_length: nonNegativeInt.optional(),
+    /** σ_min of the loop's worst cross-Gram (gauge-invariant: singular values). */
+    alignment_conditioning: nonNegative.optional(),
+    /** False when the walk reduced to no multi-topic cycle (trivial by geometry). */
+    cycle_content: z.boolean().optional(),
   })
   .strict();
 export type PhiScoreVector = z.infer<typeof phiScoreVectorSchema>;

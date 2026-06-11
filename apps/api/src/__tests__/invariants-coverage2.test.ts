@@ -414,21 +414,26 @@ describe('remaining service/data branches', () => {
     expect(await fixture.invariants.meri.redundancyOf('some-id')).toBeCloseTo(0.75, 12);
   });
 
-  it('PHI degrades when frames are unavailable for a loop', async () => {
+  it('PHI degrades when topic structures cannot be estimated for a cycle', async () => {
     const fixture = freshWsHServices();
     const { userId } = await seedUserWithSession(fixture.identity);
-    const { storyId } = await seedStory(fixture, { topicIds: ['loop-topic'] });
-    const { storyId: other } = await seedStory(fixture, { topicIds: ['other-topic'] });
-    const base = Date.now() - 20 * 60_000;
-    for (const [i, target] of [storyId, other, storyId, other, storyId].entries()) {
+    // ONE story per topic — far fewer than the preference dimension, so no
+    // behavioral structure is estimable for any cluster in the cycle.
+    const stories: string[] = [];
+    for (const topic of ['gap-a', 'gap-b', 'gap-c']) {
+      const { storyId } = await seedStory(fixture, { topicIds: [topic] });
+      stories.push(storyId);
+    }
+    const base = Date.now() - 28 * 60_000;
+    const pattern = [0, 1, 2, 0, 1, 2, 0]; // a genuine 3-topic cycle
+    for (const [i, idx] of pattern.entries()) {
       await fixture.events.router.publish(
         attentionEvent(userId, {
-          storyId: target,
+          storyId: stories[idx] ?? '',
           timestamp: new Date(base + i * 3 * 60_000).toISOString(),
         }),
       );
     }
-    fixture.invariants.phi.frameFor = async () => null;
     const outputs = await fixture.invariants.phi.computeBatch([], hourWindow(Date.now()));
     expect(outputs).toHaveLength(1);
     expect(outputs[0]?.reason_codes).toContain('INSUFFICIENT_COVERAGE');

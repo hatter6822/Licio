@@ -154,7 +154,7 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
     confidence_bounds: { min: 0.2, typical: 0.7, max: 0.95 },
     coverage_bounds: { min_acceptable: 0.5, typical: 0.9 },
     coverage_definition:
-      'Fraction of the loop path’s topic contexts with a current orthonormal frame (embedding-derived).',
+      'Fraction of the reduced cycle’s topic contexts with an estimable behavioral structure (≥ n recent stories whose projected embeddings resolve n principal directions).',
     known_failure_modes: [
       {
         mode: 'holonomy near rotation-by-π or orientation-reversing',
@@ -167,11 +167,16 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
         mitigation:
           'boundary scan throws (build-failing); conjugation verification runs in CI and as promotion evidence',
       },
+      {
+        mode: 'topic pair with rank-deficient cross-Gram (orthogonal behavioral structures)',
+        impact: 'no unique best alignment exists for the leg',
+        mitigation: 'INSUFFICIENT_COVERAGE degraded output; no transport is invented',
+      },
     ],
     fallback_behavior:
       'Loop detection (v0) continues without holonomy scores; wellbeing prompts never block; ranking omits PHI features.',
     approximation_notes:
-      'Frames are estimated from topic-context embedding structure (Gram–Schmidt orthonormalized); transports are exact orthogonal Procrustes between frames; PHI summaries are spectral (conjugation-invariant) by construction.',
+      'Transports are PAIR-SPECIFIC: each topic context carries a √λ-weighted principal-direction structure estimated from its recent content embeddings (seeded dense projection into the shared space), and each leg’s transport is the Kabsch (special-orthogonal Procrustes) rotation of the pair’s cross-Gram. Per-topic frame families A_xy = F_yF_xᵀ are NOT used — they telescope to the identity around every loop (flat by construction). Revisit walks are backtrack-reduced before holonomy: walks with no multi-topic cycle score PHI 0 honestly (trivial by geometry under the symmetric connection). PHI summaries are spectral (conjugation-invariant) by construction.',
     shadow_status: 'shadow',
     dependencies: [
       'WS-E attention aggregates (session-bucketed)',

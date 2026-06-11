@@ -7,18 +7,25 @@
 // cohort, never per-user histories on the wire).
 
 import {
+  buildTopicStructure,
   type CascadeEvent,
   type CohortExposureItem,
   estimateJaccard,
   type GweiItemFeatures,
   type Interaction,
   lshBandHashes,
+  type Matrix,
   type MeriCandidateInput,
+  matVec,
+  PHI_PREFERENCE_DIM,
+  PHI_SHARED_DIM,
   type RankSnapshot,
   type ReebEdge,
   type ReebNode,
+  randomProjectionMatrix,
   type SessionPathEvent,
   type SheafStructure,
+  type TopicStructure,
 } from '@licio/invariants';
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
@@ -237,6 +244,43 @@ export async function assembleMfciActions(
 }
 
 // ---------------------------------------------------------------------------
+// Shared embedding projection
+// ---------------------------------------------------------------------------
+
+/**
+ * Fixed seed for the shared dimension-reduction projection. The projection
+ * is a pure function of (seed, shape), so every assembler in every process
+ * reduces embeddings IDENTICALLY — distances stay comparable across runs.
+ * Provider changes re-derive structures anyway (a new dimension yields a
+ * new projection), matching the embedding-registry versioning.
+ */
+const EMBEDDING_PROJECTION_SEED = 0x9e3779b9;
+
+const projectionCache = new Map<string, Matrix>();
+
+function projectionFor(rows: number, cols: number): Matrix {
+  const key = `${rows}x${cols}`;
+  let projection = projectionCache.get(key);
+  if (!projection) {
+    projection = randomProjectionMatrix(EMBEDDING_PROJECTION_SEED, rows, cols);
+    projectionCache.set(key, projection);
+  }
+  return projection;
+}
+
+/**
+ * Reduce an embedding to `outDim` dimensions with the shared seeded dense
+ * projection (JL-style: pairwise geometry preserved in expectation across
+ * ALL coordinates). Replaces first-k truncation, which silently discarded
+ * everything the provider encodes beyond the leading coordinates.
+ * Embeddings already at or below `outDim` pass through unchanged.
+ */
+export function projectEmbedding(embedding: readonly number[], outDim: number): number[] {
+  if (embedding.length <= outDim) return [...embedding];
+  return matVec(projectionFor(outDim, embedding.length), embedding);
+}
+
+// ---------------------------------------------------------------------------
 // GWEI (WS-H.5): cohort exposure samples
 // ---------------------------------------------------------------------------
 
@@ -310,7 +354,7 @@ export async function assembleCohorts(
       });
       gwItems.push({
         itemId: storyId,
-        semantic: [...embedding].slice(0, 16),
+        semantic: projectEmbedding([...embedding], 16),
         sourceKey: story.sourceId ?? 'unknown',
         evidenceKeys: claims.map((c) => c.independenceGroupId ?? c.claimId).slice(0, 8),
         communityKeys: story.topicIds.slice(0, 4),
@@ -549,4 +593,77 @@ export function sessionEventsFromSequence(
     seen.add(transition.topicClusterId);
   }
   return events;
+}
+
+// ---------------------------------------------------------------------------
+// PHI (WS-H.6): per-topic behavioral structures for pair transports
+// ---------------------------------------------------------------------------
+
+export interface PhiTopicData {
+  /** Topic-cluster id → estimated behavioral structure (absent = no data). */
+  structures: Map<string, TopicStructure>;
+  /** Topic-cluster id → whether any in-pool story carries a sensitivity label. */
+  sensitive: Map<string, boolean>;
+}
+
+export interface PhiTopicDataOptions {
+  sharedDim?: number;
+  preferenceDim?: number;
+  maxStoriesPerTopic?: number;
+  storyPoolSize?: number;
+}
+
+/**
+ * Estimate each requested topic cluster's behavioral structure from the
+ * topic's recent content: story-title embeddings, reduced into the shared
+ * projected space, summarized as √λ-weighted leading principal directions
+ * (`buildTopicStructure`). The PAIR transports between these structures are
+ * what make PHI holonomy non-vacuous — per-topic frames would telescope to
+ * the identity around every loop (the flat-connection theorem in
+ * `@licio/invariants` phi/transports.ts).
+ *
+ * Topics with fewer stories than the preference dimension, or with an
+ * unresolved spectrum, get NO structure — the service degrades with
+ * INSUFFICIENT_COVERAGE rather than inventing geometry. Sensitivity rides
+ * along from WS-F lexicon labels so PHI-3 strictness needs no second pass.
+ */
+export async function assemblePhiTopicData(
+  ingestion: IngestionServices,
+  topicClusterIds: readonly string[],
+  options: PhiTopicDataOptions = {},
+): Promise<PhiTopicData> {
+  const sharedDim = options.sharedDim ?? PHI_SHARED_DIM;
+  const preferenceDim = options.preferenceDim ?? PHI_PREFERENCE_DIM;
+  const maxStories = options.maxStoriesPerTopic ?? 32;
+  const wanted = new Set(topicClusterIds);
+  const sensitive = new Map<string, boolean>();
+  const structures = new Map<string, TopicStructure>();
+  if (wanted.size === 0) return { structures, sensitive };
+
+  const recent = await ingestion.stories.listRecent(options.storyPoolSize ?? 400);
+  const byCluster = new Map<string, StoryRecord[]>();
+  for (const story of recent) {
+    for (const topic of story.topicIds) {
+      if (!wanted.has(topic)) continue;
+      if (story.sensitivityLabels.length > 0) sensitive.set(topic, true);
+      else if (!sensitive.has(topic)) sensitive.set(topic, false);
+      const list = byCluster.get(topic) ?? [];
+      if (list.length < maxStories) {
+        list.push(story);
+        byCluster.set(topic, list);
+      }
+    }
+  }
+
+  for (const [topic, stories] of byCluster) {
+    if (stories.length < preferenceDim) continue;
+    const projected: number[][] = [];
+    for (const story of stories) {
+      const embedding = await ingestion.embeddingProvider.embed(story.title);
+      projected.push(projectEmbedding([...embedding], sharedDim));
+    }
+    const structure = buildTopicStructure(topic, projected, { dimension: preferenceDim });
+    if (structure) structures.set(topic, structure);
+  }
+  return { structures, sensitive };
 }

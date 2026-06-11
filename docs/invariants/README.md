@@ -47,8 +47,14 @@ first-party with explicit tolerances and tests:
 - **Cyclic Jacobi** symmetric eigendecomposition (unconditional convergence,
   deterministic sweep order) — eigenpair residuals are property-tested.
 - **LU determinant** with partial pivoting (PHI's `det(H) = ±1` branch).
-- **Modified Gram–Schmidt** orthonormalization (PHI frames, random
-  orthogonal conjugations for the gauge verifier).
+- **Modified Gram–Schmidt** orthonormalization (random orthogonal
+  conjugations for the PHI gauge verifier).
+- **Small SVD** via Jacobi on `MᵀM` and the **Kabsch / special-orthogonal
+  Procrustes** rotation (det-corrected, degeneracy-flagged) — the PHI pair
+  transports.
+- **Seeded dense random projection** (JL-style, variance-1/rows entries) —
+  embedding dimension reduction that preserves pairwise geometry in
+  expectation, replacing first-k truncation.
 - **Gelfand spectral radius** by renormalized repeated squaring — the exact
   telescoping identity `2⁻ᵐ log‖A^{2^m}‖ = Σ_{k<m} 2⁻ᵏ log n_k + 2⁻ᵐ log n_m`
   makes the truncation error explicit (Braid entropy).
@@ -150,16 +156,36 @@ no choice of readings can explain) — batch-only, reason-coded
 
 ### PHI — Preference Holonomy (SPEC §11)
 
-Topic-context frames are orthonormal (derived deterministically from the
-topic's embedding; Gram–Schmidt); transports `A_xy = F_y F_xᵀ` are exactly
-orthogonal (no SVD needed for full frames). Holonomy is the ordered product;
+Transports are **pair-specific** (`phi/transports.ts`) — this is what makes
+holonomy non-vacuous. Any per-topic frame family `A_xy = F_y F_xᵀ`
+telescopes to the identity around EVERY closed loop (`F_k F_{k−1}ᵀ ⋯ F_1
+F_0ᵀ = I`: flat by construction — the flat-connection theorem, proven
+executable in `phi-transports.test.ts`). Instead, each topic context
+carries a **behavioral structure** `T_x` — the √λ-weighted leading
+principal directions of its recent content embeddings in a shared seeded
+projection space — and each leg's transport is the **Kabsch
+(special-orthogonal Procrustes) rotation of the pair's cross-Gram**
+`T_yᵀT_x`. The polar factor of a product does not factor through the
+individual structures, so loops over ≥ 3 distinct topics pick up genuine
+connection curvature; identical structures and out-and-back walks stay
+exactly trivial (the connection is symmetric: `A_yx = A_xyᵀ`). Revisit
+walks are backtrack-reduced before holonomy (`holonomyCycleFromWalk`):
+star-shaped paths bound no area and score PHI 0 honestly with
+`cycle_content: false` — never dressed up as a coverage gap. Structures
+whose spectrum is unresolved and pairs whose cross-Gram is rank-deficient
+yield NO transport (`INSUFFICIENT_COVERAGE`), never an invented one.
+
+Holonomy is the ordered product;
 `PHI = ‖log H‖_F = √(2Σθ_k²)` with the rotation angles extracted
 **gauge-invariantly** from the spectrum of the symmetric part
-`(H + Hᵀ)/2` (conjugation-invariant by construction). Near rotation-by-π
-and for orientation-reversing holonomy the robust `‖H − I‖_F` fallback is
-used with `MATRIX_LOG_FALLBACK`. Two enforcement layers protect gauge
-invariance: the random-conjugation verifier (CI + promotion evidence) and
-the output-boundary scan that throws on any frame-dependent field.
+`(H + Hᵀ)/2` (conjugation-invariant by construction — the per-topic gauge
+`T_x → T_x Q_xᵀ` conjugates H and leaves every reported field unchanged,
+including `alignment_conditioning` = σ_min of the loop's worst cross-Gram).
+Near rotation-by-π and for orientation-reversing holonomy the robust
+`‖H − I‖_F` fallback is used with `MATRIX_LOG_FALLBACK`. Two enforcement
+layers protect gauge invariance: the random-conjugation verifier (CI +
+promotion evidence) and the output-boundary scan that throws on any
+frame-dependent field.
 
 **Privacy by construction:** the session sequence holds an opaque digest
 key, topic-cluster ids, and timestamps ONLY — never a story id, never
