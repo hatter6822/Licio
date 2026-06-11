@@ -182,6 +182,72 @@ describe('POST /v1/stories — exact-URL dedup (WS-F.1.3b)', () => {
     );
     expect(other.status).toBe(201);
   });
+
+  it('does NOT leak a takedown-hidden story when its URL is resubmitted (WS-F.1.4f)', async () => {
+    const { cookie } = await seedUserWithSession(fixture.identity);
+    const first = await app().request(
+      post('/v1/stories', linkSubmission('https://hidden.example/story'), cookie),
+    );
+    expect(first.status).toBe(201);
+    const { story_id } = (await first.json()) as { story_id: string };
+    // A steward takedown hides it.
+    await fixture.ingestion.stories.update(story_id, { hiddenState: 'takedown' });
+
+    const dup = await app().request(
+      post('/v1/stories', linkSubmission('https://hidden.example/story'), cookie),
+    );
+    // A generic 403 — NOT a 409 that would reveal the hidden story's id/existence.
+    expect(dup.status).toBe(403);
+    const body = (await dup.json()) as { error: { code: string }; existing_story_id?: string };
+    expect(body.error.code).toBe('held_for_review');
+    expect(body.existing_story_id).toBeUndefined();
+  });
+});
+
+describe('POST /v1/stories — evidence-card routing (WS-F.2.5a)', () => {
+  it('routes evidence.added to the thread of the story CONTAINING the claim', async () => {
+    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    // A brief story whose extraction yields a claim bound to that story.
+    const briefRes = await app().request(
+      post(
+        '/v1/stories',
+        briefSubmission({ body: 'The council approved the reservoir bond on Tuesday.' }),
+        cookie,
+      ),
+    );
+    const { story_id: claimStoryId } = (await briefRes.json()) as { story_id: string };
+    await fixture.ingestion.settle();
+    const claimStoryThread = await fixture.ingestion.stories.getThreadByStoryId(claimStoryId);
+    const claims = await fixture.ingestion.claims.listByStory(claimStoryId);
+    expect(claims.length).toBeGreaterThan(0);
+
+    // An evidence card referencing that claim opens its OWN shell story/thread.
+    const evRes = await app().request(
+      post(
+        '/v1/stories',
+        {
+          submission_type: 'evidence_card',
+          citation_url_or_ref: 'https://example.com/study',
+          claim_id: claims[0]?.claimId,
+          relevance_note: 'Independent replication of the figure',
+          title: 'Replication study',
+          topic_ids: ['33333333-3333-4333-8333-333333333333'],
+        },
+        cookie,
+      ),
+    );
+    expect(evRes.status).toBe(201);
+    const { thread_id: shellThread } = (await evRes.json()) as { thread_id: string };
+    await fixture.ingestion.settle();
+
+    // evidence.added carries the CLAIM's story thread, not the new shell — the
+    // material-update signal must advance the discussion holding the claim.
+    const events = await fixture.events.eventStore.listByOwner(userId);
+    const evidenceAdded = events.find((e) => e.eventType === 'evidence.added');
+    const threadId = (evidenceAdded?.payload as { thread_id: string } | undefined)?.thread_id;
+    expect(threadId).toBe(claimStoryThread?.threadId);
+    expect(threadId).not.toBe(shellThread);
+  });
 });
 
 describe('POST /v1/stories — safety pre-checks (WS-F.1.4c)', () => {

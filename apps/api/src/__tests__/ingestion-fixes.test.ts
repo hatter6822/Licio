@@ -263,18 +263,29 @@ describe('B6: embedding-similarity claim dedup (WS-F.1.2b soft dep)', () => {
       modelVersion: version,
       threshold: 0.9,
     };
+    const story = { storyId: randomUUID(), title: 'Budget story' };
     const result = await persistCandidateClaims(
       claims,
       reviews,
       extractor,
-      { storyId: randomUUID(), title: 'Budget story' },
+      story,
       'body text',
       0.5,
       dedup,
     );
-    // Linked to the existing claim, NOT created anew (cosine 0.995 ≥ 0.9).
+    // Near-duplicate (cosine 0.995 ≥ 0.9): NOT an independent claim, but the
+    // new story gets its OWN row sharing the existing claim's MERI lineage.
     expect(result.created).toHaveLength(0);
-    expect(result.linked.map((c) => c.claimId)).toEqual([existing.claimId]);
+    expect(result.linked).toHaveLength(1);
+    const linkedClaim = result.linked[0];
+    expect(linkedClaim?.claimId).not.toBe(existing.claimId);
+    const original = await claims.getById(existing.claimId);
+    expect(original?.independenceGroupId).not.toBeNull();
+    expect(linkedClaim?.independenceGroupId).toBe(original?.independenceGroupId);
+    // The new story surfaces the deduplicated claim (the WS-F.1.2b read fix).
+    expect((await claims.listByStory(story.storyId)).map((c) => c.claimId)).toEqual([
+      linkedClaim?.claimId,
+    ]);
   });
 
   it('creates a new claim when no existing claim is similar enough', async () => {

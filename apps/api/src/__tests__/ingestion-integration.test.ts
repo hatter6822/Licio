@@ -279,6 +279,12 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
     );
     expect((await claims.updateStatus(claim.claimId, 'accepted'))?.claimStatus).toBe('accepted');
     expect((await claims.listRecent(10)).some((c) => c.claimId === claim.claimId)).toBe(true);
+    // Cross-story dedup lineage (WS-F.1.2b): attach to a MERI independence group.
+    const lineage = randomUUID();
+    expect((await claims.setIndependenceGroup(claim.claimId, lineage))?.independenceGroupId).toBe(
+      lineage,
+    );
+    expect((await claims.getById(claim.claimId))?.independenceGroupId).toBe(lineage);
 
     const card = await evidence.insert({
       evidenceId: randomUUID(),
@@ -363,6 +369,32 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
     );
     expect(resolved?.status).toBe('resolved');
     expect((await reviews.getById(review.reviewId))?.resolution).toBe('retried');
+  });
+
+  it('hideBySource cascades a source takedown to the source’s stories', async () => {
+    const source = await sources.upsertByDomain(`cascade-${randomUUID().slice(0, 8)}.example`, {
+      name: 'Cascade Source',
+    });
+    const a = await stories.createWithThread(
+      storyInput({ sourceId: source.sourceId, excerpt: 'archived body A' }),
+      randomUUID(),
+    );
+    const b = await stories.createWithThread(
+      storyInput({ sourceId: source.sourceId, excerpt: 'archived body B' }),
+      randomUUID(),
+    );
+    const other = await stories.createWithThread(storyInput({ sourceId: null }), randomUUID());
+    if (!a.ok || !b.ok || !other.ok) throw new Error('setup failed');
+
+    expect(await stories.hideBySource(source.sourceId, 'takedown')).toBe(2);
+    for (const id of [a.story.storyId, b.story.storyId]) {
+      const row = await stories.getById(id);
+      expect(row?.hiddenState).toBe('takedown');
+      expect(row?.excerpt).toBeNull(); // archived body dropped (noarchive)
+    }
+    // A story NOT on that source is untouched; a re-action hides nothing new.
+    expect((await stories.getById(other.story.storyId))?.hiddenState).toBeNull();
+    expect(await stories.hideBySource(source.sourceId, 'takedown')).toBe(0);
   });
 
   it('syndication adapter enforces the unique pair and symmetric lookup', async () => {

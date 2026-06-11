@@ -163,6 +163,10 @@ export function buildSearchDocuments(
       });
     }
     for (const card of await allEvidence()) {
+      // Evidence on a hidden story is excluded too (null story_id ⇒
+      // user-experience evidence, always visible). Mirrors the claim path.
+      const storyVisible =
+        card.storyId === null ? true : (storyVisibility.get(card.storyId) ?? true);
       documents.push({
         resultType: 'evidence',
         id: card.evidenceId,
@@ -174,7 +178,7 @@ export function buildSearchDocuments(
         sourceId: card.sourceId,
         language: null,
         createdAt: card.createdAt,
-        visible: card.verificationState !== 'retracted',
+        visible: card.verificationState !== 'retracted' && storyVisible,
       });
     }
     return documents;

@@ -25,8 +25,9 @@ export interface WsFFixture {
   identity: IdentityServices;
   events: EventPipelineServices;
   ingestion: IngestionServices;
-  /** Per-URL fetch fixtures (status/body); unlisted URLs 404. */
-  pages: Map<string, { status: number; body: string; contentType?: string }>;
+  /** Per-URL fetch fixtures (status/body); unlisted URLs 404. `finalUrl`
+   *  simulates a redirect — the fetcher reports it as the post-redirect URL. */
+  pages: Map<string, { status: number; body: string; contentType?: string; finalUrl?: string }>;
   /** robots.txt body served per origin; absent ⇒ 404 (no restrictions). */
   robots: Map<string, string>;
   fetchedUrls: string[];
@@ -37,7 +38,10 @@ export function freshWsFServices(
   options: { config?: Partial<IngestionRuntimeConfig>; now?: () => number } = {},
 ): WsFFixture {
   const { identity, events } = freshWsEServices(options.now ? { now: options.now } : {});
-  const pages = new Map<string, { status: number; body: string; contentType?: string }>();
+  const pages = new Map<
+    string,
+    { status: number; body: string; contentType?: string; finalUrl?: string }
+  >();
   const robots = new Map<string, string>();
   const fetchedUrls: string[] = [];
   const fetchDocument = async (url: string): Promise<SafeFetchResult> => {
@@ -49,7 +53,7 @@ export function freshWsFServices(
       status: page.status,
       body: page.body,
       contentType: page.contentType ?? 'text/html',
-      finalUrl: url,
+      finalUrl: page.finalUrl ?? url,
     };
   };
   const ingestion = createInMemoryIngestionServices({

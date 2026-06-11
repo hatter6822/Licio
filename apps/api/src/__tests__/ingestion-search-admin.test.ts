@@ -10,9 +10,11 @@ import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createV1Routes } from '../routes/v1.js';
 import {
+  articleHtml,
   briefSubmission,
   freshWsFServices,
   jsonHeaders,
+  linkSubmission,
   post,
   seedUserWithSession,
   type WsFFixture,
@@ -30,6 +32,15 @@ beforeEach(() => {
 
 async function submitBrief(cookie: string, over: Record<string, unknown> = {}): Promise<string> {
   const res = await app().request(post('/v1/stories', briefSubmission(over), cookie));
+  expect(res.status).toBe(201);
+  const { story_id } = (await res.json()) as { story_id: string };
+  await fixture.ingestion.settle();
+  return story_id;
+}
+
+async function submitLink(cookie: string, url: string): Promise<string> {
+  fixture.pages.set(url, { status: 200, body: articleHtml() });
+  const res = await app().request(post('/v1/stories', linkSubmission(url), cookie));
   expect(res.status).toBe(201);
   const { story_id } = (await res.json()) as { story_id: string };
   await fixture.ingestion.settle();
@@ -138,6 +149,54 @@ describe('GET /v1/search (WS-F.3.1b)', () => {
     expect(types.has('claim')).toBe(true);
     expect(types.has('evidence')).toBe(true);
   });
+
+  it('excludes evidence backed by a HIDDEN story from search (WS-F.3.1b visibility)', async () => {
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const author = await seedUserWithSession(fixture.identity);
+    const hiddenStoryId = await submitBrief(author.cookie, {
+      title: 'Routine procurement notice',
+      body: 'Nothing notable in the quarterly filing.',
+    });
+    await fixture.ingestion.stories.update(hiddenStoryId, { hiddenState: 'takedown' });
+    const claim = await fixture.ingestion.claims.insert({
+      claimId: randomUUID(),
+      storyId: null,
+      canonicalText: 'A neutral background claim.',
+      normalizedTextHash: randomUUID().replaceAll('-', ''),
+      claimStatus: 'candidate',
+      firstSeenStoryId: null,
+      independenceGroupId: null,
+      createdBy: null,
+      extractionSource: 'steward',
+      extractionConfidence: null,
+      modelVersion: null,
+    });
+    const evidenceCommon = {
+      claimId: claim.claimId,
+      sourceId: null,
+      submittedBy: userId,
+      evidenceType: 'supports' as const,
+      verificationState: 'unverified' as const,
+      independenceGroupId: null,
+    };
+    const hiddenEvidence = await fixture.ingestion.evidence.insert({
+      ...evidenceCommon,
+      evidenceId: randomUUID(),
+      citationUrlOrRef: 'https://example.com/quokkaphone-ledger',
+      relevanceNote: 'Quokkaphone ledger backs the figure.',
+      storyId: hiddenStoryId, // backed by the HIDDEN story ⇒ filtered out
+    });
+    const visibleEvidence = await fixture.ingestion.evidence.insert({
+      ...evidenceCommon,
+      evidenceId: randomUUID(),
+      citationUrlOrRef: 'https://example.com/quokkaphone-public',
+      relevanceNote: 'Quokkaphone public corroboration.',
+      storyId: null, // story-less ⇒ always visible
+    });
+    const ids = (await search('q=quokkaphone')).items.map((i) => i.id);
+    expect(ids).toContain(visibleEvidence.evidenceId);
+    expect(ids).not.toContain(hiddenEvidence.evidenceId);
+  });
 });
 
 describe('takedown intake → action → removal (WS-F.1.4f)', () => {
@@ -184,6 +243,51 @@ describe('takedown intake → action → removal (WS-F.1.4f)', () => {
     // Audit trail (WS-D append-only store).
     const activity = await fixture.identity.audit.securityActivityForUser(steward.userId, 10);
     expect(activity.some((entry) => entry.event_type === 'takedown_action')).toBe(true);
+  });
+
+  it('a SOURCE takedown cascades: the publisher’s existing stories leave reads + search', async () => {
+    const { cookie } = await seedUserWithSession(fixture.identity);
+    // Two link stories on the SAME domain resolve to one auto-created source.
+    const storyA = await submitLink(cookie, 'https://taken.example/a');
+    const storyB = await submitLink(cookie, 'https://taken.example/b');
+    const sourceId = (await fixture.ingestion.stories.getById(storyA))?.sourceId as string;
+    expect(sourceId).toBeTruthy();
+    expect((await fixture.ingestion.stories.getById(storyB))?.sourceId).toBe(sourceId);
+    // Both visible (read) before the takedown.
+    expect((await app().request(`http://localhost/v1/stories/${storyA}`)).status).toBe(200);
+    expect((await app().request(`http://localhost/v1/stories/${storyB}`)).status).toBe(200);
+
+    const intake = await app().request(
+      post('/v1/takedowns', {
+        target_type: 'source',
+        target_id: sourceId,
+        requester_contact: 'legal@example.com',
+        legal_basis: 'court_order',
+        claim_detail: 'A court order requires removing this publisher’s content.',
+      }),
+    );
+    expect(intake.status).toBe(202);
+    const { takedown_id } = (await intake.json()) as { takedown_id: string };
+
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const action = await app().request(
+      post(
+        `/v1/ingestion/admin/takedowns/${takedown_id}/action`,
+        { action: 'actioned', resolution_note: 'Source taken down per order.' },
+        steward.cookie,
+      ),
+    );
+    expect(action.status).toBe(200);
+
+    // BOTH of the source’s stories are now hidden from reads, their archived
+    // excerpts dropped, and the source’s display restrictions tightened.
+    expect((await app().request(`http://localhost/v1/stories/${storyA}`)).status).toBe(404);
+    expect((await app().request(`http://localhost/v1/stories/${storyB}`)).status).toBe(404);
+    const hiddenA = await fixture.ingestion.stories.getById(storyA);
+    expect(hiddenA?.hiddenState).toBe('takedown');
+    expect(hiddenA?.excerpt).toBeNull();
+    const source = await fixture.ingestion.sources.getById(sourceId);
+    expect(source?.displayRestrictions).toMatchObject({ noindex: true, noarchive: true });
   });
 
   it('rejects unauthenticated/non-steward access to the admin surface', async () => {

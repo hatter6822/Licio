@@ -167,14 +167,30 @@ describe('SSRF address gate (WS-F.1.4e)', () => {
     '::ffff:127.0.0.1',
     '::ffff:10.0.0.1',
     '64:ff9b::a00:1',
+    // HEX IPv4-mapped forms — the URL parser canonicalises mapped addresses to
+    // hex, so these (not the dotted form) are what actually reach the gate.
+    '::ffff:7f00:1', // = ::ffff:127.0.0.1 (loopback)
+    '::ffff:7f00:0001',
+    '::ffff:a00:1', // = ::ffff:10.0.0.1 (RFC 1918)
+    '::ffff:a9fe:a9fe', // = ::ffff:169.254.169.254 (cloud metadata)
+    '0:0:0:0:0:ffff:7f00:1', // fully-expanded mapped loopback
+    // Deprecated IPv4-compatible (`::/96`) forms still route in some stacks.
+    '::7f00:1', // = ::127.0.0.1
+    '::a9fe:a9fe', // = ::169.254.169.254
   ])('blocks IPv6 %s', (address) => {
     expect(isBlockedIpv6(address)).toBe(true);
   });
 
   it('allows public IPv6 and routes families correctly', () => {
     expect(isBlockedIpv6('2606:4700::6810:84e5')).toBe(false);
+    // A public IPv4 embedded in a mapped address is allowed (the embedded
+    // address is what is checked, not the mapping).
+    expect(isBlockedIpv6('::ffff:8.8.8.8')).toBe(false);
+    expect(isBlockedIpv6('::ffff:808:808')).toBe(false); // = ::ffff:8.8.8.8 (hex)
     expect(isBlockedAddress('127.0.0.1', 4)).toBe(true);
     expect(isBlockedAddress('::1', 6)).toBe(true);
+    // An unparseable IPv6 fails closed.
+    expect(isBlockedIpv6('not:an:address')).toBe(true);
   });
 
   it('treats malformed IPv4 as blocked (fail closed)', () => {

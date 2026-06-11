@@ -99,9 +99,11 @@ export interface PersistClaimsResult {
 }
 
 /**
- * Persist candidate claims with text-level dedup: an existing claim with the
- * same normalized text is LINKED (returned, not duplicated) and joins the
- * new story's independence lineage exactly as the plan requires. Embedding-
+ * Persist candidate claims with text-level dedup: when the same normalized
+ * claim already exists on ANOTHER story, the new story gets its OWN candidate
+ * row sharing that claim's `independence_group_id` (minted on first dedup) —
+ * so the new story actually surfaces the claim (`listByStory`) while MERI still
+ * sees the copies as one non-independent lineage (Section 13.6). Embedding-
  * similarity dedup arrives with populated embeddings (WS-F.3.2c, soft dep).
  */
 export async function persistCandidateClaims(
@@ -120,15 +122,25 @@ export async function persistCandidateClaims(
     const hash = normalizedClaimHash(candidate.text);
     const existing = await claims.findByNormalizedHash(hash);
     if (existing.length > 0) {
-      linked.push(existing[0] as ClaimRecord);
+      linked.push(
+        await attachStoryToClaimLineage(claims, existing, story, candidate, extractor.modelVersion),
+      );
       continue;
     }
-    // Embedding-similarity dedup (soft): link to a near-duplicate existing
-    // claim of another story instead of creating a redundant row.
+    // Embedding-similarity dedup (soft): a near-duplicate claim of ANOTHER
+    // story attaches this story to the same independence lineage.
     if (embeddingDedup !== undefined) {
-      const linkedClaim = await tryEmbeddingLink(claims, candidate.text, embeddingDedup);
-      if (linkedClaim !== null) {
-        linked.push(linkedClaim);
+      const match = await tryEmbeddingLink(claims, candidate.text, embeddingDedup);
+      if (match !== null) {
+        linked.push(
+          await attachStoryToClaimLineage(
+            claims,
+            [match],
+            story,
+            candidate,
+            extractor.modelVersion,
+          ),
+        );
         continue;
       }
     }
@@ -165,6 +177,56 @@ export async function persistCandidateClaims(
     }
   }
   return { created, linked };
+}
+
+/**
+ * Attach `story` to an existing claim's MERI independence lineage (WS-F.1.2b
+ * cross-story dedup). The same claim already exists on OTHER stories, so —
+ * rather than dropping the association (the new story would surface no claim
+ * for this text) or minting an independent row (MERI would double-count the
+ * copies) — the new story gets its OWN candidate row sharing the existing
+ * claim's `independence_group_id`. The group is minted on the first dedup and
+ * back-filled onto the canonical match so later copies converge on it.
+ *
+ * Idempotent under at-least-once redelivery: a match set containing only THIS
+ * story's prior rows (no foreign story) mints no group and returns the existing
+ * row untouched.
+ */
+async function attachStoryToClaimLineage(
+  claims: ClaimStore,
+  matches: ClaimRecord[],
+  story: { storyId: string },
+  candidate: CandidateClaim,
+  modelVersion: string,
+): Promise<ClaimRecord> {
+  const own = matches.find((c) => c.storyId === story.storyId);
+  const canonical = matches.find((c) => c.storyId !== story.storyId);
+  // No cross-story duplication — only our own prior row(s) on redelivery. Never
+  // fabricate an independence group for a claim seen in a single story.
+  if (canonical === undefined) return own ?? (matches[0] as ClaimRecord);
+
+  const groupId =
+    matches.find((c) => c.independenceGroupId !== null)?.independenceGroupId ?? randomUUID();
+  if (canonical.independenceGroupId === null) {
+    await claims.setIndependenceGroup(canonical.claimId, groupId);
+  }
+  if (own !== undefined) {
+    if (own.independenceGroupId === null) await claims.setIndependenceGroup(own.claimId, groupId);
+    return { ...own, independenceGroupId: groupId };
+  }
+  return await claims.insert({
+    claimId: randomUUID(),
+    storyId: story.storyId,
+    canonicalText: canonical.canonicalText,
+    normalizedTextHash: canonical.normalizedTextHash,
+    claimStatus: 'candidate',
+    firstSeenStoryId: canonical.firstSeenStoryId ?? canonical.storyId,
+    independenceGroupId: groupId,
+    createdBy: null,
+    extractionSource: 'system',
+    extractionConfidence: candidate.confidence,
+    modelVersion,
+  });
 }
 
 /** Embed a candidate's text and return the nearest existing claim above the

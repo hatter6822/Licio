@@ -316,6 +316,12 @@ export function createIngestionAdminRoutes() {
               await ingestion.sources.update(record.targetId, {
                 displayRestrictions: { noindex: true, noarchive: true, excerpt_max_chars: 0 },
               });
+              // Cascade (WS-F.1.4f): the publisher's EXISTING stories leave
+              // every read + search surface and shed their archived excerpts.
+              // Tightening the source's future-extraction flags alone would
+              // leave already-extracted content fully visible.
+              const hidden = await ingestion.stories.hideBySource(record.targetId, 'takedown');
+              ingestion.metrics.increment('takedowns.source_stories_hidden', hidden);
             }
           }
           const updated = await ingestion.takedowns.update(takedownId, {

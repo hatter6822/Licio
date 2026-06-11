@@ -288,6 +288,11 @@ export interface StoryStore {
   ): Promise<
     Array<{ sourceId: string; linkType: 'primary' | 'syndicated'; viaCanonicalUrl: string | null }>
   >;
+  /** Source-takedown cascade (WS-F.1.4f): hide every currently-visible story
+   *  whose PRIMARY source is `sourceId` and drop its archived excerpt (the
+   *  `noarchive` realization). Idempotent — already-hidden rows are skipped —
+   *  and returns the number of stories newly hidden. */
+  hideBySource(sourceId: string, hiddenState: 'takedown' | 'safety'): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -338,6 +343,10 @@ export interface ClaimStore {
   /** Most recent claims (search corpus; includes story-less claims). */
   listRecent(limit: number): Promise<ClaimRecord[]>;
   updateStatus(claimId: string, status: ClaimRecordStatus): Promise<ClaimRecord | null>;
+  /** Attach a claim to a MERI independence lineage (WS-F.1.2b cross-story
+   *  dedup): the SAME claim surfacing in another story shares this group so
+   *  MERI never counts the copies as independent validation (Section 13.6). */
+  setIndependenceGroup(claimId: string, groupId: string): Promise<ClaimRecord | null>;
   clear(): Promise<void>;
 }
 
@@ -626,6 +635,21 @@ export class InMemoryStoryStore implements StoryStore {
     return [...(this.#sourceLinks.get(storyId) ?? [])];
   }
 
+  async hideBySource(sourceId: string, hiddenState: 'takedown' | 'safety'): Promise<number> {
+    let count = 0;
+    for (const [storyId, record] of this.#stories) {
+      if (record.sourceId !== sourceId || record.hiddenState !== null) continue;
+      this.#stories.set(storyId, {
+        ...record,
+        hiddenState,
+        excerpt: null,
+        updatedAt: nowIso(this.#now),
+      });
+      count += 1;
+    }
+    return count;
+  }
+
   async clear(): Promise<void> {
     this.#stories.clear();
     this.#threads.clear();
@@ -826,6 +850,14 @@ export class InMemoryClaimStore implements ClaimStore {
     const claim = this.#claims.get(claimId);
     if (!claim) return null;
     const updated = { ...claim, claimStatus: status, updatedAt: nowIso(this.#now) };
+    this.#claims.set(claimId, updated);
+    return updated;
+  }
+
+  async setIndependenceGroup(claimId: string, groupId: string): Promise<ClaimRecord | null> {
+    const claim = this.#claims.get(claimId);
+    if (!claim) return null;
+    const updated = { ...claim, independenceGroupId: groupId, updatedAt: nowIso(this.#now) };
     this.#claims.set(claimId, updated);
     return updated;
   }

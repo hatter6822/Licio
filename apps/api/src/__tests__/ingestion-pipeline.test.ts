@@ -110,6 +110,53 @@ describe('robots.txt compliance (WS-F.1.4f)', () => {
     expect(deferred).toHaveLength(1);
     expect(deferred[0]?.notBefore).not.toBeNull();
   });
+
+  it('link-only (robots-disallowed) stories classify + extract claims from local text', async () => {
+    const { cookie } = await seedUserWithSession(fixture.identity);
+    fixture.robots.set('https://blocked.example', 'User-agent: *\nDisallow: /private/');
+    const url = 'https://blocked.example/private/report';
+    fixture.pages.set(url, { status: 200, body: articleHtml() });
+    const res = await app().request(
+      post(
+        '/v1/stories',
+        {
+          ...linkSubmission(url),
+          reason: 'The county council approved the reservoir bond on Tuesday evening.',
+        },
+        cookie,
+      ),
+    );
+    expect(res.status).toBe(201);
+    const { story_id } = (await res.json()) as { story_id: string };
+    await fixture.ingestion.settle();
+    const story = await fixture.ingestion.stories.getById(story_id);
+    expect(story?.extractionState).toBe('disallowed_robots');
+    expect(story?.excerpt).toBeNull(); // the page was never fetched/archived
+    expect(fixture.fetchedUrls).not.toContain(url);
+    // Candidate claims now come from the LOCAL submission text (parity with the
+    // non-link path), and ride the content.normalized event's claim_ids.
+    const claims = await fixture.ingestion.claims.listByStory(story_id);
+    expect(claims.length).toBeGreaterThan(0);
+    const normalized = (
+      await fixture.events.eventStore.listByOwner(story?.submittedBy as string)
+    ).find((e) => e.eventType === 'content.normalized');
+    expect((normalized?.payload as { claim_ids: string[] }).claim_ids.length).toBeGreaterThan(0);
+  });
+
+  it('re-checks robots on the FINAL url and degrades a redirect-to-disallowed to link-only', async () => {
+    const { cookie } = await seedUserWithSession(fixture.identity);
+    fixture.robots.set('https://redir.example', 'User-agent: *\nDisallow: /private/');
+    const start = 'https://redir.example/start'; // ALLOWED by robots…
+    const finalUrl = 'https://redir.example/private/secret'; // …redirects to DISALLOWED.
+    fixture.pages.set(start, { status: 200, body: articleHtml(), finalUrl });
+    const storyId = await submitLink(start, cookie);
+    const story = await fixture.ingestion.stories.getById(storyId);
+    // The submitted URL WAS fetched, but the post-redirect URL is robots-
+    // disallowed, so the body is discarded and the story degrades to link-only.
+    expect(fixture.fetchedUrls).toContain(start);
+    expect(story?.extractionState).toBe('disallowed_robots');
+    expect(story?.excerpt).toBeNull();
+  });
 });
 
 describe('extraction failure + retry (WS-F.1.4e non-blocking)', () => {

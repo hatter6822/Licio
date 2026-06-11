@@ -42,25 +42,80 @@ export function isBlockedIpv4(address: string): boolean {
   return false;
 }
 
+/**
+ * Expand an IPv6 literal to its 16 bytes — handling `::` zero-compression,
+ * a zone id, an embedded dotted-IPv4 tail (`::ffff:127.0.0.1`), and the
+ * hex-mapped tail (`::ffff:7f00:1`) uniformly. Returns null on anything it
+ * cannot parse (callers FAIL CLOSED). This is the canonical form the range
+ * checks run on, so neither representation of an embedded IPv4 can slip past.
+ */
+export function ipv6ToBytes(address: string): number[] | null {
+  let addr = address.toLowerCase();
+  const zone = addr.indexOf('%'); // strip a scope/zone id (fe80::1%eth0)
+  if (zone !== -1) addr = addr.slice(0, zone);
+
+  // An embedded dotted-IPv4 tail becomes its two hextets so the rest of the
+  // parser only ever deals with hex groups.
+  const lastColon = addr.lastIndexOf(':');
+  if (lastColon !== -1 && addr.slice(lastColon + 1).includes('.')) {
+    const v4 = addr
+      .slice(lastColon + 1)
+      .split('.')
+      .map((p) => Number.parseInt(p, 10));
+    if (v4.length !== 4 || v4.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    const [a, b, c, d] = v4 as [number, number, number, number];
+    addr = `${addr.slice(0, lastColon + 1)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+
+  const halves = addr.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] === '' || halves[0] === undefined ? [] : halves[0].split(':');
+  const tail =
+    halves.length === 2 ? (halves[1] === '' ? [] : (halves[1] as string).split(':')) : null;
+  let hextets: string[];
+  if (tail === null) {
+    hextets = head; // no `::`, must be all 8 groups
+  } else {
+    const fill = 8 - head.length - tail.length;
+    if (fill < 0) return null;
+    hextets = [...head, ...Array<string>(fill).fill('0'), ...tail];
+  }
+  if (hextets.length !== 8) return null;
+
+  const bytes: number[] = [];
+  for (const h of hextets) {
+    if (!/^[0-9a-f]{1,4}$/.test(h)) return null;
+    const value = Number.parseInt(h, 16);
+    bytes.push((value >> 8) & 0xff, value & 0xff);
+  }
+  return bytes;
+}
+
 /** Whether a literal IPv6 address is in a blocked range. */
 export function isBlockedIpv6(address: string): boolean {
-  const lower = address.toLowerCase();
-  // IPv4-mapped/translated forms re-check the embedded IPv4.
-  const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (mapped?.[1]) return isBlockedIpv4(mapped[1]);
-  if (lower === '::' || lower === '::1') return true; // unspecified + loopback
-  if (
-    lower.startsWith('fe8') ||
-    lower.startsWith('fe9') ||
-    lower.startsWith('fea') ||
-    lower.startsWith('feb')
-  ) {
-    return true; // fe80::/10 link-local
+  const bytes = ipv6ToBytes(address);
+  if (bytes === null) return true; // unparseable ⇒ blocked (fail closed)
+  const [b0, b1, b2, b3] = bytes as [number, number, number, number, ...number[]];
+
+  // IPv4-mapped (`::ffff:0:0/96`) and the deprecated IPv4-compatible (`::/96`,
+  // excluding `::` and `::1`) both EMBED an IPv4 in the last four bytes — check
+  // it regardless of the textual representation (hex or dotted).
+  const high96Zero = bytes.slice(0, 12).every((x) => x === 0);
+  if (bytes.slice(0, 10).every((x) => x === 0) && bytes[10] === 0xff && bytes[11] === 0xff) {
+    return isBlockedIpv4(`${bytes[12]}.${bytes[13]}.${bytes[14]}.${bytes[15]}`);
   }
-  if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // fc00::/7 ULA
-  if (lower.startsWith('ff')) return true; // multicast
-  if (lower.startsWith('2001:db8')) return true; // documentation
-  if (lower.startsWith('64:ff9b')) return true; // NAT64 (embeds IPv4)
+  const embedded = `${bytes[12]}.${bytes[13]}.${bytes[14]}.${bytes[15]}`;
+  if (high96Zero && embedded !== '0.0.0.0' && embedded !== '0.0.0.1') {
+    return isBlockedIpv4(embedded); // IPv4-compatible (deprecated, still routable)
+  }
+
+  if (bytes.every((x) => x === 0)) return true; // :: unspecified
+  if (high96Zero && embedded === '0.0.0.1') return true; // ::1 loopback
+  if (b0 === 0xfe && (b1 & 0xc0) === 0x80) return true; // fe80::/10 link-local
+  if ((b0 & 0xfe) === 0xfc) return true; // fc00::/7 ULA
+  if (b0 === 0xff) return true; // ff00::/8 multicast
+  if (b0 === 0x20 && b1 === 0x01 && b2 === 0x0d && b3 === 0xb8) return true; // 2001:db8::/32 docs
+  if (b0 === 0x00 && b1 === 0x64 && b2 === 0xff && b3 === 0x9b) return true; // 64:ff9b::/96 NAT64
   return false;
 }
 

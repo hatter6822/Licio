@@ -41,7 +41,7 @@ import type {
   StoryLifecycleState,
   VerificationState,
 } from '@licio/shared';
-import { and, asc, desc, eq, gte, inArray, isNotNull, lt, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, sql } from 'drizzle-orm';
 import {
   decodeSearchCursor,
   encodeSearchCursor,
@@ -378,6 +378,17 @@ export class DrizzleStoryStore implements StoryStore {
     }));
   }
 
+  async hideBySource(sourceId: string, hiddenState: 'takedown' | 'safety'): Promise<number> {
+    // One set-based UPDATE; `isNull(hiddenState)` makes a re-action idempotent
+    // and the count honest (only newly-hidden rows are returned).
+    const rows = await this.#db
+      .update(storiesTable)
+      .set({ hiddenState, excerpt: null })
+      .where(and(eq(storiesTable.sourceId, sourceId), isNull(storiesTable.hiddenState)))
+      .returning({ storyId: storiesTable.storyId });
+    return rows.length;
+  }
+
   async clear(): Promise<void> {
     await this.#db.delete(threadsTable);
     await this.#db.delete(storiesTable);
@@ -696,6 +707,15 @@ export class DrizzleClaimStore implements ClaimStore {
     const rows = await this.#db
       .update(claimsTable)
       .set({ claimStatus: status })
+      .where(eq(claimsTable.claimId, claimId))
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async setIndependenceGroup(claimId: string, groupId: string) {
+    const rows = await this.#db
+      .update(claimsTable)
+      .set({ independenceGroupId: groupId })
       .where(eq(claimsTable.claimId, claimId))
       .returning();
     return rows[0] ? this.#toRecord(rows[0]) : null;
@@ -1478,7 +1498,14 @@ export class PostgresSearchIndex implements SearchIndex {
       request.topic_id === undefined &&
       request.language === undefined
     ) {
-      const filters = [sql`ec.verification_state <> 'retracted'`, sql`ec.search_tsv @@ ${match}`];
+      const filters = [
+        sql`ec.verification_state <> 'retracted'`,
+        sql`ec.search_tsv @@ ${match}`,
+        // Evidence attached to a takedown/safety-hidden story is excluded too
+        // (its story_id is nullable for user-experience evidence — that is
+        // always visible). Mirrors the claim predicate above.
+        sql`(ec.story_id is null or exists (select 1 from stories sv where sv.story_id = ec.story_id and sv.hidden_state is null))`,
+      ];
       if (request.source_id !== undefined) filters.push(sql`ec.source_id = ${request.source_id}`);
       if (request.date_from !== undefined)
         filters.push(sql`ec.created_at >= ${request.date_from}::timestamptz`);

@@ -468,17 +468,30 @@ describe('claim extraction units (WS-F.1.2b)', () => {
     expect(first.created[0]?.claimStatus).toBe('candidate');
     expect(first.created[0]?.modelVersion).toBe(extractor.modelVersion);
     expect(await reviews.list({ kind: 'low_confidence_claim' }, 10)).toHaveLength(1);
-    // The same normalized text from another story LINKS, never duplicates.
+    // The same normalized text from another story does NOT spawn an
+    // independent claim — it shares the original's MERI lineage AND surfaces
+    // on the new story (WS-F.1.2b cross-story dedup).
+    const otherStory = { storyId: randomUUID(), title: 'Other story' };
     const second = await persistCandidateClaims(
       claims,
       reviews,
       extractor,
-      { storyId: randomUUID(), title: 'Other story' },
+      otherStory,
       'The reservoir level FELL by 12 percent in May!',
       0.1,
     );
     expect(second.created).toHaveLength(0);
-    expect(second.linked.map((c) => c.claimId)).toEqual([first.created[0]?.claimId]);
+    expect(second.linked).toHaveLength(1);
+    const linkedClaim = second.linked[0];
+    // A distinct PER-STORY row, not the original claim id…
+    expect(linkedClaim?.claimId).not.toBe(first.created[0]?.claimId);
+    // …sharing the independence group minted onto the original on first dedup.
+    const original = await claims.getById(first.created[0]?.claimId as string);
+    expect(original?.independenceGroupId).not.toBeNull();
+    expect(linkedClaim?.independenceGroupId).toBe(original?.independenceGroupId);
+    // The new story now actually surfaces the claim — the WS-F.1.2b read fix.
+    const otherClaims = await claims.listByStory(otherStory.storyId);
+    expect(otherClaims.map((c) => c.claimId)).toEqual([linkedClaim?.claimId]);
   });
 
   it('normalizedClaimHash is case/punctuation/whitespace-insensitive', () => {

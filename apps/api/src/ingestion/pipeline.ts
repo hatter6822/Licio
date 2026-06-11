@@ -170,6 +170,53 @@ function claimDedupOf(
 }
 
 /**
+ * Classify + normalize a LINK story we are NOT allowed to fetch (WS-F.1.4f):
+ * robots forbids the target — either the submitted URL, or (after redirects)
+ * the FINAL URL. There is no fetched document, but the LOCAL submission text
+ * still drives sensitivity classification, candidate-claim extraction, and the
+ * freshness baseline, exactly as the non-link path does. The story is marked
+ * `disallowed_robots` (no excerpt — nothing was archived) and
+ * `content.normalized` is emitted.
+ */
+async function emitLinkOnlyClassified(
+  ingestion: IngestionServices,
+  events: EventPipelineServices,
+  story: StoryRecord,
+  config: { claimConfidenceFloor: number; claimDedupSimilarity: number },
+  metric: string,
+): Promise<void> {
+  const bodyText = submissionBodyText(story);
+  const language = story.language ?? detectLanguage(null, bodyText);
+  const classified = classifySensitivity(`${story.title} ${bodyText}`);
+  const labels = [...new Set([...story.sensitivityLabels, ...classified])];
+  const sensitivityLabels = labels.length > 1 ? labels.filter((l) => l !== 'none') : labels;
+  const claims = await persistCandidateClaims(
+    ingestion.claims,
+    ingestion.reviewQueue,
+    ingestion.claimExtractor,
+    { storyId: story.storyId, title: story.title },
+    bodyText,
+    config.claimConfidenceFloor,
+    claimDedupOf(ingestion, config),
+  );
+  const updated = await ingestion.stories.update(story.storyId, {
+    language,
+    sensitivityLabels: sensitivityLabels as StoryRecord['sensitivityLabels'],
+    extractionState: 'disallowed_robots',
+  });
+  const current = updated ?? story;
+  await recomputeFreshness(ingestion.stories, ingestion.freshness, current, ingestion.now());
+  ingestion.metrics.increment(metric);
+  await emitNormalized(ingestion, events, current, {
+    sourceId: story.sourceId,
+    language,
+    sensitivityLabels,
+    duplicateGroupId: null,
+    claimIds: [...claims.created, ...claims.linked].map((c) => c.claimId),
+  });
+}
+
+/**
  * Process one submitted story end to end (the §14.2 pipeline body). Used by
  * the `ingestion-pipeline` consumer AND the scheduler's retry path.
  */
@@ -228,22 +275,10 @@ export async function processSubmittedStory(
   );
 
   if (!verdict.allowed && verdict.reason === 'disallowed') {
-    // Link-only story (WS-F.1.4f): no fetch attempt, no fetched-text
-    // embedding source; the submission text still classifies + signatures.
-    const text = submissionText(story);
-    const language = story.language ?? detectLanguage(null, text);
-    const updated = await ingestion.stories.update(story.storyId, {
-      language,
-      extractionState: 'disallowed_robots',
-    });
-    ingestion.metrics.increment('pipeline.robots_disallowed');
-    await emitNormalized(ingestion, events, updated ?? story, {
-      sourceId: story.sourceId,
-      language,
-      sensitivityLabels: story.sensitivityLabels,
-      duplicateGroupId: null,
-      claimIds: [],
-    });
+    // Link-only story (WS-F.1.4f): no fetch attempt, no fetched-text embedding
+    // source; the LOCAL submission text still classifies, extracts candidate
+    // claims, and feeds the freshness baseline (parity with the non-link path).
+    await emitLinkOnlyClassified(ingestion, events, story, config, 'pipeline.robots_disallowed');
     return;
   }
 
@@ -293,6 +328,30 @@ export async function processSubmittedStory(
     });
     ingestion.metrics.increment('pipeline.extraction_failed');
     return;
+  }
+
+  // Final-URL robots re-check (WS-F.1.4f): the initial gate consulted the
+  // SUBMITTED path, but redirects can land on a path — or origin — the
+  // publisher's robots policy forbids. If the post-redirect URL differs and is
+  // disallowed (or its robots is unreachable ⇒ fail closed), discard the
+  // fetched body and degrade to a link-only story; never extract or archive it.
+  const finalUrl = new URL(fetched.finalUrl);
+  if (finalUrl.href !== url.href) {
+    const finalVerdict = await ingestion.robots.check(
+      finalUrl,
+      config.crawlerUserAgent,
+      config.robotsCacheTtlMinutes * 60_000,
+    );
+    if (!finalVerdict.allowed) {
+      await emitLinkOnlyClassified(
+        ingestion,
+        events,
+        story,
+        config,
+        'pipeline.robots_disallowed_after_redirect',
+      );
+      return;
+    }
   }
 
   const domain = url.hostname;

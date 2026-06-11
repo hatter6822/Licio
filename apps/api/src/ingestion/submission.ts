@@ -96,6 +96,18 @@ function metadataOf(request: StoryCreateRequest): StoryRecord['submissionMetadat
   }
 }
 
+/** A generic, NON-IDENTIFYING rejection for a duplicate URL whose existing
+ *  story is hidden — leaks neither the id nor the existence of the hidden
+ *  discussion (WS-F.1.4f). The shape matches the other 403 holds so the
+ *  client cannot distinguish this case. */
+function hiddenDuplicateRejection(): SubmissionRejection {
+  return {
+    status: 403,
+    code: 'held_for_review',
+    message: 'This submission could not be accepted.',
+  };
+}
+
 /** Merge the configured extra tracker params into the shared denylist. */
 export function effectiveTrackerDenylist(extra: readonly string[]): TrackerDenylist {
   if (extra.length === 0) return DEFAULT_TRACKER_DENYLIST;
@@ -235,6 +247,14 @@ export async function submitStory(
     const existing = await ingestion.stories.getByCanonicalUrl(canonicalUrl);
     if (existing !== null) {
       ingestion.metrics.increment('dedup.exact_url_409');
+      // A takedown-/safety-hidden duplicate must NOT have its id (or its
+      // existence) revealed — that would leak a non-visible discussion and
+      // confirm a hidden story exists for the URL. Return a generic,
+      // non-identifying rejection instead (WS-F.1.4f privacy posture).
+      if (existing.hiddenState !== null) {
+        ingestion.metrics.increment('dedup.exact_url_hidden');
+        return { ok: false, rejection: hiddenDuplicateRejection() };
+      }
       ingestion.log('ingestion.duplicate_url', {
         existing_story_id: existing.storyId,
         submitted_by: userId,
@@ -280,6 +300,13 @@ export async function submitStory(
     threadId,
   );
   if (!created.ok) {
+    // Same hidden-duplicate guard on the concurrent-race outcome: re-fetch the
+    // winning story and withhold its id if it is hidden.
+    const racedExisting = await ingestion.stories.getById(created.existingStoryId);
+    if (racedExisting !== null && racedExisting.hiddenState !== null) {
+      ingestion.metrics.increment('dedup.exact_url_hidden');
+      return { ok: false, rejection: hiddenDuplicateRejection() };
+    }
     return {
       ok: false,
       rejection: {
@@ -336,6 +363,17 @@ export async function submitStory(
         evidenceType: 'contextualizes',
       });
     }
+    // Attribute the material-update signal to the discussion the CLAIM lives
+    // in: the ingestion-signals consumer resolves thread_id → story → freshness
+    // /lifecycle, so evidence added to an existing claim must advance the story
+    // CONTAINING that claim, not the new evidence-card shell. A story-less
+    // (cross-story) claim falls back to the shell thread.
+    const referencedClaim = await ingestion.claims.getById(request.claim_id);
+    let evidenceThreadId = created.thread.threadId;
+    if (referencedClaim?.storyId != null) {
+      const claimThread = await ingestion.stories.getThreadByStoryId(referencedClaim.storyId);
+      if (claimThread !== null) evidenceThreadId = claimThread.threadId;
+    }
     // The WS-E `evidence.added` event carries the MATERIAL taxonomy (what the
     // evidence IS), distinct from the card's RELATIONSHIP type; a §14.1
     // submission gives no material classification, so `other` is the honest
@@ -347,7 +385,7 @@ export async function submitStory(
       schema_version: '1',
       evidence_id: card.evidenceId,
       claim_id: card.claimId,
-      thread_id: created.thread.threadId,
+      thread_id: evidenceThreadId,
       user_id: userId,
       evidence_type: 'other',
       source_id: evidenceSourceId,
