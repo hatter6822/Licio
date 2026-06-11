@@ -114,6 +114,102 @@ export async function applyConversationTransition(
   return { ok: true, thread: updated };
 }
 
+// ---------------------------------------------------------------------------
+// Organic (system-actor) transitions.  Two principled drivers exist; both
+// ride the SAME audited apply* path as the steward surface, with actor
+// `system` and a machine-readable reason:
+//
+//   • structural deepening — §15.4 "deepening: sustained, multi-level
+//     conversation with evidence accumulating", evaluated at contribution
+//     creation (maybeDeepenConversation);
+//   • integrity escalation — the WS-E harassment-cascade detection (a
+//     validated, base-rate-conditioned signal — never a fresh lexical
+//     heuristic) elevates the thread's safety posture and marks the
+//     conversation tense (escalateThreadOnIntegritySignal).
+//
+// Everything else (de-escalation, review, resolution) stays HUMAN: the
+// ratified graph routes recovery through `under_review`, which is steward
+// judgment (WS-J).
+// ---------------------------------------------------------------------------
+
+/** Citation-bearing types whose accumulation marks "evidence accumulating"
+ *  (each REQUIRES citations in the shared schema). */
+const EVIDENCE_BEARING_TYPES = ['evidence', 'correction', 'counterexample'] as const;
+
+export interface DeepeningConfig {
+  deepeningMinContributions: number;
+  deepeningMinDepth: number;
+  deepeningMinEvidence: number;
+}
+
+/**
+ * Structural `active → deepening` evaluation (WS-G.1.1 system trigger).
+ * Fires only while a multi-level exchange is HAPPENING (the new
+ * contribution sits at depth ≥ deepeningMinDepth) and the thread has both
+ * volume (published contributions ≥ deepeningMinContributions) and
+ * accumulated evidence (citation-bearing contributions ≥
+ * deepeningMinEvidence).  Deterministic given store state; a no-op for any
+ * thread not currently `active` (tense/under-review threads are never
+ * auto-deepened).  Returns whether the transition applied.
+ */
+export async function maybeDeepenConversation(
+  deps: TransitionDeps,
+  countByType: (
+    threadId: string,
+    states: readonly ['published'],
+  ) => Promise<Partial<Record<string, number>>>,
+  config: DeepeningConfig,
+  threadId: string,
+  newContributionDepth: number,
+): Promise<boolean> {
+  if (newContributionDepth < config.deepeningMinDepth) return false;
+  const thread = await deps.stories.getThreadById(threadId);
+  if (thread?.conversationState !== 'active') return false;
+  const counts = await countByType(threadId, ['published']);
+  const total = Object.values(counts).reduce((sum: number, n) => sum + (n ?? 0), 0);
+  if (total < config.deepeningMinContributions) return false;
+  const evidence = EVIDENCE_BEARING_TYPES.reduce((sum, type) => sum + (counts[type] ?? 0), 0);
+  if (evidence < config.deepeningMinEvidence) return false;
+  const outcome = await applyConversationTransition(
+    deps,
+    threadId,
+    'deepening',
+    null,
+    `structural: ${total} published contributions, ${evidence} evidence-bearing, reply depth ${newContributionDepth}`,
+  );
+  return outcome.ok;
+}
+
+/**
+ * WS-E integrity escalation: a harassment cascade against a thread's story
+ * elevates the thread's safety posture (`normal → elevated`) and marks the
+ * conversation `tense` (legal only from `active` — the ratified graph gives
+ * `deepening` no tense edge, and an already-reviewed thread stays put).
+ * Both transitions are idempotent no-ops on redelivery (at-least-once
+ * router semantics) and on already-escalated threads.
+ */
+export async function escalateThreadOnIntegritySignal(
+  deps: TransitionDeps,
+  threadId: string,
+  signalType: string,
+  confidence: number,
+): Promise<{ safetyApplied: boolean; conversationApplied: boolean }> {
+  const reason = `integrity:${signalType} confidence=${confidence.toFixed(2)}`;
+  const thread = await deps.stories.getThreadById(threadId);
+  if (!thread) return { safetyApplied: false, conversationApplied: false };
+  let safetyApplied = false;
+  if (thread.safetyState === 'normal') {
+    const outcome = await applyThreadSafetyTransition(deps, threadId, 'elevated', null, reason);
+    safetyApplied = outcome.ok;
+  }
+  let conversationApplied = false;
+  if (thread.conversationState === 'active') {
+    const outcome = await applyConversationTransition(deps, threadId, 'tense', null, reason);
+    conversationApplied = outcome.ok;
+  }
+  return { safetyApplied, conversationApplied };
+}
+
 /** Apply a WS-G.1.1 thread-safety transition (audited, WS-J seam). */
 export async function applyThreadSafetyTransition(
   deps: TransitionDeps,

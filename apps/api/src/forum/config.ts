@@ -29,6 +29,12 @@ export interface ForumRuntimeConfig {
   /** Room listing page size bounds (WS-G.2.3a: default 20, max 50). */
   roomPageSize: number;
   roomPageSizeMax: number;
+  /** Structural `active → deepening` thresholds (§15.4 "sustained,
+   *  multi-level conversation with evidence accumulating"): evaluated at
+   *  contribution creation; ALL three must hold. */
+  deepeningMinContributions: number;
+  deepeningMinDepth: number;
+  deepeningMinEvidence: number;
 }
 
 export const DEFAULT_FORUM_CONFIG: ForumRuntimeConfig = {
@@ -40,6 +46,9 @@ export const DEFAULT_FORUM_CONFIG: ForumRuntimeConfig = {
   drainerBlocklist: [],
   roomPageSize: 20,
   roomPageSizeMax: 50,
+  deepeningMinContributions: 12,
+  deepeningMinDepth: 2,
+  deepeningMinEvidence: 2,
 };
 
 const CONFIG_PREFIX = 'forum.';
@@ -58,6 +67,9 @@ const VALIDATORS: Readonly<Record<keyof ForumRuntimeConfig, z.ZodType>> = {
     }),
   roomPageSize: z.number().int().min(5).max(50),
   roomPageSizeMax: z.number().int().min(5).max(50),
+  deepeningMinContributions: z.number().int().min(3).max(500),
+  deepeningMinDepth: z.number().int().min(1).max(10),
+  deepeningMinEvidence: z.number().int().min(0).max(100),
 };
 
 export const FORUM_CONFIG_KEYS = Object.keys(VALIDATORS) as Array<keyof ForumRuntimeConfig>;

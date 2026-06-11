@@ -235,7 +235,9 @@ describe('WS-G.1.2d — subtree reads and path/recursion parity', () => {
 
     const all = await fixture.forum.contributions.listByThread(threadId, { limit: 100 });
     const reference = recursiveDescendants(all, root.contribution_id);
-    const pathBased = await fixture.forum.contributions.listDescendants(root.contribution_id, 500);
+    const pathBased = await fixture.forum.contributions.listDescendants(root.contribution_id, {
+      limit: 500,
+    });
     expect(new Set(pathBased.map((row) => row.contributionId))).toEqual(reference);
     expect(reference.size).toBe(6);
   });
@@ -300,7 +302,7 @@ describe('WS-G.1.2d — subtree reads and path/recursion parity', () => {
       paths.set(id, [...parentPath, parentId]);
     }
     const started = performance.now();
-    const subtree = await fixture.forum.contributions.listDescendants(rootId, 500);
+    const subtree = await fixture.forum.contributions.listDescendants(rootId, { limit: 500 });
     const elapsed = performance.now() - started;
     expect(subtree.length).toBeGreaterThan(400);
     expect(elapsed).toBeLessThan(50);

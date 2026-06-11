@@ -239,14 +239,23 @@ export class DrizzleContributionStore implements ContributionStore {
     return rows.map((row) => this.#toRecord(row));
   }
 
-  async listDescendants(rootId: string, limit: number): Promise<ContributionRecord[]> {
+  async listDescendants(
+    rootId: string,
+    opts: { after?: CreatedAtCursor | null; limit: number },
+  ): Promise<ContributionRecord[]> {
     // GIN path containment: descendants of X are rows whose path ⊇ [X].
+    const conditions = [sql`${contributionsTable.path} @> ${JSON.stringify([rootId])}::jsonb`];
+    if (opts.after) {
+      conditions.push(
+        sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`,
+      );
+    }
     const rows = await this.#db
       .select()
       .from(contributionsTable)
-      .where(sql`${contributionsTable.path} @> ${JSON.stringify([rootId])}::jsonb`)
+      .where(and(...conditions))
       .orderBy(asc(contributionsTable.createdAt), asc(contributionsTable.contributionId))
-      .limit(limit);
+      .limit(opts.limit);
     return rows.map((row) => this.#toRecord(row));
   }
 
@@ -978,6 +987,15 @@ export class DrizzleUploadStore implements UploadStore {
       .update(uploadsTable)
       .set({ scanState: state })
       .where(eq(uploadsTable.uploadId, uploadId));
+  }
+
+  async listByOwner(userId: string): Promise<UploadRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(uploadsTable)
+      .where(eq(uploadsTable.ownerUserId, userId))
+      .orderBy(asc(uploadsTable.createdAt), asc(uploadsTable.uploadId));
+    return rows.map((row) => this.#toRecord(row));
   }
 
   async anonymizeUser(userId: string): Promise<void> {

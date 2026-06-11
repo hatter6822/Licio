@@ -269,7 +269,7 @@ describe('POST /v1/stories — safety pre-checks (WS-F.1.4c)', () => {
 
   it('rejects very new accounts with the waiting-period message', async () => {
     fixture = freshWsFServices({ config: { minAccountAgeMinutes: 60 } });
-    const { cookie } = await seedUserWithSession(fixture.identity);
+    const { cookie } = await seedUserWithSession(fixture.identity, { accountAgeMs: 0 });
     const res = await app().request(post('/v1/stories', briefSubmission(), cookie));
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: { code: string; message: string } };

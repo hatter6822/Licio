@@ -43,7 +43,11 @@ import {
   DrizzleSummaryStore,
   DrizzleUploadStore,
 } from './forum/drizzle-forum-stores.js';
-import { createInMemoryForumServices, setForumServices } from './forum/services.js';
+import {
+  createInMemoryForumServices,
+  registerForumConsumers,
+  setForumServices,
+} from './forum/services.js';
 import {
   DrizzleAuditStore,
   DrizzleIdentityStore,
@@ -251,6 +255,9 @@ forumServices.summaries = new DrizzleSummaryStore(db);
 forumServices.uploads = new DrizzleUploadStore(db, s3ConfigFromEnv(env));
 await forumServices.reloadConfig();
 setForumServices(forumServices);
+// Thread-posture consumer (durable; handlers first run at recovery replay,
+// which happens after the identity singleton is installed below).
+registerForumConsumers(eventServices, ingestionServices, forumServices);
 // Fill the Signal Ledger title cache as real stories are created/read.
 {
   const baseGetById = ingestionServices.stories.getById.bind(ingestionServices.stories);
@@ -342,6 +349,23 @@ identityServices.exportContributions = async (userId) => {
       status: sub.status,
       notification_preferences: sub.notificationPreferences,
       requested_at: sub.requestedAt,
+    });
+  }
+  // Uploads are personal data the user provided (their images/documents):
+  // the export lists every record with its same-origin retrieval URL — the
+  // bytes themselves stay in the upload store (publicly served once scan-
+  // cleared), so the archive stays proportionate without omitting access.
+  for (const upload of await forumServices.uploads.listByOwner(userId)) {
+    out.push({
+      kind: 'upload',
+      upload_id: upload.uploadId,
+      content_type: upload.contentType,
+      byte_size: upload.byteSize,
+      alt_text: upload.altText,
+      url: `/v1/uploads/${upload.uploadId}`,
+      metadata_stripped: upload.metadataStripped,
+      scan_state: upload.scanState,
+      created_at: upload.createdAt,
     });
   }
   return out;

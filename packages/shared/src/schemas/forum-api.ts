@@ -102,6 +102,9 @@ export const uploadPublicSchema = z
     url: z.string().min(1).max(512),
     /** True once metadata stripping ran (images; EXIF/GPS removed). */
     metadata_stripped: z.boolean(),
+    /** WS-J.2.6b gate: `pending` cannot attach or serve yet (flagged
+     *  uploads are rejected at creation and never appear on the wire). */
+    scan_state: z.enum(['clear', 'pending']),
     created_at: isoTimestampSchema,
   })
   .strict();

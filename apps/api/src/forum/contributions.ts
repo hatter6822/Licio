@@ -41,9 +41,11 @@ import {
 import { type SlidingWindowStore, slidingWindowRetryAfterMs } from '../events/ingest-limiter.js';
 import type { EventPipelineServices } from '../events/services.js';
 import type { NewStoredEvent } from '../events/stores.js';
+import { getIdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
 import type { ForumServices } from './services.js';
 import type { ContributionRecord, ForumEvidenceCardInput } from './stores.js';
+import { maybeDeepenConversation } from './transitions.js';
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
@@ -554,6 +556,24 @@ export async function createContribution(
   if (thread.roomId !== null) {
     await forum.rooms.touchActivity(thread.roomId, contribution.createdAt);
   }
+
+  // Organic deepening evaluation (WS-G.1.1 system trigger) — detached: the
+  // response never waits on it, and a failure only logs.
+  forum.trackBackground(
+    maybeDeepenConversation(
+      {
+        stories: ingestion.stories,
+        events,
+        audit: getIdentityServices().audit,
+        trackBackground: forum.trackBackground,
+        now: forum.now,
+      },
+      (tid, states) => forum.contributions.countByType(tid, states),
+      config,
+      contribution.threadId,
+      contribution.path.length,
+    ),
+  );
 
   forum.metrics.increment(`contributions.created.${request.type}`);
   forum.log('forum.contribution_created', {

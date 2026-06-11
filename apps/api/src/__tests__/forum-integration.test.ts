@@ -233,13 +233,28 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     expect(grandchild.ok).toBe(true);
 
     // GIN containment subtree: descendants of root (excluding the root).
-    const descendants = await contributions.listDescendants(rootId, 100);
+    const descendants = await contributions.listDescendants(rootId, { limit: 100 });
     expect(descendants.map((row) => row.contributionId).sort()).toEqual(
       [
         child.contribution.contributionId,
         grandchild.ok ? grandchild.contribution.contributionId : '',
       ].sort(),
     );
+    // Subtree keyset walk: 1-row pages visit every descendant exactly once
+    // (same-millisecond rows — the cursor must round-trip exactly).
+    const subtreeWalk: string[] = [];
+    let subtreeCursor: { createdAt: string; id: string } | null = null;
+    for (;;) {
+      const page = await contributions.listDescendants(rootId, {
+        after: subtreeCursor,
+        limit: 1,
+      });
+      const row = page[0];
+      if (!row) break;
+      subtreeWalk.push(row.contributionId);
+      subtreeCursor = { createdAt: row.createdAt, id: row.contributionId };
+    }
+    expect(subtreeWalk).toEqual(descendants.map((row) => row.contributionId));
 
     // Filtered + keyset-paginated thread reads.
     const questionsOnly = await contributions.listByThread(threadId, {
@@ -666,8 +681,99 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
         new Uint8Array([1]),
       ),
     ).rejects.toThrow();
+    // DSAR listing: the owner's records, oldest first (§19.3/GDPR Art. 15).
+    expect((await uploads.listByOwner(secondUserId)).map((row) => row.uploadId)).toEqual([
+      uploadId,
+    ]);
     await uploads.anonymizeUser(secondUserId);
     expect((await uploads.getRecord(uploadId))?.ownerUserId).toBeNull();
+    expect(await uploads.listByOwner(secondUserId)).toEqual([]);
     expect(await uploads.getRecord(randomUUID())).toBeNull();
+  });
+
+  it('the S3 byte path signs requests (SigV4) and round-trips through the fake bucket', async () => {
+    const objects = new Map<string, Uint8Array>();
+    const seenHeaders: Array<Record<string, string>> = [];
+    const fakeS3: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const headers = Object.fromEntries(
+        Object.entries((init?.headers ?? {}) as Record<string, string>),
+      );
+      seenHeaders.push(headers);
+      if (init?.method === 'PUT') {
+        const body = init.body as Uint8Array;
+        objects.set(url, new Uint8Array(body));
+        return new Response(null, { status: 200 });
+      }
+      const stored = objects.get(url);
+      if (!stored) return new Response(null, { status: 404 });
+      const copy = new Uint8Array(stored);
+      return new Response(copy.buffer as ArrayBuffer, { status: 200 });
+    };
+    const s3Store = new DrizzleUploadStore(
+      db,
+      {
+        endpoint: 'https://s3.test.example',
+        region: 'us-east-1',
+        bucket: 'licio-uploads',
+        accessKeyId: 'AKIDEXAMPLE',
+        secretAccessKey: 'secret',
+        prefix: 'forum/',
+      },
+      fakeS3,
+    );
+    const uploadId = randomUUID();
+    uploadIds.push(uploadId);
+    const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 9, 8, 7, 6]);
+    await s3Store.put(
+      {
+        uploadId,
+        ownerUserId: authorId,
+        contentType: 'image/jpeg',
+        byteSize: bytes.length,
+        altText: 'sigv4 round trip',
+        storageRef: `uploads/${uploadId}`,
+        metadataStripped: true,
+        scanState: 'clear',
+      },
+      bytes,
+    );
+    // The PUT was SigV4-signed with the exact payload hash.
+    const putHeaders = seenHeaders[0];
+    expect(putHeaders?.['authorization']).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\//);
+    expect(putHeaders?.['x-amz-content-sha256']).toMatch(/^[0-9a-f]{64}$/);
+    expect([...objects.keys()][0]).toContain(`/licio-uploads/forum/uploads/${uploadId}`);
+    // The record lives in Postgres; the bytes come back from the bucket.
+    expect((await s3Store.getRecord(uploadId))?.byteSize).toBe(bytes.length);
+    expect(await s3Store.getBytes(uploadId)).toEqual(bytes);
+    // A bucket miss degrades to null (and a GET is also signed).
+    objects.clear();
+    expect(await s3Store.getBytes(uploadId)).toBeNull();
+    expect(seenHeaders.at(-1)?.['authorization']).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it('listThreadsByRoom pages by the descending keyset exactly once', async () => {
+    const room = roomInput();
+    expect((await roomsStore.insert(room)).ok).toBe(true);
+    roomIds.push(room.roomId);
+    const stories = new DrizzleStoryStore(db);
+    const threadIds: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const tid = await seedThread(stories);
+      await stories.updateThread(tid, { roomId: room.roomId });
+      threadIds.push(tid);
+    }
+    const walked: string[] = [];
+    let before: { createdAt: string; threadId: string } | null = null;
+    for (;;) {
+      const page = await stories.listThreadsByRoom(room.roomId, before, 2);
+      if (page.length === 0) break;
+      walked.push(...page.map((thread) => thread.threadId));
+      const last = page[page.length - 1];
+      if (!last) break;
+      before = { createdAt: last.createdAt, threadId: last.threadId };
+    }
+    expect(new Set(walked).size).toBe(walked.length); // exactly once
+    expect([...walked].sort()).toEqual([...threadIds].sort()); // complete
   });
 });

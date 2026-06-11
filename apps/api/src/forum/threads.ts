@@ -235,21 +235,57 @@ export async function branchContent(
   return { thread_id: threadId, branch, contributions, next_cursor: nextCursor };
 }
 
-/** Subtree read (WS-G.1.2d-2 `?root=`): a root and all its descendants. */
+/**
+ * Subtree read (WS-G.1.2d-2 `?root=`): a root and its descendants, paged.
+ * Pagination is COMPLETE over arbitrarily large subtrees: pages walk the
+ * store-level `(created_at, id)` keyset (the cursor is the last fetched
+ * contribution id, recovered to its keyset position via one read), and each
+ * page is depth-first ordered locally — a row whose parent landed on an
+ * earlier page renders as a local root with its ABSOLUTE depth indicator
+ * preserved (the documented `orderDepthFirst` degradation).  The cursor
+ * advances over rows the requester cannot see (visibility filtering happens
+ * after the fetch), so hidden rows can never stall the walk.
+ */
 export async function subtreeContent(
   bundle: Bundle,
   threadId: string,
   rootId: string,
   requesterUserId: string | null,
   resolveAuthor: AuthorResolver,
-): Promise<{ rows: ContributionPublic[]; rootFound: boolean }> {
+  cursor: string | null,
+): Promise<{ rows: ContributionPublic[]; rootFound: boolean; nextCursor: string | null }> {
+  const empty = { rows: [], rootFound: false, nextCursor: null };
   const root = await bundle.forum.contributions.getById(rootId);
-  if (!root || root.threadId !== threadId) return { rows: [], rootFound: false };
+  if (!root || root.threadId !== threadId) return empty;
+  // An invisible root gates EVERY page (a removed contribution must not
+  // anchor enumeration of the conversation beneath it).
+  if (visibleRows([root], requesterUserId).length === 0) return empty;
   const config = bundle.forum.config();
-  const descendants = await bundle.forum.contributions.listDescendants(rootId, config.subtreeLimit);
-  const renderable = visibleRows([root, ...descendants], requesterUserId);
+
+  // Recover the keyset position from the opaque cursor; an unknown or
+  // foreign-subtree cursor restarts from the beginning (the branchContent
+  // fallback semantics — defensive, never an error).
+  let after: { createdAt: string; id: string } | null = null;
+  if (cursor !== null) {
+    const last = await bundle.forum.contributions.getById(cursor);
+    if (last && (last.contributionId === rootId || last.path.includes(rootId))) {
+      after = { createdAt: last.createdAt, id: last.contributionId };
+    }
+  }
+
+  const pageSize = config.branchPageSize;
+  const fetched = await bundle.forum.contributions.listDescendants(rootId, {
+    after,
+    limit: pageSize + 1,
+  });
+  const hasMore = fetched.length > pageSize;
+  const page = fetched.slice(0, pageSize);
+  const lastFetched = page[page.length - 1];
+
+  // The root row itself heads the first page only.
+  const candidates = after === null ? [root, ...page] : page;
+  const renderable = visibleRows(candidates, requesterUserId);
   const byId = new Map(renderable.map((entry) => [entry.row.contributionId, entry]));
-  if (!byId.has(rootId)) return { rows: [], rootFound: false }; // invisible root, no oracle
   const ordered = orderDepthFirst(renderable.map((entry) => entry.row));
   const childCounts = await bundle.forum.contributions.childCounts(
     ordered.map((row) => row.contributionId),
@@ -269,7 +305,11 @@ export async function subtreeContent(
       ),
     );
   }
-  return { rows, rootFound: true };
+  return {
+    rows,
+    rootFound: true,
+    nextCursor: hasMore && lastFetched ? lastFetched.contributionId : null,
+  };
 }
 
 /** Semantic anchor for a deep link (WS-G.3.3). */

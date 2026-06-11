@@ -11,6 +11,7 @@ import type { ForumRuntimeConfig } from '../forum/config.js';
 import {
   createInMemoryForumServices,
   type ForumServices,
+  registerForumConsumers,
   setForumServices,
 } from '../forum/services.js';
 import type { IdentityServices } from '../identity/services.js';
@@ -44,6 +45,7 @@ export function freshWsGServices(
     ...(options.now ? { now: options.now } : {}),
   });
   setForumServices(forum);
+  registerForumConsumers(base.events, base.ingestion, forum);
   return {
     ...base,
     forum,

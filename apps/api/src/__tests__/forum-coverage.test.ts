@@ -157,6 +157,34 @@ describe('WS-G.3.7b — uploads route', () => {
     expect(res.status).toBe(413);
   });
 
+  it('the scanner seam holds (pending) and rejects (flagged) — WS-J.2.6b', async () => {
+    fixture.forum.uploadScanner = {
+      scan: async () => ({ state: 'pending', reason: 'queued' }),
+    };
+    const heldRes = await app().request(
+      uploadRequest({ bytes: jpegBytes(), type: 'image/jpeg', name: 'p.jpg' }, { alt_text: 'x' }),
+    );
+    expect(heldRes.status).toBe(201);
+    const held = uploadPublicSchema.parse(await heldRes.json());
+    expect(held.scan_state).toBe('pending');
+    // A pending upload is not served (the WS-G.3.7b acceptance gate).
+    expect((await app().request(`http://local${held.url}`)).status).toBe(404);
+    // Until the scan clears it — then it serves.
+    await fixture.forum.uploads.setScanState(held.upload_id, 'clear');
+    expect((await app().request(`http://local${held.url}`)).status).toBe(200);
+
+    fixture.forum.uploadScanner = {
+      scan: async () => ({ state: 'flagged', reason: 'matched_intel' }),
+    };
+    const flagged = await app().request(
+      uploadRequest({ bytes: jpegBytes(), type: 'image/jpeg', name: 'f.jpg' }, { alt_text: 'x' }),
+    );
+    expect(flagged.status).toBe(422);
+    expect(((await flagged.json()) as { error: { code: string } }).error.code).toBe(
+      'upload_flagged',
+    );
+  });
+
   it('accepts a PDF without alt text and serves it as a download', async () => {
     const pdf = new Uint8Array([...'%PDF-1.4 minimal'].map((c) => c.charCodeAt(0)));
     const res = await app().request(

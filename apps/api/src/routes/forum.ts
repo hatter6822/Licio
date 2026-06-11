@@ -173,14 +173,17 @@ export function createForumRoutes() {
         },
       )
 
-      // Subtree read (WS-G.1.2d-2 `?root=`).
+      // Subtree read (WS-G.1.2d-2 `?root=`), keyset-paginated like branches.
       .get(
         '/threads/:threadId/contributions',
         zValidator('param', z.object({ threadId: uuidSchema })),
-        zValidator('query', z.object({ root: uuidSchema })),
+        zValidator(
+          'query',
+          z.object({ root: uuidSchema, cursor: z.string().min(1).max(512).optional() }),
+        ),
         async (c) => {
           const { threadId } = c.req.valid('param');
-          const { root } = c.req.valid('query');
+          const { root, cursor } = c.req.valid('query');
           const bundle = bundles();
           const identity = getIdentityServices();
           const userId = await softUserId(c.req.header('cookie'), identity);
@@ -193,6 +196,7 @@ export function createForumRoutes() {
             root,
             userId,
             makeAuthorResolver(identity),
+            cursor ?? null,
           );
           if (!subtree.rootFound) return c.json(notFound, 404);
           return c.json(
@@ -200,7 +204,7 @@ export function createForumRoutes() {
               thread_id: threadId,
               root_contribution_id: root,
               contributions: subtree.rows,
-              next_cursor: null,
+              next_cursor: subtree.nextCursor,
             }),
           );
         },
@@ -582,6 +586,16 @@ export function createForumRoutes() {
             return c.json(deny('invalid_file', 'The file does not match its declared type'), 415);
           }
           const forum = getForumServices();
+          // The injectable scanner runs AFTER the inline local checks
+          // (magic, size, strip).  Default: local checks ARE the scan
+          // (clear); WS-J.2.6b swaps in the shared malware intelligence,
+          // which may hold (`pending`) or reject (`flagged`) — the gate is
+          // real either way (attachment and serving both require `clear`).
+          const scan = await forum.uploadScanner.scan(stripped.bytes, contentType);
+          if (scan.state === 'flagged') {
+            forum.metrics.increment('uploads.flagged');
+            return c.json(deny('upload_flagged', 'This file failed the safety scan'), 422);
+          }
           const uploadId = randomUUID();
           const record = await forum.uploads.put(
             {
@@ -592,13 +606,13 @@ export function createForumRoutes() {
               altText: isImage ? altText : null,
               storageRef: `uploads/${uploadId}`,
               metadataStripped: stripped.stripped || isImage,
-              // Local checks passed (magic, size, strip) — the WS-J.2.6b
-              // shared malware intelligence upgrades this seam later.
-              scanState: 'clear',
+              scanState: scan.state,
             },
             stripped.bytes,
           );
-          forum.metrics.increment('uploads.accepted');
+          forum.metrics.increment(
+            scan.state === 'clear' ? 'uploads.accepted' : 'uploads.pending_scan',
+          );
           return c.json(uploadPublicSchema.parse(toUploadPublic(record)), 201);
         },
       )
@@ -755,6 +769,7 @@ function toUploadPublic(record: UploadRecord) {
     alt_text: record.altText,
     url: `/v1/uploads/${record.uploadId}`,
     metadata_stripped: record.metadataStripped,
+    scan_state: record.scanState,
     created_at: record.createdAt,
   };
 }

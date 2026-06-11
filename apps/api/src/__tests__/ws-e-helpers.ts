@@ -55,6 +55,17 @@ export interface SeededUser {
   cookie: string;
 }
 
+/**
+ * Seeded accounts are created 7 days OLD so the WS-F account-age precheck
+ * passes regardless of which clock a suite runs on.  Suites pin `now` to a
+ * wall-date (e.g. noon today) while the identity store stamps `created_at`
+ * with the REAL clock — without the backdate, a user created after the
+ * pinned instant has NEGATIVE age and every submission 403s the moment the
+ * wall clock passes the pin (a time bomb, not a flake).  Suites pinning a
+ * clock further than 7 days in the past must pass `nowMs` explicitly.
+ */
+const SEEDED_ACCOUNT_AGE_MS = 7 * 24 * 3_600_000;
+
 /** Seed an active, verified user and return a live session cookie. */
 export async function seedUserWithSession(
   identity: IdentityServices,
@@ -63,20 +74,27 @@ export async function seedUserWithSession(
     handle?: string;
     /** Seed a TOTP-cleared steward (the WS-E admin-surface bar, WS-D.1.5b). */
     steward?: boolean;
+    /** The suite's pinned clock (account creation backdates from it). */
+    nowMs?: number;
+    /** Override the seeded account's age (0 ⇒ created exactly "now"). */
+    accountAgeMs?: number;
   } = {},
 ): Promise<SeededUser> {
-  const user = await identity.store.createUser({
-    handle: opts.handle ?? `reader${randomUUID().slice(0, 8)}`,
-    displayName: 'Reader',
-    email: null,
-    accountState: 'active',
-    locale: null,
-    ageBand: 'adult',
-    privacySettings: opts.privacySettings ?? defaultPrivacySettings(),
-    personalizationSettings: defaultPersonalizationSettings(),
-    reputationSummary: emptyReputationSummary(),
-    roles: opts.steward ? ['user', 'steward'] : ['user'],
-  });
+  const user = await identity.store.createUser(
+    {
+      handle: opts.handle ?? `reader${randomUUID().slice(0, 8)}`,
+      displayName: 'Reader',
+      email: null,
+      accountState: 'active',
+      locale: null,
+      ageBand: 'adult',
+      privacySettings: opts.privacySettings ?? defaultPrivacySettings(),
+      personalizationSettings: defaultPersonalizationSettings(),
+      reputationSummary: emptyReputationSummary(),
+      roles: opts.steward ? ['user', 'steward'] : ['user'],
+    },
+    (opts.nowMs ?? Date.now()) - (opts.accountAgeMs ?? SEEDED_ACCOUNT_AGE_MS),
+  );
   if (opts.steward) {
     await identity.store.setAuth(user.userId, { mfaEnabled: true });
   }

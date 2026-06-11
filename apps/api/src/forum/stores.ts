@@ -182,8 +182,13 @@ export interface ContributionStore {
       limit: number;
     },
   ): Promise<ContributionRecord[]>;
-  /** Rows whose path contains `rootId` (the subtree, excluding the root). */
-  listDescendants(rootId: string, limit: number): Promise<ContributionRecord[]>;
+  /** Rows whose path contains `rootId` (the subtree, excluding the root),
+   *  `(created_at, id)` ascending with keyset continuation — the WS-G.3.3
+   *  lazy-loading contract holds for subtrees too. */
+  listDescendants(
+    rootId: string,
+    opts: { after?: CreatedAtCursor | null; limit: number },
+  ): Promise<ContributionRecord[]>;
   /** Per-type counts of a thread's contributions in the given states. */
   countByType(
     threadId: string,
@@ -283,6 +288,8 @@ export interface UploadStore {
   getRecord(uploadId: string): Promise<UploadRecord | null>;
   getBytes(uploadId: string): Promise<Uint8Array | null>;
   setScanState(uploadId: string, state: UploadRecord['scanState']): Promise<void>;
+  /** All of a user's upload records (DSAR export, §19.3/GDPR Art. 15). */
+  listByOwner(userId: string): Promise<UploadRecord[]>;
   anonymizeUser(userId: string): Promise<void>;
   clear(): Promise<void>;
 }
@@ -406,11 +413,18 @@ export class InMemoryContributionStore implements ContributionStore {
       .slice(0, opts.limit);
   }
 
-  async listDescendants(rootId: string, limit: number): Promise<ContributionRecord[]> {
+  async listDescendants(
+    rootId: string,
+    opts: { after?: CreatedAtCursor | null; limit: number },
+  ): Promise<ContributionRecord[]> {
     return [...this.#rows.values()]
-      .filter((row) => row.path.includes(rootId))
+      .filter(
+        (row) =>
+          row.path.includes(rootId) &&
+          (!opts.after || afterCursor(row, row.contributionId, opts.after)),
+      )
       .sort((a, b) => byCreatedAtThenId(a, b, a.contributionId, b.contributionId))
-      .slice(0, limit);
+      .slice(0, opts.limit);
   }
 
   async countByType(
@@ -792,6 +806,12 @@ export class InMemoryUploadStore implements UploadStore {
   async setScanState(uploadId: string, state: UploadRecord['scanState']): Promise<void> {
     const record = this.#records.get(uploadId);
     if (record) record.scanState = state;
+  }
+
+  async listByOwner(userId: string): Promise<UploadRecord[]> {
+    return [...this.#records.values()]
+      .filter((record) => record.ownerUserId === userId)
+      .sort((a, b) => byCreatedAtThenId(a, b, a.uploadId, b.uploadId));
   }
 
   async anonymizeUser(userId: string): Promise<void> {

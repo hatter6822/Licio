@@ -7,12 +7,19 @@
 // classifier seam, metrics, and the deterministic demo seed (development
 // only — production never seeds fixtures).
 import { createHash } from 'node:crypto';
+import type { IntegritySignalDetectedEvent } from '@licio/shared';
 import { InMemorySlidingWindowStore, type SlidingWindowStore } from '../events/ingest-limiter.js';
 import type { EventPipelineServices } from '../events/services.js';
+import { getIdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
 import { DEFAULT_FORUM_CONFIG, type ForumRuntimeConfig, loadForumConfig } from './config.js';
 import { ContributionRateLimiter } from './contributions.js';
-import { type ContributionSafetyClassifier, HeuristicContributionSafety } from './safety.js';
+import {
+  type ContributionSafetyClassifier,
+  HeuristicContributionSafety,
+  LocalChecksUploadScanner,
+  type UploadScanner,
+} from './safety.js';
 import {
   type ContributionStore,
   InMemoryContributionStore,
@@ -25,6 +32,7 @@ import {
   type SummaryStore,
   type UploadStore,
 } from './stores.js';
+import { escalateThreadOnIntegritySignal } from './transitions.js';
 
 /** In-process counters (ids and counts only — never UGC text or PII). */
 export class ForumMetrics {
@@ -45,6 +53,8 @@ export interface ForumServices {
   uploads: UploadStore;
   contributionLimiter: ContributionRateLimiter;
   safety: ContributionSafetyClassifier;
+  /** WS-J.2.6b seam: the post-local-checks upload scanner. */
+  uploadScanner: UploadScanner;
   metrics: ForumMetrics;
   config: () => ForumRuntimeConfig;
   reloadConfig: () => Promise<ForumRuntimeConfig>;
@@ -62,6 +72,7 @@ export interface InMemoryForumOptions {
   ingestion?: IngestionServices;
   config?: Partial<ForumRuntimeConfig>;
   safety?: ContributionSafetyClassifier;
+  uploadScanner?: UploadScanner;
   limiterStore?: SlidingWindowStore;
   log?: (event: string, meta: Record<string, unknown>) => void;
   now?: () => number;
@@ -101,6 +112,7 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
       (ingestion
         ? new HeuristicContributionSafety(ingestion.urlSafety)
         : { classify: async () => ({ flagged: false, reasons: [] }) }),
+    uploadScanner: options.uploadScanner ?? new LocalChecksUploadScanner(),
     metrics,
     config: () => config,
     reloadConfig: async () => config,
@@ -152,6 +164,55 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
  *  KNOWN_DAPP_DOMAINS constant in @licio/shared is the opposite list: the
  *  LEGITIMATE domains mimicry detection protects.) */
 const SHIPPED_DRAINER_BLOCKLIST: readonly string[] = [];
+
+/**
+ * Register the forum's WS-E router consumers (the registerIngestionConsumers
+ * pattern — durable, so checkpoint replay re-drives missed events at boot).
+ *
+ * `forum-thread-posture`: a WS-E harassment-cascade detection against a
+ * story elevates its thread's safety posture and marks the conversation
+ * tense (transitions.ts `escalateThreadOnIntegritySignal`).  The signal is
+ * `restricted` (it reveals detection thresholds) and this consumer is
+ * non-scoring, so the pay-to-rank firewall admits it; thread posture is a
+ * moderation surface, never a ranking input.  Idempotent under
+ * at-least-once redelivery: already-escalated threads no-op.
+ */
+export function registerForumConsumers(
+  events: EventPipelineServices,
+  ingestion: IngestionServices,
+  forum: ForumServices,
+): void {
+  events.router.register({
+    name: 'forum-thread-posture',
+    topics: ['integrity.signal.detected'],
+    accessClassifications: ['restricted'],
+    scoring: false,
+    durable: true,
+    handle: async (event) => {
+      const signal = event as IntegritySignalDetectedEvent;
+      if (signal.signal_type !== 'harassment_cascade') return;
+      const deps = {
+        stories: ingestion.stories,
+        events,
+        audit: getIdentityServices().audit,
+        trackBackground: forum.trackBackground,
+        now: forum.now,
+      };
+      for (const itemId of signal.target_ids) {
+        const thread = await ingestion.stories.getThreadByStoryId(itemId);
+        if (!thread) continue;
+        const applied = await escalateThreadOnIntegritySignal(
+          deps,
+          thread.threadId,
+          signal.signal_type,
+          signal.confidence,
+        );
+        if (applied.safetyApplied) forum.metrics.increment('threads.safety_escalated');
+        if (applied.conversationApplied) forum.metrics.increment('threads.marked_tense');
+      }
+    },
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Module singleton (the house pattern routes resolve through).

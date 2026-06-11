@@ -76,3 +76,34 @@ export class HeuristicContributionSafety implements ContributionSafetyClassifier
     return { flagged: reasons.length > 0, reasons };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Upload scanning (WS-G.3.7b — the WS-J.2.6b seam).
+// ---------------------------------------------------------------------------
+
+export interface UploadScanVerdict {
+  /** `clear` serves immediately; `pending` holds attachment AND serving
+   *  until a later `setScanState`; `flagged` is never served. */
+  state: 'clear' | 'pending' | 'flagged';
+  /** Machine-readable reason (metrics only; never file content). */
+  reason: string | null;
+}
+
+/**
+ * The scanner the upload route consults AFTER the inline local checks
+ * (magic-byte/declared-type match, size bounds, metadata strip) have
+ * passed.  WS-J.2.6b replaces this with the shared malware intelligence;
+ * until then the default scanner clears — the local checks ARE the scan,
+ * and `scan_state` stays a real gate (attachment and serving both require
+ * `clear`), not a decoration.
+ */
+export interface UploadScanner {
+  scan(bytes: Uint8Array, contentType: string): Promise<UploadScanVerdict>;
+}
+
+/** Default scanner: the inline local checks already ran; clear. */
+export class LocalChecksUploadScanner implements UploadScanner {
+  async scan(): Promise<UploadScanVerdict> {
+    return { state: 'clear', reason: null };
+  }
+}
