@@ -18,6 +18,14 @@ const SES_REQUIRED_KEYS = [
   'SES_FROM_ADDRESS',
 ] as const;
 
+/** The self-hosted embedding-service group is all-or-none (WS-F.3.2a). */
+const EMBEDDING_REQUIRED_KEYS = [
+  'EMBEDDING_URL',
+  'EMBEDDING_MODEL',
+  'EMBEDDING_MODEL_VERSION',
+  'EMBEDDING_DIMENSION',
+] as const;
+
 /** Report a partial all-or-none env group as a validation issue. */
 function refineGroup(
   env: Record<string, unknown>,
@@ -84,6 +92,15 @@ export const serverEnvSchema = z.object({
   // budgets are changeable without a redeploy. Defaults per the WS-E plan.
   EVENTS_RATE_PER_MINUTE: z.coerce.number().int().positive().default(10),
   EVENTS_RATE_PER_HOUR: z.coerce.number().int().positive().default(120),
+  // Self-hosted embedding service (WS-F.3.2a, SPEC §19.1: no mandatory
+  // EXTERNAL embedding API — content text must not leak to a third party).
+  // ALL-OR-NONE (refined below): when the group is unset, the deterministic
+  // local lexical provider is used (dev/CI; warned in production because it is
+  // NOT a semantic model — see apps/api/src/ingestion/embeddings.ts).
+  EMBEDDING_URL: z.string().url({ message: 'EMBEDDING_URL must be a valid URL' }).optional(),
+  EMBEDDING_MODEL: z.string().min(1).optional(),
+  EMBEDDING_MODEL_VERSION: z.string().min(1).optional(),
+  EMBEDDING_DIMENSION: z.coerce.number().int().min(8).max(4096).optional(),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;
@@ -93,6 +110,7 @@ export type ServerEnv = z.infer<typeof serverEnvSchema>;
 export const serverEnvSchemaRefined = serverEnvSchema.superRefine((env, ctx) => {
   refineGroup(env, ctx, S3_REQUIRED_KEYS, 'S3');
   refineGroup(env, ctx, SES_REQUIRED_KEYS, 'SES');
+  refineGroup(env, ctx, EMBEDDING_REQUIRED_KEYS, 'EMBEDDING');
 });
 
 export function validateServerEnv(env: Record<string, string | undefined>): ServerEnv {

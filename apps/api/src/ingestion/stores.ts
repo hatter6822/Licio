@@ -1,0 +1,1253 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-F ingestion store interfaces + in-memory adapters (the WS-E house
+// pattern: routes and services depend on these interfaces only; production
+// boot swaps in the Drizzle adapters from drizzle-ingestion-stores.ts, and
+// the gated integration tests exercise the same interfaces against live
+// Postgres). In-memory adapters are SEMANTICALLY faithful — unique
+// constraints, transactional create-with-thread, case-insensitive domain
+// upsert — so unit tests catch contract violations, not adapter quirks.
+import type {
+  ClaimExtractionSource,
+  ClaimRecordStatus,
+  DisplayRestrictions,
+  EvidenceRelationshipType,
+  LocationScope,
+  MediaType,
+  PublisherLineageEntry,
+  SensitivityLabel,
+  SourceCommunityNote,
+  SourceCorrection,
+  StoryLifecycleState,
+  StoryLifecycleTrigger,
+  SubmissionMetadata,
+  SubmissionType,
+  SyndicationRelationshipType,
+  TakedownLegalBasis,
+  TakedownStatus,
+  TakedownTargetType,
+  VerificationState,
+} from '@licio/shared';
+
+// ---------------------------------------------------------------------------
+// Records (the storage shape; ISO timestamps on this side of the boundary).
+// ---------------------------------------------------------------------------
+
+export interface StoryRecord {
+  storyId: string;
+  canonicalUrl: string | null;
+  title: string;
+  titleHash: string;
+  submittedBy: string;
+  sourceId: string | null;
+  language: string | null;
+  topicIds: string[];
+  locationScope: LocationScope | null;
+  sensitivityLabels: SensitivityLabel[];
+  lifecycleState: StoryLifecycleState;
+  submissionType: SubmissionType;
+  submissionMetadata: SubmissionMetadata;
+  excerpt: string | null;
+  publisher: string | null;
+  author: string | null;
+  publishedAt: string | null;
+  mediaType: MediaType | null;
+  extractionState:
+    | 'pending'
+    | 'completed'
+    | 'partial'
+    | 'failed'
+    | 'disallowed_robots'
+    | 'not_applicable';
+  hiddenState: 'takedown' | 'safety' | null;
+  lastMaterialUpdateAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ThreadShellRecord {
+  threadId: string;
+  storyId: string;
+  roomId: string | null;
+  branchIndex: number;
+  currentSummaryId: string | null;
+  conversationState: 'empty' | 'emerging' | 'active' | 'deepening' | 'resolved' | 'dormant';
+  safetyState: 'normal' | 'caution' | 'under_review' | 'restricted';
+  createdAt: string;
+}
+
+export type StoryCreateOutcome =
+  | { ok: true; story: StoryRecord; thread: ThreadShellRecord }
+  | { ok: false; reason: 'duplicate_canonical_url'; existingStoryId: string };
+
+export interface SourceRecord {
+  sourceId: string;
+  name: string;
+  canonicalDomain: string | null;
+  publisherLineage: PublisherLineageEntry[] | null;
+  typicalTopics: string[];
+  correctionHistory: SourceCorrection[];
+  evidenceTypeFrequency: Partial<Record<EvidenceRelationshipType, number>>;
+  communityNotes: SourceCommunityNote[];
+  displayRestrictions: DisplayRestrictions;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SyndicationRecord {
+  syndicationId: string;
+  fromSourceId: string;
+  toSourceId: string;
+  relationshipType: SyndicationRelationshipType;
+  establishedBy: 'steward' | 'system';
+  status: 'candidate' | 'confirmed';
+  evidenceRef: string;
+  confidence: number;
+  createdAt: string;
+}
+
+export interface ClaimRecord {
+  claimId: string;
+  storyId: string | null;
+  canonicalText: string;
+  normalizedTextHash: string;
+  claimStatus: ClaimRecordStatus;
+  firstSeenStoryId: string | null;
+  independenceGroupId: string | null;
+  createdBy: string | null;
+  extractionSource: ClaimExtractionSource;
+  extractionConfidence: number | null;
+  modelVersion: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EvidenceCardRecord {
+  evidenceId: string;
+  claimId: string;
+  sourceId: string | null;
+  submittedBy: string;
+  evidenceType: EvidenceRelationshipType;
+  citationUrlOrRef: string;
+  relevanceNote: string;
+  verificationState: VerificationState;
+  independenceGroupId: string | null;
+  storyId: string | null;
+  createdAt: string;
+}
+
+export interface StorySignatureRecord {
+  storyId: string;
+  /** 128 × uint32 signature. */
+  minhash: Uint32Array;
+  shingleK: number;
+  numHashes: number;
+  familyVersion: number;
+  textSource: 'submitted' | 'extracted';
+  createdAt: string;
+}
+
+export interface LifecycleAuditRecord {
+  auditId: string;
+  storyId: string;
+  fromState: StoryLifecycleState;
+  toState: StoryLifecycleState;
+  trigger: StoryLifecycleTrigger;
+  actorType: 'system' | 'steward';
+  actorUserId: string | null;
+  createdAt: string;
+}
+
+export interface FreshnessRecord {
+  storyId: string;
+  freshnessScore: number;
+  topicBaselineMs: number | null;
+  featureVersion: number;
+  computedAt: string;
+}
+
+export interface TakedownRecordRow {
+  takedownId: string;
+  targetType: TakedownTargetType;
+  targetId: string;
+  requesterContact: string;
+  legalBasis: TakedownLegalBasis;
+  claimDetail: string;
+  status: TakedownStatus;
+  resolutionNote: string | null;
+  actionedBy: string | null;
+  actionedAt: string | null;
+  createdAt: string;
+}
+
+export type ReviewKind =
+  | 'near_duplicate'
+  | 'syndication_candidate'
+  | 'extraction_failure'
+  | 'url_safety_hold'
+  | 'low_confidence_claim';
+
+export interface ReviewItemRecord {
+  reviewId: string;
+  kind: ReviewKind;
+  storyId: string | null;
+  context: Record<string, unknown>;
+  status: 'pending' | 'resolved';
+  resolution: string | null;
+  resolvedBy: string | null;
+  resolvedAt: string | null;
+  notBefore: string | null;
+  createdAt: string;
+}
+
+export type EmbeddingTargetType =
+  | 'story'
+  | 'claim'
+  | 'source'
+  | 'evidence_card'
+  | 'community_interpretation';
+
+export interface EmbeddingRecord {
+  targetType: EmbeddingTargetType;
+  targetId: string;
+  modelVersion: string;
+  embedding: Float32Array;
+  updatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Store interfaces.
+// ---------------------------------------------------------------------------
+
+export interface StoryStore {
+  /** Transactional story + thread-shell creation (WS-F.1.4d): both or neither.
+   *  Returns the duplicate outcome when the canonical URL already exists —
+   *  including the lost half of a concurrent race (unique-index backstop). */
+  createWithThread(
+    story: Omit<StoryRecord, 'createdAt' | 'updatedAt' | 'lastMaterialUpdateAt'>,
+    threadId: string,
+  ): Promise<StoryCreateOutcome>;
+  getById(storyId: string): Promise<StoryRecord | null>;
+  getByCanonicalUrl(canonicalUrl: string): Promise<StoryRecord | null>;
+  getThreadByStoryId(storyId: string): Promise<ThreadShellRecord | null>;
+  /** Reverse shell lookup (thread-scoped events → story lifecycle/freshness). */
+  getStoryIdByThreadId(threadId: string): Promise<string | null>;
+  /** Patch extraction outputs / source resolution / hidden state. */
+  update(
+    storyId: string,
+    patch: Partial<
+      Pick<
+        StoryRecord,
+        | 'sourceId'
+        | 'language'
+        | 'sensitivityLabels'
+        | 'excerpt'
+        | 'publisher'
+        | 'author'
+        | 'publishedAt'
+        | 'mediaType'
+        | 'extractionState'
+        | 'hiddenState'
+        | 'lifecycleState'
+        | 'lastMaterialUpdateAt'
+        | 'topicIds'
+      >
+    >,
+  ): Promise<StoryRecord | null>;
+  /** Spam-pattern input (WS-F.1.4c): identical-title count in a window. */
+  countByTitleHashSince(titleHash: string, sinceIso: string): Promise<number>;
+  /** Stories created in [from, to) for the given topic (freshness baseline). */
+  createdAtsForTopicBetween(topicId: string, fromIso: string, toIso: string): Promise<string[]>;
+  /** Lifecycle sweep input: stories in `states` not materially updated since. */
+  listStaleByLifecycle(
+    states: readonly StoryLifecycleState[],
+    notUpdatedSinceIso: string,
+    limit: number,
+  ): Promise<StoryRecord[]>;
+  /** Most recent stories (search corpus + admin surfaces). */
+  listRecent(limit: number): Promise<StoryRecord[]>;
+  /**
+   * One keyset page of a user's submitted stories (DSAR export, WS-D §19.3):
+   * `(created_at, story_id)` ascending, strictly after `after`. The export
+   * hook loops until a short page — NO truncation cap (a prolific submitter's
+   * export must be COMPLETE; a `listRecent` cap would silently drop rows).
+   */
+  listBySubmitter(
+    userId: string,
+    after: { createdAt: string; storyId: string } | null,
+    limit: number,
+  ): Promise<StoryRecord[]>;
+  addSourceLink(
+    storyId: string,
+    sourceId: string,
+    linkType: 'primary' | 'syndicated',
+    viaCanonicalUrl: string | null,
+  ): Promise<void>;
+  listSourceLinks(
+    storyId: string,
+  ): Promise<
+    Array<{ sourceId: string; linkType: 'primary' | 'syndicated'; viaCanonicalUrl: string | null }>
+  >;
+  /** Source-takedown cascade (WS-F.1.4f): hide every currently-visible story
+   *  whose PRIMARY source is `sourceId` and drop its archived excerpt (the
+   *  `noarchive` realization). Idempotent — already-hidden rows are skipped —
+   *  and returns the number of stories newly hidden. */
+  hideBySource(sourceId: string, hiddenState: 'takedown' | 'safety'): Promise<number>;
+  clear(): Promise<void>;
+}
+
+export interface SourceStore {
+  /** Idempotent get-or-create by canonical domain (WS-F.2.2a): concurrent
+   *  first-submissions for one domain yield exactly one source. */
+  upsertByDomain(domain: string, defaults: { name: string }): Promise<SourceRecord>;
+  getById(sourceId: string): Promise<SourceRecord | null>;
+  getByDomain(domain: string): Promise<SourceRecord | null>;
+  /** Steward edit surface (WS-F.2.3a) — replaces only the given fields. */
+  update(
+    sourceId: string,
+    patch: Partial<
+      Pick<
+        SourceRecord,
+        'name' | 'publisherLineage' | 'typicalTopics' | 'displayRestrictions' | 'communityNotes'
+      >
+    >,
+  ): Promise<SourceRecord | null>;
+  /** Append-mostly correction history (provenance preserved, WS-F.2.3a). */
+  appendCorrection(sourceId: string, correction: SourceCorrection): Promise<SourceRecord | null>;
+  /** Incremental profile aggregates (WS-F.2.2a): merge topics, bump counts. */
+  recordObservation(
+    sourceId: string,
+    observation: { topicIds?: readonly string[]; evidenceType?: EvidenceRelationshipType },
+  ): Promise<void>;
+  clear(): Promise<void>;
+}
+
+export interface SyndicationStore {
+  /** Insert a CANONICALIZED edge (from = origin). Unique directed pair. */
+  insert(
+    record: Omit<SyndicationRecord, 'createdAt'>,
+  ): Promise<{ ok: true; record: SyndicationRecord } | { ok: false; reason: 'duplicate_pair' }>;
+  /** The edge between two sources in EITHER orientation, if any. */
+  getBetween(sourceA: string, sourceB: string): Promise<SyndicationRecord | null>;
+  getById(syndicationId: string): Promise<SyndicationRecord | null>;
+  confirm(syndicationId: string): Promise<SyndicationRecord | null>;
+  listForSource(sourceId: string): Promise<SyndicationRecord[]>;
+  clear(): Promise<void>;
+}
+
+export interface ClaimStore {
+  insert(record: Omit<ClaimRecord, 'createdAt' | 'updatedAt'>): Promise<ClaimRecord>;
+  getById(claimId: string): Promise<ClaimRecord | null>;
+  findByNormalizedHash(hash: string): Promise<ClaimRecord[]>;
+  listByStory(storyId: string): Promise<ClaimRecord[]>;
+  /** Most recent claims (search corpus; includes story-less claims). */
+  listRecent(limit: number): Promise<ClaimRecord[]>;
+  updateStatus(claimId: string, status: ClaimRecordStatus): Promise<ClaimRecord | null>;
+  /** Attach a claim to a MERI independence lineage (WS-F.1.2b cross-story
+   *  dedup): the SAME claim surfacing in another story shares this group so
+   *  MERI never counts the copies as independent validation (Section 13.6). */
+  setIndependenceGroup(claimId: string, groupId: string): Promise<ClaimRecord | null>;
+  clear(): Promise<void>;
+}
+
+export interface EvidenceCardStore {
+  insert(record: Omit<EvidenceCardRecord, 'createdAt'>): Promise<EvidenceCardRecord>;
+  getById(evidenceId: string): Promise<EvidenceCardRecord | null>;
+  listByClaim(claimId: string): Promise<EvidenceCardRecord[]>;
+  /** Most recent cards (search corpus). */
+  listRecent(limit: number): Promise<EvidenceCardRecord[]>;
+  /** Verification-state change (steward review / takedown actioning). */
+  updateVerification(
+    evidenceId: string,
+    state: VerificationState,
+  ): Promise<EvidenceCardRecord | null>;
+  clear(): Promise<void>;
+}
+
+export interface SignatureStore {
+  /** Upsert the signature + its LSH bands (one signature per story). */
+  upsert(record: Omit<StorySignatureRecord, 'createdAt'>, bandHashes: Uint32Array): Promise<void>;
+  getByStoryId(storyId: string): Promise<StorySignatureRecord | null>;
+  /** Candidate story ids sharing ≥ 1 band bucket — O(bands) point lookups. */
+  candidatesByBands(bandHashes: Uint32Array, excludeStoryId: string): Promise<string[]>;
+  clear(): Promise<void>;
+}
+
+export interface LifecycleAuditStore {
+  append(
+    record: Omit<LifecycleAuditRecord, 'auditId' | 'createdAt'>,
+  ): Promise<LifecycleAuditRecord>;
+  listForStory(storyId: string): Promise<LifecycleAuditRecord[]>;
+  clear(): Promise<void>;
+}
+
+export interface FreshnessStore {
+  upsert(record: FreshnessRecord): Promise<void>;
+  get(storyId: string): Promise<FreshnessRecord | null>;
+  /** Records computed before `beforeIso` (periodic sweep input). */
+  listComputedBefore(beforeIso: string, limit: number): Promise<FreshnessRecord[]>;
+  clear(): Promise<void>;
+}
+
+export interface TakedownStore {
+  insert(record: Omit<TakedownRecordRow, 'createdAt'>): Promise<TakedownRecordRow>;
+  getById(takedownId: string): Promise<TakedownRecordRow | null>;
+  list(status: TakedownStatus | undefined, limit: number): Promise<TakedownRecordRow[]>;
+  update(
+    takedownId: string,
+    patch: Partial<
+      Pick<TakedownRecordRow, 'status' | 'resolutionNote' | 'actionedBy' | 'actionedAt'>
+    >,
+  ): Promise<TakedownRecordRow | null>;
+  clear(): Promise<void>;
+}
+
+export interface ReviewQueueStore {
+  insert(record: Omit<ReviewItemRecord, 'reviewId' | 'createdAt'>): Promise<ReviewItemRecord>;
+  getById(reviewId: string): Promise<ReviewItemRecord | null>;
+  list(
+    filter: { status?: 'pending' | 'resolved' | undefined; kind?: ReviewKind | undefined },
+    limit: number,
+  ): Promise<ReviewItemRecord[]>;
+  /** Pending retry items whose not_before has passed (scheduler input). */
+  listDueRetries(kind: ReviewKind, nowIso: string, limit: number): Promise<ReviewItemRecord[]>;
+  resolve(
+    reviewId: string,
+    resolution: string,
+    resolvedBy: string | null,
+    resolvedAtIso: string,
+  ): Promise<ReviewItemRecord | null>;
+  clear(): Promise<void>;
+}
+
+export interface EmbeddingStore {
+  /** Upsert on (target_type, target_id, model_version) — WS-F.3.2c. */
+  upsert(record: Omit<EmbeddingRecord, 'updatedAt'>): Promise<void>;
+  get(
+    targetType: EmbeddingTargetType,
+    targetId: string,
+    modelVersion: string,
+  ): Promise<EmbeddingRecord | null>;
+  /** Cosine-similar targets of one type under one model version (ANN in the
+   *  Drizzle adapter; exact scan in memory). Excludes the query target. */
+  findSimilar(
+    targetType: EmbeddingTargetType,
+    targetId: string,
+    modelVersion: string,
+    threshold: number,
+    limit: number,
+  ): Promise<Array<{ targetId: string; similarity: number }>>;
+  /**
+   * Cosine-similar targets to an ARBITRARY query vector (no stored anchor row
+   * required) — the general primitive behind claim embedding-dedup (WS-F.1.2b)
+   * and the WS-H MERI/SCOI "nearest to this vector" queries. ANN-indexed in
+   * the Drizzle adapter, exact scan in memory.
+   */
+  findSimilarToVector(
+    targetType: EmbeddingTargetType,
+    vector: Float32Array,
+    modelVersion: string,
+    threshold: number,
+    limit: number,
+  ): Promise<Array<{ targetId: string; similarity: number }>>;
+  countByVersion(modelVersion: string): Promise<number>;
+  /** Backfill scan (WS-F.3.2f): targets that have a vector under `fromVersion`
+   *  but none under `toVersion`, after `afterTargetId` (resumable keyset). */
+  listMissingForVersion(
+    fromVersion: string,
+    toVersion: string,
+    afterTargetId: string | null,
+    limit: number,
+  ): Promise<Array<{ targetType: EmbeddingTargetType; targetId: string }>>;
+  /** Cleanup of a superseded version (WS-F.3.2f); returns rows removed. */
+  deleteVersion(modelVersion: string, limit: number): Promise<number>;
+  clear(): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// In-memory adapters.
+// ---------------------------------------------------------------------------
+
+function nowIso(now: () => number): string {
+  return new Date(now()).toISOString();
+}
+
+export class InMemoryStoryStore implements StoryStore {
+  readonly #stories = new Map<string, StoryRecord>();
+  readonly #threads = new Map<string, ThreadShellRecord>();
+  readonly #byUrl = new Map<string, string>();
+  readonly #sourceLinks = new Map<
+    string,
+    Array<{ sourceId: string; linkType: 'primary' | 'syndicated'; viaCanonicalUrl: string | null }>
+  >();
+  readonly #now: () => number;
+
+  constructor(now: () => number = Date.now) {
+    this.#now = now;
+  }
+
+  async createWithThread(
+    story: Omit<StoryRecord, 'createdAt' | 'updatedAt' | 'lastMaterialUpdateAt'>,
+    threadId: string,
+  ): Promise<StoryCreateOutcome> {
+    if (story.canonicalUrl !== null) {
+      const existing = this.#byUrl.get(story.canonicalUrl);
+      if (existing !== undefined) {
+        return { ok: false, reason: 'duplicate_canonical_url', existingStoryId: existing };
+      }
+    }
+    const at = nowIso(this.#now);
+    const record: StoryRecord = {
+      ...story,
+      createdAt: at,
+      updatedAt: at,
+      lastMaterialUpdateAt: at,
+    };
+    const thread: ThreadShellRecord = {
+      threadId,
+      storyId: story.storyId,
+      roomId: null,
+      branchIndex: 0,
+      currentSummaryId: null,
+      conversationState: 'empty',
+      safetyState: 'normal',
+      createdAt: at,
+    };
+    // Both-or-neither: all validation happened above, so both writes commit.
+    this.#stories.set(record.storyId, record);
+    this.#threads.set(record.storyId, thread);
+    if (record.canonicalUrl !== null) this.#byUrl.set(record.canonicalUrl, record.storyId);
+    return { ok: true, story: record, thread };
+  }
+
+  async getById(storyId: string): Promise<StoryRecord | null> {
+    return this.#stories.get(storyId) ?? null;
+  }
+
+  async getByCanonicalUrl(canonicalUrl: string): Promise<StoryRecord | null> {
+    const id = this.#byUrl.get(canonicalUrl);
+    return id === undefined ? null : (this.#stories.get(id) ?? null);
+  }
+
+  async getThreadByStoryId(storyId: string): Promise<ThreadShellRecord | null> {
+    return this.#threads.get(storyId) ?? null;
+  }
+
+  async getStoryIdByThreadId(threadId: string): Promise<string | null> {
+    for (const thread of this.#threads.values()) {
+      if (thread.threadId === threadId) return thread.storyId;
+    }
+    return null;
+  }
+
+  async update(
+    storyId: string,
+    patch: Parameters<StoryStore['update']>[1],
+  ): Promise<StoryRecord | null> {
+    const current = this.#stories.get(storyId);
+    if (!current) return null;
+    const updated: StoryRecord = { ...current, ...patch, updatedAt: nowIso(this.#now) };
+    this.#stories.set(storyId, updated);
+    return updated;
+  }
+
+  async countByTitleHashSince(titleHash: string, sinceIso: string): Promise<number> {
+    let count = 0;
+    for (const story of this.#stories.values()) {
+      if (story.titleHash === titleHash && story.createdAt >= sinceIso) count += 1;
+    }
+    return count;
+  }
+
+  async createdAtsForTopicBetween(
+    topicId: string,
+    fromIso: string,
+    toIso: string,
+  ): Promise<string[]> {
+    const out: string[] = [];
+    for (const story of this.#stories.values()) {
+      if (
+        story.topicIds.includes(topicId) &&
+        story.createdAt >= fromIso &&
+        story.createdAt < toIso
+      ) {
+        out.push(story.createdAt);
+      }
+    }
+    return out.sort();
+  }
+
+  async listStaleByLifecycle(
+    states: readonly StoryLifecycleState[],
+    notUpdatedSinceIso: string,
+    limit: number,
+  ): Promise<StoryRecord[]> {
+    const out: StoryRecord[] = [];
+    for (const story of this.#stories.values()) {
+      if (
+        states.includes(story.lifecycleState) &&
+        story.lastMaterialUpdateAt < notUpdatedSinceIso
+      ) {
+        out.push(story);
+        if (out.length >= limit) break;
+      }
+    }
+    return out;
+  }
+
+  async listRecent(limit: number): Promise<StoryRecord[]> {
+    return [...this.#stories.values()]
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit);
+  }
+
+  async listBySubmitter(
+    userId: string,
+    after: { createdAt: string; storyId: string } | null,
+    limit: number,
+  ): Promise<StoryRecord[]> {
+    return [...this.#stories.values()]
+      .filter((s) => s.submittedBy === userId)
+      .filter(
+        (s) =>
+          after === null ||
+          s.createdAt > after.createdAt ||
+          (s.createdAt === after.createdAt && s.storyId > after.storyId),
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.storyId.localeCompare(b.storyId))
+      .slice(0, limit);
+  }
+
+  async addSourceLink(
+    storyId: string,
+    sourceId: string,
+    linkType: 'primary' | 'syndicated',
+    viaCanonicalUrl: string | null,
+  ): Promise<void> {
+    const links = this.#sourceLinks.get(storyId) ?? [];
+    if (!links.some((l) => l.sourceId === sourceId)) {
+      links.push({ sourceId, linkType, viaCanonicalUrl });
+      this.#sourceLinks.set(storyId, links);
+    }
+  }
+
+  async listSourceLinks(storyId: string) {
+    return [...(this.#sourceLinks.get(storyId) ?? [])];
+  }
+
+  async hideBySource(sourceId: string, hiddenState: 'takedown' | 'safety'): Promise<number> {
+    let count = 0;
+    for (const [storyId, record] of this.#stories) {
+      if (record.sourceId !== sourceId || record.hiddenState !== null) continue;
+      this.#stories.set(storyId, {
+        ...record,
+        hiddenState,
+        excerpt: null,
+        updatedAt: nowIso(this.#now),
+      });
+      count += 1;
+    }
+    return count;
+  }
+
+  async clear(): Promise<void> {
+    this.#stories.clear();
+    this.#threads.clear();
+    this.#byUrl.clear();
+    this.#sourceLinks.clear();
+  }
+}
+
+export class InMemorySourceStore implements SourceStore {
+  readonly #sources = new Map<string, SourceRecord>();
+  readonly #byDomain = new Map<string, string>();
+  readonly #now: () => number;
+  #counter = 0;
+
+  constructor(now: () => number = Date.now) {
+    this.#now = now;
+  }
+
+  async upsertByDomain(domain: string, defaults: { name: string }): Promise<SourceRecord> {
+    const key = domain.toLowerCase();
+    const existingId = this.#byDomain.get(key);
+    if (existingId !== undefined) {
+      const existing = this.#sources.get(existingId);
+      if (existing) return existing;
+    }
+    const at = nowIso(this.#now);
+    this.#counter += 1;
+    const record: SourceRecord = {
+      sourceId: `00000000-0000-4000-9000-${String(this.#counter).padStart(12, '0')}`,
+      name: defaults.name,
+      canonicalDomain: key,
+      publisherLineage: null,
+      typicalTopics: [],
+      correctionHistory: [],
+      evidenceTypeFrequency: {},
+      communityNotes: [],
+      displayRestrictions: { noindex: false, noarchive: false, excerpt_max_chars: null },
+      createdAt: at,
+      updatedAt: at,
+    };
+    this.#sources.set(record.sourceId, record);
+    this.#byDomain.set(key, record.sourceId);
+    return record;
+  }
+
+  async getById(sourceId: string): Promise<SourceRecord | null> {
+    return this.#sources.get(sourceId) ?? null;
+  }
+
+  async getByDomain(domain: string): Promise<SourceRecord | null> {
+    const id = this.#byDomain.get(domain.toLowerCase());
+    return id === undefined ? null : (this.#sources.get(id) ?? null);
+  }
+
+  async update(
+    sourceId: string,
+    patch: Parameters<SourceStore['update']>[1],
+  ): Promise<SourceRecord | null> {
+    const current = this.#sources.get(sourceId);
+    if (!current) return null;
+    const updated: SourceRecord = { ...current, ...patch, updatedAt: nowIso(this.#now) };
+    this.#sources.set(sourceId, updated);
+    return updated;
+  }
+
+  async appendCorrection(
+    sourceId: string,
+    correction: SourceCorrection,
+  ): Promise<SourceRecord | null> {
+    const current = this.#sources.get(sourceId);
+    if (!current) return null;
+    const updated: SourceRecord = {
+      ...current,
+      correctionHistory: [...current.correctionHistory, correction],
+      updatedAt: nowIso(this.#now),
+    };
+    this.#sources.set(sourceId, updated);
+    return updated;
+  }
+
+  async recordObservation(
+    sourceId: string,
+    observation: { topicIds?: readonly string[]; evidenceType?: EvidenceRelationshipType },
+  ): Promise<void> {
+    const current = this.#sources.get(sourceId);
+    if (!current) return;
+    const topics = new Set(current.typicalTopics);
+    for (const topic of observation.topicIds ?? []) topics.add(topic);
+    const frequency = { ...current.evidenceTypeFrequency };
+    if (observation.evidenceType) {
+      frequency[observation.evidenceType] = (frequency[observation.evidenceType] ?? 0) + 1;
+    }
+    this.#sources.set(sourceId, {
+      ...current,
+      typicalTopics: [...topics].slice(0, 50),
+      evidenceTypeFrequency: frequency,
+      updatedAt: nowIso(this.#now),
+    });
+  }
+
+  async clear(): Promise<void> {
+    this.#sources.clear();
+    this.#byDomain.clear();
+  }
+}
+
+export class InMemorySyndicationStore implements SyndicationStore {
+  readonly #records = new Map<string, SyndicationRecord>();
+  readonly #now: () => number;
+
+  constructor(now: () => number = Date.now) {
+    this.#now = now;
+  }
+
+  async insert(record: Omit<SyndicationRecord, 'createdAt'>) {
+    for (const existing of this.#records.values()) {
+      if (
+        existing.fromSourceId === record.fromSourceId &&
+        existing.toSourceId === record.toSourceId
+      ) {
+        return { ok: false as const, reason: 'duplicate_pair' as const };
+      }
+    }
+    const full: SyndicationRecord = { ...record, createdAt: nowIso(this.#now) };
+    this.#records.set(full.syndicationId, full);
+    return { ok: true as const, record: full };
+  }
+
+  async getBetween(sourceA: string, sourceB: string): Promise<SyndicationRecord | null> {
+    for (const record of this.#records.values()) {
+      if (
+        (record.fromSourceId === sourceA && record.toSourceId === sourceB) ||
+        (record.fromSourceId === sourceB && record.toSourceId === sourceA)
+      ) {
+        return record;
+      }
+    }
+    return null;
+  }
+
+  async getById(syndicationId: string): Promise<SyndicationRecord | null> {
+    return this.#records.get(syndicationId) ?? null;
+  }
+
+  async confirm(syndicationId: string): Promise<SyndicationRecord | null> {
+    const record = this.#records.get(syndicationId);
+    if (!record) return null;
+    const updated = { ...record, status: 'confirmed' as const };
+    this.#records.set(syndicationId, updated);
+    return updated;
+  }
+
+  async listForSource(sourceId: string): Promise<SyndicationRecord[]> {
+    return [...this.#records.values()].filter(
+      (r) => r.fromSourceId === sourceId || r.toSourceId === sourceId,
+    );
+  }
+
+  async clear(): Promise<void> {
+    this.#records.clear();
+  }
+}
+
+export class InMemoryClaimStore implements ClaimStore {
+  readonly #claims = new Map<string, ClaimRecord>();
+  readonly #now: () => number;
+
+  constructor(now: () => number = Date.now) {
+    this.#now = now;
+  }
+
+  async insert(record: Omit<ClaimRecord, 'createdAt' | 'updatedAt'>): Promise<ClaimRecord> {
+    const at = nowIso(this.#now);
+    const full: ClaimRecord = { ...record, createdAt: at, updatedAt: at };
+    this.#claims.set(full.claimId, full);
+    return full;
+  }
+
+  async getById(claimId: string): Promise<ClaimRecord | null> {
+    return this.#claims.get(claimId) ?? null;
+  }
+
+  async findByNormalizedHash(hash: string): Promise<ClaimRecord[]> {
+    return [...this.#claims.values()].filter((c) => c.normalizedTextHash === hash);
+  }
+
+  async listByStory(storyId: string): Promise<ClaimRecord[]> {
+    return [...this.#claims.values()].filter((c) => c.storyId === storyId);
+  }
+
+  async listRecent(limit: number): Promise<ClaimRecord[]> {
+    return [...this.#claims.values()]
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit);
+  }
+
+  async updateStatus(claimId: string, status: ClaimRecordStatus): Promise<ClaimRecord | null> {
+    const claim = this.#claims.get(claimId);
+    if (!claim) return null;
+    const updated = { ...claim, claimStatus: status, updatedAt: nowIso(this.#now) };
+    this.#claims.set(claimId, updated);
+    return updated;
+  }
+
+  async setIndependenceGroup(claimId: string, groupId: string): Promise<ClaimRecord | null> {
+    const claim = this.#claims.get(claimId);
+    if (!claim) return null;
+    const updated = { ...claim, independenceGroupId: groupId, updatedAt: nowIso(this.#now) };
+    this.#claims.set(claimId, updated);
+    return updated;
+  }
+
+  async clear(): Promise<void> {
+    this.#claims.clear();
+  }
+}
+
+export class InMemoryEvidenceCardStore implements EvidenceCardStore {
+  readonly #cards = new Map<string, EvidenceCardRecord>();
+  readonly #now: () => number;
+
+  constructor(now: () => number = Date.now) {
+    this.#now = now;
+  }
+
+  async insert(record: Omit<EvidenceCardRecord, 'createdAt'>): Promise<EvidenceCardRecord> {
+    const full: EvidenceCardRecord = { ...record, createdAt: nowIso(this.#now) };
+    this.#cards.set(full.evidenceId, full);
+    return full;
+  }
+
+  async getById(evidenceId: string): Promise<EvidenceCardRecord | null> {
+    return this.#cards.get(evidenceId) ?? null;
+  }
+
+  async listByClaim(claimId: string): Promise<EvidenceCardRecord[]> {
+    return [...this.#cards.values()].filter((c) => c.claimId === claimId);
+  }
+
+  async listRecent(limit: number): Promise<EvidenceCardRecord[]> {
+    return [...this.#cards.values()]
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit);
+  }
+
+  async updateVerification(
+    evidenceId: string,
+    state: VerificationState,
+  ): Promise<EvidenceCardRecord | null> {
+    const card = this.#cards.get(evidenceId);
+    if (!card) return null;
+    const updated = { ...card, verificationState: state };
+    this.#cards.set(evidenceId, updated);
+    return updated;
+  }
+
+  async clear(): Promise<void> {
+    this.#cards.clear();
+  }
+}
+
+export class InMemorySignatureStore implements SignatureStore {
+  readonly #signatures = new Map<string, StorySignatureRecord>();
+  /** band bucket key (`index:hash`) → story ids. */
+  readonly #bands = new Map<string, Set<string>>();
+  readonly #now: () => number;
+
+  constructor(now: () => number = Date.now) {
+    this.#now = now;
+  }
+
+  async upsert(
+    record: Omit<StorySignatureRecord, 'createdAt'>,
+    bandHashes: Uint32Array,
+  ): Promise<void> {
+    // Remove prior band entries on re-signature.
+    for (const set of this.#bands.values()) set.delete(record.storyId);
+    this.#signatures.set(record.storyId, { ...record, createdAt: nowIso(this.#now) });
+    for (let i = 0; i < bandHashes.length; i += 1) {
+      const key = `${i}:${bandHashes[i]}`;
+      const set = this.#bands.get(key) ?? new Set<string>();
+      set.add(record.storyId);
+      this.#bands.set(key, set);
+    }
+  }
+
+  async getByStoryId(storyId: string): Promise<StorySignatureRecord | null> {
+    return this.#signatures.get(storyId) ?? null;
+  }
+
+  async candidatesByBands(bandHashes: Uint32Array, excludeStoryId: string): Promise<string[]> {
+    const out = new Set<string>();
+    for (let i = 0; i < bandHashes.length; i += 1) {
+      for (const id of this.#bands.get(`${i}:${bandHashes[i]}`) ?? []) {
+        if (id !== excludeStoryId) out.add(id);
+      }
+    }
+    return [...out];
+  }
+
+  async clear(): Promise<void> {
+    this.#signatures.clear();
+    this.#bands.clear();
+  }
+}
+
+export class InMemoryLifecycleAuditStore implements LifecycleAuditStore {
+  readonly #records: LifecycleAuditRecord[] = [];
+  readonly #now: () => number;
+  #counter = 0;
+
+  constructor(now: () => number = Date.now) {
+    this.#now = now;
+  }
+
+  async append(
+    record: Omit<LifecycleAuditRecord, 'auditId' | 'createdAt'>,
+  ): Promise<LifecycleAuditRecord> {
+    this.#counter += 1;
+    const full: LifecycleAuditRecord = {
+      ...record,
+      auditId: `00000000-0000-4000-a000-${String(this.#counter).padStart(12, '0')}`,
+      createdAt: nowIso(this.#now),
+    };
+    this.#records.push(full);
+    return full;
+  }
+
+  async listForStory(storyId: string): Promise<LifecycleAuditRecord[]> {
+    return this.#records.filter((r) => r.storyId === storyId);
+  }
+
+  async clear(): Promise<void> {
+    this.#records.length = 0;
+  }
+}
+
+export class InMemoryFreshnessStore implements FreshnessStore {
+  readonly #records = new Map<string, FreshnessRecord>();
+
+  async upsert(record: FreshnessRecord): Promise<void> {
+    this.#records.set(record.storyId, record);
+  }
+
+  async get(storyId: string): Promise<FreshnessRecord | null> {
+    return this.#records.get(storyId) ?? null;
+  }
+
+  async listComputedBefore(beforeIso: string, limit: number): Promise<FreshnessRecord[]> {
+    return [...this.#records.values()].filter((r) => r.computedAt < beforeIso).slice(0, limit);
+  }
+
+  async clear(): Promise<void> {
+    this.#records.clear();
+  }
+}
+
+export class InMemoryTakedownStore implements TakedownStore {
+  readonly #records = new Map<string, TakedownRecordRow>();
+  readonly #now: () => number;
+
+  constructor(now: () => number = Date.now) {
+    this.#now = now;
+  }
+
+  async insert(record: Omit<TakedownRecordRow, 'createdAt'>): Promise<TakedownRecordRow> {
+    const full: TakedownRecordRow = { ...record, createdAt: nowIso(this.#now) };
+    this.#records.set(full.takedownId, full);
+    return full;
+  }
+
+  async getById(takedownId: string): Promise<TakedownRecordRow | null> {
+    return this.#records.get(takedownId) ?? null;
+  }
+
+  async list(status: TakedownStatus | undefined, limit: number): Promise<TakedownRecordRow[]> {
+    return [...this.#records.values()]
+      .filter((r) => status === undefined || r.status === status)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .slice(0, limit);
+  }
+
+  async update(
+    takedownId: string,
+    patch: Parameters<TakedownStore['update']>[1],
+  ): Promise<TakedownRecordRow | null> {
+    const record = this.#records.get(takedownId);
+    if (!record) return null;
+    const updated = { ...record, ...patch };
+    this.#records.set(takedownId, updated);
+    return updated;
+  }
+
+  async clear(): Promise<void> {
+    this.#records.clear();
+  }
+}
+
+export class InMemoryReviewQueueStore implements ReviewQueueStore {
+  readonly #records = new Map<string, ReviewItemRecord>();
+  readonly #now: () => number;
+  #counter = 0;
+
+  constructor(now: () => number = Date.now) {
+    this.#now = now;
+  }
+
+  async insert(
+    record: Omit<ReviewItemRecord, 'reviewId' | 'createdAt'>,
+  ): Promise<ReviewItemRecord> {
+    this.#counter += 1;
+    const full: ReviewItemRecord = {
+      ...record,
+      reviewId: `00000000-0000-4000-b000-${String(this.#counter).padStart(12, '0')}`,
+      createdAt: nowIso(this.#now),
+    };
+    this.#records.set(full.reviewId, full);
+    return full;
+  }
+
+  async getById(reviewId: string): Promise<ReviewItemRecord | null> {
+    return this.#records.get(reviewId) ?? null;
+  }
+
+  async list(
+    filter: { status?: 'pending' | 'resolved' | undefined; kind?: ReviewKind | undefined },
+    limit: number,
+  ): Promise<ReviewItemRecord[]> {
+    return [...this.#records.values()]
+      .filter(
+        (r) =>
+          (filter.status === undefined || r.status === filter.status) &&
+          (filter.kind === undefined || r.kind === filter.kind),
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .slice(0, limit);
+  }
+
+  async listDueRetries(
+    kind: ReviewKind,
+    nowIsoStr: string,
+    limit: number,
+  ): Promise<ReviewItemRecord[]> {
+    return [...this.#records.values()]
+      .filter(
+        (r) =>
+          r.kind === kind &&
+          r.status === 'pending' &&
+          r.notBefore !== null &&
+          r.notBefore <= nowIsoStr,
+      )
+      .slice(0, limit);
+  }
+
+  async resolve(
+    reviewId: string,
+    resolution: string,
+    resolvedBy: string | null,
+    resolvedAtIso: string,
+  ): Promise<ReviewItemRecord | null> {
+    const record = this.#records.get(reviewId);
+    if (!record) return null;
+    const updated: ReviewItemRecord = {
+      ...record,
+      status: 'resolved',
+      resolution,
+      resolvedBy,
+      resolvedAt: resolvedAtIso,
+    };
+    this.#records.set(reviewId, updated);
+    return updated;
+  }
+
+  async clear(): Promise<void> {
+    this.#records.clear();
+  }
+}
+
+/** Exact cosine similarity (the in-memory ANN stand-in; the math oracle). */
+export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    const x = a[i] as number;
+    const y = b[i] as number;
+    dot += x * y;
+    normA += x * x;
+    normB += y * y;
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+export class InMemoryEmbeddingStore implements EmbeddingStore {
+  readonly #records = new Map<string, EmbeddingRecord>();
+  readonly #now: () => number;
+
+  constructor(now: () => number = Date.now) {
+    this.#now = now;
+  }
+
+  #key(type: EmbeddingTargetType, id: string, version: string): string {
+    return `${type}|${id}|${version}`;
+  }
+
+  async upsert(record: Omit<EmbeddingRecord, 'updatedAt'>): Promise<void> {
+    this.#records.set(this.#key(record.targetType, record.targetId, record.modelVersion), {
+      ...record,
+      updatedAt: nowIso(this.#now),
+    });
+  }
+
+  async get(targetType: EmbeddingTargetType, targetId: string, modelVersion: string) {
+    return this.#records.get(this.#key(targetType, targetId, modelVersion)) ?? null;
+  }
+
+  async findSimilar(
+    targetType: EmbeddingTargetType,
+    targetId: string,
+    modelVersion: string,
+    threshold: number,
+    limit: number,
+  ): Promise<Array<{ targetId: string; similarity: number }>> {
+    const query = await this.get(targetType, targetId, modelVersion);
+    if (!query) return [];
+    return (
+      await this.findSimilarToVector(
+        targetType,
+        query.embedding,
+        modelVersion,
+        threshold,
+        limit + 1,
+      )
+    )
+      .filter((hit) => hit.targetId !== targetId)
+      .slice(0, limit);
+  }
+
+  async findSimilarToVector(
+    targetType: EmbeddingTargetType,
+    vector: Float32Array,
+    modelVersion: string,
+    threshold: number,
+    limit: number,
+  ): Promise<Array<{ targetId: string; similarity: number }>> {
+    const hits: Array<{ targetId: string; similarity: number }> = [];
+    for (const record of this.#records.values()) {
+      if (record.targetType !== targetType || record.modelVersion !== modelVersion) continue;
+      const similarity = cosineSimilarity(vector, record.embedding);
+      if (similarity >= threshold) hits.push({ targetId: record.targetId, similarity });
+    }
+    return hits.sort((a, b) => b.similarity - a.similarity).slice(0, limit);
+  }
+
+  async countByVersion(modelVersion: string): Promise<number> {
+    let count = 0;
+    for (const record of this.#records.values()) {
+      if (record.modelVersion === modelVersion) count += 1;
+    }
+    return count;
+  }
+
+  async listMissingForVersion(
+    fromVersion: string,
+    toVersion: string,
+    afterTargetId: string | null,
+    limit: number,
+  ): Promise<Array<{ targetType: EmbeddingTargetType; targetId: string }>> {
+    const out: Array<{ targetType: EmbeddingTargetType; targetId: string }> = [];
+    const sorted = [...this.#records.values()]
+      .filter((r) => r.modelVersion === fromVersion)
+      .sort((a, b) => a.targetId.localeCompare(b.targetId));
+    for (const record of sorted) {
+      if (afterTargetId !== null && record.targetId <= afterTargetId) continue;
+      const has = await this.get(record.targetType, record.targetId, toVersion);
+      if (!has) {
+        out.push({ targetType: record.targetType, targetId: record.targetId });
+        if (out.length >= limit) break;
+      }
+    }
+    return out;
+  }
+
+  async deleteVersion(modelVersion: string, limit: number): Promise<number> {
+    let removed = 0;
+    for (const [key, record] of this.#records) {
+      if (record.modelVersion === modelVersion) {
+        this.#records.delete(key);
+        removed += 1;
+        if (removed >= limit) break;
+      }
+    }
+    return removed;
+  }
+
+  async clear(): Promise<void> {
+    this.#records.clear();
+  }
+}

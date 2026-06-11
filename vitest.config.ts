@@ -39,6 +39,8 @@ export default defineConfig({
         'apps/api/src/identity/drizzle-store.ts',
         'apps/api/src/events/redis-event-stores.ts',
         'apps/api/src/events/drizzle-event-stores.ts',
+        'apps/api/src/ingestion/drizzle-ingestion-stores.ts',
+        'packages/db/src/similarity.ts',
       ],
       thresholds: {
         lines: 80,

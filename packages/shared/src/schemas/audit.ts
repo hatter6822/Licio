@@ -38,6 +38,15 @@ export const AUDIT_EVENT_TYPES = [
   'safety_state_change',
   // WS-E steward surface: validated PWAtt runtime-config writes.
   'pwatt_config_change',
+  // WS-F ingestion/source/search steward surface: audited source-profile
+  // edits (WS-F.2.3a), syndication create/confirm (WS-F.2.4), takedown
+  // actions (WS-F.1.4f), review-queue resolutions, and validated ingestion
+  // runtime-config writes.
+  'source_profile_edit',
+  'syndication_change',
+  'takedown_action',
+  'ingestion_review_action',
+  'ingestion_config_change',
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
 export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);

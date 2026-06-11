@@ -65,6 +65,8 @@ import type { SignalLedgerRecord } from '../events/stores.js';
 import { accountRef } from '../identity/crypto.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
+import { getIngestionServices } from '../ingestion/services.js';
+import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
 import {
   DEMO_FEED,
   DEMO_ROOMS,
@@ -84,7 +86,9 @@ import { rateLimit } from '../lib/rate-limit.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { createAuthRoutes } from './auth.js';
 import { createEventsRoutes } from './events.js';
+import { createIngestionAdminRoutes } from './ingestion-admin.js';
 import { createPrivacyRoutes } from './privacy.js';
+import { createStoriesRoutes } from './stories.js';
 
 /** Read the session id from the `__Host-session` cookie (or undefined). */
 function sessionIdOf(cookieHeader: string | undefined): string | undefined {
@@ -132,6 +136,51 @@ async function readSessionUserId(
     return null;
   }
 }
+
+/** WS-F lifecycle states → the WS-C rating-label vocabulary (read mapping). */
+const LIFECYCLE_TO_RATING_LABEL: Readonly<Record<StoryRecord['lifecycleState'], string>> = {
+  submitted: 'getting-attention',
+  gathering_attention: 'getting-attention',
+  deepening: 'deepening',
+  context_needed: 'needs-context',
+  bridging: 'bridge-active',
+  stable: 'resolved-context',
+  archived: 'resolved-context',
+};
+
+/** Map a REAL ingested story onto the established WS-C story-detail wire
+ *  shape (the client validates against storyDetailSchema; real submissions
+ *  appear through the same contract the demo fixtures established). */
+function realStoryToDetail(story: StoryRecord, thread: ThreadShellRecord | null) {
+  const excerptWords = story.excerpt === null ? 0 : story.excerpt.split(/\s+/).length;
+  return {
+    story_id: story.storyId,
+    title: story.title,
+    source: story.publisher ?? story.canonicalUrl ?? 'Community submission',
+    origin: 'independent' as const,
+    ...(story.canonicalUrl !== null ? { url: story.canonicalUrl } : {}),
+    // Best-effort estimate from the bounded excerpt (the full body is never
+    // stored, WS-F.1.4f) — a floor, not a measurement.
+    reading_minutes: Math.max(1, Math.ceil(excerptWords / 200)),
+    rating_label: LIFECYCLE_TO_RATING_LABEL[story.lifecycleState],
+    distribution_reason: 'Recently submitted to Licio',
+    context_chips: [],
+    safety_state: 'ok' as const,
+    body_summary: story.excerpt ?? '',
+    thread_id: thread?.threadId ?? null,
+  };
+}
+
+/** WS-F shell conversation states → the WS-C thread wire vocabulary. */
+const SHELL_TO_WIRE_CONVERSATION: Readonly<Record<ThreadShellRecord['conversationState'], string>> =
+  {
+    empty: 'emerging',
+    emerging: 'emerging',
+    active: 'active',
+    deepening: 'deepening',
+    resolved: 'resolved',
+    dormant: 'dormant',
+  };
 
 /** Scoring annotation → the §5.3 anti-signal name shown in the ledger. */
 const ANNOTATION_TO_LEDGER_ANTI_SIGNAL: Readonly<
@@ -195,14 +244,57 @@ export function createV1Routes() {
         const response: FeedResponse = { items: DEMO_FEED, nextCursor: null };
         return c.json(feedResponseSchema.parse(response));
       })
-      .get('/stories/:storyId', zValidator('param', z.object({ storyId: uuidSchema })), (c) => {
-        const story = demoStory(c.req.valid('param').storyId);
-        return story ? c.json(storyDetailSchema.parse(story)) : c.json(notFound, 404);
-      })
-      .get('/threads/:threadId', zValidator('param', z.object({ threadId: uuidSchema })), (c) => {
-        const thread = demoThread(c.req.valid('param').threadId);
-        return thread ? c.json(threadDetailSchema.parse(thread)) : c.json(notFound, 404);
-      })
+      .get(
+        '/stories/:storyId',
+        zValidator('param', z.object({ storyId: uuidSchema })),
+        async (c) => {
+          const { storyId } = c.req.valid('param');
+          // REAL ingested stories first (WS-F); demo fixtures remain the
+          // fallback contract data until WS-G/I own the read models.
+          const ingestion = getIngestionServices();
+          const real = await ingestion.stories.getById(storyId);
+          if (real) {
+            // Takedown-removed / safety-hidden stories are not served (404,
+            // not 403 — no existence oracle; WS-F.1.4f).
+            if (real.hiddenState !== null) return c.json(notFound, 404);
+            const thread = await ingestion.stories.getThreadByStoryId(storyId);
+            return c.json(storyDetailSchema.parse(realStoryToDetail(real, thread)));
+          }
+          const story = demoStory(storyId);
+          return story ? c.json(storyDetailSchema.parse(story)) : c.json(notFound, 404);
+        },
+      )
+      .get(
+        '/threads/:threadId',
+        zValidator('param', z.object({ threadId: uuidSchema })),
+        async (c) => {
+          const { threadId } = c.req.valid('param');
+          const ingestion = getIngestionServices();
+          const storyId = await ingestion.stories.getStoryIdByThreadId(threadId);
+          if (storyId !== null) {
+            const story = await ingestion.stories.getById(storyId);
+            const shell = await ingestion.stories.getThreadByStoryId(storyId);
+            if (story && shell) {
+              if (story.hiddenState !== null) return c.json(notFound, 404);
+              return c.json(
+                threadDetailSchema.parse({
+                  thread_id: shell.threadId,
+                  story_id: shell.storyId,
+                  room_id: shell.roomId,
+                  title: story.title,
+                  conversation_state: SHELL_TO_WIRE_CONVERSATION[shell.conversationState],
+                  safety_state: 'ok',
+                  created_at: shell.createdAt,
+                  available_branches: ['overview'],
+                  current_summary: null,
+                }),
+              );
+            }
+          }
+          const thread = demoThread(threadId);
+          return thread ? c.json(threadDetailSchema.parse(thread)) : c.json(notFound, 404);
+        },
+      )
       .get(
         '/threads/:threadId/branches/:branch',
         zValidator('param', z.object({ threadId: uuidSchema, branch: branchIdSchema })),
@@ -247,6 +339,12 @@ export function createV1Routes() {
 
       // --- Event pipeline (WS-E) --------------------------------------------
       .route('/events', createEventsRoutes())
+
+      // --- Ingestion, source model, and search (WS-F) ------------------------
+      // POST /stories, GET /search, POST /takedowns, claim/evidence/source
+      // reads — plus the steward admin surface.
+      .route('/', createStoriesRoutes())
+      .route('/ingestion/admin', createIngestionAdminRoutes())
 
       // --- Settings sync (SPEC §23.2 /feed/preferences) ---------------------
       .get('/settings', (c) => {

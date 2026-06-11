@@ -81,8 +81,12 @@ export const evidenceAddedEventSchema = z
     thread_id: uuidSchema,
     user_id: uuidSchema,
     evidence_type: evidenceTypeSchema,
-    /** In-app source id backing the evidence (never an arbitrary URL). */
-    source_id: uuidSchema,
+    /**
+     * In-app source id backing the evidence (never an arbitrary URL); null
+     * for user-experience evidence with no web source (§22.1 EvidenceCard —
+     * WS-F.2.5a is the first real producer and surfaces both shapes).
+     */
+    source_id: uuidSchema.nullable(),
     /** The contribution the card was attached to, when applicable. */
     contribution_id: uuidSchema.nullable(),
     privacy_classification: z.literal('public'),

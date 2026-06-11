@@ -42,20 +42,30 @@ pay-to-rank — is enforced by the type system, runtime guards, and CI gates.
 | Node.js | `22` (pinned in [`.nvmrc`](.nvmrc)) |
 | pnpm | `9.15.4` via Corepack (pinned in `package.json`) |
 | Language | TypeScript `6.0.3`, strict everywhere (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) |
-| Milestone | WS-0 – WS-E complete; **WS-F (ingestion and search) is next** |
+| Milestone | WS-0 – WS-F complete; **WS-G (forum and conversation) is next** |
 | Test gate | 80% cross-workspace coverage (lines, functions, branches, statements) |
 | Bundle budgets | JS < 200 KB gz, CSS < 50 KB gz (CI-enforced) |
 
-Six of seventeen workstreams are shipped: the repository foundation (WS-0),
-the doctrine and policy corpus (WS-A), the design system (WS-B), the PWA
-client (WS-C), identity and privacy (WS-D), and the event pipeline + PWAtt
-scoring (WS-E). PWAtt runs in shadow mode: scores are computed, logged to
+Seven of seventeen workstreams are shipped: the repository foundation
+(WS-0), the doctrine and policy corpus (WS-A), the design system (WS-B), the
+PWA client (WS-C), identity and privacy (WS-D), the event pipeline + PWAtt
+scoring (WS-E), and ingestion, the source model, and search (WS-F). Stories
+can be submitted (all six §14.1 types) through safety pre-checks and
+three-level duplicate detection (canonical URL, MinHash/LSH near-duplicates,
+source-aware syndication), every story gets a thread shell and a §14.4
+lifecycle, sources get no-truth-score profiles, and content is searchable
+via Postgres FTS with pgvector embeddings behind it for the coming
+MERI/SCOI work. PWAtt runs in shadow mode: scores are computed, logged to
 invariant outputs, and shown privately to each user in their own Signal
 Ledger, while front-page ranking remains freshness-only — a CI-gated
-equivalence test proves the scores have no distribution effect. WS-F – WS-P
-(search, forum, invariant services, ranking, trust & safety, AI governance,
-Knomosis wallets, treasury, compliance, security/reliability, launch) land
-per the plan.
+equivalence test proves the scores have no distribution effect. WS-G – WS-P
+(forum, invariant services, ranking, trust & safety, AI governance, Knomosis
+wallets, treasury, compliance, security/reliability, launch) land per the
+plan.
+
+> Local Postgres now runs the `pgvector/pgvector:pg16` image (a drop-in
+> pgvector-enabled build of Postgres 16): the WS-F migration chain installs
+> the `vector` extension. `docker compose up -d` provides it.
 
 ## Quick start
 
