@@ -48,9 +48,9 @@ import {
   InvariantType,
   loopHolonomy,
   MFCI_AXES,
+  nextRiskState,
   phiScore,
   reebGraph,
-  riskStateForScore,
   scoiEnergy,
   suppressBelowK,
   type TierDeclaration,
@@ -75,7 +75,7 @@ import {
   sessionEventsFromSequence,
 } from './data.js';
 import { HealthRecorder } from './runner.js';
-import type { SessionTopicSequenceStore } from './stores.js';
+import type { MfciMarginsStore, MfciRiskStateStore, SessionTopicSequenceStore } from './stores.js';
 
 /** The fixed target id for global-feed-scoped invariants. */
 export const GLOBAL_FEED_TARGET_ID = '00000000-0000-4000-8000-0000000feed1';
@@ -86,6 +86,9 @@ export interface InvariantDeps {
   ingestion: IngestionServices;
   forum: ForumServices;
   sessions: SessionTopicSequenceStore;
+  /** Getters so the production boot's Drizzle swap reaches the services. */
+  mfciMargins: () => MfciMarginsStore;
+  mfciRiskStates: () => MfciRiskStateStore;
   config: () => InvariantsRuntimeConfig;
   now: () => number;
 }
@@ -287,19 +290,41 @@ export class MfciService extends BaseInvariantService {
       },
     );
     const marginsRef = `margins:${window.start}:${seedFromName(JSON.stringify(margins)).toString(16)}`;
+    // MFCI-4: the ref RESOLVES — persist the conditioning record so every
+    // automated decision can show exactly which margins it conditioned on.
+    await this.deps.mfciMargins().put({
+      marginsRef,
+      windowStart: window.start,
+      margins,
+      createdAt: new Date(this.deps.now()).toISOString(),
+    });
     const byTarget = new Map(result.perTarget.map((entry) => [entry.targetLabel, entry]));
     const reasonCodes = result.converged ? [] : ['SAMPLER_NONCONVERGENCE'];
+    const riskStates = this.deps.mfciRiskStates();
     const out: InvariantComputation[] = [];
     for (const target of targets) {
       const entry = byTarget.get(target.targetId);
       if (!entry) continue;
-      const riskState = riskStateForScore(entry.mfci, config.mfciRiskThresholds);
+      // Risk-state CONTINUITY (WS-H.3.4a): upward follows the score;
+      // downward requires clearing evidence — only a CONVERGED exact fiber
+      // test counts (an unconverged sampler never melts a freeze).
+      const previous = (await riskStates.get(target.targetId))?.state ?? 'normal';
+      const transition = nextRiskState(previous, entry.mfci, config.mfciRiskThresholds, {
+        fiberTestCleared: result.converged,
+      });
+      await riskStates.set({
+        targetId: target.targetId,
+        state: transition.to,
+        score: entry.mfci,
+        reason: transition.reason,
+        updatedAt: new Date(this.deps.now()).toISOString(),
+      });
       const facts = {
         statistic: result.statistic,
         mfci: entry.mfci,
         pHat: entry.pHat,
         sampleCount: result.sampleCount,
-        riskState,
+        riskState: transition.to,
         conditionedMargins: margins.axes,
         targetCount: 1,
       };
@@ -313,7 +338,7 @@ export class MfciService extends BaseInvariantService {
             statistic: result.statistic,
             sample_count: result.sampleCount,
             fixed_margins_ref: marginsRef,
-            risk_state: riskState,
+            risk_state: transition.to,
           },
           result.converged ? 0.9 : 0.4,
           1,

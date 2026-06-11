@@ -229,6 +229,81 @@ describe('MFCI service (WS-H.3)', () => {
     expect(ref).toMatch(/^margins:.+:[0-9a-f]+$/);
     expect(quiet?.score_vector['fixed_margins_ref']).toBe(ref);
     expect(hot?.score_vector['risk_state']).toBeDefined();
+    // MFCI-4: the ref RESOLVES to the persisted conditioning record.
+    const persisted = await fixture.invariants.mfciMargins.get(ref as string);
+    expect(persisted?.windowStart).toBe(window.start);
+    expect(persisted?.margins.axes).toEqual([
+      'user_group',
+      'topic',
+      'time_bucket',
+      'action_type',
+      'target',
+    ]);
+    expect(persisted?.margins.total).toBe(13);
+  });
+
+  it('risk states rise on a same-group burst and clear only via a converged fiber test', async () => {
+    const fixture = freshWsHServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const { storyId: hot } = await seedStory(fixture, { topicIds: ['water'] });
+    const others: string[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      others.push((await seedStory(fixture, { topicIds: ['misc'] })).storyId);
+    }
+    const nowMs = Date.now();
+    const windowA = hourWindow(nowMs - 3_600_000);
+    const windowB = hourWindow(nowMs);
+    const row = (storyId: string, ts: number, owned: boolean) => ({
+      eventId: randomUUID(),
+      eventType: 'contribution.created',
+      topic: 'contribution.created',
+      timestamp: new Date(ts).toISOString(),
+      privacyClassification: 'public' as const,
+      retentionTier: 'public_contribution' as const,
+      payload: { story_id: storyId },
+      ownerUserId: owned ? userId : null,
+      purgeAfter: null,
+    });
+    // Window A: every burst action from ONE account-age group (coordination
+    // along the group axis), against a scattered anonymous background.
+    await fixture.events.eventStore.insertMany([
+      ...Array.from({ length: 12 }, (_, i) =>
+        row(hot, Date.parse(windowA.start) + 60_000 + i * 120_000, true),
+      ),
+      ...Array.from({ length: 6 }, (_, i) =>
+        row(others[i] ?? '', Date.parse(windowA.start) + 90_000 + i * 480_000, false),
+      ),
+    ]);
+    const [outA] = await fixture.invariants.mfci.computeBatch(
+      [{ targetType: 'story', targetId: hot }],
+      windowA,
+    );
+    const afterBurst = await fixture.invariants.mfciRiskStates.get(hot);
+    // Upward follows the score immediately — convergence evidence is NOT
+    // required to raise (the burst table mixes slowly by nature).
+    expect(outA?.score_vector['mfci']).toBeGreaterThan(3);
+    expect(afterBurst?.state).not.toBe('normal');
+    expect(afterBurst?.reason).toBe('score');
+    expect(outA?.score_vector['risk_state']).toBe(afterBurst?.state);
+
+    // Window B: organic scattered activity (one touch on the target). The
+    // exact fiber test converges and scores the target at the null —
+    // clearing evidence, so the held state releases downward.
+    await fixture.events.eventStore.insertMany([
+      row(hot, Date.parse(windowB.start) + 60_000, true),
+      ...Array.from({ length: 6 }, (_, i) =>
+        row(others[i] ?? '', Date.parse(windowB.start) + 120_000 + i * 480_000, i % 2 === 0),
+      ),
+    ]);
+    const [outB] = await fixture.invariants.mfci.computeBatch(
+      [{ targetType: 'story', targetId: hot }],
+      windowB,
+    );
+    expect(outB?.reason_codes).toEqual([]); // converged
+    const cleared = await fixture.invariants.mfciRiskStates.get(hot);
+    expect(cleared?.state).toBe('normal');
+    expect(cleared?.reason).toBe('fiber_cleared');
+    expect(outB?.score_vector['risk_state']).toBe('normal');
   });
 });
 

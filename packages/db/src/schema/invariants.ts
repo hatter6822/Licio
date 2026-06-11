@@ -125,7 +125,55 @@ export const mfciCases = pgTable(
   ],
 );
 
+/**
+ * Persisted conditioning margins (WS-H.3.2b / MFCI-4): every MFCI output's
+ * `fixed_margins_ref` resolves HERE, so an analyst can always see exactly
+ * which margins an automated coordination decision conditioned on. One
+ * content-addressed row per (window, table) — idempotent across recomputes.
+ */
+export const mfciMargins = pgTable(
+  'mfci_margins',
+  {
+    marginsRef: text('margins_ref').primaryKey(),
+    windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
+    /** { axes: string[], margins: number[][], total: number } */
+    margins: jsonb('margins').$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('mfci_margins_window_idx').on(t.windowStart),
+    check('mfci_margins_ref_len', sql`char_length(${t.marginsRef}) between 1 and 256`),
+  ],
+);
+
+/**
+ * Per-target MFCI risk state (WS-H.3.4a): upward transitions follow the
+ * score immediately; DOWNWARD transitions are held until a converged fiber
+ * test clears or an analyst overrides — a freeze never silently melts.
+ * `reason` records why the state last moved (or why it was held).
+ */
+export const mfciRiskStates = pgTable(
+  'mfci_risk_states',
+  {
+    targetId: uuid('target_id').primaryKey(),
+    state: text('state').notNull(),
+    score: doublePrecision('score').notNull(),
+    reason: text('reason').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    check('mfci_risk_states_state', sql`${t.state} in ('normal', 'elevated', 'high', 'severe')`),
+    check(
+      'mfci_risk_states_reason',
+      sql`${t.reason} in ('score', 'fiber_cleared', 'analyst_override', 'held_pending_review')`,
+    ),
+    check('mfci_risk_states_score', sql`${t.score} >= 0`),
+  ],
+);
+
 export type InvariantPromotionRow = typeof invariantPromotions.$inferSelect;
 export type InvariantCalibrationRow = typeof invariantCalibrations.$inferSelect;
 export type InvariantRunMetadataRow = typeof invariantRunMetadata.$inferSelect;
 export type MfciCaseRow = typeof mfciCases.$inferSelect;
+export type MfciMarginsRow = typeof mfciMargins.$inferSelect;
+export type MfciRiskStateRow = typeof mfciRiskStates.$inferSelect;

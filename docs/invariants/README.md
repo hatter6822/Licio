@@ -36,7 +36,7 @@ Two constraints govern everything here (SPEC §30.4, the M2 gate):
 | Platform contracts | `packages/invariants/src/platform/` | `InvariantService` interface, promotion checklist logic, envelope builders, synthetic datasets, the regression harness + pinned baselines |
 | Services | `apps/api/src/invariants/` | Stores (+ Drizzle adapters), fail-closed config, the eleven service implementations, data assembly, the fallback runner, the promotion service, the lease-guarded scheduler, router consumers |
 | Routes | `apps/api/src/routes/invariants-admin.ts`, `invariants-public.ts` | Steward/analyst surface; public SCOI/MERI reads |
-| Tables | `packages/db/src/schema/{events,invariants}.ts` | `invariant_outputs` (envelope + CHECKs), `invariant_promotions`, `invariant_calibrations`, `invariant_run_metadata`, `mfci_cases` |
+| Tables | `packages/db/src/schema/{events,invariants}.ts` | `invariant_outputs` (envelope + CHECKs), `invariant_promotions`, `invariant_calibrations`, `invariant_run_metadata`, `mfci_cases`, `mfci_margins` (MFCI-4 conditioning records), `mfci_risk_states` (per-target continuity) |
 | Client | `apps/web/src/components/story/*`, `components/composer/ComposerAffordances/ContextWarning.tsx`, `components/wellbeing/NarrowLoopPrompt`, `signals/topic-loops.ts` | Exposure labels, the independent-sources drawer, interpretation differences, the composer context warning, PHI v0 prompts and controls |
 
 ## The numeric kernels (`packages/invariants/src/math/`)
@@ -129,8 +129,20 @@ calibrations flag `NULL_CALIBRATION_STALE` and halve confidence; the
 synchrony statistic counts **cross-actor** clustering only. Anomalies open
 identifier-free cases in `mfci_cases` (analyst + appeal rationales,
 MFCI-4 margins reference); analyst **clearing lifts the safety freeze**
-(WS-H.3.3d) through the same audited WS-E path; downward risk-state
-transitions are held without clearing evidence or an analyst override.
+(WS-H.3.3d) through the same audited WS-E path.
+
+Risk states have **durable per-target continuity** (`mfci_risk_states`):
+the cheap path and the batch tier both move states through the one
+`nextRiskState` transition function — upward follows the score
+immediately (no convergence evidence required), downward is HELD unless a
+CONVERGED exact fiber test scored the target at the null
+(`fiber_cleared`) or an analyst cleared the case (`analyst_override`,
+applied by the resolve endpoint) — a freeze never silently melts, and an
+unconverged sampler can never melt one. The conditioning itself is
+persisted (`mfci_margins`): every output's `fixed_margins_ref` is a
+content-addressed reference that dereferences via
+`GET /v1/invariants/admin/mfci/margins/:ref` to the exact axes, 1-way
+margins, and table total the decision conditioned on (MFCI-4).
 
 ### GWEI — Gromov–Wasserstein Experience Isometry (SPEC §9)
 

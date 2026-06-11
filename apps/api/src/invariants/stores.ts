@@ -215,6 +215,79 @@ export class InMemoryMfciCaseStore implements MfciCaseStore {
 }
 
 // ---------------------------------------------------------------------------
+// MFCI conditioning margins (WS-H.3.2b / MFCI-4)
+// ---------------------------------------------------------------------------
+
+export interface MfciMarginsRecord {
+  /** Content-addressed reference — what every output's fixed_margins_ref names. */
+  marginsRef: string;
+  windowStart: string;
+  /** describeMargins() shape: axes, per-axis 1-way margins, table total. */
+  margins: { axes: string[]; margins: number[][]; total: number };
+  createdAt: string;
+}
+
+export interface MfciMarginsStore {
+  /** Idempotent by ref (content-addressed: same table ⇒ same record). */
+  put(record: MfciMarginsRecord): Promise<void>;
+  get(marginsRef: string): Promise<MfciMarginsRecord | null>;
+  clear(): Promise<void>;
+}
+
+export class InMemoryMfciMarginsStore implements MfciMarginsStore {
+  readonly #rows = new Map<string, MfciMarginsRecord>();
+
+  async put(record: MfciMarginsRecord): Promise<void> {
+    this.#rows.set(record.marginsRef, structuredClone(record));
+  }
+
+  async get(marginsRef: string): Promise<MfciMarginsRecord | null> {
+    const row = this.#rows.get(marginsRef);
+    return row ? structuredClone(row) : null;
+  }
+
+  async clear(): Promise<void> {
+    this.#rows.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// MFCI per-target risk states (WS-H.3.4a continuity)
+// ---------------------------------------------------------------------------
+
+export interface MfciRiskStateRecord {
+  targetId: string;
+  state: 'normal' | 'elevated' | 'high' | 'severe';
+  score: number;
+  /** Why the state last moved (or was held): the RiskTransition reason. */
+  reason: string;
+  updatedAt: string;
+}
+
+export interface MfciRiskStateStore {
+  get(targetId: string): Promise<MfciRiskStateRecord | null>;
+  set(record: MfciRiskStateRecord): Promise<void>;
+  clear(): Promise<void>;
+}
+
+export class InMemoryMfciRiskStateStore implements MfciRiskStateStore {
+  readonly #rows = new Map<string, MfciRiskStateRecord>();
+
+  async get(targetId: string): Promise<MfciRiskStateRecord | null> {
+    const row = this.#rows.get(targetId);
+    return row ? { ...row } : null;
+  }
+
+  async set(record: MfciRiskStateRecord): Promise<void> {
+    this.#rows.set(record.targetId, { ...record });
+  }
+
+  async clear(): Promise<void> {
+    this.#rows.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Session topic sequences (WS-H.6.1a) — ephemeral, privacy-preserving
 // ---------------------------------------------------------------------------
 

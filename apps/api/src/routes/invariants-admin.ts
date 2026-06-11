@@ -27,7 +27,7 @@
 //     (WS-H.1.2d-2).
 
 import { zValidator } from '@hono/zod-validator';
-import { INVARIANT_TYPE_NAMES, runRegressionSuite } from '@licio/invariants';
+import { INVARIANT_TYPE_NAMES, nextRiskState, runRegressionSuite } from '@licio/invariants';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { type EventPipelineServices, getEventPipelineServices } from '../events/services.js';
@@ -162,7 +162,9 @@ export function createInvariantsAdminRoutes(
         new Date(invariants.now()).toISOString(),
       );
       if (!resolved) return c.json(deny('not_found', 'No open case with that id'), 404);
-      // Fiber-test/analyst clearing lifts the safety freeze (WS-H.3.3d).
+      // Fiber-test/analyst clearing lifts the safety freeze (WS-H.3.3d)
+      // AND releases the held risk state through the analyst-override
+      // evidence path (WS-H.3.4a: downward needs clearing or an override).
       if (action === 'cleared') {
         await resolveItemSafetyState(
           resolveEvents(),
@@ -171,6 +173,17 @@ export function createInvariantsAdminRoutes(
           'clear',
           `steward:${auth.userId}`,
         );
+        const current = (await invariants.mfciRiskStates.get(resolved.targetId))?.state ?? 'normal';
+        const transition = nextRiskState(current, 0, invariants.config().mfciRiskThresholds, {
+          analystOverride: true,
+        });
+        await invariants.mfciRiskStates.set({
+          targetId: resolved.targetId,
+          state: transition.to,
+          score: 0,
+          reason: transition.reason,
+          updatedAt: new Date(invariants.now()).toISOString(),
+        });
       }
       await identity.audit.append({
         actorUserId: auth.userId,
@@ -179,6 +192,14 @@ export function createInvariantsAdminRoutes(
         context: { action, target_id: resolved.targetId, risk_state: resolved.riskState },
       });
       return c.json({ case: resolved });
+    })
+
+    .get('/mfci/margins/:marginsRef', async (c) => {
+      // MFCI-4: dereference a fixed_margins_ref to the persisted
+      // conditioning record (axes, 1-way margins, table total).
+      const record = await resolveInvariants().mfciMargins.get(c.req.param('marginsRef'));
+      if (!record) return c.json(deny('not_found', 'No margins record with that ref'), 404);
+      return c.json({ margins: record });
     })
 
     .get('/gwei/dashboard', async (c) => {

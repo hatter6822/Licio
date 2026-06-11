@@ -167,6 +167,64 @@ describe('MERI partition matroid (WS-H.2.2b)', () => {
     ]);
     expect(result.kind).toBe('failure');
   });
+
+  it('url-group members inherit an overlapping near-duplicate class (merge rule)', () => {
+    // A and B share a URL; only A carries the near-dup group (B's signature
+    // is pending). C is a near-duplicate of A from a different URL. All
+    // three are one redundancy chain — the pair {A, C} must rank 1, and the
+    // url class must not shadow A's near-duplicate membership.
+    const matroid = buildOrThrow([
+      { id: 'a', urlGroupId: 'shared', nearDuplicateGroupId: 'nd1' },
+      { id: 'b', urlGroupId: 'shared' },
+      { id: 'c', urlGroupId: 'url-c', nearDuplicateGroupId: 'nd1' },
+      exposure('d'),
+    ]);
+    expect(matroid.classOf['a']).toBe('near_duplicate:nd1');
+    expect(matroid.classOf['b']).toBe('near_duplicate:nd1'); // inherited
+    expect(matroid.classOf['c']).toBe('near_duplicate:nd1');
+    expect(matroidRank(matroid, ['a', 'c'])).toBe(1);
+    expect(matroidRank(matroid, ['a', 'b', 'c'])).toBe(1);
+    expect(matroidRank(matroid, ['a', 'b', 'c', 'd'])).toBe(2);
+    expect(greedyBasis(matroid, ['a', 'b', 'c', 'd'])).toHaveLength(2);
+  });
+
+  it('shared url groups WITHOUT near-dup overlap keep their own class', () => {
+    const matroid = buildOrThrow([
+      { id: 'a', urlGroupId: 'shared' },
+      { id: 'b', urlGroupId: 'shared' },
+      { id: 'c', urlGroupId: 'url-c', nearDuplicateGroupId: 'nd1' },
+    ]);
+    expect(matroid.classOf['a']).toBe('url_duplicate:shared');
+    expect(matroid.classOf['b']).toBe('url_duplicate:shared');
+    expect(matroid.classOf['c']).toBe('near_duplicate:nd1');
+    expect(matroidRank(matroid, ['a', 'b'])).toBe(1);
+  });
+
+  it('refuses the overlap under a near-duplicate bound > 1 (nested constraint)', () => {
+    const overlapping: MeriExposure[] = [
+      { id: 'a', urlGroupId: 'shared', nearDuplicateGroupId: 'nd1' },
+      { id: 'b', urlGroupId: 'shared' },
+      { id: 'c', urlGroupId: 'url-c', nearDuplicateGroupId: 'nd1' },
+    ];
+    const widened = buildPartitionMatroid(overlapping, {
+      nearDuplicate: 2,
+      sourceLineage: 2,
+      evidenceLineage: 2,
+    });
+    expect(widened.kind).toBe('failure');
+    if (widened.kind === 'failure') {
+      expect(widened.problems.join(' ')).toMatch(/nested constraint/);
+    }
+    // The same widened bound WITHOUT an overlap stays a matroid.
+    const clean = buildPartitionMatroid(
+      [
+        { id: 'a', urlGroupId: 'url-a', nearDuplicateGroupId: 'nd1' },
+        { id: 'b', urlGroupId: 'url-b', nearDuplicateGroupId: 'nd1' },
+      ],
+      { nearDuplicate: 2, sourceLineage: 2, evidenceLineage: 2 },
+    );
+    expect(clean.kind).toBe('matroid');
+  });
 });
 
 describe('MERI §7.5 marginal exposure gain (WS-H.2.1a/WS-H.2.2c)', () => {

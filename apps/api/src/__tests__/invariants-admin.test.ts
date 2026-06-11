@@ -236,6 +236,15 @@ describe('MFCI analyst queue (WS-H.3.4b) + freeze clearing (WS-H.3.3d)', () => {
     expect(dashboard.status).toBe(200);
     expect(((await dashboard.json()) as { open_cases: unknown[] }).open_cases).toHaveLength(1);
 
+    // The held risk state from the detection that opened the case.
+    await fixture.invariants.mfciRiskStates.set({
+      targetId: storyId,
+      state: 'high',
+      score: 6,
+      reason: 'score',
+      updatedAt: new Date().toISOString(),
+    });
+
     const resolved = await adminRequest(fixture, steward.cookie, `/mfci/cases/${caseId}/resolve`, {
       method: 'POST',
       body: JSON.stringify({ action: 'cleared' }),
@@ -246,12 +255,42 @@ describe('MFCI analyst queue (WS-H.3.4b) + freeze clearing (WS-H.3.3d)', () => {
     const state = await fixture.events.safetyStore.get(storyId);
     expect(state?.safetyState).toBe('normal');
     expect(state?.updatedBy).toBe(`steward:${steward.userId}`);
+    // Analyst clearing is the override evidence that releases the HELD
+    // risk state downward (WS-H.3.4a).
+    const risk = await fixture.invariants.mfciRiskStates.get(storyId);
+    expect(risk?.state).toBe('normal');
+    expect(risk?.reason).toBe('analyst_override');
     // Re-resolving 404s (single-shot lifecycle).
     const again = await adminRequest(fixture, steward.cookie, `/mfci/cases/${caseId}/resolve`, {
       method: 'POST',
       body: JSON.stringify({ action: 'confirmed' }),
     });
     expect(again.status).toBe(404);
+  });
+
+  it('a fixed_margins_ref dereferences to the persisted conditioning (MFCI-4)', async () => {
+    const fixture = freshWsHServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    await fixture.invariants.mfciMargins.put({
+      marginsRef: 'margins:2026-06-11T00:00:00.000Z:abc123',
+      windowStart: '2026-06-11T00:00:00.000Z',
+      margins: {
+        axes: ['user_group', 'topic', 'time_bucket', 'action_type', 'target'],
+        margins: [[5, 3]],
+        total: 8,
+      },
+      createdAt: new Date().toISOString(),
+    });
+    const found = await adminRequest(
+      fixture,
+      steward.cookie,
+      '/mfci/margins/margins:2026-06-11T00:00:00.000Z:abc123',
+    );
+    expect(found.status).toBe(200);
+    const body = (await found.json()) as { margins: { margins: { total: number } } };
+    expect(body.margins.margins.total).toBe(8);
+    const missing = await adminRequest(fixture, steward.cookie, '/mfci/margins/margins:absent');
+    expect(missing.status).toBe(404);
   });
 });
 

@@ -26,6 +26,7 @@ import {
   buildNullCalibration,
   type MfciStatistic,
   type NullCalibration,
+  nextRiskState,
   riskStateForScore,
   targetConcentrationScore,
 } from '@licio/invariants';
@@ -57,10 +58,14 @@ import {
   type CalibrationStore,
   InMemoryCalibrationStore,
   InMemoryMfciCaseStore,
+  InMemoryMfciMarginsStore,
+  InMemoryMfciRiskStateStore,
   InMemoryPromotionStore,
   InMemoryRunMetadataStore,
   InMemorySessionTopicSequenceStore,
   type MfciCaseStore,
+  type MfciMarginsStore,
+  type MfciRiskStateStore,
   type PromotionStore,
   type RunMetadataStore,
   type SessionTopicSequenceStore,
@@ -71,6 +76,8 @@ export interface InvariantPlatformServices {
   calibrations: CalibrationStore;
   runMetadata: RunMetadataStore;
   mfciCases: MfciCaseStore;
+  mfciMargins: MfciMarginsStore;
+  mfciRiskStates: MfciRiskStateStore;
   sessions: SessionTopicSequenceStore;
   promotionService: PromotionService;
   meri: MeriService;
@@ -128,6 +135,8 @@ export function createInMemoryInvariantServices(
     calibrations: new InMemoryCalibrationStore(),
     runMetadata: new InMemoryRunMetadataStore(),
     mfciCases: new InMemoryMfciCaseStore(),
+    mfciMargins: new InMemoryMfciMarginsStore(),
+    mfciRiskStates: new InMemoryMfciRiskStateStore(),
     sessions,
     promotionService: createPromotionService(
       promotions,
@@ -180,6 +189,10 @@ export function createInMemoryInvariantServices(
     ingestion,
     forum,
     sessions,
+    // Getters read THROUGH the container so the production boot's Drizzle
+    // swap reaches the services constructed here.
+    mfciMargins: () => services.mfciMargins,
+    mfciRiskStates: () => services.mfciRiskStates,
     config: services.config,
     now,
   };
@@ -324,10 +337,24 @@ export function registerInvariantConsumers(
       resolvedAt: null,
       resolvedBy: null,
     });
+    // The sub-minute path RAISES the per-target risk state through the same
+    // transition function the batch tier uses (WS-H.3.4a continuity);
+    // upward moves follow the score, and only the exact fiber test or an
+    // analyst can later move it back down.
+    const currentState = (await invariants.mfciRiskStates.get(itemId))?.state ?? 'normal';
+    const transition = nextRiskState(currentState, mfciScore, config.mfciRiskThresholds);
+    await invariants.mfciRiskStates.set({
+      targetId: itemId,
+      state: transition.to,
+      score: mfciScore,
+      reason: transition.reason,
+      updatedAt: new Date(nowMs).toISOString(),
+    });
     invariants.log('invariants.mfci.case_opened', {
       item_id: itemId,
       score: score.score,
       reason_codes: score.reasonCodes,
+      risk_state: transition.to,
     });
   };
 

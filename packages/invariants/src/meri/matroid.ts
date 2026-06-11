@@ -20,7 +20,17 @@
 //
 //   I = { S : |S ∩ c| ≤ b_c for every class c }
 //
-// is a partition matroid. Its rank function is the closed form
+// is a partition matroid. When a shared exact-URL group OVERLAPS a
+// near-duplicate group (some member carries the group id), the two are
+// MERGED into the near-duplicate class and every URL-group member inherits
+// the membership — an exact duplicate of a near-duplicate is itself a
+// near-duplicate, and without the merge the URL class would shadow the
+// relation and let the pair {url-member, outside-nd-member} rank 2. The
+// merge is exact only while the bounds coincide (both 1); a configured
+// near-duplicate bound > 1 over an overlap is a NESTED (laminar)
+// constraint a flat partition cannot express, so it is refused and the
+// caller takes the flagged similarity fallback rather than a silently
+// wrong matroid. Its rank function is the closed form
 //
 //   r(S) = Σ_c min(|S ∩ c|, b_c)
 //
@@ -99,7 +109,19 @@ function classFor(
   exposure: MeriExposure,
   bounds: PartitionBounds,
   sharedUrlGroups: ReadonlySet<string>,
+  inheritedNearDup: ReadonlyMap<string, string>,
 ): { classId: string; family: PartitionClass['family']; bound: number } {
+  // URL-group members inherit an overlapping near-duplicate membership
+  // (merge rule, module header) — including members WITHOUT their own
+  // near-duplicate group id, so the class captures outside members too.
+  const inherited = inheritedNearDup.get(exposure.urlGroupId);
+  if (inherited) {
+    return {
+      classId: `near_duplicate:${inherited}`,
+      family: 'near_duplicate',
+      bound: bounds.nearDuplicate,
+    };
+  }
   if (sharedUrlGroups.has(exposure.urlGroupId)) {
     return {
       classId: `url_duplicate:${exposure.urlGroupId}`,
@@ -169,16 +191,40 @@ export function buildPartitionMatroid(
       problems.push(`url group ${urlGroupId} spans ${nearDupGroups.size} near-duplicate classes`);
     }
   }
-  if (problems.length > 0) return { kind: 'failure', problems };
 
   const sharedUrlGroups = new Set(
     [...urlGroupMembers.entries()].filter(([, count]) => count > 1).map(([key]) => key),
   );
+  // Merge rule (module header): a shared url group overlapping exactly one
+  // near-duplicate group folds into it — every member inherits the
+  // membership. Exact only while both bounds are 1; a larger configured
+  // near-duplicate bound makes the overlap laminar, which a partition
+  // cannot express — refuse rather than mis-rank.
+  const inheritedNearDup = new Map<string, string>();
+  for (const [urlGroupId, nearDupGroups] of urlGroupNearDups) {
+    if (!sharedUrlGroups.has(urlGroupId) || nearDupGroups.size !== 1) continue;
+    const [nearDupGroupId] = nearDupGroups;
+    if (!nearDupGroupId) continue;
+    if (bounds.nearDuplicate > 1) {
+      problems.push(
+        `url group ${urlGroupId} overlaps near-duplicate group ${nearDupGroupId} with bound > 1 (nested constraint; not a partition)`,
+      );
+      continue;
+    }
+    inheritedNearDup.set(urlGroupId, nearDupGroupId);
+  }
+  if (problems.length > 0) return { kind: 'failure', problems };
+
   const classes = new Map<string, PartitionClass>();
   const classOf: Record<string, string> = {};
   const boundOf: Record<string, number> = {};
   for (const exposure of exposures) {
-    const { classId, family, bound } = classFor(exposure, bounds, sharedUrlGroups);
+    const { classId, family, bound } = classFor(
+      exposure,
+      bounds,
+      sharedUrlGroups,
+      inheritedNearDup,
+    );
     const existing = classes.get(classId);
     if (existing) {
       existing.memberIds.push(exposure.id);

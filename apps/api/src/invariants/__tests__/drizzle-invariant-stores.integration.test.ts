@@ -14,6 +14,8 @@ import { DrizzleInvariantOutputStore } from '../../events/drizzle-event-stores.j
 import {
   DrizzleCalibrationStore,
   DrizzleMfciCaseStore,
+  DrizzleMfciMarginsStore,
+  DrizzleMfciRiskStateStore,
   DrizzlePromotionStore,
   DrizzleRunMetadataStore,
 } from '../drizzle-invariant-stores.js';
@@ -155,6 +157,14 @@ describe.skipIf(!DB_URL)('WS-H Drizzle adapters (live Postgres)', () => {
     await store.insert(severe);
     const open = await store.listOpen(10);
     expect(open[0]?.riskState).toBe('severe'); // severity outranks recency
+    // Ordering happens IN SQL: an old severe case survives a limit smaller
+    // than the count of newer lower-severity cases.
+    for (let i = 0; i < 6; i += 1) {
+      await store.insert(mkCase('elevated', `2026-06-10T0${4 + (i % 5)}:0${i}:00.000Z`));
+    }
+    const tight = await store.listOpen(1);
+    expect(tight).toHaveLength(1);
+    expect(tight[0]?.riskState).toBe('severe');
     const resolved = await store.resolve(
       severe.caseId,
       'cleared',
@@ -169,6 +179,65 @@ describe.skipIf(!DB_URL)('WS-H Drizzle adapters (live Postgres)', () => {
     await expect(
       store.insert({ ...mkCase('high', new Date().toISOString()), pHat: 0 }),
     ).rejects.toThrow();
+    await store.clear();
+  });
+
+  it('mfci margins: content-addressed put is idempotent; the ref resolves (MFCI-4)', async () => {
+    const store = new DrizzleMfciMarginsStore(db);
+    await store.clear();
+    const record = {
+      marginsRef: `margins:2026-06-10T10:00:00.000Z:${randomUUID().slice(0, 8)}`,
+      windowStart: '2026-06-10T10:00:00.000Z',
+      margins: {
+        axes: ['user_group', 'topic', 'time_bucket', 'action_type', 'target'],
+        margins: [[3, 2]],
+        total: 5,
+      },
+      createdAt: '2026-06-10T11:00:00.000Z',
+    };
+    await store.put(record);
+    // A recompute of the same window writes the same content-addressed ref;
+    // the first record wins (no overwrite).
+    await store.put({ ...record, createdAt: '2026-06-10T12:00:00.000Z' });
+    const fetched = await store.get(record.marginsRef);
+    expect(fetched?.margins).toEqual(record.margins);
+    expect(fetched?.createdAt).toBe(record.createdAt);
+    expect(await store.get('margins:absent')).toBeNull();
+    await store.clear();
+  });
+
+  it('mfci risk states: keyed upsert round-trip + state/reason CHECKs', async () => {
+    const store = new DrizzleMfciRiskStateStore(db);
+    await store.clear();
+    const targetId = randomUUID();
+    await store.set({
+      targetId,
+      state: 'high',
+      score: 6,
+      reason: 'score',
+      updatedAt: '2026-06-10T10:00:00.000Z',
+    });
+    await store.set({
+      targetId,
+      state: 'high',
+      score: 1.2,
+      reason: 'held_pending_review',
+      updatedAt: '2026-06-10T11:00:00.000Z',
+    });
+    const row = await store.get(targetId);
+    expect(row?.state).toBe('high');
+    expect(row?.reason).toBe('held_pending_review');
+    expect(row?.score).toBe(1.2);
+    await expect(
+      store.set({
+        targetId,
+        state: 'frozen' as never,
+        score: 0,
+        reason: 'score',
+        updatedAt: new Date().toISOString(),
+      }),
+    ).rejects.toThrow();
+    expect(await store.get(randomUUID())).toBeNull();
     await store.clear();
   });
 

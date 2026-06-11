@@ -93,6 +93,8 @@ import {
 import {
   DrizzleCalibrationStore,
   DrizzleMfciCaseStore,
+  DrizzleMfciMarginsStore,
+  DrizzleMfciRiskStateStore,
   DrizzlePromotionStore,
   DrizzleRunMetadataStore,
 } from './invariants/drizzle-invariant-stores.js';
@@ -288,6 +290,8 @@ invariantServices.promotions = new DrizzlePromotionStore(db);
 invariantServices.calibrations = new DrizzleCalibrationStore(db);
 invariantServices.runMetadata = new DrizzleRunMetadataStore(db);
 invariantServices.mfciCases = new DrizzleMfciCaseStore(db);
+invariantServices.mfciMargins = new DrizzleMfciMarginsStore(db);
+invariantServices.mfciRiskStates = new DrizzleMfciRiskStateStore(db);
 await invariantServices.reloadConfig();
 setInvariantServices(invariantServices);
 // PHI session consumer + MFCI cheap-statistic intake + the WS-E hook
