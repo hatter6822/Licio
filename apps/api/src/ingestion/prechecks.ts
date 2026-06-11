@@ -12,7 +12,7 @@
 // unavailable provider HOLDS link stories for review (fail toward caution),
 // never silently allows.
 import { createHash } from 'node:crypto';
-import type { SlidingWindowStore } from '../events/ingest-limiter.js';
+import { type SlidingWindowStore, slidingWindowRetryAfterMs } from '../events/ingest-limiter.js';
 
 export interface SubmissionLimits {
   perHour: number;
@@ -46,28 +46,25 @@ export class SubmissionRateLimiter {
   ): Promise<SubmissionRateDecision> {
     const hourCount = await this.#store.hit(`sub:${accountRef}:h`, now, HOUR_MS);
     const dayCount = await this.#store.hit(`sub:${accountRef}:d`, now, DAY_MS);
-    const hourDenied = hourCount > limits.perHour;
-    const dayDenied = dayCount > limits.perDay;
-    if (!hourDenied && !dayDenied) return { allowed: true, retryAfterSec: 0 };
-    let retryAfterMs = 1_000;
-    if (hourDenied) {
-      const anchor = await this.#store.nthOldest(
-        `sub:${accountRef}:h`,
-        now,
-        HOUR_MS,
-        hourCount - limits.perHour,
-      );
-      retryAfterMs = Math.max(retryAfterMs, (anchor ?? now) + HOUR_MS - now);
+    const violated: Array<{ key: string; windowMs: number; count: number; limit: number }> = [];
+    if (hourCount > limits.perHour) {
+      violated.push({
+        key: `sub:${accountRef}:h`,
+        windowMs: HOUR_MS,
+        count: hourCount,
+        limit: limits.perHour,
+      });
     }
-    if (dayDenied) {
-      const anchor = await this.#store.nthOldest(
-        `sub:${accountRef}:d`,
-        now,
-        DAY_MS,
-        dayCount - limits.perDay,
-      );
-      retryAfterMs = Math.max(retryAfterMs, (anchor ?? now) + DAY_MS - now);
+    if (dayCount > limits.perDay) {
+      violated.push({
+        key: `sub:${accountRef}:d`,
+        windowMs: DAY_MS,
+        count: dayCount,
+        limit: limits.perDay,
+      });
     }
+    if (violated.length === 0) return { allowed: true, retryAfterSec: 0 };
+    const retryAfterMs = await slidingWindowRetryAfterMs(this.#store, now, violated);
     return { allowed: false, retryAfterSec: Math.ceil(retryAfterMs / 1_000) };
   }
 }

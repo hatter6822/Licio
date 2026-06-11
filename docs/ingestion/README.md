@@ -81,6 +81,13 @@ Extraction failure is non-blocking: the story stays readable, an
 (5/25/125 min) schedules the retry, and the attempt that succeeds emits
 `content.normalized`.
 
+An **evidence-card submission** additionally creates the `EvidenceCard` row in
+the same request (WS-F.2.5a), resolves a WEB citation URL to an in-app source
+(so the §14.3 evidence-type frequency populates; a non-web citation stays
+source-less), and emits `evidence.added` — stored durably, published detached
+— so the `ingestion-embeddings` consumer generates the card's vector
+(WS-F.3.2c) without blocking the 201.
+
 ## Mathematics
 
 ### URL canonicalization (WS-F.1.3a)
@@ -104,10 +111,15 @@ dropped.
 Character 5-shingles (casefolded, whitespace-collapsed) → 128 MinHash
 components over the fixed universal-hash family
 `hᵢ(x) = (aᵢ·x + bᵢ) mod p`, `p = 4 294 967 311` (smallest prime > 2³²),
-computed in BigInt (the product exceeds 2⁵³).  The family is generated from a
-pinned seed and frozen as `MINHASH_FAMILY_VERSION = 1` — signatures are
-persisted (`story_signatures`, bytea, big-endian uint32) and compared across
-machines, so the family may never silently change.
+evaluated in EXACT double arithmetic (`universalHashMod`): a 16-bit split of
+`x` keeps every intermediate product below 2⁵³ and therefore exact, so the hot
+per-shingle/per-hash loop needs no BigInt.  It is proven equivalent to a
+BigInt reference across the full uint32 range and pinned by a
+golden-signature regression test.  The family is generated from a pinned seed
+and frozen as `MINHASH_FAMILY_VERSION = 1` — signatures are persisted
+(`story_signatures`, bytea, big-endian uint32) and compared across machines,
+so neither the family nor the modmul may silently change (bump the version and
+re-signature instead).
 
 Estimator: component agreement fraction; `E[est] = J(A,B)`, standard error
 `√(J(1−J)/128) ≤ 0.0442` (tested against the exact-Jaccard oracle at 4.5σ
@@ -164,6 +176,32 @@ growth; a rebuild (`REINDEX CONCURRENTLY`) is only warranted after mass
 deletes (e.g. version cleanup), and similarity queries keep functioning
 throughout.
 
+**Measured operating point (WS-F.3.2e).**  The gated benchmark
+(`apps/api/src/__tests__/ingestion-performance.test.ts`, opt-in via
+`DATABASE_URL` + `RUN_PERF=1`) seeds a clustered corpus and measures recall@10
+(vs the exact seq-scan neighbours) and latency across `hnsw.ef_search`
+settings.  At N = 20 000 the forced-HNSW path records (representative; HNSW
+construction is not perfectly deterministic, so figures vary a few percent
+run to run):
+
+| `ef_search` | recall@10 | p99 latency |
+|---|---|---|
+| 10 | ≈ 0.89–0.92 | ≈ 5 ms |
+| 40 | ≈ 0.987 | ≈ 6 ms |
+| 100 | ≈ 0.990 | ≈ 6 ms |
+
+So **`ef_search = 40` is the operating point** — recall ≈ 0.987 at ~6 ms, with
+diminishing returns above it (the gated assertion is recall ≥ 0.9 at
+ef_search = 100).  The same run records exact-URL duplicate lookup p99 ≈ 5–11
+ms (target < 50 ms, WS-F.1.3b — the unique b-tree is O(log n), so the 1 M
+target is microseconds further) and the unfiltered similarity production
+query p99 ≈ 20–26 ms (target < 100 ms, WS-F.3.2d).  Note
+the production similarity query is filtered by `model_version`: below the
+HNSW crossover the planner answers EXACTLY (b-tree-on-version + sort, still
+fast); HNSW takes over as the corpus grows.  Full-scale (1 M) validation
+remains a WS-P load-harness concern, but the constants and the operating
+point are now measured, not assumed.
+
 Providers behind one interface (`EmbeddingProvider`):
 
 - `HttpEmbeddingProvider` — the production binding: a SELF-HOSTED embedding
@@ -187,16 +225,33 @@ it — a documented seam.
 
 **Model migration (WS-F.3.2f):** `startBackfill` → resumable, rate-limited
 `runBackfillStep` per scheduler tick (keyset cursor in the config store; new
-vectors written alongside the old version) → `validateBackfill` (mean
-top-k neighbor-set Jaccard overlap, the human-facing drift metric) → atomic
+vectors written alongside the old version) → `validateBackfill` → atomic
 cutover by flipping `ingestion.embeddingActiveVersion` → steward-triggered
 cleanup of the superseded version (refused for the ACTIVE version).
+`validateBackfill` reports TWO drift metrics so the human cutover decision
+sees membership AND order: `meanNeighborOverlap` (top-k neighbour-SET Jaccard)
+and `meanRankAgreement` (Rank-Biased Overlap of the top-k RANKINGS,
+top-weighted).  Set overlap alone scores reordered-but-same neighbours as
+zero drift; RBO catches a quality shift that keeps the same ids.
+
+**Embedding-similarity claim dedup (WS-F.1.2b, soft).**  Beyond exact
+normalized-text linking, a candidate claim is embedded and — via the general
+`EmbeddingStore.findSimilarToVector` primitive (an ANN query against an
+arbitrary vector, no stored anchor row; the same primitive WS-H MERI/SCOI
+will use) — LINKED to an existing claim above `ingestion.claimDedupSimilarity`
+(default 0.92) instead of being created.  With the lexical provider this
+catches reorderings/rephrasings the text hash misses; true semantic-paraphrase
+dedup needs the self-hosted model.  Cross-story by construction (a story's own
+claims are embedded only after its `content.normalized`), and best-effort (an
+embedding error degrades to no-link, never failing ingestion).
 
 Similarity helpers (WS-F.3.2d, `packages/db/src/similarity.ts`):
 `findSimilarStories` / `findSimilarClaims` (≥ threshold, hidden/retracted
 excluded), `findSimilarInterpretations` (pairwise similarity over supplied
 interpretation ids, LOW pairs first — SCOI divergence; the
-story→interpretation join arrives with WS-G.2's entity, documented seam),
+story→interpretation join arrives with WS-G.2's entity, so this helper is
+implemented and gated-tested but operates on an empty set in production until
+WS-G.2 lands),
 `findNearestEvidenceCards`.  All order by `<=>` so the HNSW index drives the
 scan (EXPLAIN-asserted in the gated tests), all bind parameters, and all
 exclude the query target and removed content.
@@ -234,9 +289,13 @@ absence is enforced three times (strict zod schemas reject the field names,
 a shared-schema test pattern-matches every key, and the db column-name test
 does the same).  Profiles are created idempotently on first ingestion
 (unique-index-resolved get-or-create; concurrent first submissions yield one
-row) and updated incrementally (topics, evidence-type counts).  Steward
-edits (WS-F.2.3a) run through `PATCH /v1/ingestion/admin/sources/:id` with
-one immutable audit record per edited field (before → after → reason).
+row) and updated incrementally: `typical_topics` from each ingested story's
+topics, and `evidence_type_frequency` from each web-cited evidence card's
+relationship type (an evidence-card submission whose citation resolves to a
+domain bumps that source's count — the mechanism that makes the §14.3
+frequency field actually populate).  Steward edits (WS-F.2.3a) run through
+`PATCH /v1/ingestion/admin/sources/:id` with one immutable audit record per
+edited field (before → after → reason).
 
 Syndication edges (WS-F.2.4) are canonicalized to `syndicates_to`
 (from = origin; a `syndicated_from` input swaps endpoints — enforced by a DB
@@ -290,6 +349,11 @@ consumer failures.  SCOI/evidence-gap triggers (`scoi_evidence_gap`,
   source restrictions tighten), writes an audit record, and best-effort
   notifies the submitter via the existing fail-closed Mailer.  Nothing
   auto-removes: the takedown path is itself a censorship-abuse vector.
+  `POST /v1/takedowns` is CSRF-EXEMPT (alongside telemetry/CSP-report):
+  an anonymous intake carries no session cookie, so there is no victim
+  session for CSRF to ride, and the Origin check would wrongly block a
+  legitimate embedded intake form on a rights holder's own site; the
+  endpoint's own 30/min global rate limit plus mandatory review bound abuse.
 - **HTML handling:** extracted documents are parsed (quote-aware scanner +
   JSON.parse for JSON-LD), never executed; script/style content never
   becomes text.
@@ -345,6 +409,13 @@ consumer failures.  SCOI/evidence-gap triggers (`scoi_evidence_gap`,
   share the live database.  The Drizzle adapters and pgvector helpers are
   excluded from unit coverage on the same precedent as every other
   production adapter.
+- **Performance benchmarks** (`ingestion-performance.test.ts`) are gated on
+  `DATABASE_URL` **and** `RUN_PERF=1` (opt-in — they seed tens of thousands
+  of rows and build an HNSW index, so they never run in CI or a normal gated
+  pass).  Run, e.g.:
+  `DATABASE_URL=… RUN_PERF=1 PERF_N=20000 pnpm --filter api test ingestion-performance`.
+  They establish the WS-F.1.3b / WS-F.3.2d latency targets and the WS-F.3.2e
+  recall-vs-latency operating point (table above).
 
 ## Closed residuals from earlier workstreams
 
@@ -352,11 +423,13 @@ consumer failures.  SCOI/evidence-gap triggers (`scoi_evidence_gap`,
   now emitted by their real producer, and the Signal Ledger's `storyTitle`
   seam resolves real story titles (write-through cache over the story store,
   demo fixtures as fallback).
-- **WS-D `exportContributions`**: the DSAR export now includes the user's
-  submitted stories (WS-G composes forum contributions into the same hook
-  when it lands; `anonymizeContributions` remains WS-G's — story rows carry
-  no scrubbable PII: the tombstoned user row is the anonymization and public
-  contributions persist per §22.4).
+- **WS-D `exportContributions`**: the DSAR export now includes ALL of the
+  user's submitted stories — the hook keyset-paginates `listBySubmitter` to
+  exhaustion (no truncation cap; the export must be COMPLETE, §19.3 / GDPR
+  Art. 15).  WS-G composes forum contributions into the same hook when it
+  lands; `anonymizeContributions` remains WS-G's — story rows carry no
+  scrubbable PII: the tombstoned user row is the anonymization and public
+  contributions persist per §22.4.
 
 ## Residuals (tracked for later workstreams)
 
@@ -381,6 +454,9 @@ consumer failures.  SCOI/evidence-gap triggers (`scoi_evidence_gap`,
   E2E for the submission flow needs the BFF-in-the-loop harness (WS-P, the
   WS-D precedent) — the CSRF token round-trip is integration-tested at the
   full-app level meanwhile.
-- **Performance benchmarks at 100K+ scale** (WS-F.1.3b/3.2d latency
-  targets): the query plans are EXPLAIN-asserted today; corpus-scale
-  benchmarks belong to the WS-P load harness.
+- **Full-scale (1 M) load validation**: the latency/recall benchmarks are
+  measured at N = 20 000 (operating-point table above); validating the same
+  constants at the 1 M-story / 100K-embedding target is a WS-P load-harness
+  concern.  Topic classification stays unmapped until the WS-K topic taxonomy
+  exists (the field accepts submitter-supplied topics meanwhile, the soft
+  WS-K.1.3a dependency).

@@ -249,15 +249,46 @@ export async function runBackfillStep(
 
 export interface BackfillValidation {
   sampled: number;
-  /** Mean Jaccard overlap of top-k neighbor SETS old vs new (drift metric). */
+  /** Mean Jaccard overlap of top-k neighbor SETS (membership drift). */
   meanNeighborOverlap: number;
+  /**
+   * Mean Rank-Biased Overlap of the top-k neighbor RANKINGS (ordering drift,
+   * top-weighted). Set overlap alone scores reordered-but-same neighbors as
+   * zero drift; RBO catches a quality shift that keeps the same ids. Both
+   * are reported so the human cutover decision sees membership AND order.
+   */
+  meanRankAgreement: number;
+}
+
+/**
+ * Rank-Biased Overlap (Webber et al. 2010), truncated at the supplied lists'
+ * depth and normalized to [0, 1]: identical rankings → 1, disjoint → 0,
+ * same-items-different-order → strictly between. `p` controls top-weighting
+ * (0.9 ⇒ the first few ranks dominate but the tail still contributes).
+ */
+export function rankBiasedOverlap(a: readonly string[], b: readonly string[], p = 0.9): number {
+  const depth = Math.max(a.length, b.length);
+  if (depth === 0) return 1;
+  let weighted = 0;
+  let weightTotal = 0;
+  for (let d = 1; d <= depth; d += 1) {
+    const prefixA = new Set(a.slice(0, d));
+    let intersection = 0;
+    for (const item of b.slice(0, d)) {
+      if (prefixA.has(item)) intersection += 1;
+    }
+    const weight = (1 - p) * p ** (d - 1);
+    weighted += weight * (intersection / d);
+    weightTotal += weight;
+  }
+  return weightTotal === 0 ? 1 : weighted / weightTotal;
 }
 
 /**
  * Dual-read validation (WS-F.3.2f): compare old- vs new-version neighbor
- * sets on a sample of targets and report the drift BEFORE cutover. Low
- * overlap is expected for a genuinely better model — the metric informs the
- * human decision, it does not gate automatically.
+ * sets AND rankings on a sample of targets and report the drift BEFORE
+ * cutover. Low overlap is expected for a genuinely better model — the
+ * metrics inform the human decision, they do not gate automatically.
  */
 export async function validateBackfill(
   store: EmbeddingStore,
@@ -267,21 +298,29 @@ export async function validateBackfill(
   toVersion: string,
   k: number,
 ): Promise<BackfillValidation> {
-  let total = 0;
+  let overlapTotal = 0;
+  let rankTotal = 0;
   let sampled = 0;
   for (const targetId of sampleTargetIds) {
     const oldNeighbors = await store.findSimilar(targetType, targetId, fromVersion, -1, k);
     const newNeighbors = await store.findSimilar(targetType, targetId, toVersion, -1, k);
     if (oldNeighbors.length === 0 && newNeighbors.length === 0) continue;
-    const oldSet = new Set(oldNeighbors.map((n) => n.targetId));
-    const newSet = new Set(newNeighbors.map((n) => n.targetId));
+    const oldRanking = oldNeighbors.map((n) => n.targetId);
+    const newRanking = newNeighbors.map((n) => n.targetId);
+    const oldSet = new Set(oldRanking);
+    const newSet = new Set(newRanking);
     let intersection = 0;
     for (const id of oldSet) {
       if (newSet.has(id)) intersection += 1;
     }
-    const union = new Set([...oldSet, ...newSet]).size;
-    total += union === 0 ? 1 : intersection / union;
+    const union = new Set([...oldRanking, ...newRanking]).size;
+    overlapTotal += union === 0 ? 1 : intersection / union;
+    rankTotal += rankBiasedOverlap(oldRanking, newRanking);
     sampled += 1;
   }
-  return { sampled, meanNeighborOverlap: sampled === 0 ? 1 : total / sampled };
+  return {
+    sampled,
+    meanNeighborOverlap: sampled === 0 ? 1 : overlapTotal / sampled,
+    meanRankAgreement: sampled === 0 ? 1 : rankTotal / sampled,
+  };
 }

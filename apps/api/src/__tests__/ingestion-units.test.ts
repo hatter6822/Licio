@@ -28,6 +28,7 @@ import {
   embedTarget,
   getBackfillProgress,
   HttpEmbeddingProvider,
+  rankBiasedOverlap,
   runBackfillStep,
   startBackfill,
   validateBackfill,
@@ -342,12 +343,30 @@ describe('re-embedding migration (WS-F.3.2f)', () => {
       3,
     );
     expect(validation.sampled).toBe(5);
+    // Identical math ⇒ identical neighbors AND identical order ⇒ both metrics 1.
     expect(validation.meanNeighborOverlap).toBeCloseTo(1, 6);
+    expect(validation.meanRankAgreement).toBeCloseTo(1, 6);
     // Cleanup removes the superseded version only.
     expect(await store.deleteVersion(v1.modelVersion, 1_000)).toBe(5);
     expect(await store.countByVersion(v2.modelVersion)).toBe(5);
     // Progress is queryable.
     expect((await getBackfillProgress(configStore))?.completed).toBe(true);
+  });
+
+  it('rankBiasedOverlap distinguishes order, not just membership (the C9 fix)', () => {
+    expect(rankBiasedOverlap(['a', 'b', 'c'], ['a', 'b', 'c'])).toBeCloseTo(1, 9);
+    expect(rankBiasedOverlap(['a', 'b', 'c'], ['x', 'y', 'z'])).toBeCloseTo(0, 9);
+    // SAME items, reversed order: set overlap = 1 but RBO is strictly < 1 —
+    // exactly the ordering drift the set metric is blind to.
+    const reordered = rankBiasedOverlap(['a', 'b', 'c'], ['c', 'b', 'a']);
+    expect(reordered).toBeGreaterThan(0);
+    expect(reordered).toBeLessThan(1);
+    // Top-weighted: a swap deeper in the list disturbs RBO less than a swap
+    // at the head.
+    const deepSwap = rankBiasedOverlap(['a', 'b', 'c', 'd'], ['a', 'b', 'd', 'c']);
+    const headSwap = rankBiasedOverlap(['a', 'b', 'c', 'd'], ['b', 'a', 'c', 'd']);
+    expect(deepSwap).toBeGreaterThan(headSwap);
+    expect(rankBiasedOverlap([], [])).toBe(1);
   });
 });
 

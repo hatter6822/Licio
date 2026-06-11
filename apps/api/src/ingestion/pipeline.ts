@@ -25,7 +25,7 @@ import {
   TOPIC_REGISTRY,
 } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
-import { persistCandidateClaims } from './claims.js';
+import { type ClaimEmbeddingDedup, persistCandidateClaims } from './claims.js';
 import { classifyDuplicate, findNearDuplicates, signatureStory } from './dedup.js';
 import {
   boundedExcerpt,
@@ -156,6 +156,19 @@ async function emitNormalized(
   await emitIngestionEvent(events, ingestion, event, story.submittedBy);
 }
 
+/** The claim embedding-dedup config for the live provider (WS-F.1.2b soft). */
+function claimDedupOf(
+  ingestion: IngestionServices,
+  config: { claimDedupSimilarity: number },
+): ClaimEmbeddingDedup {
+  return {
+    store: ingestion.embeddings,
+    provider: ingestion.embeddingProvider,
+    modelVersion: ingestion.embeddingProvider.modelVersion,
+    threshold: config.claimDedupSimilarity,
+  };
+}
+
 /**
  * Process one submitted story end to end (the §14.2 pipeline body). Used by
  * the `ingestion-pipeline` consumer AND the scheduler's retry path.
@@ -185,6 +198,7 @@ export async function processSubmittedStory(
       { storyId: story.storyId, title: story.title },
       bodyText,
       config.claimConfidenceFloor,
+      claimDedupOf(ingestion, config),
     );
     const updated = await ingestion.stories.update(story.storyId, {
       language,
@@ -394,6 +408,7 @@ export async function processSubmittedStory(
     { storyId: story.storyId, title: story.title },
     bodyText,
     config.claimConfidenceFloor,
+    claimDedupOf(ingestion, config),
   );
 
   await recomputeFreshness(ingestion.stories, ingestion.freshness, current, ingestion.now());

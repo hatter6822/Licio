@@ -8,9 +8,11 @@
 // into character-level k-shingles (k = 5). Each shingle is hashed to a 32-bit
 // integer (FNV-1a), then passed through 128 fixed universal-hash functions
 //   hᵢ(x) = (aᵢ·x + bᵢ) mod p,   p = 4 294 967 311 (smallest prime > 2³²)
-// computed in BigInt (aᵢ·x can exceed 2⁵³, so Number arithmetic would be
-// silently wrong). The signature component i is min over all shingles of
-// hᵢ(x). For random permutations, P[minᵢ(A) = minᵢ(B)] = J(A, B), so the
+// evaluated in EXACT double arithmetic via `universalHashMod` (aᵢ·x can
+// exceed 2⁵³, so a 16-bit split keeps every intermediate product < 2⁵³ and
+// therefore exact — proven equivalent to a BigInt reference and pinned by a
+// golden-signature test). The signature component i is min over all shingles
+// of hᵢ(x). For random permutations, P[minᵢ(A) = minᵢ(B)] = J(A, B), so the
 // fraction of agreeing components estimates the Jaccard similarity with
 // standard error √(J(1−J)/128) ≤ 0.0442.
 //
@@ -50,7 +52,6 @@ const _bandsTimesRows: typeof MINHASH_NUM_HASHES = (MINHASH_LSH_BANDS * MINHASH_
 void _bandsTimesRows;
 
 /** Smallest prime greater than 2³² (universal-hash modulus). */
-const PRIME = 4_294_967_311n;
 const PRIME_NUMBER = 4_294_967_311;
 
 /** mulberry32 — duplicated minimally here (the test harness copy lives under
@@ -66,18 +67,42 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-/** The fixed (aᵢ, bᵢ) universal-hash family for MINHASH_FAMILY_VERSION = 1. */
-const HASH_FAMILY: ReadonlyArray<{ a: bigint; b: bigint }> = (() => {
+/**
+ * The fixed (aᵢ, bᵢ) universal-hash family for MINHASH_FAMILY_VERSION = 1,
+ * stored as plain Numbers. The (aᵢ, bᵢ) values are at most p − 1 ≈ 2³² + 14,
+ * well within the 2⁵³ exact-integer range, so the Number family is identical
+ * to the prior BigInt family value-for-value (golden-signature regression
+ * test pins the resulting output, so persisted signatures cannot drift).
+ */
+const HASH_FAMILY_A = new Float64Array(MINHASH_NUM_HASHES);
+const HASH_FAMILY_B = new Float64Array(MINHASH_NUM_HASHES);
+(() => {
   const rng = mulberry32(0x5eed_f00d);
-  const family: Array<{ a: bigint; b: bigint }> = [];
   for (let i = 0; i < MINHASH_NUM_HASHES; i += 1) {
     // a ∈ [1, p−1] (a ≠ 0 keeps the function injective mod p), b ∈ [0, p−1].
-    const a = BigInt(1 + Math.floor(rng() * (PRIME_NUMBER - 1)));
-    const b = BigInt(Math.floor(rng() * PRIME_NUMBER));
-    family.push({ a, b });
+    HASH_FAMILY_A[i] = 1 + Math.floor(rng() * (PRIME_NUMBER - 1));
+    HASH_FAMILY_B[i] = Math.floor(rng() * PRIME_NUMBER);
   }
-  return family;
 })();
+
+/**
+ * `(a·x + b) mod p` in EXACT double arithmetic — no BigInt (the per-shingle,
+ * per-hash inner loop is the hot path). Correctness: split x into 16-bit
+ * halves so every product stays below 2⁵³ and is therefore exact —
+ *   a·x = a·(xHi·2¹⁶ + xLo);  a·xHi, a·xLo < (2³²+15)·2¹⁶ ≈ 2⁴⁸
+ * and `(a·xHi·2¹⁶ + a·xLo + b) mod p = ((a·xHi mod p)·2¹⁶ mod p
+ *   + (a·xLo mod p) + b) mod p`, each term < p ≈ 2³² so the final sum < 3p < 2⁵³.
+ * Algebraically identical to the BigInt form (property-tested against a
+ * BigInt reference across the full uint32 range).
+ */
+export function universalHashMod(a: number, x: number, b: number): number {
+  const xHi = x >>> 16;
+  const xLo = x & 0xffff;
+  let t1 = (a * xHi) % PRIME_NUMBER;
+  t1 = (t1 * 65536) % PRIME_NUMBER;
+  const t2 = (a * xLo) % PRIME_NUMBER;
+  return (t1 + t2 + b) % PRIME_NUMBER;
+}
 
 /** FNV-1a 32-bit hash of a string (shingle → uint32). */
 export function fnv1a32(value: string): number {
@@ -123,10 +148,12 @@ export function minhashSignature(text: string): Uint32Array {
   const signature = new Uint32Array(MINHASH_NUM_HASHES).fill(0xffffffff);
   if (shingles.size === 0) return signature;
   for (const shingle of shingles) {
-    const x = BigInt(shingle);
     for (let i = 0; i < MINHASH_NUM_HASHES; i += 1) {
-      const family = HASH_FAMILY[i] as { a: bigint; b: bigint };
-      const value = Number((family.a * x + family.b) % PRIME);
+      const value = universalHashMod(
+        HASH_FAMILY_A[i] as number,
+        shingle,
+        HASH_FAMILY_B[i] as number,
+      );
       // Saturate to uint32 for storage (p − 1 barely exceeds 2³² − 1; the
       // clamp affects ~15/2³² of the range and is identical for both sides
       // of any comparison, so the estimator is unaffected).

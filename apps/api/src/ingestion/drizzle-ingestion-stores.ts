@@ -330,6 +330,30 @@ export class DrizzleStoryStore implements StoryStore {
     return rows.map((row) => this.#toRecord(row));
   }
 
+  async listBySubmitter(
+    userId: string,
+    after: { createdAt: string; storyId: string } | null,
+    limit: number,
+  ): Promise<StoryRecord[]> {
+    // Keyset on (created_at, story_id) — the `stories_created_idx` covers the
+    // ordering; the submitter filter narrows it. No row cap beyond the page.
+    const keyset =
+      after === null
+        ? undefined
+        : sql`(${storiesTable.createdAt}, ${storiesTable.storyId}) > (${new Date(after.createdAt)}, ${after.storyId}::uuid)`;
+    const rows = await this.#db
+      .select()
+      .from(storiesTable)
+      .where(
+        keyset === undefined
+          ? eq(storiesTable.submittedBy, userId)
+          : and(eq(storiesTable.submittedBy, userId), keyset),
+      )
+      .orderBy(asc(storiesTable.createdAt), asc(storiesTable.storyId))
+      .limit(limit);
+    return rows.map((row) => this.#toRecord(row));
+  }
+
   async addSourceLink(
     storyId: string,
     sourceId: string,
@@ -1261,6 +1285,29 @@ export class DrizzleEmbeddingStore implements EmbeddingStore {
         and e.target_id <> ${targetId}
         and 1 - (e.embedding <=> q.embedding) >= ${threshold}
       order by e.embedding <=> q.embedding
+      limit ${Math.min(200, Math.max(1, limit))}
+    `)) as unknown as Array<{ target_id: string; similarity: number }>;
+    return rows.map((row) => ({ targetId: row.target_id, similarity: Number(row.similarity) }));
+  }
+
+  async findSimilarToVector(
+    targetType: EmbeddingTargetType,
+    vector: Float32Array,
+    modelVersion: string,
+    threshold: number,
+    limit: number,
+  ): Promise<Array<{ targetId: string; similarity: number }>> {
+    // pgvector parses the bracketed literal; it is BOUND (not interpolated)
+    // and cast to ::vector so the HNSW `<=>` operator drives the scan.
+    const literal = `[${[...vector].join(',')}]`;
+    const rows = (await this.#db.execute(sql`
+      select e.target_id as target_id,
+             1 - (e.embedding <=> ${literal}::vector) as similarity
+      from embeddings e
+      where e.target_type = ${targetType}
+        and e.model_version = ${modelVersion}
+        and 1 - (e.embedding <=> ${literal}::vector) >= ${threshold}
+      order by e.embedding <=> ${literal}::vector
       limit ${Math.min(200, Math.max(1, limit))}
     `)) as unknown as Array<{ target_id: string; similarity: number }>;
     return rows.map((row) => ({ targetId: row.target_id, similarity: Number(row.similarity) }));

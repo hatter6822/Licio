@@ -416,6 +416,20 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
     expect(hits.map((h) => h.targetId)).toContain(near);
     expect(hits.map((h) => h.targetId)).not.toContain(far);
     expect(hits[0]?.similarity).toBeGreaterThan(0.5);
+    // findSimilarToVector: the arbitrary-vector primitive (claim dedup +
+    // MERI/SCOI) — the literal-vector binding must round-trip through pgvector
+    // and the result must INCLUDE the anchor itself (no self-exclusion here).
+    const anchorVec = await provider.embed('the harbor dredging plan begins in october');
+    const vectorHits = await embeddings.findSimilarToVector(
+      'story',
+      anchorVec,
+      provider.modelVersion,
+      0.5,
+      10,
+    );
+    expect(vectorHits.map((h) => h.targetId)).toContain(near);
+    expect(vectorHits[0]?.similarity).toBeGreaterThan(0.99); // its own vector is the nearest
+    expect(vectorHits.map((h) => h.targetId)).not.toContain(far);
     // Upsert (same key) replaces, not duplicates.
     await embedTarget(embeddings, provider, 'story', anchor, 'replaced text');
     expect(await embeddings.countByVersion(provider.modelVersion)).toBe(3);

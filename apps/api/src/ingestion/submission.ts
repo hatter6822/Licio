@@ -22,6 +22,7 @@ import {
   canonicalizeBcp47,
   contentSubmittedEventSchema,
   DEFAULT_TRACKER_DENYLIST,
+  evidenceAddedEventSchema,
   normalizeUrl,
   type StoryCreateRequest,
   TOPIC_REGISTRY,
@@ -292,12 +293,30 @@ export async function submitStory(
   ingestion.metrics.increment(`submissions.${request.submission_type}`);
 
   // 6b. Evidence-card submissions create the actual EvidenceCard row in the
-  //     same request (WS-F.2.5a); its embedding follows via evidence.added.
+  //     same request (WS-F.2.5a), then emit `evidence.added` so the
+  //     `ingestion-embeddings` consumer generates the card's vector
+  //     (WS-F.3.2c) — durable insert now, publication DETACHED so embedding
+  //     latency never delays the 201 (crash recovery = checkpoint replay,
+  //     the content.submitted pattern).
   if (request.submission_type === 'evidence_card') {
-    await ingestion.evidence.insert({
+    // Resolve a WEB citation to an in-app source so the §14.3 evidence-type
+    // frequency populates (WS-F.2.1a); a non-web citation (book, filing,
+    // dataset id) stays source-less — "user-experience evidence" (WS-F.2.5a).
+    let evidenceSourceId: string | null = null;
+    const citation = normalizeUrl(
+      request.citation_url_or_ref,
+      effectiveTrackerDenylist(config.extraTrackerParams),
+    );
+    if (citation.ok) {
+      const citationSource = await ingestion.sources.upsertByDomain(citation.canonicalDomain, {
+        name: citation.canonicalDomain,
+      });
+      evidenceSourceId = citationSource.sourceId;
+    }
+    const card = await ingestion.evidence.insert({
       evidenceId: randomUUID(),
       claimId: request.claim_id,
-      sourceId: null,
+      sourceId: evidenceSourceId,
       submittedBy: userId,
       // The §14.1 evidence-card submission carries no relationship
       // direction; `contextualizes` is the NEUTRAL default (asserting
@@ -310,6 +329,47 @@ export async function submitStory(
       independenceGroupId: null,
       storyId: created.story.storyId,
     });
+    // Bump the source's §14.3 evidence-type frequency by the card's
+    // relationship type (the field that was otherwise never populated).
+    if (evidenceSourceId !== null) {
+      await ingestion.sources.recordObservation(evidenceSourceId, {
+        evidenceType: 'contextualizes',
+      });
+    }
+    // The WS-E `evidence.added` event carries the MATERIAL taxonomy (what the
+    // evidence IS), distinct from the card's RELATIONSHIP type; a §14.1
+    // submission gives no material classification, so `other` is the honest
+    // default (the governed classifier is the WS-K seam).
+    const evidenceEvent = evidenceAddedEventSchema.parse({
+      event_id: randomUUID(),
+      event_type: 'evidence.added',
+      timestamp: created.story.createdAt,
+      schema_version: '1',
+      evidence_id: card.evidenceId,
+      claim_id: card.claimId,
+      thread_id: created.thread.threadId,
+      user_id: userId,
+      evidence_type: 'other',
+      source_id: evidenceSourceId,
+      contribution_id: null,
+      privacy_classification: 'public',
+      retention_tier: 'public_contribution',
+    });
+    const evidenceRegistryEntry = TOPIC_REGISTRY['evidence.added'];
+    await events.eventStore.insertMany([
+      {
+        eventId: evidenceEvent.event_id,
+        eventType: evidenceEvent.event_type,
+        topic: evidenceEvent.event_type,
+        timestamp: evidenceEvent.timestamp,
+        privacyClassification: evidenceRegistryEntry.privacy_classification,
+        retentionTier: evidenceRegistryEntry.retention_tier,
+        payload: evidenceEvent as unknown as Record<string, unknown>,
+        ownerUserId: userId,
+        purgeAfter: null,
+      },
+    ]);
+    ingestion.trackBackground(events.router.publish(evidenceEvent));
   }
 
   // 7. SYNC near-duplicate pass on the locally available text (WS-F.1.3c):

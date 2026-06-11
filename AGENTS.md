@@ -893,7 +893,7 @@ file counts at current state:
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
 | apps/web | ~53 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~60 (incl. WS-D identity + WS-E pipeline + WS-F ingestion) | node | `pnpm --filter api test` |
+| apps/api | ~63 (incl. WS-D identity + WS-E pipeline + WS-F ingestion) | node | `pnpm --filter api test` |
 | packages/shared | ~13 (incl. WS-D/WS-E/WS-F schemas + URL/lifecycle utils) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~3 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |
 | packages/invariants | ~7 (incl. PWAtt/MinHash/freshness math + property tests) | node | `pnpm --filter @licio/invariants test` |
@@ -1059,7 +1059,7 @@ and a db column assertion), and no WS-F table can carry a financial column
 | Freshness | Versioned exponential-decay baseline in topic-cadence units (property-tested monotonicity with the exact IEEE-754 statement), recomputed on events + sweep, consumable by WS-I.2.3d | Complete |
 | Takedowns | Public structured intake (rate-limited) → steward review → actioning hides the target everywhere + audit + best-effort submitter notice | Complete |
 | Admin | `/v1/ingestion/admin/*` (steward + TOTP): review queue, syndication create/confirm, source editing, takedowns, lifecycle triggers, validated config writes (422), backfill controls, metrics | Complete |
-| Residuals | WS-G thread ownership/interpretations/room visibility; WS-H similarity consumption (semantic conclusions gated on a self-hosted model); WS-I freshness/ranking consumption; WS-J queue ownership; WS-K governed extractor/classifiers/registry behind existing seams; client submission/search UI + BFF-in-the-loop browser E2E (WS-P precedent); 100K+ scale benchmarks (WS-P load harness) | Tracked elsewhere |
+| Residuals | WS-G thread ownership/interpretations/room visibility; WS-H similarity consumption (semantic conclusions gated on a self-hosted model); WS-I freshness/ranking consumption; WS-J queue ownership; WS-K governed extractor/classifiers/registry + topic taxonomy behind existing seams; client submission/search UI + BFF-in-the-loop browser E2E (WS-P precedent); full-scale (1M) load validation (latency/recall benchmarks measured + operating point recorded at N=20K, `RUN_PERF`-gated; 1M is WS-P) | Tracked elsewhere |
 
 ### WS-G through WS-P
 

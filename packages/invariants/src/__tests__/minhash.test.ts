@@ -19,6 +19,7 @@ import {
   minhashSignature,
   normalizeForShingling,
   shingleHashes,
+  universalHashMod,
 } from '../text/minhash.js';
 import { int, mulberry32, type Rng } from './prop.js';
 
@@ -89,6 +90,52 @@ describe('MinHash signature + estimator', () => {
     expect(a.length).toBe(MINHASH_NUM_HASHES);
   });
 
+  it('GOLDEN: signatures match pinned values (persisted rows must never drift)', () => {
+    // Captured from MINHASH_FAMILY_VERSION = 1. Any change here means stored
+    // signatures stopped matching — bump the family version + re-signature,
+    // never silently change the family or the modmul.
+    const golden: Array<[string, number[], number[]]> = [
+      [
+        'The vote passed by a narrow margin on Tuesday evening.',
+        [18956012, 53722051, 74300748, 15733615, 16270728, 21650944, 146407989, 118198802],
+        [48436452, 3492941],
+      ],
+      [
+        'a perfectly ordinary sentence about local infrastructure',
+        [3331626, 196255504, 20233531, 667267, 3731104, 67044460, 89673511, 36918110],
+        [58600870, 31429060],
+      ],
+      [
+        'abcdefgh',
+        [546982325, 783934547, 106441789, 488035952, 299551265, 111557359, 375856668, 873866083],
+        [3536365420, 13707173],
+      ],
+    ];
+    for (const [text_, first8, last2] of golden) {
+      const sig = [...minhashSignature(text_)];
+      expect(sig.slice(0, 8)).toEqual(first8);
+      expect(sig.slice(-2)).toEqual(last2);
+    }
+  });
+
+  it('universalHashMod equals a BigInt reference across the uint32 range', () => {
+    const P = 4_294_967_311n;
+    const rng = mulberry32(13);
+    for (let i = 0; i < 5_000; i += 1) {
+      // a ∈ [1, p−1], b ∈ [0, p−1], x ∈ [0, 2³²) — the exact production ranges.
+      const a = 1 + Math.floor(rng() * (4_294_967_311 - 1));
+      const b = Math.floor(rng() * 4_294_967_311);
+      const x = Math.floor(rng() * 4_294_967_296);
+      const reference = Number((BigInt(a) * BigInt(x) + BigInt(b)) % P);
+      expect(universalHashMod(a, x, b)).toBe(reference);
+    }
+    // Boundary inputs.
+    expect(universalHashMod(1, 0, 0)).toBe(0);
+    expect(universalHashMod(4_294_967_310, 4_294_967_295, 4_294_967_310)).toBe(
+      Number((4_294_967_310n * 4_294_967_295n + 4_294_967_310n) % P),
+    );
+  });
+
   it('estimates 1 for identical texts and ~0 for unrelated texts', () => {
     const rng = mulberry32(7);
     const a = text(rng, 80);
@@ -97,17 +144,15 @@ describe('MinHash signature + estimator', () => {
     expect(estimateJaccard(minhashSignature(a), minhashSignature(b))).toBeLessThanOrEqual(0.1);
   });
 
-  it('approximates the exact Jaccard within 4.5σ on every pair and 0.06 on average', {
-    timeout: 30_000,
-  }, () => {
-    // σ = √(J(1−J)/128) ≤ 0.0442. Seeded corpus ⇒ fully reproducible. 48
-    // pairs keep the per-pair 4.5σ bound meaningful while staying fast under
-    // V8 coverage instrumentation (the BigInt hash family is the hot path).
+  it('approximates the exact Jaccard within 4.5σ on every pair and 0.06 on average', () => {
+    // σ = √(J(1−J)/128) ≤ 0.0442. Seeded corpus ⇒ fully reproducible. 120
+    // pairs (the modmul is now exact double arithmetic — no BigInt — so the
+    // full corpus runs fast even under V8 coverage instrumentation).
     const rng = mulberry32(2026);
     const fractions = [0.1, 0.3, 0.5, 0.7, 0.85, 0.95];
     let totalError = 0;
     let pairs = 0;
-    for (let round = 0; round < 8; round += 1) {
+    for (let round = 0; round < 20; round += 1) {
       for (const fraction of fractions) {
         const [a, b] = overlappingPair(rng, fraction);
         const exact = exactJaccard(a, b);

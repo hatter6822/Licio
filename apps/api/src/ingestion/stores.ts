@@ -266,6 +266,17 @@ export interface StoryStore {
   ): Promise<StoryRecord[]>;
   /** Most recent stories (search corpus + admin surfaces). */
   listRecent(limit: number): Promise<StoryRecord[]>;
+  /**
+   * One keyset page of a user's submitted stories (DSAR export, WS-D §19.3):
+   * `(created_at, story_id)` ascending, strictly after `after`. The export
+   * hook loops until a short page — NO truncation cap (a prolific submitter's
+   * export must be COMPLETE; a `listRecent` cap would silently drop rows).
+   */
+  listBySubmitter(
+    userId: string,
+    after: { createdAt: string; storyId: string } | null,
+    limit: number,
+  ): Promise<StoryRecord[]>;
   addSourceLink(
     storyId: string,
     sourceId: string,
@@ -413,6 +424,19 @@ export interface EmbeddingStore {
   findSimilar(
     targetType: EmbeddingTargetType,
     targetId: string,
+    modelVersion: string,
+    threshold: number,
+    limit: number,
+  ): Promise<Array<{ targetId: string; similarity: number }>>;
+  /**
+   * Cosine-similar targets to an ARBITRARY query vector (no stored anchor row
+   * required) — the general primitive behind claim embedding-dedup (WS-F.1.2b)
+   * and the WS-H MERI/SCOI "nearest to this vector" queries. ANN-indexed in
+   * the Drizzle adapter, exact scan in memory.
+   */
+  findSimilarToVector(
+    targetType: EmbeddingTargetType,
+    vector: Float32Array,
     modelVersion: string,
     threshold: number,
     limit: number,
@@ -565,6 +589,23 @@ export class InMemoryStoryStore implements StoryStore {
   async listRecent(limit: number): Promise<StoryRecord[]> {
     return [...this.#stories.values()]
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit);
+  }
+
+  async listBySubmitter(
+    userId: string,
+    after: { createdAt: string; storyId: string } | null,
+    limit: number,
+  ): Promise<StoryRecord[]> {
+    return [...this.#stories.values()]
+      .filter((s) => s.submittedBy === userId)
+      .filter(
+        (s) =>
+          after === null ||
+          s.createdAt > after.createdAt ||
+          (s.createdAt === after.createdAt && s.storyId > after.storyId),
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.storyId.localeCompare(b.storyId))
       .slice(0, limit);
   }
 
@@ -1104,16 +1145,30 @@ export class InMemoryEmbeddingStore implements EmbeddingStore {
   ): Promise<Array<{ targetId: string; similarity: number }>> {
     const query = await this.get(targetType, targetId, modelVersion);
     if (!query) return [];
+    return (
+      await this.findSimilarToVector(
+        targetType,
+        query.embedding,
+        modelVersion,
+        threshold,
+        limit + 1,
+      )
+    )
+      .filter((hit) => hit.targetId !== targetId)
+      .slice(0, limit);
+  }
+
+  async findSimilarToVector(
+    targetType: EmbeddingTargetType,
+    vector: Float32Array,
+    modelVersion: string,
+    threshold: number,
+    limit: number,
+  ): Promise<Array<{ targetId: string; similarity: number }>> {
     const hits: Array<{ targetId: string; similarity: number }> = [];
     for (const record of this.#records.values()) {
-      if (
-        record.targetType !== targetType ||
-        record.modelVersion !== modelVersion ||
-        record.targetId === targetId
-      ) {
-        continue;
-      }
-      const similarity = cosineSimilarity(query.embedding, record.embedding);
+      if (record.targetType !== targetType || record.modelVersion !== modelVersion) continue;
+      const similarity = cosineSimilarity(vector, record.embedding);
       if (similarity >= threshold) hits.push({ targetId: record.targetId, similarity });
     }
     return hits.sort((a, b) => b.similarity - a.similarity).slice(0, limit);

@@ -45,6 +45,14 @@ export interface IngestionRuntimeConfig {
   lifecycleSustainedContributions: number;
   /** Claim-extraction confidence floor; below ⇒ review queue (WS-F.1.2b). */
   claimConfidenceFloor: number;
+  /**
+   * Cosine threshold above which a candidate claim links to an existing one
+   * by EMBEDDING similarity instead of being created (WS-F.1.2b dedup beyond
+   * exact-text). High by design: with the lexical provider it catches
+   * reorderings/rephrasings the text hash misses; true semantic-paraphrase
+   * dedup needs the self-hosted model (WS-F.3.2a).
+   */
+  claimDedupSimilarity: number;
   /** The ACTIVE embedding model version similarity consumers use (WS-F.3.2f
    *  cutover switch). */
   embeddingActiveVersion: string;
@@ -72,6 +80,7 @@ export const DEFAULT_INGESTION_CONFIG: IngestionRuntimeConfig = {
   lifecycleIdleDays: 14,
   lifecycleSustainedContributions: 3,
   claimConfidenceFloor: 0.5,
+  claimDedupSimilarity: 0.92,
   embeddingActiveVersion: 'lexical-fnv-v1',
   embeddingBackfillBatch: 200,
   embeddingCleanupRetentionDays: 30,
@@ -106,6 +115,7 @@ const KEY_SCHEMAS: Record<keyof IngestionRuntimeConfig, z.ZodType<unknown>> = {
   lifecycleIdleDays: positiveInt.max(365),
   lifecycleSustainedContributions: positiveInt.max(1_000),
   claimConfidenceFloor: z.number().min(0).max(1),
+  claimDedupSimilarity: z.number().min(0.5).max(1),
   embeddingActiveVersion: z.string().min(1).max(128),
   embeddingBackfillBatch: positiveInt.max(10_000),
   embeddingCleanupRetentionDays: positiveInt.max(365),

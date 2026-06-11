@@ -241,22 +241,35 @@ setIngestionServices(ingestionServices);
 identityServices.purgeAttention = (userId, mode) => purgeUserAttention(eventServices, userId, mode);
 identityServices.exportAttention = (userId) => exportUserAttention(eventServices, userId);
 // WS-F closes the CONTENT half of the export hook for stories: a user's DSAR
-// export now includes their submitted stories. WS-G COMPOSES forum
-// contributions into the same hook when it lands (the anonymize hook stays
-// with WS-G: story rows carry no scrubbable PII — the tombstoned user row is
-// the anonymization, and public contributions persist per §22.4).
+// export now includes ALL of their submitted stories. The export must be
+// COMPLETE (§19.3 / GDPR Art. 15), so it keyset-paginates the submitter's
+// stories to exhaustion rather than scanning a capped "recent" window. WS-G
+// COMPOSES forum contributions into the same hook when it lands (the
+// anonymize hook stays with WS-G: story rows carry no scrubbable PII — the
+// tombstoned user row is the anonymization, and public contributions persist
+// per §22.4).
 identityServices.exportContributions = async (userId) => {
-  const recent = await ingestionServices.stories.listRecent(10_000);
-  return recent
-    .filter((story) => story.submittedBy === userId)
-    .map((story) => ({
-      story_id: story.storyId,
-      title: story.title,
-      submission_type: story.submissionType,
-      canonical_url: story.canonicalUrl,
-      body: submissionText(story),
-      created_at: story.createdAt,
-    }));
+  const PAGE = 500;
+  const out: Array<Record<string, unknown>> = [];
+  let after: { createdAt: string; storyId: string } | null = null;
+  for (;;) {
+    const page = await ingestionServices.stories.listBySubmitter(userId, after, PAGE);
+    for (const story of page) {
+      out.push({
+        story_id: story.storyId,
+        title: story.title,
+        submission_type: story.submissionType,
+        canonical_url: story.canonicalUrl,
+        body: submissionText(story),
+        created_at: story.createdAt,
+      });
+    }
+    if (page.length < PAGE) break;
+    const last = page[page.length - 1];
+    if (last === undefined) break;
+    after = { createdAt: last.createdAt, storyId: last.storyId };
+  }
+  return out;
 };
 identityServices.onPrivacyChange = (change) => {
   void applyRetentionPreferenceChange(eventServices, change.userId, change.retention).catch((err) =>

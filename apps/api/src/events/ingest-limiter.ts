@@ -65,6 +65,34 @@ export interface RateDecision {
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
 
+/**
+ * Exact retry-after (ms) for a set of VIOLATED sliding windows: the latest
+ * time at which enough of the oldest entries have aged out of every violated
+ * window (≥ 1 s floor). Shared by this limiter and the WS-F submission
+ * limiter so the k-th-oldest math lives in ONE tested place. For a window of
+ * length W with `count` in-window entries and limit `L`, a future attempt is
+ * admitted once the (count − L)-th oldest entry ages out, at
+ *   e_{count−L} + W. (Denied attempts are recorded too, so hammering extends
+ * the wait — conservative by construction.)
+ */
+export async function slidingWindowRetryAfterMs(
+  store: SlidingWindowStore,
+  now: number,
+  violated: ReadonlyArray<{ key: string; windowMs: number; count: number; limit: number }>,
+): Promise<number> {
+  let retryAfterMs = 1_000;
+  for (const window of violated) {
+    const anchor = await store.nthOldest(
+      window.key,
+      now,
+      window.windowMs,
+      window.count - window.limit,
+    );
+    retryAfterMs = Math.max(retryAfterMs, (anchor ?? now) + window.windowMs - now);
+  }
+  return retryAfterMs;
+}
+
 export class IngestRateLimiter {
   readonly #primary: SlidingWindowStore;
   readonly #fallback: SlidingWindowStore;
@@ -109,30 +137,27 @@ export class IngestRateLimiter {
   ): Promise<RateDecision> {
     const minuteCount = await store.hit(`${userKey}:m`, now, MINUTE_MS);
     const hourCount = await store.hit(`${userKey}:h`, now, HOUR_MS);
-    const minuteDenied = minuteCount > limits.perMinute;
-    const hourDenied = hourCount > limits.perHour;
-    if (!minuteDenied && !hourDenied) {
+    const violated: Array<{ key: string; windowMs: number; count: number; limit: number }> = [];
+    if (minuteCount > limits.perMinute) {
+      violated.push({
+        key: `${userKey}:m`,
+        windowMs: MINUTE_MS,
+        count: minuteCount,
+        limit: limits.perMinute,
+      });
+    }
+    if (hourCount > limits.perHour) {
+      violated.push({
+        key: `${userKey}:h`,
+        windowMs: HOUR_MS,
+        count: hourCount,
+        limit: limits.perHour,
+      });
+    }
+    if (violated.length === 0) {
       return { allowed: true, retryAfterSec: 0, degraded };
     }
-    let retryAfterMs = 1_000;
-    if (minuteDenied) {
-      const anchor = await store.nthOldest(
-        `${userKey}:m`,
-        now,
-        MINUTE_MS,
-        minuteCount - limits.perMinute,
-      );
-      retryAfterMs = Math.max(retryAfterMs, (anchor ?? now) + MINUTE_MS - now);
-    }
-    if (hourDenied) {
-      const anchor = await store.nthOldest(
-        `${userKey}:h`,
-        now,
-        HOUR_MS,
-        hourCount - limits.perHour,
-      );
-      retryAfterMs = Math.max(retryAfterMs, (anchor ?? now) + HOUR_MS - now);
-    }
+    const retryAfterMs = await slidingWindowRetryAfterMs(store, now, violated);
     return { allowed: false, retryAfterSec: Math.ceil(retryAfterMs / 1_000), degraded };
   }
 

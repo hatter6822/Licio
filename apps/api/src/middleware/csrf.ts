@@ -144,9 +144,22 @@ function getSessionId(cookieHeader: string | undefined): string | undefined {
   return match?.[1];
 }
 
-// Telemetry/RUM ingest is non-state-changing analytics delivered by `sendBeacon`
-// (which cannot set a CSRF header); it is exempt like the CSP report endpoint.
-const EXEMPT_PATHS = new Set(['/health', '/api/security/csp-report', '/v1/telemetry']);
+// Fully CSRF-exempt paths (no token, no Origin check). Two rationales:
+//   • Telemetry/RUM + CSP-report are non-state-changing analytics delivered by
+//     `sendBeacon` (which cannot set a CSRF header) and are cross-origin by
+//     design.
+//   • `/v1/takedowns` is PUBLIC copyright/legal intake (WS-F.1.4f): a rights
+//     holder need not hold an account, so the request carries NO session
+//     cookie — there is no victim session for CSRF to ride, and the Origin
+//     check would wrongly block a legitimate embedded intake form on a rights
+//     holder's own site. Abuse is bounded by the endpoint's own global rate
+//     limit (30/min) and mandatory steward review before any action.
+const EXEMPT_PATHS = new Set([
+  '/health',
+  '/api/security/csp-report',
+  '/v1/telemetry',
+  '/v1/takedowns',
+]);
 // WS-D identity/privacy endpoints rely on `SameSite=Strict` + the opaque session
 // model (and a per-flow `login_attempt_id` binding) as the CSRF defense, so they do
 // not use the WS-C double-submit token (WS-D.1.3b). Pre-auth flows (login/register)

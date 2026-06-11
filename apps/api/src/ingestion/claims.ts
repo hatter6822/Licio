@@ -10,11 +10,28 @@
 // ever trusted as fact — everything lands as `candidate`, and sub-threshold
 // confidence routes to the review queue rather than auto-accepting.
 import { createHash, randomUUID } from 'node:crypto';
-import type { ClaimRecord, ClaimStore, ReviewQueueStore } from './stores.js';
+import type { EmbeddingProvider } from './embeddings.js';
+import type { ClaimRecord, ClaimStore, EmbeddingStore, ReviewQueueStore } from './stores.js';
 
 export interface CandidateClaim {
   text: string;
   confidence: number;
+}
+
+/**
+ * Optional embedding-similarity dedup (WS-F.3.2c, soft dep): a candidate that
+ * survives the exact-text check is embedded and, if a stored claim under the
+ * active model version is at least `threshold` cosine-similar, LINKED rather
+ * than created. Catches reorderings/rephrasings the text hash misses;
+ * true semantic-paraphrase dedup needs the self-hosted model. Cross-story by
+ * construction (a story's own claims are embedded only after its
+ * `content.normalized`, so intra-story paraphrases fall to the text hash).
+ */
+export interface ClaimEmbeddingDedup {
+  store: EmbeddingStore;
+  provider: EmbeddingProvider;
+  modelVersion: string;
+  threshold: number;
 }
 
 /** The WS-K.1.3b seam: any governed extractor implements this. */
@@ -94,6 +111,7 @@ export async function persistCandidateClaims(
   story: { storyId: string; title: string },
   bodyText: string,
   confidenceFloor: number,
+  embeddingDedup?: ClaimEmbeddingDedup,
 ): Promise<PersistClaimsResult> {
   const candidates = await extractor.extract(story.title, bodyText);
   const created: ClaimRecord[] = [];
@@ -104,6 +122,15 @@ export async function persistCandidateClaims(
     if (existing.length > 0) {
       linked.push(existing[0] as ClaimRecord);
       continue;
+    }
+    // Embedding-similarity dedup (soft): link to a near-duplicate existing
+    // claim of another story instead of creating a redundant row.
+    if (embeddingDedup !== undefined) {
+      const linkedClaim = await tryEmbeddingLink(claims, candidate.text, embeddingDedup);
+      if (linkedClaim !== null) {
+        linked.push(linkedClaim);
+        continue;
+      }
     }
     const record = await claims.insert({
       claimId: randomUUID(),
@@ -138,4 +165,29 @@ export async function persistCandidateClaims(
     }
   }
   return { created, linked };
+}
+
+/** Embed a candidate's text and return the nearest existing claim above the
+ *  threshold, or null. Best-effort: an embedding error degrades to no-link
+ *  (text dedup already ran), never failing the pipeline. */
+async function tryEmbeddingLink(
+  claims: ClaimStore,
+  text: string,
+  dedup: ClaimEmbeddingDedup,
+): Promise<ClaimRecord | null> {
+  try {
+    const vector = await dedup.provider.embed(text);
+    const hits = await dedup.store.findSimilarToVector(
+      'claim',
+      vector,
+      dedup.modelVersion,
+      dedup.threshold,
+      1,
+    );
+    const best = hits[0];
+    if (best === undefined) return null;
+    return await claims.getById(best.targetId);
+  } catch {
+    return null;
+  }
 }

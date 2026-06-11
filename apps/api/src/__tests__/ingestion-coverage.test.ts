@@ -180,7 +180,7 @@ describe('backfill guard branches (WS-F.3.2f)', () => {
   it('validateBackfill skips targets with no neighbors under either version', async () => {
     const store = new InMemoryEmbeddingStore();
     const result = await validateBackfill(store, 'story', [randomUUID()], 'v1', 'v2', 5);
-    expect(result).toEqual({ sampled: 0, meanNeighborOverlap: 1 });
+    expect(result).toEqual({ sampled: 0, meanNeighborOverlap: 1, meanRankAgreement: 1 });
   });
 
   it('a null-text target advances the cursor without embedding', async () => {
