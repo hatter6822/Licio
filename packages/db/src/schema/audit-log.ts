@@ -50,6 +50,9 @@ export const auditEventTypeEnum = pgEnum('audit_event_type', [
   'summary_change',
   'room_steward_change',
   'forum_config_change',
+  'invariant_config_change',
+  'invariant_promotion_change',
+  'mfci_case_action',
 ]);
 
 export const auditLog = pgTable(

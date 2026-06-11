@@ -67,6 +67,8 @@ import { createAuthRoutes } from './auth.js';
 import { createEventsRoutes } from './events.js';
 import { createForumRoutes } from './forum.js';
 import { createIngestionAdminRoutes } from './ingestion-admin.js';
+import { createInvariantsAdminRoutes } from './invariants-admin.js';
+import { createInvariantsPublicRoutes } from './invariants-public.js';
 import { createPrivacyRoutes } from './privacy.js';
 import { createRoomsRoutes } from './rooms.js';
 import { createStoriesRoutes } from './stories.js';
@@ -239,6 +241,11 @@ export function createV1Routes() {
       // reads — plus the steward admin surface.
       .route('/', createStoriesRoutes())
       .route('/ingestion/admin', createIngestionAdminRoutes())
+
+      // --- Invariant services (WS-H) -----------------------------------------
+      // Public SCOI/MERI read surfaces + the steward/analyst admin surface.
+      .route('/', createInvariantsPublicRoutes())
+      .route('/invariants/admin', createInvariantsAdminRoutes())
 
       // --- Forum, conversation, rooms, and lenses (WS-G) ----------------------
       // Thread reading (overview/branches/subtree/anchor), contributions,

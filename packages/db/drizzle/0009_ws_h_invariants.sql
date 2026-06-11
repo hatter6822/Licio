@@ -99,3 +99,7 @@ CREATE TABLE "mfci_cases" (
 --> statement-breakpoint
 CREATE INDEX "mfci_cases_status_idx" ON "mfci_cases" USING btree ("status","opened_at");--> statement-breakpoint
 CREATE INDEX "mfci_cases_target_idx" ON "mfci_cases" USING btree ("target_id");
+--> statement-breakpoint
+ALTER TYPE "public"."audit_event_type" ADD VALUE 'invariant_config_change';--> statement-breakpoint
+ALTER TYPE "public"."audit_event_type" ADD VALUE 'invariant_promotion_change';--> statement-breakpoint
+ALTER TYPE "public"."audit_event_type" ADD VALUE 'mfci_case_action';

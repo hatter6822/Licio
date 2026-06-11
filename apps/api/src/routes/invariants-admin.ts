@@ -1,0 +1,289 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// Steward/analyst-gated WS-H operational surface (requireSteward — the same
+// per-session-MFA bar as every steward action; SPEC §21.4 access controls):
+//
+//   GET  /v1/invariants/admin/health            — uniform per-invariant health
+//     (WS-H.1.2g) + card + live shadow status (WS-H.1.2c-2 dashboard feed).
+//   GET  /v1/invariants/admin/outputs           — recent outputs for a target
+//     (analyst dashboards; reason-code filterable, WS-H.1.1c).
+//   GET  /v1/invariants/admin/compare           — paired two-version outputs
+//     (WS-H.1.1b A/B comparison; optional time-window filter).
+//   GET  /v1/invariants/admin/mfci/dashboard    — shadow anomaly reports +
+//     open cases + the calibration in force (WS-H.3.1c/WS-H.3.2c; strictly
+//     observational — there is deliberately NO enforcement action here).
+//   POST /v1/invariants/admin/mfci/cases/:id/resolve — confirm/clear/escalate
+//     (WS-H.3.4b); clearing lifts any safety freeze (WS-H.3.3d); audited.
+//   GET  /v1/invariants/admin/gwei/dashboard    — cohort comparisons
+//     (k-anonymity enforced at computation; suppressed cells stay withheld).
+//   GET  /v1/invariants/admin/gwei/transparency — the public-safe aggregate
+//     parity export (WS-H.5.2d): parity statements only, never cohort detail.
+//   GET  /v1/invariants/admin/promotions/:type  — status + history.
+//   POST /v1/invariants/admin/promotions        — promotion/demotion through
+//     the WS-H.1.2e checklist (422 on rejection); audited.
+//   PUT  /v1/invariants/admin/config            — validated runtime-config
+//     writes (422 at configuration time); audited.
+//   GET  /v1/invariants/admin/regression        — on-demand drift report
+//     (WS-H.1.2d-2).
+
+import { zValidator } from '@hono/zod-validator';
+import { INVARIANT_TYPE_NAMES, runRegressionSuite } from '@licio/invariants';
+import { Hono } from 'hono';
+import { z } from 'zod';
+import { type EventPipelineServices, getEventPipelineServices } from '../events/services.js';
+import { getIdentityServices, type IdentityServices } from '../identity/services.js';
+import {
+  INVARIANTS_CONFIG_KEYS,
+  storeInvariantsConfigValue,
+  validateInvariantsConfigValue,
+} from '../invariants/config.js';
+import { getInvariantServices, type InvariantPlatformServices } from '../invariants/services.js';
+import { type AuthEnv, authMiddleware, getAuth, requireSteward } from '../middleware/auth.js';
+import { resolveItemSafetyState } from '../pwatt/scoring.js';
+
+const deny = (code: string, message: string) => ({ error: { code, message } }) as const;
+
+const invariantTypeSchema = z.enum(INVARIANT_TYPE_NAMES);
+
+const promotionBodySchema = z
+  .object({
+    invariant_type: invariantTypeSchema,
+    from_status: z.enum(['shadow', 'soft_constraint', 'hard_constraint']),
+    to_status: z.enum(['shadow', 'soft_constraint', 'hard_constraint']),
+    evidence: z
+      .object({
+        shadow_duration_days: z.number().nonnegative(),
+        drift_report_ref: z.string().max(512),
+        observed_coverage: z.number().min(0).max(1),
+        observed_confidence: z.number().min(0).max(1),
+      })
+      .strict(),
+    owner: z.string().min(1).max(256),
+  })
+  .strict();
+
+const configBodySchema = z.object({ key: z.string().min(1).max(128), value: z.unknown() }).strict();
+
+const resolveBodySchema = z
+  .object({ action: z.enum(['confirmed', 'cleared', 'escalated']) })
+  .strict();
+
+export function createInvariantsAdminRoutes(
+  resolveIdentity: () => IdentityServices = getIdentityServices,
+  resolveEvents: () => EventPipelineServices = getEventPipelineServices,
+  resolveInvariants: () => InvariantPlatformServices = getInvariantServices,
+) {
+  return new Hono<AuthEnv>()
+    .use('*', authMiddleware(resolveIdentity))
+    .use('*', requireSteward())
+
+    .get('/health', async (c) => {
+      const invariants = resolveInvariants();
+      const entries = await Promise.all(
+        invariants.all().map(async (service) => ({
+          invariant_type: service.invariantType,
+          shadow_status: await invariants.promotionService.statusOf(service.invariantType),
+          tiers: service.tiers,
+          health: service.getHealthMetrics(),
+          recent_runs: await invariants.runMetadata.listRecent(service.invariantType, 5),
+          card: service.getCard(),
+        })),
+      );
+      return c.json({ invariants: entries });
+    })
+
+    .get('/outputs', async (c) => {
+      const targetId = c.req.query('target_id');
+      if (!targetId || !z.string().uuid().safeParse(targetId).success) {
+        return c.json(deny('invalid_target', 'target_id must be a UUID'), 422);
+      }
+      const reasonCode = c.req.query('reason_code');
+      const rows = (await resolveEvents().invariantStore.listForTarget(targetId)).filter(
+        (row) => !reasonCode || row.reasonCodes.includes(reasonCode),
+      );
+      return c.json({ outputs: rows });
+    })
+
+    .get('/compare', async (c) => {
+      const parsed = z
+        .object({
+          invariant_type: invariantTypeSchema,
+          version_a: z.string().min(1).max(32),
+          version_b: z.string().min(1).max(32),
+          from: z.string().datetime().optional(),
+          to: z.string().datetime().optional(),
+        })
+        .safeParse({
+          invariant_type: c.req.query('invariant_type'),
+          version_a: c.req.query('version_a'),
+          version_b: c.req.query('version_b'),
+          from: c.req.query('from'),
+          to: c.req.query('to'),
+        });
+      if (!parsed.success) {
+        return c.json(deny('invalid_query', parsed.error.issues[0]?.message ?? 'invalid'), 422);
+      }
+      const { invariant_type, version_a, version_b, from, to } = parsed.data;
+      const rows = await resolveEvents().invariantStore.listForVersionComparison(
+        invariant_type,
+        version_a,
+        version_b,
+        from && to ? { start: from, end: to } : undefined,
+      );
+      return c.json({ outputs: rows });
+    })
+
+    .get('/mfci/dashboard', async (c) => {
+      const invariants = resolveInvariants();
+      const events = resolveEvents();
+      const cases = await invariants.mfciCases.listOpen(50);
+      const calibration = await invariants.calibrations.get('mfci:target_concentration');
+      const outputs = (await events.invariantStore.listAll())
+        .filter((row) => row.invariantType === 'MFCI')
+        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+        .slice(0, 100);
+      return c.json({ open_cases: cases, calibration, recent_outputs: outputs });
+    })
+
+    .post('/mfci/cases/:caseId/resolve', zValidator('json', resolveBodySchema), async (c) => {
+      const auth = getAuth(c);
+      if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+      const invariants = resolveInvariants();
+      const identity = resolveIdentity();
+      const { action } = c.req.valid('json');
+      const caseId = c.req.param('caseId');
+      if (!z.string().uuid().safeParse(caseId).success) {
+        return c.json(deny('invalid_case', 'caseId must be a UUID'), 422);
+      }
+      const resolved = await invariants.mfciCases.resolve(
+        caseId,
+        action,
+        `steward:${auth.userId}`,
+        new Date(invariants.now()).toISOString(),
+      );
+      if (!resolved) return c.json(deny('not_found', 'No open case with that id'), 404);
+      // Fiber-test/analyst clearing lifts the safety freeze (WS-H.3.3d).
+      if (action === 'cleared') {
+        await resolveItemSafetyState(
+          resolveEvents(),
+          identity,
+          resolved.targetId,
+          'clear',
+          `steward:${auth.userId}`,
+        );
+      }
+      await identity.audit.append({
+        actorUserId: auth.userId,
+        eventType: 'mfci_case_action',
+        targetRef: caseId,
+        context: { action, target_id: resolved.targetId, risk_state: resolved.riskState },
+      });
+      return c.json({ case: resolved });
+    })
+
+    .get('/gwei/dashboard', async (c) => {
+      const rows = (await resolveEvents().invariantStore.listAll())
+        .filter((row) => row.invariantType === 'GWEI')
+        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+        .slice(0, 100);
+      return c.json({ comparisons: rows });
+    })
+
+    .get('/gwei/transparency', async (c) => {
+      // Public-safe aggregate parity statements (WS-H.5.2d): no cohort
+      // metrics, no suppressed-cell detail — parity vs under-review only.
+      const rows = (await resolveEvents().invariantStore.listAll()).filter(
+        (row) => row.invariantType === 'GWEI',
+      );
+      const threshold = 0.5;
+      const statements = rows.map((row) => {
+        const suppressed = row.reasonCodes.includes('SUPPRESSED_K_ANONYMITY');
+        const gw2 = typeof row.scoreVector['gw2'] === 'number' ? row.scoreVector['gw2'] : null;
+        return {
+          window: row.timeWindow,
+          status: suppressed
+            ? 'withheld_small_cohort'
+            : gw2 !== null && gw2 <= threshold
+              ? 'parity_within_threshold'
+              : 'degradation_under_review',
+        };
+      });
+      return c.json({ generated_at: new Date().toISOString(), statements });
+    })
+
+    .get('/promotions/:invariantType', async (c) => {
+      const parsed = invariantTypeSchema.safeParse(c.req.param('invariantType'));
+      if (!parsed.success) return c.json(deny('invalid_type', 'unknown invariant type'), 422);
+      const invariants = resolveInvariants();
+      return c.json({
+        invariant_type: parsed.data,
+        shadow_status: await invariants.promotionService.statusOf(parsed.data),
+        history: await invariants.promotionService.history(parsed.data),
+      });
+    })
+
+    .post('/promotions', zValidator('json', promotionBodySchema), async (c) => {
+      const auth = getAuth(c);
+      if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+      const invariants = resolveInvariants();
+      const identity = resolveIdentity();
+      const body = c.req.valid('json');
+      const problem = await invariants.promotionService.apply(
+        {
+          invariantType: body.invariant_type,
+          fromStatus: body.from_status,
+          toStatus: body.to_status,
+          evidence: {
+            shadowDurationDays: body.evidence.shadow_duration_days,
+            driftReportRef: body.evidence.drift_report_ref,
+            observedCoverage: body.evidence.observed_coverage,
+            observedConfidence: body.evidence.observed_confidence,
+          },
+          owner: body.owner,
+          createdAt: new Date(invariants.now()).toISOString(),
+        },
+        invariants.config().promotionMinShadowDays,
+      );
+      if (problem !== null) return c.json(deny('promotion_rejected', problem), 422);
+      await identity.audit.append({
+        actorUserId: auth.userId,
+        eventType: 'invariant_promotion_change',
+        targetRef: body.invariant_type,
+        context: { from: body.from_status, to: body.to_status, owner: body.owner },
+      });
+      return c.json({
+        invariant_type: body.invariant_type,
+        shadow_status: await invariants.promotionService.statusOf(body.invariant_type),
+      });
+    })
+
+    .put('/config', zValidator('json', configBodySchema), async (c) => {
+      const auth = getAuth(c);
+      if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+      const { key, value } = c.req.valid('json');
+      if (!INVARIANTS_CONFIG_KEYS.includes(key)) {
+        return c.json(deny('unknown_key', `unknown invariants config key '${key}'`), 422);
+      }
+      const problem = validateInvariantsConfigValue(key, value);
+      if (problem !== null) return c.json(deny('invalid_value', problem), 422);
+      const invariants = resolveInvariants();
+      await storeInvariantsConfigValue(resolveEvents().configStore, key, value);
+      await invariants.reloadConfig();
+      await resolveIdentity().audit.append({
+        actorUserId: auth.userId,
+        eventType: 'invariant_config_change',
+        targetRef: key,
+        context: { key },
+      });
+      return c.json({ ok: true, key });
+    })
+
+    .get('/regression', (c) => {
+      const report = runRegressionSuite();
+      return c.json({
+        pass: report.pass,
+        checks: report.checks.length,
+        failures: report.failures,
+      });
+    });
+}

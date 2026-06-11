@@ -58,6 +58,12 @@ export const AUDIT_EVENT_TYPES = [
   'summary_change',
   'room_steward_change',
   'forum_config_change',
+  // WS-H invariant platform: validated invariants runtime-config writes,
+  // shadow-status promotions/demotions (WS-H.1.2e), and MFCI analyst case
+  // resolutions (WS-H.3.4b).
+  'invariant_config_change',
+  'invariant_promotion_change',
+  'mfci_case_action',
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
 export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);

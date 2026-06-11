@@ -90,6 +90,21 @@ import {
   registerIngestionConsumers,
   setIngestionServices,
 } from './ingestion/services.js';
+import {
+  DrizzleCalibrationStore,
+  DrizzleMfciCaseStore,
+  DrizzlePromotionStore,
+  DrizzleRunMetadataStore,
+} from './invariants/drizzle-invariant-stores.js';
+import {
+  INVARIANTS_SCHEDULER_INTERVAL_MS,
+  startInvariantsScheduler,
+} from './invariants/scheduler.js';
+import {
+  createInMemoryInvariantServices,
+  registerInvariantConsumers,
+  setInvariantServices,
+} from './invariants/services.js';
 import { demoStory } from './lib/demo-data.js';
 import { createLogger } from './lib/logger.js';
 import { loadPwattRuntimeConfig } from './pwatt/config.js';
@@ -258,6 +273,26 @@ setForumServices(forumServices);
 // Thread-posture consumer (durable; handlers first run at recovery replay,
 // which happens after the identity singleton is installed below).
 registerForumConsumers(eventServices, ingestionServices, forumServices);
+
+// --- WS-H invariant platform (SPEC §21.4, §30.4) ---------------------------
+// All eleven invariants run SHADOW-ONLY: outputs are stored observational
+// rows; the WS-H.1.2e promotion gate is the single path to any effect.
+const invariantServices = createInMemoryInvariantServices(
+  eventServices,
+  identityServices,
+  ingestionServices,
+  forumServices,
+  { log: (event, meta) => logger.info(meta, event) },
+);
+invariantServices.promotions = new DrizzlePromotionStore(db);
+invariantServices.calibrations = new DrizzleCalibrationStore(db);
+invariantServices.runMetadata = new DrizzleRunMetadataStore(db);
+invariantServices.mfciCases = new DrizzleMfciCaseStore(db);
+await invariantServices.reloadConfig();
+setInvariantServices(invariantServices);
+// PHI session consumer + MFCI cheap-statistic intake + the WS-E hook
+// closures (MERI redundancy, MFCI intake).
+registerInvariantConsumers(eventServices, ingestionServices, invariantServices);
 // Fill the Signal Ledger title cache as real stories are created/read.
 {
   const baseGetById = ingestionServices.stories.getById.bind(ingestionServices.stories);
@@ -429,6 +464,17 @@ startIngestionScheduler(
   eventServices,
   (err, task) => logger.error({ err, task }, 'ingestion scheduler task failed'),
   INGESTION_SCHEDULER_INTERVAL_MS,
+  { lease: new DrizzleJobLeaseStore(db) },
+);
+
+// Hourly WS-H batch tier: all eleven invariants, guarded + shadow-persisted,
+// with the nightly regression drift report at 00 UTC (WS-H.1.2d-2).
+startInvariantsScheduler(
+  invariantServices,
+  eventServices,
+  ingestionServices,
+  (err, task) => logger.error({ err, task }, 'invariants scheduler task failed'),
+  INVARIANTS_SCHEDULER_INTERVAL_MS,
   { lease: new DrizzleJobLeaseStore(db) },
 );
 
