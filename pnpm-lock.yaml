@@ -203,9 +203,16 @@ importers:
 
   packages/shared:
     dependencies:
+      dompurify:
+        specifier: ^3.4.8
+        version: 3.4.8
       zod:
         specifier: ^4.4.3
         version: 4.4.3
+    devDependencies:
+      jsdom:
+        specifier: ^29.1.1
+        version: 29.1.1(@noble/hashes@1.8.0)
 
 packages:
 

@@ -22,11 +22,11 @@ const { MAX_QUEUE_ATTEMPTS, processPendingQueue, requestBackgroundSync, SYNC_TAG
 
 const CONTRIBUTION_PAYLOAD = {
   thread_id: '11111111-1111-4111-8111-111111111111',
-  branch: 'evidence',
   type: 'evidence',
   body: 'A source.',
-  citations: [],
-  local_draft_id: 'draft-1',
+  citations: [{ url: 'https://example.org/source' }],
+  target_claim_id: '22222222-2222-4222-8222-222222222222',
+  client_draft_id: 'draft-1',
 };
 
 function deleteDatabase(name: string): Promise<void> {

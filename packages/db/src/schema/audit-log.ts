@@ -43,6 +43,13 @@ export const auditEventTypeEnum = pgEnum('audit_event_type', [
   'takedown_action',
   'ingestion_review_action',
   'ingestion_config_change',
+  // WS-G forum surface (mirrors AUDIT_EVENT_TYPES in @licio/shared).
+  'thread_state_change',
+  'contribution_moderation_change',
+  'evidence_verification_change',
+  'summary_change',
+  'room_steward_change',
+  'forum_config_change',
 ]);
 
 export const auditLog = pgTable(

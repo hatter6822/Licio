@@ -84,7 +84,7 @@ export async function cacheThreadSnapshot(detail: ThreadDetail): Promise<void> {
       schemaVersion: RECORD_SCHEMA_VERSION,
       threadId: detail.thread_id,
       title: detail.title,
-      summary: detail.current_summary ?? '',
+      summary: detail.current_summary?.body ?? '',
       cachedAt: Date.now(),
     }),
   );

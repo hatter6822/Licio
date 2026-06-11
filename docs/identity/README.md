@@ -190,8 +190,14 @@ the S3-compatible export-archive store.
 
 Interface-level hooks wired to follow-up workstreams:
 
-- **Contribution anonymization** — the WS-G `anonymizeContributions`
-  implementation behind the injected hook (WS-D.2.4b).
+- **Contribution anonymization** — CLOSED by WS-G (`docs/forum/README.md`):
+  production boot wires `anonymizeContributions` to tombstone the author on
+  every contribution, evidence card, and upload (bodies persist per §22.4 —
+  the tombstoned user row is the anonymization) and to REMOVE room
+  memberships and steward assignments (membership is personal data);
+  `exportContributions` composes stories + forum contributions + evidence
+  cards + room subscriptions + upload records (with their same-origin
+  retrieval URLs), keyset-paginated to exhaustion (WS-D.2.4b).
 - **Attention-history purge**, **attention export**, and the **settings-change
   downstream consumer** — CLOSED by WS-E (`docs/events/README.md`): production
   boot wires `purgeAttention` (deletes the user's events, §22.1 aggregate rows,

@@ -7,14 +7,38 @@ const DIST_DIR = resolve(import.meta.dirname, '..', 'apps', 'web', 'dist');
 const ASSETS_DIR = join(DIST_DIR, 'assets');
 const OUTPUT_FILE = join(DIST_DIR, 'bundle-size.json');
 
-const JS_BUDGET_BYTES = 200 * 1024;
+// SPEC §6.10 budgets the INITIAL JS payload ("Budgeted and code-split;
+// route-level lazy loading"): the entry script plus every chunk index.html
+// preloads — what a first paint actually downloads.  Lazy route chunks are
+// NOT initial payload, but their sum is still bounded (the total budget) so
+// unbounded app growth has a brake too.
+const INITIAL_JS_BUDGET_BYTES = 200 * 1024;
+const TOTAL_JS_BUDGET_BYTES = 320 * 1024;
 const CSS_BUDGET_BYTES = 50 * 1024;
 
 interface BundleSizeReport {
+  initialJs: {
+    raw: number;
+    gzipped: number;
+    budget: number;
+    withinBudget: boolean;
+    files: string[];
+  };
   js: { raw: number; gzipped: number; budget: number; withinBudget: boolean };
   css: { raw: number; gzipped: number; budget: number; withinBudget: boolean };
   largestChunk: { name: string; raw: number; gzipped: number };
   assets: Array<{ name: string; raw: number; gzipped: number }>;
+}
+
+/** The initial-payload JS files: index.html's entry script + preloads. */
+function initialJsFiles(): Set<string> {
+  const html = readFileSync(join(DIST_DIR, 'index.html'), 'utf8');
+  const files = new Set<string>();
+  for (const match of html.matchAll(/(?:src|href)="\/assets\/([^"]+\.js)"/g)) {
+    const file = match[1];
+    if (file !== undefined) files.add(file);
+  }
+  return files;
 }
 
 function check(): void {
@@ -24,10 +48,13 @@ function check(): void {
   }
 
   const files = readdirSync(ASSETS_DIR);
+  const initialFiles = initialJsFiles();
   let totalJsGzipped = 0;
   let totalCssGzipped = 0;
   let totalJsRaw = 0;
   let totalCssRaw = 0;
+  let initialJsGzipped = 0;
+  let initialJsRaw = 0;
   let largestChunk = { name: '', raw: 0, gzipped: 0 };
   const assets: Array<{ name: string; raw: number; gzipped: number }> = [];
 
@@ -41,6 +68,10 @@ function check(): void {
     if (file.endsWith('.js')) {
       totalJsRaw += content.length;
       totalJsGzipped += gzipped.length;
+      if (initialFiles.has(file)) {
+        initialJsRaw += content.length;
+        initialJsGzipped += gzipped.length;
+      }
       if (gzipped.length > largestChunk.gzipped) {
         largestChunk = { name: file, raw: content.length, gzipped: gzipped.length };
       }
@@ -51,11 +82,18 @@ function check(): void {
   }
 
   const report: BundleSizeReport = {
+    initialJs: {
+      raw: initialJsRaw,
+      gzipped: initialJsGzipped,
+      budget: INITIAL_JS_BUDGET_BYTES,
+      withinBudget: initialJsGzipped <= INITIAL_JS_BUDGET_BYTES,
+      files: [...initialFiles].sort(),
+    },
     js: {
       raw: totalJsRaw,
       gzipped: totalJsGzipped,
-      budget: JS_BUDGET_BYTES,
-      withinBudget: totalJsGzipped <= JS_BUDGET_BYTES,
+      budget: TOTAL_JS_BUDGET_BYTES,
+      withinBudget: totalJsGzipped <= TOTAL_JS_BUDGET_BYTES,
     },
     css: {
       raw: totalCssRaw,
@@ -73,7 +111,10 @@ function check(): void {
 
   console.log('Bundle size report:');
   console.log(
-    `  JS:  ${formatSize(totalJsGzipped)} gzipped (budget: ${formatSize(JS_BUDGET_BYTES)})`,
+    `  Initial JS (entry + preloads): ${formatSize(initialJsGzipped)} gzipped (budget: ${formatSize(INITIAL_JS_BUDGET_BYTES)})`,
+  );
+  console.log(
+    `  JS total:  ${formatSize(totalJsGzipped)} gzipped (budget: ${formatSize(TOTAL_JS_BUDGET_BYTES)})`,
   );
   console.log(
     `  CSS: ${formatSize(totalCssGzipped)} gzipped (budget: ${formatSize(CSS_BUDGET_BYTES)})`,
@@ -83,9 +124,14 @@ function check(): void {
   );
 
   const errors: string[] = [];
+  if (!report.initialJs.withinBudget) {
+    errors.push(
+      `Initial JS budget exceeded: ${formatSize(initialJsGzipped)} > ${formatSize(INITIAL_JS_BUDGET_BYTES)}`,
+    );
+  }
   if (!report.js.withinBudget) {
     errors.push(
-      `JS budget exceeded: ${formatSize(totalJsGzipped)} > ${formatSize(JS_BUDGET_BYTES)}`,
+      `Total JS budget exceeded: ${formatSize(totalJsGzipped)} > ${formatSize(TOTAL_JS_BUDGET_BYTES)}`,
     );
   }
   if (!report.css.withinBudget) {

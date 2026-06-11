@@ -51,6 +51,7 @@ apps/web/src/
     return-store.ts  Cross-session return/rage-loop persistence (localStorage)  (WS-C.4.3)
   perf/              Core Web Vitals RUM + interaction marks                    (WS-C.5.1)
   public/sw-push.js  SW push/notificationclick/SKIP_WAITING/sync/resubscribe    (WS-C.2.4b/2.3)
+                     + the WS-G.3.7a share-target POST handler (303 → /submit)
 
 apps/api/src/
   routes/v1.ts       Versioned BFF contract the RPC client types against        (WS-C.3.1)
@@ -324,11 +325,14 @@ acknowledges the accepted count.
   `javascript:`/`data:` URLs cannot enter the cache.
 - Trusted Types `default` policy (page **and** service worker) vouchsafes script
   URLs by **same-origin comparison** (`new URL(...).origin`), not a bypassable
-  prefix check; HTML/script sinks throw. Service worker: locked scope `/`, no remote
-  `importScripts` (incl. protocol-relative), no `eval`/`new Function` — enforced by
-  `pnpm check:sw` after every build.
-- CSRF-exempt unauthenticated ingest endpoints (CSP report, telemetry) carry per-IP
-  rate limits + body caps (`lib/rate-limit.ts`). Push subscription delete is scoped
+  prefix check; HTML/script sinks throw. User content reaches the DOM only through
+  the WS-G `licio-ugc` policy (Markdown-lite AST → DOMPurify → TrustedHTML into the
+  single sanctioned `UgcBody` sink — `docs/forum/README.md`). Service worker: locked
+  scope `/`, no remote `importScripts` (incl. protocol-relative), no
+  `eval`/`new Function` — enforced by `pnpm check:sw` after every build.
+- CSRF-exempt unauthenticated ingest endpoints (CSP report, telemetry) carry
+  **identity-free** global fixed-window budgets + body caps (`lib/rate-limit.ts`;
+  no per-IP state of any kind, §19.1). Push subscription delete is scoped
   to the owning session (no cross-user unsubscribe). Push-payload navigation URLs are
   coerced to same-origin in the SW.
 - Crypto/governance flags fail closed and are never persisted. Drafts are encrypted
@@ -348,8 +352,14 @@ acknowledges the accepted count.
   coverage gate.
 - **E2E (Playwright + axe):** `e2e/routing.spec.ts` (client-side tab navigation +
   `aria-current`, auth-guard redirect, fail-closed `RestrictedState`, in-shell
-  not-found, WCAG 2.2 AA), `e2e/performance.spec.ts` (branch-open budget), and
-  `e2e/offline.spec.ts` (offline app shell from the SW precache).
+  not-found, WCAG 2.2 AA), `e2e/performance.spec.ts` (branch-open budget,
+  WS-G-schema-exact fixtures), `e2e/offline.spec.ts` (offline app shell from
+  the SW precache), `e2e/design-system.spec.ts` (workbench axe/zoom/contrast
+  modes), and the WS-G real-browser pair `e2e/ugc-safety.spec.ts` +
+  `e2e/composer.spec.ts` (the `licio-ugc` Trusted Types policy under the
+  preview's enforcing CSP, inert attack fixtures, the drainer interstitial,
+  and the 11-mode composer with shared-schema validation —
+  `docs/forum/README.md`).
 - **Static gates:** `check-sw-security`, `check-bundle-size`, `lint:security`,
   `check:no-applause`, **`check:no-raw-egress`**, `check:workspace-deps`, strict
   `tsc`.

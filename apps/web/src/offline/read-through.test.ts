@@ -45,12 +45,31 @@ const THREAD: ThreadDetail = {
   thread_id: '33333333-3333-4333-8333-333333333333',
   story_id: STORY.story_id,
   room_id: null,
+  branch_index: 0,
   title: 'A deliberative thread',
   conversation_state: 'active',
-  safety_state: 'ok',
+  safety_state: 'normal',
+  contribution_count: 2,
   created_at: '2026-06-09T12:00:00.000Z',
-  available_branches: ['overview', 'evidence'],
-  current_summary: 'Where the conversation stands.',
+  updated_at: '2026-06-09T12:00:00.000Z',
+  sections: { overview: 1, questions: 0, evidence: 1, challenges: 0, lenses: 0, chronology: 2 },
+  summary_status: 'community_synthesis',
+  current_summary: {
+    summary_id: '44444444-4444-4444-8444-444444444444',
+    thread_id: '33333333-3333-4333-8333-333333333333',
+    layer: 'community_synthesis',
+    body: 'Where the conversation stands.',
+    cited_branch_ids: [],
+    cited_evidence_ids: [],
+    unresolved_uncertainty: 'Open question.',
+    minority_views_note: null,
+    machine_generated: false,
+    authored_by_handle: 'mara',
+    approved_by_handle: null,
+    created_at: '2026-06-09T12:00:00.000Z',
+    updated_at: '2026-06-09T12:00:00.000Z',
+  },
+  summary_layers: ['community_synthesis'],
 };
 
 beforeEach(async () => {
@@ -116,7 +135,7 @@ describe('thread snapshot cache', () => {
     await cacheThreadSnapshot(THREAD);
     const record = await readThreadSnapshot(THREAD.thread_id);
     expect(record?.title).toBe(THREAD.title);
-    expect(record?.summary).toBe(THREAD.current_summary);
+    expect(record?.summary).toBe(THREAD.current_summary?.body);
   });
 
   it('stores an empty summary when the thread has none', async () => {

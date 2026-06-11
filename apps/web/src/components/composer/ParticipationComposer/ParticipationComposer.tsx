@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Participation Composer (WS-B.2.10). The composer first asks "What are you
-// adding?" and offers eight STRUCTURED modes; choosing one reveals ONLY that
-// mode's required and optional fields. This replaces a single "post" box (and,
-// pointedly, a "post for likes" button) with mode-specific prompts that ask for
-// the evidence, reasoning, or context the contribution actually needs.
+// Participation Composer (WS-G.3.4–3.6, SPEC §6.6). The composer first asks
+// "What are you adding?" and offers the ELEVEN canonical typed contributions
+// in five groups (Ask / Respond / Evidence / Improve / Meta); choosing one
+// reveals ONLY that mode's required and optional fields. This replaces a
+// single "post" box (and, pointedly, a "post for likes" button) with
+// mode-specific prompts that ask for the evidence, reasoning, or context the
+// contribution actually needs.
 //
 // Field state lives in this component, keyed by mode, so a draft survives
 // re-render AND survives switching modes and back. `onDraftChange` fires on
@@ -17,15 +19,17 @@ import { type FormEvent, useId, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
 import { Button } from '../../ui/Button/index.js';
+import { Checkbox } from '../../ui/Checkbox/index.js';
 import { Icon } from '../../ui/Icon/index.js';
 import { Input } from '../../ui/Input/index.js';
 import { Select } from '../../ui/Select/index.js';
 import { TextArea } from '../../ui/TextArea/index.js';
 import { PrivacyWarning } from '../ComposerAffordances/index.js';
+import { VoiceDictation } from '../VoiceDictation.js';
 import {
+  COMPOSER_GROUPS,
   type ComposerMode,
   type ComposerValues,
-  composerModes,
   getModeDefinition,
   type ModeField,
 } from './modes.js';
@@ -48,6 +52,11 @@ export interface ParticipationComposerProps {
    * Merged with the composer's own "required field left empty" detection.
    */
   errors?: ComposerErrors;
+  /**
+   * Seed values applied to a mode the user has not edited yet (draft
+   * recovery, WS-G.3.7c; share-target citation pre-population, WS-G.3.7a).
+   */
+  initialValues?: ComposerValues;
   className?: string;
 }
 
@@ -63,6 +72,7 @@ export function ParticipationComposer({
   onSubmit,
   onDraftChange,
   errors,
+  initialValues,
   className,
 }: ParticipationComposerProps): React.ReactElement {
   const t = useT();
@@ -79,7 +89,9 @@ export function ParticipationComposer({
   // user has left a field, never mid-typing (WCAG 3.3.1, gentle validation).
   const [blurred, setBlurred] = useState<Record<string, boolean>>({});
 
-  const activeValues = activeMode ? (valuesByMode[activeMode] ?? emptyValues()) : emptyValues();
+  const activeValues = activeMode
+    ? (valuesByMode[activeMode] ?? initialValues ?? emptyValues())
+    : emptyValues();
 
   const selectMode = (next: ComposerMode): void => {
     if (!isModeControlled) {
@@ -162,15 +174,47 @@ export function ParticipationComposer({
     const label = t(field.labelKey, field.labelText);
 
     const fieldNode = ((): React.ReactElement => {
-      if (field.kind === 'textarea') {
+      if (field.kind === 'textarea' || field.kind === 'citation') {
         return (
-          <TextArea
+          <div className="flex flex-col gap-1">
+            <TextArea
+              label={label}
+              required={field.required}
+              value={value}
+              {...(error ? { error } : {})}
+              {...(field.maxLength !== undefined ? { maxLength: field.maxLength } : {})}
+              onChange={(event) => setFieldValue(field.name, event.target.value)}
+              onBlur={() => markBlurred(field.name)}
+            />
+            {field.kind === 'citation' ? (
+              <span className="text-xs text-ink-muted">
+                {t('composer.citations.hint', 'One http(s) or doi: reference per line.')}
+              </span>
+            ) : field.dictation ? (
+              <VoiceDictation
+                fieldLabel={label}
+                onAppend={(text) =>
+                  setFieldValue(
+                    field.name,
+                    `${value}${value.endsWith(' ') || value === '' ? '' : ' '}${text}`,
+                  )
+                }
+              />
+            ) : null}
+          </div>
+        );
+      }
+      if (field.kind === 'checkbox') {
+        return (
+          <Checkbox
             label={label}
             required={field.required}
-            value={value}
+            checked={value === 'true'}
             {...(error ? { error } : {})}
-            onChange={(event) => setFieldValue(field.name, event.target.value)}
-            onBlur={() => markBlurred(field.name)}
+            onCheckedChange={(checked) => {
+              setFieldValue(field.name, checked ? 'true' : '');
+              markBlurred(field.name);
+            }}
           />
         );
       }
@@ -230,45 +274,63 @@ export function ParticipationComposer({
           with aria-pressed (a toggle group) — no hand-rolled radio roles. Each
           button's accessible name combines the mode name and its guiding
           question, and the question is also shown visually as a description. */}
-      <ul aria-labelledby={chooserLabelId} className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        <li className="sr-only" id={chooserLabelId}>
+      <div role="group" aria-labelledby={chooserLabelId} className="flex flex-col gap-3">
+        <span className="sr-only" id={chooserLabelId}>
           {t('composer.chooser.label', 'Choose what you are adding')}
-        </li>
-        {composerModes.map((definition) => {
-          const name = t(definition.nameKey, definition.nameText);
-          const prompt = t(definition.promptKey, definition.promptText);
-          const selected = definition.mode === activeMode;
-          return (
-            <li key={definition.mode}>
-              <Button
-                variant={selected ? 'primary' : 'secondary'}
-                aria-pressed={selected}
-                aria-label={t('composer.chooser.option', '{name}: {prompt}', { name, prompt })}
-                onClick={() => selectMode(definition.mode)}
-                className="h-full w-full flex-col items-start gap-1 px-4 py-3 text-start"
-              >
-                <span className="flex items-center gap-2 font-semibold">
-                  <Icon name={definition.icon} className="size-5 shrink-0" aria-hidden="true" />
-                  {name}
-                </span>
-                <span
-                  className={cn(
-                    'text-start text-sm font-normal',
-                    selected ? 'text-primary-fg' : 'text-ink-muted',
-                  )}
-                >
-                  {prompt}
-                </span>
-              </Button>
-            </li>
-          );
-        })}
-      </ul>
+        </span>
+        {COMPOSER_GROUPS.map((group) => (
+          <section key={group.id} aria-label={t(group.nameKey, group.nameText)}>
+            <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-muted">
+              {t(group.nameKey, group.nameText)}
+            </h3>
+            <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {group.modes.map((mode) => {
+                const definition = getModeDefinition(mode);
+                const name = t(definition.nameKey, definition.nameText);
+                const prompt = t(definition.promptKey, definition.promptText);
+                const selected = definition.mode === activeMode;
+                return (
+                  <li key={definition.mode}>
+                    <Button
+                      variant={selected ? 'primary' : 'secondary'}
+                      aria-pressed={selected}
+                      aria-label={t('composer.chooser.option', '{name}: {prompt}', {
+                        name,
+                        prompt,
+                      })}
+                      onClick={() => selectMode(definition.mode)}
+                      className="h-full w-full flex-col items-start gap-1 px-4 py-3 text-start"
+                    >
+                      <span className="flex items-center gap-2 font-semibold">
+                        <Icon
+                          name={definition.icon}
+                          className="size-5 shrink-0"
+                          aria-hidden="true"
+                        />
+                        {name}
+                      </span>
+                      <span
+                        className={cn(
+                          'text-start text-sm font-normal',
+                          selected ? 'text-primary-fg' : 'text-ink-muted',
+                        )}
+                      >
+                        {prompt}
+                      </span>
+                    </Button>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        ))}
+      </div>
 
       {activeMode ? (
         <ComposerForm
           key={activeMode}
           mode={activeMode}
+          values={activeValues}
           onSubmit={handleSubmit}
           renderField={renderField}
         />
@@ -283,16 +345,27 @@ export function ParticipationComposer({
 
 interface ComposerFormProps {
   mode: ComposerMode;
+  values: ComposerValues;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   renderField: (field: ModeField) => React.ReactElement;
 }
 
 /** The active mode's prompt heading + its fields + a submit (contribute) button. */
-function ComposerForm({ mode, onSubmit, renderField }: ComposerFormProps): React.ReactElement {
+function ComposerForm({
+  mode,
+  values,
+  onSubmit,
+  renderField,
+}: ComposerFormProps): React.ReactElement {
   const t = useT();
   const promptId = useId();
   const definition = getModeDefinition(mode);
   const prompt = t(definition.promptKey, definition.promptText);
+  // WS-G.3.6b: submit stays DISABLED until every required acknowledgment
+  // checkbox is checked (the privacy acknowledgment can never be skipped).
+  const ackPending = definition.fields.some(
+    (field) => field.kind === 'checkbox' && field.required && values[field.name] !== 'true',
+  );
 
   return (
     // `noValidate`: the composer owns validation. Native bubbles would conflict
@@ -308,7 +381,7 @@ function ComposerForm({ mode, onSubmit, renderField }: ComposerFormProps): React
       {/* The submit verb is "Contribute" — never "Post" / "Like". This adds a
           structured contribution; it is not an applause action. */}
       <div className="flex">
-        <Button type="submit" variant="primary">
+        <Button type="submit" variant="primary" disabled={ackPending}>
           {t('composer.submit', 'Add contribution')}
         </Button>
       </div>

@@ -25,6 +25,7 @@ const ALLOWED_CONTEXT_KEYS: ReadonlyArray<keyof AuditContext> = [
   'setting',
   'previous_value',
   'new_value',
+  'reason',
 ];
 
 const IPV4 = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/;
@@ -51,6 +52,7 @@ export function redactContext(raw: Record<string, unknown> | undefined): AuditCo
     setting: null,
     previous_value: null,
     new_value: null,
+    reason: null,
   };
   if (!raw) return base;
   for (const key of ALLOWED_CONTEXT_KEYS) {

@@ -50,6 +50,7 @@ describe('redactContext', () => {
       setting: null,
       previous_value: null,
       new_value: null,
+      reason: null,
     });
   });
 });

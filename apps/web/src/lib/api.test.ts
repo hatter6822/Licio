@@ -29,13 +29,27 @@ const ACTIVE_USER: UserContext = {
 };
 
 const VALID_CONTRIBUTION = {
-  contribution_id: '22222222-2222-4222-8222-222222222222',
-  thread_id: '33333333-3333-4333-8333-333333333333',
-  type: 'evidence',
-  body: 'A source.',
-  moderation_state: 'pending',
-  created_at: '2026-06-09T13:00:00.000Z',
-  local_draft_id: 'draft-1',
+  contribution: {
+    contribution_id: '22222222-2222-4222-8222-222222222222',
+    thread_id: '33333333-3333-4333-8333-333333333333',
+    type: 'evidence',
+    body: 'A source.',
+    citations: [{ url: 'https://example.org/source' }],
+    metadata: {},
+    target_claim_id: '55555555-5555-4555-8555-555555555555',
+    parent_contribution_id: null,
+    author_handle: 'mara',
+    author_display_name: 'Mara',
+    is_author: true,
+    depth: 0,
+    child_count: 0,
+    moderation_state: 'published',
+    edited: false,
+    created_at: '2026-06-09T13:00:00.000Z',
+    updated_at: '2026-06-09T13:00:00.000Z',
+  },
+  evidence_card: null,
+  deduplicated: false,
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -109,11 +123,11 @@ describe('request interceptor', () => {
     });
     await createContribution({
       thread_id: '33333333-3333-4333-8333-333333333333',
-      branch: 'evidence',
       type: 'evidence',
       body: 'A source.',
-      citations: [],
-      local_draft_id: 'draft-1',
+      citations: [{ url: 'https://example.org/source' }],
+      target_claim_id: '55555555-5555-4555-8555-555555555555',
+      client_draft_id: 'draft-1',
     });
     const postCall = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find((c) =>
       String(c[0]).includes('/v1/contributions'),
@@ -136,11 +150,11 @@ describe('request interceptor', () => {
     });
     const body = {
       thread_id: '33333333-3333-4333-8333-333333333333',
-      branch: 'evidence' as const,
       type: 'evidence' as const,
       body: 'x',
-      citations: [],
-      local_draft_id: 'd',
+      citations: [{ url: 'https://example.org/source' }],
+      target_claim_id: '55555555-5555-4555-8555-555555555555',
+      client_draft_id: 'd',
     };
     await createContribution(body);
     await createContribution(body);
@@ -160,11 +174,11 @@ describe('request interceptor', () => {
     });
     const body = {
       thread_id: '33333333-3333-4333-8333-333333333333',
-      branch: 'evidence' as const,
       type: 'evidence' as const,
       body: 'x',
-      citations: [],
-      local_draft_id: 'd',
+      citations: [{ url: 'https://example.org/source' }],
+      target_claim_id: '55555555-5555-4555-8555-555555555555',
+      client_draft_id: 'd',
     };
     await Promise.all([createContribution(body), createContribution(body)]);
     expect(postTokens).toHaveLength(2);

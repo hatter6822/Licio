@@ -9,9 +9,16 @@ import { RouteAnnouncer } from '../components/a11y/index.js';
 import { DefinedTerm } from '../components/cognitive/DefinedTerm/index.js';
 import { ExplainLikeNewLens } from '../components/cognitive/ExplainLikeNewLens/index.js';
 import { ProgressiveDisclosure } from '../components/cognitive/ProgressiveDisclosure/index.js';
+import {
+  type ComposerErrors,
+  type ComposerMode,
+  ParticipationComposer,
+} from '../components/composer/ParticipationComposer/index.js';
+import { buildContributionPayload } from '../components/composer/ParticipationComposer/payload.js';
 import { TranslationDisclosure } from '../components/i18n/TranslationDisclosure/index.js';
 import { RatingLabel, ratingLabelKinds } from '../components/story/RatingLabel/index.js';
 import { StoryCard } from '../components/story/StoryCard/index.js';
+import { UgcBody } from '../components/ugc/UgcBody.js';
 import { AppShell } from '../components/ui/AppShell/index.js';
 import { Avatar } from '../components/ui/Avatar/index.js';
 import { Badge } from '../components/ui/Badge/index.js';
@@ -55,6 +62,62 @@ const VARIANTS: ButtonVariant[] = ['primary', 'secondary', 'ghost', 'destructive
 function ToastDemo(): React.ReactElement {
   const { toast } = useToast();
   return <Button onClick={() => toast({ tone: 'success', message: 'Saved' })}>Show toast</Button>;
+}
+
+/**
+ * UGC fixtures the Playwright suite exercises under the preview's REAL
+ * Content-Security-Policy (`require-trusted-types-for 'script'`): the
+ * formatting sample proves the licio-ugc Trusted Types policy renders in a
+ * real engine; the attack sample's payloads must come out inert; the link
+ * sample drives the WS-G.4.2c interstitial with a heuristic-suspicious URL
+ * (no blocklist needed — the heuristics are local).
+ */
+const UGC_FORMATTING_SAMPLE = [
+  '## Reservoir levels',
+  '',
+  'The **May reading** fell *12%* against the `2019` baseline.',
+  '',
+  '> Quoted from the gauge log.',
+  '',
+  '- [agency report](https://example.org/report)',
+  '- second item',
+].join('\n');
+
+const UGC_ATTACK_SAMPLE = [
+  '<script>window.__ugc_xss = true;</script>',
+  '',
+  '<img src=x onerror="window.__ugc_xss = true">',
+  '',
+  '[harmless?](javascript:alert(1))',
+  '',
+  '[claim airdrop](https://site.example/approve?spender=0xabc123)',
+].join('\n');
+
+/** The composer wired to the REAL shared-schema validation (no server). */
+function ComposerDemo(): React.ReactElement {
+  const { toast } = useToast();
+  const [mode, setMode] = useState<ComposerMode | undefined>(undefined);
+  const [errors, setErrors] = useState<ComposerErrors>({});
+  return (
+    <ParticipationComposer
+      {...(mode !== undefined ? { mode } : {})}
+      onModeChange={setMode}
+      onDraftChange={() => {}}
+      onSubmit={(submittedMode, values) => {
+        const built = buildContributionPayload(submittedMode, values, {
+          threadId: '00000000-0000-4000-8000-000000000000',
+          clientDraftId: 'styleguide-demo',
+        });
+        if (!built.ok) {
+          setErrors(built.fieldErrors);
+          return;
+        }
+        setErrors({});
+        toast({ tone: 'success', message: 'Validated against the shared schema' });
+      }}
+      errors={errors}
+    />
+  );
 }
 
 function Gallery(): React.ReactElement {
@@ -230,6 +293,19 @@ function Gallery(): React.ReactElement {
             className="h-64 rounded-md border border-line"
             renderItem={(item) => <div className="px-3 py-3 text-ink">{item}</div>}
           />
+        </Section>
+
+        <Section title="User content (UGC pipeline)">
+          <div data-testid="ugc-formatting" className="rounded-lg border border-line p-4">
+            <UgcBody markdown={UGC_FORMATTING_SAMPLE} />
+          </div>
+          <div data-testid="ugc-attack" className="rounded-lg border border-line p-4">
+            <UgcBody markdown={UGC_ATTACK_SAMPLE} />
+          </div>
+        </Section>
+
+        <Section title="Participation composer">
+          <ComposerDemo />
         </Section>
       </div>
     </AppShell>

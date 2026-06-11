@@ -102,6 +102,15 @@ export const RANKING_CONTEXT_TABLES: ReadonlySet<Relation> = new Set<Relation>([
   'public.takedown_requests',
   'public.ingestion_review_items',
   'public.embeddings',
+  // WS-G forum content (contributions, rooms, lenses, summaries, uploads).
+  'public.contributions',
+  'public.contribution_edit_history',
+  'public.rooms',
+  'public.room_stewards',
+  'public.room_subscriptions',
+  'public.lenses',
+  'public.summaries',
+  'public.uploads',
 ]);
 
 /** Schemas whose every table must be classified into a context (fail-closed). */

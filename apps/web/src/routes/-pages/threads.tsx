@@ -4,10 +4,13 @@
 // the detail route reads a thread through the six WS-B.2.12 semantic branches,
 // with the active branch in a shareable `?branch=` search param. Visiting a
 // branch records nonredundant traversal (WS-C.4.3).
-import type { BranchId } from '@licio/shared';
+import type { BranchId, ContributionPublic } from '@licio/shared';
 import { useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { ThreadBranchNav } from '../../components/thread/ThreadBranchNav/index.js';
+import { UgcBody } from '../../components/ugc/UgcBody.js';
+import { Badge } from '../../components/ui/Badge/index.js';
+import { Button } from '../../components/ui/Button/index.js';
 import { EmptyState } from '../../components/ui/EmptyState/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
@@ -106,14 +109,61 @@ function BranchPanel({
     );
   }
   return (
-    <ul className="flex flex-col gap-3">
-      {query.data.contributions.map((contribution) => (
-        <li key={contribution.contribution_id} className="rounded-lg border border-line p-3">
-          <p className="text-sm font-medium text-ink">{contribution.author_handle}</p>
-          <p className="text-sm text-ink-muted">{contribution.body}</p>
-        </li>
-      ))}
-    </ul>
+    <>
+      <ul className="flex flex-col gap-3">
+        {query.data.contributions.map((contribution) => (
+          <ContributionCard key={contribution.contribution_id} contribution={contribution} />
+        ))}
+      </ul>
+      {query.data.next_cursor !== null ? (
+        <div className="mt-3 flex justify-center">
+          <Button variant="secondary" onClick={() => query.loadMore()}>
+            {t('thread.branch.more', 'Show more')}
+          </Button>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+/** One contribution: typed badge + author + UGC-rendered body, indented by
+ *  its tree depth (WS-G.3.3 depth indicators), with a tombstone state for
+ *  removed/hidden ancestors that keep the tree intact. */
+function ContributionCard({
+  contribution,
+}: {
+  contribution: ContributionPublic;
+}): React.ReactElement {
+  const t = useT();
+  const tombstone = contribution.author_handle === null && contribution.body === '';
+  return (
+    <li
+      id={`contribution-${contribution.contribution_id}`}
+      className="rounded-lg border border-line p-3"
+      style={{ marginInlineStart: `${Math.min(contribution.depth, 6) * 16}px` }}
+    >
+      <div className="mb-1 flex flex-wrap items-center gap-2">
+        <Badge>
+          {t(`contribution.type.${contribution.type}`, contribution.type.replace('_', ' '))}
+        </Badge>
+        <span className="text-sm font-medium text-ink">
+          {contribution.author_handle ?? t('contribution.tombstoneAuthor', '[removed]')}
+        </span>
+        {contribution.moderation_state === 'under_review' ? (
+          <Badge tone="warning">{t('contribution.underReview', 'Under review')}</Badge>
+        ) : null}
+        {contribution.edited ? (
+          <span className="text-xs text-ink-muted">{t('contribution.edited', 'edited')}</span>
+        ) : null}
+      </div>
+      {tombstone ? (
+        <p className="text-sm italic text-ink-muted">
+          {t('contribution.tombstone', 'This contribution was removed; replies are preserved.')}
+        </p>
+      ) : (
+        <UgcBody markdown={contribution.body} compact />
+      )}
+    </li>
   );
 }
 

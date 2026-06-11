@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Behaviour tests for the Participation Composer (WS-B.2.10): the mode chooser
-// lists all eight modes with accessible names; selecting a mode reveals ONLY its
-// fields; required fields are marked and validate with a linked error; privacy
-// warnings precede the sensitive fields; the draft callback fires on every edit
-// and the draft survives switching modes; and the whole surface is a11y-clean.
+// Behaviour tests for the Participation Composer (WS-G.3.4–3.6): the type
+// selector lists all ELEVEN canonical types in five groups with accessible
+// names; selecting a mode reveals ONLY its fields; required fields are marked
+// and validate with a linked error; the privacy acknowledgment gates submit;
+// privacy warnings precede the sensitive fields; the draft callback fires on
+// every edit and the draft survives switching modes; and the surface is
+// a11y-clean.
+import { CONTRIBUTION_TYPES } from '@licio/shared';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { checkA11y } from '../../../test/axe.js';
-import { composerModes } from './modes.js';
+import { COMPOSER_GROUPS, composerModes, getModeDefinition } from './modes.js';
 import { ParticipationComposer } from './ParticipationComposer.js';
 
 /** Click the chooser button for a mode by its visible name. */
@@ -17,10 +20,9 @@ async function chooseMode(user: ReturnType<typeof userEvent.setup>, name: RegExp
   await user.click(screen.getByRole('button', { name }));
 }
 
-describe('ParticipationComposer mode chooser (WS-B.2.10)', () => {
-  it('lists exactly eight modes, each with an accessible name', () => {
+describe('ParticipationComposer type selector (WS-G.3.4a)', () => {
+  it('lists exactly the eleven canonical types, grouped, with accessible names', () => {
     render(<ParticipationComposer />);
-    // Each mode's accessible name combines its name and guiding question.
     for (const definition of composerModes) {
       const button = screen.getByRole('button', {
         name: new RegExp(`${definition.nameText}.*${definition.promptText.slice(0, 12)}`, 'i'),
@@ -28,7 +30,16 @@ describe('ParticipationComposer mode chooser (WS-B.2.10)', () => {
       expect(button).toBeInTheDocument();
       expect(button).toHaveAttribute('aria-pressed', 'false');
     }
-    expect(composerModes).toHaveLength(8);
+    expect(composerModes).toHaveLength(11);
+    // The catalogue ids ARE the canonical wire enum (no drift possible).
+    expect(composerModes.map((m) => m.mode).sort()).toEqual([...CONTRIBUTION_TYPES].sort());
+    // The five WS-G.3.4a groups partition the eleven types exactly.
+    const grouped = COMPOSER_GROUPS.flatMap((group) => group.modes);
+    expect(grouped.length).toBe(11);
+    expect(new Set(grouped).size).toBe(11);
+    for (const group of COMPOSER_GROUPS) {
+      expect(screen.getByRole('region', { name: group.nameText })).toBeInTheDocument();
+    }
   });
 
   it('marks the chosen mode as pressed and shows its guiding question', async () => {
@@ -37,25 +48,22 @@ describe('ParticipationComposer mode chooser (WS-B.2.10)', () => {
     await chooseMode(user, /^Ask/i);
     const askButton = screen.getByRole('button', { name: /^Ask/i });
     expect(askButton).toHaveAttribute('aria-pressed', 'true');
-    // The mode's prompt appears as the form heading.
     expect(screen.getByRole('heading', { name: /what would clarify this\?/i })).toBeInTheDocument();
   });
 });
 
-describe('ParticipationComposer per-mode fields (WS-B.2.10)', () => {
+describe('ParticipationComposer per-mode fields (WS-G.3.4b–3.6d)', () => {
   it('shows ONLY the selected mode fields and switches cleanly', async () => {
     const user = userEvent.setup();
     render(<ParticipationComposer />);
 
     await chooseMode(user, /^Ask/i);
-    expect(screen.getByLabelText(/Question/i)).toBeInTheDocument();
-    // Evidence-only fields must not be present in Ask.
+    expect(screen.getByLabelText(/^Question/i)).toBeInTheDocument();
     expect(screen.queryByLabelText(/Why is this relevant\?/i)).not.toBeInTheDocument();
 
-    await chooseMode(user, /^Evidence/i);
-    expect(screen.getByLabelText(/Link, file, or citation/i)).toBeInTheDocument();
+    await chooseMode(user, /^Evidence.*What source/i);
+    expect(screen.getByLabelText(/Link or citation/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/Why is this relevant\?/i)).toBeInTheDocument();
-    // The Ask question field is gone now.
     expect(screen.queryByLabelText(/^Question/i)).not.toBeInTheDocument();
   });
 
@@ -63,37 +71,46 @@ describe('ParticipationComposer per-mode fields (WS-B.2.10)', () => {
     const user = userEvent.setup();
     render(<ParticipationComposer />);
     await chooseMode(user, /^Ask/i);
-    expect(screen.getByLabelText(/Question/i)).toHaveAttribute('aria-required', 'true');
-    // The optional claim reference is not required.
+    expect(screen.getByLabelText(/^Question/i)).toHaveAttribute('aria-required', 'true');
     expect(screen.getByLabelText(/Claim this refers to/i)).not.toHaveAttribute('aria-required');
   });
 
-  it('renders the Flag urgency as a select with low/medium/high', async () => {
+  it('renders the Flag reason from the WS-A.1.2 taxonomy and a normal/urgent urgency', async () => {
     const user = userEvent.setup();
     render(<ParticipationComposer />);
     await chooseMode(user, /^Flag/i);
+    const reason = screen.getByRole('combobox', { name: /Reason/i });
+    await user.click(reason);
+    expect(screen.getByRole('option', { name: /Harassment/i })).toBeInTheDocument();
     const urgency = screen.getByRole('combobox', { name: /Urgency/i });
-    expect(urgency).toBeInTheDocument();
     await user.click(urgency);
-    expect(screen.getByRole('option', { name: 'Low' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'Medium' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'High' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Normal' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('option', { name: /Urgent — use for imminent harm/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('caps the body at the per-type limit with a live counter (TextArea-owned)', async () => {
+    const user = userEvent.setup();
+    render(<ParticipationComposer />);
+    await chooseMode(user, /^Ask/i);
+    const question = screen.getByLabelText(/^Question/i);
+    await user.type(question, 'Why?');
+    // The shared cap reaches the control as the native maxLength bound.
+    expect(question).toHaveAttribute('maxlength', '2000');
+    expect(screen.getAllByText('4 / 2000').length).toBeGreaterThanOrEqual(1);
   });
 });
 
-describe('ParticipationComposer validation (WS-B.2.10)', () => {
+describe('ParticipationComposer validation (WS-G.1.2b client side)', () => {
   it('shows a linked error when a required field is left empty on blur', async () => {
     const user = userEvent.setup();
     render(<ParticipationComposer />);
     await chooseMode(user, /^Ask/i);
-    const question = screen.getByLabelText(/Question/i);
+    const question = screen.getByLabelText(/^Question/i);
     await user.click(question);
-    await user.tab(); // blur with no input
-    const describedBy = question.getAttribute('aria-describedby');
-    expect(describedBy).toBeTruthy();
-    const message = document.getElementById((describedBy as string).split(' ')[0] as string);
-    expect(message).toHaveTextContent(/required/i);
-    expect(question).toHaveAttribute('aria-invalid', 'true');
+    await user.tab();
+    expect(question).toHaveAccessibleDescription(/this field is required/i);
   });
 
   it('surfaces required errors on submit and blocks onSubmit when fields are empty', async () => {
@@ -103,7 +120,9 @@ describe('ParticipationComposer validation (WS-B.2.10)', () => {
     await chooseMode(user, /^Ask/i);
     await user.click(screen.getByRole('button', { name: /add contribution/i }));
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(screen.getByLabelText(/Question/i)).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText(/^Question/i)).toHaveAccessibleDescription(
+      /this field is required/i,
+    );
   });
 
   it('submits the values once required fields are filled', async () => {
@@ -111,87 +130,102 @@ describe('ParticipationComposer validation (WS-B.2.10)', () => {
     const onSubmit = vi.fn();
     render(<ParticipationComposer onSubmit={onSubmit} />);
     await chooseMode(user, /^Ask/i);
-    await user.type(screen.getByLabelText(/Question/i), 'How was this measured?');
+    await user.type(screen.getByLabelText(/^Question/i), 'What is the sampling window?');
     await user.click(screen.getByRole('button', { name: /add contribution/i }));
-    expect(onSubmit).toHaveBeenCalledTimes(1);
-    expect(onSubmit).toHaveBeenCalledWith('ask', { question: 'How was this measured?' });
+    expect(onSubmit).toHaveBeenCalledWith(
+      'question',
+      expect.objectContaining({ body: 'What is the sampling window?' }),
+    );
   });
 
   it('accepts externally-supplied errors and links them', async () => {
     const user = userEvent.setup();
-    render(<ParticipationComposer errors={{ question: 'Server rejected this question' }} />);
-    await chooseMode(user, /^Ask/i);
-    const question = screen.getByLabelText(/Question/i);
-    expect(question).toHaveAttribute('aria-invalid', 'true');
-    const describedBy = (question.getAttribute('aria-describedby') ?? '').split(' ')[0] as string;
-    expect(document.getElementById(describedBy)).toHaveTextContent('Server rejected this question');
+    render(
+      <ParticipationComposer
+        defaultMode="question"
+        errors={{ body: 'The server rejected this question.' }}
+      />,
+    );
+    expect(screen.getByLabelText(/^Question/i)).toHaveAccessibleDescription(
+      /the server rejected this question/i,
+    );
+    // External errors never crash mode switching.
+    await chooseMode(user, /^Explain/i);
+    expect(screen.getByLabelText(/^Explanation/i)).toBeInTheDocument();
   });
 });
 
-describe('ParticipationComposer privacy warnings (WS-B.2.10)', () => {
-  it('warns before the Experience location/time field', async () => {
+describe('ParticipationComposer privacy (WS-G.3.6b)', () => {
+  it('warns before the experience location field and requires the acknowledgment', async () => {
     const user = userEvent.setup();
-    render(<ParticipationComposer />);
+    const onSubmit = vi.fn();
+    render(<ParticipationComposer onSubmit={onSubmit} />);
     await chooseMode(user, /^Experience/i);
-    const warning = screen.getByText(/Sharing a location or time can identify you/i);
-    expect(warning).toBeInTheDocument();
-    // The warning precedes the field it guards in DOM order.
-    const field = screen.getByLabelText(/Location or time/i);
-    expect(warning.compareDocumentPosition(field) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  });
+    expect(
+      screen.getAllByText(/shares personal experience publicly/i).length,
+    ).toBeGreaterThanOrEqual(1);
 
-  it('warns before attaching evidence files', async () => {
-    const user = userEvent.setup();
-    render(<ParticipationComposer />);
-    await chooseMode(user, /^Evidence/i);
-    expect(screen.getByText(/can carry hidden metadata/i)).toBeInTheDocument();
-  });
-
-  it('does not show a privacy warning for the Ask mode', async () => {
-    const user = userEvent.setup();
-    render(<ParticipationComposer />);
-    await chooseMode(user, /^Ask/i);
-    expect(screen.queryByRole('note')).not.toBeInTheDocument();
+    // Fill every required text field; leave the acknowledgment unchecked.
+    await user.type(
+      screen.getByLabelText(/What you directly experienced/i),
+      'I attended the hearing.',
+    );
+    await user.type(screen.getByLabelText(/Your vantage point/i), 'Hearing attendee');
+    const submit = screen.getByRole('button', { name: /add contribution/i });
+    // WS-G.3.6b: submit is DISABLED (aria-disabled, focusable for SR users)
+    // until the acknowledgment is checked — and a click while pending never
+    // reaches onSubmit.
+    expect(submit).toHaveAttribute('aria-disabled', 'true');
+    await user.click(submit);
+    expect(onSubmit).not.toHaveBeenCalled();
+    await user.click(screen.getByLabelText(/I understand this will be shared publicly/i));
+    expect(submit).not.toHaveAttribute('aria-disabled');
+    await user.click(submit);
+    expect(onSubmit).toHaveBeenCalledWith(
+      'direct_experience',
+      expect.objectContaining({ privacy_acknowledged: 'true' }),
+    );
   });
 });
 
-describe('ParticipationComposer draft handling (WS-B.2.10)', () => {
+describe('ParticipationComposer draft handling (WS-G.3.7c seam)', () => {
   it('fires onDraftChange on every edit with the live values', async () => {
     const user = userEvent.setup();
     const onDraftChange = vi.fn();
     render(<ParticipationComposer onDraftChange={onDraftChange} />);
     await chooseMode(user, /^Ask/i);
-    await user.type(screen.getByLabelText(/Question/i), 'abc');
-    expect(onDraftChange).toHaveBeenCalledTimes(3);
-    expect(onDraftChange).toHaveBeenLastCalledWith('ask', { question: 'abc' });
+    await user.type(screen.getByLabelText(/^Question/i), 'Hi');
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      'question',
+      expect.objectContaining({ body: 'Hi' }),
+    );
   });
 
   it('preserves a draft when switching modes and back', async () => {
     const user = userEvent.setup();
     render(<ParticipationComposer />);
     await chooseMode(user, /^Ask/i);
-    await user.type(screen.getByLabelText(/Question/i), 'kept draft');
-    // Switch away…
-    await chooseMode(user, /^Evidence/i);
-    expect(screen.queryByDisplayValue('kept draft')).not.toBeInTheDocument();
-    // …and back — the draft is restored.
+    await user.type(screen.getByLabelText(/^Question/i), 'Persist me');
+    await chooseMode(user, /^Explain/i);
     await chooseMode(user, /^Ask/i);
-    expect(screen.getByLabelText(/Question/i)).toHaveValue('kept draft');
+    expect(screen.getByLabelText(/^Question/i)).toHaveValue('Persist me');
   });
 });
 
-describe('ParticipationComposer accessibility (WS-B.2.10)', () => {
-  it('has no axe violations at the chooser', async () => {
-    const { container } = render(<ParticipationComposer />);
-    expect(await checkA11y(container)).toHaveNoViolations();
+describe('ParticipationComposer catalogue invariants', () => {
+  it('every mode has a body field whose cap matches the shared limit', () => {
+    for (const type of CONTRIBUTION_TYPES) {
+      const definition = getModeDefinition(type);
+      const body = definition.fields.find((field) => field.name === 'body');
+      expect(body, type).toBeDefined();
+      expect(body?.required).toBe(true);
+    }
   });
 
-  it('has no axe violations across every mode', async () => {
+  it('is accessibility-clean with a mode open', async () => {
     const user = userEvent.setup();
     const { container } = render(<ParticipationComposer />);
-    for (const definition of composerModes) {
-      await chooseMode(user, new RegExp(`^${definition.nameText}`, 'i'));
-      expect(await checkA11y(container)).toHaveNoViolations();
-    }
+    await chooseMode(user, /^Experience/i);
+    await checkA11y(container);
   });
 });

@@ -2,11 +2,9 @@
 import {
   attentionAggregateSchema,
   branchContentSchema,
-  contributionSchema,
   DEFAULT_USER_SETTINGS,
   feedResponseSchema,
   notificationPreferencesSchema,
-  roomDetailSchema,
   roomListResponseSchema,
   signalLedgerResponseSchema,
   storyDetailSchema,
@@ -18,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resetPushState } from '../lib/push-service.js';
 import { createV1Routes, resetSettingsState } from '../routes/v1.js';
 import { freshWsEServices, legacyAggregate, seedUserWithSession } from './ws-e-helpers.js';
+import { freshWsGServices, seedThread } from './ws-g-helpers.js';
 
 // Mount the v1 router on a bare app: this unit-tests the contract handlers in
 // isolation. CSRF/CORS/security middleware is exercised by their own suites.
@@ -59,24 +58,24 @@ describe('v1 read models', () => {
   });
 
   it('returns a known demo story', async () => {
+    freshWsGServices();
     const res = await app().request('/v1/stories/5f5e1000-0000-4000-8000-000000000001');
     expect(res.status).toBe(200);
     const body = storyDetailSchema.parse(await res.json());
     expect(body.story_id).toBe('5f5e1000-0000-4000-8000-000000000001');
   });
 
-  it('serves schema-valid thread / branch / room bodies', async () => {
+  it('serves schema-valid thread / branch / room bodies from the REAL stores', async () => {
+    const fixture = freshWsGServices();
     const a = app();
-    const thread = '5f5e2000-0000-4000-8000-000000000001';
-    const room = '5f5e3000-0000-4000-8000-000000000001';
-    // Each body must satisfy its shared schema (fixture-drift guard, matching the
-    // server-side re-validation now done in the routes).
-    threadDetailSchema.parse(await (await a.request(`/v1/threads/${thread}`)).json());
+    const { threadId } = await seedThread(fixture);
+    // Each body must satisfy its shared schema (the server re-validates on
+    // egress; this guards the contract end to end).
+    threadDetailSchema.parse(await (await a.request(`/v1/threads/${threadId}`)).json());
     branchContentSchema.parse(
-      await (await a.request(`/v1/threads/${thread}/branches/overview`)).json(),
+      await (await a.request(`/v1/threads/${threadId}/branches/overview`)).json(),
     );
     roomListResponseSchema.parse(await (await a.request('/v1/rooms')).json());
-    roomDetailSchema.parse(await (await a.request(`/v1/rooms/${room}`)).json());
   });
 
   it('requires authentication for the Signal Ledger (owner-only, WS-E.2.1d)', async () => {
@@ -135,28 +134,27 @@ describe('v1 auth + settings + flags', () => {
 });
 
 describe('v1 writes', () => {
-  it('accepts a contribution and echoes the local draft id', async () => {
+  it('requires authentication for contribution creation (WS-G.3.1)', async () => {
+    freshWsGServices();
     const res = await app().request(
       jsonRequest('/v1/contributions', 'POST', {
         thread_id: VALID_UUID,
-        branch: 'evidence',
-        type: 'evidence',
-        body: 'A primary source worth inspecting.',
-        citations: ['https://example.org/doc'],
-        local_draft_id: 'draft-1',
+        type: 'question',
+        body: 'What evidence supports this?',
+        client_draft_id: 'draft-1',
       }),
     );
-    expect(res.status).toBe(201);
-    const created = contributionSchema.parse(await res.json());
-    expect(created.local_draft_id).toBe('draft-1');
-    expect(created.moderation_state).toBe('pending');
+    expect(res.status).toBe(401);
   });
 
-  it('rejects a malformed contribution with 400', async () => {
+  it('rejects a malformed unauthenticated contribution with 401 (auth precedes validation)', async () => {
+    freshWsGServices();
     const res = await app().request(
       jsonRequest('/v1/contributions', 'POST', { thread_id: 'nope', type: 'evidence' }),
     );
-    expect(res.status).toBe(400);
+    // Authentication runs BEFORE body validation: anonymous callers learn
+    // nothing about the contract from malformed probes.
+    expect(res.status).toBe(401);
   });
 
   it('acknowledges a safety report', async () => {

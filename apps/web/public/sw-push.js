@@ -17,6 +17,37 @@ self.addEventListener('message', (event) => {
   }
 });
 
+// Citation capture via the PWA share target (WS-G.3.7a). The manifest
+// declares a POST share_target at /share-target; a static host cannot accept
+// a POST, so the worker intercepts it, reads the shared fields, and
+// 303-redirects into the composer with the citation as SEARCH PARAMS (the
+// /submit search schema validates and length-bounds them). Same-origin only;
+// no body is stored.
+self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+  if (
+    event.request.method === 'POST' &&
+    url.origin === self.location.origin &&
+    url.pathname === '/share-target'
+  ) {
+    event.respondWith(
+      (async () => {
+        try {
+          const form = await event.request.formData();
+          const params = new URLSearchParams();
+          const shared = form.get('url') || form.get('text') || '';
+          const title = form.get('title') || '';
+          if (typeof shared === 'string' && shared) params.set('share_url', shared.slice(0, 2048));
+          if (typeof title === 'string' && title) params.set('share_title', title.slice(0, 300));
+          return Response.redirect(`/submit?${params.toString()}`, 303);
+        } catch {
+          return Response.redirect('/submit', 303);
+        }
+      })(),
+    );
+  }
+});
+
 // Notification budget meter (WS-C.2.4c): a per-UTC-day count of notifications
 // shown, kept in a tiny dedicated IndexedDB the settings UI reads. Counts only —
 // never contents. Mirrors offline/notification-meter.ts.

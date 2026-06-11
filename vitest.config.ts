@@ -40,6 +40,7 @@ export default defineConfig({
         'apps/api/src/events/redis-event-stores.ts',
         'apps/api/src/events/drizzle-event-stores.ts',
         'apps/api/src/ingestion/drizzle-ingestion-stores.ts',
+        'apps/api/src/forum/drizzle-forum-stores.ts',
         'packages/db/src/similarity.ts',
       ],
       thresholds: {

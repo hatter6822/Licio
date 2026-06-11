@@ -1,19 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Participation-mode catalogue (WS-B.2.10). Licio replaces "post for applause"
-// with eight STRUCTURED contributions, each asking for the specific evidence,
-// reasoning, or context that mode requires. The catalogue is data, not markup:
-// the composer renders a mode's fields from its `fields` array, so the modes are
-// the single source of truth for prompts, required-ness, and field kinds, and a
-// new mode never means new branching UI.
+// Participation-mode catalogue (WS-G.3.4–3.6, SPEC §6.6/§15.1). Licio
+// replaces "post for applause" with the ELEVEN canonical typed contributions
+// — the catalogue ids ARE the wire `type` values, and field names match the
+// WS-G.1.2b canon so the payload builder is mechanical and the shared zod
+// schema validates the same shapes the server enforces (no client/server
+// drift by construction).  The catalogue is data, not markup: the composer
+// renders a mode's fields from its `fields` array.
 //
-// Doctrine: NONE of these modes is "react / like / vote". There is deliberately
-// no applause field anywhere in this catalogue (asserted in the no-applause
-// test) — contributions are weighted by participation and evidence, never by
-// popularity.
+// Doctrine: NONE of these modes is "react / like / vote". There is
+// deliberately no applause field anywhere in this catalogue (asserted in the
+// no-applause test) — contributions are weighted by participation and
+// evidence, never by popularity.
+import type { ContributionType } from '@licio/shared';
+import { CONTRIBUTION_BODY_LIMITS, MODERATION_REASON_CODES } from '@licio/shared';
 
 /** Which primitive renders a field. */
-export type FieldKind = 'text' | 'textarea' | 'select';
+export type FieldKind = 'text' | 'textarea' | 'select' | 'checkbox' | 'citation';
 
 /** A selectable option for a `select` field. */
 export interface FieldOption {
@@ -27,7 +30,7 @@ export interface FieldOption {
 
 /** One field within a mode. Copy is carried as (key, default) i18n pairs. */
 export interface ModeField {
-  /** Stable key, unique within its mode; used as the values-record key. */
+  /** Stable key, unique within its mode — the WIRE field name (WS-G.1.2b). */
   name: string;
   kind: FieldKind;
   /** i18n key for the field label. */
@@ -35,27 +38,57 @@ export interface ModeField {
   /** Default English label. */
   labelText: string;
   required: boolean;
+  /** Character cap (live counter; mirrors the shared schema bound). */
+  maxLength?: number;
   /** Options for a `select` field. */
   options?: readonly FieldOption[];
   /**
-   * When set, a privacy warning renders immediately BEFORE this field. Used for
-   * sensitive inputs (file references, location/time) so the warning precedes
-   * the control in DOM and reading order (WS-B.2.10).
+   * When set, a privacy warning renders immediately BEFORE this field. Used
+   * for sensitive inputs so the warning precedes the control in DOM and
+   * reading order (WS-B.2.10 / WS-G.3.6b).
    */
   privacyWarningKey?: string;
   privacyWarningText?: string;
+  /** Voice dictation affordance (WS-G.3.7d; body-text fields only). */
+  dictation?: boolean;
 }
 
-/** The eight participation modes (WS-B.2.10). */
-export type ComposerMode =
-  | 'ask'
-  | 'evidence'
-  | 'correction'
-  | 'synthesis'
-  | 'counterexample'
-  | 'experience'
-  | 'explain'
-  | 'flag';
+/** The eleven participation modes — ids are the canonical wire types. */
+export type ComposerMode = ContributionType;
+
+/** The five WS-G.3.4a selector groups (discoverability). */
+export const COMPOSER_GROUPS = [
+  { id: 'ask', nameKey: 'composer.group.ask', nameText: 'Ask', modes: ['question'] },
+  {
+    id: 'respond',
+    nameKey: 'composer.group.respond',
+    nameText: 'Respond',
+    modes: ['answer', 'explanation'],
+  },
+  {
+    id: 'evidence',
+    nameKey: 'composer.group.evidence',
+    nameText: 'Evidence',
+    modes: ['evidence', 'counterexample', 'local_context', 'direct_experience'],
+  },
+  {
+    id: 'improve',
+    nameKey: 'composer.group.improve',
+    nameText: 'Improve',
+    modes: ['correction', 'synthesis'],
+  },
+  {
+    id: 'meta',
+    nameKey: 'composer.group.meta',
+    nameText: 'Meta',
+    modes: ['moderation_concern', 'meta_discussion'],
+  },
+] as const satisfies ReadonlyArray<{
+  id: string;
+  nameKey: string;
+  nameText: string;
+  modes: readonly ComposerMode[];
+}>;
 
 export interface ModeDefinition {
   mode: ComposerMode;
@@ -74,46 +107,93 @@ export interface ModeDefinition {
     | 'quote'
     | 'user'
     | 'circle-info'
-    | 'flag';
+    | 'flag'
+    | 'globe'
+    | 'threads'
+    | 'check-circle';
   fields: readonly ModeField[];
 }
-
-const FILE_PRIVACY = {
-  privacyWarningKey: 'composer.privacy.evidence',
-  privacyWarningText:
-    'If you attach a file, it can carry hidden metadata (location, device, author). Review it before sharing.',
-} as const;
 
 const LOCATION_PRIVACY = {
   privacyWarningKey: 'composer.privacy.experience',
   privacyWarningText:
-    'Sharing a location or time can identify you. Only add detail you are comfortable making public.',
+    'This shares personal experience publicly. Do not include identifying details you wish to keep private.',
 } as const;
+
+const body = (mode: ComposerMode, labelText: string): ModeField => ({
+  name: 'body',
+  kind: 'textarea',
+  labelKey: `composer.field.${mode}.body`,
+  labelText,
+  required: true,
+  maxLength: CONTRIBUTION_BODY_LIMITS[mode],
+  dictation: true,
+});
+
+const claimReference = (required: boolean): ModeField => ({
+  name: 'target_claim_id',
+  kind: 'text',
+  labelKey: 'composer.field.claim',
+  labelText: required ? 'Claim this refers to' : 'Claim this refers to (optional)',
+  required,
+});
+
+const citations = (required: boolean, labelText: string): ModeField => ({
+  name: 'citations',
+  kind: 'citation',
+  labelKey: 'composer.field.citations',
+  labelText,
+  required,
+});
+
+/** Reason options: a curated user-facing subset of the WS-A.1.2 taxonomy
+ *  (one representative code per §18.1 category; the full 51-code vocabulary
+ *  is steward-facing).  Pinned against MODERATION_REASON_CODES by test. */
+const FLAG_REASON_OPTIONS: readonly FieldOption[] = [
+  {
+    value: 'MOD_HARASS_001',
+    labelKey: 'flag.harassment',
+    labelText: 'Harassment or targeted abuse',
+  },
+  { value: 'MOD_THREAT_001', labelKey: 'flag.threat', labelText: 'Credible threat or incitement' },
+  { value: 'MOD_HATE_001', labelKey: 'flag.hate', labelText: 'Hate or dehumanization' },
+  { value: 'MOD_MISINFO_001', labelKey: 'flag.misinfo', labelText: 'Dangerous misinformation' },
+  { value: 'MOD_SPAM_001', labelKey: 'flag.spam', labelText: 'Spam or manipulation' },
+  { value: 'MOD_PRIVACY_001', labelKey: 'flag.privacy', labelText: 'Privacy violation or doxxing' },
+  { value: 'MOD_IMPERS_001', labelKey: 'flag.impersonation', labelText: 'Impersonation' },
+  { value: 'MOD_ILLEGAL_001', labelKey: 'flag.illegal', labelText: 'Illegal content' },
+  { value: 'MOD_CSE_001', labelKey: 'flag.cse', labelText: 'Child safety' },
+  { value: 'MOD_GRAPHIC_001', labelKey: 'flag.graphic', labelText: 'Graphic or shocking content' },
+  { value: 'MOD_SYNTH_001', labelKey: 'flag.synthetic', labelText: 'Undisclosed synthetic media' },
+  { value: 'MOD_IP_001', labelKey: 'flag.ip', labelText: 'Intellectual-property violation' },
+];
+
+/** Every flag option must be a ratified WS-A.1.2 code (import-time guard). */
+const RATIFIED = new Set<string>(MODERATION_REASON_CODES);
+for (const option of FLAG_REASON_OPTIONS) {
+  if (!RATIFIED.has(option.value)) {
+    throw new Error(`Unratified flag reason code in catalogue: ${option.value}`);
+  }
+}
 
 export const composerModes: readonly ModeDefinition[] = [
   {
-    mode: 'ask',
-    nameKey: 'composer.mode.ask.name',
+    mode: 'question',
+    nameKey: 'composer.mode.question.name',
     nameText: 'Ask',
-    promptKey: 'composer.mode.ask.prompt',
+    promptKey: 'composer.mode.question.prompt',
     promptText: 'What would clarify this?',
     icon: 'circle-question',
-    fields: [
-      {
-        name: 'question',
-        kind: 'textarea',
-        labelKey: 'composer.field.ask.question',
-        labelText: 'Question',
-        required: true,
-      },
-      {
-        name: 'claimReference',
-        kind: 'text',
-        labelKey: 'composer.field.ask.claim',
-        labelText: 'Claim this refers to (optional)',
-        required: false,
-      },
-    ],
+    fields: [body('question', 'Question'), claimReference(false)],
+  },
+  {
+    mode: 'answer',
+    nameKey: 'composer.mode.answer.name',
+    nameText: 'Answer',
+    promptKey: 'composer.mode.answer.prompt',
+    promptText: 'Answer the question directly.',
+    icon: 'check-circle',
+    fields: [body('answer', 'Answer'), citations(false, 'Citations (optional)')],
   },
   {
     mode: 'evidence',
@@ -123,27 +203,40 @@ export const composerModes: readonly ModeDefinition[] = [
     promptText: 'What source should readers inspect?',
     icon: 'paperclip',
     fields: [
+      citations(true, 'Link or citation'),
       {
-        name: 'source',
-        kind: 'text',
-        labelKey: 'composer.field.evidence.source',
-        labelText: 'Link, file, or citation',
-        required: true,
-        ...FILE_PRIVACY,
-      },
-      {
-        name: 'relevance',
+        name: 'body',
         kind: 'textarea',
-        labelKey: 'composer.field.evidence.relevance',
+        labelKey: 'composer.field.evidence.body',
         labelText: 'Why is this relevant?',
         required: true,
+        maxLength: CONTRIBUTION_BODY_LIMITS.evidence,
+        dictation: true,
       },
+      claimReference(true),
       {
-        name: 'claimReference',
-        kind: 'text',
-        labelKey: 'composer.field.evidence.claim',
-        labelText: 'Claim this refers to',
-        required: false,
+        name: 'evidence_type',
+        kind: 'select',
+        labelKey: 'composer.field.evidence.type',
+        labelText: 'What kind of evidence is this?',
+        required: true,
+        options: [
+          {
+            value: 'primary_source',
+            labelKey: 'evidence.primary_source',
+            labelText: 'Primary source',
+          },
+          { value: 'dataset', labelKey: 'evidence.dataset', labelText: 'Dataset' },
+          { value: 'transcript', labelKey: 'evidence.transcript', labelText: 'Transcript' },
+          { value: 'legal_text', labelKey: 'evidence.legal_text', labelText: 'Legal text' },
+          { value: 'report', labelKey: 'evidence.report', labelText: 'Report' },
+          {
+            value: 'expert_reference',
+            labelKey: 'evidence.expert_reference',
+            labelText: 'Expert reference',
+          },
+          { value: 'fact_check', labelKey: 'evidence.fact_check', labelText: 'Fact check' },
+        ],
       },
     ],
   },
@@ -156,26 +249,16 @@ export const composerModes: readonly ModeDefinition[] = [
     icon: 'pencil',
     fields: [
       {
-        name: 'targetText',
+        name: 'target_text_excerpt',
         kind: 'text',
         labelKey: 'composer.field.correction.target',
         labelText: 'Text being corrected',
-        required: true,
-      },
-      {
-        name: 'correction',
-        kind: 'textarea',
-        labelKey: 'composer.field.correction.correction',
-        labelText: 'Correction',
-        required: true,
-      },
-      {
-        name: 'supportingEvidence',
-        kind: 'text',
-        labelKey: 'composer.field.correction.evidence',
-        labelText: 'Supporting evidence (optional)',
         required: false,
+        maxLength: 500,
       },
+      body('correction', 'Correction'),
+      citations(true, 'Supporting evidence (1–5 citations)'),
+      claimReference(true),
     ],
   },
   {
@@ -186,26 +269,21 @@ export const composerModes: readonly ModeDefinition[] = [
     promptText: 'What can be fairly summarized?',
     icon: 'layers',
     fields: [
+      body('synthesis', 'Summary'),
       {
-        name: 'summary',
-        kind: 'textarea',
-        labelKey: 'composer.field.synthesis.summary',
-        labelText: 'Summary',
+        name: 'included_branch_ids',
+        kind: 'text',
+        labelKey: 'composer.field.synthesis.branches',
+        labelText: 'Branches included (at least two)',
         required: true,
       },
       {
-        name: 'includedBranches',
-        kind: 'text',
-        labelKey: 'composer.field.synthesis.branches',
-        labelText: 'Branches included (optional)',
-        required: false,
-      },
-      {
-        name: 'uncertainty',
+        name: 'uncertainty_note',
         kind: 'textarea',
         labelKey: 'composer.field.synthesis.uncertainty',
-        labelText: 'What remains uncertain? (optional)',
+        labelText: 'What remains unresolved? (optional)',
         required: false,
+        maxLength: 1000,
       },
     ],
   },
@@ -217,22 +295,18 @@ export const composerModes: readonly ModeDefinition[] = [
     promptText: 'What case complicates this?',
     icon: 'quote',
     fields: [
+      body('counterexample', 'The example'),
       {
-        name: 'example',
-        kind: 'textarea',
-        labelKey: 'composer.field.counterexample.example',
-        labelText: 'The example',
-        required: true,
-      },
-      {
-        name: 'relevance',
+        name: 'relevance_explanation',
         kind: 'textarea',
         labelKey: 'composer.field.counterexample.relevance',
         labelText: 'Why is it relevant?',
         required: true,
+        maxLength: 500,
       },
+      claimReference(true),
       {
-        name: 'source',
+        name: 'source_url',
         kind: 'text',
         labelKey: 'composer.field.counterexample.source',
         labelText: 'Source, if factual (optional)',
@@ -241,88 +315,134 @@ export const composerModes: readonly ModeDefinition[] = [
     ],
   },
   {
-    mode: 'experience',
-    nameKey: 'composer.mode.experience.name',
-    nameText: 'Experience',
-    promptKey: 'composer.mode.experience.prompt',
-    promptText: 'What direct context do you have?',
-    icon: 'user',
-    fields: [
-      {
-        name: 'scope',
-        kind: 'textarea',
-        labelKey: 'composer.field.experience.scope',
-        labelText: 'What you directly experienced',
-        required: true,
-      },
-      {
-        name: 'locationTime',
-        kind: 'text',
-        labelKey: 'composer.field.experience.location',
-        labelText: 'Location or time, if relevant (optional)',
-        required: false,
-        ...LOCATION_PRIVACY,
-      },
-      {
-        name: 'uncertainty',
-        kind: 'textarea',
-        labelKey: 'composer.field.experience.uncertainty',
-        labelText: 'Uncertainty or privacy note (optional)',
-        required: false,
-      },
-    ],
-  },
-  {
-    mode: 'explain',
-    nameKey: 'composer.mode.explain.name',
+    mode: 'explanation',
+    nameKey: 'composer.mode.explanation.name',
     nameText: 'Explain',
-    promptKey: 'composer.mode.explain.prompt',
+    promptKey: 'composer.mode.explanation.prompt',
     promptText: 'Can you make this easier to understand?',
     icon: 'circle-info',
     fields: [
-      {
-        name: 'explanation',
-        kind: 'textarea',
-        labelKey: 'composer.field.explain.explanation',
-        labelText: 'Explanation',
-        required: true,
-      },
+      body('explanation', 'Explanation'),
       {
         name: 'assumptions',
         kind: 'textarea',
-        labelKey: 'composer.field.explain.assumptions',
-        labelText: 'Assumptions (optional)',
+        labelKey: 'composer.field.explanation.assumptions',
+        labelText: 'Assumptions this relies on. (optional)',
         required: false,
+        maxLength: 500,
       },
       {
         name: 'caveats',
         kind: 'textarea',
-        labelKey: 'composer.field.explain.caveats',
-        labelText: 'Caveats (optional)',
+        labelKey: 'composer.field.explanation.caveats',
+        labelText: 'Limitations or exceptions. (optional)',
         required: false,
+        maxLength: 500,
       },
     ],
   },
   {
-    mode: 'flag',
-    nameKey: 'composer.mode.flag.name',
+    mode: 'local_context',
+    nameKey: 'composer.mode.local_context.name',
+    nameText: 'Local context',
+    promptKey: 'composer.mode.local_context.prompt',
+    promptText: 'What local knowledge applies here?',
+    icon: 'globe',
+    fields: [
+      body('local_context', 'Local context'),
+      {
+        name: 'scope',
+        kind: 'text',
+        labelKey: 'composer.field.scope',
+        labelText: 'Your vantage point (e.g. "Riverside resident")',
+        required: true,
+        maxLength: 200,
+      },
+      {
+        name: 'location',
+        kind: 'text',
+        labelKey: 'composer.field.location',
+        labelText: 'Approximate location (optional)',
+        required: false,
+        maxLength: 200,
+        ...LOCATION_PRIVACY,
+      },
+      {
+        name: 'time_context',
+        kind: 'text',
+        labelKey: 'composer.field.time',
+        labelText: 'Time period (optional)',
+        required: false,
+        maxLength: 200,
+      },
+    ],
+  },
+  {
+    mode: 'direct_experience',
+    nameKey: 'composer.mode.direct_experience.name',
+    nameText: 'Experience',
+    promptKey: 'composer.mode.direct_experience.prompt',
+    promptText: 'What direct context do you have?',
+    icon: 'user',
+    fields: [
+      body('direct_experience', 'What you directly experienced'),
+      {
+        name: 'scope',
+        kind: 'text',
+        labelKey: 'composer.field.scope',
+        labelText: 'Your vantage point (e.g. "Hearing attendee")',
+        required: true,
+        maxLength: 200,
+      },
+      {
+        name: 'location',
+        kind: 'text',
+        labelKey: 'composer.field.location',
+        labelText: 'Approximate location (optional)',
+        required: false,
+        maxLength: 200,
+        ...LOCATION_PRIVACY,
+      },
+      {
+        name: 'time_context',
+        kind: 'text',
+        labelKey: 'composer.field.time',
+        labelText: 'Time period (optional)',
+        required: false,
+        maxLength: 200,
+      },
+      {
+        name: 'privacy_acknowledged',
+        kind: 'checkbox',
+        labelKey: 'composer.field.privacyAck',
+        labelText: 'I understand this will be shared publicly.',
+        required: true,
+        ...LOCATION_PRIVACY,
+      },
+    ],
+  },
+  {
+    mode: 'moderation_concern',
+    nameKey: 'composer.mode.moderation_concern.name',
     nameText: 'Flag',
-    promptKey: 'composer.mode.flag.prompt',
+    promptKey: 'composer.mode.moderation_concern.prompt',
     promptText: 'What policy or safety issue exists?',
     icon: 'flag',
     fields: [
       {
-        name: 'target',
+        name: 'reason_code',
+        kind: 'select',
+        labelKey: 'composer.field.flag.reason',
+        labelText: 'Reason',
+        required: true,
+        options: FLAG_REASON_OPTIONS,
+      },
+      body('moderation_concern', 'Describe the concern'),
+      {
+        name: 'target_contribution_id',
         kind: 'text',
         labelKey: 'composer.field.flag.target',
         labelText: 'What you are flagging',
-        required: true,
-      },
-      {
-        name: 'reason',
-        kind: 'textarea',
-        labelKey: 'composer.field.flag.reason',
-        labelText: 'Reason',
         required: true,
       },
       {
@@ -332,10 +452,31 @@ export const composerModes: readonly ModeDefinition[] = [
         labelText: 'Urgency',
         required: false,
         options: [
-          { value: 'low', labelKey: 'composer.urgency.low', labelText: 'Low' },
-          { value: 'medium', labelKey: 'composer.urgency.medium', labelText: 'Medium' },
-          { value: 'high', labelKey: 'composer.urgency.high', labelText: 'High' },
+          { value: 'normal', labelKey: 'composer.urgency.normal', labelText: 'Normal' },
+          {
+            value: 'urgent',
+            labelKey: 'composer.urgency.urgent',
+            labelText: 'Urgent — use for imminent harm',
+          },
         ],
+      },
+    ],
+  },
+  {
+    mode: 'meta_discussion',
+    nameKey: 'composer.mode.meta_discussion.name',
+    nameText: 'Meta',
+    promptKey: 'composer.mode.meta_discussion.prompt',
+    promptText: 'Discuss the thread structure itself.',
+    icon: 'threads',
+    fields: [
+      body('meta_discussion', 'Discussion'),
+      {
+        name: 'target_contribution_id',
+        kind: 'text',
+        labelKey: 'composer.field.meta.target',
+        labelText: 'Contribution this refers to (optional)',
+        required: false,
       },
     ],
   },

@@ -12,7 +12,7 @@ import type {
   StoryDetail,
   UserSettings,
 } from '@licio/shared';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { readNotificationsUsedToday } from '../offline/notification-meter.js';
 import {
   cacheSignalLedger,
@@ -61,11 +61,33 @@ export function useThreadQuery(threadId: string) {
 }
 
 export function useThreadBranchQuery(threadId: string, branch: BranchId) {
-  return useQuery({
+  // Lazy loading (WS-G.3.3): pages of 50 with a continuation cursor; the
+  // hook exposes the FLATTENED contributions plus `loadMore`.
+  const query = useInfiniteQuery({
     queryKey: queryKeys.threadBranch(threadId, branch),
-    queryFn: () => api.fetchThreadBranch(threadId, branch),
+    queryFn: ({ pageParam }) => api.fetchThreadBranch(threadId, branch, pageParam ?? undefined),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.next_cursor,
     ...cachePolicy.thread,
   });
+  const pages = query.data?.pages ?? [];
+  const flattened =
+    pages.length > 0
+      ? {
+          thread_id: threadId,
+          branch,
+          contributions: pages.flatMap((page) => page.contributions),
+          next_cursor: pages[pages.length - 1]?.next_cursor ?? null,
+        }
+      : undefined;
+  return {
+    data: flattened,
+    isLoading: query.isLoading,
+    isError: query.isError,
+    isSuccess: query.isSuccess,
+    refetch: () => query.refetch(),
+    loadMore: () => query.fetchNextPage(),
+  };
 }
 
 export function useRoomsQuery() {

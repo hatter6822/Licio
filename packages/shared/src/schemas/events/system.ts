@@ -114,14 +114,28 @@ export const ITEM_SAFETY_STATES = ['normal', 'frozen', 'removed'] as const;
 export type ItemSafetyState = (typeof ITEM_SAFETY_STATES)[number];
 export const itemSafetyStateSchema = z.enum(ITEM_SAFETY_STATES);
 
-/** Emitted when a thread's conversation_state or safety_state changes. */
+/** WS-G.1.1 thread-level safety vocabulary (distinct from item states). */
+const THREAD_SAFETY_DIMENSION_STATES = [
+  'normal',
+  'elevated',
+  'under_review',
+  'restricted',
+] as const;
+
+/**
+ * Emitted when a thread's conversation_state or safety state changes.  Three
+ * dimensions: `conversation` (WS-G.1.1 lifecycle), `safety` (the WS-E ITEM
+ * scoring dimension: normal/frozen/removed), and `thread_safety` (the
+ * WS-G.1.1 thread moderation posture: normal/elevated/under_review/
+ * restricted) — each refined to its own vocabulary.
+ */
 export const threadStateChangedEventSchema = z
   .object({
     ...eventBaseShape,
     event_type: z.literal('thread.state.changed'),
     thread_id: uuidSchema,
     story_id: uuidSchema,
-    state_dimension: z.enum(['conversation', 'safety']),
+    state_dimension: z.enum(['conversation', 'safety', 'thread_safety']),
     old_state: z.string().min(1).max(64),
     new_state: z.string().min(1).max(64),
     /** The acting user, or `system` for pipeline-driven transitions. */
@@ -140,5 +154,15 @@ export const threadStateChangedEventSchema = z
       ((ITEM_SAFETY_STATES as readonly string[]).includes(event.old_state) &&
         (ITEM_SAFETY_STATES as readonly string[]).includes(event.new_state)),
     { message: 'safety states must be normal | frozen | removed', path: ['new_state'] },
+  )
+  .refine(
+    (event) =>
+      event.state_dimension !== 'thread_safety' ||
+      ((THREAD_SAFETY_DIMENSION_STATES as readonly string[]).includes(event.old_state) &&
+        (THREAD_SAFETY_DIMENSION_STATES as readonly string[]).includes(event.new_state)),
+    {
+      message: 'thread_safety states must be normal | elevated | under_review | restricted',
+      path: ['new_state'],
+    },
   );
 export type ThreadStateChangedEvent = z.infer<typeof threadStateChangedEventSchema>;

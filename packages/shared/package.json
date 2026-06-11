@@ -20,6 +20,10 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "dompurify": "^3.4.8",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
   }
 }

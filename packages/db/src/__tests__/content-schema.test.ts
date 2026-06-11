@@ -31,7 +31,7 @@ describe('WS-F.2.5b content-schema financial denylist', () => {
     expect(violations).toEqual([]);
   });
 
-  it('enumerates all fourteen WS-F content tables (fail-closed coverage)', () => {
+  it('enumerates all twenty-two WS-F/WS-G content tables (fail-closed coverage)', () => {
     expect(Object.keys(WS_F_CONTENT_TABLES).sort()).toEqual(
       [
         'claims',
@@ -48,6 +48,15 @@ describe('WS-F.2.5b content-schema financial denylist', () => {
         'story_source_links',
         'takedown_requests',
         'threads',
+        // WS-G forum content.
+        'contributions',
+        'contribution_edit_history',
+        'rooms',
+        'room_stewards',
+        'room_subscriptions',
+        'lenses',
+        'summaries',
+        'uploads',
       ].sort(),
     );
   });
