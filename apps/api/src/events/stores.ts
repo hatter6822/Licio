@@ -33,8 +33,21 @@ export type NewStoredEvent = Omit<StoredEvent, 'createdAt' | 'reviewFlaggedAt'> 
   createdAt?: string;
 };
 
+/**
+ * The §22.1 pseudonym placeholder written into de-linked payloads: a fixed,
+ * schema-valid, obviously synthetic UUID that replaces a payload `user_id`
+ * when a row is pseudonymized (minimum-privacy ingestion and owner
+ * de-linking at account deletion).
+ */
+export const PSEUDONYMOUS_USER_ID = '00000000-0000-4000-8000-000000000000';
+
 export interface EventStore {
-  /** Insert events; duplicates (by event_id) are skipped and reported. */
+  /**
+   * Insert events; duplicates are skipped and reported. Idempotency is on
+   * `event_id` ALONE (globally — never per retention tier): the durable
+   * replay backstop must hold even if a topic's tier assignment changes
+   * across deployments.
+   */
   insertMany(
     events: readonly NewStoredEvent[],
   ): Promise<{ inserted: number; duplicateIds: string[] }>;
@@ -48,11 +61,22 @@ export interface EventStore {
   ): Promise<StoredEvent[]>;
   /** All events owned by a user (deletion/export, SPEC §19.3). */
   listByOwner(userId: string): Promise<StoredEvent[]>;
-  deleteByOwner(userId: string): Promise<number>;
+  /** Delete a user's owned rows — optionally scoped to retention tiers
+   *  (attention reset deletes attention tiers ONLY, WS-E.1.4/SPEC §19.3). */
+  deleteByOwner(userId: string, tiers?: readonly RetentionTier[]): Promise<number>;
+  /**
+   * De-link a user's remaining owned rows (account deletion): the owner ref
+   * clears and any payload `user_id` is rewritten to the pseudonym, so
+   * non-attention history (contributions, privacy-request records) survives
+   * tombstoned rather than attributable. Returns rows changed.
+   */
+  anonymizeOwner(userId: string): Promise<number>;
   /** Delete rows of a tier with `timestamp` older than the cutoff. Batched. */
   deleteTierOlderThan(tier: RetentionTier, cutoffIso: string, limit: number): Promise<number>;
   /** Delete rows whose purge_after deadline has passed. Batched. */
   deletePurgeDue(nowIso: string, limit: number): Promise<number>;
+  /** Compliance audit: rows past their purge_after deadline (should be 0). */
+  countPurgeDue(nowIso: string): Promise<number>;
   /** Shorten (never extend) purge_after for a user's rows of a tier. */
   tightenOwnerPurge(userId: string, tier: RetentionTier, purgeAfterIso: string): Promise<number>;
   /** Flag (idempotently) moderation rows older than the cutoff for review. */
@@ -122,15 +146,29 @@ export class InMemoryEventStore implements EventStore {
     return [...this.#rows.values()].filter((row) => row.ownerUserId === userId);
   }
 
-  async deleteByOwner(userId: string): Promise<number> {
+  async deleteByOwner(userId: string, tiers?: readonly RetentionTier[]): Promise<number> {
+    const tierSet = tiers ? new Set(tiers) : null;
     let removed = 0;
     for (const [id, row] of this.#rows) {
-      if (row.ownerUserId === userId) {
-        this.#rows.delete(id);
-        removed += 1;
-      }
+      if (row.ownerUserId !== userId) continue;
+      if (tierSet && !tierSet.has(row.retentionTier)) continue;
+      this.#rows.delete(id);
+      removed += 1;
     }
     return removed;
+  }
+
+  async anonymizeOwner(userId: string): Promise<number> {
+    let changed = 0;
+    for (const row of this.#rows.values()) {
+      if (row.ownerUserId !== userId) continue;
+      row.ownerUserId = null;
+      if ('user_id' in row.payload) {
+        row.payload = { ...row.payload, user_id: PSEUDONYMOUS_USER_ID };
+      }
+      changed += 1;
+    }
+    return changed;
   }
 
   async deleteTierOlderThan(
@@ -161,6 +199,15 @@ export class InMemoryEventStore implements EventStore {
       }
     }
     return removed;
+  }
+
+  async countPurgeDue(nowIso: string): Promise<number> {
+    const now = Date.parse(nowIso);
+    let count = 0;
+    for (const row of this.#rows.values()) {
+      if (row.purgeAfter !== null && Date.parse(row.purgeAfter) <= now) count += 1;
+    }
+    return count;
   }
 
   async tightenOwnerPurge(

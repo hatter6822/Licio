@@ -38,7 +38,12 @@ import {
 } from './privacy-gate.js';
 import { NONCE_TTL_MS } from './replay.js';
 import type { EventPipelineServices } from './services.js';
-import { type AttentionAggregateRecord, type NewStoredEvent, PRIVACY_BUCKET } from './stores.js';
+import {
+  type AttentionAggregateRecord,
+  type NewStoredEvent,
+  PRIVACY_BUCKET,
+  PSEUDONYMOUS_USER_ID,
+} from './stores.js';
 
 /** Timestamp acceptance windows (WS-E.1.3b). */
 export interface AcceptancePolicy {
@@ -78,14 +83,13 @@ export interface IngestResult {
   accepted: number;
 }
 
-/**
- * The §22.1 pseudonym placeholder written into STORED payloads of
- * minimum-privacy events: the uploaded `user_id` is REWRITTEN to this constant
- * before persistence so the at-rest payload is de-linked from the user
- * (ownership was already verified against the session; the row also carries
- * `owner_user_id = null`). Schema-valid (a fixed UUID) and obviously synthetic.
- */
-export const PSEUDONYMOUS_USER_ID = '00000000-0000-4000-8000-000000000000';
+// The §22.1 pseudonym placeholder written into STORED payloads of
+// minimum-privacy events: the uploaded `user_id` is REWRITTEN to this constant
+// before persistence so the at-rest payload is de-linked from the user
+// (ownership was already verified against the session; the row also carries
+// `owner_user_id = null`). Defined with the stores (the owner de-linking path
+// shares it); re-exported here for the ingestion call sites and tests.
+export { PSEUDONYMOUS_USER_ID } from './stores.js';
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
@@ -102,7 +106,7 @@ export async function ingestAttentionEvents(
   const now = events.now();
   const outcomes: IngestOutcome[] = [];
   const toStore: NewStoredEvent[] = [];
-  const aggregateRows: AttentionAggregateRecord[] = [];
+  const aggregateRowsByEvent: Array<{ eventId: string; row: AttentionAggregateRecord }> = [];
   const toPublish: AttentionIngestEvent[] = [];
   const storeIndexByEventId = new Map<string, number>();
 
@@ -192,18 +196,21 @@ export async function ingestAttentionEvents(
     // Durable §22.1 aggregate rows — only when the preference retains them.
     if (decision.persistDurable && event.event_type === 'attention.aggregate') {
       for (const item of event.items) {
-        aggregateRows.push({
-          aggregate_id: randomUUID(),
-          user_id_or_privacy_bucket: pseudonymous ? PRIVACY_BUCKET : sessionUserId,
-          story_id: item.story_id,
-          session_bucket: event.session_bucket,
-          active_dwell_bucket: item.active_dwell_bucket,
-          source_opened: item.source_opened,
-          context_opened: item.context_opened,
-          branch_depth_bucket: item.branch_depth_bucket,
-          return_visit_count_bucket: item.return_visit_count_bucket,
-          privacy_level: level,
-          created_at: event.timestamp,
+        aggregateRowsByEvent.push({
+          eventId: event.event_id,
+          row: {
+            aggregate_id: randomUUID(),
+            user_id_or_privacy_bucket: pseudonymous ? PRIVACY_BUCKET : sessionUserId,
+            story_id: item.story_id,
+            session_bucket: event.session_bucket,
+            active_dwell_bucket: item.active_dwell_bucket,
+            source_opened: item.source_opened,
+            context_opened: item.context_opened,
+            branch_depth_bucket: item.branch_depth_bucket,
+            return_visit_count_bucket: item.return_visit_count_bucket,
+            privacy_level: level,
+            created_at: event.timestamp,
+          },
         });
       }
     }
@@ -211,13 +218,18 @@ export async function ingestAttentionEvents(
   }
 
   // 6. Durable insert. A duplicate event_id here is a replay that outlived the
-  //    nonce TTL — re-classify it (the durable backstop, WS-E.1.3b).
+  //    nonce TTL — re-classify it (the durable backstop, WS-E.1.3b). Its §22.1
+  //    aggregate rows are dropped with it: a replayed batch must never add
+  //    fresh aggregate rows (they would double-count in retention/export).
   const { duplicateIds } = await events.eventStore.insertMany(toStore);
   for (const duplicateId of duplicateIds) {
     const index = storeIndexByEventId.get(duplicateId);
     if (index !== undefined) outcomes[index] = 'replay';
   }
   const duplicateSet = new Set(duplicateIds);
+  const aggregateRows = aggregateRowsByEvent
+    .filter(({ eventId }) => !duplicateSet.has(eventId))
+    .map(({ row }) => row);
   if (aggregateRows.length > 0) {
     await events.attentionStore.insertMany(aggregateRows);
   }

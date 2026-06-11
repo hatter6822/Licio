@@ -216,3 +216,30 @@ describe('introspectSchemaGraph', () => {
     ]);
   });
 });
+
+describe('partition classification parity (WS-E.3.1 migrations)', () => {
+  it('every `events` partition created by a migration is a classified ranking table', async () => {
+    // Postgres exposes partitions as ordinary relations a view or FK can
+    // target DIRECTLY, so each must be a BFS target in its own right — a
+    // wallet→partition bridge must never evade the proof by hitting a
+    // partition the allowlist forgot. Parsed from the shipped migrations so
+    // adding a partition without classifying it fails here.
+    const { readdir, readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const migrationsDir = join(import.meta.dirname, '../../drizzle');
+    const partitions = new Set<string>();
+    for (const file of await readdir(migrationsDir)) {
+      if (!file.endsWith('.sql')) continue;
+      const sql = await readFile(join(migrationsDir, file), 'utf8');
+      for (const match of sql.matchAll(/CREATE TABLE "([^"]+)" PARTITION OF "events"/g)) {
+        if (match[1]) partitions.add(`public.${match[1]}`);
+      }
+    }
+    expect(partitions.size).toBeGreaterThanOrEqual(8);
+    for (const partition of partitions) {
+      expect(ISOLATION_CONTEXTS.rankingTables.has(partition)).toBe(true);
+    }
+    // And the parent itself stays classified.
+    expect(ISOLATION_CONTEXTS.rankingTables.has('public.events')).toBe(true);
+  });
+});

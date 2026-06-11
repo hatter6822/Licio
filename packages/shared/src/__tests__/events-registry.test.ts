@@ -227,3 +227,14 @@ describe('retention tiers (WS-E.1.1f)', () => {
     expect(getRetentionDays('moderation_legal').max).toBe(Number.POSITIVE_INFINITY);
   });
 });
+
+describe('client-suppliable topics share one retention tier (WS-E.1.3b backstop)', () => {
+  it('both attention-ingestion topics map to attention_aggregated', () => {
+    // The durable replay backstop dedups on event_id; the partitioned PK is
+    // (event_id, retention_tier). With both client-suppliable topics pinned to
+    // ONE tier, a client can never place the same event_id in two partitions —
+    // the PK alone already rejects the cross-topic replay at the storage layer.
+    expect(TOPIC_REGISTRY['attention.aggregate'].retention_tier).toBe('attention_aggregated');
+    expect(TOPIC_REGISTRY['source.opened.aggregate'].retention_tier).toBe('attention_aggregated');
+  });
+});

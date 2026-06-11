@@ -361,14 +361,14 @@ describe('aggregation fold: evidence + integrity branches (WS-E.2.1a)', () => {
 });
 
 describe('small pure helpers', () => {
-  it('deterministicEventId is a stable, distinct RFC 4122 v5 UUID', () => {
+  it('deterministicEventId is a stable, distinct name-based UUIDv8 (SHA-256)', () => {
     const a = deterministicEventId('integrity:x:1');
     const b = deterministicEventId('integrity:x:1');
     const c = deterministicEventId('integrity:x:2');
     expect(a).toBe(b);
     expect(a).not.toBe(c);
-    // Version nibble 5 (name-based SHA-1), RFC variant 10xx.
-    expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    // Version nibble 8 (RFC 9562 name-based-over-SHA-256), RFC variant 10xx.
+    expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 
   it('isShadowOutput admits a genuine non-shadow invariant output', () => {

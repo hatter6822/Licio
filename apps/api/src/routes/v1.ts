@@ -345,6 +345,27 @@ export function createV1Routes() {
       .post(
         '/attention/aggregates',
         authMiddleware(),
+        // Per-user sliding-window rate limit (one request = one hit), BEFORE
+        // body validation so malformed batches consume the same budget as
+        // valid ones (WS-E.1.3e: identical guard order on both surfaces).
+        async (c, next) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(notFound, 404);
+          const events = getEventPipelineServices();
+          const identity = getIdentityServices();
+          const decision = await events.ingestLimiter.hit(
+            accountRef(identity.config.masterSecret, auth.userId),
+            events.now(),
+          );
+          if (!decision.allowed) {
+            c.header('Retry-After', String(decision.retryAfterSec));
+            return c.json(
+              { error: { code: 'rate_limited', message: 'Too many attention uploads' } },
+              429,
+            );
+          }
+          await next();
+        },
         zValidator('json', attentionAggregateBatchSchema),
         async (c) => {
           const auth = getAuth(c);
@@ -358,18 +379,6 @@ export function createV1Routes() {
             return c.json(
               { error: { code: 'forbidden', message: 'Aggregate owner does not match session' } },
               403,
-            );
-          }
-          // Per-user sliding-window rate limit (one request = one hit).
-          const decision = await events.ingestLimiter.hit(
-            accountRef(identity.config.masterSecret, auth.userId),
-            events.now(),
-          );
-          if (!decision.allowed) {
-            c.header('Retry-After', String(decision.retryAfterSec));
-            return c.json(
-              { error: { code: 'rate_limited', message: 'Too many attention uploads' } },
-              429,
             );
           }
           const result = await ingestAttentionEvents(

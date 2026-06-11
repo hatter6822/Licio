@@ -87,30 +87,45 @@ function assertDeliverable(consumer: EventConsumer, topic: string): void {
   }
 }
 
+/**
+ * A store given directly or as a provider closure. The service container
+ * swaps production adapters in by ASSIGNMENT after construction (index.ts),
+ * so the router must read its stores lazily — capturing an instance at
+ * construction would silently keep writing checkpoints/dead letters to the
+ * replaced in-memory store while recovery and the admin surface read the
+ * durable one.
+ */
+type StoreOrProvider<T> = T | (() => T);
+
+function asProvider<T extends object>(value: StoreOrProvider<T>): () => T {
+  // Stores are method objects, never callable — `typeof` discriminates safely.
+  return typeof value === 'function' ? (value as () => T) : () => value;
+}
+
 export class EventRouter {
   readonly #consumers = new Map<string, EventConsumer>();
   readonly #metrics = new Map<string, ConsumerMetrics>();
   /** Per-consumer recently-delivered event ids (bounded idempotency LRU). */
   readonly #seen = new Map<string, Set<string>>();
-  readonly #deadLetters: DeadLetterStore;
-  readonly #checkpoints: ConsumerCheckpointStore | null;
+  readonly #deadLetters: () => DeadLetterStore;
+  readonly #checkpoints: (() => ConsumerCheckpointStore) | null;
   readonly #knomosisEnabled: () => boolean;
   readonly #maxAttempts: number;
   readonly #seenCapacity: number;
   readonly #onError: (consumer: string, eventId: string, error: unknown) => void;
 
   constructor(options: {
-    deadLetters: DeadLetterStore;
+    deadLetters: StoreOrProvider<DeadLetterStore>;
     /** Enables durable-consumer checkpointing + startup replay. */
-    checkpoints?: ConsumerCheckpointStore;
+    checkpoints?: StoreOrProvider<ConsumerCheckpointStore>;
     /** The crypto feature flag (SPEC §17.1); fail-closed false when absent. */
     knomosisEnabled?: () => boolean;
     maxAttempts?: number;
     seenCapacity?: number;
     onError?: (consumer: string, eventId: string, error: unknown) => void;
   }) {
-    this.#deadLetters = options.deadLetters;
-    this.#checkpoints = options.checkpoints ?? null;
+    this.#deadLetters = asProvider(options.deadLetters);
+    this.#checkpoints = options.checkpoints ? asProvider(options.checkpoints) : null;
     this.#knomosisEnabled = options.knomosisEnabled ?? (() => false);
     this.#maxAttempts = options.maxAttempts ?? 3;
     this.#seenCapacity = options.seenCapacity ?? 10_000;
@@ -203,7 +218,7 @@ export class EventRouter {
     await this.#deliver(consumer, event);
     const after = this.#metrics.get(consumerName)?.deadLettered ?? 0;
     if (after > before) return false; // dead-lettered again (still poisoned)
-    await this.#deadLetters.delete(consumerName, event.event_id);
+    await this.#deadLetters().delete(consumerName, event.event_id);
     return true;
   }
 
@@ -238,7 +253,7 @@ export class EventRouter {
     // Poisoned event: dead-letter instead of looping (WS-E.1.5 acceptance).
     metrics.deadLettered += 1;
     seen.add(event.event_id);
-    await this.#deadLetters.append({
+    await this.#deadLetters().append({
       consumerName: consumer.name,
       eventId: event.event_id,
       topic: event.event_type,
@@ -251,9 +266,10 @@ export class EventRouter {
   /** Persist the newest delivered event time for durable consumers. */
   async #advanceCheckpoint(consumer: EventConsumer, eventTimestamp: string): Promise<void> {
     if (!consumer.durable || !this.#checkpoints) return;
-    const current = await this.#checkpoints.get(consumer.name);
+    const checkpoints = this.#checkpoints();
+    const current = await checkpoints.get(consumer.name);
     if (current === null || Date.parse(eventTimestamp) > Date.parse(current)) {
-      await this.#checkpoints.set(consumer.name, eventTimestamp);
+      await checkpoints.set(consumer.name, eventTimestamp);
     }
   }
 

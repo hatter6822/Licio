@@ -79,15 +79,19 @@ Both ingestion surfaces flow through ONE pipeline
   replayed batch acks `accepted: 0` — idempotent retry semantics for the sync
   queue, never double-counting.
 
-Guard order per event: session auth → per-user sliding-window rate limit →
-schema validation → ownership (`user_id` must equal the session user) →
-timestamp window → replay nonce → server-side privacy gate → durable insert →
-publish.
+Guard order per event: session auth → per-user sliding-window rate limit
+(BEFORE body validation, on both surfaces — malformed requests consume the
+same budget as valid ones, so the JSON/schema path cannot be hammered for
+free) → schema validation → ownership (`user_id` must equal the session
+user) → timestamp window → replay nonce → server-side privacy gate → durable
+insert → publish.
 
 **Replay protection** is two-layer: a single-use nonce set (Redis `SET NX PX`,
 10-minute TTL, keys carry a non-reversible account ref) plus the event store's
 event-id uniqueness — the durable backstop that rejects a replayed event
-forever, even after the nonce TTL.
+forever, even after the nonce TTL (idempotency is on the event id GLOBALLY,
+never per retention tier, and a replayed event's §22.1 aggregate rows are
+dropped with it, never re-inserted).
 
 **Rate limiting** (SPEC §19.1-compliant: no addresses, no raw user ids) uses
 true sliding windows (timestamped ZSET entries; default 10/min + 120/h via
@@ -158,12 +162,18 @@ EVERY consumer, however authorized (withheld deliveries are metered).
 Delivery is at-least-once with consumer-side idempotency (per-consumer
 event-id LRU), bounded retries, dead-lettering for poisoned events
 (`event_dead_letters`, at most ONE letter per consumer+event with accumulating
-attempts), and per-consumer lag/health metrics. DURABLE consumers checkpoint
-the newest delivered event time; `recoverEventPipeline` (run at boot, and
-exposed to stewards) replays them from the durable log across the
-crash-between-store-and-publish window, and rebuilds the real-time layer
-exactly from the log. `redriveDeadLetters` retries poisoned events after the
-cause is fixed and clears the queue on success. Default consumers:
+attempts), and per-consumer lag/health metrics. The router reads its
+dead-letter/checkpoint stores and the crypto flag THROUGH the service
+container, so the production adapter swap (and a live flag flip) is honored
+without rebuilding the router. DURABLE consumers checkpoint the newest
+delivered event time; `recoverEventPipeline` (run at boot, and exposed to
+stewards) replays them from the durable log across the
+crash-between-store-and-publish window — INCLUSIVE at the checkpoint, so an
+undelivered event sharing the checkpointed timestamp is never dropped (the
+already-delivered one may re-deliver once; downstream intakes dedup by event
+id) — and rebuilds the real-time layer exactly from the log, clearing stale
+counters even when the log holds nothing. `redriveDeadLetters` retries
+poisoned events after the cause is fixed and clears the queue on success. Default consumers:
 `realtime-aggregation` (scoring; counters + the volume-threshold trigger,
 wired in production boot to score a hot item's current 1h window early) and
 `integrity-intake` (restricted-authorized, non-scoring, durable; forwards
@@ -185,12 +195,17 @@ Jurisdiction overrides (the WS-N hook) only ever SHORTEN windows. Per-owner
 settings are read in batches (`getUsersByIds`), every sweep emits a
 counts-only audit record (`retention_sweep`), and
 `retentionComplianceReport` is the audit query proving zero over-retained
-rows — a WS-P.2 transparency artifact. The WS-D hooks are real:
-`purgeAttention` deletes events + aggregates + ledger; `exportAttention`
-returns the user's COMPLETE attention data — every §22.1 aggregate row, every
-ledger entry (paginated, never truncated), and the owned attention events
-including source-open reports; `onPrivacyChange` tightens (never extends)
-existing purge deadlines when the preference changes.
+rows — including rows past their per-user `purge_after` deadline, so a failed
+preference purge is visible even inside the tier window — a WS-P.2
+transparency artifact. The WS-D hooks are real: `purgeAttention` deletes
+attention-TIER events + aggregates + ledger (an attention reset never touches
+the user's non-attention rows: public contributions, privacy-request
+records), and in account-deletion mode additionally DE-LINKS the remaining
+owned rows (owner cleared, payload `user_id` pseudonymized);
+`exportAttention` returns the user's COMPLETE attention data — every §22.1
+aggregate row, every ledger entry (paginated, never truncated), and the owned
+attention events including source-open reports; `onPrivacyChange` tightens
+(never extends) existing purge deadlines when the preference changes.
 
 ## PWAtt scoring (WS-E.2)
 
@@ -246,9 +261,9 @@ randomness):
   moderation clearance; a NEW window's cascade freezes again.
 
 **System-event producers (WS-E.1.1e)**: the scoring job emits
-`invariant.run.completed` once per item/window (deterministic v5 id ⇒
-idempotent re-runs never duplicate it; carries the score vector, confidence,
-and computation time); every safety-state transition — cascade freezes and
+`invariant.run.completed` once per item/window (deterministic name-based
+UUIDv8 over SHA-256 ⇒ idempotent re-runs never duplicate it; carries the
+score vector, confidence, and computation time); every safety-state transition — cascade freezes and
 steward resolutions alike — emits the §21.3 `thread.state.changed`
 safety-dimension event; and the WS-D privacy routes emit
 `privacy.request.created` for export requests, deletion requests and

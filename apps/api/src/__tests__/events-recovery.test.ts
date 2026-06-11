@@ -26,11 +26,14 @@ import {
   type WsEFixture,
 } from './ws-e-helpers.js';
 
-function integritySignal(targetId: string): IntegritySignalDetectedEvent {
+function integritySignal(
+  targetId: string,
+  timestamp = new Date().toISOString(),
+): IntegritySignalDetectedEvent {
   return integritySignalDetectedEventSchema.parse({
     event_id: randomUUID(),
     event_type: 'integrity.signal.detected',
-    timestamp: new Date().toISOString(),
+    timestamp,
     schema_version: '1',
     signal_type: 'coordinated_burst',
     target_ids: [targetId],
@@ -116,6 +119,43 @@ describe('durable-consumer recovery (WS-E.1.5 at-least-once)', () => {
     const report = await recoverEventPipeline(fixture.events);
     expect(report.realtimeRebuilt).toBeGreaterThan(0);
     expect(await fixture.events.realtime.snapshot(storyId, windowStart)).toEqual(before);
+  });
+
+  it('replays an undelivered event sharing the checkpointed timestamp (inclusive boundary)', async () => {
+    // Batched/system emissions stamp one nowIso across several events. If the
+    // process crashes after delivering only the first, the second must still
+    // replay — a strictly-after checkpoint filter would drop it forever.
+    const sharedTs = new Date().toISOString();
+    const delivered = integritySignal(randomUUID(), sharedTs);
+    const missed = integritySignal(randomUUID(), sharedTs);
+    await storeEvent(fixture, delivered);
+    await storeEvent(fixture, missed);
+    await fixture.events.router.publish(delivered); // checkpoint advances to sharedTs
+    expect(await fixture.events.checkpoints.get('integrity-intake')).toBe(sharedTs);
+    expect(mfciIntake).toEqual([delivered.event_id]);
+
+    const report = await recoverEventPipeline(fixture.events);
+    // The missed neighbor re-delivers; the already-delivered one is suppressed
+    // by the router's idempotency set (at-least-once, converging on exactly-once).
+    expect(report.replayed['integrity-intake']).toBe(1);
+    expect(mfciIntake).toEqual([delivered.event_id, missed.event_id]);
+  });
+
+  it('clears stale real-time counters even when the durable log holds nothing', async () => {
+    // Phantom counters with no durable backing (e.g. Redis outliving a
+    // `none`-preference purge) must not survive recovery as fake volume.
+    const storyId = randomUUID();
+    const now = Date.now();
+    await fixture.events.realtime.recordContribution(
+      storyId,
+      'stale-actor',
+      new Date(now).toISOString(),
+    );
+    const windowStart = realtimeWindowStart(now);
+    expect(await fixture.events.realtime.snapshot(storyId, windowStart)).not.toBeNull();
+    const report = await recoverEventPipeline(fixture.events, now);
+    expect(report.realtimeRebuilt).toBe(0);
+    expect(await fixture.events.realtime.snapshot(storyId, windowStart)).toBeNull();
   });
 });
 

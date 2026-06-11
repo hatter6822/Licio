@@ -39,6 +39,7 @@ import {
   type ItemSafetyStateStore,
   type NewStoredEvent,
   PRIVACY_BUCKET,
+  PSEUDONYMOUS_USER_ID,
   type PwattConfigStore,
   type SignalLedgerRecord,
   type SignalLedgerStore,
@@ -77,23 +78,41 @@ export class DrizzleEventStore implements EventStore {
     rows: readonly NewStoredEvent[],
   ): Promise<{ inserted: number; duplicateIds: string[] }> {
     if (rows.length === 0) return { inserted: 0, duplicateIds: [] };
-    const inserted = await this.#db
-      .insert(eventsTable)
-      .values(
-        rows.map((row) => ({
-          eventId: row.eventId,
-          eventType: row.eventType,
-          topic: row.topic,
-          timestamp: new Date(row.timestamp),
-          privacyClassification: row.privacyClassification,
-          retentionTier: row.retentionTier,
-          payload: row.payload,
-          ownerUserId: row.ownerUserId,
-          purgeAfter: row.purgeAfter ? new Date(row.purgeAfter) : null,
-        })),
-      )
-      .onConflictDoNothing()
-      .returning({ eventId: eventsTable.eventId });
+    // Idempotency is on event_id ALONE. The partitioned PK is necessarily
+    // (event_id, retention_tier) — Postgres cannot enforce a global unique
+    // without the partition key — so an explicit same-id-different-tier
+    // pre-check keeps the contract global even across a registry tier change.
+    const existing = await this.#db
+      .select({ eventId: eventsTable.eventId })
+      .from(eventsTable)
+      .where(
+        inArray(
+          eventsTable.eventId,
+          rows.map((r) => r.eventId),
+        ),
+      );
+    const existingIds = new Set(existing.map((r) => r.eventId));
+    const fresh = rows.filter((row) => !existingIds.has(row.eventId));
+    const inserted =
+      fresh.length === 0
+        ? []
+        : await this.#db
+            .insert(eventsTable)
+            .values(
+              fresh.map((row) => ({
+                eventId: row.eventId,
+                eventType: row.eventType,
+                topic: row.topic,
+                timestamp: new Date(row.timestamp),
+                privacyClassification: row.privacyClassification,
+                retentionTier: row.retentionTier,
+                payload: row.payload,
+                ownerUserId: row.ownerUserId,
+                purgeAfter: row.purgeAfter ? new Date(row.purgeAfter) : null,
+              })),
+            )
+            .onConflictDoNothing()
+            .returning({ eventId: eventsTable.eventId });
     const insertedIds = new Set(inserted.map((r) => r.eventId));
     return {
       inserted: inserted.length,
@@ -138,12 +157,33 @@ export class DrizzleEventStore implements EventStore {
     return rows.map((row) => this.#toStored(row));
   }
 
-  async deleteByOwner(userId: string): Promise<number> {
+  async deleteByOwner(userId: string, tiers?: readonly RetentionTier[]): Promise<number> {
     const removed = await this.#db
       .delete(eventsTable)
-      .where(eq(eventsTable.ownerUserId, userId))
+      .where(
+        and(
+          eq(eventsTable.ownerUserId, userId),
+          tiers ? inArray(eventsTable.retentionTier, [...tiers]) : undefined,
+        ),
+      )
       .returning({ eventId: eventsTable.eventId });
     return removed.length;
+  }
+
+  async anonymizeOwner(userId: string): Promise<number> {
+    const changed = await this.#db
+      .update(eventsTable)
+      .set({
+        ownerUserId: null,
+        payload: sql`case
+          when ${eventsTable.payload} ? 'user_id'
+          then jsonb_set(${eventsTable.payload}, '{user_id}', ${JSON.stringify(PSEUDONYMOUS_USER_ID)}::jsonb)
+          else ${eventsTable.payload}
+        end`,
+      })
+      .where(eq(eventsTable.ownerUserId, userId))
+      .returning({ eventId: eventsTable.eventId });
+    return changed.length;
   }
 
   async deleteTierOlderThan(
@@ -178,6 +218,19 @@ export class DrizzleEventStore implements EventStore {
       )
       .returning({ eventId: eventsTable.eventId });
     return removed.length;
+  }
+
+  async countPurgeDue(nowIso: string): Promise<number> {
+    const [row] = await this.#db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(eventsTable)
+      .where(
+        and(
+          isNotNull(eventsTable.purgeAfter),
+          sql`${eventsTable.purgeAfter} <= ${nowIso}::timestamptz`,
+        ),
+      );
+    return row?.count ?? 0;
   }
 
   async tightenOwnerPurge(

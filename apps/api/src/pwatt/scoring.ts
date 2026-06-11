@@ -69,22 +69,23 @@ export interface WindowScoringReport {
 const WS_E_UUID_NAMESPACE = '6f1c1ce4-8c6f-4a3e-9b51-2d3f4a5b6c7d';
 
 /**
- * A standard RFC 4122 version-5 (name-based, SHA-1) UUID. Anti-signal and
+ * A name-based RFC 9562 version-8 UUID over SHA-256(namespace ‖ name) — the
+ * same construction as a v5 UUID with the deprecated SHA-1 replaced by
+ * SHA-256 (v8 is the RFC's vehicle for exactly this). Anti-signal and
  * system-event side effects key on (kind, item, window), so a window RE-RUN
  * converges instead of emitting duplicate integrity events, opening duplicate
  * safety cases, or re-freezing content moderation already cleared — while a
- * NEW window's detection still acts in full. (SHA-1 here is name derivation
- * per the RFC, not a security boundary.)
+ * NEW window's detection still acts in full.
  */
 export function deterministicEventId(name: string): string {
   const namespaceBytes = Buffer.from(WS_E_UUID_NAMESPACE.replaceAll('-', ''), 'hex');
-  const digest = createHash('sha1')
+  const digest = createHash('sha256')
     .update(namespaceBytes)
     .update(Buffer.from(name, 'utf8'))
     .digest();
   const bytes = Buffer.from(digest.subarray(0, 16));
-  // RFC 4122 §4.3: set the version (5) and variant (10xx) bits.
-  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
+  // RFC 9562 §4: set the version (8) and variant (10xx) bits.
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x80;
   bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
   const hex = bytes.toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;

@@ -14,7 +14,8 @@ import {
 } from '@licio/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { type EventConsumer, EventRouter, RouterPolicyViolation } from '../events/router.js';
-import { InMemoryDeadLetterStore } from '../events/stores.js';
+import { createInMemoryEventPipelineServices } from '../events/services.js';
+import { InMemoryConsumerCheckpointStore, InMemoryDeadLetterStore } from '../events/stores.js';
 import { attentionEvent, sourceOpenEvent } from './ws-e-helpers.js';
 
 const U1 = '11111111-1111-4111-8111-111111111111';
@@ -308,5 +309,57 @@ describe('delivery semantics (WS-E.1.5)', () => {
   it('rejects duplicate consumer names', () => {
     router.register(consumer({}));
     expect(() => router.register(consumer({}))).toThrow(/already registered/);
+  });
+});
+
+describe('store swapping through the service container (production wiring)', () => {
+  it('honors dead-letter + checkpoint stores swapped in AFTER router construction', async () => {
+    // Production boot builds the in-memory container first and assigns the
+    // Drizzle adapters afterwards (index.ts). The router must read its stores
+    // lazily — otherwise checkpoints/dead letters keep landing in the replaced
+    // in-memory stores while recovery and the admin surface read the durable ones.
+    const services = createInMemoryEventPipelineServices();
+    services.router.register({
+      name: 'durable-flaky',
+      topics: ['contribution.created'],
+      accessClassifications: ['public'],
+      scoring: false,
+      durable: true,
+      handle: async (event) => {
+        if (event.event_id.startsWith('a')) throw new Error('poisoned');
+      },
+    });
+    // Swap-by-assignment, exactly like the production Drizzle wiring.
+    const swappedDeadLetters = new InMemoryDeadLetterStore();
+    const swappedCheckpoints = new InMemoryConsumerCheckpointStore();
+    services.deadLetters = swappedDeadLetters;
+    services.checkpoints = swappedCheckpoints;
+
+    const ok = contributionEvent();
+    await services.router.publish(ok);
+    expect(await swappedCheckpoints.get('durable-flaky')).toBe(ok.timestamp);
+
+    const poisoned = { ...contributionEvent(), event_id: `a${randomUUID().slice(1)}` };
+    await services.router.publish(poisoned as LicioEvent);
+    expect(await swappedDeadLetters.list('durable-flaky')).toHaveLength(1);
+  });
+
+  it('honors a crypto-flag provider swapped in after construction (fail-closed until then)', async () => {
+    const services = createInMemoryEventPipelineServices();
+    const received: string[] = [];
+    services.router.register({
+      name: 'wallet-indexer',
+      topics: ['wallet.linked'],
+      accessClassifications: ['restricted'],
+      scoring: false,
+      handle: async (event) => {
+        received.push(event.event_type);
+      },
+    });
+    await services.router.publish(walletLinkedEvent());
+    expect(received).toEqual([]); // fail-closed default
+    services.cryptoFlagEnabled = () => true; // ops flips the flag provider
+    await services.router.publish(walletLinkedEvent());
+    expect(received).toEqual(['wallet.linked']);
   });
 });

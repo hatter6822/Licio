@@ -215,6 +215,12 @@ export async function retentionComplianceReport(
       isoDaysAgo(now, effectiveMaxDays(events, tier)),
     );
   }
+  // Per-user purge deadlines (`none`/`minimal` preference) are stricter than
+  // any tier ceiling: a row past its purge_after is over-retained even while
+  // younger than the tier maximum, so a failed preference purge surfaces here.
+  overRetained['events:purge_due'] = await events.eventStore.countPurgeDue(
+    new Date(now).toISOString(),
+  );
   overRetained['attention_aggregates:identifiable'] =
     await events.attentionStore.countIdentifiableOlderThan(
       isoDaysAgo(now, effectiveMaxDays(events, 'attention_aggregated')),
@@ -250,21 +256,37 @@ export async function applyRetentionPreferenceChange(
   await events.ledgerStore.tightenOwnerPurge(userId, deadline);
 }
 
+/** The retention tiers that hold attention events (and nothing else). */
+const ATTENTION_TIERS = ['attention_raw', 'attention_aggregated'] as const;
+
 /**
  * The WS-D `purgeAttention` binding (SPEC §19.3 "delete attention history"):
- * remove every attention trace owned by the user — events, §22.1 aggregate
- * rows, and Signal Ledger entries. Real-time counters expire on their own
- * within the 2-hour TTL (bounded residual; they hold no durable state).
- * Returns the number of rows removed.
+ * remove every attention trace owned by the user — attention-tier events,
+ * §22.1 aggregate rows, and Signal Ledger entries. The event delete is SCOPED
+ * to the attention tiers: a user also owns non-attention rows (public
+ * `contribution.created`, `privacy.request.created` records), and an
+ * attention reset must never erase those.
+ *
+ * `mode` distinguishes the two WS-D callers:
+ *   'reset'  — the attention-history deletion endpoint: attention data only;
+ *   'delete' — the account hard purge: attention data is deleted AND the
+ *              remaining owned rows are DE-LINKED (owner cleared, payload
+ *              user_id pseudonymized) so deleted accounts leave tombstoned,
+ *              non-attributable history rather than dangling references.
+ *
+ * Real-time counters expire on their own within the 2-hour TTL (bounded
+ * residual; they hold no durable state). Returns the number of rows changed.
  */
 export async function purgeUserAttention(
   events: EventPipelineServices,
   userId: string,
+  mode: 'delete' | 'reset' = 'reset',
 ): Promise<number> {
-  const eventsDeleted = await events.eventStore.deleteByOwner(userId);
+  const eventsDeleted = await events.eventStore.deleteByOwner(userId, ATTENTION_TIERS);
   const aggregatesDeleted = await events.attentionStore.deleteByUser(userId);
   const ledgerDeleted = await events.ledgerStore.deleteByUser(userId);
-  return eventsDeleted + aggregatesDeleted + ledgerDeleted;
+  const detached = mode === 'delete' ? await events.eventStore.anonymizeOwner(userId) : 0;
+  return eventsDeleted + aggregatesDeleted + ledgerDeleted + detached;
 }
 
 /** Attention-bearing topics included in the DSAR attention export. */

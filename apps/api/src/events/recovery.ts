@@ -65,11 +65,12 @@ export async function recoverEventPipeline(
       sinceIso,
       new Date(now + 1).toISOString(),
     );
-    // Strictly-after the checkpoint (the checkpointed event itself was
-    // delivered); equal-timestamp neighbors re-deliver — at-least-once.
-    const candidates = toEvents(
-      checkpoint === null ? rows : rows.filter((row) => row.timestamp > checkpoint),
-    );
+    // INCLUSIVE at the checkpoint: an undelivered event sharing the
+    // checkpointed timestamp (batched/system events stamp one nowIso) must
+    // still replay — dropping equal-timestamp rows would violate
+    // at-least-once. The already-delivered event may re-deliver once after a
+    // restart; downstream intakes key on the event id, so that is safe.
+    const candidates = toEvents(rows);
     const delivered = await events.router.replayConsumer(consumer.name, candidates);
     report.replayed[consumer.name] = delivered;
     if (delivered > 0) {
@@ -78,15 +79,18 @@ export async function recoverEventPipeline(
   }
 
   // 2. Real-time rebuild for the live and previous windows (WS-E.3.2:
-  //    "fully rebuildable from the event store — no unique state").
+  //    "fully rebuildable from the event store — no unique state"). The clear
+  //    is UNCONDITIONAL: stale counters surviving in Redis while the durable
+  //    log holds nothing (e.g. after a `none`-preference purge) would
+  //    otherwise report phantom volume until their TTL.
   const currentWindowStart = realtimeWindowStart(now);
   const rows = await events.eventStore.listByTopicsBetween(
     ['attention.aggregate', 'source.opened.aggregate', 'contribution.created'],
     new Date(currentWindowStart - REALTIME_WINDOW_MS).toISOString(),
     new Date(now + 1).toISOString(),
   );
+  await events.realtime.clear();
   if (rows.length > 0) {
-    await events.realtime.clear();
     await rebuildRealtimeFromEvents(events.realtime, rows, actorKeyOfPayload);
     report.realtimeRebuilt = rows.length;
     events.log('events.recovery.realtime_rebuilt', { events: rows.length });

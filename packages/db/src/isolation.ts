@@ -63,6 +63,19 @@ export const WALLET_CONTEXT_TABLES: ReadonlySet<Relation> = new Set(['wallet.wal
  */
 export const RANKING_CONTEXT_TABLES: ReadonlySet<Relation> = new Set<Relation>([
   'public.events',
+  // The concrete per-tier partitions of `events` (migration 0003).  Postgres
+  // exposes partitions as ordinary relations, so a view or FK could target one
+  // DIRECTLY — each must therefore be a BFS target in its own right, or a
+  // wallet→partition bridge would evade the proof.  A migration-parity test
+  // asserts this list covers every `PARTITION OF "events"` in the migrations.
+  'public.events_attention_raw',
+  'public.events_attention_aggregated',
+  'public.events_public_contribution',
+  'public.events_ranking_log',
+  'public.events_moderation_legal',
+  'public.events_account_active',
+  'public.events_security_log',
+  'public.events_default',
   'public.attention_aggregates',
   'public.aggregation_windows',
   'public.invariant_outputs',

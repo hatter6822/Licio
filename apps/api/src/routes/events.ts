@@ -38,16 +38,16 @@ export function createEventsRoutes(
     .post(
       '/attention',
       authMiddleware(resolveIdentity),
-      zValidator('json', attentionIngestBodySchema),
-      async (c) => {
-        const startedAt = Date.now();
+      // Per-user sliding-window rate limit (WS-E.1.3c): keyed by a
+      // NON-REVERSIBLE account ref — never the user id, never any address.
+      // Runs BEFORE body validation so malformed requests consume the same
+      // budget as valid ones — the JSON/schema path cannot be hammered for
+      // free (the documented guard chain: auth → rate limit → schema).
+      async (c, next) => {
         const events = resolveEvents();
         const identity = resolveIdentity();
         const auth = getAuth(c);
         if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-
-        // Per-user sliding-window rate limit (WS-E.1.3c): keyed by a
-        // NON-REVERSIBLE account ref — never the user id, never any address.
         const decision = await events.ingestLimiter.hit(
           accountRef(identity.config.masterSecret, auth.userId),
           events.now(),
@@ -57,6 +57,15 @@ export function createEventsRoutes(
           c.header('Retry-After', String(decision.retryAfterSec));
           return c.json(deny('rate_limited', 'Too many attention events'), 429);
         }
+        await next();
+      },
+      zValidator('json', attentionIngestBodySchema),
+      async (c) => {
+        const startedAt = Date.now();
+        const events = resolveEvents();
+        const identity = resolveIdentity();
+        const auth = getAuth(c);
+        if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
 
         const event = c.req.valid('json');
         const result = await ingestAttentionEvents(

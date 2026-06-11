@@ -18,7 +18,7 @@ import {
   retentionComplianceReport,
   runRetentionSweeps,
 } from '../events/retention.js';
-import { type NewStoredEvent, PRIVACY_BUCKET } from '../events/stores.js';
+import { type NewStoredEvent, PRIVACY_BUCKET, PSEUDONYMOUS_USER_ID } from '../events/stores.js';
 import {
   attentionEvent,
   freshWsEServices,
@@ -297,6 +297,26 @@ describe('retention compliance audit query (WS-E.1.4)', () => {
     expect(after.compliant).toBe(true);
     expect(Object.values(after.overRetained).every((n) => n === 0)).toBe(true);
   });
+
+  it('flags rows past their per-user purge deadline even inside the tier window', async () => {
+    const now = Date.now();
+    // One day old — far inside the 180-day tier ceiling — but its preference
+    // deadline (`none`/`minimal` purge_after) has already passed: a failed
+    // preference purge must be VISIBLE to the report, not masked by tier age.
+    await fixture.events.eventStore.insertMany([
+      eventRow({
+        timestamp: new Date(now - DAY).toISOString(),
+        purgeAfter: new Date(now - 60_000).toISOString(),
+      }),
+    ]);
+    const before = await retentionComplianceReport(fixture.events, now);
+    expect(before.compliant).toBe(false);
+    expect(before.overRetained['events:purge_due']).toBe(1);
+    await runRetentionSweeps(fixture.events, fixture.identity, now);
+    const after = await retentionComplianceReport(fixture.events, now);
+    expect(after.compliant).toBe(true);
+    expect(after.overRetained['events:purge_due']).toBe(0);
+  });
 });
 
 describe('WS-D hook bindings (SPEC §19.3)', () => {
@@ -330,6 +350,47 @@ describe('WS-D hook bindings (SPEC §19.3)', () => {
     expect(await fixture.events.eventStore.listByOwner(userId)).toHaveLength(0);
     expect(await fixture.events.attentionStore.listByUser(userId)).toHaveLength(0);
     expect((await fixture.events.ledgerStore.listForUser(userId, 10)).entries).toHaveLength(0);
+  });
+
+  it('an attention RESET never touches non-attention owned rows; account DELETE de-links them', async () => {
+    const { userId } = await seedUserWithSession(fixture.identity);
+    await ingestAttentionEvents(
+      fixture.events,
+      fixture.identity,
+      userId,
+      [attentionEvent(userId)],
+      ONLINE_ACCEPTANCE,
+    );
+    // A user-owned NON-attention row (the public contribution pipeline event):
+    // deleting it on an attention reset would corrupt scoring/audit history.
+    const contributionId = randomUUID();
+    await fixture.events.eventStore.insertMany([
+      eventRow({
+        eventId: contributionId,
+        eventType: 'contribution.created',
+        topic: 'contribution.created',
+        privacyClassification: 'public',
+        retentionTier: 'public_contribution',
+        payload: { user_id: userId, contribution_type: 'comment' },
+        ownerUserId: userId,
+      }),
+    ]);
+
+    // RESET (the attention-history deletion endpoint): attention rows are
+    // gone, the contribution row is untouched and still attributable.
+    await purgeUserAttention(fixture.events, userId, 'reset');
+    const afterReset = await fixture.events.eventStore.listByOwner(userId);
+    expect(afterReset.map((row) => row.topic)).toEqual(['contribution.created']);
+
+    // DELETE (the account hard purge): the remaining owned row is DE-LINKED —
+    // owner cleared, payload user_id pseudonymized — never left attributable.
+    await purgeUserAttention(fixture.events, userId, 'delete');
+    expect(await fixture.events.eventStore.listByOwner(userId)).toHaveLength(0);
+    const tombstoned = await fixture.events.eventStore.getById(contributionId);
+    expect(tombstoned).not.toBeNull();
+    expect(tombstoned?.ownerUserId).toBeNull();
+    expect(tombstoned?.payload['user_id']).toBe(PSEUDONYMOUS_USER_ID);
+    expect(tombstoned?.payload['contribution_type']).toBe('comment');
   });
 
   it('exportUserAttention returns the user’s own aggregates and ledger', async () => {

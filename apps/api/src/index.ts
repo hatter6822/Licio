@@ -145,8 +145,10 @@ registerDefaultConsumers(eventServices, {
 setEventPipelineServices(eventServices);
 // Close the WS-D residual hooks with their real WS-E implementations: DSAR
 // export and deletion now cover attention data, and a retention-preference
-// change tightens existing purge deadlines (never extends them).
-identityServices.purgeAttention = (userId) => purgeUserAttention(eventServices, userId);
+// change tightens existing purge deadlines (never extends them). The purge
+// mode distinguishes the attention RESET (attention tiers only) from the
+// account hard purge (attention deleted + remaining owned rows de-linked).
+identityServices.purgeAttention = (userId, mode) => purgeUserAttention(eventServices, userId, mode);
 identityServices.exportAttention = (userId) => exportUserAttention(eventServices, userId);
 identityServices.onPrivacyChange = (change) => {
   void applyRetentionPreferenceChange(eventServices, change.userId, change.retention).catch((err) =>

@@ -96,6 +96,9 @@ describe('POST /v1/events/attention (WS-E.1.3a)', () => {
     await fixture.events.replay.clear();
     const replay = await app().request(post('/v1/events/attention', event, cookie));
     expect(replay.status).toBe(409);
+    // The replay added NOTHING durable: §22.1 aggregate rows are dropped with
+    // the duplicate event, never double-counted in retention/export/scoring.
+    expect(await fixture.events.attentionStore.listByUser(userId)).toHaveLength(1);
   });
 
   it('rejects stale (> 5 min) and future (> 30 s) timestamps with 400', async () => {
@@ -156,6 +159,23 @@ describe('POST /v1/events/attention (WS-E.1.3a)', () => {
     const retryAfter = Number(limited.headers.get('retry-after'));
     expect(retryAfter).toBeGreaterThan(0);
     expect(retryAfter).toBeLessThanOrEqual(61);
+  });
+
+  it('malformed bodies consume the rate-limit budget (no free validation hammering)', async () => {
+    fixture = freshWsEServices({ limits: { perMinute: 2, perHour: 100 } });
+    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    // Two schema-invalid requests: rejected 400, but each consumed a hit —
+    // the limiter runs BEFORE validation (the documented guard chain).
+    expect((await app().request(post('/v1/events/attention', { junk: true }, cookie))).status).toBe(
+      400,
+    );
+    expect((await app().request(post('/v1/events/attention', { junk: true }, cookie))).status).toBe(
+      400,
+    );
+    const limited = await app().request(
+      post('/v1/events/attention', attentionEvent(userId), cookie),
+    );
+    expect(limited.status).toBe(429);
   });
 });
 
@@ -304,6 +324,23 @@ describe('legacy batch wire (WS-E.1.3e: identical pipeline)', () => {
       ),
     );
     expect(await rejected.json()).toEqual({ accepted: 0 });
+  });
+
+  it('malformed batches consume the rate-limit budget (identical guard order, WS-E.1.3e)', async () => {
+    fixture = freshWsEServices({ limits: { perMinute: 2, perHour: 100 } });
+    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    expect(
+      (await app().request(post('/v1/attention/aggregates', { aggregates: 'junk' }, cookie)))
+        .status,
+    ).toBe(400);
+    expect(
+      (await app().request(post('/v1/attention/aggregates', { aggregates: 'junk' }, cookie)))
+        .status,
+    ).toBe(400);
+    const limited = await app().request(
+      post('/v1/attention/aggregates', { aggregates: [legacyAggregate(userId)] }, cookie),
+    );
+    expect(limited.status).toBe(429);
   });
 });
 
