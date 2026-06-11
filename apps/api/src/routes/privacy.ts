@@ -21,6 +21,8 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { emitPrivacyRequestEvent } from '../events/privacy-events.js';
+import { getEventPipelineServices } from '../events/services.js';
 import { randomToken } from '../identity/crypto.js';
 import { verifyDownloadToken } from '../identity/object-store.js';
 import {
@@ -144,6 +146,13 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
             eventType: 'attention_delete',
             context: {},
           });
+          // WS-E.1.1e producer: the privacy pipeline observes the request.
+          await emitPrivacyRequestEvent(
+            getEventPipelineServices(),
+            'attention_reset',
+            auth.userId,
+            'completed',
+          );
           return c.json({ mode, aggregates_removed: removed, affinities_reset: true });
         },
       )
@@ -167,6 +176,12 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
               eventType: 'export_request',
               context: {},
             });
+            await emitPrivacyRequestEvent(
+              getEventPipelineServices(),
+              'export',
+              auth.userId,
+              'received',
+            );
           }
           return c.json(await toExportStatus(services, job, auth.userId), 202);
         },
@@ -279,6 +294,12 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
             eventType: 'deletion_request',
             context: {},
           });
+          await emitPrivacyRequestEvent(
+            getEventPipelineServices(),
+            'deletion',
+            auth.userId,
+            'received',
+          );
           // A single-use cancellation token for the emailed link — minted ONLY
           // when an email exists (no orphaned 30-day secret otherwise).  A
           // no-email account cancels by re-logging in with a remaining method.
@@ -341,6 +362,7 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
           eventType: 'deletion_cancel',
           context: {},
         });
+        await emitPrivacyRequestEvent(getEventPipelineServices(), 'deletion', userId, 'cancelled');
         return c.json(await toDeletionStatus(services, userId));
       })
   );

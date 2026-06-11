@@ -13,9 +13,28 @@ import {
   deletionStatusSchema,
   type ExportJobStatus,
   exportJobStatusSchema,
+  type PrivacySettingsPatch,
+  type PrivacySettingsResponse,
+  privacySettingsResponseSchema,
 } from '@licio/shared';
 import { ApiClientError, client, parseResponse } from './api.js';
 import { parseWithStepUp } from './auth-api.js';
+
+// --- Durable privacy settings (WS-D.2.1) -----------------------------------------
+
+/**
+ * Patch the DURABLE privacy settings (`/v1/privacy/settings`) — the
+ * server-enforced blob behind the §19.2/§19.3 guarantees (the identification
+ * floor, retention preference, sharing toggles).  Server-side the patch is
+ * teen-floor clamped, audited, and propagated; the response is the effective
+ * post-clamp state.
+ */
+export async function patchPrivacySettings(
+  patch: PrivacySettingsPatch,
+): Promise<PrivacySettingsResponse> {
+  const res = await client.v1.privacy.settings.$patch({ json: patch });
+  return parseResponse(res, privacySettingsResponseSchema);
+}
 
 // --- DSAR export (WS-D.2.2) ----------------------------------------------------
 

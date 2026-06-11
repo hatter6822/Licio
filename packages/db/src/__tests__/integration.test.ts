@@ -24,6 +24,7 @@ import {
   checkSchemaIsolation,
   type IntrospectionRow,
   ISOLATION_CONTEXTS,
+  introspectEventPartitions,
   introspectSchemaGraph,
 } from '../isolation.js';
 import * as schema from '../schema/index.js';
@@ -164,5 +165,15 @@ describe.skipIf(!DB_URL)('WS-D Postgres integration', () => {
     expect(assertContextsClassified(relations, ISOLATION_CONTEXTS, ['wallet']).classified).toBe(
       true,
     );
+
+    // Every LIVE partition of the events log must itself be a classified
+    // ranking table: partitions are ordinary relations a view or FK can
+    // target directly, and `public` cannot be wholly fail-closed, so this is
+    // the runtime complement of the static migration-parity test.
+    const partitions = await introspectEventPartitions(runQuery);
+    expect(partitions.length).toBeGreaterThanOrEqual(8);
+    for (const partition of partitions) {
+      expect(ISOLATION_CONTEXTS.rankingTables.has(partition)).toBe(true);
+    }
   });
 });

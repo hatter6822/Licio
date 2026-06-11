@@ -52,3 +52,6 @@ drizzle/meta/
 sbom.cdx.json
 *.intoto.jsonl
 provenance/
+
+# Local Redis artifacts (dev daemon writes to the repo root)
+dump.rdb

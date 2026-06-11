@@ -37,7 +37,7 @@ function entryToLedgerRecord(entry: SignalLedgerEntry): SignalLedgerRecord {
     contextOpened: entry.context_opened,
     branchDepthBucket: entry.branch_depth_bucket,
     returnVisitCountBucket: entry.return_visit_count_bucket,
-    capReached: entry.cap_reached,
+    ...(entry.cap_reached !== undefined ? { capReached: entry.cap_reached } : {}),
   };
 }
 
@@ -51,7 +51,7 @@ function ledgerRecordToEntry(record: SignalLedgerRecord): SignalLedgerEntry {
     context_opened: record.contextOpened,
     branch_depth_bucket: record.branchDepthBucket,
     return_visit_count_bucket: record.returnVisitCountBucket,
-    cap_reached: record.capReached,
+    ...(record.capReached !== undefined ? { cap_reached: record.capReached } : {}),
   };
 }
 

@@ -97,13 +97,23 @@ describe('applySignalPolicy', () => {
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ collect: false }));
   });
 
-  it('falls back to defaults when settings fail to load', async () => {
+  it('falls back to defaults for a SIGNED-IN user when settings fail to load', async () => {
+    const processor = new SignalProcessor();
+    const spy = vi.spyOn(processor, 'setCollectionPolicy');
+    setSignalProcessor(processor);
+    useAuthStore.getState().setAuthenticated(USER);
+    vi.mocked(api.fetchSettings).mockRejectedValue(new Error('offline'));
+    await applySignalPolicy();
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ collect: true }));
+  });
+
+  it('never collects for an anonymous session (WS-E: uploads are authenticated)', async () => {
     const processor = new SignalProcessor();
     const spy = vi.spyOn(processor, 'setCollectionPolicy');
     setSignalProcessor(processor);
     vi.mocked(api.fetchSettings).mockRejectedValue(new Error('offline'));
     await applySignalPolicy();
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ collect: true }));
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ collect: false }));
   });
 });
 

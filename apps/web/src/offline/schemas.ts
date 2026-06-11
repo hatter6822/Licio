@@ -85,7 +85,9 @@ export const signalLedgerRecordSchema = z.object({
   contextOpened: z.boolean(),
   branchDepthBucket: branchDepthBucketSchema,
   returnVisitCountBucket: returnVisitBucketSchema,
-  capReached: z.boolean(),
+  // Optional since WS-E: cap status is client-known only; server-generated
+  // ledger entries omit it (loosening only — older cached rows still parse).
+  capReached: z.boolean().optional(),
 });
 export type SignalLedgerRecord = z.infer<typeof signalLedgerRecordSchema>;
 

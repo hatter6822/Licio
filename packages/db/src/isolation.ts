@@ -45,18 +45,46 @@ export interface IsolationResult {
 const DEFAULT_ARTICULATION: ReadonlySet<Relation> = new Set(['public.users']);
 
 // ---------------------------------------------------------------------------
-// The explicit per-context allowlists (WS-D.3.2).  WS-E extends RANKING_CONTEXT_
-// TABLES (AttentionAggregate, InvariantOutput, ranking feature store) and may add
-// a `ranking`/`attention` schema; until then the ranking context is empty and the
-// isolation check passes trivially.  Adding a wallet/ranking table without listing
-// it here fails `assertContextsClassified` (fail-closed).
+// The explicit per-context allowlists (WS-D.3.2 / WS-E.3.1).  The ranking
+// context now lists every WS-E event/attention/scoring table, so the BFS proof
+// actively verifies the wallet↔ranking separation rather than passing
+// trivially.  Adding a wallet/ranking table without listing it here fails
+// `assertContextsClassified` (fail-closed).
 // ---------------------------------------------------------------------------
 
 /** Wallet/Knomosis bounded-context tables (financial wallet only). */
 export const WALLET_CONTEXT_TABLES: ReadonlySet<Relation> = new Set(['wallet.wallet_accounts']);
 
-/** Ranking/attention bounded-context tables (populated by WS-E). */
-export const RANKING_CONTEXT_TABLES: ReadonlySet<Relation> = new Set<Relation>([]);
+/**
+ * Ranking/attention bounded-context tables (WS-E.3.1).  These are the BFS
+ * targets of the pay-to-rank isolation proof: no FK/view join path may connect
+ * them to the wallet context (transiting `public.users` does not count — it is
+ * an articulation node that may be reached but never crossed).
+ */
+export const RANKING_CONTEXT_TABLES: ReadonlySet<Relation> = new Set<Relation>([
+  'public.events',
+  // The concrete per-tier partitions of `events` (migration 0003).  Postgres
+  // exposes partitions as ordinary relations, so a view or FK could target one
+  // DIRECTLY — each must therefore be a BFS target in its own right, or a
+  // wallet→partition bridge would evade the proof.  A migration-parity test
+  // asserts this list covers every `PARTITION OF "events"` in the migrations.
+  'public.events_attention_raw',
+  'public.events_attention_aggregated',
+  'public.events_public_contribution',
+  'public.events_ranking_log',
+  'public.events_moderation_legal',
+  'public.events_account_active',
+  'public.events_security_log',
+  'public.events_default',
+  'public.attention_aggregates',
+  'public.aggregation_windows',
+  'public.invariant_outputs',
+  'public.signal_ledger_entries',
+  'public.item_safety_states',
+  'public.pwatt_config',
+  'public.event_dead_letters',
+  'public.consumer_checkpoints',
+]);
 
 /** Schemas whose every table must be classified into a context (fail-closed). */
 export const CONTEXT_SCHEMAS: readonly string[] = ['wallet'];
@@ -198,6 +226,30 @@ export const VIEW_INTROSPECTION_SQL = `
     vtu.table_name    AS dep_table
   FROM information_schema.view_table_usage vtu;
 `;
+
+/**
+ * SQL that lists the LIVE concrete partitions of `public.events`.  Postgres
+ * exposes partitions as ordinary relations a view or FK can target directly,
+ * and the `public` schema cannot be wholly fail-closed (it also holds
+ * identity tables), so the gated integration test asserts every live
+ * partition is a classified ranking table — the runtime complement of the
+ * static migration-parity test.
+ */
+export const EVENT_PARTITION_INTROSPECTION_SQL = `
+  SELECT cn.nspname AS child_schema, c.relname AS child_table
+  FROM pg_inherits i
+  JOIN pg_class c ON c.oid = i.inhrelid
+  JOIN pg_namespace cn ON cn.oid = c.relnamespace
+  JOIN pg_class p ON p.oid = i.inhparent
+  JOIN pg_namespace pn ON pn.oid = p.relnamespace
+  WHERE pn.nspname = 'public' AND p.relname = 'events';
+`;
+
+/** The live `events` partitions as qualified relations (gated integration). */
+export async function introspectEventPartitions(runQuery: QueryRunner): Promise<Relation[]> {
+  const rows = await runQuery(EVENT_PARTITION_INTROSPECTION_SQL);
+  return rows.map((r) => `${r['child_schema']}.${r['child_table']}`);
+}
 
 /** Assemble a {@link SchemaGraph} from a live database via the injected runner. */
 export async function introspectSchemaGraph(runQuery: QueryRunner): Promise<SchemaGraph> {

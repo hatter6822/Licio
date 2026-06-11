@@ -37,6 +37,8 @@ export default defineConfig({
         // is fully covered.
         'apps/api/src/identity/redis-stores.ts',
         'apps/api/src/identity/drizzle-store.ts',
+        'apps/api/src/events/redis-event-stores.ts',
+        'apps/api/src/events/drizzle-event-stores.ts',
       ],
       thresholds: {
         lines: 80,

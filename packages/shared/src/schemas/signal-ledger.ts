@@ -12,6 +12,22 @@ import {
 } from './attention.js';
 import { isoTimestampSchema, paginatedSchema, uuidSchema } from './common.js';
 
+/**
+ * Anti-signals a user may see applied in their own ledger (SPEC §5.3,
+ * WS-E.2.1d transparency). Named after the §5.3 anti-signal table; the
+ * plain-language `summary` explains each in words.
+ */
+export const LEDGER_ANTI_SIGNALS = [
+  'rapid_repetition',
+  'coordinated_burst',
+  'rage_loop',
+  'source_free_accusation',
+  'brigading',
+  'harassment_cascade',
+] as const;
+export type LedgerAntiSignal = (typeof LEDGER_ANTI_SIGNALS)[number];
+export const ledgerAntiSignalSchema = z.enum(LEDGER_ANTI_SIGNALS);
+
 export const signalLedgerEntrySchema = z.object({
   item_id: uuidSchema,
   story_title: z.string().min(1),
@@ -21,8 +37,21 @@ export const signalLedgerEntrySchema = z.object({
   context_opened: z.boolean(),
   branch_depth_bucket: branchDepthBucketSchema,
   return_visit_count_bucket: returnVisitBucketSchema,
-  /** True when the per-item cap was reached and counting stopped (WS-C.4.1c). */
-  cap_reached: z.boolean(),
+  /**
+   * True when the per-item cap was reached and counting stopped (WS-C.4.1c).
+   * OPTIONAL because cap state is known only on the client (the §22.1 wire
+   * deliberately carries buckets, not the cap flag — the bucket ceiling IS the
+   * cap expression). Server-generated WS-E entries omit it rather than guess;
+   * a client-emitted canonical event can carry it in the future.
+   */
+  cap_reached: z.boolean().optional(),
+  // --- WS-E.2.1d additions (optional: pre-WS-E entries omit them) -----------
+  /** Anti-signals applied to this item/window, shown for transparency (§5.3). */
+  anti_signals: z.array(ledgerAntiSignalSchema).max(8).optional(),
+  /** The user's own PWAtt v0 shadow score for the item/window (0-1, §30.5). */
+  pwatt_v0_score: z.number().min(0).max(1).optional(),
+  /** Plain-language explanation of how the signals were counted (§19.3). */
+  summary: z.string().min(1).max(500).optional(),
 });
 export type SignalLedgerEntry = z.infer<typeof signalLedgerEntrySchema>;
 

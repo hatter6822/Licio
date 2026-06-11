@@ -17,6 +17,7 @@ import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resetPushState } from '../lib/push-service.js';
 import { createV1Routes, resetSettingsState } from '../routes/v1.js';
+import { freshWsEServices, legacyAggregate, seedUserWithSession } from './ws-e-helpers.js';
 
 // Mount the v1 router on a bare app: this unit-tests the contract handlers in
 // isolation. CSRF/CORS/security middleware is exercised by their own suites.
@@ -64,7 +65,7 @@ describe('v1 read models', () => {
     expect(body.story_id).toBe('5f5e1000-0000-4000-8000-000000000001');
   });
 
-  it('serves schema-valid thread / branch / room / signal-ledger bodies', async () => {
+  it('serves schema-valid thread / branch / room bodies', async () => {
     const a = app();
     const thread = '5f5e2000-0000-4000-8000-000000000001';
     const room = '5f5e3000-0000-4000-8000-000000000001';
@@ -76,7 +77,22 @@ describe('v1 read models', () => {
     );
     roomListResponseSchema.parse(await (await a.request('/v1/rooms')).json());
     roomDetailSchema.parse(await (await a.request(`/v1/rooms/${room}`)).json());
-    signalLedgerResponseSchema.parse(await (await a.request('/v1/signal-ledger')).json());
+  });
+
+  it('requires authentication for the Signal Ledger (owner-only, WS-E.2.1d)', async () => {
+    const res = await app().request('/v1/signal-ledger');
+    expect(res.status).toBe(401);
+  });
+
+  it('serves an authenticated user their own (initially empty) Signal Ledger', async () => {
+    const { identity } = freshWsEServices();
+    const { cookie } = await seedUserWithSession(identity);
+    const res = await app().request(
+      new Request('http://local/v1/signal-ledger', { headers: { cookie } }),
+    );
+    expect(res.status).toBe(200);
+    const body = signalLedgerResponseSchema.parse(await res.json());
+    expect(body).toEqual({ items: [], nextCursor: null });
   });
 
   it('returns 404 for a valid-but-unknown story id', async () => {
@@ -156,7 +172,7 @@ describe('v1 writes', () => {
     expect(await res.json()).toEqual({ status: 'received', local_operation_id: 'op-1' });
   });
 
-  it('ingests an attention aggregate batch and acks the count', async () => {
+  it('rejects an unauthenticated attention upload (WS-E.1.3a)', async () => {
     const aggregate = attentionAggregateSchema.parse({
       aggregate_id: VALID_UUID,
       user_id_or_privacy_bucket: 'privacy-bucket',
@@ -173,6 +189,21 @@ describe('v1 writes', () => {
     const res = await app().request(
       jsonRequest('/v1/attention/aggregates', 'POST', { aggregates: [aggregate] }),
     );
+    expect(res.status).toBe(401);
+  });
+
+  it('ingests an authenticated attention aggregate batch through the WS-E pipeline', async () => {
+    const { identity } = freshWsEServices();
+    const { userId, cookie } = await seedUserWithSession(identity);
+    const aggregate = legacyAggregate(userId);
+    const res = await app().request(
+      new Request('http://local/v1/attention/aggregates', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify({ aggregates: [aggregate] }),
+      }),
+    );
+    expect(res.status).toBe(202);
     expect(await res.json()).toEqual({ accepted: 1 });
   });
 

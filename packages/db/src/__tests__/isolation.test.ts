@@ -7,6 +7,7 @@ import {
   type IntrospectionRow,
   ISOLATION_CONTEXTS,
   type IsolationContexts,
+  introspectEventPartitions,
   introspectSchemaGraph,
   type SchemaGraph,
   VIEW_INTROSPECTION_SQL,
@@ -119,13 +120,28 @@ describe('assertContextsClassified — fail-closed', () => {
 });
 
 describe('the SHIPPED isolation contexts', () => {
-  it('classify wallet.wallet_accounts and leave ranking empty until WS-E', () => {
+  it('classify wallet.wallet_accounts and the WS-E ranking/attention tables', () => {
     expect(ISOLATION_CONTEXTS.walletTables.has('wallet.wallet_accounts')).toBe(true);
-    expect(ISOLATION_CONTEXTS.rankingTables.size).toBe(0);
+    // WS-E.3.1: the ranking context is populated, so the BFS proof is active
+    // (no longer trivially true). Every event/attention/scoring table is a
+    // target the wallet context must not reach.
+    for (const table of [
+      'public.events',
+      'public.attention_aggregates',
+      'public.aggregation_windows',
+      'public.invariant_outputs',
+      'public.signal_ledger_entries',
+      'public.item_safety_states',
+    ]) {
+      expect(ISOLATION_CONTEXTS.rankingTables.has(table), `${table} classified`).toBe(true);
+    }
   });
 
-  it('hold isolation for the current WS-D identity+wallet graph', () => {
-    // Every WS-D table references only the identity root; no ranking tables yet.
+  it('hold isolation for the current WS-D + WS-E graph', () => {
+    // Every WS-D table references only the identity root; the WS-E tables that
+    // carry an owner FK also reference only `users` — which is an articulation
+    // node (reachable, never transitable), so the wallet context still cannot
+    // reach any ranking table.
     const graph: SchemaGraph = {
       foreignKeys: [
         { from: 'wallet.wallet_accounts', to: USERS },
@@ -134,10 +150,29 @@ describe('the SHIPPED isolation contexts', () => {
         { from: 'public.user_auth', to: USERS },
         { from: 'public.webauthn_credentials', to: USERS },
         { from: 'public.audit_log', to: USERS },
+        { from: 'public.events', to: USERS },
+        { from: 'public.signal_ledger_entries', to: USERS },
       ],
       views: [],
     };
     expect(checkSchemaIsolation(graph, ISOLATION_CONTEXTS).isolated).toBe(true);
+  });
+
+  it('fails if a view ever bridges a wallet table to a WS-E ranking table', () => {
+    const graph: SchemaGraph = {
+      foreignKeys: [
+        { from: 'wallet.wallet_accounts', to: USERS },
+        { from: 'public.events', to: USERS },
+      ],
+      views: [
+        {
+          view: 'public.v_wallet_attention',
+          dependsOn: ['wallet.wallet_accounts', 'public.attention_aggregates'],
+        },
+      ],
+    };
+    const result = checkSchemaIsolation(graph, ISOLATION_CONTEXTS);
+    expect(result.isolated).toBe(false);
   });
 });
 
@@ -180,5 +215,42 @@ describe('introspectSchemaGraph', () => {
         dependsOn: ['wallet.wallet_accounts', 'ranking.attention_aggregates'],
       },
     ]);
+  });
+});
+
+describe('partition classification parity (WS-E.3.1 migrations)', () => {
+  it('every `events` partition created by a migration is a classified ranking table', async () => {
+    // Postgres exposes partitions as ordinary relations a view or FK can
+    // target DIRECTLY, so each must be a BFS target in its own right — a
+    // wallet→partition bridge must never evade the proof by hitting a
+    // partition the allowlist forgot. Parsed from the shipped migrations so
+    // adding a partition without classifying it fails here.
+    const { readdir, readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const migrationsDir = join(import.meta.dirname, '../../drizzle');
+    const partitions = new Set<string>();
+    for (const file of await readdir(migrationsDir)) {
+      if (!file.endsWith('.sql')) continue;
+      const sql = await readFile(join(migrationsDir, file), 'utf8');
+      for (const match of sql.matchAll(/CREATE TABLE "([^"]+)" PARTITION OF "events"/g)) {
+        if (match[1]) partitions.add(`public.${match[1]}`);
+      }
+    }
+    expect(partitions.size).toBeGreaterThanOrEqual(8);
+    for (const partition of partitions) {
+      expect(ISOLATION_CONTEXTS.rankingTables.has(partition)).toBe(true);
+    }
+    // And the parent itself stays classified.
+    expect(ISOLATION_CONTEXTS.rankingTables.has('public.events')).toBe(true);
+  });
+});
+
+describe('introspectEventPartitions', () => {
+  it('maps live partition rows to qualified relations', async () => {
+    const partitions = await introspectEventPartitions(async () => [
+      { child_schema: 'public', child_table: 'events_attention_aggregated' },
+      { child_schema: 'public', child_table: 'events_default' },
+    ]);
+    expect(partitions).toEqual(['public.events_attention_aggregated', 'public.events_default']);
   });
 });

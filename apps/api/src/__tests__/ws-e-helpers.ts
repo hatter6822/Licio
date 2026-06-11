@@ -1,0 +1,180 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// Shared WS-E test fixtures: fresh in-memory identity + event-pipeline
+// bundles, seeded users with session cookies, and canonical event builders.
+
+import { randomUUID } from 'node:crypto';
+import {
+  type AttentionAggregate,
+  type AttentionAggregateEvent,
+  attentionAggregateEventSchema,
+  attentionAggregateSchema,
+  defaultPersonalizationSettings,
+  defaultPrivacySettings,
+  emptyReputationSummary,
+  type PrivacySettings,
+  type SourceOpenedAggregateEvent,
+  sourceOpenedAggregateEventSchema,
+} from '@licio/shared';
+import {
+  createInMemoryEventPipelineServices,
+  type EventPipelineServices,
+  type InMemoryEventServicesOptions,
+  setEventPipelineServices,
+} from '../events/services.js';
+import {
+  createInMemoryIdentityServices,
+  type IdentityConfig,
+  type IdentityServices,
+  setIdentityServices,
+} from '../identity/services.js';
+import { buildSessionCookie, createSession } from '../identity/sessions.js';
+
+export const TEST_IDENTITY_CONFIG: IdentityConfig = {
+  masterSecret: 'test-master-secret-at-least-32-characters-long',
+  webauthn: { rpName: 'Licio', rpID: 'localhost', origin: 'http://localhost' },
+  siwe: { domain: 'localhost', uri: 'http://localhost', chainAllowlist: [1] },
+};
+
+export interface WsEFixture {
+  identity: IdentityServices;
+  events: EventPipelineServices;
+}
+
+/** Fresh in-memory bundles, installed as the module singletons. */
+export function freshWsEServices(options: InMemoryEventServicesOptions = {}): WsEFixture {
+  const identity = createInMemoryIdentityServices(TEST_IDENTITY_CONFIG);
+  const events = createInMemoryEventPipelineServices(options);
+  setIdentityServices(identity);
+  setEventPipelineServices(events);
+  return { identity, events };
+}
+
+export interface SeededUser {
+  userId: string;
+  cookie: string;
+}
+
+/** Seed an active, verified user and return a live session cookie. */
+export async function seedUserWithSession(
+  identity: IdentityServices,
+  opts: {
+    privacySettings?: PrivacySettings;
+    handle?: string;
+    /** Seed a TOTP-cleared steward (the WS-E admin-surface bar, WS-D.1.5b). */
+    steward?: boolean;
+  } = {},
+): Promise<SeededUser> {
+  const user = await identity.store.createUser({
+    handle: opts.handle ?? `reader${randomUUID().slice(0, 8)}`,
+    displayName: 'Reader',
+    email: null,
+    accountState: 'active',
+    locale: null,
+    ageBand: 'adult',
+    privacySettings: opts.privacySettings ?? defaultPrivacySettings(),
+    personalizationSettings: defaultPersonalizationSettings(),
+    reputationSummary: emptyReputationSummary(),
+    roles: opts.steward ? ['user', 'steward'] : ['user'],
+  });
+  if (opts.steward) {
+    await identity.store.setAuth(user.userId, { mfaEnabled: true });
+  }
+  await identity.store.addWebauthn({
+    credentialId: `cred-${user.userId}`,
+    userId: user.userId,
+    publicKey: new Uint8Array([1, 2, 3]),
+    counter: 0,
+    deviceType: 'platform',
+    deviceName: null,
+    transports: [],
+    backedUp: false,
+    createdAt: new Date().toISOString(),
+    lastUsedAt: null,
+  });
+  const created = await createSession(identity.sessions, {
+    userId: user.userId,
+    authMethod: 'webauthn',
+    credentialRef: `cred-${user.userId}`,
+    deviceLabel: 'test',
+    rememberMe: false,
+    mfaVerified: opts.steward ?? false,
+  });
+  const cookie = buildSessionCookie(created.token, created.maxAgeSec).split(';')[0] as string;
+  return { userId: user.userId, cookie };
+}
+
+/** A canonical attention.aggregate event for `userId` at `timestamp`. */
+export function attentionEvent(
+  userId: string,
+  overrides: Partial<AttentionAggregateEvent> & { storyId?: string } = {},
+): AttentionAggregateEvent {
+  const { storyId, ...rest } = overrides;
+  return attentionAggregateEventSchema.parse({
+    event_id: randomUUID(),
+    event_type: 'attention.aggregate',
+    timestamp: new Date().toISOString(),
+    schema_version: '1',
+    nonce: randomUUID(),
+    user_id: userId,
+    privacy_level: 'standard',
+    session_bucket: '2026-06-10T10:00:00.000Z',
+    items: [
+      {
+        story_id: storyId ?? randomUUID(),
+        active_dwell_bucket: 'medium',
+        source_opened: true,
+        context_opened: false,
+        branch_depth_bucket: 'shallow',
+        return_visit_count_bucket: 'none',
+      },
+    ],
+    privacy_classification: 'aggregated',
+    retention_tier: 'attention_aggregated',
+    ...rest,
+  });
+}
+
+/** A canonical source.opened.aggregate event. */
+export function sourceOpenEvent(
+  userId: string,
+  overrides: Partial<SourceOpenedAggregateEvent> = {},
+): SourceOpenedAggregateEvent {
+  return sourceOpenedAggregateEventSchema.parse({
+    event_id: randomUUID(),
+    event_type: 'source.opened.aggregate',
+    timestamp: new Date().toISOString(),
+    schema_version: '1',
+    nonce: randomUUID(),
+    user_id: userId,
+    privacy_level: 'standard',
+    story_id: randomUUID(),
+    source_id: randomUUID(),
+    dwell_bucket: 'moderate',
+    bounce: false,
+    privacy_classification: 'aggregated',
+    retention_tier: 'attention_aggregated',
+    ...overrides,
+  });
+}
+
+/** A legacy §22.1 aggregate (the WS-C batch wire shape). */
+export function legacyAggregate(
+  ownerOrBucket: string,
+  overrides: Partial<AttentionAggregate> = {},
+): AttentionAggregate {
+  return attentionAggregateSchema.parse({
+    aggregate_id: randomUUID(),
+    user_id_or_privacy_bucket: ownerOrBucket,
+    story_id: randomUUID(),
+    session_bucket: '2026-06-10T10:00:00.000Z',
+    active_dwell_bucket: 'short',
+    source_opened: true,
+    context_opened: false,
+    branch_depth_bucket: 'shallow',
+    return_visit_count_bucket: 'none',
+    privacy_level: 'standard',
+    created_at: new Date().toISOString(),
+    ...overrides,
+  });
+}

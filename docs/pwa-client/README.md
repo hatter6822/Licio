@@ -17,6 +17,13 @@ flags, zod validation at every trust boundary, and attention signals that are
 extracted and discarded in-browser so only bucketed aggregates ever leave the
 device.
 
+> **WS-E integration note.** Attention ingestion and the Signal Ledger are now
+> authenticated server surfaces (`docs/events/README.md`): uploads pass
+> ownership, replay, rate-limit, and privacy guards, and the ledger returns
+> only the session user's entries. Correspondingly, the client collection
+> policy requires an authenticated session (anonymous readers generate no
+> attention data), and the policy re-applies live on login/logout.
+
 ## Layers
 
 ```

@@ -24,7 +24,7 @@ import {
 } from '../offline/read-through.js';
 import * as api from './api.js';
 import { fetchCredentials, fetchSecurityActivity, fetchSessions } from './auth-api.js';
-import { fetchDeletionStatus, fetchExportStatus } from './privacy-api.js';
+import { fetchDeletionStatus, fetchExportStatus, patchPrivacySettings } from './privacy-api.js';
 import { cachePolicy } from './query-client.js';
 import { queryKeys } from './query-keys.js';
 
@@ -258,4 +258,15 @@ export function useDeletionStatusQuery() {
     queryFn: () => fetchDeletionStatus(),
     ...cachePolicy.profile,
   });
+}
+
+/**
+ * Patch the DURABLE (server-enforced) privacy settings — the §19.2
+ * identification floor, retention preference, and sharing toggles behind
+ * `/v1/privacy/settings`. Distinct from `useUpdateSettingsMutation` (the
+ * device-local UserSettings sync): this one changes what the ingestion
+ * boundary enforces.
+ */
+export function useUpdateDurablePrivacyMutation() {
+  return useMutation({ mutationFn: patchPrivacySettings });
 }

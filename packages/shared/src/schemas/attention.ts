@@ -157,9 +157,11 @@ export const attentionAggregateSchema = z.object({
 
 export type AttentionAggregate = z.infer<typeof attentionAggregateSchema>;
 
-/** A batch of aggregates uploaded together to `attention.aggregate` (§21.3). */
+/** A batch of aggregates uploaded together to `attention.aggregate` (§21.3).
+ *  Non-empty: an empty upload would spend a rate-limit token for nothing (the
+ *  client uploader and sync queue never send empty batches). */
 export const attentionAggregateBatchSchema = z.object({
-  aggregates: z.array(attentionAggregateSchema).max(200),
+  aggregates: z.array(attentionAggregateSchema).min(1).max(200),
 });
 export type AttentionAggregateBatch = z.infer<typeof attentionAggregateBatchSchema>;
 

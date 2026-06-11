@@ -38,6 +38,14 @@ describe('resolveCollectionPolicy', () => {
     );
     expect(policy).toEqual({ collect: true, privacyLevel: 'standard', identifier: 'user-1' });
   });
+
+  it('stops collection for an anonymous session (WS-E: uploads are authenticated)', () => {
+    const policy = resolveCollectionPolicy(
+      { personalization_enabled: true, privacy_level: 'standard' },
+      null,
+    );
+    expect(policy.collect).toBe(false);
+  });
 });
 
 describe('assertNoRawEgress', () => {

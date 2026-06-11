@@ -35,8 +35,8 @@ type level, runtime, and CI (the no-applause static gate).
 
 **Current status.**  Workstreams WS-0 (repository foundation), WS-A
 (doctrine and policy), WS-B (design system), WS-C (PWA client
-application), and WS-D (identity, accounts, and privacy) are
-**complete**.  WS-D ships the WebAuthn-first/passwordless authentication
+application), WS-D (identity, accounts, and privacy), and WS-E (event
+pipeline and PWAtt) are **complete**.  WS-D ships the WebAuthn-first/passwordless authentication
 foundation, secure server-side sessions, RBAC + audit log, age gating,
 user-facing privacy controls (settings, DSAR export with an encrypted
 signed-URL archive, and account deletion with a 30-day grace + hard
@@ -48,10 +48,23 @@ store) and the full client surface (passkey-first login/registration,
 the `/profile/security` management page, and real data-rights flows with
 step-up gating).  Email delivery has a production SES binding (SigV4
 over fetch, all-or-none `SES_*` env group) behind the fail-closed
-`Mailer` selection.  WS-D residuals tracked elsewhere: WS-E/WS-G
-injected hooks and browser-level auth E2E (needs a BFF-in-the-loop
-harness; WS-P).
-Workstreams WS-E through WS-P are planned (planning documents
+`Mailer` selection.  WS-D residuals tracked elsewhere: WS-G injected
+hooks (the WS-E hooks are closed) and browser-level auth E2E (needs a
+BFF-in-the-loop harness; WS-P).
+WS-E ships the event pipeline and PWAtt scoring engine
+(`docs/events/README.md`): strict event schemas + a single topic registry
+(14 core + 18 flagged Knomosis topics in a separate bounded context), the
+hardened attention-ingestion boundary (auth, ownership, two-layer replay
+protection, fail-closed sliding-window rate limits, server-side privacy
+enforcement), a retention-tier-partitioned Postgres event store with
+scheduled retention/anonymization sweeps + a compliance audit query, a
+rebuildable Redis real-time layer (HyperLogLog uniques), the consumer
+router enforcing the pay-to-rank firewall, PWAtt v0 in CI-verified shadow
+mode (anti-signals: coordinated bursts, source-free accusations,
+harassment-cascade freezes), the real owner-only Signal Ledger, and PWAtt
+v1 saturation/weights/penalties (still shadow until the §30.5 safety
+review with WS-I).
+Workstreams WS-F through WS-P are planned (planning documents
 exist under `docs/planning/`; implementation not yet started).  See
 "Implementation roadmap" below for the full status table.
 
@@ -265,6 +278,7 @@ licio/
 │           │   ├── v1.ts                --   /v1/* API routes
 │           │   ├── auth.ts              --   /v1/auth/* (WS-D auth surface)
 │           │   ├── privacy.ts           --   /v1/privacy/* (WS-D privacy controls)
+│           │   ├── events.ts            --   POST /v1/events/attention (WS-E.1.3)
 │           │   ├── health.ts            --   /health endpoint
 │           │   └── csp-report.ts        --   CSP violation ingest
 │           ├── middleware/
@@ -298,6 +312,29 @@ licio/
 │           │   ├── mailer-ses.ts        --   production SES mailer (SigV4 over fetch)
 │           │   ├── redis-stores.ts      --   production Redis adapters (gated)
 │           │   └── drizzle-store.ts     --   production Postgres identity/audit/lease adapters (gated)
+│           ├── events/                  -- WS-E event pipeline
+│           │   ├── stores.ts            --   store interfaces + in-memory adapters
+│           │   ├── ingest.ts            --   shared attention-ingestion pipeline (both routes)
+│           │   ├── privacy-gate.ts      --   server-side privacy enforcement (WS-E.1.3d)
+│           │   ├── replay.ts            --   single-use nonce store (WS-E.1.3b)
+│           │   ├── ingest-limiter.ts    --   sliding-window rate limiter, fail-closed fallback
+│           │   ├── router.ts            --   consumer router + pay-to-rank firewall (WS-E.1.5)
+│           │   ├── consumers.ts         --   default consumers (realtime, integrity intake)
+│           │   ├── realtime.ts          --   1h real-time aggregation layer (WS-E.3.2)
+│           │   ├── hll.ts               --   HyperLogLog (bias-corrected, ~0.81% error)
+│           │   ├── retention.ts         --   retention/anonymization sweeps + compliance query
+│           │   ├── metrics.ts           --   in-process counters/latency (no attention values)
+│           │   ├── services.ts          --   injectable WS-E service container
+│           │   ├── redis-event-stores.ts --  production Redis adapters (gated)
+│           │   └── drizzle-event-stores.ts -- production Postgres adapters (gated)
+│           ├── pwatt/                   -- WS-E PWAtt scoring services
+│           │   ├── aggregation.ts       --   per-item/window fold with per-user dedup (WS-E.2.1a)
+│           │   ├── anti-signals.ts      --   burst + cascade detectors (WS-E.2.2a/c)
+│           │   ├── config.ts            --   tunable runtime config (fail-closed loader)
+│           │   ├── scoring.ts           --   window scoring job (v0+v1 shadow, ledger, freezes)
+│           │   ├── shadow.ts            --   ranking-boundary shadow guard (WS-E.2.1e)
+│           │   ├── ranking-v0.ts        --   freshness-only ranking (equivalence target)
+│           │   └── scheduler.ts         --   lease-guarded hourly tick
 │           ├── lib/
 │           │   ├── rate-limit.ts        --   global fixed-window budget (no client keying)
 │           │   ├── push-service.ts      --   VAPID push (session-scoped delete)
@@ -325,13 +362,16 @@ licio/
 │   │       │   ├── identity-records.ts  --   session/credential/wallet zod mirrors
 │   │       │   ├── auth-api.ts          --   auth endpoint wire contracts
 │   │       │   ├── privacy-api.ts       --   privacy endpoint wire contracts
-│   │       │   └── audit.ts             --   audit event taxonomy
+│   │       │   ├── audit.ts             --   audit event taxonomy
+│   │       │   └── events/              --   WS-E event schemas (envelope, retention
+│   │       │                                 tiers, 14 core topic schemas, topic
+│   │       │                                 registry SSOT, knomosis/ bounded context)
 │   │       ├── types/                   --   TypeScript type exports
 │   │       ├── enums/                   --   enumeration constants
 │   │       ├── constants/               --   shared constants
 │   │       └── env/                     --   environment variable validation
 │   ├── db/                      -- Drizzle ORM schema + migrations
-│   │   ├── drizzle/                     --   generated SQL migrations (WS-D)
+│   │   ├── drizzle/                     --   generated SQL migrations (WS-D, WS-E)
 │   │   └── src/
 │   │       ├── schema/                  --   PostgreSQL table definitions
 │   │       │   ├── user.ts              --     users + JSONB + indexes/CHECK (WS-D.1.1)
@@ -340,6 +380,10 @@ licio/
 │   │       │   ├── wallet-auth-credential.ts -- auth-wallet (identity context)
 │   │       │   ├── audit-log.ts         --     append-only audit log
 │   │       │   ├── privacy.ts           --     export_jobs, deletion_requests
+│   │       │   ├── events.ts            --     WS-E: events (LIST-partitioned by tier),
+│   │       │   │                               attention_aggregates (§22.1), windows,
+│   │       │   │                               invariant_outputs (+shadow), signal ledger,
+│   │       │   │                               safety states, pwatt_config, DLQ, checkpoints
 │   │       │   └── wallet/wallet-account.ts -- isolated financial WalletAccount
 │   │       ├── isolation.ts             --   wallet↔ranking BFS isolation (WS-D.3.2)
 │   │       ├── client.ts                --   database client initialization
@@ -347,7 +391,11 @@ licio/
 │   └── invariants/              -- invariant computation modules
 │       └── src/
 │           ├── types.ts                 --   type-level invariants
-│           └── __tests__/               --   invariant tests
+│           ├── pwatt/                   --   WS-E PWAtt pure math (v0/v1 scoring,
+│           │                                 saturation curves, ranking profiles,
+│           │                                 penalties, safety-state machine,
+│           │                                 accusation classifier, ledger summaries)
+│           └── __tests__/               --   invariant + deterministic property tests
 ├── scripts/                     -- build validation and security gates
 │   ├── validate-build.ts        --   post-build orchestrator
 │   ├── check-bundle-size.ts     --   JS < 200 KB gz, CSS < 50 KB gz
@@ -374,6 +422,8 @@ licio/
 │   │   └── 05–17-*.md                   -- WS-D through WS-P
 │   ├── design-system/           -- design system documentation
 │   ├── pwa-client/              -- PWA implementation documentation
+│   ├── identity/                -- WS-D implementation reference
+│   ├── events/                  -- WS-E implementation reference
 │   └── policy/                  -- 9 policy documents (moderation, signals,
 │                                   privacy, crypto, jurisdiction, transparency)
 └── .github/
@@ -724,7 +774,7 @@ Status:
 | WS-B | Design system | Complete |
 | WS-C | PWA client application | Complete |
 | WS-D | Identity and privacy | Complete |
-| WS-E | Event pipeline and PWAtt scoring | Planned |
+| WS-E | Event pipeline and PWAtt scoring | Complete |
 | WS-F | Ingestion and search | Planned |
 | WS-G | Forum and conversation | Planned |
 | WS-H | Invariant services (MERI, MFCI, SCOI, GWEI, PHI) | Planned |
@@ -801,15 +851,16 @@ file counts at current state:
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
 | apps/web | ~53 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~33 (incl. WS-D identity + routes) | node | `pnpm --filter api test` |
-| packages/shared | ~7 (incl. WS-D schemas) | node | `pnpm --filter @licio/shared test` |
+| apps/api | ~52 (incl. WS-D identity + WS-E pipeline) | node | `pnpm --filter api test` |
+| packages/shared | ~9 (incl. WS-D + WS-E schemas) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~2 (isolation + gated integration) | node | via root `pnpm test` (db project) |
-| packages/invariants | ~1 | node | `pnpm --filter @licio/invariants test` |
+| packages/invariants | ~5 (incl. PWAtt math + property tests) | node | `pnpm --filter @licio/invariants test` |
 | scripts | ~2 | node | via root `pnpm test` (policy project) |
 
-WS-D adds **gated** integration tests (Postgres + Redis) that run only
-when `DATABASE_URL` / `REDIS_URL` are set; they are skipped in CI, which
-has no database service.  See `docs/identity/README.md`.
+WS-D and WS-E add **gated** integration tests (Postgres + Redis) that run
+only when `DATABASE_URL` / `REDIS_URL` are set; they are skipped in CI,
+which has no database service.  See `docs/identity/README.md` and
+`docs/events/README.md`.
 
 Only monotonic growth is enforced — no global gate pins the count.
 
@@ -907,15 +958,43 @@ password column, hashing, or reset flow anywhere.
 | Client security | `/profile/security`: sessions list/revoke/revoke-others, passkey add/rename/remove, email-factor add/verify/change/disable, wallet unlink, TOTP enroll → recovery codes → disable, owner activity feed; sensitive actions run through the step-up retry gate (challenge → dialog → SAME action retries) and a step-up 401 never expires the session | Complete |
 | Client data rights | Privacy page wired to the real `/v1/privacy/*`: export request → poll → step-up-gated archive download, attention-history deletion, account deletion (confirm → step-up → sign-out) with grace-period cancel on the login page (emailed `?cancel_token=` link AND deactivated re-login path) | Complete |
 | Email delivery | Production `Mailer` over the SES v2 HTTP API (SigV4 on `node:crypto`, no SDK dep; all-or-none `SES_*` env group, partial fails boot): login/verify code templates and the WS-D.2.4a deletion notice (grace window, `/login?cancel_token=…` link, irreversibility); never logs recipient/code; without SES, production still fails closed unless `ALLOW_INSECURE_NULL_MAILER=true` | Complete |
-| Residuals | WS-E/WS-G injected hooks (`purgeAttention`, `onPrivacyChange`, `anonymizeContributions`); browser-level auth E2E scenarios (the Playwright harness serves only the static preview — a BFF-in-the-loop harness lands with WS-P launch testing) | Tracked elsewhere |
+| Residuals | WS-G injected hooks (`anonymizeContributions`, `exportContributions`) — the WS-E hooks (`purgeAttention`, `exportAttention`, `onPrivacyChange`) are CLOSED with real implementations; browser-level auth E2E scenarios (the Playwright harness serves only the static preview — a BFF-in-the-loop harness lands with WS-P launch testing) | Tracked elsewhere |
 
 Pure crypto is mathematically validated: TOTP against the RFC 6238
 Appendix B vectors, real WebAuthn attestation/assertion via a pure-crypto
 software authenticator, real SIWE EOA signatures via viem.
 
-### WS-E through WS-P
+### WS-E: Event pipeline and PWAtt
 
-Plans: `docs/planning/06-event-pipeline-and-pwatt.md` through
+Plan: `docs/planning/06-event-pipeline-and-pwatt.md`
+Documentation: `docs/events/README.md`
+
+Complete.  PWAtt v0 AND v1 outputs are stored **shadow-only** (SPEC §30.5):
+lifting shadow mode is a code change (`PWATT_V0_SHADOW_MODE` in
+`@licio/invariants`) gated on the safety review with WS-I — never a
+configuration flip.
+
+| Sub-area | Key surface | Status |
+|----------|-------------|--------|
+| Schemas + registry | Strict envelope + retention tiers (§22.4); 14 core + 18 Knomosis topics (separate bounded context, never in the client bundle); single `TOPIC_REGISTRY` SSOT; discriminated union rejects unknown topics; §22.1 field-name mapping unit-asserted | Complete |
+| Ingestion | `POST /v1/events/attention` (online window) + the WS-C batch wire (offline 7d window) through ONE pipeline: auth, ownership, two-layer replay (nonce + durable event-id), per-user sliding-window limits with fail-closed in-memory fallback, server-side privacy gate (personalization off → 204; retention `none` → real-time only; `minimal` → 90d; the durable `attention_privacy_level` floor clamps every event's identification level); logs/metrics carry ids + counts only (redaction-tested) | Complete |
+| Storage | `events` LIST-partitioned by retention tier (partition drop = provable deletion); NOT NULL classification/tier (storage-layer defense); `attention_aggregates` §22.1 field-exact; minimum-privacy rows pseudonymized at rest (owner null, payload user id rewritten) | Complete |
+| Real-time | Rebuildable 1h acceleration layer; HyperLogLog uniques (~0.81% error, documented); every key TTL'd; hourly reconciliation vs the durable aggregation within ~3σ | Complete |
+| Router + firewall | At-least-once with event-id idempotency, bounded retries → DLQ (one letter per consumer+event, accumulating attempts, steward redrive), durable-consumer checkpoints + startup replay, exact real-time rebuild at boot, lag metrics; Knomosis topics can NEVER reach scoring consumers; scoring consumers hold public+aggregated only; the fail-closed crypto flag withholds Knomosis topics from EVERY consumer; all enforced at subscription AND delivery | Complete |
+| Retention | Hourly lease-guarded sweeps per tier with batched settings reads; aggregates anonymize at the CURRENT preference's window, delete at the hard cap; moderation rows flagged for annual review (never auto-deleted); jurisdiction overrides shorten-only (WS-N hook); counts-only audit record + `retentionComplianceReport` (zero over-retained rows); WS-D hooks closed — `purgeAttention`, `onPrivacyChange`, and a COMPLETE `exportAttention` (all aggregates, all ledger pages, owned attention events incl. source-opens) | Complete |
+| PWAtt v0 (shadow) | Per-user-per-window dedup fold; ActiveAttention (dwell caps, idle/bounce filtering, source>headline, clickbait zero-weight) + ConstructiveParticipation (diminishing returns, low save weight, uniform v0 type weights, `low_info_reply`=0); pure/total functions; deterministic property tests pin "genuine attention never decreases / anti-signals never increase" | Complete |
+| Anti-signals | Coordinated bursts conditioned on the item's own base rate (active communities never flagged for volume alone) + distinct-actor guard → integrity event + MFCI/review hooks; conservative lexical accusation classifier (hedges/questions/opinions never flagged; WS-K seam); harassment cascades → restricted integrity signal + `MOD_HARASS_002` safety case + growth freeze; detection side effects deterministic per (item, window) | Complete |
+| Signal Ledger | Owner-only `GET /v1/signal-ledger` (401 unauthenticated; no other-user path); ONE canonical entry per (owner, item, 1h window) — larger windows live in invariant_outputs — with bucketed breakdown, applied anti-signals, shadow score, plain-language summary; cap status honestly omitted server-side (client-known only; optional on the wire); purge deadlines coupled to retention preference; rendered on the profile page | Complete |
+| PWAtt v1 | INTEGRATED live stage (`computePwattV1Components`): per-user diminishing curves at the contribution hierarchy's weights (evidence > correction > … > low_info_reply=0; accusation downweight at the accusing type's weight), item dimensions through `applySaturation` (log + tanh curves; total/monotone/concave; 50% dominance cap; exact sum-to-100); §5.5-guardrailed profiles (selection context has no payment/wallet field); penalties as separate nonnegative coefficients that can drive totals below zero (pM real from burst confidence, pR via MERI hook, pH/pT pinned-zero placeholders); v0 weights AND the full v1 stage runtime-tunable via `pwatt_config` (fail-closed loader + steward write endpoint with config-time 422 rejection) | Complete |
+| Shadow verification | CI-gated equivalence: ranking output byte-identical with/without (and with mutated) PWAtt scores; the boundary rejects PWAtt rows even if the shadow flag were mislabeled; `/v1/feed` equivalence asserted end-to-end | Complete |
+| Scheduler | Hourly tick under a Postgres job lease (`events_hourly`); freshness-aware `windowsNeedingCompute` (a window recomputes only when events ARRIVED after its computedAt — fresh windows compute once, late offline events re-open theirs, unchanged windows skip; lookback ~26h/36h/8d/14d per size), retention sweeps, real-time reconciliation; the volume-threshold trigger is wired in production boot (early 1h scoring for hot items); startup recovery (checkpoint replay + real-time rebuild) runs at boot | Complete |
+| Production bindings | Drizzle adapters for all nine durable stores + Redis adapters (nonces `SET NX PX`, ZSET sliding windows, native PFADD/PFCOUNT HLL); gated integration tests run the REAL migration chain (incl. the partitioned DDL) against live Postgres/Redis | Complete |
+| System events | `invariant.run.completed` emitted once per item/window (deterministic name-based UUIDv8/SHA-256 ids; idempotent re-runs); `thread.state.changed` (safety dimension) on every freeze/resolution; `privacy.request.created` from the WS-D privacy routes (export/deletion/cancel/attention-reset); steward admin surface at `/v1/events/admin` (safety-state, validated config writes, DLQ list/redrive, manual recovery) | Complete |
+| Residuals | WS-F/G story emission + evidence-link correlation + `low_info_reply` classification (the type is weighted 0 and tracked; nothing classifies real replies yet); WS-H invariant providers + burst covariates behind existing hooks; WS-I ranking-boundary consumption + shadow lift; WS-J case lifecycle behind hooks; WS-K classifier seam; `notification.sent` producer (no in-repo dispatch path exists); client-side `source.opened.aggregate` + `cap_reached` emitters (server paths complete); cross-instance stream binding behind the `EventRouter` surface (WS-O) | Tracked elsewhere |
+
+### WS-F through WS-P
+
+Plans: `docs/planning/07-ingestion-and-search.md` through
 `docs/planning/17-experimentation-and-launch.md`
 
 Not yet started.  Read the relevant planning document and the

@@ -99,11 +99,14 @@ interfaces.
   WebAuthn register/authenticate, wallet nonce/verify, session list/revoke,
   security-activity.
 - `/v1/privacy/*`: settings get/patch (teen-clamped, audited, propagated
-  downstream), attention deletion, DSAR export (assembled → encrypted →
-  served via a step-up-protected, signed, 72h-expiring URL — own data only),
-  and account deletion (deactivate + 30-day grace + session revocation,
-  cancellable by a remaining-method re-login **or** an emailed single-use
-  token, then a scheduled hard purge that anonymizes + tombstones).
+  downstream — including `attention_privacy_level`, the durable §19.2
+  identification floor the WS-E ingestion boundary clamps every accepted
+  attention event to, so a compromised client can never weaken the user's
+  chosen pseudonymization), attention deletion, DSAR export (assembled →
+  encrypted → served via a step-up-protected, signed, 72h-expiring URL — own
+  data only), and account deletion (deactivate + 30-day grace + session
+  revocation, cancellable by a remaining-method re-login **or** an emailed
+  single-use token, then a scheduled hard purge that anonymizes + tombstones).
 - Steward MFA: `/v1/auth/mfa/totp/{enroll,verify,disable}` — TOTP enroll with an
   encrypt-at-rest secret, per-session `mfa_verified`, recovery codes.
 
@@ -189,8 +192,12 @@ Interface-level hooks wired to follow-up workstreams:
 
 - **Contribution anonymization** — the WS-G `anonymizeContributions`
   implementation behind the injected hook (WS-D.2.4b).
-- **Attention-history purge** and the **settings-change downstream consumer** are
-  injected hooks (`purgeAttention`, `onPrivacyChange`) that WS-E implements.
+- **Attention-history purge**, **attention export**, and the **settings-change
+  downstream consumer** — CLOSED by WS-E (`docs/events/README.md`): production
+  boot wires `purgeAttention` (deletes the user's events, §22.1 aggregate rows,
+  and Signal Ledger entries), `exportAttention` (the user's own attention data
+  for the DSAR archive), and `onPrivacyChange` (a retention-preference change
+  tightens existing purge deadlines, never extends them).
 - **Client auth UI** — complete: passkey-first login/registration (WebAuthn L3
   JSON methods with a manual fallback — no client-side webauthn dependency;
   `apps/web/src/lib/webauthn.ts`), the emailed one-time code as the universal
