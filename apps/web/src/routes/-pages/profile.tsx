@@ -33,6 +33,7 @@ import {
   useSettingsQuery,
   useSignalLedgerQuery,
   useToggleSavedStoryMutation,
+  useUpdateDurablePrivacyMutation,
   useUpdateNotificationPreferencesMutation,
   useUpdateSettingsMutation,
 } from '../../lib/queries.js';
@@ -300,6 +301,7 @@ export function PrivacyPage(): React.ReactElement {
   usePageFocus(t('profile.privacy', 'Privacy'));
   const settings = useSettingsQuery();
   const updateSettings = useUpdateSettingsMutation();
+  const updateDurablePrivacy = useUpdateDurablePrivacyMutation();
   const userId = useAuthStore((state) => state.user?.id ?? null);
 
   // Push the resolved collection policy to the signal processor immediately so a
@@ -338,6 +340,13 @@ export function PrivacyPage(): React.ReactElement {
               onValueChange={(value) => {
                 const level = value as PrivacyLevel;
                 updateSettings.mutate({ privacy_level: level });
+                // The DURABLE identification floor (§19.2): the ingestion
+                // boundary stores every event at the more private of this and
+                // the upload's claim, so the choice holds server-side even
+                // against a misbehaving client.
+                updateDurablePrivacy.mutate({
+                  privacy_settings: { attention_privacy_level: level },
+                });
                 syncPolicy(data.personalization_enabled, level);
               }}
               options={[

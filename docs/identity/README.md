@@ -99,11 +99,14 @@ interfaces.
   WebAuthn register/authenticate, wallet nonce/verify, session list/revoke,
   security-activity.
 - `/v1/privacy/*`: settings get/patch (teen-clamped, audited, propagated
-  downstream), attention deletion, DSAR export (assembled → encrypted →
-  served via a step-up-protected, signed, 72h-expiring URL — own data only),
-  and account deletion (deactivate + 30-day grace + session revocation,
-  cancellable by a remaining-method re-login **or** an emailed single-use
-  token, then a scheduled hard purge that anonymizes + tombstones).
+  downstream — including `attention_privacy_level`, the durable §19.2
+  identification floor the WS-E ingestion boundary clamps every accepted
+  attention event to, so a compromised client can never weaken the user's
+  chosen pseudonymization), attention deletion, DSAR export (assembled →
+  encrypted → served via a step-up-protected, signed, 72h-expiring URL — own
+  data only), and account deletion (deactivate + 30-day grace + session
+  revocation, cancellable by a remaining-method re-login **or** an emailed
+  single-use token, then a scheduled hard purge that anonymizes + tombstones).
 - Steward MFA: `/v1/auth/mfa/totp/{enroll,verify,disable}` — TOTP enroll with an
   encrypt-at-rest secret, per-session `mfa_verified`, recovery codes.
 

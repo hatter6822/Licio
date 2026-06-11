@@ -165,9 +165,11 @@ export async function ingestAttentionEvents(
       continue;
     }
 
-    // 5. Build storage rows. The claimed collection level can only ever
-    //    STRENGTHEN pseudonymization relative to the server floor.
-    const level = effectivePrivacyLevel(event.privacy_level);
+    // 5. Build storage rows. The effective level is the MORE private of the
+    //    claim and the user's durable identification floor (WS-E.1.3d): the
+    //    claim can only ever STRENGTHEN pseudonymization, and a compromised
+    //    client claiming `standard` cannot re-identify a `minimum` user.
+    const level = effectivePrivacyLevel(event.privacy_level, decision.identificationFloor);
     const pseudonymous = level === 'minimum';
     const purgeAfter = attentionPurgeAfterIso(decision.preference, eventMs, now);
     const storedPayload = asRecord(

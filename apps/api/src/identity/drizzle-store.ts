@@ -35,6 +35,8 @@ import {
   defaultPersonalizationSettings,
   defaultPrivacySettings,
   emptyReputationSummary,
+  migratePersonalizationSettings,
+  migratePrivacySettings,
   type SecurityActivityEntry,
 } from '@licio/shared';
 import { and, desc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
@@ -79,8 +81,12 @@ function rowToUser(r: typeof users.$inferSelect): StoredUser {
     accountState: r.accountState,
     locale: r.locale,
     ageBand: r.ageBandIfKnown,
-    privacySettings: r.privacySettings,
-    personalizationSettings: r.personalizationSettings,
+    // Forward-migrate at the read boundary: a JSONB blob written under an
+    // older settings schema (e.g. before `attention_privacy_level` existed)
+    // upgrades to the current shape with privacy-protective defaults, so no
+    // downstream consumer ever sees a missing field at runtime.
+    privacySettings: migratePrivacySettings(r.privacySettings),
+    personalizationSettings: migratePersonalizationSettings(r.personalizationSettings),
     reputationSummary: r.reputationSummaryPrivate,
     roles: r.roles.filter((x): x is Role => ROLE_SET.has(x)),
     createdAt: iso(r.createdAt),

@@ -266,6 +266,36 @@ describe('server-side privacy enforcement (WS-E.1.3d)', () => {
     expect(aggregates).toHaveLength(1);
     expect(aggregates[0]?.privacy_level).toBe('minimum');
   });
+
+  it('enforces the durable identification floor against a weaker claim (§19.2)', async () => {
+    // The user's DURABLE setting is `minimum`; a buggy or compromised client
+    // claims `standard`. The server must store at the user's floor — the
+    // claim can strengthen pseudonymization, never weaken it.
+    const settings = {
+      ...defaultPrivacySettings(),
+      attention_privacy_level: 'minimum' as const,
+    };
+    const { userId, cookie } = await seedUserWithSession(fixture.identity, {
+      privacySettings: settings,
+    });
+    const event = attentionEvent(userId, { privacy_level: 'standard' });
+    const res = await app().request(post('/v1/events/attention', event, cookie));
+    expect(res.status).toBe(202);
+    // Stored exactly as a minimum-privacy event: de-linked at rest.
+    expect(await fixture.events.eventStore.listByOwner(userId)).toHaveLength(0);
+    const all = await fixture.events.eventStore.listByTopicsBetween(
+      ['attention.aggregate'],
+      new Date(Date.now() - 60_000).toISOString(),
+      new Date(Date.now() + 60_000).toISOString(),
+    );
+    expect(all).toHaveLength(1);
+    expect(all[0]?.ownerUserId).toBeNull();
+    expect(all[0]?.payload['user_id']).toBe(PSEUDONYMOUS_USER_ID);
+    const aggregates = await fixture.events.attentionStore.listByUser(PRIVACY_BUCKET);
+    expect(aggregates).toHaveLength(1);
+    expect(aggregates[0]?.privacy_level).toBe('minimum');
+    expect(await fixture.events.attentionStore.listByUser(userId)).toHaveLength(0);
+  });
 });
 
 describe('legacy batch wire (WS-E.1.3e: identical pipeline)', () => {

@@ -35,6 +35,12 @@ export type AttentionPrivacyDecision =
       preference: AttentionRetentionPreference;
       /** False ⇒ no durable §22.1 aggregate rows (real-time only). */
       persistDurable: boolean;
+      /**
+       * The user's DURABLE identification floor (§19.2): every accepted event
+       * is stored at the more private of this and the per-upload claim, so a
+       * misbehaving client can never weaken the user's chosen pseudonymization.
+       */
+      identificationFloor: PrivacyLevel;
     };
 
 /** Evaluate the user's settings into an enforcement decision. */
@@ -43,7 +49,12 @@ export function evaluateAttentionPrivacy(settings: PrivacySettings): AttentionPr
     return { action: 'discard', reason: 'personalization_disabled' };
   }
   const preference = settings.attention_retention_preference;
-  return { action: 'accept', preference, persistDurable: preference !== 'none' };
+  return {
+    action: 'accept',
+    preference,
+    persistDurable: preference !== 'none',
+    identificationFloor: settings.attention_privacy_level,
+  };
 }
 
 /**

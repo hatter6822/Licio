@@ -158,6 +158,27 @@ describe('GET/PATCH /v1/privacy/settings', () => {
     );
     expect(body.personalization_settings.topic_preferences).toEqual(['technology']);
   });
+
+  it('round-trips the durable identification floor (defaults standard, settable to minimum)', async () => {
+    await seedUser('adult', 'floor@example.com', 'flooruser');
+    const app = createApp();
+    const sid = await login(app, 'floor@example.com');
+    const get = await app.request('/v1/privacy/settings', { headers: { cookie: sid } });
+    expect(
+      (await readJson<{ privacy_settings: { attention_privacy_level: string } }>(get))
+        .privacy_settings.attention_privacy_level,
+    ).toBe('standard');
+    const patch = await app.request('/v1/privacy/settings', {
+      method: 'PATCH',
+      headers: jsonHeaders(sid),
+      body: JSON.stringify({ privacy_settings: { attention_privacy_level: 'minimum' } }),
+    });
+    expect(patch.status).toBe(200);
+    expect(
+      (await readJson<{ privacy_settings: { attention_privacy_level: string } }>(patch))
+        .privacy_settings.attention_privacy_level,
+    ).toBe('minimum');
+  });
 });
 
 describe('POST /v1/privacy/attention/delete', () => {

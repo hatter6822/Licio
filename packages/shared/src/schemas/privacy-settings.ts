@@ -16,6 +16,7 @@
 //     applied server-side so a teen cannot weaken a protection via a direct API
 //     call (fail-closed), not merely hidden in the UI.
 import { z } from 'zod';
+import { privacyLevelSchema } from './attention.js';
 import { feedModeSchema } from './feed.js';
 
 /** Current on-the-wire / at-rest schema version for both settings blobs. */
@@ -83,6 +84,15 @@ const privacySettingsShape = {
   personalization_enabled: z.boolean(),
   cross_device_sync: z.boolean(),
   attention_retention_preference: attentionRetentionPreferenceSchema,
+  /**
+   * The durable identification floor for attention collection (§19.2): the
+   * server stores every accepted attention event at the MORE private of this
+   * setting and the per-upload claim, so a buggy or compromised client
+   * claiming `standard` can never re-identify a user who chose `minimum`
+   * (`PRIVACY_LEVELS` is ordered least→most private: standard < reduced <
+   * minimum).  Enforced at the WS-E ingestion boundary on every event.
+   */
+  attention_privacy_level: privacyLevelSchema,
   local_vs_server_personalization: personalizationLocalitySchema,
   notification_preferences: privacyNotificationPreferencesSchema,
   data_sharing_preferences: dataSharingPreferencesSchema,
@@ -140,6 +150,10 @@ export function defaultPrivacySettings(): PrivacySettings {
     personalization_enabled: true,
     cross_device_sync: false,
     attention_retention_preference: 'default',
+    // `standard` mirrors the historical server floor: identified collection
+    // is what makes personalization work at all; the user can raise the floor
+    // any time and the boundary enforces it on the very next event.
+    attention_privacy_level: 'standard',
     local_vs_server_personalization: 'local',
     notification_preferences: {
       quiet_hours_start: '22:00',
@@ -177,6 +191,10 @@ export function teenFloorPrivacySettings(): PrivacySettings {
     personalization_enabled: true,
     cross_device_sync: false,
     attention_retention_preference: 'minimal',
+    // The teen floor does not constrain the identification level (a teen may
+    // choose any level; the seed matches the adult default) — retention is
+    // already clamped to `minimal`, bounding the linkable window to 90 days.
+    attention_privacy_level: 'standard',
     local_vs_server_personalization: 'local',
     notification_preferences: {
       quiet_hours_start: '21:00',

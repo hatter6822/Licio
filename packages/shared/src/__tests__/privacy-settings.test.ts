@@ -188,8 +188,20 @@ describe('migratePrivacySettings', () => {
     expect(migrated.schema_version).toBe(PRIVACY_SETTINGS_VERSION);
     expect(migrated.personalization_enabled).toBe(false);
     expect(migrated.cross_device_sync).toBe(true);
-    // Untouched fields take the current defaults.
+    // Untouched fields take the current defaults — including the
+    // identification floor added after the first at-rest blobs were written.
     expect(migrated.sensitive_topic_handling).toBe('strict');
+    expect(migrated.attention_privacy_level).toBe('standard');
+  });
+
+  it('preserves a stored identification floor through migration (and the teen clamp)', () => {
+    const migrated = migratePrivacySettings({ attention_privacy_level: 'minimum' });
+    expect(migrated.attention_privacy_level).toBe('minimum');
+    // The teen floor does not constrain the identification level: the user's
+    // choice passes through the clamp untouched in BOTH directions.
+    expect(clampPrivacySettingsToTeenFloor(migrated).attention_privacy_level).toBe('minimum');
+    const standard = migratePrivacySettings({ attention_privacy_level: 'standard' });
+    expect(clampPrivacySettingsToTeenFloor(standard).attention_privacy_level).toBe('standard');
   });
 
   it('drops unknown keys rather than smuggling them through', () => {

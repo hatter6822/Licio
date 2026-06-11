@@ -104,12 +104,16 @@ every request (a mid-session change applies to the next event):
 `personalization_enabled: false` ⇒ silent discard (204);
 `attention_retention_preference: 'none'` ⇒ real-time only (the event row gets
 a ranking-window purge deadline; no durable §22.1 row); `'minimal'` ⇒ the
-90-day tier minimum; default ⇒ the 180-day maximum. EVERY enforcement decision
-is compliance-logged — discards and the `none`/`minimal` retention modes alike
-(user id + action, never payloads). On the client, collection itself requires
-an authenticated session (the policy tracks login/logout live): signed-out
-readers generate no attention data at all, so nothing is ever queued toward a
-401.
+90-day tier minimum; default ⇒ the 180-day maximum. The user's durable
+`attention_privacy_level` is the IDENTIFICATION FLOOR (§19.2): every accepted
+event is stored at the more private of the floor and the upload's claimed
+level, so a buggy or compromised client claiming `standard` can never
+re-identify a user who chose `minimum` (the claim can only ever strengthen
+pseudonymization). EVERY enforcement decision is compliance-logged — discards
+and the `none`/`minimal` retention modes alike (user id + action, never
+payloads). On the client, collection itself requires an authenticated session
+(the policy tracks login/logout live): signed-out readers generate no
+attention data at all, so nothing is ever queued toward a 401.
 
 Logs and metrics carry event ids, the user id, and counts ONLY — a
 log-redaction test asserts no dwell/bucket/per-item field ever appears.
