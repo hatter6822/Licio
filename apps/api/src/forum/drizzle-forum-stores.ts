@@ -72,12 +72,26 @@ function isoOrNull(value: Date | null): string | null {
 }
 
 function isUniqueViolation(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    (error as { code?: string }).code === '23505'
-  );
+  // Drizzle wraps the driver error (DrizzleQueryError → cause: PostgresError),
+  // so the unique-violation code must be checked down the cause chain (the
+  // WS-F adapter precedent; proven by the gated integration tests).
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
+    if ((current as { code?: string }).code === '23505') return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/** The violated constraint's name, from anywhere in the cause chain. */
+function uniqueViolationConstraint(error: unknown): string {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
+    const name = (current as { constraint_name?: unknown }).constraint_name;
+    if (typeof name === 'string') return name;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return '';
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +130,11 @@ export class DrizzleContributionStore implements ContributionStore {
     evidenceCard?: ForumEvidenceCardInput,
   ): Promise<ContributionInsertOutcome> {
     try {
+      // Explicit millisecond-precision timestamps (not SQL now()): keyset
+      // cursors round-trip created_at through JS Dates/ISO strings, which
+      // carry milliseconds — a microsecond-precision default would make the
+      // cursor row reappear on the next page (gated-test-proven).
+      const now = new Date();
       const inserted = await this.#db.transaction(async (tx) => {
         const rows = await tx
           .insert(contributionsTable)
@@ -132,6 +151,8 @@ export class DrizzleContributionStore implements ContributionStore {
             clientDraftId: record.clientDraftId,
             path: record.path,
             moderationState: record.moderationState,
+            createdAt: now,
+            updatedAt: now,
           })
           .returning();
         if (evidenceCard) {
@@ -148,6 +169,8 @@ export class DrizzleContributionStore implements ContributionStore {
             verificationState: 'unverified',
             independenceGroupId: evidenceCard.independenceGroupId,
             storyId: evidenceCard.storyId,
+            createdAt: now,
+            updatedAt: now,
           });
         }
         return rows[0];
@@ -201,8 +224,10 @@ export class DrizzleContributionStore implements ContributionStore {
       conditions.push(inArray(contributionsTable.moderationState, [...opts.states]));
     }
     if (opts.after) {
+      // ISO string + explicit cast — a raw Date in a sql`` fragment is not
+      // serializable by the postgres-js driver (gated-test-proven).
       conditions.push(
-        sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${new Date(opts.after.createdAt)}, ${opts.after.id})`,
+        sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`,
       );
     }
     const rows = await this.#db
@@ -338,7 +363,7 @@ export class DrizzleContributionStore implements ContributionStore {
     const conditions = [eq(contributionsTable.userId, userId)];
     if (after) {
       conditions.push(
-        sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${new Date(after.createdAt)}, ${after.id})`,
+        sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${after.createdAt}::timestamptz, ${after.id}::uuid)`,
       );
     }
     const rows = await this.#db
@@ -426,6 +451,9 @@ export class DrizzleRoomStore implements RoomStore {
 
   async insert(record: Omit<RoomRecord, 'createdAt' | 'updatedAt'>): Promise<RoomCreateOutcome> {
     try {
+      // Millisecond-precision timestamps so list() keyset cursors round-trip
+      // exactly (see DrizzleContributionStore.insert).
+      const now = new Date();
       const rows = await this.#db
         .insert(roomsTable)
         .values({
@@ -441,6 +469,8 @@ export class DrizzleRoomStore implements RoomStore {
           typeMetadata: record.typeMetadata,
           latestActivityAt:
             record.latestActivityAt !== null ? new Date(record.latestActivityAt) : null,
+          createdAt: now,
+          updatedAt: now,
         })
         .returning();
       const row = rows[0];
@@ -448,10 +478,12 @@ export class DrizzleRoomStore implements RoomStore {
       return { ok: true, room: this.#toRoom(row) };
     } catch (error) {
       if (isUniqueViolation(error)) {
-        const message = error instanceof Error ? error.message : '';
         return {
           ok: false,
-          reason: message.includes('rooms_type_slug_uq') ? 'duplicate_slug' : 'duplicate_name',
+          reason:
+            uniqueViolationConstraint(error) === 'rooms_type_slug_uq'
+              ? 'duplicate_slug'
+              : 'duplicate_name',
         };
       }
       throw error;
@@ -487,7 +519,7 @@ export class DrizzleRoomStore implements RoomStore {
     }
     if (opts.after) {
       conditions.push(
-        sql`(${roomsTable.createdAt}, ${roomsTable.roomId}) > (${new Date(opts.after.createdAt)}, ${opts.after.id})`,
+        sql`(${roomsTable.createdAt}, ${roomsTable.roomId}) > (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`,
       );
     }
     const rows = await this.#db
@@ -529,7 +561,7 @@ export class DrizzleRoomStore implements RoomStore {
       .where(
         and(
           eq(roomsTable.roomId, roomId),
-          sql`(${roomsTable.latestActivityAt} is null or ${roomsTable.latestActivityAt} < ${new Date(atIso)})`,
+          sql`(${roomsTable.latestActivityAt} is null or ${roomsTable.latestActivityAt} < ${atIso}::timestamptz)`,
         ),
       );
   }

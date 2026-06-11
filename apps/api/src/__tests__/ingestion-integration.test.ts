@@ -172,7 +172,7 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
     const first = await stories.createWithThread(storyInput({ canonicalUrl: url }), randomUUID());
     expect(first.ok).toBe(true);
     if (!first.ok) return;
-    expect(first.thread.conversationState).toBe('empty');
+    expect(first.thread.conversationState).toBe('active');
     expect(await stories.getStoryIdByThreadId(first.thread.threadId)).toBe(first.story.storyId);
     const loser = await stories.createWithThread(storyInput({ canonicalUrl: url }), randomUUID());
     expect(loser).toEqual({

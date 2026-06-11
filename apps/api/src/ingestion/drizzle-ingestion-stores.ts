@@ -192,7 +192,9 @@ export class DrizzleStoryStore implements StoryStore {
     const conditions = [eq(threadsTable.roomId, roomId)];
     if (before !== null) {
       conditions.push(
-        sql`(${threadsTable.createdAt}, ${threadsTable.threadId}) < (${new Date(before.createdAt)}, ${before.threadId})`,
+        // ISO string + explicit cast — a raw Date in a sql`` fragment is not
+        // serializable by the postgres-js driver (gated-test-proven).
+        sql`(${threadsTable.createdAt}, ${threadsTable.threadId}) < (${before.createdAt}::timestamptz, ${before.threadId}::uuid)`,
       );
     }
     const rows = await this.#db
@@ -217,6 +219,11 @@ export class DrizzleStoryStore implements StoryStore {
     threadId: string,
   ): Promise<StoryCreateOutcome> {
     try {
+      // Explicit millisecond-precision timestamps (not SQL now()): keyset
+      // cursors round-trip created_at through JS Dates/ISO strings, which
+      // carry milliseconds — a microsecond-precision default would make the
+      // cursor row reappear on the next page (gated-test-proven).
+      const now = new Date();
       return await this.#db.transaction(async (tx) => {
         const inserted = await tx
           .insert(storiesTable)
@@ -241,11 +248,13 @@ export class DrizzleStoryStore implements StoryStore {
             mediaType: story.mediaType,
             extractionState: story.extractionState,
             hiddenState: story.hiddenState,
+            createdAt: now,
+            updatedAt: now,
           })
           .returning();
         const thread = await tx
           .insert(threadsTable)
-          .values({ threadId, storyId: story.storyId })
+          .values({ threadId, storyId: story.storyId, createdAt: now, updatedAt: now })
           .returning();
         const storyRow = inserted[0];
         const threadRow = thread[0];
@@ -406,7 +415,7 @@ export class DrizzleStoryStore implements StoryStore {
     const keyset =
       after === null
         ? undefined
-        : sql`(${storiesTable.createdAt}, ${storiesTable.storyId}) > (${new Date(after.createdAt)}, ${after.storyId}::uuid)`;
+        : sql`(${storiesTable.createdAt}, ${storiesTable.storyId}) > (${after.createdAt}::timestamptz, ${after.storyId}::uuid)`;
     const rows = await this.#db
       .select()
       .from(storiesTable)
@@ -712,6 +721,9 @@ export class DrizzleClaimStore implements ClaimStore {
   }
 
   async insert(record: Omit<ClaimRecord, 'createdAt' | 'updatedAt'>): Promise<ClaimRecord> {
+    // Millisecond-precision timestamps so search keyset cursors round-trip
+    // exactly (see DrizzleStoryStore.createWithThread).
+    const now = new Date();
     const rows = await this.#db
       .insert(claimsTable)
       .values({
@@ -726,6 +738,8 @@ export class DrizzleClaimStore implements ClaimStore {
         extractionSource: record.extractionSource,
         extractionConfidence: record.extractionConfidence,
         modelVersion: record.modelVersion,
+        createdAt: now,
+        updatedAt: now,
       })
       .returning();
     const row = rows[0];
@@ -821,6 +835,9 @@ export class DrizzleEvidenceCardStore implements EvidenceCardStore {
   async insert(
     record: Omit<EvidenceCardRecord, 'createdAt' | 'updatedAt'>,
   ): Promise<EvidenceCardRecord> {
+    // Millisecond-precision timestamps so search keyset cursors round-trip
+    // exactly (see DrizzleStoryStore.createWithThread).
+    const now = new Date();
     const rows = await this.#db
       .insert(evidenceTable)
       .values({
@@ -836,6 +853,8 @@ export class DrizzleEvidenceCardStore implements EvidenceCardStore {
         verificationState: record.verificationState,
         independenceGroupId: record.independenceGroupId,
         storyId: record.storyId,
+        createdAt: now,
+        updatedAt: now,
       })
       .returning();
     const row = rows[0];
@@ -843,7 +862,8 @@ export class DrizzleEvidenceCardStore implements EvidenceCardStore {
     return this.#toRecord(row);
   }
 
-  async insertForumCard(card: ForumEvidenceCardSinkInput, _createdAt: string): Promise<void> {
+  async insertForumCard(card: ForumEvidenceCardSinkInput, createdAt: string): Promise<void> {
+    const at = new Date(createdAt);
     await this.#db.insert(evidenceTable).values({
       evidenceId: card.evidenceId,
       claimId: card.claimId,
@@ -857,6 +877,8 @@ export class DrizzleEvidenceCardStore implements EvidenceCardStore {
       verificationState: 'unverified',
       independenceGroupId: card.independenceGroupId,
       storyId: card.storyId,
+      createdAt: at,
+      updatedAt: at,
     });
   }
 

@@ -275,10 +275,8 @@ identityServices.exportAttention = (userId) => exportUserAttention(eventServices
 // export now includes ALL of their submitted stories. The export must be
 // COMPLETE (§19.3 / GDPR Art. 15), so it keyset-paginates the submitter's
 // stories to exhaustion rather than scanning a capped "recent" window. WS-G
-// COMPOSES forum contributions into the same hook when it lands (the
-// anonymize hook stays with WS-G: story rows carry no scrubbable PII — the
-// tombstoned user row is the anonymization, and public contributions persist
-// per §22.4).
+// composes forum contributions, evidence cards, and room memberships into
+// the same hook below.
 identityServices.exportContributions = async (userId) => {
   const PAGE = 500;
   const out: Array<Record<string, unknown>> = [];

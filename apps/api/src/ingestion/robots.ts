@@ -128,10 +128,10 @@ export type RobotsVerdict =
   | { allowed: true; crawlDelaySec: number | null }
   | { allowed: false; reason: 'disallowed' | 'robots_unreachable' };
 
-export interface RobotsFetcher {
-  /** Fetch `https://origin/robots.txt`; status + body, or a network error. */
-  (origin: string): Promise<{ status: number; body: string } | { error: string }>;
-}
+/** Fetch `https://origin/robots.txt`; status + body, or a network error. */
+export type RobotsFetcher = (
+  origin: string,
+) => Promise<{ status: number; body: string } | { error: string }>;
 
 interface CacheEntry {
   policy: RobotsPolicy | null; // null ⇒ unreachable (fail-closed) cached too
