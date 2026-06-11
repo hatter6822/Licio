@@ -21,6 +21,7 @@ import { RadioGroup } from '../../components/ui/RadioGroup/index.js';
 import { RestrictedState } from '../../components/ui/RestrictedState/index.js';
 import { Switch } from '../../components/ui/Switch/index.js';
 import { ThemeToggle } from '../../components/ui/ThemeToggle/index.js';
+import { useToast } from '../../components/ui/Toast/index.js';
 import { NotificationBudget } from '../../components/wellbeing/NotificationBudget/index.js';
 import { QuietHoursSetting } from '../../components/wellbeing/QuietHoursSetting/index.js';
 import { useT } from '../../i18n/index.js';
@@ -42,6 +43,7 @@ import { hhmmToMinutes, minutesToHHMM } from '../../lib/time.js';
 import { usePushControls } from '../../push/index.js';
 import { resolveCollectionPolicy } from '../../signals/privacy.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
+import { getTopicLoopTracker } from '../../signals/topic-loops.js';
 import {
   selectCryptoEnabled,
   useAuthStore,
@@ -206,6 +208,7 @@ function MutedTopicsSection(): React.ReactElement {
 
 export function SettingsPage(): React.ReactElement {
   const t = useT();
+  const { toast } = useToast();
   usePageFocus(t('profile.settings', 'Settings'));
   const theme = useUIStore((state) => state.theme);
   const setTheme = useUIStore((state) => state.setTheme);
@@ -247,6 +250,44 @@ export function SettingsPage(): React.ReactElement {
             checked={focusMode}
             onCheckedChange={setFocusMode}
           />
+          {/* PHI-4 (WS-H.6.1c-2): reset/reduce personalization without
+              touching the account or any contribution. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                getTopicLoopTracker().reset();
+                toast({
+                  message: t(
+                    'settings.topicHistory.cleared',
+                    'Topic history cleared on this device.',
+                  ),
+                });
+              }}
+            >
+              {t('settings.topicHistory.reset', 'Reset topic history')}
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setFeedMode('low-personalization');
+                toast({
+                  message: t(
+                    'settings.personalization.reduced',
+                    'Feed switched to low personalization.',
+                  ),
+                });
+              }}
+            >
+              {t('settings.personalization.reduce', 'Reduce personalization')}
+            </Button>
+          </div>
+          <p className="text-xs text-ink-muted">
+            {t(
+              'settings.personalization.note',
+              'Resetting clears the topic sequence used for wellbeing prompts on this device; reducing personalization changes only how your feed is ordered. Neither affects your account or contributions.',
+            )}
+          </p>
         </Section>
         <Section title={t('settings.notifications', 'Notifications')}>
           <Switch

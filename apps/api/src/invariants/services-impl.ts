@@ -799,13 +799,16 @@ export class CidService extends BaseInvariantService {
       },
     ]);
     const stories = await this.deps.ingestion.stories.listRecent(20);
+    const nowMs = this.deps.now();
     let worst = 0;
     let evaluated = 0;
     for (const story of stories) {
-      const createdMs = Date.parse(story.createdAt);
+      // v0 ranking feature: freshness only — attribute-blind AND a pure
+      // function per story (the clock is captured once; a per-call clock
+      // read would smuggle nondeterminism into the audit itself).
+      const freshness = Date.parse(story.createdAt) / nowMs;
       const result = counterfactualInvarianceDefect(
-        // v0 ranking feature: freshness only — attribute-blind.
-        () => createdMs / Date.now(),
+        () => freshness,
         { topic: story.topicIds[0] ?? 'untagged' },
         { locale: 'en', age_band: 'adult' },
         group,

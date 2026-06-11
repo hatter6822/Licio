@@ -5,20 +5,27 @@
 // for the signal processor; opening the in-app reader records a source-open
 // (WS-C.4.2). Source content is rendered by the sandboxed WS-B.2.7 reader.
 import type { StoryDetail } from '@licio/shared';
-import { useParams } from '@tanstack/react-router';
+import { useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
+import { IndependentSourcesDrawer } from '../../components/story/IndependentSourcesDrawer/index.js';
+import { WhereInterpretationsDiffer } from '../../components/story/WhereInterpretationsDiffer/index.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
+import { NarrowLoopPrompt } from '../../components/wellbeing/NarrowLoopPrompt/index.js';
 import { useT } from '../../i18n/index.js';
 import {
+  useIndependentSourcesQuery,
   useSavedStoriesQuery,
+  useStoryInterpretationsQuery,
   useStoryQuery,
   useToggleSavedStoryMutation,
 } from '../../lib/queries.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
+import { getTopicLoopTracker } from '../../signals/topic-loops.js';
+import { useUIStore } from '../../stores/ui.js';
 import { PageScaffold } from './PageScaffold.js';
 import { usePageFocus } from './usePageFocus.js';
 
@@ -47,8 +54,13 @@ function SaveStoryButton({ story }: { story: StoryDetail }): React.ReactElement 
 function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElement {
   const t = useT();
   const story = useStoryQuery(storyId);
+  const interpretations = useStoryInterpretationsQuery(storyId);
+  const independentSources = useIndependentSourcesQuery(storyId);
   const [readerOpen, setReaderOpen] = useState(false);
+  const [loopPromptDismissed, setLoopPromptDismissed] = useState(false);
   const openId = useRef(`source-${storyId}`);
+  const navigate = useNavigate();
+  const setFeedMode = useUIStore((state) => state.setFeedMode);
 
   // Mark this story the active item for dwell/return tracking while it is open.
   useEffect(() => {
@@ -59,6 +71,21 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
       void processor.flush();
     };
   }, [storyId]);
+
+  // PHI v0 (WS-H.6.1a/b): record the TOPIC-CLUSTER visit in the in-browser
+  // session sequence (topic ids + timing only — never the story id).
+  const topicIds = story.data?.topic_ids;
+  useEffect(() => {
+    const firstTopic = topicIds?.[0];
+    if (firstTopic) getTopicLoopTracker().recordVisit(firstTopic);
+  }, [topicIds]);
+  const loopDetected = !loopPromptDismissed && getTopicLoopTracker().assess().narrowLoop.detected;
+  const broadenFeed = (): void => {
+    // "See broader context": switch to the source-diverse feed mode and go
+    // there — a soft, reversible intervention (SPEC §11.6).
+    setFeedMode('source-diverse');
+    void navigate({ to: '/', search: { mode: 'source-diverse' } });
+  };
 
   const openReader = (): void => {
     getSignalProcessor().recordSourceOpen(openId.current, storyId);
@@ -76,6 +103,12 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
           <SourceReader url={data.url} title={data.title} onClose={closeReader} />
         ) : (
           <article className="flex flex-col gap-4">
+            {loopDetected ? (
+              <NarrowLoopPrompt
+                onSeeBroader={broadenFeed}
+                onDismiss={() => setLoopPromptDismissed(true)}
+              />
+            ) : null}
             <p className="text-sm text-ink-muted">{data.source}</p>
             <p className="text-base text-ink">{data.body_summary}</p>
             <div className="flex flex-wrap gap-2">
@@ -86,6 +119,12 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
               ) : null}
               <SaveStoryButton story={data} />
             </div>
+            {interpretations.data ? (
+              <WhereInterpretationsDiffer data={interpretations.data} />
+            ) : null}
+            {independentSources.data ? (
+              <IndependentSourcesDrawer data={independentSources.data} />
+            ) : null}
           </article>
         )
       }

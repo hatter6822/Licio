@@ -69,18 +69,21 @@ const STORY_DETAILS: Record<string, StoryDetail> = {
     body_summary:
       'The board released raw and processed results alongside the sampling methodology. Several readers opened the dataset and cross-checked it against an independent lab report.',
     thread_id: THREAD_1,
+    topic_ids: ['water-quality'],
   },
   [STORY_2]: {
     ...feedZoning,
     body_summary:
       'The proposal text is identical, but two rooms summarise its effects differently. A bridge contribution translated each interpretation for the other.',
     thread_id: THREAD_2,
+    topic_ids: ['zoning'],
   },
   [STORY_3]: {
     ...feedTransit,
     body_summary:
       'The timetable claim omits a service-frequency caveat. A clarifying question is awaiting a cited source before the label changes.',
     thread_id: null,
+    topic_ids: ['transit'],
   },
 };
 

@@ -120,6 +120,7 @@ function realStoryToDetail(story: StoryRecord, thread: { threadId: string } | nu
     safety_state: 'ok' as const,
     body_summary: story.excerpt ?? '',
     thread_id: thread?.threadId ?? null,
+    topic_ids: story.topicIds.slice(0, 8),
   };
 }
 

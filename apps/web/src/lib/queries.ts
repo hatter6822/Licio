@@ -46,9 +46,30 @@ export function useStoryQuery(storyId: string) {
   });
 }
 
-export function useThreadQuery(threadId: string) {
+/** SCOI "Where interpretations differ" + the Needs-Context gate (WS-H.4.3a/b). */
+export function useStoryInterpretationsQuery(storyId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.storyInterpretations(storyId),
+    queryFn: () => api.fetchStoryInterpretations(storyId),
+    enabled: enabled && storyId.length > 0,
+    ...cachePolicy.feed,
+  });
+}
+
+/** MERI independent-sources drawer data (WS-H.2.3b). */
+export function useIndependentSourcesQuery(storyId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.independentSources(storyId),
+    queryFn: () => api.fetchIndependentSources(storyId),
+    enabled,
+    ...cachePolicy.feed,
+  });
+}
+
+export function useThreadQuery(threadId: string, enabled = true) {
   return useQuery({
     queryKey: queryKeys.thread(threadId),
+    enabled: enabled && threadId.length > 0,
     // Write-through: a successful fetch refreshes the offline thread summary
     // (read back by the thread page when the network is unavailable, WS-C.2.2a).
     queryFn: async () => {

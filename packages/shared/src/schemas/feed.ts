@@ -77,5 +77,7 @@ export type FeedQuery = z.infer<typeof feedQuerySchema>;
 export const storyDetailSchema = feedItemSchema.extend({
   body_summary: z.string(),
   thread_id: uuidSchema.nullable(),
+  /** Topic-cluster ids (WS-H.6.1a client loop tracking; descriptive only). */
+  topic_ids: z.array(z.string().min(1).max(128)).max(8).default([]),
 });
 export type StoryDetail = z.infer<typeof storyDetailSchema>;

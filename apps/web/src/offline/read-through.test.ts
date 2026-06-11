@@ -27,6 +27,7 @@ const STORY: StoryDetail = {
   safety_state: 'ok',
   body_summary: 'A short, structurally honest summary.',
   thread_id: null,
+  topic_ids: [],
 };
 
 const LEDGER_ENTRY: SignalLedgerEntry = {

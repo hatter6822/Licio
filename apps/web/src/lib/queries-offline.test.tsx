@@ -45,6 +45,7 @@ const SAVED_STORY = {
   safety_state: 'ok' as const,
   body_summary: 'summary',
   thread_id: null,
+  topic_ids: [],
 };
 
 function wrapper() {
