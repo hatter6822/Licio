@@ -23,7 +23,9 @@ import {
   enumerateBasisMoves,
   enumerateFiber,
   fiberTest,
+  fiberTestMulti,
   flatten2Way,
+  logFactorial,
   mfciFromPValue,
   moderatorEffectForState,
   type NullCalibration,
@@ -37,6 +39,7 @@ import {
   synchronyScore,
   tableSignature,
   targetConcentrationScore,
+  targetCoordinationStatistic,
   validateMfciRiskThresholds,
 } from '../mfci/index.js';
 
@@ -299,6 +302,163 @@ describe('MFCI p-value and score (WS-H.3.3c)', () => {
     expect(hot.mfci).toBeGreaterThan(cold.mfci);
     expect(hot.pHat).toBeLessThan(cold.pHat);
     expect(hot.pHat).toBeGreaterThan(0);
+  });
+});
+
+describe('MH stationary distribution (Diaconis–Sturmfels)', () => {
+  // The chain's stationary law must BE the generalized hypergeometric
+  // π(X) ∝ ∏ 1/x_c! — verified by visit-frequency chi-square against the
+  // EXACT distribution on small enumerable fibers. Deterministic per seed;
+  // heavy thinning keeps retained samples near-independent so the χ²
+  // reference distribution applies.
+  function exactFiberLaw(tables: readonly SparseTable[]): Map<string, number> {
+    const weights = tables.map((table) => {
+      let logW = 0;
+      for (const count of table.cells.values()) logW -= logFactorial(count);
+      return { signature: tableSignature(table), w: Math.exp(logW) };
+    });
+    const total = weights.reduce((acc, { w }) => acc + w, 0);
+    return new Map(weights.map(({ signature, w }) => [signature, w / total]));
+  }
+
+  function chiSquareVisits(
+    observed: SparseTable,
+    samples: number,
+    seed: number,
+  ): { chi2: number; df: number; minExpected: number } {
+    const fiber = enumerateFiber(observed.axes, computeMargins(observed));
+    const law = exactFiberLaw(fiber);
+    const indexOf = new Map(fiber.map((table, i) => [tableSignature(table), i]));
+    const counts = new Array<number>(fiber.length).fill(0);
+    const run = sampleFiber(
+      observed,
+      (state) => {
+        const idx = indexOf.get(tableSignature(state));
+        if (idx === undefined) throw new Error('sampler left the fiber');
+        counts[idx] = (counts[idx] ?? 0) + 1;
+        return idx;
+      },
+      { samples, burnIn: 2_000, thinning: 10, seed },
+    );
+    expect(run.statistics.length).toBe(samples);
+    let chi2 = 0;
+    let minExpected = Number.POSITIVE_INFINITY;
+    fiber.forEach((table, i) => {
+      const expected = samples * (law.get(tableSignature(table)) ?? 0);
+      minExpected = Math.min(minExpected, expected);
+      chi2 += ((counts[i] ?? 0) - expected) ** 2 / expected;
+    });
+    return { chi2, df: fiber.length - 1, minExpected };
+  }
+
+  it('2-way fiber visit frequencies match the exact law (χ², α = 0.001)', () => {
+    const observed = buildSparseTable(AXES_2D, [
+      { labels: ['g1', 'x'], count: 2 },
+      { labels: ['g1', 'y'], count: 1 },
+      { labels: ['g2', 'x'], count: 0 },
+      { labels: ['g2', 'y'], count: 2 },
+    ]);
+    const { chi2, df, minExpected } = chiSquareVisits(observed, 4_000, 1234);
+    expect(minExpected).toBeGreaterThan(5); // χ² validity condition
+    // χ²₀.₉₉₉ for df 2 = 13.8, df 3 = 16.3 — generous, deterministic seed.
+    expect(df).toBeLessThanOrEqual(3);
+    expect(chi2).toBeLessThan(16.3);
+  });
+
+  it('3-axis fiber visit frequencies match the exact law too', () => {
+    const observed = buildSparseTable(
+      [
+        { name: 'user_group', labels: ['g1', 'g2'] },
+        { name: 'time_bucket', labels: ['b1', 'b2'] },
+        { name: 'target', labels: ['x', 'y'] },
+      ],
+      [
+        { labels: ['g1', 'b1', 'x'], count: 1 },
+        { labels: ['g1', 'b2', 'y'], count: 1 },
+        { labels: ['g2', 'b1', 'y'], count: 1 },
+        { labels: ['g2', 'b2', 'x'], count: 1 },
+      ],
+    );
+    const fiber = enumerateFiber(observed.axes, computeMargins(observed));
+    expect(fiber.length).toBeGreaterThan(3); // a non-trivial fiber
+    const { chi2, df } = chiSquareVisits(observed, 6_000, 99);
+    // χ²₀.₉₉₉ critical values: df 5 → 20.5, df 10 → 29.6, df 20 → 45.3.
+    const critical = df <= 5 ? 20.5 : df <= 10 ? 29.6 : 45.3;
+    expect(df).toBeLessThanOrEqual(20);
+    expect(chi2).toBeLessThan(critical);
+  });
+});
+
+describe('MFCI per-target attribution (fiberTestMulti)', () => {
+  // Target x is hammered by one group; target y sees the same VOLUME but
+  // scattered across groups/buckets/types — the per-target statistics must
+  // separate them on the SAME table under the SAME global margins.
+  const mixed = table5d([
+    ...Array.from({ length: 12 }, () => ['g1', 't1', 'b1', 'report', 'x']),
+    ['g1', 't1', 'b1', 'report', 'y'],
+    ['g1', 't2', 'b2', 'reply', 'y'],
+    ['g2', 't1', 'b2', 'report', 'y'],
+    ['g2', 't2', 'b1', 'reply', 'y'],
+    ['g1', 't1', 'b2', 'reply', 'y'],
+    ['g2', 't2', 'b2', 'report', 'y'],
+    ['g2', 't1', 'b1', 'reply', 'y'],
+    ['g1', 't2', 'b1', 'report', 'y'],
+    ['g2', 't2', 'b1', 'report', 'y'],
+    ['g1', 't2', 'b2', 'report', 'y'],
+    ['g2', 't1', 'b2', 'reply', 'y'],
+    ['g1', 't1', 'b1', 'reply', 'y'],
+  ]);
+  const sampler = { samples: 600, burnIn: 600, thinning: 2, seed: 7 } as const;
+
+  it('per-target statistics sum to the global statistic', () => {
+    for (const statistic of ['target_concentration', 'synchrony', 'phrase_repetition'] as const) {
+      const global = coordinationStatistic(mixed, statistic);
+      const perTarget = [0, 1].map((idx) => targetCoordinationStatistic(mixed, statistic, idx));
+      expect(perTarget.reduce((a, b) => a + b, 0)).toBe(global);
+    }
+  });
+
+  it('attributes coordination to the attacked target, not its neighbors', () => {
+    const result = fiberTestMulti(mixed, 'target_concentration', ['x', 'y'], sampler);
+    const x = result.perTarget.find((t) => t.targetLabel === 'x');
+    const y = result.perTarget.find((t) => t.targetLabel === 'y');
+    expect(x).toBeDefined();
+    expect(y).toBeDefined();
+    if (!x || !y) return;
+    expect(x.actionCount).toBe(12);
+    expect(y.actionCount).toBe(12);
+    // The attacked target is extreme relative to its fixed volume; the
+    // scattered target is NOT — its concentration is at or below the null's.
+    expect(x.mfci).toBeGreaterThan(y.mfci);
+    expect(x.pHat).toBeLessThan(0.1);
+    expect(y.pHat).toBeGreaterThan(0.5);
+  });
+
+  it('absent targets score exactly zero with full p-value', () => {
+    const result = fiberTestMulti(mixed, 'target_concentration', ['never-seen'], sampler);
+    const absent = result.perTarget[0];
+    expect(absent?.observedT).toBe(0);
+    expect(absent?.actionCount).toBe(0);
+    expect(absent?.pHat).toBe(1);
+    expect(absent?.mfci).toBe(0);
+  });
+
+  it('is deterministic per seed and shares one fiber across targets', () => {
+    const a = fiberTestMulti(mixed, 'target_concentration', ['x', 'y'], sampler);
+    const b = fiberTestMulti(mixed, 'target_concentration', ['x', 'y'], sampler);
+    expect(a.perTarget).toEqual(b.perTarget);
+    expect(a.sampleCount).toBe(sampler.samples);
+    expect(a.effectiveSampleSize).toBeGreaterThan(0);
+    // Convergence diagnostics ride the GLOBAL statistic. Concentrated
+    // tables mix slowly (~6% acceptance here — honesty over optimism), so
+    // clearing the ESS floor takes a long, well-thinned run.
+    const longer = fiberTestMulti(mixed, 'target_concentration', ['x'], {
+      ...sampler,
+      samples: 2_000,
+      burnIn: 2_000,
+      thinning: 10,
+    });
+    expect(longer.converged).toBe(true);
   });
 });
 

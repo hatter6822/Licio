@@ -175,12 +175,14 @@ describe('MFCI service (WS-H.3)', () => {
     expect(await fixture.invariants.mfciCases.listOpen(10)).toHaveLength(0);
   });
 
-  it('batch fiber test produces a finite MFCI with margins reference', async () => {
+  it('batch fiber test attributes per-target scores under one shared conditioning', async () => {
     const fixture = freshWsHServices();
     const { userId } = await seedUserWithSession(fixture.identity);
     const { storyId } = await seedStory(fixture, { topicIds: ['water'] });
+    const { storyId: quietId } = await seedStory(fixture, { topicIds: ['water'] });
     const nowMs = Date.now();
     const window = hourWindow(nowMs);
+    // 12 burst actions on one story; a single organic action on the other.
     const rows = Array.from({ length: 12 }, (_, i) => ({
       eventId: randomUUID(),
       eventType: 'contribution.created',
@@ -192,17 +194,41 @@ describe('MFCI service (WS-H.3)', () => {
       ownerUserId: i % 2 === 0 ? userId : null,
       purgeAfter: null,
     }));
+    rows.push({
+      eventId: randomUUID(),
+      eventType: 'contribution.created',
+      topic: 'contribution.created',
+      timestamp: new Date(Date.parse(window.start) + 90_000).toISOString(),
+      privacyClassification: 'public' as const,
+      retentionTier: 'public_contribution' as const,
+      payload: { story_id: quietId },
+      ownerUserId: null,
+      purgeAfter: null,
+    });
     await fixture.events.eventStore.insertMany(rows);
-    const [output] = await fixture.invariants.mfci.computeBatch(
-      [{ targetType: 'story', targetId: storyId }],
+    const outputs = await fixture.invariants.mfci.computeBatch(
+      [
+        { targetType: 'story', targetId: storyId },
+        { targetType: 'story', targetId: quietId },
+      ],
       window,
     );
-    expect(output).toBeTruthy();
-    const mfci = output?.score_vector['mfci'];
-    expect(typeof mfci).toBe('number');
-    expect(Number.isFinite(mfci)).toBe(true);
-    expect(output?.score_vector['fixed_margins_ref']).toContain(storyId);
-    expect(output?.score_vector['risk_state']).toBeDefined();
+    expect(outputs).toHaveLength(2);
+    const hot = outputs.find((o) => o.target.targetId === storyId);
+    const quiet = outputs.find((o) => o.target.targetId === quietId);
+    const hotMfci = hot?.score_vector['mfci'];
+    const quietMfci = quiet?.score_vector['mfci'];
+    expect(typeof hotMfci).toBe('number');
+    expect(Number.isFinite(hotMfci)).toBe(true);
+    // Attribution: the burst target scores at least as extreme as the
+    // single-action target — never inherited the other way around.
+    expect(hotMfci as number).toBeGreaterThanOrEqual(quietMfci as number);
+    // The conditioning is genuinely SHARED: one content-addressed margins
+    // ref per window, identical across targets, never a dangling id.
+    const ref = hot?.score_vector['fixed_margins_ref'];
+    expect(ref).toMatch(/^margins:.+:[0-9a-f]+$/);
+    expect(quiet?.score_vector['fixed_margins_ref']).toBe(ref);
+    expect(hot?.score_vector['risk_state']).toBeDefined();
   });
 });
 

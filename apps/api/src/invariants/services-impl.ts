@@ -34,7 +34,7 @@ import {
   detectSynchronizedCascade,
   effectiveRepeatThreshold,
   experienceMetrics,
-  fiberTest,
+  fiberTestMulti,
   generateGroup,
   gwDistanceWithStability,
   type HealthMetrics,
@@ -272,21 +272,32 @@ export class MfciService extends BaseInvariantService {
       observations,
     );
     const margins = describeMargins(table);
-    const out: InvariantComputation[] = [];
-    for (const target of targets) {
-      const seedName = `MFCI:${target.targetId}:${window.start}`;
-      const result = fiberTest(table, 'target_concentration', {
+    // ONE shared fiber per window: each target's score is ITS restricted
+    // statistic's p-value, so coordination is attributed to the target it
+    // lands on — never inherited from a hot neighbor in the same window.
+    const result = fiberTestMulti(
+      table,
+      'target_concentration',
+      targets.map((target) => target.targetId),
+      {
         samples: config.mfciSamples,
         burnIn: config.mfciBurnIn,
         thinning: config.mfciThinning,
-        seed: seedFromName(seedName),
-      });
-      const riskState = riskStateForScore(result.mfci, config.mfciRiskThresholds);
-      const reasonCodes = result.converged ? [] : ['SAMPLER_NONCONVERGENCE'];
+        seed: seedFromName(`MFCI:${window.start}`),
+      },
+    );
+    const marginsRef = `margins:${window.start}:${seedFromName(JSON.stringify(margins)).toString(16)}`;
+    const byTarget = new Map(result.perTarget.map((entry) => [entry.targetLabel, entry]));
+    const reasonCodes = result.converged ? [] : ['SAMPLER_NONCONVERGENCE'];
+    const out: InvariantComputation[] = [];
+    for (const target of targets) {
+      const entry = byTarget.get(target.targetId);
+      if (!entry) continue;
+      const riskState = riskStateForScore(entry.mfci, config.mfciRiskThresholds);
       const facts = {
         statistic: result.statistic,
-        mfci: result.mfci,
-        pHat: result.pHat,
+        mfci: entry.mfci,
+        pHat: entry.pHat,
         sampleCount: result.sampleCount,
         riskState,
         conditionedMargins: margins.axes,
@@ -297,11 +308,11 @@ export class MfciService extends BaseInvariantService {
           target,
           window,
           {
-            mfci: result.mfci,
-            p_hat: result.pHat,
+            mfci: entry.mfci,
+            p_hat: entry.pHat,
             statistic: result.statistic,
             sample_count: result.sampleCount,
-            fixed_margins_ref: `margins:${target.targetId}:${window.start}`,
+            fixed_margins_ref: marginsRef,
             risk_state: riskState,
           },
           result.converged ? 0.9 : 0.4,

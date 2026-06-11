@@ -189,7 +189,10 @@ export function logFactorial(n: number): number {
 
 /**
  * Run the Metropolis–Hastings sampler over the fiber of `observed`,
- * evaluating `statistic` on each retained sample. Deterministic per seed.
+ * evaluating `statistic` EXACTLY ONCE per retained sample (a contract —
+ * `fiberTestMulti` accumulates per-target exceedances in that evaluation;
+ * acceptance never consults the statistic, so side effects cannot bias the
+ * chain). Deterministic per seed.
  */
 export function sampleFiber(
   observed: SparseTable,

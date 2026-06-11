@@ -102,11 +102,26 @@ fiber enumeration in tests. The Metropolis–Hastings sampler proposes
 uniformly from the fixed (cell, cell, subset) space (symmetric; lazy
 self-loops on degenerate draws) with acceptance
 `min(1, x_u·x_v / ((x_{w1}+1)(x_{w2}+1)))`; every retained state provably
-shares the margins with nonnegative integers. `p̂` uses the §8.2 add-one
+shares the margins with nonnegative integers, and the chain's stationary
+law is verified DISTRIBUTIONALLY: visit frequencies on small enumerable
+fibers pass a χ² test against the exact generalized hypergeometric (2-way
+and 3-axis fibers, deterministic seeds). `p̂` uses the §8.2 add-one
 estimator; `MFCI = −log p̂` is always finite. The three statistics
 (synchrony, target concentration, phrase repetition) are quadratic
 concentration functionals of 2-way flattenings — exactly what 1-way margins
 do not fix.
+
+Attribution is **per target** (`fiberTestMulti`): one shared fiber per
+window carries every target, the conditional null staying global (the
+system's group sizes, topic popularity, temporal pattern, action mix,
+per-target volumes), while each target's statistic is the
+target-restricted quadratic mass `T_t = Σ_pair count(pair, t)²` — its own
+margin fixes `Σ_pair count(pair, t)` but not the split, so `T_t` varies on
+the fiber and `Σ_t T_t` equals the global statistic (tested). A burst
+target scores extreme relative to its OWN fixed volume; a quiet neighbor
+in the same window scores ~0 instead of inheriting the global signal.
+`fixed_margins_ref` is one content-addressed reference per window, shared
+by every output it conditioned.
 
 The sub-minute path (MFCI-3) uses volume-conditioned cheap statistics
 against versioned null calibrations (`invariant_calibrations`); stale

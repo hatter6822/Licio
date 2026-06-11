@@ -26,7 +26,7 @@
 //     repeated at one target".
 
 import { type SamplerOptions, sampleFiber } from './markov.js';
-import { flatten2Way, MFCI_AXES, type SparseTable } from './table.js';
+import { computeMargins, flatten2Way, keyToIndices, MFCI_AXES, type SparseTable } from './table.js';
 
 export const MFCI_STATISTICS = ['synchrony', 'target_concentration', 'phrase_repetition'] as const;
 export type MfciStatistic = (typeof MFCI_STATISTICS)[number];
@@ -43,21 +43,55 @@ function sumOfSquares(flat: Map<string, number>): number {
   return sum;
 }
 
-/** T for a named statistic (see module header for definitions). */
-export function coordinationStatistic(table: SparseTable, statistic: MfciStatistic): number {
-  const target = axisIndex(table, 'target');
+/** The non-target axis each statistic pairs with `target`. */
+function pairAxisFor(table: SparseTable, statistic: MfciStatistic): number {
   switch (statistic) {
     case 'target_concentration':
-      return sumOfSquares(flatten2Way(table, axisIndex(table, 'user_group'), target));
+      return axisIndex(table, 'user_group');
     case 'synchrony':
-      return sumOfSquares(flatten2Way(table, axisIndex(table, 'time_bucket'), target));
+      return axisIndex(table, 'time_bucket');
     case 'phrase_repetition':
-      return sumOfSquares(flatten2Way(table, axisIndex(table, 'action_type'), target));
+      return axisIndex(table, 'action_type');
     default: {
       const exhaustive: never = statistic;
       throw new Error(`unknown statistic ${String(exhaustive)}`);
     }
   }
+}
+
+/** T for a named statistic (see module header for definitions). */
+export function coordinationStatistic(table: SparseTable, statistic: MfciStatistic): number {
+  return sumOfSquares(
+    flatten2Way(table, pairAxisFor(table, statistic), axisIndex(table, 'target')),
+  );
+}
+
+/**
+ * The TARGET-RESTRICTED statistic T_t: the quadratic mass of the 2-way
+ * flattening's slice at one target label — Σ_pair count(pair, t)². The
+ * target's own 1-way margin fixes Σ_pair count(pair, t) but NOT its split
+ * across pair labels, so T_t still varies on the fiber, and
+ * Σ_t T_t = the global statistic (tested). This is what makes per-target
+ * attribution honest: each target's p-value measures concentration of the
+ * activity ON THAT TARGET, conditional on the system-wide margins.
+ */
+export function targetCoordinationStatistic(
+  table: SparseTable,
+  statistic: MfciStatistic,
+  targetLabelIndex: number,
+): number {
+  const targetAxis = axisIndex(table, 'target');
+  const pairAxis = pairAxisFor(table, statistic);
+  const counts = new Map<number, number>();
+  for (const [key, count] of table.cells) {
+    const indices = keyToIndices(key);
+    if (indices[targetAxis] !== targetLabelIndex) continue;
+    const pairLabel = indices[pairAxis] ?? -1;
+    counts.set(pairLabel, (counts.get(pairLabel) ?? 0) + count);
+  }
+  let sum = 0;
+  for (const count of counts.values()) sum += count * count;
+  return sum;
 }
 
 /** The §8.2 add-one estimator. Exceedances are counted with T(X′) ≥ T(X). */
@@ -113,6 +147,95 @@ export function fiberTest(
     mfci: mfciFromPValue(pHat),
     sampleCount: run.statistics.length,
     exceedances,
+    acceptanceRate: run.diagnostics.acceptanceRate,
+    effectiveSampleSize: run.diagnostics.effectiveSampleSize,
+    converged: run.diagnostics.converged,
+  };
+}
+
+export interface TargetFiberResult {
+  targetLabel: string;
+  observedT: number;
+  exceedances: number;
+  pHat: number;
+  mfci: number;
+  /** The target's fixed 1-way margin (its in-window action count). */
+  actionCount: number;
+}
+
+export interface MultiTargetFiberResult {
+  statistic: MfciStatistic;
+  perTarget: TargetFiberResult[];
+  sampleCount: number;
+  acceptanceRate: number;
+  effectiveSampleSize: number;
+  converged: boolean;
+}
+
+/**
+ * PER-TARGET conditional fiber test over ONE shared fiber sample. The
+ * conditional null (all 1-way margins fixed) is GLOBAL — group sizes,
+ * topic popularity, temporal pattern, action mix, per-target baseline
+ * volumes — while each target's statistic is the target-restricted
+ * quadratic mass T_t, so each target's p̂ asks exactly: "is the activity
+ * ON THIS TARGET more concentrated than its fixed volume predicts?" A
+ * single MH run serves every target (`sampleFiber` evaluates its statistic
+ * exactly once per retained sample; per-target exceedances accumulate in
+ * that evaluation while the GLOBAL statistic drives the shared mixing
+ * diagnostics — side effects cannot bias the chain, whose acceptance never
+ * consults the statistic).
+ *
+ * Targets absent from the table get T = 0 with every sampled T′ = 0 ≥ 0:
+ * p̂ = 1, MFCI = 0 — no actions, no coordination, honestly.
+ */
+export function fiberTestMulti(
+  observed: SparseTable,
+  statistic: MfciStatistic,
+  targetLabels: readonly string[],
+  sampler: SamplerOptions,
+): MultiTargetFiberResult {
+  for (const required of MFCI_AXES) {
+    axisIndex(observed, required);
+  }
+  const targetAxis = axisIndex(observed, 'target');
+  const labels = observed.axes[targetAxis]?.labels ?? [];
+  const labelIndex = new Map(labels.map((label, i) => [label, i]));
+  const margins = computeMargins(observed);
+  const entries = targetLabels.map((label) => {
+    const idx = labelIndex.get(label) ?? -1;
+    return {
+      targetLabel: label,
+      idx,
+      observedT: idx < 0 ? 0 : targetCoordinationStatistic(observed, statistic, idx),
+      exceedances: 0,
+      actionCount: idx < 0 ? 0 : (margins[targetAxis]?.[idx] ?? 0),
+    };
+  });
+  const run = sampleFiber(
+    observed,
+    (table) => {
+      for (const entry of entries) {
+        const t = entry.idx < 0 ? 0 : targetCoordinationStatistic(table, statistic, entry.idx);
+        if (t >= entry.observedT) entry.exceedances += 1;
+      }
+      return coordinationStatistic(table, statistic);
+    },
+    sampler,
+  );
+  return {
+    statistic,
+    perTarget: entries.map((entry) => {
+      const pHat = addOnePValue(entry.exceedances, run.statistics.length);
+      return {
+        targetLabel: entry.targetLabel,
+        observedT: entry.observedT,
+        exceedances: entry.exceedances,
+        pHat,
+        mfci: mfciFromPValue(pHat),
+        actionCount: entry.actionCount,
+      };
+    }),
+    sampleCount: run.statistics.length,
     acceptanceRate: run.diagnostics.acceptanceRate,
     effectiveSampleSize: run.diagnostics.effectiveSampleSize,
     converged: run.diagnostics.converged,
