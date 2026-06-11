@@ -2,9 +2,16 @@
 //
 // Client link-safety cache tests (WS-G.4.2c): version-keyed TTL caching,
 // fetch-failure degradation (heuristics still run, rendering never blocks),
+// the never-blocking click path (cached blocklist + background refresh),
 // and the anonymous-counter telemetry contract.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { checkLinkSafety, currentBlocklist, resetLinkSafetyCacheForTests } from './link-safety.js';
+import {
+  cachedBlocklist,
+  checkLinkSafety,
+  currentBlocklist,
+  resetLinkSafetyCacheForTests,
+  warmLinkSafety,
+} from './link-safety.js';
 
 beforeEach(() => resetLinkSafetyCacheForTests());
 afterEach(() => {
@@ -69,5 +76,49 @@ describe('WS-G.4.2c blocklist cache', () => {
     stubFetch(ok([]));
     const verdict = await checkLinkSafety('https://en.wikipedia.org/wiki/Reservoir');
     expect(verdict.suspicious).toBe(false);
+  });
+});
+
+describe('the never-blocking click path (transient-activation safety)', () => {
+  it('checkLinkSafety never awaits the network: a cold cache is heuristics-only', async () => {
+    let resolveFetch: (() => void) | null = null;
+    stubFetch(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = () =>
+            resolve(
+              new Response(JSON.stringify({ version: 'v1', domains: ['drainer.example'] }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+              }),
+            );
+        }),
+    );
+    // The fetch is STILL PENDING — the verdict must not wait for it.
+    const verdict = await checkLinkSafety('https://drainer.example/claim');
+    expect(verdict.suspicious).toBe(false); // blocklist not yet available
+    // …but the click triggered the background refresh: once it lands,
+    // the NEXT verdict uses the list.
+    expect(resolveFetch).not.toBeNull();
+    (resolveFetch as unknown as () => void)();
+    await vi.waitFor(() => expect(cachedBlocklist()).toContain('drainer.example'));
+    const next = await checkLinkSafety('https://drainer.example/claim');
+    expect(next.suspicious).toBe(true);
+  });
+
+  it('warmLinkSafety primes the cache so the FIRST click already has the list', async () => {
+    stubFetch(ok(['drainer.example']));
+    await warmLinkSafety();
+    const verdict = await checkLinkSafety('https://drainer.example/claim');
+    expect(verdict.suspicious).toBe(true);
+    expect(verdict.reasons).toContain('blocklisted_domain');
+  });
+
+  it('warmLinkSafety swallows fetch failures (bootstrap never crashes)', async () => {
+    stubFetch(async () => {
+      throw new Error('offline');
+    });
+    await expect(warmLinkSafety()).resolves.toBeUndefined();
+    expect(cachedBlocklist()).toEqual([]);
   });
 });

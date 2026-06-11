@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Submit (WS-C.1.1a, auth-guarded). Hosts the WS-G structured composer with
-// the canonical 11 contribution types.  Every keystroke autosaves an
-// encrypted draft to IndexedDB (WS-G.3.7c) — plus interval/visibility
-// triggers — so nothing is lost; reopening with a saved draft for the same
-// thread offers resume-or-discard.  Submitting to a thread builds the
-// canonical payload (validated through the SHARED schema — identical
-// client/server rules) and enqueues it in the durable pending queue with the
-// draft id as the server-side idempotency key (WS-G.3.1 dedup).  Share-target
-// intake (WS-G.3.7a): `?share_url=`/`?share_title=` pre-populate a citation.
+// the canonical 11 contribution types.  Edits autosave an encrypted draft to
+// IndexedDB (WS-G.3.7c) through a trailing debounce — at most one
+// encrypt+write per pause, never one per keystroke — with visibility-change
+// and unmount flushes so nothing is lost; reopening with saved drafts for
+// the same thread offers resume-or-discard per draft.  Submitting to a
+// thread builds the canonical payload (validated through the SHARED schema —
+// identical client/server rules) and enqueues it in the durable pending
+// queue with the draft id as the server-side idempotency key (WS-G.3.1
+// dedup).  Share-target intake (WS-G.3.7a): `?share_url=`/`?share_title=`
+// become a STRUCTURED citation (url + title + accessed_at) shown as a
+// preview chip — checked against the link-safety heuristics — and merged
+// into the payload when the citation line survives in the composer.
+import type { Citation } from '@licio/shared';
 import { useSearch } from '@tanstack/react-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -22,6 +27,7 @@ import { Button } from '../../components/ui/Button/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { useToast } from '../../components/ui/Toast/index.js';
 import { useT } from '../../i18n/index.js';
+import { checkLinkSafety } from '../../lib/link-safety.js';
 import { deleteDraft, listDraftsForThread, queue, saveDraft } from '../../offline/index.js';
 import type { DraftContributionRecord } from '../../offline/schemas.js';
 import { processPendingQueue } from '../../offline/sync.js';
@@ -34,8 +40,18 @@ function newDraftId(): string {
     : `draft-${Date.now()}`;
 }
 
-/** Autosave interval (WS-G.3.7c: every 5 seconds while composing). */
-const AUTOSAVE_INTERVAL_MS = 5_000;
+/** Trailing autosave debounce (WS-G.3.7c): one encrypt+write per pause. */
+const DRAFT_DEBOUNCE_MS = 800;
+/** Recovery offers the most recent drafts, not just one. */
+const MAX_RECOVERABLE_DRAFTS = 3;
+
+function shareHost(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
 
 export function SubmitPage(): React.ReactElement {
   const t = useT();
@@ -46,9 +62,35 @@ export function SubmitPage(): React.ReactElement {
   const draftId = useRef(newDraftId());
   const [mode, setMode] = useState<ComposerMode | undefined>(undefined);
   const [serverErrors, setServerErrors] = useState<ComposerErrors>({});
-  const [recoverable, setRecoverable] = useState<DraftContributionRecord | null>(null);
+  const [recoverable, setRecoverable] = useState<DraftContributionRecord[]>([]);
   const [initialValues, setInitialValues] = useState<ComposerValues | undefined>(undefined);
   const latest = useRef<{ mode: ComposerMode; values: ComposerValues } | null>(null);
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Share-target intake (WS-G.3.7a): a STRUCTURED citation with the shared
+  // title preserved; `accessed_at` records when the share happened.
+  const [shareCitation, setShareCitation] = useState<Citation | null>(() =>
+    search.share_url !== undefined
+      ? {
+          url: search.share_url,
+          ...(search.share_title !== undefined && search.share_title.trim().length > 0
+            ? { title: search.share_title.trim() }
+            : {}),
+          accessed_at: new Date().toISOString(),
+        }
+      : null,
+  );
+  const [shareCaution, setShareCaution] = useState(false);
+  useEffect(() => {
+    if (shareCitation === null) return;
+    let cancelled = false;
+    void checkLinkSafety(shareCitation.url).then((verdict) => {
+      if (!cancelled) setShareCaution(verdict.suspicious);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [shareCitation]);
 
   // Composer-open budget (≤300ms): mark on mount, measure on first paint.
   useEffect(() => {
@@ -57,15 +99,17 @@ export function SubmitPage(): React.ReactElement {
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  // Draft recovery (WS-G.3.7c): an existing draft for this thread offers
-  // "Resume or discard?".
+  // Draft recovery (WS-G.3.7c): existing drafts for this thread offer
+  // "Resume or discard?" — the most recent few, not just one.
   useEffect(() => {
     let cancelled = false;
     void listDraftsForThread(threadId ?? null).then((drafts) => {
-      const candidate = drafts[0];
-      if (!cancelled && candidate && candidate.draftId !== draftId.current) {
-        setRecoverable(candidate);
-      }
+      if (cancelled) return;
+      setRecoverable(
+        drafts
+          .filter((draft) => draft.draftId !== draftId.current)
+          .slice(0, MAX_RECOVERABLE_DRAFTS),
+      );
     });
     return () => {
       cancelled = true;
@@ -87,38 +131,45 @@ export function SubmitPage(): React.ReactElement {
     [threadId],
   );
 
-  // WS-G.3.7c triggers beyond per-edit saving: a 5s interval and app
-  // backgrounding both flush the LATEST draft state.
+  const flushDraft = useCallback((): void => {
+    if (debounceTimer.current !== null) {
+      clearTimeout(debounceTimer.current);
+      debounceTimer.current = null;
+    }
+    if (latest.current) persistDraft(latest.current.mode, latest.current.values);
+  }, [persistDraft]);
+
+  // WS-G.3.7c flush triggers beyond the debounce: app backgrounding and
+  // unmount both persist the LATEST state immediately.
   useEffect(() => {
-    const flush = (): void => {
-      if (latest.current) persistDraft(latest.current.mode, latest.current.values);
-    };
-    const interval = setInterval(flush, AUTOSAVE_INTERVAL_MS);
     const onHide = (): void => {
-      if (document.visibilityState === 'hidden') flush();
+      if (document.visibilityState === 'hidden') flushDraft();
     };
     document.addEventListener('visibilitychange', onHide);
     return () => {
-      clearInterval(interval);
       document.removeEventListener('visibilitychange', onHide);
+      flushDraft();
     };
-  }, [persistDraft]);
+  }, [flushDraft]);
 
   const onDraftChange = (composerMode: ComposerMode, values: ComposerValues): void => {
     latest.current = { mode: composerMode, values };
-    persistDraft(composerMode, values);
+    if (debounceTimer.current !== null) clearTimeout(debounceTimer.current);
+    debounceTimer.current = setTimeout(() => {
+      debounceTimer.current = null;
+      if (latest.current) persistDraft(latest.current.mode, latest.current.values);
+    }, DRAFT_DEBOUNCE_MS);
   };
 
-  // Share-target intake (WS-G.3.7a): pre-populate a citation line.
-  const shareSeed =
-    search.share_url !== undefined
-      ? { citations: search.share_title ? `${search.share_url}` : search.share_url }
-      : undefined;
+  // The citations textarea is pre-populated with the shared URL so the user
+  // SEES (and controls) the line; the structured chip enriches it at build.
+  const shareSeed = shareCitation !== null ? { citations: shareCitation.url } : undefined;
 
   const onSubmit = (composerMode: ComposerMode, values: ComposerValues): void => {
     setServerErrors({});
     if (!threadId) {
       // No thread context yet: the draft is preserved locally for later.
+      flushDraft();
       toast({
         tone: 'success',
         message: t('submit.draftSaved', 'Saved as a draft on this device.'),
@@ -130,6 +181,7 @@ export function SubmitPage(): React.ReactElement {
       clientDraftId: draftId.current,
       ...(search.parentId !== undefined ? { parentContributionId: search.parentId } : {}),
       ...(search.targetId !== undefined ? { targetContributionId: search.targetId } : {}),
+      ...(shareCitation !== null ? { seedCitations: [shareCitation] } : {}),
     });
     if (!built.ok) {
       setServerErrors(built.fieldErrors);
@@ -159,36 +211,67 @@ export function SubmitPage(): React.ReactElement {
     <>
       <PageHeader title={t('nav.submit', 'Submit')} />
       <div className="mx-auto w-full max-w-2xl p-4">
-        {recoverable !== null ? (
+        {recoverable.length > 0 ? (
           <div
             role="status"
-            className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface-sunken p-3"
+            className="mb-4 flex flex-col gap-2 rounded-lg border border-line bg-surface-sunken p-3"
           >
             <span className="text-sm text-ink">
-              {t('submit.recover.prompt', 'You have an unsaved draft. Resume or discard?')}
+              {t('submit.recover.prompt', 'You have unsaved drafts. Resume or discard?')}
             </span>
-            <div className="flex gap-2">
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  draftId.current = recoverable.draftId;
-                  setMode(recoverable.contributionType);
-                  setInitialValues(recoverable.values);
-                  setRecoverable(null);
-                }}
+            {recoverable.map((draft) => (
+              <div
+                key={draft.draftId}
+                className="flex flex-wrap items-center justify-between gap-2"
               >
-                {t('submit.recover.resume', 'Resume')}
-              </Button>
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  void deleteDraft(recoverable.draftId);
-                  setRecoverable(null);
-                }}
-              >
-                {t('submit.recover.discard', 'Discard')}
-              </Button>
+                <span className="text-sm text-ink-muted">
+                  {draft.contributionType} · {new Date(draft.updatedAt).toLocaleString()}
+                </span>
+                <div className="flex gap-2">
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      draftId.current = draft.draftId;
+                      setMode(draft.contributionType);
+                      setInitialValues(draft.values);
+                      setRecoverable([]);
+                    }}
+                  >
+                    {t('submit.recover.resume', 'Resume')}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      void deleteDraft(draft.draftId);
+                      setRecoverable((rest) => rest.filter((d) => d.draftId !== draft.draftId));
+                    }}
+                  >
+                    {t('submit.recover.discard', 'Discard')}
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {shareCitation !== null ? (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface-sunken p-3">
+            <div className="min-w-0">
+              <p className="truncate font-medium text-ink text-sm">
+                {shareCitation.title ?? shareHost(shareCitation.url)}
+              </p>
+              <p className="truncate text-ink-muted text-xs">{shareCitation.url}</p>
+              {shareCaution ? (
+                <p className="text-danger text-xs">
+                  {t(
+                    'submit.share.caution',
+                    'This link matches suspicious patterns — double-check before citing it.',
+                  )}
+                </p>
+              ) : null}
             </div>
+            <Button variant="ghost" onClick={() => setShareCitation(null)}>
+              {t('submit.share.dismiss', 'Dismiss')}
+            </Button>
           </div>
         ) : null}
         <ParticipationComposer

@@ -24,6 +24,13 @@ export interface PayloadContext {
   attachmentIds?: string[];
   /** Lens vantage (WS-G.2.4). */
   lensId?: string;
+  /**
+   * Structured citations captured OUTSIDE the textarea (the WS-G.3.7a
+   * share-target intake carries url + title + accessed_at).  The textarea
+   * stays the source of truth for WHICH urls ship: a seed only ENRICHES a
+   * matching textarea line — deleting the line drops the seed too.
+   */
+  seedCitations?: Citation[];
 }
 
 export type PayloadResult =
@@ -39,6 +46,14 @@ export function parseCitations(raw: string | undefined): Citation[] {
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
     .map((url) => ({ url }));
+}
+
+/** Textarea citations, enriched by any matching structured seeds. */
+function citationsWithSeed(raw: string | undefined, context: PayloadContext): Citation[] {
+  const parsed = parseCitations(raw);
+  const seeds = context.seedCitations ?? [];
+  if (seeds.length === 0) return parsed;
+  return parsed.map((entry) => seeds.find((seed) => seed.url === entry.url) ?? entry);
 }
 
 /** Parse a comma/whitespace-separated id list (synthesis branch selector). */
@@ -82,13 +97,13 @@ export function assemblePayload(
           : {}),
       };
     case 'answer': {
-      const citations = parseCitations(values['citations']);
+      const citations = citationsWithSeed(values['citations'], context);
       return { ...base, ...(citations.length > 0 ? { citations } : {}) };
     }
     case 'evidence':
       return {
         ...base,
-        citations: parseCitations(values['citations']),
+        citations: citationsWithSeed(values['citations'], context),
         target_claim_id: optional(values['target_claim_id']),
         ...(optional(values['evidence_type'])
           ? { evidence_type: optional(values['evidence_type']) }
@@ -97,7 +112,7 @@ export function assemblePayload(
     case 'correction':
       return {
         ...base,
-        citations: parseCitations(values['citations']),
+        citations: citationsWithSeed(values['citations'], context),
         target_claim_id: optional(values['target_claim_id']),
         ...(optional(values['target_text_excerpt'])
           ? { target_text_excerpt: optional(values['target_text_excerpt']) }

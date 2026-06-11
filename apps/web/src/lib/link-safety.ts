@@ -53,9 +53,33 @@ export async function currentBlocklist(now: number = Date.now()): Promise<readon
   }
 }
 
-/** Evaluate a URL for the interstitial decision (WS-G.4.2c). */
+/**
+ * The blocklist available RIGHT NOW, without ever awaiting the network: the
+ * cache (fresh or stale) is returned synchronously, and a stale/cold cache
+ * triggers a BACKGROUND refresh for the next call.  This is what the click
+ * path uses — a verdict must never suspend past the browser's transient
+ * user-activation window, or `window.open` gets popup-blocked.  A cold
+ * cache degrades to heuristics-only for that one click (the heuristics are
+ * pure and local), which `warmLinkSafety()` at bootstrap makes rare.
+ */
+export function cachedBlocklist(now: number = Date.now()): readonly string[] {
+  if (!cache || now - cache.fetchedAt >= BLOCKLIST_TTL_MS) {
+    void currentBlocklist(now).catch(() => {});
+  }
+  return cache?.domains ?? [];
+}
+
+/** Bootstrap warm-up: fetch the blocklist before the first link click. */
+export async function warmLinkSafety(): Promise<void> {
+  await currentBlocklist().catch(() => {});
+}
+
+/**
+ * Evaluate a URL for the interstitial decision (WS-G.4.2c).  Resolves in a
+ * microtask — never a network round-trip (see `cachedBlocklist`).
+ */
 export async function checkLinkSafety(url: string): Promise<LinkSafetyVerdict> {
-  const verdict = evaluateLinkSafety(url, await currentBlocklist());
+  const verdict = evaluateLinkSafety(url, cachedBlocklist());
   if (verdict.suspicious) {
     // Anonymous counter only — never the user, never the destination host
     // beyond the coarse reason (§18.5 "not associated with their identity").

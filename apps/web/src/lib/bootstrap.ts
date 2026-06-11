@@ -21,6 +21,7 @@ import { initAuthSync, useAuthStore } from '../stores/auth.js';
 import { useFeatureFlagStore } from '../stores/feature-flags.js';
 import { initUIStore } from '../stores/ui.js';
 import { fetchAuthStatus, fetchFeatureFlags, fetchSettings } from './api.js';
+import { warmLinkSafety } from './link-safety.js';
 import { initTelemetry, track } from './telemetry.js';
 
 /** Event dispatched on detected eviction so the UI can notify the reader. */
@@ -119,6 +120,10 @@ export function startRuntime(): () => void {
   void ensurePushSubscription();
 
   void hydrateFeatureFlags();
+  // WS-G.4.2c: warm the drainer blocklist BEFORE the first UGC link click —
+  // the click-path verdict never awaits the network (transient-activation
+  // safety), so the list must already be cached to participate.
+  void warmLinkSafety();
   void confirmSession().then(applySignalPolicy);
   // Re-apply the collection policy whenever the SESSION USER changes (login,
   // logout, expiry): collection requires an authenticated session (the WS-E

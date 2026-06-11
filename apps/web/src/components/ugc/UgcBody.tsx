@@ -25,6 +25,24 @@ export interface UgcBodyProps {
   compact?: boolean;
 }
 
+/**
+ * Open an external destination in a new tab with the opener severed.  The
+ * `noopener` FEATURE STRING is deliberately not used: per spec it makes
+ * `window.open` return null even on success, which would make popup
+ * blocking undetectable — instead the opener is nulled on the returned
+ * proxy (the same security property), and an actual block (null return)
+ * falls back to the caller (the interstitial offers a fresh user gesture
+ * instead of failing silently).
+ */
+function openExternal(href: string, onBlocked: () => void): void {
+  const opened = window.open(href, '_blank');
+  if (opened === null) {
+    onBlocked();
+    return;
+  }
+  opened.opener = null;
+}
+
 export function UgcBody({ markdown, compact = false }: UgcBodyProps): React.ReactElement {
   const [pendingUrl, setPendingUrl] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -47,12 +65,14 @@ export function UgcBody({ markdown, compact = false }: UgcBodyProps): React.Reac
       const href = anchor.getAttribute('href');
       if (!href || href.startsWith('mailto:')) return;
       // Hold navigation until the safety verdict; mailto passes through.
+      // The verdict resolves in a MICROTASK (cached blocklist — never the
+      // network), so transient user activation survives to window.open.
       event.preventDefault();
       void checkLinkSafety(href).then((verdict) => {
         if (verdict.suspicious) {
           setPendingUrl(href);
         } else {
-          window.open(href, '_blank', 'noopener,noreferrer');
+          openExternal(href, () => setPendingUrl(href));
         }
       });
     };
@@ -76,7 +96,9 @@ export function UgcBody({ markdown, compact = false }: UgcBodyProps): React.Reac
         <LinkInterstitial
           url={pendingUrl}
           onContinue={() => {
-            window.open(pendingUrl, '_blank', 'noopener,noreferrer');
+            // A direct user gesture: if even this is blocked there is no
+            // further fallback — the dialog simply stays for another try.
+            openExternal(pendingUrl, () => {});
             setPendingUrl(null);
           }}
           onBack={() => setPendingUrl(null)}

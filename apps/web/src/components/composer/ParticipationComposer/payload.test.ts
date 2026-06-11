@@ -230,6 +230,53 @@ describe('optional fields and context branches', () => {
   });
 });
 
+describe('share-target seed citations (WS-G.3.7a)', () => {
+  const seed = {
+    url: 'https://shared.example/report',
+    title: 'Annual Report',
+    accessed_at: '2026-06-11T12:00:00.000Z',
+  };
+
+  it('enriches a matching textarea line with the structured citation', () => {
+    const result = buildContributionPayload(
+      'evidence',
+      {
+        body: 'Shared report.',
+        citations: 'https://shared.example/report\nhttps://other.example/x',
+        target_claim_id: CLAIM,
+        evidence_type: 'report',
+      },
+      { ...CTX, seedCitations: [seed] },
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok && result.payload.type === 'evidence') {
+      expect(result.payload.citations).toEqual([seed, { url: 'https://other.example/x' }]);
+    }
+  });
+
+  it('a deleted citation line drops the seed too (the textarea decides)', () => {
+    const result = buildContributionPayload(
+      'answer',
+      { body: 'Answered.', citations: 'https://other.example/x' },
+      { ...CTX, parentContributionId: PARENT, seedCitations: [seed] },
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok && result.payload.type === 'answer') {
+      expect(result.payload.citations).toEqual([{ url: 'https://other.example/x' }]);
+    }
+  });
+
+  it('non-citation modes ignore seeds entirely', () => {
+    const result = buildContributionPayload(
+      'question',
+      { body: 'What changed?' },
+      { ...CTX, seedCitations: [seed] },
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect('citations' in result.payload).toBe(false);
+  });
+});
+
 describe('citation helpers (WS-G.3.7a)', () => {
   it('parses one citation per line, skipping blanks', () => {
     expect(parseCitations('https://a.example/x\n\n  doi:10.1000/abc1  \n')).toEqual([
