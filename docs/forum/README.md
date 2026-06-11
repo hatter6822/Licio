@@ -244,15 +244,24 @@ counter only).
 
 ## Testing
 
-~150 WS-G tests across the suites: shared schema/table-driven state machines
+~160 WS-G tests across the suites: shared schema/table-driven state machines
 (54), the UGC pipeline + XSS gate (132), api routes/units (67+), invariants
 classifier (22), and the web composer/UGC/drafts/dictation/payload suites.
 The 0008 migration was applied against live Postgres 16 over the real chain
 with legacy-vocabulary seed rows: enum mappings, CHECK constraints, the
-dedup index, FK actions, and the anonymize path verified.  Gated integration
-tests (`DATABASE_URL`) run the Drizzle forum adapters; browser-level E2E
-follows the WS-D/WS-F precedent (the Playwright harness serves the static
-preview; BFF-in-the-loop E2E lands with WS-P).
+dedup index, FK actions, and the anonymize path verified.  The gated
+integration suite (`apps/api/src/__tests__/forum-integration.test.ts`,
+`DATABASE_URL`) proves all five Drizzle forum adapters against the real
+migration chain: drizzle-wrapped unique-violation mapping (the 23505 code
+lives down the error `cause` chain), transactional evidence co-create
+rollback, GIN path-containment subtree reads, storage-layer CHECK
+enforcement (depth cap, path/parent consistency, §24.3 uncertainty,
+content-type allow-list), draft-key dedup + tombstone semantics, and exact
+keyset-cursor walks (the adapters write millisecond-precision timestamps so
+`(created_at, id)` cursors round-trip through ISO strings without
+microsecond drift).  Browser-level E2E follows the WS-D/WS-F precedent (the
+Playwright harness serves the static preview; BFF-in-the-loop E2E lands
+with WS-P).
 
 ## Residuals (tracked elsewhere)
 

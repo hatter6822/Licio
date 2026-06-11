@@ -27,6 +27,7 @@ pay-to-rank — is enforced by the type system, runtime guards, and CI gates.
 - **No applause mechanics** — no likes, upvotes, karma, reaction bars, or follower counts anywhere; the absence is type-level, runtime-guarded, and CI-gated (`check:no-applause`).
 - **In-browser attention processing** — raw engagement (scrolls, touches, dwell) is bucketed in the browser and discarded; only coarse `AttentionAggregate`s ever reach the network (SPEC §19.2; runtime egress guard + the `check:no-raw-egress` gate).
 - **PWAtt shadow scoring** — Participation-Weighted Attention (v0 + guardrailed v1) rewards source-opening, evidence, corrections, synthesis, and bridge-building; anti-signals only ever subtract; scores carry zero ranking power until the SPEC §30.5 review lifts shadow by an explicit code change.
+- **Structured conversation, not comments** — eleven typed contributions (question, answer, evidence, correction, synthesis, counterexample, …) with type-specific requirements enforced by one shared schema on both client and server; branch-aware threads with materialized-path subtrees; rooms, lenses, and steward roles; every piece of user content reaches the DOM through a single sanctioned Markdown-lite → DOMPurify → Trusted Types sink with an external-link safety interstitial.
 - **A hardened event pipeline** — a strict topic registry of zod envelopes, authenticated replay-protected ingestion, a retention-tier-partitioned event store with sweeps, a real-time HyperLogLog layer, boot recovery + dead-letter redrive, and a pay-to-rank firewall at the consumer router.
 - **Passwordless identity** — WebAuthn-first with email-OTP and SIWE; there is no password column anywhere; RBAC with object-level authorization, an append-only audit log, steward TOTP MFA.
 - **Privacy by construction** — the client address and location are never read (statically tested); rate limiting is identity-free; DSAR export ships an encrypted signed-URL archive; account deletion has a 30-day grace then hard purge.
@@ -42,24 +43,30 @@ pay-to-rank — is enforced by the type system, runtime guards, and CI gates.
 | Node.js | `22` (pinned in [`.nvmrc`](.nvmrc)) |
 | pnpm | `9.15.4` via Corepack (pinned in `package.json`) |
 | Language | TypeScript `6.0.3`, strict everywhere (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) |
-| Milestone | WS-0 – WS-F complete; **WS-G (forum and conversation) is next** |
+| Milestone | WS-0 – WS-G complete; **WS-H (invariant services) is next** |
 | Test gate | 80% cross-workspace coverage (lines, functions, branches, statements) |
-| Bundle budgets | JS < 200 KB gz, CSS < 50 KB gz (CI-enforced) |
+| Bundle budgets | initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz (CI-enforced) |
 
-Seven of seventeen workstreams are shipped: the repository foundation
+Eight of seventeen workstreams are shipped: the repository foundation
 (WS-0), the doctrine and policy corpus (WS-A), the design system (WS-B), the
 PWA client (WS-C), identity and privacy (WS-D), the event pipeline + PWAtt
-scoring (WS-E), and ingestion, the source model, and search (WS-F). Stories
-can be submitted (all six §14.1 types) through safety pre-checks and
-three-level duplicate detection (canonical URL, MinHash/LSH near-duplicates,
-source-aware syndication), every story gets a thread shell and a §14.4
-lifecycle, sources get no-truth-score profiles, and content is searchable
-via Postgres FTS with pgvector embeddings behind it for the coming
-MERI/SCOI work. PWAtt runs in shadow mode: scores are computed, logged to
-invariant outputs, and shown privately to each user in their own Signal
-Ledger, while front-page ranking remains freshness-only — a CI-gated
-equivalence test proves the scores have no distribution effect. WS-G – WS-P
-(forum, invariant services, ranking, trust & safety, AI governance, Knomosis
+scoring (WS-E), ingestion, the source model, and search (WS-F), and forum
+and conversation (WS-G). Stories can be submitted (all six §14.1 types)
+through safety pre-checks and three-level duplicate detection (canonical
+URL, MinHash/LSH near-duplicates, source-aware syndication), every story
+gets a thread shell and a §14.4 lifecycle, sources get no-truth-score
+profiles, and content is searchable via Postgres FTS with pgvector
+embeddings behind it for the coming MERI/SCOI work. Conversation is live:
+threads carry the eleven-type §15.2 contribution taxonomy through the
+structured composer, user content renders through the single sanctioned
+Markdown-lite → DOMPurify → Trusted Types pipeline, evidence cards attach
+to claims, summaries carry §24.3 provenance and uncertainty disclosure, and
+rooms ship with lenses, steward roles, and join models — still with zero
+applause affordances. PWAtt runs in shadow mode: scores are computed,
+logged to invariant outputs, and shown privately to each user in their own
+Signal Ledger, while front-page ranking remains freshness-only — a CI-gated
+equivalence test proves the scores have no distribution effect. WS-H – WS-P
+(invariant services, ranking, trust & safety, AI governance, Knomosis
 wallets, treasury, compliance, security/reliability, launch) land per the
 plan.
 
@@ -102,6 +109,10 @@ the contribution checklist.
 │ RBAC + append-only audit; the ingestion boundary (ownership,     │
 │ replay protection, fail-closed rate limits, privacy gate)        │
 ├──────────────────────────────────────────────────────────────────┤
+│ Forum + rooms: 11 typed contributions, materialized-path trees,  │  apps/api
+│ the sanctioned UGC sink (Markdown-lite → DOMPurify → TT), rooms, │  (forum/)
+│ lenses, steward roles, §24.3 summaries, conversation health      │
+├──────────────────────────────────────────────────────────────────┤
 │ Event pipeline: topic registry → partitioned event store →       │  apps/api
 │ consumer router (pay-to-rank firewall, crypto-flag gate) →       │  (events/)
 │ real-time HLL → retention sweeps, recovery, dead-letter redrive  │
@@ -126,7 +137,7 @@ tests use — partial configuration fails boot rather than degrading silently.
 | Package | Role | Workspace deps |
 |---------|------|----------------|
 | `apps/web` | React 19 PWA — routes, offline store, signals, push, design system | `shared`, `invariants` |
-| `apps/api` | Hono BFF — identity, event pipeline, PWAtt scoring, schedulers | `shared`, `db`, `invariants` |
+| `apps/api` | Hono BFF — identity, event pipeline, PWAtt scoring, ingestion, forum + rooms, schedulers | `shared`, `db`, `invariants` |
 | `packages/shared` | zod schemas, types, enums, constants (the wire SSOT) | none (leaf) |
 | `packages/db` | Drizzle ORM schema + SQL migrations (PostgreSQL) | `shared` |
 | `packages/invariants` | pure invariant + scoring mathematics (PWAtt v0/v1) | `shared` |
@@ -209,7 +220,7 @@ Database workflow: `pnpm db:generate` (create migrations from schema),
 
 ```text
 apps/web/             React 19 PWA — routes, offline store, signals, push, design system
-apps/api/             Hono BFF — identity, event pipeline, PWAtt scoring, schedulers
+apps/api/             Hono BFF — identity, event pipeline, PWAtt scoring, ingestion, forum + rooms
 packages/shared/      zod schemas, types, enums, constants (the wire SSOT; leaf)
 packages/db/          Drizzle ORM schema + hand-tuned SQL migrations (PostgreSQL)
 packages/invariants/  pure invariant + scoring mathematics (PWAtt v0/v1, guardrails)
@@ -238,7 +249,7 @@ licenses are checked for AGPL compatibility at SBOM time (`pnpm sbom`).
 
 - **Specification:** [`docs/SPEC.md`](docs/SPEC.md) — the canonical design spec (v0.6).
 - **Implementation plan:** [`docs/planning/00-index.md`](docs/planning/00-index.md) — 17 workstreams (WS-0 – WS-P), ~646 atomic tasks.
-- **Completed-workstream references:** [`docs/design-system/`](docs/design-system/README.md), [`docs/pwa-client/`](docs/pwa-client/README.md), [`docs/identity/`](docs/identity/README.md), [`docs/events/`](docs/events/README.md), and the policy corpus under [`docs/policy/`](docs/policy/).
+- **Completed-workstream references:** [`docs/design-system/`](docs/design-system/README.md), [`docs/pwa-client/`](docs/pwa-client/README.md), [`docs/identity/`](docs/identity/README.md), [`docs/events/`](docs/events/README.md), [`docs/ingestion/`](docs/ingestion/README.md), [`docs/forum/`](docs/forum/README.md), and the policy corpus under [`docs/policy/`](docs/policy/).
 - **Conventions:** [`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md) (kept byte-identical).
 
 ## Security

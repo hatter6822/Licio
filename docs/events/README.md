@@ -376,11 +376,12 @@ REDIS_URL=redis://localhost:6379 pnpm test
 - **WS-F (CLOSED)** — `content.submitted`/`content.normalized` are emitted
   by the real story-submission pipeline (`apps/api/src/ingestion/`,
   `docs/ingestion/README.md`), and ledger story titles resolve from the real
-  story store (write-through cache; demo fixtures as fallback). Remaining
-  with **WS-G**: `evidence.added` correlation for the accusation downweight
-  and report-intake mapping onto the WS-A reason codes for user-filed
-  `moderation.case.created` events (the schema, storage, routing, and the
-  integrity-emitted path are live).
+  story store (write-through cache; demo fixtures as fallback).
+- **WS-G (CLOSED)** — forum contributions emit `contribution.created` and
+  `evidence.added` with real correlation ids (`docs/forum/README.md`), so
+  the accusation downweight and the lifecycle activity triggers run on real
+  conversation data; user-filed `moderation_concern` contributions carry
+  ratified WS-A reason codes into the review queue.
 - **WS-H** — MERI/SCOI/PHI/Hodge providers behind the existing hooks
   (`hooks.redundancy`, the wE/wS/wC component inputs, pH/pT penalty inputs);
   MFCI consumes the burst signals already flowing through `hooks.mfci`.
@@ -398,14 +399,14 @@ REDIS_URL=redis://localhost:6379 pnpm test
   booleans, and a dedicated client emitter with dwell-bucket/bounce
   measurement can land without server changes. The same applies to a
   client-emitted `cap_reached` on canonical events (optional on the wire).
-- **`low_info_reply` classification** — the type is registered, weighted (0),
-  and anti-signal-tracked, but nothing classifies real contributions as
-  low-information yet: the conversation model (WS-G) or the reviewed AI
-  classifier (WS-K) owns that judgment. Until then the cascade detector's
-  hostile share draws on `flag` contributions.
+- **`low_info_reply` classification (CLOSED by WS-G)** — the conservative
+  heuristic `classifyLowInfoReplyV0` (`@licio/invariants`) classifies
+  replies at creation time and the classification rides
+  `contribution.created`; the reviewed AI classifier (WS-K) can replace the
+  heuristic behind the same seam.
 - **Burst-conditioning covariates** — base rates condition on the item's own
-  trailing windows; time-of-day/topic/community covariates need WS-F/WS-G
-  metadata and land with WS-H's MFCI.
+  trailing windows; time-of-day/topic/community covariates consume the
+  WS-F/WS-G metadata (now present) and land with WS-H's MFCI.
 - **Cross-instance streaming** — the router is in-process over the durable
   Postgres log, with real per-consumer checkpoints and startup replay; a
   Redis Streams/broker binding can replace delivery behind the same

@@ -35,8 +35,9 @@ type level, runtime, and CI (the no-applause static gate).
 
 **Current status.**  Workstreams WS-0 (repository foundation), WS-A
 (doctrine and policy), WS-B (design system), WS-C (PWA client
-application), WS-D (identity, accounts, and privacy), and WS-E (event
-pipeline and PWAtt) are **complete**.  WS-D ships the WebAuthn-first/passwordless authentication
+application), WS-D (identity, accounts, and privacy), WS-E (event
+pipeline and PWAtt), WS-F (ingestion, source model, and search), and
+WS-G (forum and conversation) are **complete**.  WS-D ships the WebAuthn-first/passwordless authentication
 foundation, secure server-side sessions, RBAC + audit log, age gating,
 user-facing privacy controls (settings, DSAR export with an encrypted
 signed-URL archive, and account deletion with a 30-day grace + hard
@@ -48,9 +49,9 @@ store) and the full client surface (passkey-first login/registration,
 the `/profile/security` management page, and real data-rights flows with
 step-up gating).  Email delivery has a production SES binding (SigV4
 over fetch, all-or-none `SES_*` env group) behind the fail-closed
-`Mailer` selection.  WS-D residuals tracked elsewhere: WS-G injected
-hooks (the WS-E hooks are closed) and browser-level auth E2E (needs a
-BFF-in-the-loop harness; WS-P).
+`Mailer` selection.  WS-D residuals tracked elsewhere: browser-level
+auth E2E (needs a BFF-in-the-loop harness; WS-P) — the WS-E and WS-G
+injected hooks are all closed.
 WS-E ships the event pipeline and PWAtt scoring engine
 (`docs/events/README.md`): strict event schemas + a single topic registry
 (14 core + 18 flagged Knomosis topics in a separate bounded context), the
@@ -83,7 +84,31 @@ migration) behind self-hosted/deterministic providers; the versioned
 freshness baseline for WS-I; the public takedown intake; the WS-F.2.5b
 financial-denylist CI assertion; and `content.submitted`/
 `content.normalized` emission (closing that WS-E residual).
-Workstreams WS-G through WS-P are planned (planning documents
+WS-G ships forum and conversation (`docs/forum/README.md`): the
+eleven-type §15.2 contribution taxonomy behind ONE shared
+discriminated-union schema (client and server validate identically,
+type-specific requirements like evidence citations and the
+direct-experience privacy acknowledgment included), branch-aware
+threads on a materialized-path tree (depth-capped, GIN-containment
+subtree reads) with the §15.4 conversation/safety state machines
+(table-driven legal-transition functions, audited transitions emitting
+`thread.state.changed`), the WS-G.4 UGC pipeline (strict Markdown-lite
+AST with no raw-HTML node → constrained serializer → DOMPurify
+`licio-ugc` Trusted Types policy → THE single sanctioned
+`dangerouslySetInnerHTML` sink) with the external-link safety
+interstitial (drainer blocklist + dApp-mimicry heuristics) and
+EXIF-stripped image uploads, dual-dimension evidence cards
+(material type × claim relationship) shared with WS-F claims, §24.3
+provenance-bearing summaries with uncertainty disclosure, rooms with
+§16.2 join models, lenses, steward roles, audited governance settings
++ recommendation-input transparency, moderation-concern intake with
+ratified WS-A reason codes routed to the review queue (WS-J seam),
+conversation-health metrics, encrypted offline drafts with autosave/
+recovery + PWA share-target intake, and the 11-mode structured
+composer; it closes the WS-D contribution hooks
+(`anonymizeContributions`, forum-composed `exportContributions`) and
+the WS-E `low_info_reply` classifier + evidence-correlation residuals.
+Workstreams WS-H through WS-P are planned (planning documents
 exist under `docs/planning/`; implementation not yet started).  See
 "Implementation roadmap" below for the full status table.
 
@@ -200,7 +225,7 @@ licio/
 │   │   ├── playwright.config.ts --   E2E config (Chromium, Firefox, WebKit)
 │   │   ├── index.html           --   entry HTML (no inline scripts)
 │   │   ├── public/
-│   │   │   └── sw-push.js       --   push + background-sync handler
+│   │   │   └── sw-push.js       --   push + background-sync + share-target handler
 │   │   └── src/
 │   │       ├── main.tsx                 -- app entry point
 │   │       ├── routeTree.gen.ts         -- auto-generated route tree
@@ -208,10 +233,13 @@ licio/
 │   │       │   ├── ui/                  -- 32 reusable UI primitives
 │   │       │   ├── a11y/                -- RouteAnnouncer, SkipToContent, useSpaFocus
 │   │       │   ├── cognitive/           -- DefinedTerm, ProgressiveDisclosure, jargon
-│   │       │   ├── composer/            -- ParticipationComposer, CitationCapture
+│   │       │   ├── composer/            -- 11-mode ParticipationComposer + shared-schema
+│   │       │   │                           payload builder, VoiceDictation (WS-G.3)
 │   │       │   ├── feed/                -- FeedModeSwitcher, DiminishingReturnsPrompt
 │   │       │   ├── story/               -- StoryCard, ContextCard, RatingLabel
 │   │       │   ├── thread/              -- ThreadBranchNav
+│   │       │   ├── ugc/                 -- UgcBody (THE sanctioned UGC sink, WS-G.4.2b)
+│   │       │   │                           + LinkInterstitial (WS-G.4.2c)
 │   │       │   ├── reader/              -- SourceReader + readability worker
 │   │       │   ├── profile/             -- SignalLedger
 │   │       │   ├── security/            -- StepUpDialog + step-up retry gate
@@ -228,6 +256,7 @@ licio/
 │   │       │   ├── auth-api.ts          --   WS-D auth flows (passkey/email login, signup)
 │   │       │   ├── webauthn.ts          --   WebAuthn JSON↔ArrayBuffer plumbing
 │   │       │   ├── privacy-api.ts       --   WS-D data-rights flows (export, deletion)
+│   │       │   ├── link-safety.ts       --   WS-G external-link verdicts (shared heuristics)
 │   │       │   ├── queries.ts           --   TanStack Query hooks
 │   │       │   ├── query-keys.ts        --   query-key factory
 │   │       │   ├── query-client.ts      --   SWR defaults (30s stale, 5min gc)
@@ -300,6 +329,9 @@ licio/
 │           │   ├── events.ts            --   POST /v1/events/attention (WS-E.1.3)
 │           │   ├── stories.ts           --   POST /v1/stories, search, takedowns, reads (WS-F)
 │           │   ├── ingestion-admin.ts   --   /v1/ingestion/admin/* steward surface (WS-F)
+│           │   ├── forum.ts             --   /v1/contributions, threads, summaries,
+│           │   │                             uploads, flags (WS-G §23.2)
+│           │   ├── rooms.ts             --   /v1/rooms/* + lenses + governance (WS-G)
 │           │   ├── health.ts            --   /health endpoint
 │           │   └── csp-report.ts        --   CSP violation ingest
 │           ├── middleware/
@@ -374,24 +406,43 @@ licio/
 │           │   ├── config.ts            --   fail-closed runtime config (ingestion.* keys)
 │           │   ├── scheduler.ts         --   lease-guarded hourly maintenance tick
 │           │   └── drizzle-ingestion-stores.ts -- production Postgres adapters + FTS (gated)
+│           ├── forum/                   -- WS-G forum, rooms, lenses, summaries
+│           │   ├── stores.ts            --   store interfaces + in-memory adapters
+│           │   ├── services.ts          --   injectable container + metrics + boot wiring
+│           │   ├── contributions.ts     --   create/edit/remove guard chain + event emission
+│           │   ├── threads.ts           --   thread/branch/subtree reads (visibility-aware)
+│           │   ├── tree.ts              --   materialized-path math + depth-first ordering
+│           │   ├── rooms.ts             --   rooms/lenses/stewards/joins + governance audit
+│           │   ├── summaries.ts         --   §24.3 layered summaries (supersede semantics)
+│           │   ├── transitions.ts       --   audited §15.4 state machines → thread.state.changed
+│           │   ├── safety.ts            --   heuristic contribution pre-screen (WS-J/K seam)
+│           │   ├── exif.ts              --   byte-level image metadata stripping (WS-G.4.4)
+│           │   ├── config.ts            --   fail-closed runtime config (forum.* keys)
+│           │   └── drizzle-forum-stores.ts -- production Postgres adapters (gated)
 │           ├── lib/
 │           │   ├── rate-limit.ts        --   global fixed-window budget (no client keying)
 │           │   ├── push-service.ts      --   VAPID push (session-scoped delete)
 │           │   ├── vapid.ts             --   VAPID key management
 │           │   ├── logger.ts            --   pino logger setup
-│           │   └── demo-data.ts         --   demo/seed data
-│           └── __tests__/               -- WS-C + WS-D route/middleware tests
+│           │   ├── demo-data.ts         --   demo feed fixtures + stable demo ids
+│           │   └── demo-seed.ts         --   dev seed through the real forum/ingestion stores
+│           └── __tests__/               -- route/middleware/service tests (WS-C – WS-G)
 ├── packages/
 │   ├── shared/                  -- shared schemas, types, constants (leaf)
 │   │   └── src/
 │   │       ├── schemas/
 │   │       │   ├── common.ts            --   UUID, timestamp, httpUrlSchema, cursor
 │   │       │   ├── attention.ts         --   AttentionAggregate, bucketing fns
-│   │       │   ├── thread.ts            --   ThreadDetail, ThreadSummary
-│   │       │   ├── room.ts              --   RoomDetail
+│   │       │   ├── thread.ts            --   ThreadDetail + §15.4 conversation/safety
+│   │       │   │                             state machines (WS-G)
+│   │       │   ├── room.ts              --   rooms, lenses, stewards, join models,
+│   │       │   │                             governance settings (WS-G)
 │   │       │   ├── feed.ts              --   FeedItem
 │   │       │   ├── profile.ts           --   UserProfile
-│   │       │   ├── contribution.ts      --   Contribution
+│   │       │   ├── contribution.ts      --   11-type create union + body limits +
+│   │       │   │                             citations + depth cap (WS-G §15.2)
+│   │       │   ├── summary.ts           --   §24.3 layered summaries + uncertainty (WS-G)
+│   │       │   ├── forum-api.ts         --   forum endpoint wire contracts (WS-G)
 │   │       │   ├── signal-ledger.ts     --   SignalLedgerEntry
 │   │       │   ├── notifications.ts     --   Notification schemas
 │   │       │   ├── telemetry.ts         --   telemetryBatchSchema
@@ -405,12 +456,17 @@ licio/
 │   │       │   └── events/              --   WS-E event schemas (envelope, retention
 │   │       │                                 tiers, 14 core topic schemas, topic
 │   │       │                                 registry SSOT, knomosis/ bounded context)
+│   │       ├── ugc/                     --   WS-G.4 UGC pipeline: Markdown-lite AST
+│   │       │                                 (no raw-HTML node), constrained serializer,
+│   │       │                                 DOMPurify `licio-ugc` policy, renderUGC,
+│   │       │                                 link-safety heuristics
 │   │       ├── types/                   --   TypeScript type exports
 │   │       ├── enums/                   --   enumeration constants
-│   │       ├── constants/               --   shared constants
+│   │       ├── constants/               --   shared constants (incl. the 51 ratified
+│   │       │                                 WS-A moderation reason codes)
 │   │       └── env/                     --   environment variable validation
 │   ├── db/                      -- Drizzle ORM schema + migrations
-│   │   ├── drizzle/                     --   generated SQL migrations (WS-D, WS-E)
+│   │   ├── drizzle/                     --   generated SQL migrations (WS-D – WS-G)
 │   │   └── src/
 │   │       ├── schema/                  --   PostgreSQL table definitions
 │   │       │   ├── user.ts              --     users + JSONB + indexes/CHECK (WS-D.1.1)
@@ -423,6 +479,19 @@ licio/
 │   │       │   │                               attention_aggregates (§22.1), windows,
 │   │       │   │                               invariant_outputs (+shadow), signal ledger,
 │   │       │   │                               safety states, pwatt_config, DLQ, checkpoints
+│   │       │   ├── story.ts, source.ts, claim.ts,
+│   │       │   │   takedown.ts, embedding.ts,
+│   │       │   │   ingestion-review.ts  --     WS-F content tables (stories, sources,
+│   │       │   │                               claims + dual-dimension evidence cards,
+│   │       │   │                               syndication, takedowns, pgvector, queue)
+│   │       │   ├── thread.ts            --     WS-G threads (conversation/safety states,
+│   │       │   │                               per-story branch uniqueness)
+│   │       │   ├── contribution.ts      --     WS-G contributions (materialized path JSONB,
+│   │       │   │                               depth/parent CHECKs, client-draft dedup,
+│   │       │   │                               edit history, tombstones)
+│   │       │   ├── room.ts              --     WS-G rooms, stewards, subscriptions, lenses
+│   │       │   ├── summary.ts           --     WS-G §24.3 summaries (provenance CHECK)
+│   │       │   ├── upload.ts            --     WS-G uploads (EXIF-stripped, scan-gated)
 │   │       │   └── wallet/wallet-account.ts -- isolated financial WalletAccount
 │   │       ├── isolation.ts             --   wallet↔ranking BFS isolation (WS-D.3.2)
 │   │       ├── client.ts                --   database client initialization
@@ -433,13 +502,14 @@ licio/
 │           ├── pwatt/                   --   WS-E PWAtt pure math (v0/v1 scoring,
 │           │                                 saturation curves, ranking profiles,
 │           │                                 penalties, safety-state machine,
-│           │                                 accusation classifier, ledger summaries)
+│           │                                 accusation + low-info-reply classifiers,
+│           │                                 ledger summaries)
 │           ├── text/                    --   WS-F MinHash/LSH (pinned hash family)
 │           ├── freshness/               --   WS-F freshness baseline math
 │           └── __tests__/               --   invariant + deterministic property tests
 ├── scripts/                     -- build validation and security gates
 │   ├── validate-build.ts        --   post-build orchestrator
-│   ├── check-bundle-size.ts     --   JS < 200 KB gz, CSS < 50 KB gz
+│   ├── check-bundle-size.ts     --   initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz
 │   ├── check-sw-security.ts     --   no remote importScripts/eval/new Function
 │   ├── inject-sw-trusted-types.ts --  prepend TT default policy to built sw.js
 │   ├── check-no-applause.ts     --   no like/vote/karma/reaction affordances
@@ -466,6 +536,7 @@ licio/
 │   ├── identity/                -- WS-D implementation reference
 │   ├── events/                  -- WS-E implementation reference
 │   ├── ingestion/               -- WS-F implementation reference
+│   ├── forum/                   -- WS-G implementation reference
 │   └── policy/                  -- 9 policy documents (moderation, signals,
 │                                   privacy, crypto, jurisdiction, transparency)
 └── .github/
@@ -578,7 +649,12 @@ foreground agent has already modified the same files.
   `innerHTML`, `outerHTML`, `document.write()`, `eval()`,
   `new Function()` are forbidden.  All UGC must pass through
   DOMPurify.  `pnpm lint:security` is the mechanical check; CI
-  blocks the merge on a violation.
+  blocks the merge on a violation.  The SINGLE sanctioned exception
+  is `UgcBody` (`apps/web/src/components/ugc/UgcBody.tsx`, WS-G.4.2b):
+  one `dangerouslySetInnerHTML` whose value is always `renderUGC`
+  output (Markdown-lite AST → constrained serializer → DOMPurify
+  `licio-ugc` → TrustedHTML).  Any other suppression of
+  `noDangerouslySetInnerHtml` is a review-blocking violation.
 
 - **No inline styles.**  Use Tailwind CSS utility classes (static
   CSS, zero JS runtime).
@@ -668,11 +744,14 @@ Every layer is enforced by both runtime guards and CI static gates.
 
 ### Trusted Types
 
-Two named policies (`default`, `dompurify`) plus the SW-injected
-default policy.  The client default policy validates script URLs via
-**origin comparison** (`new URL(url, location.origin).origin ===
-location.origin`), not prefix matching — this prevents subdomain
-spoofing and protocol-relative bypasses.
+Three named policies (`default`, `dompurify`, `licio-ugc`) plus the
+SW-injected default policy.  The client default policy validates
+script URLs via **origin comparison** (`new URL(url,
+location.origin).origin === location.origin`), not prefix matching —
+this prevents subdomain spoofing and protocol-relative bypasses.
+`licio-ugc` is the WS-G UGC sanitizer policy: DOMPurify returns
+TrustedHTML under it, and its `createScriptURL` throws
+unconditionally (UGC can never mint a script URL).
 
 ### CSP directives
 
@@ -681,7 +760,7 @@ default-src 'self'; script-src 'self'; style-src 'self';
 img-src 'self' data:; font-src 'self'; connect-src 'self';
 worker-src 'self'; manifest-src 'self'; frame-ancestors 'self';
 object-src 'none'; base-uri 'self'; form-action 'self';
-trusted-types default dompurify;
+trusted-types default dompurify licio-ugc;
 require-trusted-types-for 'script';
 report-uri /api/security/csp-report; report-to csp-endpoint
 ```
@@ -793,7 +872,7 @@ Biome 2.x does not support:
 | `@tanstack/react-query` ^5.62 | web | server-state (SWR, zod on every response) |
 | `zustand` ^5.0 | web | client-state (3 stores: auth, ui, feature-flags) |
 | `zod` ^4.4 | shared, web, api | schema validation at every trust boundary |
-| `dompurify` ^3.4 | web | HTML sanitization (Trusted Types integration) |
+| `dompurify` ^3.4 | shared, web | HTML sanitization (Trusted Types integration; the WS-G `licio-ugc` UGC sanitizer lives in `@licio/shared`) |
 | `hono` ^4.7 | web, api | typed RPC client (web) / BFF server (api) |
 | `tailwindcss` ^4.1 | web (dev) | utility-first CSS (static, zero JS runtime) |
 | `drizzle-orm` ^0.45 | db | type-safe SQL (parameterized queries only) |
@@ -818,7 +897,7 @@ Status:
 | WS-D | Identity and privacy | Complete |
 | WS-E | Event pipeline and PWAtt scoring | Complete |
 | WS-F | Ingestion, source model, and search | Complete |
-| WS-G | Forum and conversation | Planned |
+| WS-G | Forum and conversation | Complete |
 | WS-H | Invariant services (MERI, MFCI, SCOI, GWEI, PHI) | Planned |
 | WS-I | Ranking and distribution | Planned |
 | WS-J | Trust and safety | Planned |
@@ -892,19 +971,19 @@ file counts at current state:
 
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
-| apps/web | ~53 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~63 (incl. WS-D identity + WS-E pipeline + WS-F ingestion) | node | `pnpm --filter api test` |
-| packages/shared | ~13 (incl. WS-D/WS-E/WS-F schemas + URL/lifecycle utils) | node | `pnpm --filter @licio/shared test` |
-| packages/db | ~3 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |
-| packages/invariants | ~7 (incl. PWAtt/MinHash/freshness math + property tests) | node | `pnpm --filter @licio/invariants test` |
-| scripts | ~2 | node | via root `pnpm test` (policy project) |
+| apps/web | ~104 unit + 4 E2E | jsdom / Playwright | `pnpm --filter web test` |
+| apps/api | ~68 (incl. WS-D identity + WS-E pipeline + WS-F ingestion + WS-G forum) | node | `pnpm --filter api test` |
+| packages/shared | ~19 (incl. WS-D–WS-G schemas, URL/lifecycle utils, the UGC pipeline + XSS-vector suite) | node | `pnpm --filter @licio/shared test` |
+| packages/db | ~4 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |
+| packages/invariants | ~8 (incl. PWAtt/MinHash/freshness math + property tests) | node | `pnpm --filter @licio/invariants test` |
+| scripts | ~4 | node | via root `pnpm test` (policy project) |
 
-WS-D, WS-E, and WS-F add **gated** integration tests (Postgres + Redis) that
-run only when `DATABASE_URL` / `REDIS_URL` are set; they are skipped in CI,
-which has no database service.  The WS-F chain requires a pgvector-enabled
+WS-D, WS-E, WS-F, and WS-G add **gated** integration tests (Postgres + Redis)
+that run only when `DATABASE_URL` / `REDIS_URL` are set; they are skipped in
+CI, which has no database service.  The WS-F chain requires a pgvector-enabled
 Postgres (docker-compose ships `pgvector/pgvector:pg16`).  See
-`docs/identity/README.md`, `docs/events/README.md`, and
-`docs/ingestion/README.md`.
+`docs/identity/README.md`, `docs/events/README.md`,
+`docs/ingestion/README.md`, and `docs/forum/README.md`.
 
 Only monotonic growth is enforced — no global gate pins the count.
 
@@ -975,14 +1054,14 @@ Documentation: `docs/pwa-client/README.md`
 | Signals | Attention pipeline, bucketed aggregates, no-raw-egress, rage-loop dampening | Complete |
 | Telemetry | Privacy-safe RUM, closed event enum, sendBeacon + keepalive fallback | Complete |
 | Security | Trusted Types, CSP, CSRF serialization, SW TT injection, rate limiting | Complete |
-| Performance | JS < 200 KB gz, CSS < 50 KB gz, Core Web Vitals targets, performance marks | Complete |
+| Performance | initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz, Core Web Vitals targets, performance marks | Complete |
 
 ### WS-D: Identity, accounts, and privacy
 
 Plan: `docs/planning/05-identity-and-privacy.md`
 Documentation: `docs/identity/README.md`
 
-In progress.  WebAuthn-first, **passwordless always** — there is no
+Complete.  WebAuthn-first, **passwordless always** — there is no
 password column, hashing, or reset flow anywhere.
 
 | Sub-area | Key surface | Status |
@@ -1002,7 +1081,7 @@ password column, hashing, or reset flow anywhere.
 | Client security | `/profile/security`: sessions list/revoke/revoke-others, passkey add/rename/remove, email-factor add/verify/change/disable, wallet unlink, TOTP enroll → recovery codes → disable, owner activity feed; sensitive actions run through the step-up retry gate (challenge → dialog → SAME action retries) and a step-up 401 never expires the session | Complete |
 | Client data rights | Privacy page wired to the real `/v1/privacy/*`: export request → poll → step-up-gated archive download, attention-history deletion, account deletion (confirm → step-up → sign-out) with grace-period cancel on the login page (emailed `?cancel_token=` link AND deactivated re-login path) | Complete |
 | Email delivery | Production `Mailer` over the SES v2 HTTP API (SigV4 on `node:crypto`, no SDK dep; all-or-none `SES_*` env group, partial fails boot): login/verify code templates and the WS-D.2.4a deletion notice (grace window, `/login?cancel_token=…` link, irreversibility); never logs recipient/code; without SES, production still fails closed unless `ALLOW_INSECURE_NULL_MAILER=true` | Complete |
-| Residuals | `anonymizeContributions` (WS-G) — `exportContributions` now exports WS-F stories (WS-G composes forum contributions into the same hook), and the WS-E hooks (`purgeAttention`, `exportAttention`, `onPrivacyChange`) are CLOSED with real implementations; browser-level auth E2E scenarios (the Playwright harness serves only the static preview — a BFF-in-the-loop harness lands with WS-P launch testing) | Tracked elsewhere |
+| Residuals | The WS-E hooks (`purgeAttention`, `exportAttention`, `onPrivacyChange`) AND the WS-G hooks (`anonymizeContributions` tombstones forum contributions on purge; `exportContributions` composes WS-F stories + forum contributions + evidence + room subscriptions) are CLOSED with real implementations; the only remaining residual is browser-level auth E2E scenarios (the Playwright harness serves only the static preview — a BFF-in-the-loop harness lands with WS-P launch testing) | Tracked elsewhere |
 
 Pure crypto is mathematically validated: TOTP against the RFC 6238
 Appendix B vectors, real WebAuthn attestation/assertion via a pure-crypto
@@ -1034,7 +1113,7 @@ configuration flip.
 | Scheduler | Hourly tick under a Postgres job lease (`events_hourly`); freshness-aware `windowsNeedingCompute` (a window recomputes only when events ARRIVED after its computedAt — fresh windows compute once, late offline events re-open theirs, unchanged windows skip; lookback ~26h/36h/8d/14d per size), retention sweeps, real-time reconciliation; the volume-threshold trigger is wired in production boot (early 1h scoring for hot items); startup recovery (checkpoint replay + real-time rebuild) runs at boot | Complete |
 | Production bindings | Drizzle adapters for all nine durable stores + Redis adapters (nonces `SET NX PX`, ZSET sliding windows, native PFADD/PFCOUNT HLL); gated integration tests run the REAL migration chain (incl. the partitioned DDL) against live Postgres/Redis | Complete |
 | System events | `invariant.run.completed` emitted once per item/window (deterministic name-based UUIDv8/SHA-256 ids; idempotent re-runs); `thread.state.changed` (safety dimension) on every freeze/resolution; `privacy.request.created` from the WS-D privacy routes (export/deletion/cancel/attention-reset); steward admin surface at `/v1/events/admin` (safety-state, validated config writes, DLQ list/redrive, manual recovery) | Complete |
-| Residuals | story emission is CLOSED (WS-F emits `content.submitted`/`content.normalized`; ledger titles resolve from the real story store); WS-G evidence-link correlation + `low_info_reply` classification (the type is weighted 0 and tracked; nothing classifies real replies yet); WS-H invariant providers + burst covariates behind existing hooks; WS-I ranking-boundary consumption + shadow lift; WS-J case lifecycle behind hooks; WS-K classifier seam; `notification.sent` producer (no in-repo dispatch path exists); client-side `source.opened.aggregate` + `cap_reached` emitters (server paths complete); cross-instance stream binding behind the `EventRouter` surface (WS-O) | Tracked elsewhere |
+| Residuals | story emission is CLOSED (WS-F emits `content.submitted`/`content.normalized`; ledger titles resolve from the real story store); the WS-G residuals are CLOSED (forum contributions emit `contribution.created`/`evidence.added` with real correlation, and `classifyLowInfoReplyV0` in `@licio/invariants` classifies replies at creation); WS-H invariant providers + burst covariates behind existing hooks; WS-I ranking-boundary consumption + shadow lift; WS-J case lifecycle behind hooks; WS-K classifier seam; `notification.sent` producer (no in-repo dispatch path exists); client-side `source.opened.aggregate` + `cap_reached` emitters (server paths complete); cross-instance stream binding behind the `EventRouter` surface (WS-O) | Tracked elsewhere |
 
 ### WS-F: Ingestion, source model, and search
 
@@ -1050,7 +1129,7 @@ and a db column assertion), and no WS-F table can carry a financial column
 |----------|-------------|--------|
 | Submission | `POST /v1/stories` (six §14.1 types, discriminated-union validation), pre-checks (rate limit/account age/spam titles/local malware denylist; fail-toward-caution hold), transactional thread shell, `content.submitted` emission with detached publication | Complete |
 | URL + dedup | Shared pure normalizer (idempotent; paths keep case per RFC 3986 — documented deviation), exact-URL 409 via partial unique index (race-safe), MinHash(128)/LSH(32×4) near-duplicates with the corrected detection curve (retrieval recall ≈ 0.9998 at J=0.7; estimate makes the decision), source-aware syndication (confirmed edges auto-link; unknown publishers flag) | Complete |
-| Lifecycle | Pure shared transition function (exhaustively tested table), append-only `story_lifecycle_audits`, WS-E-event triggers + hourly low-activity sweep + steward endpoint; SCOI/evidence-gap triggers are the WS-H/G seam | Complete |
+| Lifecycle | Pure shared transition function (exhaustively tested table), append-only `story_lifecycle_audits`, WS-E-event triggers + hourly low-activity sweep + steward endpoint; WS-G's real `contribution.created`/`evidence.added` events now drive the activity triggers; SCOI triggers remain the WS-H seam | Complete |
 | Extraction | SSRF-hardened fetcher (per-resolution lookup gate, redirect re-validation, streaming byte cap), RFC 9309 robots compliance (fail-closed unreachable, crawl-delay deferral), quote-aware HTML scanning + JSON-LD, declared-first language detection + conservative sensitivity lexicons (WS-K seams), copyright-bounded excerpt (full body never persisted), non-blocking failures with scheduled retries | Complete |
 | Source model | §14.3 profiles (auto-created idempotently, incrementally aggregated), steward editing with per-field audit, append-mostly corrections, canonicalized unique syndication edges | Complete |
 | Claims/evidence | Claim + EvidenceCard schemas with shared `independence_group_id` (MERI), heuristic extractor with provenance + confidence floor → review queue, claim↔evidence navigable both directions, evidence-card submissions create real cards | Complete |
@@ -1059,11 +1138,40 @@ and a db column assertion), and no WS-F table can carry a financial column
 | Freshness | Versioned exponential-decay baseline in topic-cadence units (property-tested monotonicity with the exact IEEE-754 statement), recomputed on events + sweep, consumable by WS-I.2.3d | Complete |
 | Takedowns | Public structured intake (rate-limited) → steward review → actioning hides the target everywhere + audit + best-effort submitter notice | Complete |
 | Admin | `/v1/ingestion/admin/*` (steward + TOTP): review queue, syndication create/confirm, source editing, takedowns, lifecycle triggers, validated config writes (422), backfill controls, metrics | Complete |
-| Residuals | WS-G thread ownership/interpretations/room visibility; WS-H similarity consumption (semantic conclusions gated on a self-hosted model); WS-I freshness/ranking consumption; WS-J queue ownership; WS-K governed extractor/classifiers/registry + topic taxonomy behind existing seams; client submission/search UI + BFF-in-the-loop browser E2E (WS-P precedent); full-scale (1M) load validation (latency/recall benchmarks measured + operating point recorded at N=20K, `RUN_PERF`-gated; 1M is WS-P) | Tracked elsewhere |
+| Residuals | the WS-G residuals are CLOSED (threads carry real conversation/safety states and contributions; room visibility gates thread/contribution reads); WS-H similarity consumption (semantic conclusions gated on a self-hosted model); WS-I freshness/ranking consumption; WS-J queue ownership; WS-K governed extractor/classifiers/registry + topic taxonomy behind existing seams; client submission/search UI + BFF-in-the-loop browser E2E (WS-P precedent); full-scale (1M) load validation (latency/recall benchmarks measured + operating point recorded at N=20K, `RUN_PERF`-gated; 1M is WS-P) | Tracked elsewhere |
 
-### WS-G through WS-P
+### WS-G: Forum, conversation, rooms, and lenses
 
-Plans: `docs/planning/08-forum-and-conversation.md` through
+Plan: `docs/planning/08-forum-and-conversation.md`
+Documentation: `docs/forum/README.md`
+
+Complete.  Conversation is structured — there is no generic "comment":
+every contribution is one of the eleven §15.2 types, validated by ONE
+shared discriminated union on both client and server, and rendered
+through ONE sanctioned UGC sink.
+
+| Sub-area | Key surface | Status |
+|----------|-------------|--------|
+| Schemas | 11-type `contributionCreateSchema` discriminated union (per-type body limits, citation bounds, the direct-experience privacy acknowledgment, ratified WS-A reason codes for moderation concerns), §15.4 thread conversation/safety state machines as table-driven legal-transition functions, room/lens/steward/subscription/governance enums, §24.3 summary schemas, forum wire contracts — all in `@licio/shared` (client/server rule identity) | Complete |
+| Storage | `contributions` (materialized JSONB ancestor path + GIN containment for subtree reads, depth ≤ 10 CHECK, path/parent consistency CHECK, `(user_id, client_draft_id)` partial unique for idempotent create, append-only edit history, author tombstones), `rooms`/`room_stewards`/`room_subscriptions`/`lenses`, `summaries` (§24.3 uncertainty CHECK), `uploads` (content-type allow-list CHECK, scan gate); migration 0008 recreates the thread enums with USING maps and splits evidence into material × relationship dimensions | Complete |
+| Contributions | Guard chain (auth → thread/room visibility → per-account sliding-window rate limit → shared-schema validation → per-type semantic guards → attachment/lens validation → safety pre-screen hold) → transactional insert WITH the evidence card (both-or-neither) → `contribution.created`/`evidence.added` emission; §15.5 edit (snapshot history, type immutable, per-type caps re-enforced) and author removal (tombstone, idempotent, 404-over-403) | Complete |
+| Threads | Branch-aware reads on the §15.3 structured sections (`sectionOfType`), depth-first subtree ordering, visibility-aware row filtering (removed/hidden collapse honestly), keyset pagination, room-visibility gating on every read | Complete |
+| Rooms + lenses | §16.2 join models per visibility (public auto-active, restricted request → steward approval, expert-led), steward roles (WS-A taxonomy), audited governance-settings writes, `RECOMMENDATION_INPUT_KEYS` transparency (what room recommendations may ever consume — no applause, no payment), one lens per `(room, lens_type)`, lens-tagged contribution surfacing | Complete |
+| Summaries | §24.3 three layers (automated_draft / community_synthesis / steward_summary) with REQUIRED unresolved-uncertainty disclosure for human layers (CHECK + service), supersede semantics (an automated draft can never displace a human summary), provenance fields end-to-end | Complete |
+| UGC pipeline | WS-G.4: strict Markdown-lite parser → closed AST (no raw-HTML node kind) → constrained serializer → DOMPurify behind the `licio-ugc` Trusted Types policy → TrustedHTML → the SINGLE sanctioned `UgcBody` sink; `normalizeUgcLink` drops javascript/data/vbscript/file schemes at parse time; the XSS-vector suite (script/event-handler/scheme/mXSS payloads) walks the rendered DOM; fail-closed degraded mode (no DOM ⇒ escaped plain text) | Complete |
+| Link safety | WS-G.4.2c interstitial on suspicious external links: drainer blocklist, contract-interaction URL patterns, dApp-mimicry edit distance; click interception via native event delegation (sanitized HTML carries no handlers); verdicts never tied to identity | Complete |
+| Uploads | WS-G.4.4 byte-level EXIF/GPS/XMP stripping for JPEG/PNG/WebP/AVIF BEFORE storage, alt text required for images (WCAG), scan state gates attachment and serving (WS-J.2.6b seam), bytes in S3 when configured (records survive either way) | Complete |
+| Composer | 11 modes in 5 groups with type-specific fields, char counters, citation capture, acknowledgment-gates-submit; the payload builder validates through the SHARED schema (drift impossible) with field-level error mapping; encrypted IndexedDB drafts (5s autosave + visibility flush, resume-or-discard recovery, draft id doubles as the server idempotency key); PWA share-target intake; VoiceDictation behind feature detection | Complete |
+| Safety intake | `moderation_concern` requires a ratified WS-A reason code (fabricated codes 422), routes to the review queue (WS-J seam), never auto-actions; the heuristic contribution pre-screen can only HOLD for review (fail-toward-caution); harassment-cascade and burst anti-signals remain WS-E's | Complete |
+| Health metrics | Per-thread conversation-health rollup (question→answer coverage, evidence density, correction uptake, accusation rate) — descriptive, owner/steward-facing, never a ranking input | Complete |
+| Events | `contribution.created` (with `low_info_reply` classification via `classifyLowInfoReplyV0` in `@licio/invariants`), `evidence.added` (real correlation ids), `thread.state.changed` (both dimensions, audited transitions); WS-F lifecycle activity triggers now fire from real conversation events | Complete |
+| Privacy hooks | WS-D.2.4 closed: `anonymizeContributions` tombstones contributions/evidence/uploads and REMOVES room memberships + steward rows (membership is personal data); `exportContributions` composes stories + contributions + evidence cards + room subscriptions (keyset-complete, §19.3/GDPR Art. 15) | Complete |
+| Production bindings | Drizzle adapters for all five forum stores behind the same interfaces; gated integration tests (`forum-integration.test.ts`) prove them against the REAL migration chain — the drizzle-wrapped unique-violation mapping, transactional evidence co-create rollback, GIN subtree reads, CHECK enforcement at the storage layer, and exact keyset-cursor round-trips (adapters write millisecond-precision timestamps so cursors round-trip through ISO strings) | Complete |
+| Residuals | WS-H Hodge/SCOI consumption of branch structure behind existing hooks; WS-I ranking consumption of health metrics (descriptive until then); WS-J queue ownership + the shared malware-intelligence upload scan; WS-K governed summary generation (the automated_draft layer stays heuristic until then); client thread-UI browser E2E with a BFF-in-the-loop harness (WS-P precedent); cross-room bridge tooling (WS-I/WS-J) | Tracked elsewhere |
+
+### WS-H through WS-P
+
+Plans: `docs/planning/09-invariant-services.md` through
 `docs/planning/17-experimentation-and-launch.md`
 
 Not yet started.  Read the relevant planning document and the

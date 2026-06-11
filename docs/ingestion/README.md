@@ -248,10 +248,9 @@ embedding error degrades to no-link, never failing ingestion).
 Similarity helpers (WS-F.3.2d, `packages/db/src/similarity.ts`):
 `findSimilarStories` / `findSimilarClaims` (≥ threshold, hidden/retracted
 excluded), `findSimilarInterpretations` (pairwise similarity over supplied
-interpretation ids, LOW pairs first — SCOI divergence; the
-story→interpretation join arrives with WS-G.2's entity, so this helper is
-implemented and gated-tested but operates on an empty set in production until
-WS-G.2 lands),
+interpretation ids, LOW pairs first — SCOI divergence; WS-G's lens-tagged
+contributions now provide the per-lens interpretation entity, and the
+embedding/SCOI consumption that feeds ids into this helper lands with WS-H),
 `findNearestEvidenceCards`.  All order by `<=>` so the HNSW index drives the
 scan (EXPLAIN-asserted in the gated tests), all bind parameters, and all
 exclude the query target and removed content.
@@ -317,9 +316,10 @@ with per-transition counters.  Trigger sources are structural: WS-E events
 legal for the current state), the hourly low-activity sweep, and the steward
 admin endpoint — no client-facing route can force a transition.  Invalid
 transitions under at-least-once redelivery are reported no-ops, never
-consumer failures.  SCOI/evidence-gap triggers (`scoi_evidence_gap`,
-`context_added`, …) arrive with WS-H/WS-G through the same
-`applyLifecycleTrigger` seam.
+consumer failures.  WS-G's real `contribution.created`/`evidence.added`
+events now drive the rolling contribution counter; SCOI/evidence-gap
+triggers (`scoi_evidence_gap`, `context_added`, …) arrive with WS-H through
+the same `applyLifecycleTrigger` seam.
 
 ## Security posture
 
@@ -426,21 +426,22 @@ consumer failures.  SCOI/evidence-gap triggers (`scoi_evidence_gap`,
 - **WS-D `exportContributions`**: the DSAR export now includes ALL of the
   user's submitted stories — the hook keyset-paginates `listBySubmitter` to
   exhaustion (no truncation cap; the export must be COMPLETE, §19.3 / GDPR
-  Art. 15).  WS-G composes forum contributions into the same hook when it
-  lands; `anonymizeContributions` remains WS-G's — story rows carry no
+  Art. 15).  WS-G composes forum contributions, evidence cards, and room
+  subscriptions into the same hook, and `anonymizeContributions` is closed
+  by WS-G too (`docs/forum/README.md`) — story/contribution rows carry no
   scrubbable PII: the tombstoned user row is the anonymization and public
   contributions persist per §22.4.
 
 ## Residuals (tracked for later workstreams)
 
-- **WS-G**: the full Thread/Contribution schema takes ownership of the
-  shell table (enums already superset the WS-C vocabulary so no destructive
-  migration); evidence flows with explicit relationship types; community
-  interpretations (which also unlock the story→interpretation join for
-  `findSimilarInterpretations` and interpretation embeddings); room
-  visibility in search.
+- **WS-G (CLOSED)**: the full Thread/Contribution schema owns the shell
+  table (migration 0008 recreated the enums with USING maps); evidence
+  flows attach explicit material × relationship types; lens-tagged
+  contributions provide the per-lens interpretation entity; room visibility
+  gates thread/contribution reads.  See `docs/forum/README.md`.
 - **WS-H**: MERI/SCOI consumption of the similarity helpers and signature
-  grouping; semantic conclusions gated on a self-hosted embedding model.
+  grouping; semantic conclusions gated on a self-hosted embedding model;
+  the story→interpretation embedding join for `findSimilarInterpretations`.
 - **WS-I**: freshness-baseline consumption (WS-I.2.3d) and search/feed
   ranking beyond textual relevance.
 - **WS-J**: the full moderation queue takes ownership of the ingestion
@@ -449,10 +450,11 @@ consumer failures.  SCOI/evidence-gap triggers (`scoi_evidence_gap`,
   the model registry replace the heuristic defaults behind the existing
   seams (`ClaimExtractor`, `detectLanguage`/`classifySensitivity` fallbacks,
   `EMBEDDING_MODEL_REGISTRY`).
-- **Client surfaces**: story-submission UI and the search page consume the
-  now-typed RPC contract (tracked with WS-C follow-ups/WS-G); browser-level
-  E2E for the submission flow needs the BFF-in-the-loop harness (WS-P, the
-  WS-D precedent) — the CSRF token round-trip is integration-tested at the
+- **Client surfaces**: the WS-G composer ships CONTRIBUTION submission
+  end-to-end; the story-URL submission UI and the search page still need to
+  consume the typed RPC contract (WS-C follow-ups); browser-level E2E for
+  the submission flow needs the BFF-in-the-loop harness (WS-P, the WS-D
+  precedent) — the CSRF token round-trip is integration-tested at the
   full-app level meanwhile.
 - **Full-scale (1 M) load validation**: the latency/recall benchmarks are
   measured at N = 20 000 (operating-point table above); validating the same
