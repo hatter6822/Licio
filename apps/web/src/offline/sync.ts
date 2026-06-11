@@ -10,7 +10,7 @@
 // `online`/app-open path too (WS-C.2.3 edge case).
 import {
   attentionAggregateBatchSchema,
-  createContributionRequestSchema,
+  contributionCreateSchema,
   createReportRequestSchema,
 } from '@licio/shared';
 import { ZodError } from 'zod';
@@ -68,7 +68,7 @@ export interface SyncOptions {
 async function sendOperation(operation: PendingOperationRecord): Promise<void> {
   switch (operation.operationType) {
     case 'contribution':
-      await createContribution(createContributionRequestSchema.parse(operation.payload));
+      await createContribution(contributionCreateSchema.parse(operation.payload));
       return;
     case 'report':
       await createReport(createReportRequestSchema.parse(operation.payload));

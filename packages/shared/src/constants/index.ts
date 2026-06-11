@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+export * from './moderation.js';
+
 export const APP_NAME = 'Licio';
 export const APP_VERSION = '0.1.0';
 export const DEFAULT_PAGE_SIZE = 25;

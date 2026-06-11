@@ -1,0 +1,78 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// Contribution safety pre-checks (WS-G.3.1 — the WS-J.2.6 seam).  The
+// classifier interface is what WS-J's governed classifiers replace; the
+// default heuristic is deliberately NARROW (flag-for-review posture, never
+// auto-removal, and false positives only delay publication):
+//
+//   • any citation/source/body URL whose domain hits the local malware
+//     denylist (the WS-F.1.4c provider — URLs never leave the platform,
+//     §19.1) flags the contribution, and
+//   • an `unavailable` safety provider fails TOWARD CAUTION (flag), never
+//     open.
+//
+// Flagged contributions persist with `moderation_state = under_review`
+// (default-hidden, §18.4) and land in the shared review queue
+// (`contribution_safety_hold`) for steward review.
+import type { ContributionCreate } from '@licio/shared';
+import type { UrlSafetyProvider } from '../ingestion/prechecks.js';
+
+export interface ContributionSafetyVerdict {
+  /** True → persist as under_review + enqueue for steward review. */
+  flagged: boolean;
+  /** Machine-readable reasons (counted in metrics; no body text). */
+  reasons: string[];
+}
+
+export interface ContributionSafetyClassifier {
+  classify(request: ContributionCreate): Promise<ContributionSafetyVerdict>;
+}
+
+const BARE_URL = /https?:\/\/[^\s<>"'`)]{1,2048}/gi;
+
+/** Every URL a contribution carries (citations, source_url, body autolinks). */
+export function contributionUrls(request: ContributionCreate): string[] {
+  const urls: string[] = [];
+  if ('citations' in request && request.citations) {
+    for (const citation of request.citations) {
+      if (citation.url.startsWith('http')) urls.push(citation.url);
+      if (citation.archive_url) urls.push(citation.archive_url);
+    }
+  }
+  if ('source_url' in request && request.source_url) urls.push(request.source_url);
+  for (const match of request.body.matchAll(BARE_URL)) urls.push(match[0]);
+  return urls;
+}
+
+export class HeuristicContributionSafety implements ContributionSafetyClassifier {
+  readonly #urlSafety: UrlSafetyProvider;
+
+  constructor(urlSafety: UrlSafetyProvider) {
+    this.#urlSafety = urlSafety;
+  }
+
+  async classify(request: ContributionCreate): Promise<ContributionSafetyVerdict> {
+    const reasons: string[] = [];
+    const domains = new Set<string>();
+    for (const url of contributionUrls(request)) {
+      try {
+        domains.add(new URL(url).hostname.toLowerCase());
+      } catch {
+        // Unparseable URL in body text — inert (renderUGC drops it anyway).
+      }
+    }
+    for (const domain of domains) {
+      const verdict = await this.#urlSafety.check(domain);
+      if (verdict === 'malicious') {
+        reasons.push('malware_domain');
+        break;
+      }
+      if (verdict === 'unavailable') {
+        // Fail toward caution (the WS-F.1.4c posture): hold for review.
+        reasons.push('url_safety_unavailable');
+        break;
+      }
+    }
+    return { flagged: reasons.length > 0, reasons };
+  }
+}

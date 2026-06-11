@@ -11,6 +11,7 @@ import type {
   ClaimExtractionSource,
   ClaimRecordStatus,
   DisplayRestrictions,
+  EvidenceCardType,
   EvidenceRelationshipType,
   LocationScope,
   MediaType,
@@ -26,6 +27,8 @@ import type {
   TakedownLegalBasis,
   TakedownStatus,
   TakedownTargetType,
+  ThreadConversationState,
+  ThreadSafetyState,
   VerificationState,
 } from '@licio/shared';
 
@@ -71,9 +74,13 @@ export interface ThreadShellRecord {
   roomId: string | null;
   branchIndex: number;
   currentSummaryId: string | null;
-  conversationState: 'empty' | 'emerging' | 'active' | 'deepening' | 'resolved' | 'dormant';
-  safetyState: 'normal' | 'caution' | 'under_review' | 'restricted';
+  /** WS-G.1.1 canonical vocabularies (the 0008 migration retired the WS-F
+   *  shell values: empty|emerging->active, dormant->archived,
+   *  caution->elevated). */
+  conversationState: ThreadConversationState;
+  safetyState: ThreadSafetyState;
   createdAt: string;
+  updatedAt: string;
 }
 
 export type StoryCreateOutcome =
@@ -126,14 +133,21 @@ export interface EvidenceCardRecord {
   evidenceId: string;
   claimId: string;
   sourceId: string | null;
-  submittedBy: string;
-  evidenceType: EvidenceRelationshipType;
+  /** The forum contribution that introduced this card (WS-G.1.3). */
+  contributionId: string | null;
+  /** Null = tombstoned submitter (account deleted; WS-G.1.3). */
+  submittedBy: string | null;
+  /** MATERIAL type (WS-G.1.3 canon: what the evidence IS). */
+  evidenceType: EvidenceCardType;
+  /** Claim relationship (the WS-F-era dimension, renamed at rest). */
+  relationshipType: EvidenceRelationshipType;
   citationUrlOrRef: string;
   relevanceNote: string;
   verificationState: VerificationState;
   independenceGroupId: string | null;
   storyId: string | null;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface StorySignatureRecord {
@@ -185,7 +199,10 @@ export type ReviewKind =
   | 'syndication_candidate'
   | 'extraction_failure'
   | 'url_safety_hold'
-  | 'low_confidence_claim';
+  | 'low_confidence_claim'
+  // WS-G forum intake (the same WS-J.2 inbox).
+  | 'contribution_safety_hold'
+  | 'moderation_concern';
 
 export interface ReviewItemRecord {
   reviewId: string;
@@ -232,6 +249,25 @@ export interface StoryStore {
   getThreadByStoryId(storyId: string): Promise<ThreadShellRecord | null>;
   /** Reverse shell lookup (thread-scoped events → story lifecycle/freshness). */
   getStoryIdByThreadId(threadId: string): Promise<string | null>;
+  // -- WS-G thread ownership (the forum module reads/writes through these) --
+  getThreadById(threadId: string): Promise<ThreadShellRecord | null>;
+  /** Patch room/summary/state fields; bumps updated_at.  State LEGALITY is
+   *  the transition service's concern (forum/transitions.ts) — the store is
+   *  mechanism, not policy. */
+  updateThread(
+    threadId: string,
+    patch: Partial<
+      Pick<ThreadShellRecord, 'roomId' | 'currentSummaryId' | 'conversationState' | 'safetyState'>
+    >,
+  ): Promise<ThreadShellRecord | null>;
+  /** Keyset page of a room's threads, `(created_at, thread_id)` DESCENDING
+   *  (most recent first, WS-G.2.3b). */
+  listThreadsByRoom(
+    roomId: string,
+    before: { createdAt: string; threadId: string } | null,
+    limit: number,
+  ): Promise<ThreadShellRecord[]>;
+  countThreadsByRoom(roomId: string): Promise<number>;
   /** Patch extraction outputs / source resolution / hidden state. */
   update(
     storyId: string,
@@ -350,17 +386,41 @@ export interface ClaimStore {
   clear(): Promise<void>;
 }
 
+/** Forum co-created card input (mirrors forum/stores.ts; unverified at birth). */
+export interface ForumEvidenceCardSinkInput {
+  evidenceId: string;
+  claimId: string;
+  sourceId: string | null;
+  contributionId: string | null;
+  submittedBy: string | null;
+  evidenceType: EvidenceCardType;
+  relationshipType: EvidenceRelationshipType;
+  citationUrlOrRef: string;
+  relevanceNote: string;
+  independenceGroupId: string | null;
+  storyId: string | null;
+}
+
 export interface EvidenceCardStore {
-  insert(record: Omit<EvidenceCardRecord, 'createdAt'>): Promise<EvidenceCardRecord>;
+  insert(record: Omit<EvidenceCardRecord, 'createdAt' | 'updatedAt'>): Promise<EvidenceCardRecord>;
   getById(evidenceId: string): Promise<EvidenceCardRecord | null>;
   listByClaim(claimId: string): Promise<EvidenceCardRecord[]>;
   /** Most recent cards (search corpus). */
   listRecent(limit: number): Promise<EvidenceCardRecord[]>;
-  /** Verification-state change (steward review / takedown actioning). */
+  /** Verification-state change (steward review / takedown actioning).
+   *  AUDITED at the call sites (WS-G.1.3: every transition writes an audit
+   *  record with actor, from, to, reason). */
   updateVerification(
     evidenceId: string,
     state: VerificationState,
   ): Promise<EvidenceCardRecord | null>;
+  /** WS-G.3.2 co-creation sink (transactional with the contribution). */
+  insertForumCard(card: ForumEvidenceCardSinkInput, createdAt: string): Promise<void>;
+  removeForumCard(evidenceId: string): Promise<void>;
+  /** DSAR export support (WS-D §19.3). */
+  listBySubmitter(userId: string): Promise<EvidenceCardRecord[]>;
+  /** WS-D.2.4 anonymize hook: tombstone the submitter. */
+  anonymizeUser(userId: string): Promise<void>;
   clear(): Promise<void>;
 }
 
@@ -509,9 +569,10 @@ export class InMemoryStoryStore implements StoryStore {
       roomId: null,
       branchIndex: 0,
       currentSummaryId: null,
-      conversationState: 'empty',
+      conversationState: 'active',
       safetyState: 'normal',
       createdAt: at,
+      updatedAt: at,
     };
     // Both-or-neither: all validation happened above, so both writes commit.
     this.#stories.set(record.storyId, record);
@@ -538,6 +599,55 @@ export class InMemoryStoryStore implements StoryStore {
       if (thread.threadId === threadId) return thread.storyId;
     }
     return null;
+  }
+
+  async getThreadById(threadId: string): Promise<ThreadShellRecord | null> {
+    for (const thread of this.#threads.values()) {
+      if (thread.threadId === threadId) return thread;
+    }
+    return null;
+  }
+
+  async updateThread(
+    threadId: string,
+    patch: Partial<
+      Pick<ThreadShellRecord, 'roomId' | 'currentSummaryId' | 'conversationState' | 'safetyState'>
+    >,
+  ): Promise<ThreadShellRecord | null> {
+    const thread = await this.getThreadById(threadId);
+    if (!thread) return null;
+    Object.assign(thread, patch);
+    thread.updatedAt = nowIso(this.#now);
+    return thread;
+  }
+
+  async listThreadsByRoom(
+    roomId: string,
+    before: { createdAt: string; threadId: string } | null,
+    limit: number,
+  ): Promise<ThreadShellRecord[]> {
+    return [...this.#threads.values()]
+      .filter((t) => t.roomId === roomId)
+      .filter(
+        (t) =>
+          before === null ||
+          t.createdAt < before.createdAt ||
+          (t.createdAt === before.createdAt && t.threadId < before.threadId),
+      )
+      .sort((a, b) =>
+        a.createdAt === b.createdAt
+          ? b.threadId.localeCompare(a.threadId)
+          : b.createdAt.localeCompare(a.createdAt),
+      )
+      .slice(0, limit);
+  }
+
+  async countThreadsByRoom(roomId: string): Promise<number> {
+    let count = 0;
+    for (const thread of this.#threads.values()) {
+      if (thread.roomId === roomId) count += 1;
+    }
+    return count;
   }
 
   async update(
@@ -875,10 +985,37 @@ export class InMemoryEvidenceCardStore implements EvidenceCardStore {
     this.#now = now;
   }
 
-  async insert(record: Omit<EvidenceCardRecord, 'createdAt'>): Promise<EvidenceCardRecord> {
-    const full: EvidenceCardRecord = { ...record, createdAt: nowIso(this.#now) };
+  async insert(
+    record: Omit<EvidenceCardRecord, 'createdAt' | 'updatedAt'>,
+  ): Promise<EvidenceCardRecord> {
+    const at = nowIso(this.#now);
+    const full: EvidenceCardRecord = { ...record, createdAt: at, updatedAt: at };
     this.#cards.set(full.evidenceId, full);
     return full;
+  }
+
+  /** WS-G.3.2 co-creation sink (both-or-neither with the contribution). */
+  async insertForumCard(card: ForumEvidenceCardSinkInput, createdAt: string): Promise<void> {
+    this.#cards.set(card.evidenceId, {
+      ...card,
+      verificationState: 'unverified',
+      createdAt,
+      updatedAt: createdAt,
+    });
+  }
+
+  async removeForumCard(evidenceId: string): Promise<void> {
+    this.#cards.delete(evidenceId);
+  }
+
+  async listBySubmitter(userId: string): Promise<EvidenceCardRecord[]> {
+    return [...this.#cards.values()].filter((c) => c.submittedBy === userId);
+  }
+
+  async anonymizeUser(userId: string): Promise<void> {
+    for (const card of this.#cards.values()) {
+      if (card.submittedBy === userId) card.submittedBy = null;
+    }
   }
 
   async getById(evidenceId: string): Promise<EvidenceCardRecord | null> {
@@ -901,7 +1038,7 @@ export class InMemoryEvidenceCardStore implements EvidenceCardStore {
   ): Promise<EvidenceCardRecord | null> {
     const card = this.#cards.get(evidenceId);
     if (!card) return null;
-    const updated = { ...card, verificationState: state };
+    const updated = { ...card, verificationState: state, updatedAt: nowIso(this.#now) };
     this.#cards.set(evidenceId, updated);
     return updated;
   }

@@ -14,7 +14,7 @@ const CSP = [
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
-  'trusted-types default dompurify',
+  'trusted-types default dompurify licio-ugc',
   "require-trusted-types-for 'script'",
   'report-uri /api/security/csp-report',
   'report-to csp-endpoint',

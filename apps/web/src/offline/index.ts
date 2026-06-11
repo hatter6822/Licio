@@ -18,7 +18,15 @@ export {
   encryptDraftValues,
   resetDraftKeyCache,
 } from './draft-crypto.js';
-export { type DraftInput, loadDraft, saveDraft } from './drafts.js';
+export {
+  DRAFT_MAX_AGE_MS,
+  type DraftInput,
+  deleteDraft,
+  expireOldDrafts,
+  listDraftsForThread,
+  loadDraft,
+  saveDraft,
+} from './drafts.js';
 export {
   type EvictionCallbacks,
   type IntegrityVerdict,

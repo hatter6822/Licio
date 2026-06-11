@@ -92,13 +92,25 @@ export type ClaimInsert = typeof claims.$inferInsert;
 // ---------------------------------------------------------------------------
 
 /** Claim-RELATIONSHIP taxonomy (§22.3 edges) — how evidence relates to the
- *  claim, distinct from the WS-E `evidence.added` MATERIAL taxonomy. */
+ *  claim, distinct from the MATERIAL taxonomy below. */
 export const evidenceRelationshipTypeEnum = pgEnum('evidence_relationship_type', [
   'supports',
   'contradicts',
   'contextualizes',
   'corrects',
   'counterexample',
+]);
+
+/** Evidence MATERIAL taxonomy (WS-G.1.3, §22.1 `EvidenceCard.evidence_type`
+ *  / §5.3) — what the evidence IS. */
+export const evidenceCardTypeEnum = pgEnum('evidence_card_type', [
+  'primary_source',
+  'dataset',
+  'transcript',
+  'legal_text',
+  'report',
+  'expert_reference',
+  'fact_check',
 ]);
 
 export const evidenceVerificationStateEnum = pgEnum('evidence_verification_state', [
@@ -112,16 +124,23 @@ export const evidenceCards = pgTable(
   'evidence_cards',
   {
     evidenceId: uuid('evidence_id').primaryKey().defaultRandom(),
+    /** Deleting a claim cascades to its cards (WS-G.1.3 acceptance). */
     claimId: uuid('claim_id')
       .notNull()
-      .references(() => claims.claimId),
+      .references(() => claims.claimId, { onDelete: 'cascade' }),
     /** Nullable for user-experience evidence (no web source). */
-    sourceId: uuid('source_id').references(() => sources.sourceId),
-    /** Attribution/moderation only — never a ranking authority signal (§13.6). */
-    submittedBy: uuid('submitted_by')
-      .notNull()
-      .references(() => users.userId),
-    evidenceType: evidenceRelationshipTypeEnum('evidence_type').notNull(),
+    sourceId: uuid('source_id').references(() => sources.sourceId, { onDelete: 'set null' }),
+    /** The forum contribution that introduced this card (WS-G.1.3); SQL FK
+     *  added by the 0008 migration (contributions table; avoids a TS module
+     *  cycle claim→contribution→claim). */
+    contributionId: uuid('contribution_id'),
+    /** Attribution/moderation only — never a ranking authority signal
+     *  (§13.6); tombstoned on account deletion (WS-G.1.3). */
+    submittedBy: uuid('submitted_by').references(() => users.userId, { onDelete: 'set null' }),
+    /** MATERIAL type (WS-G.1.3 canon). */
+    evidenceType: evidenceCardTypeEnum('evidence_type').notNull(),
+    /** Claim relationship (renamed from the WS-F-era `evidence_type`). */
+    relationshipType: evidenceRelationshipTypeEnum('relationship_type').notNull(),
     citationUrlOrRef: text('citation_url_or_ref').notNull(),
     relevanceNote: text('relevance_note').notNull(),
     verificationState: evidenceVerificationStateEnum('verification_state')
@@ -132,6 +151,7 @@ export const evidenceCards = pgTable(
     /** The evidence-card story shell that created this card, when applicable. */
     storyId: uuid('story_id').references(() => stories.storyId),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
     searchTsv: tsvector('search_tsv').generatedAlwaysAs(
       () =>
         sql`setweight(to_tsvector('simple', coalesce(relevance_note, '')), 'A') || setweight(to_tsvector('simple', coalesce(citation_url_or_ref, '')), 'B')`,
@@ -140,6 +160,10 @@ export const evidenceCards = pgTable(
   (t) => [
     index('evidence_cards_claim_idx').on(t.claimId),
     index('evidence_cards_source_idx').on(t.sourceId),
+    index('evidence_cards_contribution_idx').on(t.contributionId),
+    index('evidence_cards_submitted_by_idx').on(t.submittedBy),
+    index('evidence_cards_type_idx').on(t.evidenceType),
+    index('evidence_cards_verification_idx').on(t.verificationState),
     index('evidence_cards_independence_idx').on(t.independenceGroupId),
     index('evidence_cards_search_gin').using('gin', t.searchTsv),
     check(

@@ -18,8 +18,10 @@
 import { isFinancialFieldName } from '@licio/shared';
 import { getTableColumns, type Table } from 'drizzle-orm';
 import { claims, evidenceCards } from './schema/claim.js';
+import { contributionEditHistory, contributions } from './schema/contribution.js';
 import { embeddings } from './schema/embedding.js';
 import { ingestionReviewItems } from './schema/ingestion-review.js';
+import { lenses, roomStewards, roomSubscriptions, rooms } from './schema/room.js';
 import { sourceSyndications, sources } from './schema/source.js';
 import {
   stories,
@@ -29,8 +31,10 @@ import {
   storySignatures,
   storySourceLinks,
 } from './schema/story.js';
+import { summaries } from './schema/summary.js';
 import { takedownRequests } from './schema/takedown.js';
 import { threads } from './schema/thread.js';
+import { uploads } from './schema/upload.js';
 
 /** Every WS-F content/ingestion/search/embedding table, by SQL name. */
 export const WS_F_CONTENT_TABLES: Readonly<Record<string, Table>> = {
@@ -48,6 +52,15 @@ export const WS_F_CONTENT_TABLES: Readonly<Record<string, Table>> = {
   takedown_requests: takedownRequests,
   ingestion_review_items: ingestionReviewItems,
   embeddings,
+  // WS-G forum content (the same structural no-pay-to-rank guarantee).
+  contributions,
+  contribution_edit_history: contributionEditHistory,
+  rooms,
+  room_stewards: roomStewards,
+  room_subscriptions: roomSubscriptions,
+  lenses,
+  summaries,
+  uploads,
 };
 
 /** The SQL column names of a Drizzle table. */

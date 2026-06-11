@@ -133,7 +133,7 @@ describe('A2: evidence-card submissions get embedded via evidence.added (WS-F.3.
     );
     expect(vector).not.toBeNull();
     // And exactly one evidence.added event was stored.
-    const events = (await fixture.events.eventStore.listByOwner(card.submittedBy)).filter(
+    const events = (await fixture.events.eventStore.listByOwner(card.submittedBy ?? '')).filter(
       (e) => e.eventType === 'evidence.added',
     );
     expect(events).toHaveLength(1);

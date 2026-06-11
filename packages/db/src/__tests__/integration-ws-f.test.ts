@@ -275,7 +275,8 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
       {
         claimId: claim.claimId,
         submittedBy: submitterId,
-        evidenceType: 'supports',
+        evidenceType: 'report',
+        relationshipType: 'supports',
         citationUrlOrRef: 'https://example.com/report',
         relevanceNote: 'Official measurement bulletin.',
         independenceGroupId: group,
@@ -283,7 +284,8 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
       {
         claimId: claim.claimId,
         submittedBy: submitterId,
-        evidenceType: 'contradicts',
+        evidenceType: 'dataset',
+        relationshipType: 'contradicts',
         citationUrlOrRef: 'https://example.com/other',
         relevanceNote: 'Alternative dataset disagrees.',
         independenceGroupId: group,
@@ -562,7 +564,8 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
           .values({
             claimId: anchor.claimId,
             submittedBy: submitterId,
-            evidenceType: 'supports',
+            evidenceType: 'report',
+            relationshipType: 'supports',
             citationUrlOrRef: 'https://example.com/near-evidence',
             relevanceNote: 'near evidence',
           })

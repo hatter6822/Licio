@@ -66,15 +66,40 @@ export const VERIFICATION_STATES = ['unverified', 'verified', 'disputed', 'retra
 export type VerificationState = (typeof VERIFICATION_STATES)[number];
 export const verificationStateSchema = z.enum(VERIFICATION_STATES);
 
-/** Public evidence-card projection (§22.1 EvidenceCard). */
+/**
+ * Evidence MATERIAL types (WS-G.1.3, SPEC §22.1 `EvidenceCard.evidence_type`
+ * / §5.3 "primary source, dataset, transcript, legal text, credible
+ * report…").  Orthogonal to {@link EVIDENCE_RELATIONSHIP_TYPES}: this says
+ * what the evidence IS; the relationship says how it bears on the claim.
+ */
+export const EVIDENCE_CARD_TYPES = [
+  'primary_source',
+  'dataset',
+  'transcript',
+  'legal_text',
+  'report',
+  'expert_reference',
+  'fact_check',
+] as const;
+export type EvidenceCardType = (typeof EVIDENCE_CARD_TYPES)[number];
+export const evidenceCardTypeSchema = z.enum(EVIDENCE_CARD_TYPES);
+
+/** Public evidence-card projection (§22.1 EvidenceCard, WS-G.1.3). */
 export const evidenceCardPublicSchema = z
   .object({
     evidence_id: uuidSchema,
     claim_id: uuidSchema,
     /** Nullable for user-experience evidence (no web source). */
     source_id: uuidSchema.nullable(),
-    submitted_by: uuidSchema,
-    evidence_type: evidenceRelationshipTypeSchema,
+    /** The contribution that introduced this card (WS-G.1.3); null for
+     *  pre-forum cards and direct submissions. */
+    contribution_id: uuidSchema.nullable(),
+    /** Null when the submitting account was deleted (tombstone). */
+    submitted_by: uuidSchema.nullable(),
+    /** Material type (WS-G.1.3 canon). */
+    evidence_type: evidenceCardTypeSchema,
+    /** Claim relationship (supports/contradicts/…, §22.3 edges). */
+    relationship_type: evidenceRelationshipTypeSchema,
     citation_url_or_ref: z.string().min(1).max(2048),
     relevance_note: z.string().min(1).max(2_000),
     verification_state: verificationStateSchema,

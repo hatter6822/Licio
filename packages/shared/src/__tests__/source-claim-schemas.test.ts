@@ -53,13 +53,17 @@ describe('claim + evidence schemas (WS-F.1.2a / WS-F.2.5a)', () => {
     expect(claimPublicSchema.safeParse({ ...claim, created_by: randomUUID() }).success).toBe(false);
   });
 
-  it('accepts each evidence type and rejects invalid type/verification values', () => {
+  it('accepts each evidence material/relationship type and rejects invalid values', () => {
+    // WS-G.1.3 canon: `evidence_type` is the MATERIAL taxonomy (what the
+    // evidence IS); `relationship_type` is how it bears on the claim.
     const card = {
       evidence_id: randomUUID(),
       claim_id: claim.claim_id,
       source_id: null,
+      contribution_id: null,
       submitted_by: randomUUID(),
-      evidence_type: 'supports' as const,
+      evidence_type: 'report' as const,
+      relationship_type: 'supports' as const,
       citation_url_or_ref: 'https://example.com/study',
       relevance_note: 'Direct replication',
       verification_state: 'unverified' as const,
@@ -67,22 +71,35 @@ describe('claim + evidence schemas (WS-F.1.2a / WS-F.2.5a)', () => {
       created_at: now(),
     };
     for (const type of [
-      'supports',
-      'contradicts',
-      'contextualizes',
-      'corrects',
-      'counterexample',
+      'primary_source',
+      'dataset',
+      'transcript',
+      'legal_text',
+      'report',
+      'expert_reference',
+      'fact_check',
     ]) {
       expect(evidenceCardPublicSchema.safeParse({ ...card, evidence_type: type }).success).toBe(
         true,
       );
     }
-    expect(evidenceCardPublicSchema.safeParse({ ...card, evidence_type: 'proves' }).success).toBe(
+    for (const rel of ['supports', 'contradicts', 'contextualizes', 'corrects', 'counterexample']) {
+      expect(evidenceCardPublicSchema.safeParse({ ...card, relationship_type: rel }).success).toBe(
+        true,
+      );
+    }
+    // The relationship vocabulary is NOT valid as a material type (and vice versa).
+    expect(evidenceCardPublicSchema.safeParse({ ...card, evidence_type: 'supports' }).success).toBe(
       false,
     );
     expect(
+      evidenceCardPublicSchema.safeParse({ ...card, relationship_type: 'report' }).success,
+    ).toBe(false);
+    expect(
       evidenceCardPublicSchema.safeParse({ ...card, verification_state: 'gospel' }).success,
     ).toBe(false);
+    // Tombstoned submitter (account deleted) stays parseable (WS-G.1.3).
+    expect(evidenceCardPublicSchema.safeParse({ ...card, submitted_by: null }).success).toBe(true);
   });
 });
 

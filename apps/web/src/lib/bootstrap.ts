@@ -6,6 +6,7 @@
 // feature flags, session, and the signal collection policy. Pure side-effect
 // orchestration kept out of main.tsx so the wiring is reviewable in one place.
 import { DEFAULT_USER_SETTINGS } from '@licio/shared';
+import { expireOldDrafts } from '../offline/drafts.js';
 import {
   initEvictionDetection,
   type ProbeResult,
@@ -104,6 +105,8 @@ export function startRuntime(): () => void {
   const teardownProcessor = getSignalProcessor().start();
   const teardownSync = initForegroundSync();
   const teardownEviction = initEvictionDetection({ onEvicted });
+  // WS-G.3.7c: drafts older than 30 days are cleaned up on app start.
+  void expireOldDrafts().catch(() => undefined);
   // Core Web Vitals RUM → privacy-safe telemetry (metric name/value/rating only,
   // never a URL or identifier). Lab measurement remains the authoritative gate.
   const teardownVitals = initWebVitals((vital) => {

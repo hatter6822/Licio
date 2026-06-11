@@ -75,7 +75,7 @@ export function RoomDetailPage(): React.ReactElement {
       {(data) => (
         <div className="flex flex-col gap-3">
           {data.description ? <p className="text-ink-muted">{data.description}</p> : null}
-          {data.governance_available ? (
+          {data.governance !== null ? (
             <Link
               to="/rooms/$roomId/governance"
               params={{ roomId }}

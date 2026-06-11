@@ -93,13 +93,17 @@ describe('POST /v1/stories — submission types (WS-F.1.4a/b)', () => {
       // Exactly one thread shell, linked to the story (WS-F.1.4d).
       const thread = await fixture.ingestion.stories.getThreadByStoryId(json.story_id);
       expect(thread?.threadId).toBe(json.thread_id);
-      expect(thread?.conversationState).toBe('empty');
+      // WS-G canon: shells are born `active` (the 0008 migration retired `empty`).
+      expect(thread?.conversationState).toBe('active');
       expect(thread?.safetyState).toBe('normal');
     }
     // The evidence-card submission created a navigable card (WS-F.2.5a).
     const cards = await fixture.ingestion.evidence.listByClaim(claimSeed.claimId);
     expect(cards).toHaveLength(1);
-    expect(cards[0]?.evidenceType).toBe('contextualizes');
+    // WS-G dual dimensions: material type defaults to `report`, the
+    // relationship keeps the WS-F neutral default `contextualizes`.
+    expect(cards[0]?.evidenceType).toBe('report');
+    expect(cards[0]?.relationshipType).toBe('contextualizes');
   });
 
   it('returns 401 unauthenticated and 400 with field detail on invalid bodies', async () => {
@@ -399,7 +403,7 @@ describe('POST /v1/stories — emission + sync near-duplicate (WS-F.1.3c)', () =
     const thread = await app().request(new Request(`http://localhost/v1/threads/${thread_id}`));
     expect(thread.status).toBe(200);
     expect(((await thread.json()) as { conversation_state: string }).conversation_state).toBe(
-      'emerging',
+      'active',
     );
   });
 });

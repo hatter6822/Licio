@@ -35,6 +35,15 @@ import {
   createInMemoryEventPipelineServices,
   setEventPipelineServices,
 } from './events/services.js';
+import { ContributionRateLimiter } from './forum/contributions.js';
+import {
+  DrizzleContributionStore,
+  DrizzleLensStore,
+  DrizzleRoomStore,
+  DrizzleSummaryStore,
+  DrizzleUploadStore,
+} from './forum/drizzle-forum-stores.js';
+import { createInMemoryForumServices, setForumServices } from './forum/services.js';
 import {
   DrizzleAuditStore,
   DrizzleIdentityStore,
@@ -220,6 +229,28 @@ ingestionServices.searchIndex = new PostgresSearchIndex(db);
 await ingestionServices.reloadConfig();
 registerIngestionConsumers(eventServices, ingestionServices);
 setIngestionServices(ingestionServices);
+
+// --- WS-G forum services -----------------------------------------------------
+const forumServices = createInMemoryForumServices({
+  events: eventServices,
+  ingestion: ingestionServices,
+  log: (event, meta) => logger.info(meta, event),
+});
+{
+  const IORedis = (await import('ioredis')).default;
+  const redis = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
+  redis.on('error', (err) => logger.warn({ err }, 'Redis connection error (forum limiter)'));
+  forumServices.contributionLimiter = new ContributionRateLimiter(
+    new RedisSlidingWindowStore(redis),
+  );
+}
+forumServices.contributions = new DrizzleContributionStore(db);
+forumServices.rooms = new DrizzleRoomStore(db);
+forumServices.lenses = new DrizzleLensStore(db);
+forumServices.summaries = new DrizzleSummaryStore(db);
+forumServices.uploads = new DrizzleUploadStore(db, s3ConfigFromEnv(env));
+await forumServices.reloadConfig();
+setForumServices(forumServices);
 // Fill the Signal Ledger title cache as real stories are created/read.
 {
   const baseGetById = ingestionServices.stories.getById.bind(ingestionServices.stories);
@@ -256,6 +287,7 @@ identityServices.exportContributions = async (userId) => {
     const page = await ingestionServices.stories.listBySubmitter(userId, after, PAGE);
     for (const story of page) {
       out.push({
+        kind: 'story',
         story_id: story.storyId,
         title: story.title,
         submission_type: story.submissionType,
@@ -269,7 +301,62 @@ identityServices.exportContributions = async (userId) => {
     if (last === undefined) break;
     after = { createdAt: last.createdAt, storyId: last.storyId };
   }
+  // WS-G closes the forum half of the hook: every contribution (keyset-
+  // paginated to exhaustion — the export must be COMPLETE, §19.3/GDPR
+  // Art. 15), the user's evidence cards, and room memberships.
+  let cAfter: { createdAt: string; id: string } | null = null;
+  for (;;) {
+    const page = await forumServices.contributions.listByUser(userId, cAfter, PAGE);
+    for (const row of page) {
+      out.push({
+        kind: 'contribution',
+        contribution_id: row.contributionId,
+        thread_id: row.threadId,
+        type: row.type,
+        body: row.body,
+        citations: row.citations,
+        metadata: row.metadata,
+        moderation_state: row.moderationState,
+        created_at: row.createdAt,
+      });
+    }
+    if (page.length < PAGE) break;
+    const last = page[page.length - 1];
+    if (last === undefined) break;
+    cAfter = { createdAt: last.createdAt, id: last.contributionId };
+  }
+  for (const card of await ingestionServices.evidence.listBySubmitter(userId)) {
+    out.push({
+      kind: 'evidence_card',
+      evidence_id: card.evidenceId,
+      claim_id: card.claimId,
+      evidence_type: card.evidenceType,
+      relationship_type: card.relationshipType,
+      citation_url_or_ref: card.citationUrlOrRef,
+      relevance_note: card.relevanceNote,
+      created_at: card.createdAt,
+    });
+  }
+  for (const sub of await forumServices.rooms.listSubscriptionsByUser(userId)) {
+    out.push({
+      kind: 'room_subscription',
+      room_id: sub.roomId,
+      status: sub.status,
+      notification_preferences: sub.notificationPreferences,
+      requested_at: sub.requestedAt,
+    });
+  }
   return out;
+};
+// WS-G closes the WS-D.2.4 anonymize hook: tombstone the author on every
+// contribution/evidence card/upload (bodies persist per §22.4 — the
+// tombstoned user row is the anonymization) and REMOVE room memberships
+// and steward assignments (membership is personal data).
+identityServices.anonymizeContributions = async (userId) => {
+  await forumServices.contributions.anonymizeUser(userId);
+  await ingestionServices.evidence.anonymizeUser(userId);
+  await forumServices.uploads.anonymizeUser(userId);
+  await forumServices.rooms.anonymizeUser(userId);
 };
 identityServices.onPrivacyChange = (change) => {
   void applyRetentionPreferenceChange(eventServices, change.userId, change.retention).catch((err) =>

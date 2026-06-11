@@ -302,6 +302,7 @@ describe('security management flows (WS-D.1.2c/1.4a/1.5)', () => {
                 setting: null,
                 previous_value: null,
                 new_value: null,
+                reason: null,
               },
               created_at: '2026-06-10T00:00:00.000Z',
             },

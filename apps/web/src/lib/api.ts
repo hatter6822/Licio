@@ -19,14 +19,17 @@ import {
   type BranchContent,
   type BranchId,
   branchContentSchema,
-  type Contribution,
-  type CreateContributionRequest,
+  type ContributionCreate,
+  type ContributionCreateResponse,
   type CreateReportRequest,
-  contributionSchema,
+  contributionCreateResponseSchema,
   type FeatureFlags,
   type FeedMode,
+  type FeedPreferences,
+  type FeedPreferencesPatch,
   type FeedResponse,
   featureFlagsResponseSchema,
+  feedPreferencesSchema,
   feedResponseSchema,
   type NotificationPreferences,
   notificationPreferencesSchema,
@@ -34,9 +37,11 @@ import {
   type PushSubscriptionJson,
   type ReportAck,
   type RoomDetail,
+  type RoomJoinResponse,
   type RoomListResponse,
   reportAckSchema,
   roomDetailSchema,
+  roomJoinResponseSchema,
   roomListResponseSchema,
   type SignalLedgerResponse,
   type StoryDetail,
@@ -212,9 +217,11 @@ export async function fetchThread(threadId: string): Promise<ThreadDetail> {
 export async function fetchThreadBranch(
   threadId: string,
   branch: BranchId,
+  cursor?: string,
 ): Promise<BranchContent> {
   const response = await client.v1.threads[':threadId'].branches[':branch'].$get({
     param: { threadId, branch },
+    query: cursor ? { cursor } : {},
   });
   return parseResponse(response, branchContentSchema);
 }
@@ -227,6 +234,26 @@ export async function fetchRooms(cursor?: string): Promise<RoomListResponse> {
 export async function fetchRoom(roomId: string): Promise<RoomDetail> {
   const response = await client.v1.rooms[':roomId'].$get({ param: { roomId } });
   return parseResponse(response, roomDetailSchema);
+}
+
+export async function joinRoom(roomId: string): Promise<RoomJoinResponse> {
+  const response = await client.v1.rooms[':roomId'].join.$post({ param: { roomId } });
+  return parseResponse(response, roomJoinResponseSchema);
+}
+
+export async function leaveRoom(roomId: string): Promise<void> {
+  const response = await client.v1.rooms[':roomId'].join.$delete({ param: { roomId } });
+  await parseResponse(response, z.object({ left: z.boolean() }));
+}
+
+export async function fetchFeedPreferences(): Promise<FeedPreferences> {
+  const response = await client.v1.feed.preferences.$get();
+  return parseResponse(response, feedPreferencesSchema);
+}
+
+export async function updateFeedPreferences(patch: FeedPreferencesPatch): Promise<FeedPreferences> {
+  const response = await client.v1.feed.preferences.$patch({ json: patch });
+  return parseResponse(response, feedPreferencesSchema);
 }
 
 export async function fetchAuthStatus(): Promise<AuthStatusResponse> {
@@ -258,10 +285,10 @@ export async function fetchFeatureFlags(): Promise<FeatureFlags> {
 }
 
 export async function createContribution(
-  request: CreateContributionRequest,
-): Promise<Contribution> {
+  request: ContributionCreate,
+): Promise<ContributionCreateResponse> {
   const response = await client.v1.contributions.$post({ json: request });
-  return parseResponse(response, contributionSchema);
+  return parseResponse(response, contributionCreateResponseSchema);
 }
 
 export async function createReport(request: CreateReportRequest): Promise<ReportAck> {

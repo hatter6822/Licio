@@ -41,7 +41,20 @@ import type {
   StoryLifecycleState,
   VerificationState,
 } from '@licio/shared';
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  lte,
+  sql,
+} from 'drizzle-orm';
 import {
   decodeSearchCursor,
   encodeSearchCursor,
@@ -56,6 +69,7 @@ import type {
   EmbeddingTargetType,
   EvidenceCardRecord,
   EvidenceCardStore,
+  ForumEvidenceCardSinkInput,
   FreshnessRecord,
   FreshnessStore,
   LifecycleAuditRecord,
@@ -143,7 +157,59 @@ export class DrizzleStoryStore implements StoryStore {
       conversationState: row.conversationState,
       safetyState: row.safetyState,
       createdAt: iso(row.createdAt),
+      updatedAt: iso(row.updatedAt),
     };
+  }
+
+  async getThreadById(threadId: string): Promise<ThreadShellRecord | null> {
+    const rows = await this.#db
+      .select()
+      .from(threadsTable)
+      .where(eq(threadsTable.threadId, threadId))
+      .limit(1);
+    return rows[0] ? this.#toThread(rows[0]) : null;
+  }
+
+  async updateThread(
+    threadId: string,
+    patch: Partial<
+      Pick<ThreadShellRecord, 'roomId' | 'currentSummaryId' | 'conversationState' | 'safetyState'>
+    >,
+  ): Promise<ThreadShellRecord | null> {
+    const rows = await this.#db
+      .update(threadsTable)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(threadsTable.threadId, threadId))
+      .returning();
+    return rows[0] ? this.#toThread(rows[0]) : null;
+  }
+
+  async listThreadsByRoom(
+    roomId: string,
+    before: { createdAt: string; threadId: string } | null,
+    limit: number,
+  ): Promise<ThreadShellRecord[]> {
+    const conditions = [eq(threadsTable.roomId, roomId)];
+    if (before !== null) {
+      conditions.push(
+        sql`(${threadsTable.createdAt}, ${threadsTable.threadId}) < (${new Date(before.createdAt)}, ${before.threadId})`,
+      );
+    }
+    const rows = await this.#db
+      .select()
+      .from(threadsTable)
+      .where(and(...conditions))
+      .orderBy(desc(threadsTable.createdAt), desc(threadsTable.threadId))
+      .limit(limit);
+    return rows.map((row) => this.#toThread(row));
+  }
+
+  async countThreadsByRoom(roomId: string): Promise<number> {
+    const rows = await this.#db
+      .select({ value: count() })
+      .from(threadsTable)
+      .where(eq(threadsTable.roomId, roomId));
+    return rows[0]?.value ?? 0;
   }
 
   async createWithThread(
@@ -738,26 +804,33 @@ export class DrizzleEvidenceCardStore implements EvidenceCardStore {
       evidenceId: row.evidenceId,
       claimId: row.claimId,
       sourceId: row.sourceId,
+      contributionId: row.contributionId,
       submittedBy: row.submittedBy,
       evidenceType: row.evidenceType,
+      relationshipType: row.relationshipType,
       citationUrlOrRef: row.citationUrlOrRef,
       relevanceNote: row.relevanceNote,
       verificationState: row.verificationState,
       independenceGroupId: row.independenceGroupId,
       storyId: row.storyId,
       createdAt: iso(row.createdAt),
+      updatedAt: iso(row.updatedAt),
     };
   }
 
-  async insert(record: Omit<EvidenceCardRecord, 'createdAt'>): Promise<EvidenceCardRecord> {
+  async insert(
+    record: Omit<EvidenceCardRecord, 'createdAt' | 'updatedAt'>,
+  ): Promise<EvidenceCardRecord> {
     const rows = await this.#db
       .insert(evidenceTable)
       .values({
         evidenceId: record.evidenceId,
         claimId: record.claimId,
         sourceId: record.sourceId,
+        contributionId: record.contributionId,
         submittedBy: record.submittedBy,
         evidenceType: record.evidenceType,
+        relationshipType: record.relationshipType,
         citationUrlOrRef: record.citationUrlOrRef,
         relevanceNote: record.relevanceNote,
         verificationState: record.verificationState,
@@ -768,6 +841,42 @@ export class DrizzleEvidenceCardStore implements EvidenceCardStore {
     const row = rows[0];
     if (!row) throw new Error('insert returned no row');
     return this.#toRecord(row);
+  }
+
+  async insertForumCard(card: ForumEvidenceCardSinkInput, _createdAt: string): Promise<void> {
+    await this.#db.insert(evidenceTable).values({
+      evidenceId: card.evidenceId,
+      claimId: card.claimId,
+      sourceId: card.sourceId,
+      contributionId: card.contributionId,
+      submittedBy: card.submittedBy,
+      evidenceType: card.evidenceType,
+      relationshipType: card.relationshipType,
+      citationUrlOrRef: card.citationUrlOrRef,
+      relevanceNote: card.relevanceNote,
+      verificationState: 'unverified',
+      independenceGroupId: card.independenceGroupId,
+      storyId: card.storyId,
+    });
+  }
+
+  async removeForumCard(evidenceId: string): Promise<void> {
+    await this.#db.delete(evidenceTable).where(eq(evidenceTable.evidenceId, evidenceId));
+  }
+
+  async listBySubmitter(userId: string): Promise<EvidenceCardRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(evidenceTable)
+      .where(eq(evidenceTable.submittedBy, userId));
+    return rows.map((row) => this.#toRecord(row));
+  }
+
+  async anonymizeUser(userId: string): Promise<void> {
+    await this.#db
+      .update(evidenceTable)
+      .set({ submittedBy: null })
+      .where(eq(evidenceTable.submittedBy, userId));
   }
 
   async getById(evidenceId: string): Promise<EvidenceCardRecord | null> {
@@ -800,7 +909,7 @@ export class DrizzleEvidenceCardStore implements EvidenceCardStore {
   async updateVerification(evidenceId: string, state: VerificationState) {
     const rows = await this.#db
       .update(evidenceTable)
-      .set({ verificationState: state })
+      .set({ verificationState: state, updatedAt: new Date() })
       .where(eq(evidenceTable.evidenceId, evidenceId))
       .returning();
     return rows[0] ? this.#toRecord(rows[0]) : null;

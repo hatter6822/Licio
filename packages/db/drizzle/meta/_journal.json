@@ -57,6 +57,13 @@
       "when": 1781148689276,
       "tag": "0007_ws_f_ingestion",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1781162625657,
+      "tag": "0008_ws_g_forum",
+      "breakpoints": true
     }
   ]
 }

@@ -17,6 +17,11 @@ export const ingestionReviewKindEnum = pgEnum('ingestion_review_kind', [
   'extraction_failure',
   'url_safety_hold',
   'low_confidence_claim',
+  // WS-G forum intake (the same WS-J.2 inbox): safety-flagged contributions
+  // held under_review, and user-filed moderation_concern contributions
+  // (urgent flags surface first via the context.urgency field).
+  'contribution_safety_hold',
+  'moderation_concern',
 ]);
 
 export const ingestionReviewStatusEnum = pgEnum('ingestion_review_status', ['pending', 'resolved']);

@@ -344,12 +344,14 @@ export async function submitStory(
       evidenceId: randomUUID(),
       claimId: request.claim_id,
       sourceId: evidenceSourceId,
+      contributionId: null,
       submittedBy: userId,
-      // The §14.1 evidence-card submission carries no relationship
-      // direction; `contextualizes` is the NEUTRAL default (asserting
-      // `supports` would fabricate a stance). WS-G's evidence flows attach
-      // explicit typed relationships.
-      evidenceType: 'contextualizes',
+      // The §14.1 evidence-card submission carries no MATERIAL type and no
+      // relationship direction; `report` and `contextualizes` are the
+      // neutral defaults (asserting `supports` would fabricate a stance).
+      // WS-G's evidence composer attaches both dimensions explicitly.
+      evidenceType: 'report',
+      relationshipType: 'contextualizes',
       citationUrlOrRef: request.citation_url_or_ref,
       relevanceNote: request.relevance_note,
       verificationState: 'unverified',

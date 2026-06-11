@@ -13,21 +13,13 @@
 // serve a deterministic in-memory demo dataset (see `lib/demo-data.ts`) so the PWA
 // has stable, structurally honest content to render — clearly fixture data, never
 // a fabricated production source of truth.
-import { randomUUID } from 'node:crypto';
 import { zValidator } from '@hono/zod-validator';
-import { classifyAccusationV0 } from '@licio/invariants';
 import {
   type AttentionIngestAck,
   attentionAggregateBatchSchema,
   attentionIngestAckSchema,
-  branchContentSchema,
-  branchIdSchema,
-  contributionCreatedEventSchema,
-  contributionSchema,
-  createContributionRequestSchema,
   createReportRequestSchema,
   DEFAULT_USER_SETTINGS,
-  type EventContributionType,
   FAIL_CLOSED_FLAGS,
   type FeedResponse,
   feedQuerySchema,
@@ -35,18 +27,13 @@ import {
   notificationPreferencesSchema,
   okAckSchema,
   pushRegisterRequestSchema,
-  type RoomListResponse,
-  roomDetailSchema,
-  roomListResponseSchema,
   type SignalLedgerEntry,
   type SignalLedgerResponse,
   signalLedgerResponseSchema,
   storyDetailSchema,
   type TelemetryIngestAck,
-  TOPIC_REGISTRY,
   telemetryBatchSchema,
   telemetryIngestAckSchema,
-  threadDetailSchema,
   userSettingsSchema,
   uuidSchema,
   vapidPublicKeyResponseSchema,
@@ -63,18 +50,10 @@ import {
 import { getEventPipelineServices } from '../events/services.js';
 import type { SignalLedgerRecord } from '../events/stores.js';
 import { accountRef } from '../identity/crypto.js';
-import { getIdentityServices, type IdentityServices } from '../identity/services.js';
-import { readSessionToken, validateSession } from '../identity/sessions.js';
+import { getIdentityServices } from '../identity/services.js';
 import { getIngestionServices } from '../ingestion/services.js';
-import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
-import {
-  DEMO_FEED,
-  DEMO_ROOMS,
-  demoBranch,
-  demoRoom,
-  demoStory,
-  demoThread,
-} from '../lib/demo-data.js';
+import type { StoryRecord } from '../ingestion/stores.js';
+import { DEMO_FEED, demoStory } from '../lib/demo-data.js';
 import {
   getPreferences,
   getVapidConfig,
@@ -86,8 +65,10 @@ import { rateLimit } from '../lib/rate-limit.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { createAuthRoutes } from './auth.js';
 import { createEventsRoutes } from './events.js';
+import { createForumRoutes } from './forum.js';
 import { createIngestionAdminRoutes } from './ingestion-admin.js';
 import { createPrivacyRoutes } from './privacy.js';
+import { createRoomsRoutes } from './rooms.js';
 import { createStoriesRoutes } from './stories.js';
 
 /** Read the session id from the `__Host-session` cookie (or undefined). */
@@ -106,37 +87,6 @@ const settingsBySession = new Map<string, z.infer<typeof userSettingsSchema>>();
 
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } } as const;
 
-/** Client composer mode → event-pipeline contribution taxonomy (WS-E.1.1c). */
-const COMPOSER_TO_EVENT_TYPE: Readonly<Record<string, EventContributionType>> = {
-  ask: 'question',
-  evidence: 'evidence',
-  correction: 'correction',
-  synthesis: 'synthesis',
-  counterexample: 'counterexample',
-  experience: 'experience',
-  explain: 'explanation',
-  flag: 'flag',
-};
-
-/**
- * Soft session read: the user id when a valid session cookie is present, else
- * null — never a 401 (used by routes whose contract is unauthenticated but
- * which emit owned events only for signed-in users).
- */
-async function readSessionUserId(
-  cookieHeader: string | undefined,
-  identity: IdentityServices,
-): Promise<string | null> {
-  const token = readSessionToken(cookieHeader);
-  if (!token) return null;
-  try {
-    const validated = await validateSession(identity.sessions, token);
-    return validated?.record.user_id ?? null;
-  } catch {
-    return null;
-  }
-}
-
 /** WS-F lifecycle states → the WS-C rating-label vocabulary (read mapping). */
 const LIFECYCLE_TO_RATING_LABEL: Readonly<Record<StoryRecord['lifecycleState'], string>> = {
   submitted: 'getting-attention',
@@ -151,7 +101,7 @@ const LIFECYCLE_TO_RATING_LABEL: Readonly<Record<StoryRecord['lifecycleState'], 
 /** Map a REAL ingested story onto the established WS-C story-detail wire
  *  shape (the client validates against storyDetailSchema; real submissions
  *  appear through the same contract the demo fixtures established). */
-function realStoryToDetail(story: StoryRecord, thread: ThreadShellRecord | null) {
+function realStoryToDetail(story: StoryRecord, thread: { threadId: string } | null) {
   const excerptWords = story.excerpt === null ? 0 : story.excerpt.split(/\s+/).length;
   return {
     story_id: story.storyId,
@@ -170,17 +120,6 @@ function realStoryToDetail(story: StoryRecord, thread: ThreadShellRecord | null)
     thread_id: thread?.threadId ?? null,
   };
 }
-
-/** WS-F shell conversation states → the WS-C thread wire vocabulary. */
-const SHELL_TO_WIRE_CONVERSATION: Readonly<Record<ThreadShellRecord['conversationState'], string>> =
-  {
-    empty: 'emerging',
-    emerging: 'emerging',
-    active: 'active',
-    deepening: 'deepening',
-    resolved: 'resolved',
-    dormant: 'dormant',
-  };
 
 /** Scoring annotation → the §5.3 anti-signal name shown in the ledger. */
 const ANNOTATION_TO_LEDGER_ANTI_SIGNAL: Readonly<
@@ -264,53 +203,8 @@ export function createV1Routes() {
           return story ? c.json(storyDetailSchema.parse(story)) : c.json(notFound, 404);
         },
       )
-      .get(
-        '/threads/:threadId',
-        zValidator('param', z.object({ threadId: uuidSchema })),
-        async (c) => {
-          const { threadId } = c.req.valid('param');
-          const ingestion = getIngestionServices();
-          const storyId = await ingestion.stories.getStoryIdByThreadId(threadId);
-          if (storyId !== null) {
-            const story = await ingestion.stories.getById(storyId);
-            const shell = await ingestion.stories.getThreadByStoryId(storyId);
-            if (story && shell) {
-              if (story.hiddenState !== null) return c.json(notFound, 404);
-              return c.json(
-                threadDetailSchema.parse({
-                  thread_id: shell.threadId,
-                  story_id: shell.storyId,
-                  room_id: shell.roomId,
-                  title: story.title,
-                  conversation_state: SHELL_TO_WIRE_CONVERSATION[shell.conversationState],
-                  safety_state: 'ok',
-                  created_at: shell.createdAt,
-                  available_branches: ['overview'],
-                  current_summary: null,
-                }),
-              );
-            }
-          }
-          const thread = demoThread(threadId);
-          return thread ? c.json(threadDetailSchema.parse(thread)) : c.json(notFound, 404);
-        },
-      )
-      .get(
-        '/threads/:threadId/branches/:branch',
-        zValidator('param', z.object({ threadId: uuidSchema, branch: branchIdSchema })),
-        (c) => {
-          const { threadId, branch } = c.req.valid('param');
-          return c.json(branchContentSchema.parse(demoBranch(threadId, branch)));
-        },
-      )
-      .get('/rooms', zValidator('query', z.object({ cursor: z.string().optional() })), (c) => {
-        const response: RoomListResponse = { items: DEMO_ROOMS, nextCursor: null };
-        return c.json(roomListResponseSchema.parse(response));
-      })
-      .get('/rooms/:roomId', zValidator('param', z.object({ roomId: uuidSchema })), (c) => {
-        const room = demoRoom(c.req.valid('param').roomId);
-        return room ? c.json(roomDetailSchema.parse(room)) : c.json(notFound, 404);
-      })
+      // Threads, contributions, rooms, and lenses are REAL WS-G read/write
+      // models now (routes/forum.ts + routes/rooms.ts, mounted below).
       // Owner-only (WS-E.2.1d): the ledger returns ONLY the authenticated
       // user's entries — there is no path to another user's ledger (the
       // endpoint takes no user parameter), and it is excluded from public
@@ -346,6 +240,13 @@ export function createV1Routes() {
       .route('/', createStoriesRoutes())
       .route('/ingestion/admin', createIngestionAdminRoutes())
 
+      // --- Forum, conversation, rooms, and lenses (WS-G) ----------------------
+      // Thread reading (overview/branches/subtree/anchor), contributions,
+      // evidence cards, summaries, feed preferences, uploads, the drainer
+      // blocklist, room listing/creation/detail/subscription, and lenses.
+      .route('/', createForumRoutes())
+      .route('/', createRoomsRoutes())
+
       // --- Settings sync (SPEC §23.2 /feed/preferences) ---------------------
       .get('/settings', (c) => {
         const key = stateKey(c.req.header('cookie'));
@@ -366,61 +267,7 @@ export function createV1Routes() {
         return c.json(FAIL_CLOSED_FLAGS);
       })
 
-      // --- Contributions + reports (queued offline, WS-C.2.3) ---------------
-      .post('/contributions', zValidator('json', createContributionRequestSchema), async (c) => {
-        const request = c.req.valid('json');
-        const created = contributionSchema.parse({
-          contribution_id: randomUUID(),
-          thread_id: request.thread_id,
-          type: request.type,
-          body: request.body,
-          moderation_state: 'pending',
-          created_at: new Date().toISOString(),
-          local_draft_id: request.local_draft_id,
-        });
-        // WS-E.1.1c: emit `contribution.created` into the event pipeline for
-        // signed-in users (participation scoring input). The event carries NO
-        // body text — only the type, citation flag, and the conservative v0
-        // accusation classification (WS-E.2.2b) computed here, where the body
-        // is available, then discarded.
-        const identity = getIdentityServices();
-        const userId = await readSessionUserId(c.req.header('cookie'), identity);
-        if (userId) {
-          const events = getEventPipelineServices();
-          const event = contributionCreatedEventSchema.parse({
-            event_id: randomUUID(),
-            event_type: 'contribution.created',
-            timestamp: created.created_at,
-            schema_version: '1',
-            contribution_id: created.contribution_id,
-            thread_id: request.thread_id,
-            user_id: userId,
-            contribution_type: COMPOSER_TO_EVENT_TYPE[request.type] ?? 'low_info_reply',
-            target_claim_id: request.target_claim_id ?? null,
-            parent_contribution_id: request.parent_id ?? null,
-            has_citation: request.citations.length > 0,
-            accusation_flag: classifyAccusationV0(request.body),
-            privacy_classification: 'public',
-            retention_tier: 'public_contribution',
-          });
-          const registryEntry = TOPIC_REGISTRY['contribution.created'];
-          await events.eventStore.insertMany([
-            {
-              eventId: event.event_id,
-              eventType: event.event_type,
-              topic: event.event_type,
-              timestamp: event.timestamp,
-              privacyClassification: registryEntry.privacy_classification,
-              retentionTier: registryEntry.retention_tier,
-              payload: event as unknown as Record<string, unknown>,
-              ownerUserId: userId,
-              purgeAfter: null,
-            },
-          ]);
-          await events.router.publish(event);
-        }
-        return c.json(created, 201);
-      })
+      // --- Reports (§18.4 report mechanism; queued offline, WS-C.2.3) -------
       .post('/reports', zValidator('json', createReportRequestSchema), (c) => {
         const request = c.req.valid('json');
         return c.json(

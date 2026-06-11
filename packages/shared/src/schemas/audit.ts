@@ -47,6 +47,17 @@ export const AUDIT_EVENT_TYPES = [
   'takedown_action',
   'ingestion_review_action',
   'ingestion_config_change',
+  // WS-G forum surface: thread conversation/safety transitions (WS-G.1.1),
+  // contribution moderation-state changes, evidence verification-state
+  // transitions (WS-G.1.3), summary creation/approval (WS-G.1.4), room
+  // steward/join-request decisions (WS-G.2.3c/d), and validated forum
+  // runtime-config writes.
+  'thread_state_change',
+  'contribution_moderation_change',
+  'evidence_verification_change',
+  'summary_change',
+  'room_steward_change',
+  'forum_config_change',
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
 export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);
@@ -65,6 +76,8 @@ export const auditContextSchema = z
     setting: z.string().max(128).nullable(),
     previous_value: z.string().max(256).nullable(),
     new_value: z.string().max(256).nullable(),
+    /** WS-G.1.1 transitions: the human-stated reason for the change. */
+    reason: z.string().max(256).nullable(),
   })
   .strict();
 export type AuditContext = z.infer<typeof auditContextSchema>;

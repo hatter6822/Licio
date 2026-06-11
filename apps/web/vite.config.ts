@@ -110,9 +110,25 @@ export default defineConfig({
           { name: 'Submit', short_name: 'Submit', url: '/submit?source=pwa-shortcut' },
           { name: 'Front Page', short_name: 'Front Page', url: '/?source=pwa-shortcut' },
         ],
+        // Citation capture (WS-G.3.7a): sharing a URL to Licio opens the
+        // composer with the citation pre-populated. POST is handled by the
+        // service worker (sw-push.js), which 303-redirects into /submit —
+        // a static host never sees the POST.
+        share_target: {
+          action: '/share-target',
+          method: 'POST',
+          enctype: 'multipart/form-data',
+          params: { title: 'title', text: 'text', url: 'url' },
+        },
       },
     }),
   ],
+  resolve: {
+    // dompurify reaches the graph through TWO workspace paths (the app's own
+    // dependency and @licio/shared's UGC pipeline). Without dedupe, Rolldown
+    // bundles it twice (~8.7KB gz) — one copy, one Trusted Types story.
+    dedupe: ['dompurify', 'zod'],
+  },
   build: {
     target: 'es2022',
     sourcemap: false,
@@ -157,7 +173,7 @@ export default defineConfig({
         "object-src 'none'",
         "base-uri 'self'",
         "form-action 'self'",
-        'trusted-types default dompurify',
+        'trusted-types default dompurify licio-ugc',
         "require-trusted-types-for 'script'",
         'report-uri /api/security/csp-report',
         'report-to csp-endpoint',

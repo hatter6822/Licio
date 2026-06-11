@@ -36,6 +36,13 @@ export type LoginSearch = z.infer<typeof loginSearchSchema>;
 export const submitSearchSchema = z.object({
   threadId: uuidSchema.optional().catch(undefined),
   branch: branchIdSchema.optional().catch(undefined),
+  /** Reply context: the question being answered (WS-G.3.6d). */
+  parentId: uuidSchema.optional().catch(undefined),
+  /** Flag context: the contribution being reported (WS-G.3.4c). */
+  targetId: uuidSchema.optional().catch(undefined),
+  /** Share-target intake (WS-G.3.7a): citation pre-population. */
+  share_url: z.string().url().max(2048).optional().catch(undefined),
+  share_title: z.string().max(300).optional().catch(undefined),
 });
 export type SubmitSearch = z.infer<typeof submitSearchSchema>;
 

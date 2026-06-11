@@ -335,7 +335,10 @@ describe('store swapping through the service container (production wiring)', () 
     services.deadLetters = swappedDeadLetters;
     services.checkpoints = swappedCheckpoints;
 
-    const ok = contributionEvent();
+    // The poison trigger is "id starts with 'a'" — force the OK event's id
+    // to start with 'b' (a random hex UUID starts with 'a' 1/16 of the time,
+    // which made this test flaky).
+    const ok = { ...contributionEvent(), event_id: `b${randomUUID().slice(1)}` } as LicioEvent;
     await services.router.publish(ok);
     expect(await swappedCheckpoints.get('durable-flaky')).toBe(ok.timestamp);
 

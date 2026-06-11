@@ -37,6 +37,47 @@ export async function saveDraft(input: DraftInput): Promise<void> {
   }
 }
 
+/** Draft retention bound (WS-G.3.7c): stale drafts auto-delete on start. */
+export const DRAFT_MAX_AGE_MS = 30 * 24 * 60 * 60_000;
+
+/** Drafts for a thread (newest first), decrypted — the recovery prompt input. */
+export async function listDraftsForThread(
+  threadId: string | null,
+): Promise<DraftContributionRecord[]> {
+  const all = await draftContributions.getAll();
+  const matches = all
+    .filter((record) => record.threadId === threadId)
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  const out: DraftContributionRecord[] = [];
+  for (const record of matches) {
+    if (record.encrypted && record.cipher) {
+      const values = await decryptDraftValues(record.cipher);
+      out.push({ ...record, values: values ?? {} });
+    } else {
+      out.push(record);
+    }
+  }
+  return out;
+}
+
+/** Discard a draft (the recovery prompt's "discard"; post-submit cleanup). */
+export async function deleteDraft(draftId: string): Promise<void> {
+  await draftContributions.delete(draftId);
+}
+
+/** WS-G.3.7c expiry: delete drafts older than 30 days (called on app start). */
+export async function expireOldDrafts(now: number = Date.now()): Promise<number> {
+  const all = await draftContributions.getAll();
+  let removed = 0;
+  for (const record of all) {
+    if (now - record.updatedAt > DRAFT_MAX_AGE_MS) {
+      await draftContributions.delete(record.draftId);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
 /** Load a draft, decrypting the body when it was stored encrypted. */
 export async function loadDraft(draftId: string): Promise<DraftContributionRecord | undefined> {
   const record = await draftContributions.get(draftId);
