@@ -12,7 +12,7 @@ import { PWATT_V0_SHADOW_MODE } from '@licio/invariants';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ingestAttentionEvents } from '../events/ingest.js';
-import type { NewStoredEvent } from '../events/stores.js';
+import type { AggregationWindowRecord, NewStoredEvent } from '../events/stores.js';
 import { computeAggregationWindow, windowStartMs } from '../pwatt/aggregation.js';
 import { rankFrontPageV0 } from '../pwatt/ranking-v0.js';
 import { runEventPipelineTick } from '../pwatt/scheduler.js';
@@ -138,7 +138,15 @@ describe('aggregation per item/window (WS-E.2.1a)', () => {
     const first = await fixture.events.windowStore.get(storyId, new Date(T0).toISOString(), '1h');
     await computeAggregationWindow(fixture.events, T0, '1h');
     const second = await fixture.events.windowStore.get(storyId, new Date(T0).toISOString(), '1h');
-    expect(second).toEqual(first);
+    // The fold output is identical; computedAt is excluded DELIBERATELY — it
+    // is execution metadata that advances on every recompute (the scheduler's
+    // freshness comparison depends on that), so comparing it makes the test
+    // hostage to whether both runs land in the same clock millisecond.
+    expect(first).not.toBeNull();
+    const { computedAt: firstAt, ...firstData } = first as AggregationWindowRecord;
+    const { computedAt: secondAt, ...secondData } = second as AggregationWindowRecord;
+    expect(secondData).toEqual(firstData);
+    expect(Date.parse(secondAt)).toBeGreaterThanOrEqual(Date.parse(firstAt));
   });
 
   it('respects window boundaries (an event outside the window is excluded)', async () => {
