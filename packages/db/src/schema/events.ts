@@ -193,7 +193,42 @@ export const aggregationWindows = pgTable(
   ],
 );
 
-/** InvariantOutput (SPEC §22.1) + the WS-E.2.1e shadow-mode flag. */
+/** The known invariant-type vocabulary at rest (11 WS-H + PWAtt shadow). */
+export const INVARIANT_TYPE_DB_VALUES = [
+  'MERI',
+  'MFCI',
+  'GWEI',
+  'SCOI',
+  'PHI',
+  'hodge_tension',
+  'tropical_cascade',
+  'braid_dynamics',
+  'reeb_landscape',
+  'counterfactual_defect',
+  'path_signature_wellbeing',
+  'PWAtt_v0',
+  'PWAtt_v1',
+] as const;
+
+/** The six §22.1 target types (WS-H.1.1a). */
+export const INVARIANT_TARGET_DB_VALUES = [
+  'story',
+  'thread',
+  'feed',
+  'room',
+  'cohort',
+  'session',
+] as const;
+
+/**
+ * InvariantOutput (SPEC §22.1) + the WS-E.2.1e shadow-mode flag and the
+ * WS-H.1.1a/b/c envelope: coverage, reason codes, fallback indicator, and
+ * version metadata. `time_window` is JSONB `{start, end}` (half-open ISO
+ * instants); `score_vector` is validated per invariant type at the
+ * application layer (packages/invariants score-vector schemas) before any
+ * insert — the DB CHECKs hold the closed type/target vocabularies and the
+ * [0, 1] ranges.
+ */
 export const invariantOutputs = pgTable(
   'invariant_outputs',
   {
@@ -201,11 +236,19 @@ export const invariantOutputs = pgTable(
     invariantType: text('invariant_type').notNull(),
     targetType: text('target_type').notNull(),
     targetId: uuid('target_id').notNull(),
-    timeWindow: text('time_window').notNull(),
+    timeWindow: jsonb('time_window').$type<{ start: string; end: string }>().notNull(),
     version: text('version').notNull(),
-    scoreVector: jsonb('score_vector').$type<Record<string, number>>().notNull(),
+    scoreVector: jsonb('score_vector').$type<Record<string, unknown>>().notNull(),
     explanationSummary: text('explanation_summary'),
     confidence: doublePrecision('confidence').notNull(),
+    /** Fraction of required inputs available and fresh (WS-H.1.1c). */
+    coverage: doublePrecision('coverage').notNull(),
+    /** Registry-validated reason codes; empty array = unqualified output. */
+    reasonCodes: jsonb('reason_codes').$type<string[]>().notNull().default([]),
+    /** Derivable from reason codes; materialized for dashboard filters. */
+    fallbackUsed: boolean('fallback_used').notNull().default(false),
+    /** Algorithm parameters/config snapshot for reproducibility (WS-H.1.1b). */
+    versionMetadata: jsonb('version_metadata').$type<Record<string, unknown>>(),
     /**
      * True ⇒ the output has ZERO distribution power (SPEC §30.5). The ranking
      * boundary independently rejects shadow rows; lifting shadow mode is a
@@ -222,9 +265,25 @@ export const invariantOutputs = pgTable(
       t.timeWindow,
       t.version,
     ),
-    index('invariant_outputs_target_idx').on(t.targetId, t.createdAt),
+    index('invariant_outputs_type_target_idx').on(t.invariantType, t.targetType, t.targetId),
+    index('invariant_outputs_target_idx').on(t.targetId, t.invariantType),
     index('invariant_outputs_created_idx').on(t.createdAt),
+    index('invariant_outputs_type_version_idx').on(t.invariantType, t.version),
+    index('invariant_outputs_type_target_created_idx').on(
+      t.invariantType,
+      t.targetType,
+      sql`${t.createdAt} DESC`,
+    ),
     check('invariant_outputs_confidence', sql`${t.confidence} >= 0 and ${t.confidence} <= 1`),
+    check('invariant_outputs_coverage', sql`${t.coverage} >= 0 and ${t.coverage} <= 1`),
+    check(
+      'invariant_outputs_type',
+      sql`${t.invariantType} in ('MERI', 'MFCI', 'GWEI', 'SCOI', 'PHI', 'hodge_tension', 'tropical_cascade', 'braid_dynamics', 'reeb_landscape', 'counterfactual_defect', 'path_signature_wellbeing', 'PWAtt_v0', 'PWAtt_v1')`,
+    ),
+    check(
+      'invariant_outputs_target_type',
+      sql`${t.targetType} in ('story', 'thread', 'feed', 'room', 'cohort', 'session')`,
+    ),
   ],
 );
 
