@@ -243,3 +243,16 @@ describe('rng: seedFromString', () => {
     expect(seedFromString('MFCI:a:b')).not.toBe(seedFromString('MFCI:a:c'));
   });
 });
+
+describe('linalg: remaining guards', () => {
+  it('spectralRadius rejects non-finite inputs and isOrthogonal rejects non-square', () => {
+    expect(() =>
+      spectralRadius([
+        [Number.POSITIVE_INFINITY, 0],
+        [0, 1],
+      ]),
+    ).toThrow(/overflow/);
+    expect(isOrthogonal([[1, 0]])).toBe(false);
+    expect(isOrthogonal([])).toBe(false);
+  });
+});

@@ -5,7 +5,11 @@
 // with the shared @licio/invariants mathematics, resets cleanly (PHI-4),
 // and degrades silently when storage is unavailable.
 import { beforeEach, describe, expect, it } from 'vitest';
-import { resetTopicLoopTrackerForTests, TopicLoopTracker } from './topic-loops.js';
+import {
+  getTopicLoopTracker,
+  resetTopicLoopTrackerForTests,
+  TopicLoopTracker,
+} from './topic-loops.js';
 
 class FakeStorage implements Storage {
   #map = new Map<string, string>();
@@ -90,5 +94,38 @@ describe('TopicLoopTracker', () => {
     expect(tracker.assess().narrowLoop.detected).toBe(false);
     tracker.recordVisit('a'); // recovers by rewriting
     expect(JSON.parse(storage.getItem('licio.topic-sequence.v1') ?? '[]')).toHaveLength(1);
+  });
+});
+
+describe('TopicLoopTracker storage failures', () => {
+  class ThrowingStorage implements Storage {
+    length = 0;
+    clear(): void {}
+    getItem(): string | null {
+      throw new Error('blocked');
+    }
+    key(): string | null {
+      return null;
+    }
+    removeItem(): void {
+      throw new Error('blocked');
+    }
+    setItem(): void {
+      throw new Error('quota exceeded');
+    }
+  }
+
+  it('the module singleton is constructed once and reused', () => {
+    resetTopicLoopTrackerForTests();
+    const first = getTopicLoopTracker();
+    expect(getTopicLoopTracker()).toBe(first);
+  });
+
+  it('degrades silently when storage reads, writes, and resets throw', () => {
+    const tracker = new TopicLoopTracker(new ThrowingStorage(), () => 1_000);
+    expect(() => tracker.recordVisit('a')).not.toThrow();
+    expect(() => tracker.reset()).not.toThrow();
+    expect(tracker.assess().narrowLoop.detected).toBe(false);
+    expect(() => tracker.recordVisit('')).not.toThrow(); // empty-id guard
   });
 });

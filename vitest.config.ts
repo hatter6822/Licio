@@ -41,6 +41,7 @@ export default defineConfig({
         'apps/api/src/events/drizzle-event-stores.ts',
         'apps/api/src/ingestion/drizzle-ingestion-stores.ts',
         'apps/api/src/forum/drizzle-forum-stores.ts',
+        'apps/api/src/invariants/drizzle-invariant-stores.ts',
         'packages/db/src/similarity.ts',
       ],
       thresholds: {
