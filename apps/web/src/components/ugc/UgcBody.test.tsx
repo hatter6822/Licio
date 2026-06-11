@@ -26,7 +26,9 @@ function mockBlocklist(domains: string[]): void {
 beforeEach(() => {
   resetLinkSafetyCacheForTests();
   mockBlocklist([]);
-  vi.stubGlobal('open', vi.fn());
+  // A window-like return (the real-browser success shape): tests that need
+  // the blocked path stub null explicitly.
+  vi.stubGlobal('open', vi.fn().mockReturnValue({ opener: 'parent' }));
 });
 
 afterEach(() => {

@@ -142,8 +142,22 @@ export async function toRoomSummary(
   };
 }
 
-/** Visibility filter for listings: anonymous and non-members see PUBLIC
- *  rooms only; members/stewards additionally see their own non-public rooms. */
+/** The store's `q` semantics as a pure predicate (case-insensitive
+ *  substring on name/description) — for paths that assemble candidate
+ *  lists outside the store, e.g. the requester's own memberships. */
+export function roomMatchesQuery(room: RoomRecord, q: string): boolean {
+  const needle = q.toLowerCase();
+  return (
+    room.name.toLowerCase().includes(needle) ||
+    (room.description ?? '').toLowerCase().includes(needle)
+  );
+}
+
+/** EXISTENCE visibility (listings, join status): anonymous and non-members
+ *  see PUBLIC rooms only; members/stewards AND pending applicants see their
+ *  own non-public rooms — an applicant must be able to find the room they
+ *  applied to.  Never use this for content-bearing reads: that is
+ *  `roomContentVisibleToUser`. */
 export async function roomVisibleToUser(
   forum: ForumServices,
   room: RoomRecord,
@@ -153,6 +167,23 @@ export async function roomVisibleToUser(
   if (userId === null) return false;
   const subscription = await forum.rooms.getSubscription(room.roomId, userId);
   if (subscription !== null) return true; // active OR pending (they applied)
+  const roles = await forum.rooms.stewardRolesFor(room.roomId, userId);
+  return roles.length > 0;
+}
+
+/** CONTENT visibility (threads, lenses, detail): ACTIVE membership or a
+ *  steward role.  A pending applicant may know the room exists but reads
+ *  none of its content until a steward approves the request
+ *  (WS-G.2.3b/§16.2 — the same bar `threadVisibleToUser` enforces). */
+export async function roomContentVisibleToUser(
+  forum: ForumServices,
+  room: RoomRecord,
+  userId: string | null,
+): Promise<boolean> {
+  if (room.visibility === 'public') return true;
+  if (userId === null) return false;
+  const subscription = await forum.rooms.getSubscription(room.roomId, userId);
+  if (subscription?.status === 'active') return true;
   const roles = await forum.rooms.stewardRolesFor(room.roomId, userId);
   return roles.length > 0;
 }

@@ -267,6 +267,9 @@ export interface StoryStore {
     before: { createdAt: string; threadId: string } | null,
     limit: number,
   ): Promise<ThreadShellRecord[]>;
+  /** VISIBLE thread count: threads whose story is hidden (takedown or
+   *  safety) are excluded — a count exceeding the listable threads would be
+   *  a hidden-story oracle. */
   countThreadsByRoom(roomId: string): Promise<number>;
   /** Patch extraction outputs / source resolution / hidden state. */
   update(
@@ -645,7 +648,9 @@ export class InMemoryStoryStore implements StoryStore {
   async countThreadsByRoom(roomId: string): Promise<number> {
     let count = 0;
     for (const thread of this.#threads.values()) {
-      if (thread.roomId === roomId) count += 1;
+      if (thread.roomId !== roomId) continue;
+      const story = this.#stories.get(thread.storyId);
+      if (story && story.hiddenState === null) count += 1;
     }
     return count;
   }

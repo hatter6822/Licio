@@ -207,10 +207,13 @@ export class DrizzleStoryStore implements StoryStore {
   }
 
   async countThreadsByRoom(roomId: string): Promise<number> {
+    // Visible threads only: hidden stories (takedown/safety) are excluded so
+    // the count can never exceed the listable threads (no hidden oracle).
     const rows = await this.#db
       .select({ value: count() })
       .from(threadsTable)
-      .where(eq(threadsTable.roomId, roomId));
+      .innerJoin(storiesTable, eq(threadsTable.storyId, storiesTable.storyId))
+      .where(and(eq(threadsTable.roomId, roomId), isNull(storiesTable.hiddenState)));
     return rows[0]?.value ?? 0;
   }
 

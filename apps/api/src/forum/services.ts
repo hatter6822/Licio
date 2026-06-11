@@ -199,7 +199,14 @@ export function registerForumConsumers(
         now: forum.now,
       };
       for (const itemId of signal.target_ids) {
-        const thread = await ingestion.stories.getThreadByStoryId(itemId);
+        // Cascade target ids are HETEROGENEOUS: attention-driven items carry
+        // story ids, while contribution/evidence-driven items carry THREAD
+        // ids (pwatt/aggregation.ts folds those events by payload.thread_id).
+        // Resolve thread-first so forum-driven cascades — the common case
+        // for harassment — are never silently skipped.
+        const thread =
+          (await ingestion.stories.getThreadById(itemId)) ??
+          (await ingestion.stories.getThreadByStoryId(itemId));
         if (!thread) continue;
         const applied = await escalateThreadOnIntegritySignal(
           deps,

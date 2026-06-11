@@ -210,6 +210,16 @@ describe('integrity escalation (the forum-thread-posture consumer)', () => {
     expect(await fixture.events.deadLetters.list()).toEqual([]);
   });
 
+  it('resolves THREAD-id targets too (forum-driven cascades aggregate by thread)', async () => {
+    // pwatt/aggregation folds contribution/evidence events by
+    // payload.thread_id, so cascades detected on forum activity carry
+    // THREAD ids in target_ids — the consumer must not silently skip them.
+    await fixture.events.router.publish(cascadeSignal(threadId));
+    await fixture.settleAll();
+    expect(await safetyState()).toBe('elevated');
+    expect(await conversationState()).toBe('tense');
+  });
+
   it('ignores non-cascade signals and unknown targets', async () => {
     await fixture.events.router.publish(
       integritySignalDetectedEventSchema.parse({

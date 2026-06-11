@@ -36,7 +36,9 @@ export interface UgcBodyProps {
  */
 function openExternal(href: string, onBlocked: () => void): void {
   const opened = window.open(href, '_blank');
-  if (opened === null) {
+  // Falsy (not just null) covers environments whose open() returns
+  // undefined — jsdom, some embedders — as well as spec-compliant blocking.
+  if (!opened) {
     onBlocked();
     return;
   }

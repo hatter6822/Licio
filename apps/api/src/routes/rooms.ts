@@ -33,6 +33,8 @@ import {
   isRoomSteward,
   joinRoom,
   mergeNotificationPreferences,
+  roomContentVisibleToUser,
+  roomMatchesQuery,
   roomTypeMetadata,
   roomVisibleToUser,
   slugify,
@@ -113,13 +115,6 @@ export function createRoomsRoutes() {
           const config = forum.config();
           const pageSize = Math.min(query.limit ?? config.roomPageSize, config.roomPageSizeMax);
 
-          // Fetch a bounded superset, then apply requester-specific filters.
-          const candidates = await forum.rooms.list({
-            ...(query.type !== undefined ? { roomType: query.type } : {}),
-            ...(query.q !== undefined ? { query: query.q } : {}),
-            limit: 1_000,
-          });
-
           const joinedSet = new Set(
             userId !== null
               ? (await forum.rooms.listSubscriptionsByUser(userId))
@@ -128,30 +123,89 @@ export function createRoomsRoutes() {
               : [],
           );
 
-          let rows: RoomRecord[] = [];
-          for (const room of candidates) {
-            if (!(await roomVisibleToUser(forum, room, userId))) continue;
-            if (query.joined === 'true' && !joinedSet.has(room.roomId)) continue;
-            if (query.recommended === 'true' && joinedSet.has(room.roomId)) continue;
-            rows.push(room);
-          }
-          if (query.recommended === 'true') {
-            // Recency-only ordering (no popularity inputs — see forum/rooms.ts).
-            rows = [...rows].sort(compareRecommended);
-          }
+          let page: RoomRecord[];
+          let nextCursor: string | null;
 
-          // Opaque cursor = the last room id of the previous page
-          // (deterministic order ⇒ exact resumption).
-          const startIndex =
-            query.cursor !== undefined
-              ? (() => {
-                  const at = rows.findIndex((room) => room.roomId === query.cursor);
-                  return at >= 0 ? at + 1 : 0;
-                })()
-              : 0;
-          const page = rows.slice(startIndex, startIndex + pageSize);
-          const last = page[page.length - 1];
-          const nextCursor = startIndex + page.length < rows.length && last ? last.roomId : null;
+          if (query.joined === 'true' || query.recommended === 'true') {
+            // `joined` enumerates the requester's OWN memberships (complete by
+            // construction); `recommended` is a bounded recent-rooms SURFACE,
+            // not a directory — both order deterministically and page with a
+            // findIndex cursor over the assembled list.
+            let rows: RoomRecord[] = [];
+            if (query.joined === 'true') {
+              for (const roomId of joinedSet) {
+                const room = await forum.rooms.getById(roomId);
+                if (!room) continue;
+                if (query.type !== undefined && room.roomType !== query.type) continue;
+                if (query.q !== undefined && !roomMatchesQuery(room, query.q)) continue;
+                rows.push(room);
+              }
+              rows.sort((a, b) =>
+                a.createdAt === b.createdAt
+                  ? a.roomId.localeCompare(b.roomId)
+                  : a.createdAt.localeCompare(b.createdAt),
+              );
+            } else {
+              const candidates = await forum.rooms.list({
+                ...(query.type !== undefined ? { roomType: query.type } : {}),
+                ...(query.q !== undefined ? { query: query.q } : {}),
+                limit: 1_000,
+              });
+              for (const room of candidates) {
+                if (joinedSet.has(room.roomId)) continue;
+                if (!(await roomVisibleToUser(forum, room, userId))) continue;
+                rows.push(room);
+              }
+              // Recency-only ordering (no popularity inputs — forum/rooms.ts).
+              rows = [...rows].sort(compareRecommended);
+            }
+            const startIndex =
+              query.cursor !== undefined
+                ? (() => {
+                    const at = rows.findIndex((room) => room.roomId === query.cursor);
+                    return at >= 0 ? at + 1 : 0;
+                  })()
+                : 0;
+            page = rows.slice(startIndex, startIndex + pageSize);
+            const last = page[page.length - 1];
+            nextCursor = startIndex + page.length < rows.length && last ? last.roomId : null;
+          } else {
+            // Directory listing: walk the store-level `(created_at, id)`
+            // keyset until a full visible page accumulates — no fixed fetch
+            // prefix can strand rooms beyond it.  The cursor is the last room
+            // id of the page; the scan is bounded per request and resumes
+            // exactly (the keyset survives inserts).
+            let after: { createdAt: string; id: string } | null = null;
+            if (query.cursor !== undefined) {
+              const lastRoom = await forum.rooms.getById(query.cursor);
+              if (lastRoom) after = { createdAt: lastRoom.createdAt, id: lastRoom.roomId };
+            }
+            const visible: RoomRecord[] = [];
+            let exhausted = false;
+            const BATCH = 200;
+            const MAX_BATCHES = 25;
+            for (let scan = 0; scan < MAX_BATCHES && visible.length <= pageSize; scan += 1) {
+              const batch = await forum.rooms.list({
+                ...(query.type !== undefined ? { roomType: query.type } : {}),
+                ...(query.q !== undefined ? { query: query.q } : {}),
+                after,
+                limit: BATCH,
+              });
+              for (const room of batch) {
+                if (visible.length > pageSize) break;
+                if (await roomVisibleToUser(forum, room, userId)) visible.push(room);
+              }
+              const lastScanned = batch[batch.length - 1];
+              if (!lastScanned || batch.length < BATCH) {
+                exhausted = true;
+                break;
+              }
+              after = { createdAt: lastScanned.createdAt, id: lastScanned.roomId };
+            }
+            page = visible.slice(0, pageSize);
+            const last = page[page.length - 1];
+            nextCursor = (visible.length > pageSize || !exhausted) && last ? last.roomId : null;
+          }
 
           const items = [];
           for (const room of page) {
@@ -299,7 +353,10 @@ export function createRoomsRoutes() {
           const userId = await softUserId(c.req.header('cookie'), identity);
           const room = await forum.rooms.getById(roomId);
           if (!room) return c.json(notFound, 404);
-          if (room.visibility !== 'public' && !(await roomVisibleToUser(forum, room, userId))) {
+          if (
+            room.visibility !== 'public' &&
+            !(await roomContentVisibleToUser(forum, room, userId))
+          ) {
             return c.json(deny('forbidden', 'This room is restricted'), 403);
           }
           let before: { createdAt: string; threadId: string } | null = null;
@@ -494,7 +551,10 @@ export function createRoomsRoutes() {
           const userId = await softUserId(c.req.header('cookie'), identity);
           const room = await forum.rooms.getById(roomId);
           if (!room) return c.json(notFound, 404);
-          if (room.visibility !== 'public' && !(await roomVisibleToUser(forum, room, userId))) {
+          if (
+            room.visibility !== 'public' &&
+            !(await roomContentVisibleToUser(forum, room, userId))
+          ) {
             return c.json(deny('forbidden', 'This room is restricted'), 403);
           }
           const lenses = await forum.lenses.listByRoom(roomId);
@@ -560,7 +620,7 @@ export function createRoomsRoutes() {
             if (
               room &&
               room.visibility !== 'public' &&
-              !(await roomVisibleToUser(forum, room, userId))
+              !(await roomContentVisibleToUser(forum, room, userId))
             ) {
               return c.json(
                 storyLensesResponseSchema.parse({

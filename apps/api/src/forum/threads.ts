@@ -165,11 +165,16 @@ export async function threadOverview(
 }
 
 /**
- * One structured section's content (WS-G.3.3 branch endpoint).  Tree
- * sections page over the deterministic DFS sequence; chronology pages over
- * flat `(created_at, id)` order.  `cursor` is the last contribution id of
- * the previous page (recompute-and-skip over the bounded fetch — the order
- * is deterministic, so resumption is exact).
+ * One structured section's content (WS-G.3.3 branch endpoint).  Pagination
+ * is COMPLETE over arbitrarily large threads: pages walk the store-level
+ * `(created_at, id)` keyset (the cursor is the last FETCHED contribution
+ * id, recovered to its keyset position via one read), so no fixed fetch
+ * prefix can strand older contributions.  Chronology pages are exactly the
+ * keyset order; tree sections are depth-first ordered WITHIN each page — a
+ * row whose parent landed on an earlier page renders as a local root with
+ * its absolute depth indicator preserved (the same documented degradation
+ * as subtree pages).  The cursor advances over rows the requester cannot
+ * see, so hidden rows can never stall the walk.
  */
 export async function branchContent(
   bundle: Bundle,
@@ -180,19 +185,35 @@ export async function branchContent(
   cursor: string | null,
 ): Promise<BranchContent> {
   const config = bundle.forum.config();
+  const pageSize = config.branchPageSize;
+
+  // Recover the keyset position; an unknown or foreign-thread cursor
+  // restarts from the beginning (defensive, never an error).
+  let after: { createdAt: string; id: string } | null = null;
+  if (cursor !== null) {
+    const last = await bundle.forum.contributions.getById(cursor);
+    if (last && last.threadId === threadId) {
+      after = { createdAt: last.createdAt, id: last.contributionId };
+    }
+  }
+
   const fetchOpts = {
     states: ['published', 'under_review', 'hidden', 'removed'] as const,
-    limit: config.threadFetchLimit,
+    after,
+    limit: pageSize + 1,
   };
-  const rows =
+  const fetched =
     branch === 'chronology'
       ? await bundle.forum.contributions.listByThread(threadId, { ...fetchOpts })
       : await bundle.forum.contributions.listByThread(threadId, {
           ...fetchOpts,
           types: SECTION_TYPES[branch],
         });
+  const hasMore = fetched.length > pageSize;
+  const page = fetched.slice(0, pageSize);
+  const lastFetched = page[page.length - 1];
 
-  const renderable = visibleRows(rows, requesterUserId);
+  const renderable = visibleRows(page, requesterUserId);
   const ordered =
     branch === 'chronology'
       ? renderable // already (created_at, id) ascending
@@ -204,23 +225,11 @@ export async function branchContent(
           });
         })();
 
-  const startIndex =
-    cursor === null
-      ? 0
-      : (() => {
-          const at = ordered.findIndex((entry) => entry.row.contributionId === cursor);
-          return at >= 0 ? at + 1 : 0;
-        })();
-  const page = ordered.slice(startIndex, startIndex + config.branchPageSize);
-  const last = page[page.length - 1];
-  const nextCursor =
-    startIndex + page.length < ordered.length && last ? last.row.contributionId : null;
-
   const childCounts = await bundle.forum.contributions.childCounts(
-    page.map((entry) => entry.row.contributionId),
+    ordered.map((entry) => entry.row.contributionId),
   );
   const contributions: ContributionPublic[] = [];
-  for (const entry of page) {
+  for (const entry of ordered) {
     const author = entry.tombstone ? null : await resolveAuthor(entry.row.userId);
     contributions.push(
       toContributionPublic(
@@ -232,7 +241,12 @@ export async function branchContent(
       ),
     );
   }
-  return { thread_id: threadId, branch, contributions, next_cursor: nextCursor };
+  return {
+    thread_id: threadId,
+    branch,
+    contributions,
+    next_cursor: hasMore && lastFetched ? lastFetched.contributionId : null,
+  };
 }
 
 /**

@@ -480,7 +480,31 @@ export async function createContribution(
     });
   }
 
-  // 7. Durable events (ids/types/flags only — never body text).
+  // 7. Durable events (ids/types/flags only — never body text).  A
+  // safety-HELD contribution emits NOTHING (fail toward caution): scoring,
+  // lifecycle activity, and freshness must not count content readers
+  // cannot see — a malware-held "evidence" post would otherwise still earn
+  // participation weight while hidden.  Emission on release is the WS-J
+  // approval flow's job (the review-queue seam owns the state change).
+  if (moderationState === 'under_review') {
+    // No room-activity bump either: the public recency timestamp must not
+    // reflect content readers cannot see.
+    forum.metrics.increment('contributions.held_emission_deferred');
+    forum.metrics.increment(`contributions.created.${request.type}`);
+    forum.log('forum.contribution_created', {
+      contribution_id: contribution.contributionId,
+      thread_id: contribution.threadId,
+      type: request.type,
+      moderation_state: moderationState,
+      has_citation: citations.length > 0,
+    });
+    return {
+      ok: true,
+      contribution,
+      evidenceCardId: evidenceCard?.evidenceId ?? null,
+      deduplicated: false,
+    };
+  }
   const hasCitation = citations.length > 0;
   const baseType = FORUM_TO_EVENT_TYPE[request.type];
   const eventType: EventContributionType =
@@ -689,12 +713,52 @@ export async function editContribution(
   if (update.citations !== undefined) patch.citations = update.citations;
   // Metadata edits are deliberately NOT accepted in v0 (the structured fields
   // define the contribution's meaning; changing them is a new contribution).
+
+  // Safety re-screen (WS-G.3.1 parity): an edit can introduce exactly the
+  // content the create-time classifier would have held — a denylisted URL
+  // in the body or citations.  Classify the contribution AS IT WILL READ
+  // after the patch; a flag holds it for review (fail toward caution, same
+  // queue as create-time holds).
+  const editedShape = {
+    type: existing.type,
+    thread_id: existing.threadId,
+    client_draft_id: existing.clientDraftId,
+    body: patch.body ?? existing.body,
+    citations: patch.citations ?? existing.citations,
+    ...(typeof existing.metadata['source_url'] === 'string'
+      ? { source_url: existing.metadata['source_url'] }
+      : {}),
+  } as unknown as ContributionCreate;
+  const verdict = await forum.safety.classify(editedShape);
+
   const edited = await forum.contributions.applyEdit(contributionId, patch, userId, randomUUID());
   if (!edited) {
     return {
       ok: false,
       rejection: { status: 404, code: 'not_found', message: 'Contribution not found' },
     };
+  }
+  if (verdict.flagged && edited.moderationState === 'published') {
+    forum.metrics.increment('contributions.edit_safety_flagged');
+    const held = await forum.contributions.setModerationState(contributionId, 'under_review');
+    const storyId = await bundle.ingestion.stories.getStoryIdByThreadId(existing.threadId);
+    await bundle.ingestion.reviewQueue.insert({
+      kind: 'contribution_safety_hold',
+      storyId,
+      context: {
+        contribution_id: contributionId,
+        thread_id: existing.threadId,
+        reasons: verdict.reasons,
+        trigger: 'edit',
+      },
+      status: 'pending',
+      resolution: null,
+      resolvedBy: null,
+      resolvedAt: null,
+      notBefore: null,
+    });
+    forum.metrics.increment('contributions.edited');
+    return { ok: true, contribution: held ?? edited };
   }
   forum.metrics.increment('contributions.edited');
   return { ok: true, contribution: edited };

@@ -143,7 +143,11 @@ tests.  `member_count` and `thread_count` are display-only.
 Subscriptions (WS-G.2.3d): public joins are immediate and idempotent;
 restricted joins create a pending request (stable `request_id`) decided by
 room stewards; leaving removes the subscription AND its per-room
-notification preferences (one row).
+notification preferences (one row).  Visibility is two-tier: a pending
+applicant can see the room EXISTS (listings, their join status) but reads
+none of its content — threads, lenses, and detail all require an ACTIVE
+membership or a steward role (`roomContentVisibleToUser`, the same bar
+`threadVisibleToUser` enforces).
 
 Lenses (WS-G.2.2/2.4): `(room_id, lens_type)` unique over the seven §16.2
 types; contributions may carry `metadata.lens_id` (validated against the
@@ -155,18 +159,18 @@ SCOI divergence summary is absent gracefully until WS-H.4 produces it.
 
 | Endpoint | Notes |
 |---|---|
-| `POST /v1/contributions` | The guard chain: per-account sliding-window rate limit (10/min default, 429 + exact Retry-After, keyed by non-reversible account ref — never an IP) → thread existence/visibility (hidden story → 404; restricted-room thread → 404 to non-members; archived → 409; safety-restricted → 403) → `client_draft_id` dedup (existing row returns, 200) → per-type cross-record validation (422 with specific messages) → safety pre-checks (flag → `under_review` + review queue) → transactional insert (atomic with the evidence card) → durable `contribution.created` (+`evidence.added`) emission |
+| `POST /v1/contributions` | The guard chain: per-account sliding-window rate limit (10/min default, 429 + exact Retry-After, keyed by non-reversible account ref — never an IP) → thread existence/visibility (hidden story → 404; restricted-room thread → 404 to non-members; archived → 409; safety-restricted → 403) → `client_draft_id` dedup (existing row returns, 200) → per-type cross-record validation (422 with specific messages) → safety pre-checks (flag → `under_review` + review queue) → transactional insert (atomic with the evidence card) → durable `contribution.created` (+`evidence.added`) emission — EXCEPT for safety-held rows, which emit nothing and bump no room activity (scoring/lifecycle/freshness must not count invisible content; emission on release is the WS-J approval seam) |
 | `GET /v1/threads/:id` | Overview: six section counts + layered summary status |
-| `GET /v1/threads/:id/branches/:branch` | Section content in deterministic DFS tree order with depth indicators; pages of 50 with a continuation cursor |
+| `GET /v1/threads/:id/branches/:branch` | Section content with depth indicators, keyset-paginated at the store level (complete over arbitrarily large threads; chronology pages are exact `(created_at, id)` order, tree sections are depth-first WITHIN each page — a cross-page parent renders as a local root with absolute depth) |
 | `GET /v1/threads/:id/contributions?root=` | Materialized-path subtree, keyset-paginated like branches (pages of `branchPageSize`; the cursor is the last contribution id; complete over arbitrarily large subtrees; an invisible root gates every page) |
 | `GET /v1/contributions/:id/anchor` | Semantic deep-link anchor (section + subtree root) |
-| `PATCH/DELETE /v1/contributions/:id` | Author-only edit (history snapshot; citation floors survive edits) and tombstone removal; 404-over-403 |
-| `POST /v1/evidence` | Standalone cards with explicit material + relationship types |
-| `POST /v1/threads/:id/summaries` | Community/steward layers (§24.3 uncertainty required) |
+| `PATCH/DELETE /v1/contributions/:id` | Author-only edit (history snapshot; citation floors survive edits; the safety classifier RE-RUNS on the edited content and a flag holds it for review) and tombstone removal; 404-over-403 |
+| `POST /v1/evidence` | Standalone cards with explicit material + relationship types; emits the same durable `evidence.added` as the co-create path (resolved through the claim's story thread) so embeddings/lifecycle see every card |
+| `POST /v1/threads/:id/summaries` | Community/steward layers (§24.3 uncertainty required); cited branches AND cited evidence are validated as real, thread-scoped records — provenance can never point at arbitrary ids |
 | `GET/PATCH /v1/feed/preferences` | The §23.2 canonical veneer over the WS-D settings stores (single source of truth; clamped/audited); the five §13 modes |
 | `POST /v1/uploads`, `GET /v1/uploads/:id` | See uploads below |
 | `GET /v1/security/link-blocklist` | Drainer blocklist, steward-tunable, content-hash version for cache busting |
-| `GET/POST… /v1/rooms*` | Listing/creation/detail/threads/join/notifications/join-requests/lenses |
+| `GET/POST… /v1/rooms*` | Listing/creation/detail/threads/join/notifications/join-requests/lenses; the directory walks the store keyset until a full visible page (no fetch-prefix cap), `joined` enumerates the requester's own memberships, and `thread_count` counts VISIBLE threads only (hidden stories excluded — no oracle) |
 | `PATCH /v1/threads/:id/state` | Steward transitions (audited, reasoned) |
 | `/v1/forum/admin/*` | Steward+TOTP: validated config writes (422 on bad values), metrics |
 

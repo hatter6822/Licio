@@ -18,6 +18,7 @@ import {
   contributionPublicSchema,
   contributionSubtreeSchema,
   contributionUpdateSchema,
+  evidenceAddedEventSchema,
   evidenceCreateRequestSchema,
   evidenceCreateResponseSchema,
   feedPreferencesPatchSchema,
@@ -31,6 +32,7 @@ import {
   summaryCreateRequestSchema,
   summaryPublicSchema,
   type ThreadSafetyState,
+  TOPIC_REGISTRY,
   threadConversationStateSchema,
   threadDetailSchema,
   threadSafetyStateSchema,
@@ -51,6 +53,7 @@ import {
 import {
   createContribution,
   editContribution,
+  mapCardTypeToEventType,
   removeContribution,
   threadVisibleToUser,
 } from '../forum/contributions.js';
@@ -389,6 +392,50 @@ export function createForumRoutes() {
             storyId: claim.storyId,
           });
           bundle.forum.metrics.increment(`evidence.created.${card.evidenceType}`);
+          // The standalone path emits the SAME durable `evidence.added` the
+          // contribution co-create path does — the embedding and lifecycle
+          // consumers only see cards through that event.  The wire requires
+          // a thread id: resolve it through the claim's story; a storyless
+          // claim has no thread to attribute, so its card stays unemitted
+          // (counted, not silent).
+          const threadShell =
+            claim.storyId !== null
+              ? await bundle.ingestion.stories.getThreadByStoryId(claim.storyId)
+              : null;
+          if (threadShell) {
+            const added = evidenceAddedEventSchema.parse({
+              event_id: randomUUID(),
+              event_type: 'evidence.added',
+              timestamp: card.createdAt,
+              schema_version: '1',
+              evidence_id: card.evidenceId,
+              claim_id: card.claimId,
+              thread_id: threadShell.threadId,
+              user_id: auth.userId,
+              evidence_type: mapCardTypeToEventType(card.evidenceType),
+              source_id: null,
+              contribution_id: card.contributionId,
+              privacy_classification: 'public',
+              retention_tier: 'public_contribution',
+            });
+            const registryEntry = TOPIC_REGISTRY['evidence.added'];
+            await bundle.events.eventStore.insertMany([
+              {
+                eventId: added.event_id,
+                eventType: added.event_type,
+                topic: added.event_type,
+                timestamp: added.timestamp,
+                privacyClassification: registryEntry.privacy_classification,
+                retentionTier: registryEntry.retention_tier,
+                payload: added as unknown as Record<string, unknown>,
+                ownerUserId: auth.userId,
+                purgeAfter: null,
+              },
+            ]);
+            bundle.forum.trackBackground(bundle.events.router.publish(added));
+          } else {
+            bundle.forum.metrics.increment('evidence.created.unemitted_no_thread');
+          }
           return c.json(
             evidenceCreateResponseSchema.parse({
               evidence: {
@@ -440,7 +487,12 @@ export function createForumRoutes() {
               ? (await bundle.forum.rooms.stewardRolesFor(thread.roomId, auth.userId)).length > 0
               : false;
           const outcome = await createSummary(
-            { forum: bundle.forum, stories: bundle.ingestion.stories, audit: identity.audit },
+            {
+              forum: bundle.forum,
+              stories: bundle.ingestion.stories,
+              evidence: bundle.ingestion.evidence,
+              audit: identity.audit,
+            },
             request,
             auth.userId,
             platformSteward || roomSteward,
