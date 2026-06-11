@@ -352,8 +352,14 @@ acknowledges the accepted count.
   coverage gate.
 - **E2E (Playwright + axe):** `e2e/routing.spec.ts` (client-side tab navigation +
   `aria-current`, auth-guard redirect, fail-closed `RestrictedState`, in-shell
-  not-found, WCAG 2.2 AA), `e2e/performance.spec.ts` (branch-open budget), and
-  `e2e/offline.spec.ts` (offline app shell from the SW precache).
+  not-found, WCAG 2.2 AA), `e2e/performance.spec.ts` (branch-open budget,
+  WS-G-schema-exact fixtures), `e2e/offline.spec.ts` (offline app shell from
+  the SW precache), `e2e/design-system.spec.ts` (workbench axe/zoom/contrast
+  modes), and the WS-G real-browser pair `e2e/ugc-safety.spec.ts` +
+  `e2e/composer.spec.ts` (the `licio-ugc` Trusted Types policy under the
+  preview's enforcing CSP, inert attack fixtures, the drainer interstitial,
+  and the 11-mode composer with shared-schema validation —
+  `docs/forum/README.md`).
 - **Static gates:** `check-sw-security`, `check-bundle-size`, `lint:security`,
   `check:no-applause`, **`check:no-raw-egress`**, `check:workspace-deps`, strict
   `tsc`.

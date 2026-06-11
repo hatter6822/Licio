@@ -206,7 +206,9 @@ pnpm sbom                  # CycloneDX SBOM + license-compatibility check
 
 Unit suites run in-memory with no services. The gated integration tests —
 the real Drizzle migration chain against Postgres plus the Redis adapters —
-run only when the services are reachable and skip otherwise:
+run whenever the services are reachable and skip otherwise. CI provisions
+`pgvector/pgvector:pg16` and `redis:7` service containers on the test job,
+so they run there too; locally:
 
 ```sh
 DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev \

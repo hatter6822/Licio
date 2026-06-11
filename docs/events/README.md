@@ -181,7 +181,11 @@ poisoned events after the cause is fixed and clears the queue on success. Defaul
 `realtime-aggregation` (scoring; counters + the volume-threshold trigger,
 wired in production boot to score a hot item's current 1h window early) and
 `integrity-intake` (restricted-authorized, non-scoring, durable; forwards
-integrity signals to the MFCI/review-queue hooks).
+integrity signals to the MFCI/review-queue hooks).  WS-F registers the
+ingestion consumers and WS-G registers `forum-thread-posture`
+(restricted-authorized, non-scoring, durable; a harassment-cascade
+detection elevates the target thread's safety posture and marks the
+conversation tense — `docs/forum/README.md`).
 
 ## Retention and anonymization (WS-E.1.4)
 

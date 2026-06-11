@@ -196,7 +196,8 @@ Interface-level hooks wired to follow-up workstreams:
   the tombstoned user row is the anonymization) and to REMOVE room
   memberships and steward assignments (membership is personal data);
   `exportContributions` composes stories + forum contributions + evidence
-  cards + room subscriptions, keyset-paginated to exhaustion (WS-D.2.4b).
+  cards + room subscriptions + upload records (with their same-origin
+  retrieval URLs), keyset-paginated to exhaustion (WS-D.2.4b).
 - **Attention-history purge**, **attention export**, and the **settings-change
   downstream consumer** — CLOSED by WS-E (`docs/events/README.md`): production
   boot wires `purgeAttention` (deletes the user's events, §22.1 aggregate rows,

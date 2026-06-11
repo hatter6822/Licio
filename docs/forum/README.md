@@ -63,6 +63,30 @@ vocabulary by enum recreation (`empty`/`emerging`→`active`,
 `dormant`→`archived`, `caution`→`elevated`), so the final enums hold exactly
 the canon.
 
+**Organic (system) transitions.**  Two principled drivers ride the same
+audited path as the steward surface, with actor `system` and a
+machine-readable reason:
+
+* *Structural deepening* — `active → deepening` evaluates at contribution
+  creation (detached; the response never waits) and fires only when ALL of
+  volume (published contributions ≥ `forum.deepeningMinContributions`,
+  default 12), evidence (citation-bearing types — evidence/correction/
+  counterexample — ≥ `forum.deepeningMinEvidence`, default 2), and a LIVE
+  multi-level exchange (the new contribution's depth ≥
+  `forum.deepeningMinDepth`, default 2) hold.  Deterministic given store
+  state; never fires from a non-active state.
+* *Integrity escalation* — the WS-E harassment-cascade detection (a
+  validated, base-rate-conditioned signal — never a fresh lexical
+  heuristic) drives `safety normal → elevated` and `conversation active →
+  tense` through the durable `forum-thread-posture` router consumer
+  (restricted classification, non-scoring; idempotent under at-least-once
+  redelivery; burst signals deliberately ignored).  Per the ratified graph,
+  `deepening` has no tense edge — an escalated deepening thread elevates
+  its SAFETY posture and keeps its conversation state.
+
+Everything else (de-escalation, review, resolution) stays HUMAN: recovery
+routes through `under_review`, which is steward judgment (WS-J).
+
 **Contributions** (WS-G.1.2a–d).  Eleven types — `question`, `answer`,
 `evidence`, `correction`, `synthesis`, `counterexample`, `explanation`,
 `local_context`, `direct_experience`, `moderation_concern`,
@@ -134,7 +158,7 @@ SCOI divergence summary is absent gracefully until WS-H.4 produces it.
 | `POST /v1/contributions` | The guard chain: per-account sliding-window rate limit (10/min default, 429 + exact Retry-After, keyed by non-reversible account ref — never an IP) → thread existence/visibility (hidden story → 404; restricted-room thread → 404 to non-members; archived → 409; safety-restricted → 403) → `client_draft_id` dedup (existing row returns, 200) → per-type cross-record validation (422 with specific messages) → safety pre-checks (flag → `under_review` + review queue) → transactional insert (atomic with the evidence card) → durable `contribution.created` (+`evidence.added`) emission |
 | `GET /v1/threads/:id` | Overview: six section counts + layered summary status |
 | `GET /v1/threads/:id/branches/:branch` | Section content in deterministic DFS tree order with depth indicators; pages of 50 with a continuation cursor |
-| `GET /v1/threads/:id/contributions?root=` | Materialized-path subtree |
+| `GET /v1/threads/:id/contributions?root=` | Materialized-path subtree, keyset-paginated like branches (pages of `branchPageSize`; the cursor is the last contribution id; complete over arbitrarily large subtrees; an invisible root gates every page) |
 | `GET /v1/contributions/:id/anchor` | Semantic deep-link anchor (section + subtree root) |
 | `PATCH/DELETE /v1/contributions/:id` | Author-only edit (history snapshot; citation floors survive edits) and tombstone removal; 404-over-403 |
 | `POST /v1/evidence` | Standalone cards with explicit material + relationship types |
@@ -174,11 +198,18 @@ char caps with live counters, the `direct_experience` privacy acknowledgment
 gates submit (aria-disabled until checked), flag reasons are a curated
 WS-A.1.2 subset (import-time guarded against the ratified list), voice
 dictation rides the Web Speech API (graceful absence), and drafts autosave
-encrypted to IndexedDB on every edit + every 5 s + on backgrounding, with a
-resume-or-discard prompt and a 30-day expiry sweep at app start.  Share
-target (WS-G.3.7a): the manifest registers a POST `/share-target`; the
-service worker 303-redirects the shared payload into `/submit` search params
-(length-bounded, schema-validated).
+encrypted to IndexedDB through a trailing 800 ms debounce (one
+encrypt+write per pause — never one per keystroke) with backgrounding and
+unmount flushes, a per-draft resume-or-discard prompt (the most recent
+three), and a 30-day expiry sweep at app start.  Share target (WS-G.3.7a):
+the manifest registers a POST `/share-target`; the service worker
+303-redirects the shared payload into `/submit` search params
+(length-bounded, schema-validated), where it becomes a STRUCTURED citation
+(`url` + shared `title` + `accessed_at`) shown as a preview chip with a
+link-safety caution when the heuristics flag it.  The citations textarea is
+seeded with the URL and stays the source of truth: at payload build the
+seed only ENRICHES a surviving matching line (deleting the line — or
+dismissing the chip — drops it).
 
 **Uploads** (WS-G.3.7b).  JPEG/PNG/WebP ≤ 5 MB and PDF ≤ 10 MB with
 magic-byte validation (polyglots rejected).  Image metadata is stripped
@@ -188,10 +219,21 @@ EXIF/XMP chunks, clears the VP8X flag bits, and recomputes the RIFF size.
 AVIF metadata removal would require rewriting ISO-BMFF `iloc` offsets, so an
 AVIF carrying Exif/XMP is REJECTED (fail closed — the privacy promise is
 never silently broken) and metadata-free AVIF passes.  Alt text is required
-for images; only scan-cleared uploads are served (the WS-J.2.6b seam); PDFs
-download rather than render inline.  Bytes live in S3-compatible storage
-when the `S3_*` group is configured, else in-memory with a production
-warning (the WS-D DSAR-archive posture).
+for images; PDFs download rather than render inline.  Bytes live in
+S3-compatible storage when the `S3_*` group is configured, else in-memory
+with a production warning (the WS-D DSAR-archive posture).
+
+**Scan gate** (the WS-J.2.6b seam, explicit).  After the inline local
+checks pass, the route consults the injectable `UploadScanner`
+(`forum/safety.ts`): `clear` serves immediately, `pending` stores the
+record but blocks BOTH attachment and serving until a later
+`setScanState('clear')`, and `flagged` rejects the upload outright (422,
+nothing stored).  The default `LocalChecksUploadScanner` clears — the local
+checks ARE the scan until WS-J's shared malware intelligence swaps in
+behind the same interface — and the gate itself is exercised with fake
+scanners at the route level, so the seam swap needs no route changes.
+`scan_state` rides the wire (`uploadPublicSchema`) so clients can show a
+pending hold.
 
 ## WS-G.4 UGC safety (defense in depth)
 
@@ -226,10 +268,21 @@ blocklist (exact/subdomain), contract-interaction path/query patterns
 cost), and dApp mimicry (brand labels outside the real domain;
 edit-distance-1 typosquats).  The runtime blocklist is steward-config
 (`forum.drainerBlocklist`), served with a content-hash version and cached
-client-side for 5 minutes.  Clicks on rendered UGC anchors are intercepted by
-React delegation; suspicious destinations show the full URL with
+client-side for 5 minutes.  Clicks on rendered UGC anchors are intercepted
+by native event delegation; suspicious destinations show the full URL with
 continue/back, and the choice is never logged against the user (anonymous
 counter only).
+
+The click path **never awaits the network**: verdicts read the cached
+blocklist synchronously (`cachedBlocklist` — bootstrap warms it via
+`warmLinkSafety`, and a stale/cold cache triggers a background refresh
+while that one click degrades to the local heuristics), so transient user
+activation always survives to `window.open`.  Openings sever the opener on
+the returned proxy rather than passing the `noopener` feature string —
+per spec that string makes `window.open` return null even on SUCCESS,
+which would make popup blocking undetectable; with the proxy approach an
+actual block falls back to the interstitial, whose Continue button is a
+fresh user gesture.
 
 ## Privacy and WS-D hooks (closed)
 
@@ -237,31 +290,52 @@ counter only).
   tombstones contribution/evidence/upload authorship and REMOVES room
   subscriptions and steward rows (membership is personal data).
 * `exportContributions` now composes stories + every forum contribution
-  (keyset-paginated to exhaustion), evidence cards, and room subscriptions —
-  the DSAR export is complete (§19.3 / GDPR Art. 15).
+  (keyset-paginated to exhaustion), evidence cards, room subscriptions, AND
+  the user's upload records (content type, size, alt text, scan state, and
+  the same-origin retrieval URL — the bytes stay in the upload store, which
+  serves them publicly once scan-cleared) — the DSAR export is complete
+  (§19.3 / GDPR Art. 15).
 * No IP, no location, anywhere (§19.1): rate limits key on non-reversible
   account refs; logs and metrics carry ids and counts, never body text.
 
 ## Testing
 
-~160 WS-G tests across the suites: shared schema/table-driven state machines
-(54), the UGC pipeline + XSS gate (132), api routes/units (67+), invariants
-classifier (22), and the web composer/UGC/drafts/dictation/payload suites.
-The 0008 migration was applied against live Postgres 16 over the real chain
-with legacy-vocabulary seed rows: enum mappings, CHECK constraints, the
-dedup index, FK actions, and the anonymize path verified.  The gated
-integration suite (`apps/api/src/__tests__/forum-integration.test.ts`,
-`DATABASE_URL`) proves all five Drizzle forum adapters against the real
-migration chain: drizzle-wrapped unique-violation mapping (the 23505 code
-lives down the error `cause` chain), transactional evidence co-create
-rollback, GIN path-containment subtree reads, storage-layer CHECK
-enforcement (depth cap, path/parent consistency, §24.3 uncertainty,
-content-type allow-list), draft-key dedup + tombstone semantics, and exact
+~190 WS-G tests across the suites: shared schema/table-driven state machines
+(54), the UGC pipeline + XSS gate (132), api routes/units/organic-transition
+suites (80+), invariants classifier (22), and the web
+composer/UGC/drafts/dictation/payload/link-safety suites.  The 0008
+migration was applied against live Postgres 16 over the real chain with
+legacy-vocabulary seed rows: enum mappings, CHECK constraints, the dedup
+index, FK actions, and the anonymize path verified.
+
+**Gated integration** (`apps/api/src/__tests__/forum-integration.test.ts`)
+proves all five Drizzle forum adapters against the real migration chain:
+drizzle-wrapped unique-violation mapping (the 23505 code lives down the
+error `cause` chain), transactional evidence co-create rollback, GIN
+path-containment subtree reads WITH keyset continuation, storage-layer
+CHECK enforcement (depth cap, path/parent consistency, §24.3 uncertainty,
+content-type allow-list), draft-key dedup + tombstone semantics, DSAR
+`listByOwner`, descending `listThreadsByRoom` pagination, exact
 keyset-cursor walks (the adapters write millisecond-precision timestamps so
 `(created_at, id)` cursors round-trip through ISO strings without
-microsecond drift).  Browser-level E2E follows the WS-D/WS-F precedent (the
-Playwright harness serves the static preview; BFF-in-the-loop E2E lands
-with WS-P).
+microsecond drift), and the S3 byte path end-to-end against a fake bucket
+(SigV4 `Authorization` + exact payload hash, round-trip, 404 degradation).
+**These run in CI**: the Test & Coverage job provisions
+`pgvector/pgvector:pg16` + `redis:7` service containers, so the gated
+suites are no longer skip-only.
+
+**Real-browser E2E** (`apps/web/e2e/ugc-safety.spec.ts`, `composer.spec.ts`;
+Chromium + Firefox + WebKit against the preview's enforcing CSP): the
+`licio-ugc` Trusted Types policy creates TrustedHTML under
+`require-trusted-types-for 'script'` in real engines, the attack fixtures
+come out inert (no script/handlers/javascript: remnants, execution flag
+never set), the interstitial intercepts a heuristic-suspicious link and
+Back closes without navigating, a safe link opens a popup under intact
+user activation, the 11-mode chooser renders with shared-schema validation
+errors and the acknowledgment-gates-submit rule, and axe passes on every
+state.  What still needs the WS-P BFF-in-the-loop harness: authenticated
+thread-page flows (server-rendered branch reads, draft RECOVERY across
+reload, submit→sync round-trips).
 
 ## Residuals (tracked elsewhere)
 
@@ -272,11 +346,19 @@ with WS-P).
   the §13 vocabulary is wired); room/thread read models in the front page.
 * **WS-J**: queue ownership (forum intake lands in the shared review inbox
   as `contribution_safety_hold`/`moderation_concern` with urgency), steward
-  moderation actions on contributions beyond author tombstones, appeals.
+  moderation actions on contributions beyond author tombstones, appeals;
+  the shared malware intelligence behind the `UploadScanner` seam.
 * **WS-K**: governed classifiers behind the `ContributionSafetyClassifier`
   and `classifyLowInfoReplyV0` seams; automated draft summaries.
 * **WS-L/M**: governance-mode transitions (read-only `ordinary` here).
-* **WS-P**: BFF-in-the-loop browser E2E (composer < 300 ms budget is
-  instrumented via the perf marks; the lab E2E measurement joins WS-P).
-* Citation TITLE extraction (og:title) needs a server-side fetch proxy —
-  cross-origin pages are not client-readable; the domain fallback ships.
+* **WS-P**: BFF-in-the-loop browser E2E for authenticated thread/submit
+  flows (the composer + UGC sink are real-browser covered via the
+  workbench; the composer < 300 ms budget is instrumented via perf marks
+  and its lab measurement joins WS-P).
+* Citation TITLE extraction for PASTED urls (og:title) needs a server-side
+  fetch proxy — cross-origin pages are not client-readable; shares carry
+  their own title through the share-target intake, and the domain fallback
+  covers the rest.
+* Migration 0008's enum recreation takes table-rewrite locks — fine for a
+  pre-production database; a live deployment would need a staged
+  (add-value/backfill/swap) variant.
