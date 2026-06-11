@@ -227,6 +227,30 @@ export const VIEW_INTROSPECTION_SQL = `
   FROM information_schema.view_table_usage vtu;
 `;
 
+/**
+ * SQL that lists the LIVE concrete partitions of `public.events`.  Postgres
+ * exposes partitions as ordinary relations a view or FK can target directly,
+ * and the `public` schema cannot be wholly fail-closed (it also holds
+ * identity tables), so the gated integration test asserts every live
+ * partition is a classified ranking table — the runtime complement of the
+ * static migration-parity test.
+ */
+export const EVENT_PARTITION_INTROSPECTION_SQL = `
+  SELECT cn.nspname AS child_schema, c.relname AS child_table
+  FROM pg_inherits i
+  JOIN pg_class c ON c.oid = i.inhrelid
+  JOIN pg_namespace cn ON cn.oid = c.relnamespace
+  JOIN pg_class p ON p.oid = i.inhparent
+  JOIN pg_namespace pn ON pn.oid = p.relnamespace
+  WHERE pn.nspname = 'public' AND p.relname = 'events';
+`;
+
+/** The live `events` partitions as qualified relations (gated integration). */
+export async function introspectEventPartitions(runQuery: QueryRunner): Promise<Relation[]> {
+  const rows = await runQuery(EVENT_PARTITION_INTROSPECTION_SQL);
+  return rows.map((r) => `${r['child_schema']}.${r['child_table']}`);
+}
+
 /** Assemble a {@link SchemaGraph} from a live database via the injected runner. */
 export async function introspectSchemaGraph(runQuery: QueryRunner): Promise<SchemaGraph> {
   const fkRows = await runQuery(FK_INTROSPECTION_SQL);

@@ -7,6 +7,7 @@ import {
   type IntrospectionRow,
   ISOLATION_CONTEXTS,
   type IsolationContexts,
+  introspectEventPartitions,
   introspectSchemaGraph,
   type SchemaGraph,
   VIEW_INTROSPECTION_SQL,
@@ -241,5 +242,15 @@ describe('partition classification parity (WS-E.3.1 migrations)', () => {
     }
     // And the parent itself stays classified.
     expect(ISOLATION_CONTEXTS.rankingTables.has('public.events')).toBe(true);
+  });
+});
+
+describe('introspectEventPartitions', () => {
+  it('maps live partition rows to qualified relations', async () => {
+    const partitions = await introspectEventPartitions(async () => [
+      { child_schema: 'public', child_table: 'events_attention_aggregated' },
+      { child_schema: 'public', child_table: 'events_default' },
+    ]);
+    expect(partitions).toEqual(['public.events_attention_aggregated', 'public.events_default']);
   });
 });
