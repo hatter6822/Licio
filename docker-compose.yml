@@ -1,7 +1,11 @@
 services:
   postgres:
-    # Pin to digest in production for reproducibility: docker pull postgres:16-alpine && docker inspect --format='{{index .RepoDigests 0}}' postgres:16-alpine
-    image: postgres:16-alpine@sha256:de3d8034ba7d698dea0e29f5ea11bf3e05ab08e52f055a42e3840da78df7fe08
+    # pgvector-enabled PostgreSQL 16 (WS-F.3.2b: the `vector` extension is part
+    # of the migration chain; the stock postgres image does not bundle it).
+    # pgvector/pgvector:pg16 is the pgvector project's official build on top of
+    # the postgres:16 image — a drop-in replacement.
+    # Pin to digest in production for reproducibility: docker pull pgvector/pgvector:pg16 && docker inspect --format='{{index .RepoDigests 0}}' pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16
     ports:
       - "5432:5432"
     environment:

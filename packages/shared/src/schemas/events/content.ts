@@ -53,7 +53,13 @@ export const contentNormalizedEventSchema = z
   .object({
     ...contentShape,
     event_type: z.literal('content.normalized'),
-    source_id: uuidSchema,
+    /**
+     * Resolved source profile (WS-F.2.2a). Null for non-link submission types
+     * (original brief, question, local update, live thread): the author IS
+     * the submitter and no web source exists to resolve — normalization still
+     * runs (language, sensitivity, claims) and still emits this event.
+     */
+    source_id: uuidSchema.nullable(),
     /** BCP-47 language tag of the normalized content. */
     language: z.string().min(2).max(35),
     sensitivity_labels: z.array(z.string().min(1).max(64)).max(20),

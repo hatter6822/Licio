@@ -373,12 +373,14 @@ REDIS_URL=redis://localhost:6379 pnpm test
 
 ## Deferred / interface-level (wired to follow-up workstreams)
 
-- **WS-F/WS-G** — `content.submitted`/`content.normalized` emission from a
-  real story-submission pipeline; `evidence.added` correlation for the
-  accusation downweight; real story titles for ledger entries (an injected
-  resolver, demo-backed today); report-intake mapping onto the WS-A reason
-  codes for user-filed `moderation.case.created` events (the schema, storage,
-  routing, and the integrity-emitted path are live).
+- **WS-F (CLOSED)** — `content.submitted`/`content.normalized` are emitted
+  by the real story-submission pipeline (`apps/api/src/ingestion/`,
+  `docs/ingestion/README.md`), and ledger story titles resolve from the real
+  story store (write-through cache; demo fixtures as fallback). Remaining
+  with **WS-G**: `evidence.added` correlation for the accusation downweight
+  and report-intake mapping onto the WS-A reason codes for user-filed
+  `moderation.case.created` events (the schema, storage, routing, and the
+  integrity-emitted path are live).
 - **WS-H** — MERI/SCOI/PHI/Hodge providers behind the existing hooks
   (`hooks.redundancy`, the wE/wS/wC component inputs, pH/pT penalty inputs);
   MFCI consumes the burst signals already flowing through `hooks.mfci`.

@@ -54,6 +54,29 @@ import {
   selectMailer,
   setIdentityServices,
 } from './identity/services.js';
+import {
+  DrizzleClaimStore,
+  DrizzleEmbeddingStore,
+  DrizzleEvidenceCardStore,
+  DrizzleFreshnessStore,
+  DrizzleLifecycleAuditStore,
+  DrizzleReviewQueueStore,
+  DrizzleSignatureStore,
+  DrizzleSourceStore,
+  DrizzleStoryStore,
+  DrizzleSyndicationStore,
+  DrizzleTakedownStore,
+  PostgresSearchIndex,
+} from './ingestion/drizzle-ingestion-stores.js';
+import { HttpEmbeddingProvider } from './ingestion/embeddings.js';
+import { submissionText } from './ingestion/pipeline.js';
+import { SubmissionRateLimiter } from './ingestion/prechecks.js';
+import { INGESTION_SCHEDULER_INTERVAL_MS, startIngestionScheduler } from './ingestion/scheduler.js';
+import {
+  createInMemoryIngestionServices,
+  registerIngestionConsumers,
+  setIngestionServices,
+} from './ingestion/services.js';
 import { demoStory } from './lib/demo-data.js';
 import { createLogger } from './lib/logger.js';
 import { loadPwattRuntimeConfig } from './pwatt/config.js';
@@ -85,9 +108,13 @@ const identityServices = buildIdentityServicesFromEnv(env, {
 // Event-pipeline services (WS-E): the in-memory base, with the Redis replay/
 // rate-limit/real-time adapters and the Drizzle durable stores swapped in
 // below (same adapter pattern as identity).
+// WS-F: story titles for Signal Ledger entries resolve from a small write-
+// through cache over the REAL story store (the seam is synchronous; the cache
+// fills on create/read below), with the demo fixtures as the fallback.
+const storyTitleCache = new Map<string, string>();
 const eventServices = createInMemoryEventPipelineServices({
   limits: { perMinute: env.EVENTS_RATE_PER_MINUTE, perHour: env.EVENTS_RATE_PER_HOUR },
-  storyTitle: (storyId) => demoStory(storyId)?.title ?? null,
+  storyTitle: (storyId) => storyTitleCache.get(storyId) ?? demoStory(storyId)?.title ?? null,
   log: (event, meta) => logger.info(meta, event),
 });
 {
@@ -143,6 +170,69 @@ registerDefaultConsumers(eventServices, {
   },
 });
 setEventPipelineServices(eventServices);
+// WS-F ingestion services: in-memory base + the Drizzle content adapters, the
+// Postgres FTS search index, the Redis-backed submission limiter window, and
+// the embedding provider (self-hosted HTTP service when the all-or-none
+// EMBEDDING_* group is set; the deterministic lexical provider otherwise —
+// loudly warned in production because it is NOT a semantic model).
+const embeddingProvider =
+  env.EMBEDDING_URL !== undefined &&
+  env.EMBEDDING_MODEL !== undefined &&
+  env.EMBEDDING_MODEL_VERSION !== undefined &&
+  env.EMBEDDING_DIMENSION !== undefined
+    ? new HttpEmbeddingProvider({
+        url: env.EMBEDDING_URL,
+        model: env.EMBEDDING_MODEL,
+        modelVersion: env.EMBEDDING_MODEL_VERSION,
+        dimension: env.EMBEDDING_DIMENSION,
+      })
+    : undefined;
+if (embeddingProvider === undefined && env.NODE_ENV === 'production') {
+  logger.warn(
+    'EMBEDDING_* env group is not set: embeddings use the deterministic LEXICAL provider — fine for dedup, NOT a semantic model (MERI/SCOI semantic conclusions are gated on a self-hosted model, WS-F.3.2a).',
+  );
+}
+const ingestionServices = createInMemoryIngestionServices({
+  events: eventServices,
+  ...(embeddingProvider !== undefined ? { embeddingProvider } : {}),
+  log: (event, meta) => logger.info(meta, event),
+});
+{
+  const IORedis = (await import('ioredis')).default;
+  const redis = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
+  redis.on('error', (err) => logger.warn({ err }, 'Redis connection error (ingestion limiter)'));
+  ingestionServices.submissionLimiter = new SubmissionRateLimiter(
+    new RedisSlidingWindowStore(redis),
+  );
+}
+ingestionServices.stories = new DrizzleStoryStore(db);
+ingestionServices.sources = new DrizzleSourceStore(db);
+ingestionServices.syndications = new DrizzleSyndicationStore(db);
+ingestionServices.claims = new DrizzleClaimStore(db);
+ingestionServices.evidence = new DrizzleEvidenceCardStore(db);
+ingestionServices.signatures = new DrizzleSignatureStore(db);
+ingestionServices.lifecycleAudits = new DrizzleLifecycleAuditStore(db);
+ingestionServices.freshness = new DrizzleFreshnessStore(db);
+ingestionServices.takedowns = new DrizzleTakedownStore(db);
+ingestionServices.reviewQueue = new DrizzleReviewQueueStore(db);
+ingestionServices.embeddings = new DrizzleEmbeddingStore(db);
+ingestionServices.searchIndex = new PostgresSearchIndex(db);
+await ingestionServices.reloadConfig();
+registerIngestionConsumers(eventServices, ingestionServices);
+setIngestionServices(ingestionServices);
+// Fill the Signal Ledger title cache as real stories are created/read.
+{
+  const baseGetById = ingestionServices.stories.getById.bind(ingestionServices.stories);
+  ingestionServices.stories.getById = async (storyId: string) => {
+    const story = await baseGetById(storyId);
+    if (story) storyTitleCache.set(story.storyId, story.title);
+    if (storyTitleCache.size > 10_000) {
+      const oldest = storyTitleCache.keys().next().value;
+      if (oldest !== undefined) storyTitleCache.delete(oldest);
+    }
+    return story;
+  };
+}
 // Close the WS-D residual hooks with their real WS-E implementations: DSAR
 // export and deletion now cover attention data, and a retention-preference
 // change tightens existing purge deadlines (never extends them). The purge
@@ -150,6 +240,24 @@ setEventPipelineServices(eventServices);
 // account hard purge (attention deleted + remaining owned rows de-linked).
 identityServices.purgeAttention = (userId, mode) => purgeUserAttention(eventServices, userId, mode);
 identityServices.exportAttention = (userId) => exportUserAttention(eventServices, userId);
+// WS-F closes the CONTENT half of the export hook for stories: a user's DSAR
+// export now includes their submitted stories. WS-G COMPOSES forum
+// contributions into the same hook when it lands (the anonymize hook stays
+// with WS-G: story rows carry no scrubbable PII — the tombstoned user row is
+// the anonymization, and public contributions persist per §22.4).
+identityServices.exportContributions = async (userId) => {
+  const recent = await ingestionServices.stories.listRecent(10_000);
+  return recent
+    .filter((story) => story.submittedBy === userId)
+    .map((story) => ({
+      story_id: story.storyId,
+      title: story.title,
+      submission_type: story.submissionType,
+      canonical_url: story.canonicalUrl,
+      body: submissionText(story),
+      created_at: story.createdAt,
+    }));
+};
 identityServices.onPrivacyChange = (change) => {
   void applyRetentionPreferenceChange(eventServices, change.userId, change.retention).catch((err) =>
     logger.error({ err }, 'retention preference propagation failed'),
@@ -191,6 +299,16 @@ try {
 } catch (err) {
   logger.error({ err }, 'event pipeline recovery failed (idempotent; next boot retries)');
 }
+
+// Hourly WS-F maintenance (lifecycle/freshness sweeps, extraction retries,
+// embedding backfill, config reload) under its own Postgres job lease.
+startIngestionScheduler(
+  ingestionServices,
+  eventServices,
+  (err, task) => logger.error({ err, task }, 'ingestion scheduler task failed'),
+  INGESTION_SCHEDULER_INTERVAL_MS,
+  { lease: new DrizzleJobLeaseStore(db) },
+);
 
 // Hourly WS-E pipeline: aggregation windows + PWAtt shadow scoring
 // (WS-E.2.1), retention/anonymization sweeps (WS-E.1.4), and real-time

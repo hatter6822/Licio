@@ -6,10 +6,17 @@
 // path bridges the wallet context and the ranking/attention context.
 
 export * from './audit-log.js';
+export * from './claim.js';
+export * from './embedding.js';
 export * from './events.js';
+export * from './ingestion-review.js';
 export * from './job-lease.js';
 export * from './privacy.js';
 export * from './session.js';
+export * from './source.js';
+export * from './story.js';
+export * from './takedown.js';
+export * from './thread.js';
 export * from './user.js';
 export * from './wallet/wallet-account.js';
 export * from './wallet-auth-credential.js';
