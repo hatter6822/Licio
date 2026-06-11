@@ -73,6 +73,36 @@ jobs:
   test:
     name: Test & Coverage
     runs-on: ubuntu-latest
+    # Live services so the GATED integration suites run in CI too (the
+    # Drizzle/Redis production adapters against the real migration chain) —
+    # the in-memory unit suites never touch them.  pgvector image: the WS-F
+    # chain installs the `vector` extension.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: licio
+          POSTGRES_PASSWORD: licio_ci
+          POSTGRES_DB: licio_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U licio"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://licio:licio_ci@localhost:5432/licio_ci
+      REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093

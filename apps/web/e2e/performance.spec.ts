@@ -19,6 +19,8 @@ test.use({ serviceWorkers: 'block' });
 
 test.describe('interaction budgets (WS-C.5.1)', () => {
   test('opening a thread branch stays within the 500ms budget', async ({ page }) => {
+    // Fixtures match the WS-G wire schemas exactly — the page zod-validates
+    // every response before it enters the cache (the WS-C.1.2 boundary).
     await page.route(/\/v1\/threads\//, async (route) => {
       const branch = new URL(route.request().url()).pathname.match(/\/branches\/([^/?]+)/)?.[1];
       if (branch) {
@@ -29,11 +31,25 @@ test.describe('interaction budgets (WS-C.5.1)', () => {
             contributions: [
               {
                 contribution_id: '5f5e4000-0000-4000-8000-000000000001',
-                author_handle: 'ada',
+                thread_id: THREAD,
+                type: 'evidence',
                 body: 'A primary source worth weighing.',
+                citations: [{ url: 'https://example.org/source' }],
+                metadata: {},
+                target_claim_id: null,
+                parent_contribution_id: null,
+                author_handle: 'ada',
+                author_display_name: 'Ada',
+                is_author: false,
+                depth: 0,
+                child_count: 0,
+                moderation_state: 'published',
+                edited: false,
                 created_at: '2026-06-09T12:30:00.000Z',
+                updated_at: '2026-06-09T12:30:00.000Z',
               },
             ],
+            next_cursor: null,
           },
         });
         return;
@@ -43,12 +59,24 @@ test.describe('interaction budgets (WS-C.5.1)', () => {
           thread_id: THREAD,
           story_id: STORY,
           room_id: null,
+          branch_index: 0,
           title: 'A deliberative thread',
           conversation_state: 'active',
-          safety_state: 'ok',
+          safety_state: 'normal',
+          contribution_count: 1,
           created_at: '2026-06-09T12:00:00.000Z',
-          available_branches: ['overview', 'evidence'],
-          current_summary: 'Where the conversation stands.',
+          updated_at: '2026-06-09T12:30:00.000Z',
+          sections: {
+            overview: 0,
+            questions: 0,
+            evidence: 1,
+            challenges: 0,
+            lenses: 0,
+            chronology: 1,
+          },
+          summary_status: 'none',
+          current_summary: null,
+          summary_layers: [],
         },
       });
     });
