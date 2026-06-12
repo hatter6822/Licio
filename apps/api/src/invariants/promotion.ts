@@ -10,10 +10,17 @@ import {
   type InvariantCard,
   type PromotionRecord,
   resolveShadowStatus,
+  runRegressionSuite,
   type ShadowStatus,
   validatePromotion,
 } from '@licio/invariants';
 import type { PromotionStore } from './stores.js';
+
+const STATUS_RANK: Record<ShadowStatus, number> = {
+  shadow: 0,
+  soft_constraint: 1,
+  hard_constraint: 2,
+};
 
 export interface PromotionService {
   /** Current status (no records ⇒ shadow). */
@@ -32,6 +39,8 @@ export function createPromotionService(
   store: PromotionStore,
   cardFor: (invariantType: string) => InvariantCard | null,
   log: (event: string, meta: Record<string, unknown>) => void,
+  regressionGate: () => { pass: boolean; failures: Array<{ invariant: string }> } = () =>
+    runRegressionSuite(),
 ): PromotionService {
   const history = async (invariantType: string): Promise<PromotionRecord[]> => {
     const rows = await store.listForInvariant(invariantType);
@@ -70,6 +79,22 @@ export function createPromotionService(
           problem,
         });
         return problem;
+      }
+      // UPWARD promotions additionally require the regression suite to pass
+      // RIGHT NOW against the production algorithm versions — a drifting
+      // invariant can never gain authority. Demotions (the kill switch) are
+      // NEVER gated: the safety path must always be available.
+      if (STATUS_RANK[record.toStatus] > STATUS_RANK[record.fromStatus]) {
+        const report = regressionGate();
+        if (!report.pass) {
+          const failing = [...new Set(report.failures.map((f) => f.invariant))].join(', ');
+          const reason = `regression suite failing (${failing}) — promotion blocked`;
+          log('invariants.promotion_rejected', {
+            invariant_type: record.invariantType,
+            problem: reason,
+          });
+          return reason;
+        }
       }
       await store.append({
         invariantType: record.invariantType,

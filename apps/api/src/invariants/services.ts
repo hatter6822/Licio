@@ -249,20 +249,47 @@ export function registerInvariantConsumers(
         user_id?: string;
         session_bucket?: string;
         timestamp: string;
-        items?: Array<{ story_id?: string }>;
+        items?: Array<{
+          story_id?: string;
+          source_opened?: boolean;
+          context_opened?: boolean;
+          active_dwell_bucket?: string;
+        }>;
       };
       if (!payload.user_id || !payload.session_bucket) return;
       const config = invariants.config();
+      // §22.1 canonical DWELL_BUCKETS midpoints.
+      const dwellMidpoint: Record<string, number> = {
+        none: 0,
+        glance: 0.1,
+        short: 0.3,
+        medium: 0.5,
+        long: 0.75,
+        extended: 1,
+      };
       for (const item of payload.items ?? []) {
         if (!item.story_id) continue;
         const story = await ingestion.stories.getById(item.story_id);
-        // ONLY the topic-cluster id and the event instant are retained —
-        // the story id never enters the sequence (WS-H.6.1a privacy).
+        // ONLY the topic-cluster id, the event instant, and the §22.1
+        // aggregate's OWN coarse buckets (action kind from the
+        // source/context booleans, dwell midpoint) are retained — the story
+        // id never enters the sequence, and no information class beyond
+        // what the aggregate already discloses is added (WS-H.6.1a).
         const topicClusterId = story?.topicIds[0];
         if (!topicClusterId) continue;
+        const kind = item.source_opened
+          ? ('open_source' as const)
+          : item.context_opened
+            ? ('open_context' as const)
+            : ('read' as const);
         await invariants.sessions.append(
           sessionKeyOf(payload.user_id, payload.session_bucket),
-          { topicClusterId, atMs: Date.parse(payload.timestamp) },
+          {
+            topicClusterId,
+            atMs: Date.parse(payload.timestamp),
+            kind,
+            engagement: dwellMidpoint[item.active_dwell_bucket ?? ''] ?? 0.5,
+          },
           invariants.now(),
           config.phiSequenceCap,
         );

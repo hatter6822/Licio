@@ -291,66 +291,151 @@ export interface CohortSample {
   gwItems: GweiItemFeatures[];
 }
 
+/** §22.1 active-dwell bucket midpoints (the CANONICAL `DWELL_BUCKETS`). */
 const DWELL_WEIGHT: Record<string, number> = {
-  glance: 0.25,
-  brief: 0.5,
-  engaged: 0.75,
-  deep: 1,
+  none: 0,
+  glance: 0.1,
+  short: 0.3,
+  medium: 0.5,
+  long: 0.75,
+  extended: 1,
 };
 
 /**
  * Assemble cohort exposure samples from owned attention aggregates joined
- * to stories. Cohorts: primary locale and new/established (WS-H.5.1a —
- * derived ONLY from user-provided metadata; age-band cohorts are skipped
- * when unknown, never inferred).
+ * to stories. Cohorts (WS-H.5.1a — derived ONLY from user-provided
+ * metadata): primary locale, new/established tenure, and the coarse WS-D
+ * age band when KNOWN — never inferred, skipped when null.
+ *
+ * The §9.4 experience features are real: discussion depth is the story
+ * thread's deepest contribution, lens keys are the lenses with tagged
+ * contributions on the thread, primary evidence requires an actual
+ * evidence card reachable from a claim, and topic familiarity is repeat
+ * exposure — the share of the cohort's attention weight coming from users
+ * who engaged ≥ 2 distinct stories sharing one of the item's topics.
  */
 export async function assembleCohorts(
   events: EventPipelineServices,
   identity: IdentityServices,
   ingestion: IngestionServices,
+  forum: ForumServices,
   nowMs: number,
 ): Promise<CohortSample[]> {
   const owners = await events.attentionStore.listIdentifiableOwners();
   const users = await identity.store.getUsersByIds(owners);
-  const byCohort = new Map<string, { userIds: Set<string>; stories: Map<string, number> }>();
-  const add = (cohortKey: string, userId: string, storyId: string, weight: number): void => {
+  interface StoryWeights {
+    weight: number;
+    familiarWeight: number;
+  }
+  const byCohort = new Map<string, { userIds: Set<string>; stories: Map<string, StoryWeights> }>();
+  const add = (
+    cohortKey: string,
+    userId: string,
+    storyId: string,
+    weight: number,
+    familiarWeight: number,
+  ): void => {
     const cohort = byCohort.get(cohortKey) ?? { userIds: new Set(), stories: new Map() };
     cohort.userIds.add(userId);
-    cohort.stories.set(storyId, (cohort.stories.get(storyId) ?? 0) + weight);
+    const current = cohort.stories.get(storyId) ?? { weight: 0, familiarWeight: 0 };
+    cohort.stories.set(storyId, {
+      weight: current.weight + weight,
+      familiarWeight: current.familiarWeight + familiarWeight,
+    });
     byCohort.set(cohortKey, cohort);
+  };
+  const storyTopics = new Map<string, string[]>();
+  const topicsOf = async (storyId: string): Promise<string[]> => {
+    const cached = storyTopics.get(storyId);
+    if (cached) return cached;
+    const story = await ingestion.stories.getById(storyId);
+    const topics = story ? [...story.topicIds] : [];
+    storyTopics.set(storyId, topics);
+    return topics;
   };
   for (const user of users) {
     const aggregates = await events.attentionStore.listByUser(user.userId);
+    // Repeat exposure per user: distinct stories engaged per topic.
+    const storiesByTopic = new Map<string, Set<string>>();
+    for (const aggregate of aggregates) {
+      for (const topic of await topicsOf(aggregate.story_id)) {
+        const set = storiesByTopic.get(topic) ?? new Set<string>();
+        set.add(aggregate.story_id);
+        storiesByTopic.set(topic, set);
+      }
+    }
     const cohorts = [
       `locale:${user.locale ?? 'unknown'}`,
       `tenure:${accountAgeBucket(Date.parse(user.createdAt), nowMs) === 'new' ? 'new' : 'established'}`,
+      // Age-band cohorts only when the band is KNOWN (WS-H.5.1a).
+      ...(user.ageBand ? [`age:${user.ageBand}`] : []),
     ];
     for (const aggregate of aggregates) {
       const weight = DWELL_WEIGHT[aggregate.active_dwell_bucket] ?? 0.25;
-      for (const cohortKey of cohorts) add(cohortKey, user.userId, aggregate.story_id, weight);
+      const familiar = (await topicsOf(aggregate.story_id)).some(
+        (topic) => (storiesByTopic.get(topic)?.size ?? 0) >= 2,
+      );
+      for (const cohortKey of cohorts) {
+        add(cohortKey, user.userId, aggregate.story_id, weight, familiar ? weight : 0);
+      }
     }
   }
+
+  // Per-story experience enrichment, cached across cohorts.
+  interface StoryEnrichment {
+    discussionDepth: number;
+    lensKeys: string[];
+    hasPrimaryEvidence: boolean;
+  }
+  const enrichmentCache = new Map<string, StoryEnrichment>();
+  const enrich = async (storyId: string): Promise<StoryEnrichment> => {
+    const cached = enrichmentCache.get(storyId);
+    if (cached) return cached;
+    let discussionDepth = 0;
+    const lensKeys = new Set<string>();
+    const thread = await ingestion.stories.getThreadByStoryId(storyId);
+    if (thread) {
+      const contributions = await forum.contributions.listByThread(thread.threadId, {
+        limit: 500,
+      });
+      for (const contribution of contributions) {
+        discussionDepth = Math.max(discussionDepth, contribution.path.length);
+        const lensId = contribution.metadata['lens_id'];
+        if (typeof lensId === 'string' && lensId.length > 0) lensKeys.add(lensId);
+      }
+    }
+    let hasPrimaryEvidence = false;
+    for (const claim of await ingestion.claims.listByStory(storyId)) {
+      if ((await ingestion.evidence.listByClaim(claim.claimId)).length > 0) {
+        hasPrimaryEvidence = true;
+        break;
+      }
+    }
+    const enriched = { discussionDepth, lensKeys: [...lensKeys].sort(), hasPrimaryEvidence };
+    enrichmentCache.set(storyId, enriched);
+    return enriched;
+  };
 
   const samples: CohortSample[] = [];
   for (const [cohortKey, cohort] of byCohort) {
     const items: CohortExposureItem[] = [];
     const gwItems: GweiItemFeatures[] = [];
-    for (const [storyId, weight] of cohort.stories) {
+    for (const [storyId, weights] of cohort.stories) {
       const story = await ingestion.stories.getById(storyId);
       if (!story) continue;
       const claims = await ingestion.claims.listByStory(storyId);
-      const hasEvidence = claims.length > 0;
       const embedding = await ingestion.embeddingProvider.embed(story.title);
+      const enrichedStory = await enrich(storyId);
       items.push({
         itemId: storyId,
         sourceKey: story.sourceId ?? 'unknown',
         topicIds: [...story.topicIds],
-        hasPrimaryEvidence: hasEvidence,
-        discussionDepth: 1,
-        lensKeys: [],
-        familiarTopic: false,
+        hasPrimaryEvidence: enrichedStory.hasPrimaryEvidence,
+        discussionDepth: enrichedStory.discussionDepth,
+        lensKeys: enrichedStory.lensKeys,
+        familiarTopic: weights.familiarWeight > weights.weight / 2,
         safetyElevated: story.sensitivityLabels.length > 0,
-        weight,
+        weight: weights.weight,
       });
       gwItems.push({
         itemId: storyId,
@@ -358,7 +443,7 @@ export async function assembleCohorts(
         sourceKey: story.sourceId ?? 'unknown',
         evidenceKeys: claims.map((c) => c.independenceGroupId ?? c.claimId).slice(0, 8),
         communityKeys: story.topicIds.slice(0, 4),
-        weight,
+        weight: weights.weight,
       });
     }
     samples.push({ cohortKey, size: cohort.userIds.size, items, gwItems });
@@ -569,11 +654,18 @@ export async function assembleEngagementLandscape(
 /**
  * Map a privacy-preserving topic sequence to session path events. Topic
  * ordinals are per-session (first-seen order) — no global identifier leaves
- * the session scope; the action kind for sequence transitions is `read`
- * (re-entries become `return`).
+ * the session scope. Re-entries dominate as `return`; first visits carry
+ * the transition's coarse action kind when the consumer recorded one
+ * (source/context opens make `constructive` REACHABLE for the classifier)
+ * and the §22.1 dwell-bucket midpoint as engagement.
  */
 export function sessionEventsFromSequence(
-  sequence: ReadonlyArray<{ topicClusterId: string; atMs: number }>,
+  sequence: ReadonlyArray<{
+    topicClusterId: string;
+    atMs: number;
+    kind?: 'read' | 'open_source' | 'open_context' | undefined;
+    engagement?: number | undefined;
+  }>,
 ): SessionPathEvent[] {
   const ordinals = new Map<string, number>();
   const seen = new Set<string>();
@@ -585,10 +677,10 @@ export function sessionEventsFromSequence(
       ordinals.set(transition.topicClusterId, ordinal);
     }
     events.push({
-      kind: seen.has(transition.topicClusterId) ? 'return' : 'read',
+      kind: seen.has(transition.topicClusterId) ? 'return' : (transition.kind ?? 'read'),
       topicOrdinal: ordinal,
       atMs: transition.atMs,
-      engagement: 0.5,
+      engagement: transition.engagement ?? 0.5,
     });
     seen.add(transition.topicClusterId);
   }

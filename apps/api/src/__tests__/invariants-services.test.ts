@@ -339,7 +339,7 @@ describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
     return userId;
   }
 
-  it('the consumer stores topic-cluster ids + timestamps ONLY (privacy)', async () => {
+  it('the consumer stores topic ids, timing, and §22.1-coarse buckets ONLY (privacy)', async () => {
     const fixture = freshWsHServices();
     await seedSession(fixture, 'topic-a', 'topic-b');
     const live = await fixture.invariants.sessions.listLive(Date.now());
@@ -347,8 +347,18 @@ describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
     const sequence = live[0]?.sequence ?? [];
     expect(sequence.length).toBe(5);
     for (const transition of sequence) {
-      expect(Object.keys(transition).sort()).toEqual(['atMs', 'topicClusterId']);
+      // The CLOSED record vocabulary: topic + instant + the aggregate's own
+      // coarse action/engagement buckets — nothing else, ever.
+      expect(Object.keys(transition).sort()).toEqual([
+        'atMs',
+        'engagement',
+        'kind',
+        'topicClusterId',
+      ]);
       expect(['topic-a', 'topic-b']).toContain(transition.topicClusterId);
+      expect(['read', 'open_source', 'open_context']).toContain(transition.kind);
+      expect(transition.engagement).toBeGreaterThanOrEqual(0);
+      expect(transition.engagement).toBeLessThanOrEqual(1);
       // No story id, no user id, no content anywhere in the record.
       expect(JSON.stringify(transition)).not.toMatch(/story|user|body/);
     }
@@ -504,6 +514,46 @@ describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
       (await fixture.invariants.sessions.listLive(Date.now()))[0]?.sequence ?? [],
     );
     expect(events.filter((e) => e.kind === 'return').length).toBeGreaterThan(0);
+  });
+
+  it('source-seeking sessions carry coarse action kinds and reach CONSTRUCTIVE', async () => {
+    const fixture = freshWsHServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const base = Date.now() - 25 * 60_000;
+    // Distinct topics opened with the source each time: deliberate,
+    // source-seeking behavior — the §22.1 aggregate's own coarse booleans
+    // make the action kind recoverable without any new information class.
+    for (const [i, topic] of ['t-a', 't-b', 't-c', 't-d'].entries()) {
+      const { storyId } = await seedStory(fixture, { topicIds: [topic] });
+      await fixture.events.router.publish(
+        attentionEvent(userId, {
+          storyId,
+          timestamp: new Date(base + i * 5 * 60_000).toISOString(),
+          items: [
+            {
+              story_id: storyId,
+              active_dwell_bucket: 'extended',
+              source_opened: true,
+              context_opened: false,
+              branch_depth_bucket: 'shallow',
+              return_visit_count_bucket: 'none',
+            },
+          ],
+        } as never),
+      );
+    }
+    const sequence = (await fixture.invariants.sessions.listLive(Date.now()))[0]?.sequence ?? [];
+    expect(sequence.length).toBe(4);
+    for (const transition of sequence) {
+      expect(transition.kind).toBe('open_source');
+      expect(transition.engagement).toBe(1);
+      // Still no story id, no content, no other identity.
+      expect(JSON.stringify(transition)).not.toMatch(/story|body|user/);
+    }
+    const events = sessionEventsFromSequence(sequence);
+    expect(events.every((e) => e.kind === 'open_source')).toBe(true);
+    const outputs = await fixture.invariants.pathsig.computeBatch([], hourWindow(Date.now()));
+    expect(outputs[0]?.score_vector['classification']).toBe('constructive');
   });
 
   it('expired sequences sweep away (session-scoped retention)', async () => {

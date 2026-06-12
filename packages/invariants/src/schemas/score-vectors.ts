@@ -71,6 +71,10 @@ export const scoiScoreVectorSchema = z
     lens_count: nonNegativeInt,
     context_state: z.enum(SCOI_CONTEXT_STATES),
     per_overlap_energy: z.record(z.string(), nonNegative),
+    /** SCOI v2 (batch): dim H¹ of the overlap diagram — > 0 means the
+     * STRUCTURE obstructs gluing regardless of any choice of readings. */
+    dim_h1: nonNegativeInt.optional(),
+    structural_obstruction: z.boolean().optional(),
   })
   .strict();
 export type ScoiScoreVector = z.infer<typeof scoiScoreVectorSchema>;
@@ -112,6 +116,9 @@ export const tropicalScoreVectorSchema = z
     seed_count: nonNegativeInt,
     coordinated_drop_count: nonNegativeInt,
     detected: z.boolean(),
+    /** The topic the cascade was measured over (routing data for the
+     * tropical→MFCI intake feed; the target id is a derived UUID). */
+    topic_id: z.string().optional(),
   })
   .strict();
 export type TropicalScoreVector = z.infer<typeof tropicalScoreVectorSchema>;

@@ -40,11 +40,13 @@ exports[`score-vector schemas (WS-H.1.1d) > score-vector shapes are pinned by sn
   ],
   "SCOI": [
     "context_state",
+    "dim_h1",
     "lens_count",
     "normalizer",
     "overlap_count",
     "per_overlap_energy",
     "scoi",
+    "structural_obstruction",
   ],
   "braid_dynamics": [
     "crossing_number",
@@ -89,6 +91,7 @@ exports[`score-vector schemas (WS-H.1.1d) > score-vector shapes are pinned by sn
     "detected",
     "seed_count",
     "synchronized_fraction",
+    "topic_id",
   ],
 }
 `;

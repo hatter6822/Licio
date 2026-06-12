@@ -13,6 +13,15 @@ export interface TopicTransition {
   /** Coarse topic-cluster id — never a story id or content. */
   topicClusterId: string;
   atMs: number;
+  /**
+   * Coarse action kind, carried straight from the §22.1 aggregate's
+   * already-bucketed booleans (source/context opened) — no new information
+   * class beyond what the aggregate itself discloses. Optional: the client
+   * tracker stores topic + time only; the server consumer enriches.
+   */
+  kind?: 'read' | 'open_source' | 'open_context' | undefined;
+  /** Active-dwell bucket midpoint ∈ [0, 1] (again §22.1-coarse). */
+  engagement?: number | undefined;
 }
 
 export const DEFAULT_SEQUENCE_CAP = 200;

@@ -8,10 +8,17 @@
 // regression suite against the production algorithm versions and records
 // the drift report (WS-H.1.2d-2).
 
-import { runRegressionSuite } from '@licio/invariants';
+import {
+  buildNullCalibration,
+  type InvariantTarget,
+  runRegressionSuite,
+  synchronyScore,
+  targetConcentrationScore,
+} from '@licio/invariants';
 import type { EventPipelineServices } from '../events/services.js';
 import { AlwaysGrantJobLeaseStore, type JobLeaseStore } from '../identity/job-lease.js';
 import type { IngestionServices } from '../ingestion/services.js';
+import type { InvariantsRuntimeConfig } from './config.js';
 import { hourWindow, mapBounded, persistComputations, runGuarded } from './runner.js';
 import type { InvariantPlatformServices } from './services.js';
 import { GLOBAL_FEED_TARGET_ID } from './services-impl.js';
@@ -23,7 +30,47 @@ export type InvariantsSchedulerTask =
   | 'config_reload'
   | 'batch_compute'
   | 'session_sweep'
-  | 'nightly_regression';
+  | 'nightly_regression'
+  | 'calibration_rebuild';
+
+/**
+ * The configuration slice an invariant's outputs were computed under —
+ * persisted as `version_metadata.config` on every row so WS-H.1.1b version
+ * comparisons can tell algorithm drift from configuration drift.
+ */
+export function configSnapshotFor(
+  invariantType: string,
+  config: InvariantsRuntimeConfig,
+): Record<string, unknown> {
+  const slices: Record<string, Record<string, unknown>> = {
+    MERI: {
+      candidate_limit: config.meriCandidateLimit,
+      near_duplicate_threshold: config.meriNearDuplicateThreshold,
+    },
+    MFCI: {
+      samples: config.mfciSamples,
+      burn_in: config.mfciBurnIn,
+      thinning: config.mfciThinning,
+      risk_thresholds: config.mfciRiskThresholds,
+    },
+    GWEI: {
+      seeds: config.gweiSeeds,
+      epsilons: config.gweiEpsilons,
+      k_anonymity: config.gweiKAnonymity,
+      min_cohort_size: config.gweiMinCohortSize,
+    },
+    SCOI: {
+      state_thresholds: config.scoiStateThresholds,
+      needs_context_threshold: config.scoiNeedsContextThreshold,
+    },
+    PHI: {
+      narrow_loop: config.phiNarrowLoop,
+      thresholds: config.phiThresholds,
+      sequence_cap: config.phiSequenceCap,
+    },
+  };
+  return { config: slices[invariantType] ?? {} };
+}
 
 /** One scheduler tick: config reload → batch tier → sweeps → nightly drift. */
 export async function runInvariantsTick(
@@ -51,7 +98,10 @@ export async function runInvariantsTick(
     onError(err, 'session_sweep');
   }
 
-  // Nightly (00:xx UTC): regression drift report against production code.
+  // Nightly (00:xx UTC): regression drift report against production code,
+  // then the MFCI null-calibration rebuild from the trailing week's
+  // ORGANIC baseline (so the cheap statistics judge against current
+  // community behavior, not the bootstrap defaults).
   if (new Date(nowMs).getUTCHours() === 0) {
     try {
       const report = runRegressionSuite();
@@ -66,6 +116,93 @@ export async function runInvariantsTick(
     } catch (err) {
       onError(err, 'nightly_regression');
     }
+    try {
+      await rebuildMfciCalibrations(invariants, events, nowMs);
+    } catch (err) {
+      onError(err, 'calibration_rebuild');
+    }
+  }
+}
+
+const CALIBRATION_TOPICS = ['contribution.created', 'evidence.added', 'content.submitted'];
+
+/**
+ * Rebuild the MFCI null calibrations (WS-H.3.1a "precomputed null
+ * calibrations established from historical baseline data"): hourly windows
+ * over the trailing 7 days each contribute one (volume, rawValue) sample
+ * per statistic — the SAME window size and action source the sub-minute
+ * intake scores against, so the null conditions on exactly what the
+ * statistic sees. Too few nonempty windows keeps the previous calibration
+ * (never replace a baseline with noise).
+ */
+export async function rebuildMfciCalibrations(
+  invariants: InvariantPlatformServices,
+  events: EventPipelineServices,
+  nowMs: number,
+  options: { lookbackHours?: number; minSamples?: number } = {},
+): Promise<void> {
+  const lookbackHours = options.lookbackHours ?? 7 * 24;
+  const minSamples = options.minSamples ?? 6;
+  const fromIso = new Date(nowMs - lookbackHours * 3_600_000).toISOString();
+  const toIso = new Date(nowMs).toISOString();
+  const rows = await events.eventStore.listByTopicsBetween(CALIBRATION_TOPICS, fromIso, toIso);
+  const byHour = new Map<number, Array<{ actorRef: string; targetId: string; atMs: number }>>();
+  for (const row of rows) {
+    const targetId =
+      typeof row.payload['story_id'] === 'string'
+        ? row.payload['story_id']
+        : typeof row.payload['thread_id'] === 'string'
+          ? row.payload['thread_id']
+          : null;
+    if (!targetId) continue;
+    const atMs = Date.parse(row.timestamp);
+    const hour = Math.floor(atMs / 3_600_000);
+    const list = byHour.get(hour) ?? [];
+    list.push({ actorRef: row.ownerUserId ?? 'anonymous', targetId, atMs });
+    byHour.set(hour, list);
+  }
+  // rawValue is calibration-independent; a bucketless neutral calibration
+  // extracts it without scoring.
+  const neutral = {
+    statistic: 'target_concentration' as const,
+    version: 'neutral',
+    computedAtMs: nowMs,
+    buckets: [],
+  };
+  const samples = {
+    target_concentration: [] as Array<{ volume: number; rawValue: number }>,
+    synchrony: [] as Array<{ volume: number; rawValue: number }>,
+  };
+  for (const actions of byHour.values()) {
+    if (actions.length === 0) continue;
+    samples.target_concentration.push({
+      volume: actions.length,
+      rawValue: targetConcentrationScore(actions, neutral, { nowMs }).rawValue,
+    });
+    samples.synchrony.push({
+      volume: actions.length,
+      rawValue: synchronyScore(actions, { ...neutral, statistic: 'synchrony' }, { nowMs }).rawValue,
+    });
+  }
+  for (const statistic of ['target_concentration', 'synchrony'] as const) {
+    const list = samples[statistic];
+    if (list.length < minSamples) continue;
+    const version = `auto:${new Date(nowMs).toISOString().slice(0, 10)}`;
+    const calibration = buildNullCalibration(statistic, version, nowMs, list);
+    if (calibration.buckets.length === 0) continue;
+    await invariants.calibrations.upsert({
+      calibrationKey: `mfci:${statistic}`,
+      version,
+      data: calibration as unknown as Record<string, unknown>,
+      sampleCount: list.length,
+      computedAt: new Date(nowMs).toISOString(),
+    });
+    invariants.log('invariants.mfci.calibration_rebuilt', {
+      statistic,
+      version,
+      windows: list.length,
+      buckets: calibration.buckets.length,
+    });
   }
 }
 
@@ -98,178 +235,155 @@ export async function runBatchTier(
   }
   const feedTarget = { targetType: 'feed' as const, targetId: GLOBAL_FEED_TARGET_ID };
 
-  const jobs: Array<() => Promise<void>> = [
-    async () => {
-      const run = await runGuarded(
+  // One uniform job runner: guard → observe health → persist with the
+  // invariant's CONFIG SNAPSHOT in version_metadata (WS-H.1.1b: version
+  // comparisons can tell algorithm drift from configuration drift).
+  type AnyService = ReturnType<InvariantPlatformServices['all']>[number];
+  const runAndPersist = async (
+    name: string,
+    service: AnyService,
+    target: InvariantTarget | null,
+    work: () => Promise<Awaited<ReturnType<AnyService['computeBatch']>>>,
+    afterPersist?: (outputs: Awaited<ReturnType<AnyService['computeBatch']>>) => Promise<void>,
+  ): Promise<void> => {
+    const run = await runGuarded(
+      deps,
+      name,
+      service.getCard().version,
+      'batch',
+      target,
+      config.wrapperTimeoutMs,
+      work,
+    );
+    if (run.ok) {
+      service.health.observe(run.durationMs, run.outputs);
+      await persistComputations(
+        events.invariantStore,
         deps,
-        'MERI',
-        invariants.meri.getCard().version,
-        'batch',
-        feedTarget,
-        config.wrapperTimeoutMs,
-        () => invariants.meri.computeBatch([feedTarget], window),
+        run.outputs,
+        configSnapshotFor(service.invariantType, config),
       );
-      if (run.ok) {
-        invariants.meri.health.observe(run.durationMs, run.outputs);
-        await persistComputations(events.invariantStore, deps, run.outputs);
-      } else invariants.meri.health.observeError();
-    },
+      await afterPersist?.(run.outputs);
+    } else service.health.observeError();
+  };
+
+  const jobs: Array<() => Promise<void>> = [
+    () =>
+      runAndPersist('MERI', invariants.meri, feedTarget, () =>
+        invariants.meri.computeBatch([feedTarget], window),
+      ),
     async () => {
-      // MFCI batch: the hottest recent story (cap: 3 targets per tick).
+      // MFCI batch: the hottest recent stories (cap: 3 targets per tick).
       const targets = storyTargets.slice(0, 3);
       if (targets.length === 0) return;
-      const run = await runGuarded(
-        deps,
-        'MFCI',
-        invariants.mfci.getCard().version,
-        'batch',
-        targets[0] ?? null,
-        config.wrapperTimeoutMs,
-        () => invariants.mfci.computeBatch(targets, window),
+      await runAndPersist('MFCI', invariants.mfci, targets[0] ?? null, () =>
+        invariants.mfci.computeBatch(targets, window),
       );
-      if (run.ok) {
-        invariants.mfci.health.observe(run.durationMs, run.outputs);
-        await persistComputations(events.invariantStore, deps, run.outputs);
-      } else invariants.mfci.health.observeError();
     },
-    async () => {
-      const run = await runGuarded(
-        deps,
-        'GWEI',
-        invariants.gwei.getCard().version,
-        'batch',
-        null,
-        config.wrapperTimeoutMs,
-        () => invariants.gwei.computeBatch([], window),
-      );
-      if (run.ok) {
-        invariants.gwei.health.observe(run.durationMs, run.outputs);
-        await persistComputations(events.invariantStore, deps, run.outputs);
-      } else invariants.gwei.health.observeError();
-    },
-    async () => {
-      const run = await runGuarded(
-        deps,
-        'SCOI',
-        invariants.scoi.getCard().version,
-        'batch',
-        null,
-        config.wrapperTimeoutMs,
-        () => invariants.scoi.computeBatch(storyTargets, window),
-      );
-      if (run.ok) {
-        invariants.scoi.health.observe(run.durationMs, run.outputs);
-        await persistComputations(events.invariantStore, deps, run.outputs);
-      } else invariants.scoi.health.observeError();
-    },
-    async () => {
-      const run = await runGuarded(
-        deps,
-        'PHI',
-        invariants.phi.getCard().version,
-        'batch',
-        null,
-        config.wrapperTimeoutMs,
-        () => invariants.phi.computeBatch([], window),
-      );
-      if (run.ok) {
-        invariants.phi.health.observe(run.durationMs, run.outputs);
-        await persistComputations(events.invariantStore, deps, run.outputs);
-      } else invariants.phi.health.observeError();
-    },
-    async () => {
-      const run = await runGuarded(
-        deps,
-        'hodge_tension',
-        invariants.hodge.getCard().version,
-        'batch',
-        null,
-        config.wrapperTimeoutMs,
-        () => invariants.hodge.computeBatch(threadTargets, window),
-      );
-      if (run.ok) {
-        invariants.hodge.health.observe(run.durationMs, run.outputs);
-        await persistComputations(events.invariantStore, deps, run.outputs);
-      } else invariants.hodge.health.observeError();
-    },
-    async () => {
-      const run = await runGuarded(
-        deps,
+    () =>
+      runAndPersist('GWEI', invariants.gwei, null, () => invariants.gwei.computeBatch([], window)),
+    () =>
+      runAndPersist('SCOI', invariants.scoi, null, () =>
+        invariants.scoi.computeBatch(storyTargets, window),
+      ),
+    () => runAndPersist('PHI', invariants.phi, null, () => invariants.phi.computeBatch([], window)),
+    () =>
+      runAndPersist('hodge_tension', invariants.hodge, null, () =>
+        invariants.hodge.computeBatch(threadTargets, window),
+      ),
+    () =>
+      runAndPersist(
         'tropical_cascade',
-        invariants.tropical.getCard().version,
-        'batch',
+        invariants.tropical,
         null,
-        config.wrapperTimeoutMs,
         () => invariants.tropical.computeBatch([], window),
-      );
-      if (run.ok) {
-        invariants.tropical.health.observe(run.durationMs, run.outputs);
-        await persistComputations(events.invariantStore, deps, run.outputs);
-      } else invariants.tropical.health.observeError();
-    },
-    async () => {
-      const run = await runGuarded(
-        deps,
-        'braid_dynamics',
-        invariants.braid.getCard().version,
-        'batch',
-        null,
-        config.wrapperTimeoutMs,
-        () => invariants.braid.computeBatch([], window),
-      );
-      if (run.ok) {
-        invariants.braid.health.observe(run.durationMs, run.outputs);
-        await persistComputations(events.invariantStore, deps, run.outputs);
-      } else invariants.braid.health.observeError();
-    },
-    async () => {
-      const run = await runGuarded(
-        deps,
-        'reeb_landscape',
-        invariants.reeb.getCard().version,
-        'batch',
-        null,
-        config.wrapperTimeoutMs,
-        () => invariants.reeb.computeBatch([], window),
-      );
-      if (run.ok) {
-        invariants.reeb.health.observe(run.durationMs, run.outputs);
-        await persistComputations(events.invariantStore, deps, run.outputs);
-      } else invariants.reeb.health.observeError();
-    },
-    async () => {
-      const run = await runGuarded(
-        deps,
-        'counterfactual_defect',
-        invariants.cid.getCard().version,
-        'batch',
-        null,
-        config.wrapperTimeoutMs,
-        () => invariants.cid.computeBatch([], window),
-      );
-      if (run.ok) {
-        invariants.cid.health.observe(run.durationMs, run.outputs);
-        await persistComputations(events.invariantStore, deps, run.outputs);
-      } else invariants.cid.health.observeError();
-    },
-    async () => {
-      const run = await runGuarded(
-        deps,
-        'path_signature_wellbeing',
-        invariants.pathsig.getCard().version,
-        'batch',
-        null,
-        config.wrapperTimeoutMs,
-        () => invariants.pathsig.computeBatch([], window),
-      );
-      if (run.ok) {
-        invariants.pathsig.health.observe(run.durationMs, run.outputs);
-        await persistComputations(events.invariantStore, deps, run.outputs);
-      } else invariants.pathsig.health.observeError();
-    },
+        async (outputs) => {
+          // Tropical → MFCI feature feed: a DETECTED synchronized cascade
+          // routes the topic's recent stories through the SAME cheap-stat
+          // intake the WS-E integrity events use — the intake re-checks
+          // each target and only opens a case when the statistics confirm
+          // (fail-toward-caution; never an auto-action).
+          if (!events.hooks.mfci) return;
+          const targetIds = new Set<string>();
+          for (const output of outputs) {
+            if (output.score_vector['detected'] !== true) continue;
+            const topicId = output.score_vector['topic_id'];
+            if (typeof topicId !== 'string') continue;
+            for (const story of recentStories) {
+              if (story.topicIds.includes(topicId)) targetIds.add(story.storyId);
+              if (targetIds.size >= 10) break;
+            }
+          }
+          if (targetIds.size > 0) {
+            await events.hooks.mfci({ target_ids: [...targetIds] } as never);
+          }
+        },
+      ),
+    () =>
+      runAndPersist('braid_dynamics', invariants.braid, null, () =>
+        invariants.braid.computeBatch([], window),
+      ),
+    () =>
+      runAndPersist('reeb_landscape', invariants.reeb, null, () =>
+        invariants.reeb.computeBatch([], window),
+      ),
+    () =>
+      runAndPersist('counterfactual_defect', invariants.cid, null, () =>
+        invariants.cid.computeBatch([], window),
+      ),
+    () =>
+      runAndPersist('path_signature_wellbeing', invariants.pathsig, null, () =>
+        invariants.pathsig.computeBatch([], window),
+      ),
   ];
   // Bounded concurrency: the batch tier may never starve real-time work.
   await mapBounded(jobs, config.batchConcurrency, (job) => job());
+}
+
+/**
+ * The REAL-TIME tier entry point (WS-H.1.2f): run one realtime-capable
+ * invariant for a target under the configured latency budget. The budget is
+ * ENFORCED — a slow computation times out into the standard degraded
+ * envelope (TIMEOUT) and ranking proceeds with the feature ABSENT. Health
+ * is observed on the same per-invariant recorder as the batch tier.
+ * Batch-only invariants answer through their honest degraded default.
+ * (WS-I consumes this at the ranking boundary; until then it serves the
+ * admin surface and tests.)
+ */
+export async function runRealtimeTier(
+  invariants: InvariantPlatformServices,
+  events: EventPipelineServices,
+  invariantType: string,
+  target: InvariantTarget,
+): Promise<
+  | { ok: true; output: Awaited<ReturnType<InvariantPlatformServices['meri']['computeRealtime']>> }
+  | { ok: false; reasonCodes: string[] }
+> {
+  const config = invariants.config();
+  const service = invariants.all().find((s) => s.invariantType === invariantType);
+  if (!service) return { ok: false, reasonCodes: ['COMPUTE_ERROR'] };
+  const run = await runGuarded(
+    {
+      runMetadata: invariants.runMetadata,
+      metrics: events.metrics,
+      log: invariants.log,
+      now: invariants.now,
+    },
+    invariantType,
+    service.getCard().version,
+    'realtime',
+    target,
+    config.realtimeLatencyBudgetMs,
+    async () => [await service.computeRealtime(target)],
+  );
+  if (!run.ok) {
+    service.health.observeError();
+    return { ok: false, reasonCodes: run.degraded.reason_codes };
+  }
+  service.health.observe(run.durationMs, run.outputs);
+  const output = run.outputs[0];
+  if (!output) return { ok: false, reasonCodes: ['COMPUTE_ERROR'] };
+  return { ok: true, output };
 }
 
 /** Start the hourly scheduler under the distributed lease. */

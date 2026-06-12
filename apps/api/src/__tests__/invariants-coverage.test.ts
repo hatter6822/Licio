@@ -97,6 +97,10 @@ describe('SCOI full lens pipeline (WS-H.4.1a/b)', () => {
     expect(output?.score_vector['lens_count']).toBe(2);
     expect(output?.score_vector['overlap_count']).toBe(1);
     expect(typeof output?.score_vector['context_state']).toBe('string');
+    // SCOI v2 rides the same batch output: identity restriction maps over
+    // a two-lens diagram glue freely — H¹ trivial, no structural code.
+    expect(output?.score_vector['dim_h1']).toBe(0);
+    expect(output?.score_vector['structural_obstruction']).toBe(false);
   });
 });
 
@@ -150,7 +154,7 @@ describe('GWEI cohort comparison end-to-end (WS-H.5)', () => {
               user_id_or_privacy_bucket: userId,
               story_id: storyId,
               session_bucket: '2026-06-10T10:00:00.000Z',
-              active_dwell_bucket: 'engaged',
+              active_dwell_bucket: 'long',
               source_opened: locale === 'en-US',
               context_opened: false,
               branch_depth_bucket: 'shallow',
@@ -178,6 +182,157 @@ describe('GWEI cohort comparison end-to-end (WS-H.5)', () => {
     await fixture.invariants.reloadConfig();
     const suppressed = await fixture.invariants.gwei.computeBatch([], hourWindow(Date.now()));
     expect(suppressed.every((o) => o.reason_codes.includes('SUPPRESSED_K_ANONYMITY'))).toBe(true);
+  });
+
+  it('assembles REAL experience features: depth, lenses, evidence, familiarity, age bands', async () => {
+    const fixture = freshWsHServices();
+    const { assembleCohorts } = await import('../invariants/data.js');
+    const { defaultPersonalizationSettings, defaultPrivacySettings } = await import(
+      '@licio/shared'
+    );
+    const mkUser = async (ageBand: 'adult' | 'teen_16_17' | null): Promise<string> => {
+      const user = await fixture.identity.store.createUser(
+        {
+          handle: `gwei-${randomUUID().slice(0, 10)}`,
+          displayName: 'Cohort member',
+          email: null,
+          accountState: 'active',
+          locale: 'en-US',
+          ageBand,
+          privacySettings: defaultPrivacySettings(),
+          personalizationSettings: defaultPersonalizationSettings(),
+          reputationSummary: {
+            schema_version: 1,
+            evidence_reliability: null,
+            correction_accuracy: null,
+            bridge_ability: null,
+            computed_at: null,
+          },
+          roles: ['user'],
+        },
+        Date.now() - 30 * 86_400_000,
+      );
+      return user.userId;
+    };
+    const teen = await mkUser('teen_16_17');
+    const noBand = await mkUser(null);
+
+    // Story S1: thread with a depth-2 reply chain, a lens-tagged
+    // contribution, and a claim with a REAL evidence card.
+    const s1 = await seedStory(fixture, { topicIds: ['water'] });
+    const s2 = await seedStory(fixture, { topicIds: ['water'] });
+    const s3 = await seedStory(fixture, { topicIds: ['transit'] });
+    const root = await fixture.forum.contributions.insert({
+      contributionId: randomUUID(),
+      threadId: s1.threadId,
+      userId: randomUUID(),
+      type: 'question',
+      body: 'What does the sampling protocol require here?',
+      citations: [],
+      metadata: {},
+      targetClaimId: null,
+      parentContributionId: null,
+      clientDraftId: randomUUID(),
+      path: [],
+      moderationState: 'published',
+    });
+    expect(root.ok).toBe(true);
+    const rootId = root.ok ? root.contribution.contributionId : '';
+    const reply = await fixture.forum.contributions.insert({
+      contributionId: randomUUID(),
+      threadId: s1.threadId,
+      userId: randomUUID(),
+      type: 'answer',
+      body: 'Quarterly composite samples per the permit.',
+      citations: [],
+      metadata: { lens_id: 'lens-expert' },
+      targetClaimId: null,
+      parentContributionId: rootId,
+      clientDraftId: randomUUID(),
+      path: [rootId],
+      moderationState: 'published',
+    });
+    expect(reply.ok).toBe(true);
+    const claim = await fixture.ingestion.claims.insert({
+      claimId: randomUUID(),
+      storyId: s1.storyId,
+      canonicalText: 'The plant samples quarterly.',
+      normalizedTextHash: randomUUID().replaceAll('-', ''),
+      claimStatus: 'candidate',
+      firstSeenStoryId: s1.storyId,
+      independenceGroupId: null,
+      createdBy: null,
+      extractionSource: 'system',
+      extractionConfidence: 0.8,
+      modelVersion: null,
+    });
+    await fixture.ingestion.evidence.insert({
+      evidenceId: randomUUID(),
+      claimId: claim.claimId,
+      sourceId: null,
+      contributionId: null,
+      submittedBy: teen,
+      evidenceType: 'report',
+      relationshipType: 'supports',
+      citationUrlOrRef: 'https://example.com/permit',
+      relevanceNote: 'permit text',
+      verificationState: 'unverified',
+      independenceGroupId: null,
+      storyId: s1.storyId,
+    });
+
+    const aggregate = (userId: string, storyId: string, dwell: 'extended' | 'long') => ({
+      aggregate_id: randomUUID(),
+      user_id_or_privacy_bucket: userId,
+      story_id: storyId,
+      session_bucket: '2026-06-10T10:00:00.000Z',
+      active_dwell_bucket: dwell,
+      source_opened: false,
+      context_opened: false,
+      branch_depth_bucket: 'shallow',
+      return_visit_count_bucket: 'none',
+      privacy_level: 'standard',
+      created_at: new Date().toISOString(),
+    });
+    // Teen engages TWO water stories (repeat exposure ⇒ familiar) at
+    // extended dwell; the band-less user touches S1 once at lighter dwell.
+    await fixture.events.attentionStore.insertMany([
+      aggregate(teen, s1.storyId, 'extended'),
+      aggregate(teen, s2.storyId, 'extended'),
+      aggregate(teen, s3.storyId, 'extended'),
+      aggregate(noBand, s1.storyId, 'long'),
+    ]);
+
+    const cohorts = await assembleCohorts(
+      fixture.events,
+      fixture.identity,
+      fixture.ingestion,
+      fixture.forum,
+      Date.now(),
+    );
+    const keys = cohorts.map((c) => c.cohortKey);
+    // Age-band cohorts only when KNOWN — never inferred, never null-keyed.
+    expect(keys).toContain('age:teen_16_17');
+    expect(keys.some((k) => k.startsWith('age:') && k.includes('null'))).toBe(false);
+    const teenCohort = cohorts.find((c) => c.cohortKey === 'age:teen_16_17');
+    expect(teenCohort?.size).toBe(1);
+
+    const enUs = cohorts.find((c) => c.cohortKey === 'locale:en-US');
+    expect(enUs?.size).toBe(2);
+    const item1 = enUs?.items.find((i) => i.itemId === s1.storyId);
+    const item3 = enUs?.items.find((i) => i.itemId === s3.storyId);
+    // Real thread depth (root + reply ⇒ deepest path length 1), the tagged
+    // lens, and evidence reachable through the claim's REAL card.
+    expect(item1?.discussionDepth).toBe(1);
+    expect(item1?.lensKeys).toEqual(['lens-expert']);
+    expect(item1?.hasPrimaryEvidence).toBe(true);
+    // Familiarity is weight-majority repeat exposure: the teen's extended
+    // (1.0) familiar weight outweighs the band-less user's long (0.75)
+    // single touch on S1; the lone transit story stays unfamiliar.
+    expect(item1?.familiarTopic).toBe(true);
+    expect(item3?.familiarTopic).toBe(false);
+    expect(item3?.hasPrimaryEvidence).toBe(false);
+    expect(item3?.discussionDepth).toBe(0);
   });
 });
 

@@ -38,6 +38,7 @@ import {
   generateGroup,
   gwDistanceWithStability,
   type HealthMetrics,
+  h1Diagnostic,
   helmholtzDecompose,
   holonomyCycleFromWalk,
   type InvariantCard,
@@ -382,6 +383,7 @@ export class GweiService extends BaseInvariantService {
       this.deps.events,
       this.deps.identity,
       this.deps.ingestion,
+      this.deps.forum,
       this.deps.now(),
     );
     const out: InvariantComputation[] = [];
@@ -490,6 +492,11 @@ export class ScoiService extends BaseInvariantService {
       const energy = scoiEnergy(structure);
       const state = contextStateForScore(energy.scoi, false, config.scoiStateThresholds);
       const coverage = lensesTotal === 0 ? 0 : lensesWithData / lensesTotal;
+      // SCOI v2 (batch tier): the structural diagnostic — dim H¹ > 0 means
+      // the overlap DIAGRAM obstructs gluing regardless of any choice of
+      // readings, reason-coded so consumers can distinguish structural
+      // obstruction from high-but-resolvable disagreement.
+      const diagnostic = h1Diagnostic(structure);
       out.push(
         this.computation(
           target,
@@ -503,10 +510,12 @@ export class ScoiService extends BaseInvariantService {
             per_overlap_energy: Object.fromEntries(
               energy.perOverlap.map((o) => [`${o.lensA}~${o.lensB}`, o.energy]),
             ),
+            dim_h1: diagnostic.dimH1,
+            structural_obstruction: diagnostic.structuralObstruction,
           },
           Math.min(1, 0.4 + 0.15 * lensesWithData),
           coverage,
-          [],
+          diagnostic.structuralObstruction ? ['STRUCTURAL_OBSTRUCTION'] : [],
           `Interpretations across ${energy.lensCount} lenses are ${state} (normalized disagreement ${energy.scoi.toFixed(2)}).`,
         ),
       );
@@ -747,6 +756,7 @@ export class TropicalService extends BaseInvariantService {
             seed_count: detection.seedCount,
             coordinated_drop_count: detection.coordinatedDropNodes.length,
             detected: detection.detected,
+            topic_id: topicId,
           },
           detection.confidence,
           matrix.nodeIds.length === 0 ? 0 : multiSeedFamilies / matrix.nodeIds.length,

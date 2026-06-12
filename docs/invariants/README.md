@@ -215,12 +215,22 @@ promotion evidence) and the output-boundary scan that throws on any
 frame-dependent field.
 
 **Privacy by construction:** the session sequence holds an opaque digest
-key, topic-cluster ids, and timestamps ONLY — never a story id, never
-content — TTL'd with the session and capped at 200 transitions. v0
-narrow-loop/compulsive detection is the same pure math on both the client
-(`apps/web/src/signals/topic-loops.ts`, sessionStorage) and the server
-batch tier. Sensitive-topic and minor thresholds are strictly tighter;
-config that would weaken them (factor > 1) is rejected at write time.
+key, topic-cluster ids, timestamps, and the §22.1 aggregate's OWN coarse
+buckets (action kind from the source/context booleans, dwell-bucket
+midpoint as engagement) — never a story id, never content, never another
+user's identity, and no information class beyond what the aggregate
+itself already discloses — TTL'd with the session and capped at 200
+transitions. The coarse action kinds make the path-signature
+`constructive` class REACHABLE (source-seeking sessions classify as such)
+while the client tracker (`apps/web/src/signals/topic-loops.ts`,
+sessionStorage) still stores topic + time only. v0 narrow-loop/compulsive
+detection is the same pure math on both the client and the server batch
+tier. Sensitive-topic strictness is applied server-side from WS-F
+sensitivity labels (a second detection pass at the reduced repeat
+threshold, honored when the flagged cluster is sensitive); minor
+strictness stays client-side where age is known — the opaque session key
+carries no identity to resolve an age band against. Config that would
+weaken either (factor > 1) is rejected at write time.
 
 ### Supporting invariants (SPEC §12)
 
@@ -233,7 +243,11 @@ config that would weaken them (factor > 1) is rejected at write time.
   squaring); synchronized cascades = near-identical arrivals from ≥ 3
   distinct sources across a topic's content families; the documented
   rank-style feature is the arrival-profile rank (distinct timing columns
-  after per-column min subtraction).
+  after per-column min subtraction). A DETECTED cascade feeds MFCI: the
+  scheduler routes the topic's recent stories through the same
+  cheap-statistic intake the WS-E integrity events use (the intake
+  re-checks each target and only opens a case when the statistics confirm
+  — fail-toward-caution, never an auto-action).
 - **Braid** — hourly topic-activity rankings trace strands; adjacent swaps
   (selection-sort decomposition, displacement over/under rule) form the
   word; entropy is the classical homological lower bound
@@ -278,10 +292,32 @@ config that would weaken them (factor > 1) is rejected at write time.
   seeded baselines for MFCI/GWEI) run in CI as part of the test suite and
   nightly at 00 UTC on the scheduler, with per-invariant tolerances
   (MERI 0.01, MFCI p̂ 0.05, GWEI within its stability interval, PHI 0.01).
-  Updating a baseline is a reviewed code change.
+  Updating a baseline is a reviewed code change. UPWARD promotions are
+  additionally regression-gated at apply time: a drifting invariant can
+  never gain authority, while demotions (the kill switch) are never
+  blocked by the gate.
+- **Real-time tier (WS-H.1.2f).** `runRealtimeTier` is the budget-enforced
+  entry point: the configured `realtimeLatencyBudgetMs` is the runGuarded
+  timeout, so a slow computation degrades (TIMEOUT, feature ABSENT) instead
+  of stalling the caller; health and run metadata are observed on the same
+  per-invariant recorders as batch. WS-I consumes this at the ranking
+  boundary.
+- **Calibration rebuild (WS-H.3.1a).** Nightly at 00 UTC the scheduler
+  rebuilds the MFCI null calibrations from the trailing week's ORGANIC
+  hourly windows (same window size and action source the intake scores
+  against), versioned `auto:<date>`; a too-thin baseline keeps the
+  previous calibration rather than replacing it with noise.
 - **Config (fail closed).** All tunables live under `invariants.*` keys in
   the shared runtime-config store; every stored value validates on load
   (invalid → rejected + logged + default kept) and at write time (422).
+  Every persisted output additionally carries its invariant's CONFIG
+  SNAPSHOT in `version_metadata.config`, so WS-H.1.1b version comparisons
+  can tell algorithm drift from configuration drift.
+- **Run visibility.** WS-H batch/real-time executions are observable
+  through `invariant_run_metadata` + the health surface;
+  `invariant.run.completed` remains the WS-E PWAtt scoring pipeline's
+  per-item/window contract (emitting it from WS-H too would double-fire
+  the WS-F lifecycle triggers under different event ids).
 
 ## Surfaces
 
