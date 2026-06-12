@@ -129,38 +129,50 @@ export function SubmitPage(): React.ReactElement {
   }, [threadId]);
 
   const persistDraft = useCallback(
-    (composerMode: ComposerMode, values: ComposerValues): void => {
+    (composerMode: ComposerMode, values: ComposerValues): Promise<void> => {
       markInteractionStart('draft-save');
-      void saveDraft({
+      return saveDraft({
         draftId: draftId.current,
         storyId: null,
         threadId: threadId ?? null,
         branch: null,
         contributionType: composerMode,
         values,
-      }).then(() => measureInteraction('draft-save'));
+      }).then(() => {
+        measureInteraction('draft-save');
+      });
     },
     [threadId],
   );
 
-  const flushDraft = useCallback((): void => {
+  const flushDraft = useCallback((): Promise<void> => {
     if (debounceTimer.current !== null) {
       clearTimeout(debounceTimer.current);
       debounceTimer.current = null;
     }
-    if (latest.current) persistDraft(latest.current.mode, latest.current.values);
+    if (latest.current) return persistDraft(latest.current.mode, latest.current.values);
+    return Promise.resolve();
   }, [persistDraft]);
+
+  const clearSubmittedDraft = useCallback(async (): Promise<void> => {
+    if (debounceTimer.current !== null) {
+      clearTimeout(debounceTimer.current);
+      debounceTimer.current = null;
+    }
+    latest.current = null;
+    await deleteDraft(draftId.current);
+  }, []);
 
   // WS-G.3.7c flush triggers beyond the debounce: app backgrounding and
   // unmount both persist the LATEST state immediately.
   useEffect(() => {
     const onHide = (): void => {
-      if (document.visibilityState === 'hidden') flushDraft();
+      if (document.visibilityState === 'hidden') void flushDraft();
     };
     document.addEventListener('visibilitychange', onHide);
     return () => {
       document.removeEventListener('visibilitychange', onHide);
-      flushDraft();
+      void flushDraft();
     };
   }, [flushDraft]);
 
@@ -169,7 +181,7 @@ export function SubmitPage(): React.ReactElement {
     if (debounceTimer.current !== null) clearTimeout(debounceTimer.current);
     debounceTimer.current = setTimeout(() => {
       debounceTimer.current = null;
-      if (latest.current) persistDraft(latest.current.mode, latest.current.values);
+      if (latest.current) void persistDraft(latest.current.mode, latest.current.values);
     }, DRAFT_DEBOUNCE_MS);
   };
 
@@ -179,9 +191,10 @@ export function SubmitPage(): React.ReactElement {
 
   const onSubmit = (composerMode: ComposerMode, values: ComposerValues): void => {
     setServerErrors({});
+    latest.current = { mode: composerMode, values };
     if (!threadId) {
       // No thread context yet: the draft is preserved locally for later.
-      flushDraft();
+      void flushDraft();
       toast({
         tone: 'success',
         message: t('submit.draftSaved', 'Saved as a draft on this device.'),
@@ -191,8 +204,8 @@ export function SubmitPage(): React.ReactElement {
     const built = buildContributionPayload(composerMode, values, {
       threadId,
       clientDraftId: draftId.current,
-      ...(search.parentId !== undefined ? { parentContributionId: search.parentId } : {}),
-      ...(search.targetId !== undefined ? { targetContributionId: search.targetId } : {}),
+      ...(search['parentId'] !== undefined ? { parentContributionId: search['parentId'] } : {}),
+      ...(search['targetId'] !== undefined ? { targetContributionId: search['targetId'] } : {}),
       ...(shareCitation !== null ? { seedCitations: [shareCitation] } : {}),
     });
     if (!built.ok) {
@@ -200,13 +213,18 @@ export function SubmitPage(): React.ReactElement {
       return;
     }
     void (async () => {
-      await queue.enqueue('contribution', built.payload);
+      // Persist the exact submitted state before networking. If the server cannot
+      // acknowledge the write (offline, transient error, or terminal rejection),
+      // the draft remains recoverable for retry/editing.
+      await flushDraft().catch(() => undefined);
+      const operationId = await queue.enqueue('contribution', built.payload);
       toast({
         tone: 'success',
         message: t('submit.queued', 'Queued — this will sync when you are online.'),
       });
       await processPendingQueue({
-        onTerminalFailure: () => {
+        onTerminalFailure: (operation) => {
+          if (operation.operationId !== operationId) return;
           toast({
             tone: 'error',
             message: t(
@@ -216,6 +234,14 @@ export function SubmitPage(): React.ReactElement {
           });
         },
       });
+      const queuedOperation = await queue.get(operationId);
+      if (queuedOperation === undefined) {
+        await clearSubmittedDraft();
+        toast({
+          tone: 'success',
+          message: t('submit.published', 'Contribution submitted.'),
+        });
+      }
     })();
   };
 
@@ -237,14 +263,14 @@ export function SubmitPage(): React.ReactElement {
                 className="flex flex-wrap items-center justify-between gap-2"
               >
                 <span className="text-sm text-ink-muted">
-                  {draft.contributionType} · {new Date(draft.updatedAt).toLocaleString()}
+                  {draft['contributionType']} · {new Date(draft.updatedAt).toLocaleString()}
                 </span>
                 <div className="flex gap-2">
                   <Button
                     variant="secondary"
                     onClick={() => {
                       draftId.current = draft.draftId;
-                      setMode(draft.contributionType);
+                      setMode(draft['contributionType']);
                       setInitialValues(draft.values);
                       setRecoverable([]);
                     }}
