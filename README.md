@@ -38,44 +38,49 @@ pay-to-rank — is enforced by the type system, runtime guards, and CI gates.
 
 | Attribute | Value |
 |-----------|-------|
-| Version | `v0.1.0` |
+| Version | `v0.2.1` |
 | Specification | [`docs/SPEC.md`](docs/SPEC.md) `v0.6` |
 | Node.js | `22` (pinned in [`.nvmrc`](.nvmrc)) |
 | pnpm | `9.15.4` via Corepack (pinned in `package.json`) |
 | Language | TypeScript `6.0.3`, strict everywhere (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) |
-| Milestone | WS-0 – WS-H complete; **WS-I (ranking and distribution) is next** |
+| Milestone | WS-0 – WS-I complete; **WS-J (trust and safety) is next** |
 | Test gate | 80% cross-workspace coverage (lines, functions, branches, statements) |
 | Bundle budgets | initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz (CI-enforced) |
 
-Nine of seventeen workstreams are shipped: the repository foundation
+Ten of seventeen workstreams are shipped: the repository foundation
 (WS-0), the doctrine and policy corpus (WS-A), the design system (WS-B), the
 PWA client (WS-C), identity and privacy (WS-D), the event pipeline + PWAtt
 scoring (WS-E), ingestion, the source model, and search (WS-F), forum
-and conversation (WS-G), and the core invariant services (WS-H). Stories can be submitted (all six §14.1 types)
+and conversation (WS-G), the core invariant services (WS-H), and ranking
+and distribution (WS-I). Stories can be submitted (all six §14.1 types)
 through safety pre-checks and three-level duplicate detection (canonical
 URL, MinHash/LSH near-duplicates, source-aware syndication), every story
 gets a thread shell and a §14.4 lifecycle, sources get no-truth-score
 profiles, and content is searchable via Postgres FTS with pgvector
-embeddings behind it for the coming MERI/SCOI work. Conversation is live:
+embeddings. Conversation is live:
 threads carry the eleven-type §15.2 contribution taxonomy through the
 structured composer, user content renders through the single sanctioned
 Markdown-lite → DOMPurify → Trusted Types pipeline, evidence cards attach
 to claims, summaries carry §24.3 provenance and uncertainty disclosure, and
 rooms ship with lenses, steward roles, and join models — still with zero
-applause affordances. PWAtt runs in shadow mode: scores are computed,
-logged to invariant outputs, and shown privately to each user in their own
-Signal Ledger, while front-page ranking remains freshness-only — a CI-gated
-equivalence test proves the scores have no distribution effect. All eleven
+applause affordances. The front page is now ranked by the full SPEC §13.3
+pipeline: eight organic candidate retrievers with diversity quotas, a
+financially-denylisted feature store, a non-overridable safety filter,
+deterministic constrained PWAtt scoring (the §30.5 shadow stage lifted —
+PWAtt serves as a bounded input behind §5.5 weight guardrails), MERI
+dedup + source/topic/lens balancing + SCOI context gating, exactly one
+replayable decision log per request, specific per-item explanations that
+can never say "trending" or "because of the algorithm", a runtime kill
+switch over a provably score-blind chronological fallback, and the
+ten-test ranking-neutrality suite as a named CI gate. All eleven
 WS-H invariants (MERI's exact partition-matroid rank, MFCI's Markov-fiber
 conditional coordination test, GWEI's entropic Gromov–Wasserstein cohort
 audits with k-anonymity, SCOI's sheaf-Laplacian context obstruction, PHI's
-gauge-invariant preference holonomy, and the six supporting invariants) run
-in the same shadow discipline: every output carries confidence, coverage,
-reason codes, and a fallback indicator; analyst dashboards, appeal-ready
-rationales, and the client context/wellbeing surfaces are live; and the
-only path to any ranking or moderation effect is the audited
-shadow-to-enforcement promotion gate — which nothing has passed yet, by
-design. WS-I – WS-P (ranking, trust & safety, AI governance, Knomosis
+gauge-invariant preference holonomy, and the six supporting invariants)
+remain in the shadow discipline: ranking computes and LOGS their penalties
+and constraints on every decision, but enforces them only through the
+audited shadow-to-enforcement promotion gate — which nothing has passed
+yet, by design. WS-J – WS-P (trust & safety, AI governance, Knomosis
 wallets, treasury, compliance, security/reliability, launch) land per the
 plan.
 

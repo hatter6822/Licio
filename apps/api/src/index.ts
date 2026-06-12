@@ -117,6 +117,13 @@ import {
   startEventPipelineScheduler,
 } from './pwatt/scheduler.js';
 import { runPwattWindow } from './pwatt/scoring.js';
+import { DrizzleDecisionLogStore, DrizzleFeatureStore } from './ranking/drizzle-ranking-stores.js';
+import { RANKING_SCHEDULER_INTERVAL_MS, startRankingScheduler } from './ranking/scheduler.js';
+import {
+  createInMemoryRankingServices,
+  registerRankingConsumers,
+  setRankingServices,
+} from './ranking/services.js';
 
 const env = validateServerEnv(process.env);
 const logger = createLogger(env.LOG_LEVEL);
@@ -301,6 +308,28 @@ setInvariantServices(invariantServices);
 // PHI session consumer + MFCI cheap-statistic intake + the WS-E hook
 // closures (MERI redundancy, MFCI intake).
 registerInvariantConsumers(eventServices, ingestionServices, identityServices, invariantServices);
+
+// --- WS-I ranking and distribution (SPEC §13) -------------------------------
+// The eight-stage feed pipeline: candidate generation → feature join →
+// safety filter → constrained PWAtt scoring → diversification → decision
+// logging → explanations → feed response. PWAtt serves as a BOUNDED input
+// (the §30.5 lift); invariant penalties/constraints enforce only through the
+// WS-H promotion gate; the runtime kill switch reverts to the chronological
+// fallback without a deployment (WS-I.4.1a/b).
+const rankingServices = createInMemoryRankingServices(
+  eventServices,
+  identityServices,
+  ingestionServices,
+  forumServices,
+  invariantServices,
+  { log: (event, meta) => logger.info(meta, event) },
+);
+rankingServices.featureStore = new DrizzleFeatureStore(db);
+rankingServices.decisionLogs = new DrizzleDecisionLogStore(db);
+await rankingServices.reloadConfig();
+// Real-time feature-store path: the durable invariant.run.completed consumer.
+registerRankingConsumers(rankingServices);
+setRankingServices(rankingServices);
 // Fill the Signal Ledger title cache as real stories are created/read.
 {
   const baseGetById = ingestionServices.stories.getById.bind(ingestionServices.stories);
@@ -486,15 +515,26 @@ startInvariantsScheduler(
   { lease: new DrizzleJobLeaseStore(db) },
 );
 
-// Hourly WS-E pipeline: aggregation windows + PWAtt shadow scoring
-// (WS-E.2.1), retention/anonymization sweeps (WS-E.1.4), and real-time
-// reconciliation (WS-E.3.2) — under its own Postgres job lease, same
-// distributed-runner semantics as the privacy scheduler.
+// Hourly WS-E pipeline: aggregation windows + PWAtt scoring (WS-E.2.1, a
+// bounded ranking input since the WS-I §30.5 lift), retention/anonymization
+// sweeps (WS-E.1.4), and real-time reconciliation (WS-E.3.2) — under its own
+// Postgres job lease, same distributed-runner semantics as the privacy
+// scheduler.
 startEventPipelineScheduler(
   eventServices,
   identityServices,
   (err, task) => logger.error({ err, task }, 'event pipeline scheduler task failed'),
   EVENT_PIPELINE_SCHEDULER_INTERVAL_MS,
+  { lease: new DrizzleJobLeaseStore(db) },
+);
+
+// Hourly WS-I maintenance: feature-store batch refresh, the §22.4
+// decision-log retention sweep, and the replay-regression sample — under its
+// own Postgres job lease.
+startRankingScheduler(
+  rankingServices,
+  (err, task) => logger.error({ err, task }, 'ranking scheduler task failed'),
+  RANKING_SCHEDULER_INTERVAL_MS,
   { lease: new DrizzleJobLeaseStore(db) },
 );
 

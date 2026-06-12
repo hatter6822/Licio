@@ -31,7 +31,7 @@ describe('WS-F.2.5b content-schema financial denylist', () => {
     expect(violations).toEqual([]);
   });
 
-  it('enumerates all twenty-two WS-F/WS-G content tables (fail-closed coverage)', () => {
+  it('enumerates all twenty-four WS-F/WS-G/WS-I content tables (fail-closed coverage)', () => {
     expect(Object.keys(WS_F_CONTENT_TABLES).sort()).toEqual(
       [
         'claims',
@@ -57,6 +57,9 @@ describe('WS-F.2.5b content-schema financial denylist', () => {
         'lenses',
         'summaries',
         'uploads',
+        // WS-I ranking surfaces (the feature store + decision logs).
+        'ranking_feature_vectors',
+        'ranking_decision_logs',
       ].sort(),
     );
   });

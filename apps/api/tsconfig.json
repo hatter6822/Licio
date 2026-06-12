@@ -11,13 +11,16 @@
       "@licio/db": ["../../packages/db/src"],
       "@licio/db/*": ["../../packages/db/src/*"],
       "@licio/invariants": ["../../packages/invariants/src"],
-      "@licio/invariants/*": ["../../packages/invariants/src/*"]
+      "@licio/invariants/*": ["../../packages/invariants/src/*"],
+      "@licio/ranking": ["../../packages/ranking/src"],
+      "@licio/ranking/*": ["../../packages/ranking/src/*"]
     }
   },
   "include": ["src/**/*"],
   "references": [
     { "path": "../../packages/shared" },
     { "path": "../../packages/db" },
-    { "path": "../../packages/invariants" }
+    { "path": "../../packages/invariants" },
+    { "path": "../../packages/ranking" }
   ]
 }

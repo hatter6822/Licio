@@ -16,6 +16,7 @@ export default defineConfig({
         'packages/shared/src/**/*.ts',
         'packages/db/src/**/*.ts',
         'packages/invariants/src/**/*.ts',
+        'packages/ranking/src/**/*.ts',
         'apps/api/src/**/*.ts',
         'apps/web/src/**/*.ts',
         'apps/web/src/**/*.tsx',
@@ -42,6 +43,7 @@ export default defineConfig({
         'apps/api/src/ingestion/drizzle-ingestion-stores.ts',
         'apps/api/src/forum/drizzle-forum-stores.ts',
         'apps/api/src/invariants/drizzle-invariant-stores.ts',
+        'apps/api/src/ranking/drizzle-ranking-stores.ts',
         'packages/db/src/similarity.ts',
       ],
       thresholds: {
@@ -55,6 +57,7 @@ export default defineConfig({
       { test: { ...nodeProjectTest('shared'), root: 'packages/shared' } },
       { test: { ...nodeProjectTest('db'), root: 'packages/db' } },
       { test: { ...nodeProjectTest('invariants'), root: 'packages/invariants' } },
+      { test: { ...nodeProjectTest('ranking'), root: 'packages/ranking' } },
       { test: { ...nodeProjectTest('api'), root: 'apps/api' } },
       { test: { ...webProjectTest, root: 'apps/web' } },
       { test: { ...policyProjectTest, root: 'scripts' } },

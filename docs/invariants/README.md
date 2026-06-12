@@ -384,8 +384,8 @@ personalization settings), and the PHI-4 wellbeing controls ("Reset topic
 history" clears the device-local sequence and the quiet-topic set;
 "Reduce personalization" switches the feed mode) — plus the per-topic
 repeats preference control on the story page (WS-H.2.3c), persisted in
-`personalization_settings.topic_repeat_preference` and consumed by
-ranking once WS-I lands. Feed-mode choices sync to the durable settings
+`personalization_settings.topic_repeat_preference` and consumable by
+the WS-I ranking pipeline. Feed-mode choices sync to the durable settings
 on change and seed back at sign-in (WS-H.6.1c-2 "persists across sessions
 and devices"). The WS-H.6.1c quiet-notification policy is live: a
 narrow-loop detection marks the topic quiet (TTL'd, ids only) in the
@@ -419,10 +419,14 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
 
 ## Residuals (tracked elsewhere)
 
-- **WS-I** consumes promoted invariants at the ranking boundary (MERI
-  dampening, MFCI risk-state effects, SCOI context gates, PHI dampening
-  with the deliberate-choice override, the per-topic repeats threshold);
-  until then every effect is computed-and-logged only.
+- **WS-I** is CLOSED as a seam (`docs/ranking/README.md`): the ranking
+  pipeline consults `effectsEnabled(invariantType)` for every penalty and
+  constraint (MERI dampening + cluster caps, MFCI risk-state effects, SCOI
+  context gates, PHI dampening, the GWEI deployment gate) — promoted
+  invariants ENFORCE; shadow invariants are computed and RECORDED in every
+  decision log with `enforced: false`. Nothing has been promoted yet, by
+  design; the per-topic repeats preference and the deliberate-choice
+  override remain consumable through the same surfaces.
 - **WS-J** takes ownership of the analyst queue UX and supplies the
   hostility signal behind the Hodge seam (defaults to 0) and the appeals
   flow that surfaces `mfci_cases.appeal_summary` and the

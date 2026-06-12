@@ -21,6 +21,7 @@ import { claims, evidenceCards } from './schema/claim.js';
 import { contributionEditHistory, contributions } from './schema/contribution.js';
 import { embeddings } from './schema/embedding.js';
 import { ingestionReviewItems } from './schema/ingestion-review.js';
+import { rankingDecisionLogs, rankingFeatureVectors } from './schema/ranking.js';
 import { lenses, roomStewards, roomSubscriptions, rooms } from './schema/room.js';
 import { sourceSyndications, sources } from './schema/source.js';
 import {
@@ -61,6 +62,14 @@ export const WS_F_CONTENT_TABLES: Readonly<Record<string, Table>> = {
   lenses,
   summaries,
   uploads,
+  // WS-I ranking surfaces (WS-I.2.1b at the table layer): the feature store
+  // and decision logs are THE pay-to-rank boundary — no financial column can
+  // exist on them. Their jsonb payload SUB-FIELDS are audited against the
+  // same shared denylist by the @licio/ranking schema tests (strict zod
+  // closure + collectZodFieldNames), so column and payload layers cannot
+  // drift apart.
+  ranking_feature_vectors: rankingFeatureVectors,
+  ranking_decision_logs: rankingDecisionLogs,
 };
 
 /** The SQL column names of a Drizzle table. */

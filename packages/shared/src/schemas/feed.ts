@@ -66,8 +66,12 @@ export const feedItemSchema = z.object({
 });
 export type FeedItem = z.infer<typeof feedItemSchema>;
 
-/** Keyset-paginated feed page (read-only-offline cacheable, WS-C.1.2 table). */
-export const feedResponseSchema = paginatedSchema(feedItemSchema);
+/** Keyset-paginated feed page (read-only-offline cacheable, WS-C.1.2 table).
+ *  `request_id` is the WS-I ranking decision id (SPEC §23.3 FeedResponse):
+ *  present on pipeline-served feeds, absent on the legacy demo contract. */
+export const feedResponseSchema = paginatedSchema(feedItemSchema).extend({
+  request_id: uuidSchema.optional(),
+});
 export type FeedResponse = z.infer<typeof feedResponseSchema>;
 
 /** Query params for the feed (mode switcher + keyset cursor). */
