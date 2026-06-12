@@ -91,12 +91,14 @@ import {
   setIngestionServices,
 } from './ingestion/services.js';
 import {
+  DrizzleBridgeAttemptStore,
   DrizzleCalibrationStore,
   DrizzleMfciCaseStore,
   DrizzleMfciMarginsStore,
   DrizzleMfciRiskStateStore,
   DrizzlePromotionStore,
   DrizzleRunMetadataStore,
+  DrizzleScoiContextActionStore,
 } from './invariants/drizzle-invariant-stores.js';
 import {
   INVARIANTS_SCHEDULER_INTERVAL_MS,
@@ -292,11 +294,13 @@ invariantServices.runMetadata = new DrizzleRunMetadataStore(db);
 invariantServices.mfciCases = new DrizzleMfciCaseStore(db);
 invariantServices.mfciMargins = new DrizzleMfciMarginsStore(db);
 invariantServices.mfciRiskStates = new DrizzleMfciRiskStateStore(db);
+invariantServices.scoiActions = new DrizzleScoiContextActionStore(db);
+invariantServices.bridgeAttempts = new DrizzleBridgeAttemptStore(db);
 await invariantServices.reloadConfig();
 setInvariantServices(invariantServices);
 // PHI session consumer + MFCI cheap-statistic intake + the WS-E hook
 // closures (MERI redundancy, MFCI intake).
-registerInvariantConsumers(eventServices, ingestionServices, invariantServices);
+registerInvariantConsumers(eventServices, ingestionServices, identityServices, invariantServices);
 // Fill the Signal Ledger title cache as real stories are created/read.
 {
   const baseGetById = ingestionServices.stories.getById.bind(ingestionServices.stories);

@@ -38,7 +38,7 @@ export function freshWsHServices(
     options.invariantsNow ? { now: options.invariantsNow } : {},
   );
   setInvariantServices(invariants);
-  registerInvariantConsumers(base.events, base.ingestion, invariants);
+  registerInvariantConsumers(base.events, base.ingestion, base.identity, invariants);
   return { ...base, invariants };
 }
 

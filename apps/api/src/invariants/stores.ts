@@ -288,6 +288,145 @@ export class InMemoryMfciRiskStateStore implements MfciRiskStateStore {
 }
 
 // ---------------------------------------------------------------------------
+// SCOI moderator context actions (WS-H.4.3d / SCOI-4)
+// ---------------------------------------------------------------------------
+
+export type ScoiContextActionKind = 'merge' | 'annotate' | 'separate';
+
+export interface ScoiContextActionRecord {
+  actionId: string;
+  action: ScoiContextActionKind;
+  threadId: string;
+  relatedThreadId: string | null;
+  storyId: string;
+  roomId: string | null;
+  /** Ratified WS-A moderation reason code. */
+  reasonCode: string;
+  annotation: string | null;
+  /** `steward:<uuid>` — never a raw identity. */
+  actorRef: string;
+  scoiBefore: number | null;
+  scoiAfter: number | null;
+  createdAt: string;
+}
+
+export interface ScoiContextActionStore {
+  insert(record: ScoiContextActionRecord): Promise<void>;
+  listForThread(threadId: string, limit: number): Promise<ScoiContextActionRecord[]>;
+  clear(): Promise<void>;
+}
+
+export class InMemoryScoiContextActionStore implements ScoiContextActionStore {
+  readonly #rows: ScoiContextActionRecord[] = [];
+
+  async insert(record: ScoiContextActionRecord): Promise<void> {
+    this.#rows.push({ ...record });
+  }
+
+  async listForThread(threadId: string, limit: number): Promise<ScoiContextActionRecord[]> {
+    return this.#rows
+      .filter((r) => r.threadId === threadId || r.relatedThreadId === threadId)
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, limit)
+      .map((r) => ({ ...r }));
+  }
+
+  async clear(): Promise<void> {
+    this.#rows.length = 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bridge requests/attempts (WS-H.4.2d / SCOI-2)
+// ---------------------------------------------------------------------------
+
+export type BridgeAttemptStatus = 'requested' | 'credited';
+
+export interface BridgeAttemptRecord {
+  attemptId: string;
+  threadId: string;
+  storyId: string;
+  status: BridgeAttemptStatus;
+  /** `steward:<uuid>` or `system:scoi`. */
+  requestedBy: string;
+  candidateUserIds: string[];
+  contributionId: string | null;
+  bridgeUserId: string | null;
+  scoiBaseline: number;
+  scoiAfter: number | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+export interface BridgeAttemptStore {
+  insert(record: BridgeAttemptRecord): Promise<void>;
+  /** The open (requested) attempt for a thread, if any. */
+  openForThread(threadId: string): Promise<BridgeAttemptRecord | null>;
+  listForThread(threadId: string, limit: number): Promise<BridgeAttemptRecord[]>;
+  /** Single-shot credit: only a `requested` row transitions. */
+  credit(
+    attemptId: string,
+    patch: {
+      contributionId: string;
+      bridgeUserId: string;
+      scoiAfter: number;
+      resolvedAt: string;
+    },
+  ): Promise<BridgeAttemptRecord | null>;
+  clear(): Promise<void>;
+}
+
+export class InMemoryBridgeAttemptStore implements BridgeAttemptStore {
+  readonly #rows = new Map<string, BridgeAttemptRecord>();
+
+  async insert(record: BridgeAttemptRecord): Promise<void> {
+    this.#rows.set(record.attemptId, { ...record, candidateUserIds: [...record.candidateUserIds] });
+  }
+
+  async openForThread(threadId: string): Promise<BridgeAttemptRecord | null> {
+    const open = [...this.#rows.values()]
+      .filter((r) => r.threadId === threadId && r.status === 'requested')
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    return open[0] ? { ...open[0] } : null;
+  }
+
+  async listForThread(threadId: string, limit: number): Promise<BridgeAttemptRecord[]> {
+    return [...this.#rows.values()]
+      .filter((r) => r.threadId === threadId)
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, limit)
+      .map((r) => ({ ...r }));
+  }
+
+  async credit(
+    attemptId: string,
+    patch: {
+      contributionId: string;
+      bridgeUserId: string;
+      scoiAfter: number;
+      resolvedAt: string;
+    },
+  ): Promise<BridgeAttemptRecord | null> {
+    const row = this.#rows.get(attemptId);
+    if (row?.status !== 'requested') return null;
+    const next: BridgeAttemptRecord = {
+      ...row,
+      status: 'credited',
+      contributionId: patch.contributionId,
+      bridgeUserId: patch.bridgeUserId,
+      scoiAfter: patch.scoiAfter,
+      resolvedAt: patch.resolvedAt,
+    };
+    this.#rows.set(attemptId, next);
+    return { ...next };
+  }
+
+  async clear(): Promise<void> {
+    this.#rows.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Session topic sequences (WS-H.6.1a) — ephemeral, privacy-preserving
 // ---------------------------------------------------------------------------
 

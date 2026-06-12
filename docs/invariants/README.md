@@ -36,7 +36,7 @@ Two constraints govern everything here (SPEC §30.4, the M2 gate):
 | Platform contracts | `packages/invariants/src/platform/` | `InvariantService` interface, promotion checklist logic, envelope builders, synthetic datasets, the regression harness + pinned baselines |
 | Services | `apps/api/src/invariants/` | Stores (+ Drizzle adapters), fail-closed config, the eleven service implementations, data assembly, the fallback runner, the promotion service, the lease-guarded scheduler, router consumers |
 | Routes | `apps/api/src/routes/invariants-admin.ts`, `invariants-public.ts` | Steward/analyst surface; public SCOI/MERI reads |
-| Tables | `packages/db/src/schema/{events,invariants}.ts` | `invariant_outputs` (envelope + CHECKs), `invariant_promotions`, `invariant_calibrations`, `invariant_run_metadata`, `mfci_cases`, `mfci_margins` (MFCI-4 conditioning records), `mfci_risk_states` (per-target continuity) |
+| Tables | `packages/db/src/schema/{events,invariants}.ts` | `invariant_outputs` (envelope + CHECKs), `invariant_promotions`, `invariant_calibrations`, `invariant_run_metadata`, `mfci_cases`, `mfci_margins` (MFCI-4 conditioning records), `mfci_risk_states` (per-target continuity), `scoi_context_actions` (WS-H.4.3d), `bridge_attempts` (WS-H.4.2d) |
 | Client | `apps/web/src/components/story/*`, `components/composer/ComposerAffordances/ContextWarning.tsx`, `components/wellbeing/NarrowLoopPrompt`, `signals/topic-loops.ts` | Exposure labels, the independent-sources drawer, interpretation differences, the composer context warning, PHI v0 prompts and controls |
 
 ## The numeric kernels (`packages/invariants/src/math/`)
@@ -178,8 +178,31 @@ is PSD by construction, property-tested). Context states map by threshold;
 it. SCOI v2 (`h1.ts`) computes the structural obstruction: `dim H¹ =
 dim C¹ − rank d₀` from the restriction maps alone, plus the harmonic
 representative norm of an observed pairwise-disagreement cochain (the part
-no choice of readings can explain) — batch-only, reason-coded
-`STRUCTURAL_OBSTRUCTION`.
+no choice of readings can explain) — emitted on every batch output
+(`dim_h1`, `structural_obstruction`, reason-coded
+`STRUCTURAL_OBSTRUCTION`).
+
+**Context surfaces** (`scoi-actions.ts`): room stewards get per-room
+reports (WS-H.4.1c; scope is the room's OWN steward roster, 404-over-403)
+with context state, per-lens interpretation summaries, recommended actions
+(invite-bridge/annotate for split/obstructed, safety review for
+weaponized), the §10.5 "Bridge attempts" record, and recent context
+actions. Moderator context actions (WS-H.4.3d / SCOI-4: merge, annotate,
+separate) require a RATIFIED WS-A reason code, are audited
+(`scoi_context_action`), and record the measured SCOI before/after.
+Annotation is mathematically honest: ONE shared `local_context`
+contribution per active lens pulls every interpretation vector toward the
+same point, so the Dirichlet energy genuinely decreases — measured by
+re-computation, never asserted (the acceptance test pins the decrease on a
+synthetic split case). Merge/separate are audited records whose physical
+tree mechanics belong to WS-G/WS-J tooling. Bridge routing (WS-H.4.2d /
+SCOI-2): candidates are multi-lens participants; an open request carries
+the SCOI baseline, and the durable `invariant-scoi-bridge` consumer
+credits a contribution (single-shot) when re-computation measures a real
+decrease — credit lands in the DESCRIPTIVE reputation summary
+(`bridge_ability`), never a wallet, never a ranking input. Notification
+dispatch is a later seam; routing produces records only, so spam is
+impossible by construction.
 
 ### PHI — Preference Holonomy (SPEC §11)
 
@@ -369,10 +392,17 @@ once WS-I lands).
   until then every effect is computed-and-logged only.
 - **WS-J** takes ownership of the analyst queue UX and supplies the
   hostility signal behind the Hodge seam (defaults to 0) and the appeals
-  flow that surfaces `mfci_cases.appeal_summary`.
+  flow that surfaces `mfci_cases.appeal_summary` and the
+  `scoi_context_actions` records (every moderator context action is
+  already reason-coded and audited for it). Physical thread merge/split
+  tree mechanics ride WS-G/WS-J moderation tooling; until then merge/
+  separate are audited records surfaced on the steward report.
 - **WS-K** owns learned restriction maps (SCOI v2 estimation), the
   framing/misleading classifiers MERI's semantic dimension awaits, and
   governed summary generation.
+- **Notification dispatch** for bridge invitations awaits a platform
+  dispatch path (`notification.sent` has no in-repo producer); bridge
+  routing produces records for steward visibility only.
 - **WS-P** wires the GWEI release gate and the CID model-release gate into
   the experiment framework, and owns the transparency-report pipeline the
   export feeds.

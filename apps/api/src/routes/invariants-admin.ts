@@ -28,15 +28,24 @@
 
 import { zValidator } from '@hono/zod-validator';
 import { INVARIANT_TYPE_NAMES, nextRiskState, runRegressionSuite } from '@licio/invariants';
+import { MODERATION_REASON_CODES } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { type EventPipelineServices, getEventPipelineServices } from '../events/services.js';
+import { type ForumServices, getForumServices } from '../forum/services.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
+import { getIngestionServices, type IngestionServices } from '../ingestion/services.js';
 import {
   INVARIANTS_CONFIG_KEYS,
   storeInvariantsConfigValue,
   validateInvariantsConfigValue,
 } from '../invariants/config.js';
+import {
+  annotateThreadLenses,
+  bridgeCandidatesFor,
+  latestScoiFor,
+  recomputeScoiFor,
+} from '../invariants/scoi-actions.js';
 import { getInvariantServices, type InvariantPlatformServices } from '../invariants/services.js';
 import { type AuthEnv, authMiddleware, getAuth, requireSteward } from '../middleware/auth.js';
 import { resolveItemSafetyState } from '../pwatt/scoring.js';
@@ -68,10 +77,23 @@ const resolveBodySchema = z
   .object({ action: z.enum(['confirmed', 'cleared', 'escalated']) })
   .strict();
 
+const REASON_CODE_SET: ReadonlySet<string> = new Set(MODERATION_REASON_CODES);
+
+const contextActionBodySchema = z
+  .object({
+    action: z.enum(['merge', 'annotate', 'separate']),
+    reason_code: z.string().min(1).max(64),
+    annotation: z.string().min(1).max(4_000).optional(),
+    related_thread_id: z.string().uuid().optional(),
+  })
+  .strict();
+
 export function createInvariantsAdminRoutes(
   resolveIdentity: () => IdentityServices = getIdentityServices,
   resolveEvents: () => EventPipelineServices = getEventPipelineServices,
   resolveInvariants: () => InvariantPlatformServices = getInvariantServices,
+  resolveForum: () => ForumServices = getForumServices,
+  resolveIngestion: () => IngestionServices = getIngestionServices,
 ) {
   return new Hono<AuthEnv>()
     .use('*', authMiddleware(resolveIdentity))
@@ -230,6 +252,212 @@ export function createInvariantsAdminRoutes(
         };
       });
       return c.json({ generated_at: new Date().toISOString(), statements });
+    })
+
+    .get('/scoi/reports/:roomId', async (c) => {
+      // WS-H.4.1c steward reports — scoped to the room's OWN stewards
+      // (404-over-403: an out-of-scope steward learns nothing).
+      const auth = getAuth(c);
+      if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+      const roomId = c.req.param('roomId');
+      if (!z.string().uuid().safeParse(roomId).success) {
+        return c.json(deny('invalid_room', 'roomId must be a UUID'), 422);
+      }
+      const forum = resolveForum();
+      const roles = await forum.rooms.stewardRolesFor(roomId, auth.userId);
+      if (roles.length === 0) return c.json(deny('not_found', 'No such report'), 404);
+      const ingestion = resolveIngestion();
+      const events = resolveEvents();
+      const invariants = resolveInvariants();
+      const lenses = await forum.lenses.listByRoom(roomId);
+      const lensNames = new Map(lenses.map((lens) => [lens.lensId, lens.name]));
+      const entries = [];
+      for (const story of await ingestion.stories.listRecent(200)) {
+        const thread = await ingestion.stories.getThreadByStoryId(story.storyId);
+        if (!thread || thread.roomId !== roomId) continue;
+        const scoi = await latestScoiFor(events, story.storyId);
+        if (!scoi) continue;
+        // Per-lens interpretation summaries: tagged contribution counts.
+        const contributions = await forum.contributions.listByThread(thread.threadId, {
+          limit: 500,
+        });
+        const perLens = new Map<string, number>();
+        for (const contribution of contributions) {
+          const lensId = contribution.metadata['lens_id'];
+          if (typeof lensId !== 'string') continue;
+          perLens.set(lensId, (perLens.get(lensId) ?? 0) + 1);
+        }
+        const recommended =
+          scoi.contextState === 'split' || scoi.contextState === 'obstructed'
+            ? ['invite_bridge', 'annotate_context']
+            : scoi.contextState === 'weaponized'
+              ? ['safety_review']
+              : scoi.contextState === 'ambiguous'
+                ? ['monitor']
+                : [];
+        entries.push({
+          story_id: story.storyId,
+          thread_id: thread.threadId,
+          title: story.title,
+          context_state: scoi.contextState,
+          scoi: scoi.scoi,
+          lenses: [...perLens.entries()].map(([lensId, count]) => ({
+            lens_id: lensId,
+            name: lensNames.get(lensId) ?? lensId,
+            contribution_count: count,
+          })),
+          recommended_actions: recommended,
+          // The §10.5 "Bridge attempts" branch + recent context actions.
+          bridge_attempts: await invariants.bridgeAttempts.listForThread(thread.threadId, 10),
+          context_actions: await invariants.scoiActions.listForThread(thread.threadId, 10),
+        });
+      }
+      return c.json({ room_id: roomId, reports: entries });
+    })
+
+    .post(
+      '/scoi/threads/:threadId/actions',
+      zValidator('json', contextActionBodySchema),
+      async (c) => {
+        // WS-H.4.3d moderator context actions (SCOI-4): merge / annotate /
+        // separate — ratified reason code, steward room scope, audited,
+        // and (for annotate/merge) SCOI re-computation with the measured
+        // before/after on the record.
+        const auth = getAuth(c);
+        if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+        const threadId = c.req.param('threadId');
+        if (!z.string().uuid().safeParse(threadId).success) {
+          return c.json(deny('invalid_thread', 'threadId must be a UUID'), 422);
+        }
+        const body = c.req.valid('json');
+        if (!REASON_CODE_SET.has(body.reason_code)) {
+          return c.json(deny('invalid_reason', 'reason_code must be a ratified WS-A code'), 422);
+        }
+        if (body.action === 'annotate' && !body.annotation) {
+          return c.json(deny('missing_annotation', 'annotate requires an annotation body'), 422);
+        }
+        if (body.action === 'merge' && !body.related_thread_id) {
+          return c.json(deny('missing_related', 'merge requires related_thread_id'), 422);
+        }
+        const forum = resolveForum();
+        const ingestion = resolveIngestion();
+        const thread = await ingestion.stories.getThreadById(threadId);
+        if (!thread) return c.json(deny('not_found', 'No such thread'), 404);
+        const roles = thread.roomId
+          ? await forum.rooms.stewardRolesFor(thread.roomId, auth.userId)
+          : [];
+        if (roles.length === 0) return c.json(deny('not_found', 'No such thread'), 404);
+        const events = resolveEvents();
+        const invariants = resolveInvariants();
+        const before = await latestScoiFor(events, thread.storyId);
+        const actionId = crypto.randomUUID();
+        if (body.action === 'annotate' && body.annotation) {
+          const inserted = await annotateThreadLenses(forum, threadId, body.annotation);
+          if (inserted === 0) {
+            return c.json(deny('no_lenses', 'No lens-tagged interpretations to annotate'), 422);
+          }
+        }
+        // Re-computation reflects the action in context state (annotate/
+        // merge); separate records the incompatibility for WS-G tooling.
+        const after =
+          body.action === 'separate'
+            ? before
+            : await recomputeScoiFor(invariants, events, thread.storyId);
+        await invariants.scoiActions.insert({
+          actionId,
+          action: body.action,
+          threadId,
+          relatedThreadId: body.related_thread_id ?? null,
+          storyId: thread.storyId,
+          roomId: thread.roomId,
+          reasonCode: body.reason_code,
+          annotation: body.annotation ?? null,
+          actorRef: `steward:${auth.userId}`,
+          scoiBefore: before?.scoi ?? null,
+          scoiAfter: after?.scoi ?? null,
+          createdAt: new Date(invariants.now()).toISOString(),
+        });
+        const identity = resolveIdentity();
+        await identity.audit.append({
+          actorUserId: auth.userId,
+          eventType: 'scoi_context_action',
+          targetRef: threadId,
+          context: {
+            action: body.action,
+            reason_code: body.reason_code,
+            related_thread_id: body.related_thread_id ?? null,
+            scoi_before: before?.scoi ?? null,
+            scoi_after: after?.scoi ?? null,
+          },
+        });
+        return c.json({
+          action_id: actionId,
+          scoi_before: before?.scoi ?? null,
+          scoi_after: after?.scoi ?? null,
+          context_state: after?.contextState ?? before?.contextState ?? null,
+        });
+      },
+    )
+
+    .post('/scoi/threads/:threadId/bridge-requests', async (c) => {
+      // WS-H.4.2d bridge routing: identify multi-lens participants and open
+      // a bridge request with the SCOI baseline. Records only — credit is
+      // decided by the durable consumer when a contribution measurably
+      // reduces the obstruction.
+      const auth = getAuth(c);
+      if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+      const threadId = c.req.param('threadId');
+      if (!z.string().uuid().safeParse(threadId).success) {
+        return c.json(deny('invalid_thread', 'threadId must be a UUID'), 422);
+      }
+      const forum = resolveForum();
+      const ingestion = resolveIngestion();
+      const thread = await ingestion.stories.getThreadById(threadId);
+      if (!thread) return c.json(deny('not_found', 'No such thread'), 404);
+      const roles = thread.roomId
+        ? await forum.rooms.stewardRolesFor(thread.roomId, auth.userId)
+        : [];
+      if (roles.length === 0) return c.json(deny('not_found', 'No such thread'), 404);
+      const events = resolveEvents();
+      const invariants = resolveInvariants();
+      const existing = await invariants.bridgeAttempts.openForThread(threadId);
+      if (existing) {
+        return c.json(deny('already_open', 'A bridge request is already open'), 409);
+      }
+      const baseline =
+        (await latestScoiFor(events, thread.storyId)) ??
+        (await recomputeScoiFor(invariants, events, thread.storyId));
+      if (!baseline) {
+        return c.json(deny('no_scoi', 'No SCOI measurement available to baseline against'), 422);
+      }
+      const candidates = await bridgeCandidatesFor(forum, ingestion, threadId);
+      const attemptId = crypto.randomUUID();
+      await invariants.bridgeAttempts.insert({
+        attemptId,
+        threadId,
+        storyId: thread.storyId,
+        status: 'requested',
+        requestedBy: `steward:${auth.userId}`,
+        candidateUserIds: candidates,
+        contributionId: null,
+        bridgeUserId: null,
+        scoiBaseline: baseline.scoi,
+        scoiAfter: null,
+        createdAt: new Date(invariants.now()).toISOString(),
+        resolvedAt: null,
+      });
+      const identity = resolveIdentity();
+      await identity.audit.append({
+        actorUserId: auth.userId,
+        eventType: 'bridge_request',
+        targetRef: threadId,
+        context: { candidate_count: candidates.length, scoi_baseline: baseline.scoi },
+      });
+      return c.json({
+        attempt_id: attemptId,
+        scoi_baseline: baseline.scoi,
+        candidates,
+      });
     })
 
     .get('/promotions/:invariantType', async (c) => {

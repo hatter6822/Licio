@@ -9,6 +9,7 @@
 
 import { randomUUID } from 'node:crypto';
 import {
+  bridgeAttempts,
   type createDbClient,
   invariantCalibrations,
   invariantPromotions,
@@ -16,9 +17,13 @@ import {
   mfciCases,
   mfciMargins,
   mfciRiskStates,
+  scoiContextActions,
 } from '@licio/db';
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, or, sql } from 'drizzle-orm';
 import type {
+  BridgeAttemptRecord,
+  BridgeAttemptStatus,
+  BridgeAttemptStore,
   CalibrationRow,
   CalibrationStore,
   MfciCaseRowRecord,
@@ -32,6 +37,8 @@ import type {
   PromotionStore,
   RunMetadataRow,
   RunMetadataStore,
+  ScoiContextActionRecord,
+  ScoiContextActionStore,
 } from './stores.js';
 
 type Db = ReturnType<typeof createDbClient>;
@@ -298,6 +305,152 @@ export class DrizzleMfciMarginsStore implements MfciMarginsStore {
 
   async clear(): Promise<void> {
     await this.#db.delete(mfciMargins);
+  }
+}
+
+export class DrizzleScoiContextActionStore implements ScoiContextActionStore {
+  readonly #db: Db;
+
+  constructor(db: Db) {
+    this.#db = db;
+  }
+
+  async insert(record: ScoiContextActionRecord): Promise<void> {
+    await this.#db.insert(scoiContextActions).values({
+      actionId: record.actionId || randomUUID(),
+      action: record.action,
+      threadId: record.threadId,
+      relatedThreadId: record.relatedThreadId,
+      storyId: record.storyId,
+      roomId: record.roomId,
+      reasonCode: record.reasonCode,
+      annotation: record.annotation,
+      actorRef: record.actorRef,
+      scoiBefore: record.scoiBefore,
+      scoiAfter: record.scoiAfter,
+      createdAt: new Date(record.createdAt),
+    });
+  }
+
+  async listForThread(threadId: string, limit: number): Promise<ScoiContextActionRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(scoiContextActions)
+      .where(
+        or(
+          eq(scoiContextActions.threadId, threadId),
+          eq(scoiContextActions.relatedThreadId, threadId),
+        ),
+      )
+      .orderBy(desc(scoiContextActions.createdAt))
+      .limit(limit);
+    return rows.map((row) => ({
+      actionId: row.actionId,
+      action: row.action as ScoiContextActionRecord['action'],
+      threadId: row.threadId,
+      relatedThreadId: row.relatedThreadId,
+      storyId: row.storyId,
+      roomId: row.roomId,
+      reasonCode: row.reasonCode,
+      annotation: row.annotation,
+      actorRef: row.actorRef,
+      scoiBefore: row.scoiBefore,
+      scoiAfter: row.scoiAfter,
+      createdAt: iso(row.createdAt),
+    }));
+  }
+
+  async clear(): Promise<void> {
+    await this.#db.delete(scoiContextActions);
+  }
+}
+
+export class DrizzleBridgeAttemptStore implements BridgeAttemptStore {
+  readonly #db: Db;
+
+  constructor(db: Db) {
+    this.#db = db;
+  }
+
+  #toRecord(row: typeof bridgeAttempts.$inferSelect): BridgeAttemptRecord {
+    return {
+      attemptId: row.attemptId,
+      threadId: row.threadId,
+      storyId: row.storyId,
+      status: row.status as BridgeAttemptStatus,
+      requestedBy: row.requestedBy,
+      candidateUserIds: row.candidateUserIds,
+      contributionId: row.contributionId,
+      bridgeUserId: row.bridgeUserId,
+      scoiBaseline: row.scoiBaseline,
+      scoiAfter: row.scoiAfter,
+      createdAt: iso(row.createdAt),
+      resolvedAt: row.resolvedAt ? iso(row.resolvedAt) : null,
+    };
+  }
+
+  async insert(record: BridgeAttemptRecord): Promise<void> {
+    await this.#db.insert(bridgeAttempts).values({
+      attemptId: record.attemptId || randomUUID(),
+      threadId: record.threadId,
+      storyId: record.storyId,
+      status: record.status,
+      requestedBy: record.requestedBy,
+      candidateUserIds: [...record.candidateUserIds],
+      contributionId: record.contributionId,
+      bridgeUserId: record.bridgeUserId,
+      scoiBaseline: record.scoiBaseline,
+      scoiAfter: record.scoiAfter,
+      createdAt: new Date(record.createdAt),
+      resolvedAt: record.resolvedAt ? new Date(record.resolvedAt) : null,
+    });
+  }
+
+  async openForThread(threadId: string): Promise<BridgeAttemptRecord | null> {
+    const [row] = await this.#db
+      .select()
+      .from(bridgeAttempts)
+      .where(and(eq(bridgeAttempts.threadId, threadId), eq(bridgeAttempts.status, 'requested')))
+      .orderBy(desc(bridgeAttempts.createdAt))
+      .limit(1);
+    return row ? this.#toRecord(row) : null;
+  }
+
+  async listForThread(threadId: string, limit: number): Promise<BridgeAttemptRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(bridgeAttempts)
+      .where(eq(bridgeAttempts.threadId, threadId))
+      .orderBy(desc(bridgeAttempts.createdAt))
+      .limit(limit);
+    return rows.map((row) => this.#toRecord(row));
+  }
+
+  async credit(
+    attemptId: string,
+    patch: {
+      contributionId: string;
+      bridgeUserId: string;
+      scoiAfter: number;
+      resolvedAt: string;
+    },
+  ): Promise<BridgeAttemptRecord | null> {
+    const [row] = await this.#db
+      .update(bridgeAttempts)
+      .set({
+        status: 'credited',
+        contributionId: patch.contributionId,
+        bridgeUserId: patch.bridgeUserId,
+        scoiAfter: patch.scoiAfter,
+        resolvedAt: new Date(patch.resolvedAt),
+      })
+      .where(and(eq(bridgeAttempts.attemptId, attemptId), eq(bridgeAttempts.status, 'requested')))
+      .returning();
+    return row ? this.#toRecord(row) : null;
+  }
+
+  async clear(): Promise<void> {
+    await this.#db.delete(bridgeAttempts);
   }
 }
 

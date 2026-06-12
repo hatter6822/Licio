@@ -12,12 +12,14 @@ import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DrizzleInvariantOutputStore } from '../../events/drizzle-event-stores.js';
 import {
+  DrizzleBridgeAttemptStore,
   DrizzleCalibrationStore,
   DrizzleMfciCaseStore,
   DrizzleMfciMarginsStore,
   DrizzleMfciRiskStateStore,
   DrizzlePromotionStore,
   DrizzleRunMetadataStore,
+  DrizzleScoiContextActionStore,
 } from '../drizzle-invariant-stores.js';
 
 const DB_URL = process.env['DATABASE_URL'];
@@ -238,6 +240,118 @@ describe.skipIf(!DB_URL)('WS-H Drizzle adapters (live Postgres)', () => {
       }),
     ).rejects.toThrow();
     expect(await store.get(randomUUID())).toBeNull();
+    await store.clear();
+  });
+
+  it('scoi context actions: insert + thread listing (both sides) + action CHECK', async () => {
+    const store = new DrizzleScoiContextActionStore(db);
+    await store.clear();
+    const threadId = randomUUID();
+    const relatedId = randomUUID();
+    await store.insert({
+      actionId: randomUUID(),
+      action: 'annotate',
+      threadId,
+      relatedThreadId: null,
+      storyId: randomUUID(),
+      roomId: randomUUID(),
+      reasonCode: 'MOD_MISINFO_001',
+      annotation: 'Shared context.',
+      actorRef: 'steward:test',
+      scoiBefore: 0.8,
+      scoiAfter: 0.4,
+      createdAt: '2026-06-11T10:00:00.000Z',
+    });
+    await store.insert({
+      actionId: randomUUID(),
+      action: 'merge',
+      threadId: relatedId,
+      relatedThreadId: threadId, // listed from BOTH sides
+      storyId: randomUUID(),
+      roomId: null,
+      reasonCode: 'MOD_SPAM_001',
+      annotation: null,
+      actorRef: 'steward:test',
+      scoiBefore: null,
+      scoiAfter: null,
+      createdAt: '2026-06-11T11:00:00.000Z',
+    });
+    const rows = await store.listForThread(threadId, 10);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.action).toBe('merge'); // newest first
+    await expect(
+      store.insert({
+        actionId: randomUUID(),
+        action: 'obliterate' as never,
+        threadId,
+        relatedThreadId: null,
+        storyId: randomUUID(),
+        roomId: null,
+        reasonCode: 'MOD_SPAM_001',
+        annotation: null,
+        actorRef: 'steward:test',
+        scoiBefore: null,
+        scoiAfter: null,
+        createdAt: new Date().toISOString(),
+      }),
+    ).rejects.toThrow();
+    await store.clear();
+  });
+
+  it('bridge attempts: open lookup + single-shot credit + baseline CHECK', async () => {
+    const store = new DrizzleBridgeAttemptStore(db);
+    await store.clear();
+    const threadId = randomUUID();
+    const attemptId = randomUUID();
+    await store.insert({
+      attemptId,
+      threadId,
+      storyId: randomUUID(),
+      status: 'requested',
+      requestedBy: 'steward:test',
+      candidateUserIds: [randomUUID(), randomUUID()],
+      contributionId: null,
+      bridgeUserId: null,
+      scoiBaseline: 0.7,
+      scoiAfter: null,
+      createdAt: '2026-06-11T10:00:00.000Z',
+      resolvedAt: null,
+    });
+    expect((await store.openForThread(threadId))?.attemptId).toBe(attemptId);
+    const credited = await store.credit(attemptId, {
+      contributionId: randomUUID(),
+      bridgeUserId: randomUUID(),
+      scoiAfter: 0.3,
+      resolvedAt: new Date().toISOString(),
+    });
+    expect(credited?.status).toBe('credited');
+    expect(credited?.candidateUserIds).toHaveLength(2);
+    // Single-shot: a second credit returns null; nothing stays open.
+    expect(
+      await store.credit(attemptId, {
+        contributionId: randomUUID(),
+        bridgeUserId: randomUUID(),
+        scoiAfter: 0.2,
+        resolvedAt: new Date().toISOString(),
+      }),
+    ).toBeNull();
+    expect(await store.openForThread(threadId)).toBeNull();
+    await expect(
+      store.insert({
+        attemptId: randomUUID(),
+        threadId,
+        storyId: randomUUID(),
+        status: 'requested',
+        requestedBy: 'x',
+        candidateUserIds: [],
+        contributionId: null,
+        bridgeUserId: null,
+        scoiBaseline: 1.5, // out of [0, 1]
+        scoiAfter: null,
+        createdAt: new Date().toISOString(),
+        resolvedAt: null,
+      }),
+    ).rejects.toThrow();
     await store.clear();
   });
 

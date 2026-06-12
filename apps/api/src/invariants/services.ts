@@ -41,6 +41,7 @@ import {
   loadInvariantsConfig,
 } from './config.js';
 import { createPromotionService, type PromotionService } from './promotion.js';
+import { registerScoiBridgeConsumer } from './scoi-actions.js';
 import {
   BraidService,
   CidService,
@@ -55,19 +56,23 @@ import {
   TropicalService,
 } from './services-impl.js';
 import {
+  type BridgeAttemptStore,
   type CalibrationStore,
+  InMemoryBridgeAttemptStore,
   InMemoryCalibrationStore,
   InMemoryMfciCaseStore,
   InMemoryMfciMarginsStore,
   InMemoryMfciRiskStateStore,
   InMemoryPromotionStore,
   InMemoryRunMetadataStore,
+  InMemoryScoiContextActionStore,
   InMemorySessionTopicSequenceStore,
   type MfciCaseStore,
   type MfciMarginsStore,
   type MfciRiskStateStore,
   type PromotionStore,
   type RunMetadataStore,
+  type ScoiContextActionStore,
   type SessionTopicSequenceStore,
 } from './stores.js';
 
@@ -78,6 +83,8 @@ export interface InvariantPlatformServices {
   mfciCases: MfciCaseStore;
   mfciMargins: MfciMarginsStore;
   mfciRiskStates: MfciRiskStateStore;
+  scoiActions: ScoiContextActionStore;
+  bridgeAttempts: BridgeAttemptStore;
   sessions: SessionTopicSequenceStore;
   promotionService: PromotionService;
   meri: MeriService;
@@ -137,6 +144,8 @@ export function createInMemoryInvariantServices(
     mfciCases: new InMemoryMfciCaseStore(),
     mfciMargins: new InMemoryMfciMarginsStore(),
     mfciRiskStates: new InMemoryMfciRiskStateStore(),
+    scoiActions: new InMemoryScoiContextActionStore(),
+    bridgeAttempts: new InMemoryBridgeAttemptStore(),
     sessions,
     promotionService: createPromotionService(
       promotions,
@@ -222,6 +231,7 @@ function sessionKeyOf(ownerRef: string, sessionBucket: string): string {
 export function registerInvariantConsumers(
   events: EventPipelineServices,
   ingestion: IngestionServices,
+  identity: IdentityServices,
   invariants: InvariantPlatformServices,
 ): void {
   // WS-E seam closure: MERI redundancy for the PWAtt redundancy penalty.
@@ -403,6 +413,10 @@ export function registerInvariantConsumers(
       for (const targetId of payload.target_ids ?? []) await intake(targetId);
     },
   });
+
+  // SCOI bridge credit (WS-H.4.2d): contributions on bridge-requested
+  // threads trigger re-computation; measured decreases credit the bridger.
+  registerScoiBridgeConsumer(events, ingestion, identity, invariants);
 }
 
 // ---------------------------------------------------------------------------

@@ -392,3 +392,261 @@ describe('public WS-H read surfaces', () => {
     expect(body.marginal_gain).toBeNull(); // no MERI run yet — honestly absent
   });
 });
+
+describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
+  /** A room with two lenses reading the SAME story divergently, plus a
+   * multi-lens participant (the bridge candidate), with the acting user as
+   * the room's steward. */
+  async function seedSplitRoom(fixture: WsHFixture, stewardUserId: string) {
+    const roomId = randomUUID();
+    const inserted = await fixture.forum.rooms.insert({
+      roomId,
+      name: `Room ${roomId.slice(0, 8)}`,
+      slug: `room-${roomId.slice(0, 8)}`,
+      description: null,
+      roomType: 'global_topic',
+      visibility: 'public',
+      createdBy: null,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+    });
+    expect(inserted.ok).toBe(true);
+    await fixture.forum.rooms.addSteward({
+      roomId,
+      userId: stewardUserId,
+      role: 'community_steward',
+      assignedAt: new Date().toISOString(),
+    });
+    const lensIds: string[] = [];
+    for (const lensType of ['local_resident', 'expert'] as const) {
+      const lens = await fixture.forum.lenses.insert({
+        lensId: randomUUID(),
+        roomId,
+        name: `Lens ${lensType}`,
+        lensType,
+        description: null,
+      });
+      if (lens.ok) lensIds.push(lens.lens.lensId);
+    }
+    const { storyId, threadId } = await seedStory(fixture);
+    await fixture.ingestion.stories.updateThread(threadId, { roomId });
+    const bridgeUser = await seedUserWithSession(fixture.identity);
+    const bodies: Record<string, string> = {
+      [lensIds[0] ?? '']: 'Routine harmless maintenance notice nothing unusual here at all.',
+      [lensIds[1] ?? '']: 'Critical alarming contamination emergency requiring immediate action.',
+    };
+    for (const lensId of lensIds) {
+      const result = await fixture.forum.contributions.insert({
+        contributionId: randomUUID(),
+        threadId,
+        userId: bridgeUser.userId, // posts under BOTH lenses → bridge candidate
+        type: 'explanation',
+        body: bodies[lensId] ?? 'Reading.',
+        citations: [],
+        metadata: { lens_id: lensId },
+        targetClaimId: null,
+        parentContributionId: null,
+        clientDraftId: randomUUID(),
+        path: [],
+        moderationState: 'published',
+      });
+      expect(result.ok).toBe(true);
+    }
+    return { roomId, storyId, threadId, lensIds, bridgeUserId: bridgeUser.userId };
+  }
+
+  it('steward reports are room-scoped with states, lenses, and recommendations', async () => {
+    const fixture = freshWsHServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { roomId, storyId, threadId } = await seedSplitRoom(fixture, steward.userId);
+    // Store a SCOI output so the report has a measurement to show.
+    await fixture.invariants.scoi
+      .computeBatch([{ targetType: 'story', targetId: storyId }], hourWindow(Date.now()))
+      .then((outputs) =>
+        Promise.all(
+          outputs.map((o) =>
+            fixture.events.invariantStore.upsert({
+              invariantType: o.invariantType,
+              targetType: o.target.targetType,
+              targetId: o.target.targetId,
+              timeWindow: o.window,
+              version: o.version,
+              scoreVector: o.score_vector,
+              explanationSummary: o.explanationSummary,
+              confidence: o.confidence,
+              coverage: o.coverage,
+              reasonCodes: o.reason_codes,
+              fallbackUsed: o.fallback_used,
+              versionMetadata: null,
+              shadowMode: true,
+              createdAt: new Date().toISOString(),
+            }),
+          ),
+        ),
+      );
+    const report = await adminRequest(fixture, steward.cookie, `/scoi/reports/${roomId}`);
+    expect(report.status).toBe(200);
+    const body = (await report.json()) as {
+      reports: Array<{
+        story_id: string;
+        thread_id: string;
+        context_state: string;
+        scoi: number;
+        lenses: Array<{ name: string; contribution_count: number }>;
+        recommended_actions: string[];
+        bridge_attempts: unknown[];
+      }>;
+    };
+    expect(body.reports).toHaveLength(1);
+    const entry = body.reports[0];
+    expect(entry?.story_id).toBe(storyId);
+    expect(entry?.thread_id).toBe(threadId);
+    expect(entry?.lenses).toHaveLength(2);
+    expect(typeof entry?.scoi).toBe('number');
+    // An OUT-OF-SCOPE steward (global role, not a room steward) gets 404.
+    const outsider = await seedUserWithSession(fixture.identity, { steward: true });
+    const denied = await adminRequest(fixture, outsider.cookie, `/scoi/reports/${roomId}`);
+    expect(denied.status).toBe(404);
+  });
+
+  it('annotation measurably reduces SCOI and is audited with a ratified code (SCOI-4)', async () => {
+    const fixture = freshWsHServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { storyId, threadId } = await seedSplitRoom(fixture, steward.userId);
+    // Baseline measurement (stored so the action has a before).
+    const baseline = await fixture.invariants.scoi.computeBatch(
+      [{ targetType: 'story', targetId: storyId }],
+      hourWindow(Date.now()),
+    );
+    const scoiBefore = baseline[0]?.score_vector['scoi'] as number;
+    expect(scoiBefore).toBeGreaterThan(0);
+    await fixture.events.invariantStore.upsert({
+      invariantType: 'SCOI',
+      targetType: 'story',
+      targetId: storyId,
+      timeWindow: hourWindow(Date.now()),
+      version: '1.0.0',
+      scoreVector: baseline[0]?.score_vector ?? {},
+      explanationSummary: null,
+      confidence: 0.8,
+      coverage: 1,
+      reasonCodes: [],
+      fallbackUsed: false,
+      versionMetadata: null,
+      shadowMode: true,
+      createdAt: new Date().toISOString(),
+    });
+    // A fabricated reason code is refused (422).
+    const fabricated = await adminRequest(
+      fixture,
+      steward.cookie,
+      `/scoi/threads/${threadId}/actions`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'annotate',
+          reason_code: 'MADE_UP_001',
+          annotation: 'Shared context.',
+        }),
+      },
+    );
+    expect(fabricated.status).toBe(422);
+    // The real annotation: identical shared context lands on BOTH lenses,
+    // pulling the interpretation vectors together.
+    const acted = await adminRequest(fixture, steward.cookie, `/scoi/threads/${threadId}/actions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'annotate',
+        reason_code: 'MOD_MISINFO_001',
+        annotation:
+          'Officials confirmed this is a scheduled maintenance notice; the contamination figures referenced were from the 2019 incident report.',
+      }),
+    });
+    expect(acted.status).toBe(200);
+    const result = (await acted.json()) as {
+      action_id: string;
+      scoi_before: number;
+      scoi_after: number;
+    };
+    // The ACCEPTANCE criterion: annotation reduces SCOI on re-computation.
+    expect(result.scoi_after).toBeLessThan(result.scoi_before);
+    const actions = await fixture.invariants.scoiActions.listForThread(threadId, 5);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]?.reasonCode).toBe('MOD_MISINFO_001');
+    expect(actions[0]?.actorRef).toBe(`steward:${steward.userId}`);
+  });
+
+  it('bridge requests route multi-lens candidates; a reducing contribution credits (SCOI-2)', async () => {
+    const fixture = freshWsHServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { threadId, lensIds, bridgeUserId } = await seedSplitRoom(fixture, steward.userId);
+    const opened = await adminRequest(
+      fixture,
+      steward.cookie,
+      `/scoi/threads/${threadId}/bridge-requests`,
+      { method: 'POST', body: JSON.stringify({}) },
+    );
+    expect(opened.status).toBe(200);
+    const request = (await opened.json()) as {
+      attempt_id: string;
+      scoi_baseline: number;
+      candidates: string[];
+    };
+    expect(request.scoi_baseline).toBeGreaterThan(0);
+    // The multi-lens participant is the routed candidate.
+    expect(request.candidates).toContain(bridgeUserId);
+    // A second open request 409s (one at a time per thread).
+    const duplicate = await adminRequest(
+      fixture,
+      steward.cookie,
+      `/scoi/threads/${threadId}/bridge-requests`,
+      { method: 'POST', body: JSON.stringify({}) },
+    );
+    expect(duplicate.status).toBe(409);
+    // The bridge contribution: the SAME shared context under both lenses,
+    // then the durable consumer measures the decrease and credits.
+    for (const lensId of lensIds) {
+      const inserted = await fixture.forum.contributions.insert({
+        contributionId: randomUUID(),
+        threadId,
+        userId: bridgeUserId,
+        type: 'local_context',
+        body: 'Both readings reference the same scheduled maintenance bulletin from the city.',
+        citations: [],
+        metadata: { lens_id: lensId },
+        targetClaimId: null,
+        parentContributionId: null,
+        clientDraftId: randomUUID(),
+        path: [],
+        moderationState: 'published',
+      });
+      expect(inserted.ok).toBe(true);
+      if (inserted.ok) {
+        await fixture.events.router.publish({
+          event_id: randomUUID(),
+          event_type: 'contribution.created',
+          timestamp: new Date().toISOString(),
+          schema_version: '1',
+          thread_id: threadId,
+          contribution_id: inserted.contribution.contributionId,
+          user_id: bridgeUserId,
+          contribution_type: 'local_context',
+          privacy_classification: 'public',
+          retention_tier: 'public_contribution',
+        } as never);
+      }
+    }
+    const attempts = await fixture.invariants.bridgeAttempts.listForThread(threadId, 5);
+    const credited = attempts.find((a) => a.status === 'credited');
+    expect(credited).toBeDefined();
+    expect(credited?.bridgeUserId).toBe(bridgeUserId);
+    expect(credited?.scoiAfter).toBeLessThan(request.scoi_baseline);
+    // SCOI-2 participation credit: the DESCRIPTIVE reputation summary.
+    const user = await fixture.identity.store.getUser(bridgeUserId);
+    expect(user?.reputationSummary.bridge_ability).toBe(1);
+    // Single-shot: only one credit even though two contributions arrived.
+    expect(attempts.filter((a) => a.status === 'credited')).toHaveLength(1);
+  });
+});
