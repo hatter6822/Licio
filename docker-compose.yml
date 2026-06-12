@@ -24,7 +24,7 @@ services:
 
   redis:
     # Pin to digest in production for reproducibility: docker pull redis:7-alpine && docker inspect --format='{{index .RepoDigests 0}}' redis:7-alpine
-    image: redis:7-alpine@sha256:de78a1421f2e3564e1f9b7e4aad1f7decb0a5d9a45fbb61c1b21817dc105ab8e
+    image: redis:7.0-alpine@sha256:de78a1421f2e3564e1f9b7e4aad1f7decb0a5d9a45fbb61c1b21817dc105ab8e
     ports:
       - "6379:6379"
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
