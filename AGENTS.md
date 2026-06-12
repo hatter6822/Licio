@@ -146,26 +146,40 @@ differ", the composer context warning, the narrow-loop wellbeing
 prompt, PHI-4 reset/reduce-personalization controls, the per-topic
 repeats preference).
 WS-I ships ranking and distribution (`docs/ranking/README.md`): the
-eight-stage SPEC §13.3 pipeline behind `GET /v1/feed` — eight organic
-candidate retrievers with ceil-reserved diversity quotas, the strict
+eight-stage SPEC §13.3 pipeline behind `GET /v1/feed` (front page +
+`?topic=` topic surface) and `GET /v1/rooms/:roomId/feed` (room surface
+gated by WS-G content visibility, with REAL lens-tagged balancing) —
+eight organic candidate retrievers (+ the room-surface scoper) with
+ceil-reserved, jointly-protected diversity quotas, the strict
 WS-I.2.1a feature store (append-only revisions, the WS-I.2.1b financial
-denylist on the SHARED WS-A.1.1 term list at every write, invariant
-version/config-hash traceability, real-time router consumer + hourly
-batch), the non-overridable safety filter (WS-J seam), deterministic
-constrained PWAtt scoring (§5.4 exactly; §5.5-guardrailed versioned
-profiles; penalties and constraints enforced ONLY through the WS-H
-promotion gate — computed and logged otherwise), MERI cluster dedup +
-source/topic/lens balancing + SCOI context gating + PHI per-user
-diversification + the GWEI deployment gate, EXACTLY one replayable
+denylist on the SHARED WS-A.1.1 term list — pinned to a versioned
+artifact — at every write, invariant version/config-hash traceability,
+real-time router consumer on `invariant.run.completed` AND the MFCI
+intake path's `integrity.signal.detected` + hourly batch, by-timestamp
+snapshot reads, BFS chain near-dup clustering), the non-overridable
+batched safety filter (WS-J seam), deterministic constrained PWAtt
+scoring (§5.4 exactly; §5.5-guardrailed versioned profiles with
+profile-configured baseline weights; penalties and constraints enforced
+ONLY through the WS-H promotion gate — computed and logged otherwise;
+the recency-windowed, suppression-aware GWEI gate with the
+documented-owner override), MERI cluster dedup (demoted siblings serve
+as `more_on_this_story`) + source/topic/lens balancing + SCOI context
+gating (wire-borne `context_card`) + PHI per-user diversification (max
+over recent session buckets), EXACTLY one replayable
 `RankingDecisionLog` per served request (privacy-bucketed, §22.4
 retention, replay at recorded feature revisions/profile snapshot/
-enforcement flags, a scheduled replay-regression sample), per-item
+enforcement flags/lens assignments — backward-compatible with pre-
+upgrade snapshots, a scheduled replay-regression sample), per-item
 template explanations that structurally cannot emit prohibited
-phrasings, the runtime kill switch (global/surface/profile scopes,
-audited, fail-closed on unreadable state) over the score-blind
-chronological fallback, the steward audit surface (six query
-dimensions, meta-audited reads), and the ten-test ranking-neutrality
-suite as a named CI gate (`pnpm check:neutrality`).  WS-I performs the
+phrasings (locale-ready rendering with the x-pseudo proof; the story
+page links each reason to the reader's own Signal Ledger), the runtime
+kill switch (global/surface/profile scopes, audited, fail-closed on
+unreadable state) over the score-blind chronological fallback, the
+steward audit surface (six query dimensions over TRUE SQL keyset
+pagination, meta-audited reads, feature snapshots), and the ten-test
+ranking-neutrality suite as a named CI gate (`pnpm check:neutrality`;
+transitive import-closure walk, router-published financial events,
+introspected health payloads, the room-surface leg).  WS-I performs the
 documented §30.5 lift: `PWATT_V0_SHADOW_MODE` is now `false` (a code
 change; reverting it or engaging the kill switch restores the pre-lift
 posture).
@@ -471,7 +485,8 @@ licio/
 │           │   └── drizzle-invariant-stores.ts -- production Postgres adapters (gated)
 │           ├── ranking/                 -- WS-I ranking and distribution
 │           │   ├── stores.ts            --   feature store + decision logs (in-memory)
-│           │   ├── retrievers.ts        --   the eight organic candidate retrievers (WS-I.1.1a)
+│           │   ├── retrievers.ts        --   the eight organic candidate retrievers
+│           │   │                             (WS-I.1.1a) + the room-surface scoper
 │           │   ├── quotas.ts            --   diversity quotas (WS-I.1.1b, ceil-reserved)
 │           │   ├── orchestrator.ts      --   candidate merge/dedup/budget (WS-I.1.1d)
 │           │   ├── features.ts          --   feature assembly + population (WS-I.2.1d)
@@ -609,16 +624,18 @@ licio/
 │   └── ranking/                 -- WS-I pure ranking domain logic (no I/O)
 │       └── src/
 │           ├── denylist.ts              --   WS-I.2.1b financial denylist + typed error
+│           ├── denylist.config.json     --   the VERSIONED denylist artifact (pinned to
+│           │                                 the shared doctrine list at module load)
 │           ├── schemas/                 --   strict stage-boundary zod schemas
 │           │                                 (candidate, feature vector, profile,
 │           │                                 scored item, decision log)
 │           ├── scoring/                 --   §5.4 baseline/positive/penalties/constraints
 │           ├── diversify/               --   matroid dedup + source/topic/lens balancing
 │           ├── explain/                 --   template registry + generation (prohibited-
-│           │                                 language structural block)
+│           │                                 language structural block; locale-ready)
 │           ├── pipeline.ts              --   the deterministic constrained-optimization
 │           │                                 core (serving AND replay execute this)
-│           └── __tests__/               --   114 deterministic unit/property tests
+│           └── __tests__/               --   124 deterministic unit/property tests
 ├── scripts/                     -- build validation and security gates
 │   ├── validate-build.ts        --   post-build orchestrator
 │   ├── check-bundle-size.ts     --   initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz
@@ -1095,12 +1112,12 @@ file counts at current state:
 
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
-| apps/web | ~110 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~81 (incl. WS-D identity + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/neutrality) | node | `pnpm --filter api test` |
+| apps/web | ~113 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
+| apps/api | ~84 (incl. WS-D identity + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
 | packages/shared | ~19 (incl. WS-D–WS-H schemas, URL/lifecycle utils, the UGC pipeline + XSS-vector suite) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~4 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |
 | packages/invariants | ~18 (PWAtt/MinHash/freshness + the WS-H invariant mathematics: matroid/fiber/GW/sheaf/holonomy/supporting property suites + the regression harness) | node | `pnpm --filter @licio/invariants test` |
-| packages/ranking | ~7 (denylist, strict schemas, §5.5 profile fuzzing, §5.4 arithmetic, penalties/constraints, dedup/balancing, templates, pipeline determinism, replay diff) | node | `pnpm --filter @licio/ranking test` |
+| packages/ranking | ~7 (denylist + versioned-artifact pinning, strict schemas, §5.5 profile fuzzing + baseline weights, §5.4 arithmetic, penalties/constraints incl. tie enforcement, dedup/balancing, templates + x-pseudo localization, pipeline determinism, replay diff) | node | `pnpm --filter @licio/ranking test` |
 | scripts | ~4 | node | via root `pnpm test` (policy project) |
 
 WS-D, WS-E, WS-F, WS-G, WS-H, and WS-I add **gated** integration tests
@@ -1337,25 +1354,27 @@ owner-signed demotion).
 Plan: `docs/planning/10-ranking-and-distribution.md`
 Documentation: `docs/ranking/README.md`
 
-Complete.  The SPEC §13.3 pipeline serves `GET /v1/feed` end to end, with
-PWAtt as a BOUNDED input (the §30.5 lift), invariant effects gated on the
-WS-H promotion service, and the safe chronological fallback one runtime
-kill-switch write away.
+Complete.  The SPEC §13.3 pipeline serves `GET /v1/feed` (front page +
+`?topic=`) and `GET /v1/rooms/:roomId/feed` (WS-G-visibility-gated) end
+to end, with PWAtt as a BOUNDED input (the §30.5 lift), invariant
+effects gated on the WS-H promotion service, and the safe chronological
+fallback one runtime kill-switch write away.
 
 | Sub-area | Key surface | Status |
 |----------|-------------|--------|
-| Candidates | Eight organic retrievers behind the `CandidateRetriever` interface + closed registry (subscribed rooms, locale-region local news, PWAtt-threshold global with honest cold start, constructive-velocity emerging discussions, seen-story evidence additions, SCOI bridge candidates with context metadata, expert-led/human-summary explanations, per-room chronological catch-up); hidden/archived stories never retrieve; the orchestrator merges/dedupes (origins merged, max score kept), isolates failures, budgets, and re-validates the strict `Candidate` boundary; quotas reserve ceil(pct·budget) slots (fresh 15% / independent 20% / local 10%) with logged graceful degradation | Complete |
-| Feature store | Strict-closed WS-I.2.1a vector (every invariant field OPTIONAL — degraded ⇒ ABSENT, never zero) + the WS-I.2.1b denylist (the SHARED WS-A.1.1 list; typed `DeniedFinancialFieldError`; case-insensitive nested/camelCase matching) inside `upsert` on BOTH adapters; append-only `(item_id, revision)` history with optimistic concurrency; `invariant_versions` (version/timestamp/config-hash) per row; populated by the durable `ranking-feature-store` consumer (story/thread-target `invariant.run.completed`) + the hourly batch; per-request topic relevance never persisted | Complete |
-| Safety filter | Authoritative, BEFORE scoring, never overridable (§24.4): WS-F hidden state, WS-E integrity removals, WS-G thread restriction, age gating (graphic/crisis excluded for teens AND unknown-age — fail closed), the WS-N jurisdiction seam, the WS-J `ModerationStateProvider` seam (unknown items fail closed); every exclusion logged with `policy_reason` + case ref; a feasibility assertion proves scoring cannot re-admit | Complete |
-| Scoring | §5.4 exactly: convex §5.5 weights (validated through the SAME guardrail code WS-E uses; integer percents summing to exactly 100), baseline = 0.5·freshness + 0.3·source-reliability + 0.2·relevance (renormalized when personalization is off; Licio-internal history only — never popularity, never a truth score; cold-start nonzero), penalties pM=max(MFCI ladder, tropical) / pH (sensitive topics get stricter thresholds) / pT (reads ONLY Hodge `harmful_tension_risk`, zero absent hostility) / pR (MERI redundancy) — all nonnegative, enforced ONLY via `effectsEnabled`, able to drive totals below zero; constraints (MFCI cross-community exclusion, SCOI card/reduce/pause ladder, PHI per-user diversification, the GWEI deployment gate) hard-limit the feasible set; `rankFeasibleSet` is clockless/seedless — byte-identical output for identical inputs | Complete |
-| Diversification | MERI duplicate-cluster cap (default 2/page; demoted items stay available for expansion), source ≤ 15% / topic ≤ 25% page shares with deterministic backfill + logged graceful degradation, lens representation (≥ 2 when available), PHI tightening halves topic caps | Complete |
-| Decision logs + replay | EXACTLY one `RankingDecisionLog` per served request (ranked AND fallback; a failed write is a counted auditability incident, never a serving failure); privacy-bucketed requester (`bucket:<2 hex>`/`anonymous` — zod refinement AND a db CHECK reject identifier shapes); full per-item score/penalty breakdowns, per-feasible-item feature revisions, the profile SNAPSHOT, enforcement flags, resolved per-item relevance (the interest list itself is never persisted); §22.4 retention 180–365d (clamped, swept); `replayDecision` re-executes the pure core at the recorded versions → structured diff; a scheduled replay-regression sample alerts after deploys; `ranking.decision.logged` event per selected item | Complete |
-| Explanations | Closed template registry (positive/contextual/constraint/safety + honest fallback reasons), parameter zod validation, priority selection from the item's REAL signal profile (slowing reasons outrank positive; no raw statistics or thresholds in any rendered string); the §13.6/§30.6 prohibited-language list is ONE shared artifact enforced at render time, in the package suite, and by neutrality test 9 | Complete |
+| Candidates | Eight organic retrievers behind the `CandidateRetriever` interface + closed registry (subscribed rooms, locale-region local news, PWAtt-threshold global with honest cold start, constructive-velocity emerging discussions, seen-story evidence additions, SCOI bridge candidates with context metadata, expert-led/human-summary explanations, per-room chronological catch-up) + the `room_surface_v1` scoper (inert outside room feeds); hidden/archived stories never retrieve; the orchestrator merges/dedupes (origins merged, max score kept), isolates failures with per-retriever timing, budgets, and re-validates the strict `Candidate` boundary; quotas reserve ceil(pct·budget) slots (fresh 15% / independent 20% / local 10%) with JOINT class protection (filling one class never breaks another's reserve), logged graceful degradation, and always-reported targets carrying an `applicable` flag | Complete |
+| Surfaces | `front_page`; `topic` (`?topic=` scopes the pool and derives profile sensitivity from the topic — sensitive topics always select the conservative profile); `room` (`/v1/rooms/:roomId/feed` behind `roomContentVisibleToUser` — restricted/expert-led rooms read 404 for signed-out and pending users; the pool scopes to the room; lens balancing runs on REAL per-item assignments: each item's most frequent lens-tagged `lens_id`, ties lexicographic, pinned in the decision log for replay) | Complete |
+| Feature store | Strict-closed WS-I.2.1a vector (every invariant field OPTIONAL — degraded ⇒ ABSENT, never zero) + the WS-I.2.1b denylist (the SHARED WS-A.1.1 list pinned to the versioned `denylist.config.json` artifact with a load-time drift assertion; typed `DeniedFinancialFieldError`; case-insensitive nested/camelCase matching) inside `upsert` on BOTH adapters; append-only `(item_id, revision)` history with optimistic concurrency + by-timestamp `getAt` snapshots + one-query DISTINCT ON bulk reads; `invariant_versions` (version/timestamp/config-hash) per row with batch-logged version distribution; populated by the durable `ranking-feature-store` consumer (story/thread-target `invariant.run.completed` AND `integrity.signal.detected` for the MFCI intake path's sub-minute freshness) + the hourly batch; `duplicate_cluster_id` from a bounded BFS over MinHash hits (chains A↔B↔C share one key); source reliability from the real §14.3 aggregates (correction frequency, evidence-type diversity, notes, the citation seam); per-request topic relevance never persisted | Complete |
+| Safety filter | Authoritative, BEFORE scoring, never overridable (§24.4): WS-F hidden state, WS-E integrity removals, WS-G thread restriction, age gating (graphic/crisis excluded for teens AND unknown-age — fail closed), the WS-N jurisdiction seam, the BATCHED WS-J `ModerationStateProvider` seam (three bulk reads per request; unknown items fail closed); every exclusion logged with `policy_reason` + case ref; a feasibility assertion proves scoring cannot re-admit | Complete |
+| Scoring | §5.4 exactly: convex §5.5 weights (validated through the SAME guardrail code WS-E uses; integer percents summing to exactly 100), baseline = profile-configured integer-percent weights over freshness/source-reliability/relevance (evergreen 50/30/20, breaking 60/25/15; schema-defaulted so pre-upgrade log snapshots replay identically; renormalized when personalization is off; Licio-internal history only — never popularity, never a truth score; cold-start nonzero), penalties pM=max(MFCI ladder, tropical) with inclusive-tie enforcement / pH (sensitive topics get stricter thresholds) / pT (reads ONLY Hodge `harmful_tension_risk`, zero absent hostility) / pR (MERI redundancy) — all nonnegative, enforced ONLY via `effectsEnabled`, able to drive totals below zero; constraints (MFCI cross-community exclusion, SCOI card/reduce/pause ladder, PHI per-user diversification over the max of recent session buckets, the recency-windowed suppression-aware GWEI deployment gate with TTL cache + the `ranking.gwei_override` documented-owner override) hard-limit the feasible set; `rankFeasibleSet` is clockless/seedless — byte-identical output for identical inputs | Complete |
+| Diversification | MERI duplicate-cluster cap (default 2/page; demoted siblings ride the wire as `more_on_this_story` on the cluster representative), source ≤ 15% / topic ≤ 25% page shares with deterministic backfill + logged graceful degradation, lens representation (≥ 2 when available; real assignments on room surfaces), PHI tightening halves topic caps; SCOI-flagged items carry the compact `context_card` (level, lens count, open bridge attempts) and read `needs-context` | Complete |
+| Decision logs + replay | EXACTLY one `RankingDecisionLog` per served request (ranked AND fallback; a failed write is a counted auditability incident, never a serving failure); privacy-bucketed requester (`bucket:<2 hex>`/`anonymous` — zod refinement AND a db CHECK reject identifier shapes); full per-item score/penalty breakdowns, per-feasible-item feature revisions, the profile SNAPSHOT, enforcement flags, resolved per-item relevance (the interest list itself is never persisted), per-item lens assignments; §22.4 retention 180–365d (clamped, swept); `replayDecision` re-executes the pure core at the recorded versions → structured diff (backward-compatible with pre-baseline_weights snapshots via schema defaults); a scheduled replay-regression sample alerts after deploys and verifies logged template ids still exist; `ranking.decision.logged` event per selected item (ONE batched insertMany) | Complete |
+| Explanations | Closed template registry (positive/contextual/constraint/safety + honest fallback reasons), parameter zod validation, priority selection from the item's REAL signal profile (slowing reasons outrank positive; no raw statistics or thresholds in any rendered string; room counts claimed only when genuinely multi-room); LOCALE-READY rendering (`renderTemplate(id, params, locale)` guards prohibited language on the EN canonical then localizes; the `x-pseudo` two-language proof is CI-tested; catalogs slot into `LOCALE_CATALOGS`); the story page links each reason to the reader's own Signal Ledger; the §13.6/§30.6 prohibited-language list is ONE shared artifact enforced at render time, in the package suite, and by neutrality test 9 | Complete |
 | Kill switch + fallback | Runtime config control (global/per-surface/per-profile scopes; §30.8 owner/trigger/rollback/review fields; audited engage/release; UNREADABLE state fails closed to the fallback); the fallback serves chronological order over the SAFETY-FILTERED set with no PWAtt/personalization/financial anything, an honest "ranking is paused" reason, and a `fallback: true` decision log | Complete |
-| Neutrality suite | All ten WS-I.3 tests in CI on every PR (`pnpm check:neutrality` is a named test-job step): wallet-link feed equivalence (incl. the fallback + candidate sets, with synthesized wallet credentials and payment events in the durable log under the crypto flag), deep schema field walks, import-graph + runtime donor neutrality, treasury side-channel equivalence, governance-vote claim-label immutability, paid-status bypass checks, the ML feature audit (add → fail naming the field, remove → pass), the closed organic source enum (no `sponsored`), endorsement-language scans over templates + web copy, and financially-clean product-health metric names; complemented by the db table denylist + the wallet↔ranking BFS isolation targets | Complete |
-| Admin surface | `/v1/ranking/admin/*` (steward + per-session MFA): decision queries on all six audit dimensions (keyset-paginated; every read META-AUDITED as `ranking_decision_query`), decision detail, replay (`ranking_replay_run`), the kill switch (`ranking_killswitch_change`), validated config writes (422; `ranking_config_change`), profiles, health | Complete |
-| Config + scheduler | Fail-closed `ranking.scalars`/`ranking.profiles` keys (invalid stored values logged, reviewed defaults kept; profile sets all-or-none through the §5.5 loader); hourly tick under the `ranking_hourly` Postgres lease: config reload, feature batch, decision-log sweep, replay-regression sample (per-task error isolation) | Complete |
-| Production bindings | `DrizzleFeatureStore` (append-only PK realizes optimistic concurrency) + `DrizzleDecisionLogStore` (jsonb containment queries for the audit dimensions) behind the in-memory interfaces; gated integration tests run the REAL migration chain (0012 tables + CHECKs, 0013 audit-enum extension) in CI's service containers; boot wires the adapters, registers the durable consumer, and starts the scheduler | Complete |
+| Neutrality suite | All ten WS-I.3 tests in CI on every PR (`pnpm check:neutrality` is a named test-job step): wallet-link feed equivalence on the front-page, topic, AND room surfaces (incl. the fallback + candidate sets, with synthesized wallet credentials and payment events in the durable log under the crypto flag), deep schema field walks, TRANSITIVE import-closure + runtime donor neutrality, treasury side-channel equivalence, governance-vote claim-label immutability (durable-log AND live-router-published legs), paid-status bypass checks, the ML feature audit (add → fail naming the field, remove → pass), the closed organic source enum (no `sponsored`), endorsement-language scans over templates + web copy, and financially-clean product-health metrics with the ACTUAL admin health payload introspected; complemented by the db table denylist + the wallet↔ranking BFS isolation targets | Complete |
+| Admin surface | `/v1/ranking/admin/*` (steward + per-session MFA): decision queries on all six audit dimensions (TRUE SQL keyset pagination — composite `(timestamp, request_id)` row comparison; every read META-AUDITED as `ranking_decision_query`), decision detail, replay (`ranking_replay_run`), feature snapshots (`/features/:itemId[?at=ISO]`), the kill switch (`ranking_killswitch_change`), validated config writes (422; `ranking_config_change`), profiles, health | Complete |
+| Config + scheduler | Fail-closed `ranking.scalars`/`ranking.profiles`/`ranking.gwei_override` keys (invalid stored values logged, reviewed defaults kept; profile sets all-or-none through the §5.5 loader; an unreadable override never overrides); hourly tick under the `ranking_hourly` Postgres lease: config reload, feature batch (+ version-distribution and staleness-needle logs), decision-log sweep, replay-regression sample + explanation-template existence check (per-task error isolation) | Complete |
+| Production bindings | `DrizzleFeatureStore` (append-only PK realizes optimistic concurrency; DISTINCT ON bulk reads; by-timestamp snapshots) + `DrizzleDecisionLogStore` (jsonb containment queries for the audit dimensions; SQL keyset pagination) behind the in-memory interfaces; gated integration tests run the REAL migration chain (0012 tables + CHECKs, 0013 audit-enum extension) in CI's service containers, incl. the bulk serving-path reads on the WS-E/WS-F adapters; an opt-in RUN_PERF benchmark records the 10k-candidate core budget + decision-log query latency at depth; boot wires the adapters, registers the durable consumer, and starts the scheduler | Complete |
 | Residuals | WS-J replaces the default `ModerationStateProvider` + supplies the Hodge hostility signal and coordinated-reporting detection behind existing seams; WS-N supplies the jurisdiction engine (defaults: none restricted); WS-K supplies governed topic classification + learned relevance; WS-L/WS-M plug real staging financial events into the neutrality harness (§30.6 pre-pilot requirement) and own sponsored surfaces (quarantined by the closed enum); WS-P wires experiment ids (field exists), the GWEI experiment-gate integration, and BFF-in-the-loop feed E2E; a first-class WS-D location preference can replace locale-region matching behind the same port | Tracked elsewhere |
 
 ### WS-J through WS-P

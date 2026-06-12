@@ -39,6 +39,45 @@ export function violatesProhibitedLanguage(text: string): boolean {
 export const TEMPLATE_CATEGORIES = ['positive', 'contextual', 'constraint', 'safety'] as const;
 export type TemplateCategory = (typeof TEMPLATE_CATEGORIES)[number];
 
+/**
+ * Locales the explanation renderer can produce (WS-I.2.6a "localization-
+ * ready"). The template render functions ARE the `en` catalog; additional
+ * locales either provide a per-template override in {@link LOCALE_CATALOGS}
+ * or — for `x-pseudo`, the standard localization-readiness proof — derive
+ * deterministically from the English rendering. Real translation catalogs
+ * slot into LOCALE_CATALOGS without touching any template.
+ */
+export const RANKING_EXPLANATION_LOCALES = ['en', 'x-pseudo'] as const;
+export type ExplanationLocale = (typeof RANKING_EXPLANATION_LOCALES)[number];
+
+/** Per-locale, per-template overrides (empty until translations exist). */
+export const LOCALE_CATALOGS: Readonly<
+  Partial<Record<ExplanationLocale, Readonly<Record<string, (params: never) => string>>>>
+> = {};
+
+const PSEUDO_MAP: Readonly<Record<string, string>> = {
+  a: 'á',
+  e: 'é',
+  i: 'í',
+  o: 'ó',
+  u: 'ú',
+  y: 'ý',
+  A: 'Á',
+  E: 'É',
+  I: 'Í',
+  O: 'Ó',
+  U: 'Ú',
+  Y: 'Ý',
+};
+
+/** Deterministic pseudo-localization: accents vowels, brackets the string,
+ *  preserves digits and punctuation (so parameter values stay readable). */
+export function pseudoLocalize(text: string): string {
+  let out = '';
+  for (const char of text) out += PSEUDO_MAP[char] ?? char;
+  return `⟦${out}⟧`;
+}
+
 export interface ExplanationTemplate<P = Record<string, unknown>> {
   templateId: string;
   category: TemplateCategory;
@@ -82,9 +121,15 @@ export const TPL_EVIDENCE_RISING = defineTemplate({
   priority: 90,
   i18nKey: 'explain.positive.evidence_rising',
   paramsSchema: z.object({ roomCount: count.min(1), evidenceCount: count.min(1) }).strict(),
-  render: ({ roomCount, evidenceCount }) =>
-    `Rising because readers in ${roomCount} ${roomCount === 1 ? 'room' : 'rooms'} opened the ` +
-    `source and added ${evidenceCount} independent ${evidenceCount === 1 ? 'evidence card' : 'evidence cards'}.`,
+  // Room counts are only CLAIMED when genuinely multi-room (threads are
+  // currently 1:1 with stories, so roomCount is usually 1 — the single-room
+  // variant makes no count claim rather than saying "readers in 1 room").
+  render: ({ roomCount, evidenceCount }) => {
+    const cards = `${evidenceCount} independent ${evidenceCount === 1 ? 'evidence card' : 'evidence cards'}`;
+    return roomCount > 1
+      ? `Rising because readers in ${roomCount} rooms opened the source and added ${cards}.`
+      : `Rising because readers opened the source and added ${cards}.`;
+  },
 });
 
 export const TPL_SOURCE_OPENS = defineTemplate({
@@ -275,9 +320,15 @@ export const EXPLANATION_TEMPLATES: ReadonlyMap<string, ExplanationTemplate<neve
 /**
  * Render a template with validated params; throws on schema failure and on
  * prohibited output (defense in depth — the static suite scans sources, this
- * guard catches dynamic composition).
+ * guard catches dynamic composition). The prohibited-language guard runs on
+ * the CANONICAL English rendering (the §13.6/§30.6 vocabulary is English
+ * doctrine); the locale rendering derives from the guarded string.
  */
-export function renderTemplate(templateId: string, params: unknown): string {
+export function renderTemplate(
+  templateId: string,
+  params: unknown,
+  locale: ExplanationLocale = 'en',
+): string {
   const template = EXPLANATION_TEMPLATES.get(templateId);
   if (template === undefined) {
     throw new ExplanationParamError(templateId, 'unknown template id');
@@ -293,5 +344,12 @@ export function renderTemplate(templateId: string, params: unknown): string {
   if (violatesProhibitedLanguage(rendered)) {
     throw new ProhibitedExplanationError(templateId, rendered);
   }
-  return rendered;
+  if (locale === 'en') return rendered;
+  const override = LOCALE_CATALOGS[locale]?.[templateId];
+  if (override !== undefined) {
+    const localized = (override as (p: unknown) => string)(parsed.data);
+    return localized;
+  }
+  // x-pseudo (and any locale without an override) derives from English.
+  return pseudoLocalize(rendered);
 }

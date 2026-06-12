@@ -18,16 +18,38 @@
 import {
   FINANCIAL_FIELD_COMPOUNDS,
   FINANCIAL_FIELD_SEGMENTS,
+  fieldNameSegments,
   isFinancialFieldName,
 } from '@licio/shared';
+import denylistConfig from './denylist.config.json';
 
 /**
- * Version of the ranking denylist configuration. Bump on ANY change to the
- * matched pattern set (the shared list or the matcher semantics); the version
- * is carried on every rejection so audit logs identify which rule set fired.
- * Changing this list is an audited, review-gated change (WS-I.2.1b).
+ * The versioned denylist ARTIFACT (WS-I.2.1b: "a versioned configuration
+ * file, not inline code"). `denylist.config.json` is the reviewable record;
+ * the shared WS-A.1.1 doctrine list in `@licio/shared` is the executable
+ * source. The assertion below pins them to each other at module load: any
+ * change to the matched pattern set requires editing BOTH in one reviewed
+ * change (and bumping the artifact's `version`), or every consumer of this
+ * module throws before a single feature can be written.
  */
-export const RANKING_DENYLIST_VERSION = 1;
+export const RANKING_DENYLIST_VERSION: number = denylistConfig.version;
+
+function assertArtifactMatchesDoctrine(): void {
+  const artifactSegments = [...denylistConfig.segments].sort();
+  const doctrineSegments = [...FINANCIAL_FIELD_SEGMENTS].sort();
+  const artifactCompounds = [...denylistConfig.compounds].sort();
+  const doctrineCompounds = [...FINANCIAL_FIELD_COMPOUNDS].sort();
+  const same = (a: readonly string[], b: readonly string[]): boolean =>
+    a.length === b.length && a.every((value, index) => value === b[index]);
+  if (!same(artifactSegments, doctrineSegments) || !same(artifactCompounds, doctrineCompounds)) {
+    throw new Error(
+      'ranking denylist drift: denylist.config.json does not match the shared ' +
+        'WS-A.1.1 doctrine list (@licio/shared financial-fields). Update both ' +
+        'in one reviewed change and bump the artifact version (WS-I.2.1b).',
+    );
+  }
+}
+assertArtifactMatchesDoctrine();
 
 /**
  * The denied patterns, exposed as data for the neutrality suite (WS-I.3.1b/g)
@@ -78,13 +100,9 @@ export function matchedFinancialPattern(name: string): string | null {
   for (const compound of FINANCIAL_FIELD_COMPOUNDS) {
     if (lower.includes(compound)) return compound;
   }
-  const segments = new Set(
-    name
-      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((segment) => segment.length > 0),
-  );
+  // The SAME segmentation the shared matcher uses (single source of truth —
+  // re-implementing the split here invited drift).
+  const segments = new Set(fieldNameSegments(name));
   for (const term of FINANCIAL_FIELD_SEGMENTS) {
     if (segments.has(term)) return term;
   }

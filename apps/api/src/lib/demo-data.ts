@@ -35,6 +35,8 @@ const feedWater: FeedItem = {
     { id: 'c2', label: '2 lenses', icon: 'layers' },
   ],
   safety_state: 'ok',
+  more_on_this_story: [],
+  context_card: null,
 };
 
 const feedZoning: FeedItem = {
@@ -49,6 +51,8 @@ const feedZoning: FeedItem = {
   distribution_reason: 'A bridge comment reduced cross-community confusion between two rooms.',
   context_chips: [{ id: 'c3', label: 'cross-community', icon: 'bridge' }],
   safety_state: 'ok',
+  more_on_this_story: [],
+  context_card: null,
 };
 
 const feedTransit: FeedItem = {
@@ -62,6 +66,8 @@ const feedTransit: FeedItem = {
   distribution_reason: 'A clarifying question identified an ambiguity awaiting evidence.',
   context_chips: [{ id: 'c4', label: 'awaiting evidence', icon: 'circle-question' }],
   safety_state: 'caution',
+  more_on_this_story: [],
+  context_card: null,
 };
 
 export const DEMO_FEED: FeedItem[] = [feedWater, feedZoning, feedTransit];

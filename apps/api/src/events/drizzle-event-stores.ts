@@ -22,7 +22,7 @@ import {
   signalLedgerEntries,
 } from '@licio/db';
 import type { PrivacyClassification, RetentionTier } from '@licio/shared';
-import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 import {
   type AggregationWindowRecord,
   type AggregationWindowSize,
@@ -374,6 +374,19 @@ export class DrizzleAttentionAggregateStore implements AttentionAggregateStore {
     return rows.map((row) => this.#toRecord(row));
   }
 
+  async listByUserSince(userId: string, sinceIso: string): Promise<AttentionAggregateRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(attentionAggregates)
+      .where(
+        and(
+          eq(attentionAggregates.userIdOrPrivacyBucket, userId),
+          gte(attentionAggregates.createdAt, new Date(sinceIso)),
+        ),
+      );
+    return rows.map((row) => this.#toRecord(row));
+  }
+
   async deleteByUser(userId: string): Promise<number> {
     const removed = await this.#db
       .delete(attentionAggregates)
@@ -633,6 +646,25 @@ export class DrizzleInvariantOutputStore implements InvariantOutputStore {
     return rows.map((row) => this.#toRecord(row));
   }
 
+  async listByTypeSince(
+    invariantType: string,
+    sinceIso: string,
+    limit: number,
+  ): Promise<InvariantOutputRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(invariantOutputs)
+      .where(
+        and(
+          eq(invariantOutputs.invariantType, invariantType),
+          gte(invariantOutputs.createdAt, new Date(sinceIso)),
+        ),
+      )
+      .orderBy(desc(invariantOutputs.createdAt))
+      .limit(Math.max(0, limit));
+    return rows.map((row) => this.#toRecord(row));
+  }
+
   async latest(invariantType: string, targetId: string): Promise<InvariantOutputRecord | null> {
     const [row] = await this.#db
       .select()
@@ -863,6 +895,26 @@ export class DrizzleItemSafetyStateStore implements ItemSafetyStateStore {
       updatedBy: row.updatedBy,
       updatedAt: iso(row.updatedAt),
     };
+  }
+
+  async getMany(itemIds: readonly string[]): Promise<Map<string, ItemSafetyRecord>> {
+    const out = new Map<string, ItemSafetyRecord>();
+    if (itemIds.length === 0) return out;
+    const rows = await this.#db
+      .select()
+      .from(itemSafetyStates)
+      .where(inArray(itemSafetyStates.itemId, [...itemIds]));
+    for (const row of rows) {
+      out.set(row.itemId, {
+        itemId: row.itemId,
+        safetyState: row.safetyState,
+        frozenScore: row.frozenScore,
+        caseId: row.caseId,
+        updatedBy: row.updatedBy,
+        updatedAt: iso(row.updatedAt),
+      });
+    }
+    return out;
   }
 
   async set(record: ItemSafetyRecord): Promise<void> {

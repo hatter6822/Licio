@@ -61,11 +61,29 @@ export function applyQuotas(
   const selectedIds = new Set(selected.map((c) => c.item_id));
 
   // Pass 2: for each under-represented class, swap in the best remaining
-  // class members for the lowest-ranked non-class members (preserves the
-  // budget; deterministic because both sides are rank-ordered).
+  // class members for the lowest-ranked EVICTABLE selected items. An item is
+  // evictable only when removing it breaks NO class reserve: for every class
+  // it belongs to, the count stays at/above that class's reservation. This
+  // gives JOINT protection — a later class's swap can never re-create a
+  // shortfall in a class satisfied earlier (greedy-with-protection: each
+  // swap is monotone, raising the filling class by one and lowering no
+  // other class below its reserve). Exact joint optimality is a matching
+  // problem; this deterministic greedy never regresses a satisfied reserve,
+  // and when no evictable item exists the shortfall degrades gracefully and
+  // is reported (never silently traded between classes).
+  const CLASS_KEYS = ['fresh', 'independent', 'local'] as const;
   const classCount = (klass: keyof CandidateClassification): number =>
     selected.filter((c) => classes.get(c.item_id)?.[klass] === true).length;
-  for (const klass of ['fresh', 'independent', 'local'] as const) {
+  const evictable = (candidate: Candidate, filling: keyof CandidateClassification): boolean => {
+    const membership = classes.get(candidate.item_id);
+    if (membership?.[filling] === true) return false; // never evict the class being filled
+    for (const klass of CLASS_KEYS) {
+      if (membership?.[klass] !== true) continue;
+      if (classCount(klass) - 1 < reserved[klass]) return false; // would break a reserve
+    }
+    return true;
+  };
+  for (const klass of CLASS_KEYS) {
     let need = reserved[klass] - classCount(klass);
     if (need <= 0) continue;
     const candidatesOutside = ordered.filter(
@@ -73,11 +91,7 @@ export function applyQuotas(
     );
     for (const incoming of candidatesOutside) {
       if (need <= 0) break;
-      // Lowest-ranked selected item NOT in this class (and not protecting
-      // another under-filled class) leaves the pool.
-      const outgoing = [...selected]
-        .reverse()
-        .find((c) => classes.get(c.item_id)?.[klass] !== true);
+      const outgoing = [...selected].reverse().find((c) => evictable(c, klass));
       if (outgoing === undefined) break;
       selected.splice(selected.indexOf(outgoing), 1);
       selectedIds.delete(outgoing.item_id);
@@ -90,20 +104,25 @@ export function applyQuotas(
   const total = selected.length;
   const outcomes: QuotaOutcome[] = (
     [
-      ['fresh', quotas.fresh_min_pct],
-      ['independent', quotas.independent_min_pct],
-      ['local', options.localQuotaApplies ? quotas.local_min_pct : 0],
+      ['fresh', quotas.fresh_min_pct, true],
+      ['independent', quotas.independent_min_pct, true],
+      ['local', quotas.local_min_pct, options.localQuotaApplies],
     ] as const
-  ).map(([klass, target]) => {
+  ).map(([klass, target, applicable]) => {
     const achieved = pctOf(
       selected.filter((c) => classes.get(c.item_id)?.[klass] === true).length,
       total,
     );
     return {
       quota_type: klass,
+      // The TARGET is always reported (auditability); `applicable: false`
+      // says it did not bind this request (e.g. no local signal exists),
+      // which is distinct from a real shortfall (WS-I.1.1b graceful
+      // degradation is observable, not silent).
       target_pct: target,
       achieved_pct: Math.min(100, achieved),
-      shortfall: achieved < target,
+      shortfall: applicable && achieved < target,
+      applicable,
     };
   });
 

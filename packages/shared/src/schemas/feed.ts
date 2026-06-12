@@ -48,6 +48,24 @@ export const contextChipSchema = z.object({
   icon: z.string().optional(),
 });
 
+/**
+ * Structured SCOI context card attached to feed items whose interpretations
+ * diverge (WS-I.2.4c, SPEC §10.6). Informational ONLY: "Needs Context" never
+ * means false or banned. Lens-map detail stays on the story read surface
+ * (`GET /v1/stories/{id}/interpretations`); the card carries the compact
+ * references the feed needs.
+ */
+export const feedContextCardSchema = z.object({
+  scoi_level: z.enum(['medium', 'high', 'very_high']),
+  /** Lenses with recorded interpretations on this story. */
+  lens_count: z.number().int().nonnegative(),
+  /** Open bridge attempts on the story's thread (WS-H.4.2d records). */
+  bridge_attempts_open: z.number().int().nonnegative(),
+  /** True ⇒ the story read surface has a lens map worth opening. */
+  where_interpretations_differ: z.boolean(),
+});
+export type FeedContextCard = z.infer<typeof feedContextCardSchema>;
+
 export const feedItemSchema = z.object({
   story_id: uuidSchema,
   title: z.string().min(1),
@@ -63,6 +81,11 @@ export const feedItemSchema = z.object({
   /** MERI exposure label (SPEC §7.6, WS-H.2.3a) — null until a MERI shadow
    * run covers the story (honest absence; never implies truth). */
   exposure_label: z.enum(MERI_EXPOSURE_LABELS_WIRE).nullable().default(null),
+  /** Same-cluster stories demoted by matroid dedup, available for the
+   * "more on this story" expansion (WS-I.2.4a). */
+  more_on_this_story: z.array(uuidSchema).max(12).default([]),
+  /** SCOI context card when interpretations diverge (WS-I.2.4c). */
+  context_card: feedContextCardSchema.nullable().default(null),
 });
 export type FeedItem = z.infer<typeof feedItemSchema>;
 
@@ -74,10 +97,12 @@ export const feedResponseSchema = paginatedSchema(feedItemSchema).extend({
 });
 export type FeedResponse = z.infer<typeof feedResponseSchema>;
 
-/** Query params for the feed (mode switcher + keyset cursor). */
+/** Query params for the feed (mode switcher + keyset cursor + the optional
+ *  topic scope: `?topic=` serves the WS-I TOPIC surface). */
 export const feedQuerySchema = z.object({
   mode: feedModeSchema.optional(),
   cursor: cursorSchema.optional(),
+  topic: z.string().min(1).max(128).optional(),
 });
 export type FeedQuery = z.infer<typeof feedQuerySchema>;
 

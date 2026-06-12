@@ -96,6 +96,18 @@ export interface RankingServicesOptions {
   sensitiveTopicIds?: ReadonlySet<string>;
 }
 
+/** Seen-history horizon for the serving-path reads (catch-up/freshness). */
+export const SEEN_HISTORY_WINDOW_MS = 30 * 24 * 3_600_000;
+
+/** PHI lookback: sessions whose aggregates landed in this window count. */
+export const PHI_SESSION_WINDOW_MS = 7 * 24 * 3_600_000;
+
+/** Max distinct recent session buckets consulted for the user PHI risk. */
+export const PHI_SESSION_BUCKET_CAP = 8;
+
+/** GWEI-gate read cache TTL (the serving path pays ≤ 1 query per minute). */
+export const GWEI_CACHE_TTL_MS = 60_000;
+
 /** WS-A sensitive-topic categories with stricter PHI thresholds (§11.5). */
 export const DEFAULT_SENSITIVE_TOPIC_IDS: ReadonlySet<string> = new Set([
   'self-harm',
@@ -111,6 +123,7 @@ export function createCandidateDataPorts(
   ingestion: IngestionServices,
   forum: ForumServices,
   identity: IdentityServices,
+  now: () => number = Date.now,
 ): CandidateDataPorts {
   return {
     recentStories: (limit) => ingestion.stories.listRecent(limit),
@@ -127,8 +140,12 @@ export function createCandidateDataPorts(
       return rooms.map((r) => r.roomId);
     },
     async userSeenStories(userId) {
+      // Bounded to the catch-up horizon (30d): seen-history serves the
+      // recent-items retrievers, and an unbounded scan of a heavy reader's
+      // whole history is a serving-path cost with no product effect.
+      const sinceIso = new Date(now() - SEEN_HISTORY_WINDOW_MS).toISOString();
       const seen = new Map<string, string>();
-      for (const aggregate of await events.attentionStore.listByUser(userId)) {
+      for (const aggregate of await events.attentionStore.listByUserSince(userId, sinceIso)) {
         const current = seen.get(aggregate.story_id);
         if (current === undefined || aggregate.created_at > current) {
           seen.set(aggregate.story_id, aggregate.created_at);
@@ -160,7 +177,7 @@ export function createCandidateDataPorts(
       return { activeAttention: attention, participation };
     },
     async latestDayWindow(itemId) {
-      const nowIso = new Date(Date.now()).toISOString();
+      const nowIso = new Date(now()).toISOString();
       const windows = await events.windowStore.listForItemBefore(itemId, '24h', nowIso, 1);
       return windows[0] ?? null;
     },
@@ -188,14 +205,19 @@ export function createCandidateDataPorts(
 export function createClassificationPorts(
   events: EventPipelineServices,
   ingestion: IngestionServices,
+  now: () => number = Date.now,
 ): ClassificationPorts {
   return {
     async seenSourceIds(userId) {
       const sources = new Set<string>();
       if (userId === null) return sources;
-      for (const aggregate of await events.attentionStore.listByUser(userId)) {
-        const story = await ingestion.stories.getById(aggregate.story_id);
-        if (story?.sourceId != null) sources.add(story.sourceId);
+      const sinceIso = new Date(now() - SEEN_HISTORY_WINDOW_MS).toISOString();
+      const aggregates = await events.attentionStore.listByUserSince(userId, sinceIso);
+      const stories = await ingestion.stories.getByIds([
+        ...new Set(aggregates.map((a) => a.story_id)),
+      ]);
+      for (const story of stories.values()) {
+        if (story.sourceId !== null) sources.add(story.sourceId);
       }
       return sources;
     },
@@ -221,16 +243,18 @@ export function createInMemoryRankingServices(
   const sensitiveTopics = options.sensitiveTopicIds ?? DEFAULT_SENSITIVE_TOPIC_IDS;
   const background = new Set<Promise<unknown>>();
 
-  const ports = createCandidateDataPorts(events, ingestion, forum, identity);
+  const ports = createCandidateDataPorts(events, ingestion, forum, identity, now);
+  let gweiCache: { value: number | null; atMs: number } | null = null;
   const services: RankingServices = {
     featureStore: new InMemoryFeatureStore(),
     decisionLogs: new InMemoryDecisionLogStore(),
     retrievers: createDefaultRetrievers(ports),
-    classification: createClassificationPorts(events, ingestion),
+    classification: createClassificationPorts(events, ingestion, now),
     moderation: createDefaultModerationStateProvider({ events, stories: ingestion.stories }),
     config: () => runtimeConfig,
     reloadConfig: async () => {
       runtimeConfig = await loadRankingRuntimeConfig(events);
+      gweiCache = null; // the gate window may have changed
       return runtimeConfig;
     },
     async enforcement(): Promise<RankingEnforcement> {
@@ -247,17 +271,27 @@ export function createInMemoryRankingServices(
       return { mfci, phi, scoi, gwei, meri, hodge, tropical };
     },
     async userPhiRisk(userId) {
-      // The requesting user's OWN latest PHI output: their most recent
-      // session bucket → the same opaque target id the PHI tier writes.
-      const aggregates = await events.attentionStore.listByUser(userId);
-      const latest = aggregates.sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
-      if (latest === undefined) return null;
-      const row = await events.invariantStore.latest(
-        'PHI',
-        phiSessionTargetId(userId, latest.session_bucket),
-      );
-      const phi = row?.scoreVector['phi'];
-      return typeof phi === 'number' && Number.isFinite(phi) ? phi : null;
+      // The requesting user's OWN PHI outputs: the MAX holonomy over their
+      // recent session buckets (a single-latest-session read missed an
+      // older high-holonomy session that should still diversify the feed).
+      // Buckets derive from the user's own aggregates via the same opaque
+      // digest the PHI tier writes; bounded by window + bucket cap.
+      const sinceIso = new Date(now() - PHI_SESSION_WINDOW_MS).toISOString();
+      const aggregates = await events.attentionStore.listByUserSince(userId, sinceIso);
+      const buckets: string[] = [];
+      for (const aggregate of aggregates.sort((a, b) => b.created_at.localeCompare(a.created_at))) {
+        if (!buckets.includes(aggregate.session_bucket)) buckets.push(aggregate.session_bucket);
+        if (buckets.length >= PHI_SESSION_BUCKET_CAP) break;
+      }
+      let max: number | null = null;
+      for (const bucket of buckets) {
+        const row = await events.invariantStore.latest('PHI', phiSessionTargetId(userId, bucket));
+        const phi = row?.scoreVector['phi'];
+        if (typeof phi === 'number' && Number.isFinite(phi)) {
+          max = max === null ? phi : Math.max(max, phi);
+        }
+      }
+      return max;
     },
     async userContext(userId) {
       if (userId === null) {
@@ -296,18 +330,31 @@ export function createInMemoryRankingServices(
     },
     sensitiveTopicIds: () => sensitiveTopics,
     async latestGweiDisparity() {
-      // Max upper-bound disparity over the latest GWEI outputs (the gate
-      // input). Suppressed/absent cohorts simply do not contribute.
-      const rows = (await events.invariantStore.listAll()).filter(
-        (row) => row.invariantType === 'GWEI',
-      );
+      // The gate input: max upper-bound disparity (gw2 is already an exact-
+      // marginal UPPER bound, WS-H.5) over RECENT GWEI rows — a targeted,
+      // recency-windowed read (never a table scan), skipping k-anonymity-
+      // suppressed rows (a suppressed cohort is "withheld", not "zero" and
+      // not "infinite"), TTL-cached so the serving path pays one query per
+      // minute, not one per request.
+      const nowMs = now();
+      if (gweiCache !== null && nowMs - gweiCache.atMs < GWEI_CACHE_TTL_MS) {
+        return gweiCache.value;
+      }
+      const config = services.config();
+      const sinceIso = new Date(nowMs - config.gweiGateWindowHours * 3_600_000).toISOString();
+      const rows = await events.invariantStore.listByTypeSince('GWEI', sinceIso, 500);
       let max: number | null = null;
       for (const row of rows) {
+        if (row.reasonCodes.some((code) => code.includes('SUPPRESSED'))) continue;
         const value = row.scoreVector['gw2'];
         if (typeof value === 'number' && Number.isFinite(value)) {
           max = max === null ? value : Math.max(max, value);
         }
       }
+      // A null result is never cached: until the first GWEI row exists the
+      // query is an empty indexed read, and caching the negative would
+      // delay the gate's FIRST engagement by up to the TTL.
+      if (max !== null) gweiCache = { value: max, atMs: nowMs };
       return max;
     },
     trackBackground(work) {

@@ -30,6 +30,15 @@ export interface RankingRuntimeConfig {
   featureBatchLimit: number;
   /** Feature staleness horizon (hours) before batch refresh re-assembles. */
   featureStaleHours: number;
+  /** GWEI-gate recency window: only rows this fresh feed the gate. */
+  gweiGateWindowHours: number;
+  /**
+   * The DOCUMENTED-OWNER override of the GWEI release gate (SPEC §9.5 /
+   * WS-H.5: "override requires a documented owner"): while `untilMs` is in
+   * the future, a tripped gate keeps ranked serving but logs loudly with
+   * the owner and reason on every affected request. Null ⇒ no override.
+   */
+  gweiOverride: { untilMs: number; owner: string; reason: string } | null;
 }
 
 export const DEFAULT_RANKING_CONFIG: RankingRuntimeConfig = {
@@ -38,6 +47,8 @@ export const DEFAULT_RANKING_CONFIG: RankingRuntimeConfig = {
   replaySampleSize: 5,
   featureBatchLimit: 200,
   featureStaleHours: 6,
+  gweiGateWindowHours: 7 * 24,
+  gweiOverride: null,
 };
 
 const scalarsSchema = z
@@ -46,12 +57,30 @@ const scalarsSchema = z
     replay_sample_size: z.number().int().min(0).max(100).optional(),
     feature_batch_limit: z.number().int().min(1).max(5000).optional(),
     feature_stale_hours: z.number().int().min(1).max(168).optional(),
+    gwei_gate_window_hours: z
+      .number()
+      .int()
+      .min(1)
+      .max(24 * 90)
+      .optional(),
   })
   .strict();
 
 const profilesSchema = z.object({ profiles: z.array(z.unknown()).min(1) }).strict();
 
-export const RANKING_CONFIG_KEYS = ['ranking.scalars', 'ranking.profiles'] as const;
+const gweiOverrideSchema = z
+  .object({
+    until: z.string().datetime(),
+    owner: z.string().min(1).max(128),
+    reason: z.string().min(1).max(512),
+  })
+  .strict();
+
+export const RANKING_CONFIG_KEYS = [
+  'ranking.scalars',
+  'ranking.profiles',
+  'ranking.gwei_override',
+] as const;
 export type RankingConfigKey = (typeof RANKING_CONFIG_KEYS)[number];
 
 /**
@@ -76,6 +105,10 @@ export function validateRankingConfigValue(
       } catch (error) {
         return error instanceof RankingProfileLoadError ? error.message : 'invalid profiles';
       }
+    }
+    case 'ranking.gwei_override': {
+      const parsed = gweiOverrideSchema.safeParse(value);
+      return parsed.success ? null : (parsed.error.issues[0]?.message ?? 'invalid override');
     }
     default:
       return 'unknown ranking config key';
@@ -107,8 +140,26 @@ export async function loadRankingRuntimeConfig(
       if (parsed.data.feature_stale_hours !== undefined) {
         config.featureStaleHours = parsed.data.feature_stale_hours;
       }
+      if (parsed.data.gwei_gate_window_hours !== undefined) {
+        config.gweiGateWindowHours = parsed.data.gwei_gate_window_hours;
+      }
     } else {
       reject('ranking.scalars', parsed.error.issues[0]?.message ?? 'invalid');
+    }
+  }
+
+  const override = await events.configStore.get('ranking.gwei_override');
+  if (override) {
+    const parsed = gweiOverrideSchema.safeParse(override);
+    if (parsed.success) {
+      config.gweiOverride = {
+        untilMs: Date.parse(parsed.data.until),
+        owner: parsed.data.owner,
+        reason: parsed.data.reason,
+      };
+    } else {
+      // Fail closed: an unreadable override does NOT override the gate.
+      reject('ranking.gwei_override', parsed.error.issues[0]?.message ?? 'invalid');
     }
   }
 

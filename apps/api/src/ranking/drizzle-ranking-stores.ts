@@ -19,7 +19,7 @@ import {
   rankingDecisionLogSchema,
   validateFeatureVector,
 } from '@licio/ranking';
-import { and, desc, eq, lt, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, lt, lte, sql } from 'drizzle-orm';
 import {
   type DecisionLogQuery,
   type DecisionLogStore,
@@ -85,11 +85,34 @@ export class DrizzleFeatureStore implements FeatureStore {
 
   async getLatestMany(itemIds: readonly string[]): Promise<Map<string, FeatureVector>> {
     const out = new Map<string, FeatureVector>();
-    for (const itemId of itemIds) {
-      const latest = await this.getLatest(itemId);
-      if (latest !== null) out.set(itemId, latest);
+    if (itemIds.length === 0) return out;
+    // ONE query for the whole pool: Postgres DISTINCT ON picks the highest
+    // revision per item (never a per-item round trip on the serving path).
+    const rows = await this.#db
+      .selectDistinctOn([rankingFeatureVectors.itemId])
+      .from(rankingFeatureVectors)
+      .where(inArray(rankingFeatureVectors.itemId, [...itemIds]))
+      .orderBy(rankingFeatureVectors.itemId, desc(rankingFeatureVectors.revision));
+    for (const row of rows) {
+      out.set(row.itemId, row.payload as unknown as FeatureVector);
     }
     return out;
+  }
+
+  async getAt(itemId: string, atIso: string): Promise<FeatureVector | null> {
+    const rows = await this.#db
+      .select()
+      .from(rankingFeatureVectors)
+      .where(
+        and(
+          eq(rankingFeatureVectors.itemId, itemId),
+          lte(rankingFeatureVectors.updatedAt, new Date(atIso)),
+        ),
+      )
+      .orderBy(desc(rankingFeatureVectors.revision))
+      .limit(1);
+    const row = rows[0];
+    return row === undefined ? null : (row.payload as unknown as FeatureVector);
   }
 
   async listStaleItems(beforeIso: string, limit: number): Promise<string[]> {
@@ -188,15 +211,31 @@ export class DrizzleDecisionLogStore implements DecisionLogStore {
       );
     }
     const limit = Math.max(1, Math.min(1000, query.limit));
-    let rows = await this.#db
+    // TRUE keyset pagination: the cursor row's (timestamp, request_id) keys
+    // a composite-row comparison and the SQL carries a LIMIT — the database
+    // never materializes more than one page (+1 row for next-page
+    // detection), whatever the table size (the WS-I.2.5c latency target).
+    if (query.afterRequestId !== undefined) {
+      const cursorRows = await this.#db
+        .select({
+          timestamp: rankingDecisionLogs.timestamp,
+          requestId: rankingDecisionLogs.requestId,
+        })
+        .from(rankingDecisionLogs)
+        .where(eq(rankingDecisionLogs.requestId, query.afterRequestId))
+        .limit(1);
+      const cursor = cursorRows[0];
+      if (cursor === undefined) return { logs: [], nextCursor: null };
+      conditions.push(
+        sql`(${rankingDecisionLogs.timestamp}, ${rankingDecisionLogs.requestId}) < (${cursor.timestamp}, ${cursor.requestId})`,
+      );
+    }
+    const rows = await this.#db
       .select()
       .from(rankingDecisionLogs)
       .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(desc(rankingDecisionLogs.timestamp), desc(rankingDecisionLogs.requestId));
-    if (query.afterRequestId !== undefined) {
-      const cursorIndex = rows.findIndex((r) => r.requestId === query.afterRequestId);
-      rows = cursorIndex === -1 ? [] : rows.slice(cursorIndex + 1);
-    }
+      .orderBy(desc(rankingDecisionLogs.timestamp), desc(rankingDecisionLogs.requestId))
+      .limit(limit + 1);
     const page = rows.slice(0, limit);
     const nextCursor =
       rows.length > limit && page.length > 0 ? (page[page.length - 1]?.requestId ?? null) : null;

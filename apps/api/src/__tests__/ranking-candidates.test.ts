@@ -385,8 +385,47 @@ describe('WS-I.1.1b quotas', () => {
       5,
       { localQuotaApplies: false },
     );
-    expect(result.outcomes.find((o) => o.quota_type === 'local')?.target_pct).toBe(0);
-    expect(result.outcomes.find((o) => o.quota_type === 'local')?.shortfall).toBe(false);
+    const local = result.outcomes.find((o) => o.quota_type === 'local');
+    // The target is always REPORTED; `applicable: false` records that it
+    // did not bind (no local signal) — distinct from a real shortfall.
+    expect(local?.target_pct).toBe(quotas.local_min_pct);
+    expect(local?.applicable).toBe(false);
+    expect(local?.shortfall).toBe(false);
+  });
+
+  it('JOINT protection: filling one class never evicts another class below its reserve', () => {
+    // Budget 10 ⇒ reserves: fresh ceil(1.5)=2, independent ceil(2)=2.
+    // Top-10 contains EXACTLY the fresh reserve (c9, c10 — the two lowest-
+    // ranked selected items) and zero independent members; the independent
+    // fill must evict the lowest-ranked EVICTABLE items (c8, c7), never the
+    // fresh members whose eviction would re-create a fresh shortfall.
+    const pool = Array.from({ length: 12 }, (_, i) => candidate(i + 1, 1 - i * 0.01));
+    const id = (n: number) => pool[n - 1]?.item_id as string;
+    const freshIds = new Set([id(9), id(10)]);
+    const independentIds = new Set([id(11), id(12)]);
+    const result = applyQuotas(
+      pool,
+      (c) => ({
+        fresh: freshIds.has(c.item_id),
+        independent: independentIds.has(c.item_id),
+        local: false,
+      }),
+      quotas,
+      10,
+      { localQuotaApplies: false },
+    );
+    const selected = new Set(result.pool.map((c) => c.item_id));
+    // The fresh reserve survived the independent fill…
+    expect(selected.has(id(9))).toBe(true);
+    expect(selected.has(id(10))).toBe(true);
+    // …the independent members were swapped in…
+    expect(selected.has(id(11))).toBe(true);
+    expect(selected.has(id(12))).toBe(true);
+    // …at the cost of the lowest-ranked unprotected items.
+    expect(selected.has(id(7))).toBe(false);
+    expect(selected.has(id(8))).toBe(false);
+    expect(result.outcomes.find((o) => o.quota_type === 'fresh')?.shortfall).toBe(false);
+    expect(result.outcomes.find((o) => o.quota_type === 'independent')?.shortfall).toBe(false);
   });
 });
 
@@ -460,7 +499,7 @@ describe('WS-I.1.1d orchestrator', () => {
     expect(result.pool.length).toBeLessThanOrEqual(10);
   });
 
-  it('the registry holds exactly the eight organic origins and rejects duplicates', () => {
+  it('the registry holds the eight organic origins + the room scoper, and rejects duplicates', () => {
     const origins = createDefaultRetrievers(ports()).origins();
     expect(origins.sort()).toEqual(
       [
@@ -472,6 +511,9 @@ describe('WS-I.1.1d orchestrator', () => {
         'cross_community_bridges_v1',
         'expert_explanations_v1',
         'chronological_catch_up_v1',
+        // Room-surface scoping (inert outside room feeds; not an organic
+        // front-page source — those remain exactly the SPEC §13.2 eight).
+        'room_surface_v1',
       ].sort(),
     );
     const registry = new RetrieverRegistry();

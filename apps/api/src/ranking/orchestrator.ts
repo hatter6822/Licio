@@ -45,25 +45,42 @@ export async function assembleCandidatePool(
 ): Promise<CandidatePoolResult> {
   const startedAt = Date.now();
   const retrievers = registry.all();
-  const settled = await Promise.allSettled(retrievers.map((r) => r.retrieve(context)));
+  // Per-retriever wall-clock timing (the WS-I.1.1a latency observability):
+  // each retrieval is wrapped so the completed/gap log carries duration_ms.
+  const settled = await Promise.allSettled(
+    retrievers.map(async (r) => {
+      const t0 = Date.now();
+      try {
+        const candidates = await r.retrieve(context);
+        return { candidates, durationMs: Date.now() - t0 };
+      } catch (error) {
+        throw Object.assign(error instanceof Error ? error : new Error('unknown'), {
+          durationMs: Date.now() - t0,
+        });
+      }
+    }),
+  );
 
   const batches: Candidate[][] = [];
   const skippedRetrievers: string[] = [];
   settled.forEach((result, index) => {
     const origin = retrievers[index]?.origin ?? `unknown_${index}`;
     if (result.status === 'fulfilled') {
-      batches.push(result.value);
+      batches.push(result.value.candidates);
       log('candidate.retrieval.completed', {
         retrieval_origin: origin,
-        candidate_count: result.value.length,
-        empty: result.value.length === 0,
+        candidate_count: result.value.candidates.length,
+        empty: result.value.candidates.length === 0,
+        duration_ms: result.value.durationMs,
       });
     } else {
       // WS-I.1.1d: a failing retriever is skipped, logged, never fatal.
       skippedRetrievers.push(origin);
+      const reason = result.reason as { message?: string; durationMs?: number };
       log('candidate.retrieval.gap', {
         retrieval_origin: origin,
-        error: result.reason instanceof Error ? result.reason.message : 'unknown',
+        error: typeof reason?.message === 'string' ? reason.message : 'unknown',
+        duration_ms: typeof reason?.durationMs === 'number' ? reason.durationMs : null,
       });
     }
   });
@@ -129,6 +146,7 @@ export async function assembleCandidatePool(
       target_pct: outcome.target_pct,
       achieved_pct: outcome.achieved_pct,
       shortfall: outcome.shortfall,
+      applicable: outcome.applicable,
     });
   }
   log('candidate.pool.assembled', {

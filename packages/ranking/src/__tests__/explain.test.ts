@@ -13,6 +13,8 @@ import {
   ExplanationParamError,
   PROHIBITED_EXPLANATION_PATTERNS,
   ProhibitedExplanationError,
+  pseudoLocalize,
+  RANKING_EXPLANATION_LOCALES,
   renderTemplate,
   TEMPLATE_CATEGORIES,
   violatesProhibitedLanguage,
@@ -88,6 +90,9 @@ describe('WS-I.2.6a template system', () => {
     expect(renderTemplate('positive.evidence_rising', { roomCount: 3, evidenceCount: 2 })).toBe(
       'Rising because readers in 3 rooms opened the source and added 2 independent evidence cards.',
     );
+    expect(renderTemplate('positive.evidence_rising', { roomCount: 1, evidenceCount: 1 })).toBe(
+      'Rising because readers opened the source and added 1 independent evidence card.',
+    );
     expect(() => renderTemplate('positive.evidence_rising', { roomCount: 0 })).toThrow(
       ExplanationParamError,
     );
@@ -129,8 +134,10 @@ describe('WS-I.2.6b explanation generation', () => {
       { ...NO_SIGNALS, evidenceCount: 2, roomCount: 1 },
     );
     expect(result.templateId).toBe('positive.evidence_rising');
-    expect(result.distributionReason).toContain('1 room');
-    expect(result.distributionReason).toContain('2 independent evidence cards');
+    // Single-room contexts make NO room-count claim (honest phrasing).
+    expect(result.distributionReason).toBe(
+      'Rising because readers opened the source and added 2 independent evidence cards.',
+    );
   });
 
   it('every item gets a non-empty, specific explanation (the floor)', () => {
@@ -184,6 +191,64 @@ describe('WS-I.2.6b explanation generation', () => {
     const a = explainItem(scored({}), { mfci_risk_state: 'elevated' }, NO_SIGNALS);
     const b = explainItem(scored({}), { mfci_risk_state: 'elevated' }, NO_SIGNALS);
     expect(a).toEqual(b);
+  });
+});
+
+describe('WS-I.2.6a localization readiness (x-pseudo two-language proof)', () => {
+  it('the locale set contains EN plus the pseudo-locale', () => {
+    expect(RANKING_EXPLANATION_LOCALES).toEqual(['en', 'x-pseudo']);
+  });
+
+  it('pseudoLocalize accents vowels, brackets the string, preserves digits', () => {
+    expect(pseudoLocalize('Shown 3 times')).toBe('⟦Shówn 3 tímés⟧');
+    expect(pseudoLocalize('')).toBe('⟦⟧');
+  });
+
+  it('EVERY template renders in x-pseudo, distinct from EN, parameters intact', () => {
+    const minimalParams: Record<string, unknown> = {
+      'positive.evidence_rising': { roomCount: 3, evidenceCount: 2 },
+      'contextual.lens_diversity': { lensCount: 2 },
+    };
+    for (const template of EXPLANATION_TEMPLATES.values()) {
+      const params = minimalParams[template.templateId] ?? {};
+      const en = renderTemplate(template.templateId, params, 'en');
+      const pseudo = renderTemplate(template.templateId, params, 'x-pseudo');
+      expect(pseudo).not.toBe(en);
+      expect(pseudo).toBe(pseudoLocalize(en));
+      expect(pseudo.startsWith('⟦')).toBe(true);
+      expect(pseudo.endsWith('⟧')).toBe(true);
+    }
+    // Parameter values survive localization (digits are never accented).
+    const localized = renderTemplate(
+      'positive.evidence_rising',
+      { roomCount: 3, evidenceCount: 2 },
+      'x-pseudo',
+    );
+    expect(localized).toContain('3');
+    expect(localized).toContain('2');
+  });
+
+  it('the prohibited-language guard runs on the EN canonical for every locale', () => {
+    // The §13.6/§30.6 vocabulary is English doctrine; localization derives
+    // from the ALREADY-GUARDED string, so no locale can smuggle prohibited
+    // phrasing past the guard. Every x-pseudo rendering above came through
+    // the same guard — assert the guard itself sees through the accents by
+    // construction: scanning the EN source string is what renderTemplate
+    // does before localizing.
+    const en = renderTemplate('positive.source_opens', {}, 'en');
+    expect(violatesProhibitedLanguage(en)).toBe(false);
+  });
+
+  it('explainItem and fallbackExplanation plumb the locale through', () => {
+    const localized = explainItem(scored({}), {}, NO_SIGNALS, 'x-pseudo');
+    expect(localized.templateId).toBe('positive.recent_submission');
+    expect(localized.distributionReason).toBe(
+      pseudoLocalize(renderTemplate('positive.recent_submission', {}, 'en')),
+    );
+    const fallback = fallbackExplanation('kill_switch', 'x-pseudo');
+    expect(fallback.distributionReason).toBe(
+      pseudoLocalize('Shown in time order while ranking is paused.'),
+    );
   });
 });
 

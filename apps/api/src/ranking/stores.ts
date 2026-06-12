@@ -49,6 +49,10 @@ export interface FeatureStore {
   getLatest(itemId: string): Promise<FeatureVector | null>;
   /** The exact stored snapshot at a revision (replay join, WS-I.2.5b). */
   getRevision(itemId: string, revision: number): Promise<FeatureVector | null>;
+  /** The revision in force AT an instant (WS-I.2.1c audit query: "the
+   *  invariant versions for any feature vector by item_id and timestamp"):
+   *  the newest revision with updated_at ≤ `atIso`, or null. */
+  getAt(itemId: string, atIso: string): Promise<FeatureVector | null>;
   /** Latest revisions for many items at once (the feature-join stage). */
   getLatestMany(itemIds: readonly string[]): Promise<Map<string, FeatureVector>>;
   /** Items whose latest revision is older than `beforeIso` (batch refresh). */
@@ -85,6 +89,13 @@ export class InMemoryFeatureStore implements FeatureStore {
 
   async getRevision(itemId: string, revision: number): Promise<FeatureVector | null> {
     const row = this.#rows.get(itemId)?.find((r) => r.revision === revision);
+    return row === undefined ? null : structuredClone(row);
+  }
+
+  async getAt(itemId: string, atIso: string): Promise<FeatureVector | null> {
+    const row = [...(this.#rows.get(itemId) ?? [])]
+      .filter((r) => r.updated_at <= atIso)
+      .sort((a, b) => b.revision - a.revision)[0];
     return row === undefined ? null : structuredClone(row);
   }
 

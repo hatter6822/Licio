@@ -8,8 +8,10 @@
 //
 // The filter READS moderation state through the `ModerationStateProvider`
 // seam — policy is computed by Moderation (WS-J when it lands), never by
-// ranking (SPEC §21.5 service boundaries). The default provider composes
-// today's authoritative sources:
+// ranking (SPEC §21.5 service boundaries). The interface is BATCHED (one
+// provider call per candidate pool; the default provider issues three bulk
+// queries — stories, threads, safety states — instead of three per item).
+// The default provider composes today's authoritative sources:
 //   • WS-F hidden state (takedown / safety-hidden stories)
 //   • WS-E item safety state `removed` (frozen items stay VISIBLE — a trend
 //     freeze is a constraint, not a removal)
@@ -18,12 +20,19 @@
 //     teen bands AND for unknown-age (signed-out) requests — fail closed
 //   • jurisdiction legal restriction (WS-N seam; defaults to none)
 //
+// Personalization-off is honored by the BASELINE stage (topic relevance is
+// excluded and its weight renormalized away) rather than here: the plan
+// places the guarantee at this stage, and the realized invariant is
+// identical — no personalized signal is applied anywhere for such a request
+// — the enforcement point is simply the component that owns the signal.
+//
 // Every exclusion is recorded with `policy_reason` + the moderation case ref
 // for the decision log; an exclusion never reveals WHICH rule fired to the
 // end user (the item simply does not appear).
 
 import type { Candidate, SafetyExclusion } from '@licio/ranking';
 import type { EventPipelineServices } from '../events/services.js';
+import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
 
 export interface ItemPolicyState {
   removed: boolean;
@@ -37,9 +46,10 @@ export interface ItemPolicyState {
   stewardHold: boolean;
 }
 
-/** The WS-J read-only seam (SPEC §21.5: ranking never computes policy). */
+/** The WS-J read-only seam (SPEC §21.5: ranking never computes policy).
+ *  BATCHED: one call per candidate pool. */
 export interface ModerationStateProvider {
-  itemPolicyState(itemId: string): Promise<ItemPolicyState>;
+  itemPolicyStates(itemIds: readonly string[]): Promise<Map<string, ItemPolicyState>>;
 }
 
 export interface SafetyRequestContext {
@@ -57,6 +67,16 @@ export interface SafetyFilterResult {
 /** Sensitivity labels excluded for minors and unknown-age requests. */
 const AGE_RESTRICTED_LABELS: ReadonlySet<string> = new Set(['graphic', 'crisis']);
 
+/** The fail-closed state for an item the provider cannot verify. */
+const UNKNOWN_ITEM_STATE: ItemPolicyState = {
+  removed: true,
+  removalReason: 'unknown_item',
+  moderationCaseRef: null,
+  sensitivityLabels: [],
+  legallyRestrictedIn: [],
+  stewardHold: false,
+};
+
 /**
  * Apply the non-overridable policy filter. Scoring has NO path to re-admit
  * an excluded item: the feasible set is what this function returns, and the
@@ -69,8 +89,10 @@ export async function applySafetyFilter(
 ): Promise<SafetyFilterResult> {
   const feasible: Candidate[] = [];
   const exclusions: SafetyExclusion[] = [];
+  const states = await provider.itemPolicyStates(candidates.map((c) => c.item_id));
   for (const candidate of candidates) {
-    const state = await provider.itemPolicyState(candidate.item_id);
+    // An item the provider returned NO verdict for fails closed.
+    const state = states.get(candidate.item_id) ?? UNKNOWN_ITEM_STATE;
     if (state.removed) {
       exclusions.push({
         item_id: candidate.item_id,
@@ -116,76 +138,81 @@ export async function applySafetyFilter(
 export interface DefaultProviderDeps {
   events: EventPipelineServices;
   stories: {
-    getById(storyId: string): Promise<{
-      hiddenState: 'takedown' | 'safety' | null;
-      sensitivityLabels: readonly string[];
-    } | null>;
-    getThreadByStoryId(storyId: string): Promise<{ safetyState: string } | null>;
+    getByIds(storyIds: readonly string[]): Promise<Map<string, StoryRecord>>;
+    getThreadsByStoryIds(storyIds: readonly string[]): Promise<Map<string, ThreadShellRecord>>;
   };
 }
 
 /**
- * The default provider over today's authoritative stores. WS-J replaces this
- * behind the SAME interface when the moderation service lands.
+ * The default provider over today's authoritative stores — THREE bulk
+ * queries per pool (stories, WS-E safety states, thread shells). WS-J
+ * replaces this behind the SAME interface when the moderation service lands.
  */
 export function createDefaultModerationStateProvider(
   deps: DefaultProviderDeps,
 ): ModerationStateProvider {
   return {
-    async itemPolicyState(itemId: string): Promise<ItemPolicyState> {
-      const story = await deps.stories.getById(itemId);
-      if (story === null) {
-        // Unknown item: fail closed — an item ranking cannot verify is not
-        // served (the demo fixtures route through their own explicit path).
-        return {
-          removed: true,
-          removalReason: 'unknown_item',
-          moderationCaseRef: null,
-          sensitivityLabels: [],
-          legallyRestrictedIn: [],
-          stewardHold: false,
-        };
-      }
-      if (story.hiddenState !== null) {
-        return {
-          removed: true,
-          removalReason: story.hiddenState === 'takedown' ? 'takedown_removal' : 'safety_removal',
+    async itemPolicyStates(itemIds: readonly string[]): Promise<Map<string, ItemPolicyState>> {
+      const out = new Map<string, ItemPolicyState>();
+      if (itemIds.length === 0) return out;
+      const [stories, safetyStates, threads] = await Promise.all([
+        deps.stories.getByIds(itemIds),
+        deps.events.safetyStore.getMany(itemIds),
+        deps.stories.getThreadsByStoryIds(itemIds),
+      ]);
+      for (const itemId of itemIds) {
+        const story = stories.get(itemId);
+        if (story === undefined) {
+          // Unknown item: fail closed — an item ranking cannot verify is
+          // not served (demo fixtures route through their own path).
+          out.set(itemId, UNKNOWN_ITEM_STATE);
+          continue;
+        }
+        if (story.hiddenState !== null) {
+          out.set(itemId, {
+            removed: true,
+            removalReason: story.hiddenState === 'takedown' ? 'takedown_removal' : 'safety_removal',
+            moderationCaseRef: null,
+            sensitivityLabels: story.sensitivityLabels,
+            legallyRestrictedIn: [],
+            stewardHold: false,
+          });
+          continue;
+        }
+        const safety = safetyStates.get(itemId);
+        if (safety?.safetyState === 'removed') {
+          out.set(itemId, {
+            removed: true,
+            removalReason: 'integrity_removal',
+            moderationCaseRef: safety.caseId ?? null,
+            sensitivityLabels: story.sensitivityLabels,
+            legallyRestrictedIn: [],
+            stewardHold: false,
+          });
+          continue;
+        }
+        const thread = threads.get(itemId);
+        if (thread?.safetyState === 'restricted') {
+          out.set(itemId, {
+            removed: true,
+            removalReason: 'thread_restricted',
+            moderationCaseRef: null,
+            sensitivityLabels: story.sensitivityLabels,
+            legallyRestrictedIn: [],
+            stewardHold: false,
+          });
+          continue;
+        }
+        out.set(itemId, {
+          removed: false,
+          removalReason: null,
           moderationCaseRef: null,
           sensitivityLabels: story.sensitivityLabels,
           legallyRestrictedIn: [],
           stewardHold: false,
-        };
+        });
       }
-      const safety = await deps.events.safetyStore.get(itemId);
-      if (safety?.safetyState === 'removed') {
-        return {
-          removed: true,
-          removalReason: 'integrity_removal',
-          moderationCaseRef: safety.caseId ?? null,
-          sensitivityLabels: story.sensitivityLabels,
-          legallyRestrictedIn: [],
-          stewardHold: false,
-        };
-      }
-      const thread = await deps.stories.getThreadByStoryId(itemId);
-      if (thread?.safetyState === 'restricted') {
-        return {
-          removed: true,
-          removalReason: 'thread_restricted',
-          moderationCaseRef: null,
-          sensitivityLabels: story.sensitivityLabels,
-          legallyRestrictedIn: [],
-          stewardHold: false,
-        };
-      }
-      return {
-        removed: false,
-        removalReason: null,
-        moderationCaseRef: null,
-        sensitivityLabels: story.sensitivityLabels,
-        legallyRestrictedIn: [],
-        stewardHold: false,
-      };
+      return out;
     },
   };
 }

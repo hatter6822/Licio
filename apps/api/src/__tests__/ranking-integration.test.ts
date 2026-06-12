@@ -17,8 +17,18 @@ import {
   type RankingDecisionLog,
   retentionDeadline,
 } from '@licio/ranking';
+import {
+  defaultPersonalizationSettings,
+  defaultPrivacySettings,
+  emptyReputationSummary,
+} from '@licio/shared';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  DrizzleInvariantOutputStore,
+  DrizzleItemSafetyStateStore,
+} from '../events/drizzle-event-stores.js';
+import { DrizzleStoryStore } from '../ingestion/drizzle-ingestion-stores.js';
 import { DrizzleDecisionLogStore, DrizzleFeatureStore } from '../ranking/drizzle-ranking-stores.js';
 
 const DB_URL = process.env['DATABASE_URL'];
@@ -201,5 +211,246 @@ describe.skipIf(!DB_URL)('WS-I ranking Drizzle adapters (live Postgres)', () => 
         retainUntil: new Date(),
       }),
     ).rejects.toThrow();
+  });
+
+  it('getLatestMany is ONE DISTINCT ON query; getAt resolves by-timestamp snapshots', async () => {
+    const itemA = randomUUID();
+    const itemB = randomUUID();
+    itemIds.push(itemA, itemB);
+    const at = (offsetMin: number) => new Date(Date.now() + offsetMin * 60_000).toISOString();
+    for (const [itemId, offsets] of [
+      [itemA, [-30, -20, -10]],
+      [itemB, [-30, -20]],
+    ] as const) {
+      for (const [revision, offset] of offsets.entries()) {
+        expect(
+          await features.upsert({ ...vectorOf(itemId, revision), updated_at: at(offset) }),
+        ).not.toBeNull();
+      }
+    }
+    // DISTINCT ON returns exactly the highest revision per item.
+    const many = await features.getLatestMany([itemA, itemB, randomUUID()]);
+    expect(many.size).toBe(2);
+    expect(many.get(itemA)?.revision).toBe(2);
+    expect(many.get(itemB)?.revision).toBe(1);
+    // getAt: the NEWEST revision at-or-before the timestamp (WS-I.2.5c
+    // "feature snapshot by item and timestamp" admin read).
+    expect((await features.getAt(itemA, at(-15)))?.revision).toBe(1);
+    expect((await features.getAt(itemA, at(-25)))?.revision).toBe(0);
+    expect((await features.getAt(itemA, at(0)))?.revision).toBe(2);
+    expect(await features.getAt(itemA, at(-45))).toBeNull(); // predates coverage
+  });
+
+  it('decision-log keyset pagination pages completely, in order, without overlap', async () => {
+    // A unique experiment id scopes this test's rows (gated suites share the
+    // live database; an unfiltered query would see parallel writers).
+    const experimentId = `exp-keyset-${randomUUID().slice(0, 8)}`;
+    const base = Date.now();
+    const inserted: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const requestId = randomUUID();
+      requestIds.push(requestId);
+      inserted.push(requestId);
+      await decisions.insert({
+        ...logOf(requestId, new Date(base + i * 1_000).toISOString()),
+        experiment_ids: [experimentId],
+      });
+    }
+    // Two SAME-timestamp rows exercise the composite (timestamp, request_id)
+    // row comparison — the tie breaks on request_id desc, deterministically.
+    const tieA = randomUUID();
+    const tieB = randomUUID();
+    requestIds.push(tieA, tieB);
+    for (const requestId of [tieA, tieB]) {
+      await decisions.insert({
+        ...logOf(requestId, new Date(base + 10_000).toISOString()),
+        experiment_ids: [experimentId],
+      });
+    }
+    const collected: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 10; page += 1) {
+      const result = await decisions.query({
+        experimentId,
+        limit: 2,
+        ...(cursor !== undefined ? { afterRequestId: cursor } : {}),
+      });
+      collected.push(...result.logs.map((log) => log.request_id));
+      if (result.nextCursor === null) break;
+      cursor = result.nextCursor;
+    }
+    // Complete (all 7), no duplicates, ordered newest-first with the id
+    // tie-break on the equal-timestamp pair.
+    expect(collected).toHaveLength(7);
+    expect(new Set(collected).size).toBe(7);
+    const expectedTieOrder = [tieA, tieB].sort().reverse();
+    expect(collected.slice(0, 2)).toEqual(expectedTieOrder);
+    expect(collected.slice(2)).toEqual([...inserted].reverse());
+    // An unknown cursor yields an empty page, never an error or a full scan.
+    expect(
+      (await decisions.query({ experimentId, limit: 2, afterRequestId: randomUUID() })).logs,
+    ).toEqual([]);
+  });
+});
+
+describe.skipIf(!DB_URL)('WS-I serving-path reads on the WS-E/WS-F Drizzle adapters', () => {
+  let db: ReturnType<typeof createDbClient>;
+  let invariantStore: DrizzleInvariantOutputStore;
+  let safetyStore: DrizzleItemSafetyStateStore;
+  let stories: DrizzleStoryStore;
+  let submitterId: string;
+  const safetyItemIds: string[] = [];
+  /** Unique per-run invariant type: parallel gated suites share the table. */
+  const GATE_TYPE = `GWEI_ITEST_${randomUUID().slice(0, 8)}`;
+
+  beforeAll(async () => {
+    db = createDbClient(DB_URL as string);
+    await migrate(db, { migrationsFolder: migrationsFolder() });
+    invariantStore = new DrizzleInvariantOutputStore(db);
+    safetyStore = new DrizzleItemSafetyStateStore(db);
+    stories = new DrizzleStoryStore(db);
+    const { users } = await import('@licio/db');
+    const inserted = await db
+      .insert(users)
+      .values({
+        handle: `wsiapi_${randomUUID().slice(0, 8)}`,
+        displayName: 'WS-I API Integration',
+        email: null,
+        ageBandIfKnown: 'adult',
+        privacySettings: defaultPrivacySettings(),
+        personalizationSettings: defaultPersonalizationSettings(),
+        reputationSummaryPrivate: emptyReputationSummary(),
+      })
+      .returning();
+    submitterId = (inserted[0] as { userId: string }).userId;
+  });
+
+  afterAll(async () => {
+    const dbSchema = await import('@licio/db');
+    const { eq, inArray, sql } = await import('drizzle-orm');
+    await db
+      .delete(dbSchema.invariantOutputs)
+      .where(eq(dbSchema.invariantOutputs.invariantType, GATE_TYPE));
+    if (safetyItemIds.length > 0) {
+      await db
+        .delete(dbSchema.itemSafetyStates)
+        .where(inArray(dbSchema.itemSafetyStates.itemId, safetyItemIds));
+    }
+    const storyIds = (
+      await db
+        .select({ id: dbSchema.stories.storyId })
+        .from(dbSchema.stories)
+        .where(sql`${dbSchema.stories.submittedBy} = ${submitterId}`)
+    ).map((r) => r.id);
+    if (storyIds.length > 0) {
+      await db.delete(dbSchema.threads).where(inArray(dbSchema.threads.storyId, storyIds));
+      await db.delete(dbSchema.stories).where(inArray(dbSchema.stories.storyId, storyIds));
+    }
+    await db.delete(dbSchema.users).where(sql`${dbSchema.users.userId} = ${submitterId}`);
+    const client = (db as unknown as { $client: { end: () => Promise<void> } }).$client;
+    await client.end();
+  });
+
+  it('listByTypeSince windows on created_at, newest first, capped (the GWEI gate read)', async () => {
+    const row = (offsetHours: number, gw2: number) => ({
+      invariantType: GATE_TYPE,
+      targetType: 'cohort',
+      targetId: randomUUID(),
+      timeWindow: { start: '2026-06-10T00:00:00.000Z', end: '2026-06-10T01:00:00.000Z' },
+      version: '1.0.0',
+      scoreVector: { gw2 },
+      explanationSummary: null,
+      confidence: 1,
+      coverage: 1,
+      reasonCodes: [],
+      fallbackUsed: false,
+      versionMetadata: null,
+      shadowMode: true,
+      createdAt: new Date(Date.now() - offsetHours * 3_600_000).toISOString(),
+    });
+    await invariantStore.upsert(row(48, 0.9)); // outside a 24h window
+    await invariantStore.upsert(row(2, 0.2));
+    await invariantStore.upsert(row(1, 0.3));
+    const since = new Date(Date.now() - 24 * 3_600_000).toISOString();
+    const recent = await invariantStore.listByTypeSince(GATE_TYPE, since, 500);
+    expect(recent).toHaveLength(2);
+    expect(recent.map((r) => r.scoreVector['gw2'])).toEqual([0.3, 0.2]); // newest first
+    expect(await invariantStore.listByTypeSince(GATE_TYPE, since, 1)).toHaveLength(1);
+  });
+
+  it('safety getMany returns one bulk map (the batched safety-filter read)', async () => {
+    const frozen = randomUUID();
+    const removed = randomUUID();
+    safetyItemIds.push(frozen, removed);
+    await safetyStore.set({
+      itemId: frozen,
+      safetyState: 'frozen',
+      frozenScore: 0.4,
+      caseId: 'case-f',
+      updatedBy: 'system',
+      updatedAt: new Date().toISOString(),
+    });
+    await safetyStore.set({
+      itemId: removed,
+      safetyState: 'removed',
+      frozenScore: null,
+      caseId: 'case-r',
+      updatedBy: 'system',
+      updatedAt: new Date().toISOString(),
+    });
+    const many = await safetyStore.getMany([frozen, removed, randomUUID()]);
+    expect(many.size).toBe(2);
+    expect(many.get(frozen)?.safetyState).toBe('frozen');
+    expect(many.get(removed)?.caseId).toBe('case-r');
+    expect(await safetyStore.getMany([])).toEqual(new Map());
+  });
+
+  it('story getByIds + getThreadsByStoryIds are single bulk reads (feed mapping)', async () => {
+    const ids: string[] = [];
+    const threadIds = new Map<string, string>();
+    for (let i = 0; i < 3; i += 1) {
+      const storyId = randomUUID();
+      const threadId = randomUUID();
+      ids.push(storyId);
+      threadIds.set(storyId, threadId);
+      const outcome = await stories.createWithThread(
+        {
+          storyId,
+          canonicalUrl: null,
+          title: `Bulk-read story ${i} about the reservoir audit`,
+          titleHash: randomUUID().replaceAll('-', ''),
+          submittedBy: submitterId,
+          sourceId: null,
+          language: 'en',
+          topicIds: [randomUUID()],
+          locationScope: null,
+          sensitivityLabels: ['none'],
+          lifecycleState: 'submitted',
+          submissionType: 'original_brief',
+          submissionMetadata: {
+            submission_type: 'original_brief',
+            body: 'The reservoir audit results were published this week.',
+          } as never,
+          excerpt: 'The reservoir audit results were published this week.',
+          publisher: null,
+          author: null,
+          publishedAt: null,
+          mediaType: null,
+          extractionState: 'not_applicable',
+          hiddenState: null,
+        },
+        threadId,
+      );
+      expect(outcome.ok).toBe(true);
+    }
+    const byId = await stories.getByIds([...ids, randomUUID()]);
+    expect(byId.size).toBe(3);
+    expect(byId.get(ids[0] as string)?.storyId).toBe(ids[0]);
+    const threads = await stories.getThreadsByStoryIds(ids);
+    expect(threads.size).toBe(3);
+    for (const storyId of ids) {
+      expect(threads.get(storyId)?.threadId).toBe(threadIds.get(storyId));
+    }
+    expect(await stories.getByIds([])).toEqual(new Map());
   });
 });

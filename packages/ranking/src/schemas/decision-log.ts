@@ -64,6 +64,10 @@ export const quotaOutcomeSchema = z
     target_pct: z.number().min(0).max(100),
     achieved_pct: z.number().min(0).max(100),
     shortfall: z.boolean(),
+    /** False ⇒ the quota did not apply to this request (e.g. the local
+     *  quota with no local signal) — distinct from a real shortfall.
+     *  Defaulted for logs written before the field existed. */
+    applicable: z.boolean().default(true),
   })
   .strict();
 export type QuotaOutcome = z.infer<typeof quotaOutcomeSchema>;
@@ -98,6 +102,10 @@ export const replayInputsSchema = z
     user_phi_risk: z.number().nullable(),
     max_source_share_pct_override: z.number().int().min(1).max(100).nullable(),
     surface_room_id: uuid.nullable(),
+    /** item id → lens id (room surfaces; WS-I.2.4b lens balancing). Pinned
+     *  here because lens assignments affect the ordering. Defaulted for
+     *  logs written before lens balancing carried real data. */
+    lens_by_item: z.record(uuid, z.string().min(1).max(64)).nullable().default(null),
   })
   .strict();
 export type ReplayInputs = z.infer<typeof replayInputsSchema>;

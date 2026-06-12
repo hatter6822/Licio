@@ -12,6 +12,7 @@
 import type { FeatureVector } from '../schemas/feature-vector.js';
 import type { ConstraintFlag, ScoredItem } from '../schemas/scored-item.js';
 import {
+  type ExplanationLocale,
   type ExplanationTemplate,
   renderTemplate,
   TPL_BRIDGE_ACTIVE,
@@ -59,6 +60,7 @@ export function explainItem(
   scored: ScoredItem,
   features: Pick<FeatureVector, 'scoi_level' | 'mfci_risk_state'>,
   signals: ExplanationSignals,
+  locale: ExplanationLocale = 'en',
 ): GeneratedExplanation {
   const flags = new Set<ConstraintFlag>(scored.constraint_flags);
   const candidates: Candidate[] = [];
@@ -124,7 +126,7 @@ export function explainItem(
   )[0] as Candidate;
   return {
     templateId: best.template.templateId,
-    distributionReason: renderTemplate(best.template.templateId, best.params),
+    distributionReason: renderTemplate(best.template.templateId, best.params, locale),
   };
 }
 
@@ -137,13 +139,16 @@ export type FallbackReason =
   | 'gwei_gate';
 
 /** The honest fallback explanations (WS-I.4.1b). */
-export function fallbackExplanation(reason: FallbackReason): GeneratedExplanation {
+export function fallbackExplanation(
+  reason: FallbackReason,
+  locale: ExplanationLocale = 'en',
+): GeneratedExplanation {
   // A user-CHOSEN chronological mode and an empty pool say "time order";
   // every safety/incident path says "ranking is paused" honestly.
   const template =
     reason === 'user_mode' || reason === 'empty_pool' ? TPL_CHRONOLOGICAL : TPL_RANKING_PAUSED;
   return {
     templateId: template.templateId,
-    distributionReason: renderTemplate(template.templateId, {}),
+    distributionReason: renderTemplate(template.templateId, {}, locale),
   };
 }

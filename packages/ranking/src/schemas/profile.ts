@@ -88,6 +88,23 @@ export const decayCurveSchema = z
   })
   .strict();
 
+/**
+ * Baseline part weights (WS-I.2.3d): integer percents over freshness /
+ * source-reliability / topic-relevance, summing to exactly 100 (the same
+ * integer-exact convention as the §5.5 positive weights). DEFAULTED so that
+ * decision-log profile snapshots written before this field existed still
+ * parse — and replay with the identical arithmetic they were served with.
+ */
+export const baselineWeightsSchema = z
+  .object({
+    freshness: z.number().int().min(0).max(100),
+    reliability: z.number().int().min(0).max(100),
+    relevance: z.number().int().min(0).max(100),
+  })
+  .strict()
+  .default({ freshness: 50, reliability: 30, relevance: 20 });
+export type BaselineWeights = z.infer<typeof baselineWeightsSchema>;
+
 /** Source/topic/lens balancing limits (WS-I.2.4b). */
 export const profileBalancingSchema = z
   .object({
@@ -132,6 +149,7 @@ export const rankingProfileConfigSchema = z
     weights: profileWeightsSchema,
     penalties: profilePenaltiesSchema,
     constraints: profileConstraintsSchema,
+    baseline_weights: baselineWeightsSchema,
     decay_curves: z
       .object({
         breaking: decayCurveSchema,
@@ -165,6 +183,11 @@ export function validateRankingProfileConfig(profile: unknown): string[] {
   const problems = weightCheck.ok ? [] : [...weightCheck.problems];
   if (parsed.data.quotas.fresh_min_pct + parsed.data.quotas.independent_min_pct > 100) {
     problems.push('fresh + independent quotas exceed 100%');
+  }
+  const baseline = parsed.data.baseline_weights;
+  const baselineSum = baseline.freshness + baseline.reliability + baseline.relevance;
+  if (baselineSum !== 100) {
+    problems.push(`baseline weights must sum to exactly 100, got ${baselineSum}`);
   }
   return problems;
 }
@@ -291,10 +314,12 @@ const DEFAULT_QUOTAS: z.infer<typeof profileQuotasSchema> = {
  */
 export const BREAKING_NEWS_PROFILE: RankingProfileConfig = {
   profile_id: 'breaking_news',
-  profile_version: '1.0.0',
+  profile_version: '1.1.0',
   weights: { wA: 30, wP: 25, wE: 15, wS: 15, wC: 15 },
   penalties: { pM: 1.0, pH: 0.5, pT: 0.75, pR: 0.5 },
   constraints: DEFAULT_CONSTRAINTS,
+  // Timeliness-weighted baseline: freshness carries more of B.
+  baseline_weights: { freshness: 60, reliability: 25, relevance: 15 },
   decay_curves: {
     breaking: { half_life_hours: 6 },
     evergreen: { half_life_hours: 24 * 7 },
@@ -322,10 +347,11 @@ export const BREAKING_NEWS_PROFILE: RankingProfileConfig = {
  */
 export const EVERGREEN_PROFILE: RankingProfileConfig = {
   profile_id: 'evergreen',
-  profile_version: '1.0.0',
+  profile_version: '1.1.0',
   weights: { wA: 20, wP: 40, wE: 15, wS: 15, wC: 10 },
   penalties: { pM: 1.0, pH: 0.75, pT: 0.75, pR: 0.75 },
   constraints: DEFAULT_CONSTRAINTS,
+  baseline_weights: { freshness: 50, reliability: 30, relevance: 20 },
   decay_curves: {
     breaking: { half_life_hours: 12 },
     evergreen: { half_life_hours: 24 * 14 },

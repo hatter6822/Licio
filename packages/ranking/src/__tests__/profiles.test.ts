@@ -54,6 +54,27 @@ describe('WS-I.2.3f profile validation (§5.5 guardrails)', () => {
     expect(validateRankingProfileConfig(bad).length).toBeGreaterThan(0);
   });
 
+  it('rejects baseline weights not summing to exactly 100', () => {
+    const bad = {
+      ...EVERGREEN_PROFILE,
+      profile_id: 'baseline_bad',
+      baseline_weights: { freshness: 50, reliability: 30, relevance: 30 },
+    };
+    const problems = validateRankingProfileConfig(bad);
+    expect(problems.some((p) => p.includes('baseline weights must sum to exactly 100'))).toBe(true);
+  });
+
+  it('a profile WITHOUT baseline_weights still parses (replay backward-compat)', () => {
+    // Decision-log profile snapshots written before baseline_weights existed
+    // must keep parsing — and the default must be the exact weights the old
+    // hard-coded baseline used, so replay arithmetic is unchanged.
+    const { baseline_weights: _omitted, ...legacy } = EVERGREEN_PROFILE;
+    const problems = validateRankingProfileConfig(legacy);
+    expect(problems).toEqual([]);
+    const loaded = loadRankingProfiles([legacy])[0];
+    expect(loaded?.baseline_weights).toEqual({ freshness: 50, reliability: 30, relevance: 20 });
+  });
+
   it('rejects unknown fields (strict closure — no financial dimension)', () => {
     const bad = { ...EVERGREEN_PROFILE, profile_id: 'fin', payment_boost: 2 };
     expect(validateRankingProfileConfig(bad).length).toBeGreaterThan(0);
@@ -145,8 +166,20 @@ describe('WS-I.2.3f deterministic profile selection', () => {
   });
 
   it('shipped-profile snapshot (unreviewed changes fail here)', () => {
+    expect(BREAKING_NEWS_PROFILE.profile_version).toBe('1.1.0');
+    expect(EVERGREEN_PROFILE.profile_version).toBe('1.1.0');
     expect(BREAKING_NEWS_PROFILE.weights).toEqual({ wA: 30, wP: 25, wE: 15, wS: 15, wC: 15 });
     expect(EVERGREEN_PROFILE.weights).toEqual({ wA: 20, wP: 40, wE: 15, wS: 15, wC: 10 });
+    expect(BREAKING_NEWS_PROFILE.baseline_weights).toEqual({
+      freshness: 60,
+      reliability: 25,
+      relevance: 15,
+    });
+    expect(EVERGREEN_PROFILE.baseline_weights).toEqual({
+      freshness: 50,
+      reliability: 30,
+      relevance: 20,
+    });
     expect(BREAKING_NEWS_PROFILE.constraints.meri_max_per_cluster).toBe(2);
     expect(EVERGREEN_PROFILE.balancing).toEqual({
       max_source_share_pct: 15,

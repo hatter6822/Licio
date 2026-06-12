@@ -5,7 +5,9 @@
 // camelCase prefixed forms, typed errors carrying field/pattern/version,
 // clean records accepted, and the audit helper for WS-I.3.1g.
 
+import { FINANCIAL_FIELD_COMPOUNDS, FINANCIAL_FIELD_SEGMENTS } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
+import denylistArtifact from '../denylist.config.json';
 import {
   assertNoDeniedFields,
   auditFeatureFieldNames,
@@ -97,5 +99,19 @@ describe('WS-I.2.1b denylist matcher', () => {
     for (const compound of ['vote_weight', 'membership_tier', 'subscription_amount']) {
       expect(patterns).toContain(compound);
     }
+  });
+
+  it('the versioned artifact is pinned to the WS-A.1.1 doctrine list (WS-I.2.1b)', () => {
+    // denylist.config.json is the reviewable record; @licio/shared is the
+    // executable source. The module-load assertion throws on drift — this
+    // test makes the pinning visible in CI output and pins the version so a
+    // pattern change without a version bump fails review here.
+    expect(denylistArtifact.version).toBe(2);
+    expect(RANKING_DENYLIST_VERSION).toBe(denylistArtifact.version);
+    expect([...denylistArtifact.segments].sort()).toEqual([...FINANCIAL_FIELD_SEGMENTS].sort());
+    expect([...denylistArtifact.compounds].sort()).toEqual([...FINANCIAL_FIELD_COMPOUNDS].sort());
+    // No duplicates inside the artifact itself.
+    expect(new Set(denylistArtifact.segments).size).toBe(denylistArtifact.segments.length);
+    expect(new Set(denylistArtifact.compounds).size).toBe(denylistArtifact.compounds.length);
   });
 });

@@ -10,14 +10,21 @@
 // Serving and replay (WS-I.2.5b) execute the SAME pure core
 // (`rankFeasibleSet` from @licio/ranking) over the same pinned inputs: the
 // decision log records the feature revision per feasible item, the exact
-// profile snapshot, the promotion-enforcement flags, and the resolved
-// per-item relevance — so any decision is reproducible at its recorded
-// versions, byte for byte.
+// profile snapshot, the promotion-enforcement flags, the resolved per-item
+// relevance, and the per-item lens assignments — so any decision is
+// reproducible at its recorded versions, byte for byte.
 //
-// EXACTLY ONE decision log per served request (ranked, fallback, demo —
-// every path). A failed log write never fails the feed (availability), but
-// it is loudly logged and counted: a missing log is an auditability
+// EXACTLY ONE decision log per served request (ranked, fallback — every
+// pipeline path). A failed log write never fails the feed (availability),
+// but it is loudly logged and counted: a missing log is an auditability
 // incident (WS-I.2.5a observability).
+//
+// Surfaces: `front_page` (GET /v1/feed), `topic` (GET /v1/feed?topic=…,
+// pool scoped to the topic, sensitivity derived from it), and `room`
+// (GET /v1/rooms/:roomId/feed, pool scoped to the room; ACCESS to
+// restricted rooms is enforced by the route via `roomContentVisibleToUser`
+// BEFORE this service runs). Room feeds carry real lens assignments
+// (derived from lens-tagged contributions) into WS-I.2.4b lens balancing.
 
 import { randomUUID } from 'node:crypto';
 import {
@@ -25,6 +32,7 @@ import {
   candidateSchema,
   chronologicalOrder,
   diffRankings,
+  type ExplanationLocale,
   emptyFeatureVector,
   explainItem,
   type FallbackReason,
@@ -33,7 +41,6 @@ import {
   type GeneratedExplanation,
   gweiDeploymentGate,
   type RankingDecisionLog,
-  type RankingEnforcement,
   type RankingProfileConfig,
   type RankingRequestContext,
   type ReplayDiffEntry,
@@ -41,23 +48,26 @@ import {
   rankingDecisionLogSchema,
   retentionDeadline,
   type SafetyExclusion,
+  type ScoiLevel,
   type ScoredItem,
   selectProfileForContext,
   topicRelevance,
 } from '@licio/ranking';
 import {
+  type FeedContextCard,
   type FeedItem,
   type FeedMode,
   feedItemSchema,
   rankingDecisionLoggedEventSchema,
   TOPIC_REGISTRY,
 } from '@licio/shared';
+import type { NewStoredEvent } from '../events/stores.js';
 import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
 import { exposureLabelForGain, latestMeriGains } from '../routes/invariants-public.js';
 import { killSwitchDecision } from './killswitch.js';
 import { assembleCandidatePool } from './orchestrator.js';
 import { applySafetyFilter } from './safety-filter.js';
-import type { RankingServices } from './services.js';
+import { type RankingServices, SEEN_HISTORY_WINDOW_MS } from './services.js';
 
 /** WS-F lifecycle states → the WS-C rating-label vocabulary (read mapping). */
 export const LIFECYCLE_TO_RATING_LABEL: Readonly<Record<StoryRecord['lifecycleState'], string>> = {
@@ -70,10 +80,20 @@ export const LIFECYCLE_TO_RATING_LABEL: Readonly<Record<StoryRecord['lifecycleSt
   archived: 'resolved-context',
 };
 
+/**
+ * The locale explanations are served in. The renderer is catalog-ready
+ * (`renderTemplate(id, params, locale)` with the `x-pseudo` readiness proof
+ * exercised in tests); real translation catalogs slot into the @licio/ranking
+ * `LOCALE_CATALOGS` map, after which this derives from the user's locale.
+ */
+const SERVED_EXPLANATION_LOCALE: ExplanationLocale = 'en';
+
 export interface FeedServeRequest {
   userId: string | null;
   surface: 'front_page' | 'room' | 'topic';
   surfaceRoomId: string | null;
+  /** The topic a `topic`-surface request is scoped to (`?topic=`). */
+  surfaceTopicId: string | null;
   mode: FeedMode | undefined;
 }
 
@@ -102,7 +122,7 @@ function poolFreshnessClass(
 /** Story safety posture for the wire (descriptive, never a sanction). */
 function feedSafetyState(
   features: FeatureVector | undefined,
-  thread: ThreadShellRecord | null,
+  thread: ThreadShellRecord | undefined,
   frozen: boolean,
 ): FeedItem['safety_state'] {
   if (frozen) return 'under-review';
@@ -113,47 +133,99 @@ function feedSafetyState(
   return 'ok';
 }
 
-/** Map one ranked story onto the §23.3 FeedItem wire shape. */
-async function toFeedItem(
+/** One selected entry on its way to the wire. */
+interface SelectedEntry {
+  itemId: string;
+  score: number;
+  explanation: GeneratedExplanation;
+  features: FeatureVector | undefined;
+  /** Same-cluster items demoted by dedup ("more on this story"). */
+  moreOnThisStory: readonly string[];
+  contextCard: FeedContextCard | null;
+}
+
+/**
+ * Map selected entries onto §23.3 FeedItems with BATCHED reads: one bulk
+ * story read, one bulk thread read, one bulk safety read, one lens listing
+ * per distinct room, and parallel evidence counts — never per-item serial
+ * round trips on the serving path.
+ */
+async function buildFeedItems(
   services: RankingServices,
-  story: StoryRecord,
-  explanation: GeneratedExplanation,
-  features: FeatureVector | undefined,
-  meriGain: number | null,
-  evidenceCount: number,
-): Promise<FeedItem> {
-  const thread = await services.ingestion.stories.getThreadByStoryId(story.storyId);
-  const safety = await services.events.safetyStore.get(story.storyId);
-  const excerptWords = story.excerpt === null ? 0 : story.excerpt.split(/\s+/).length;
-  const chips: Array<{ id: string; label: string }> = [];
-  if (evidenceCount > 0) {
-    chips.push({
-      id: 'evidence',
-      label: `${evidenceCount} ${evidenceCount === 1 ? 'evidence card' : 'evidence cards'}`,
-    });
-  }
-  if (thread?.roomId != null) {
-    const lenses = await services.forum.lenses.listByRoom(thread.roomId);
-    if (lenses.length >= 2) {
-      chips.push({ id: 'lenses', label: `${lenses.length} lenses` });
+  entries: readonly SelectedEntry[],
+): Promise<FeedItem[]> {
+  if (entries.length === 0) return [];
+  const ids = entries.map((entry) => entry.itemId);
+  const [stories, threads, safeties, meriGains] = await Promise.all([
+    services.ingestion.stories.getByIds(ids),
+    services.ingestion.stories.getThreadsByStoryIds(ids),
+    services.events.safetyStore.getMany(ids),
+    latestMeriGains(services.events),
+  ]);
+  const evidenceCounts = await Promise.all(ids.map((id) => evidenceCountOf(services, id)));
+  const lensCountByRoom = new Map<string, number>();
+  for (const thread of threads.values()) {
+    if (thread.roomId !== null && !lensCountByRoom.has(thread.roomId)) {
+      lensCountByRoom.set(
+        thread.roomId,
+        (await services.forum.lenses.listByRoom(thread.roomId)).length,
+      );
     }
   }
-  if (features?.mfci_risk_state === 'normal') {
-    chips.push({ id: 'coordination', label: 'low coordination risk' });
+  const items: FeedItem[] = [];
+  for (const [index, entry] of entries.entries()) {
+    const story = stories.get(entry.itemId);
+    if (story === undefined) continue;
+    const thread = threads.get(entry.itemId);
+    const evidenceCount = evidenceCounts[index] ?? 0;
+    const excerptWords = story.excerpt === null ? 0 : story.excerpt.split(/\s+/).length;
+    const chips: Array<{ id: string; label: string }> = [];
+    if (evidenceCount > 0) {
+      chips.push({
+        id: 'evidence',
+        label: `${evidenceCount} ${evidenceCount === 1 ? 'evidence card' : 'evidence cards'}`,
+      });
+    }
+    const roomLenses = thread?.roomId != null ? (lensCountByRoom.get(thread.roomId) ?? 0) : 0;
+    if (roomLenses >= 2) chips.push({ id: 'lenses', label: `${roomLenses} lenses` });
+    if (entry.features?.mfci_risk_state === 'normal') {
+      chips.push({ id: 'coordination', label: 'low coordination risk' });
+    }
+    if (entry.moreOnThisStory.length > 0) {
+      chips.push({
+        id: 'more-on-this-story',
+        label: `+${entry.moreOnThisStory.length} more on this story`,
+      });
+    }
+    // §10.5: the feed-card label says "Needs Context" when SCOI is elevated
+    // (the live signal outranks the slower lifecycle-state mapping).
+    const ratingLabel =
+      entry.contextCard !== null
+        ? 'needs-context'
+        : LIFECYCLE_TO_RATING_LABEL[story.lifecycleState];
+    items.push(
+      feedItemSchema.parse({
+        story_id: story.storyId,
+        title: story.title,
+        source: story.publisher ?? story.canonicalUrl ?? 'Community submission',
+        origin: 'independent' as const,
+        ...(story.canonicalUrl !== null ? { url: story.canonicalUrl } : {}),
+        reading_minutes: Math.max(1, Math.ceil(excerptWords / 200)),
+        rating_label: ratingLabel,
+        distribution_reason: entry.explanation.distributionReason,
+        context_chips: chips,
+        safety_state: feedSafetyState(
+          entry.features,
+          thread,
+          safeties.get(entry.itemId)?.safetyState === 'frozen',
+        ),
+        exposure_label: exposureLabelForGain(meriGains[entry.itemId] ?? null),
+        more_on_this_story: [...entry.moreOnThisStory].slice(0, 12),
+        context_card: entry.contextCard,
+      }),
+    );
   }
-  return feedItemSchema.parse({
-    story_id: story.storyId,
-    title: story.title,
-    source: story.publisher ?? story.canonicalUrl ?? 'Community submission',
-    origin: 'independent' as const,
-    ...(story.canonicalUrl !== null ? { url: story.canonicalUrl } : {}),
-    reading_minutes: Math.max(1, Math.ceil(excerptWords / 200)),
-    rating_label: LIFECYCLE_TO_RATING_LABEL[story.lifecycleState],
-    distribution_reason: explanation.distributionReason,
-    context_chips: chips,
-    safety_state: feedSafetyState(features, thread, safety?.safetyState === 'frozen'),
-    exposure_label: exposureLabelForGain(meriGain),
-  });
+  return items;
 }
 
 interface DecisionLogDraft {
@@ -185,13 +257,13 @@ async function commitDecision(
     selected: draft.log.selected_ids.length,
     fallback: draft.log.fallback,
   });
-  // §21.3 topic: one `ranking.decision.logged` event per SELECTED item.
+  // §21.3 topic: one `ranking.decision.logged` event per SELECTED item —
+  // built as ONE batch, persisted with ONE insertMany (never one INSERT per
+  // item on the serving path), then published in-process.
   const registry = TOPIC_REGISTRY['ranking.decision.logged'];
   const context = surface === 'room' ? ('room' as const) : ('feed' as const);
-  for (let position = 0; position < selected.length; position += 1) {
-    const entry = selected[position];
-    if (entry === undefined) continue;
-    const event = rankingDecisionLoggedEventSchema.parse({
+  const events = selected.map((entry, position) =>
+    rankingDecisionLoggedEventSchema.parse({
       event_id: randomUUID(),
       event_type: 'ranking.decision.logged',
       timestamp: draft.log.timestamp,
@@ -205,21 +277,24 @@ async function commitDecision(
       explanation_summary: entry.explanation.distributionReason.slice(0, 500),
       privacy_classification: 'sensitive',
       retention_tier: 'ranking_log',
-    });
-    await services.events.eventStore.insertMany([
-      {
-        eventId: event.event_id,
-        eventType: event.event_type,
-        topic: event.event_type,
-        timestamp: event.timestamp,
-        privacyClassification: registry.privacy_classification,
-        retentionTier: registry.retention_tier,
-        payload: event as unknown as Record<string, unknown>,
-        ownerUserId: null,
-        purgeAfter: null,
-      },
-    ]);
-    services.trackBackground(services.events.router.publish(event));
+    }),
+  );
+  if (events.length > 0) {
+    const rows: NewStoredEvent[] = events.map((event) => ({
+      eventId: event.event_id,
+      eventType: event.event_type,
+      topic: event.event_type,
+      timestamp: event.timestamp,
+      privacyClassification: registry.privacy_classification,
+      retentionTier: registry.retention_tier,
+      payload: event as unknown as Record<string, unknown>,
+      ownerUserId: null,
+      purgeAfter: null,
+    }));
+    await services.events.eventStore.insertMany(rows);
+    for (const event of events) {
+      services.trackBackground(services.events.router.publish(event));
+    }
   }
 }
 
@@ -237,12 +312,87 @@ function signalNamesOf(log: RankingDecisionLog, itemId: string): string[] {
   }
   if (components.context_coherence_gain !== null) names.push('context_coherence_gain');
   names.push('freshness', 'source_reliability');
+  if (scored.baseline.topic_relevance !== null) names.push('topic_relevance');
   for (const [name, term] of Object.entries(scored.penalty_components)) {
     if (typeof term === 'object' && term !== null && 'applied' in term && term.applied > 0) {
       names.push(`penalty_${name}`);
     }
   }
   return names.slice(0, 50);
+}
+
+/**
+ * Real lens assignments for room-surface lens balancing (WS-I.2.4b): each
+ * feasible item's lens is the MOST FREQUENT `lens_id` among its thread's
+ * lens-tagged contributions (ties → lexicographically smallest, so the
+ * assignment is deterministic and replayable). Items with no lens-tagged
+ * contributions carry no lens.
+ */
+async function lensAssignments(
+  services: RankingServices,
+  feasible: readonly Candidate[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const threads = await services.ingestion.stories.getThreadsByStoryIds(
+    feasible.map((c) => c.item_id),
+  );
+  const threadToStory = new Map<string, string>();
+  for (const [storyId, thread] of threads) threadToStory.set(thread.threadId, storyId);
+  if (threadToStory.size === 0) return out;
+  const tagged = await services.forum.contributions.listLensTagged([...threadToStory.keys()], 500);
+  const countsByStory = new Map<string, Map<string, number>>();
+  for (const contribution of tagged) {
+    const storyId = threadToStory.get(contribution.threadId);
+    const lensId = (contribution.metadata as { lens_id?: unknown }).lens_id;
+    if (storyId === undefined || typeof lensId !== 'string') continue;
+    const counts = countsByStory.get(storyId) ?? new Map<string, number>();
+    counts.set(lensId, (counts.get(lensId) ?? 0) + 1);
+    countsByStory.set(storyId, counts);
+  }
+  for (const [storyId, counts] of countsByStory) {
+    const best = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
+    if (best !== undefined) out.set(storyId, best[0]);
+  }
+  return out;
+}
+
+/**
+ * Compact SCOI context cards (WS-I.2.4c) for the selected items that carry
+ * the `scoi_context_card` flag: lens count from the stored SCOI row, open
+ * bridge attempts from the WS-H records — bounded by page size, stored rows
+ * only (never computed on request).
+ */
+async function contextCardsFor(
+  services: RankingServices,
+  selected: readonly ScoredItem[],
+  featuresById: ReadonlyMap<string, FeatureVector>,
+): Promise<Map<string, FeedContextCard>> {
+  const out = new Map<string, FeedContextCard>();
+  const flagged = selected.filter((item) => item.constraint_flags.includes('scoi_context_card'));
+  if (flagged.length === 0) return out;
+  const threads = await services.ingestion.stories.getThreadsByStoryIds(
+    flagged.map((item) => item.item_id),
+  );
+  for (const item of flagged) {
+    const level = featuresById.get(item.item_id)?.scoi_level;
+    if (level === undefined || level === 'low') continue;
+    const scoiRow = await services.events.invariantStore.latest('SCOI', item.item_id);
+    const lensCount = scoiRow?.scoreVector['lens_count'];
+    const thread = threads.get(item.item_id);
+    const openBridges =
+      thread !== undefined &&
+      (await services.invariants.bridgeAttempts.openForThread(thread.threadId)) !== null
+        ? 1
+        : 0;
+    out.set(item.item_id, {
+      scoi_level: level as Exclude<ScoiLevel, 'low'>,
+      lens_count: typeof lensCount === 'number' && lensCount >= 0 ? Math.floor(lensCount) : 0,
+      bridge_attempts_open: openBridges,
+      where_interpretations_differ: true,
+    });
+    services.events.metrics.increment('ranking.context_gate.card');
+  }
+  return out;
 }
 
 /** Serve one feed request through the full WS-I pipeline. */
@@ -274,7 +424,7 @@ export async function serveFeed(
           },
         }
       : baseProfile;
-  const pool = await assembleCandidatePool(
+  const assembled = await assembleCandidatePool(
     services.retrievers,
     services.classification,
     { ...quotaProfile, candidate_budget: retrievalBudget },
@@ -289,20 +439,44 @@ export async function serveFeed(
     bucket,
   );
 
-  // Empty pool ⇒ the legacy demo-contract path is the caller's concern; the
-  // service reports an honest empty fallback decision.
+  // Surface scoping: a room feed ranks the ROOM's items; a topic feed ranks
+  // the TOPIC's items (room ACCESS was enforced by the route before this).
+  let surfacePool = assembled.pool;
+  if (request.surface === 'room' && request.surfaceRoomId !== null) {
+    surfacePool = surfacePool.filter((c) => c.room_id === request.surfaceRoomId);
+  } else if (request.surface === 'topic' && request.surfaceTopicId !== null) {
+    const topicId = request.surfaceTopicId;
+    surfacePool = surfacePool.filter((c) => c.topic_ids.includes(topicId));
+  }
+
+  // Profile selection context: the topic surface derives its sensitivity
+  // from the requested topic; jurisdiction stays the WS-N seam (null) and
+  // request-level risk the WS-J seam ('normal') — item-level risk is
+  // enforced per item by the constraint stage regardless.
+  const topicSensitivity =
+    request.surface === 'topic' &&
+    request.surfaceTopicId !== null &&
+    services.sensitiveTopicIds().has(request.surfaceTopicId)
+      ? ('sensitive' as const)
+      : ('standard' as const);
   const profileContext = {
     surface: request.surface,
-    freshness: poolFreshnessClass(pool.pool, nowMs),
-    topicSensitivity: 'standard' as const,
+    freshness: poolFreshnessClass(surfacePool, nowMs),
+    topicSensitivity,
     ageGroup: (user.ageBand ?? 'unknown') as 'adult' | 'teen_16_17' | 'teen_13_15' | 'unknown',
     jurisdiction: null,
     riskState: 'normal' as const,
   };
   const profile = selectProfileForContext(profileContext, config.profiles) ?? baseProfile;
+  services.log('ranking.profile.selected', {
+    request_id: requestId,
+    profile_id: profile.profile_id,
+    profile_version: profile.profile_version,
+    surface: request.surface,
+  });
 
   // --- Stage 3: safety filter (before scoring; authoritative) -------------
-  const safety = await applySafetyFilter(pool.pool, services.moderation, {
+  const safety = await applySafetyFilter(surfacePool, services.moderation, {
     ageBand: user.ageBand,
     jurisdiction: null,
   });
@@ -321,10 +495,25 @@ export async function serveFeed(
   const killSwitch = await killSwitchDecision(services.events, request.surface, profile.profile_id);
   const enforcement = await services.enforcement();
   const gwei = gweiDeploymentGate(await services.latestGweiDisparity(), profile, enforcement);
+  // The documented-owner override (SPEC §9.5): a tripped gate keeps ranked
+  // serving while the override is live, logged LOUDLY with the owner on
+  // every affected request — never silent.
+  const override = config.gweiOverride;
+  const gweiOverridden =
+    gwei.blocked && override !== null && override.untilMs > nowMs ? override : null;
+  if (gweiOverridden !== null) {
+    services.events.metrics.increment('ranking.gwei_gate.overridden');
+    services.log('ranking.gwei_gate.overridden', {
+      request_id: requestId,
+      owner: gweiOverridden.owner,
+      reason: gweiOverridden.reason,
+      until: new Date(gweiOverridden.untilMs).toISOString(),
+    });
+  }
   let fallbackReason: FallbackReason | null = null;
   if (killSwitch.engaged) fallbackReason = 'kill_switch';
   else if (mode === 'chronological') fallbackReason = 'user_mode';
-  else if (gwei.blocked) fallbackReason = 'gwei_gate';
+  else if (gwei.blocked && gweiOverridden === null) fallbackReason = 'gwei_gate';
   else if (safety.feasible.length === 0) fallbackReason = 'empty_pool';
 
   if (fallbackReason !== null) {
@@ -334,9 +523,9 @@ export async function serveFeed(
       bucket,
       profile,
       feasible: safety.feasible,
-      candidateIds: pool.pool.map((c) => c.item_id),
+      candidateIds: surfacePool.map((c) => c.item_id),
       safetyExclusions: safety.exclusions,
-      quotaOutcomes: pool.quotaOutcomes,
+      quotaOutcomes: assembled.quotaOutcomes,
       reason: fallbackReason,
       gweiApplication: gwei.application,
       retentionDays: config.decisionLogRetentionDays,
@@ -377,6 +566,11 @@ export async function serveFeed(
     mode === 'source-diverse'
       ? Math.max(1, Math.floor(profile.balancing.max_source_share_pct / 2))
       : null;
+  // Real lens assignments for room-surface lens balancing (WS-I.2.4b).
+  const lensByItem =
+    request.surface === 'room' && request.surfaceRoomId !== null
+      ? await lensAssignments(services, safety.feasible)
+      : null;
   const context: RankingRequestContext = {
     surface: request.surface,
     surfaceRoomId: request.surfaceRoomId,
@@ -385,6 +579,7 @@ export async function serveFeed(
     userPhiRisk: phiRisk,
     sensitiveTopicIds: services.sensitiveTopicIds(),
     maxSourceSharePctOverride: sourceShareOverride,
+    lensByItem,
   };
   const ranked = rankFeasibleSet(safety.feasible, featuresById, profile, enforcement, context);
 
@@ -397,26 +592,42 @@ export async function serveFeed(
     }
   }
   if (gwei.application !== null) ranked.applications.push(gwei.application);
+  // Context-gate observability (WS-I.2.4c): the volume of reduced/paused
+  // items feeds the dashboard that resources the bridge/expert queue.
+  for (const application of ranked.applications) {
+    if (application.constraint === 'scoi_reduced_distribution') {
+      services.events.metrics.increment('ranking.context_gate.reduced');
+    } else if (application.constraint === 'scoi_paused_pending_review') {
+      services.events.metrics.increment('ranking.context_gate.paused');
+    }
+  }
 
   // --- Stage 7: explanations ------------------------------------------------
-  const meriGains = await latestMeriGains(services.events);
   const seen =
     request.userId === null
       ? new Map<string, string>()
       : await collectSeen(services, request.userId);
-  const items: FeedItem[] = [];
-  const explanationIds: Record<string, string> = {};
-  const selectedForEvents: Array<{
-    itemId: string;
-    score: number;
-    explanation: GeneratedExplanation;
-  }> = [];
-  const scoreComponents: Record<string, ScoredItem> = {};
+  const evidenceCounts = await Promise.all(
+    ranked.selected.map((scored) => evidenceCountOf(services, scored.item_id)),
+  );
+  const contextCards = await contextCardsFor(services, ranked.selected, featuresById);
+  // "More on this story" (WS-I.2.4a): the selected cluster representative
+  // carries its demoted same-cluster siblings.
+  const moreByItem = new Map<string, string[]>();
   for (const scored of ranked.selected) {
-    const story = await services.ingestion.stories.getById(scored.item_id);
-    if (story === null) continue;
+    const cluster = featuresById.get(scored.item_id)?.duplicate_cluster_id;
+    if (cluster === undefined) continue;
+    const expansion = ranked.expansions.get(cluster);
+    if (expansion !== undefined && expansion.length > 0) {
+      moreByItem.set(scored.item_id, expansion);
+    }
+  }
+  const explanationIds: Record<string, string> = {};
+  const scoreComponents: Record<string, ScoredItem> = {};
+  const entries: SelectedEntry[] = [];
+  for (const [index, scored] of ranked.selected.entries()) {
     const features = featuresById.get(scored.item_id);
-    const evidenceCount = await evidenceCountOf(services, scored.item_id);
+    const evidenceCount = evidenceCounts[index] ?? 0;
     const explanation = explainItem(
       scored,
       {
@@ -434,25 +645,24 @@ export async function serveFeed(
           (relevanceByItem.get(scored.item_id) ?? 0) === 0,
         previouslySeen: seen.has(scored.item_id),
       },
+      SERVED_EXPLANATION_LOCALE,
     );
     explanationIds[scored.item_id] = explanation.templateId;
     scoreComponents[scored.item_id] = scored;
-    selectedForEvents.push({
+    entries.push({
       itemId: scored.item_id,
       score: scored.pwatt_score,
       explanation,
+      features,
+      moreOnThisStory: moreByItem.get(scored.item_id) ?? [],
+      contextCard: contextCards.get(scored.item_id) ?? null,
     });
-    items.push(
-      await toFeedItem(
-        services,
-        story,
-        explanation,
-        features,
-        meriGains[scored.item_id] ?? null,
-        evidenceCount,
-      ),
-    );
   }
+  const items = await buildFeedItems(services, entries);
+  const servedIds = new Set(items.map((item) => item.story_id));
+  const selectedForEvents = entries
+    .filter((entry) => servedIds.has(entry.itemId))
+    .map((entry) => ({ itemId: entry.itemId, score: entry.score, explanation: entry.explanation }));
 
   // --- Stage 6: decision logging -------------------------------------------
   const featureRevisions: Record<string, number> = {};
@@ -468,14 +678,14 @@ export async function serveFeed(
     request_id: requestId,
     surface: request.surface,
     user_privacy_bucket: bucket,
-    candidate_ids: pool.pool.map((c) => c.item_id),
+    candidate_ids: surfacePool.map((c) => c.item_id),
     selected_ids: selectedForEvents.map((s) => s.itemId),
     score_components: scoreComponents,
     feature_revisions: featureRevisions,
     invariant_versions: invariantVersions,
     constraints_applied: ranked.applications,
     safety_exclusions: safety.exclusions,
-    quota_outcomes: pool.quotaOutcomes,
+    quota_outcomes: assembled.quotaOutcomes,
     explanation_ids: explanationIds,
     experiment_ids: [],
     timestamp: nowIso,
@@ -491,6 +701,7 @@ export async function serveFeed(
       user_phi_risk: phiRisk,
       max_source_share_pct_override: sourceShareOverride,
       surface_room_id: request.surfaceRoomId,
+      lens_by_item: lensByItem === null ? null : Object.fromEntries(lensByItem),
     },
     retain_until: retentionDeadline(nowIso, config.decisionLogRetentionDays),
   });
@@ -503,8 +714,9 @@ async function collectSeen(
   services: RankingServices,
   userId: string,
 ): Promise<Map<string, string>> {
+  const sinceIso = new Date(services.now() - SEEN_HISTORY_WINDOW_MS).toISOString();
   const seen = new Map<string, string>();
-  for (const aggregate of await services.events.attentionStore.listByUser(userId)) {
+  for (const aggregate of await services.events.attentionStore.listByUserSince(userId, sinceIso)) {
     const current = seen.get(aggregate.story_id);
     if (current === undefined || aggregate.created_at > current) {
       seen.set(aggregate.story_id, aggregate.created_at);
@@ -547,32 +759,22 @@ async function serveFallback(
   args: FallbackArgs,
 ): Promise<ServedFeed> {
   const ordered = chronologicalOrder(args.feasible).slice(0, args.profile.page_size);
-  const explanation = fallbackExplanation(args.reason);
-  const meriGains = await latestMeriGains(services.events);
-  const items: FeedItem[] = [];
-  const selectedForEvents: Array<{
-    itemId: string;
-    score: number;
-    explanation: GeneratedExplanation;
-  }> = [];
+  const explanation = fallbackExplanation(args.reason, SERVED_EXPLANATION_LOCALE);
+  const entries: SelectedEntry[] = ordered.map((candidate) => ({
+    itemId: candidate.item_id,
+    score: 0,
+    explanation,
+    features: undefined,
+    moreOnThisStory: [],
+    contextCard: null,
+  }));
+  const items = await buildFeedItems(services, entries);
+  const servedIds = new Set(items.map((item) => item.story_id));
+  const selectedForEvents = entries
+    .filter((entry) => servedIds.has(entry.itemId))
+    .map((entry) => ({ itemId: entry.itemId, score: entry.score, explanation: entry.explanation }));
   const explanationIds: Record<string, string> = {};
-  for (const candidate of ordered) {
-    const story = await services.ingestion.stories.getById(candidate.item_id);
-    if (story === null) continue;
-    const evidenceCount = await evidenceCountOf(services, candidate.item_id);
-    items.push(
-      await toFeedItem(
-        services,
-        story,
-        explanation,
-        undefined,
-        meriGains[candidate.item_id] ?? null,
-        evidenceCount,
-      ),
-    );
-    explanationIds[candidate.item_id] = explanation.templateId;
-    selectedForEvents.push({ itemId: candidate.item_id, score: 0, explanation });
-  }
+  for (const entry of selectedForEvents) explanationIds[entry.itemId] = explanation.templateId;
   const log = rankingDecisionLogSchema.parse({
     request_id: args.requestId,
     surface: request.surface,
@@ -616,9 +818,8 @@ export interface ReplayResult {
 /**
  * WS-I.2.5b — replay a logged decision at its recorded versions and report
  * a structured diff. Ranked decisions replay the pure core exactly;
- * fallback decisions verify the chronological invariant over the logged
- * selection (their ordering inputs are the immutable feature-pinned
- * timestamps where available).
+ * fallback decisions verify the structural invariants over the logged
+ * selection (their ordering inputs are not pinned by score components).
  */
 export async function replayDecision(
   services: RankingServices,
@@ -682,11 +883,13 @@ export async function replayDecision(
   const inputs = log.replay_inputs;
   const relevance =
     inputs.topic_relevance === null ? null : new Map(Object.entries(inputs.topic_relevance));
+  const lensByItem =
+    inputs.lens_by_item === null ? null : new Map(Object.entries(inputs.lens_by_item));
   const replayed = rankFeasibleSet(
     candidates,
     features,
     inputs.profile_snapshot,
-    inputs.enforcement as RankingEnforcement,
+    inputs.enforcement,
     {
       surface: log.surface,
       surfaceRoomId: inputs.surface_room_id,
@@ -695,6 +898,7 @@ export async function replayDecision(
       userPhiRisk: inputs.user_phi_risk,
       sensitiveTopicIds: services.sensitiveTopicIds(),
       maxSourceSharePctOverride: inputs.max_source_share_pct_override,
+      lensByItem,
     },
   );
   const actual = replayed.selected.map((item) => ({

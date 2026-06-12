@@ -13,8 +13,8 @@
 // real-funds pilot").
 
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, relative, resolve } from 'node:path';
 import {
   auditFeatureFieldNames,
   CANDIDATE_SOURCE_TYPES,
@@ -28,12 +28,19 @@ import {
   validateFeatureVector,
   violatesProhibitedLanguage,
 } from '@licio/ranking';
-import { collectZodFieldNames, isFinancialFieldName } from '@licio/shared';
+import {
+  collectZodFieldNames,
+  DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
+  isFinancialFieldName,
+} from '@licio/shared';
+import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ingestAttentionEvents } from '../events/ingest.js';
 import { assembleFeatureVector, runFeatureBatch } from '../ranking/features.js';
 import { engageKillSwitch } from '../ranking/killswitch.js';
 import { serveFeed } from '../ranking/service.js';
+import { registerRankingConsumers } from '../ranking/services.js';
+import { createV1Routes } from '../routes/v1.js';
 import {
   freshRankingServices,
   type RankingFixture,
@@ -117,6 +124,7 @@ async function feedSignature(
     userId,
     surface,
     surfaceRoomId,
+    surfaceTopicId: null,
     mode: undefined,
   });
   const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
@@ -138,6 +146,48 @@ function rankingModuleSource(file: string): string {
 function importSpecifiers(source: string): string[] {
   return [...source.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1] as string);
 }
+
+/**
+ * The TRANSITIVE import closure of the WHOLE ranking layer inside
+ * apps/api/src: every file under src/ranking is a root (a new ranking module
+ * is covered automatically), relative imports are resolved and walked to a
+ * fixpoint. Workspace packages are covered by their own legs: @licio/ranking
+ * by the package denylist + schema walks (Test 2/7), @licio/db by the
+ * WS-F.2.5b content denylist + the WS-D.3.2 BFS isolation proof, and the
+ * pnpm boundary gate (`check:workspace-deps`) pins which packages apps/api
+ * may import at all.
+ */
+function rankingTransitiveClosure(): { files: string[]; specifiers: string[] } {
+  const srcRoot = resolve(import.meta.dirname, '..');
+  const rankingDir = resolve(srcRoot, 'ranking');
+  const queue = readdirSync(rankingDir)
+    .filter((name) => name.endsWith('.ts'))
+    .map((name) => resolve(rankingDir, name));
+  const visited = new Set<string>();
+  const specifiers = new Set<string>();
+  while (queue.length > 0) {
+    const file = queue.pop() as string;
+    if (visited.has(file)) continue;
+    visited.add(file);
+    for (const specifier of importSpecifiers(readFileSync(file, 'utf-8'))) {
+      specifiers.add(specifier);
+      if (!specifier.startsWith('.')) continue;
+      const base = resolve(dirname(file), specifier.replace(/\.js$/, ''));
+      for (const candidate of [`${base}.ts`, `${base}.tsx`, resolve(base, 'index.ts')]) {
+        if (existsSync(candidate)) {
+          queue.push(candidate);
+          break;
+        }
+      }
+    }
+  }
+  return {
+    files: [...visited].map((file) => relative(srcRoot, file)).sort(),
+    specifiers: [...specifiers].sort(),
+  };
+}
+
+const FINANCIAL_MODULE_PATTERN = /(wallet|payment|treasury|donor|knomosis|membership)/i;
 
 describe('Test 1 — feed replay with/without wallet links is identical (WS-I.3.1a)', () => {
   it('two identical users — one wallet-linked with payment events — get identical feeds', async () => {
@@ -172,6 +222,34 @@ describe('Test 1 — feed replay with/without wallet links is identical (WS-I.3.
       50,
       6,
     );
+    // A shared public room (both users active members, one story inside) so
+    // the ROOM surface leg exercises the room-scoped pool + lens path too.
+    const roomId = randomUUID();
+    await fixture.forum.rooms.insert({
+      roomId,
+      name: 'Neutrality room',
+      slug: 'neutrality-room',
+      description: null,
+      roomType: 'global_topic',
+      visibility: 'public',
+      createdBy: null,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+    });
+    for (const user of [a, b]) {
+      await fixture.forum.rooms.upsertSubscription({
+        roomId,
+        userId: user.userId,
+        status: 'active',
+        requestId: randomUUID(),
+        notificationPreferences: DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
+        requestedAt: new Date().toISOString(),
+        joinedAt: new Date().toISOString(),
+      });
+    }
+    await seedStory(fixture.ingestion, { roomId });
     // Identical organic behavior for both users…
     const ids = stories.map((s) => s.storyId);
     await ingestIdenticalAttention(a.userId, ids.slice(0, 1));
@@ -180,9 +258,13 @@ describe('Test 1 — feed replay with/without wallet links is identical (WS-I.3.
     await giveFinancialState(a.userId);
 
     // Identical ranking on every surface (§30.6: front page, room, topic).
-    for (const surface of ['front_page', 'topic'] as const) {
-      const sigA = await feedSignature(a.userId, surface);
-      const sigB = await feedSignature(b.userId, surface);
+    for (const [surface, surfaceRoomId] of [
+      ['front_page', null],
+      ['topic', null],
+      ['room', roomId],
+    ] as const) {
+      const sigA = await feedSignature(a.userId, surface, surfaceRoomId);
+      const sigB = await feedSignature(b.userId, surface, surfaceRoomId);
       expect(sigA).toBe(sigB);
     }
 
@@ -213,12 +295,14 @@ describe('Test 1 — feed replay with/without wallet links is identical (WS-I.3.
       userId: a.userId,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     const servedB = await serveFeed(fixture.ranking, {
       userId: b.userId,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     const logA = await fixture.ranking.decisionLogs.getByRequestId(servedA.requestId);
@@ -252,22 +336,21 @@ describe('Test 2 — payment amount absent from organic feature schemas (WS-I.3.
 });
 
 describe('Test 3 — donor identity absent from PWAtt and invariant joins (WS-I.3.1c)', () => {
-  it('static: the scoring/feature/retrieval modules import no financial module', () => {
-    for (const file of [
-      'features.ts',
-      'retrievers.ts',
-      'orchestrator.ts',
-      'service.ts',
-      'services.ts',
-      'safety-filter.ts',
-      'quotas.ts',
-    ]) {
-      const imports = importSpecifiers(rankingModuleSource(file));
-      const offending = imports.filter((specifier) =>
-        /wallet|payment|treasury|donor|knomosis|membership/i.test(specifier),
-      );
-      expect({ file, offending }).toEqual({ file, offending: [] });
-    }
+  it('static: the TRANSITIVE ranking import closure reaches no financial module', () => {
+    // Every file under src/ranking is a root; the walk resolves relative
+    // imports to a fixpoint. A financial module ANYWHERE in the closure —
+    // even imported three hops deep through a helper — fails here by file
+    // path or by import specifier.
+    const closure = rankingTransitiveClosure();
+    // Sanity: the walk really is transitive (it left src/ranking and pulled
+    // in the events/ingestion/forum/invariants layers the ports compose).
+    expect(closure.files.length).toBeGreaterThan(30);
+    expect(closure.files.some((file) => file.startsWith('events/'))).toBe(true);
+    expect(closure.files.some((file) => file.startsWith('identity/'))).toBe(true);
+    expect(closure.files.filter((file) => FINANCIAL_MODULE_PATTERN.test(file))).toEqual([]);
+    expect(
+      closure.specifiers.filter((specifier) => FINANCIAL_MODULE_PATTERN.test(specifier)),
+    ).toEqual([]);
   });
 
   it('runtime: feature vectors are identical whether or not the submitter has a wallet', async () => {
@@ -364,6 +447,42 @@ describe('Test 5 — governance votes cannot relabel claims (WS-I.3.1e)', () => 
     await fixture.ingestion.claims.updateStatus(claim.claimId, 'accepted');
     expect((await fixture.ingestion.claims.getById(claim.claimId))?.claimStatus).toBe('accepted');
   });
+
+  it('a ROUTER-published schema-valid governance event reaches no ranking state', async () => {
+    // The live-delivery leg: with the crypto flag ON and the ranking
+    // consumers REGISTERED, a registry-valid Knomosis governance event goes
+    // through the real router — and changes no claim label and no feature
+    // vector (the WS-E firewall + the consumers' closed topic lists hold at
+    // delivery, not just at rest).
+    registerRankingConsumers(fixture.ranking);
+    const { storyId } = await seedStory(fixture.ingestion);
+    const claim = await fixture.ingestion.claims.insert({
+      claimId: randomUUID(),
+      storyId,
+      canonicalText: 'The proposal passed with a quorum.',
+      normalizedTextHash: `h-${randomUUID()}`,
+      claimStatus: 'candidate',
+      firstSeenStoryId: storyId,
+      independenceGroupId: null,
+      createdBy: null,
+      extractionSource: 'system',
+      extractionConfidence: 0.9,
+      modelVersion: null,
+    });
+    await fixture.events.router.publish({
+      event_id: randomUUID(),
+      event_type: 'governance.proposal.executed',
+      timestamp: new Date().toISOString(),
+      schema_version: '1',
+      proposal_id: randomUUID(),
+      room_id: randomUUID(),
+      execution_state: 'executed',
+      privacy_classification: 'sensitive',
+      retention_tier: 'account_active',
+    } as never);
+    expect((await fixture.ingestion.claims.getById(claim.claimId))?.claimStatus).toBe('candidate');
+    expect(await fixture.ranking.featureStore.getLatest(storyId)).toBeNull();
+  });
 });
 
 describe('Test 6 — paid status bypasses no safety, rate limit, or moderation (WS-I.3.1f)', () => {
@@ -403,6 +522,7 @@ describe('Test 6 — paid status bypasses no safety, rate limit, or moderation (
         userId: user.userId,
         surface: 'front_page',
         surfaceRoomId: null,
+        surfaceTopicId: null,
         mode: undefined,
       });
       expect(served.items.map((i) => i.story_id)).not.toContain(removed.storyId);
@@ -503,12 +623,13 @@ describe('Test 8 — sponsored content cannot enter organic ranking (WS-I.3.1h)'
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
     expect(log).not.toBeNull();
     const registered = new Set(fixture.ranking.retrievers.origins());
-    expect(registered.size).toBe(8);
+    expect(registered.size).toBe(9); // eight organic + the room scoper
     // (Origins are recorded per candidate at retrieval; the registry is the
     // closed set every origin must come from.)
     for (const origin of registered) {
@@ -553,6 +674,7 @@ describe('Test 10 — product-health metrics separate from revenue metrics (WS-I
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     // The metric registries behind the operational dashboards.
@@ -564,10 +686,31 @@ describe('Test 10 — product-health metrics separate from revenue metrics (WS-I
     expect(financial).toEqual([]);
   });
 
-  it('the ranking admin health payload (the dashboard source) is financially clean', () => {
-    // Dashboard-as-code: the health endpoint fields ARE the product-health
-    // dashboard's data source; none may be a financial dimension.
-    const healthFields = ['decision_logs', 'profiles_loaded', 'retrievers', 'killswitch_engaged'];
-    expect(healthFields.filter((f) => isFinancialFieldName(f))).toEqual([]);
+  it('the ACTUAL ranking admin health payload (the dashboard source) is financially clean', async () => {
+    // Dashboard-as-code, INTROSPECTED: call the real endpoint and deep-walk
+    // every key of the actual response — a financial dimension added to the
+    // health payload fails here without anyone updating a hard-coded list.
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const app = new Hono().route('/v1', createV1Routes());
+    const response = await app.request('/v1/ranking/admin/health', {
+      headers: { cookie: steward.cookie },
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    const keys: string[] = [];
+    const walk = (node: unknown): void => {
+      if (node === null || typeof node !== 'object') return;
+      if (Array.isArray(node)) {
+        for (const child of node) walk(child);
+        return;
+      }
+      for (const [key, child] of Object.entries(node)) {
+        keys.push(key);
+        walk(child);
+      }
+    };
+    walk(body);
+    expect(keys.length).toBeGreaterThan(3); // the walk really saw the payload
+    expect(keys.filter((key) => isFinancialFieldName(key))).toEqual([]);
   });
 });

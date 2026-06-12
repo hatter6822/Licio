@@ -314,6 +314,7 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     expect(served.fallback).toBe(false);
@@ -366,6 +367,7 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     // Neither the hidden story (never retrieved) nor the integrity-removed
@@ -391,6 +393,7 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
       userId,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
@@ -424,6 +427,7 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     expect(served.fallback).toBe(true);
@@ -440,6 +444,7 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     expect(restored.fallback).toBe(false);
@@ -454,6 +459,7 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     expect(served.fallback).toBe(true);
@@ -488,6 +494,7 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: 'chronological',
     });
     expect(served.fallback).toBe(true);
@@ -511,6 +518,7 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     expect(served.fallback).toBe(true);
@@ -535,6 +543,7 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     // MFCI is shadow: the severe item still serves; its penalty shows
@@ -568,6 +577,7 @@ describe('feed serving end to end (SPEC §13.3 stages)', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     expect(served.items.map((i) => i.story_id)).toEqual([clean.storyId]);
@@ -614,6 +624,7 @@ describe('replay (WS-I.2.5b)', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
   }
@@ -680,6 +691,7 @@ describe('replay (WS-I.2.5b)', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: 'chronological',
     });
     const result = await replayDecision(fixture.ranking, served.requestId);
@@ -767,6 +779,7 @@ describe('admin surface (WS-I.2.5c / WS-I.4.1a; steward + MFA, meta-audited)', (
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     const { app, steward } = await stewardApp();
@@ -847,6 +860,7 @@ describe('admin surface (WS-I.2.5c / WS-I.4.1a; steward + MFA, meta-audited)', (
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     const { app, steward } = await stewardApp();
@@ -873,7 +887,8 @@ describe('admin surface (WS-I.2.5c / WS-I.4.1a; steward + MFA, meta-audited)', (
       killswitch_engaged: boolean;
     };
     expect(healthBody.decision_logs).toBe(1);
-    expect(healthBody.retrievers).toHaveLength(8);
+    // Eight organic SPEC §13.2 sources + the room-surface scoper.
+    expect(healthBody.retrievers).toHaveLength(9);
     expect(healthBody.killswitch_engaged).toBe(false);
   });
 });
@@ -885,6 +900,7 @@ describe('maintenance scheduler (lease-guarded tick)', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     expect(await fixture.ranking.decisionLogs.count()).toBe(1);

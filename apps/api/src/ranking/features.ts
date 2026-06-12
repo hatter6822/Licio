@@ -254,13 +254,16 @@ export async function assembleFeatureVector(
   if (story.sourceId !== null) {
     const source = await ingestion.sources.getById(story.sourceId);
     if (source !== null) {
+      // Inputs are exactly the aggregates the WS-F profile carries
+      // (correction FREQUENCY, evidence-type diversity, community notes).
+      // citationCount (citations by later summaries, the fourth §13.3
+      // input) stays 0 until WS-F aggregates summary citations onto the
+      // source profile — an explicit seam, documented on the pure function.
       vector.source_reliability = sourceReliabilityFromHistory({
         corrections: source.correctionHistory.length,
-        correctionsAcknowledged: source.correctionHistory.filter(
-          (c) => (c as { acknowledged?: boolean }).acknowledged === true,
-        ).length,
         evidenceTypeCount: Object.keys(source.evidenceTypeFrequency).length,
         communityNotes: source.communityNotes.length,
+        citationCount: 0,
       });
     }
   }
@@ -273,22 +276,58 @@ export async function assembleFeatureVector(
   vector.source_evidence_completeness = clamp01(evidenceCount / (evidenceCount + 3));
 
   // --- Duplicate cluster key (WS-I.2.4a input) ------------------------------
-  const signature = await ingestion.signatures.getByStoryId(storyId);
-  if (signature !== null) {
-    const hits = await findNearDuplicates(
-      ingestion.signatures,
-      storyId,
-      signature.minhash,
-      lshBandHashes(signature.minhash),
-      0.7,
-      16,
-    );
-    if (hits.length > 0) {
-      vector.duplicate_cluster_id = [storyId, ...hits.map((h) => h.storyId)].sort()[0] as string;
-    }
-  }
+  const clusterId = await duplicateClusterId(ingestion, storyId);
+  if (clusterId !== null) vector.duplicate_cluster_id = clusterId;
 
   return vector;
+}
+
+/** Bounded component exploration limits (cost ceiling per assembly). */
+const CLUSTER_MAX_NODES = 32;
+const CLUSTER_HITS_PER_NODE = 16;
+const CLUSTER_JACCARD_THRESHOLD = 0.7;
+
+/**
+ * The duplicate-cluster key: the MINIMUM story id over the near-duplicate
+ * CONNECTED COMPONENT containing `storyId`, discovered by a bounded
+ * breadth-first expansion over MinHash hits (hits-of-hits included, so
+ * chains A↔B↔C share one key even when A and C are not mutual hits —
+ * min-over-direct-hits split such chains and under-capped them). The
+ * frontier is capped at {@link CLUSTER_MAX_NODES}: beyond that, every
+ * discovered member still maps to the same minimum, so the per-page cap
+ * stays consistent — exact matroid classes remain MERI's concern; this key
+ * only feeds the WS-I.2.4a page cap. Returns null for unique items.
+ */
+async function duplicateClusterId(
+  ingestion: IngestionServices,
+  storyId: string,
+): Promise<string | null> {
+  const visited = new Set<string>([storyId]);
+  const frontier: string[] = [storyId];
+  let sawAnyHit = false;
+  while (frontier.length > 0 && visited.size < CLUSTER_MAX_NODES) {
+    // Deterministic order: expand the smallest pending id first.
+    frontier.sort();
+    const current = frontier.shift() as string;
+    const signature = await ingestion.signatures.getByStoryId(current);
+    if (signature === null) continue;
+    const hits = await findNearDuplicates(
+      ingestion.signatures,
+      current,
+      signature.minhash,
+      lshBandHashes(signature.minhash),
+      CLUSTER_JACCARD_THRESHOLD,
+      CLUSTER_HITS_PER_NODE,
+    );
+    for (const hit of hits) {
+      sawAnyHit = true;
+      if (visited.has(hit.storyId) || visited.size >= CLUSTER_MAX_NODES) continue;
+      visited.add(hit.storyId);
+      frontier.push(hit.storyId);
+    }
+  }
+  if (!sawAnyHit) return null;
+  return [...visited].sort()[0] as string;
 }
 
 /**
@@ -325,15 +364,32 @@ export async function refreshFeatures(
 export function registerFeatureStoreConsumer(deps: FeatureAssemblyDeps): void {
   deps.events.router.register({
     name: 'ranking-feature-store',
-    topics: ['invariant.run.completed'],
-    accessClassifications: ['sensitive'],
+    // integrity.signal.detected is subscribed because the MFCI INTAKE path
+    // (the sub-minute freeze path, WS-H.3.1a) writes risk states directly
+    // without an invariant.run.completed — the plan's "<5s for MFCI state
+    // changes" target holds only if those transitions refresh features too.
+    // The 'restricted' classification covers that topic; this is NOT a
+    // scoring consumer (the WS-E firewall applies to attention-scoring
+    // consumers) and the handler reads only target ids from the event.
+    topics: ['invariant.run.completed', 'integrity.signal.detected'],
+    accessClassifications: ['sensitive', 'restricted'],
     scoring: false,
     durable: true,
     handle: async (event) => {
       const payload = event as unknown as {
+        event_type?: string;
         target_type?: string;
         target_id?: string;
+        target_ids?: string[];
       };
+      if (payload.event_type === 'integrity.signal.detected') {
+        // The WS-H intake consumer registers BEFORE this one at boot, so the
+        // risk-state store is already updated when this handler assembles.
+        for (const targetId of (payload.target_ids ?? []).slice(0, 25)) {
+          await refreshFeatures(deps, targetId);
+        }
+        return;
+      }
       if (payload.target_id === undefined) return;
       if (payload.target_type === 'story') {
         await refreshFeatures(deps, payload.target_id);
@@ -366,8 +422,22 @@ export async function runFeatureBatch(
     targets.add(itemId);
   }
   let refreshed = 0;
+  const versionCounts = new Map<string, number>();
   for (const storyId of [...targets].slice(0, cap)) {
-    if (await refreshFeatures(deps, storyId)) refreshed += 1;
+    if (await refreshFeatures(deps, storyId)) {
+      refreshed += 1;
+      const latest = await deps.featureStore.getLatest(storyId);
+      for (const [name, entry] of Object.entries(latest?.invariant_versions ?? {})) {
+        const key = `${name}@${entry.version_string}`;
+        versionCounts.set(key, (versionCounts.get(key) ?? 0) + 1);
+      }
+    }
+  }
+  // WS-I.2.1c observability: the distribution of invariant versions now
+  // populating production feature vectors (a stalled rollout shows up as a
+  // version that never gains share).
+  for (const [invariant_version, count] of versionCounts) {
+    deps.log('ranking.feature.invariant_versions', { invariant_version, count });
   }
   deps.log('feature.store.batch.completed', { refreshed, targets: targets.size });
   return { refreshed };

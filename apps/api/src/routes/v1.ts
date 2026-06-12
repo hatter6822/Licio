@@ -49,6 +49,8 @@ import {
 } from '../events/ingest.js';
 import { getEventPipelineServices } from '../events/services.js';
 import type { SignalLedgerRecord } from '../events/stores.js';
+import { roomContentVisibleToUser } from '../forum/rooms.js';
+import { getForumServices } from '../forum/services.js';
 import { accountRef } from '../identity/crypto.js';
 import { getIdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
@@ -228,11 +230,14 @@ export function createV1Routes() {
           return c.json(feedResponseSchema.parse(response));
         }
         const ranking = getRankingServices();
-        const { mode } = c.req.valid('query');
+        const { mode, topic } = c.req.valid('query');
+        // `?topic=` serves the WS-I TOPIC surface: the pool scopes to the
+        // topic and the profile selector derives its sensitivity from it.
         const served = await serveFeed(ranking, {
           userId: await resolveOptionalUserId(c.req.header('cookie')),
-          surface: 'front_page',
+          surface: topic !== undefined ? 'topic' : 'front_page',
           surfaceRoomId: null,
+          surfaceTopicId: topic ?? null,
           mode,
         });
         const response: FeedResponse = {
@@ -242,6 +247,41 @@ export function createV1Routes() {
         };
         return c.json(feedResponseSchema.parse(response));
       })
+      // --- Room feed (WS-I room surface, SPEC §13.2/§16.2) ------------------
+      // The ranked feed of ONE room. CONTENT visibility is the WS-G bar
+      // (`roomContentVisibleToUser`): public rooms serve signed-out; a
+      // restricted/expert-led room serves only ACTIVE members or stewards —
+      // and an unauthorized request reads 404, never 403 (no existence
+      // oracle beyond what the room directory already discloses).
+      .get(
+        '/rooms/:roomId/feed',
+        zValidator('param', z.object({ roomId: uuidSchema })),
+        zValidator('query', feedQuerySchema),
+        async (c) => {
+          const { roomId } = c.req.valid('param');
+          const { mode } = c.req.valid('query');
+          const userId = await resolveOptionalUserId(c.req.header('cookie'));
+          const forum = getForumServices();
+          const room = await forum.rooms.getById(roomId);
+          if (room === null) return c.json(notFound, 404);
+          if (!(await roomContentVisibleToUser(forum, room, userId))) {
+            return c.json(notFound, 404);
+          }
+          const served = await serveFeed(getRankingServices(), {
+            userId,
+            surface: 'room',
+            surfaceRoomId: roomId,
+            surfaceTopicId: null,
+            mode,
+          });
+          const response: FeedResponse = {
+            items: served.items,
+            nextCursor: null,
+            request_id: served.requestId,
+          };
+          return c.json(feedResponseSchema.parse(response));
+        },
+      )
       .get(
         '/stories/:storyId',
         zValidator('param', z.object({ storyId: uuidSchema })),

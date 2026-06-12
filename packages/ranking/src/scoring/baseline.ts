@@ -20,9 +20,9 @@ import type { BaselineBreakdown } from '../schemas/scored-item.js';
 
 /** Fixed convex weights of the three baseline parts (sum to 1). */
 export const BASELINE_WEIGHTS = {
-  freshness: 0.5,
-  reliability: 0.3,
-  relevance: 0.2,
+  freshness: 50,
+  reliability: 30,
+  relevance: 20,
 } as const;
 
 /** Neutral reliability for a source with no history yet (neither boosted nor
@@ -71,28 +71,34 @@ export interface BaselineInputs {
   /** False ⇒ relevance is EXCLUDED and its weight renormalized away — a
    *  personalization-off user's feed applies no personal topic match. */
   personalizationEnabled: boolean;
+  /** Integer-percent part weights summing to 100 (profile-configured,
+   *  WS-I.2.3f `baseline_weights`); defaults to {@link BASELINE_WEIGHTS}. */
+  weights?: { freshness: number; reliability: number; relevance: number };
 }
 
 /**
- * Combine the parts. With personalization off the relevance term is removed
+ * Combine the parts as a convex combination of the profile's integer-percent
+ * baseline weights. With personalization off the relevance term is removed
  * and the remaining weights renormalized (so disabling personalization never
  * deflates every score — it redistributes weight to freshness/reliability).
  */
 export function computeBaseline(inputs: BaselineInputs): BaselineBreakdown {
+  const weights = inputs.weights ?? BASELINE_WEIGHTS;
   const freshness = clamp01(inputs.freshnessDecay ?? 0);
   const reliability = clamp01(inputs.sourceReliability ?? NEUTRAL_SOURCE_RELIABILITY);
   const usePersonalization = inputs.personalizationEnabled && inputs.topicRelevance !== undefined;
   const relevance = usePersonalization ? clamp01(inputs.topicRelevance ?? 0) : null;
   let value: number;
   if (relevance === null) {
-    const denom = BASELINE_WEIGHTS.freshness + BASELINE_WEIGHTS.reliability;
+    const denom = weights.freshness + weights.reliability;
     value =
-      (BASELINE_WEIGHTS.freshness * freshness + BASELINE_WEIGHTS.reliability * reliability) / denom;
+      denom <= 0 ? 0 : (weights.freshness * freshness + weights.reliability * reliability) / denom;
   } else {
     value =
-      BASELINE_WEIGHTS.freshness * freshness +
-      BASELINE_WEIGHTS.reliability * reliability +
-      BASELINE_WEIGHTS.relevance * relevance;
+      (weights.freshness * freshness +
+        weights.reliability * reliability +
+        weights.relevance * relevance) /
+      100;
   }
   return {
     freshness_decay: freshness,
@@ -104,35 +110,47 @@ export function computeBaseline(inputs: BaselineInputs): BaselineBreakdown {
 
 /**
  * Source reliability from Licio-internal history (SPEC §14.3 source model —
- * context and history, never a truth score and never external popularity):
+ * context and history, never a truth score and never external popularity).
+ * Inputs are exactly the aggregates the WS-F source profile actually carries:
  *
- *   - correction acknowledgment: sources that acknowledge corrections score
- *     higher than sources with many unacknowledged corrections;
- *   - evidence diversity: a source whose stories attract diverse evidence
- *     types scores higher than a single-mode source;
- *   - community notes: heavily-noted sources are slightly dampened (notes
- *     flag missing context, not falsity).
+ *   - corrections: `correction_history.length` — a high correction FREQUENCY
+ *     dampens gently (the §14.3 record has no acknowledgment field; frequency
+ *     is the real signal available, and corrections are partly a transparency
+ *     virtue, so the dampening is deliberately mild);
+ *   - evidenceTypeCount: distinct keys of `evidence_type_frequency` — a
+ *     source whose stories attract DIVERSE evidence types scores higher than
+ *     a single-mode source;
+ *   - communityNotes: `community_notes.length` — heavily-noted sources are
+ *     slightly dampened (notes flag missing context, not falsity);
+ *   - citationCount: citations of this source's evidence by later summaries
+ *     (the fourth §13.3 input). The WS-F source profile does not aggregate
+ *     summary citations yet, so callers pass 0 until that aggregate exists —
+ *     an explicit, documented seam, not a hidden default.
  *
- * All inputs are COUNTS from the source profile; none is a popularity or
+ * All inputs are COUNTS from Licio-internal data; none is a popularity or
  * financial metric. Output ∈ [0, 1]; a source with no history ⇒ neutral 0.5.
+ *
+ *   reliability = clamp01((0.5 + 0.3·div + 0.2·cite) · corrDamp · noteDamp)
+ *     div  = types/(types+2)          (saturating diversity bonus)
+ *     cite = citations/(citations+4)  (saturating citation bonus)
+ *     corrDamp = 1/(1 + corrections/10), noteDamp = 1/(1 + notes/8)
  */
 export function sourceReliabilityFromHistory(history: {
   corrections: number;
-  correctionsAcknowledged: number;
   evidenceTypeCount: number;
   communityNotes: number;
+  citationCount: number;
 }): number {
-  const { corrections, correctionsAcknowledged, evidenceTypeCount, communityNotes } = history;
-  if (corrections === 0 && evidenceTypeCount === 0 && communityNotes === 0) {
+  const corrections = Math.max(0, history.corrections);
+  const evidenceTypeCount = Math.max(0, history.evidenceTypeCount);
+  const communityNotes = Math.max(0, history.communityNotes);
+  const citationCount = Math.max(0, history.citationCount);
+  if (corrections === 0 && evidenceTypeCount === 0 && communityNotes === 0 && citationCount === 0) {
     return NEUTRAL_SOURCE_RELIABILITY;
   }
-  // Acknowledgment ratio: 1 when every correction is acknowledged (or none
-  // exist), decaying toward 0 with unacknowledged corrections.
-  const acknowledged = Math.min(correctionsAcknowledged, corrections);
-  const correctionScore = corrections === 0 ? 1 : (1 + acknowledged) / (1 + corrections);
-  // Evidence diversity saturates: k / (k + 2).
-  const diversityScore = evidenceTypeCount / (evidenceTypeCount + 2);
-  // Community-note dampening: 1 / (1 + notes/8) — gentle, never zeroing.
+  const diversityBonus = 0.3 * (evidenceTypeCount / (evidenceTypeCount + 2));
+  const citationBonus = 0.2 * (citationCount / (citationCount + 4));
+  const correctionDampening = 1 / (1 + corrections / 10);
   const noteDampening = 1 / (1 + communityNotes / 8);
-  return clamp01((0.5 * correctionScore + 0.5 * diversityScore) * noteDampening);
+  return clamp01((0.5 + diversityBonus + citationBonus) * correctionDampening * noteDampening);
 }

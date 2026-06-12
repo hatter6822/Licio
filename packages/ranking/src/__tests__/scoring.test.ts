@@ -87,6 +87,43 @@ describe('WS-I.2.3d baseline', () => {
     expect(on.value).toBeCloseTo(0.78, 12);
   });
 
+  it('baseline part weights are profile-configurable (WS-I.2.3f baseline_weights)', () => {
+    const breaking = { freshness: 60, reliability: 25, relevance: 15 };
+    const on = computeBaseline({
+      freshnessDecay: 0.8,
+      sourceReliability: 0.6,
+      topicRelevance: 1,
+      personalizationEnabled: true,
+      weights: breaking,
+    });
+    // (60·0.8 + 25·0.6 + 15·1)/100 = 0.78
+    expect(on.value).toBeCloseTo(0.78, 12);
+    const off = computeBaseline({
+      freshnessDecay: 0.8,
+      sourceReliability: 0.6,
+      topicRelevance: 1,
+      personalizationEnabled: false,
+      weights: breaking,
+    });
+    // Renormalized over the CONFIGURED weights: (60·0.8 + 25·0.6)/85 = 0.74117…
+    expect(off.value).toBeCloseTo((60 * 0.8 + 25 * 0.6) / 85, 12);
+    // Omitting weights uses the shipped default — identical to passing it.
+    const defaulted = computeBaseline({
+      freshnessDecay: 0.8,
+      sourceReliability: 0.6,
+      topicRelevance: 1,
+      personalizationEnabled: true,
+    });
+    const explicit = computeBaseline({
+      freshnessDecay: 0.8,
+      sourceReliability: 0.6,
+      topicRelevance: 1,
+      personalizationEnabled: true,
+      weights: { freshness: 50, reliability: 30, relevance: 20 },
+    });
+    expect(defaulted.value).toBe(explicit.value);
+  });
+
   it('topic relevance is the matched-topic fraction over the user OWN interests', () => {
     expect(topicRelevance(['a', 'b'], ['a'])).toBe(0.5);
     expect(topicRelevance(['a', 'b'], ['a', 'b', 'c'])).toBe(1);
@@ -94,36 +131,64 @@ describe('WS-I.2.3d baseline', () => {
     expect(topicRelevance(['a'], [])).toBe(0);
   });
 
-  it('source reliability: acknowledged corrections and evidence diversity raise it; notes dampen', () => {
-    const acknowledged = sourceReliabilityFromHistory({
-      corrections: 4,
-      correctionsAcknowledged: 4,
+  it('source reliability: diversity/citations raise it; correction frequency and notes dampen GENTLY', () => {
+    // Inputs are exactly the WS-F §14.3 profile aggregates (the record has
+    // no acknowledgment field — frequency is the real correction signal).
+    const diverse = sourceReliabilityFromHistory({
+      corrections: 0,
       evidenceTypeCount: 4,
       communityNotes: 0,
+      citationCount: 0,
     });
-    const ignored = sourceReliabilityFromHistory({
-      corrections: 4,
-      correctionsAcknowledged: 0,
+    expect(diverse).toBeGreaterThan(NEUTRAL_SOURCE_RELIABILITY);
+    const cited = sourceReliabilityFromHistory({
+      corrections: 0,
       evidenceTypeCount: 4,
       communityNotes: 0,
+      citationCount: 8,
     });
-    expect(acknowledged).toBeGreaterThan(ignored);
+    expect(cited).toBeGreaterThan(diverse);
+    const corrected = sourceReliabilityFromHistory({
+      corrections: 6,
+      evidenceTypeCount: 4,
+      communityNotes: 0,
+      citationCount: 0,
+    });
+    expect(corrected).toBeLessThan(diverse);
+    expect(corrected).toBeGreaterThan(0.3); // corrections dampen MILDLY (transparency virtue)
     const noted = sourceReliabilityFromHistory({
-      corrections: 4,
-      correctionsAcknowledged: 4,
+      corrections: 0,
       evidenceTypeCount: 4,
       communityNotes: 16,
+      citationCount: 0,
     });
-    expect(noted).toBeLessThan(acknowledged);
+    expect(noted).toBeLessThan(diverse);
     expect(noted).toBeGreaterThan(0);
+    // No history at all ⇒ exactly neutral.
     expect(
       sourceReliabilityFromHistory({
         corrections: 0,
-        correctionsAcknowledged: 0,
         evidenceTypeCount: 0,
         communityNotes: 0,
+        citationCount: 0,
       }),
     ).toBe(NEUTRAL_SOURCE_RELIABILITY);
+    // Monotone in diversity and citations; antitone in corrections/notes.
+    for (let k = 0; k < 6; k += 1) {
+      const lower = sourceReliabilityFromHistory({
+        corrections: 0,
+        evidenceTypeCount: k,
+        communityNotes: 0,
+        citationCount: 0,
+      });
+      const higher = sourceReliabilityFromHistory({
+        corrections: 0,
+        evidenceTypeCount: k + 1,
+        communityNotes: 0,
+        citationCount: 0,
+      });
+      expect(higher).toBeGreaterThanOrEqual(lower);
+    }
   });
 });
 
@@ -202,6 +267,17 @@ describe('WS-I.2.3b penalties', () => {
       { mfci: true, tropical: false },
     );
     expect(mfciDominates.enforced).toBe(true);
+  });
+
+  it('an EXACT tie enforces when EITHER tied source is promoted (inclusive compare)', () => {
+    // mfci 'high' maps to 0.5; tropical 0.5 ties it exactly. The tied
+    // evidence equally justifies the value, so promotion of either source
+    // suffices — and with both shadow, the tie never enforces.
+    const tie = { mfci_risk_state: 'high' as const, tropical_cascade_rank: 0.5 };
+    expect(coordinationInput(tie, { mfci: true, tropical: false }).enforced).toBe(true);
+    expect(coordinationInput(tie, { mfci: false, tropical: true }).enforced).toBe(true);
+    expect(coordinationInput(tie, { mfci: false, tropical: false }).enforced).toBe(false);
+    expect(coordinationInput(tie, { mfci: true, tropical: true }).value).toBe(0.5);
   });
 
   it('pH uses STRICTER thresholds for sensitive topics (§11.5)', () => {

@@ -245,8 +245,13 @@ export interface StoryStore {
     threadId: string,
   ): Promise<StoryCreateOutcome>;
   getById(storyId: string): Promise<StoryRecord | null>;
+  /** Batch read (the WS-I safety filter / feed mapping — one query per
+   *  pool, never one per item). Unknown ids simply have no map entry. */
+  getByIds(storyIds: readonly string[]): Promise<Map<string, StoryRecord>>;
   getByCanonicalUrl(canonicalUrl: string): Promise<StoryRecord | null>;
   getThreadByStoryId(storyId: string): Promise<ThreadShellRecord | null>;
+  /** Batch thread-shell read keyed by STORY id (WS-I safety filter). */
+  getThreadsByStoryIds(storyIds: readonly string[]): Promise<Map<string, ThreadShellRecord>>;
   /** Reverse shell lookup (thread-scoped events → story lifecycle/freshness). */
   getStoryIdByThreadId(threadId: string): Promise<string | null>;
   // -- WS-G thread ownership (the forum module reads/writes through these) --
@@ -588,6 +593,15 @@ export class InMemoryStoryStore implements StoryStore {
     return this.#stories.get(storyId) ?? null;
   }
 
+  async getByIds(storyIds: readonly string[]): Promise<Map<string, StoryRecord>> {
+    const out = new Map<string, StoryRecord>();
+    for (const storyId of storyIds) {
+      const story = this.#stories.get(storyId);
+      if (story !== undefined) out.set(storyId, story);
+    }
+    return out;
+  }
+
   async getByCanonicalUrl(canonicalUrl: string): Promise<StoryRecord | null> {
     const id = this.#byUrl.get(canonicalUrl);
     return id === undefined ? null : (this.#stories.get(id) ?? null);
@@ -595,6 +609,15 @@ export class InMemoryStoryStore implements StoryStore {
 
   async getThreadByStoryId(storyId: string): Promise<ThreadShellRecord | null> {
     return this.#threads.get(storyId) ?? null;
+  }
+
+  async getThreadsByStoryIds(storyIds: readonly string[]): Promise<Map<string, ThreadShellRecord>> {
+    const out = new Map<string, ThreadShellRecord>();
+    for (const storyId of storyIds) {
+      const thread = this.#threads.get(storyId);
+      if (thread !== undefined) out.set(storyId, thread);
+    }
+    return out;
   }
 
   async getStoryIdByThreadId(threadId: string): Promise<string | null> {

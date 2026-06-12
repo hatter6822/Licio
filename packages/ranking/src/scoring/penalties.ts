@@ -72,11 +72,13 @@ export function coordinationInput(
   // tropical_cascade_rank is the synchronized fraction ∈ [0, 1] when present.
   const tropical = clamp01(features.tropical_cascade_rank ?? 0);
   const value = Math.max(mfci, tropical);
-  // Enforced when the SOURCE of the dominating evidence is promoted.
+  // Enforced when the SOURCE of the dominating evidence is promoted. Both
+  // comparisons are inclusive so an EXACT tie enforces if EITHER tied source
+  // is promoted (the tied evidence equally justifies the penalty value).
   const enforced =
     value === 0
       ? enforcement.mfci || enforcement.tropical
-      : (mfci >= tropical && enforcement.mfci) || (tropical > mfci && enforcement.tropical);
+      : (mfci >= tropical && enforcement.mfci) || (tropical >= mfci && enforcement.tropical);
   return { value, enforced };
 }
 

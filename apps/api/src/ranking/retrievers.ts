@@ -454,6 +454,44 @@ export class ChronologicalCatchUpRetriever implements CandidateRetriever {
   }
 }
 
+/**
+ * Room-surface scoping retriever: the SURFACE room's recent threads, served
+ * regardless of the requesting user's subscriptions (a PUBLIC room's feed is
+ * readable signed-out; restricted-room ACCESS is enforced by the route via
+ * `roomContentVisibleToUser` BEFORE serving — this retriever only scopes
+ * candidates). Returns [] on every non-room surface, so the front page's
+ * eight organic sources (SPEC §13.2) are unaffected. Uses the
+ * `subscribed_room` source type (room-scoped content); its own origin keeps
+ * the audit trail distinct.
+ */
+export class RoomSurfaceRetriever implements CandidateRetriever {
+  readonly origin = 'room_surface_v1';
+  readonly sourceType = 'subscribed_room' as const;
+  constructor(private readonly ports: CandidateDataPorts) {}
+
+  async retrieve(context: RetrieveContext): Promise<Candidate[]> {
+    if (context.surface !== 'room' || context.surfaceRoomId === null) return [];
+    const out: Candidate[] = [];
+    for (const thread of await this.ports.threadsByRoom(context.surfaceRoomId, context.limit)) {
+      const storyId = await this.ports.storyIdByThreadId(thread.threadId);
+      if (storyId === null) continue;
+      const story = await storyIfRetrievable(this.ports, storyId);
+      if (story === null) continue;
+      out.push(
+        await storyToCandidate(
+          this.ports,
+          story,
+          this.sourceType,
+          this.origin,
+          recencyScore(storyFreshnessIso(story), context.nowMs, 24 * 14),
+        ),
+      );
+      if (out.length >= context.limit) break;
+    }
+    return out;
+  }
+}
+
 /** WS-I.1.1a — the retriever registry: a CLOSED, named set. */
 export class RetrieverRegistry {
   readonly #retrievers = new Map<string, CandidateRetriever>();
@@ -474,7 +512,8 @@ export class RetrieverRegistry {
   }
 }
 
-/** Build the default registry with all eight retrievers (WS-I.1.1a). */
+/** Build the default registry: the eight organic SPEC §13.2 sources plus
+ *  the room-surface scoper (inert outside room feeds). */
 export function createDefaultRetrievers(ports: CandidateDataPorts): RetrieverRegistry {
   const registry = new RetrieverRegistry();
   registry.register(new SubscribedRoomsRetriever(ports));
@@ -485,5 +524,6 @@ export function createDefaultRetrievers(ports: CandidateDataPorts): RetrieverReg
   registry.register(new CrossCommunityBridgesRetriever(ports));
   registry.register(new ExpertExplanationsRetriever(ports));
   registry.register(new ChronologicalCatchUpRetriever(ports));
+  registry.register(new RoomSurfaceRetriever(ports));
   return registry;
 }

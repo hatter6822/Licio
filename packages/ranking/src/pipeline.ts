@@ -69,6 +69,13 @@ export interface RankingRequestContext {
   sensitiveTopicIds: ReadonlySet<string>;
   /** Feed-mode balancing override (source-diverse mode); null ⇒ profile. */
   maxSourceSharePctOverride: number | null;
+  /**
+   * item id → lens id for WS-I.2.4b lens balancing (room surfaces; derived
+   * from the thread's lens-tagged contributions). Null when the surface has
+   * no lens dimension. Pinned in the decision log because lens assignments
+   * affect the ordering (WS-I.2.5b).
+   */
+  lensByItem: ReadonlyMap<string, string> | null;
 }
 
 export interface RankedSelection {
@@ -117,6 +124,7 @@ export function scoreItem(
     sourceReliability: features.source_reliability,
     topicRelevance: relevance,
     personalizationEnabled: context.topicRelevanceByItem !== null,
+    weights: profile.baseline_weights,
   });
   const positive = computePositiveScore(features, profile, baseline);
   const penalties = computePenalties(features, profile, enforcement, { sensitiveTopic });
@@ -210,7 +218,7 @@ export function rankFeasibleSet(
     score: item.pwatt_score,
     sourceId: features.source_id,
     topicIds: features.topic_ids,
-    lensId: null,
+    lensId: context.lensByItem?.get(item.item_id) ?? null,
   }));
   const balanced = applyBalancing(balanceInput, {
     pageSize: profile.page_size,

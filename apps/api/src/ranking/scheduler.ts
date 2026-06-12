@@ -12,6 +12,7 @@
 //   4. Runtime-config reload (picks up validated steward writes).
 
 import { hostname } from 'node:os';
+import { EXPLANATION_TEMPLATES } from '@licio/ranking';
 import type { JobLeaseStore } from '../identity/job-lease.js';
 import { runFeatureBatch } from './features.js';
 import { replayDecision } from './service.js';
@@ -64,9 +65,16 @@ export async function runRankingTick(
     if (config.replaySampleSize > 0) {
       const recent = await services.decisionLogs.query({ limit: config.replaySampleSize });
       let mismatches = 0;
+      let unknownTemplates = 0;
       for (const log of recent.logs) {
         const result = await replayDecision(services, log.request_id);
         if (!result.match) mismatches += 1;
+        // Explanation-consistency check (WS-I.2.6b observability): every
+        // logged explanation template must still exist in the registry — a
+        // removed/renamed template would silently orphan served reasons.
+        for (const templateId of Object.values(log.explanation_ids)) {
+          if (!EXPLANATION_TEMPLATES.has(templateId)) unknownTemplates += 1;
+        }
       }
       if (mismatches > 0) {
         services.events.metrics.increment('ranking.replay.regression_mismatch', mismatches);
@@ -75,9 +83,29 @@ export async function runRankingTick(
           mismatches,
         });
       }
+      if (unknownTemplates > 0) {
+        services.events.metrics.increment('ranking.explanation.unknown_template', unknownTemplates);
+        services.log('ranking.explanation.unknown_template', { count: unknownTemplates });
+      }
     }
   } catch (err) {
     onError(err, 'replay_regression');
+  }
+  try {
+    // Feature-staleness observability (WS-I.2.1d): the OLDEST unrefreshed
+    // vector's age is the dashboard's staleness needle.
+    const staleHorizon = new Date(nowMs - config.featureStaleHours * 3_600_000).toISOString();
+    const staleIds = await services.featureStore.listStaleItems(staleHorizon, 1);
+    const oldestId = staleIds[0];
+    if (oldestId !== undefined) {
+      const oldest = await services.featureStore.getLatest(oldestId);
+      services.log('ranking.feature.staleness', {
+        oldest_item: oldestId,
+        oldest_updated_at: oldest?.updated_at ?? null,
+      });
+    }
+  } catch (err) {
+    onError(err, 'feature_batch');
   }
 }
 

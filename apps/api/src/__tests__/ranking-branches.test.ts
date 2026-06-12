@@ -334,6 +334,7 @@ describe('scheduler lease behavior', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
@@ -367,6 +368,7 @@ describe('replay + serving edge branches', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     // Drop the feature store (simulating revision retention expiry).
@@ -409,6 +411,7 @@ describe('replay + serving edge branches', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     expect(served.items.length).toBeGreaterThan(0); // the feed still served
@@ -431,6 +434,7 @@ describe('replay + serving edge branches', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     expect(served.fallback).toBe(true);
@@ -456,14 +460,20 @@ describe('replay + serving edge branches', () => {
     const held = await applySafetyFilter(
       [candidate],
       {
-        itemPolicyState: async () => ({
-          removed: false,
-          removalReason: null,
-          moderationCaseRef: 'hold-1',
-          sensitivityLabels: [],
-          legallyRestrictedIn: [],
-          stewardHold: true,
-        }),
+        itemPolicyStates: async (ids) =>
+          new Map(
+            ids.map((id) => [
+              id,
+              {
+                removed: false,
+                removalReason: null,
+                moderationCaseRef: 'hold-1',
+                sensitivityLabels: [],
+                legallyRestrictedIn: [],
+                stewardHold: true,
+              },
+            ]),
+          ),
       },
       { ageBand: 'adult', jurisdiction: null },
     );
@@ -471,14 +481,20 @@ describe('replay + serving edge branches', () => {
     const restricted = await applySafetyFilter(
       [candidate],
       {
-        itemPolicyState: async () => ({
-          removed: false,
-          removalReason: null,
-          moderationCaseRef: null,
-          sensitivityLabels: [],
-          legallyRestrictedIn: ['DE'],
-          stewardHold: false,
-        }),
+        itemPolicyStates: async (ids) =>
+          new Map(
+            ids.map((id) => [
+              id,
+              {
+                removed: false,
+                removalReason: null,
+                moderationCaseRef: null,
+                sensitivityLabels: [],
+                legallyRestrictedIn: ['DE'],
+                stewardHold: false,
+              },
+            ]),
+          ),
       },
       { ageBand: 'adult', jurisdiction: 'DE' },
     );
@@ -540,6 +556,7 @@ describe('admin route edge branches', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     const detail = await app.request(`/v1/ranking/admin/decisions/${served.requestId}`, {
@@ -571,7 +588,7 @@ describe('admin route edge branches', () => {
     );
     resetRankingServices();
     const lazy = getRankingServices();
-    expect(lazy.retrievers.origins()).toHaveLength(8);
+    expect(lazy.retrievers.origins()).toHaveLength(9);
     expect(getRankingServices()).toBe(lazy);
     // Restore the fixture singleton for the rest of the suite.
     setRankingServices(fixture.ranking);
@@ -680,6 +697,7 @@ describe('feed mapping variants', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: undefined,
     });
     const item = served.items.find((i) => i.story_id === storyId);
@@ -693,6 +711,7 @@ describe('feed mapping variants', () => {
       userId: null,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: 'source-diverse',
     });
     const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
@@ -708,6 +727,7 @@ describe('feed mapping variants', () => {
       userId,
       surface: 'front_page',
       surfaceRoomId: null,
+      surfaceTopicId: null,
       mode: 'local',
     });
     const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);

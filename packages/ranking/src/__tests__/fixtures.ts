@@ -61,6 +61,7 @@ export function makeContext(partial: Partial<RankingRequestContext> = {}): Ranki
     userPhiRisk: null,
     sensitiveTopicIds: new Set(['self-harm']),
     maxSourceSharePctOverride: null,
+    lensByItem: null,
     ...partial,
   };
 }
