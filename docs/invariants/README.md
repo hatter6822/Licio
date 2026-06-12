@@ -375,6 +375,9 @@ confirmed-syndication siblings, visibility-gated server-side),
 `WhereInterpretationsDiffer` (+ the needs-context framing; human lens
 NAMES resolved through the room when available), the composer
 `ContextWarning` (dismissible; the user can always proceed), the
+`ShareStoryButton` with the §10.5 origin-context prompt (sharing a
+context-sensitive story first offers to include a one-line origin note —
+"share as is" always works; Web Share API with clipboard fallback), the
 `NarrowLoopPrompt` (non-blocking; "see broader context" switches to the
 source-diverse feed mode AND, signed in, persists it through the durable
 personalization settings), and the PHI-4 wellbeing controls ("Reset topic

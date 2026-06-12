@@ -10,6 +10,7 @@ import { useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
 import { IndependentSourcesDrawer } from '../../components/story/IndependentSourcesDrawer/index.js';
+import { ShareStoryButton } from '../../components/story/ShareStoryButton/index.js';
 import { WhereInterpretationsDiffer } from '../../components/story/WhereInterpretationsDiffer/index.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
@@ -176,6 +177,11 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 </Button>
               ) : null}
               <SaveStoryButton story={data} />
+              <ShareStoryButton
+                title={data.title}
+                url={typeof window !== 'undefined' ? window.location.href : ''}
+                needsContext={interpretations.data?.needs_context ?? false}
+              />
             </div>
             {topicIds?.[0] ? <TopicRepeatsPreference topicId={topicIds[0]} /> : null}
             {interpretations.data ? (
