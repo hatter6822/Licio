@@ -150,7 +150,6 @@ export const BRIDGE_CREDIT_MIN_DECREASE = 0.02;
  */
 export function registerScoiBridgeConsumer(
   events: EventPipelineServices,
-  ingestion: IngestionServices,
   identity: IdentityServices,
   invariants: InvariantPlatformServices,
 ): void {

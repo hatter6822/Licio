@@ -416,7 +416,7 @@ export function registerInvariantConsumers(
 
   // SCOI bridge credit (WS-H.4.2d): contributions on bridge-requested
   // threads trigger re-computation; measured decreases credit the bridger.
-  registerScoiBridgeConsumer(events, ingestion, identity, invariants);
+  registerScoiBridgeConsumer(events, identity, invariants);
 }
 
 // ---------------------------------------------------------------------------
