@@ -273,13 +273,17 @@ interface DecisionLogDraft {
   log: RankingDecisionLog;
 }
 
-/** Insert the decision log + emit the per-item events; never throws. */
+/**
+ * Insert the decision log + emit the per-item events; never throws. Returns
+ * whether the LOG insert landed: pagination must not advertise a cursor
+ * whose chain link does not exist (the next page would re-serve page one).
+ */
 async function commitDecision(
   services: RankingServices,
   draft: DecisionLogDraft,
   selected: ReadonlyArray<{ itemId: string; score: number; explanation: GeneratedExplanation }>,
   surface: 'front_page' | 'room' | 'topic',
-): Promise<void> {
+): Promise<boolean> {
   try {
     await services.decisionLogs.insert(draft.log);
   } catch (error) {
@@ -290,7 +294,7 @@ async function commitDecision(
       request_id: draft.log.request_id,
       error: error instanceof Error ? error.message : 'unknown',
     });
-    return;
+    return false;
   }
   services.log('ranking.decision.logged', {
     request_id: draft.log.request_id,
@@ -349,6 +353,7 @@ async function commitDecision(
       });
     }
   }
+  return true;
 }
 
 /** Signal NAMES that fed one item's decision (names only, never values). */
@@ -807,12 +812,16 @@ export async function serveFeed(
     },
     retain_until: retentionDeadline(nowIso, config.decisionLogRetentionDays),
   });
-  await commitDecision(services, { log }, selectedForEvents, request.surface);
+  const logCommitted = await commitDecision(services, { log }, selectedForEvents, request.surface);
 
   // Seen-aware pagination: more pages exist while UNSERVED feasible items
-  // remain (an empty page never advertises a next page — no client loops).
+  // remain (an empty page never advertises a next page — no client loops),
+  // and only when the chain link PERSISTED (a cursor pointing at a failed
+  // log write would silently re-serve page one).
   const hasMore =
-    items.length > 0 && safety.feasible.some((candidate) => !servedIds.has(candidate.item_id));
+    logCommitted &&
+    items.length > 0 &&
+    safety.feasible.some((candidate) => !servedIds.has(candidate.item_id));
   return { requestId, items, fallback: false, nextCursor: hasMore ? requestId : null };
 }
 
@@ -906,16 +915,19 @@ async function serveFallback(
     replay_inputs: null,
     retain_until: retentionDeadline(args.nowIso, args.retentionDays),
   });
-  await commitDecision(services, { log }, selectedForEvents, request.surface);
+  const logCommitted = await commitDecision(services, { log }, selectedForEvents, request.surface);
   services.log('ranking.fallback.served', {
     request_id: args.requestId,
     surface: request.surface,
     reason: args.reason,
   });
   // The fallback paginates too (deep scroll keeps working while ranking is
-  // paused): same exclusion semantics, time order, honest reason per page.
+  // paused): same exclusion semantics, time order, honest reason per page —
+  // and the same chain-link guard as the ranked path.
   const hasMore =
-    items.length > 0 && args.feasible.some((candidate) => !servedIds.has(candidate.item_id));
+    logCommitted &&
+    items.length > 0 &&
+    args.feasible.some((candidate) => !servedIds.has(candidate.item_id));
   return {
     requestId: args.requestId,
     items,

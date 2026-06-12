@@ -691,6 +691,32 @@ describe('seen-aware pagination (the ?cursor= page chain)', () => {
     expect(page2.nextCursor).toBeNull();
   });
 
+  it('a failed decision-log write never advertises a next page (no silent restarts)', async () => {
+    // The cursor IS the chain link: when the log insert fails (a counted
+    // auditability incident), a cursor pointing at it would resolve to no
+    // exclusions and re-serve page one — so the page reports exhaustion
+    // instead, and the client simply re-requests later.
+    await fivePerPage();
+    for (let i = 0; i < 7; i += 1) {
+      await seedStory(fixture.ingestion);
+    }
+    const failing = {
+      ...fixture.ranking,
+      decisionLogs: {
+        ...fixture.ranking.decisionLogs,
+        insert: async () => {
+          throw new Error('log store outage');
+        },
+      },
+    };
+    const served = await serveFeed(failing as typeof fixture.ranking, feedRequest(null));
+    expect(served.items).toHaveLength(5); // serving never fails…
+    expect(served.nextCursor).toBeNull(); // …but no unresolvable cursor ships
+    expect(
+      fixture.events.metrics.snapshot().counters['ranking.decision_log.write_failed'],
+    ).toBeGreaterThanOrEqual(1);
+  });
+
   it('the room route honors ?cursor= end to end', async () => {
     await fivePerPage();
     const roomId = await insertRoom('public');
