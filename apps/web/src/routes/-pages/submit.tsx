@@ -189,6 +189,23 @@ export function SubmitPage(): React.ReactElement {
   // SEES (and controls) the line; the structured chip enriches it at build.
   const shareSeed = shareCitation !== null ? { citations: shareCitation.url } : undefined;
 
+  const onSaveDraft = (composerMode: ComposerMode, values: ComposerValues): void => {
+    latest.current = { mode: composerMode, values };
+    void persistDraft(composerMode, values)
+      .then(() => {
+        toast({
+          tone: 'success',
+          message: t('submit.draftSaved', 'Saved as a draft on this device.'),
+        });
+      })
+      .catch(() => {
+        toast({
+          tone: 'error',
+          message: t('submit.draftSaveFailed', 'Could not save this draft on this device.'),
+        });
+      });
+  };
+
   const onSubmit = (composerMode: ComposerMode, values: ComposerValues): void => {
     setServerErrors({});
     latest.current = { mode: composerMode, values };
@@ -317,6 +334,7 @@ export function SubmitPage(): React.ReactElement {
           {...(mode !== undefined ? { mode } : {})}
           onModeChange={setMode}
           onDraftChange={onDraftChange}
+          onSaveDraft={onSaveDraft}
           onSubmit={onSubmit}
           errors={serverErrors}
           {...(initialValues !== undefined || shareSeed !== undefined

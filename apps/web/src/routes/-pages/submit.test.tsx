@@ -124,6 +124,29 @@ describe('SubmitPage contribution submission', () => {
     expect(screen.getByText('Contribution submitted.')).toBeInTheDocument();
   });
 
+  it('saves a contribution draft without enqueueing or deleting when Save draft is selected', async () => {
+    const user = userEvent.setup();
+    renderSubmitPage();
+
+    await user.click(screen.getByRole('button', { name: /^Ask/i }));
+    await user.type(screen.getByLabelText(/^Question/i), 'Save this for later?');
+    await user.click(screen.getByRole('button', { name: /Save draft/i }));
+
+    await waitFor(() =>
+      expect(saveDraft).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: THREAD_ID,
+          contributionType: 'question',
+          values: expect.objectContaining({ body: 'Save this for later?' }),
+        }),
+      ),
+    );
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(processPendingQueue).not.toHaveBeenCalled();
+    expect(deleteDraft).not.toHaveBeenCalled();
+    expect(screen.getByText('Saved as a draft on this device.')).toBeInTheDocument();
+  });
+
   it('keeps the draft when the queued contribution has not been acknowledged yet', async () => {
     getQueuedOperation.mockResolvedValue({ operationId: 'queued-op-1', status: 'pending' });
     processPendingQueue.mockResolvedValue({ sent: 0, retried: 1, failed: 0 });
