@@ -14,16 +14,20 @@ const ALLOWED_WORKSPACE_DEPS: Record<string, string[]> = {
   '@licio/shared': [],
   '@licio/db': ['@licio/shared'],
   '@licio/invariants': ['@licio/shared'],
+  // Pure ranking domain logic (WS-I): NEVER @licio/db — the ranking math has
+  // no database access by construction (pay-to-rank firewall, SPEC §21.5).
+  '@licio/ranking': ['@licio/shared', '@licio/invariants'],
   web: ['@licio/shared', '@licio/invariants'],
-  api: ['@licio/shared', '@licio/db', '@licio/invariants'],
+  api: ['@licio/shared', '@licio/db', '@licio/invariants', '@licio/ranking'],
 };
 
-const WORKSPACE_PACKAGES = ['@licio/shared', '@licio/db', '@licio/invariants'];
+const WORKSPACE_PACKAGES = ['@licio/shared', '@licio/db', '@licio/invariants', '@licio/ranking'];
 
 const PACKAGE_PATHS: Record<string, string> = {
   '@licio/shared': resolve(ROOT, 'packages/shared/package.json'),
   '@licio/db': resolve(ROOT, 'packages/db/package.json'),
   '@licio/invariants': resolve(ROOT, 'packages/invariants/package.json'),
+  '@licio/ranking': resolve(ROOT, 'packages/ranking/package.json'),
   web: resolve(ROOT, 'apps/web/package.json'),
   api: resolve(ROOT, 'apps/api/package.json'),
 };
@@ -32,6 +36,7 @@ const SOURCE_DIRS: Record<string, string> = {
   '@licio/shared': resolve(ROOT, 'packages/shared/src'),
   '@licio/db': resolve(ROOT, 'packages/db/src'),
   '@licio/invariants': resolve(ROOT, 'packages/invariants/src'),
+  '@licio/ranking': resolve(ROOT, 'packages/ranking/src'),
   web: resolve(ROOT, 'apps/web/src'),
   api: resolve(ROOT, 'apps/api/src'),
 };

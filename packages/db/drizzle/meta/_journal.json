@@ -85,6 +85,20 @@
       "when": 1781223630830,
       "tag": "0011_perfect_mentallo",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1781236266930,
+      "tag": "0012_ws_i_ranking",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1781236487493,
+      "tag": "0013_ws_i_audit_events",
+      "breakpoints": true
     }
   ]
 }

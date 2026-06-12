@@ -34,6 +34,7 @@ import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
+import { deterministicEventId } from '../pwatt/scoring.js';
 import { INVARIANT_CARDS, validateAllCards } from './cards.js';
 import {
   DEFAULT_INVARIANTS_CONFIG,
@@ -225,6 +226,17 @@ function sessionKeyOf(ownerRef: string, sessionBucket: string): string {
     .update(`phi-session:${ownerRef}:${sessionBucket}`)
     .digest('hex')
     .slice(0, 32);
+}
+
+/**
+ * The PHI invariant-output target id for one (owner, session bucket) pair —
+ * the SAME derivation the session consumer + batch tier use, exported so the
+ * WS-I ranking layer can read the requesting user's OWN latest PHI output
+ * without duplicating the digest (drift here would silently break PHI
+ * dampening, WS-I.2.3c).
+ */
+export function phiSessionTargetId(ownerUserId: string, sessionBucket: string): string {
+  return deterministicEventId(`phi:${sessionKeyOf(ownerUserId, sessionBucket)}`);
 }
 
 /** Register the WS-H durable consumers and close the WS-E hook seams. */

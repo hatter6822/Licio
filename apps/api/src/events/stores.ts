@@ -318,6 +318,10 @@ export interface AttentionAggregateStore {
   /** Insert rows; duplicate aggregate_ids are skipped (idempotent). */
   insertMany(rows: readonly AttentionAggregateRecord[]): Promise<number>;
   listByUser(userId: string): Promise<AttentionAggregateRecord[]>;
+  /** A user's rows created at/after `sinceIso` (bounded reads for the WS-I
+   *  per-request seen-history and PHI session lookups — never a full scan
+   *  of a heavy reader's history on the serving path). */
+  listByUserSince(userId: string, sinceIso: string): Promise<AttentionAggregateRecord[]>;
   deleteByUser(userId: string): Promise<number>;
   /** Distinct identifiable owners (excludes the privacy bucket). */
   listIdentifiableOwners(): Promise<string[]>;
@@ -334,6 +338,12 @@ export interface AttentionAggregateStore {
 
 export class InMemoryAttentionAggregateStore implements AttentionAggregateStore {
   readonly #rows = new Map<string, AttentionAggregateRecord>();
+
+  async listByUserSince(userId: string, sinceIso: string): Promise<AttentionAggregateRecord[]> {
+    return [...this.#rows.values()].filter(
+      (row) => row.user_id_or_privacy_bucket === userId && row.created_at >= sinceIso,
+    );
+  }
 
   async insertMany(rows: readonly AttentionAggregateRecord[]): Promise<number> {
     let inserted = 0;
@@ -581,6 +591,14 @@ export interface InvariantOutputStore {
     versionB: string,
     window?: InvariantTimeWindow,
   ): Promise<InvariantOutputRecord[]>;
+  /** Rows of ONE invariant type created at/after `sinceIso`, newest first,
+   *  capped at `limit` (the WS-I GWEI-gate input — a targeted read, never a
+   *  full-table scan on the serving path). */
+  listByTypeSince(
+    invariantType: string,
+    sinceIso: string,
+    limit: number,
+  ): Promise<InvariantOutputRecord[]>;
   listAll(): Promise<InvariantOutputRecord[]>;
   deleteOlderThan(cutoffIso: string): Promise<number>;
   countOlderThan(cutoffIso: string): Promise<number>;
@@ -612,6 +630,17 @@ export class InMemoryInvariantOutputStore implements InvariantOutputStore {
 
   async listForTarget(targetId: string): Promise<InvariantOutputRecord[]> {
     return [...this.#rows.values()].filter((r) => r.targetId === targetId);
+  }
+
+  async listByTypeSince(
+    invariantType: string,
+    sinceIso: string,
+    limit: number,
+  ): Promise<InvariantOutputRecord[]> {
+    return [...this.#rows.values()]
+      .filter((r) => r.invariantType === invariantType && r.createdAt >= sinceIso)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, Math.max(0, limit));
   }
 
   async latest(invariantType: string, targetId: string): Promise<InvariantOutputRecord | null> {
@@ -811,6 +840,9 @@ export interface ItemSafetyRecord {
 
 export interface ItemSafetyStateStore {
   get(itemId: string): Promise<ItemSafetyRecord | null>;
+  /** Batch read for the WS-I safety filter (one query per pool, not per
+   *  item). Absent items simply have no entry in the returned map. */
+  getMany(itemIds: readonly string[]): Promise<Map<string, ItemSafetyRecord>>;
   set(record: ItemSafetyRecord): Promise<void>;
   clear(): Promise<void>;
 }
@@ -820,6 +852,15 @@ export class InMemoryItemSafetyStateStore implements ItemSafetyStateStore {
 
   async get(itemId: string): Promise<ItemSafetyRecord | null> {
     return this.#rows.get(itemId) ?? null;
+  }
+
+  async getMany(itemIds: readonly string[]): Promise<Map<string, ItemSafetyRecord>> {
+    const out = new Map<string, ItemSafetyRecord>();
+    for (const itemId of itemIds) {
+      const row = this.#rows.get(itemId);
+      if (row !== undefined) out.set(itemId, { ...row });
+    }
+    return out;
   }
 
   async set(record: ItemSafetyRecord): Promise<void> {

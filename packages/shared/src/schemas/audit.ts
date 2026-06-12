@@ -67,6 +67,14 @@ export const AUDIT_EVENT_TYPES = [
   'mfci_case_action',
   'scoi_context_action',
   'bridge_request',
+  // WS-I ranking: validated ranking runtime-config writes (WS-I.2.3f),
+  // kill-switch engage/release (WS-I.4.1a), decision-log queries (the
+  // WS-I.2.5c meta-audit -- every read of ranking decisions is itself
+  // audited), and replay runs (WS-I.2.5b).
+  'ranking_config_change',
+  'ranking_killswitch_change',
+  'ranking_decision_query',
+  'ranking_replay_run',
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
 export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);

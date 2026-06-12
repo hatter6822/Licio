@@ -111,6 +111,11 @@ export const RANKING_CONTEXT_TABLES: ReadonlySet<Relation> = new Set<Relation>([
   'public.lenses',
   'public.summaries',
   'public.uploads',
+  // WS-I ranking (the feature store and the decision-log audit record):
+  // THE pay-to-rank surfaces — no FK/view join path may ever connect them
+  // to the wallet context.
+  'public.ranking_feature_vectors',
+  'public.ranking_decision_logs',
 ]);
 
 /** Schemas whose every table must be classified into a context (fail-closed). */

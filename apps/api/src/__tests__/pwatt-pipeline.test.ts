@@ -237,7 +237,10 @@ describe('shadow scoring + Signal Ledger (WS-E.2.1b-d)', () => {
 
     const outputs = await fixture.events.invariantStore.listForTarget(storyId);
     expect(outputs).toHaveLength(2);
-    expect(outputs.every((o) => o.shadowMode === true)).toBe(true);
+    // Post-lift (§30.5 via WS-I): PWAtt rows are stored as BOUNDED ranking
+    // inputs (`shadow_mode: false`); the fallback boundary still rejects
+    // them unconditionally (asserted in the shadow-verification suite).
+    expect(outputs.every((o) => o.shadowMode === PWATT_V0_SHADOW_MODE)).toBe(true);
     const v0 = outputs.find((o) => o.invariantType === 'PWAtt_v0');
     expect(v0?.scoreVector['score']).toBeGreaterThan(0);
     expect(v0?.scoreVector['score']).toBeLessThanOrEqual(1);
@@ -468,24 +471,32 @@ describe('harassment-cascade freeze (WS-E.2.2c + WS-E.2.3e)', () => {
   });
 });
 
-describe('shadow-mode verification (WS-E.2.1e, CI-gated)', () => {
-  it('PWAtt outputs are stored shadow and the ranking boundary rejects them', async () => {
-    expect(PWATT_V0_SHADOW_MODE).toBe(true); // lifting this is a CODE change
+describe('fallback-boundary verification (WS-E.2.1e → WS-I.4.1b, CI-gated)', () => {
+  it('PWAtt rows are stored as bounded inputs; the FALLBACK boundary still rejects them', async () => {
+    // §30.5 LIFTED by WS-I: this constant is the reviewed code-level gate.
+    // Reverting it to `true` is the code counterpart of the runtime kill
+    // switch (the WS-I scoring path then refuses PWAtt components again).
+    expect(PWATT_V0_SHADOW_MODE).toBe(false);
     const { userId } = await seedUserWithSession(fixture.identity);
     const storyId = randomUUID();
     await ingestAttention(userId, storyId);
     await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
     const outputs = await fixture.events.invariantStore.listForTarget(storyId);
+    expect(outputs.length).toBeGreaterThan(0);
     for (const output of outputs) {
-      expect(output.shadowMode).toBe(true);
+      // Post-lift storage: bounded inputs, not shadow artifacts.
+      expect(output.shadowMode).toBe(false);
+      // The SAFE FALLBACK boundary rejects every PWAtt row REGARDLESS of
+      // its flag — engaging the kill switch restores the pre-lift posture
+      // with zero PWAtt influence (WS-I.4.1b).
       expect(() => assertRankingInputAllowed(output)).toThrow(RankingBoundaryViolation);
     }
-    // The boundary rejects a PWAtt row even if its flag were mislabeled.
+    // …even when the flag claims otherwise (belt and braces).
     const mislabeled = { ...(outputs[0] as NonNullable<(typeof outputs)[0]>), shadowMode: false };
     expect(() => assertRankingInputAllowed(mislabeled)).toThrow(RankingBoundaryViolation);
   });
 
-  it('ranking output is IDENTICAL with and without PWAtt scores (equivalence)', async () => {
+  it('FALLBACK ranking output is IDENTICAL with and without PWAtt scores', async () => {
     const candidates = [
       { storyId: '5f5e1000-0000-4000-8000-000000000001', createdAt: '2026-06-10T09:00:00.000Z' },
       { storyId: '5f5e1000-0000-4000-8000-000000000002', createdAt: '2026-06-10T08:00:00.000Z' },
@@ -503,7 +514,9 @@ describe('shadow-mode verification (WS-E.2.1e, CI-gated)', () => {
     expect(withScores.order).toEqual(before.order);
     expect(withScores.rejectedShadowInputs).toBeGreaterThan(0);
 
-    // Mutate the scores wildly and re-rank: STILL identical (§30.5 proof).
+    // Mutate the scores wildly and re-rank: STILL identical — the fallback
+    // is provably score-blind, which is what makes the kill switch a safe
+    // revert (WS-I.4.1a/b).
     for (const candidate of candidates) {
       await fixture.events.invariantStore.upsert({
         invariantType: 'PWAtt_v0',
@@ -518,7 +531,7 @@ describe('shadow-mode verification (WS-E.2.1e, CI-gated)', () => {
         reasonCodes: [],
         fallbackUsed: false,
         versionMetadata: null,
-        shadowMode: true,
+        shadowMode: false,
         createdAt: new Date().toISOString(),
       });
     }
@@ -526,7 +539,10 @@ describe('shadow-mode verification (WS-E.2.1e, CI-gated)', () => {
     expect(mutated.order).toEqual(before.order);
   });
 
-  it('the /v1/feed response is byte-identical before and after a scoring run', async () => {
+  it('the demo-contract /v1/feed response is byte-identical before and after a scoring run', async () => {
+    // With an EMPTY story store the feed serves the WS-C demo contract,
+    // which is OUTSIDE the ranking pipeline and therefore score-invariant.
+    // (Pipeline-served feeds are exercised by the WS-I suites.)
     const app = new Hono().route('/v1', createV1Routes());
     const before = await (await app.request('/v1/feed')).text();
     const { userId } = await seedUserWithSession(fixture.identity);

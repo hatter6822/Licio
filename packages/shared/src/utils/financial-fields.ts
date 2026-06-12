@@ -48,6 +48,14 @@ export const FINANCIAL_FIELD_SEGMENTS: readonly string[] = [
   'membership',
   'sponsor',
   'sponsored',
+  // WS-I.2.1b ranking-feature denylist additions (WS-A.1.1 prohibited
+  // signals): follower counts and stake/vote weights are popularity/financial
+  // signals that must never enter candidate retrieval or the feature store.
+  'follower',
+  'followers',
+  'stake',
+  'staked',
+  'stakes',
 ];
 
 /** Multi-segment compounds matched against the whole (lowercased) name. */
@@ -56,6 +64,10 @@ export const FINANCIAL_FIELD_COMPOUNDS: readonly string[] = [
   'paid_amount',
   'tx_hash',
   'chain_id',
+  // WS-I.2.1b ranking-feature denylist additions.
+  'vote_weight',
+  'membership_tier',
+  'subscription_amount',
 ];
 
 /** Split a column/field name into lowercase segments (snake_case + camelCase). */

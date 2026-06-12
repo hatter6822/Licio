@@ -9,7 +9,7 @@
 // on seeded data, and the WS-E hook closures (redundancy, mfci).
 import { randomUUID } from 'node:crypto';
 import type { SensitivityLabel } from '@licio/shared';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { assembleMeriCandidates, sessionEventsFromSequence } from '../invariants/data.js';
 import { hourWindow } from '../invariants/runner.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
@@ -243,6 +243,24 @@ describe('MFCI service (WS-H.3)', () => {
   });
 
   it('risk states rise on a same-group burst and clear only via a converged fiber test', async () => {
+    // PINNED clock (Date only — no timer faking): the fiber test's MH seed
+    // derives from the content-addressed margins ref, which embeds the hour
+    // window's ABSOLUTE timestamps. With a wall-clock window the seed
+    // changes every hour and the finite-sample p̂ estimate straddles the
+    // score threshold on some seeds — a once-per-hour lottery. Pinning the
+    // instant pins the windows, the margins hash, and therefore the seed:
+    // the same deterministic-baseline discipline the WS-H regression
+    // harness uses.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-06-12T06:55:00.000Z'));
+    try {
+      await runBurstAndClearScenario();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  async function runBurstAndClearScenario(): Promise<void> {
     const fixture = freshWsHServices();
     const { userId } = await seedUserWithSession(fixture.identity);
     const { storyId: hot } = await seedStory(fixture, { topicIds: ['water'] });
@@ -304,7 +322,7 @@ describe('MFCI service (WS-H.3)', () => {
     expect(cleared?.state).toBe('normal');
     expect(cleared?.reason).toBe('fiber_cleared');
     expect(outB?.score_vector['risk_state']).toBe('normal');
-  });
+  }
 });
 
 describe('SCOI service (WS-H.4)', () => {

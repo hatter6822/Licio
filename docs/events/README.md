@@ -3,8 +3,9 @@
 This document describes the implemented WS-E surface: the event schemas and
 topic registry, the hardened attention-ingestion boundary, durable storage and
 real-time aggregation, retention enforcement, the consumer router with the
-pay-to-rank firewall, and the PWAtt scoring engine (v0 shadow + v1
-saturation/weights/penalties). The design specification is SPEC §5, §19,
+pay-to-rank firewall, and the PWAtt scoring engine (v0 + v1
+saturation/weights/penalties — a BOUNDED ranking input since the WS-I
+§30.5 lift). The design specification is SPEC §5, §19,
 §21.3, §22, §25.5, and §30.5; the task plan is
 `docs/planning/06-event-pipeline-and-pwatt.md`.
 
@@ -14,12 +15,17 @@ Two constraints govern everything here (SPEC §19.2, §30.5):
    on the wire is a closed enum bucket; schemas are strict (unknown keys
    rejected); a dedicated test asserts the schema cannot be widened to accept
    a numeric dwell.
-2. **PWAtt has zero distribution power while in shadow.** Every PWAtt output
-   is stored `shadow_mode: true`, the ranking boundary rejects PWAtt rows even
-   if the flag were mislabeled, and a CI-gated equivalence test proves ranking
-   output is identical with and without scores. Lifting shadow mode requires
-   editing `PWATT_V0_SHADOW_MODE` in `@licio/invariants` — a reviewed code
-   change, never configuration (SPEC §30.5 safety review, with WS-I).
+2. **PWAtt is a BOUNDED input, reversibly.** The §30.5 shadow stage was
+   lifted by WS-I (`PWATT_V0_SHADOW_MODE = false` in `@licio/invariants` — a
+   reviewed CODE change, never configuration): outputs are stored
+   `shadow_mode: false` and feed the WS-I feature store under §5.5 weight
+   guardrails, promotion-gated penalties, the non-overridable safety filter,
+   and the runtime kill switch. The SAFE FALLBACK boundary
+   (`selectRankingInputs`) still rejects every PWAtt row regardless of its
+   flag, and the CI-gated equivalence tests now prove the FALLBACK ordering
+   is identical with, without, and with mutated scores — so reverting the
+   constant or engaging the kill switch restores the pre-lift posture
+   instantly. Pre-lift rows (stored `shadow_mode: true`) stay powerless.
 
 ## Architecture
 
@@ -28,7 +34,7 @@ Two constraints govern everything here (SPEC §19.2, §30.5):
 | Schemas | `packages/shared/src/schemas/events/` | Envelope, retention tiers, 14 core topics, 18 Knomosis topics (bounded context), topic registry + discriminated union |
 | Pure math | `packages/invariants/src/pwatt/` | ActiveAttention, ConstructiveParticipation, saturation curves, ranking profiles, penalties, safety-state machine, accusation classifier, ledger summaries |
 | Pipeline | `apps/api/src/events/` | Stores (in-memory + Drizzle + Redis), ingestion pipeline, replay guard, sliding-window rate limiter, privacy gate, consumer router, real-time aggregation (HLL), retention sweeps, metrics |
-| Scoring | `apps/api/src/pwatt/` | Window aggregation, anti-signal detectors, runtime config, the scoring job, shadow boundary, freshness ranking v0, lease-guarded scheduler |
+| Scoring | `apps/api/src/pwatt/` | Window aggregation, anti-signal detectors, runtime config, the scoring job, the score-blind fallback boundary, freshness ordering v0 (the WS-I safe fallback), lease-guarded scheduler |
 | Routes | `apps/api/src/routes/events.ts` + `v1.ts` | `POST /v1/events/attention`, the hardened `POST /v1/attention/aggregates` batch wire, the real owner-only `GET /v1/signal-ledger`, `contribution.created` emission |
 | Tables | `packages/db/src/schema/events.ts` | `events` (LIST-partitioned by retention tier), `attention_aggregates` (§22.1 field-exact), `aggregation_windows`, `invariant_outputs` (+ shadow flag), `signal_ledger_entries`, `item_safety_states`, `pwatt_config`, `event_dead_letters`, `consumer_checkpoints` |
 
@@ -286,8 +292,8 @@ entries keep recording (transparency without distribution); removed scores 0.
 All transitions are audit-logged (`safety_state_change`).
 `resolveItemSafetyState` is the WS-J moderation-resolution hook.
 
-**v1 (WS-E.2.3a-d)** — INTEGRATED into the live scoring job and stored (still
-shadow until the §30.5 review with WS-I). `computePwattV1Components` is the
+**v1 (WS-E.2.3a-d)** — INTEGRATED into the live scoring job and stored (a
+bounded ranking input since the WS-I §30.5 lift). `computePwattV1Components` is the
 pipeline stage: each actor's per-type contribution counts pass through a
 per-user diminishing-returns curve at the contribution hierarchy's weights
 (evidence > correction > synthesis > question > counterexample > explanation >
@@ -315,7 +321,7 @@ authenticated; the endpoint takes no user parameter, so another user's ledger
 is unreachable), populated from the 1-HOUR window ONLY — one canonical entry
 per (owner, item, hour); the larger windows' scores live in
 `invariant_outputs`, their actual audience — with the bucketed signal
-breakdown, applied anti-signals, the shadow score, and a deterministic
+breakdown, applied anti-signals, the PWAtt score, and a deterministic
 plain-language summary ("You read this for a moderate duration, opened the
 source, and returned to it. Your question was counted as constructive
 participation."). Cap status is honestly OMITTED from server-generated
@@ -389,9 +395,11 @@ REDIS_URL=redis://localhost:6379 pnpm test
 - **WS-H** — MERI/SCOI/PHI/Hodge providers behind the existing hooks
   (`hooks.redundancy`, the wE/wS/wC component inputs, pH/pT penalty inputs);
   MFCI consumes the burst signals already flowing through `hooks.mfci`.
-- **WS-I** — the ranking service consumes `selectRankingInputs` at its
-  boundary; lifting shadow mode is the §30.5 code change + safety review. The
-  freshness baseline B is supplied at decision time.
+- **WS-I** — CLOSED: the ranking pipeline consumes PWAtt components from
+  post-lift rows in its feature store (`docs/ranking/README.md`), the §30.5
+  lift shipped (`PWATT_V0_SHADOW_MODE = false`), the freshness baseline B is
+  computed at decision time, and `selectRankingInputs` is now the SAFE
+  FALLBACK's score-blind boundary.
 - **WS-J** — review/safety queues behind `hooks.reviewQueue`/`hooks.safetyQueue`;
   moderation resolution drives `resolveItemSafetyState`.
 - **WS-K** — a reviewed AI classifier behind the `classifyAccusationV0` seam.

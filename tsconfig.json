@@ -4,6 +4,7 @@
     { "path": "packages/shared" },
     { "path": "packages/db" },
     { "path": "packages/invariants" },
+    { "path": "packages/ranking" },
     { "path": "apps/web" },
     { "path": "apps/api" }
   ]

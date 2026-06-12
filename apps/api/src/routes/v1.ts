@@ -49,8 +49,11 @@ import {
 } from '../events/ingest.js';
 import { getEventPipelineServices } from '../events/services.js';
 import type { SignalLedgerRecord } from '../events/stores.js';
+import { roomContentVisibleToUser } from '../forum/rooms.js';
+import { getForumServices } from '../forum/services.js';
 import { accountRef } from '../identity/crypto.js';
 import { getIdentityServices } from '../identity/services.js';
+import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { getIngestionServices } from '../ingestion/services.js';
 import type { StoryRecord } from '../ingestion/stores.js';
 import { DEMO_FEED, demoStory } from '../lib/demo-data.js';
@@ -63,6 +66,8 @@ import {
 } from '../lib/push-service.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
+import { serveFeed } from '../ranking/service.js';
+import { getRankingServices } from '../ranking/services.js';
 import { createAuthRoutes } from './auth.js';
 import { createEventsRoutes } from './events.js';
 import { createForumRoutes } from './forum.js';
@@ -74,6 +79,7 @@ import {
   latestMeriGains,
 } from './invariants-public.js';
 import { createPrivacyRoutes } from './privacy.js';
+import { createRankingAdminRoutes } from './ranking-admin.js';
 import { createRoomsRoutes } from './rooms.js';
 import { createStoriesRoutes } from './stories.js';
 
@@ -81,6 +87,24 @@ import { createStoriesRoutes } from './stories.js';
 function sessionIdOf(cookieHeader: string | undefined): string | undefined {
   if (!cookieHeader) return undefined;
   return cookieHeader.match(/(?:^|;\s*)__Host-session=([^;]+)/)?.[1];
+}
+
+/**
+ * OPTIONAL session resolution for public-but-personalizable surfaces (the
+ * feed): a valid `__Host-sid` session yields the user id; anything else —
+ * absent cookie, expired session, store outage — yields anonymous. Failures
+ * degrade to the signed-out feed, never to an error (and never to access).
+ */
+async function resolveOptionalUserId(cookieHeader: string | undefined): Promise<string | null> {
+  const token = readSessionToken(cookieHeader);
+  if (token === undefined) return null;
+  try {
+    const services = getIdentityServices();
+    const validated = await validateSession(services.sessions, token);
+    return validated?.record.user_id ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** A stable per-request key for in-memory user state (session or anonymous). */
@@ -182,22 +206,86 @@ function toLedgerEntry(row: SignalLedgerRecord): SignalLedgerEntry {
 export function createV1Routes() {
   return (
     new Hono<AuthEnv>()
-      // --- Read models (in-memory demo fixture; durable data owned by WS-G/H/J) ---
-      // Responses are re-validated against the shared schema before they leave the
-      // BFF (the stated boundary guarantee, WS-C.1.2) — so fixture drift fails loudly
-      // here, not silently at the client.
+      // --- Feed (WS-I ranking pipeline, SPEC §13.3/§23.2) -------------------
+      // The eight-stage pipeline serves whenever ANY real story exists:
+      // candidate generation → feature join → safety filter → constrained
+      // PWAtt scoring → diversification → decision log → explanations →
+      // FeedItem mapping. The kill switch / user feed modes route through
+      // the safe chronological fallback inside the service (WS-I.4.1a/b).
+      // With an EMPTY story store (fresh dev boot, contract tests) the
+      // legacy WS-C demo fixture serves unchanged — clearly fixture data,
+      // outside the ranking pipeline, and logged as demo serving.
       .get('/feed', zValidator('query', feedQuerySchema), async (c) => {
-        // WS-H.2.3a: feed cards carry the MERI exposure label, resolved from
-        // the latest STORED shadow output (never computed on request; null =
-        // honest absence before the first MERI run covers the story).
-        const gains = await latestMeriGains(getEventPipelineServices());
-        const items = DEMO_FEED.map((item) => ({
-          ...item,
-          exposure_label: exposureLabelForGain(gains[item.story_id] ?? null),
-        }));
-        const response: FeedResponse = { items, nextCursor: null };
+        const ingestion = getIngestionServices();
+        const hasStories = (await ingestion.stories.listRecent(1)).length > 0;
+        if (!hasStories) {
+          // WS-H.2.3a: demo cards still carry the MERI exposure label,
+          // resolved from the latest STORED output (never computed here).
+          const gains = await latestMeriGains(getEventPipelineServices());
+          const items = DEMO_FEED.map((item) => ({
+            ...item,
+            exposure_label: exposureLabelForGain(gains[item.story_id] ?? null),
+          }));
+          const response: FeedResponse = { items, nextCursor: null };
+          return c.json(feedResponseSchema.parse(response));
+        }
+        const ranking = getRankingServices();
+        const { mode, topic, cursor } = c.req.valid('query');
+        // `?topic=` serves the WS-I TOPIC surface: the pool scopes to the
+        // topic and the profile selector derives its sensitivity from it.
+        // `?cursor=` is the previous page's request id (seen-aware
+        // pagination); unknown/expired cursors serve the first page.
+        const served = await serveFeed(ranking, {
+          userId: await resolveOptionalUserId(c.req.header('cookie')),
+          surface: topic !== undefined ? 'topic' : 'front_page',
+          surfaceRoomId: null,
+          surfaceTopicId: topic ?? null,
+          mode,
+          cursor: cursor ?? null,
+        });
+        const response: FeedResponse = {
+          items: served.items,
+          nextCursor: served.nextCursor,
+          request_id: served.requestId,
+        };
         return c.json(feedResponseSchema.parse(response));
       })
+      // --- Room feed (WS-I room surface, SPEC §13.2/§16.2) ------------------
+      // The ranked feed of ONE room. CONTENT visibility is the WS-G bar
+      // (`roomContentVisibleToUser`): public rooms serve signed-out; a
+      // restricted/expert-led room serves only ACTIVE members or stewards —
+      // and an unauthorized request reads 404, never 403 (no existence
+      // oracle beyond what the room directory already discloses).
+      .get(
+        '/rooms/:roomId/feed',
+        zValidator('param', z.object({ roomId: uuidSchema })),
+        zValidator('query', feedQuerySchema),
+        async (c) => {
+          const { roomId } = c.req.valid('param');
+          const { mode, cursor } = c.req.valid('query');
+          const userId = await resolveOptionalUserId(c.req.header('cookie'));
+          const forum = getForumServices();
+          const room = await forum.rooms.getById(roomId);
+          if (room === null) return c.json(notFound, 404);
+          if (!(await roomContentVisibleToUser(forum, room, userId))) {
+            return c.json(notFound, 404);
+          }
+          const served = await serveFeed(getRankingServices(), {
+            userId,
+            surface: 'room',
+            surfaceRoomId: roomId,
+            surfaceTopicId: null,
+            mode,
+            cursor: cursor ?? null,
+          });
+          const response: FeedResponse = {
+            items: served.items,
+            nextCursor: served.nextCursor,
+            request_id: served.requestId,
+          };
+          return c.json(feedResponseSchema.parse(response));
+        },
+      )
       .get(
         '/stories/:storyId',
         zValidator('param', z.object({ storyId: uuidSchema })),
@@ -259,6 +347,11 @@ export function createV1Routes() {
       // Public SCOI/MERI read surfaces + the steward/analyst admin surface.
       .route('/', createInvariantsPublicRoutes())
       .route('/invariants/admin', createInvariantsAdminRoutes())
+
+      // --- Ranking and distribution (WS-I) ------------------------------------
+      // Decision-log audit queries, replay, the kill switch, validated
+      // config writes, and the profile registry (steward + MFA).
+      .route('/ranking/admin', createRankingAdminRoutes())
 
       // --- Forum, conversation, rooms, and lenses (WS-G) ----------------------
       // Thread reading (overview/branches/subtree/anchor), contributions,

@@ -55,6 +55,11 @@ export const auditEventTypeEnum = pgEnum('audit_event_type', [
   'mfci_case_action',
   'scoi_context_action',
   'bridge_request',
+  // WS-I ranking surface (mirrors AUDIT_EVENT_TYPES in @licio/shared).
+  'ranking_config_change',
+  'ranking_killswitch_change',
+  'ranking_decision_query',
+  'ranking_replay_run',
 ]);
 
 export const auditLog = pgTable(

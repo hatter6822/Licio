@@ -295,6 +295,17 @@ export class DrizzleStoryStore implements StoryStore {
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }
 
+  async getByIds(storyIds: readonly string[]): Promise<Map<string, StoryRecord>> {
+    const out = new Map<string, StoryRecord>();
+    if (storyIds.length === 0) return out;
+    const rows = await this.#db
+      .select()
+      .from(storiesTable)
+      .where(inArray(storiesTable.storyId, [...storyIds]));
+    for (const row of rows) out.set(row.storyId, this.#toRecord(row));
+    return out;
+  }
+
   async getByCanonicalUrl(canonicalUrl: string): Promise<StoryRecord | null> {
     const rows = await this.#db
       .select()
@@ -311,6 +322,17 @@ export class DrizzleStoryStore implements StoryStore {
       .where(eq(threadsTable.storyId, storyId))
       .limit(1);
     return rows[0] ? this.#toThread(rows[0]) : null;
+  }
+
+  async getThreadsByStoryIds(storyIds: readonly string[]): Promise<Map<string, ThreadShellRecord>> {
+    const out = new Map<string, ThreadShellRecord>();
+    if (storyIds.length === 0) return out;
+    const rows = await this.#db
+      .select()
+      .from(threadsTable)
+      .where(inArray(threadsTable.storyId, [...storyIds]));
+    for (const row of rows) out.set(row.storyId, this.#toThread(row));
+    return out;
   }
 
   async getStoryIdByThreadId(threadId: string): Promise<string | null> {

@@ -112,6 +112,12 @@ jobs:
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
       - run: pnpm test -- --coverage --reporter=default --reporter=junit --outputFile=test-results/junit.xml
+      # WS-I.3: the ten ranking-neutrality tests as an EXPLICIT, named gate
+      # (they also run inside the full suite above; this step makes the
+      # pay-to-rank guarantee a visible required check on every PR and
+      # before every crypto release, SPEC §30.6).
+      - name: Ranking-neutrality gate (WS-I.3)
+        run: pnpm check:neutrality
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:

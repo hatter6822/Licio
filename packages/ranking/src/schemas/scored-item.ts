@@ -1,0 +1,106 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-I.2.3e — the `ScoredItem` stage boundary (SPEC §13.4). Every scored item
+// carries its FULL breakdown — baseline parts, weighted positive components,
+// per-penalty value/coefficient/applied/enforced, and constraint flags — so
+// the decision log can reproduce the arithmetic exactly and explanations can
+// reference real signal values (WS-I.2.6b consistency).
+
+import { z } from 'zod';
+
+const unit = z.number().min(0).max(1);
+
+/** Baseline breakdown (WS-I.2.3d). */
+export const baselineBreakdownSchema = z
+  .object({
+    freshness_decay: unit,
+    source_reliability: unit,
+    /** Null when personalization is off or the user is signed out. */
+    topic_relevance: unit.nullable(),
+    /** The combined baseline B, same scale as the positive score. */
+    value: unit,
+  })
+  .strict();
+export type BaselineBreakdown = z.infer<typeof baselineBreakdownSchema>;
+
+/** Positive-component breakdown: raw component values and applied weights. */
+export const scoreComponentsSchema = z
+  .object({
+    /** Component values actually used (absent feature ⇒ 0 contribution). */
+    active_attention: unit.nullable(),
+    constructive_participation: unit.nullable(),
+    exposure_independence: unit.nullable(),
+    source_evidence_completeness: unit.nullable(),
+    context_coherence_gain: unit.nullable(),
+    /** The §5.5 integer weights of the profile that scored this item. */
+    weights: z
+      .object({
+        wA: z.number().int(),
+        wP: z.number().int(),
+        wE: z.number().int(),
+        wS: z.number().int(),
+        wC: z.number().int(),
+      })
+      .strict(),
+    /** B + weighted convex combination (before penalties). */
+    positive: z.number(),
+  })
+  .strict();
+export type ScoreComponents = z.infer<typeof scoreComponentsSchema>;
+
+/** One penalty term with its enforcement provenance (WS-H promotion gate). */
+export const penaltyTermSchema = z
+  .object({
+    /** The invariant-derived penalty input in [0, 1]. */
+    value: unit,
+    /** The profile's nonnegative coefficient. */
+    coefficient: z.number().nonnegative(),
+    /** coefficient × value when enforced; 0 when shadow (logged only). */
+    applied: z.number().nonnegative(),
+    /** False ⇒ the governing invariant is still shadow (WS-H.1.2e). */
+    enforced: z.boolean(),
+  })
+  .strict();
+export type PenaltyTerm = z.infer<typeof penaltyTermSchema>;
+
+export const penaltyComponentsSchema = z
+  .object({
+    coordination: penaltyTermSchema,
+    holonomy: penaltyTermSchema,
+    harmful_tension: penaltyTermSchema,
+    redundancy: penaltyTermSchema,
+    /** Sum of the applied (enforced) penalties. */
+    total_applied: z.number().nonnegative(),
+  })
+  .strict();
+export type PenaltyComponents = z.infer<typeof penaltyComponentsSchema>;
+
+/** Constraint flags a scored item can carry (WS-I.2.3c / 2.4). */
+export const CONSTRAINT_FLAGS = [
+  'mfci_cross_community_excluded',
+  'mfci_review_flagged',
+  'phi_diversify',
+  'scoi_context_card',
+  'scoi_reduced_distribution',
+  'scoi_paused',
+  'meri_cluster_capped',
+  'source_share_demoted',
+  'topic_share_demoted',
+  'lens_balance_promoted',
+] as const;
+export type ConstraintFlag = (typeof CONSTRAINT_FLAGS)[number];
+
+export const scoredItemSchema = z
+  .object({
+    item_id: z.string().uuid(),
+    /** Final PWAtt score: baseline + positive − applied penalties. */
+    pwatt_score: z.number(),
+    score_components: scoreComponentsSchema,
+    penalty_components: penaltyComponentsSchema,
+    baseline: baselineBreakdownSchema,
+    constraint_flags: z.array(z.enum(CONSTRAINT_FLAGS)).max(16),
+  })
+  .strict();
+export type ScoredItem = z.infer<typeof scoredItemSchema>;
+
+export const scoredItemsSchema = z.array(scoredItemSchema);

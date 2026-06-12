@@ -7,15 +7,23 @@
 import type { DwellBucket, EventContributionType, ReturnVisitBucket } from '@licio/shared';
 
 /**
- * SHADOW MODE (SPEC §30.5). While true, every PWAtt output is stored with
- * `shadow_mode: true` and has ZERO distribution power: the ranking boundary
- * (apps/api pwatt/shadow) rejects shadow rows as ranking inputs, and a CI
- * equivalence test proves ranking output is identical with and without PWAtt
- * scores. Lifting shadow mode requires EDITING THIS CONSTANT — a code change
- * reviewed like any other, never a configuration flip — and is gated on the
- * §30.5 safety review with WS-I.
+ * SHADOW MODE (SPEC §30.5). LIFTED by WS-I (the §30.5 v1 "bounded ranking
+ * input" stage): PWAtt outputs are now stored `shadow_mode: false` and feed
+ * the WS-I ranking pipeline as BOUNDED inputs — saturated components in
+ * [0, 1], §5.5-guardrailed convex weights, promotion-gated penalties, the
+ * non-overridable safety filter, the runtime kill switch (WS-I.4.1a), and
+ * the safe chronological fallback (WS-I.4.1b). Review evidence for the lift:
+ * the WS-I.3 ranking-neutrality suite (ten CI tests), deterministic decision
+ * logs with replay (WS-I.2.5), and the WS-E fallback-invariance tests (the
+ * fallback ranker provably ignores every PWAtt value, so engaging the kill
+ * switch restores the pre-lift posture instantly).
+ *
+ * Changing this constant remains a CODE change reviewed like any other —
+ * never a configuration flip. Setting it back to `true` is the code-level
+ * counterpart of the runtime kill switch: the WS-I scoring path refuses
+ * PWAtt components while it is true (see apps/api ranking/features.ts).
  */
-export const PWATT_V0_SHADOW_MODE = true as const;
+export const PWATT_V0_SHADOW_MODE = false as const;
 
 /** Implementation version stamped on stored v0 outputs. */
 export const PWATT_V0_VERSION = 'v0' as const;
