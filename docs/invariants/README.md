@@ -436,6 +436,11 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
 - **Notification dispatch** for bridge invitations awaits a platform
   dispatch path (`notification.sent` has no in-repo producer); bridge
   routing produces records for steward visibility only.
+- **Calibration contamination hardening:** the nightly MFCI null rebuild
+  does not yet exclude windows overlapping coordinated bursts, so a
+  sustained attack could gradually lift the cheap path's q99. The exact
+  fiber test is the calibration-independent backstop; window exclusion
+  keyed on opened cases lands with the WS-J case lifecycle.
 - **WS-P** wires the GWEI release gate and the CID model-release gate into
   the experiment framework, and owns the transparency-report pipeline the
   export feeds.

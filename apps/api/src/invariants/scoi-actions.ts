@@ -16,30 +16,52 @@ import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
-import { hourWindow, persistComputations } from './runner.js';
+import { hourWindow, persistComputations, runGuarded } from './runner.js';
+import { configSnapshotFor } from './scheduler.js';
 import type { InvariantPlatformServices } from './services.js';
 
-/** Re-run SCOI for a story and persist the shadow output; returns the new
- * energy score, or null when the computation degraded. */
+/**
+ * Re-run SCOI for a story and persist the shadow output; returns the new
+ * energy score, or null when the computation degraded. Runs through the
+ * SAME runGuarded wrapper as every other invariant call (WS-H.1.2c): the
+ * wrapper timeout bounds a route handler or durable consumer that would
+ * otherwise hang on a slow embedding provider, health/run metadata are
+ * observed, and the persisted row carries the SCOI config snapshot.
+ */
 export async function recomputeScoiFor(
   invariants: InvariantPlatformServices,
   events: EventPipelineServices,
   storyId: string,
 ): Promise<{ scoi: number; contextState: string } | null> {
+  const config = invariants.config();
   const window = hourWindow(invariants.now());
-  const outputs = await invariants.scoi.computeBatch(
-    [{ targetType: 'story', targetId: storyId }],
-    window,
+  const target = { targetType: 'story' as const, targetId: storyId };
+  const run = await runGuarded(
+    {
+      runMetadata: invariants.runMetadata,
+      metrics: events.metrics,
+      log: invariants.log,
+      now: invariants.now,
+    },
+    'SCOI',
+    invariants.scoi.getCard().version,
+    'near_realtime',
+    target,
+    config.wrapperTimeoutMs,
+    () => invariants.scoi.computeBatch([target], window),
   );
+  if (!run.ok) {
+    invariants.scoi.health.observeError();
+    return null;
+  }
+  invariants.scoi.health.observe(run.durationMs, run.outputs);
   await persistComputations(
     events.invariantStore,
-    {
-      log: invariants.log,
-      metrics: events.metrics,
-    },
-    outputs,
+    { log: invariants.log, metrics: events.metrics },
+    run.outputs,
+    configSnapshotFor('SCOI', config),
   );
-  const output = outputs[0];
+  const output = run.outputs[0];
   const scoi = output?.score_vector['scoi'];
   const contextState = output?.score_vector['context_state'];
   if (typeof scoi !== 'number' || typeof contextState !== 'string') return null;

@@ -363,6 +363,13 @@ export function createInvariantsAdminRoutes(
           body.action === 'separate'
             ? before
             : await recomputeScoiFor(invariants, events, thread.storyId);
+        // A moderator intervention that lowered SCOI must not be inherited
+        // by the next contribution as bridge credit: rebaseline any OPEN
+        // bridge attempt to the post-action energy.
+        if (body.action !== 'separate' && after) {
+          const open = await invariants.bridgeAttempts.openForThread(threadId);
+          if (open) await invariants.bridgeAttempts.rebaseline(open.attemptId, after.scoi);
+        }
         await invariants.scoiActions.insert({
           actionId,
           action: body.action,

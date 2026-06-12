@@ -4,13 +4,13 @@
 // error state rather than fetching). Mounting the story marks it the active item
 // for the signal processor; opening the in-app reader records a source-open
 // (WS-C.4.2). Source content is rendered by the sandboxed WS-B.2.7 reader.
-import type { StoryDetail, TopicRepeatPreference } from '@licio/shared';
-import { TOPIC_REPEAT_PREFERENCES } from '@licio/shared';
+import type { StoryDetail } from '@licio/shared';
 import { useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
 import { IndependentSourcesDrawer } from '../../components/story/IndependentSourcesDrawer/index.js';
 import { ShareStoryButton } from '../../components/story/ShareStoryButton/index.js';
+import { TopicRepeatsPreference } from '../../components/story/TopicRepeatsPreference/index.js';
 import { WhereInterpretationsDiffer } from '../../components/story/WhereInterpretationsDiffer/index.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
@@ -53,47 +53,6 @@ function SaveStoryButton({ story }: { story: StoryDetail }): React.ReactElement 
     >
       {isSaved ? t('story.saved', 'Saved for offline') : t('story.save', 'Save for offline')}
     </Button>
-  );
-}
-
-/**
- * Per-topic repeats preference (WS-H.2.3c, SPEC §7.6): "show fewer repeats" /
- * "balanced" / "show all updates" for THIS story's topic, persisted in the
- * durable personalization settings (consumed by ranking once WS-I lands).
- * Signed-in only — the preference must survive sessions and devices.
- */
-function TopicRepeatsPreference({ topicId }: { topicId: string }): React.ReactElement | null {
-  const t = useT();
-  const authenticated = useAuthStore((state) => state.status === 'authenticated');
-  const updateDurable = useUpdateDurablePrivacyMutation();
-  const [value, setValue] = useState<TopicRepeatPreference>('balanced');
-  if (!authenticated) return null;
-  const labels: Record<TopicRepeatPreference, string> = {
-    fewer_repeats: t('repeats.fewer', 'Show fewer repeats'),
-    balanced: t('repeats.balanced', 'Balanced'),
-    show_all: t('repeats.showAll', 'Show all updates'),
-  };
-  return (
-    <label className="flex flex-wrap items-center gap-2 text-xs text-ink-muted">
-      <span>{t('repeats.label', 'Repeats on this topic')}</span>
-      <select
-        className="rounded-md border border-edge bg-surface px-2 py-1 text-xs text-ink"
-        value={value}
-        onChange={(event) => {
-          const next = event.target.value as TopicRepeatPreference;
-          setValue(next);
-          updateDurable.mutate({
-            personalization_settings: { topic_repeat_preference: { [topicId]: next } },
-          });
-        }}
-      >
-        {TOPIC_REPEAT_PREFERENCES.map((option) => (
-          <option key={option} value={option}>
-            {labels[option]}
-          </option>
-        ))}
-      </select>
-    </label>
   );
 }
 

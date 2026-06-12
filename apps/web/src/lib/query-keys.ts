@@ -27,4 +27,5 @@ export const queryKeys = {
   securityActivity: () => ['security-activity'] as const,
   exportStatus: (jobId: string) => ['export-status', jobId] as const,
   deletionStatus: () => ['deletion-status'] as const,
+  durablePrivacySettings: () => ['durable-privacy-settings'] as const,
 } as const;

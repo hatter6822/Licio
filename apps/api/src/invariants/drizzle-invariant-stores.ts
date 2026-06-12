@@ -449,6 +449,15 @@ export class DrizzleBridgeAttemptStore implements BridgeAttemptStore {
     return row ? this.#toRecord(row) : null;
   }
 
+  async rebaseline(attemptId: string, scoiBaseline: number): Promise<BridgeAttemptRecord | null> {
+    const [row] = await this.#db
+      .update(bridgeAttempts)
+      .set({ scoiBaseline })
+      .where(and(eq(bridgeAttempts.attemptId, attemptId), eq(bridgeAttempts.status, 'requested')))
+      .returning();
+    return row ? this.#toRecord(row) : null;
+  }
+
   async clear(): Promise<void> {
     await this.#db.delete(bridgeAttempts);
   }

@@ -685,3 +685,23 @@ describe('SCOI surface edge branches', () => {
     expect(await store.openForThread('none')).toBeNull();
   });
 });
+
+describe('guarded SCOI recompute (WS-H.1.2c on the on-demand path)', () => {
+  it('a hanging compute degrades at the wrapper timeout instead of stalling the caller', async () => {
+    const fixture = freshWsHServices();
+    await fixture.events.configStore.set('invariants.wrapperTimeoutMs', { value: 200 });
+    await fixture.invariants.reloadConfig();
+    const { recomputeScoiFor } = await import('../invariants/scoi-actions.js');
+    fixture.invariants.scoi.computeBatch = () =>
+      new Promise((resolve) => setTimeout(() => resolve([]), 2_000));
+    const started = Date.now();
+    const result = await recomputeScoiFor(fixture.invariants, fixture.events, randomUUID());
+    expect(result).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1_500); // cut off, not awaited
+    expect(fixture.invariants.scoi.getHealthMetrics().errorCount).toBe(1);
+    const runs = await fixture.invariants.runMetadata.listRecent('SCOI', 1);
+    expect(runs[0]?.success).toBe(false);
+    expect(runs[0]?.failureReason).toBe('TIMEOUT');
+    expect(runs[0]?.tier).toBe('near_realtime');
+  });
+});

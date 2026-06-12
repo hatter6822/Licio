@@ -318,6 +318,10 @@ describe.skipIf(!DB_URL)('WS-H Drizzle adapters (live Postgres)', () => {
       resolvedAt: null,
     });
     expect((await store.openForThread(threadId))?.attemptId).toBe(attemptId);
+    // Rebaseline applies only while OPEN (requested) — and survives reads.
+    const rebased = await store.rebaseline(attemptId, 0.4);
+    expect(rebased?.scoiBaseline).toBe(0.4);
+    expect((await store.openForThread(threadId))?.scoiBaseline).toBe(0.4);
     const credited = await store.credit(attemptId, {
       contributionId: randomUUID(),
       bridgeUserId: randomUUID(),
@@ -336,6 +340,8 @@ describe.skipIf(!DB_URL)('WS-H Drizzle adapters (live Postgres)', () => {
       }),
     ).toBeNull();
     expect(await store.openForThread(threadId)).toBeNull();
+    // A credited attempt can no longer be rebaselined (single-shot stands).
+    expect(await store.rebaseline(attemptId, 0.2)).toBeNull();
     await expect(
       store.insert({
         attemptId: randomUUID(),

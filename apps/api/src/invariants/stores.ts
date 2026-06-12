@@ -373,6 +373,12 @@ export interface BridgeAttemptStore {
       resolvedAt: string;
     },
   ): Promise<BridgeAttemptRecord | null>;
+  /**
+   * Reset an OPEN attempt's baseline after a non-bridge intervention (a
+   * moderator annotation/merge) lowered SCOI: credit must measure a
+   * decrease the BRIDGE contribution caused, never one it inherited.
+   */
+  rebaseline(attemptId: string, scoiBaseline: number): Promise<BridgeAttemptRecord | null>;
   clear(): Promise<void>;
 }
 
@@ -417,6 +423,14 @@ export class InMemoryBridgeAttemptStore implements BridgeAttemptStore {
       scoiAfter: patch.scoiAfter,
       resolvedAt: patch.resolvedAt,
     };
+    this.#rows.set(attemptId, next);
+    return { ...next };
+  }
+
+  async rebaseline(attemptId: string, scoiBaseline: number): Promise<BridgeAttemptRecord | null> {
+    const row = this.#rows.get(attemptId);
+    if (row?.status !== 'requested') return null;
+    const next: BridgeAttemptRecord = { ...row, scoiBaseline };
     this.#rows.set(attemptId, next);
     return { ...next };
   }

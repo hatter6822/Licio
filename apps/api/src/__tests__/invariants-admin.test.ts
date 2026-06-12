@@ -649,6 +649,72 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     // Single-shot: only one credit even though two contributions arrived.
     expect(attempts.filter((a) => a.status === 'credited')).toHaveLength(1);
   });
+
+  it('a moderator annotation rebaselines the open request — credit is never inherited', async () => {
+    const fixture = freshWsHServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { threadId, lensIds, bridgeUserId } = await seedSplitRoom(fixture, steward.userId);
+    const opened = await adminRequest(
+      fixture,
+      steward.cookie,
+      `/scoi/threads/${threadId}/bridge-requests`,
+      { method: 'POST', body: JSON.stringify({}) },
+    );
+    expect(opened.status).toBe(200);
+    const { scoi_baseline } = (await opened.json()) as { scoi_baseline: number };
+    // The STEWARD annotation lowers SCOI (shared context on both lenses)…
+    const acted = await adminRequest(fixture, steward.cookie, `/scoi/threads/${threadId}/actions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'annotate',
+        reason_code: 'MOD_MISINFO_001',
+        annotation:
+          'City bulletin: the figures describe the 2019 incident, not current conditions; both readings reference the same maintenance schedule.',
+      }),
+    });
+    expect(acted.status).toBe(200);
+    const { scoi_after } = (await acted.json()) as { scoi_after: number };
+    expect(scoi_after).toBeLessThan(scoi_baseline);
+    // …and the open attempt's baseline follows it, so the decrease the
+    // moderator caused cannot be claimed by the next contribution.
+    const open = await fixture.invariants.bridgeAttempts.openForThread(threadId);
+    expect(open?.scoiBaseline).toBe(scoi_after);
+    // A contribution that does NOT further reduce the energy (it restates
+    // one lens's reading) gets no credit.
+    const inserted = await fixture.forum.contributions.insert({
+      contributionId: randomUUID(),
+      threadId,
+      userId: bridgeUserId,
+      type: 'explanation',
+      body: 'Routine harmless maintenance notice nothing unusual here at all.',
+      citations: [],
+      metadata: { lens_id: lensIds[0] ?? '' },
+      targetClaimId: null,
+      parentContributionId: null,
+      clientDraftId: randomUUID(),
+      path: [],
+      moderationState: 'published',
+    });
+    expect(inserted.ok).toBe(true);
+    if (inserted.ok) {
+      await fixture.events.router.publish({
+        event_id: randomUUID(),
+        event_type: 'contribution.created',
+        timestamp: new Date().toISOString(),
+        schema_version: '1',
+        thread_id: threadId,
+        contribution_id: inserted.contribution.contributionId,
+        user_id: bridgeUserId,
+        contribution_type: 'explanation',
+        privacy_classification: 'public',
+        retention_tier: 'public_contribution',
+      } as never);
+    }
+    const after = await fixture.invariants.bridgeAttempts.openForThread(threadId);
+    expect(after?.status).toBe('requested'); // still open — no inherited credit
+    const user = await fixture.identity.store.getUser(bridgeUserId);
+    expect(user?.reputationSummary.bridge_ability).toBeNull();
+  });
 });
 
 describe('WS-H client wire surfaces (feed labels, lens names, co-group)', () => {

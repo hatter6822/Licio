@@ -134,6 +134,14 @@ const CALIBRATION_TOPICS = ['contribution.created', 'evidence.added', 'content.s
  * intake scores against, so the null conditions on exactly what the
  * statistic sees. Too few nonempty windows keeps the previous calibration
  * (never replace a baseline with noise).
+ *
+ * Contamination note: windows containing coordinated bursts are NOT
+ * excluded from the baseline, so sustained attacks could gradually lift
+ * the q99 and desensitize the CHEAP path. The exact fiber test is the
+ * calibration-independent backstop (margins-conditioned, recomputed per
+ * window), and analyst case review covers the residual. Window exclusion
+ * keyed on opened cases is a deliberate hardening follow-up (WS-J owns
+ * the case-lifecycle signals it would key on).
  */
 export async function rebuildMfciCalibrations(
   invariants: InvariantPlatformServices,
