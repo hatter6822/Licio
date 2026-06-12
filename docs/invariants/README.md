@@ -111,7 +111,10 @@ estimator; `MFCI = −log p̂` is always finite. The three statistics
 concentration functionals of 2-way flattenings — exactly what 1-way margins
 do not fix.
 
-Attribution is **per target** (`fiberTestMulti`): one shared fiber per
+Attribution is **per target** (`fiberTestMulti`, single-pass evaluator:
+one walk over the sampled table's cells accumulates EVERY target's
+restricted mass and the global statistic together — measured ~46× faster
+than per-target re-scans at production sizes): one shared fiber per
 window carries every target, the conditional null staying global (the
 system's group sizes, topic popularity, temporal pattern, action mix,
 per-target volumes), while each target's statistic is the
@@ -181,6 +184,15 @@ representative norm of an observed pairwise-disagreement cochain (the part
 no choice of readings can explain) — emitted on every batch output
 (`dim_h1`, `structural_obstruction`, reason-coded
 `STRUCTURAL_OBSTRUCTION`).
+
+SCOI-5 is validated by the curated human-labeled harness
+(`scoi/validation.ts`): six constructed context-collapse cases, each with
+the reviewer's recorded rationale and an ordinal severity label; the CI
+suite asserts Spearman ρ ≥ 0.8 between SCOI scores and the labels AND
+strict separation (every collapse case above every coherent case) —
+measured ρ ≈ 0.96. Production human labels accumulate post-launch through
+the steward report surface; extending the curated set is a reviewed code
+change.
 
 **Context surfaces** (`scoi-actions.ts`): room stewards get per-room
 reports (WS-H.4.1c; scope is the room's OWN steward roster, 404-over-403)
@@ -393,6 +405,12 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
   tests (DATABASE_URL) that run the real migration chain — including a
   live-Postgres proof of the 0009 `time_window` text→jsonb USING
   conversion. CI's service containers run the gated suites.
+- `packages/invariants` performance (RUN_PERF-gated, the WS-F precedent):
+  batch-tier budgets MEASURED at production-like sizes — MERI 200
+  candidates ≈ 5 ms, MFCI 800 observations × 60 targets at the production
+  sampler ≈ 0.9 s, GWEI 50×50 stability grid ≈ 0.8 s, PHI 40 structures +
+  a 12-leg loop ≈ 30 ms, Hodge ≈ 280 edges ≈ 5 ms — all far inside the
+  wrapper timeout, so a TIMEOUT degradation signals a real regression.
 - `apps/web`: component tests with axe audits + the topic-loop tracker's
   privacy/cap/reset/corruption suites.
 

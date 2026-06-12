@@ -5,5 +5,6 @@
 export * from './h1.js';
 export * from './sheaf.js';
 export * from './states.js';
+export * from './validation.js';
 
 export const SCOI_VERSION = '1.0.0';

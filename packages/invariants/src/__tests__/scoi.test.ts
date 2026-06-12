@@ -245,3 +245,30 @@ describe('SCOI v2 — H¹ structural obstruction (WS-H.4.2f)', () => {
     expect(() => harmonicRepresentative(twoLens([1, 0], [0, 1]), [1])).toThrow(/dimension/);
   });
 });
+
+describe('SCOI-5 human-label validation (WS-H.4.2c)', () => {
+  it('scores rank-correlate with the curated human labels and separate the extremes', async () => {
+    const { LABELED_CONTEXT_CASES, validateScoiAgainstLabels } = await import(
+      '../scoi/validation.js'
+    );
+    const report = validateScoiAgainstLabels();
+    expect(report.cases).toHaveLength(LABELED_CONTEXT_CASES.length);
+    expect(report.spearman).toBeGreaterThanOrEqual(0.8);
+    expect(report.separation).toBe(true);
+    expect(report.pass).toBe(true);
+    // The labels span the full ordinal range (the set stays meaningful).
+    const labels = new Set(LABELED_CONTEXT_CASES.map((c) => c.label));
+    expect(labels).toEqual(new Set([0, 1, 2]));
+    // Every case records its human rationale (the audit trail).
+    for (const entry of LABELED_CONTEXT_CASES) {
+      expect(entry.rationale.length).toBeGreaterThan(20);
+    }
+  });
+
+  it('spearman guards its domain and detects perfect anti-correlation', async () => {
+    const { spearmanCorrelation } = await import('../scoi/validation.js');
+    expect(spearmanCorrelation([1, 2, 3], [3, 2, 1])).toBeCloseTo(-1, 10);
+    expect(spearmanCorrelation([1, 2, 3], [10, 20, 30])).toBeCloseTo(1, 10);
+    expect(() => spearmanCorrelation([1], [1])).toThrow(/n >= 2/);
+  });
+});
