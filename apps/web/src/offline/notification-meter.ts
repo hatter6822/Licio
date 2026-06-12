@@ -10,10 +10,19 @@
 // notification contents.
 const METER_DB = 'licio-meter';
 const METER_STORE = 'counts';
+const QUIET_STORE = 'quiet-topics';
+
+/** How long a looped topic stays quiet (matches the PHI session TTL). */
+export const QUIET_TOPIC_TTL_MS = 6 * 3_600_000;
 
 interface DayCount {
   day: string;
   count: number;
+}
+
+interface QuietTopic {
+  topicClusterId: string;
+  untilMs: number;
 }
 
 /** UTC day bucket (YYYY-MM-DD) shared by the worker and the client. */
@@ -23,9 +32,16 @@ function utcDay(at: Date = new Date()): string {
 
 function openMeterDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(METER_DB, 1);
+    // v2 adds the quiet-topics store (WS-H.6.1c); upgrades are idempotent.
+    const request = indexedDB.open(METER_DB, 2);
     request.onupgradeneeded = () => {
-      request.result.createObjectStore(METER_STORE, { keyPath: 'day' });
+      const db = request.result;
+      if (!db.objectStoreNames.contains(METER_STORE)) {
+        db.createObjectStore(METER_STORE, { keyPath: 'day' });
+      }
+      if (!db.objectStoreNames.contains(QUIET_STORE)) {
+        db.createObjectStore(QUIET_STORE, { keyPath: 'topicClusterId' });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error('meter open failed'));
@@ -70,6 +86,62 @@ export async function recordNotificationShown(at: Date = new Date()): Promise<vo
     await idbRequest(
       db.transaction(METER_STORE, 'readwrite').objectStore(METER_STORE).put({ day, count }),
     );
+    db.close();
+  } catch {
+    // Non-fatal.
+  }
+}
+
+/**
+ * Quiet-notification policy (WS-H.6.1c): when narrow-loop detection flags a
+ * topic, the topic id lands here (TTL'd) and the service worker shows that
+ * topic's pushes SILENTLY — delivered, never reinforcing the loop with a
+ * buzz. Topic-cluster ids only; never content, never identity. Best-effort
+ * (a storage failure quiets nothing — availability over the soft policy).
+ */
+export async function markTopicQuiet(
+  topicClusterId: string,
+  nowMs: number = Date.now(),
+): Promise<void> {
+  if (typeof indexedDB === 'undefined' || topicClusterId.length === 0) return;
+  try {
+    const db = await openMeterDb();
+    await idbRequest(
+      db
+        .transaction(QUIET_STORE, 'readwrite')
+        .objectStore(QUIET_STORE)
+        .put({ topicClusterId, untilMs: nowMs + QUIET_TOPIC_TTL_MS } satisfies QuietTopic),
+    );
+    db.close();
+  } catch {
+    // Non-fatal.
+  }
+}
+
+/** Whether a topic is currently quieted (expired entries read false). */
+export async function isTopicQuiet(
+  topicClusterId: string,
+  nowMs: number = Date.now(),
+): Promise<boolean> {
+  if (typeof indexedDB === 'undefined') return false;
+  try {
+    const db = await openMeterDb();
+    const record = await idbRequest<QuietTopic | undefined>(
+      db.transaction(QUIET_STORE, 'readonly').objectStore(QUIET_STORE).get(topicClusterId),
+    );
+    db.close();
+    return record !== undefined && record.untilMs > nowMs;
+  } catch {
+    return false;
+  }
+}
+
+/** PHI-4 "reset topic history" also clears the quiet set. */
+export async function clearQuietTopics(): Promise<void> {
+  if (typeof indexedDB === 'undefined') return;
+  try {
+    const db = await openMeterDb();
+    await idbRequest(db.transaction(QUIET_STORE, 'readwrite').objectStore(QUIET_STORE).clear());
     db.close();
   } catch {
     // Non-fatal.

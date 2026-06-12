@@ -129,3 +129,16 @@ describe('StoryCard distribution-reason guard (no-applause)', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 });
+
+describe('MERI exposure label (WS-H.2.3a)', () => {
+  it('renders the exposure label beside the rating label when present', () => {
+    render(<StoryCard {...sample} exposureLabel="independent_source" />);
+    expect(screen.getByText('Independent source')).toBeInTheDocument();
+  });
+
+  it('omits the label honestly before analysis covers the story', () => {
+    render(<StoryCard {...sample} />);
+    expect(screen.queryByText('Independent source')).not.toBeInTheDocument();
+    expect(screen.queryByText('Duplicate context')).not.toBeInTheDocument();
+  });
+});

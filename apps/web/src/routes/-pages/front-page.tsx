@@ -10,8 +10,8 @@ import { StoryCard } from '../../components/story/StoryCard/index.js';
 import type { StoryCardData } from '../../components/story/types.js';
 import { type IconName, iconNames } from '../../components/ui/Icon/index.js';
 import { useT } from '../../i18n/index.js';
-import { useFeedQuery } from '../../lib/queries.js';
-import { useUIStore } from '../../stores/index.js';
+import { useFeedQuery, useUpdateDurablePrivacyMutation } from '../../lib/queries.js';
+import { useAuthStore, useUIStore } from '../../stores/index.js';
 import { PageScaffold } from './PageScaffold.js';
 import { usePageFocus } from './usePageFocus.js';
 
@@ -33,6 +33,7 @@ function toStoryCardData(item: FeedItem): StoryCardData {
       readingMinutes: item.reading_minutes,
     },
     ratingLabel: item.rating_label,
+    ...(item.exposure_label ? { exposureLabel: item.exposure_label } : {}),
     distributionReason: item.distribution_reason,
     contextChips: item.context_chips.map((chip) => {
       const icon = asIconName(chip.icon);
@@ -52,8 +53,16 @@ export function FrontPage(): React.ReactElement {
   const mode = search.mode ?? savedMode;
   const feed = useFeedQuery(mode);
 
+  const authenticated = useAuthStore((state) => state.status === 'authenticated');
+  const updateDurable = useUpdateDurablePrivacyMutation();
   const onModeChange = (next: FeedMode): void => {
     setFeedMode(next);
+    // WS-H.6.1c-2: the mode persists across sessions AND devices — sync the
+    // durable personalization settings best-effort when signed in (the
+    // local store keeps working offline/anonymous).
+    if (authenticated) {
+      updateDurable.mutate({ personalization_settings: { feed_mode: next } });
+    }
     void navigate({ to: '/', search: { mode: next } });
   };
 

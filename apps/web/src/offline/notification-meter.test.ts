@@ -32,3 +32,24 @@ describe('notification meter', () => {
     expect(await readNotificationsUsedToday()).toBe(0);
   });
 });
+
+describe('quiet-notification policy (WS-H.6.1c)', () => {
+  it('marks, reads, expires, and clears quiet topics', async () => {
+    const { clearQuietTopics, isTopicQuiet, markTopicQuiet, QUIET_TOPIC_TTL_MS } = await import(
+      './notification-meter.js'
+    );
+    const nowMs = 1_000_000;
+    await markTopicQuiet('topic-a', nowMs);
+    expect(await isTopicQuiet('topic-a', nowMs + 1_000)).toBe(true);
+    // TTL'd: an expired entry reads false (never permanent).
+    expect(await isTopicQuiet('topic-a', nowMs + QUIET_TOPIC_TTL_MS + 1)).toBe(false);
+    expect(await isTopicQuiet('never-marked', nowMs)).toBe(false);
+    // Empty ids are ignored (never a wildcard quiet).
+    await markTopicQuiet('', nowMs);
+    expect(await isTopicQuiet('', nowMs)).toBe(false);
+    // PHI-4 reset clears the set.
+    await markTopicQuiet('topic-b', nowMs);
+    await clearQuietTopics();
+    expect(await isTopicQuiet('topic-b', nowMs + 1)).toBe(false);
+  });
+});

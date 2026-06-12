@@ -16,6 +16,7 @@ const base: IndependentSourcesResponse = {
   exposure_label: 'independent_source',
   redundancy_classes: 3,
   source: { name: 'Wire Service', publisher_lineage: ['Holding Co', 'Wire Service'] },
+  co_group_stories: [],
   confirmed_syndication_count: 2,
 };
 
@@ -41,5 +42,38 @@ describe('IndependentSourcesDrawer', () => {
   it('passes the accessibility audit', async () => {
     const { container } = render(<IndependentSourcesDrawer data={base} />);
     expect(await checkA11y(container)).toHaveNoViolations();
+  });
+});
+
+describe('co-group members (WS-H.2.3b)', () => {
+  it('lists same-coverage stories with their relationship', () => {
+    render(
+      <IndependentSourcesDrawer
+        data={{
+          ...base,
+          co_group_stories: [
+            {
+              story_id: '22222222-2222-4222-8222-222222222222',
+              title: 'Wire copy of the same report',
+              relationship: 'syndicated',
+            },
+            {
+              story_id: '33333333-3333-4333-8333-333333333333',
+              title: 'Near-identical coverage elsewhere',
+              relationship: 'near_duplicate',
+            },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText('Same coverage elsewhere')).toBeInTheDocument();
+    expect(screen.getByText('Wire copy of the same report')).toBeInTheDocument();
+    expect(screen.getByText('syndicated')).toBeInTheDocument();
+    expect(screen.getByText('near-duplicate')).toBeInTheDocument();
+  });
+
+  it('omits the section when no members exist', () => {
+    render(<IndependentSourcesDrawer data={base} />);
+    expect(screen.queryByText('Same coverage elsewhere')).not.toBeInTheDocument();
   });
 });

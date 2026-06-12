@@ -776,6 +776,11 @@ foreground agent has already modified the same files.
 - **Git practices:**  One commit per completed work unit.  All
   commits must pass `pnpm typecheck`, `pnpm lint`, and `pnpm test`.
 
+- **Versioning:**  The root `package.json` version is the project
+  version (workspace packages stay private at `0.0.0`).  EVERY pull
+  request bumps the PATCH version unless otherwise directed; minor or
+  major bumps only when explicitly requested.
+
 - **Commit message convention:**
 
   ```

@@ -46,7 +46,12 @@ export function WhereInterpretationsDiffer({
             className="border-s-2 border-edge ps-3"
           >
             <p className="text-sm font-medium text-ink">
-              {t('interpretations.between', 'Between two lenses')}
+              {interpretation.lens_a_name && interpretation.lens_b_name
+                ? t('interpretations.betweenNamed', 'Between {a} and {b}', {
+                    a: interpretation.lens_a_name,
+                    b: interpretation.lens_b_name,
+                  })
+                : t('interpretations.between', 'Between two lenses')}
             </p>
             <p className="text-sm text-ink-muted">{interpretation.summary}</p>
           </li>

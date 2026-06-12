@@ -650,3 +650,169 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     expect(attempts.filter((a) => a.status === 'credited')).toHaveLength(1);
   });
 });
+
+describe('WS-H client wire surfaces (feed labels, lens names, co-group)', () => {
+  it('feed items carry the MERI exposure label from stored gains', async () => {
+    const fixture = freshWsHServices();
+    const demoId = '5f5e1000-0000-4000-8000-000000000001';
+    await fixture.events.invariantStore.upsert({
+      invariantType: 'MERI',
+      targetType: 'feed',
+      targetId: '00000000-0000-4000-8000-0000000feed1',
+      timeWindow: hourWindow(Date.now()),
+      version: '1.0.0',
+      scoreVector: {
+        meri: 0.9,
+        marginal_gains: { [demoId]: 1 },
+        approximation: false,
+        per_class_bounds: {},
+        group_ids: [],
+      },
+      explanationSummary: null,
+      confidence: 0.9,
+      coverage: 1,
+      reasonCodes: [],
+      fallbackUsed: false,
+      versionMetadata: null,
+      shadowMode: true,
+      createdAt: new Date().toISOString(),
+    });
+    const response = await app().request('http://local/v1/feed');
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      items: Array<{ story_id: string; exposure_label: string | null }>;
+    };
+    const labeled = body.items.find((item) => item.story_id === demoId);
+    expect(labeled?.exposure_label).toBe('independent_source');
+    // Stories without a stored gain stay honestly unlabeled.
+    const unlabeled = body.items.find((item) => item.story_id !== demoId);
+    expect(unlabeled?.exposure_label).toBeNull();
+  });
+
+  it('interpretations resolve human lens names through the room', async () => {
+    const fixture = freshWsHServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const { storyId } = await (async () => {
+      const roomId = randomUUID();
+      await fixture.forum.rooms.insert({
+        roomId,
+        name: 'Names room',
+        slug: `room-${roomId.slice(0, 8)}`,
+        description: null,
+        roomType: 'global_topic',
+        visibility: 'public',
+        createdBy: null,
+        governanceMode: 'ordinary',
+        charterSummary: null,
+        typeMetadata: {},
+        latestActivityAt: null,
+      });
+      const lensIds: string[] = [];
+      for (const [lensType, name] of [
+        ['local_resident', 'Local residents'],
+        ['expert', 'Water engineers'],
+      ] as const) {
+        const lens = await fixture.forum.lenses.insert({
+          lensId: randomUUID(),
+          roomId,
+          name,
+          lensType,
+          description: null,
+        });
+        if (lens.ok) lensIds.push(lens.lens.lensId);
+      }
+      const seeded = await seedStory(fixture);
+      await fixture.ingestion.stories.updateThread(seeded.threadId, { roomId });
+      for (const lensId of lensIds) {
+        await fixture.forum.contributions.insert({
+          contributionId: randomUUID(),
+          threadId: seeded.threadId,
+          userId: steward.userId,
+          type: 'explanation',
+          body: lensId === lensIds[0] ? 'Reads as routine here.' : 'Figures look anomalous.',
+          citations: [],
+          metadata: { lens_id: lensId },
+          targetClaimId: null,
+          parentContributionId: null,
+          clientDraftId: randomUUID(),
+          path: [],
+          moderationState: 'published',
+        });
+      }
+      return seeded;
+    })();
+    const [output] = await fixture.invariants.scoi.computeBatch(
+      [{ targetType: 'story', targetId: storyId }],
+      hourWindow(Date.now()),
+    );
+    await fixture.events.invariantStore.upsert({
+      invariantType: 'SCOI',
+      targetType: 'story',
+      targetId: storyId,
+      timeWindow: hourWindow(Date.now()),
+      version: '1.0.0',
+      scoreVector: output?.score_vector ?? {},
+      explanationSummary: null,
+      confidence: 0.8,
+      coverage: 1,
+      reasonCodes: [],
+      fallbackUsed: false,
+      versionMetadata: null,
+      shadowMode: true,
+      createdAt: new Date().toISOString(),
+    });
+    const response = await app().request(`http://local/v1/stories/${storyId}/interpretations`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      interpretations: Array<{ lens_a_name?: string; lens_b_name?: string }>;
+    };
+    expect(body.interpretations.length).toBeGreaterThan(0);
+    const names = new Set(
+      body.interpretations.flatMap((i) => [i.lens_a_name, i.lens_b_name]).filter(Boolean),
+    );
+    expect(names.has('Local residents')).toBe(true);
+    expect(names.has('Water engineers')).toBe(true);
+  });
+
+  it('the drawer lists visible co-group stories (syndication siblings)', async () => {
+    const fixture = freshWsHServices();
+    const wire = await fixture.ingestion.sources.upsertByDomain('wire.example', { name: 'Wire' });
+    const mirror = await fixture.ingestion.sources.upsertByDomain('mirror.example', {
+      name: 'Mirror',
+    });
+    await fixture.ingestion.syndications.insert({
+      syndicationId: randomUUID(),
+      fromSourceId: wire.sourceId,
+      toSourceId: mirror.sourceId,
+      relationshipType: 'wire',
+      establishedBy: 'steward',
+      status: 'confirmed',
+      evidenceRef: 'steward:confirmed',
+      confidence: 1,
+    });
+    const { storyId } = await seedStory(fixture, {
+      canonicalUrl: 'https://wire.example/report',
+      sourceId: wire.sourceId,
+      title: 'Original wire report',
+    });
+    const { storyId: copyId } = await seedStory(fixture, {
+      canonicalUrl: 'https://mirror.example/report',
+      sourceId: mirror.sourceId,
+      title: 'Mirrored wire report',
+    });
+    const response = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      co_group_stories: Array<{ story_id: string; relationship: string }>;
+    };
+    expect(body.co_group_stories.map((m) => m.story_id)).toContain(copyId);
+    expect(body.co_group_stories.find((m) => m.story_id === copyId)?.relationship).toBe(
+      'syndicated',
+    );
+    // Hidden members never appear (visibility-gated).
+    await fixture.ingestion.stories.update(copyId, { hiddenState: 'takedown' });
+    const after = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
+    const afterBody = (await after.json()) as { co_group_stories: Array<{ story_id: string }> };
+    expect(afterBody.co_group_stories.map((m) => m.story_id)).not.toContain(copyId);
+  });
+});

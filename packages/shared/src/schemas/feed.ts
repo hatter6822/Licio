@@ -6,6 +6,7 @@
 // reaction/follower field — only descriptive conversation-state signals.
 import { z } from 'zod';
 import { cursorSchema, httpUrlSchema, paginatedSchema, uuidSchema } from './common.js';
+import { MERI_EXPOSURE_LABELS_WIRE } from './invariants-api.js';
 
 /** Feed ranking/personalization modes (SPEC §6.4; WS-B.2.9 switcher). */
 export const FEED_MODES = [
@@ -59,6 +60,9 @@ export const feedItemSchema = z.object({
   distribution_reason: z.string().min(1),
   context_chips: z.array(contextChipSchema).default([]),
   safety_state: safetyStateSchema.default('ok'),
+  /** MERI exposure label (SPEC §7.6, WS-H.2.3a) — null until a MERI shadow
+   * run covers the story (honest absence; never implies truth). */
+  exposure_label: z.enum(MERI_EXPOSURE_LABELS_WIRE).nullable().default(null),
 });
 export type FeedItem = z.infer<typeof feedItemSchema>;
 

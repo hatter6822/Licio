@@ -53,3 +53,28 @@ describe('WhereInterpretationsDiffer', () => {
     expect(await checkA11y(container)).toHaveNoViolations();
   });
 });
+
+describe('lens names (WS-H.4.3b)', () => {
+  it('shows human lens names when the wire carries them', () => {
+    render(
+      <WhereInterpretationsDiffer
+        data={{
+          ...base,
+          interpretations: [
+            {
+              ...(base.interpretations[0] as (typeof base.interpretations)[number]),
+              lens_a_name: 'Local residents',
+              lens_b_name: 'Water engineers',
+            },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText('Between Local residents and Water engineers')).toBeInTheDocument();
+  });
+
+  it('falls back to the generic heading when names are absent', () => {
+    render(<WhereInterpretationsDiffer data={base} />);
+    expect(screen.getByText('Between two lenses')).toBeInTheDocument();
+  });
+});

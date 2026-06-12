@@ -21,6 +21,9 @@ export const SCOI_CONTEXT_STATES_WIRE = [
 export const storyInterpretationSchema = z.object({
   lens_a: z.string().min(1).max(128),
   lens_b: z.string().min(1).max(128),
+  /** Human lens names when resolvable (ids stay the stable keys). */
+  lens_a_name: z.string().min(1).max(120).optional(),
+  lens_b_name: z.string().min(1).max(120).optional(),
   /** Plain language; neither side is marked correct (WS-H.4.3b). */
   summary: z.string().min(1).max(500),
   disagreement: z.number().min(0).max(1),
@@ -57,6 +60,18 @@ export const independentSourcesResponseSchema = z.object({
     })
     .nullable(),
   confirmed_syndication_count: z.number().int().nonnegative(),
+  /** Same-coverage members (near-duplicates / confirmed syndication) so the
+   * drawer can show WHICH stories share this story's redundancy class. */
+  co_group_stories: z
+    .array(
+      z.object({
+        story_id: uuidSchema,
+        title: z.string().min(1).max(300),
+        relationship: z.enum(['near_duplicate', 'syndicated']),
+      }),
+    )
+    .max(8)
+    .default([]),
 });
 export type IndependentSourcesResponse = z.infer<typeof independentSourcesResponseSchema>;
 

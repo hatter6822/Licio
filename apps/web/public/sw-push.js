@@ -50,11 +50,20 @@ self.addEventListener('fetch', (event) => {
 
 // Notification budget meter (WS-C.2.4c): a per-UTC-day count of notifications
 // shown, kept in a tiny dedicated IndexedDB the settings UI reads. Counts only —
-// never contents. Mirrors offline/notification-meter.ts.
+// never contents. Mirrors offline/notification-meter.ts (v2 adds the
+// quiet-topics store for the WS-H.6.1c quiet-notification policy).
 function openMeterDb() {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open('licio-meter', 1);
-    request.onupgradeneeded = () => request.result.createObjectStore('counts', { keyPath: 'day' });
+    const request = indexedDB.open('licio-meter', 2);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains('counts')) {
+        db.createObjectStore('counts', { keyPath: 'day' });
+      }
+      if (!db.objectStoreNames.contains('quiet-topics')) {
+        db.createObjectStore('quiet-topics', { keyPath: 'topicClusterId' });
+      }
+    };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
@@ -79,6 +88,23 @@ async function recordNotificationShown() {
     db.close();
   } catch {
     // Non-fatal: the budget indicator is best-effort.
+  }
+}
+
+// Quiet-notification policy (WS-H.6.1c): a push tagged with a topic the
+// narrow-loop detector quieted shows SILENTLY — delivered, never a buzz
+// that reinforces the loop. Topic ids only; failure quiets nothing.
+async function isTopicQuiet(topicClusterId) {
+  if (typeof topicClusterId !== 'string' || topicClusterId.length === 0) return false;
+  try {
+    const db = await openMeterDb();
+    const record = await meterRequest(
+      db.transaction('quiet-topics').objectStore('quiet-topics').get(topicClusterId),
+    );
+    db.close();
+    return Boolean(record && typeof record.untilMs === 'number' && record.untilMs > Date.now());
+  } catch {
+    return false;
   }
 }
 
@@ -108,16 +134,24 @@ self.addEventListener('push', (event) => {
     }
   }
   const title = typeof payload.title === 'string' ? payload.title : 'Licio';
-  const options = {
-    body: typeof payload.body === 'string' ? payload.body : 'You have a new update.',
-    // Same tag collapses repeated same-thread notifications (grouping default).
-    tag: typeof payload.tag === 'string' ? payload.tag : 'licio-notification',
-    icon: '/icon-192.png',
-    badge: '/icon-192.png',
-    data: { url: safeNavigationUrl(payload.url) },
-  };
   event.waitUntil(
-    Promise.all([self.registration.showNotification(title, options), recordNotificationShown()]),
+    (async () => {
+      const quiet = await isTopicQuiet(payload.topic);
+      const options = {
+        body: typeof payload.body === 'string' ? payload.body : 'You have a new update.',
+        // Same tag collapses repeated same-thread notifications (grouping default).
+        tag: typeof payload.tag === 'string' ? payload.tag : 'licio-notification',
+        icon: '/icon-192.png',
+        badge: '/icon-192.png',
+        // WS-H.6.1c: looped topics deliver silently (no sound/vibration).
+        silent: quiet,
+        data: { url: safeNavigationUrl(payload.url) },
+      };
+      await Promise.all([
+        self.registration.showNotification(title, options),
+        recordNotificationShown(),
+      ]);
+    })(),
   );
 });
 

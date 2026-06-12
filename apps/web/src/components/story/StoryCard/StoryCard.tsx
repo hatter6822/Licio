@@ -4,6 +4,7 @@ import { formatReadingEstimate, useI18n } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
 import { Button } from '../../ui/Button/index.js';
 import { Icon } from '../../ui/Icon/index.js';
+import { ExposureLabel } from '../ExposureLabel/index.js';
 import { RatingLabel } from '../RatingLabel/index.js';
 import type { StoryCardData, StoryOrigin } from '../types.js';
 
@@ -39,6 +40,7 @@ function warnIfScoreLike(reason: string): void {
 export function StoryCard({
   story,
   ratingLabel,
+  exposureLabel,
   distributionReason,
   contextChips,
   branchPreview,
@@ -91,9 +93,11 @@ export function StoryCard({
         </span>
       </p>
 
-      {/* 3. Rating label (conversation state — not a score) */}
-      <div>
+      {/* 3. Rating label (conversation state) + MERI exposure label
+          (WS-H.2.3a; exposure nonredundancy — never truth-by-repetition) */}
+      <div className="flex flex-wrap items-center gap-2">
         <RatingLabel kind={ratingLabel} />
+        {exposureLabel ? <ExposureLabel label={exposureLabel} /> : null}
       </div>
 
       {/* 4. One-line distribution reason (human-readable, no raw score) */}

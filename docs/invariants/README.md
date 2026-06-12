@@ -355,15 +355,27 @@ Public reads (`/v1/stories/:id/interpretations`,
 served from STORED shadow outputs only — a page load never triggers
 computation.
 
-Client: `ExposureLabel` (four §7.6 labels), `IndependentSourcesDrawer`,
-`WhereInterpretationsDiffer` (+ the needs-context framing), the composer
+Client: `ExposureLabel` (four §7.6 labels — rendered on FEED CARDS from
+the `exposure_label` the feed wire now carries, resolved from stored MERI
+gains, and in the drawer), `IndependentSourcesDrawer` (now with the
+"Same coverage elsewhere" co-group members — near-duplicates by MinHash +
+confirmed-syndication siblings, visibility-gated server-side),
+`WhereInterpretationsDiffer` (+ the needs-context framing; human lens
+NAMES resolved through the room when available), the composer
 `ContextWarning` (dismissible; the user can always proceed), the
 `NarrowLoopPrompt` (non-blocking; "see broader context" switches to the
-source-diverse feed mode), and the PHI-4 wellbeing controls ("Reset topic
-history" clears the device-local sequence only; "Reduce personalization"
-switches the feed mode) — plus the per-topic repeats preference stored in
-personalization settings (`topic_repeat_preference`, consumed by ranking
-once WS-I lands).
+source-diverse feed mode AND, signed in, persists it through the durable
+personalization settings), and the PHI-4 wellbeing controls ("Reset topic
+history" clears the device-local sequence and the quiet-topic set;
+"Reduce personalization" switches the feed mode) — plus the per-topic
+repeats preference control on the story page (WS-H.2.3c), persisted in
+`personalization_settings.topic_repeat_preference` and consumed by
+ranking once WS-I lands. Feed-mode choices sync to the durable settings
+on change and seed back at sign-in (WS-H.6.1c-2 "persists across sessions
+and devices"). The WS-H.6.1c quiet-notification policy is live: a
+narrow-loop detection marks the topic quiet (TTL'd, ids only) in the
+shared meter IndexedDB, and the service worker shows that topic's pushes
+SILENTLY — delivered, never a buzz that reinforces the loop.
 
 ## Testing
 

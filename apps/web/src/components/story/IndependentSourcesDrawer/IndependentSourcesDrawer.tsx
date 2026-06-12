@@ -65,6 +65,30 @@ export function IndependentSourcesDrawer({
                 'No confirmed syndication relationships are recorded for this source.',
               )}
         </p>
+        {data.co_group_stories.length > 0 ? (
+          <div>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-muted">
+              {t('exposure.drawer.coGroup', 'Same coverage elsewhere')}
+            </h3>
+            <ul className="mt-1 flex flex-col gap-1">
+              {data.co_group_stories.map((member) => (
+                <li key={member.story_id} className="flex items-baseline gap-2">
+                  <a
+                    href={`/stories/${member.story_id}`}
+                    className="text-sm text-ink underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                  >
+                    {member.title}
+                  </a>
+                  <span className="text-xs text-ink-muted">
+                    {member.relationship === 'syndicated'
+                      ? t('exposure.drawer.relSyndicated', 'syndicated')
+                      : t('exposure.drawer.relNearDuplicate', 'near-duplicate')}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </div>
     </details>
   );

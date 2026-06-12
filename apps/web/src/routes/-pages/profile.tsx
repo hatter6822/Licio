@@ -40,6 +40,7 @@ import {
 } from '../../lib/queries.js';
 import { track } from '../../lib/telemetry.js';
 import { hhmmToMinutes, minutesToHHMM } from '../../lib/time.js';
+import { clearQuietTopics } from '../../offline/notification-meter.js';
 import { usePushControls } from '../../push/index.js';
 import { resolveCollectionPolicy } from '../../signals/privacy.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
@@ -257,6 +258,7 @@ export function SettingsPage(): React.ReactElement {
               variant="secondary"
               onClick={() => {
                 getTopicLoopTracker().reset();
+                void clearQuietTopics();
                 toast({
                   message: t(
                     'settings.topicHistory.cleared',
