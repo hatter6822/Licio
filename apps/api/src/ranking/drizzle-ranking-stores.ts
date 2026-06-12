@@ -19,7 +19,7 @@ import {
   rankingDecisionLogSchema,
   validateFeatureVector,
 } from '@licio/ranking';
-import { and, desc, eq, inArray, lt, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lt, lte, sql } from 'drizzle-orm';
 import {
   type DecisionLogQuery,
   type DecisionLogStore,
@@ -124,7 +124,7 @@ export class DrizzleFeatureStore implements FeatureStore {
       })
       .from(rankingFeatureVectors)
       .groupBy(rankingFeatureVectors.itemId)
-      .having(sql`max(${rankingFeatureVectors.updatedAt}) < ${new Date(beforeIso)}`)
+      .having(sql`max(${rankingFeatureVectors.updatedAt}) < ${beforeIso}::timestamptz`)
       .orderBy(sql`max(${rankingFeatureVectors.updatedAt}) asc`)
       .limit(Math.max(0, limit));
     return rows.map((r) => r.itemId);
@@ -175,7 +175,10 @@ export class DrizzleDecisionLogStore implements DecisionLogStore {
     // invariant, constraint, experiment) filter on the validated payload.
     const conditions = [];
     if (query.fromIso !== undefined) {
-      conditions.push(sql`${rankingDecisionLogs.timestamp} >= ${new Date(query.fromIso)}`);
+      // Typed operator, never a raw-sql Date param: drizzle's `sql` template
+      // passes a Date through to the postgres.js driver UNMAPPED (no column
+      // mapToDriverValue), and the driver rejects non-string Bind values.
+      conditions.push(gte(rankingDecisionLogs.timestamp, new Date(query.fromIso)));
     }
     if (query.toIso !== undefined) {
       conditions.push(lt(rankingDecisionLogs.timestamp, new Date(query.toIso)));
@@ -226,8 +229,11 @@ export class DrizzleDecisionLogStore implements DecisionLogStore {
         .limit(1);
       const cursor = cursorRows[0];
       if (cursor === undefined) return { logs: [], nextCursor: null };
+      // String params with explicit casts: a raw-sql Date param bypasses the
+      // column driver mapping and the postgres.js driver rejects it; the
+      // casts also pin the row-comparison types unambiguously.
       conditions.push(
-        sql`(${rankingDecisionLogs.timestamp}, ${rankingDecisionLogs.requestId}) < (${cursor.timestamp}, ${cursor.requestId})`,
+        sql`(${rankingDecisionLogs.timestamp}, ${rankingDecisionLogs.requestId}) < (${cursor.timestamp.toISOString()}::timestamptz, ${cursor.requestId}::uuid)`,
       );
     }
     const rows = await this.#db

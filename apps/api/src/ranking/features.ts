@@ -385,7 +385,11 @@ export function registerFeatureStoreConsumer(deps: FeatureAssemblyDeps): void {
       if (payload.event_type === 'integrity.signal.detected') {
         // The WS-H intake consumer registers BEFORE this one at boot, so the
         // risk-state store is already updated when this handler assembles.
-        for (const targetId of (payload.target_ids ?? []).slice(0, 25)) {
+        // EVERY target refreshes — the schema caps target_ids at 100, and a
+        // partial refresh would leave the remainder ranking on stale risk
+        // inputs until the hourly batch (the slice is belt-and-braces at
+        // exactly the schema bound, never a smaller silent cap).
+        for (const targetId of (payload.target_ids ?? []).slice(0, 100)) {
           await refreshFeatures(deps, targetId);
         }
         return;

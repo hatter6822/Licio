@@ -178,6 +178,50 @@ describe('room feed route (WS-I room surface; WS-G content visibility)', () => {
     const replay = await replayDecision(fixture.ranking, served.requestId);
     expect(replay.match).toBe(true);
   });
+
+  it('restricted-room content NEVER leaks into public front-page/topic feeds (§16.2)', async () => {
+    // The WS-G content-visibility bar holds on the DISTRIBUTION side too:
+    // a story whose thread lives in a restricted room is room content, and
+    // the front page serves it only to readers the room route would serve.
+    const roomId = await insertRoom('restricted');
+    const hidden = await seedStory(fixture.ingestion, { roomId });
+    const visible = await seedStory(fixture.ingestion);
+    const member = await seedUserWithSession(fixture.identity);
+    await subscribe(roomId, member.userId, 'active');
+    // Signed out: the restricted story is filtered BEFORE the pipeline —
+    // it appears in neither the served items nor the logged candidate set.
+    const anonymous = await serveFeed(fixture.ranking, {
+      userId: null,
+      surface: 'front_page',
+      surfaceRoomId: null,
+      surfaceTopicId: null,
+      mode: undefined,
+    });
+    expect(anonymous.items.map((i) => i.story_id)).toEqual([visible.storyId]);
+    const anonymousLog = await fixture.ranking.decisionLogs.getByRequestId(anonymous.requestId);
+    expect(anonymousLog?.candidate_ids).not.toContain(hidden.storyId);
+    // A signed-in NON-member reads the same public-only feed.
+    const outsider = await seedUserWithSession(fixture.identity);
+    const outsiderFeed = await serveFeed(fixture.ranking, {
+      userId: outsider.userId,
+      surface: 'front_page',
+      surfaceRoomId: null,
+      surfaceTopicId: null,
+      mode: undefined,
+    });
+    expect(outsiderFeed.items.map((i) => i.story_id)).toEqual([visible.storyId]);
+    // An ACTIVE member's front page may carry the room's content.
+    const memberFeed = await serveFeed(fixture.ranking, {
+      userId: member.userId,
+      surface: 'front_page',
+      surfaceRoomId: null,
+      surfaceTopicId: null,
+      mode: undefined,
+    });
+    expect(memberFeed.items.map((i) => i.story_id).sort()).toEqual(
+      [hidden.storyId, visible.storyId].sort(),
+    );
+  });
 });
 
 describe('topic feed surface (GET /v1/feed?topic=…)', () => {
@@ -502,6 +546,69 @@ describe('MFCI intake-path feature refresh (WS-I.2.1d real-time freshness)', () 
     const stored = await fixture.ranking.featureStore.getLatest(storyId);
     expect(stored?.mfci_risk_state).toBe('high');
     expect(stored?.coordination_penalty).toBe(0.5);
+  });
+
+  it('EVERY target refreshes — events near the 100-id schema cap leave no stale tail', async () => {
+    registerRankingConsumers(fixture.ranking);
+    const storyIds: string[] = [];
+    for (let i = 0; i < 30; i += 1) {
+      const { storyId } = await seedStory(fixture.ingestion);
+      storyIds.push(storyId);
+      await fixture.invariants.mfciRiskStates.set({
+        targetId: storyId,
+        state: 'elevated',
+        score: 1.1,
+        reason: 'intake',
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    await fixture.events.router.publish({
+      event_id: randomUUID(),
+      event_type: 'integrity.signal.detected',
+      timestamp: new Date().toISOString(),
+      schema_version: '1',
+      signal_type: 'brigading',
+      target_ids: storyIds,
+      confidence: 0.8,
+      evidence_summary: 'coordinated activity across thirty stories',
+      privacy_classification: 'restricted',
+      retention_tier: 'security_log',
+    } as never);
+    // The 26th-and-beyond targets refresh too (a 25-item cap left them
+    // ranking on stale risk inputs until the hourly batch).
+    for (const storyId of [storyIds[0], storyIds[25], storyIds[29]] as string[]) {
+      const stored = await fixture.ranking.featureStore.getLatest(storyId);
+      expect(stored?.mfci_risk_state).toBe('elevated');
+    }
+  });
+});
+
+describe('serving survives audit-write outages (WS-I.2.5a availability)', () => {
+  it('an event-store failure on the §21.3 batch never fails the feed', async () => {
+    const { storyId } = await seedStory(fixture.ingestion);
+    const originalInsertMany = fixture.events.eventStore.insertMany.bind(fixture.events.eventStore);
+    fixture.events.eventStore.insertMany = async () => {
+      throw new Error('event store outage');
+    };
+    try {
+      const served = await serveFeed(fixture.ranking, {
+        userId: null,
+        surface: 'front_page',
+        surfaceRoomId: null,
+        surfaceTopicId: null,
+        mode: undefined,
+      });
+      // The user still gets the ranked feed; the decision log landed; the
+      // missing events are a counted incident.
+      expect(served.fallback).toBe(false);
+      expect(served.items.map((i) => i.story_id)).toEqual([storyId]);
+      expect(await fixture.ranking.decisionLogs.getByRequestId(served.requestId)).not.toBeNull();
+      expect(
+        fixture.events.metrics.snapshot().counters['ranking.decision_event.write_failed'],
+      ).toBeGreaterThanOrEqual(1);
+    } finally {
+      fixture.events.eventStore.insertMany = originalInsertMany;
+    }
   });
 });
 

@@ -62,6 +62,7 @@ import {
   TOPIC_REGISTRY,
 } from '@licio/shared';
 import type { NewStoredEvent } from '../events/stores.js';
+import { roomContentVisibleToUser } from '../forum/rooms.js';
 import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
 import { exposureLabelForGain, latestMeriGains } from '../routes/invariants-public.js';
 import { killSwitchDecision } from './killswitch.js';
@@ -291,9 +292,21 @@ async function commitDecision(
       ownerUserId: null,
       purgeAfter: null,
     }));
-    await services.events.eventStore.insertMany(rows);
-    for (const event of events) {
-      services.trackBackground(services.events.router.publish(event));
+    try {
+      await services.events.eventStore.insertMany(rows);
+      for (const event of events) {
+        services.trackBackground(services.events.router.publish(event));
+      }
+    } catch (error) {
+      // The §21.3 per-item events are AUDIT artifacts, exactly like the
+      // decision log above: a transient event-store outage is a counted
+      // incident, never a serving failure — the user still gets the feed.
+      services.events.metrics.increment('ranking.decision_event.write_failed');
+      services.log('ranking.decision.event_failed', {
+        request_id: draft.log.request_id,
+        events: rows.length,
+        error: error instanceof Error ? error.message : 'unknown',
+      });
     }
   }
 }
@@ -395,6 +408,41 @@ async function contextCardsFor(
   return out;
 }
 
+/**
+ * WS-G two-tier visibility on the DISTRIBUTION side (§16.2): content in a
+ * restricted/expert-led room never reaches a feed its requester cannot read
+ * — the SAME `roomContentVisibleToUser` bar the room routes enforce (rule
+ * identity), evaluated once per DISTINCT room in the pool (bounded by pool
+ * diversity, never per item). Unknown rooms fail closed. Room-less items
+ * (no thread room) pass through; the room surface re-verifies its own room
+ * cheaply, keeping serveFeed safe for any caller that bypasses the route.
+ */
+async function filterByRoomVisibility(
+  services: RankingServices,
+  pool: readonly Candidate[],
+  userId: string | null,
+  requestId: string,
+): Promise<Candidate[]> {
+  const roomIds = [
+    ...new Set(pool.map((c) => c.room_id).filter((id): id is string => id !== null)),
+  ];
+  if (roomIds.length === 0) return [...pool];
+  const visible = new Set<string>();
+  for (const roomId of roomIds) {
+    const room = await services.forum.rooms.getById(roomId);
+    if (room === null) continue; // unknown room ⇒ fail closed
+    if (await roomContentVisibleToUser(services.forum, room, userId)) visible.add(roomId);
+  }
+  const filtered = pool.filter((c) => c.room_id === null || visible.has(c.room_id));
+  if (filtered.length < pool.length) {
+    services.log('ranking.room_visibility.filtered', {
+      request_id: requestId,
+      excluded_count: pool.length - filtered.length,
+    });
+  }
+  return filtered;
+}
+
 /** Serve one feed request through the full WS-I pipeline. */
 export async function serveFeed(
   services: RankingServices,
@@ -448,6 +496,7 @@ export async function serveFeed(
     const topicId = request.surfaceTopicId;
     surfacePool = surfacePool.filter((c) => c.topic_ids.includes(topicId));
   }
+  surfacePool = await filterByRoomVisibility(services, surfacePool, request.userId, requestId);
 
   // Profile selection context: the topic surface derives its sensitivity
   // from the requested topic; jurisdiction stays the WS-N seam (null) and

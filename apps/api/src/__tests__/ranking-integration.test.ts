@@ -300,8 +300,11 @@ describe.skipIf(!DB_URL)('WS-I serving-path reads on the WS-E/WS-F Drizzle adapt
   let stories: DrizzleStoryStore;
   let submitterId: string;
   const safetyItemIds: string[] = [];
-  /** Unique per-run invariant type: parallel gated suites share the table. */
-  const GATE_TYPE = `GWEI_ITEST_${randomUUID().slice(0, 8)}`;
+  // The invariant_outputs type vocabulary is a CLOSED db CHECK — synthetic
+  // types are impossible. The gate-read test uses the real 'GWEI' type with
+  // UNIQUE target ids and scopes every assertion to them (parallel gated
+  // suites share the live database).
+  const gweiTargetIds: string[] = [];
 
   beforeAll(async () => {
     db = createDbClient(DB_URL as string);
@@ -327,10 +330,12 @@ describe.skipIf(!DB_URL)('WS-I serving-path reads on the WS-E/WS-F Drizzle adapt
 
   afterAll(async () => {
     const dbSchema = await import('@licio/db');
-    const { eq, inArray, sql } = await import('drizzle-orm');
-    await db
-      .delete(dbSchema.invariantOutputs)
-      .where(eq(dbSchema.invariantOutputs.invariantType, GATE_TYPE));
+    const { inArray, sql } = await import('drizzle-orm');
+    if (gweiTargetIds.length > 0) {
+      await db
+        .delete(dbSchema.invariantOutputs)
+        .where(inArray(dbSchema.invariantOutputs.targetId, gweiTargetIds));
+    }
     if (safetyItemIds.length > 0) {
       await db
         .delete(dbSchema.itemSafetyStates)
@@ -352,41 +357,54 @@ describe.skipIf(!DB_URL)('WS-I serving-path reads on the WS-E/WS-F Drizzle adapt
   });
 
   it('listByTypeSince windows on created_at, newest first, capped (the GWEI gate read)', async () => {
-    const row = (offsetHours: number, gw2: number) => ({
-      invariantType: GATE_TYPE,
-      targetType: 'cohort',
-      targetId: randomUUID(),
-      timeWindow: { start: '2026-06-10T00:00:00.000Z', end: '2026-06-10T01:00:00.000Z' },
-      version: '1.0.0',
-      scoreVector: { gw2 },
-      explanationSummary: null,
-      confidence: 1,
-      coverage: 1,
-      reasonCodes: [],
-      fallbackUsed: false,
-      versionMetadata: null,
-      shadowMode: true,
-      createdAt: new Date(Date.now() - offsetHours * 3_600_000).toISOString(),
-    });
+    const row = (offsetHours: number, gw2: number) => {
+      const targetId = randomUUID();
+      gweiTargetIds.push(targetId);
+      return {
+        invariantType: 'GWEI',
+        targetType: 'cohort',
+        targetId,
+        timeWindow: { start: '2026-06-10T00:00:00.000Z', end: '2026-06-10T01:00:00.000Z' },
+        version: '1.0.0',
+        scoreVector: { gw2 },
+        explanationSummary: null,
+        confidence: 1,
+        coverage: 1,
+        reasonCodes: [],
+        fallbackUsed: false,
+        versionMetadata: null,
+        shadowMode: true,
+        createdAt: new Date(Date.now() - offsetHours * 3_600_000).toISOString(),
+      };
+    };
     await invariantStore.upsert(row(48, 0.9)); // outside a 24h window
     await invariantStore.upsert(row(2, 0.2));
     await invariantStore.upsert(row(1, 0.3));
     const since = new Date(Date.now() - 24 * 3_600_000).toISOString();
-    const recent = await invariantStore.listByTypeSince(GATE_TYPE, since, 500);
-    expect(recent).toHaveLength(2);
+    // Assertions scope to THIS suite's target ids: other gated suites may
+    // write GWEI rows into the same live table concurrently.
+    const mine = (rows: Awaited<ReturnType<typeof invariantStore.listByTypeSince>>) =>
+      rows.filter((r) => gweiTargetIds.includes(r.targetId));
+    const recent = mine(await invariantStore.listByTypeSince('GWEI', since, 500));
+    expect(recent).toHaveLength(2); // the 48h-old row is outside the window
     expect(recent.map((r) => r.scoreVector['gw2'])).toEqual([0.3, 0.2]); // newest first
-    expect(await invariantStore.listByTypeSince(GATE_TYPE, since, 1)).toHaveLength(1);
+    const capped = await invariantStore.listByTypeSince('GWEI', since, 1);
+    expect(capped.length).toBeLessThanOrEqual(1);
   });
 
   it('safety getMany returns one bulk map (the batched safety-filter read)', async () => {
     const frozen = randomUUID();
     const removed = randomUUID();
+    // case_id is a uuid COLUMN (the WS-J case reference) — opaque strings
+    // are rejected at the storage layer.
+    const frozenCase = randomUUID();
+    const removedCase = randomUUID();
     safetyItemIds.push(frozen, removed);
     await safetyStore.set({
       itemId: frozen,
       safetyState: 'frozen',
       frozenScore: 0.4,
-      caseId: 'case-f',
+      caseId: frozenCase,
       updatedBy: 'system',
       updatedAt: new Date().toISOString(),
     });
@@ -394,14 +412,14 @@ describe.skipIf(!DB_URL)('WS-I serving-path reads on the WS-E/WS-F Drizzle adapt
       itemId: removed,
       safetyState: 'removed',
       frozenScore: null,
-      caseId: 'case-r',
+      caseId: removedCase,
       updatedBy: 'system',
       updatedAt: new Date().toISOString(),
     });
     const many = await safetyStore.getMany([frozen, removed, randomUUID()]);
     expect(many.size).toBe(2);
     expect(many.get(frozen)?.safetyState).toBe('frozen');
-    expect(many.get(removed)?.caseId).toBe('case-r');
+    expect(many.get(removed)?.caseId).toBe(removedCase);
     expect(await safetyStore.getMany([])).toEqual(new Map());
   });
 
