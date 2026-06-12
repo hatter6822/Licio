@@ -47,43 +47,6 @@ pay-to-rank — is enforced by the type system, runtime guards, and CI gates.
 | Test gate | 80% cross-workspace coverage (lines, functions, branches, statements) |
 | Bundle budgets | initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz (CI-enforced) |
 
-Ten of seventeen workstreams are shipped: the repository foundation
-(WS-0), the doctrine and policy corpus (WS-A), the design system (WS-B), the
-PWA client (WS-C), identity and privacy (WS-D), the event pipeline + PWAtt
-scoring (WS-E), ingestion, the source model, and search (WS-F), forum
-and conversation (WS-G), the core invariant services (WS-H), and ranking
-and distribution (WS-I). Stories can be submitted (all six §14.1 types)
-through safety pre-checks and three-level duplicate detection (canonical
-URL, MinHash/LSH near-duplicates, source-aware syndication), every story
-gets a thread shell and a §14.4 lifecycle, sources get no-truth-score
-profiles, and content is searchable via Postgres FTS with pgvector
-embeddings. Conversation is live:
-threads carry the eleven-type §15.2 contribution taxonomy through the
-structured composer, user content renders through the single sanctioned
-Markdown-lite → DOMPurify → Trusted Types pipeline, evidence cards attach
-to claims, summaries carry §24.3 provenance and uncertainty disclosure, and
-rooms ship with lenses, steward roles, and join models — still with zero
-applause affordances. The front page is now ranked by the full SPEC §13.3
-pipeline: eight organic candidate retrievers with diversity quotas, a
-financially-denylisted feature store, a non-overridable safety filter,
-deterministic constrained PWAtt scoring (the §30.5 shadow stage lifted —
-PWAtt serves as a bounded input behind §5.5 weight guardrails), MERI
-dedup + source/topic/lens balancing + SCOI context gating, exactly one
-replayable decision log per request, specific per-item explanations that
-can never say "trending" or "because of the algorithm", a runtime kill
-switch over a provably score-blind chronological fallback, and the
-ten-test ranking-neutrality suite as a named CI gate. All eleven
-WS-H invariants (MERI's exact partition-matroid rank, MFCI's Markov-fiber
-conditional coordination test, GWEI's entropic Gromov–Wasserstein cohort
-audits with k-anonymity, SCOI's sheaf-Laplacian context obstruction, PHI's
-gauge-invariant preference holonomy, and the six supporting invariants)
-remain in the shadow discipline: ranking computes and LOGS their penalties
-and constraints on every decision, but enforces them only through the
-audited shadow-to-enforcement promotion gate — which nothing has passed
-yet, by design. WS-J – WS-P (trust & safety, AI governance, Knomosis
-wallets, treasury, compliance, security/reliability, launch) land per the
-plan.
-
 > Local Postgres now runs the `pgvector/pgvector:pg16` image (a drop-in
 > pgvector-enabled build of Postgres 16): the WS-F migration chain installs
 > the `vector` extension. `docker compose up -d` provides it.
