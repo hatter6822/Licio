@@ -19,9 +19,10 @@ import { resolveCollectionPolicy } from '../signals/privacy.js';
 import { getSignalProcessor } from '../signals/runtime.js';
 import { initAuthSync, useAuthStore } from '../stores/auth.js';
 import { useFeatureFlagStore } from '../stores/feature-flags.js';
-import { initUIStore } from '../stores/ui.js';
+import { initUIStore, useUIStore } from '../stores/ui.js';
 import { fetchAuthStatus, fetchFeatureFlags, fetchSettings } from './api.js';
 import { warmLinkSafety } from './link-safety.js';
+import { fetchPrivacySettings } from './privacy-api.js';
 import { initTelemetry, track } from './telemetry.js';
 
 /** Event dispatched on detected eviction so the UI can notify the reader. */
@@ -50,11 +51,28 @@ export async function confirmSession(): Promise<void> {
     const status = await fetchAuthStatus();
     if (status.authenticated) {
       useAuthStore.getState().setUser(status.user);
+      void seedDurableFeedMode();
     } else if (useAuthStore.getState().status === 'authenticated') {
       useAuthStore.getState().expireSession();
     }
   } catch {
     // Offline: keep the optimistic state; the next protected call re-checks.
+  }
+}
+
+/**
+ * Seed the feed mode from the DURABLE personalization settings on sign-in
+ * (WS-H.6.1c-2: the mode persists across sessions and devices — the server
+ * copy is the cross-device truth at boot; local changes during the session
+ * sync back through the switcher/prompt mutations).
+ */
+async function seedDurableFeedMode(): Promise<void> {
+  try {
+    const settings = await fetchPrivacySettings();
+    const mode = settings.personalization_settings.feed_mode;
+    if (mode) useUIStore.getState().setFeedMode(mode);
+  } catch {
+    // Offline / not yet verified: the locally persisted mode stands.
   }
 }
 

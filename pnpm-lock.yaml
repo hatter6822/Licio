@@ -200,6 +200,9 @@ importers:
       '@licio/shared':
         specifier: workspace:*
         version: link:../shared
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
 
   packages/shared:
     dependencies:

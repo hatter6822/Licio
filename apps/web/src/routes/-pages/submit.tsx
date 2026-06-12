@@ -16,6 +16,7 @@
 import type { Citation } from '@licio/shared';
 import { useSearch } from '@tanstack/react-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { ContextWarning } from '../../components/composer/ComposerAffordances/ContextWarning.js';
 import {
   type ComposerErrors,
   type ComposerMode,
@@ -28,6 +29,7 @@ import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { useToast } from '../../components/ui/Toast/index.js';
 import { useT } from '../../i18n/index.js';
 import { checkLinkSafety } from '../../lib/link-safety.js';
+import { useStoryInterpretationsQuery, useThreadQuery } from '../../lib/queries.js';
 import { deleteDraft, listDraftsForThread, queue, saveDraft } from '../../offline/index.js';
 import type { DraftContributionRecord } from '../../offline/schemas.js';
 import { processPendingQueue } from '../../offline/sync.js';
@@ -59,6 +61,16 @@ export function SubmitPage(): React.ReactElement {
   const search = useSearch({ from: '/submit' });
   const threadId = search.threadId;
   const { toast } = useToast();
+  // SCOI composer warning (WS-H.4.3c): when the reply target's story is
+  // read differently across communities, surface a dismissible note.
+  const targetThread = useThreadQuery(threadId ?? '');
+  const targetStoryId = threadId ? (targetThread.data?.story_id ?? null) : null;
+  const targetInterpretations = useStoryInterpretationsQuery(
+    targetStoryId ?? '',
+    targetStoryId !== null,
+  );
+  const showContextWarning =
+    targetStoryId !== null && targetInterpretations.data?.needs_context === true;
   const draftId = useRef(newDraftId());
   const [mode, setMode] = useState<ComposerMode | undefined>(undefined);
   const [serverErrors, setServerErrors] = useState<ComposerErrors>({});
@@ -274,6 +286,7 @@ export function SubmitPage(): React.ReactElement {
             </Button>
           </div>
         ) : null}
+        {showContextWarning ? <ContextWarning className="mb-3" /> : null}
         <ParticipationComposer
           {...(mode !== undefined ? { mode } : {})}
           onModeChange={setMode}

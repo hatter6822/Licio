@@ -29,6 +29,11 @@ import { parseWithStepUp } from './auth-api.js';
  * teen-floor clamped, audited, and propagated; the response is the effective
  * post-clamp state.
  */
+export async function fetchPrivacySettings(): Promise<PrivacySettingsResponse> {
+  const res = await client.v1.privacy.settings.$get();
+  return parseResponse(res, privacySettingsResponseSchema);
+}
+
 export async function patchPrivacySettings(
   patch: PrivacySettingsPatch,
 ): Promise<PrivacySettingsResponse> {

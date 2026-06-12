@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import type { MeriExposureLabelWire } from '@licio/shared';
 //
 // Presentation types for the story surface (WS-B.2.1a). These are no-applause-
 // safe BY CONSTRUCTION: there is deliberately no `likeCount`, `voteCount`,
@@ -40,6 +41,8 @@ export interface BranchPreviewItem {
 }
 
 export interface StoryCardData {
+  /** MERI exposure label (WS-H.2.3a) — absent until analysis covers the story. */
+  exposureLabel?: MeriExposureLabelWire;
   story: Story;
   ratingLabel: RatingLabelKind;
   /** Human-readable distribution reason; never a raw numeric score. */

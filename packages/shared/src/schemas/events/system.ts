@@ -10,13 +10,34 @@ import { z } from 'zod';
 import { uuidSchema } from '../common.js';
 import { eventBaseShape } from './envelope.js';
 
-/** Invariant families (SPEC §7-§12 + PWAtt). */
-export const INVARIANT_TYPES = ['MERI', 'MFCI', 'SCOI', 'GWEI', 'PHI', 'PWAtt'] as const;
+/** Invariant families (SPEC §7-§12 + PWAtt): 5 core + 6 supporting (WS-H). */
+export const INVARIANT_TYPES = [
+  'MERI',
+  'MFCI',
+  'SCOI',
+  'GWEI',
+  'PHI',
+  'PWAtt',
+  'hodge_tension',
+  'tropical_cascade',
+  'braid_dynamics',
+  'reeb_landscape',
+  'counterfactual_defect',
+  'path_signature_wellbeing',
+] as const;
 export type InvariantType = (typeof INVARIANT_TYPES)[number];
 export const invariantTypeSchema = z.enum(INVARIANT_TYPES);
 
-/** Targets an invariant run can score. */
-export const INVARIANT_TARGET_TYPES = ['story', 'thread', 'user', 'room'] as const;
+/** Targets an invariant run can score (§22.1 + the WS-H.1.1a additions). */
+export const INVARIANT_TARGET_TYPES = [
+  'story',
+  'thread',
+  'user',
+  'room',
+  'feed',
+  'cohort',
+  'session',
+] as const;
 export type InvariantTargetType = (typeof INVARIANT_TARGET_TYPES)[number];
 
 /**

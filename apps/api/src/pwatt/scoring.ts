@@ -45,6 +45,7 @@ import {
   toActorSummary,
   WINDOW_SIZES_MS,
   type WindowAggregationResult,
+  windowBounds,
   windowLabel,
 } from './aggregation.js';
 import { detectCoordinatedBurst, detectHarassmentCascade } from './anti-signals.js';
@@ -130,10 +131,11 @@ async function freezeItem(
   const transition = transitionItemSafetyState(state, 'flag');
   if (!transition.ok) return; // already frozen/removed — idempotent
   const latest = await events.invariantStore.latest('PWAtt_v0', itemId);
+  const latestScore = latest?.scoreVector['score'];
   await events.safetyStore.set({
     itemId,
     safetyState: transition.next,
-    frozenScore: latest?.scoreVector['score'] ?? 0,
+    frozenScore: typeof latestScore === 'number' ? latestScore : 0,
     caseId,
     updatedBy: 'system:harassment_cascade',
     updatedAt: nowIso,
@@ -199,6 +201,7 @@ export async function runPwattWindow(
     size,
   );
   const label = windowLabel(startMs, size);
+  const bounds = windowBounds(startMs, size);
   const nowIso = new Date(events.now()).toISOString();
   const report: WindowScoringReport = {
     windowStart: aggregation.windowStart,
@@ -380,7 +383,7 @@ export async function runPwattWindow(
       invariantType: 'PWAtt_v0',
       targetType: 'story',
       targetId: item.itemId,
-      timeWindow: label,
+      timeWindow: bounds,
       version: PWATT_V0_VERSION,
       scoreVector: {
         active_attention: v0.activeAttention,
@@ -390,14 +393,19 @@ export async function runPwattWindow(
       },
       explanationSummary: null,
       confidence: v0.confidence,
+      // The window fold consumes its own complete inputs (WS-H.1.1c).
+      coverage: 1,
+      reasonCodes: [],
+      fallbackUsed: false,
+      versionMetadata: null,
       shadowMode: PWATT_V0_SHADOW_MODE,
       createdAt: nowIso,
     });
     await events.invariantStore.upsert({
-      invariantType: 'PWAtt',
+      invariantType: 'PWAtt_v1',
       targetType: 'story',
       targetId: item.itemId,
-      timeWindow: label,
+      timeWindow: bounds,
       version: PWATT_V1_VERSION,
       scoreVector: {
         active_attention: v1Components.activeAttention,
@@ -411,6 +419,10 @@ export async function runPwattWindow(
       },
       explanationSummary: `profile=${v1.profileName}`,
       confidence: v0.confidence,
+      coverage: 1,
+      reasonCodes: [],
+      fallbackUsed: false,
+      versionMetadata: { profile: v1.profileName },
       shadowMode: PWATT_V0_SHADOW_MODE,
       createdAt: nowIso,
     });

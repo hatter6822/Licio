@@ -40,11 +40,13 @@ const SAVED_STORY = {
   url: 'https://example.org/a',
   reading_minutes: 3,
   rating_label: 'well-sourced' as const,
+  exposure_label: null,
   distribution_reason: 'reason',
   context_chips: [],
   safety_state: 'ok' as const,
   body_summary: 'summary',
   thread_id: null,
+  topic_ids: [],
 };
 
 function wrapper() {

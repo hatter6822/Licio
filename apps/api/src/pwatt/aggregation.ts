@@ -46,6 +46,17 @@ export function windowLabel(startMs: number, size: AggregationWindowSize): strin
   return `${new Date(startMs).toISOString()}/${size}`;
 }
 
+/** The half-open [start, end) window bounds (WS-H.1.1a `time_window`). */
+export function windowBounds(
+  startMs: number,
+  size: AggregationWindowSize,
+): { start: string; end: string } {
+  return {
+    start: new Date(startMs).toISOString(),
+    end: new Date(startMs + WINDOW_SIZES_MS[size]).toISOString(),
+  };
+}
+
 function maxBucket<T extends string>(order: readonly T[], a: T, b: T): T {
   return order.indexOf(a) >= order.indexOf(b) ? a : b;
 }

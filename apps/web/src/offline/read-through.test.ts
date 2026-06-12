@@ -22,11 +22,13 @@ const STORY: StoryDetail = {
   url: 'https://example.org/a',
   reading_minutes: 4,
   rating_label: 'well-sourced',
+  exposure_label: null,
   distribution_reason: 'Read by people who also read primary sources.',
   context_chips: [],
   safety_state: 'ok',
   body_summary: 'A short, structurally honest summary.',
   thread_id: null,
+  topic_ids: [],
 };
 
 const LEDGER_ENTRY: SignalLedgerEntry = {

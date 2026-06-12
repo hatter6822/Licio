@@ -18,6 +18,7 @@
 import { z } from 'zod';
 import { privacyLevelSchema } from './attention.js';
 import { feedModeSchema } from './feed.js';
+import { topicRepeatPreferenceSchema } from './invariants-api.js';
 
 /** Current on-the-wire / at-rest schema version for both settings blobs. */
 export const PRIVACY_SETTINGS_VERSION = 1 as const;
@@ -123,6 +124,14 @@ export const personalizationSettingsSchema = z
     topic_preferences: z.array(z.string().min(1).max(128)).max(MAX_TOPIC_PREFERENCES),
     feed_mode: feedModeSchema,
     locale_overrides: z.array(z.string().min(2).max(35)).max(10),
+    /**
+     * Per-topic MERI repeats preference (SPEC §7.6; WS-H.2.3c): adjusts the
+     * marginal-gain threshold ranking will consume once promoted (WS-I).
+     * Defaulted so blobs written before WS-H parse forward unchanged.
+     */
+    topic_repeat_preference: z
+      .record(z.string().min(1).max(128), topicRepeatPreferenceSchema)
+      .default({}),
   })
   .strict();
 export type PersonalizationSettings = z.infer<typeof personalizationSettingsSchema>;
@@ -173,6 +182,7 @@ export function defaultPersonalizationSettings(): PersonalizationSettings {
   return {
     schema_version: PRIVACY_SETTINGS_VERSION,
     topic_preferences: [],
+    topic_repeat_preference: {},
     feed_mode: 'balanced',
     locale_overrides: [],
   };

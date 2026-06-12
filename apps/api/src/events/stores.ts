@@ -535,18 +535,32 @@ export class InMemoryAggregationWindowStore implements AggregationWindowStore {
 }
 
 // ---------------------------------------------------------------------------
-// Invariant outputs (§22.1 + shadow flag, WS-E.2.1e).
+// Invariant outputs (§22.1 + shadow flag, WS-E.2.1e + the WS-H envelope).
 // ---------------------------------------------------------------------------
+
+/** Half-open computation window [start, end) as ISO instants (WS-H.1.1a). */
+export interface InvariantTimeWindow {
+  start: string;
+  end: string;
+}
 
 export interface InvariantOutputRecord {
   invariantType: string;
   targetType: string;
   targetId: string;
-  timeWindow: string;
+  timeWindow: InvariantTimeWindow;
   version: string;
-  scoreVector: Record<string, number>;
+  /** Validated per invariant type before insert (WS-H.1.1d schemas). */
+  scoreVector: Record<string, unknown>;
   explanationSummary: string | null;
   confidence: number;
+  /** Fraction of required inputs available and fresh (WS-H.1.1c). */
+  coverage: number;
+  /** Registry-validated reason codes; [] = unqualified output. */
+  reasonCodes: string[];
+  fallbackUsed: boolean;
+  /** Algorithm config snapshot for reproducibility (WS-H.1.1b); null = none. */
+  versionMetadata: Record<string, unknown> | null;
   shadowMode: boolean;
   createdAt: string;
 }
@@ -555,8 +569,18 @@ export interface InvariantOutputStore {
   /** Upsert on the natural key (type, targetType, targetId, window, version). */
   upsert(row: InvariantOutputRecord): Promise<void>;
   listForTarget(targetId: string): Promise<InvariantOutputRecord[]>;
-  /** Latest output of a type for a target (by createdAt, then window label). */
+  /** Latest output of a type for a target (by createdAt, then window start). */
   latest(invariantType: string, targetId: string): Promise<InvariantOutputRecord | null>;
+  /**
+   * Paired outputs of two versions of one invariant over the same targets
+   * (WS-H.1.1b A/B comparison), optionally bounded to a time window.
+   */
+  listForVersionComparison(
+    invariantType: string,
+    versionA: string,
+    versionB: string,
+    window?: InvariantTimeWindow,
+  ): Promise<InvariantOutputRecord[]>;
   listAll(): Promise<InvariantOutputRecord[]>;
   deleteOlderThan(cutoffIso: string): Promise<number>;
   countOlderThan(cutoffIso: string): Promise<number>;
@@ -572,7 +596,14 @@ export class InMemoryInvariantOutputStore implements InvariantOutputStore {
       'invariantType' | 'targetType' | 'targetId' | 'timeWindow' | 'version'
     >,
   ): string {
-    return [row.invariantType, row.targetType, row.targetId, row.timeWindow, row.version].join('|');
+    return [
+      row.invariantType,
+      row.targetType,
+      row.targetId,
+      row.timeWindow.start,
+      row.timeWindow.end,
+      row.version,
+    ].join('|');
   }
 
   async upsert(row: InvariantOutputRecord): Promise<void> {
@@ -589,9 +620,30 @@ export class InMemoryInvariantOutputStore implements InvariantOutputStore {
       .sort(
         (a, b) =>
           Date.parse(b.createdAt) - Date.parse(a.createdAt) ||
-          b.timeWindow.localeCompare(a.timeWindow),
+          b.timeWindow.start.localeCompare(a.timeWindow.start),
       );
     return rows[0] ?? null;
+  }
+
+  async listForVersionComparison(
+    invariantType: string,
+    versionA: string,
+    versionB: string,
+    window?: InvariantTimeWindow,
+  ): Promise<InvariantOutputRecord[]> {
+    return [...this.#rows.values()]
+      .filter(
+        (r) =>
+          r.invariantType === invariantType &&
+          (r.version === versionA || r.version === versionB) &&
+          (!window || (r.timeWindow.start >= window.start && r.timeWindow.end <= window.end)),
+      )
+      .sort(
+        (a, b) =>
+          a.targetId.localeCompare(b.targetId) ||
+          a.timeWindow.start.localeCompare(b.timeWindow.start) ||
+          a.version.localeCompare(b.version),
+      );
   }
 
   async listAll(): Promise<InvariantOutputRecord[]> {

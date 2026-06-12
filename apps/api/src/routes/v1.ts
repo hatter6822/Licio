@@ -67,6 +67,12 @@ import { createAuthRoutes } from './auth.js';
 import { createEventsRoutes } from './events.js';
 import { createForumRoutes } from './forum.js';
 import { createIngestionAdminRoutes } from './ingestion-admin.js';
+import { createInvariantsAdminRoutes } from './invariants-admin.js';
+import {
+  createInvariantsPublicRoutes,
+  exposureLabelForGain,
+  latestMeriGains,
+} from './invariants-public.js';
 import { createPrivacyRoutes } from './privacy.js';
 import { createRoomsRoutes } from './rooms.js';
 import { createStoriesRoutes } from './stories.js';
@@ -118,6 +124,7 @@ function realStoryToDetail(story: StoryRecord, thread: { threadId: string } | nu
     safety_state: 'ok' as const,
     body_summary: story.excerpt ?? '',
     thread_id: thread?.threadId ?? null,
+    topic_ids: story.topicIds.slice(0, 8),
   };
 }
 
@@ -179,8 +186,16 @@ export function createV1Routes() {
       // Responses are re-validated against the shared schema before they leave the
       // BFF (the stated boundary guarantee, WS-C.1.2) — so fixture drift fails loudly
       // here, not silently at the client.
-      .get('/feed', zValidator('query', feedQuerySchema), (c) => {
-        const response: FeedResponse = { items: DEMO_FEED, nextCursor: null };
+      .get('/feed', zValidator('query', feedQuerySchema), async (c) => {
+        // WS-H.2.3a: feed cards carry the MERI exposure label, resolved from
+        // the latest STORED shadow output (never computed on request; null =
+        // honest absence before the first MERI run covers the story).
+        const gains = await latestMeriGains(getEventPipelineServices());
+        const items = DEMO_FEED.map((item) => ({
+          ...item,
+          exposure_label: exposureLabelForGain(gains[item.story_id] ?? null),
+        }));
+        const response: FeedResponse = { items, nextCursor: null };
         return c.json(feedResponseSchema.parse(response));
       })
       .get(
@@ -239,6 +254,11 @@ export function createV1Routes() {
       // reads — plus the steward admin surface.
       .route('/', createStoriesRoutes())
       .route('/ingestion/admin', createIngestionAdminRoutes())
+
+      // --- Invariant services (WS-H) -----------------------------------------
+      // Public SCOI/MERI read surfaces + the steward/analyst admin surface.
+      .route('/', createInvariantsPublicRoutes())
+      .route('/invariants/admin', createInvariantsAdminRoutes())
 
       // --- Forum, conversation, rooms, and lenses (WS-G) ----------------------
       // Thread reading (overview/branches/subtree/anchor), contributions,

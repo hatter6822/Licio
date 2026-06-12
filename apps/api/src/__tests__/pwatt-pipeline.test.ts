@@ -27,6 +27,10 @@ import {
   type WsEFixture,
 } from './ws-e-helpers.js';
 
+/** Narrow an unknown score-vector component for matcher arguments. */
+const asNumber = (value: unknown, fallback: number): number =>
+  typeof value === 'number' ? value : fallback;
+
 const HOUR = 3_600_000;
 
 let fixture: WsEFixture;
@@ -505,11 +509,15 @@ describe('shadow-mode verification (WS-E.2.1e, CI-gated)', () => {
         invariantType: 'PWAtt_v0',
         targetType: 'story',
         targetId: candidate.storyId,
-        timeWindow: 'forged',
+        timeWindow: { start: '2026-06-01T00:00:00.000Z', end: '2026-06-01T01:00:00.000Z' },
         version: 'v0',
         scoreVector: { score: Math.random() },
         explanationSummary: null,
         confidence: 1,
+        coverage: 1,
+        reasonCodes: [],
+        fallbackUsed: false,
+        versionMetadata: null,
         shadowMode: true,
         createdAt: new Date().toISOString(),
       });
@@ -600,13 +608,13 @@ describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
       contributionRow(questionItem, userId, 'question'),
     ]);
     await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
-    const evidenceV1 = await fixture.events.invariantStore.latest('PWAtt', evidenceItem);
-    const questionV1 = await fixture.events.invariantStore.latest('PWAtt', questionItem);
+    const evidenceV1 = await fixture.events.invariantStore.latest('PWAtt_v1', evidenceItem);
+    const questionV1 = await fixture.events.invariantStore.latest('PWAtt_v1', questionItem);
     expect(evidenceV1?.scoreVector['participation']).toBeGreaterThan(
-      questionV1?.scoreVector['participation'] ?? Number.POSITIVE_INFINITY,
+      asNumber(questionV1?.scoreVector['participation'], Number.POSITIVE_INFINITY),
     );
     expect(evidenceV1?.scoreVector['total']).toBeGreaterThan(
-      questionV1?.scoreVector['total'] ?? Number.POSITIVE_INFINITY,
+      asNumber(questionV1?.scoreVector['total'], Number.POSITIVE_INFINITY),
     );
     // v0 (uniform weights) sees them identically — the control assertion.
     const evidenceV0 = await fixture.events.invariantStore.latest('PWAtt_v0', evidenceItem);
@@ -619,7 +627,7 @@ describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
     const { userId } = await seedUserWithSession(fixture.identity);
     await fixture.events.eventStore.insertMany([contributionRow(itemId, userId, 'evidence')]);
     await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
-    const before = await fixture.events.invariantStore.latest('PWAtt', itemId);
+    const before = await fixture.events.invariantStore.latest('PWAtt_v1', itemId);
 
     // Tune the participation contributions dimension DOWN via the store.
     const curve = { kind: 'logarithmic', scale: 4, saturationPoint: 25 };
@@ -653,9 +661,9 @@ describe('integrated v1 stage (WS-E.2.3a/b in the live pipeline)', () => {
       rapidDampening: 0.3,
     });
     await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
-    const after = await fixture.events.invariantStore.latest('PWAtt', itemId);
+    const after = await fixture.events.invariantStore.latest('PWAtt_v1', itemId);
     expect(after?.scoreVector['participation']).toBeLessThan(
-      before?.scoreVector['participation'] ?? 0,
+      asNumber(before?.scoreVector['participation'], 0),
     );
   });
 });

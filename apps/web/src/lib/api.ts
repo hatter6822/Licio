@@ -31,6 +31,8 @@ import {
   featureFlagsResponseSchema,
   feedPreferencesSchema,
   feedResponseSchema,
+  type IndependentSourcesResponse,
+  independentSourcesResponseSchema,
   type NotificationPreferences,
   notificationPreferencesSchema,
   okAckSchema,
@@ -45,8 +47,10 @@ import {
   roomListResponseSchema,
   type SignalLedgerResponse,
   type StoryDetail,
+  type StoryInterpretationsResponse,
   signalLedgerResponseSchema,
   storyDetailSchema,
+  storyInterpretationsResponseSchema,
   type ThreadDetail,
   threadDetailSchema,
   type UserSettings,
@@ -207,6 +211,24 @@ export async function fetchFeed(mode?: FeedMode): Promise<FeedResponse> {
 export async function fetchStory(storyId: string): Promise<StoryDetail> {
   const response = await client.v1.stories[':storyId'].$get({ param: { storyId } });
   return parseResponse(response, storyDetailSchema);
+}
+
+export async function fetchStoryInterpretations(
+  storyId: string,
+): Promise<StoryInterpretationsResponse> {
+  const response = await client.v1.stories[':storyId'].interpretations.$get({
+    param: { storyId },
+  });
+  return parseResponse(response, storyInterpretationsResponseSchema);
+}
+
+export async function fetchIndependentSources(
+  storyId: string,
+): Promise<IndependentSourcesResponse> {
+  const response = await client.v1.stories[':storyId']['independent-sources'].$get({
+    param: { storyId },
+  });
+  return parseResponse(response, independentSourcesResponseSchema);
 }
 
 export async function fetchThread(threadId: string): Promise<ThreadDetail> {

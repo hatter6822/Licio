@@ -36,8 +36,9 @@ type level, runtime, and CI (the no-applause static gate).
 **Current status.**  Workstreams WS-0 (repository foundation), WS-A
 (doctrine and policy), WS-B (design system), WS-C (PWA client
 application), WS-D (identity, accounts, and privacy), WS-E (event
-pipeline and PWAtt), WS-F (ingestion, source model, and search), and
-WS-G (forum and conversation) are **complete**.  WS-D ships the WebAuthn-first/passwordless authentication
+pipeline and PWAtt), WS-F (ingestion, source model, and search),
+WS-G (forum and conversation), and WS-H (core invariant services) are
+**complete**.  WS-D ships the WebAuthn-first/passwordless authentication
 foundation, secure server-side sessions, RBAC + audit log, age gating,
 user-facing privacy controls (settings, DSAR export with an encrypted
 signed-URL archive, and account deletion with a 30-day grace + hard
@@ -108,7 +109,43 @@ recovery + PWA share-target intake, and the 11-mode structured
 composer; it closes the WS-D contribution hooks
 (`anonymizeContributions`, forum-composed `exportContributions`) and
 the WS-E `low_info_reply` classifier + evidence-correlation residuals.
-Workstreams WS-H through WS-P are planned (planning documents
+WS-H ships the eleven invariant services in shadow
+(`docs/invariants/README.md`): the computation platform (the WS-H.1.1c
+envelope on every `invariant_outputs` row, per-type score-vector zod
+validation before insert, eleven validated invariant cards, the
+fallback execution wrapper whose degraded outputs ranking treats as
+ABSENT — proven with all eleven failing, the append-only WS-H.1.2e
+promotion gate with the always-available demotion kill switch, the
+lease-guarded hourly batch tier with bounded concurrency, uniform
+health metrics, and the CI + nightly regression/drift harness over
+deterministic synthetic datasets); MERI (exact partition-matroid rank
+over exact-URL/near-dup/lineage/evidence classes, §7.5 gains, the
+similarity fallback flagged MATROID_FALLBACK, the WS-E redundancy hook
+closed); MFCI (the Markov-basis Metropolis–Hastings fiber test with
+the add-one conditional p-value over account-age-bucketed tables,
+volume-conditioned cheap statistics with versioned null calibrations,
+identifier-free analyst cases whose clearing lifts safety freezes, the
+WS-E mfci hook closed); GWEI (entropic-regularized Gromov–Wasserstein
+upper bounds with seed/regularization stability intervals, the seven
+§9.4 metrics, k-anonymity suppression, the release-gate decision, the
+parity-statements-only transparency export); SCOI (sheaf Dirichlet
+energy over embedding-captured lens interpretations, context states
+where weaponized REQUIRES a safety signal, the H¹ structural
+diagnostic); PHI (orthogonal transports from embedding-derived frames,
+gauge-invariant holonomy scores with the near-π fallback, the
+conjugation verifier + output-boundary scan, privacy-preserving
+session sequences — topic-cluster ids + timing only, TTL'd, capped);
+the six supporting invariants (Hodge Helmholtz decomposition with
+HarmfulTensionRisk ≡ 0 absent hostility, tropical cascade timing,
+Burau-bounded braid entropy, Reeb join/split landscapes with fragile
+saddles, CID over verified permutation groups, depth-3 path
+signatures); the steward/analyst admin surface; the public
+interpretation/lineage reads; and the client surfaces (exposure
+labels, the independent-sources drawer, "Where interpretations
+differ", the composer context warning, the narrow-loop wellbeing
+prompt, PHI-4 reset/reduce-personalization controls, the per-topic
+repeats preference).
+Workstreams WS-I through WS-P are planned (planning documents
 exist under `docs/planning/`; implementation not yet started).  See
 "Implementation roadmap" below for the full status table.
 
@@ -236,7 +273,9 @@ licio/
 │   │       │   ├── composer/            -- 11-mode ParticipationComposer + shared-schema
 │   │       │   │                           payload builder, VoiceDictation (WS-G.3)
 │   │       │   ├── feed/                -- FeedModeSwitcher, DiminishingReturnsPrompt
-│   │       │   ├── story/               -- StoryCard, ContextCard, RatingLabel
+│   │       │   ├── story/               -- StoryCard, ContextCard, RatingLabel,
+│   │       │   │                           ExposureLabel, IndependentSourcesDrawer,
+│   │       │   │                           WhereInterpretationsDiffer (WS-H)
 │   │       │   ├── thread/              -- ThreadBranchNav
 │   │       │   ├── ugc/                 -- UgcBody (THE sanctioned UGC sink, WS-G.4.2b)
 │   │       │   │                           + LinkInterstitial (WS-G.4.2c)
@@ -244,7 +283,8 @@ licio/
 │   │       │   ├── profile/             -- SignalLedger
 │   │       │   ├── security/            -- StepUpDialog + step-up retry gate
 │   │       │   ├── i18n/                -- TranslationDisclosure
-│   │       │   └── wellbeing/           -- FocusModeToggle, NotificationBudget
+│   │       │   └── wellbeing/           -- FocusModeToggle, NotificationBudget,
+│   │       │                               NarrowLoopPrompt (WS-H.6.1c)
 │   │       ├── stores/                  -- Zustand state (3 stores)
 │   │       │   ├── auth.ts              --   session + cross-tab logout
 │   │       │   ├── ui.ts                --   theme, motion, feed mode, focus
@@ -288,6 +328,7 @@ licio/
 │   │       │   ├── return-store.ts      --   LRU return persistence
 │   │       │   ├── source-tracker.ts    --   source-open tracking
 │   │       │   ├── caps.ts              --   per-item dwell caps
+│   │       │   ├── topic-loops.ts       --   PHI v0 session topic-loop tracker (WS-H)
 │   │       │   └── runtime.ts           --   runtime signal management
 │   │       ├── security/
 │   │       │   └── trusted-types.ts     --   TT policies (origin comparison)
@@ -329,6 +370,8 @@ licio/
 │           │   ├── events.ts            --   POST /v1/events/attention (WS-E.1.3)
 │           │   ├── stories.ts           --   POST /v1/stories, search, takedowns, reads (WS-F)
 │           │   ├── ingestion-admin.ts   --   /v1/ingestion/admin/* steward surface (WS-F)
+│           │   ├── invariants-admin.ts  --   /v1/invariants/admin/* analyst surface (WS-H)
+│           │   ├── invariants-public.ts --   public SCOI/MERI story reads (WS-H)
 │           │   ├── forum.ts             --   /v1/contributions, threads, summaries,
 │           │   │                             uploads, flags (WS-G §23.2)
 │           │   ├── rooms.ts             --   /v1/rooms/* + lenses + governance (WS-G)
@@ -388,6 +431,17 @@ licio/
 │           │   ├── shadow.ts            --   ranking-boundary shadow guard (WS-E.2.1e)
 │           │   ├── ranking-v0.ts        --   freshness-only ranking (equivalence target)
 │           │   └── scheduler.ts         --   lease-guarded hourly tick
+│           ├── invariants/              -- WS-H invariant platform + services
+│           │   ├── stores.ts            --   promotions/calibrations/runs/cases/sessions
+│           │   ├── config.ts            --   fail-closed invariants.* runtime config
+│           │   ├── cards.ts             --   the eleven validated invariant cards
+│           │   ├── runner.ts            --   fallback wrapper, tiers, health, persistence
+│           │   ├── promotion.ts         --   the WS-H.1.2e shadow-status gate
+│           │   ├── data.ts              --   input assembly from WS-D/E/F/G stores
+│           │   ├── services-impl.ts     --   the eleven InvariantService implementations
+│           │   ├── services.ts          --   container + consumers + WS-E hook closures
+│           │   ├── scheduler.ts         --   lease-guarded batch tier + nightly drift
+│           │   └── drizzle-invariant-stores.ts -- production Postgres adapters (gated)
 │           ├── ingestion/               -- WS-F ingestion, source model, search
 │           │   ├── stores.ts            --   store interfaces + in-memory adapters
 │           │   ├── services.ts          --   injectable container + WS-E router consumers
@@ -466,7 +520,7 @@ licio/
 │   │       │                                 WS-A moderation reason codes)
 │   │       └── env/                     --   environment variable validation
 │   ├── db/                      -- Drizzle ORM schema + migrations
-│   │   ├── drizzle/                     --   generated SQL migrations (WS-D – WS-G)
+│   │   ├── drizzle/                     --   generated SQL migrations (WS-D – WS-H)
 │   │   └── src/
 │   │       ├── schema/                  --   PostgreSQL table definitions
 │   │       │   ├── user.ts              --     users + JSONB + indexes/CHECK (WS-D.1.1)
@@ -475,6 +529,9 @@ licio/
 │   │       │   ├── wallet-auth-credential.ts -- auth-wallet (identity context)
 │   │       │   ├── audit-log.ts         --     append-only audit log
 │   │       │   ├── privacy.ts           --     export_jobs, deletion_requests
+│   │       │   ├── invariants.ts        --     WS-H: promotions (append-only shadow
+│   │       │   │                               status), calibrations, run metadata,
+│   │       │   │                               mfci_cases (analyst queue)
 │   │       │   ├── events.ts            --     WS-E: events (LIST-partitioned by tier),
 │   │       │   │                               attention_aggregates (§22.1), windows,
 │   │       │   │                               invariant_outputs (+shadow), signal ledger,
@@ -537,6 +594,7 @@ licio/
 │   ├── events/                  -- WS-E implementation reference
 │   ├── ingestion/               -- WS-F implementation reference
 │   ├── forum/                   -- WS-G implementation reference
+│   ├── invariants/              -- WS-H implementation reference
 │   └── policy/                  -- 9 policy documents (moderation, signals,
 │                                   privacy, crypto, jurisdiction, transparency)
 └── .github/
@@ -718,6 +776,11 @@ foreground agent has already modified the same files.
 - **Git practices:**  One commit per completed work unit.  All
   commits must pass `pnpm typecheck`, `pnpm lint`, and `pnpm test`.
 
+- **Versioning:**  The root `package.json` version is the project
+  version (workspace packages stay private at `0.0.0`).  EVERY pull
+  request bumps the PATCH version unless otherwise directed; minor or
+  major bumps only when explicitly requested.
+
 - **Commit message convention:**
 
   ```
@@ -898,7 +961,7 @@ Status:
 | WS-E | Event pipeline and PWAtt scoring | Complete |
 | WS-F | Ingestion, source model, and search | Complete |
 | WS-G | Forum and conversation | Complete |
-| WS-H | Invariant services (MERI, MFCI, SCOI, GWEI, PHI) | Planned |
+| WS-H | Invariant services (MERI, MFCI, SCOI, GWEI, PHI) | Complete |
 | WS-I | Ranking and distribution | Planned |
 | WS-J | Trust and safety | Planned |
 | WS-K | AI governance | Planned |
@@ -971,21 +1034,22 @@ file counts at current state:
 
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
-| apps/web | ~104 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~70 (incl. WS-D identity + WS-E pipeline + WS-F ingestion + WS-G forum) | node | `pnpm --filter api test` |
-| packages/shared | ~19 (incl. WS-D–WS-G schemas, URL/lifecycle utils, the UGC pipeline + XSS-vector suite) | node | `pnpm --filter @licio/shared test` |
+| apps/web | ~110 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
+| apps/api | ~76 (incl. WS-D identity + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants) | node | `pnpm --filter api test` |
+| packages/shared | ~19 (incl. WS-D–WS-H schemas, URL/lifecycle utils, the UGC pipeline + XSS-vector suite) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~4 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |
-| packages/invariants | ~8 (incl. PWAtt/MinHash/freshness math + property tests) | node | `pnpm --filter @licio/invariants test` |
+| packages/invariants | ~18 (PWAtt/MinHash/freshness + the WS-H invariant mathematics: matroid/fiber/GW/sheaf/holonomy/supporting property suites + the regression harness) | node | `pnpm --filter @licio/invariants test` |
 | scripts | ~4 | node | via root `pnpm test` (policy project) |
 
-WS-D, WS-E, WS-F, and WS-G add **gated** integration tests (Postgres + Redis)
+WS-D, WS-E, WS-F, WS-G, and WS-H add **gated** integration tests (Postgres + Redis)
 that run only when `DATABASE_URL` / `REDIS_URL` are set.  CI's Test &
 Coverage job provisions `pgvector/pgvector:pg16` and `redis:7` service
 containers, so the gated suites RUN in CI; without the env vars (e.g. a bare
 local `pnpm test`) they skip.  The WS-F chain requires a pgvector-enabled
 Postgres (docker-compose ships `pgvector/pgvector:pg16`).  See
 `docs/identity/README.md`, `docs/events/README.md`,
-`docs/ingestion/README.md`, and `docs/forum/README.md`.
+`docs/ingestion/README.md`, `docs/forum/README.md`, and
+`docs/invariants/README.md`.
 
 Only monotonic growth is enforced — no global gate pins the count.
 
@@ -1174,9 +1238,34 @@ through ONE sanctioned UGC sink.
 | Real-browser E2E | `ugc-safety.spec.ts` + `composer.spec.ts` against the preview's ENFORCING CSP in Chromium/Firefox/WebKit: the `licio-ugc` policy under real `require-trusted-types-for`, inert attack fixtures, interstitial interception + safe-link popup under intact activation, the 11-mode chooser with shared-schema validation + ack-gating, axe on every state (fixtures live in the styleguide workbench) | Complete |
 | Residuals | WS-H Hodge/SCOI consumption of branch structure behind existing hooks; WS-I ranking consumption of health metrics (descriptive until then); WS-J queue ownership + the shared malware intelligence behind the `UploadScanner` seam; WS-K governed summary generation (the automated_draft layer stays heuristic until then); authenticated thread/submit browser E2E with a BFF-in-the-loop harness (WS-P — the composer + UGC sink are already real-browser covered via the workbench); cross-room bridge tooling (WS-I/WS-J) | Tracked elsewhere |
 
-### WS-H through WS-P
+### WS-H: Core invariant services
 
-Plans: `docs/planning/09-invariant-services.md` through
+Plan: `docs/planning/09-invariant-services.md`
+Documentation: `docs/invariants/README.md`
+
+Complete.  All eleven invariants run **shadow-only** (SPEC §30.4 / the
+M2 "no hidden sanctions" gate): every output is stored observational,
+the ranking boundary independently rejects shadow rows, and the ONLY
+path to any effect is the WS-H.1.2e promotion gate (append-only
+records, checklist-validated one-step promotions, always-available
+owner-signed demotion).
+
+| Sub-area | Key surface | Status |
+|----------|-------------|--------|
+| Platform | `invariant_outputs` envelope (coverage, registry-validated reason codes, fallback flag, version metadata, jsonb time_window + the §22.1/WS-H.1.1a index set and closed type/target CHECK vocabularies), per-type score-vector zod validation before insert, eleven validated invariant cards, the fallback execution wrapper (timeout/error → degraded reason-coded envelope + gap log/metric/run row; ranking proceeds with features OMITTED — proven with all eleven failing), compute tiers under the `invariants_hourly` lease with bounded batch concurrency, uniform health metrics, fail-closed `invariants.*` runtime config (write-time 422), CI + nightly regression/drift over deterministic synthetic datasets with pinned baselines | Complete |
+| MERI | Exact partition-matroid rank (exact-URL > near-dup > source-lineage > evidence classes; monotone/submodular property-tested; greedy = brute-force optimum), §7.5 marginal gains + §7.4 dimensions, MinHash/LSH + confirmed-syndication/ownership assembly, similarity fallback flagged `MATROID_FALLBACK`, WS-H.2.4a coverage/confidence, the WS-E `hooks.redundancy` closure, exposure labels + the independent-sources drawer + the per-topic repeats preference | Complete |
+| MFCI | Five-axis tables with the account-age bucket as the privacy-preserving group axis, the degree-2 Markov basis (connectivity brute-force-verified) driving the MH fiber sampler (stationary = the generalized hypergeometric; margins/nonnegativity invariant-tested), the add-one p̂ (`MFCI = −log p̂`, always finite), synchrony/target-concentration/phrase-repetition statistics, volume-conditioned cheap statistics + versioned null calibrations (`NULL_CALIBRATION_STALE`), risk states with held downward transitions, identifier-free `mfci_cases` whose clearing lifts the safety freeze (WS-H.3.3d), the WS-E `hooks.mfci` closure, MFCI-4 margin refs + MFCI-5 appeal summaries | Complete |
+| GWEI | Locale/tenure cohorts from owned attention aggregates (user-provided metadata only), log-domain Sinkhorn + coupling rounding so every reported GW₂ is an exact-marginal upper bound with a seed/regularization stability interval, the seven §9.4 metrics, k-anonymity suppression (`SUPPRESSED_K_ANONYMITY`, distinguishable from zero) before ANY surface, the release-gate decision (override requires a documented owner), the parity-statements-only transparency export | Complete |
+| SCOI | Embedding-captured lens interpretations (unit ball validated), identity restriction maps (v1 configuration, documented), normalized Dirichlet energy ∈ [0, 1] with the attained per-overlap normalizer, PSD Laplacian property-tested, context states (weaponized REQUIRES a safety signal), §10.6 ranking actions as promotion-gated descriptions, the H¹ structural diagnostic + harmonic-representative norm (v2, batch-only), "Where interpretations differ" + the needs-context gate + the composer warning | Complete |
+| PHI | Privacy-preserving session sequences (opaque digest keys; topic-cluster ids + timestamps ONLY; TTL'd; capped) fed by the durable attention consumer, v0 narrow-loop/compulsive detection (same pure math client + server), embedding-derived orthonormal frames → exact orthogonal transports → gauge-invariant holonomy scores (spectral extraction; near-π/det = −1 `MATRIX_LOG_FALLBACK`), the conjugation verifier + output-boundary scan (frame-dependent fields throw), fail-closed sensitive/minor strictness, the non-blocking narrow-loop prompt + PHI-4 reset/reduce controls | Complete |
+| Supporting | Hodge Helmholtz decomposition (CG on consistent normal equations; exact range orthogonality; `HarmfulTensionRisk ≡ 0` absent hostility — the WS-J seam defaults to 0), tropical min-plus earliest arrival + synchronized-cascade detection (documented arrival-profile rank), braid words from activity rankings with the Burau-at-−1 entropy bound (figure-eight anchor; braid relation verified), Reeb join/split landscapes with fragile-saddle bridge prompts, CID over verified permutation groups (v0 ranking certified attribute-blind; gate blocks above threshold), depth-3 path signatures via Chen (exactness tested) with session-health classification | Complete |
+| Surfaces | `/v1/invariants/admin/*` (steward + MFA): health, reason-code-filterable outputs, WS-H.1.1b version comparison, the observational MFCI dashboard + case resolution, GWEI dashboards + transparency export, promotions, validated config writes, on-demand regression; public visibility-gated interpretation/lineage reads (stored shadow outputs only — no compute on page load) | Complete |
+| Production bindings | Drizzle adapters for promotions/calibrations/run-metadata/mfci-cases behind the in-memory interfaces; gated integration tests run the real migration chain including a live-Postgres proof of the 0009 `time_window` text→jsonb USING conversion; the boot path swaps adapters, registers the durable consumers (`invariant-phi-sessions`, `invariant-mfci-intake`), and starts the lease-guarded scheduler | Complete |
+| Residuals | WS-I consumes promoted effects at the ranking boundary (until then: computed and logged only); WS-J owns queue UX, the hostility signal behind the Hodge seam, and the appeals flow over `appeal_summary`; WS-K owns learned restriction maps, framing/misleading classifiers, governed summaries; WS-P wires the GWEI/CID gates into the experiment framework and the transparency pipeline | Tracked elsewhere |
+
+### WS-I through WS-P
+
+Plans: `docs/planning/10-ranking-and-distribution.md` through
 `docs/planning/17-experimentation-and-launch.md`
 
 Not yet started.  Read the relevant planning document and the

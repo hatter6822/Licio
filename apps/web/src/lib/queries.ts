@@ -24,7 +24,12 @@ import {
 } from '../offline/read-through.js';
 import * as api from './api.js';
 import { fetchCredentials, fetchSecurityActivity, fetchSessions } from './auth-api.js';
-import { fetchDeletionStatus, fetchExportStatus, patchPrivacySettings } from './privacy-api.js';
+import {
+  fetchDeletionStatus,
+  fetchExportStatus,
+  fetchPrivacySettings,
+  patchPrivacySettings,
+} from './privacy-api.js';
 import { cachePolicy } from './query-client.js';
 import { queryKeys } from './query-keys.js';
 
@@ -46,9 +51,30 @@ export function useStoryQuery(storyId: string) {
   });
 }
 
-export function useThreadQuery(threadId: string) {
+/** SCOI "Where interpretations differ" + the Needs-Context gate (WS-H.4.3a/b). */
+export function useStoryInterpretationsQuery(storyId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.storyInterpretations(storyId),
+    queryFn: () => api.fetchStoryInterpretations(storyId),
+    enabled: enabled && storyId.length > 0,
+    ...cachePolicy.feed,
+  });
+}
+
+/** MERI independent-sources drawer data (WS-H.2.3b). */
+export function useIndependentSourcesQuery(storyId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.independentSources(storyId),
+    queryFn: () => api.fetchIndependentSources(storyId),
+    enabled,
+    ...cachePolicy.feed,
+  });
+}
+
+export function useThreadQuery(threadId: string, enabled = true) {
   return useQuery({
     queryKey: queryKeys.thread(threadId),
+    enabled: enabled && threadId.length > 0,
     // Write-through: a successful fetch refreshes the offline thread summary
     // (read back by the thread page when the network is unavailable, WS-C.2.2a).
     queryFn: async () => {
@@ -283,12 +309,34 @@ export function useDeletionStatusQuery() {
 }
 
 /**
+ * Read the DURABLE privacy + personalization settings. Consumers that
+ * patch nested MAPS (e.g. `topic_repeat_preference`) MUST read first and
+ * send the merged map: the server PATCH replaces each top-level
+ * personalization key wholesale (replace semantics keep deletion
+ * expressible), so a blind single-entry write would wipe the rest.
+ */
+export function useDurablePrivacySettingsQuery(enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.durablePrivacySettings(),
+    queryFn: fetchPrivacySettings,
+    enabled,
+  });
+}
+
+/**
  * Patch the DURABLE (server-enforced) privacy settings — the §19.2
  * identification floor, retention preference, and sharing toggles behind
  * `/v1/privacy/settings`. Distinct from `useUpdateSettingsMutation` (the
  * device-local UserSettings sync): this one changes what the ingestion
- * boundary enforces.
+ * boundary enforces. Invalidates the durable-settings read on success so
+ * map-merging consumers never write over a stale snapshot twice.
  */
 export function useUpdateDurablePrivacyMutation() {
-  return useMutation({ mutationFn: patchPrivacySettings });
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: patchPrivacySettings,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.durablePrivacySettings() });
+    },
+  });
 }

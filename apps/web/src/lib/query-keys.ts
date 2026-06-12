@@ -8,6 +8,8 @@ import type { BranchId, FeedMode } from '@licio/shared';
 export const queryKeys = {
   feed: (mode: FeedMode = 'balanced') => ['feed', mode] as const,
   story: (storyId: string) => ['story', storyId] as const,
+  storyInterpretations: (storyId: string) => ['story', storyId, 'interpretations'] as const,
+  independentSources: (storyId: string) => ['story', storyId, 'independent-sources'] as const,
   thread: (threadId: string) => ['thread', threadId] as const,
   threadBranch: (threadId: string, branch: BranchId) =>
     ['thread', threadId, 'branch', branch] as const,
@@ -25,4 +27,5 @@ export const queryKeys = {
   securityActivity: () => ['security-activity'] as const,
   exportStatus: (jobId: string) => ['export-status', jobId] as const,
   deletionStatus: () => ['deletion-status'] as const,
+  durablePrivacySettings: () => ['durable-privacy-settings'] as const,
 } as const;

@@ -35,6 +35,7 @@ import {
   type EventStore,
   type InvariantOutputRecord,
   type InvariantOutputStore,
+  type InvariantTimeWindow,
   type ItemSafetyRecord,
   type ItemSafetyStateStore,
   type NewStoredEvent,
@@ -583,6 +584,10 @@ export class DrizzleInvariantOutputStore implements InvariantOutputStore {
       scoreVector: row.scoreVector,
       explanationSummary: row.explanationSummary,
       confidence: row.confidence,
+      coverage: row.coverage,
+      reasonCodes: row.reasonCodes,
+      fallbackUsed: row.fallbackUsed,
+      versionMetadata: row.versionMetadata ?? null,
       shadowMode: row.shadowMode,
       createdAt: iso(row.createdAt),
     };
@@ -598,6 +603,10 @@ export class DrizzleInvariantOutputStore implements InvariantOutputStore {
       scoreVector: row.scoreVector,
       explanationSummary: row.explanationSummary,
       confidence: row.confidence,
+      coverage: row.coverage,
+      reasonCodes: row.reasonCodes,
+      fallbackUsed: row.fallbackUsed,
+      versionMetadata: row.versionMetadata,
       shadowMode: row.shadowMode,
       createdAt: new Date(row.createdAt),
     };
@@ -634,9 +643,37 @@ export class DrizzleInvariantOutputStore implements InvariantOutputStore {
           eq(invariantOutputs.targetId, targetId),
         ),
       )
-      .orderBy(desc(invariantOutputs.createdAt), desc(invariantOutputs.timeWindow))
+      .orderBy(desc(invariantOutputs.createdAt), sql`${invariantOutputs.timeWindow}->>'start' DESC`)
       .limit(1);
     return row ? this.#toRecord(row) : null;
+  }
+
+  async listForVersionComparison(
+    invariantType: string,
+    versionA: string,
+    versionB: string,
+    window?: InvariantTimeWindow,
+  ): Promise<InvariantOutputRecord[]> {
+    const conditions = [
+      eq(invariantOutputs.invariantType, invariantType),
+      or(eq(invariantOutputs.version, versionA), eq(invariantOutputs.version, versionB)),
+    ];
+    if (window) {
+      conditions.push(
+        sql`${invariantOutputs.timeWindow}->>'start' >= ${window.start}`,
+        sql`${invariantOutputs.timeWindow}->>'end' <= ${window.end}`,
+      );
+    }
+    const rows = await this.#db
+      .select()
+      .from(invariantOutputs)
+      .where(and(...conditions))
+      .orderBy(
+        asc(invariantOutputs.targetId),
+        sql`${invariantOutputs.timeWindow}->>'start' ASC`,
+        asc(invariantOutputs.version),
+      );
+    return rows.map((row) => this.#toRecord(row));
   }
 
   async listAll(): Promise<InvariantOutputRecord[]> {
