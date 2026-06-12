@@ -377,12 +377,18 @@ reach the client bundle (a guard rejects anything else).
 | `VITE_API_URL` | `http://localhost:3001` | API base URL the client calls for `/v1/*`. Set this so the web app reaches the API |
 | `VITE_APP_URL` | `http://localhost:5173` | The app's own public URL |
 
-> In dev, the Vite server also proxies same-origin `/api/*` (e.g. the
-> CSRF-token endpoint) to `http://localhost:3001`, while `/v1/*` requests
-> go to `VITE_API_URL` cross-origin — allowed because `CORS_ORIGIN` matches
-> the web origin. Keep `CORS_ORIGIN`, `VITE_API_URL`, and `VITE_APP_URL`
-> consistent (all `http://` for plain dev; all `https://` if you enable
-> `DEV_HTTPS`, Section 10).
+> In dev, the Vite server proxies same-origin `/api/*` (e.g. the CSRF-token
+> endpoint) to `http://localhost:3001`, and the typed API client sends
+> `/v1/*` to `VITE_API_URL` cross-origin — allowed because `CORS_ORIGIN`
+> matches the web origin. **Caveat:** a few client modules fetch `/v1/*`
+> *same-origin* instead of through the API client (e.g. the link-safety
+> blocklist in `apps/web/src/lib/link-safety.ts`), so they bypass
+> `VITE_API_URL` and the dev proxy doesn't forward `/v1`. If you exercise
+> those paths locally, add a `/v1` entry to the `server.proxy` block in
+> `apps/web/vite.config.ts` (mirroring `/api`) so they reach the API too.
+> Keep `CORS_ORIGIN`, `VITE_API_URL`, and `VITE_APP_URL` consistent (all
+> `http://` for plain dev; all `https://` if you enable `DEV_HTTPS`,
+> Section 10).
 
 ### 7.4 Optional / feature-gating variables
 
@@ -463,6 +469,14 @@ DATABASE_URL=postgresql://licio:licio_dev@localhost:5432/licio_dev pnpm db:migra
 > **fish shell:** `set -a` / `.` are bash syntax. Use a loop such as
 > `for line in (cat .env | grep -v '^#' | grep '='); set -x (string split -m1 = $line); end`,
 > or use `direnv`.
+
+> **Quote JSON / special values.** When you source `.env` (any shell), a value
+> containing double quotes, spaces, or shell metacharacters must be
+> **single-quoted** or the shell mangles it. This matters for the JSON-valued
+> `CHAIN_RPC_URLS` (Section 15): write `CHAIN_RPC_URLS='{"1":"https://..."}'`,
+> not bare `{"1":"https://..."}` — without the single quotes the shell strips
+> the inner `"`, and the value parses as malformed (silently disabling the
+> feature).
 
 ### 7.8 Never commit secrets
 
@@ -617,7 +631,10 @@ source of truth; this is the working subset.
 | `pnpm db:push` | Push schema directly (development only) |
 | `pnpm clean` | Remove build artifacts, coverage, test output, caches |
 
-**Static / security / doctrine gates** (each is also a CI check):
+**Static / security / doctrine gates** — run these locally before pushing.
+CI runs all of them on every PR **except `pnpm check:no-applause`**, which is
+not currently wired into `ci.yml`; since it guards a core product invariant
+(no like/vote/karma/reaction affordances), run it locally:
 
 | Command | Fails if… |
 |---------|-----------|
@@ -702,8 +719,12 @@ pnpm test:e2e         # or: pnpm --filter web test:e2e
 ```
 
 > If the managed browser download is blocked in your environment, set
-> `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to a local Chromium binary (the config
-> honors it; unset in CI).
+> `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to a local Chromium binary. The config
+> applies that override **only to the `chromium` project**, while
+> `pnpm test:e2e` also runs the Firefox and WebKit projects (which still
+> need their own managed browsers). In a download-blocked environment, run
+> just Chromium: `pnpm --filter web exec playwright test --project=chromium`.
+> (`PLAYWRIGHT_CHROMIUM_EXECUTABLE` is unset in CI, which installs all three.)
 
 ### The ranking-neutrality gate
 
@@ -775,7 +796,7 @@ The three commands and when to use them:
 
 | Command | Use |
 |---------|-----|
-| `pnpm db:generate` | After editing a schema file — diffs the schema against the existing migrations and writes a **new** SQL migration. Commit the generated file |
+| `pnpm db:generate` | After editing a schema file — diffs the schema against existing migrations and writes a **new** SQL migration plus an updated `drizzle/meta/` snapshot. Commit both (see the note below) |
 | `pnpm db:migrate` | Apply pending migrations to the database `DATABASE_URL` points at (the normal "catch up my DB" command) |
 | `pnpm db:push` | **Development only** — push the schema directly without a migration file. Handy for rapid local iteration; never use against a shared/production database |
 
@@ -787,6 +808,14 @@ pnpm db:generate            # create the migration
 pnpm db:migrate             # apply it locally
 pnpm --filter @licio/db test    # run the db project's tests
 ```
+
+> **Commit the meta snapshot too.** `db:generate` also writes/updates
+> `packages/db/drizzle/meta/<NNNN>_snapshot.json` and `_journal.json` —
+> Drizzle's bookkeeping for the next diff. The existing snapshots are
+> tracked, but `.gitignore` excludes `drizzle/meta/`, so a **new** snapshot
+> is not staged by a plain `git add`. Force-add it alongside the SQL:
+> `git add -f packages/db/drizzle/meta/<NNNN>_snapshot.json packages/db/drizzle/meta/_journal.json`.
+> Omitting the snapshot breaks later migration generation.
 
 All queries in the codebase use Drizzle's parameterized queries — never
 string-concatenated SQL.
@@ -816,9 +845,12 @@ never added to the client bundle. When unset, push is simply disabled.
 
 `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`,
 `S3_SECRET_ACCESS_KEY` (and optional `S3_PREFIX`). Stores DSAR export
-archives (AWS S3 / Cloudflare R2 / MinIO). Archives are encrypted
-client-side regardless. Unset → in-memory store (dev/CI; archives don't
-survive a restart, which production warns about).
+archives (AWS S3 / Cloudflare R2 / MinIO). The API seals each archive with
+SecretBox (AES-256-GCM) **before** writing it to the bucket, so object
+storage only ever holds ciphertext — this is application-side encryption
+before upload (done by the API, which sees the plaintext while assembling
+the export), **not** browser/end-to-end encryption. Unset → in-memory store
+(dev/CI; archives don't survive a restart, which production warns about).
 
 ### Email delivery (`SES_*`)
 
@@ -840,9 +872,15 @@ configured.
 
 ### Contract-wallet RPC (`CHAIN_RPC_URLS`)
 
-A JSON map of chain id → RPC URL, e.g.
-`{"1":"https://...","8453":"https://..."}`, enabling EIP-1271/6492
-contract-wallet sign-in verification. Unset → EOA wallet sign-in only.
+A JSON map of chain id → RPC URL, enabling EIP-1271/6492 contract-wallet
+sign-in verification. Unset → EOA wallet sign-in only. When sourcing `.env`
+with `set -a` (Section 7.7), **single-quote** the JSON so the shell preserves
+the embedded double quotes — otherwise the value parses as malformed and the
+RPC map is silently disabled:
+
+```sh
+CHAIN_RPC_URLS='{"1":"https://...","8453":"https://..."}'
+```
 
 ---
 
