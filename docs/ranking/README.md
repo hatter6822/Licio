@@ -118,12 +118,28 @@ derived from it — a sensitive topic always selects the conservative
 profile); `GET /v1/rooms/:roomId/feed` serves the ROOM surface, gated by
 the WS-G content-visibility bar (`roomContentVisibleToUser`) BEFORE the
 service runs — restricted/expert-led rooms read 404 (never 403) for
-signed-out users and pending applicants. The pipeline serves whenever any
-real story exists; with an EMPTY store (fresh dev boot, contract tests) the
-legacy WS-C demo fixture serves unchanged — clearly fixture data, outside
-the pipeline, no decision log. Feeds are public; a valid session
-personalizes them (optional session resolution degrades to anonymous on
-any failure, never to an error).
+signed-out users and pending applicants. The same bar also holds on the
+DISTRIBUTION side: every pool is filtered through
+`roomContentVisibleToUser` per distinct room (batched; unknown rooms fail
+closed), so restricted-room content never leaks into public front-page or
+topic feeds either. The pipeline serves whenever any real story exists;
+with an EMPTY store (fresh dev boot, contract tests) the legacy WS-C demo
+fixture serves unchanged — clearly fixture data, outside the pipeline, no
+decision log. Feeds are public; a valid session personalizes them
+(optional session resolution degrades to anonymous on any failure, never
+to an error).
+
+**Pagination (seen-aware re-rank).** Every feed surface paginates with
+`?cursor=<previous page's request_id>`: the next page re-runs the FULL
+pipeline excluding everything that page chain already served (each
+decision log links its `parent_request_id`; the walk is bounded at 20
+pages). Each page is its own replayable decision; `nextCursor` is the
+current request id while unserved feasible items remain, null when the
+feed is exhausted. Ordering may shift between pages as live signals
+update — honest, since ranking is live. Unknown or retention-swept
+cursors serve the first page (clients recover, never an error), and the
+chronological fallback paginates with the same semantics, so deep scroll
+keeps working while ranking is paused.
 
 ## Candidate generation (WS-I.1)
 
@@ -268,7 +284,9 @@ byte-identical output.
 
 ## Decision logs and replay (WS-I.2.5)
 
-One `RankingDecisionLog` per served request: `request_id`, the anonymized
+One `RankingDecisionLog` per served request: `request_id` (+
+`parent_request_id` linking the pagination chain — null on first pages,
+defaulted so pre-pagination logs parse), the anonymized
 `user_privacy_bucket` (a 256-cohort keyed hash, shaped `bucket:<2 hex>` or
 `anonymous`; the zod refinement AND a db CHECK reject identifier-shaped
 values), candidate/selected ids, full per-selected-item score and penalty
@@ -427,7 +445,7 @@ feeding the bridge/expert-queue dashboard), the
 | Pure domain (7 files, 124 tests) | `packages/ranking/src/__tests__/` | Denylist patterns (nested/camel/case) + the versioned-artifact pinning, strict schemas + field-name snapshot, §5.5 guardrail property fuzzing + baseline-weight validation + legacy-snapshot defaults, §5.4 exact arithmetic + configurable baseline weights, penalty derivations (tension-without-hostility ≡ 0, sensitive strictness, negative totals, shadow non-application, inclusive-tie enforcement), constraint ladders, dedup/balancing properties, template rendering + prohibited-language structural block + the x-pseudo localization proof, pipeline determinism, replay diff |
 | Candidates | `apps/api/src/__tests__/ranking-candidates.test.ts` | All eight organic retrievers against seeded stores, quota reservation/degradation + JOINT class protection, orchestrator merge/failure-isolation/budget, the closed 9-origin registry |
 | Pipeline | `apps/api/src/__tests__/ranking-pipeline.test.ts` | Feature store semantics, assembly provenance (incl. pre-lift shadow rows staying powerless), the real-time consumer, the non-overridable safety filter, end-to-end serving (ranked + every fallback reason), replay exactness/pinning/diffs, config, the admin surface, the scheduler |
-| Surfaces | `apps/api/src/__tests__/ranking-surfaces.test.ts` | The room feed route (WS-G visibility 404s, room-scoped pool, REAL lens balancing pinned + replayed), the topic surface (scoping + sensitivity-driven profile), the wire fields (context_card, more_on_this_story), GWEI gate semantics (window, suppression, TTL cache, owner override), the MFCI intake-path refresh, near-duplicate CHAIN clustering (exact hand-crafted signatures), replay backward-compatibility for pre-baseline_weights logs, /v1/feed stability under the kill switch |
+| Surfaces | `apps/api/src/__tests__/ranking-surfaces.test.ts` | The room feed route (WS-G visibility 404s, room-scoped pool, REAL lens balancing pinned + replayed), the distribution-side room-visibility bar (restricted content never on public feeds), seen-aware pagination (chain coverage/no-duplicates/replay, unknown-cursor recovery, fallback + room-route paging), the topic surface (scoping + sensitivity-driven profile), the wire fields (context_card, more_on_this_story), GWEI gate semantics (window, suppression, TTL cache, owner override), the MFCI intake-path refresh at the 100-target bound, audit-write outage resilience, near-duplicate CHAIN clustering (exact hand-crafted signatures), replay backward-compatibility for pre-baseline_weights logs, /v1/feed stability under the kill switch |
 | Branch edges | `apps/api/src/__tests__/ranking-branches.test.ts` | Audit-dimension queries, per-key config, MERI/tropical/cluster joins, PHI/GWEI helpers, lease behavior, mapping variants, fail-closed paths |
 | Neutrality | `apps/api/src/__tests__/ranking-neutrality.test.ts` | The ten WS-I.3 tests |
 | Gated integration | `apps/api/src/__tests__/ranking-integration.test.ts` | Drizzle adapters against the REAL migration chain (PK-collision concurrency, jsonb audit-dimension queries, retention sweep, the privacy-bucket CHECK, DISTINCT ON `getLatestMany`, by-timestamp `getAt`, TRUE keyset pagination with same-timestamp tie-breaks, `listByTypeSince`, bulk safety/story/thread reads); runs in CI's service containers |

@@ -59,6 +59,7 @@ function vectorOf(itemId: string, revision: number): FeatureVector {
 function logOf(requestId: string, timestampIso: string): RankingDecisionLog {
   return {
     request_id: requestId,
+    parent_request_id: null,
     surface: 'front_page',
     user_privacy_bucket: 'bucket:1f',
     candidate_ids: [randomUUID()],

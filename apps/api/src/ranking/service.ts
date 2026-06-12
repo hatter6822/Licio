@@ -60,6 +60,7 @@ import {
   feedItemSchema,
   rankingDecisionLoggedEventSchema,
   TOPIC_REGISTRY,
+  uuidSchema,
 } from '@licio/shared';
 import type { NewStoredEvent } from '../events/stores.js';
 import { roomContentVisibleToUser } from '../forum/rooms.js';
@@ -96,12 +97,51 @@ export interface FeedServeRequest {
   /** The topic a `topic`-surface request is scoped to (`?topic=`). */
   surfaceTopicId: string | null;
   mode: FeedMode | undefined;
+  /** SEEN-AWARE pagination cursor: the previous page's request id. The next
+   *  page re-runs the pipeline excluding everything that page chain already
+   *  served. Absent/unknown/expired cursors serve the first page (clients
+   *  recover gracefully — a swept chain is not an error). */
+  cursor?: string | null;
 }
 
 export interface ServedFeed {
   requestId: string;
   items: FeedItem[];
   fallback: boolean;
+  /** Cursor for the NEXT page (this request's id) when unserved feasible
+   *  items remain; null when the feed is exhausted. */
+  nextCursor: string | null;
+}
+
+/** Bounded pagination-chain walk (≈ caps a session at 20 ranked pages). */
+const PAGINATION_CHAIN_CAP = 20;
+
+/**
+ * Resolve a pagination cursor to the EXCLUSION set: the union of selected
+ * ids along the page chain (each log links its parent). Unknown cursors —
+ * garbage, or a chain head swept by §22.4 retention — resolve to an empty
+ * set and a null parent: the request serves the first page, never an
+ * error. Cursors are opaque request ids; resolving one reveals no content
+ * (it only REMOVES items from the requester's own next page).
+ */
+async function resolveCursorExclusions(
+  services: RankingServices,
+  cursor: string | null | undefined,
+): Promise<{ excluded: Set<string>; parentRequestId: string | null }> {
+  const excluded = new Set<string>();
+  if (cursor === null || cursor === undefined || !uuidSchema.safeParse(cursor).success) {
+    return { excluded, parentRequestId: null };
+  }
+  let parentRequestId: string | null = null;
+  let current: string | null = cursor;
+  for (let hop = 0; hop < PAGINATION_CHAIN_CAP && current !== null; hop += 1) {
+    const log: RankingDecisionLog | null = await services.decisionLogs.getByRequestId(current);
+    if (log === null) break; // swept or unknown: exclude what still resolves
+    if (hop === 0) parentRequestId = log.request_id;
+    for (const itemId of log.selected_ids) excluded.add(itemId);
+    current = log.parent_request_id;
+  }
+  return { excluded, parentRequestId };
 }
 
 /** Request freshness class from the pool's median age (deterministic). */
@@ -498,6 +538,17 @@ export async function serveFeed(
   }
   surfacePool = await filterByRoomVisibility(services, surfacePool, request.userId, requestId);
 
+  // Seen-aware pagination: items the cursor's page chain already served
+  // leave the pool BEFORE profile selection and the safety filter, so the
+  // next page is a fresh, fully-pipelined ranking over the remainder.
+  const { excluded: pageExcluded, parentRequestId } = await resolveCursorExclusions(
+    services,
+    request.cursor,
+  );
+  if (pageExcluded.size > 0) {
+    surfacePool = surfacePool.filter((c) => !pageExcluded.has(c.item_id));
+  }
+
   // Profile selection context: the topic surface derives its sensitivity
   // from the requested topic; jurisdiction stays the WS-N seam (null) and
   // request-level risk the WS-J seam ('normal') — item-level risk is
@@ -568,6 +619,7 @@ export async function serveFeed(
   if (fallbackReason !== null) {
     return serveFallback(services, request, {
       requestId,
+      parentRequestId,
       nowIso,
       bucket,
       profile,
@@ -725,6 +777,7 @@ export async function serveFeed(
   }
   const log = rankingDecisionLogSchema.parse({
     request_id: requestId,
+    parent_request_id: parentRequestId,
     surface: request.surface,
     user_privacy_bucket: bucket,
     candidate_ids: surfacePool.map((c) => c.item_id),
@@ -756,7 +809,11 @@ export async function serveFeed(
   });
   await commitDecision(services, { log }, selectedForEvents, request.surface);
 
-  return { requestId, items, fallback: false };
+  // Seen-aware pagination: more pages exist while UNSERVED feasible items
+  // remain (an empty page never advertises a next page — no client loops).
+  const hasMore =
+    items.length > 0 && safety.feasible.some((candidate) => !servedIds.has(candidate.item_id));
+  return { requestId, items, fallback: false, nextCursor: hasMore ? requestId : null };
 }
 
 async function collectSeen(
@@ -784,6 +841,7 @@ async function evidenceCountOf(services: RankingServices, storyId: string): Prom
 
 interface FallbackArgs {
   requestId: string;
+  parentRequestId: string | null;
   nowIso: string;
   bucket: string;
   profile: RankingProfileConfig;
@@ -826,6 +884,7 @@ async function serveFallback(
   for (const entry of selectedForEvents) explanationIds[entry.itemId] = explanation.templateId;
   const log = rankingDecisionLogSchema.parse({
     request_id: args.requestId,
+    parent_request_id: args.parentRequestId,
     surface: request.surface,
     user_privacy_bucket: args.bucket,
     candidate_ids: [...args.candidateIds],
@@ -853,7 +912,16 @@ async function serveFallback(
     surface: request.surface,
     reason: args.reason,
   });
-  return { requestId: args.requestId, items, fallback: true };
+  // The fallback paginates too (deep scroll keeps working while ranking is
+  // paused): same exclusion semantics, time order, honest reason per page.
+  const hasMore =
+    items.length > 0 && args.feasible.some((candidate) => !servedIds.has(candidate.item_id));
+  return {
+    requestId: args.requestId,
+    items,
+    fallback: true,
+    nextCursor: hasMore ? args.requestId : null,
+  };
 }
 
 export interface ReplayResult {

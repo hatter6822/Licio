@@ -195,6 +195,7 @@ describe.skipIf(!PERF || !DB_URL)(
           const timestamp = new Date(baseMs + i * 1_000).toISOString();
           const log: RankingDecisionLog = {
             request_id: requestId,
+            parent_request_id: null,
             surface: 'front_page',
             user_privacy_bucket: `bucket:${(i % 256).toString(16).padStart(2, '0')}`,
             candidate_ids: [randomUUID()],

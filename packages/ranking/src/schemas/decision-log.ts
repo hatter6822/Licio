@@ -113,6 +113,11 @@ export type ReplayInputs = z.infer<typeof replayInputsSchema>;
 export const rankingDecisionLogSchema = z
   .object({
     request_id: uuid,
+    /** The PREVIOUS page's request id when this decision served a
+     *  seen-aware pagination request (`?cursor=`); null on first pages.
+     *  Links the page chain for exclusion resolution and audit lineage.
+     *  Defaulted so logs written before pagination existed still parse. */
+    parent_request_id: uuid.nullable().default(null),
     surface: rankingSurfaceSchema,
     user_privacy_bucket: userPrivacyBucketSchema,
     /** All candidate ids after retrieval (pre-safety-filter). */

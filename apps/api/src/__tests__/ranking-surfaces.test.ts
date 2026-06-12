@@ -16,7 +16,7 @@ import {
   MINHASH_NUM_HASHES,
   MINHASH_SHINGLE_K,
 } from '@licio/invariants';
-import { rankingDecisionLogSchema } from '@licio/ranking';
+import { EVERGREEN_PROFILE, rankingDecisionLogSchema } from '@licio/ranking';
 import { DEFAULT_ROOM_NOTIFICATION_PREFERENCES, feedResponseSchema } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -580,6 +580,138 @@ describe('MFCI intake-path feature refresh (WS-I.2.1d real-time freshness)', () 
       const stored = await fixture.ranking.featureStore.getLatest(storyId);
       expect(stored?.mfci_risk_state).toBe('elevated');
     }
+  });
+});
+
+describe('seen-aware pagination (the ?cursor= page chain)', () => {
+  /** Shrink the page so a dozen stories paginate (loader floor is 5). */
+  async function fivePerPage(): Promise<void> {
+    await fixture.events.configStore.set('ranking.profiles', {
+      profiles: [{ ...EVERGREEN_PROFILE, page_size: 5 }],
+    });
+    await fixture.ranking.reloadConfig();
+  }
+
+  function feedRequest(cursor: string | null) {
+    return {
+      userId: null,
+      surface: 'front_page' as const,
+      surfaceRoomId: null,
+      surfaceTopicId: null,
+      mode: undefined,
+      cursor,
+    };
+  }
+
+  it('pages cover the pool exactly once; the chain pins parents and replays', async () => {
+    await fivePerPage();
+    const ids = new Set<string>();
+    for (let i = 0; i < 12; i += 1) {
+      const { storyId } = await seedStory(fixture.ingestion, {
+        publishedAt: new Date(Date.now() - i * 3_600_000).toISOString(),
+      });
+      ids.add(storyId);
+    }
+    const pages: Awaited<ReturnType<typeof serveFeed>>[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 10; page += 1) {
+      const served = await serveFeed(fixture.ranking, feedRequest(cursor));
+      pages.push(served);
+      if (served.nextCursor === null) break;
+      cursor = served.nextCursor;
+    }
+    // 12 items at 5 per page ⇒ 3 pages (5 + 5 + 2), then the feed honestly
+    // reports exhaustion.
+    expect(pages.map((p) => p.items.length)).toEqual([5, 5, 2]);
+    expect(pages[0]?.nextCursor).toBe(pages[0]?.requestId);
+    expect(pages[2]?.nextCursor).toBeNull();
+    const collected = pages.flatMap((p) => p.items.map((i) => i.story_id));
+    expect(new Set(collected).size).toBe(12); // complete, no duplicates
+    expect(new Set(collected)).toEqual(ids);
+    // Audit lineage: each page's decision log links its parent…
+    const log2 = await fixture.ranking.decisionLogs.getByRequestId(pages[1]?.requestId as string);
+    const log3 = await fixture.ranking.decisionLogs.getByRequestId(pages[2]?.requestId as string);
+    expect(log2?.parent_request_id).toBe(pages[0]?.requestId);
+    expect(log3?.parent_request_id).toBe(pages[1]?.requestId);
+    expect(
+      (await fixture.ranking.decisionLogs.getByRequestId(pages[0]?.requestId as string))
+        ?.parent_request_id,
+    ).toBeNull();
+    // …and every page is its OWN exactly-replayable decision.
+    const replay = await replayDecision(fixture.ranking, pages[1]?.requestId as string);
+    expect(replay.problems).toEqual([]);
+    expect(replay.match).toBe(true);
+  });
+
+  it('unknown or expired cursors serve the FIRST page, never an error', async () => {
+    const { storyId } = await seedStory(fixture.ingestion);
+    // A cursor whose chain head was swept (or never existed) resolves to an
+    // empty exclusion set — clients recover with a fresh first page.
+    const served = await serveFeed(fixture.ranking, feedRequest(randomUUID()));
+    expect(served.items.map((i) => i.story_id)).toEqual([storyId]);
+    expect(
+      (await fixture.ranking.decisionLogs.getByRequestId(served.requestId))?.parent_request_id,
+    ).toBeNull();
+    // Garbage (non-uuid) cursors through the ROUTE behave the same way.
+    const app = new Hono().route('/v1', createV1Routes());
+    const response = await app.request('/v1/feed?cursor=not-a-request-id');
+    expect(response.status).toBe(200);
+    expect(feedResponseSchema.parse(await response.json()).items).toHaveLength(1);
+  });
+
+  it('the chronological fallback paginates too (deep scroll under the kill switch)', async () => {
+    await fivePerPage();
+    const ordered: string[] = [];
+    for (let i = 0; i < 7; i += 1) {
+      const { storyId } = await seedStory(fixture.ingestion, {
+        publishedAt: new Date(Date.now() - i * 3_600_000).toISOString(),
+      });
+      ordered.push(storyId); // newest first by construction
+    }
+    await engageKillSwitch(
+      fixture.events,
+      {
+        global: true,
+        surfaces: [],
+        profileIds: [],
+        owner: 'oncall',
+        triggerCondition: 'pagination drill',
+        rollbackPath: 'release',
+        reviewDate: new Date().toISOString(),
+      },
+      new Date().toISOString(),
+    );
+    const page1 = await serveFeed(fixture.ranking, feedRequest(null));
+    expect(page1.fallback).toBe(true);
+    expect(page1.items.map((i) => i.story_id)).toEqual(ordered.slice(0, 5));
+    expect(page1.nextCursor).toBe(page1.requestId);
+    const page2 = await serveFeed(fixture.ranking, feedRequest(page1.nextCursor));
+    expect(page2.fallback).toBe(true);
+    expect(page2.items.map((i) => i.story_id)).toEqual(ordered.slice(5));
+    expect(page2.nextCursor).toBeNull();
+  });
+
+  it('the room route honors ?cursor= end to end', async () => {
+    await fivePerPage();
+    const roomId = await insertRoom('public');
+    const inRoom = new Set<string>();
+    for (let i = 0; i < 7; i += 1) {
+      inRoom.add((await seedStory(fixture.ingestion, { roomId })).storyId);
+    }
+    const app = new Hono().route('/v1', createV1Routes());
+    const first = feedResponseSchema.parse(
+      await (await app.request(`/v1/rooms/${roomId}/feed`)).json(),
+    );
+    expect(first.items).toHaveLength(5);
+    expect(first.nextCursor).not.toBeNull();
+    const second = feedResponseSchema.parse(
+      await (await app.request(`/v1/rooms/${roomId}/feed?cursor=${first.nextCursor}`)).json(),
+    );
+    expect(second.items).toHaveLength(2);
+    expect(second.nextCursor).toBeNull();
+    const union = [...first.items, ...second.items].map((i) => i.story_id);
+    expect(new Set(union).size).toBe(7);
+    expect(new Set(union)).toEqual(inRoom);
   });
 });
 

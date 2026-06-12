@@ -230,19 +230,22 @@ export function createV1Routes() {
           return c.json(feedResponseSchema.parse(response));
         }
         const ranking = getRankingServices();
-        const { mode, topic } = c.req.valid('query');
+        const { mode, topic, cursor } = c.req.valid('query');
         // `?topic=` serves the WS-I TOPIC surface: the pool scopes to the
         // topic and the profile selector derives its sensitivity from it.
+        // `?cursor=` is the previous page's request id (seen-aware
+        // pagination); unknown/expired cursors serve the first page.
         const served = await serveFeed(ranking, {
           userId: await resolveOptionalUserId(c.req.header('cookie')),
           surface: topic !== undefined ? 'topic' : 'front_page',
           surfaceRoomId: null,
           surfaceTopicId: topic ?? null,
           mode,
+          cursor: cursor ?? null,
         });
         const response: FeedResponse = {
           items: served.items,
-          nextCursor: null,
+          nextCursor: served.nextCursor,
           request_id: served.requestId,
         };
         return c.json(feedResponseSchema.parse(response));
@@ -259,7 +262,7 @@ export function createV1Routes() {
         zValidator('query', feedQuerySchema),
         async (c) => {
           const { roomId } = c.req.valid('param');
-          const { mode } = c.req.valid('query');
+          const { mode, cursor } = c.req.valid('query');
           const userId = await resolveOptionalUserId(c.req.header('cookie'));
           const forum = getForumServices();
           const room = await forum.rooms.getById(roomId);
@@ -273,10 +276,11 @@ export function createV1Routes() {
             surfaceRoomId: roomId,
             surfaceTopicId: null,
             mode,
+            cursor: cursor ?? null,
           });
           const response: FeedResponse = {
             items: served.items,
-            nextCursor: null,
+            nextCursor: served.nextCursor,
             request_id: served.requestId,
           };
           return c.json(feedResponseSchema.parse(response));
