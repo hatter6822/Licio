@@ -18,6 +18,13 @@ export interface ShareStoryButtonProps {
   url: string;
   /** SCOI needs-context gate from the interpretations read. */
   needsContext: boolean;
+  /**
+   * True while the interpretations read is still in flight: sharing waits
+   * so an early click can never bypass the §10.5 prompt. A FAILED read
+   * enables sharing with needsContext false — the status is unknowable,
+   * and an offline reader must still be able to share.
+   */
+  contextStatusPending?: boolean;
 }
 
 type ShareState = 'idle' | 'prompt' | 'shared' | 'copied';
@@ -38,6 +45,7 @@ export function ShareStoryButton({
   title,
   url,
   needsContext,
+  contextStatusPending = false,
 }: ShareStoryButtonProps): React.ReactElement {
   const t = useT();
   const [state, setState] = useState<ShareState>('idle');
@@ -83,6 +91,7 @@ export function ShareStoryButton({
     <span className="inline-flex items-center gap-2">
       <Button
         variant="secondary"
+        disabled={contextStatusPending}
         onClick={() => {
           if (needsContext) setState('prompt');
           else void share(false);

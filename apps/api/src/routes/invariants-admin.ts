@@ -347,6 +347,23 @@ export function createInvariantsAdminRoutes(
           ? await forum.rooms.stewardRolesFor(thread.roomId, auth.userId)
           : [];
         if (roles.length === 0) return c.json(deny('not_found', 'No such thread'), 404);
+        // The RELATED thread is persisted on the record and surfaces in
+        // ITS thread's reports (listForThread matches both sides), so it
+        // gets the same scope bar as the primary: it must exist and the
+        // actor must steward its room. ONE error shape for missing and
+        // out-of-scope — no existence oracle across rooms.
+        if (body.related_thread_id) {
+          const related = await ingestion.stories.getThreadById(body.related_thread_id);
+          const relatedRoles = related?.roomId
+            ? await forum.rooms.stewardRolesFor(related.roomId, auth.userId)
+            : [];
+          if (!related || relatedRoles.length === 0) {
+            return c.json(
+              deny('invalid_related', 'related_thread_id is not a thread you steward'),
+              422,
+            );
+          }
+        }
         const events = resolveEvents();
         const invariants = resolveInvariants();
         const before = await latestScoiFor(events, thread.storyId);

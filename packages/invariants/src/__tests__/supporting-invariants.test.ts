@@ -267,6 +267,10 @@ describe('Braid agenda dynamics (WS-H.7.3)', () => {
       [1, 0],
       [0, 1],
     ]);
+    // Non-integer positions are refused — a fractional index would write
+    // non-index array properties the product never reads (silent identity).
+    expect(() => burauGeneratorAtMinusOne(4, 0.5, 1)).toThrow(/out of range/);
+    expect(() => burauGeneratorAtMinusOne(4, Number.NaN, 1)).toThrow(/out of range/);
   });
 
   it('the figure-eight braid σ₁σ₂⁻¹ has entropy log((3+√5)/2)', () => {

@@ -219,6 +219,18 @@ export function SettingsPage(): React.ReactElement {
   const setFeedMode = useUIStore((state) => state.setFeedMode);
   const focusMode = useUIStore((state) => state.focusMode);
   const setFocusMode = useUIStore((state) => state.setFocusMode);
+  const authenticated = useAuthStore((state) => state.status === 'authenticated');
+  const updateDurable = useUpdateDurablePrivacyMutation();
+  // WS-H.6.1c-2: feed-mode choices persist across sessions AND devices —
+  // bootstrap re-seeds from the durable settings, so a local-only change
+  // here would be silently undone on the next boot. Best-effort when
+  // signed in; anonymous readers keep the local mode.
+  const applyFeedMode = (mode: Parameters<typeof setFeedMode>[0]): void => {
+    setFeedMode(mode);
+    if (authenticated) {
+      updateDurable.mutate({ personalization_settings: { feed_mode: mode } });
+    }
+  };
 
   const prefs = useNotificationPreferencesQuery();
   const updatePrefs = useUpdateNotificationPreferencesMutation();
@@ -242,7 +254,7 @@ export function SettingsPage(): React.ReactElement {
           />
         </Section>
         <Section title={t('settings.feed', 'Feed')}>
-          <FeedModeSwitcher value={feedMode} onValueChange={setFeedMode} />
+          <FeedModeSwitcher value={feedMode} onValueChange={applyFeedMode} />
         </Section>
         <Section title={t('settings.wellbeing', 'Wellbeing')}>
           <Switch
@@ -272,7 +284,7 @@ export function SettingsPage(): React.ReactElement {
             <Button
               variant="secondary"
               onClick={() => {
-                setFeedMode('low-personalization');
+                applyFeedMode('low-personalization');
                 toast({
                   message: t(
                     'settings.personalization.reduced',

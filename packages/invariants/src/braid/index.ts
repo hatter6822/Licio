@@ -110,19 +110,26 @@ export function braidWordFromSnapshots(snapshots: readonly RankSnapshot[]): Brai
 export function burauGeneratorAtMinusOne(strands: number, position: number, sign: 1 | -1): Matrix {
   const size = strands - 1;
   if (size < 1) throw new Error('Burau needs at least 2 strands');
-  if (position < 0 || position >= size) {
+  // Integer guard is load-bearing: a fractional position would pass a bare
+  // range check and the off-diagonal writes would land on NON-INDEX array
+  // properties (row[1.5]) the matrix product never reads — silently
+  // yielding the identity generator and a wrong entropy bound.
+  if (!Number.isInteger(position) || position < 0 || position >= size) {
     throw new Error(`generator position ${position} out of range for ${strands} strands`);
   }
-  const m = identity(size);
-  // Generator σ_{position+1} in 1-based braid convention; basis index i =
-  // position (0-based row/col of the matrix).
-  const i = position;
-  const row = m[i];
-  if (row) {
-    if (i - 1 >= 0) row[i - 1] = -1 * sign;
-    if (i + 1 < size) row[i + 1] = 1 * sign;
-  }
-  return m;
+  // Generator σ_{position+1} in 1-based braid convention: the identity
+  // plus −sign at (position, position−1) and +sign at (position,
+  // position+1). Rows are constructed directly (no chained index
+  // assignment) so no injected key shape can ever reach a property write.
+  return Array.from({ length: size }, (_, r) =>
+    Array.from({ length: size }, (_, c) => {
+      if (r === c) return 1;
+      if (r !== position) return 0;
+      if (c === position - 1) return -1 * sign;
+      if (c === position + 1) return 1 * sign;
+      return 0;
+    }),
+  );
 }
 
 /** Burau image of a braid word at t = −1 (exact integer product). */

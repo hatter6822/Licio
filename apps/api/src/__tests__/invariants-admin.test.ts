@@ -715,6 +715,50 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     const user = await fixture.identity.store.getUser(bridgeUserId);
     expect(user?.reputationSummary.bridge_ability).toBeNull();
   });
+
+  it('merge requires the actor to steward the RELATED thread too', async () => {
+    const fixture = freshWsHServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const outsider = await seedUserWithSession(fixture.identity, { steward: true });
+    const mine = await seedSplitRoom(fixture, steward.userId);
+    const theirs = await seedSplitRoom(fixture, outsider.userId);
+    // Cross-room merge into a thread the actor does not steward: refused,
+    // and nothing lands in the other room's report.
+    const denied = await adminRequest(
+      fixture,
+      steward.cookie,
+      `/scoi/threads/${mine.threadId}/actions`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'merge',
+          reason_code: 'MOD_SPAM_001',
+          related_thread_id: theirs.threadId,
+        }),
+      },
+    );
+    expect(denied.status).toBe(422);
+    expect(await fixture.invariants.scoiActions.listForThread(theirs.threadId, 5)).toHaveLength(0);
+    // A related thread within the actor's own stewarded room is accepted
+    // and the record lists from BOTH sides.
+    const sibling = await seedStory(fixture);
+    await fixture.ingestion.stories.updateThread(sibling.threadId, { roomId: mine.roomId });
+    const merged = await adminRequest(
+      fixture,
+      steward.cookie,
+      `/scoi/threads/${mine.threadId}/actions`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'merge',
+          reason_code: 'MOD_SPAM_001',
+          related_thread_id: sibling.threadId,
+        }),
+      },
+    );
+    expect(merged.status).toBe(200);
+    expect(await fixture.invariants.scoiActions.listForThread(sibling.threadId, 5)).toHaveLength(1);
+  });
 });
 
 describe('WS-H client wire surfaces (feed labels, lens names, co-group)', () => {

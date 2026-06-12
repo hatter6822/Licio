@@ -611,13 +611,23 @@ describe('SCOI surface edge branches', () => {
         })
       ).status,
     ).toBe(422); // no lens-tagged interpretations to annotate
+    // A related thread the actor does NOT steward (or that does not
+    // exist) is refused with ONE error shape — no cross-room oracle.
+    const ghostRelated = await req(`/scoi/threads/${threadId}/actions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'separate',
+        reason_code: 'MOD_SPAM_001',
+        related_thread_id: ghost,
+      }),
+    });
+    expect(ghostRelated.status).toBe(422);
     // SEPARATE records without recomputation (scoi_after mirrors before).
     const separated = await req(`/scoi/threads/${threadId}/actions`, {
       method: 'POST',
       body: JSON.stringify({
         action: 'separate',
         reason_code: 'MOD_SPAM_001',
-        related_thread_id: ghost,
       }),
     });
     expect(separated.status).toBe(200);

@@ -80,13 +80,18 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
   }, [storyId]);
 
   // PHI v0 (WS-H.6.1a/b): record the TOPIC-CLUSTER visit in the in-browser
-  // session sequence (topic ids + timing only — never the story id).
+  // session sequence (topic ids + timing only — never the story id), then
+  // RE-ASSESS in the same effect — assessment lives in state so the visit
+  // that crosses the narrow-loop threshold triggers the prompt and the
+  // quiet-notification write immediately, not on a later re-render.
   const topicIds = story.data?.topic_ids;
+  const [assessment, setAssessment] = useState(() => getTopicLoopTracker().assess());
   useEffect(() => {
+    const tracker = getTopicLoopTracker();
     const firstTopic = topicIds?.[0];
-    if (firstTopic) getTopicLoopTracker().recordVisit(firstTopic);
+    if (firstTopic) tracker.recordVisit(firstTopic);
+    setAssessment(tracker.assess());
   }, [topicIds]);
-  const assessment = getTopicLoopTracker().assess();
   const loopDetected = !loopPromptDismissed && assessment.narrowLoop.detected;
   // Quiet-notification policy (WS-H.6.1c): a flagged topic's pushes show
   // silently for a while — never a buzz that reinforces the loop.
@@ -140,6 +145,7 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 title={data.title}
                 url={typeof window !== 'undefined' ? window.location.href : ''}
                 needsContext={interpretations.data?.needs_context ?? false}
+                contextStatusPending={interpretations.isPending}
               />
             </div>
             {topicIds?.[0] ? <TopicRepeatsPreference topicId={topicIds[0]} /> : null}

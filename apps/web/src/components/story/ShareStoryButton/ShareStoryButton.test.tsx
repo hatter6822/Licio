@@ -82,3 +82,25 @@ describe('ShareStoryButton (WS-H.4.3c §10.5)', () => {
     expect(await checkA11y(container)).toHaveNoViolations();
   });
 });
+
+describe('context-status race (early click)', () => {
+  it('sharing waits while the interpretations read is pending', async () => {
+    const share = stubShare();
+    const { rerender } = render(
+      <ShareStoryButton {...props} needsContext={false} contextStatusPending />,
+    );
+    const button = screen.getByRole('button', { name: /share/i });
+    // The design-system Button disables via aria-disabled (stays focusable
+    // and announced); the behavioral truth is that the click is inert.
+    expect(button).toHaveAttribute('aria-disabled', 'true');
+    await userEvent.click(button);
+    expect(share).not.toHaveBeenCalled();
+    // Once the read resolves with needs-context, the prompt gates as usual.
+    rerender(<ShareStoryButton {...props} needsContext contextStatusPending={false} />);
+    await userEvent.click(screen.getByRole('button', { name: /share/i }));
+    expect(
+      screen.getByText('This item is context-sensitive. Include origin context?'),
+    ).toBeInTheDocument();
+    expect(share).not.toHaveBeenCalled();
+  });
+});
