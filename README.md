@@ -11,7 +11,7 @@
   <a href="https://github.com/hatter6822/Licio/actions/workflows/ci.yml">
     <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/hatter6822/Licio/ci.yml?branch=main&label=CI" />
   </a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.1.0-blue" />
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.2.1-blue" />
   <img alt="Node.js" src="https://img.shields.io/badge/Node.js-22-339933" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-6.0-3178c6" />
   <img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0--or--later-informational" />
