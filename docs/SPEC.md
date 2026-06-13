@@ -1256,8 +1256,9 @@ and deletion.
 | Context opens | Upload aggregate; used for ranking and UI improvement. |
 | Draft text | Stored locally (IndexedDB); synced encrypted if the user enables sync. |
 | Private saves | Private; low/no ranking effect unless the user opts into an aggregate signal. |
-| In-room (private) content | Distribution-bounded to the home room (Section 14.5); excluded from public feeds, topic surfaces, and global search; not end-to-end encrypted; reachable by moderation and legal process. |
 | Sensitive-topic interest | Protected; shorter retention and stricter use limits. |
+
+Attention and participation signals on **in-room** content (Section 14.5) feed only that room's surfaces, the owner's private Signal Ledger, and the safety invariants — they never promote the item onto a public surface, and in-room visibility bounds distribution without being end-to-end encryption (the honest limit stated in Section 14.5.7).
 
 ## 19.3 User controls
 
