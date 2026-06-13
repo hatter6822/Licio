@@ -37,6 +37,7 @@ function room(over: Partial<RoomDetail>): RoomDetail {
     governance: null,
     charter_summary: null,
     join_pending: false,
+    can_post: true,
     is_steward: true,
     ...over,
   };

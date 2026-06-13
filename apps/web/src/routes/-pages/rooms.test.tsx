@@ -44,6 +44,7 @@ function baseRoom(over: Partial<RoomDetail>): RoomDetail {
     governance: null,
     charter_summary: null,
     join_pending: false,
+    can_post: false,
     ...over,
   };
 }

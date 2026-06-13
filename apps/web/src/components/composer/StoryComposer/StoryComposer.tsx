@@ -100,11 +100,9 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
     [rooms.data, roomId],
   );
   const roomIsPrivate = selectedRoom?.visibility === 'private';
-  const postable =
-    roomId === COMMONS_ROOM_ID ||
-    selectedRoom === null ||
-    selectedRoom.visibility === 'public' ||
-    selectedRoom.joined;
+  // Postability comes from the server's precise `can_post` (posting_policy +
+  // membership/steward); Commons is always postable (auto-joined public room).
+  const postable = roomId === COMMONS_ROOM_ID || selectedRoom === null || selectedRoom.can_post;
 
   // WS-Q.6.2 — when the in-room-visibility flag is OFF, the author choice is
   // suppressed (the server forces public in public rooms; private rooms still
@@ -149,12 +147,12 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
         value,
         label: canPost
           ? name
-          : t('storyComposer.room.joinToPost', '{name} (join to post)', { name }),
+          : t('storyComposer.room.cantPost', '{name} (you can’t post here)', { name }),
       });
     };
     push(COMMONS_ROOM_ID, t('storyComposer.room.commons', 'Commons'), true);
     for (const room of items) {
-      push(room.room_id, room.name, room.visibility === 'public' || room.joined);
+      push(room.room_id, room.name, room.can_post);
     }
     return options;
   }, [rooms.data, t]);

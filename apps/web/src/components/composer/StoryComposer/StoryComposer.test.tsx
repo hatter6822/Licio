@@ -39,6 +39,7 @@ function roomList() {
         latest_activity_at: null,
         governance_mode: 'ordinary',
         joined: true,
+        can_post: true,
         created_at: '2026-01-01T00:00:00.000Z',
       },
     ],
@@ -156,6 +157,23 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
       visibility: 'public',
     });
     await waitFor(() => expect(onSubmitted).toHaveBeenCalled());
+  });
+});
+
+describe('StoryComposer postable filtering (WS-Q.5.1a)', () => {
+  it('disables submit and labels a non-postable room (can_post=false)', async () => {
+    const restricted = '22222222-2222-4222-8222-222222222222';
+    fetchRooms.mockResolvedValue({
+      items: [{ ...roomList().items[0], room_id: restricted, name: 'Experts', can_post: false }],
+      nextCursor: null,
+    });
+    const user = userEvent.setup();
+    renderComposer();
+    await screen.findByText('Commons');
+    await user.click(screen.getByRole('combobox', { name: /home room/i }));
+    await user.click(screen.getByRole('option', { name: /experts.*can.t post/i }));
+    await user.type(screen.getByLabelText(/^title/i), 'X');
+    expect(screen.getByRole('button', { name: /post/i })).toHaveAttribute('aria-disabled', 'true');
   });
 });
 

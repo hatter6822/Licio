@@ -172,6 +172,13 @@ export async function toRoomSummary(
     requesterUserId !== null
       ? await forum.rooms.getSubscription(room.roomId, requesterUserId)
       : null;
+  // can_post: a public room auto-joins on post (so all_members ⇒ postable even
+  // unjoined); a private room needs membership; experts_and_stewards needs the
+  // steward/expert bar. Platform roles aren't resolved here, so a platform
+  // steward sees an experts room as postable only via a room-steward row — the
+  // server re-checks authoritatively at submit either way.
+  const canPost =
+    requesterUserId !== null && (await userMayPostTopLevel(forum, room, requesterUserId));
   return {
     room_id: room.roomId,
     name: room.name,
@@ -186,6 +193,7 @@ export async function toRoomSummary(
     latest_activity_at: room.latestActivityAt,
     governance_mode: room.governanceMode,
     joined: subscription?.status === 'active',
+    can_post: canPost,
     created_at: room.createdAt,
   };
 }

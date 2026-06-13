@@ -182,6 +182,10 @@ export const roomSummarySchema = z
     governance_mode: governanceModeSchema,
     /** True when the requesting user has an active subscription. */
     joined: z.boolean(),
+    /** WS-Q.5.1a — true when the requesting user may open top-level content here
+     *  (posting_policy + membership/steward; a public room auto-joins on post).
+     *  Lets the composer offer only postable rooms. Absent ⇒ false. */
+    can_post: z.boolean().default(false),
     created_at: isoTimestampSchema,
   })
   .strict();
