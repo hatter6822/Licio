@@ -26,6 +26,7 @@ import {
   linkBlocklistResponseSchema,
   MAX_DOCUMENT_BYTES,
   MAX_IMAGE_BYTES,
+  MAX_VIDEO_BYTES,
   personalizationSettingsSchema,
   privacyNotificationPreferencesSchema,
   privacySettingsSchema,
@@ -38,6 +39,7 @@ import {
   threadSafetyStateSchema,
   UPLOAD_DOCUMENT_TYPES,
   UPLOAD_IMAGE_TYPES,
+  UPLOAD_VIDEO_TYPES,
   uploadPublicSchema,
   uuidSchema,
 } from '@licio/shared';
@@ -71,6 +73,7 @@ import {
   visibleRows,
 } from '../forum/threads.js';
 import { applyConversationTransition, applyThreadSafetyTransition } from '../forum/transitions.js';
+import { probeVideo } from '../forum/video.js';
 import { accountRef } from '../identity/crypto.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
@@ -85,6 +88,38 @@ import {
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
 const notFound = deny('not_found', 'Resource not found');
+
+/**
+ * Parse a single-range `Range: bytes=…` header against a known content length.
+ * Returns the inclusive `{ start, end }`, `'unsatisfiable'` (→ 416), or null
+ * (absent/invalid/multi-range ⇒ serve the full body, per RFC 9110 §14.2).
+ */
+function parseByteRange(
+  header: string | undefined,
+  size: number,
+): { start: number; end: number } | 'unsatisfiable' | null {
+  if (!header || size <= 0) return null;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!m) return null; // multi-range or malformed ⇒ full body
+  const startRaw = m[1] ?? '';
+  const endRaw = m[2] ?? '';
+  let start: number;
+  let end: number;
+  if (startRaw === '') {
+    // Suffix range `bytes=-N`: the last N bytes.
+    if (endRaw === '') return null;
+    const suffix = Number(endRaw);
+    if (suffix <= 0) return 'unsatisfiable';
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(startRaw);
+    end = endRaw === '' ? size - 1 : Math.min(Number(endRaw), size - 1);
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) return 'unsatisfiable';
+  if (start >= size) return 'unsatisfiable';
+  return { start, end };
+}
 
 /** Soft session read: user id when a valid cookie is present, else null. */
 async function softUserId(
@@ -593,7 +628,9 @@ export function createForumRoutes() {
         authMiddleware(),
         requireVerifiedAccount(),
         bodyLimit({
-          maxSize: MAX_DOCUMENT_BYTES + 64 * 1024,
+          // The largest admissible type (video) sets the body ceiling; per-type
+          // caps below reject smaller-type overages with the precise reason.
+          maxSize: MAX_VIDEO_BYTES + 64 * 1024,
           onError: (c) => c.json(deny('payload_too_large', 'Upload exceeds the size limit'), 413),
         }),
         async (c) => {
@@ -609,14 +646,23 @@ export function createForumRoutes() {
           const contentType = file.type;
           const isImage = (UPLOAD_IMAGE_TYPES as readonly string[]).includes(contentType);
           const isDocument = (UPLOAD_DOCUMENT_TYPES as readonly string[]).includes(contentType);
-          if (!isImage && !isDocument) {
-            return c.json(deny('unsupported_type', 'Allowed: JPEG, PNG, WebP, AVIF, PDF'), 415);
+          const isVideo = (UPLOAD_VIDEO_TYPES as readonly string[]).includes(contentType);
+          if (!isImage && !isDocument && !isVideo) {
+            return c.json(
+              deny('unsupported_type', 'Allowed: JPEG, PNG, WebP, AVIF, PDF, MP4, WebM'),
+              415,
+            );
           }
-          const maxBytes = isImage ? MAX_IMAGE_BYTES : MAX_DOCUMENT_BYTES;
+          // The video byte cap is the steward-tunable `ingestion.video_max_bytes`
+          // clamped to the hard DB ceiling (it may lower it, never raise it).
+          const videoCfg = getIngestionServices().config();
+          const maxVideoBytes = Math.min(videoCfg.videoMaxBytes, MAX_VIDEO_BYTES);
+          const maxBytes = isImage ? MAX_IMAGE_BYTES : isVideo ? maxVideoBytes : MAX_DOCUMENT_BYTES;
           if (file.size > maxBytes) {
             return c.json(deny('payload_too_large', 'Upload exceeds the size limit'), 413);
           }
-          // Alt text is REQUIRED for images (WCAG; WS-G.3.7b acceptance).
+          // Alt text is REQUIRED for images (WCAG; WS-G.3.7b acceptance);
+          // videos/documents carry none (captions are a separate post field).
           if (isImage && altText.length === 0) {
             return c.json(deny('alt_text_required', 'Images require alt text'), 422);
           }
@@ -624,18 +670,42 @@ export function createForumRoutes() {
             return c.json(deny('alt_text_too_long', 'Alt text is limited to 500 characters'), 422);
           }
           const bytes = new Uint8Array(await file.arrayBuffer());
-          const stripped = stripUploadMetadata(contentType, bytes);
-          if (!stripped.ok) {
-            if (stripped.reason === 'metadata_strip_unsupported') {
+          // Video rides the validate-only container probe (WS-Q.2.3d); images and
+          // documents ride the metadata-stripping path (WS-G.3.7b).
+          let storedBytes: Uint8Array;
+          let metadataStripped: boolean;
+          if (isVideo) {
+            const probe = probeVideo(contentType, bytes);
+            if (!probe.ok) {
+              return c.json(deny('invalid_file', 'The file does not match its declared type'), 415);
+            }
+            if (
+              probe.durationSeconds !== null &&
+              probe.durationSeconds > videoCfg.videoMaxSeconds
+            ) {
               return c.json(
-                deny(
-                  'metadata_strip_unsupported',
-                  'This AVIF file carries metadata that cannot be stripped — re-export it without EXIF/XMP',
-                ),
-                422,
+                deny('video_too_long', `Video exceeds the ${videoCfg.videoMaxSeconds}s limit`),
+                413,
               );
             }
-            return c.json(deny('invalid_file', 'The file does not match its declared type'), 415);
+            storedBytes = probe.bytes;
+            metadataStripped = probe.stripped;
+          } else {
+            const stripped = stripUploadMetadata(contentType, bytes);
+            if (!stripped.ok) {
+              if (stripped.reason === 'metadata_strip_unsupported') {
+                return c.json(
+                  deny(
+                    'metadata_strip_unsupported',
+                    'This AVIF file carries metadata that cannot be stripped — re-export it without EXIF/XMP',
+                  ),
+                  422,
+                );
+              }
+              return c.json(deny('invalid_file', 'The file does not match its declared type'), 415);
+            }
+            storedBytes = stripped.bytes;
+            metadataStripped = stripped.stripped;
           }
           const forum = getForumServices();
           // The injectable scanner runs AFTER the inline local checks
@@ -643,7 +713,7 @@ export function createForumRoutes() {
           // (clear); WS-J.2.6b swaps in the shared malware intelligence,
           // which may hold (`pending`) or reject (`flagged`) — the gate is
           // real either way (attachment and serving both require `clear`).
-          const scan = await forum.uploadScanner.scan(stripped.bytes, contentType);
+          const scan = await forum.uploadScanner.scan(storedBytes, contentType);
           if (scan.state === 'flagged') {
             forum.metrics.increment('uploads.flagged');
             return c.json(deny('upload_flagged', 'This file failed the safety scan'), 422);
@@ -654,13 +724,13 @@ export function createForumRoutes() {
               uploadId,
               ownerUserId: auth.userId,
               contentType,
-              byteSize: stripped.bytes.length,
+              byteSize: storedBytes.length,
               altText: isImage ? altText : null,
               storageRef: `uploads/${uploadId}`,
-              metadataStripped: stripped.stripped || isImage,
+              metadataStripped: metadataStripped || isImage,
               scanState: scan.state,
             },
-            stripped.bytes,
+            storedBytes,
           );
           forum.metrics.increment(
             scan.state === 'clear' ? 'uploads.accepted' : 'uploads.pending_scan',
@@ -689,12 +759,22 @@ export function createForumRoutes() {
               ? `attachment; filename="${uploadId}.pdf"`
               : 'inline',
           );
-          return c.body(
-            bytes.buffer.slice(
-              bytes.byteOffset,
-              bytes.byteOffset + bytes.byteLength,
-            ) as ArrayBuffer,
-          );
+          // Range requests (WS-Q.2.3e): native <video> seeks via `Range`, so the
+          // gated path advertises and honors single-range byte serving.
+          c.header('Accept-Ranges', 'bytes');
+          const slice = (from: number, to: number): ArrayBuffer =>
+            bytes.buffer.slice(bytes.byteOffset + from, bytes.byteOffset + to) as ArrayBuffer;
+          const range = parseByteRange(c.req.header('range'), bytes.byteLength);
+          if (range === 'unsatisfiable') {
+            c.header('Content-Range', `bytes */${bytes.byteLength}`);
+            return c.body(null, 416);
+          }
+          if (range !== null) {
+            c.header('Content-Range', `bytes ${range.start}-${range.end}/${bytes.byteLength}`);
+            c.header('Content-Length', String(range.end - range.start + 1));
+            return c.body(slice(range.start, range.end + 1), 206);
+          }
+          return c.body(slice(0, bytes.byteLength));
         },
       )
 

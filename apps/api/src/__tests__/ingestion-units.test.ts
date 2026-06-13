@@ -253,6 +253,21 @@ describe('runtime config (WS-F admin; fail-closed loader)', () => {
     expect(loaded.submissionPerHour).toBe(DEFAULT_INGESTION_CONFIG.submissionPerHour);
     expect(invalid).toEqual(['submissionPerHour']);
   });
+
+  it('WS-Q.2.3c — video caps validate, clamp to the hard ceiling, and fail closed', async () => {
+    // The byte cap may only LOWER the 200 MB DB ceiling.
+    expect(validateIngestionConfigValue('videoMaxBytes', 50 * 1024 * 1024)).toBeNull();
+    expect(validateIngestionConfigValue('videoMaxBytes', 300 * 1024 * 1024)).not.toBeNull();
+    expect(validateIngestionConfigValue('videoMaxSeconds', 120)).toBeNull();
+    expect(validateIngestionConfigValue('videoMaxSeconds', 0)).not.toBeNull();
+
+    const store = new InMemoryPwattConfigStore();
+    await store.set('ingestion.videoMaxBytes', { value: 999 * 1024 * 1024 }); // over the ceiling
+    const invalid: string[] = [];
+    const loaded = await loadIngestionConfig(store, (key) => invalid.push(key));
+    expect(loaded.videoMaxBytes).toBe(DEFAULT_INGESTION_CONFIG.videoMaxBytes);
+    expect(invalid).toEqual(['videoMaxBytes']);
+  });
 });
 
 describe('deterministic lexical embedding provider (WS-F.3.2a)', () => {
