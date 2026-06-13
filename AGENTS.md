@@ -55,7 +55,7 @@ auth E2E (needs a BFF-in-the-loop harness; WS-P) — the WS-E and WS-G
 injected hooks are all closed.
 WS-E ships the event pipeline and PWAtt scoring engine
 (`docs/events/README.md`): strict event schemas + a single topic registry
-(14 core + 18 flagged Knomosis topics in a separate bounded context), the
+(15 core + 18 flagged Knomosis topics in a separate bounded context), the
 hardened attention-ingestion boundary (auth, ownership, two-layer replay
 protection, fail-closed sliding-window rate limits, server-side privacy
 enforcement), a retention-tier-partitioned Postgres event store with
@@ -187,16 +187,22 @@ introspected health payloads, the room-surface leg).  WS-I performs the
 documented §30.5 lift: `PWATT_V0_SHADOW_MODE` is now `false` (a code
 change; reverting it or engaging the kill switch restores the pre-lift
 posture).
-Workstreams WS-J through WS-Q are planned (planning documents
-exist under `docs/planning/`; implementation not yet started).  WS-Q
-(content–room ownership and visibility, `docs/planning/18-content-and-room-model.md`)
-captures the SPEC v0.7 model — rooms own content, content owns
-conversation, binary public/private rooms with orthogonal join-model/
-posting-policy axes, per-item public/in-room visibility with private-room
-forcing, native image/video posts, and visibility-scoped distribution —
-as a remodel of the shipped WS-F/WS-G/WS-I surfaces; the current code
-still ships the pre-v0.7 model (global stories, three-value room
-visibility).  See "Implementation roadmap" below for the full status table.
+WS-Q (content–room ownership and visibility,
+`docs/planning/18-content-and-room-model.md`) implements the SPEC v0.7 model —
+rooms own content, content owns conversation, binary public/private rooms with
+orthogonal join-model/posting-policy axes, per-item public/`room_only`
+visibility with private-room forcing (`deriveStoryVisibility`), native
+image/video posts, tier-scoped canonical-URL dedup with cross-tier linking, the
+`content.visibility.changed` core event (core topics 14→15), author
+narrow/widen transitions, the steward public⇄private room cascade, and the
+always-on surface-aware distribution gate (`filterByVisibility`) + item read
+bar (`storyReadableByUser`) proven by the extended `check:neutrality`
+containment leg.  The shared schemas, migrations (`0014`–`0020`,
+expand→backfill→contract), ingestion/rooms/ranking backend, and their tests are
+shipped; the client surface (WS-Q.5 composer/media/room-shell) and the gated
+migration-validation harness (WS-Q.6.1) remain.  Workstreams WS-J through WS-P
+are planned (planning documents exist under `docs/planning/`; implementation
+not yet started).  See "Implementation roadmap" below for the full status table.
 
 ## Build and run
 
@@ -511,7 +517,9 @@ licio/
 │           ├── ingestion/               -- WS-F ingestion, source model, search
 │           │   ├── stores.ts            --   store interfaces + in-memory adapters
 │           │   ├── services.ts          --   injectable container + WS-E router consumers
-│           │   ├── submission.ts        --   POST /v1/stories orchestration (guard chain)
+│           │   ├── submission.ts        --   POST /v1/stories orchestration (room/posting
+│           │   │                             guards + visibility derivation + tier dedup, WS-Q)
+│           │   ├── visibility.ts        --   WS-Q.2.4 author narrow/widen visibility transitions
 │           │   ├── pipeline.ts          --   §14.2 extraction worker + content.normalized
 │           │   ├── prechecks.ts         --   submission limits, spam patterns, URL safety
 │           │   ├── safe-fetch.ts        --   SSRF-hardened fetcher (per-resolution gate)
@@ -532,7 +540,9 @@ licio/
 │           │   ├── contributions.ts     --   create/edit/remove guard chain + event emission
 │           │   ├── threads.ts           --   thread/branch/subtree reads (visibility-aware)
 │           │   ├── tree.ts              --   materialized-path math + depth-first ordering
-│           │   ├── rooms.ts             --   rooms/lenses/stewards/joins + governance audit
+│           │   ├── rooms.ts             --   rooms/lenses/stewards/joins + the binary
+│           │   │                             read bar / userMayPostTopLevel / Commons (WS-Q)
+│           │   ├── room-visibility.ts   --   WS-Q.3.3b/3.4 governance settings + visibility cascade
 │           │   ├── summaries.ts         --   §24.3 layered summaries (supersede semantics)
 │           │   ├── transitions.ts       --   audited §15.4 state machines → thread.state.changed
 │           │   ├── safety.ts            --   heuristic contribution pre-screen (WS-J/K seam)
@@ -574,7 +584,7 @@ licio/
 │   │       │   ├── privacy-api.ts       --   privacy endpoint wire contracts
 │   │       │   ├── audit.ts             --   audit event taxonomy
 │   │       │   └── events/              --   WS-E event schemas (envelope, retention
-│   │       │                                 tiers, 14 core topic schemas, topic
+│   │       │                                 tiers, 15 core topic schemas, topic
 │   │       │                                 registry SSOT, knomosis/ bounded context)
 │   │       ├── ugc/                     --   WS-G.4 UGC pipeline: Markdown-lite AST
 │   │       │                                 (no raw-HTML node), constrained serializer,
@@ -1059,7 +1069,7 @@ Status:
 | WS-N | Compliance | Planned |
 | WS-O | Security and reliability | Planned |
 | WS-P | Experimentation and launch | Planned |
-| WS-Q | Content–room ownership and visibility | Planned |
+| WS-Q | Content–room ownership and visibility | In progress (backend shipped; client + harness residual) |
 
 Read the per-workstream planning document under `docs/planning/`
 before starting new work.  The master index at

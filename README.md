@@ -43,7 +43,7 @@ pay-to-rank — is enforced by the type system, runtime guards, and CI gates.
 | Node.js | `22` (pinned in [`.nvmrc`](.nvmrc)) |
 | pnpm | `9.15.4` via Corepack (pinned in `package.json`) |
 | Language | TypeScript `6.0.3`, strict everywhere (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) |
-| Milestone | WS-0 – WS-I complete; **WS-J (trust and safety) and WS-Q (content–room ownership/visibility) are next** |
+| Milestone | WS-0 – WS-I complete; **WS-Q (content–room ownership/visibility): backend shipped** (rooms own content, binary room visibility + join/posting axes, public/`room_only` content with private-room forcing, image/video posts, always-on two-tier containment; client surface + migration harness residual); WS-J (trust and safety) next |
 | Test gate | 80% cross-workspace coverage (lines, functions, branches, statements) |
 | Bundle budgets | initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz (CI-enforced) |
 

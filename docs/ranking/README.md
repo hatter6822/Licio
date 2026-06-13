@@ -471,3 +471,34 @@ feeding the bridge/expert-queue dashboard), the
   BFF-in-the-loop browser E2E for the ranked feed.
 - A first-class user location preference (WS-D) can replace the coarse
   locale-region matching in the local-news retriever behind the same port.
+
+## WS-Q deltas — two-tier visibility containment
+
+WS-Q makes content visibility a first-class ranking input — as a NON-SCORING
+eligibility field, never a score:
+
+- **`Candidate.visibility` / `FeatureVector.visibility`** carry the item's
+  `public | room_only` tier. The scoring stage ignores it (a property test
+  proves flipping it changes neither order nor scores); legacy feature
+  snapshots and decision logs default to `public` so pre-WS-Q decisions replay
+  unchanged.
+- **Visibility-scoped retrievers.** The eight organic retrievers apply the
+  two-condition global predicate `story.visibility = 'public' AND room.visibility
+  = 'public'` (`globallyRetrievable`), so a `room_only` item — or a
+  transiently-mislabeled public item in a private room — appears in NONE of
+  them, and even a user's own subscribed private-room content stays off the
+  public front page. `RoomSurfaceRetriever` serves the room's full pool.
+- **`filterByVisibility`** (renamed from `filterByRoomVisibility`) is the
+  authoritative ALWAYS-ON distribution gate, applied to the surface pool BEFORE
+  the ranked/fallback split so both inherit identical containment. On
+  `front_page`/`topic` it drops anything not public-from-a-public-room; on
+  `room` it keeps the room's pool behind the content bar and drops foreign-room
+  `room_only`. An unknown room fails closed. Drops are reason-coded
+  (`item_visibility` / `room_private_on_global` / `room_bar`) and the count
+  rides the `RankingDecisionLog.visibility_excluded_count`.
+- **`check:neutrality` containment leg** (tests 11–13): in-room content never
+  reaches a global surface (ranked OR fallback), private-room content is absent
+  from a non-member's every surface, widen/narrow flips eligibility, visibility
+  is not a ranking signal, and every global retrieval path routes through the
+  gate. The financial denylist + wallet↔ranking BFS isolation stay green on the
+  new `visibility` columns.
