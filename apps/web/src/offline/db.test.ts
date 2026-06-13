@@ -34,11 +34,12 @@ afterEach(() => {
 });
 
 describe('schema creation', () => {
-  it('creates all five object stores', async () => {
+  it('creates all six object stores', async () => {
     const db = await getDb();
     expect([...db.objectStoreNames].sort()).toEqual(
       [
         STORE.draftContributions,
+        STORE.draftStories,
         STORE.pendingQueue,
         STORE.savedStories,
         STORE.signalLedger,
@@ -52,6 +53,12 @@ describe('schema creation', () => {
     const tx = db.transaction(STORE.draftContributions, 'readonly');
     const indexes = [...tx.objectStore(STORE.draftContributions).indexNames].sort();
     expect(indexes).toEqual(['contributionType', 'storyId', 'threadId', 'updatedAt']);
+  });
+
+  it('defines the updatedAt index on the story-draft store', async () => {
+    const db = await getDb();
+    const tx = db.transaction(STORE.draftStories, 'readonly');
+    expect([...tx.objectStore(STORE.draftStories).indexNames]).toEqual(['updatedAt']);
   });
 });
 
@@ -155,6 +162,32 @@ describe('migrations', () => {
     expect(await get(STORE.draftContributions, 'd-keep')).toBeDefined(); // preserved
     expect(await get(STORE.pendingQueue, 'op-keep')).toBeDefined(); // never dropped
     v2.close();
+    await deleteDatabase(name);
+  });
+
+  it('WS-Q.5.1b — the v3 bump adds the story-draft store additively', async () => {
+    const name = `licio-wsq51b-${Math.random().toString(36).slice(2)}`;
+    const v2 = await openDb(name, 2, MIGRATIONS);
+    expect([...v2.objectStoreNames]).not.toContain(STORE.draftStories);
+    await new Promise<void>((resolve, reject) => {
+      // User data written at v2 must survive the additive v3 upgrade.
+      const tx = v2.transaction(STORE.draftContributions, 'readwrite');
+      tx.objectStore(STORE.draftContributions).put({ draftId: 'd-keep', updatedAt: 1 });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    v2.close();
+
+    const v3 = await openDb(name, 3, MIGRATIONS);
+    expect([...v3.objectStoreNames]).toContain(STORE.draftStories);
+    const get = (store: string, key: string) =>
+      new Promise<unknown>((resolve, reject) => {
+        const req = v3.transaction(store, 'readonly').objectStore(store).get(key);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    expect(await get(STORE.draftContributions, 'd-keep')).toBeDefined(); // preserved
+    v3.close();
     await deleteDatabase(name);
   });
 

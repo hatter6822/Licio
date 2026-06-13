@@ -9,10 +9,12 @@
 // thread builds the canonical payload (validated through the SHARED schema —
 // identical client/server rules) and enqueues it in the durable pending
 // queue with the draft id as the server-side idempotency key (WS-G.3.1
-// dedup).  Share-target intake (WS-G.3.7a): `?share_url=`/`?share_title=`
-// become a STRUCTURED citation (url + title + accessed_at) shown as a
-// preview chip — checked against the link-safety heuristics — and merged
-// into the payload when the citation line survives in the composer.
+// dedup).  Share-target intake (WS-G.3.7a): with a thread target,
+// `?share_url=`/`?share_title=` become a STRUCTURED citation (url + title +
+// accessed_at) shown as a preview chip — checked against the link-safety
+// heuristics — and merged into the payload when the citation line survives in
+// the composer.  With NO thread target (WS-Q.5.1c) the same params seed a LINK
+// post in the story composer instead.
 import type { Citation } from '@licio/shared';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -249,6 +251,18 @@ export function SubmitPage(): React.ReactElement {
   // SEES (and controls) the line; the structured chip enriches it at build.
   const shareSeed = shareCitation !== null ? { citations: shareCitation.url } : undefined;
 
+  // Story-submission share intake (WS-Q.5.1c): with no thread target a shared
+  // URL/title seeds a LINK post in the story composer (not a thread citation).
+  const storyShare =
+    threadId === undefined && search.share_url !== undefined
+      ? {
+          url: search.share_url,
+          ...(search.share_title !== undefined && search.share_title.trim().length > 0
+            ? { title: search.share_title.trim() }
+            : {}),
+        }
+      : undefined;
+
   const onSaveDraft = (composerMode: ComposerMode, values: ComposerValues): void => {
     latest.current = { mode: composerMode, values };
     void flushDraft()
@@ -351,6 +365,7 @@ export function SubmitPage(): React.ReactElement {
             the WS-G contribution composer (reply to a conversation). */}
         {threadId === undefined ? (
           <StoryComposer
+            {...(storyShare !== undefined ? { share: storyShare } : {})}
             onSubmitted={({ storyId, pendingScan }) => {
               toast({
                 tone: 'success',

@@ -18,10 +18,17 @@ import {
   UPLOAD_IMAGE_TYPES,
   UPLOAD_VIDEO_TYPES,
 } from '@licio/shared';
-import { useEffect, useId, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { ApiClientError, createStory, uploadMedia } from '../../../lib/api.js';
 import { useRoomsQuery } from '../../../lib/queries.js';
+import {
+  type DraftStoryRecord,
+  deleteStoryDraft,
+  listStoryDrafts,
+  type StoryDraftMode,
+  saveStoryDraft,
+} from '../../../offline/index.js';
 import { selectContentSurface, useFeatureFlagStore } from '../../../stores/index.js';
 import { Button } from '../../ui/Button/index.js';
 import { Input } from '../../ui/Input/index.js';
@@ -29,7 +36,8 @@ import { RadioGroup } from '../../ui/RadioGroup/index.js';
 import { Select } from '../../ui/Select/index.js';
 import { TextArea } from '../../ui/TextArea/index.js';
 
-export type StoryComposerMode = 'link' | 'original_brief' | 'image_post' | 'video_post';
+/** The composer modes are exactly the persisted story-draft modes (one SSOT). */
+export type StoryComposerMode = StoryDraftMode;
 
 export interface StoryComposerResult {
   storyId: string;
@@ -38,6 +46,17 @@ export interface StoryComposerResult {
 
 export interface StoryComposerProps {
   onSubmitted?: (result: StoryComposerResult) => void;
+  /** Share-target intake (WS-Q.5.1c): seed a link post from a shared URL/title. */
+  share?: { url: string; title?: string };
+}
+
+/** Trailing autosave debounce (WS-Q.5.1b): one encrypt+write per pause. */
+const DRAFT_DEBOUNCE_MS = 800;
+
+function newStoryDraftId(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? `story-${crypto.randomUUID()}`
+    : `story-${Date.now()}`;
 }
 
 /** Best-effort client duration probe (0 when the browser can't read metadata). */
@@ -66,7 +85,7 @@ function readVideoDurationSeconds(file: File): Promise<number> {
   });
 }
 
-export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactElement {
+export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React.ReactElement {
   const t = useT();
   const rooms = useRoomsQuery();
   const formId = useId();
@@ -77,8 +96,9 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
   const [mode, setMode] = useState<StoryComposerMode>('link');
   const [roomId, setRoomId] = useState<string>(COMMONS_ROOM_ID);
   const [requestedVisibility, setRequestedVisibility] = useState<'public' | 'room_only'>('public');
-  const [title, setTitle] = useState('');
-  const [url, setUrl] = useState('');
+  // Share-target intake (WS-Q.5.1c): a shared URL/title seeds a link post.
+  const [title, setTitle] = useState(share?.title ?? '');
+  const [url, setUrl] = useState(share?.url ?? '');
   const [reason, setReason] = useState('');
   const [body, setBody] = useState('');
   const [altText, setAltText] = useState('');
@@ -92,6 +112,16 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
   const [status, setStatus] = useState<'idle' | 'uploading' | 'submitting' | 'done' | 'pending'>(
     'idle',
   );
+
+  // WS-Q.5.1b — encrypted draft autosave. The composer owns its state, so it
+  // persists through a dedicated store: structural fields (mode/room/visibility)
+  // round-trip as metadata; the text body is AES-GCM-encrypted at rest (§6.8).
+  // Files are NOT persisted — a restored draft keeps the text and the user
+  // re-picks any media.
+  const draftId = useRef(newStoryDraftId());
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestDraft = useRef<Parameters<typeof saveStoryDraft>[0] | null>(null);
+  const [recoverable, setRecoverable] = useState<DraftStoryRecord | null>(null);
 
   // The selected room and whether it can be POSTED to from the client's view
   // (a public room auto-joins on post; a private room must be joined first).
@@ -135,6 +165,96 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
     if (previewUrl === null) return;
     return () => URL.revokeObjectURL(previewUrl);
   }, [previewUrl]);
+
+  // Offer the most recent OTHER story draft for resume-or-discard (the one being
+  // edited now is excluded). Runs once on mount, before autosave writes. Draft
+  // I/O is best-effort: a missing/quota-blocked IndexedDB never breaks posting.
+  useEffect(() => {
+    let cancelled = false;
+    void listStoryDrafts()
+      .then((drafts) => {
+        if (cancelled) return;
+        setRecoverable(drafts.find((draft) => draft.draftId !== draftId.current) ?? null);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Trailing-debounced autosave: an empty composer never writes a draft; each
+  // pause persists the latest mode/room/visibility + text body (files excluded).
+  useEffect(() => {
+    const values = { title, url, reason, body, altText, captionsText };
+    const hasContent = Object.values(values).some((value) => value.trim().length > 0);
+    if (!hasContent) {
+      latestDraft.current = null;
+      return;
+    }
+    latestDraft.current = {
+      draftId: draftId.current,
+      mode,
+      roomId,
+      visibility: requestedVisibility,
+      values,
+    };
+    if (debounceTimer.current !== null) clearTimeout(debounceTimer.current);
+    debounceTimer.current = setTimeout(() => {
+      debounceTimer.current = null;
+      if (latestDraft.current) void saveStoryDraft(latestDraft.current).catch(() => undefined);
+    }, DRAFT_DEBOUNCE_MS);
+    return () => {
+      if (debounceTimer.current !== null) {
+        clearTimeout(debounceTimer.current);
+        debounceTimer.current = null;
+      }
+    };
+  }, [mode, roomId, requestedVisibility, title, url, reason, body, altText, captionsText]);
+
+  // Flush the latest draft immediately on app backgrounding and on unmount, so a
+  // half-written post is never lost between debounce ticks (WS-Q.5.1b).
+  useEffect(() => {
+    const flush = (): void => {
+      if (debounceTimer.current !== null) {
+        clearTimeout(debounceTimer.current);
+        debounceTimer.current = null;
+      }
+      if (latestDraft.current) void saveStoryDraft(latestDraft.current).catch(() => undefined);
+    };
+    const onHide = (): void => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    document.addEventListener('visibilitychange', onHide);
+    return () => {
+      document.removeEventListener('visibilitychange', onHide);
+      flush();
+    };
+  }, []);
+
+  // Resume a saved draft: adopt its id (continue editing it) and rehydrate the
+  // structural fields + text so room + visibility round-trip exactly.
+  function resumeDraft(draft: DraftStoryRecord): void {
+    draftId.current = draft.draftId;
+    setMode(draft.mode);
+    setRoomId(draft.roomId);
+    setRequestedVisibility(draft.visibility);
+    setTitle(draft.values['title'] ?? '');
+    setUrl(draft.values['url'] ?? '');
+    setReason(draft.values['reason'] ?? '');
+    setBody(draft.values['body'] ?? '');
+    setAltText(draft.values['altText'] ?? '');
+    setCaptionsText(draft.values['captionsText'] ?? '');
+    setErrors({});
+    onPickFile(null);
+    setCaptionsFile(null);
+    setPosterFile(null);
+    setRecoverable(null);
+  }
+
+  function discardDraft(draft: DraftStoryRecord): void {
+    void deleteStoryDraft(draft.draftId).catch(() => undefined);
+    setRecoverable(null);
+  }
 
   const roomOptions = useMemo(() => {
     const items = rooms.data?.items ?? [];
@@ -259,6 +379,14 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
         };
       }
       const result = await createStory(request);
+      // The post is accepted — clear its autosaved draft (cancel any pending
+      // write first so a late debounce tick can't resurrect it).
+      if (debounceTimer.current !== null) {
+        clearTimeout(debounceTimer.current);
+        debounceTimer.current = null;
+      }
+      latestDraft.current = null;
+      void deleteStoryDraft(draftId.current).catch(() => undefined);
       const pendingScan = result.lifecycle_state === 'submitted' && isMedia;
       setStatus(pendingScan ? 'pending' : 'done');
       onSubmitted?.({ storyId: result.story_id, pendingScan });
@@ -283,6 +411,26 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
       className="flex flex-col gap-4"
       aria-describedby={`${formId}-status`}
     >
+      {/* WS-Q.5.1b — a saved draft on this device offers resume-or-discard. */}
+      {recoverable !== null ? (
+        <div
+          role="status"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface-sunken p-3"
+        >
+          <span className="text-ink text-sm">
+            {t('storyComposer.recover.prompt', 'You have an unsent post draft. Resume or discard?')}
+          </span>
+          <div className="flex gap-2">
+            <Button variant="secondary" onClick={() => resumeDraft(recoverable)}>
+              {t('storyComposer.recover.resume', 'Resume')}
+            </Button>
+            <Button variant="ghost" onClick={() => discardDraft(recoverable)}>
+              {t('storyComposer.recover.discard', 'Discard')}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
       <RadioGroup
         label={t('storyComposer.mode.label', 'What are you posting?')}
         value={mode}

@@ -66,6 +66,11 @@ vi.mock('../../offline/index.js', () => ({
     get: mocks.getQueuedOperation,
   },
   saveDraft: mocks.saveDraft,
+  // The story composer (no-thread path) autosaves through its own store; stub
+  // the story-draft API as inert so the page renders without real IndexedDB.
+  listStoryDrafts: vi.fn(async () => []),
+  saveStoryDraft: vi.fn(async () => undefined),
+  deleteStoryDraft: vi.fn(async () => undefined),
 }));
 
 vi.mock('../../offline/sync.js', () => ({

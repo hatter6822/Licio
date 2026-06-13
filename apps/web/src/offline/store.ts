@@ -19,7 +19,9 @@ import {
 } from './db.js';
 import {
   type DraftContributionRecord,
+  type DraftStoryRecord,
   draftContributionRecordSchema,
+  draftStoryRecordSchema,
   type SavedStoryRecord,
   type SignalLedgerRecord,
   savedStoryRecordSchema,
@@ -94,6 +96,10 @@ export const savedStories: IntegrityStore<SavedStoryRecord> = createStore(
 export const draftContributions: IntegrityStore<DraftContributionRecord> = createStore(
   STORE.draftContributions,
   draftContributionRecordSchema,
+);
+export const draftStories: IntegrityStore<DraftStoryRecord> = createStore(
+  STORE.draftStories,
+  draftStoryRecordSchema,
 );
 export const threadSnapshots: IntegrityStore<ThreadSnapshotRecord> = createStore(
   STORE.threadSnapshots,

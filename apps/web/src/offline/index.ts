@@ -22,10 +22,15 @@ export {
   DRAFT_MAX_AGE_MS,
   type DraftInput,
   deleteDraft,
+  deleteStoryDraft,
   expireOldDrafts,
   listDraftsForThread,
+  listStoryDrafts,
   loadDraft,
+  loadStoryDraft,
+  type StoryDraftInput,
   saveDraft,
+  saveStoryDraft,
 } from './drafts.js';
 export {
   type EvictionCallbacks,
@@ -50,14 +55,17 @@ export {
 } from './read-through.js';
 export type {
   DraftContributionRecord,
+  DraftStoryRecord,
   OperationType,
   PendingOperationRecord,
   SavedStoryRecord,
   SignalLedgerRecord,
+  StoryDraftMode,
   ThreadSnapshotRecord,
 } from './schemas.js';
 export {
   draftContributions,
+  draftStories,
   getRejectionCount,
   type IntegrityStore,
   resetRejectionCounts,

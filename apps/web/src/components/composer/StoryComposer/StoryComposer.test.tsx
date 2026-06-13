@@ -160,6 +160,23 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
   });
 });
 
+describe('StoryComposer share-target prefill (WS-Q.5.1c)', () => {
+  it('seeds a link post from a shared URL + title', async () => {
+    fetchRooms.mockResolvedValue({ items: [], nextCursor: null });
+    render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <StoryComposer share={{ url: 'https://example.org/x', title: 'Shared headline' }} />
+      </QueryClientProvider>,
+    );
+    await screen.findByText('Commons');
+    // Defaults to the link mode with the URL + title prefilled (editable).
+    expect(screen.getByLabelText(/link url/i)).toHaveValue('https://example.org/x');
+    expect(screen.getByLabelText(/^title/i)).toHaveValue('Shared headline');
+  });
+});
+
 describe('StoryComposer postable filtering (WS-Q.5.1a)', () => {
   it('disables submit and labels a non-postable room (can_post=false)', async () => {
     const restricted = '22222222-2222-4222-8222-222222222222';

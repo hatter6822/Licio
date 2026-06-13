@@ -5,8 +5,12 @@
 // decrypts it back. Encryption is best-effort: where Web Crypto is unavailable
 // the draft is stored as plaintext (encrypted: false) so it is never lost.
 import { decryptDraftValues, encryptDraftValues } from './draft-crypto.js';
-import { type DraftContributionRecord, RECORD_SCHEMA_VERSION } from './schemas.js';
-import { draftContributions } from './store.js';
+import {
+  type DraftContributionRecord,
+  type DraftStoryRecord,
+  RECORD_SCHEMA_VERSION,
+} from './schemas.js';
+import { draftContributions, draftStories } from './store.js';
 
 export interface DraftInput {
   draftId: string;
@@ -65,13 +69,21 @@ export async function deleteDraft(draftId: string): Promise<void> {
   await draftContributions.delete(draftId);
 }
 
-/** WS-G.3.7c expiry: delete drafts older than 30 days (called on app start). */
+/** WS-G.3.7c expiry: delete drafts older than 30 days (called on app start).
+ *  Covers BOTH contribution drafts and story-composer drafts (WS-Q.5.1b). */
 export async function expireOldDrafts(now: number = Date.now()): Promise<number> {
-  const all = await draftContributions.getAll();
   let removed = 0;
-  for (const record of all) {
+  const contributions = await draftContributions.getAll();
+  for (const record of contributions) {
     if (now - record.updatedAt > DRAFT_MAX_AGE_MS) {
       await draftContributions.delete(record.draftId);
+      removed += 1;
+    }
+  }
+  const stories = await draftStories.getAll();
+  for (const record of stories) {
+    if (now - record.updatedAt > DRAFT_MAX_AGE_MS) {
+      await draftStories.delete(record.draftId);
       removed += 1;
     }
   }
@@ -88,4 +100,69 @@ export async function loadDraft(draftId: string): Promise<DraftContributionRecor
     return { ...record, values: values ?? {} };
   }
   return record;
+}
+
+// --- Story-composer drafts (WS-Q.5.1b) -------------------------------------
+// The story composer owns its own state (mode + room + visibility + text), so
+// it autosaves through a parallel, equally-encrypted store. Mode/room/visibility
+// are plaintext metadata (they must round-trip on restore); the text body is
+// encrypted exactly like a contribution draft.
+
+export interface StoryDraftInput {
+  draftId: string;
+  mode: DraftStoryRecord['mode'];
+  roomId: string;
+  visibility: DraftStoryRecord['visibility'];
+  values: Record<string, string>;
+}
+
+/** Persist a story draft, encrypting the text body at rest when available. */
+export async function saveStoryDraft(input: StoryDraftInput): Promise<void> {
+  const cipher = await encryptDraftValues(input.values);
+  const base = {
+    schemaVersion: RECORD_SCHEMA_VERSION,
+    draftId: input.draftId,
+    mode: input.mode,
+    roomId: input.roomId,
+    visibility: input.visibility,
+    updatedAt: Date.now(),
+  } as const;
+  if (cipher) {
+    await draftStories.put({ ...base, values: {}, encrypted: true, cipher });
+  } else {
+    // Web Crypto unavailable — never lose the draft (availability > confidentiality).
+    await draftStories.put({ ...base, values: input.values, encrypted: false });
+  }
+}
+
+/** All story drafts (newest first), decrypted — the recovery-prompt input. */
+export async function listStoryDrafts(): Promise<DraftStoryRecord[]> {
+  const all = await draftStories.getAll();
+  const matches = all.sort((a, b) => b.updatedAt - a.updatedAt);
+  const out: DraftStoryRecord[] = [];
+  for (const record of matches) {
+    if (record.encrypted && record.cipher) {
+      const values = await decryptDraftValues(record.cipher);
+      out.push({ ...record, values: values ?? {} });
+    } else {
+      out.push(record);
+    }
+  }
+  return out;
+}
+
+/** Load one story draft, decrypting the body when it was stored encrypted. */
+export async function loadStoryDraft(draftId: string): Promise<DraftStoryRecord | undefined> {
+  const record = await draftStories.get(draftId);
+  if (!record) return undefined;
+  if (record.encrypted && record.cipher) {
+    const values = await decryptDraftValues(record.cipher);
+    return { ...record, values: values ?? {} };
+  }
+  return record;
+}
+
+/** Discard a story draft (the recovery prompt's "discard"; post-submit cleanup). */
+export async function deleteStoryDraft(draftId: string): Promise<void> {
+  await draftStories.delete(draftId);
 }
