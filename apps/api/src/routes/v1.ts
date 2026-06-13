@@ -22,6 +22,7 @@ import {
   DEFAULT_USER_SETTINGS,
   FAIL_CLOSED_FLAGS,
   type FeedResponse,
+  featureFlagsResponseSchema,
   feedQuerySchema,
   feedResponseSchema,
   notificationPreferencesSchema,
@@ -54,6 +55,7 @@ import { getForumServices } from '../forum/services.js';
 import { accountRef } from '../identity/crypto.js';
 import { getIdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
+import { loadContentFlags } from '../ingestion/content-flags.js';
 import { getIngestionServices } from '../ingestion/services.js';
 import type { StoryRecord } from '../ingestion/stores.js';
 import { DEMO_FEED, demoStory } from '../lib/demo-data.js';
@@ -400,10 +402,30 @@ export function createV1Routes() {
       })
 
       // --- Feature flags (WS-C.1.3c, fail-closed) ---------------------------
-      .get('/feature-flags', (c) => {
-        // Production default is fail-closed; per-region enablement is wired by
-        // WS-D/compliance. Crypto/governance never default on (SPEC §0.5).
-        return c.json(FAIL_CLOSED_FLAGS);
+      .get('/feature-flags', async (c) => {
+        // Crypto/governance stay fail-closed (per-region enablement is WS-D/
+        // compliance; SPEC §0.5). The WS-Q content surface IS populated: the
+        // fail-closed rollout flags + the video caps the composer pre-checks
+        // against (the server remains authoritative).
+        const events = getEventPipelineServices();
+        const ingestion = getIngestionServices();
+        const flags = await loadContentFlags(events.configStore);
+        const cfg = ingestion.config();
+        return c.json(
+          featureFlagsResponseSchema.parse({
+            ...FAIL_CLOSED_FLAGS,
+            content: {
+              media_posts_enabled: flags.mediaPostsEnabled,
+              in_room_visibility_enabled: flags.inRoomVisibilityEnabled,
+              binary_visibility_ui: flags.binaryVisibilityUi,
+              video_max_bytes: Math.min(
+                cfg.videoMaxBytes,
+                FAIL_CLOSED_FLAGS.content.video_max_bytes,
+              ),
+              video_max_seconds: cfg.videoMaxSeconds,
+            },
+          }),
+        );
       })
 
       // --- Reports (§18.4 report mechanism; queued offline, WS-C.2.3) -------

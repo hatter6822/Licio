@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { UserContext } from '@licio/shared';
+import { FAIL_CLOSED_FLAGS, type UserContext } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('./api.js', async (importOriginal) => {
@@ -46,6 +46,7 @@ describe('hydrateFeatureFlags', () => {
       cryptoEnabled: true,
       governanceEnabled: false,
       regionFlags: {},
+      content: FAIL_CLOSED_FLAGS.content,
     });
     await hydrateFeatureFlags();
     expect(useFeatureFlagStore.getState().flags.cryptoEnabled).toBe(true);
@@ -123,6 +124,7 @@ describe('startRuntime', () => {
       cryptoEnabled: false,
       governanceEnabled: false,
       regionFlags: {},
+      content: FAIL_CLOSED_FLAGS.content,
     });
     vi.mocked(api.fetchAuthStatus).mockResolvedValue({ authenticated: false });
     vi.mocked(api.fetchSettings).mockResolvedValue({

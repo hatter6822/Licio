@@ -14,15 +14,15 @@
 import {
   COMMONS_ROOM_ID,
   deriveStoryVisibility,
-  MAX_VIDEO_BYTES,
   type StoryCreateRequest,
   UPLOAD_IMAGE_TYPES,
   UPLOAD_VIDEO_TYPES,
 } from '@licio/shared';
-import { useId, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { ApiClientError, createStory, uploadMedia } from '../../../lib/api.js';
 import { useRoomsQuery } from '../../../lib/queries.js';
+import { selectContentSurface, useFeatureFlagStore } from '../../../stores/index.js';
 import { Button } from '../../ui/Button/index.js';
 import { Input } from '../../ui/Input/index.js';
 import { RadioGroup } from '../../ui/RadioGroup/index.js';
@@ -30,9 +30,6 @@ import { Select } from '../../ui/Select/index.js';
 import { TextArea } from '../../ui/TextArea/index.js';
 
 export type StoryComposerMode = 'link' | 'original_brief' | 'image_post' | 'video_post';
-
-/** Client hint for the §14.x duration cap (the server default; it may be lower). */
-const VIDEO_MAX_SECONDS_HINT = 600;
 
 export interface StoryComposerResult {
   storyId: string;
@@ -73,6 +70,9 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
   const t = useT();
   const rooms = useRoomsQuery();
   const formId = useId();
+  // WS-Q.6.2 — the fail-closed content surface gates media modes + the in-room
+  // visibility choice, and supplies the real video caps for the pre-checks.
+  const content = useFeatureFlagStore(selectContentSurface);
 
   const [mode, setMode] = useState<StoryComposerMode>('link');
   const [roomId, setRoomId] = useState<string>(COMMONS_ROOM_ID);
@@ -102,12 +102,24 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
     selectedRoom.visibility === 'public' ||
     selectedRoom.joined;
 
+  // WS-Q.6.2 — when the in-room-visibility flag is OFF, the author choice is
+  // suppressed (the server forces public in public rooms; private rooms still
+  // force room_only). The submitted value is then always `public`.
+  const submittedVisibility = content.in_room_visibility_enabled ? requestedVisibility : 'public';
   // The DISPLAYED visibility equals the server-derived value (shared helper):
   // a private room forces room_only regardless of the requested value.
   const effectiveVisibility = deriveStoryVisibility(
     roomIsPrivate ? 'private' : 'public',
-    requestedVisibility,
+    submittedVisibility,
   );
+
+  // Media modes appear only when the rollout flag is on; if a media mode is
+  // selected and the flag flips off (rare), fall back to a link.
+  useEffect(() => {
+    if (!content.media_posts_enabled && (mode === 'image_post' || mode === 'video_post')) {
+      setMode('link');
+    }
+  }, [content.media_posts_enabled, mode]);
 
   const roomOptions = useMemo(() => {
     const items = rooms.data?.items ?? [];
@@ -154,7 +166,7 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
     if (mode === 'image_post' && altText.trim().length === 0) {
       next['altText'] = t('storyComposer.err.alt', 'Images require alternative text.');
     }
-    if (mode === 'video_post' && file !== null && file.size > MAX_VIDEO_BYTES) {
+    if (mode === 'video_post' && file !== null && file.size > content.video_max_bytes) {
       next['file'] = t('storyComposer.err.videoSize', 'This video exceeds the size limit.');
     }
     return next;
@@ -163,12 +175,13 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
   async function onSubmit(event: React.FormEvent): Promise<void> {
     event.preventDefault();
     const found = validate();
-    // Video duration is an async, best-effort pre-check (skipped when unreadable).
+    // Video duration is an async, best-effort pre-check against the SERVER cap
+    // (skipped when the browser can't read metadata; the server is authoritative).
     if (
       mode === 'video_post' &&
       file !== null &&
       found['file'] === undefined &&
-      (await readVideoDurationSeconds(file)) > VIDEO_MAX_SECONDS_HINT
+      (await readVideoDurationSeconds(file)) > content.video_max_seconds
     ) {
       found['file'] = t('storyComposer.err.videoLength', 'This video exceeds the length limit.');
     }
@@ -187,7 +200,7 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
       const base = {
         title: title.trim(),
         room_id: roomId,
-        visibility: requestedVisibility,
+        visibility: submittedVisibility,
         topic_ids: topicIds,
       };
       let request: StoryCreateRequest;
@@ -245,8 +258,13 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
         options={[
           { value: 'link', label: t('storyComposer.mode.link', 'A link') },
           { value: 'original_brief', label: t('storyComposer.mode.brief', 'A brief') },
-          { value: 'image_post', label: t('storyComposer.mode.image', 'An image') },
-          { value: 'video_post', label: t('storyComposer.mode.video', 'A video') },
+          // Media modes appear only when the rollout flag is on (WS-Q.6.2).
+          ...(content.media_posts_enabled
+            ? [
+                { value: 'image_post', label: t('storyComposer.mode.image', 'An image') },
+                { value: 'video_post', label: t('storyComposer.mode.video', 'A video') },
+              ]
+            : []),
         ]}
       />
 
@@ -260,22 +278,26 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
         helperText={t('storyComposer.room.help', 'Every post belongs to one room.')}
       />
 
-      <fieldset className="flex flex-col gap-1">
-        <RadioGroup
-          label={t('storyComposer.vis.label', 'Who can see this?')}
-          value={effectiveVisibility}
-          onValueChange={(value) => setRequestedVisibility(value as 'public' | 'room_only')}
-          options={[
-            { value: 'public', label: t('storyComposer.vis.public', 'Anyone (public)') },
-            { value: 'room_only', label: t('storyComposer.vis.room', 'This room only') },
-          ]}
-        />
-        {roomIsPrivate ? (
-          <p className="text-ink-muted text-sm">
-            {t('storyComposer.vis.locked', 'This room is private — posts stay in the room.')}
-          </p>
-        ) : null}
-      </fieldset>
+      {/* The visibility choice is shown only when the rollout flag is on; when
+          off, the server forces public (public rooms) / room_only (private). */}
+      {content.in_room_visibility_enabled ? (
+        <fieldset className="flex flex-col gap-1">
+          <RadioGroup
+            label={t('storyComposer.vis.label', 'Who can see this?')}
+            value={effectiveVisibility}
+            onValueChange={(value) => setRequestedVisibility(value as 'public' | 'room_only')}
+            options={[
+              { value: 'public', label: t('storyComposer.vis.public', 'Anyone (public)') },
+              { value: 'room_only', label: t('storyComposer.vis.room', 'This room only') },
+            ]}
+          />
+          {roomIsPrivate ? (
+            <p className="text-ink-muted text-sm">
+              {t('storyComposer.vis.locked', 'This room is private — posts stay in the room.')}
+            </p>
+          ) : null}
+        </fieldset>
+      ) : null}
 
       <Input
         label={t('storyComposer.title.label', 'Title')}

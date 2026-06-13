@@ -24,7 +24,11 @@ import {
 } from '../../lib/queries.js';
 import { track } from '../../lib/telemetry.js';
 import { isValidUuidParam } from '../../routing/guards.js';
-import { selectGovernanceEnabled, useFeatureFlagStore } from '../../stores/index.js';
+import {
+  selectContentSurface,
+  selectGovernanceEnabled,
+  useFeatureFlagStore,
+} from '../../stores/index.js';
 import { PageScaffold } from './PageScaffold.js';
 import { usePageFocus } from './usePageFocus.js';
 
@@ -33,16 +37,20 @@ export function RoomsPage(): React.ReactElement {
   usePageFocus(t('nav.rooms', 'Rooms'));
   const navigate = useNavigate();
   const rooms = useRoomsQuery();
+  // WS-Q.6.2 — the new room controls appear only when the rollout flag is on.
+  const binaryVisibilityUi = useFeatureFlagStore(selectContentSurface).binary_visibility_ui;
   const [showCreate, setShowCreate] = useState(false);
   return (
     <PageScaffold
       title={t('nav.rooms', 'Rooms')}
       actions={
-        <Button variant="secondary" onClick={() => setShowCreate((v) => !v)}>
-          {showCreate
-            ? t('rooms.create.cancel', 'Cancel')
-            : t('rooms.create.open', 'Create a room')}
-        </Button>
+        binaryVisibilityUi ? (
+          <Button variant="secondary" onClick={() => setShowCreate((v) => !v)}>
+            {showCreate
+              ? t('rooms.create.cancel', 'Cancel')
+              : t('rooms.create.open', 'Create a room')}
+          </Button>
+        ) : undefined
       }
       query={rooms}
       isEmpty={(data) => data.items.length === 0}
@@ -54,7 +62,7 @@ export function RoomsPage(): React.ReactElement {
     >
       {(data) => (
         <div className="flex flex-col gap-4">
-          {showCreate ? (
+          {showCreate && binaryVisibilityUi ? (
             <div className="rounded-lg border border-line p-4">
               <RoomCreateForm
                 onCreated={(roomId) => {
@@ -132,6 +140,8 @@ export function RoomDetailBody({
   const contentVisible = !isPrivate || room.joined;
   const feed = useRoomFeedQuery(roomId, contentVisible);
   const join = useJoinRoomMutation(roomId);
+  // WS-Q.6.2 — the steward settings UI is part of the flag-gated room controls.
+  const binaryVisibilityUi = useFeatureFlagStore(selectContentSurface).binary_visibility_ui;
 
   return (
     <div className="flex flex-col gap-4">
@@ -187,8 +197,10 @@ export function RoomDetailBody({
       ) : null}
 
       {/* WS-Q.5.3c — steward-only room settings (join/posting) + the audited
-          public⇄private visibility cascade. */}
-      {room.is_steward ? <RoomSettingsForm roomId={roomId} room={room} /> : null}
+          public⇄private visibility cascade (gated by the rollout flag). */}
+      {room.is_steward && binaryVisibilityUi ? (
+        <RoomSettingsForm roomId={roomId} room={room} />
+      ) : null}
 
       {/* Tier two: the room feed (in-room chip on every room_only item). */}
       {contentVisible ? (

@@ -4,11 +4,12 @@
 // control LOCKED to in-room for private rooms (shown value == server-derived),
 // image posts that block submit without alt text, and videos rejected pre-upload
 // when oversize. A link submit builds the shared StoryCreateRequest.
-import { COMMONS_ROOM_ID, MAX_VIDEO_BYTES } from '@licio/shared';
+import { COMMONS_ROOM_ID, FAIL_CLOSED_FLAGS, MAX_VIDEO_BYTES } from '@licio/shared';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useFeatureFlagStore } from '../../../stores/index.js';
 import { StoryComposer } from './StoryComposer.js';
 
 const fetchRooms = vi.hoisted(() => vi.fn());
@@ -54,10 +55,27 @@ function renderComposer(onSubmitted = vi.fn()) {
   );
 }
 
+beforeEach(() => {
+  // The composer surface is flag-gated; enable the content rollout flags so the
+  // media modes + visibility control render (the OFF behavior is covered below).
+  useFeatureFlagStore.getState().hydrate({
+    cryptoEnabled: false,
+    governanceEnabled: false,
+    regionFlags: {},
+    content: {
+      ...FAIL_CLOSED_FLAGS.content,
+      media_posts_enabled: true,
+      in_room_visibility_enabled: true,
+      binary_visibility_ui: true,
+    },
+  });
+});
+
 afterEach(() => {
   fetchRooms.mockReset();
   createStory.mockReset();
   uploadMedia.mockReset();
+  useFeatureFlagStore.getState().reset();
 });
 
 describe('StoryComposer (WS-Q.5.1/5.2)', () => {
@@ -138,5 +156,35 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
       visibility: 'public',
     });
     await waitFor(() => expect(onSubmitted).toHaveBeenCalled());
+  });
+});
+
+describe('StoryComposer flag gating (WS-Q.6.2)', () => {
+  it('hides media modes when content.media_posts_enabled is off', async () => {
+    useFeatureFlagStore.getState().hydrate({
+      cryptoEnabled: false,
+      governanceEnabled: false,
+      regionFlags: {},
+      content: { ...FAIL_CLOSED_FLAGS.content, in_room_visibility_enabled: true },
+    });
+    fetchRooms.mockResolvedValue({ items: [], nextCursor: null });
+    renderComposer();
+    await screen.findByText('Commons');
+    expect(screen.getByRole('radio', { name: /a link/i })).toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: /an image/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: /a video/i })).not.toBeInTheDocument();
+  });
+
+  it('hides the visibility control when content.in_room_visibility_enabled is off', async () => {
+    useFeatureFlagStore.getState().hydrate({
+      cryptoEnabled: false,
+      governanceEnabled: false,
+      regionFlags: {},
+      content: { ...FAIL_CLOSED_FLAGS.content, media_posts_enabled: true },
+    });
+    fetchRooms.mockResolvedValue({ items: [], nextCursor: null });
+    renderComposer();
+    await screen.findByText('Commons');
+    expect(screen.queryByRole('radio', { name: /this room only/i })).not.toBeInTheDocument();
   });
 });

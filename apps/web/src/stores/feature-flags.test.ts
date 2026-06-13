@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { FAIL_CLOSED_FLAGS } from '@licio/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   selectCryptoEnabled,
@@ -26,6 +27,7 @@ describe('feature-flag store hydration', () => {
       cryptoEnabled: true,
       governanceEnabled: false,
       regionFlags: { 'wallet-eu': true },
+      content: FAIL_CLOSED_FLAGS.content,
     });
     expect(ok).toBe(true);
     expect(selectCryptoEnabled(useFeatureFlagStore.getState())).toBe(true);
@@ -63,6 +65,7 @@ describe('feature-flag store jurisdiction disables', () => {
       cryptoEnabled: true,
       governanceEnabled: true,
       regionFlags: { 'gov-x': true },
+      content: FAIL_CLOSED_FLAGS.content,
     });
   });
 

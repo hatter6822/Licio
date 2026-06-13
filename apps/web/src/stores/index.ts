@@ -14,6 +14,7 @@ export {
 export { applyMotion, applyTheme } from './dom-sync.js';
 export {
   type FeatureFlagState,
+  selectContentSurface,
   selectCryptoEnabled,
   selectGovernanceEnabled,
   selectRegionEnabled,

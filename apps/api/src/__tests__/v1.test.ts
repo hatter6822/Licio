@@ -123,12 +123,21 @@ describe('v1 auth + settings + flags', () => {
     expect(body.personalization_enabled).toBe(true);
   });
 
-  it('serves fail-closed feature flags', async () => {
+  it('serves fail-closed crypto/governance + the WS-Q content surface', async () => {
     const res = await app().request('/v1/feature-flags');
     expect(await res.json()).toEqual({
       cryptoEnabled: false,
       governanceEnabled: false,
       regionFlags: {},
+      // WS-Q.6.2 — content flags default ON (the live model); the video caps
+      // mirror ingestion config (defaults). Crypto/governance stay fail-closed.
+      content: {
+        media_posts_enabled: true,
+        in_room_visibility_enabled: true,
+        binary_visibility_ui: true,
+        video_max_bytes: 200 * 1024 * 1024,
+        video_max_seconds: 600,
+      },
     });
   });
 });
