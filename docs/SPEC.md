@@ -1,8 +1,8 @@
-# Licio v0.6: A Progressive-Web-App Social News, Knomosis L2 Payments, and DAO-Like Forum Governance Platform
+# Licio v0.7: A Progressive-Web-App Social News, Knomosis L2 Payments, and DAO-Like Forum Governance Platform
 
-**Document status:** v0.6 — PWA-only delivery, consolidated and optimized end-to-end rewrite
+**Document status:** v0.7 — room-owned content and two-tier visibility model, layered onto the consolidated v0.6 PWA-only rewrite
 **Prepared date:** June 7, 2026
-**Revision date:** June 7, 2026
+**Revision date:** June 13, 2026
 **Working product name:** Licio
 **Primary platform:** A mobile-first **Progressive Web App (PWA)** served over HTTPS and installable to the home screen on iOS, Android, and desktop. Licio ships **no native app-store binaries**. Because a web app is not "distributed" through Apple App Review or Google Play, this delivery model resolves both the GPL-3.0/App-Store license conflict and the app-store crypto-policy restrictions identified in earlier revisions.
 **Core premise:** There are no traditional user-cast upvotes, likes, heart buttons, karma counts, follower-count leaderboards, or popularity badges. Public visibility is derived from privacy-preserving measures of active attention, participation depth, conversation quality, nonredundant exposure, cross-context coherence, anti-coordination checks, and recommender-safety constraints. Knomosis L2 is an optional, compliance-gated payment and forum-governance substrate; cryptocurrency, wallets, treasuries, DAO-like votes, and payments never buy visibility, status, notifications, search placement, or recommendation advantage.
@@ -74,7 +74,8 @@ Licio is a mobile-first Progressive Web App for social news and forum discussion
 | v0.4 | End-to-end optimization; smaller work packages, parallel tracks, stronger no-pay-to-rank controls, Knomosis due-diligence path, treasury model, wallet UX, release gates. |
 | v0.4.1 | Deep audit: corrected the mathematics of MERI, MFCI, GWEI, SCOI, and PHI; operationalized EIP-1271; flagged the GPL-3.0/App-Store conflict; fixed internal inconsistencies. |
 | v0.5 | Independent multi-channel distribution (PWA + F-Droid + sideloading) to escape app-store gatekeeping. |
-| **v0.6** | **PWA-only delivery** (native binaries dropped), which fully resolves the license and crypto app-store blockers; the document is consolidated and optimized end-to-end; the rating primitive is renamed **PWAtt** to free "PWA" for Progressive Web App. |
+| v0.6 | **PWA-only delivery** (native binaries dropped), which fully resolves the license and crypto app-store blockers; the document is consolidated and optimized end-to-end; the rating primitive is renamed **PWAtt** to free "PWA" for Progressive Web App. |
+| **v0.7** | **Room-owned content and two-tier visibility.** Every content item — an external link, an uploaded image or video, or a user-written post — is posted in exactly one home room and owns its discussion thread (Section 3.4); content is **public** (distributed everywhere) or **in-room** (never leaves its room); rooms are **public** or **private**, and a private room forces all of its content in-room (Sections 14.5, 16.1–16.2); the front page organizes and displays the public content earning the most meaningful attention (Section 13). Native image/video posts join the submission types (Section 14.1). Existing subsection numbering is preserved; stale stack versions corrected (Section 6.12). |
 
 ## 0.3 Audit verdict and corrections carried forward
 
@@ -136,7 +137,7 @@ The platform has five core invariant services:
 
 Supporting invariants cover conversational tension, cascade timing, trend turbulence, attention landscapes, counterfactual recommender defects, and session wellbeing.
 
-Licio is a hybrid of social news, public forum, and civic sensemaking tool: links, original posts, evidence cards, claims, live discussion threads, topic rooms, and curated community lenses. It avoids applause mechanics and rewards contributions that make the shared information environment more intelligible. The optional **Knomosis** plane adds verifiable, compliance-gated payments and room treasuries with DAO-like governance, used for accountability — not as an applause counter. A user's civic rights never depend on crypto holdings.
+Licio is a hybrid of social news, public forum, and civic sensemaking tool: links, original posts, evidence cards, claims, live discussion threads, topic rooms, and curated community lenses. Structurally, **rooms own content and content owns conversation**: every content item — an external link, an uploaded image or video, or a user-written post — is posted in exactly one room and anchors its own discussion thread; public content from public rooms circulates everywhere, including the front page, while in-room content never leaves its room (Section 3.4). It avoids applause mechanics and rewards contributions that make the shared information environment more intelligible. The optional **Knomosis** plane adds verifiable, compliance-gated payments and room treasuries with DAO-like governance, used for accountability — not as an applause counter. A user's civic rights never depend on crypto holdings.
 
 # 2. Product north star
 
@@ -181,9 +182,9 @@ Licio is a **loom** for public knowledge. Sources, posts, claims, comments, summ
 
 ## 3.2 Core user-facing surfaces
 
-1. **Front Page:** a personalized but constrained feed of important stories and discussions.
-2. **Topic Rooms:** persistent spaces around topics such as climate, local politics, science, technology, health, or city-level news.
-3. **Threads:** structured discussion spaces attached to a story, claim, or question.
+1. **Front Page:** a personalized but constrained feed that organizes and displays the **public** content earning the most meaningful attention and constructive participation platform-wide; in-room content never appears here.
+2. **Topic Rooms:** persistent spaces around topics such as climate, local politics, science, technology, health, or city-level news. Every content item on the platform is posted in exactly one room (Section 3.4); rooms are public or private (Section 16.1).
+3. **Threads:** structured discussion spaces owned by content — every story (link, image, video, or written post) anchors its own thread.
 4. **Context Cards:** compact overlays explaining source history, community interpretations, claim status, timeline, and missing context.
 5. **Evidence Drawer:** a swipe-up panel of cited sources, primary documents, fact checks, data references, and counterevidence.
 6. **Participation Composer:** a structured composer that asks what kind of contribution the user is making.
@@ -196,16 +197,30 @@ Licio is a **loom** for public knowledge. Sources, posts, claims, comments, summ
 
 | Object | Description |
 |---|---|
-| Story | A submitted link or original item that anchors discussion. |
+| Story | A submitted content item — an external link, an uploaded image or video, or a user-written post — posted in exactly one home room; it anchors and owns its discussion thread and carries a visibility (public or in-room, Section 14.5). |
+| Room | The community space that owns content: every story is posted in one home room; rooms are public or private (Section 16.1). |
 | Source | The external publisher, author, dataset, document, or media origin. |
 | Claim | A discrete proposition extracted from a story or comment. |
 | Evidence Card | A citation, data point, document, image, transcript, or expert reference supporting or challenging a claim. |
-| Thread | A structured conversation space attached to a story, claim, or topic. |
+| Thread | The structured conversation space owned by its anchoring story; branches organize questions, evidence, challenges, and lenses (Section 15.3). |
 | Contribution | A value-adding user action: question, evidence, correction, synthesis, summary, counterexample, moderation flag, etc. |
 | Lens | A community-specific interpretation frame: local resident, domain expert, affected group, skeptic, beginner. |
 | Context Patch | A reusable piece of explanation that reduces context obstruction. |
 | Attention Receipt | A private, aggregated record of meaningful attention counted for the user. |
 | Invariant Run | A computation of one or more invariants over a time window, feed, thread, cohort, or topic. |
+
+## 3.4 Structural ownership model
+
+The platform has one containment chain, enforced at the schema level and on every read path:
+
+    Room  ⊃  Content (story)  ⊃  Thread  ⊃  Contributions
+
+1. **Rooms own content.** Every content item — link story, image post, video post, or user-written post (the Section 14.1 submission types) — is posted in exactly one **home room**, chosen at submission. There is no room-less content.
+2. **Content owns conversation.** Every content item anchors its own thread (with structured branches, Section 15.3). Threads never exist apart from the content that owns them; claim- and evidence-level discussion happens inside the owning item's thread.
+3. **Visibility is two-tier.** A room is **public** or **private** (Section 16.1). A content item is **public** — eligible for every distribution surface: front page, topic surfaces, global search, cross-room recommendation — or **in-room**, visible only on its home room's surfaces to users who can read that room. A private room forces every item in it in-room with no override; a public room lets the author choose at submission, defaulting to public (Section 14.5).
+4. **The front page is the public tier's showcase.** It organizes and displays the public content receiving the broadest meaningful attention and constructive participation, ranked by PWAtt under Section 13's constraints — on Licio, "popular" always means participation-weighted attention, never applause counts.
+
+Visibility bounds distribution and discovery; it is not a secrecy guarantee (Section 14.5 states the honest limits), and it never bounds moderation: platform policy reaches private rooms exactly as it reaches public ones (Section 18).
 
 # 4. User personas and core jobs
 
@@ -344,7 +359,7 @@ Primary bottom navigation (at most five surfaces):
 |---|---|
 | Front Page | Ranked feed of stories and discussions. |
 | Rooms | Topic rooms, local rooms, community lenses, subscribed areas. |
-| Submit | Capture link, write post, add evidence, ask a question, start a thread. |
+| Submit | Capture a link, write a post, upload an image or video, add evidence, ask a question — always into a chosen home room, with a visibility choice where the room permits one (Section 14.5). |
 | Threads | Active conversations, replies, saved drafts, participation history. |
 | Profile | Private Signal Ledger, settings, reputation, privacy, moderation notices, and (where enabled) wallet/governance. |
 
@@ -352,7 +367,7 @@ The Submit tab is centered and persistent; it is a contribution entry point, not
 
 ## 6.3 Front Page layout
 
-Each feed card contains: story title; source and origin badge; rating label (e.g. "Deepening," "Needs Context"); one-line reason ("Rising from independent source opens and evidence additions"); context chips ("3 lenses," "2 primary sources," "low coordination risk"); reading estimate; thread-branch preview; and swipe actions (left to save, right to open context card, long-press to signal problem / mute source / adjust topic). No card contains a like count, vote count, heart icon, public score, or reaction bar.
+Each feed card contains: story title; source and origin badge; home-room chip (where the conversation lives); rating label (e.g. "Deepening," "Needs Context"); one-line reason ("Rising from independent source opens and evidence additions"); context chips ("3 lenses," "2 primary sources," "low coordination risk"); reading estimate; thread-branch preview; and swipe actions (left to save, right to open context card, long-press to signal problem / mute source / adjust topic). The front page serves public content only (Section 3.4). No card contains a like count, vote count, heart icon, public score, or reaction bar.
 
 ## 6.4 Thread layout
 
@@ -377,7 +392,7 @@ The composer reduces low-information replies and encourages substance. Structure
 | Explain | "Can you make this easier to understand?" | Explanation, assumptions, caveats. |
 | Flag | "What policy or safety issue exists?" | Reason, target, urgency. |
 
-It supports voice dictation (Web Speech where available), citation capture from the browser share target, image/document attachment with privacy warnings, and local draft autosave.
+It supports voice dictation (Web Speech where available), citation capture from the browser share target, image/document attachment with privacy warnings, and local draft autosave. Story submission through the composer always shows the destination room and the content-visibility choice before posting — and shows the visibility as locked to in-room when the destination room is private (Section 14.5).
 
 ## 6.7 Stopping cues and wellbeing
 
@@ -440,15 +455,15 @@ This section specifies the TypeScript-based development stack for the Licio PWA 
 
 ### 6.12.2 Language, package manager, and build tooling
 
-**TypeScript 5.x in strict mode** (`strict: true`, `noUncheckedIndexedAccess: true`, `exactOptionalPropertyTypes: true`) is the project language. Strict mode catches null-safety violations, type-coercion bugs, and unchecked property access at compile time; it is non-negotiable for a security-critical application.
+**TypeScript 6.x in strict mode** (`strict: true`, `noUncheckedIndexedAccess: true`, `exactOptionalPropertyTypes: true`) is the project language. Strict mode catches null-safety violations, type-coercion bugs, and unchecked property access at compile time; it is non-negotiable for a security-critical application.
 
 **pnpm** is the package manager. pnpm enforces strict dependency resolution: a package cannot `import` a transitive dependency it did not explicitly declare (phantom dependencies). This closes a supply-chain attack vector that npm and Yarn classic leave open. pnpm's content-addressable store deduplicates disk usage and its lockfile is integrity-enforced. **lockfile-lint** validates the pnpm lockfile against declared registries on every CI run, preventing lockfile-poisoning attacks.
 
-**Vite 6** (Rollup-based production builds) is the build tool. Vite is chosen over Next.js, Webpack, and other bundlers for specific security reasons:
+**Vite 8** (Rolldown-based production builds) is the build tool. Vite is chosen over Next.js, Webpack, and other bundlers for specific security reasons:
 
 - **No inline scripts.** Vite produces clean JavaScript files with no injected inline `<script>` blocks, fully compatible with the strict CSP (`default-src 'self'`, no `'unsafe-inline'`) and `require-trusted-types-for 'script'` required by Section 25.2. No nonce or hash workaround is needed for framework-injected hydration data.
 - **Small, auditable dependency tree.** Vite's transitive dependency count is an order of magnitude smaller than Next.js, directly reducing supply-chain attack surface. Fewer packages means each can be reviewed, and the risk of a compromised transitive dependency reaching the production bundle is proportionally lower.
-- **Deterministic output.** Rollup produces stable, content-hashed output suitable for reproducible builds, Subresource Integrity, and signed provenance (Section 20.2).
+- **Deterministic output.** Rolldown produces stable, content-hashed output suitable for reproducible builds, Subresource Integrity, and signed provenance (Section 20.2).
 - **Explicit client-server boundary.** Vite builds the client; the BFF is a separate process with its own entry point. There is no framework-level blurring of which code runs where, preventing accidental data exposure across security domains.
 - **Route-level code splitting and tree-shaking** support the initial JS payload budget and lazy-loading requirements (Section 6.10).
 
@@ -558,9 +573,9 @@ The client bundle targets fewer than **15 direct production dependencies**. The 
 
 | Layer | Technology | Primary security rationale |
 |---|---|---|
-| Language | TypeScript 5.x strict | Compile-time null safety, type safety, and unchecked-access prevention. |
+| Language | TypeScript 6.x strict | Compile-time null safety, type safety, and unchecked-access prevention. |
 | Package manager | pnpm | Strict resolution prevents phantom dependencies; lockfile integrity. |
-| Build | Vite 6 (Rollup) | No inline scripts; small dep tree; deterministic output; explicit client-server boundary. |
+| Build | Vite 8 (Rolldown) | No inline scripts; small dep tree; deterministic output; explicit client-server boundary. |
 | UI framework | React 19 | JSX auto-escaping; Trusted Types compatible; largest security-audit community. |
 | Routing | TanStack Router | Type-safe route params; no server-side routing complexity. |
 | Server state | TanStack Query v5 | Offline support; zod-validated responses at API boundary. |
@@ -586,7 +601,7 @@ The client bundle targets fewer than **15 direct production dependencies**. The 
 | **Express.js** | Effectively unmaintained with minimal security updates; no built-in TypeScript support; middleware ordering is error-prone for security-critical headers (a misordered middleware can silently skip CSRF or CSP enforcement); large middleware ecosystem with inconsistent security posture and many abandoned packages. |
 | **Prisma** | Larger runtime footprint (requires a separate query-engine binary); the engine binary increases supply-chain surface and complicates reproducible builds; implicit behaviors (auto-include, lazy loading) can produce unexpected data access patterns that are hard to audit; less SQL-auditable than Drizzle's direct SQL mapping. |
 | **CSS-in-JS (styled-components, Emotion, Stitches)** | Requires `'unsafe-inline'` in `style-src` or complex SSR style extraction to avoid FOUC; runtime style injection is an additional attack surface; conflicts with the strict CSP required by Section 25.2; adds JavaScript bundle weight for functionality that static CSS handles with zero runtime cost. |
-| **Webpack** | Larger, more complex configuration surface than Vite; slower builds reduce security-iteration velocity; output is less deterministic by default; HMR implementation is more complex with more edge cases; Vite's Rollup-based production pipeline produces cleaner, more auditable output. |
+| **Webpack** | Larger, more complex configuration surface than Vite; slower builds reduce security-iteration velocity; output is less deterministic by default; HMR implementation is more complex with more edge cases; Vite's Rolldown-based production pipeline produces cleaner, more auditable output. |
 
 # 7. Core invariant 1: Matroid Exposure Rank Invariant (MERI)
 
@@ -921,18 +936,18 @@ Session events form a path; iterated integrals (the path signature) encode order
 
 ## 13.1 Objectives and constraints
 
-Ranking is a constrained multi-objective optimizer. It maximizes meaningful attention, constructive participation, nonredundant exposure, evidence completeness, context coherence, topic relevance, civic importance, user agency, and conversation health — subject to constraints: coordination risk below threshold (MFCI), holonomy risk below threshold (PHI), GWEI cohort disparity below threshold, redundancy bounded by MERI, context obstruction handled by context cards or dampening (SCOI), safety-policy compliance, and privacy/age-appropriate limits.
+Ranking is a constrained multi-objective optimizer. It maximizes meaningful attention, constructive participation, nonredundant exposure, evidence completeness, context coherence, topic relevance, civic importance, user agency, and conversation health — subject to constraints: coordination risk below threshold (MFCI), holonomy risk below threshold (PHI), GWEI cohort disparity below threshold, redundancy bounded by MERI, context obstruction handled by context cards or dampening (SCOI), safety-policy compliance, privacy/age-appropriate limits, and content-visibility containment (in-room content never leaves its room, Section 14.5).
 
 ## 13.2 Candidate generation
 
-Sources: subscribed rooms; local and regional news; global front-page candidates; emerging discussions with high constructive participation; independent source additions to known stories; cross-community bridge candidates; expert explanations and high-quality summaries; chronological catch-up. Candidate generation must preserve a minimum quota of fresh, independent, and local sources to prevent personalization collapse. Candidate generation is independent of likes, follower counts, wallet activity, payments, and donor status.
+Sources: subscribed rooms; local and regional news; global front-page candidates; emerging discussions with high constructive participation; independent source additions to known stories; cross-community bridge candidates; expert explanations and high-quality summaries; chronological catch-up. Candidate generation is **visibility-scoped**: global surfaces (front page, topic surfaces) draw only from public content; a room surface draws from that room's full pool — public and in-room — for users who pass the room's read bar (Sections 14.5, 16.2). Candidate generation must preserve a minimum quota of fresh, independent, and local sources to prevent personalization collapse. Candidate generation is independent of likes, follower counts, wallet activity, payments, and donor status.
 
 ## 13.3 Ranking stages
 
 | Stage | Description |
 |---|---|
 | Ingest | Normalize links, extract metadata, classify topics, detect duplicates. |
-| Candidate retrieval | Retrieve stories/threads relevant to user, room, and global context. |
+| Candidate retrieval | Retrieve visibility-eligible stories/threads relevant to user, room, and global context (public content for global surfaces; the room pool for room surfaces). |
 | Invariant feature join | Add MERI, MFCI, GWEI, SCOI, PHI, and support-invariant features. |
 | Safety filter | Remove or restrict policy-violating content. |
 | Multi-objective rank | Score with PWAtt and constraints. |
@@ -944,6 +959,7 @@ Sources: subscribed rooms; local and regional news; global front-page candidates
 
     function rank_front_page(user u, context c):
         candidates = retrieve_candidates(u, c)
+        candidates = restrict_to_visibility_scope(candidates, c)   # public-only on global surfaces (Section 14.5)
         candidates = remove_policy_disallowed(candidates)
         for item in candidates:
             features[item] = join_features(item, u, c)        # excludes payment/wallet fields
@@ -968,12 +984,18 @@ The ranking system must not: use likes or upvotes (they do not exist); optimize 
 
 # 14. Social news aggregation model
 
+Licio aggregates **content**: a content item is an external link, an uploaded image or video, or a user-written post (the Section 14.1 submission types), posted in exactly one home room and anchoring exactly one discussion thread (Section 3.4). "Story" is this specification's canonical name for a content item of any type. This section defines the submission types, the ingestion pipeline, the source model, the lifecycle, and the content-ownership and visibility rules.
+
 ## 14.1 Submission types
+
+Every submission targets exactly one home room and carries a content visibility (public or in-room, derived per Section 14.5); the home room and visibility join the per-type metadata below.
 
 | Type | Description | Required metadata |
 |---|---|---|
 | Link story | External article, blog, report, video, podcast, dataset. | URL, topic, short reason for submission. |
 | Original brief | User-written post. | Topic, title, body, disclosure if personal experience. |
+| Image post | User-uploaded image anchoring discussion. | Image upload (allow-listed type, EXIF/GPS-stripped, scan-gated), required alt text, title, topic. |
+| Video post | User-uploaded short video anchoring discussion. | Video upload (allow-listed container, metadata-stripped, size/duration-capped, scan-gated), title, topic, captions or transcript where available. |
 | Question | A discussion-seeking prompt. | Question, context, topic. |
 | Evidence card | Source tied to an existing claim. | Citation, claim reference, relevance note. |
 | Local update | Time/place-specific update. | Location scope, time, source or experience disclosure. |
@@ -981,7 +1003,7 @@ The ranking system must not: use likes or upvotes (they do not exist); optimize 
 
 ## 14.2 Ingestion pipeline
 
-Normalize URL and canonical source; detect duplicates and syndicated copies; extract metadata, author, date, publisher, primary media type; generate a candidate claim list; classify topic, location, language, sensitivity, source type; compute embeddings and similarity links; run initial safety checks; initialize MERI, SCOI, and cascade-tracking state; create the story card and thread shell. Crawling respects robots.txt and publisher restrictions; copyright-aware display and a takedown intake path are mandatory.
+Normalize URL and canonical source; detect duplicates and syndicated copies within the item's visibility tier (Section 14.5); extract metadata, author, date, publisher, primary media type; for image and video posts, admit the upload through the shared media pipeline (content-type allowlist, byte-level metadata stripping, scan gate, required alt text — Section 15.5) instead of crawling; generate a candidate claim list; classify topic, location, language, sensitivity, source type; compute embeddings and similarity links; run initial safety checks; initialize MERI, SCOI, and cascade-tracking state; create the story card and its thread shell in the home room, stamped with the derived visibility. Crawling respects robots.txt and publisher restrictions; copyright-aware display and a takedown intake path are mandatory.
 
 ## 14.3 Source model
 
@@ -989,9 +1011,31 @@ Source profiles contain: name and canonical domain; ownership/publisher lineage 
 
 ## 14.4 Story lifecycle
 
-Submitted → Gathering attention → Deepening → Context needed (SCOI or evidence gaps elevated) → Bridging → Stable → Archived (low activity; preserved for search and reference).
+Submitted → Gathering attention → Deepening → Context needed (SCOI or evidence gaps elevated) → Bridging → Stable → Archived (low activity; preserved for search and reference). The lifecycle is visibility-independent: an in-room story moves through the same states, driven by its room's activity.
+
+## 14.5 Content ownership and visibility
+
+Every story is posted in exactly one home room and carries a visibility derived as follows:
+
+| Room visibility | Author's choice | Content visibility | Where the item can appear |
+|---|---|---|---|
+| Public | Public (default) | Public | Home-room surfaces, front page, topic surfaces, global search, cross-room recommendation, share previews. |
+| Public | In-room | In-room | Home-room surfaces only (room feed, room-scoped search), for any user who can read the room. |
+| Private | — (forced) | In-room | Home-room surfaces only, for active room members; outsiders and pending applicants see nothing (two-tier visibility, Section 16.2). |
+
+Rules:
+
+1. **Private rooms force privacy.** Content in a private room is always in-room; neither the author nor a steward can override it short of reposting into a public room.
+2. **Visibility transitions are bounded and audited.** An author may narrow a public item to in-room at any time; it leaves global surfaces, search, and candidate pools on the next index/serve cycle. Widening in-room → public is allowed only in public rooms and re-runs the public-distribution admission checks (tier-scoped duplicate detection, safety pre-checks, freshness baseline). When a public room becomes private, every item it contains is forced in-room; making a private room public never auto-publishes its content — each item stays in-room until its author widens it. Every transition emits `content.visibility.changed` (Section 21.3) and is written to the audit log.
+3. **Distribution enforcement is server-side and layered.** Candidate retrieval scopes by visibility (Section 13.2); the room read bar (Section 16.2) gates every thread, contribution, and search read; and the ranking pipeline independently re-asserts the bar on the distribution side — so in-room content cannot reach a public feed even through a mislabeled retriever.
+4. **Search respects the same boundary.** Public content is globally searchable; in-room content is searchable only through its home room's scoped search, by users who can read the room.
+5. **Signals are visibility-neutral in collection, visibility-bound in effect.** Attention and participation on in-room content feed the owner's private Signal Ledger, the room surface's ranking, and the safety invariants — but can never promote the item onto a global surface.
+6. **Duplicate detection is tier-scoped.** The public tier keeps at most one public story per canonical URL (a duplicate public submission 409s to the existing story); the in-room tier keeps at most one per room, so the same URL may anchor separate in-room conversations in different rooms. An in-room item never blocks a later public submission of the same URL; when both exist, the in-room item links to the canonical public story as room-local context.
+7. **Honest limits.** In-room visibility bounds distribution; it is not end-to-end encryption and not a secrecy guarantee. Room members can copy what they can read; stewards, platform moderation, safety systems, and legal process reach private rooms exactly as they reach public ones (Sections 16.4, 18); DSAR export returns a user's own contributions wherever they were posted (Section 19.3). The UI states this plainly inside private rooms.
 
 # 15. Forum and conversation design
+
+Conversation is owned by content: every thread belongs to the story that anchors it (Section 3.4), lives in that story's home room, and inherits its visibility — the room read bar of Section 16.2 gates every thread and contribution read.
 
 ## 15.1 Structured contribution taxonomy
 
@@ -1001,17 +1045,24 @@ Contributions are classified because classification improves ranking, moderation
 
 A conversation is high quality when it has clear claims; independent evidence; visible unanswered questions; corrections explicitly accepted or disputed; multiple lenses represented fairly; low harassment and manipulation; summaries that improve as the thread grows; and structure that lets readers enter at different depths.
 
-## 15.3 Thread branch scoring
+## 15.3 Thread structure and branch scoring
+
+Threads are read through six fixed **structured sections** (Section 6.4): Overview, Questions, Evidence, Challenges, Local/Expert Lenses, and Chronology — never a flat list. Contributions form a depth-bounded tree beneath the sections; every read is branch-aware, keyset-paginated, and visibility-filtered (removed or hidden contributions collapse honestly rather than disappearing silently, and the room read bar gates every page).
 
 Branches receive internal scores from nonredundant evidence added, questions answered, context obstruction reduced (SCOI), harmonic tension reduced without suppressing disagreement (Hodge), corrections incorporated, low coordination risk (MFCI), and reader utility from active attention and return visits. No branch receives score from likes.
 
-## 15.4 Summaries
+## 15.4 Thread states and summaries
 
-Three layers: an **automated draft summary** (generated, labeled machine-generated, never final); a **community synthesis** (user-written, citing branches and evidence); and a **steward summary** (moderator-approved, for high-impact threads). Summaries include unresolved uncertainty and relevant minority views (Section 24.3).
+A thread carries two orthogonal, audited state dimensions, evolved only through table-driven legal-transition functions:
+
+- **Conversation state** — the discourse lifecycle: `active → {deepening, tense, under_review, resolved}`; `tense ⇄ under_review`; `under_review → {active, resolved}`; any non-archived state → `archived` (terminal). `deepening` is entered structurally on sustained, multi-level participation with evidence (volume, evidence, and live-depth thresholds). A review that ends in restriction moves the safety dimension, not the conversation dimension.
+- **Safety state** — the trust-and-safety posture: `normal`, `elevated`, `under_review`, `restricted`. Escalation may move one step or jump straight to `restricted` for imminent harm (Section 18.3); de-escalation always passes through review (`restricted → under_review` is the appeal path). Every change is audit-logged and emits `thread.state.changed` (Section 21.3).
+
+Summaries come in three layers: an **automated draft summary** (generated, labeled machine-generated, never final); a **community synthesis** (user-written, citing branches and evidence); and a **steward summary** (moderator-approved, for high-impact threads). A human layer always supersedes the automated draft, and summaries include unresolved uncertainty and relevant minority views (Section 24.3).
 
 ## 15.5 Comments and replies
 
-Comments support Markdown-lite formatting (rendered through a strict sanitizer and Trusted Types, Section 25); source-citation cards; claim references; quote snippets with attribution; edit history for material changes; deletion with a tombstone when needed for thread integrity; abuse reporting; translation with original text accessible; and accessibility labels for attachments.
+Comments support Markdown-lite formatting (rendered through a strict sanitizer and Trusted Types, Section 25); source-citation cards; claim references; quote snippets with attribution; edit history for material changes; deletion with a tombstone when needed for thread integrity; abuse reporting; translation with original text accessible; and accessibility labels for attachments. Image and document attachments pass the shared media pipeline before storage: a content-type allowlist, byte-level EXIF/GPS/XMP metadata stripping for images, a scan gate that holds flagged files, and required alt text for images — the same pipeline that admits Section 14.1 image and video posts.
 
 ## 15.6 Reputation without applause
 
@@ -1021,11 +1072,22 @@ Reputation is based on contribution outcomes, not public likes: evidence reliabi
 
 ## 16.1 Rooms
 
-Rooms are topic or locality spaces, public, restricted, or expert/steward-led. Types: global topic room; local geographic room; professional/domain room; event room; learning room; steward room.
+Rooms are the topic, locality, and community spaces that **own content**: every content item is posted in exactly one home room (Section 3.4). Types: global topic room; local geographic room; professional/domain room; event room; learning room; steward room.
 
-## 16.2 Lenses
+Room **visibility** is binary — **public** or **private**:
 
-A lens is an interpretation context, not a private echo chamber: local resident, beginner, expert, affected community, skeptical, policy, historical. SCOI uses lenses to identify where meanings diverge.
+- A **public** room is readable by everyone, signed in or not; joining enables participation and subscription. Content posted in it is public by default, and the author may instead keep an item in-room (Section 14.5).
+- A **private** room exposes nothing beyond its existence: non-members — including pending applicants — can discover that the room exists (name, description, join affordance) but read none of its content, membership, or activity. Everything posted in a private room is forced in-room. Steward rooms are always private.
+
+Visibility composes with two orthogonal, per-room policy axes: the **join model** (how membership is granted, Section 16.2) and the **posting policy** (who may post top-level content — all members, or experts/stewards only with replies open to members: the expert-led pattern, available at either visibility). Private means private from the public, not from the platform: global safety, legality, child-protection, privacy, accessibility, and ranking-integrity constraints reach private rooms in full (Sections 16.4, 18).
+
+## 16.2 Membership, visibility mechanics, and lenses
+
+**Join models** are configured per room within its visibility class: public rooms grant membership on join (auto-active); private rooms grant it by request with steward approval, or by invitation. Expert-led posting (Section 16.1) composes with either. Membership states are `active` and `pending`.
+
+**Two-tier visibility** is the read bar enforced on every surface. Tier one is room *existence* — name, description, visibility class, join affordance — visible to all, so private rooms are discoverable and joinable. Tier two is room *content* — threads, contributions, members, activity — visible only to users who pass the room's read bar: everyone for public rooms, active members for private rooms. The same bar gates thread reads, contribution reads, room-scoped search, and the room feed; the ranking pipeline re-asserts it independently on the distribution side, so private-room content can never leak into public front-page or topic feeds even through a mislabeled candidate source (Section 14.5).
+
+A **lens** is an interpretation context, not a private echo chamber: local resident, beginner, expert, affected community, skeptical, policy, historical. SCOI uses lenses to identify where meanings diverge.
 
 ## 16.3 Steward roles
 
@@ -1194,6 +1256,7 @@ and deletion.
 | Context opens | Upload aggregate; used for ranking and UI improvement. |
 | Draft text | Stored locally (IndexedDB); synced encrypted if the user enables sync. |
 | Private saves | Private; low/no ranking effect unless the user opts into an aggregate signal. |
+| In-room (private) content | Distribution-bounded to the home room (Section 14.5); excluded from public feeds, topic surfaces, and global search; not end-to-end encrypted; reachable by moderation and legal process. |
 | Sensitive-topic interest | Protected; shorter retention and stricter use limits. |
 
 ## 19.3 User controls
@@ -1263,7 +1326,7 @@ API gateway; web BFF (backend-for-frontend) for the PWA; identity and account; c
 
 ## 21.3 Event-driven processing
 
-Core topics: `content.submitted`, `content.normalized`, `source.opened.aggregate`, `attention.aggregate`, `contribution.created`, `evidence.added`, `claim.updated`, `thread.state.changed`, `moderation.case.created`, `integrity.signal.detected`, `invariant.run.completed`, `ranking.decision.logged`, `notification.sent`, `privacy.request.created`. Knomosis topics: `wallet.link.requested`, `wallet.linked`, `payment.intent.created`, `payment.intent.failed`, `payment.receipt.indexed`, `room.governance.mode.changed`, `governance.proposal.created`, `governance.signature.recorded`, `governance.proposal.executed`, `governance.proposal.challenged`, `treasury.deposit.indexed`, `treasury.grant.approved`, `treasury.payout.executed`, `knomosis.action.preflighted`, `knomosis.action.submitted`, `knomosis.event.indexed`, `compliance.financial.case.created`, `jurisdiction.feature.disabled`.
+Core topics: `content.submitted`, `content.normalized`, `content.visibility.changed`, `source.opened.aggregate`, `attention.aggregate`, `contribution.created`, `evidence.added`, `claim.updated`, `thread.state.changed`, `moderation.case.created`, `integrity.signal.detected`, `invariant.run.completed`, `ranking.decision.logged`, `notification.sent`, `privacy.request.created`. Knomosis topics: `wallet.link.requested`, `wallet.linked`, `payment.intent.created`, `payment.intent.failed`, `payment.receipt.indexed`, `room.governance.mode.changed`, `governance.proposal.created`, `governance.signature.recorded`, `governance.proposal.executed`, `governance.proposal.challenged`, `treasury.deposit.indexed`, `treasury.grant.approved`, `treasury.payout.executed`, `knomosis.action.preflighted`, `knomosis.action.submitted`, `knomosis.event.indexed`, `compliance.financial.case.created`, `jurisdiction.feature.disabled`.
 
 ## 21.4 Invariant computation platform
 
@@ -1290,7 +1353,11 @@ Knomosis is an isolated bounded context: ranking services read only sanitized, a
            age_band_if_known, privacy_settings, personalization_settings,
            reputation_summary_private }
 
-    Story { story_id, canonical_url, title, submitted_by, source_id, language,
+    Room { room_id, slug, name, description, room_type, visibility,
+           join_model, posting_policy, governance_mode, created_at }
+
+    Story { story_id, room_id, visibility, submission_type, canonical_url,
+            media_upload_ref, title, submitted_by, source_id, language,
             topic_ids, location_scope, sensitivity_labels, lifecycle_state,
             created_at, updated_at }
 
@@ -1313,6 +1380,14 @@ Knomosis is an isolated bounded context: ranking services read only sanitized, a
     InvariantOutput { invariant_output_id, invariant_type, target_type, target_id,
                       time_window, version, score_vector, explanation_summary,
                       confidence, created_at }
+
+Ownership and visibility notes: `Story.room_id` is the authoritative home room
+(NOT NULL — there is no room-less content); `Thread.room_id` is denormalized
+from the owning story and kept consistent by the storage layer.
+`Room.visibility` is `public | private`; `Story.visibility` is
+`public | room_only`, derived per Section 14.5 (a private room forces
+`room_only`). `Story.media_upload_ref` is set only for image/video posts and
+points into the scan-gated upload store.
 
 ## 22.2 Knomosis and treasury entities
 
@@ -1377,7 +1452,7 @@ These live in a separate bounded context from feed ranking and ordinary social a
 
 ## 22.3 Relationship graph
 
-Key edges: User contributed to Thread; Story cites Source; Claim supported-by / challenged-by Evidence; Contribution replies-to Contribution; Contribution clarifies Claim; Story duplicates Story; Source syndicated-from Source; Room has Lens; Lens interprets Story; Moderator-action targets Contribution.
+Key edges: Room contains Story; Story owns Thread; User contributed to Thread; Story cites Source; Claim supported-by / challenged-by Evidence; Contribution replies-to Contribution; Contribution clarifies Claim; Story duplicates Story; Source syndicated-from Source; Room has Lens; Lens interprets Story; Moderator-action targets Contribution.
 
 ## 22.4 Data retention defaults
 
@@ -1402,9 +1477,10 @@ A web BFF (Hono, Section 6.12.8) with end-to-end type-safe contracts (Hono RPC f
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/v1/feed/front-page` | GET | Ranked feed with explanations. |
+| `/v1/feed` | GET | Ranked front-page feed of public content, with explanations (`?topic=` scopes to a topic surface). |
 | `/v1/rooms` | GET | List joined and recommended rooms. |
-| `/v1/stories` | POST | Submit link or original story. |
+| `/v1/rooms/{room_id}/feed` | GET | Room feed (public + in-room content of that room) for users who pass the room read bar. |
+| `/v1/stories` | POST | Submit a content item (link, image, video, or written post) to a home room, with a visibility choice where the room permits one. |
 | `/v1/stories/{id}` | GET | Story detail and context. |
 | `/v1/threads/{id}` | GET | Thread overview and branch index. |
 | `/v1/threads/{id}/branches/{branch}` | GET | Branch content. |
@@ -1418,9 +1494,9 @@ A web BFF (Hono, Section 6.12.8) with end-to-end type-safe contracts (Hono RPC f
 
 ## 23.3 Representative payload shapes
 
-    FeedItem { story_id, title, source_summary, rating_label, distribution_reason,
-               context_chips[], reader_state, thread_preview, safety_state,
-               user_controls }
+    FeedItem { story_id, room_ref, visibility, title, source_summary,
+               rating_label, distribution_reason, context_chips[], reader_state,
+               thread_preview, safety_state, user_controls }
 
     CreateContributionRequest { thread_id, type, body, parent_id_optional,
                                 target_claim_id_optional, citations[], attachments[],
@@ -1607,7 +1683,7 @@ Do not optimize for total value locked, tokens traded, wallet connects, speculat
 
 ## 29.1 New story
 
-User submits a link via the browser share target or the Submit tab → client captures URL, title, optional reason → backend normalizes URL and detects duplicates → story shell created or existing story reopened → initial thread summary and context cards generated → feed candidates receive a baseline rank → as users read and contribute, PWAtt grows or dampens → invariant services update state → the story moves through lifecycle labels.
+User submits a link via the browser share target or the Submit tab → client captures URL, title, optional reason, the destination home room, and the visibility choice (locked to in-room when the room is private) → backend normalizes URL and detects duplicates within the visibility tier (Section 14.5) → story shell created in the home room or the existing story reopened → initial thread summary and context cards generated → visibility-eligible feed candidates receive a baseline rank → as users read and contribute, PWAtt grows or dampens → invariant services update state → the story moves through lifecycle labels.
 
 ## 29.2 New contribution
 
@@ -1677,6 +1753,7 @@ No crypto task blocks steps 1–9. The rule is: **PWAtt and MERI exist before pu
 - **N — Compliance, finance, distribution readiness:** region/feature policy engine; custody-model decision; jurisdiction/asset/sanctions/tax mapping; reproducible-build provenance and published signing keys; Licio-published financial-risk disclosures and content rating; compliance case management; suspicious-activity escalation; treasury accounting export; pre-release integrity review.
 - **O — Security, reliability, incident response:** threat models; secure SDLC gates (review, dependency/secret scanning, SAST/DAST, web security testing, smart-contract testing, infra scanning); web hardening (CSP/Trusted Types/SRI); backend authz/encryption/key management; contract/gateway tests (access control, replay, signature validation, reentrancy, chain ID, nonce, withdrawal, emergency controls); external audits; observability/SLOs; incident runbooks; tabletop drills; bug bounty.
 - **P — Experimentation, metrics, launch ops:** launch phases; quality/harm/fairness/wellbeing metrics; anti-metrics; experiment registry and launch review; transparency pipeline; rollout/rollback automation by region/room/flag/version; post-launch reviews; deprecation/archive process.
+- **Q — Content–room ownership and visibility (Sections 3.4, 14.5, 16.1–16.2):** home room required at submission (no room-less content); binary public/private room visibility with join-model and posting-policy axes; per-item public/in-room visibility with private-room forcing and bounded, audited transitions (`content.visibility.changed`); native image/video posts through the shared media pipeline; tier-scoped duplicate detection; visibility-scoped candidate retrieval, search, and share surfaces; migration of pre-room content into home rooms. Plan: `docs/planning/18-content-and-room-model.md`.
 
 ## 30.4 Core invariant build plans
 
@@ -1880,6 +1957,10 @@ A user reads a treasury explainer showing balance, caps, active proposals, and r
 
 A newly formed cluster of wallet-linked accounts joins a room before a high-value vote; MFCI flags synchronized joining and co-voting after conditioning on ordinary room activity; the vote enters review rather than auto-execution; an analyst sees preserved-margin comparisons, account-age distribution, and timing skeleton; the room can extend deliberation, reduce the cap, require additional eligibility, or cancel with notice; affected users receive appeal paths; the transparency report describes the intervention in aggregate without exposing anti-abuse detail.
 
+## 35.8 Posting an image into a private room
+
+A member of a private neighborhood room uploads a photo of a flooded underpass; the upload is EXIF/GPS-stripped and scan-gated before storage, and the composer requires alt text for accessibility; the destination room is the private one she is in, so the visibility control is locked to "in-room" with the note "This room is private — posts stay in the room (private from the public, not from moderation; not encrypted)"; she posts, and the image story anchors its own thread inside the room. The post never reaches the front page, topic surfaces, or global search; other members read and add local context; her private Signal Ledger records the attention her post received, but no global score exists. Weeks later she decides the hazard is of public interest, reposts the same image into the public city-news room, and there chooses "public" — only then does the item become eligible for front-page distribution, ranked by participation-weighted attention under the usual constraints.
+
 # 36. Appendix C: Prioritized backlog and dependency map
 
 ## 36.1 Priority 0 (before any real-user alpha)
@@ -1908,7 +1989,7 @@ K0 (before any wallet UX): pin commit and license/copyleft review; threat-model 
 
 ## 36.7 Dependency map
 
-PWAtt depends on event schema, in-browser instrumentation, privacy classification, and aggregation jobs. MERI depends on canonicalization, source metadata, embeddings, and merge tools. MFCI depends on trustworthy event ingestion, action tables, margin definitions, and analyst tooling. GWEI depends on ranking decision logs, cohort definitions, impression logs, and privacy thresholds. SCOI depends on lenses, context cards, local summaries, taxonomy, and steward patch tools. PHI depends on session summaries, topic-state transitions, recommender logs, and user reset controls. Transparency depends on moderation reason codes, ranking decision logs, incident logs, and aggregation jobs. Public beta depends on web security testing, accessibility remediation, incident response, T&S staffing, and rollback mechanisms. Wallet UX depends on web security, account identity, the wallet-link service, and the distribution-integrity pipeline. Governance simulation depends on rooms, proposals, conversation linking, and steward roles. Testnet actions depend on the Knomosis gateway, deployment manifest, law-pack registry, and event indexer. Real funds depend on legal approval, external audits, compliance controls, support staffing, incident response, and treasury accounting.
+PWAtt depends on event schema, in-browser instrumentation, privacy classification, and aggregation jobs. MERI depends on canonicalization, source metadata, embeddings, and merge tools. MFCI depends on trustworthy event ingestion, action tables, margin definitions, and analyst tooling. GWEI depends on ranking decision logs, cohort definitions, impression logs, and privacy thresholds. SCOI depends on lenses, context cards, local summaries, taxonomy, and steward patch tools. PHI depends on session summaries, topic-state transitions, recommender logs, and user reset controls. Transparency depends on moderation reason codes, ranking decision logs, incident logs, and aggregation jobs. Public beta depends on web security testing, accessibility remediation, incident response, T&S staffing, and rollback mechanisms. Wallet UX depends on web security, account identity, the wallet-link service, and the distribution-integrity pipeline. Governance simulation depends on rooms, proposals, conversation linking, and steward roles. Testnet actions depend on the Knomosis gateway, deployment manifest, law-pack registry, and event indexer. Real funds depend on legal approval, external audits, compliance controls, support staffing, incident response, and treasury accounting. The content–room ownership and visibility model (Section 14.5, workstream Q) depends on the room model, the story/thread schema, the ingestion guard chain, the upload pipeline, the search surfaces, and the ranking distribution-side visibility bar; it remodels shipped surfaces and is dependency-ordered after ingestion, forum, and ranking.
 
 # 37. Appendix D: Reference standards and sources
 
@@ -1971,8 +2052,3 @@ Matroid theory and submodular optimization (nonredundant selection); algebraic s
 ## 37.8 Source-review notes and legal disclaimer
 
 The Knomosis repository (reviewed June 7, 2026) describes a Lean 4 proof-carrying state-transition kernel with Solidity and Rust mirrors, a small trusted core, fixture-based cross-stack determinism, and audit gates; the README lists version v0.4.11, Lean toolchain v4.29.1, and GPL-3.0-or-later licensing. Licio must pin a specific commit before implementation because branch state changes. This document is a product and technical specification, not legal advice; it does not guarantee compliance with any jurisdiction. The legal and standards landscape for social media, minors, AI, privacy, accessibility, financial services, and platform accountability changes frequently; refresh this appendix at every major release gate.
-
-
-
-
-

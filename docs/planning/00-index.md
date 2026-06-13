@@ -1,12 +1,13 @@
 # Licio Implementation Plan — Master Index
 
-**Version:** v4.0
-**Source specification:** docs/SPEC.md v0.6
-**Date:** June 7, 2026
+**Version:** v4.1
+**Source specification:** docs/SPEC.md v0.7
+**Date:** June 13, 2026
 
-This plan decomposes the Licio specification into 17 workstream documents housed in `docs/planning/`. Each document is independently actionable, dependency-ordered, and composed of **~646 atomic tasks** targeting 0.5-2 engineering days each. Every task carries a unique ID, a spec reference (`Ref:`), a description, measurable acceptance criteria, testing requirements, and explicit dependencies; data-bearing tasks include Drizzle/zod schemas and API request/response shapes. Tasks are independently reviewable, testable, and reversible per Section 30.8. The plan follows the spec's milestone structure (M0-M6), workstream labels (0, A-P), and the critical-path ordering from Section 30.2.
+This plan decomposes the Licio specification into 18 workstream documents housed in `docs/planning/`. Each document is independently actionable, dependency-ordered, and composed of **~678 atomic tasks** targeting 0.5-2 engineering days each. Every task carries a unique ID, a spec reference (`Ref:`), a description, measurable acceptance criteria, testing requirements, and explicit dependencies; data-bearing tasks include Drizzle/zod schemas and API request/response shapes. Tasks are independently reviewable, testable, and reversible per Section 30.8. The plan follows the spec's milestone structure (M0-M6), workstream labels (0, A-Q), and the critical-path ordering from Section 30.2.
 
 **Revision history:**
+- **v4.1** — Added **WS-Q (content–room ownership and visibility)** as `18-content-and-room-model.md` (32 atomic tasks) for the SPEC v0.7 model: rooms own content, content owns conversation, binary public/private room visibility with orthogonal join-model/posting-policy axes, per-item public/in-room visibility with private-room forcing and audited transitions, native image/video posts through the scan-gated media pipeline, tier-scoped duplicate detection, visibility-scoped retrieval/search/distribution, and the behavior-preserving migration of pre-room content into home rooms. WS-Q remodels shipped WS-F/WS-G/WS-I surfaces and is dependency-ordered after them.
 - **v4.0** — Deep audit + expansion of every workstream (≈2x depth; ~22,900 lines; ~646 atomic tasks). Closed spec-coverage gaps surfaced during the audit, including: emergency feature-flag substrate and kill switches (WS-O.2.2), integrity/abuse defense without device attestation (WS-O.4), backend hardening/secrets and reliability/DR (WS-O.5/O.6), Knomosis event schemas behind the pay-to-rank firewall (WS-E.1.2), event storage + retention jobs (WS-E.3), governance action budgets (WS-M.3.2a) and delegation/anti-capture (WS-M.4.2c-*), on-chain privacy (WS-L.1.2e), Knomosis transparency metrics and phase success-gates (WS-P.1.4a/3.1a), Core Web Vitals enforcement (WS-C.5.1), and source/claim/search definitions referenced cross-workstream (WS-F.1.1/1.2/2/3.1). Standardized per-task dependencies and definitions of done across all documents.
 - **v3.0** — Split the monolithic `WORKSTREAM_PLAN.md` into 17 dependency-ordered documents.
 - **v2.0** — Refined and cross-validated the monolithic plan against SPEC.md v0.6.
@@ -34,7 +35,8 @@ This plan decomposes the Licio specification into 17 workstream documents housed
 | `15-compliance.md` | WS-N | M5 | P4-5 | 8 | 27 | Jurisdiction engine, financial compliance, support |
 | `16-security-and-reliability.md` | WS-O | M0-M6 | P0 | 2+6 | 46 | Security testing, integrity defense, incident response, reproducible builds, reliability/DR |
 | `17-experimentation-and-launch.md` | WS-P | M3-M6 | P3 | 6 | 32 | Product metrics, anti-metrics, experiments, transparency, i18n |
-| **Total** | | | | | **~646** | Atomic tasks across 17 workstreams (~22,900 lines) |
+| `18-content-and-room-model.md` | WS-Q | M3 | P1 | 9 | 32 | Room-owned content, public/private rooms, public/in-room visibility, image/video posts, visibility-scoped distribution |
+| **Total** | | | | | **~678** | Atomic tasks across 18 workstreams |
 
 ---
 
@@ -58,6 +60,7 @@ WS-0 (Repository foundation) ── 01-repository-foundation.md
  │    │    └── WS-G (Forum/conversation/rooms/lenses) ── 08-forum-and-conversation.md
  │    │         ├── WS-H (Invariants) → depends on WS-E, WS-F.3.2 (embeddings) ── 09-invariant-services.md
  │    │         │    └── WS-I (Ranking) → depends on WS-E.2 ── 10-ranking-and-distribution.md
+ │    │         │         └── WS-Q (Content–room ownership/visibility) → remodels WS-F/WS-G/WS-I ── 18-content-and-room-model.md
  │    │         ├── WS-K (AI governance) ── 12-ai-governance.md
  │    │         └── WS-L (Knomosis) → depends on WS-D.3, WS-O ── 13-knomosis-and-wallets.md
  │    │              └── WS-M (Treasury/governance) ── 14-treasury-and-governance.md
@@ -135,6 +138,7 @@ Note: WS-L.1 (due diligence, document-only) starts in Wave 1 alongside WS-A. See
 | Core Web Vitals | WS-P.1.1 | LCP ≤ 2.5s, INP ≤ 200ms, CLS ≤ 0.1 at p75 |
 | Transparency | WS-P.2 | Reports from live data |
 | No-pay-to-rank | WS-I.3 | Tests pass even though crypto disabled/simulated |
+| Content containment | WS-Q.4.2, WS-Q.4.4 | In-room content never reaches a global surface (ranked or fallback), proven in CI; home room required on every content item |
 
 ### M4 — Knomosis sim + testnet
 
@@ -245,6 +249,10 @@ Note: WS-L.1 (due diligence, document-only) starts in Wave 1 alongside WS-A. See
 - WS-O.2 (incident response playbook, emergency flags) -- `16-security-and-reliability.md`
 - WS-O.3 (reproducible builds, provenance, SBOM) -- `16-security-and-reliability.md`
 
+### Wave 9 (post-WS-I): Content–room ownership and visibility
+
+- WS-Q (room-owned content, binary room visibility + join/posting axes, public/in-room content visibility, image/video posts, tier-scoped dedup, visibility-scoped retrieval/search/distribution, behavior-preserving migration) -- `18-content-and-room-model.md`. Remodels shipped WS-F/WS-G/WS-I surfaces; lands before WS-J takes queue ownership.
+
 ### Wave 7 (Week 16-22): Knomosis
 **Estimated team:** 3-4 engineers
 
@@ -295,6 +303,7 @@ Tasks exceeding three days must be split into sub-tasks that are independently r
 | Cold start | Medium | WS-F.1.4 (freshness baseline), WS-I.1.1 (diversity quotas), WS-G.2 (room seeding) |
 | Phishing PWA | High | WS-O.3.2 (signed provenance), WS-L.2.6 (transaction previews), WS-0.5.1 (strict CSP) |
 | Governance capture | High | WS-M.4.2 (anti-capture controls), WS-H.3 (MFCI monitoring), WS-M.1.2 (readiness checklist) |
+| In-room content leak | High | WS-Q.3.2 (item read bar, fail-closed), WS-Q.4.2 (always-on distribution-side visibility gate), WS-Q.4.4 (containment CI gate), WS-Q.6.1 (monotonic-visibility migration harness) |
 | Smart contract bug | Critical | WS-L.1.2 (threat model), WS-L.1.3 (external audit), WS-M.2.4 (freeze), WS-L.3.5 (kill switches) |
 | Regulatory noncompliance | High | WS-N.1 (jurisdiction engine), WS-A.2.1 (matrix), WS-N.2 (compliance controls), fail-closed default |
 
