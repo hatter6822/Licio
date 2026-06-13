@@ -592,6 +592,66 @@ describe('WS-Q.5.2c restricted media serving gate', () => {
     // Public media stays a bare, shareable URL served to anyone.
     expect((await app().request(`http://local/v1/uploads/${uploadId}`)).status).toBe(200);
   });
+
+  it('gates a contribution attachment by its thread’s story (private refused, public served)', async () => {
+    // A room_only story's thread: its contribution attachment is restricted.
+    const room = await makeRoom('private');
+    const author = await seedUserWithSession(fixture.identity, { handle: 'evidence' });
+    await joinAsMember(room, author.userId);
+    const story = await app().request(
+      post('/v1/stories', briefSubmission({ room_id: room }), author.cookie),
+    );
+    const { story_id } = (await story.json()) as { story_id: string };
+    const thread = await fixture.ingestion.stories.getThreadByStoryId(story_id);
+    const attachment = await uploadJpeg(author.cookie);
+    const contribution = await app().request(
+      post(
+        '/v1/contributions',
+        {
+          type: 'question',
+          thread_id: thread?.threadId,
+          client_draft_id: randomUUID(),
+          body: 'What does the attached chart show?',
+          attachment_ids: [attachment],
+        },
+        author.cookie,
+      ),
+    );
+    expect(contribution.status).toBe(201);
+    // The attachment is now governed by its (room_only) story …
+    expect((await fixture.forum.uploads.getRecord(attachment))?.ownerStoryId).toBe(story_id);
+    // … so a bare fetch is refused — the same leak the gate closes for story media.
+    expect((await app().request(`http://local/v1/uploads/${attachment}`)).status).toBe(404);
+    // … but the owner can still retrieve their OWN upload (e.g. a DSAR export
+    // link) with their session, even without a signed URL.
+    const asOwner = await app().request(
+      new Request(`http://local/v1/uploads/${attachment}`, { headers: { cookie: author.cookie } }),
+    );
+    expect(asOwner.status).toBe(200);
+
+    // A PUBLIC story's contribution attachment stays a bare, served URL.
+    const pubAuthor = await seedUserWithSession(fixture.identity, { handle: 'pubc' });
+    const pub = await app().request(post('/v1/stories', briefSubmission(), pubAuthor.cookie));
+    const pubThread = await fixture.ingestion.stories.getThreadByStoryId(
+      ((await pub.json()) as { story_id: string }).story_id,
+    );
+    const pubAttachment = await uploadJpeg(pubAuthor.cookie);
+    const pubContribution = await app().request(
+      post(
+        '/v1/contributions',
+        {
+          type: 'question',
+          thread_id: pubThread?.threadId,
+          client_draft_id: randomUUID(),
+          body: 'What does the attached chart show?',
+          attachment_ids: [pubAttachment],
+        },
+        pubAuthor.cookie,
+      ),
+    );
+    expect(pubContribution.status).toBe(201);
+    expect((await app().request(`http://local/v1/uploads/${pubAttachment}`)).status).toBe(200);
+  });
 });
 
 describe('WS-Q.6.2 rollout flags + containment not flaggable', () => {

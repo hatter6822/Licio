@@ -763,26 +763,34 @@ export function createForumRoutes() {
           if (record?.scanState !== 'clear') return c.json(notFound, 404);
 
           // WS-Q.5.2c — story-scoped authorization. An upload linked to a story
-          // is gated by that story: a taken-down/safety-hidden story's media is
-          // refused outright (re-checked here, so removal is immediate), and a
-          // room_only story's media is served ONLY through a valid, unexpired
-          // signed URL. Contribution attachments (ownerStoryId null) keep their
-          // unrestricted serving. Public-story media stays a stable bare URL.
+          // (story media OR a contribution attachment, whose thread inherits the
+          // story's visibility, §14.5.6) is gated by that story: a taken-down/
+          // safety-hidden story's media is refused outright (re-checked here, so
+          // removal is immediate), and a room_only story's media is served ONLY
+          // through a valid signed URL OR to its authenticated owner (so a user
+          // can always retrieve their own upload, e.g. a DSAR export link).
+          // Public-story media stays a stable bare URL; an upload with no owning
+          // story (not yet linked) serves unrestricted.
           let restricted = false;
           if (record.ownerStoryId !== null) {
             const story = await getIngestionServices().stories.getById(record.ownerStoryId);
             if (story === null || story.hiddenState !== null) return c.json(notFound, 404);
             if (story.visibility === 'room_only') {
+              restricted = true;
               const expiresAt = Number(c.req.query('e') ?? '');
-              const ok = verifyMediaToken(
+              const signed = verifyMediaToken(
                 getIdentityServices().config.masterSecret,
                 uploadId,
                 expiresAt,
                 c.req.query('t') ?? '',
                 Date.now(),
               );
-              if (!ok) return c.json(notFound, 404);
-              restricted = true;
+              if (!signed) {
+                const requester = await softUserId(c.req.header('cookie'), getIdentityServices());
+                if (record.ownerUserId === null || requester !== record.ownerUserId) {
+                  return c.json(notFound, 404);
+                }
+              }
             }
           }
 

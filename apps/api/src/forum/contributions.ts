@@ -441,6 +441,17 @@ export async function createContribution(
   }
   const contribution = inserted.contribution;
 
+  // WS-Q.5.2c — back-link attachments to the thread's story so the gated
+  // serving path restricts them exactly as it restricts story media: an
+  // attachment in a room_only story's thread is reachable only through a signed
+  // URL, and a taken-down story's attachments stop serving. A thread inherits
+  // its story's visibility (§14.5.6), so the owning story is the right governor.
+  if (request.attachment_ids !== undefined) {
+    for (const uploadId of request.attachment_ids) {
+      await forum.uploads.setOwnerStory(uploadId, thread.storyId);
+    }
+  }
+
   // Review-queue intake: safety holds AND user-filed moderation concerns
   // (§18.4 report mechanism; urgent flags carry their urgency in context).
   if (verdict.flagged) {
