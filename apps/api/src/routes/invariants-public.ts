@@ -18,8 +18,13 @@ import type { MeriExposureLabelWire } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { type EventPipelineServices, getEventPipelineServices } from '../events/services.js';
-import { type ForumServices, getForumServices } from '../forum/services.js';
+import { storyReadableByUser } from '../forum/rooms.js';
+import type { ForumServices } from '../forum/services.js';
+import { getForumServices } from '../forum/services.js';
+import { getIdentityServices, type IdentityServices } from '../identity/services.js';
+import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { getIngestionServices, type IngestionServices } from '../ingestion/services.js';
+import type { StoryRecord } from '../ingestion/stores.js';
 import { getInvariantServices, type InvariantPlatformServices } from '../invariants/services.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
 
@@ -55,11 +60,45 @@ export async function latestMeriGains(
   );
 }
 
+/** Soft session resolution (anonymous on any failure; never an error/access). */
+async function resolveSoftUserId(
+  identity: IdentityServices,
+  cookieHeader: string | undefined,
+): Promise<string | null> {
+  const token = readSessionToken(cookieHeader);
+  if (!token) return null;
+  try {
+    return (await validateSession(identity.sessions, token))?.record.user_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * WS-Q.3.2 — the item read bar for the story-adjacent public reads. A story is
+ * readable when it is not hidden AND the requester passes the room CONTENT bar
+ * (a `room_only` story in a private room is 404 to non-members, no existence
+ * oracle). Mirrors the story-detail read gate (routes/v1.ts) so these WS-H
+ * drawers can never widen a read surface that a story-detail 404 already closed
+ * — applied BOTH to the requested story and to every lineage co-member, so a
+ * public story's drawer never leaks a contained co-member's id/title.
+ */
+async function storyReadableTo(
+  forum: ForumServices,
+  story: Pick<StoryRecord, 'hiddenState' | 'visibility' | 'roomId'>,
+  userId: string | null,
+): Promise<boolean> {
+  const room = await forum.rooms.getById(story.roomId);
+  if (room === null) return false; // fail closed (unknown room ⇒ unreadable)
+  return storyReadableByUser(forum, story, room, userId);
+}
+
 export function createInvariantsPublicRoutes(
   resolveEvents: () => EventPipelineServices = getEventPipelineServices,
   resolveIngestion: () => IngestionServices = getIngestionServices,
   resolveInvariants: () => InvariantPlatformServices = getInvariantServices,
   resolveForum: () => ForumServices = getForumServices,
+  resolveIdentity: () => IdentityServices = getIdentityServices,
 ) {
   return new Hono()
     .get('/stories/:storyId/interpretations', async (c) => {
@@ -69,8 +108,14 @@ export function createInvariantsPublicRoutes(
       }
       const ingestion = resolveIngestion();
       const story = await ingestion.stories.getById(storyId);
-      // 404-over-403 + visibility gating: hidden stories expose nothing.
+      // 404-over-403 + the item read bar: a hidden story OR a room_only story in
+      // a private room is 404 to non-members (no existence oracle, WS-Q.3.2).
       if (!story || story.hiddenState !== null) {
+        return c.json(deny('not_found', 'Story not found'), 404);
+      }
+      const forum = resolveForum();
+      const userId = await resolveSoftUserId(resolveIdentity(), c.req.header('cookie'));
+      if (!(await storyReadableTo(forum, story, userId))) {
         return c.json(deny('not_found', 'Story not found'), 404);
       }
       const latest = await resolveEvents().invariantStore.latest('SCOI', storyId);
@@ -142,6 +187,11 @@ export function createInvariantsPublicRoutes(
       if (!story || story.hiddenState !== null) {
         return c.json(deny('not_found', 'Story not found'), 404);
       }
+      const forum = resolveForum();
+      const userId = await resolveSoftUserId(resolveIdentity(), c.req.header('cookie'));
+      if (!(await storyReadableTo(forum, story, userId))) {
+        return c.json(deny('not_found', 'Story not found'), 404);
+      }
       const events = resolveEvents();
       const latest = await events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID);
       const bounds =
@@ -196,7 +246,12 @@ export function createInvariantsPublicRoutes(
       for (const [coStoryId, relationship] of coGroup) {
         if (coGroupStories.length >= 8) break;
         const member = await ingestion.stories.getById(coStoryId);
-        if (!member || member.hiddenState !== null) continue; // visibility-gated
+        if (!member || member.hiddenState !== null) continue;
+        // Per-co-member read bar: a contained (room_only / private-room)
+        // co-member never surfaces in a reader's lineage unless they can read it
+        // directly — closes the cross-reference leak the raw MinHash/syndication
+        // candidate sets would otherwise allow (NOT tier-scoped at the source).
+        if (!(await storyReadableTo(forum, member, userId))) continue;
         coGroupStories.push({ story_id: coStoryId, title: member.title, relationship });
       }
       return c.json({

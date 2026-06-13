@@ -44,6 +44,7 @@ import {
   roomTypeMetadata,
   roomVisibleToUser,
   slugify,
+  storyReadableByUser,
   toRoomSummary,
 } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
@@ -681,28 +682,18 @@ export function createRoomsRoutes() {
           const userId = await softUserId(c.req.header('cookie'), identity);
           const story = await ingestion.stories.getById(storyId);
           if (!story || story.hiddenState !== null) return c.json(notFound, 404);
+          // WS-Q.3.2 — the item read bar: a room_only story in a private room is
+          // 404 to non-members (404-over-403, consistent with the story detail —
+          // no existence oracle, unlike the prior empty-200 for outsiders).
+          const room = await forum.rooms.getById(story.roomId);
+          if (room === null || !(await storyReadableByUser(forum, story, room, userId))) {
+            return c.json(notFound, 404);
+          }
           const thread = await ingestion.stories.getThreadByStoryId(storyId);
           if (!thread) {
             return c.json(
               storyLensesResponseSchema.parse({ story_id: storyId, groups: [], divergence: null }),
             );
-          }
-          // Visibility: restricted-room lenses are hidden from non-members.
-          if (thread.roomId !== null) {
-            const room = await forum.rooms.getById(thread.roomId);
-            if (
-              room &&
-              room.visibility !== 'public' &&
-              !(await roomContentVisibleToUser(forum, room, userId))
-            ) {
-              return c.json(
-                storyLensesResponseSchema.parse({
-                  story_id: storyId,
-                  groups: [],
-                  divergence: null,
-                }),
-              );
-            }
           }
           const lenses = thread.roomId !== null ? await forum.lenses.listByRoom(thread.roomId) : [];
           const tagged = await forum.contributions.listLensTagged([thread.threadId], 700);

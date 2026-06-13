@@ -874,3 +874,49 @@ describe('/v1/feed stability under the kill switch (real stories)', () => {
     expect(log?.fallback_reason).toBe('kill_switch');
   });
 });
+
+describe('WS-H public story drawers honor the room read bar (WS-Q.3.2)', () => {
+  it('interpretations + independent-sources + lenses 404 for non-members of a private room', async () => {
+    const roomId = await insertRoom('private');
+    const { storyId } = await seedStory(fixture.ingestion, { roomId, visibility: 'room_only' });
+    const member = await seedUserWithSession(fixture.identity);
+    const outsider = await seedUserWithSession(fixture.identity);
+    await subscribe(roomId, member.userId, 'active');
+    const app = new Hono().route('/v1', createV1Routes());
+
+    // The story-detail drawers + the SCOI lens read all gate on the SAME item
+    // read bar (no existence oracle): 404 to outsiders, 200 to active members.
+    for (const drawer of ['interpretations', 'independent-sources', 'lenses'] as const) {
+      const path = `/v1/stories/${storyId}/${drawer}`;
+      // Signed out → 404 (no existence oracle).
+      expect((await app.request(path)).status).toBe(404);
+      // A non-member with a valid session → 404.
+      expect((await app.request(path, { headers: { cookie: outsider.cookie } })).status).toBe(404);
+      // An active member reads it (200; the body may be empty pre-computation).
+      expect((await app.request(path, { headers: { cookie: member.cookie } })).status).toBe(200);
+    }
+  });
+
+  it('a public story never leaks a room_only near-duplicate co-member', async () => {
+    const sharedText =
+      'The regional water board released the full nitrate testing dataset with its methodology appendix.';
+    const publicRoom = await insertRoom('public');
+    const privateRoom = await insertRoom('private');
+    const pub = await seedStory(fixture.ingestion, { roomId: publicRoom, visibility: 'public' });
+    const hidden = await seedStory(fixture.ingestion, {
+      roomId: privateRoom,
+      visibility: 'room_only',
+    });
+    // Identical signature text ⇒ the room_only story is a near-duplicate CANDIDATE
+    // of the public one (the raw MinHash band set is NOT tier-scoped).
+    await signatureStory(fixture.ingestion.signatures, pub.storyId, sharedText, 'submitted');
+    await signatureStory(fixture.ingestion.signatures, hidden.storyId, sharedText, 'submitted');
+    const app = new Hono().route('/v1', createV1Routes());
+    const res = await app.request(`/v1/stories/${pub.storyId}/independent-sources`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { co_group_stories?: Array<{ story_id: string }> };
+    const coIds = (body.co_group_stories ?? []).map((m) => m.story_id);
+    // The contained near-duplicate must NOT appear to an anonymous reader.
+    expect(coIds).not.toContain(hidden.storyId);
+  });
+});
