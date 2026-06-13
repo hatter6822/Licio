@@ -272,7 +272,7 @@ export interface StoryStore {
   listRoomOnlyByCanonicalUrl(canonicalUrl: string): Promise<StoryRecord[]>;
   /** WS-Q.3.4a — stories in a room (the room-visibility cascade sweep input),
    *  most-recent first, bounded. */
-  listByRoom(roomId: string, limit: number): Promise<StoryRecord[]>;
+  listByRoom(roomId: string, limit: number, visibility?: StoryVisibility): Promise<StoryRecord[]>;
   /** WS-Q.2.3a — the story (if any) already anchored to a media upload (a
    *  media upload anchors at most one story; claim-uniqueness). */
   getByMediaUploadRef(uploadId: string): Promise<StoryRecord | null>;
@@ -584,7 +584,7 @@ export class InMemoryStoryStore implements StoryStore {
   readonly #threads = new Map<string, ThreadShellRecord>();
   // WS-Q.2.2a — tier-scoped URL slots, faithful to the two partial unique
   // indexes: a slot is held only by a VISIBLE (non-hidden) story. Public is
-  // global (key = url); room is per-room (key = `${roomId} ${url}`).
+  // global (key = url); room is per-room (NUL-separated `roomId` + `url`).
   readonly #publicByUrl = new Map<string, string>();
   readonly #roomByUrl = new Map<string, string>();
   readonly #sourceLinks = new Map<
@@ -597,13 +597,22 @@ export class InMemoryStoryStore implements StoryStore {
     this.#now = now;
   }
 
+  /** The room-tier URL-dedup map key. A NUL separator (impossible in a UUID
+   *  room id or an http(s) URL) keeps it unambiguous. THE single key format:
+   *  every store AND lookup path uses this helper, so the index can never be
+   *  written under one separator and read under another (room-tier dedup +
+   *  canonical public linking would otherwise silently miss in this store). */
+  #roomUrlKey(roomId: string, canonicalUrl: string): string {
+    return `${roomId} ${canonicalUrl}`;
+  }
+
   /** The tier URL-slot key a story occupies, or null when it holds no slot
    *  (no canonical URL, or hidden — matching `hidden_state IS NULL`). */
   #slotFor(story: StoryRecord): { map: Map<string, string>; key: string } | null {
     if (story.canonicalUrl === null || story.hiddenState !== null) return null;
     return story.visibility === 'public'
       ? { map: this.#publicByUrl, key: story.canonicalUrl }
-      : { map: this.#roomByUrl, key: `${story.roomId} ${story.canonicalUrl}` };
+      : { map: this.#roomByUrl, key: this.#roomUrlKey(story.roomId, story.canonicalUrl) };
   }
 
   /** Re-evaluate a story's URL slot occupancy (idempotent; de-indexes stale). */
@@ -630,7 +639,7 @@ export class InMemoryStoryStore implements StoryStore {
       const key =
         story.visibility === 'public'
           ? story.canonicalUrl
-          : `${story.roomId} ${story.canonicalUrl}`;
+          : this.#roomUrlKey(story.roomId, story.canonicalUrl);
       const existing = map.get(key);
       if (existing !== undefined) {
         return { ok: false, reason: 'duplicate_canonical_url', existingStoryId: existing };
@@ -676,7 +685,8 @@ export class InMemoryStoryStore implements StoryStore {
   }
 
   async getByCanonicalUrl(canonicalUrl: string, tier: StoryDedupTier): Promise<StoryRecord | null> {
-    const key = tier.visibility === 'public' ? canonicalUrl : `${tier.roomId} ${canonicalUrl}`;
+    const key =
+      tier.visibility === 'public' ? canonicalUrl : this.#roomUrlKey(tier.roomId, canonicalUrl);
     const map = tier.visibility === 'public' ? this.#publicByUrl : this.#roomByUrl;
     const id = map.get(key);
     return id === undefined ? null : (this.#stories.get(id) ?? null);
@@ -703,9 +713,15 @@ export class InMemoryStoryStore implements StoryStore {
     return null;
   }
 
-  async listByRoom(roomId: string, limit: number): Promise<StoryRecord[]> {
+  async listByRoom(
+    roomId: string,
+    limit: number,
+    visibility?: StoryVisibility,
+  ): Promise<StoryRecord[]> {
     return [...this.#stories.values()]
-      .filter((s) => s.roomId === roomId)
+      .filter(
+        (s) => s.roomId === roomId && (visibility === undefined || s.visibility === visibility),
+      )
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit);
   }

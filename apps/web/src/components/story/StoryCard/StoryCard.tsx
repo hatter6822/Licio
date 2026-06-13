@@ -102,12 +102,16 @@ export function StoryCard({
         ) : null}
       </p>
 
-      {/* 2.5 Native media (image/video post) — gated URL, no autoplay. */}
+      {/* 2.5 Native media (image/video post) — gated URL, no autoplay. The card
+          is rendered inside the route-level <Link>, so media is a NON-interactive
+          preview (a video shows its poster, never <video controls> nested in a
+          link); the full player lives on the story page. */}
       {media ? (
         <StoryMedia
           uploadRef={media.uploadRef}
           kind={media.kind}
           altText={media.altText}
+          preview
           {...(media.captionsText !== undefined ? { captionsText: media.captionsText } : {})}
           {...(media.captionsUploadRef !== undefined
             ? { captionsUploadRef: media.captionsUploadRef }

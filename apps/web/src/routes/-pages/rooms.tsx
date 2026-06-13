@@ -136,8 +136,12 @@ export function RoomDetailBody({
 }): React.ReactElement {
   const t = useT();
   const isPrivate = room.visibility === 'private';
-  // Tier two: public rooms are readable by all; private rooms need membership.
-  const contentVisible = !isPrivate || room.joined;
+  // Tier two: public rooms are readable by all; private rooms need ACTIVE
+  // membership OR a steward role — the server bar (roomContentVisibleToUser)
+  // allows stewards, and a freshly-created private room makes its creator a
+  // steward WITHOUT an active subscription, so `joined` alone would wrongly
+  // show that steward the join UI and never load the feed.
+  const contentVisible = !isPrivate || room.joined || room.is_steward === true;
   const feed = useRoomFeedQuery(roomId, contentVisible);
   const join = useJoinRoomMutation(roomId);
   // WS-Q.6.2 — the steward settings UI is part of the flag-gated room controls.

@@ -20,6 +20,12 @@ export interface StoryMediaProps {
   captionsUploadRef?: string | null;
   /** Gated upload ref for a video poster image. */
   posterUploadRef?: string | null;
+  /** Non-interactive preview (WS-Q.5.2c): used INSIDE a card link, where an
+   *  interactive `<video controls>` subtree would nest controls in the link
+   *  (invalid for assistive tech + click conflicts with navigation). A video
+   *  then renders as a static poster/placeholder; the full player lives on the
+   *  story page. Images are non-interactive either way. */
+  preview?: boolean;
   className?: string;
 }
 
@@ -30,6 +36,7 @@ export function StoryMedia({
   captionsText,
   captionsUploadRef,
   posterUploadRef,
+  preview = false,
   className,
 }: StoryMediaProps): React.ReactElement {
   const t = useT();
@@ -68,6 +75,31 @@ export function StoryMedia({
         onError={() => setFailed(true)}
         className={cn('max-h-[32rem] w-full rounded-md object-contain', className)}
       />
+    );
+  }
+
+  if (preview) {
+    // Card-link context: NO interactive controls nested in the link. Show the
+    // poster image (non-interactive) when present, else a labeled placeholder;
+    // the interactive player renders on the story page.
+    return posterSrc !== null ? (
+      <img
+        src={posterSrc}
+        alt={altText ?? t('storymedia.videoPoster', 'Video preview')}
+        loading="lazy"
+        decoding="async"
+        onError={() => setFailed(true)}
+        className={cn('max-h-[32rem] w-full rounded-md bg-black object-contain', className)}
+      />
+    ) : (
+      <div
+        className={cn(
+          'flex aspect-video w-full items-center justify-center rounded-md bg-surface-sunken text-ink-muted text-sm',
+          className,
+        )}
+      >
+        {t('storymedia.videoPreview', 'Video — open to play')}
+      </div>
     );
   }
 

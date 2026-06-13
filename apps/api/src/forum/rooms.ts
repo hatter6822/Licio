@@ -136,8 +136,13 @@ export function resolveRoomCreateAxes(request: RoomCreateRequest): {
 } {
   const visibility: RoomVisibility =
     request.visibility ?? (request.room_type === 'steward' ? 'private' : 'public');
+  // A PUBLIC room MUST use the `open` join model (the rooms_public_join_open
+  // CHECK). FORCE it whenever the resolved visibility is public — even if the
+  // client sent `request_approval`/`invite` while OMITTING visibility (the
+  // schema's explicit-public coherence refinement does not fire in that default
+  // case), so the resolved axes are always coherent, never a 500 at insert.
   const joinModel: RoomJoinModel =
-    request.join_model ?? (visibility === 'public' ? 'open' : 'request_approval');
+    visibility === 'public' ? 'open' : (request.join_model ?? 'request_approval');
   const postingPolicy: RoomPostingPolicy = request.posting_policy ?? 'all_members';
   return { visibility, joinModel, postingPolicy };
 }
@@ -266,15 +271,19 @@ export async function userMayPostTopLevel(
 }
 
 /**
- * WS-Q.3.2 — the SINGLE item-level read bar (§14.5.3/§15.3). A story is
- * readable when it is not hidden AND the reader passes the room CONTENT bar.
- * Both visibility tiers gate on the room bar: a `public` story is readable by
- * anyone who can reach its (necessarily public) room; a `room_only` story
- * requires active membership of its room. Item visibility governs DISTRIBUTION
- * (global surfaces), enforced by the ranking gate + search predicate — it never
- * WIDENS the read bar, so a public story mislabeled into a private room fails
- * closed for a non-member. Every direct-read path (story, thread, branch,
- * subtree, contribution) calls this; an unknown room/story is unreadable (404).
+ * WS-Q.3.2 — the SINGLE item-level read bar (§14.5.3/§16.1). A story is readable
+ * when it is not hidden AND the reader passes the story's ROOM content bar. Per
+ * SPEC §16.1, the read bar is by ROOM visibility: public rooms are readable by
+ * ALL, private rooms by active members/stewards. Item `visibility`
+ * (`public`/`room_only`) is a DISTRIBUTION control (which surfaces carry the
+ * item), NOT a per-item read restriction — so a `room_only` item in a PUBLIC
+ * room is readable by anyone who reaches that public room (the in-room chip
+ * marks it), it is merely excluded from GLOBAL surfaces by the ranking gate +
+ * search predicate; a `room_only` item in a PRIVATE room needs membership
+ * because the ROOM is private. Item visibility never WIDENS the read bar, so a
+ * public item mislabeled into a private room still fails closed for a
+ * non-member. Every direct-read path (story, thread, branch, subtree,
+ * contribution, the WS-H drawers) calls this; an unknown room/story is 404.
  */
 export async function storyReadableByUser(
   forum: ForumServices,

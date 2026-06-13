@@ -59,14 +59,31 @@ function newStoryDraftId(): string {
     : `story-${Date.now()}`;
 }
 
+/**
+ * A same-origin object URL for a local preview/probe. Returns ONLY a
+ * browser-minted `blob:` URL (the invariant `createObjectURL` guarantees) and
+ * rejects anything else as null. A blob URL assigned to an `<img>`/`<video>`
+ * `src` LOADS A RESOURCE — it cannot be a `javascript:` URL, inject markup, or
+ * run script — so this is purely a defensive scheme assertion that also serves
+ * as the CodeQL `js/xss-through-dom` sanitizer (clears the false positive on
+ * these object-URL previews without weakening the global security scan).
+ */
+function blobObjectUrl(file: File): string | null {
+  if (typeof URL.createObjectURL !== 'function') return null;
+  const url = URL.createObjectURL(file);
+  if (url.startsWith('blob:')) return url;
+  URL.revokeObjectURL(url);
+  return null;
+}
+
 /** Best-effort client duration probe (0 when the browser can't read metadata). */
 function readVideoDurationSeconds(file: File): Promise<number> {
   return new Promise((resolve) => {
-    if (typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') {
+    const url = typeof document === 'undefined' ? null : blobObjectUrl(file);
+    if (url === null) {
       resolve(0);
       return;
     }
-    const url = URL.createObjectURL(file);
     const video = document.createElement('video');
     video.preload = 'metadata';
     let settled = false;
@@ -158,8 +175,9 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
   function onPickFile(picked: File | null): void {
     setFile(picked);
     setUploadPct(0);
-    const canPreview = picked !== null && typeof URL.createObjectURL === 'function';
-    setPreviewUrl(canPreview && mode === 'image_post' ? URL.createObjectURL(picked) : null);
+    // Only a verified `blob:` object URL ever reaches the <img> src (scheme
+    // guard; see blobObjectUrl).
+    setPreviewUrl(picked !== null && mode === 'image_post' ? blobObjectUrl(picked) : null);
   }
   useEffect(() => {
     if (previewUrl === null) return;
@@ -383,8 +401,19 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
         // Optional video sub-uploads: a WebVTT caption track and/or a poster.
         const captionsUploadId =
           captionsFile !== null ? (await uploadMedia(captionsFile)).upload_id : undefined;
+        // The poster is an IMAGE upload, which the server requires alt text for
+        // (WCAG); derive it from the title so the poster upload never 422s.
         const posterUploadId =
-          posterFile !== null ? (await uploadMedia(posterFile)).upload_id : undefined;
+          posterFile !== null
+            ? (
+                await uploadMedia(
+                  posterFile,
+                  t('storyComposer.poster.alt', 'Poster image for {title}', {
+                    title: title.trim(),
+                  }),
+                )
+              ).upload_id
+            : undefined;
         request = {
           submission_type: 'video_post',
           upload_id: uploadId ?? '',

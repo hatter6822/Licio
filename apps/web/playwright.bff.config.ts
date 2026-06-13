@@ -36,13 +36,14 @@ export default defineConfig({
         ...(chromiumExecutable ? { launchOptions: { executablePath: chromiumExecutable } } : {}),
       },
     },
-    // Firefox/WebKit add coverage in CI; chromium suffices for local iteration.
-    ...(isCI
-      ? [
-          { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
-          { name: 'webkit', use: { ...devices['Desktop Safari'] } },
-        ]
-      : []),
+    // Firefox adds coverage in CI; chromium suffices for local iteration.
+    // WebKit is deliberately EXCLUDED from the BFF harness: it refuses to store
+    // a `Secure` cookie over plain `http://localhost` (Chromium/Firefox allow
+    // it), so the `__Host-sid` session cookie never lands and the authenticated
+    // flow can't run. This is a WebKit local-http limitation, not a product bug
+    // (production is HTTPS, where WebKit accepts `__Host-` cookies); the
+    // frontend-only suite (playwright.config.ts) still exercises WebKit.
+    ...(isCI ? [{ name: 'firefox', use: { ...devices['Desktop Firefox'] } }] : []),
   ],
   webServer: [
     {

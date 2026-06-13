@@ -39,6 +39,7 @@ import type {
   SearchRequest,
   SearchResult,
   StoryLifecycleState,
+  StoryVisibility,
   VerificationState,
 } from '@licio/shared';
 import {
@@ -371,11 +372,19 @@ export class DrizzleStoryStore implements StoryStore {
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }
 
-  async listByRoom(roomId: string, limit: number): Promise<StoryRecord[]> {
+  async listByRoom(
+    roomId: string,
+    limit: number,
+    visibility?: StoryVisibility,
+  ): Promise<StoryRecord[]> {
     const rows = await this.#db
       .select()
       .from(storiesTable)
-      .where(eq(storiesTable.roomId, roomId))
+      .where(
+        visibility === undefined
+          ? eq(storiesTable.roomId, roomId)
+          : and(eq(storiesTable.roomId, roomId), eq(storiesTable.visibility, visibility)),
+      )
       .orderBy(desc(storiesTable.createdAt))
       .limit(limit);
     return rows.map((row) => this.#toRecord(row));
@@ -440,6 +449,15 @@ export class DrizzleStoryStore implements StoryStore {
       values['lastMaterialUpdateAt'] = new Date(patch.lastMaterialUpdateAt);
     }
     if (patch.topicIds !== undefined) values['topicIds'] = patch.topicIds;
+    // WS-Q.2.4 — the author narrow/widen + the room private⇄public cascade patch
+    // these fields; omitting them here made a visibility-only patch a silent
+    // no-op in Postgres (the no-op-on-empty-values guard returned the unchanged
+    // row), so narrowed content stayed publicly distributed in production.
+    if (patch.visibility !== undefined) values['visibility'] = patch.visibility;
+    if (patch.canonicalPublicStoryId !== undefined) {
+      values['canonicalPublicStoryId'] = patch.canonicalPublicStoryId;
+    }
+    if (patch.mediaUploadRef !== undefined) values['mediaUploadRef'] = patch.mediaUploadRef;
     if (Object.keys(values).length === 0) return this.getById(storyId);
     const rows = await this.#db
       .update(storiesTable)

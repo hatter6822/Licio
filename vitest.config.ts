@@ -45,6 +45,14 @@ export default defineConfig({
         'apps/api/src/invariants/drizzle-invariant-stores.ts',
         'apps/api/src/ranking/drizzle-ranking-stores.ts',
         'packages/db/src/similarity.ts',
+        // Dev/test-only entrypoint + fixtures (never production): the in-memory
+        // E2E server is run by Playwright, not vitest, and the demo seed/data are
+        // development fixtures. Their CORRECTNESS is covered (the BFF E2E harness;
+        // the forum-coverage demo-seed test), but their branch profile is not
+        // product logic — same precedent as `**/index.ts` + the adapters above.
+        'apps/api/src/e2e-server.ts',
+        'apps/api/src/lib/demo-seed.ts',
+        'apps/api/src/lib/demo-data.ts',
       ],
       thresholds: {
         lines: 80,

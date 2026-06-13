@@ -99,41 +99,49 @@ export async function changeRoomVisibility(
   let converted = 0;
 
   if (target === 'private') {
-    // Per-story sweep: force every PUBLIC story room_only (idempotent — already
-    // room_only stories are skipped, so a crash mid-cascade resumes cleanly).
-    for (const story of await ingestion.stories.listByRoom(roomId, CASCADE_SWEEP_LIMIT)) {
-      if (story.visibility !== 'public') continue;
-      await ingestion.stories.update(story.storyId, { visibility: 'room_only' });
-      const event = contentVisibilityChangedEventSchema.parse({
-        event_id: randomUUID(),
-        event_type: 'content.visibility.changed',
-        timestamp: nowIso,
-        schema_version: '1',
-        story_id: story.storyId,
-        room_id: roomId,
-        from: 'public',
-        to: 'room_only',
-        trigger: 'room_visibility_change',
-        actor_ref: actorUserId,
-        privacy_classification: 'public',
-        retention_tier: 'public_contribution',
-      });
-      const entry = TOPIC_REGISTRY['content.visibility.changed'];
-      await events.eventStore.insertMany([
-        {
-          eventId: event.event_id,
-          eventType: event.event_type,
-          topic: event.event_type,
-          timestamp: event.timestamp,
-          privacyClassification: entry.privacy_classification,
-          retentionTier: entry.retention_tier,
-          payload: event as unknown as Record<string, unknown>,
-          ownerUserId: actorUserId,
-          purgeAfter: null,
-        },
-      ]);
-      ingestion.trackBackground(events.router.publish(event));
-      converted += 1;
+    // Per-story sweep: force every PUBLIC story room_only. PAGED until none
+    // remain — converting a story to room_only removes it from the public-only
+    // query, so each page is a fresh batch of the remaining public stories (a
+    // room with >CASCADE_SWEEP_LIMIT public stories is fully converted, not just
+    // its newest page). Idempotent: a crash mid-cascade resumes cleanly.
+    for (;;) {
+      const batch = await ingestion.stories.listByRoom(roomId, CASCADE_SWEEP_LIMIT, 'public');
+      if (batch.length === 0) break;
+      for (const story of batch) {
+        await ingestion.stories.update(story.storyId, { visibility: 'room_only' });
+        const event = contentVisibilityChangedEventSchema.parse({
+          event_id: randomUUID(),
+          event_type: 'content.visibility.changed',
+          timestamp: nowIso,
+          schema_version: '1',
+          story_id: story.storyId,
+          room_id: roomId,
+          from: 'public',
+          to: 'room_only',
+          trigger: 'room_visibility_change',
+          actor_ref: actorUserId,
+          privacy_classification: 'public',
+          retention_tier: 'public_contribution',
+        });
+        const entry = TOPIC_REGISTRY['content.visibility.changed'];
+        await events.eventStore.insertMany([
+          {
+            eventId: event.event_id,
+            eventType: event.event_type,
+            topic: event.event_type,
+            timestamp: event.timestamp,
+            privacyClassification: entry.privacy_classification,
+            retentionTier: entry.retention_tier,
+            payload: event as unknown as Record<string, unknown>,
+            ownerUserId: actorUserId,
+            purgeAfter: null,
+          },
+        ]);
+        ingestion.trackBackground(events.router.publish(event));
+        converted += 1;
+      }
+      // A short page means no public stories remain — the sweep is complete.
+      if (batch.length < CASCADE_SWEEP_LIMIT) break;
     }
     // Flip the room; collapse an `open` join model (incoherent once private →
     // a request-approval gate) — active memberships are retained.
@@ -143,8 +151,10 @@ export async function changeRoomVisibility(
     });
   } else {
     // private → public: the room becomes readable by all; content is untouched
-    // (every story stays room_only until its author widens it).
-    await forum.rooms.update(roomId, { visibility: 'public' });
+    // (every story stays room_only until its author widens it). A public room
+    // MUST use the `open` join model (the rooms_public_join_open CHECK), so a
+    // request_approval/invite private room is reset to open as it publishes.
+    await forum.rooms.update(roomId, { visibility: 'public', joinModel: 'open' });
   }
 
   await identity.audit.append({

@@ -5,9 +5,11 @@
 // cross-tier linking, the item read bar, author visibility transitions, and
 // the per-event classification firewall for in-room content.
 import { randomUUID } from 'node:crypto';
-import { COMMONS_ROOM_ID } from '@licio/shared';
+import { COMMONS_ROOM_ID, type RoomCreateRequest } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { changeRoomVisibility } from '../forum/room-visibility.js';
+import { resolveRoomCreateAxes } from '../forum/rooms.js';
 import { setContentFlagByName } from '../ingestion/content-flags.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
@@ -166,6 +168,43 @@ describe('WS-Q.2.2 tier-scoped dedup + cross-tier linking', () => {
     // The in-room row records the canonical-public pointer (cross-tier link).
     const body = (await inRoom.json()) as { story: { canonical_public_story_id: string | null } };
     expect(body.story.canonical_public_story_id).not.toBeNull();
+  });
+
+  it('room-tier dedup: a duplicate room_only URL in the SAME room ⇒ 409, a DIFFERENT room is allowed', async () => {
+    const url = 'https://example.com/room-tier-dup';
+    const room = await makeRoom('public');
+    const a = await seedUserWithSession(fixture.identity, { handle: 'rd-a' });
+    const first = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission(url, { room_id: room, visibility: 'room_only' }),
+        a.cookie,
+      ),
+    );
+    expect(first.status).toBe(201);
+    // SAME url, SAME room, room_only ⇒ duplicate. The in-memory dedup index now
+    // writes and reads under ONE key format, so this lookup matches what was
+    // stored (it silently missed before — store/lookup separators disagreed).
+    const b = await seedUserWithSession(fixture.identity, { handle: 'rd-b' });
+    const dup = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission(url, { room_id: room, visibility: 'room_only' }),
+        b.cookie,
+      ),
+    );
+    expect(dup.status).toBe(409);
+    // The SAME url in a DIFFERENT room is fine — the tier is per-room.
+    const room2 = await makeRoom('public');
+    const c = await seedUserWithSession(fixture.identity, { handle: 'rd-c' });
+    const other = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission(url, { room_id: room2, visibility: 'room_only' }),
+        c.cookie,
+      ),
+    );
+    expect(other.status).toBe(201);
   });
 });
 
@@ -685,5 +724,37 @@ describe('WS-Q.3.3b/3.4 room governance + visibility cascade (steward)', () => {
     const room = await fixture.forum.rooms.getById(roomId);
     expect(room?.visibility).toBe('private');
     expect(room?.joinModel).toBe('request_approval'); // open collapsed
+  });
+});
+
+describe('WS-Q room-axis coherence (a public room is always open-join)', () => {
+  it('resolveRoomCreateAxes forces join_model=open for a public room (even if the client sent request_approval while omitting visibility)', () => {
+    const axes = resolveRoomCreateAxes({
+      room_type: 'global_topic',
+      join_model: 'request_approval',
+    } as RoomCreateRequest);
+    // Visibility defaults to public (non-steward type); the join model is FORCED
+    // open, never the incoherent request_approval that would 500 at insert.
+    expect(axes.visibility).toBe('public');
+    expect(axes.joinModel).toBe('open');
+  });
+
+  it('the private → public cascade resets a request_approval join model to open', async () => {
+    const room = await makeRoom('private', { joinModel: 'request_approval' });
+    const steward = await seedUserWithSession(fixture.identity, { handle: 'cascade-sw' });
+    const out = await changeRoomVisibility(
+      fixture.forum,
+      fixture.ingestion,
+      fixture.events,
+      fixture.identity,
+      steward.userId,
+      room,
+      'public',
+    );
+    expect(out.ok).toBe(true);
+    const after = await fixture.forum.rooms.getById(room);
+    expect(after?.visibility).toBe('public');
+    // A public room MUST be open (rooms_public_join_open) — the cascade resets it.
+    expect(after?.joinModel).toBe('open');
   });
 });
