@@ -84,6 +84,8 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
   const [altText, setAltText] = useState('');
   const [captionsText, setCaptionsText] = useState('');
   const [file, setFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [uploadPct, setUploadPct] = useState(0);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<'idle' | 'uploading' | 'submitting' | 'done' | 'pending'>(
     'idle',
@@ -120,6 +122,19 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
       setMode('link');
     }
   }, [content.media_posts_enabled, mode]);
+
+  // WS-Q.5.2a — pick a file and (for image posts) build a client-side preview.
+  // The object URL is revoked when it changes or on unmount (no leak).
+  function onPickFile(picked: File | null): void {
+    setFile(picked);
+    setUploadPct(0);
+    const canPreview = picked !== null && typeof URL.createObjectURL === 'function';
+    setPreviewUrl(canPreview && mode === 'image_post' ? URL.createObjectURL(picked) : null);
+  }
+  useEffect(() => {
+    if (previewUrl === null) return;
+    return () => URL.revokeObjectURL(previewUrl);
+  }, [previewUrl]);
 
   const roomOptions = useMemo(() => {
     const items = rooms.data?.items ?? [];
@@ -193,7 +208,12 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
       let uploadId: string | null = null;
       if (isMedia && file !== null) {
         setStatus('uploading');
-        const upload = await uploadMedia(file, mode === 'image_post' ? altText.trim() : undefined);
+        setUploadPct(0);
+        const upload = await uploadMedia(
+          file,
+          mode === 'image_post' ? altText.trim() : undefined,
+          (f) => setUploadPct(f),
+        );
         uploadId = upload.upload_id;
       }
       setStatus('submitting');
@@ -254,6 +274,7 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
         onValueChange={(value) => {
           setMode(value as StoryComposerMode);
           setErrors({});
+          onPickFile(null); // clear any chosen media + preview when switching modes
         }}
         options={[
           { value: 'link', label: t('storyComposer.mode.link', 'A link') },
@@ -348,10 +369,18 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
             id={`${formId}-file`}
             type="file"
             accept={acceptTypes}
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            onChange={(e) => onPickFile(e.target.files?.[0] ?? null)}
             className="text-sm text-ink"
             {...(errors['file'] ? { 'aria-invalid': true } : {})}
           />
+          {/* WS-Q.5.2a — client-side image preview before upload. */}
+          {previewUrl !== null ? (
+            <img
+              src={previewUrl}
+              alt={t('storyComposer.preview.alt', 'Selected image preview')}
+              className="max-h-48 w-auto rounded-md object-contain"
+            />
+          ) : null}
           {errors['file'] ? <p className="text-danger text-sm">{errors['file']}</p> : null}
         </div>
       ) : null}
@@ -380,7 +409,11 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
       ) : null}
 
       <p id={`${formId}-status`} role="status" className="text-ink-muted text-sm">
-        {status === 'uploading' ? t('storyComposer.status.uploading', 'Uploading…') : null}
+        {status === 'uploading'
+          ? t('storyComposer.status.uploadingPct', 'Uploading… {pct}%', {
+              pct: Math.round(uploadPct * 100),
+            })
+          : null}
         {status === 'submitting' ? t('storyComposer.status.submitting', 'Submitting…') : null}
         {status === 'pending'
           ? t('storyComposer.status.pending', 'Posted, pending a safety check.')

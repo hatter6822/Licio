@@ -378,18 +378,52 @@ export async function createStory(request: StoryCreateRequest): Promise<StoryCre
 }
 
 /**
- * Upload media bytes (image/video) through the scan-gated upload path. EXIF/GPS
- * is stripped server-side before storage; video containers are sniffed. Goes
- * through the CSRF-serialized fetch (FormData; the browser sets the multipart
- * boundary). Upload progress is reported as an indeterminate state — `fetch`
- * cannot surface byte progress.
+ * Upload media bytes (image/video/captions) through the scan-gated upload path.
+ * EXIF/GPS is stripped server-side before storage; video containers are sniffed.
+ * Uses `XMLHttpRequest` (not `fetch`) so real byte progress is reported via
+ * `onProgress` (0–1); a fresh single-use CSRF token is attached and credentials
+ * ride the cookie, matching the mutation contract.
  */
-export async function uploadMedia(file: File, altText?: string): Promise<UploadPublic> {
+export async function uploadMedia(
+  file: File,
+  altText?: string,
+  onProgress?: (fraction: number) => void,
+): Promise<UploadPublic> {
   const form = new FormData();
   form.set('file', file);
   if (altText !== undefined && altText.length > 0) form.set('alt_text', altText);
-  const response = await apiFetch(`${API_BASE}/v1/uploads`, { method: 'POST', body: form });
-  return parseResponse(response, uploadPublicSchema);
+  const token = await fetchCsrfToken();
+  const raw = await new Promise<{ status: number; body: unknown }>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${API_BASE}/v1/uploads`);
+    xhr.withCredentials = true;
+    if (token) xhr.setRequestHeader('x-csrf-token', token);
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(e.loaded / e.total);
+      };
+    }
+    xhr.onload = () => {
+      let body: unknown;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        body = null;
+      }
+      resolve({ status: xhr.status, body });
+    };
+    xhr.onerror = () => reject(new ApiClientError('network_error', 'Upload failed'));
+    xhr.send(form);
+  });
+  if (raw.status < 200 || raw.status >= 300) {
+    const parsed = apiErrorSchema.safeParse(raw.body);
+    throw parsed.success
+      ? new ApiClientError(parsed.data.error.code, parsed.data.error.message, raw.status)
+      : new ApiClientError(`http_${raw.status}`, 'Upload failed', raw.status);
+  }
+  const parsed = uploadPublicSchema.safeParse(raw.body);
+  if (!parsed.success) throw new ApiClientError('invalid_response', 'Malformed upload response');
+  return parsed.data;
 }
 
 const visibilityChangeResponseSchema = z.object({
