@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { COMMONS_ROOM_ID } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { setContentFlagByName } from '../ingestion/content-flags.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
   articleHtml,
@@ -369,6 +370,76 @@ describe('WS-Q.2.3b image-post serving — EXIF-absence through the story path',
       String.fromCharCode(b),
     ).join('');
     expect(text).not.toContain('GPSLatitude'); // stripped at upload, proven through the story path
+  });
+});
+
+describe('WS-Q.6.2 rollout flags + containment not flaggable', () => {
+  it('media_posts_enabled OFF rejects an image-post submission (403)', async () => {
+    await setContentFlagByName(fixture.events.configStore, 'content.media_posts_enabled', false);
+    const author = await seedUserWithSession(fixture.identity, { handle: 'noflag' });
+    const res = await app().request(
+      post(
+        '/v1/stories',
+        {
+          submission_type: 'image_post',
+          upload_id: randomUUID(),
+          alt_text: 'A photo',
+          title: 'Photo',
+          topic_ids: [randomUUID()],
+          room_id: COMMONS_ROOM_ID,
+        },
+        author.cookie,
+      ),
+    );
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+      'media_posts_disabled',
+    );
+  });
+
+  it('in_room_visibility OFF forces a PUBLIC-room room_only request back to public', async () => {
+    await setContentFlagByName(
+      fixture.events.configStore,
+      'content.in_room_visibility_enabled',
+      false,
+    );
+    const room = await makeRoom('public');
+    const author = await seedUserWithSession(fixture.identity, { handle: 'pubonly' });
+    const res = await app().request(
+      post(
+        '/v1/stories',
+        briefSubmission({ room_id: room, visibility: 'room_only' }),
+        author.cookie,
+      ),
+    );
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as { story: { visibility: string } }).story.visibility).toBe(
+      'public',
+    );
+  });
+
+  it('CONTAINMENT IS NOT FLAGGABLE: a private room still forces room_only with the flag OFF', async () => {
+    await setContentFlagByName(
+      fixture.events.configStore,
+      'content.in_room_visibility_enabled',
+      false,
+    );
+    const room = await makeRoom('private');
+    const member = await seedUserWithSession(fixture.identity, { handle: 'contain' });
+    await joinAsMember(room, member.userId);
+    const created = await app().request(
+      post('/v1/stories', briefSubmission({ room_id: room, visibility: 'public' }), member.cookie),
+    );
+    expect(created.status).toBe(201);
+    const { story_id, story } = (await created.json()) as {
+      story_id: string;
+      story: { visibility: string };
+    };
+    // The new item is room_only despite the author requesting public AND the
+    // flag being off — the private-room forcing is not flag-controlled.
+    expect(story.visibility).toBe('room_only');
+    // And the always-on read bar keeps it 404 to an outsider (no flag widens it).
+    expect((await app().request(`http://local/v1/stories/${story_id}`)).status).toBe(404);
   });
 });
 

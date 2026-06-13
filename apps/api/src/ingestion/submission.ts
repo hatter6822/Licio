@@ -35,6 +35,7 @@ import { joinRoom, roomContentVisibleToUser, userMayPostTopLevel } from '../foru
 import type { ForumServices } from '../forum/services.js';
 import { accountRef } from '../identity/crypto.js';
 import type { IdentityServices } from '../identity/services.js';
+import { loadContentFlags } from './content-flags.js';
 import { findNearDuplicates, signatureStory } from './dedup.js';
 import { submissionText } from './pipeline.js';
 import { evaluatePrechecks, titleHash } from './prechecks.js';
@@ -196,8 +197,31 @@ export async function submitStory(
       },
     };
   }
-  // 4. Visibility derivation (WS-Q.2.1c): a private room FORCES room_only.
-  const visibility = deriveStoryVisibility(room.visibility, request.visibility);
+  // 3b. WS-Q.6.2 rollout flags (fail-closed). Media posts gate the new types;
+  //     the in-room-visibility flag gates the PUBLIC-room author choice only.
+  const contentFlags = await loadContentFlags(events.configStore, (name, problem) =>
+    ingestion.log('content.flag.invalid', { name, problem }),
+  );
+  if (
+    (request.submission_type === 'image_post' || request.submission_type === 'video_post') &&
+    !contentFlags.mediaPostsEnabled
+  ) {
+    ingestion.metrics.increment('submission.media_posts_disabled');
+    return {
+      ok: false,
+      rejection: {
+        status: 403,
+        code: 'media_posts_disabled',
+        message: 'Image and video posts are not currently enabled',
+      },
+    };
+  }
+  // 4. Visibility derivation (WS-Q.2.1c): a private room FORCES room_only
+  //    (containment — independent of any flag). When the in-room-visibility
+  //    flag is OFF, a PUBLIC room ignores the author's room_only request and
+  //    behaves pre-WS-Q (public); the request is treated as `public`.
+  const requestedVisibility = contentFlags.inRoomVisibilityEnabled ? request.visibility : 'public';
+  const visibility = deriveStoryVisibility(room.visibility, requestedVisibility);
   if (request.visibility === 'public' && visibility === 'room_only') {
     ingestion.metrics.increment('submission.visibility_forced');
   }
