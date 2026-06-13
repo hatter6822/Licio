@@ -143,28 +143,48 @@ function probeMp4(input: Uint8Array): VideoProbeResult {
   }
 
   const bytes = input.slice(); // clone — never mutate the caller's buffer
-  let stripped = false;
-  let durationSeconds: number | null = null;
+  const state = { stripped: false, durationSeconds: null as number | null };
 
+  // `udta` (user data; the `©xyz` GPS box) and `meta` (item metadata) are
+  // droppable and can sit at the top level, under `moov`, or under a `moov/trak`.
+  // Neutralizing the whole box in place (→ `free`, payload zeroed) is
+  // length-preserving, so `stco`/`co64` sample offsets stay valid.
+  const dropTypes = new Set(['udta', 'meta']);
   for (const box of top) {
-    if (box.type === 'udta') {
+    if (dropTypes.has(box.type)) {
       neutralizeMp4Box(bytes, box);
-      stripped = true;
+      state.stripped = true;
       continue;
     }
     if (box.type === 'moov') {
       const children = readMp4Children(input, box.dataStart, box.end);
       if (children === null) return { ok: false, reason: 'malformed' };
       for (const child of children) {
-        if (child.type === 'mvhd') durationSeconds = mp4Duration(input, child);
-        if (child.type === 'udta') {
+        if (child.type === 'mvhd') state.durationSeconds = mp4Duration(input, child);
+        if (dropTypes.has(child.type)) {
           neutralizeMp4Box(bytes, child);
-          stripped = true;
+          state.stripped = true;
+        } else if (child.type === 'trak') {
+          // One level deeper: `moov/trak/udta` (per-track user data).
+          const trakChildren = readMp4Children(input, child.dataStart, child.end);
+          if (trakChildren === null) return { ok: false, reason: 'malformed' };
+          for (const tc of trakChildren) {
+            if (dropTypes.has(tc.type)) {
+              neutralizeMp4Box(bytes, tc);
+              state.stripped = true;
+            }
+          }
         }
       }
     }
   }
-  return { ok: true, container: 'mp4', bytes, stripped, durationSeconds };
+  return {
+    ok: true,
+    container: 'mp4',
+    bytes,
+    stripped: state.stripped,
+    durationSeconds: state.durationSeconds,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +278,53 @@ function readEbmlChildren(bytes: Uint8Array, start: number, end: number): EbmlEl
   return out;
 }
 
+/** The 4-byte Level-1 (Segment-child) master ids used to resync past an
+ *  unknown-size element (e.g. a streamed Cluster) so a trailing `Tags` is still
+ *  found and stripped. */
+const SEGMENT_LEVEL1_IDS = new Set<number>([
+  0x114d9b74, // SeekHead
+  ID_INFO,
+  0x1654ae6b, // Tracks
+  0x1f43b675, // Cluster
+  0x1c53bb6b, // Cues
+  0x1941a469, // Attachments
+  0x1043a770, // Chapters
+  ID_TAGS,
+]);
+
+/** Scan forward for the next Level-1 element header; returns `end` if none.
+ *  Resync is bounded to the (in-memory) byte range and only runs for the rare
+ *  unknown-size case, so it never costs anything on a definite-size file. */
+function findNextLevel1(bytes: Uint8Array, from: number, end: number): number {
+  for (let pos = from; pos + 4 <= end; pos += 1) {
+    const id = readVint(bytes, pos, end, 'id');
+    if (id === null || id.length !== 4 || !SEGMENT_LEVEL1_IDS.has(id.value)) continue;
+    // Confirm a size vint follows (a real element header, not a coincidence).
+    if (readVint(bytes, pos + id.length, end, 'size') !== null) return pos;
+  }
+  return end;
+}
+
+/** Walk Segment children, resyncing past an unknown-size element to the next
+ *  Level-1 header (definite-size files never trigger the resync). */
+function walkSegmentChildren(bytes: Uint8Array, start: number, end: number): EbmlElement[] | null {
+  const out: EbmlElement[] = [];
+  let cursor = start;
+  while (cursor < end) {
+    const el = readEbmlElement(bytes, cursor, end);
+    if (el === null) return null;
+    if (el.unknownSize) {
+      const next = findNextLevel1(bytes, el.dataStart, end);
+      out.push({ ...el, end: next });
+      cursor = next;
+    } else {
+      out.push(el);
+      cursor = el.end;
+    }
+  }
+  return out;
+}
+
 /** Read an IEEE float (4- or 8-byte) element payload. */
 function ebmlFloat(bytes: Uint8Array, el: EbmlElement): number | null {
   const len = el.end - el.dataStart;
@@ -308,7 +375,7 @@ function probeWebm(input: Uint8Array): VideoProbeResult {
   let stripped = false;
   let durationSeconds: number | null = null;
 
-  const segChildren = readEbmlChildren(input, segment.dataStart, segment.end);
+  const segChildren = walkSegmentChildren(input, segment.dataStart, segment.end);
   if (segChildren === null) return { ok: false, reason: 'malformed' };
   for (const child of segChildren) {
     if (child.id === ID_INFO && !child.unknownSize) {

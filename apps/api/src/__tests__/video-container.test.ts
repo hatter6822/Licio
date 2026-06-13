@@ -132,6 +132,22 @@ describe('WS-Q.2.3d — MP4 probe', () => {
     const probe = probeVideo('video/mp4', new Uint8Array(ftyp));
     expect(probe).toEqual({ ok: false, reason: 'malformed' });
   });
+
+  it('neutralizes a per-track `moov/trak/udta` location box', () => {
+    const ftyp = mp4Box('ftyp', [...ascii('isom'), ...u32(0x200), ...ascii('isom')]);
+    const mvhdBox = mp4Box('mvhd', mvhd(600, 1200));
+    const trak = mp4Box('trak', mp4Box('udta', mp4Box('©xyz', ascii('+12.3000-045.6000/'))));
+    const moov = mp4Box('moov', [...mvhdBox, ...trak]);
+    const mdat = mp4Box('mdat', ascii('TRACK-MEDIA-INTACT'));
+    const input = new Uint8Array([...ftyp, ...moov, ...mdat]);
+    const probe = probeVideo('video/mp4', input);
+    expect(probe.ok).toBe(true);
+    if (!probe.ok) return;
+    expect(probe.stripped).toBe(true);
+    expect(probe.bytes.length).toBe(input.length);
+    expect(textOf(probe.bytes)).not.toContain('+12.3000'); // per-track GPS stripped
+    expect(textOf(probe.bytes)).toContain('TRACK-MEDIA-INTACT');
+  });
 });
 
 // --- WebM ------------------------------------------------------------------
@@ -168,6 +184,26 @@ describe('WS-Q.2.3d — WebM probe', () => {
     const seg = [...ID.segment, ...vintSize(9999, 2), 1, 2, 3];
     const probe = probeVideo('video/webm', new Uint8Array([...header, ...seg]));
     expect(probe).toEqual({ ok: false, reason: 'malformed' });
+  });
+
+  it('strips a `Tags` element that follows an UNKNOWN-SIZE (streamed) Cluster', () => {
+    const header = ebml(ID.ebml, ascii('webm'), 1);
+    const timecodeScale = ebml(ID.timecodeScale, [0x0f, 0x42, 0x40], 1);
+    const duration = ebml(ID.duration, f64(3000), 1);
+    const info = ebml(ID.info, [...timecodeScale, ...duration], 1);
+    // A Cluster with an unknown size (single 0xFF size vint) + innocuous payload
+    // (0xAA bytes never match a Level-1 id), then a definite-size Tags after it.
+    const cluster = [0x1f, 0x43, 0xb6, 0x75, 0xff, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa];
+    const tags = ebml(ID.tags, ascii('TRAILING-SECRET-TAG-METADATA'), 2);
+    const segment = ebml(ID.segment, [...info, ...cluster, ...tags], 2);
+    const input = new Uint8Array([...header, ...segment]);
+    const probe = probeVideo('video/webm', input);
+    expect(probe.ok).toBe(true);
+    if (!probe.ok) return;
+    expect(probe.durationSeconds).toBeCloseTo(3.0, 6); // Info still read
+    expect(probe.stripped).toBe(true); // resync found the trailing Tags
+    expect(probe.bytes.length).toBe(input.length);
+    expect(textOf(probe.bytes)).not.toContain('TRAILING-SECRET-TAG');
   });
 });
 
