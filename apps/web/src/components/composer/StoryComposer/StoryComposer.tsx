@@ -21,6 +21,7 @@ import {
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { ApiClientError, createStory, uploadMedia } from '../../../lib/api.js';
+import { mintObjectUrl, sanitizeBlobUrl } from '../../../lib/blob-url.js';
 import { useRoomsQuery } from '../../../lib/queries.js';
 import {
   type DraftStoryRecord,
@@ -59,22 +60,6 @@ function newStoryDraftId(): string {
     : `story-${Date.now()}`;
 }
 
-/**
- * A same-origin object URL for a local preview. Returns ONLY a browser-minted
- * blob-scheme URL and rejects anything else as null. Callers ALSO re-assert the
- * `blob:` scheme with an allowlist guard right at the DOM sink (so the sanitizer
- * dominates the sink intra-procedurally). Such a URL on an `<img>`/`<video>`
- * `src` loads a resource — it can carry no script scheme, inject no markup, and
- * run no code.
- */
-function blobObjectUrl(file: File): string | null {
-  if (typeof URL.createObjectURL !== 'function') return null;
-  const url = URL.createObjectURL(file);
-  if (url.startsWith('blob:')) return url;
-  URL.revokeObjectURL(url);
-  return null;
-}
-
 /** Best-effort client duration probe (0 when the browser can't read metadata). */
 function readVideoDurationSeconds(file: File): Promise<number> {
   return new Promise((resolve) => {
@@ -83,9 +68,10 @@ function readVideoDurationSeconds(file: File): Promise<number> {
       return;
     }
     const url = URL.createObjectURL(file);
-    // Sanitize the URL AT THE SINK: only a browser `blob:` URL is ever assigned
-    // to video.src — an allowlist guard dominating the sink in this function.
-    if (!url.startsWith('blob:')) {
+    // Sanitize AT THE SINK: validate the `blob:` scheme via the URL API and
+    // percent-encode before assigning to video.src (see lib/blob-url).
+    const safeSrc = sanitizeBlobUrl(url);
+    if (safeSrc === null) {
       URL.revokeObjectURL(url);
       resolve(0);
       return;
@@ -104,7 +90,7 @@ function readVideoDurationSeconds(file: File): Promise<number> {
     const timer = setTimeout(() => done(0), 5_000);
     video.onloadedmetadata = () => done(video.duration);
     video.onerror = () => done(0);
-    video.src = url;
+    video.src = safeSrc;
   });
 }
 
@@ -181,9 +167,9 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
   function onPickFile(picked: File | null): void {
     setFile(picked);
     setUploadPct(0);
-    // Only a verified `blob:` object URL ever reaches the <img> src (scheme
-    // guard; see blobObjectUrl).
-    setPreviewUrl(picked !== null && mode === 'image_post' ? blobObjectUrl(picked) : null);
+    // Mint a validated `blob:` handle; the <img> src is re-sanitized at the sink
+    // (see lib/blob-url).
+    setPreviewUrl(picked !== null && mode === 'image_post' ? mintObjectUrl(picked) : null);
   }
   useEffect(() => {
     if (previewUrl === null) return;
@@ -457,6 +443,9 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
 
   const acceptTypes =
     mode === 'image_post' ? UPLOAD_IMAGE_TYPES.join(',') : UPLOAD_VIDEO_TYPES.join(',');
+  // The preview src is re-sanitized at render so the encodeURI barrier dominates
+  // the <img> sink directly (see lib/blob-url).
+  const previewSrc = previewUrl === null ? null : sanitizeBlobUrl(previewUrl);
 
   return (
     <form
@@ -593,11 +582,11 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
             {...(errors['file'] ? { 'aria-invalid': true } : {})}
           />
           {/* WS-Q.5.2a — client-side image preview before upload. The src is
-              sanitized AT THE SINK: an allowlist guard (`blob:`) dominates the
-              <img> so only a browser object URL is ever rendered. */}
-          {previewUrl !== null && previewUrl.startsWith('blob:') ? (
+              sanitized AT THE SINK: sanitizeBlobUrl validates the `blob:` scheme
+              and percent-encodes the value before it reaches the <img>. */}
+          {previewSrc !== null ? (
             <img
-              src={previewUrl}
+              src={previewSrc}
               alt={t('storyComposer.preview.alt', 'Selected image preview')}
               className="max-h-48 w-auto rounded-md object-contain"
             />
