@@ -248,7 +248,17 @@ export interface RoomStore {
   }): Promise<RoomRecord[]>;
   update(
     roomId: string,
-    patch: Partial<Pick<RoomRecord, 'description' | 'charterSummary' | 'latestActivityAt'>>,
+    patch: Partial<
+      Pick<
+        RoomRecord,
+        | 'description'
+        | 'charterSummary'
+        | 'latestActivityAt'
+        | 'visibility'
+        | 'joinModel'
+        | 'postingPolicy'
+      >
+    >,
   ): Promise<RoomRecord | null>;
   /** Bump latest_activity_at monotonically (never backwards). */
   touchActivity(roomId: string, atIso: string): Promise<void>;
@@ -640,7 +650,17 @@ export class InMemoryRoomStore implements RoomStore {
 
   async update(
     roomId: string,
-    patch: Partial<Pick<RoomRecord, 'description' | 'charterSummary' | 'latestActivityAt'>>,
+    patch: Partial<
+      Pick<
+        RoomRecord,
+        | 'description'
+        | 'charterSummary'
+        | 'latestActivityAt'
+        | 'visibility'
+        | 'joinModel'
+        | 'postingPolicy'
+      >
+    >,
   ): Promise<RoomRecord | null> {
     const room = this.#rooms.get(roomId);
     if (!room) return null;

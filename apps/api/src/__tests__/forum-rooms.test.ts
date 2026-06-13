@@ -205,6 +205,11 @@ describe('WS-G.2.3a — listing, filters, recommendation (no applause)', () => {
       expect(isFinancialFieldName(key)).toBe(false);
       expect(/like|vote|karma|follower|reaction|member_count|applause/i.test(key)).toBe(false);
     }
+    // WS-Q.3.3b — visibility / join_model / posting_policy GATE eligibility,
+    // they never SCORE: none may appear as a recommendation input.
+    for (const key of RECOMMENDATION_INPUT_KEYS as readonly string[]) {
+      expect(/visibility|join_model|posting_policy/.test(key)).toBe(false);
+    }
   });
 
   it('anonymous listing INCLUDES private rooms — tier-one existence is universal (WS-Q.3.1a)', async () => {

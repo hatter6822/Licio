@@ -347,6 +347,21 @@ export const roomJoinRequestDecisionSchema = z
   .object({ decision: z.enum(['approve', 'deny']) })
   .strict();
 
+/** WS-Q.3.3b — steward governance write (join/posting only; NOT visibility). */
+export const roomGovernanceSettingsRequestSchema = z
+  .object({
+    join_model: roomJoinModelSchema.optional(),
+    posting_policy: roomPostingPolicySchema.optional(),
+  })
+  .strict();
+export type RoomGovernanceSettingsRequest = z.infer<typeof roomGovernanceSettingsRequestSchema>;
+
+/** WS-Q.3.4 — steward room-visibility cascade (public⇄private). */
+export const roomVisibilityChangeRequestSchema = z
+  .object({ visibility: roomVisibilitySchema })
+  .strict();
+export type RoomVisibilityChangeRequest = z.infer<typeof roomVisibilityChangeRequestSchema>;
+
 export const roomJoinRequestPublicSchema = z
   .object({
     request_id: uuidSchema,

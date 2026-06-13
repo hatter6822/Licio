@@ -16,6 +16,7 @@ import {
   RESERVED_ROOM_SLUGS,
   roomCreateRequestSchema,
   roomDetailSchema,
+  roomGovernanceSettingsRequestSchema,
   roomJoinRequestDecisionSchema,
   roomJoinRequestPublicSchema,
   roomJoinResponseSchema,
@@ -23,11 +24,14 @@ import {
   roomNotificationPreferencesSchema,
   roomSummarySchema,
   roomTypeSchema,
+  roomVisibilityChangeRequestSchema,
   storyLensesResponseSchema,
   uuidSchema,
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { getEventPipelineServices } from '../events/services.js';
+import { changeRoomVisibility, updateRoomGovernanceSettings } from '../forum/room-visibility.js';
 import {
   authorizeRoomCreate,
   compareRecommended,
@@ -542,6 +546,70 @@ export function createRoomsRoutes() {
           });
           forum.metrics.increment(`rooms.join_${decision}`);
           return c.json({ request_id: requestId, decision });
+        },
+      )
+
+      // --- Governance settings (WS-Q.3.3b): steward join/posting write -------
+      .patch(
+        '/rooms/:roomId/settings',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        zValidator('param', z.object({ roomId: uuidSchema })),
+        zValidator('json', roomGovernanceSettingsRequestSchema),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const { roomId } = c.req.valid('param');
+          const forum = getForumServices();
+          if (!(await isRoomSteward(forum, roomId, auth.userId, auth.roles))) {
+            return c.json(deny('forbidden', 'Steward role required'), 403);
+          }
+          const body = c.req.valid('json');
+          const outcome = await updateRoomGovernanceSettings(
+            forum,
+            getIdentityServices(),
+            auth.userId,
+            roomId,
+            {
+              ...(body.join_model !== undefined ? { joinModel: body.join_model } : {}),
+              ...(body.posting_policy !== undefined ? { postingPolicy: body.posting_policy } : {}),
+            },
+          );
+          if (!outcome.ok) return c.json(deny(outcome.code, outcome.message), outcome.status);
+          return c.json({ ok: true });
+        },
+      )
+
+      // --- Visibility cascade (WS-Q.3.4): steward public⇄private -------------
+      .post(
+        '/rooms/:roomId/visibility',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        zValidator('param', z.object({ roomId: uuidSchema })),
+        zValidator('json', roomVisibilityChangeRequestSchema),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const { roomId } = c.req.valid('param');
+          const forum = getForumServices();
+          // Governance-capable steward only; others get 404 (no oracle).
+          if (!(await isRoomSteward(forum, roomId, auth.userId, auth.roles))) {
+            return c.json(notFound, 404);
+          }
+          const outcome = await changeRoomVisibility(
+            forum,
+            getIngestionServices(),
+            getEventPipelineServices(),
+            getIdentityServices(),
+            auth.userId,
+            roomId,
+            c.req.valid('json').visibility,
+          );
+          if (!outcome.ok) return c.json(deny(outcome.code, outcome.message), outcome.status);
+          return c.json({
+            visibility: c.req.valid('json').visibility,
+            converted: outcome.converted,
+          });
         },
       )
 

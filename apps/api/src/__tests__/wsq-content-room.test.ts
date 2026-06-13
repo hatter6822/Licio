@@ -273,3 +273,77 @@ describe('WS-Q.1.7c content-event classification firewall', () => {
     }
   });
 });
+
+describe('WS-Q.3.3b/3.4 room governance + visibility cascade (steward)', () => {
+  async function stewardOfNewRoom(
+    visibility: 'public' | 'private',
+  ): Promise<{ roomId: string; cookie: string }> {
+    const roomId = await makeRoom(visibility);
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    await fixture.forum.rooms.addSteward({
+      roomId,
+      userId: steward.userId,
+      role: 'community_steward',
+      assignedAt: new Date().toISOString(),
+    });
+    return { roomId, cookie: steward.cookie };
+  }
+
+  it('the settings write changes join/posting but REJECTS a visibility change (422)', async () => {
+    const { roomId, cookie } = await stewardOfNewRoom('private');
+    const ok = await app().request(
+      new Request(`http://local/v1/rooms/${roomId}/settings`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify({ posting_policy: 'experts_and_stewards' }),
+      }),
+    );
+    expect(ok.status).toBe(200);
+    const visAttempt = await app().request(
+      new Request(`http://local/v1/rooms/${roomId}/settings`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify({ visibility: 'public' }),
+      }),
+    );
+    // The shared schema is strict, so an unknown `visibility` key is a 400.
+    expect(visAttempt.status).toBe(400);
+  });
+
+  it('public → private cascade forces every public story room_only', async () => {
+    const { roomId, cookie } = await stewardOfNewRoom('public');
+    const member = await seedUserWithSession(fixture.identity, { handle: 'cm' });
+    await fixture.forum.rooms.upsertSubscription({
+      roomId,
+      userId: member.userId,
+      status: 'active',
+      requestId: randomUUID(),
+      notificationPreferences: {
+        threads: 'mentions',
+        new_evidence: false,
+        bridge_requests: false,
+        steward_announcements: true,
+      },
+      requestedAt: new Date().toISOString(),
+      joinedAt: new Date().toISOString(),
+    });
+    const created = await app().request(
+      post('/v1/stories', briefSubmission({ room_id: roomId }), member.cookie),
+    );
+    const { story_id } = (await created.json()) as { story_id: string };
+    // Cascade public → private.
+    const cascade = await app().request(
+      new Request(`http://local/v1/rooms/${roomId}/visibility`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify({ visibility: 'private' }),
+      }),
+    );
+    expect(cascade.status).toBe(200);
+    const story = await fixture.ingestion.stories.getById(story_id);
+    expect(story?.visibility).toBe('room_only');
+    const room = await fixture.forum.rooms.getById(roomId);
+    expect(room?.visibility).toBe('private');
+    expect(room?.joinModel).toBe('request_approval'); // open collapsed
+  });
+});

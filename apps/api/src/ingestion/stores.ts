@@ -270,6 +270,9 @@ export interface StoryStore {
   /** WS-Q.2.2b — VISIBLE room_only stories sharing a canonical URL (cross-tier
    *  back-linking when a public story becomes canonical). */
   listRoomOnlyByCanonicalUrl(canonicalUrl: string): Promise<StoryRecord[]>;
+  /** WS-Q.3.4a — stories in a room (the room-visibility cascade sweep input),
+   *  most-recent first, bounded. */
+  listByRoom(roomId: string, limit: number): Promise<StoryRecord[]>;
   /** WS-Q.2.3a — the story (if any) already anchored to a media upload (a
    *  media upload anchors at most one story; claim-uniqueness). */
   getByMediaUploadRef(uploadId: string): Promise<StoryRecord | null>;
@@ -698,6 +701,13 @@ export class InMemoryStoryStore implements StoryStore {
       if (story.mediaUploadRef === uploadId) return story;
     }
     return null;
+  }
+
+  async listByRoom(roomId: string, limit: number): Promise<StoryRecord[]> {
+    return [...this.#stories.values()]
+      .filter((s) => s.roomId === roomId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit);
   }
 
   async hasHiddenForUrl(canonicalUrl: string): Promise<boolean> {

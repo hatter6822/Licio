@@ -546,13 +546,26 @@ export class DrizzleRoomStore implements RoomStore {
 
   async update(
     roomId: string,
-    patch: Partial<Pick<RoomRecord, 'description' | 'charterSummary' | 'latestActivityAt'>>,
+    patch: Partial<
+      Pick<
+        RoomRecord,
+        | 'description'
+        | 'charterSummary'
+        | 'latestActivityAt'
+        | 'visibility'
+        | 'joinModel'
+        | 'postingPolicy'
+      >
+    >,
   ): Promise<RoomRecord | null> {
     const rows = await this.#db
       .update(roomsTable)
       .set({
         ...(patch.description !== undefined ? { description: patch.description } : {}),
         ...(patch.charterSummary !== undefined ? { charterSummary: patch.charterSummary } : {}),
+        ...(patch.visibility !== undefined ? { visibility: patch.visibility } : {}),
+        ...(patch.joinModel !== undefined ? { joinModel: patch.joinModel } : {}),
+        ...(patch.postingPolicy !== undefined ? { postingPolicy: patch.postingPolicy } : {}),
         ...(patch.latestActivityAt !== undefined
           ? {
               latestActivityAt:
