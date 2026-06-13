@@ -364,6 +364,47 @@ acknowledges the accepted count.
   `check:no-applause`, **`check:no-raw-egress`**, `check:workspace-deps`, strict
   `tsc`.
 
+## WS-Q client surface — content–room ownership and visibility
+
+The content–room model (rooms own content; binary public/private rooms;
+per-item `public`/`room_only` visibility) reaches the client through these
+surfaces. Containment is never weakened on the client — it relays the
+server's bars, it does not re-decide them.
+
+- **Story-submission composer** (`components/composer/StoryComposer`, hosted by
+  `/submit` when there is no thread target; the WS-G contribution composer still
+  handles thread replies). A REQUIRED home-room picker (Commons default;
+  non-postable rooms shown with the reason, submit disabled); a public/in-room
+  visibility control whose displayed value equals the SHARED
+  `deriveStoryVisibility` output and is LOCKED to in-room for private rooms; and
+  four modes — link, brief, image post (alt text required), video post (optional
+  text captions; oversize/overlong rejected before upload). Media uploads through
+  the scan-gated path first; a still-pending scan shows "pending a safety
+  check", never a failure. The form uses `noValidate` so the accessible JS
+  validation (not native bubbles) drives the UX.
+- **Native media rendering** (`components/story/StoryMedia`, wired into
+  `StoryCard` and the story page via the shared `feed-card` mapper). Image/video
+  load ONLY through the scan-gated upload URL; video is a native
+  `<video controls preload="metadata">` with NO autoplay in any state; a load
+  failure collapses to an honest message, never a broken element; text captions
+  render beneath the player.
+- **Rooms** (`routes/-pages/rooms.tsx`, `components/rooms/RoomCreateForm`). The
+  room detail renders the tier-one shell (visibility badge, description, join
+  affordance per `join_model`, pending state, honest-limits notice) for
+  everyone; the room feed (with the in-room chip on every `room_only` item)
+  renders only once the reader passes the content bar. The directory marks
+  private rooms at tier one. The create form enforces the shared coherence rule
+  (a public room locks the join model to `open`).
+- **Author visibility control** (`components/story/AuthorVisibilityControl`,
+  owner-only on the story page): narrow always; widen only from a public room; a
+  widen collision (409) links to the existing public story.
+- **Front-page framing** affirms participation-weighted attention, never
+  popularity (no applause vocabulary; a copy test pins it).
+- **Offline** (`offline/db.ts` at `DB_VERSION` 2): the version bump evicts the
+  read-model cache (stale pre-WS-Q server shapes) while PRESERVING user data —
+  drafts, the pending queue, saved stories, and the signal ledger are never
+  cleared, so a queued submission is never silently dropped.
+
 ## Commands
 
 ```bash

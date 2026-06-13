@@ -425,3 +425,16 @@ descriptive, but visibility is now **binary** and join/posting are
   and publishes NO content (each story stays `room_only` until its author
   widens it).  One summary `room_visibility_change` audit record carries the
   converted count.
+- **Native video admission (`forum/video.ts`).** Uploaded `video/mp4` /
+  `video/webm` ride a validate-only probe: byte-level MP4-box / WebM-EBML
+  sniffing (a spoofed extension/MIME is caught by content), duration extraction
+  for the `ingestion.video_max_seconds` cap, and OFFSET-PRESERVING metadata
+  neutralization (MP4 `udta`→`free`, WebM `Tags`→`Void`) so sample-offset
+  tables / cue points stay valid with no re-encode.  The gated upload-serving
+  path advertises `Accept-Ranges` and honors single byte-range requests (206)
+  for native `<video>` seeking.
+- **Data-rights across both tiers (`forum/data-rights.ts`, WS-Q.3.5).**
+  `exportUserContent` returns the user's own stories/contributions regardless of
+  visibility (room_only included), each tagged `room_ref`+`visibility`, plus
+  private-room subscriptions; `anonymizeUserContent` tombstones contributions
+  across tiers and strips private-room memberships/steward rows.

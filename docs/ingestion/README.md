@@ -531,3 +531,17 @@ tier-aware.
   distribution side enforces, applied at the event boundary.  The stored
   event row is persisted with the event's own classification (not a static
   topic default), so replay/redrive preserve containment too.
+- **Video caps + rollout flags (`ingestion/config.ts`, `content-flags.ts`).**
+  Steward-tunable, fail-closed `ingestion.video_max_bytes` (clamped to the hard
+  200 MB DB ceiling) and `ingestion.video_max_seconds` bound native video.
+  Three fail-closed WS-Q.6.2 rollout flags — `content.media_posts_enabled`,
+  `content.in_room_visibility_enabled`, `rooms.binary_visibility_ui` — gate the
+  user-visible surface (ON by default, steward-toggleable, audited); CONTAINMENT
+  IS NOT FLAGGABLE (a private room still forces `room_only` with the flag off,
+  and the distribution gate/read bar have no off switch).
+- **Migration validation harness** (`packages/db/.../migration-harness.test.ts`,
+  gated): seeds a pre-WS-Q dataset (public/restricted/expert_led rooms;
+  thread-roomed, room-less, near-duplicate public stories) in a throwaway
+  database, runs the WS-Q chain, and asserts the monotonic-visibility property
+  (a story is public iff its home room is public), no room-less story, axis
+  derivation, near-dup survival, and backfill/seed idempotency.

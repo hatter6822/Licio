@@ -198,11 +198,19 @@ narrow/widen transitions, the steward public⇄private room cascade, and the
 always-on surface-aware distribution gate (`filterByVisibility`) + item read
 bar (`storyReadableByUser`) proven by the extended `check:neutrality`
 containment leg.  The shared schemas, migrations (`0014`–`0020`,
-expand→backfill→contract), ingestion/rooms/ranking backend, and their tests are
-shipped; the client surface (WS-Q.5 composer/media/room-shell) and the gated
-migration-validation harness (WS-Q.6.1) remain.  Workstreams WS-J through WS-P
-are planned (planning documents exist under `docs/planning/`; implementation
-not yet started).  See "Implementation roadmap" below for the full status table.
+expand→backfill→contract), and the ingestion/rooms/ranking backend are shipped,
+along with: the native-video pipeline (byte-level MP4/WebM sniffing,
+duration/size caps, offset-preserving metadata neutralization, range serving);
+DSAR/anonymization across both tiers; takedown reach over room-tier content;
+fail-closed content rollout flags (containment is NOT flaggable); the gated
+end-to-end migration-validation harness (monotonic-visibility property, verified
+against live pgvector); and the full WS-Q.5 client surface — the story-submission
+composer (home-room picker, visibility lock, image/video modes), native media
+rendering (no autoplay), the room shell/feed/in-room chip/create form, the author
+visibility control, the participation-weighted front-page framing, and the
+offline cache-version bump.  Workstreams WS-J through WS-P are planned (planning
+documents exist under `docs/planning/`; implementation not yet started).  See
+"Implementation roadmap" below for the full status table.
 
 ## Build and run
 
@@ -328,11 +336,14 @@ licio/
 │   │       │   ├── a11y/                -- RouteAnnouncer, SkipToContent, useSpaFocus
 │   │       │   ├── cognitive/           -- DefinedTerm, ProgressiveDisclosure, jargon
 │   │       │   ├── composer/            -- 11-mode ParticipationComposer + shared-schema
-│   │       │   │                           payload builder, VoiceDictation (WS-G.3)
+│   │       │   │                           payload builder, VoiceDictation (WS-G.3),
+│   │       │   │                           StoryComposer (WS-Q.5.1/5.2 story submission)
 │   │       │   ├── feed/                -- FeedModeSwitcher, DiminishingReturnsPrompt
+│   │       │   ├── rooms/               -- RoomCreateForm (WS-Q.5.3c)
 │   │       │   ├── story/               -- StoryCard, ContextCard, RatingLabel,
 │   │       │   │                           ExposureLabel, IndependentSourcesDrawer,
-│   │       │   │                           WhereInterpretationsDiffer (WS-H)
+│   │       │   │                           WhereInterpretationsDiffer (WS-H), StoryMedia +
+│   │       │   │                           AuthorVisibilityControl + feed-card (WS-Q.5)
 │   │       │   ├── thread/              -- ThreadBranchNav
 │   │       │   ├── ugc/                 -- UgcBody (THE sanctioned UGC sink, WS-G.4.2b)
 │   │       │   │                           + LinkInterstitial (WS-G.4.2c)
@@ -520,6 +531,7 @@ licio/
 │           │   ├── submission.ts        --   POST /v1/stories orchestration (room/posting
 │           │   │                             guards + visibility derivation + tier dedup, WS-Q)
 │           │   ├── visibility.ts        --   WS-Q.2.4 author narrow/widen visibility transitions
+│           │   ├── content-flags.ts     --   WS-Q.6.2 fail-closed content rollout flags
 │           │   ├── pipeline.ts          --   §14.2 extraction worker + content.normalized
 │           │   ├── prechecks.ts         --   submission limits, spam patterns, URL safety
 │           │   ├── safe-fetch.ts        --   SSRF-hardened fetcher (per-resolution gate)
@@ -543,6 +555,8 @@ licio/
 │           │   ├── rooms.ts             --   rooms/lenses/stewards/joins + the binary
 │           │   │                             read bar / userMayPostTopLevel / Commons (WS-Q)
 │           │   ├── room-visibility.ts   --   WS-Q.3.3b/3.4 governance settings + visibility cascade
+│           │   ├── video.ts             --   WS-Q.2.3d validate-only MP4/WebM sniff + metadata strip
+│           │   ├── data-rights.ts       --   WS-Q.3.5 DSAR export + anonymize across both tiers
 │           │   ├── summaries.ts         --   §24.3 layered summaries (supersede semantics)
 │           │   ├── transitions.ts       --   audited §15.4 state machines → thread.state.changed
 │           │   ├── safety.ts            --   heuristic contribution pre-screen (WS-J/K seam)
@@ -554,6 +568,7 @@ licio/
 │           │   ├── push-service.ts      --   VAPID push (session-scoped delete)
 │           │   ├── vapid.ts             --   VAPID key management
 │           │   ├── logger.ts            --   pino logger setup
+│           │   ├── story-media.ts       --   WS-Q.5.2c story→feed media projection
 │           │   ├── demo-data.ts         --   demo feed fixtures + stable demo ids
 │           │   └── demo-seed.ts         --   dev seed through the real forum/ingestion stores
 │           └── __tests__/               -- route/middleware/service tests (WS-C – WS-G)
@@ -1069,7 +1084,7 @@ Status:
 | WS-N | Compliance | Planned |
 | WS-O | Security and reliability | Planned |
 | WS-P | Experimentation and launch | Planned |
-| WS-Q | Content–room ownership and visibility | In progress (backend shipped; client + harness residual) |
+| WS-Q | Content–room ownership and visibility | Complete |
 
 Read the per-workstream planning document under `docs/planning/`
 before starting new work.  The master index at
