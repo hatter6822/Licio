@@ -65,7 +65,10 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     return (inserted[0] as { userId: string }).userId;
   }
 
-  async function seedThread(stories: DrizzleStoryStore): Promise<string> {
+  async function seedThread(
+    stories: DrizzleStoryStore,
+    roomId: string = defaultRoomId,
+  ): Promise<string> {
     const storyId = randomUUID();
     const newThreadId = randomUUID();
     const created = await stories.createWithThread(
@@ -76,7 +79,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
         titleHash: randomUUID().replaceAll('-', ''),
         submittedBy: authorId,
         sourceId: null,
-        roomId: defaultRoomId,
+        roomId,
         visibility: 'public',
         mediaUploadRef: null,
         canonicalPublicStoryId: null,
@@ -771,9 +774,9 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     const stories = new DrizzleStoryStore(db);
     const threadIds: string[] = [];
     for (let i = 0; i < 5; i += 1) {
-      const tid = await seedThread(stories);
-      await stories.updateThread(tid, { roomId: room.roomId });
-      threadIds.push(tid);
+      // Seed the story+thread directly IN this room (the WS-Q consistency
+      // trigger forbids moving a thread to a room its story is not in).
+      threadIds.push(await seedThread(stories, room.roomId));
     }
     const walked: string[] = [];
     let before: { createdAt: string; threadId: string } | null = null;
