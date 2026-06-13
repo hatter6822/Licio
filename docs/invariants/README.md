@@ -363,9 +363,14 @@ controls) + case resolution, GWEI dashboards + the transparency export,
 promotion apply/history, validated config writes, on-demand regression.
 
 Public reads (`/v1/stories/:id/interpretations`,
-`/v1/stories/:id/independent-sources`): visibility-gated (404-over-403),
-served from STORED shadow outputs only — a page load never triggers
-computation.
+`/v1/stories/:id/independent-sources`, and the SCOI `/v1/stories/:id/lenses`
+read): each gates on the WS-Q item read bar (`storyReadableByUser`, soft
+session resolution, fail-closed on an unknown room) — a `room_only` story in
+a private room is 404 to non-members (404-over-403, no existence oracle),
+and every independent-sources lineage co-member is ITSELF read-bar-filtered
+so a public story never surfaces a contained near-duplicate's id/title (the
+raw MinHash/syndication candidate sets are not tier-scoped). Served from
+STORED shadow outputs only — a page load never triggers computation.
 
 Client: `ExposureLabel` (four §7.6 labels — rendered on FEED CARDS from
 the `exposure_label` the feed wire now carries, resolved from stored MERI
