@@ -69,6 +69,7 @@ export async function seedThread(
     roomId?: string | null;
     title?: string;
     visibility?: 'public' | 'room_only';
+    submittedBy?: string;
   } = {},
 ): Promise<{ storyId: string; threadId: string }> {
   const storyId = options.storyId ?? randomUUID();
@@ -79,7 +80,7 @@ export async function seedThread(
       canonicalUrl: null,
       title: options.title ?? `Story ${storyId.slice(0, 8)}`,
       titleHash: `hash-${storyId}`,
-      submittedBy: randomUUID(),
+      submittedBy: options.submittedBy ?? randomUUID(),
       sourceId: null,
       // WS-Q — every story has a home room (defaults to Commons) + visibility.
       roomId: options.roomId ?? COMMONS_ROOM_ID,

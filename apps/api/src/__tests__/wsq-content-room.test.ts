@@ -5,10 +5,12 @@
 // cross-tier linking, the item read bar, author visibility transitions, and
 // the per-event classification firewall for in-room content.
 import { randomUUID } from 'node:crypto';
+import { COMMONS_ROOM_ID } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createV1Routes } from '../routes/v1.js';
 import {
+  articleHtml,
   briefSubmission,
   freshIngestionServices,
   type IngestionServicesFixture,
@@ -26,6 +28,24 @@ let fixture: IngestionServicesFixture;
 beforeEach(() => {
   fixture = freshIngestionServices({ config: { minAccountAgeMinutes: 0 } });
 });
+
+/** Subscribe a user to a room as an active member (the WS-Q.3.1c open path). */
+async function joinAsMember(roomId: string, userId: string): Promise<void> {
+  await fixture.forum.rooms.upsertSubscription({
+    roomId,
+    userId,
+    status: 'active',
+    requestId: randomUUID(),
+    notificationPreferences: {
+      threads: 'mentions',
+      new_evidence: false,
+      bridge_requests: false,
+      steward_announcements: true,
+    },
+    requestedAt: new Date().toISOString(),
+    joinedAt: new Date().toISOString(),
+  });
+}
 
 /** Create a room directly through the store and return its id. */
 async function makeRoom(
@@ -271,6 +291,150 @@ describe('WS-Q.1.7c content-event classification firewall', () => {
     for (const row of roomOnly) {
       expect(row.privacyClassification).toBe('restricted');
     }
+  });
+});
+
+/** A minimal valid JPEG carrying an EXIF GPS marker (mirrors the WS-G fixture). */
+function jpegWithExif(): Uint8Array {
+  const seg = (marker: number, payload: number[]): number[] => [
+    0xff,
+    marker,
+    ((payload.length + 2) >> 8) & 0xff,
+    (payload.length + 2) & 0xff,
+    ...payload,
+  ];
+  const a = (t: string): number[] => [...t].map((c) => c.charCodeAt(0));
+  return new Uint8Array([
+    0xff,
+    0xd8,
+    ...seg(0xe0, [...a('JFIF\0'), 1, 2, 0, 0, 1, 0, 1, 0, 0]),
+    ...seg(0xe1, [...a('Exif\0\0'), ...a('GPSLatitude 51.5')]),
+    0xff,
+    0xda,
+    0x00,
+    0x04,
+    0x00,
+    0x00,
+    0x12,
+    0x34,
+    0xff,
+    0xd9,
+  ]);
+}
+
+async function uploadJpeg(cookie: string): Promise<string> {
+  const bytes = jpegWithExif();
+  const form = new FormData();
+  const buf = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+  form.set('file', new File([buf], 'photo.jpg', { type: 'image/jpeg' }));
+  form.set('alt_text', 'A reservoir gauge');
+  const res = await app().request(
+    new Request('http://local/v1/uploads', { method: 'POST', headers: { cookie }, body: form }),
+  );
+  expect(res.status).toBe(201);
+  return ((await res.json()) as { upload_id: string }).upload_id;
+}
+
+describe('WS-Q.2.3b image-post serving — EXIF-absence through the story path', () => {
+  it('serves image bytes (via the story media ref) with no EXIF/GPS', async () => {
+    const author = await seedUserWithSession(fixture.identity, { handle: 'shutter' });
+    const uploadId = await uploadJpeg(author.cookie);
+    // Submit an image_post that anchors the upload.
+    const created = await app().request(
+      post(
+        '/v1/stories',
+        {
+          submission_type: 'image_post',
+          upload_id: uploadId,
+          alt_text: 'A reservoir gauge at noon',
+          title: 'Reservoir gauge',
+          topic_ids: [randomUUID()],
+          room_id: COMMONS_ROOM_ID,
+        },
+        author.cookie,
+      ),
+    );
+    expect(created.status).toBe(201);
+    const { story_id } = (await created.json()) as { story_id: string };
+
+    // Read the story → its media upload ref → fetch the served bytes.
+    const story = await fixture.ingestion.stories.getById(story_id);
+    expect(story?.mediaUploadRef).toBe(uploadId);
+    const served = await app().request(`http://local/v1/uploads/${uploadId}`);
+    expect(served.status).toBe(200);
+    const text = Array.from(new Uint8Array(await served.arrayBuffer()), (b) =>
+      String.fromCharCode(b),
+    ).join('');
+    expect(text).not.toContain('GPSLatitude'); // stripped at upload, proven through the story path
+  });
+});
+
+describe('WS-Q.2.6 takedown reach over room-tier content', () => {
+  it('a taken-down room_only story leaves direct read, room search, and re-entry', async () => {
+    const room = await makeRoom('private');
+    const member = await seedUserWithSession(fixture.identity, { handle: 'tdm' });
+    await joinAsMember(room, member.userId);
+
+    const url = 'https://example.com/room-takedown-target';
+    const term = 'zylophonium';
+    fixture.pages.set(url, {
+      status: 200,
+      body: articleHtml({ title: `${term} reservoir notice` }),
+    });
+    const created = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission(url, { room_id: room, title: `${term} reservoir notice` }),
+        member.cookie,
+      ),
+    );
+    expect(created.status).toBe(201);
+    const { story_id } = (await created.json()) as { story_id: string };
+    await fixture.ingestion.settle();
+    const story = await fixture.ingestion.stories.getById(story_id);
+    expect(story?.visibility).toBe('room_only'); // private room forced it
+
+    // BEFORE takedown: the member reads it and finds it in room-scoped search.
+    const readBefore = await app().request(
+      new Request(`http://local/v1/stories/${story_id}`, { headers: { cookie: member.cookie } }),
+    );
+    expect(readBefore.status).toBe(200);
+    const searchBefore = await app().request(
+      new Request(`http://local/v1/search?q=${term}&room=${room}`, {
+        headers: { cookie: member.cookie },
+      }),
+    );
+    const before = (await searchBefore.json()) as { items: Array<{ id: string }> };
+    expect(before.items.some((i) => i.id === story_id)).toBe(true);
+
+    // Steward action hides the story (the actioning effect; hidden_state).
+    await fixture.ingestion.stories.update(story_id, { hiddenState: 'takedown' });
+
+    // AFTER: 404 direct read, excluded from room search, re-entry blocked.
+    const readAfter = await app().request(
+      new Request(`http://local/v1/stories/${story_id}`, { headers: { cookie: member.cookie } }),
+    );
+    expect(readAfter.status).toBe(404);
+    const searchAfter = await app().request(
+      new Request(`http://local/v1/search?q=${term}&room=${room}`, {
+        headers: { cookie: member.cookie },
+      }),
+    );
+    const after = (await searchAfter.json()) as { items: Array<{ id: string }> };
+    expect(after.items.some((i) => i.id === story_id)).toBe(false);
+
+    // The canonical-URL denylist now blocks re-entry through EITHER tier.
+    expect(story?.canonicalUrl).not.toBeNull();
+    if (story?.canonicalUrl) {
+      expect(await fixture.ingestion.stories.hasHiddenForUrl(story.canonicalUrl)).toBe(true);
+    }
+    const reentry = await app().request(
+      post('/v1/stories', linkSubmission(url, { room_id: room }), member.cookie),
+    );
+    expect(reentry.status).toBe(403);
   });
 });
 
