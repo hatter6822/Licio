@@ -227,7 +227,7 @@ licenses are checked for AGPL compatibility at SBOM time (`pnpm sbom`).
 ## Planning & design
 
 - **Specification:** [`docs/SPEC.md`](docs/SPEC.md) — the canonical design spec (v0.6).
-- **Implementation plan:** [`docs/planning/00-index.md`](docs/planning/00-index.md) — 18 workstreams (WS-0 – WS-Q), ~678 atomic tasks.
+- **Implementation plan:** [`docs/planning/00-index.md`](docs/planning/00-index.md) — 18 workstreams (WS-0 – WS-Q), ~706 atomic tasks.
 - **Completed-workstream references:** [`docs/design-system/`](docs/design-system/README.md), [`docs/pwa-client/`](docs/pwa-client/README.md), [`docs/identity/`](docs/identity/README.md), [`docs/events/`](docs/events/README.md), [`docs/ingestion/`](docs/ingestion/README.md), [`docs/forum/`](docs/forum/README.md), and the policy corpus under [`docs/policy/`](docs/policy/).
 - **Conventions:** [`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md) (kept byte-identical).
 

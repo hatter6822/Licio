@@ -1,6 +1,6 @@
 # WS-Q: Content–Room Ownership and Visibility
 
-**Milestone:** M3 (remodel of shipped M1–M3 surfaces) | **Priority:** P1 | **Dependencies:** WS-F (ingestion), WS-G (forum/rooms), WS-I (ranking) — all complete; WS-E (topic registry) for the new event topic | **Wave:** 9 (first post-WS-I workstream; lands before WS-J queue ownership) | **Estimated duration:** 3-4 weeks
+**Milestone:** M3 (remodel of shipped M1–M3 surfaces) | **Priority:** P1 | **Dependencies:** WS-F (ingestion), WS-G (forum/rooms), WS-I (ranking) — all complete; WS-E (topic registry) for the new event topic | **Wave:** 9 (first post-WS-I workstream; lands before WS-J takes queue ownership) | **Estimated duration:** 4-5 weeks | **Task count:** 60 atomic cards
 
 ---
 
@@ -12,456 +12,672 @@ WS-Q implements the SPEC v0.7 structural model (Sections 3.4, 14.1, 14.5, 16.1�
 
 1. **Rooms own content.** Every content item — link story, original brief, **image post**, **video post**, question, evidence card, local update, live thread — is posted in exactly one **home room**, chosen at submission. There is no room-less content. Today stories are global and reach rooms only through the thread's nullable `room_id`; WS-Q makes `Story.room_id` authoritative and NOT NULL, with `Thread.room_id` denormalized from it.
 2. **Content owns conversation.** Already structurally true (one thread shell per story, WS-F.1); WS-Q ties the thread's room to the owning story and documents the ownership contract.
-3. **Two-tier visibility.** Room visibility becomes **binary** (`public | private`), replacing the conflated three-value `public | restricted | expert_led` enum; the old values' membership and posting semantics move to two new orthogonal axes, `join_model` and `posting_policy`. Content visibility is `public | room_only`, derived per SPEC Section 14.5: a private room **forces** `room_only`; a public room lets the author choose, defaulting to `public`.
-4. **The front page is the public tier's showcase.** Global surfaces (front page, `?topic=`, global search, cross-room recommendation) serve only `public` content from public rooms; room surfaces serve the room's full pool to users who pass the room read bar. WS-I already enforces the room read bar on the distribution side (`roomContentVisibleToUser`); WS-Q extends that bar to item-level visibility and adds the containment test suite.
+3. **Two-tier visibility.** Room visibility becomes **binary** (`public | private`), replacing the conflated three-value `public | restricted | expert_led` enum; the old values' membership and posting semantics move to two new orthogonal axes, `join_model` and `posting_policy`. Content visibility is `public | room_only`, derived per SPEC Section 14.5 by ONE shared helper: a private room **forces** `room_only`; a public room lets the author choose, defaulting to `public`.
+4. **The front page is the public tier's showcase.** Global surfaces (front page, `?topic=`, global search, cross-room recommendation) serve only `public` content from public rooms; room surfaces serve the room's full pool to users who pass the room read bar. WS-I already enforces the room read bar on the distribution side (`filterByRoomVisibility` over `roomContentVisibleToUser`); WS-Q extends that bar to item-level visibility and adds the containment test suite.
 5. **Native media content.** Image and video posts ride the WS-G.4.4 upload pipeline (content-type allowlist, byte-level metadata stripping, scan gate, required alt text), extended with video containers.
 
 The behavior-preserving migration maps existing data onto the new model: `restricted` rooms → `private` + `request_approval`; `expert_led` rooms → `private` + `request_approval` + `experts_and_stewards` (preserving their current read gating exactly); `public` rooms stay public with `open` join; stories backfill `room_id` from their thread's room, or into the system **Commons** room when no room exists; stories in private rooms backfill `visibility = room_only`, all others `public`. Net effect for existing data: nothing becomes more visible, and nothing publicly visible disappears.
+
+### Verified integration points (current code)
+
+These are the exact files/symbols WS-Q touches; they are confirmed against the shipped tree so each card is actionable without rediscovery.
+
+| Concern | Symbol / file | WS-Q change |
+|---|---|---|
+| Room enum (wire) | `roomVisibilitySchema` / `packages/shared/src/schemas/room.ts` | `public\|restricted\|expert_led` → `public\|private` + `join_model` + `posting_policy` |
+| Room enum (storage) | `roomVisibilityEnum` / `packages/db/src/schema/room.ts` | enum recreation + two columns + CHECKs |
+| Submission types | `SUBMISSION_TYPES` / `packages/shared/src/schemas/events/content.ts` (+ `submissionTypeEnum` DB mirror) | append `image_post`, `video_post` |
+| Story create payload | `storyCreateBaseShape` / `packages/shared/src/schemas/story.ts` | add `room_id` (required) + `visibility` in ONE place (all branches inherit) |
+| Story read projection | `storyPublicSchema` / same | add `room_id` + `visibility` |
+| Story entity | `stories` / `packages/db/src/schema/story.ts` | add `room_id`, `visibility`, `media_upload_ref`, `canonical_public_story_id` |
+| Content events | `contentShape` / `events/content.ts` | add `room_id` + `visibility` (covers `content.submitted` + `content.normalized`) |
+| Event registry | `CORE_EVENT_SCHEMAS` / `licioEventSchema` / `TOPIC_REGISTRY` / `events/registry.ts` | register `content.visibility.changed` (core 14 → 15) |
+| Audit taxonomy | `AUDIT_EVENT_TYPES` / `packages/shared/src/schemas/audit.ts` | add `story_visibility_change`, `room_visibility_change` (governance writes keep `forum_config_change`) |
+| Upload scan gate | `uploadScanStateEnum` (`pending\|clear\|flagged`) + `UploadScanner` / `apps/api/src/forum/safety.ts`; CHECK in `packages/db/src/schema/upload.ts` | extend content-type allowlist with video; reuse the scan gate |
+| Room read bar | `roomVisibleToUser` (tier one) + `roomContentVisibleToUser` (tier two) + `joinRoom` / `apps/api/src/forum/rooms.ts` | retarget to binary + add `userMayPostTopLevel` + `join_model` rewrite |
+| Submission guard chain | `apps/api/src/ingestion/submission.ts` | room/membership/posting guards + visibility derivation |
+| Dedup | `signatureStory` / `findNearDuplicates` / `classifyDuplicate` / `apps/api/src/ingestion/dedup.ts` | tier-scope exact-URL + near-dup |
+| Search | `SearchIndex` / `apps/api/src/ingestion/search.ts` (+ Drizzle FTS adapter) | tier predicate + room scoping |
+| Distribution gate | `filterByRoomVisibility` / `apps/api/src/ranking/service.ts` | rename `filterByVisibility`; add surface-aware item-tier clause |
+| Candidate boundary | `Candidate` / `packages/ranking/src/schemas/candidate.ts` | add `visibility` |
+| Retrievers | eight organic retrievers + `RoomSurfaceRetriever` / `apps/api/src/ranking/retrievers.ts` | public predicate on the eight; room pool on the scoper |
+| Neutrality gate | `apps/api/src/__tests__/ranking-neutrality.test.ts` (`pnpm check:neutrality`) | add the containment leg |
+
+### Migration strategy (expand → backfill → contract, online-safe)
+
+Schema change follows the **expand/contract** pattern so the running system is never blocked by a long lock and so a half-applied chain is always forward-recoverable. Migration numbers continue the chain after the shipped `0013`:
+
+| # | Card | Phase | Online-safety note |
+|---|---|---|---|
+| `0014` | WS-Q.1.2 | rooms: enum recreate + columns + CHECKs + backfill | one txn; rooms table is small (bounded by room count) so the rewrite is cheap |
+| `0015` | WS-Q.1.4a | stories: ADD nullable `room_id`/`visibility`(default `public`)/`media_upload_ref`/`canonical_public_story_id`; append enum values; Commons seed | additive + defaulted; no rewrite of existing rows' data; `ADD VALUE` is non-locking |
+| `0016` | WS-Q.1.4b | stories: BACKFILL `room_id`/`visibility` in batches, then `SET NOT NULL` | batched UPDATE (keyset by `created_at`); NOT NULL only after backfill completes |
+| `0017` | WS-Q.1.4c | stories: drop global URL unique; add the two partial unique indexes | `CREATE INDEX CONCURRENTLY` (outside a txn) to avoid write locks |
+| `0018` | WS-Q.1.5 | threads: backfill `room_id`, `SET NOT NULL`, consistency trigger | batched backfill before NOT NULL/trigger |
+| `0019` | WS-Q.1.7b | audit enum: `ADD VALUE` the two new audit types | non-locking enum extension |
+| `0020` | WS-Q.2.3c | uploads: extend content-type CHECK with video containers | drop+add CHECK NOT VALID then VALIDATE to avoid a full-table lock |
+
+Every migration ships an idempotent down path; where a down path is lossy (e.g. rooms created with `invite` after `0014`) the card documents it explicitly. Each gated integration test runs the REAL chain in CI's Postgres service container (the WS-D…WS-I precedent).
+
+**Transient-default safety.** `0015` adds `stories.visibility` as `NOT NULL DEFAULT 'public'`, so between `0015` and the `0016` backfill an existing private-room story is briefly stamped `public` at rest. This is never a live over-exposure window because (a) the chain `0014`–`0020` is applied as a unit ahead of the serving code that depends on it (standard deploy ordering), and (b) the runtime distribution gate (WS-Q.4.2a) and read bar (WS-Q.3.2) ship with that code and re-derive containment from `room.visibility` at serve time, so even a mislabeled row cannot leak from a private room. New rows written during the window go through the submission guard (WS-Q.2.1c), which sets the correct value. The migration harness (WS-Q.6.1) asserts the post-`0016` end state, not the transient.
 
 ### Conventions for this workstream
 
 - **Fail-closed visibility.** Wherever visibility cannot be established (unknown room, unreadable row, missing flag), the item is EXCLUDED from the surface. Unknown ⇒ private. This mirrors the WS-I safety-filter posture.
 - **404-over-403.** Private-room content reads return 404 to outsiders and pending applicants, never 403 (WS-D.1.6a house rule). Tier one (room existence) is the only thing a non-member can see.
-- **No contribution-level visibility.** Contributions inherit reach from their thread's story and room; there is no per-contribution visibility flag. The room read bar (one function) gates every read.
+- **One derivation, one bar.** `deriveStoryVisibility` (visibility forcing) and `storyReadableByUser` (item read bar) each live in exactly one place; every server and client path calls the shared function — no re-implementation, no drift.
+- **No contribution-level visibility.** Contributions inherit reach from their thread's story and room; there is no per-contribution visibility flag.
 - **No-applause invariant.** No task introduces likes, votes, karma, reactions, or follower mechanics; "popular" on the front page means PWAtt-ranked participation-weighted attention under the Section 13 constraints, computed exactly as today.
 - **Identity-free privacy (Section 19.1).** No task reads or stores IP addresses or geolocation. Visibility checks key on account membership only.
 - **Private ≠ secret.** Every private-room surface states the SPEC Section 14.5.7 honest limits: distribution-bounded, not end-to-end encrypted, reachable by moderation and legal process. No task may describe private rooms as "encrypted" or "secret".
 - **Tier-scoped dedup canon (Section 14.5.6).** Public tier: at most one public story per canonical URL (global). Room tier: at most one `room_only` story per `(canonical_url, room_id)`. An in-room item never blocks a public submission; cross-tier pairs link.
-- **Schema canon.** `Room.visibility ∈ {public, private}`; `Room.join_model ∈ {open, request_approval, invite}`; `Room.posting_policy ∈ {all_members, experts_and_stewards}`; `Story.visibility ∈ {public, room_only}`; `Story.room_id` NOT NULL FK; `Story.media_upload_ref` nullable FK to `uploads`. New submission types: `image_post`, `video_post`. New event topic: `content.visibility.changed`.
+- **Schema canon.** `Room.visibility ∈ {public, private}`; `Room.join_model ∈ {open, request_approval, invite}`; `Room.posting_policy ∈ {all_members, experts_and_stewards}`; `Story.visibility ∈ {public, room_only}`; `Story.room_id` NOT NULL FK; `Story.media_upload_ref` nullable FK to `uploads`; `Story.canonical_public_story_id` nullable self-FK. New submission types: `image_post`, `video_post`. New event topic: `content.visibility.changed`. New audit types: `story_visibility_change`, `room_visibility_change`.
 - **Financial denylist unchanged.** No new table or column may carry a financial field (WS-F.2.5b assertion + the wallet↔ranking BFS proof re-run in CI on the modified schemas).
-- **Monorepo atomicity.** Client and server ship together; wire-shape changes (room visibility values, FeedItem additions) land in `@licio/shared` first and both sides consume the same schemas. Offline caches bump their record-schema version so stale cached shapes are evicted, never mis-parsed.
+- **Monorepo atomicity.** Wire-shape changes land in `@licio/shared` first; both sides consume the same schemas. Offline caches bump their record-schema version so stale cached shapes are evicted, never mis-parsed.
+- **Task sizing (Section 30.8).** Every card below is one deliverable — one schema, one helper, one migration phase, one guard, one endpoint, one client state — reviewable, testable, and reversible in ≤ 1-3 engineering days. Sub-area headers group cards; the dependency graph at the end fixes their order.
 
 ---
 
-## WS-Q.1 Schemas, storage, and migration
+## WS-Q.1 Shared schemas, storage, and migrations
 
-### WS-Q.1.1 Room schema canon: binary visibility + join model + posting policy
-**ID:** WS-Q.1.1
-**Ref:** Sections 16.1, 16.2, 22.1
+### WS-Q.1.1a Shared room schema: binary visibility + join model + posting policy
+**ID:** WS-Q.1.1a | **Ref:** Sections 16.1, 16.2, 22.1
 
-**Description:**
-Rework the shared room contracts in `packages/shared/src/schemas/room.ts`. Replace `ROOM_VISIBILITIES = ['public','restricted','expert_led']` with `['public','private']`, and add two new closed enums: `ROOM_JOIN_MODELS = ['open','request_approval','invite']` and `ROOM_POSTING_POLICIES = ['all_members','experts_and_stewards']`. Extend `roomSummarySchema`/`roomDetailSchema` with `join_model` and `posting_policy`; extend `roomCreateRequestSchema` (all six type branches) with optional `join_model`/`posting_policy` defaulted per visibility (`public → open`, `private → request_approval`; posting defaults `all_members`). Keep the steward-room refinement, retargeted: steward rooms must be `private`. Add a `superRefine` rejecting incoherent combinations (`public` + `invite` is rejected — public rooms are open-join by definition; `public` + `request_approval` is rejected for the same reason). Export a pure legacy-mapping helper `mapLegacyRoomVisibility(v: 'public'|'restricted'|'expert_led'): { visibility, join_model, posting_policy }` (public→{public, open, all_members}; restricted→{private, request_approval, all_members}; expert_led→{private, request_approval, experts_and_stewards}) as the single source of truth the migration and any compatibility shim both use.
+**Description:** In `packages/shared/src/schemas/room.ts` replace `ROOM_VISIBILITIES = ['public','restricted','expert_led']` with `['public','private']`; add `ROOM_JOIN_MODELS = ['open','request_approval','invite']` and `ROOM_POSTING_POLICIES = ['all_members','experts_and_stewards']` with their `z.enum` schemas and inferred types. Extend `roomSummarySchema`/`roomDetailSchema` with `join_model` and `posting_policy`; extend `roomCreateRequestSchema` (all six type branches) with optional `join_model`/`posting_policy` and a `superRefine` enforcing coherence: `public` ⇒ `join_model = open` only (reject `request_approval`/`invite`); steward rooms ⇒ `private`. Defaults are applied by the route/service layer (WS-Q.3.3a), not the schema, so the schema stays a pure validator.
 
 **Acceptance criteria:**
-- `roomVisibilitySchema` accepts exactly `public|private`; the old values fail parsing.
-- `join_model` and `posting_policy` are present on every room wire projection, with documented defaults applied at create time.
-- Steward rooms cannot be public (schema-level rejection, as today).
-- `public` rooms can only be `open` join; `private` rooms can be `request_approval` or `invite`.
-- `mapLegacyRoomVisibility` is total over the three legacy values and is property-tested to never widen read access (restricted/expert_led both map to `private`).
-- No applause/financial field appears on any room shape (denylist tests stay green).
+- `roomVisibilitySchema` accepts exactly `public|private`; the three legacy values fail parsing.
+- `join_model`/`posting_policy` appear on every room wire projection and the create request.
+- Coherence refinement rejects `public`+`request_approval`, `public`+`invite`, and public steward rooms; accepts every legal combination.
+- No applause/financial field appears on any room shape (existing denylist tests stay green).
 
-**Testing:**
-- Unit: parse/reject matrices for visibility × join_model × posting_policy combinations.
-- Unit: legacy-mapping table test (3 rows, exact expected triples).
-- Unit: existing room schema tests updated; `zod` inference type assertions for the new fields.
+**Testing:** Unit — parse/reject matrix over visibility × join_model × posting_policy; updated room-schema tests; `expectTypeOf` for the new fields.
 
-**Dependencies:** None (shared package leaf). Blocks every other WS-Q task that touches rooms.
+**Dependencies:** none (shared leaf). Blocks all room-touching WS-Q cards.
 
 ---
 
-### WS-Q.1.2a Story submission schemas: home room + visibility on every type
-**ID:** WS-Q.1.2a
-**Ref:** Sections 14.1, 14.5, 22.1, 23.2
+### WS-Q.1.1b `mapLegacyRoomVisibility` migration helper
+**ID:** WS-Q.1.1b | **Ref:** Section 16.1
 
-**Description:**
-Extend the shared §14.1 submission discriminated union (`packages/shared/src/schemas/` story submission contracts) so EVERY branch carries `room_id` (uuid, **required**) and `visibility` (`storyVisibilitySchema = z.enum(['public','room_only'])`, optional, default `'public'`). Add `storyVisibilitySchema` and export the derivation helper `deriveStoryVisibility(roomVisibility, requested?): 'public'|'room_only'` implementing SPEC Section 14.5 exactly: private room ⇒ `room_only` regardless of the request; public room ⇒ requested value, defaulting to `public`. The helper is pure and is the ONLY place the rule lives (server guard chain and client composer both call it). Extend the story/feed wire projections (`StoryDetail`, submission receipts) with `room_id` and `visibility`.
+**Description:** Export a pure total helper `mapLegacyRoomVisibility(v: 'public'|'restricted'|'expert_led'): { visibility: RoomVisibility; join_model: RoomJoinModel; posting_policy: RoomPostingPolicy }` — `public → {public, open, all_members}`, `restricted → {private, request_approval, all_members}`, `expert_led → {private, request_approval, experts_and_stewards}`. This is the single SSOT the SQL backfill (WS-Q.1.2) mirrors and any compatibility shim reuses.
 
 **Acceptance criteria:**
-- Submission payloads without `room_id` fail validation with a structured per-field error on every one of the eight type branches.
-- `deriveStoryVisibility('private', 'public') === 'room_only'` (forcing, never an error — the composer locks the choice; the server silently derives, and logs a metric when a mismatch was requested).
-- `deriveStoryVisibility('public', undefined) === 'public'` (default-public in public rooms).
-- Wire projections expose `room_id` + `visibility`; no projection leaks room-membership data.
-- Client and server import the same module (no drift).
+- Total over the three legacy values; exhaustive `switch` with a `never` default.
+- Property test: neither legacy non-public value ever maps to `public` (no read-access widening).
 
-**Testing:**
-- Unit: derivation table test (all 2×3 room-visibility × request combinations).
-- Unit: per-branch required-`room_id` rejection (8 tests).
-- Unit: projection parse round-trips.
+**Testing:** Unit — three-row table test; the no-widening property.
 
-**Dependencies:** WS-Q.1.1 (room visibility enum).
+**Dependencies:** WS-Q.1.1a.
 
 ---
 
-### WS-Q.1.2b Media submission types: `image_post` and `video_post`
-**ID:** WS-Q.1.2b
-**Ref:** Sections 14.1, 14.2, 15.5
+### WS-Q.1.2 DB room schema + migration 0014 (enum recreate + axes + backfill)
+**ID:** WS-Q.1.2 | **Ref:** Sections 16.1, 16.2, 22.1
 
-**Description:**
-Add two new branches to the §14.1 submission union: `image_post` (`upload_id` uuid required — a WS-G upload record in `clear` scan state owned by the submitter; `alt_text` required, 1–1,000 chars; `title`; `topic`) and `video_post` (`upload_id` required; `title`; `topic`; `captions_text` optional ≤ 20,000 chars or `captions_upload_id` optional). Mirror the two values into the shared `submissionType` enum and types. Neither branch carries `canonical_url`; both are exempt from URL normalization/dedup (WS-Q.2.2 scopes dedup to link stories) and from crawling/extraction (`extraction_state = not_applicable`). Document the §22.1 field `Story.media_upload_ref` as the storage-side pointer the API layer resolves from `upload_id`.
+**Description:** In `packages/db/src/schema/room.ts` recreate `roomVisibilityEnum` as `('public','private')`; add `joinModelEnum`, `postingPolicyEnum`, and the `join_model`/`posting_policy` NOT NULL columns; add CHECKs `(visibility = 'private' OR join_model = 'open')` and `(room_type <> 'steward' OR visibility = 'private')`. Migration `0014` (one txn, following the 0008 enum-recreation precedent): create the new enum, `ALTER COLUMN ... USING` map (`restricted→private`, `expert_led→private`), backfill `join_model`/`posting_policy` from the OLD visibility value with the `mapLegacyRoomVisibility` semantics expressed in SQL, drop the old enum, add the CHECKs. The rooms table is bounded by room count, so the rewrite is cheap and a single txn is safe.
 
 **Acceptance criteria:**
-- `image_post` without `alt_text` fails validation (WCAG: alt text is required, not optional, for image content).
-- `video_post` accepts captions as inline text or a second upload reference, not both.
-- Both branches require `room_id` like every other type (WS-Q.1.2a).
-- The submission union still rejects unknown types; the enum order is appended-only (no reordering of existing values).
+- Migration is green on a DB seeded with all three legacy values; the mapped triples are asserted row-by-row.
+- CHECKs reject `public`+`request_approval`/`invite` and public steward rooms.
+- Down migration restores the legacy enum (`private`+`all_members`→`restricted`; `private`+`experts_and_stewards`→`expert_led`), documented lossy only for post-migration `invite` rooms.
+- The DB enums mirror the shared enums exactly (storage-layer defense in depth).
 
-**Testing:**
-- Unit: valid/invalid payloads per branch (missing alt text, both captions fields, missing upload_id).
-- Unit: type-inference assertions for the new branches.
+**Testing:** Gated integration (Postgres) — real chain, seeded legacy rows, CHECK-violation cases. Unit — DB-enum ≡ shared-enum mirror test.
 
-**Dependencies:** WS-Q.1.2a.
+**Dependencies:** WS-Q.1.1a, WS-Q.1.1b.
 
 ---
 
-### WS-Q.1.3 Rooms migration: enum split with USING maps
-**ID:** WS-Q.1.3
-**Ref:** Sections 16.1, 16.2, 22.1
+### WS-Q.1.3a Story submission schema: home room + visibility
+**ID:** WS-Q.1.3a | **Ref:** Sections 14.1, 14.5, 22.1, 23.2
 
-**Description:**
-Drizzle migration (next number in the chain; referred to here as `001A`) reworking `packages/db/src/schema/room.ts` + generated SQL: recreate the room visibility enum as `('public','private')` with a `USING` map (`restricted → private`, `expert_led → private`) following the 0008 enum-recreation precedent; add `join_model` (enum, NOT NULL) and `posting_policy` (enum, NOT NULL) columns backfilled from the OLD visibility value via `mapLegacyRoomVisibility` semantics expressed in SQL (`public → open/all_members`, `restricted → request_approval/all_members`, `expert_led → request_approval/experts_and_stewards`); add CHECK constraints `(visibility = 'private' OR join_model = 'open')` and `(room_type <> 'steward' OR visibility = 'private')`. The backfill and the enum map run in one transaction so no row is ever observable in a mixed state.
+**Description:** In `packages/shared/src/schemas/story.ts` add `storyVisibilitySchema = z.enum(['public','room_only'])`. Add `room_id: uuidSchema` (**required**) and `visibility: storyVisibilitySchema.optional()` to `storyCreateBaseShape` — ONE insertion point that every one of the six discriminated-union branches inherits through `.extend()`. Add `room_id` + `visibility` to `storyPublicSchema` and `storyCreateResponseSchema`. (Derivation is WS-Q.1.3b; media branches are WS-Q.1.3c.)
 
 **Acceptance criteria:**
-- Migration runs green on a database seeded with all three legacy visibility values and verifies the mapped triples row-by-row.
-- CHECKs reject `public` + `request_approval`, `public` + `invite`, and public steward rooms at the storage layer.
-- Down migration restores the legacy enum (private + all_members → restricted; private + experts_and_stewards → expert_led) — documented as lossy only for rooms created post-migration with `invite`.
-- The drizzle schema file mirrors the shared enums exactly (storage-layer defense in depth, the WS-E house pattern).
+- Every branch's create payload requires `room_id`; omission yields a per-field error naming `room_id`.
+- `visibility` is optional on input (server derives it) and present on the read projection/response.
+- `.strict()` still rejects unknown keys on every branch.
 
-**Testing:**
-- Gated integration (Postgres): real migration chain run; seeded legacy rows assert mapped values; CHECK violation tests.
-- Unit: schema mirror test (db enum values === shared enum values).
+**Testing:** Unit — required-`room_id` rejection on each of the six branches; projection round-trip with the new fields.
 
-**Dependencies:** WS-Q.1.1.
+**Dependencies:** WS-Q.1.1a (visibility values share the room vocabulary review).
 
 ---
 
-### WS-Q.1.4 Stories migration: home room, visibility, media ref, tier-scoped uniqueness
-**ID:** WS-Q.1.4
-**Ref:** Sections 14.5, 22.1
+### WS-Q.1.3b `deriveStoryVisibility` helper
+**ID:** WS-Q.1.3b | **Ref:** Section 14.5
 
-**Description:**
-Migration `001B` on `packages/db/src/schema/story.ts`: (1) add `room_id` uuid FK → `rooms` (nullable at first); (2) add `visibility` enum `('public','room_only')` NOT NULL DEFAULT `'public'`; (3) add `media_upload_ref` uuid FK → `uploads` (nullable; set only for media posts); (4) extend `story_submission_type` with `image_post`, `video_post` (`ALTER TYPE ... ADD VALUE`, appended); (5) backfill `room_id` from the story's branch-0 thread's `room_id` where present, else the Commons room (WS-Q.1.6 creates it earlier in the same chain); (6) backfill `visibility = 'room_only'` for every story whose home room is `private` (post-WS-Q.1.3 mapping); (7) set `room_id` NOT NULL; (8) replace the global canonical-URL partial unique index with the tier-scoped pair: `UNIQUE (canonical_url) WHERE canonical_url IS NOT NULL AND visibility = 'public' AND hidden_state IS NULL` and `UNIQUE (canonical_url, room_id) WHERE canonical_url IS NOT NULL AND visibility = 'room_only' AND hidden_state IS NULL`; (9) add indexes `(room_id, created_at)` and `(visibility, lifecycle_state)` for room feeds and global retrieval; (10) add `canonical_public_story_id` uuid NULL FK → `stories` (the cross-tier link WS-Q.2.2 sets so an in-room item can point at the canonical public story for the same URL; self-referential, ON DELETE SET NULL).
+**Description:** Export the pure helper `deriveStoryVisibility(roomVisibility: RoomVisibility, requested?: StoryVisibility): StoryVisibility` implementing Section 14.5 exactly: `private` room ⇒ always `room_only` (forcing, never an error); `public` room ⇒ `requested ?? 'public'`. This is the ONLY place the rule lives; server guard (WS-Q.2.1c) and client composer (WS-Q.5.1b) both call it.
 
 **Acceptance criteria:**
-- After migration, `SELECT count(*) FROM stories WHERE room_id IS NULL` = 0 on any seeded dataset.
-- A story whose thread pointed at a legacy `restricted`/`expert_led` room ends `room_only`; thread-roomed public stories and previously room-less stories end `public` (no item becomes MORE visible than before; no public item disappears).
-- Duplicate-URL semantics: two public stories with one canonical URL are impossible; the same URL may exist `room_only` in two different rooms; a `room_only` row does not block a public insert (race-safety preserved through the partial unique indexes, as in WS-F.1.3a).
-- Down migration drops the new columns/indexes and restores the global unique index, documented as valid only when no tier-duplicate URLs were created.
+- `deriveStoryVisibility('private', 'public') === 'room_only'`; `deriveStoryVisibility('public', undefined) === 'public'`; `deriveStoryVisibility('public','room_only') === 'room_only'`.
+- No throw path — forcing is silent (callers may compare requested vs derived to emit a metric).
 
-**Testing:**
-- Gated integration: migration chain on seeded data covering every backfill branch; uniqueness race test (concurrent public inserts of one URL — exactly one wins with 409 semantics at the service layer).
-- Unit: schema mirror test for the new enums/columns.
+**Testing:** Unit — full 2×3 (room-visibility × requested∈{public,room_only,undefined}) truth table.
 
-**Dependencies:** WS-Q.1.3, WS-Q.1.6 (Commons room exists before backfill).
+**Dependencies:** WS-Q.1.1a, WS-Q.1.3a.
 
 ---
 
-### WS-Q.1.5 Threads: denormalized room consistency
-**ID:** WS-Q.1.5
-**Ref:** Sections 3.4, 22.1
+### WS-Q.1.3c Media submission types: `image_post` and `video_post`
+**ID:** WS-Q.1.3c | **Ref:** Sections 14.1, 14.2, 15.5
 
-**Description:**
-Migration `001C` + storage contract: backfill `threads.room_id` from the owning story's new `room_id`, set NOT NULL, and keep it consistent thereafter (the thread is created in the story's home room at submission; a story can change rooms only through the explicit move/repost path, out of scope for v1 — documented). Add a lightweight consistency trigger (or a CHECK-equivalent trigger function) rejecting an INSERT/UPDATE where `threads.room_id` differs from the owning story's `room_id`. Update `threadSummarySchema.room_id` from nullable to required in `@licio/shared`, and sweep the API/forum/ranking code paths that handled `room_id: null` (the WS-I retrievers' `thread?.roomId ?? null` branches become dead and are removed).
+**Description:** Append `image_post`, `video_post` to `SUBMISSION_TYPES` in `events/content.ts` (the SSOT `submissionTypeSchema` and the DB `submissionTypeEnum` mirror both extend; existing values keep their order). Add two zod metadata branches to `submissionMetadataSchema`/`storyCreateRequestSchema`: `image_post` (`upload_id` uuid required; `alt_text` 1–1,000 chars required; no `canonical_url`) and `video_post` (`upload_id` required; exactly one of `captions_text` ≤ 20,000 or `captions_upload_id`; no `canonical_url`). Both inherit `room_id`/`visibility` from the base shape. Both are exempt from URL normalization and crawling (`extraction_state = not_applicable`, `media_type ∈ {image,video}`).
+
+**Acceptance criteria:**
+- `image_post` without `alt_text` fails (alt text is required for image content — WCAG).
+- `video_post` rejects both-captions or neither beyond the allowed (text XOR upload, both optional-but-not-both).
+- Both require `room_id`; the union still rejects unknown `submission_type`.
+- The DB `submissionTypeEnum` `ADD VALUE`s are appended (handled in 0015, WS-Q.1.4a).
+
+**Testing:** Unit — valid/invalid payloads per branch (missing alt text, both caption fields); type-inference assertions.
+
+**Dependencies:** WS-Q.1.3a.
+
+---
+
+### WS-Q.1.4a Stories schema + migration 0015 (EXPAND: additive columns + Commons seed)
+**ID:** WS-Q.1.4a | **Ref:** Sections 14.5, 22.1
+
+**Description:** In `packages/db/src/schema/story.ts` add: `roomId` uuid FK→`rooms` (nullable for now), `visibility` (new `storyVisibilityEnum('public','room_only')`, NOT NULL DEFAULT `'public'`), `mediaUploadRef` uuid FK→`uploads` (nullable), `canonicalPublicStoryId` uuid self-FK (nullable, ON DELETE SET NULL); append `image_post`,`video_post` to `submissionTypeEnum`; add btree indexes `(room_id, created_at)` and `(visibility, lifecycle_state)`. Migration `0015` is purely additive (nullable/defaulted columns, non-locking `ADD VALUE`) and seeds the **Commons** room with a pinned UUID `ON CONFLICT DO NOTHING` so WS-Q.1.4b's backfill can target it deterministically in the same chain.
+
+**Acceptance criteria:**
+- All columns/indexes/enum values added; no existing row is rewritten (defaults are metadata-only in PG ≥ 11).
+- Commons row exists with the pinned id after 0015; re-running 0015 is a no-op.
+- Down migration drops the additive columns/indexes; the appended enum values are documented as non-removable (PG limitation) and left in place.
+
+**Testing:** Gated integration — additive apply + Commons idempotency. Unit — DB schema mirror for the new enum/columns.
+
+**Dependencies:** WS-Q.1.3a, WS-Q.1.3c, WS-Q.1.2 (rooms exist for the FK).
+
+---
+
+### WS-Q.1.4b Stories migration 0016 (BACKFILL room + visibility, then NOT NULL)
+**ID:** WS-Q.1.4b | **Ref:** Section 14.5
+
+**Description:** Migration `0016` backfills in batches (keyset by `created_at`, bounded statement timeout): `room_id` from the story's branch-0 thread's `room_id` where present, else the Commons id; `visibility = 'room_only'` for every story whose (post-0014) home room is `private`, else leave `'public'`. After the backfill completes, `ALTER COLUMN room_id SET NOT NULL`. The batched shape avoids a single long-locking UPDATE on a large table.
+
+**Acceptance criteria:**
+- `count(*) FROM stories WHERE room_id IS NULL` = 0 after the migration.
+- A story whose thread pointed at a legacy `restricted`/`expert_led` room ends `room_only`; thread-roomed public-room stories and previously room-less stories end `public` (no item gains reach; no public item disappears).
+- Re-running 0016 is idempotent (already-backfilled rows are skipped).
+- Down migration drops NOT NULL (data backfill is not reverted — documented).
+
+**Testing:** Gated integration — every backfill branch on seeded data; the monotonic-visibility property (asserted fully in WS-Q.6.1).
+
+**Dependencies:** WS-Q.1.4a, WS-Q.1.6 (Commons app-ensure is parallel; the seed row is created in 0015).
+
+---
+
+### WS-Q.1.4c Stories migration 0017 (tier-scoped uniqueness)
+**ID:** WS-Q.1.4c | **Ref:** Section 14.5.6
+
+**Description:** Migration `0017` replaces the global canonical-URL partial unique index with the tier-scoped pair, created `CONCURRENTLY` (outside a txn) to avoid blocking writes: `UNIQUE (canonical_url) WHERE canonical_url IS NOT NULL AND visibility = 'public' AND hidden_state IS NULL` and `UNIQUE (canonical_url, room_id) WHERE canonical_url IS NOT NULL AND visibility = 'room_only' AND hidden_state IS NULL`. Drop the old global index after the new public index is valid.
+
+**Acceptance criteria:**
+- Two public stories with one canonical URL are impossible; the same URL may exist `room_only` in two rooms; a `room_only` row never blocks a public insert.
+- Index creation does not hold a write lock (CONCURRENTLY; migration marked non-transactional).
+- Down migration restores the global unique index (valid only when no tier-duplicate URLs exist — documented).
+
+**Testing:** Gated integration — concurrent public-insert race (exactly one wins, the rest 409 at the service layer, WS-Q.2.2a); same-URL-different-rooms both succeed.
+
+**Dependencies:** WS-Q.1.4b.
+
+---
+
+### WS-Q.1.5 Threads: room NOT NULL + consistency trigger (migration 0018) + schema sweep
+**ID:** WS-Q.1.5 | **Ref:** Sections 3.4, 22.1
+
+**Description:** Migration `0018` backfills `threads.room_id` from the owning story's `room_id` (batched), sets it NOT NULL, and adds a trigger rejecting any INSERT/UPDATE where `threads.room_id <> stories.room_id` (a programming-error guard; story room moves are out of v1 scope and documented). Update `threadSummarySchema.room_id` from nullable to required in `@licio/shared`, then sweep the dead room-less branches (e.g. the WS-I retrievers' `thread?.roomId ?? null`); typecheck proves the nullable type is gone.
 
 **Acceptance criteria:**
 - No nullable-room thread remains; the wire schema requires `room_id`.
-- Trigger rejects divergent thread/story rooms with a typed error surfaced as a 500-class integrity failure (this is a programming-error guard, not a user path).
-- All call sites that special-cased room-less threads are removed; typecheck is the proof (the nullable type is gone).
+- The trigger rejects divergent thread/story rooms with a typed integrity error.
+- All `?? null` room-less call sites are removed; `pnpm typecheck` passes with the non-null type.
 
-**Testing:**
-- Gated integration: backfill correctness; trigger rejection.
-- Unit: updated thread schema parse tests; retriever tests updated for non-null rooms.
+**Testing:** Gated integration — backfill + trigger rejection. Unit — updated thread schema parse; retriever tests with non-null rooms.
 
-**Dependencies:** WS-Q.1.4.
+**Dependencies:** WS-Q.1.4b.
 
 ---
 
-### WS-Q.1.6 The Commons room, seed, and demo data
-**ID:** WS-Q.1.6
-**Ref:** Sections 3.4, 14.5
+### WS-Q.1.6 Commons room app-ensure, reserved slug, demo data
+**ID:** WS-Q.1.6 | **Ref:** Sections 3.4, 14.5
 
-**Description:**
-Create the system **Commons** room — a public `global_topic` room with the reserved slug `commons`, `open` join, `all_members` posting — as the home for pre-WS-Q room-less stories and the default suggestion for new submitters. Creation is an idempotent seed inside the migration chain (insert with a pinned UUID, `ON CONFLICT DO NOTHING`) so the WS-Q.1.4 backfill can target it deterministically in the same chain, plus a boot-time idempotent ensure (mirroring the demo-seed pattern) for fresh in-memory stores. Reserve the slug (`commons` joins the route/slug reserved list). Update `apps/api/src/lib/demo-data.ts` / `demo-seed.ts`: every demo story gets a home room (stable demo room ids), demo rooms carry the new fields, and at least one demo private room with `room_only` content exists so every gated read path is exercised by the dev stack.
+**Description:** Add a boot-time idempotent `ensureCommonsRoom` (mirroring the demo-seed pattern) so in-memory stores (tests/demo) expose the same Commons the 0015 seed creates in Postgres; reserve the `commons` slug in room-creation validation; update `apps/api/src/lib/demo-data.ts`/`demo-seed.ts` so every demo story has a home room (stable demo room ids), demo rooms carry the new axes, and at least one demo **private** room with `room_only` content exists to exercise every gated path.
 
 **Acceptance criteria:**
-- Running migrations on an empty database, on a seeded database, and twice in a row each yield exactly one Commons room with the pinned id.
-- Room creation by users rejects the reserved slug.
-- Demo seed produces: ≥ 1 public room with public + `room_only` stories, ≥ 1 private room with forced-`room_only` stories, and the Commons.
-- In-memory stores (tests, demo mode) expose the same Commons via the boot ensure.
+- Boot on an empty in-memory store yields exactly one Commons with the pinned id; running boot twice is a no-op.
+- User room creation rejects the reserved `commons` slug.
+- Demo seed produces ≥ 1 public room (public + `room_only` stories), ≥ 1 private room (forced `room_only`), and the Commons.
 
-**Testing:**
-- Gated integration: idempotency (run twice), pinned id stability.
-- Unit: demo-seed shape assertions; reserved-slug rejection.
+**Testing:** Unit — boot idempotency; reserved-slug rejection; demo-seed shape assertions.
 
-**Dependencies:** WS-Q.1.3 (room columns exist). Blocks WS-Q.1.4.
+**Dependencies:** WS-Q.1.2 (room columns), WS-Q.1.4a (Commons seed/pinned id).
 
 ---
 
-### WS-Q.1.7 `content.visibility.changed` topic + audit taxonomy
-**ID:** WS-Q.1.7
-**Ref:** Sections 14.5, 21.3, 22.4
+### WS-Q.1.7a `content.visibility.changed` event + registry wiring
+**ID:** WS-Q.1.7a | **Ref:** Sections 14.5, 21.3, 22.4
 
-**Description:**
-Add the `content.visibility.changed` topic to the WS-E topic registry (`packages/shared/src/schemas/events/`): payload `{ story_id, room_id, from: 'public'|'room_only', to: 'public'|'room_only', trigger: 'author'|'room_visibility_change'|'migration', actor_ref? }`, standard envelope, `operational` retention tier (it carries no attention data), core (non-Knomosis) classification. Extend the shared audit-event taxonomy with `story_visibility_change` and `room_visibility_change` (+ the db audit enum extension migration, following the 0013 precedent). The topic count assertions in the registry tests move from 14 to 15 core topics.
+**Description:** Add `contentVisibilityChangedEventSchema` (payload: `story_id`, `room_id`, `from`/`to ∈ {public,room_only}`, `trigger ∈ {author,room_visibility_change,migration}`, `actor_ref?`; `privacy_classification: 'public'`, retention `operational`/non-Knomosis envelope). Register it in `events/registry.ts`: add to `CORE_EVENT_SCHEMAS` (14→15), the `licioEventSchema` discriminated union, and `TOPIC_REGISTRY` (`entry(schema,'public',<tier>,false)`). Update the registry count-pinning tests (14→15 core).
 
 **Acceptance criteria:**
-- Discriminated-union event parsing accepts the new topic and still rejects unknown topics.
-- Registry SSOT lists 15 core topics; the count-pinning tests are updated in the same commit.
-- The topic is NOT subscribable by scoring consumers in any way that could create a visibility-keyed ranking signal — it is a cache-invalidation/audit topic; the pay-to-rank firewall tests are extended to assert the new topic carries no financial fields (trivially true) and the payload never includes attention values.
-- Audit enum migration extends, never rewrites, the existing enum.
+- The union parses the new topic and still rejects unknown `event_type`/extra keys.
+- `CORE_TOPICS.length === 15`; the count tests are updated in the same commit.
+- The topic carries no attention values and no financial fields; the pay-to-rank firewall test covers it trivially.
 
-**Testing:**
-- Unit: schema parse/reject; registry count; envelope round-trip.
-- Gated integration: audit enum migration.
+**Testing:** Unit — schema parse/reject; registry count; envelope round-trip; firewall classification.
 
-**Dependencies:** WS-Q.1.2a (visibility values).
+**Dependencies:** WS-Q.1.3a (visibility values).
 
 ---
 
-## WS-Q.2 Submission and ingestion (WS-F deltas)
+### WS-Q.1.7b Audit taxonomy + migration 0019
+**ID:** WS-Q.1.7b | **Ref:** Sections 14.5, 16.1
 
-### WS-Q.2.1 Submission guard chain: room, membership, posting policy, derived visibility
-**ID:** WS-Q.2.1
-**Ref:** Sections 14.1, 14.5, 16.1, 23.2
-
-**Description:**
-Extend `apps/api/src/ingestion/submission.ts` (`POST /v1/stories`). New guards, inserted after auth and before the existing WS-F pre-checks, in order: (1) the destination room exists (404 on unknown id — never confirm/deny beyond tier one); (2) the submitter passes the room read bar AND holds `active` membership (public rooms: membership granted on join — the route auto-joins on first submission with the user's consent flag from the composer; private rooms: pending applicants 404); (3) the room's `posting_policy` admits the submitter for top-level content (`experts_and_stewards` checks the steward table + the expert-lens assignment seam; violation → 403-equivalent 404-over-403 per house rule, with a distinct in-room error for members who can read but not post); (4) `visibility = deriveStoryVisibility(room.visibility, requested)` — the SHARED helper, never re-implemented. The transactional story+thread insert stamps `room_id` on both rows and `visibility` on the story. `content.submitted` gains `room_id` + `visibility` payload fields (additive registry change).
+**Description:** Add `story_visibility_change` and `room_visibility_change` to shared `AUDIT_EVENT_TYPES` (`packages/shared/src/schemas/audit.ts`); migration `0019` `ADD VALUE`s them to the DB audit-event enum (non-locking; the 0013 audit-enum-extension precedent). Governance setting writes continue to use the existing `forum_config_change` type — only visibility transitions use the two new types.
 
 **Acceptance criteria:**
-- Submission without a readable room: 404. Readable-but-not-postable: a structured error distinguishing "join to post" (public, not yet member) from "posting is steward/expert-led here" (members who cannot post) — both without leaking private-room internals to outsiders.
-- A request asking `public` in a private room is accepted and stored `room_only` (forced derivation; a `visibility_forced` counter increments — no user error, the composer locks the control client-side).
-- The thread shell lands in the same room transactionally (both-or-neither).
-- The existing WS-F pre-checks (rate limits, account-age, spam-title, malware denylist) run unchanged after the new guards.
-- `content.submitted` consumers (lifecycle, search index, ranking feature population) receive the new fields; the registry change is additive and parse-tested.
+- The two new audit types parse; the enum extension is additive (no rewrite).
+- A test asserts governance writes still emit `forum_config_change`, not a new type.
 
-**Testing:**
-- Unit (service level): guard-order table tests — each guard fires before the next; forced-derivation metric.
-- Unit: 404-over-403 for private rooms (outsider, pending, member matrices).
-- Integration: transactional both-or-neither story+thread insert with room stamping.
+**Testing:** Unit — audit-type parse. Gated integration — audit enum `ADD VALUE`.
 
-**Dependencies:** WS-Q.1.2a, WS-Q.1.4, WS-Q.1.5, WS-Q.3.2 (read bar).
+**Dependencies:** WS-Q.1.7a.
 
 ---
 
-### WS-Q.2.2 Tier-scoped duplicate detection
-**ID:** WS-Q.2.2
-**Ref:** Section 14.5.6
+### WS-Q.1.7c `content.submitted`/`content.normalized` gain room + visibility
+**ID:** WS-Q.1.7c | **Ref:** Sections 14.5, 21.3
 
-**Description:**
-Rework `apps/api/src/ingestion/dedup.ts` + the submission 409 path. Exact-URL: the public tier keeps the global 409-through-the-normalizer behavior, now scoped `WHERE visibility = 'public'` (backed by the WS-Q.1.4 partial unique index, race-safe as today); a `room_only` submission 409s only against a `room_only` story with the same canonical URL in the SAME room. Cross-tier: a `room_only` submission whose URL matches an existing public story succeeds and records a `canonical_public_story_id` link on the story row (one nullable uuid column, added in WS-Q.1.4's migration file); a public submission whose URL matches only `room_only` rows succeeds, becomes the canonical public story, and back-links existing in-room rows opportunistically (batched update, no transaction coupling). Near-duplicate (MinHash/LSH) and syndication classification scope their candidate queries to the PUBLIC tier only — in-room content never feeds public near-dup clusters and is never flagged against them (room-tier near-dup detection is explicitly out of scope for v1; documented).
+**Description:** Add `room_id: uuidSchema` and `visibility: storyVisibilitySchema` to the shared `contentShape` in `events/content.ts` (covers both `content.submitted` and `content.normalized`). This is an additive event-field change; update the consumers that read these events (lifecycle init, search-index population, ranking feature population) to thread the new fields, and the firewall/parse tests.
 
 **Acceptance criteria:**
-- Public/public same URL: 409 (unchanged). Room-only/room-only same URL same room: 409. Room-only same URL different rooms: both live. Room-only then public: public succeeds + back-link. Public then room-only: room-only succeeds + forward link.
-- LSH band queries filter `visibility = 'public'`; signatures are still computed and stored for all stories (so a later widen can join the public clusters without recompute).
-- The story read surface exposes "a public conversation about this link exists" on in-room items carrying the link (wire field on `StoryDetail`, room-readers only).
+- Both content events carry `room_id`+`visibility`; strict parsing still holds.
+- Downstream consumers compile and receive the fields; no consumer treats `visibility` as a behavioral signal.
+- The pay-to-rank firewall test still passes (no financial field introduced).
 
-**Testing:**
-- Unit: the five URL-collision matrix cases above.
-- Gated integration: concurrent insert races per tier against the partial unique indexes.
-- Unit: LSH candidate queries exclude `room_only` rows (seeded store).
+**Testing:** Unit — content-event parse with the new fields; consumer wiring smoke tests.
 
-**Dependencies:** WS-Q.1.4, WS-Q.2.1.
+**Dependencies:** WS-Q.1.3a.
 
 ---
 
-### WS-Q.2.3a Image-post intake
-**ID:** WS-Q.2.3a
-**Ref:** Sections 14.1, 14.2, 15.5
+## WS-Q.2 Ingestion and submission (WS-F deltas)
 
-**Description:**
-Wire `image_post` submissions through the WS-G.4.4 upload pipeline: the composer uploads first (existing `/v1/uploads` surface — EXIF/GPS/XMP stripped at byte level, content-type allowlist, scan gate), then submits the story referencing `upload_id`. The submission guard verifies: the upload exists, is owned by the submitter, is an image type, is in `clear` scan state (a `pending` scan holds the story in the WS-F review-hold path rather than rejecting; `flagged` rejects), and is not already claimed by another story or contribution. On success the story stores `media_upload_ref`; `extraction_state = 'not_applicable'`; `media_type = 'image'`. Serving rides the existing scan-gated upload read path. Alt text from the payload is stored as the story's accessibility text and required at render.
+### WS-Q.2.1a Submission guard: room existence + read bar + active membership
+**ID:** WS-Q.2.1a | **Ref:** Sections 14.1, 14.5, 16.1, 23.2
+
+**Description:** In `apps/api/src/ingestion/submission.ts`, after auth and before the existing WS-F pre-checks, add the first guards: (1) the destination room exists (404 on unknown id — never confirm/deny beyond tier one); (2) the submitter passes `roomContentVisibleToUser` AND holds `active` membership. For public rooms, first submission auto-joins when the composer passed the consent flag (the user chose this room); for private rooms, a pending or absent applicant gets 404. The guard returns a typed outcome the route maps to status.
 
 **Acceptance criteria:**
-- Story creation with an unscanned upload lands in the review-hold state (fail-toward-caution), never published-then-hidden.
-- A claimed upload cannot anchor a second story (uniqueness guard).
-- The stored image never retains EXIF/GPS (pipeline already proves this; the new test asserts it end-to-end through the story path).
-- Story cards and the story page render the image only through the gated upload URL with the required alt text.
+- Unknown/unreadable room ⇒ 404 (no tier-two leakage).
+- Private-room outsider/pending ⇒ 404; active member/steward ⇒ passes.
+- Public-room non-member with consent flag ⇒ auto-joined `active` then passes; without consent ⇒ a "join to post here" outcome.
 
-**Testing:**
-- Unit: ownership/type/scan-state guard matrix.
-- Integration: end-to-end submit → stored story → gated serving; EXIF-absence assertion on served bytes.
+**Testing:** Unit (service) — room-existence/membership matrix (outsider/pending/active/steward × public/private); auto-join consent path.
 
-**Dependencies:** WS-Q.1.2b, WS-Q.2.1.
+**Dependencies:** WS-Q.3.1a (`roomContentVisibleToUser` binary), WS-Q.3.1c (`joinRoom`).
 
 ---
 
-### WS-Q.2.3b Video-post intake (validate-only v1)
-**ID:** WS-Q.2.3b
-**Ref:** Sections 14.1, 14.2, 15.5
+### WS-Q.2.1b Submission guard: posting policy
+**ID:** WS-Q.2.1b | **Ref:** Sections 14.1, 16.1, 16.2
 
-**Description:**
-Extend the upload pipeline's allowlist with video containers — `video/mp4` (H.264/AAC) and `video/webm` (VP9/Opus) — behind strict caps (default: ≤ 200 MB, ≤ 10 minutes where duration is cheaply readable from container metadata; runtime-config keys `ingestion.video_max_bytes` / `ingestion.video_max_seconds`, fail-closed loader). v1 is **validate-only**: byte-level container sniffing (magic numbers + box/EBML structure sanity), metadata stripping limited to droppable container-level tags (MP4 `udta`/location boxes; WebM `Tags`) without re-encoding, scan-gate seam (the `UploadScanner` interface already gates attachment and serving), and NO transcoding (documented trade-off: codec compatibility is the submitter's responsibility; the player shows a fallback message for undecodable streams). The uploads-table content-type CHECK is extended by migration. Serving uses range requests through the gated read path; playback is a native `<video>` element with `controls`, no autoplay (autoplay can never feed PWAtt — re-asserted by the no-raw-egress/cap tests).
+**Description:** Add the posting-policy guard after membership: `userMayPostTopLevel(room, userId)` must hold for top-level story creation. `experts_and_stewards` rooms admit only steward-role holders or expert-lens assignees (the WS-G expert seam); a member who can read but not post gets a distinct in-room error ("posting here is steward/expert-led"), not a 404, since they already passed the content bar.
 
 **Acceptance criteria:**
-- Disallowed containers/types are rejected at upload by both the allowlist CHECK and the byte sniffer (extension/mime spoofing is caught by content sniffing, not headers).
-- Location metadata in MP4 boxes (e.g. `©xyz`) is stripped before storage.
-- Oversize/overlong uploads are rejected pre-storage with structured errors; the caps are runtime-tunable with write-time 422 validation like other config keys.
-- Autoplay is absent; dwell on a video post follows the standard §5.3 caps (no per-second video credit).
+- `all_members` rooms admit any active member; `experts_and_stewards` rooms admit only stewards/experts.
+- A read-capable member who cannot post gets the distinct in-room error, never a 404 (they can see the room) and never a generic 403.
 
-**Testing:**
-- Unit: sniffer fixtures (valid mp4/webm; spoofed extensions; corrupt boxes); metadata-strip assertions on crafted fixtures.
-- Unit: config loader fail-closed on invalid caps.
-- Integration: upload → submit → ranged serving round-trip.
+**Testing:** Unit — posting-policy × role matrix; the member-can't-post error shape.
 
-**Dependencies:** WS-Q.2.3a (shared intake path).
+**Dependencies:** WS-Q.2.1a, WS-Q.3.1b (`userMayPostTopLevel`).
 
 ---
 
-### WS-Q.2.4 Visibility transition service
-**ID:** WS-Q.2.4
-**Ref:** Section 14.5.2
+### WS-Q.2.1c Visibility derivation + transactional room-stamped insert
+**ID:** WS-Q.2.1c | **Ref:** Sections 14.5, 22.1
 
-**Description:**
-New service + endpoints for bounded, audited visibility transitions. `PATCH /v1/stories/{id}/visibility` (author-only; 404-over-403): **narrow** `public → room_only` always allowed; **widen** `room_only → public` allowed only when the home room is public, and re-runs the public-admission checks synchronously — tier-scoped exact-URL dedup (409 if a public story now holds the URL; the response offers the existing story), spam-title/malware pre-checks, freshness-baseline (re)initialization, and search/feature reindex enqueue. Every transition writes the audit log (`story_visibility_change`) and emits `content.visibility.changed` with the correct `trigger`. Narrowing propagates synchronously to the search index row's visibility column and asynchronously (next serve) to candidate pools — the serving-side bar (WS-Q.4.2) makes the gap safe.
+**Description:** Compute `visibility = deriveStoryVisibility(room.visibility, payload.visibility)` (the shared helper). The transactional story+thread insert stamps `room_id` on both rows and `visibility` on the story (both-or-neither). Emit `content.submitted` with the new `room_id`/`visibility` fields. When the request asked `public` in a private room, increment a `submission.visibility_forced` metric (no user error — the composer locks the control).
 
 **Acceptance criteria:**
-- Author-only; editors/stewards cannot change another author's item visibility through this endpoint (room privacy flips are WS-Q.3.4's separate, steward-audited cascade).
-- Widen in a private room: structurally impossible (422 citing Section 14.5.1).
-- Widen that collides with an existing public URL: 409 + pointer to the canonical public story (no silent merge).
-- Narrow is idempotent; repeated calls emit one event per actual state change only.
-- Every transition row-locks the story (no lost updates under concurrent transitions).
+- A request asking `public` in a private room is stored `room_only` and bumps the forced metric.
+- Story and thread land in the same room transactionally; a failure rolls back both.
+- The existing WS-F pre-checks (rate limit, account-age, spam-title, malware) run unchanged AFTER these guards.
 
-**Testing:**
-- Unit: transition matrix (narrow/widen × public/private room × URL-collision).
-- Unit: idempotency + single-event emission; audit record contents.
-- Integration: widen re-runs dedup against live partial indexes.
+**Testing:** Unit — derivation+forced metric; both-or-neither rollback. Integration — room-stamped insert + `content.submitted` payload.
 
-**Dependencies:** WS-Q.2.2, WS-Q.1.7.
+**Dependencies:** WS-Q.1.3b, WS-Q.2.1b, WS-Q.1.7c.
 
 ---
 
-### WS-Q.2.5 Search: tier-scoped global search + room-scoped search
-**ID:** WS-Q.2.5
-**Ref:** Sections 14.5.3, 14.5.4
+### WS-Q.2.2a Tier-scoped exact-URL duplicate detection
+**ID:** WS-Q.2.2a | **Ref:** Section 14.5.6
 
-**Description:**
-Extend the WS-F search surfaces. Global search (`GET /v1/stories/search` and the embedding similarity helpers feeding public surfaces) adds `visibility = 'public'` to the server-side visibility predicate (alongside the existing takedown/safety-hidden/retracted exclusions) in BOTH adapters (in-memory FTS semantics and the Drizzle FTS). Room-scoped search (`?room=` parameter on the same endpoint) requires the caller to pass the room read bar, then searches that room's full pool (`public` + `room_only` of that room). Embedding similarity reads used by GLOBAL surfaces (related stories, claim similarity on public pages) filter to the public tier; room-surface similarity (if requested by a room reader) may include that room's pool only. The keyset pagination contract is unchanged.
+**Description:** Scope the existing exact-URL 409 path by tier (backed by the WS-Q.1.4c partial unique indexes, race-safe as today): a `public` submission 409s against any public story with the same canonical URL (global); a `room_only` submission 409s only against a `room_only` story with the same URL in the SAME room. The 409 body still returns the existing story id as the redirect suggestion.
 
 **Acceptance criteria:**
-- A `room_only` story never appears in any global search result, FTS or vector, in either adapter (seeded adversarial test: identical title public + room_only — only the public row returns globally).
-- `?room=` without read-bar passage: 404 for private rooms (existence is tier one; content search is tier two).
-- Room search returns the room's `room_only` rows to members and excludes other rooms' content entirely.
-- Query building remains tokenization-only (injection posture unchanged).
+- public/public same URL ⇒ 409; room_only/room_only same URL same room ⇒ 409; room_only same URL different rooms ⇒ both live; concurrency races resolve to exactly one winner per tier.
 
-**Testing:**
-- Unit: both adapters' predicate tests; the adversarial twin-title test.
-- Gated integration: Drizzle FTS with the new predicate; room-scoped pagination round-trip.
+**Testing:** Unit — the URL-collision matrix. Gated integration — concurrent inserts per tier against the partial indexes.
 
-**Dependencies:** WS-Q.1.4, WS-Q.3.2.
+**Dependencies:** WS-Q.1.4c, WS-Q.2.1c.
 
 ---
 
-### WS-Q.2.6 Takedown and moderation reach into the room tier
-**ID:** WS-Q.2.6
-**Ref:** Sections 14.5.7, 18, 16.4
+### WS-Q.2.2b Cross-tier linking (`canonical_public_story_id`)
+**ID:** WS-Q.2.2b | **Ref:** Section 14.5.6
 
-**Description:**
-Verify and close the moderation-reach paths over in-room content: the public takedown intake accepts URLs/ids that resolve to `room_only` stories (the intake never confirms existence to the reporter beyond the standard receipt); steward takedown actioning hides a `room_only` story from its room exactly as it hides public stories from everywhere (`hidden_state` already serves this — add the room-feed exclusion test); the WS-F review queue, the WS-G moderation-concern flow, and the WS-E safety states all operate identically on room-tier content. No moderation surface filters by visibility: stewards with platform-scope roles see held/flagged items from private rooms in their queues (room privacy never shields content from the review pipeline — SPEC Section 16.1).
+**Description:** A `room_only` submission whose URL matches an existing public story succeeds and records `canonical_public_story_id` on the new row; a public submission whose URL matches only `room_only` rows succeeds, becomes canonical, and opportunistically back-links those rows (batched UPDATE, no transaction coupling). Surface a read-only "a public conversation about this link exists" pointer on the in-room story's `StoryDetail` (room-readers only).
 
 **Acceptance criteria:**
-- Takedown actioning on a `room_only` story removes it from the room feed, room search, and direct reads (404), with the audit trail intact.
-- Review-queue listings include private-room items for platform stewards; room-level stewards see their own room's items.
-- The moderation-concern intake works from private-room threads end-to-end.
+- room_only-then-public and public-then-room_only both succeed with the correct forward/back link.
+- The in-room story detail exposes the canonical-public pointer to room readers only.
 
-**Testing:**
-- Unit: hidden-state exclusion on the room feed/search paths.
-- Integration: takedown → actioning → all-surface exclusion for a `room_only` story.
+**Testing:** Unit — both cross-tier orderings set the link; the detail pointer renders only behind the read bar.
 
-**Dependencies:** WS-Q.2.1, WS-Q.4.1.
+**Dependencies:** WS-Q.2.2a.
+
+---
+
+### WS-Q.2.2c Near-duplicate + syndication scoping to the public tier
+**ID:** WS-Q.2.2c | **Ref:** Section 14.5.6
+
+**Description:** Scope `findNearDuplicates`/`classifyDuplicate` candidate queries to `visibility = 'public'` so in-room content never feeds public near-dup/syndication clusters and is never flagged against them. `signatureStory` still computes and stores MinHash signatures for ALL stories (so a later widen joins the public clusters without recompute). Room-tier near-dup detection is explicitly out of scope for v1 (documented).
+
+**Acceptance criteria:**
+- LSH band queries filter `visibility='public'`; a `room_only` twin of a public story is neither flagged nor flags others.
+- Signatures exist for `room_only` rows (verified by a widen-then-cluster test seam).
+
+**Testing:** Unit — candidate queries exclude `room_only` (seeded store); signature presence for room_only.
+
+**Dependencies:** WS-Q.1.4a, WS-Q.2.2a.
+
+---
+
+### WS-Q.2.3a Image-post intake (upload guard + store)
+**ID:** WS-Q.2.3a | **Ref:** Sections 14.1, 14.2, 15.5
+
+**Description:** Wire `image_post` through the WS-G.4.4 upload path: the composer uploads first (EXIF/GPS/XMP stripped, content-type allowlisted, scan-gated), then submits referencing `upload_id`. The submission guard verifies the upload exists, is owned by the submitter, is an image type, and is not already claimed; `scanState='pending'` holds the story in the WS-F review-hold path (fail-toward-caution), `flagged` rejects, `clear` publishes. Store `media_upload_ref`; set `extraction_state='not_applicable'`, `media_type='image'`; persist `alt_text` as the story accessibility text.
+
+**Acceptance criteria:**
+- Unscanned upload ⇒ story enters review-hold, never published-then-hidden; `flagged` ⇒ rejected; `clear` ⇒ published.
+- A claimed upload cannot anchor a second story.
+
+**Testing:** Unit — ownership/type/scan-state guard matrix; claim-uniqueness.
+
+**Dependencies:** WS-Q.1.3c, WS-Q.2.1c.
+
+---
+
+### WS-Q.2.3b Image-post serving (gated path + EXIF-absence proof)
+**ID:** WS-Q.2.3b | **Ref:** Sections 15.5, 25
+
+**Description:** Serve image-post bytes only through the existing scan-gated upload read path; the story card/page reference the gated URL with the required alt text. Add an end-to-end test asserting served image bytes carry no EXIF/GPS (the pipeline strips at upload; this proves it through the story path).
+
+**Acceptance criteria:**
+- Image bytes are reachable only via the gated, scan-checked URL; a removed/flagged media post collapses to a clear state (no broken element).
+- Served bytes contain no EXIF/GPS metadata.
+
+**Testing:** Integration — submit→store→gated serve; EXIF-absence on served bytes.
+
+**Dependencies:** WS-Q.2.3a.
+
+---
+
+### WS-Q.2.3c Video container allowlist + caps config + migration 0020
+**ID:** WS-Q.2.3c | **Ref:** Sections 14.1, 14.2
+
+**Description:** Extend the upload content-type allowlist with `video/mp4` and `video/webm` in BOTH the shared check and the DB CHECK (migration `0020`: drop+`ADD CONSTRAINT ... NOT VALID` then `VALIDATE CONSTRAINT` to avoid a full-table lock). Add fail-closed runtime-config caps `ingestion.video_max_bytes` (default 200 MB) and `ingestion.video_max_seconds` (default 600) with write-time 422 validation like other config keys.
+
+**Acceptance criteria:**
+- The allowlist admits mp4/webm and nothing else new; the DB CHECK matches the shared allowlist.
+- Caps load fail-closed (invalid stored values ⇒ reviewed defaults, logged); oversize/overlong is rejected pre-storage.
+
+**Testing:** Unit — config loader fail-closed; allowlist parity (shared ≡ DB CHECK). Gated integration — CHECK migration apply.
+
+**Dependencies:** WS-Q.1.3c.
+
+---
+
+### WS-Q.2.3d Video byte-sniffing + container metadata stripping (validate-only)
+**ID:** WS-Q.2.3d | **Ref:** Sections 14.2, 15.5
+
+**Description:** Add validate-only video admission to the upload pipeline: byte-level container sniffing (MP4 box / WebM EBML magic + structural sanity) so extension/MIME spoofing is caught by content, not headers; strip droppable container-level metadata (MP4 `udta`/location boxes like `©xyz`; WebM `Tags`) WITHOUT re-encoding. No transcoding in v1 (documented: codec compatibility is the submitter's responsibility; the player shows a fallback for undecodable streams). The scan gate (`UploadScanner`) applies as for images.
+
+**Acceptance criteria:**
+- Spoofed-extension/corrupt-container uploads are rejected by the sniffer.
+- MP4 location boxes are stripped before storage; no re-encode occurs.
+
+**Testing:** Unit — sniffer fixtures (valid mp4/webm, spoofed, corrupt); metadata-strip assertions on crafted fixtures.
+
+**Dependencies:** WS-Q.2.3c.
+
+---
+
+### WS-Q.2.3e Video-post intake + serving (no autoplay)
+**ID:** WS-Q.2.3e | **Ref:** Sections 14.1, 15.5, 5.3
+
+**Description:** Mirror WS-Q.2.3a/b for `video_post`: the submission guard verifies the upload (owned, video type, scan state) and stores `media_upload_ref`/`media_type='video'`/`extraction_state='not_applicable'`; serving uses range requests through the gated read path. Playback is a native `<video controls>` with no autoplay; dwell on a video post follows the standard §5.3 caps (no per-second video credit) — re-asserted by the no-raw-egress/cap tests.
+
+**Acceptance criteria:**
+- Video stories admit only `clear`/held uploads; serving supports range requests behind the gate.
+- No autoplay anywhere; video dwell cannot exceed the standard per-item caps.
+
+**Testing:** Unit — intake guard; cap assertion (no per-second credit). Integration — upload→submit→ranged serve.
+
+**Dependencies:** WS-Q.2.3d, WS-Q.2.3a.
+
+---
+
+### WS-Q.2.4a Narrow transition (`public → room_only`)
+**ID:** WS-Q.2.4a | **Ref:** Section 14.5.2
+
+**Description:** `PATCH /v1/stories/{id}/visibility` to narrow (author-only, 404-over-403): set `visibility='room_only'`, row-locked and idempotent; write the audit log (`story_visibility_change`) and emit `content.visibility.changed` (`trigger='author'`) only on an actual state change; propagate synchronously to the search-index visibility column and enqueue a candidate/feature reindex (the serving-side bar makes the async gap safe).
+
+**Acceptance criteria:**
+- Author-only; editors/stewards cannot narrow another author's item here.
+- Idempotent — repeated calls emit one event per real change; row-locked against concurrent transitions.
+
+**Testing:** Unit — narrow idempotency + single-event + audit contents; non-author rejection.
+
+**Dependencies:** WS-Q.1.7a, WS-Q.1.7b.
+
+---
+
+### WS-Q.2.4b Widen transition (`room_only → public`)
+**ID:** WS-Q.2.4b | **Ref:** Section 14.5.2
+
+**Description:** Extend the same endpoint to widen, allowed ONLY when the home room is public (private-room widen ⇒ 422 citing 14.5.1). Widening re-runs public-admission synchronously: tier-scoped exact-URL dedup (409 + pointer to the existing public story on collision), spam-title/malware pre-checks, freshness-baseline (re)init, and a search/feature reindex enqueue. Audit + `content.visibility.changed` (`trigger='author'`).
+
+**Acceptance criteria:**
+- Widen in a private room ⇒ 422; widen colliding with an existing public URL ⇒ 409 + pointer (no silent merge); otherwise the item becomes `public` and globally eligible on the next serve.
+
+**Testing:** Unit — widen matrix (public/private room × URL-collision). Gated integration — widen re-runs dedup against live partial indexes.
+
+**Dependencies:** WS-Q.2.4a, WS-Q.2.2a.
+
+---
+
+### WS-Q.2.5a Global search tier predicate (both adapters)
+**ID:** WS-Q.2.5a | **Ref:** Sections 14.5.3, 14.5.4
+
+**Description:** Add `visibility = 'public'` to the server-side visibility predicate of global search in BOTH `SearchIndex` adapters (in-memory FTS semantics and the Drizzle FTS) alongside the existing hidden/retracted exclusions. Embedding-similarity reads feeding GLOBAL surfaces (related stories, public claim pages) filter to the public tier. Keyset pagination is unchanged.
+
+**Acceptance criteria:**
+- A `room_only` story never appears in any global FTS or vector result in either adapter (adversarial twin-title test: identical-title public + room_only ⇒ only public returns globally).
+
+**Testing:** Unit — both adapters' predicate + the twin-title test. Gated integration — Drizzle FTS predicate + pagination.
+
+**Dependencies:** WS-Q.1.4a.
+
+---
+
+### WS-Q.2.5b Room-scoped search + similarity
+**ID:** WS-Q.2.5b | **Ref:** Sections 14.5.3, 14.5.4
+
+**Description:** Add a `?room=` parameter to the search endpoint: the caller must pass the room read bar (404 for private rooms otherwise), then search that room's full pool (`public` + `room_only` of that room only). Room-surface embedding similarity may include that room's pool only. No other room's content is reachable through a room-scoped query.
+
+**Acceptance criteria:**
+- `?room=` without read-bar passage ⇒ 404 (existence is tier one; content search is tier two).
+- Room search returns the room's `room_only` rows to members and excludes other rooms entirely.
+
+**Testing:** Unit — room-scoped predicate; cross-room exclusion. Gated integration — room-scoped pagination round-trip.
+
+**Dependencies:** WS-Q.2.5a, WS-Q.3.2 (read bar).
+
+---
+
+### WS-Q.2.6 Takedown + moderation reach over room-tier content
+**ID:** WS-Q.2.6 | **Ref:** Sections 14.5.7, 16.1, 18
+
+**Description:** Verify and close moderation reach over in-room content: the public takedown intake resolves `room_only` ids (receipt never confirms existence beyond the standard response); steward takedown actioning hides a `room_only` story from its room exactly as it hides public stories (`hidden_state` already serves this — add the room-feed/room-search exclusion tests); the WS-F review queue and WS-G moderation-concern flow operate on room-tier content; platform-scope stewards see private-room held/flagged items in their queues (room privacy never shields content from review — Section 16.1).
+
+**Acceptance criteria:**
+- Takedown actioning on a `room_only` story removes it from room feed, room search, and direct reads (404), audit intact.
+- Review-queue listings include private-room items for platform stewards; the moderation-concern intake works from private-room threads end-to-end.
+
+**Testing:** Unit — hidden-state exclusion on room feed/search. Integration — takedown→action→all-surface exclusion for a `room_only` story.
+
+**Dependencies:** WS-Q.2.1c, WS-Q.4.2a.
 
 ---
 
 ## WS-Q.3 Forum, rooms, and the read bar (WS-G deltas)
 
-### WS-Q.3.1 Room read bar: binary visibility + join model + posting policy
-**ID:** WS-Q.3.1
-**Ref:** Sections 16.1, 16.2
+### WS-Q.3.1a Adapt the room read bar to binary visibility
+**ID:** WS-Q.3.1a | **Ref:** Sections 16.1, 16.2
 
-**Description:**
-Adapt the two existing bar functions in `apps/api/src/forum/rooms.ts` to the new model WITHOUT changing their call sites' contract. `roomVisibleToUser` (tier one — existence) returns true for `public` rooms and for `private` rooms where the user has any subscription (active OR pending) or a steward role — unchanged logic, retargeted to the binary enum. `roomContentVisibleToUser` (tier two — content) returns true for `public` rooms and for `private` rooms with ACTIVE membership or a steward role — unchanged logic, retargeted. Add `userMayPostTopLevel(room, userId)`: `true` when the user passes the content bar AND (`posting_policy === 'all_members'` OR the user holds a steward role OR an expert-lens assignment for the room). Rewrite `joinRoom` against `join_model`: `open` → immediate `active`; `request_approval` → `pending`; `invite` → reject self-join with a "this room is invite-only" outcome (invitations are a separate steward action, seam stubbed for WS-J). The functions remain the single chokepoint; no route re-implements the predicate.
+**Description:** Retarget the two existing bar functions in `apps/api/src/forum/rooms.ts` to the binary enum WITHOUT changing their call-site contract. `roomVisibleToUser` (tier one): `true` for `public`; for `private`, any subscription (active OR pending) or steward role. `roomContentVisibleToUser` (tier two): `true` for `public`; for `private`, ACTIVE membership or steward role. Logic is unchanged — only the `=== 'public'` discriminator replaces the three-value check.
 
 **Acceptance criteria:**
-- Behavior parity for migrated rooms: a former `restricted` room (now `private` + `request_approval`) gates reads exactly as before; a former `expert_led` room additionally blocks non-expert top-level posting via `userMayPostTopLevel`.
-- `joinRoom` honors all three join models; `invite` rooms reject self-join cleanly.
-- Signed-out users pass neither bar for private rooms and see only tier one.
-- The directory listing still shows private rooms at tier one (existence) with VISIBLE-only (now public-only) thread counts.
+- Behavior parity for migrated rooms: a former `restricted`/`expert_led` room (now `private`) gates reads exactly as before.
+- Signed-out users pass neither bar for private rooms; they see only tier one.
 
-**Testing:**
-- Unit: bar truth tables across visibility × membership-state × steward × join_model.
-- Unit: `userMayPostTopLevel` across posting_policy × role.
-- Integration: join flows per join model.
+**Testing:** Unit — bar truth tables over visibility × membership-state × steward.
 
-**Dependencies:** WS-Q.1.1, WS-Q.1.3.
+**Dependencies:** WS-Q.1.1a, WS-Q.1.2.
 
 ---
 
-### WS-Q.3.2 Item-level read bar: thread/contribution/story reads honor story visibility
-**ID:** WS-Q.3.2
-**Ref:** Sections 14.5.3, 15.3
+### WS-Q.3.1b `userMayPostTopLevel`
+**ID:** WS-Q.3.1b | **Ref:** Sections 16.1, 16.2
 
-**Description:**
-Extend the read gate so that reaching a story/thread requires passing BOTH the room content bar AND the item's visibility: a `room_only` story is readable only by users who pass `roomContentVisibleToUser` for its home room; a `public` story is readable by anyone who can reach its room (public rooms: everyone). Because a `public` story can only live in a public room (a private room forces `room_only`), the item bar reduces to: "public story ⇒ room is public ⇒ readable; room_only story ⇒ active membership/steward." Implement as a single `storyReadableByUser(story, room, userId)` helper used by `GET /v1/stories/{id}`, the thread reads (`threadVisibleToUser` composes it), the branch/subtree reads, and the contribution reads. Fail-closed: unknown room or story ⇒ not readable ⇒ 404.
+**Description:** Add `userMayPostTopLevel(room, userId)`: `true` when the user passes `roomContentVisibleToUser` AND (`posting_policy === 'all_members'` OR the user holds a steward role OR an expert-lens assignment for the room). The single chokepoint for "may create top-level content here", consumed by the submission guard (WS-Q.2.1b) and the composer's postable-room filter (WS-Q.5.1a).
 
 **Acceptance criteria:**
-- A `room_only` story in a private room: 404 for outsiders and pending applicants; 200 for active members and stewards.
-- A `public` story: 200 for anyone (its room is necessarily public).
-- Thread, branch, subtree, and contribution reads all 404 when the owning story is unreadable (no partial leakage of contribution bodies).
-- The helper is the only place the rule lives; call sites pass through it.
+- `all_members` ⇒ any reader-member may post; `experts_and_stewards` ⇒ only stewards/experts.
+- A non-reader never passes (composes the content bar first).
 
-**Testing:**
-- Unit: `storyReadableByUser` truth table.
-- Integration: every read endpoint returns 404 for an unreadable `room_only` story (story, thread, branch, subtree, contribution — 5 paths).
+**Testing:** Unit — posting_policy × role × membership matrix.
 
-**Dependencies:** WS-Q.3.1, WS-Q.1.4, WS-Q.1.5.
+**Dependencies:** WS-Q.3.1a.
 
 ---
 
-### WS-Q.3.3 Room creation and governance: visibility/join/posting writes
-**ID:** WS-Q.3.3
-**Ref:** Sections 16.1, 16.2, 16.4
+### WS-Q.3.1c `joinRoom` rewrite against `join_model`
+**ID:** WS-Q.3.1c | **Ref:** Section 16.2
 
-**Description:**
-Update `apps/api/src/routes/rooms.ts` + `apps/api/src/forum/rooms.ts` room creation and the audited governance-settings writes to accept and validate `visibility`, `join_model`, and `posting_policy` (through the shared schema's coherence refinement). Creating a private room is allowed to any account within the existing room-creation rate limits; the creator becomes the first `community_steward`. Governance-settings updates may change `join_model` and `posting_policy` freely (audited); changing `visibility` is the WS-Q.3.4 cascade and routes through that path. The `RECOMMENDATION_INPUT_KEYS` transparency list is reviewed to confirm visibility/join/posting are NOT recommendation inputs (they gate eligibility; they never score) — add an assertion.
+**Description:** Rewrite `joinRoom` to branch on `join_model`: `open` ⇒ immediate `active`; `request_approval` ⇒ `pending`; `invite` ⇒ reject self-join with an "invite-only" outcome (invitations are a separate steward action, seam stubbed for WS-J). Idempotent: re-joining returns the existing subscription unchanged.
 
 **Acceptance criteria:**
-- Room creation accepts the new fields with documented defaults; incoherent combinations are rejected (422) by the shared schema.
-- Governance writes for join/posting are audited (`room_governance_change`) with before/after.
-- Visibility changes are NOT accepted through the generic governance write — they 422 with a pointer to the visibility-cascade endpoint.
-- A test asserts visibility/join_model/posting_policy never appear in `RECOMMENDATION_INPUT_KEYS`.
+- All three join models honored; `invite` rejects self-join cleanly; re-join is idempotent.
 
-**Testing:**
-- Unit: create/validate matrices; governance-write audit contents.
-- Unit: recommendation-input exclusion assertion.
+**Testing:** Unit/integration — join flow per model; idempotent re-join.
 
-**Dependencies:** WS-Q.1.1, WS-Q.3.1.
+**Dependencies:** WS-Q.3.1a.
 
 ---
 
-### WS-Q.3.4 Room visibility cascade: public ⇄ private
-**ID:** WS-Q.3.4
-**Ref:** Sections 14.5.2, 16.1
+### WS-Q.3.2 `storyReadableByUser` item-level read bar
+**ID:** WS-Q.3.2 | **Ref:** Sections 14.5.3, 15.3
 
-**Description:**
-A dedicated steward-only, audited endpoint to flip a room's visibility, with the content cascade SPEC Section 14.5.2 mandates. **Public → private:** every `public` story in the room is forced to `room_only` (batched, row-locked, each emitting `content.visibility.changed` with `trigger: 'room_visibility_change'`); the room's content leaves all global surfaces on the next index/serve cycle; existing `active` memberships are retained, future joins become `request_approval` (the join_model is set to `request_approval` if it was `open`). **Private → public:** the room becomes readable by all, but **no content auto-publishes** — every story stays `room_only` until its author widens it (WS-Q.2.4); the join_model may be set to `open`. Both directions are a single audited transaction over the room row + a durable, resumable per-story sweep (the sweep is idempotent and lease-guarded, mirroring the WS-E/WS-F sweep pattern, so a crash mid-cascade resumes safely). A steward-facing confirmation states the consequence count ("N stories will leave public surfaces").
+**Description:** Add a single helper `storyReadableByUser(story, room, userId)` = "passes the room content bar AND the item visibility": a `public` story is readable by anyone who can reach its (necessarily public) room; a `room_only` story requires `roomContentVisibleToUser`. Wire it into `GET /v1/stories/{id}`, the thread overview (`threadVisibleToUser` composes it), branch/subtree reads, and contribution reads. Fail-closed: unknown room/story ⇒ not readable ⇒ 404.
 
 **Acceptance criteria:**
-- Public → private: every story ends `room_only`; none remains on a global feed/search after reindex; one event per story; one room-audit record summarizing the count.
-- Private → public: zero stories change visibility; the room becomes globally listable; authors can then widen individually.
-- The cascade is resumable: interrupting it and re-running completes without double-emitting events for already-converted stories.
-- Only stewards with the governance capability can invoke it; others 404.
+- `room_only` story in a private room ⇒ 404 for outsiders/pending, 200 for active members/stewards; `public` story ⇒ 200 for anyone.
+- Thread/branch/subtree/contribution reads all 404 when the owning story is unreadable (no body leakage).
+- The rule lives only in this helper; all five read paths call it.
 
-**Testing:**
-- Unit: cascade direction semantics; idempotent resume; per-story event emission.
-- Integration: public→private reindex removes items from the global feed (composed with WS-Q.4.2); private→public leaves content in-room.
+**Testing:** Unit — `storyReadableByUser` truth table. Integration — each of the five read endpoints 404s for an unreadable `room_only` story.
 
-**Dependencies:** WS-Q.2.4, WS-Q.1.7, WS-Q.4.2.
+**Dependencies:** WS-Q.3.1a, WS-Q.1.4b, WS-Q.1.5.
 
 ---
 
-### WS-Q.3.5 DSAR, anonymization, and conversation-health under the room tier
-**ID:** WS-Q.3.5
-**Ref:** Sections 14.5.7, 19.3
+### WS-Q.3.3a Room creation accepts visibility/join/posting
+**ID:** WS-Q.3.3a | **Ref:** Sections 16.1, 16.2
 
-**Description:**
-Confirm and extend the WS-D/WS-G privacy hooks for room-tier content. `exportContributions` (DSAR Art. 15) returns the user's own stories and contributions **regardless of visibility**, including `room_only` items and private-room memberships, each tagged with its room and visibility (a user's own data is theirs to export even from private rooms — distribution bounds do not bound self-access). `anonymizeContributions` tombstones the user's room-tier contributions and removes private-room memberships/steward rows exactly as for public ones. Conversation-health rollups remain per-thread and owner/steward-facing only (never a ranking input) and are computed identically for room_only threads. Add tests proving DSAR completeness across both tiers.
+**Description:** Update room creation (`apps/api/src/routes/rooms.ts`/`forum/rooms.ts`) to accept and validate `visibility`/`join_model`/`posting_policy` (through the shared coherence refinement), apply the documented defaults (`public→open`, `private→request_approval`; posting `all_members`), and make the creator the first `community_steward`. Creating a private room is allowed to any account within the existing room-creation rate limits.
 
 **Acceptance criteria:**
-- DSAR export includes `room_only` stories/contributions and private-room subscriptions, each carrying `room_ref` + `visibility`.
-- Account purge tombstones room-tier content and strips private-room memberships (membership is personal data, WS-D.2.4 rule).
-- Health metrics compute for room_only threads and never enter ranking.
+- Create accepts the new fields with defaults; incoherent combinations ⇒ 422 (shared refinement).
+- The creator becomes `community_steward`; private-room creation is rate-limited like public.
 
-**Testing:**
-- Unit: DSAR composition includes both tiers (seeded fixture with one private-room contribution).
-- Unit: purge removes private-room membership rows.
+**Testing:** Unit — create/validate matrix; first-steward assignment.
+
+**Dependencies:** WS-Q.1.1a, WS-Q.3.1a.
+
+---
+
+### WS-Q.3.3b Governance writes for join/posting; visibility routed away; recommendation-input assertion
+**ID:** WS-Q.3.3b | **Ref:** Sections 16.2, 16.4, 13.6
+
+**Description:** The audited governance-settings write may change `join_model`/`posting_policy` freely (audit type `forum_config_change`, before/after recorded). A `visibility` change is REJECTED here (422 pointing to the visibility-cascade endpoint, WS-Q.3.4a). Add an assertion that `visibility`/`join_model`/`posting_policy` never appear in `RECOMMENDATION_INPUT_KEYS` (they gate eligibility; they never score).
+
+**Acceptance criteria:**
+- Join/posting writes are audited as `forum_config_change`; a visibility change via the generic write ⇒ 422 with the cascade pointer.
+- The recommendation-input exclusion assertion is green.
+
+**Testing:** Unit — governance-write audit contents; visibility-rejection; recommendation-input exclusion.
+
+**Dependencies:** WS-Q.3.3a, WS-Q.1.7b.
+
+---
+
+### WS-Q.3.4a Room cascade: public → private
+**ID:** WS-Q.3.4a | **Ref:** Sections 14.5.2, 16.1
+
+**Description:** A steward-only, audited endpoint flips a room public→private with the content cascade: every `public` story in the room is forced `room_only` via a durable, idempotent, lease-guarded per-story sweep (the WS-E/WS-F sweep pattern), each emitting `content.visibility.changed` (`trigger='room_visibility_change'`); the room row flips and `open` join_model becomes `request_approval`; existing `active` memberships are retained. One room-audit record summarizes the count; a confirmation states "N stories will leave public surfaces". Crash mid-cascade resumes without double-emitting for already-converted stories.
+
+**Acceptance criteria:**
+- Every story ends `room_only`; none remains on a global surface after reindex; one event per story; one summary audit record.
+- The sweep is resumable/idempotent; only governance-capable stewards can invoke (others 404).
+
+**Testing:** Unit — cascade semantics + idempotent resume + per-story emission. Integration — reindex removes items from the global feed (composed with WS-Q.4.2a).
+
+**Dependencies:** WS-Q.2.4a, WS-Q.1.7a, WS-Q.4.2a.
+
+---
+
+### WS-Q.3.4b Room cascade: private → public
+**ID:** WS-Q.3.4b | **Ref:** Sections 14.5.2, 16.1
+
+**Description:** The reverse flip makes the room readable by all but auto-publishes NO content: every story stays `room_only` until its author widens it (WS-Q.2.4b); `join_model` may be set to `open`. One audited transaction over the room row; no per-story sweep (nothing changes at the item level).
+
+**Acceptance criteria:**
+- Zero stories change visibility; the room becomes globally listable; authors can then widen individually.
+- Steward-only; audited (`room_visibility_change`).
+
+**Testing:** Unit — no-item-change semantics; listability flip. Integration — content stays in-room post-flip.
+
+**Dependencies:** WS-Q.3.4a.
+
+---
+
+### WS-Q.3.5 DSAR + anonymization across both tiers
+**ID:** WS-Q.3.5 | **Ref:** Sections 14.5.7, 19.3
+
+**Description:** Extend the WS-D/WS-G privacy hooks: `exportContributions` returns the user's own stories/contributions REGARDLESS of visibility (including `room_only` items and private-room memberships), each tagged `room_ref`+`visibility` (self-access is not bounded by distribution). `anonymizeContributions` tombstones room-tier contributions and strips private-room memberships/steward rows. Conversation-health rollups compute identically for `room_only` threads and never enter ranking.
+
+**Acceptance criteria:**
+- DSAR export includes `room_only` content and private-room subscriptions with `room_ref`+`visibility`.
+- Account purge tombstones room-tier content and removes private-room membership rows.
+
+**Testing:** Unit — DSAR composition across both tiers (private-room fixture); purge strips memberships.
 
 **Dependencies:** WS-Q.3.2.
 
@@ -469,292 +685,362 @@ Confirm and extend the WS-D/WS-G privacy hooks for room-tier content. `exportCon
 
 ## WS-Q.4 Ranking and distribution (WS-I deltas)
 
-### WS-Q.4.1 Candidate carries visibility; retrievers are visibility-scoped
-**ID:** WS-Q.4.1
-**Ref:** Sections 13.2, 14.5.3
+### WS-Q.4.1a Candidate carries visibility
+**ID:** WS-Q.4.1a | **Ref:** Sections 13.2, 14.5.3
 
-**Description:**
-Add `visibility: 'public' | 'room_only'` to the strict `Candidate` stage-boundary schema (`packages/ranking/src/schemas/candidate.ts`) and populate it from the story row in every retriever and in the feature-store join. Scope each retriever's pool query by SURFACE: the eight organic retrievers that feed GLOBAL surfaces (front page, topic) query `WHERE visibility = 'public'` (and, as today, not hidden/archived); the `room_surface_v1` scoper queries the target room's full pool (`public` + `room_only`). The orchestrator's strict-boundary re-validation now also asserts `visibility` is present. The "PWAtt-threshold global", "constructive-velocity emerging", "seen-story evidence additions", "SCOI bridge", and "expert-led explanations" retrievers all gain the public predicate; the "subscribed rooms" and "per-room chronological catch-up" retrievers feed only room-eligible content and keep their room scoping.
+**Description:** Add `visibility: 'public' | 'room_only'` to the strict `Candidate` stage-boundary schema (`packages/ranking/src/schemas/candidate.ts`) and populate it from the story row in the feature-store join and every retriever path. The orchestrator's strict re-validation now also asserts `visibility` is present.
 
 **Acceptance criteria:**
 - Every `Candidate` carries `visibility`; the boundary schema rejects a candidate without it.
-- Global-surface retrievers never emit a `room_only` candidate (seeded adversarial test: a `room_only` story matching every retriever's criteria appears in NONE of them).
-- The room scoper emits the room's `room_only` items (for a reader who passes the bar).
-- Subscribed-rooms retriever: a user's subscription to a private room surfaces that room's `room_only` items into the user's room-eligible candidate set but NEVER onto the front page (the front-page assembly drops them — WS-Q.4.2).
 
-**Testing:**
-- Unit: per-retriever visibility-predicate tests; the adversarial `room_only` exclusion sweep across all eight.
-- Unit: candidate boundary rejects missing `visibility`.
+**Testing:** Unit — candidate boundary rejects missing `visibility`; population smoke test.
 
-**Dependencies:** WS-Q.1.4, WS-Q.5-none (pure-ish; uses retriever ports).
+**Dependencies:** WS-Q.1.4a.
 
 ---
 
-### WS-Q.4.2 Distribution-side visibility bar: surface-aware containment
-**ID:** WS-Q.4.2
-**Ref:** Sections 13.2, 14.5.3
+### WS-Q.4.1b Visibility-scoped retrievers
+**ID:** WS-Q.4.1b | **Ref:** Sections 13.2, 14.5.3
 
-**Description:**
-Extend `filterByRoomVisibility` (rename to `filterByVisibility`) in `apps/api/src/ranking/service.ts` into a two-clause, surface-aware, fail-closed gate that runs on EVERY served request as the authoritative backstop (independent of retriever correctness — defense in depth, the WS-I posture): (1) **item-tier clause** — on `front_page` and `topic` surfaces, drop every candidate whose `visibility === 'room_only'` (global surfaces are public-only, Section 14.5); on `room` surfaces, keep `room_only` only for the surface's own room. (2) **room-bar clause** — the existing per-distinct-room `roomContentVisibleToUser` check, retained unchanged. The dead "room-less items pass through" branch is removed (every item now has a room; an item whose room is unknown fails closed). Each exclusion is logged with a reason (`item_visibility` vs `room_bar`). The chronological fallback runs the SAME gate (its candidate set is visibility-filtered identically), so paused ranking never widens reach.
+**Description:** Scope retrieval by surface: the EIGHT organic retrievers that feed the front page/topic (`subscribed_rooms_v1`, `local_news_v1`, `global_pwatt_v1`, `emerging_discussions_v1`, `independent_additions_v1`, `cross_community_bridges_v1`, `expert_explanations_v1`, `chronological_catch_up_v1`) gain a `visibility='public'` predicate (so even a user's own subscribed private-room content is excluded from the public front page); `RoomSurfaceRetriever` queries the target room's full pool (`public` + `room_only`).
 
 **Acceptance criteria:**
-- A `room_only` item cannot appear on `front_page` or `topic` even if a buggy retriever emits it (the gate drops it; covered by a test that force-injects one).
-- On a `room` surface, the room's own `room_only` items pass (for a reader who passes the bar) and OTHER rooms' `room_only` items are dropped.
-- Unknown-room items fail closed on every surface.
-- The fallback path applies the identical gate; a neutrality-style test asserts fallback reach ⊆ ranked reach for visibility.
-- Every drop is logged with a distinguishable reason; the decision log records the visibility-excluded count.
+- A `room_only` story matching every front-page heuristic appears in NONE of the eight organic retrievers (adversarial sweep).
+- The room scoper emits the room's `room_only` items for a reader who passes the bar.
 
-**Testing:**
-- Unit: surface × visibility × room-membership matrix; force-injected `room_only` on front_page is dropped.
-- Unit: fallback applies the gate (force-inject + assert absence).
-- Integration: room feed shows own `room_only`, hides foreign `room_only`.
+**Testing:** Unit — per-retriever public predicate; the adversarial exclusion sweep across all eight; room-scoper inclusion.
 
-**Dependencies:** WS-Q.4.1, WS-Q.3.1.
+**Dependencies:** WS-Q.4.1a.
 
 ---
 
-### WS-Q.4.3 Feature store + decision log: visibility-aware, financially clean
-**ID:** WS-Q.4.3
-**Ref:** Sections 13.3, 22.4, 30.6
+### WS-Q.4.2a Surface-aware distribution gate (`filterByVisibility`)
+**ID:** WS-Q.4.2a | **Ref:** Sections 13.2, 14.5.3
 
-**Description:**
-Thread visibility through the WS-I feature store and decision log without making it a SCORING input. The feature vector may record `visibility` as an eligibility/audit field (like the safety flags) but it MUST NOT enter PWAtt or any invariant join as a positive/negative weight (it gates candidacy, it never scores) — add it to the explicit "non-scoring eligibility fields" set the scoring stage ignores. The `RankingDecisionLog` records, per request, the surface, the visibility-excluded count, and per-item `visibility` (for replay fidelity); replay re-applies the surface-aware gate at the recorded surface so a replayed decision reproduces the served set exactly. The WS-I.2.1b financial denylist runs unchanged on the modified feature-store writes (no financial field is introduced; the BFS isolation proof and the db table denylist re-run on the new `stories` columns and the `Candidate`/feature shapes).
+**Description:** Rename `filterByRoomVisibility`→`filterByVisibility` and add the item-tier clause as the authoritative always-on backstop: on `front_page`/`topic`, drop every `room_only` candidate; on `room`, keep `room_only` only for the surface's own room. Keep the existing per-distinct-room `roomContentVisibleToUser` clause. Remove the dead "room-less items pass through" branch (every item now has a room; unknown room ⇒ fail closed). Each drop is logged with a reason (`item_visibility` vs `room_bar`).
 
 **Acceptance criteria:**
-- `visibility` is present in the feature vector and the decision log but is provably ignored by `rankFeasibleSet` (a property test: flipping only `visibility` on already-eligible, same-room items never changes their relative order or scores).
-- Replay reproduces the served ordering including the visibility gate at the recorded surface (backward-compatible: pre-WS-Q decision logs without `visibility` replay via a `public` default, since every pre-WS-Q served item was on a public surface).
-- The financial denylist + BFS isolation tests pass on the new columns/shapes.
+- A force-injected `room_only` candidate cannot appear on `front_page`/`topic`; on `room`, foreign-room `room_only` is dropped and own-room `room_only` passes (behind the bar); unknown room fails closed on every surface.
 
-**Testing:**
-- Unit: visibility-is-not-a-score property test; replay-with-default for legacy logs.
-- Unit: denylist + isolation re-run green on the new schema.
+**Testing:** Unit — surface × visibility × membership matrix; force-injected `room_only` on front_page is dropped; reason-coded logging.
 
-**Dependencies:** WS-Q.4.2, WS-Q.1.4.
+**Dependencies:** WS-Q.4.1b, WS-Q.3.1a.
 
 ---
 
-### WS-Q.4.4 Neutrality + containment test suite extension
-**ID:** WS-Q.4.4
-**Ref:** Sections 13.2, 14.5, 30.6
+### WS-Q.4.2b Gate the fallback path + decision-log excluded count
+**ID:** WS-Q.4.2b | **Ref:** Sections 13.2, 14.5.3
 
-**Description:**
-Extend the named ranking-neutrality CI gate (`pnpm check:neutrality`) and the ranking package suite with **content-containment** tests as first-class, transitive-closure-style assertions: (1) no global surface (front_page, topic, global search, embedding similarity feeding public pages) ever returns a `room_only` item, across ranked AND fallback paths, proven against a seeded store where every public-surface heuristic is satisfied by a planted `room_only` story; (2) the front-page/topic candidate UNION (all eight retrievers) is visibility-pure; (3) a private room's content is absent from a non-member's every surface (feed, search, story read, share preview); (4) widening (`room_only → public`) makes an item eligible and narrowing removes it on the next serve, asserted end-to-end; (5) visibility is not a ranking signal (the WS-Q.4.3 property test, lifted into the neutrality gate). These run alongside the existing ten WS-I.3 tests; the gate's documentation enumerates them as the containment leg.
+**Description:** Apply `filterByVisibility` identically on the score-blind chronological fallback path (so paused ranking never widens reach) and record the visibility-excluded count in the `RankingDecisionLog`. A neutrality-style invariant asserts fallback reach ⊆ ranked reach for visibility.
 
 **Acceptance criteria:**
-- `pnpm check:neutrality` includes the containment leg and fails if any global surface leaks a `room_only` item.
-- The transitive import-closure walk already used by neutrality test 8/9 is extended to assert the visibility predicate is applied on every global retrieval path (no path bypasses `filterByVisibility`).
-- Tests cover ranked and fallback, front_page/topic/room/search surfaces.
+- The fallback applies the identical gate (force-inject + assert absence); the decision log records the excluded count.
 
-**Testing:**
-- The suite IS the test; CI runs it as a named step. Add fixtures to the ranking package and the api neutrality suite.
+**Testing:** Unit — fallback gate application; decision-log field.
 
-**Dependencies:** WS-Q.4.2, WS-Q.4.3, WS-Q.2.5.
+**Dependencies:** WS-Q.4.2a.
+
+---
+
+### WS-Q.4.3 Feature store + decision log: visibility as non-scoring eligibility
+**ID:** WS-Q.4.3 | **Ref:** Sections 13.3, 22.4, 30.6
+
+**Description:** Record `visibility` in the feature vector and decision log as an eligibility/audit field in the explicit "non-scoring eligibility fields" set the scoring stage ignores (like the safety flags) — it gates candidacy, never scores. Replay re-applies the surface-aware gate at the recorded surface (pre-WS-Q logs without `visibility` replay via a `public` default, since every pre-WS-Q served item was public). Re-run the WS-I.2.1b financial denylist and the wallet↔ranking BFS isolation proof on the modified feature-store/`Candidate`/`stories` shapes.
+
+**Acceptance criteria:**
+- A property test proves flipping ONLY `visibility` on already-eligible same-room items changes neither order nor scores.
+- Replay reproduces the served set including the gate; legacy logs replay with the `public` default.
+- Denylist + BFS isolation tests stay green on the new columns/shapes.
+
+**Testing:** Unit — visibility-not-a-score property; legacy-log replay default; denylist/isolation re-run.
+
+**Dependencies:** WS-Q.4.2b, WS-Q.1.4a.
+
+---
+
+### WS-Q.4.4a Containment neutrality tests
+**ID:** WS-Q.4.4a | **Ref:** Sections 13.2, 14.5, 30.6
+
+**Description:** Add containment assertions to `apps/api/src/__tests__/ranking-neutrality.test.ts`: (1) no global surface (front_page, topic, global search, embedding similarity feeding public pages) returns a `room_only` item, across ranked AND fallback, proven against a seeded store where every public-surface heuristic is satisfied by a planted `room_only` story; (2) the eight-retriever front-page UNION is visibility-pure; (3) a private room's content is absent from a non-member's every surface (feed, search, story read, share preview).
+
+**Acceptance criteria:**
+- `pnpm check:neutrality` fails if any global surface leaks a `room_only` item; the three assertions cover ranked + fallback and all global surfaces.
+
+**Testing:** The suite IS the test; add fixtures to the api neutrality suite + the ranking package.
+
+**Dependencies:** WS-Q.4.2b, WS-Q.4.3, WS-Q.2.5a.
+
+---
+
+### WS-Q.4.4b Not-a-signal + transition + import-closure assertions
+**ID:** WS-Q.4.4b | **Ref:** Sections 13.2, 14.5, 30.6
+
+**Description:** Add to the neutrality gate: (4) the WS-Q.4.3 "visibility is not a ranking signal" property, lifted into the gate; (5) widen (`room_only→public`) makes an item eligible and narrow removes it on the next serve, asserted end-to-end; (6) extend the existing transitive import-closure walk (neutrality tests 8/9) to assert no global retrieval path bypasses `filterByVisibility`. Document the containment leg in the gate's header.
+
+**Acceptance criteria:**
+- The gate proves visibility is non-scoring, that widen/narrow flip eligibility, and that every global path routes through `filterByVisibility`.
+
+**Testing:** Extends `check:neutrality`; the import-closure walk fails if a global path skips the gate.
+
+**Dependencies:** WS-Q.4.4a.
 
 ---
 
 ## WS-Q.5 Client surfaces (WS-C/WS-B/WS-G deltas)
 
-### WS-Q.5.1 Composer: home-room picker + visibility control
-**ID:** WS-Q.5.1
-**Ref:** Sections 6.3, 6.6, 14.5
+### WS-Q.5.1a Composer: home-room picker
+**ID:** WS-Q.5.1a | **Ref:** Sections 6.3, 6.6, 14.5
 
-**Description:**
-Extend the submit flow (`apps/web/src/routes/submit.tsx` + the composer) with a required **home-room picker** (the user's joined rooms, postable-to per `posting_policy`, with the Commons as the default suggestion and a typeahead over discoverable rooms) and a **visibility control** (a two-option public/in-room toggle). The control is **locked to in-room and explained** when the chosen room is private ("This room is private — posts stay in the room"); it defaults to public in public rooms. The payload builder calls the SHARED `deriveStoryVisibility` so the client-shown value equals the server-derived value (no drift), and validates the whole payload through the shared submission schema. Image/video post modes (WS-Q.5.2) reuse the same picker/toggle. Encrypted-draft autosave persists the chosen room + visibility; share-target intake defaults the room to the last-used or Commons.
+**Description:** Add a required home-room picker to the submit flow (`apps/web/src/routes/submit.tsx` + composer): the user's joined rooms filtered to postable-to (per `posting_policy`, via the room detail the API exposes), Commons as the default suggestion, and a typeahead over discoverable rooms. Submit is disabled with an accessible explanation until a room is chosen.
 
 **Acceptance criteria:**
-- Submitting without a room is impossible (the submit button is disabled with an accessible explanation until a room is chosen).
-- Private-room selection visibly locks the toggle to in-room and never lets the user request public (matches server forcing).
-- The displayed final visibility equals what the server will store for every room/choice combination (shared-helper parity, asserted in a test).
-- Draft autosave/restore round-trips room + visibility; accessibility (labels, focus, 200% reflow) holds on the new controls.
+- Submitting without a room is impossible; the disabled state has an accessible reason.
+- Only postable rooms are selectable (non-postable rooms are shown disabled with the reason, not hidden, so the user understands).
 
-**Testing:**
-- Unit (jsdom): picker disabled-state, private-room lock, derivation parity.
-- E2E (workbench/preview): compose → room+visibility shown → payload matches; axe on the new controls.
+**Testing:** Unit (jsdom) — picker disabled-state, postable filtering. E2E — choose room → enabled submit; axe on the control.
 
-**Dependencies:** WS-Q.1.1, WS-Q.1.2a.
+**Dependencies:** WS-Q.1.1a, WS-Q.3.1b.
 
 ---
 
-### WS-Q.5.2 Image/video post composer modes + media rendering
-**ID:** WS-Q.5.2
-**Ref:** Sections 14.1, 15.5, 26
+### WS-Q.5.1b Composer: visibility control (locked for private rooms)
+**ID:** WS-Q.5.1b | **Ref:** Section 14.5
 
-**Description:**
-Add image-post and video-post modes to the composer: file picker (allow-listed types), client-side preview, **required alt-text field for images** (submit blocked without it, WCAG), optional captions for video, upload-progress and scan-pending states (the story enters review-hold if the scan is still pending — the UI says "Posted, pending a safety check"). Add the rendering surfaces: `StoryCard` and the story page render images through the gated upload URL with alt text, and videos through a native `<video controls>` (no autoplay; poster frame where available; a fallback message for undecodable codecs). Media respects reduced-motion (no autoplay ever) and offline (cached posters; the player degrades gracefully offline).
+**Description:** Add a public/in-room visibility toggle that calls the SHARED `deriveStoryVisibility` so the shown value equals the server-derived value. The control is locked to in-room and explained when the chosen room is private ("This room is private — posts stay in the room"); defaults to public in public rooms. Encrypted-draft autosave persists room + visibility; share-target intake defaults room to last-used or Commons.
+
+**Acceptance criteria:**
+- Private-room selection locks the toggle to in-room; the user can never request public there.
+- The displayed final visibility equals the server-stored value for every room/choice combination (shared-helper parity test).
+- Draft autosave/restore round-trips room + visibility.
+
+**Testing:** Unit — private-room lock + derivation parity; draft round-trip. E2E — compose shows room+visibility; payload matches.
+
+**Dependencies:** WS-Q.5.1a, WS-Q.1.3b.
+
+---
+
+### WS-Q.5.2a Composer: image-post mode
+**ID:** WS-Q.5.2a | **Ref:** Sections 14.1, 26
+
+**Description:** Add the image-post composer mode: file picker (allow-listed types), client-side preview, REQUIRED alt-text field (submit blocked without it), and upload-progress + scan-pending states ("Posted, pending a safety check" when the scan is still pending).
 
 **Acceptance criteria:**
 - Image submit is blocked without alt text; the error is field-tied and accessible.
-- Video has no autoplay in any state; controls are keyboard-operable; captions render when present.
-- Images/videos load only via the gated, scan-checked URL; a flagged/removed media post collapses honestly (no broken element, a clear state).
-- New media states pass axe; the bundle-size budget still holds (media players use platform elements, no heavy deps — the dependency budget is unchanged).
+- Scan-pending posts show the pending state, not a failure.
 
-**Testing:**
-- Unit: alt-text gating; no-autoplay assertion; degraded states.
-- E2E: image/video post render + keyboard operability + axe.
+**Testing:** Unit — alt-text gating; scan-pending state. E2E — image post + axe.
 
-**Dependencies:** WS-Q.5.1, WS-Q.2.3a, WS-Q.2.3b.
+**Dependencies:** WS-Q.5.1b, WS-Q.2.3a.
 
 ---
 
-### WS-Q.5.3 Room surfaces: binary visibility, join models, two-tier reveal
-**ID:** WS-Q.5.3
-**Ref:** Sections 16.1, 16.2
+### WS-Q.5.2b Composer: video-post mode
+**ID:** WS-Q.5.2b | **Ref:** Sections 14.1, 26
 
-**Description:**
-Update the room routes/components (`apps/web/src/routes/rooms*.tsx`, room detail, directory) for the binary model: a **private-room badge** and a tier-one shell for non-members (name, description, "Request to join" / "Invite only" per `join_model`, and the honest private-room notice from Section 14.5.7 — "private from the public, not from moderation; not encrypted"); a content area that renders only after the user passes the content bar (otherwise the request/pending state). The room feed calls `GET /v1/rooms/:roomId/feed` and shows the room's full pool (public + in-room) with an **in-room chip** on items that are not public. The directory lists public rooms and discoverable private rooms (tier one) with public-only thread counts. Room creation/settings UI exposes visibility, join model, and posting policy with the coherence rules enforced client-side (mirroring the shared refinement).
+**Description:** Add the video-post composer mode: file picker (allow-listed containers, client-side size/duration hints matching the server caps), optional captions (text or upload), and upload-progress/scan-pending states. Oversize/overlong files are rejected client-side with the cap reason before upload starts.
 
 **Acceptance criteria:**
-- Non-members of a private room see only the tier-one shell + the honest notice, never content; pending applicants see a pending state.
-- The in-room chip marks every non-public item on a room feed; public items in a public room carry no chip.
-- Creation/settings UI cannot submit an incoherent visibility/join/posting combination.
-- All states (empty/loading/pending/forbidden/offline) are designed and pass axe.
+- Captions accept text XOR upload, not both; oversize/overlong is rejected pre-upload with the cap reason.
 
-**Testing:**
-- Unit: tier-one vs tier-two render gating; chip logic; coherence enforcement.
-- E2E: private-room non-member shell; member content; join flow per model; axe on each state.
+**Testing:** Unit — caption XOR; cap pre-check. E2E — video post flow.
 
-**Dependencies:** WS-Q.1.1, WS-Q.3.1.
+**Dependencies:** WS-Q.5.2a, WS-Q.2.3c.
 
 ---
 
-### WS-Q.5.4 Visibility management + front-page framing
-**ID:** WS-Q.5.4
-**Ref:** Sections 6.3, 14.5.2
+### WS-Q.5.2c Media rendering (image + video)
+**ID:** WS-Q.5.2c | **Ref:** Sections 15.5, 26, 6.9
 
-**Description:**
-Add author-facing visibility management on the story page (a "Change visibility" control wired to `PATCH /v1/stories/{id}/visibility`: narrow always offered; widen offered only in public rooms, with the re-admission/dup-collision outcomes surfaced — including the "a public story already exists for this link" 409 with a link to it). Update front-page framing copy to reflect that it shows public content earning the most meaningful participation-weighted attention (never "most liked"/"most upvoted" — the no-applause language gate already forbids those strings; add the new copy to the prohibited-language fixtures so "popular" is never rendered as an applause claim). The signal-ledger reason links continue to resolve for in-room items (the owner sees their own in-room participation).
+**Description:** Render media on `StoryCard` and the story page: images through the gated upload URL with alt text; videos through a native `<video controls>` (no autoplay; poster where available; a fallback message for undecodable codecs). Respect reduced-motion (no autoplay ever) and offline (cached posters; graceful offline degradation). A flagged/removed media post collapses to a clear state, not a broken element. Players use platform elements — no new dependency (the budget is unchanged).
+
+**Acceptance criteria:**
+- No autoplay in any state; video controls are keyboard-operable; captions render when present.
+- Media loads only via the gated URL; flagged/removed collapses honestly; bundle-size budget holds.
+
+**Testing:** Unit — no-autoplay; degraded/collapsed states. E2E — image/video render + keyboard + axe.
+
+**Dependencies:** WS-Q.5.2b, WS-Q.2.3b, WS-Q.2.3e.
+
+---
+
+### WS-Q.5.3a Room shell for non-members (tier one)
+**ID:** WS-Q.5.3a | **Ref:** Sections 16.1, 16.2, 14.5.7
+
+**Description:** Render the tier-one shell for non-members of a private room (`apps/web/src/routes/rooms*.tsx`): private-room badge, name/description, a "Request to join" or "Invite only" CTA per `join_model`, a pending state for applicants, and the honest-limits notice ("private from the public, not from moderation; not encrypted"). No content renders until the content bar passes.
+
+**Acceptance criteria:**
+- Non-members see only the tier-one shell + honest notice; pending applicants see a pending state; content never renders for them.
+
+**Testing:** Unit — tier-one vs tier-two render gating per membership state. E2E — private-room non-member shell + axe.
+
+**Dependencies:** WS-Q.1.1a, WS-Q.3.1a.
+
+---
+
+### WS-Q.5.3b Room feed surface + in-room chip
+**ID:** WS-Q.5.3b | **Ref:** Sections 16.1, 16.2
+
+**Description:** Wire the room feed to `GET /v1/rooms/:roomId/feed` (the room's full pool for readers who pass the bar) and add an in-room chip to every non-public item; public items in a public room carry no chip. Empty/loading/offline states designed and accessible.
+
+**Acceptance criteria:**
+- The in-room chip marks every `room_only` item on a room feed; public items carry no chip.
+- All states pass axe.
+
+**Testing:** Unit — chip logic; states. E2E — member room feed shows own `room_only` with chip.
+
+**Dependencies:** WS-Q.5.3a, WS-Q.4.2a.
+
+---
+
+### WS-Q.5.3c Room create/settings UI + directory
+**ID:** WS-Q.5.3c | **Ref:** Sections 16.1, 16.2
+
+**Description:** Expose visibility/join-model/posting-policy in room creation and settings UI with the coherence rules enforced client-side (mirroring the shared refinement); update the directory to list public rooms and discoverable private rooms (tier one) with public-only thread counts.
+
+**Acceptance criteria:**
+- The UI cannot submit an incoherent visibility/join/posting combination.
+- The directory shows private rooms at tier one with public-only counts.
+
+**Testing:** Unit — coherence enforcement; directory listing. E2E — create flow per visibility + axe.
+
+**Dependencies:** WS-Q.5.3a, WS-Q.3.3a.
+
+---
+
+### WS-Q.5.4a Author visibility management control
+**ID:** WS-Q.5.4a | **Ref:** Sections 6.3, 14.5.2
+
+**Description:** Add an author-facing "Change visibility" control on the story page wired to `PATCH /v1/stories/{id}/visibility`: narrow always offered; widen offered only in public rooms; surface the widen outcomes — including the "a public story already exists for this link" 409 with a link to it. The Signal Ledger reason links continue to resolve for the owner's in-room items.
 
 **Acceptance criteria:**
 - Narrow/widen controls appear per the rules; widen collision shows the existing public story; private-room items offer no widen.
-- Front-page/explanation copy passes the prohibited-language gate and the x-pseudo localization proof; no string implies likes/votes/applause.
-- Owners see Signal Ledger entries for their in-room participation; readers never see a global score.
 
-**Testing:**
-- Unit: control visibility per room/visibility; collision rendering.
-- Unit: prohibited-language fixtures include the new copy; render-time gate green.
-- E2E: narrow then confirm item leaves the front page (composed with API).
+**Testing:** Unit — control visibility per room/visibility; collision rendering. E2E — narrow then confirm the item leaves the front page.
 
-**Dependencies:** WS-Q.2.4, WS-Q.5.3.
+**Dependencies:** WS-Q.5.3b, WS-Q.2.4b.
 
 ---
 
-### WS-Q.5.5 Offline + cache schema bump for room/visibility shapes
-**ID:** WS-Q.5.5
-**Ref:** Section 6.9
+### WS-Q.5.4b Front-page framing + prohibited-language fixtures
+**ID:** WS-Q.5.4b | **Ref:** Sections 6.3, 32.1
 
-**Description:**
-Bump the offline IndexedDB record-schema version so cached feed/story/room shapes from before WS-Q (no `room_id`/`visibility`/binary room visibility) are evicted and refetched rather than mis-parsed against the new zod schemas. The read-through cache mapping and the offline store's zod-validated integrity layer adopt the new shapes; a versioned migration drops incompatible cached records. Queued offline submissions created pre-WS-Q (without a room) are reconciled on sync: they are held and surfaced to the user to choose a home room (never silently dropped, never auto-posted to Commons without consent — the eviction/reconciliation discipline of WS-C).
+**Description:** Update front-page/explanation framing copy to reflect that it shows public content earning the most meaningful participation-weighted attention (never "most liked"/"most upvoted"); add the new copy to the prohibited-language fixtures so the render-time no-applause gate and the x-pseudo localization proof cover it.
 
 **Acceptance criteria:**
-- Stale cached records (old shape) are evicted on version bump; no parse error reaches the UI.
-- A pre-WS-Q queued submission without a room is surfaced for room selection on sync, not lost and not auto-posted.
-- The offline integrity tests (`fake-indexeddb`) cover the migration and the reconciliation path.
+- No string implies likes/votes/applause; the prohibited-language gate and x-pseudo proof pass on the new copy.
 
-**Testing:**
-- Unit: schema-version migration eviction; queued-submission reconciliation.
+**Testing:** Unit — prohibited-language fixtures include the new copy; render-time gate green.
 
-**Dependencies:** WS-Q.1.1, WS-Q.1.2a.
+**Dependencies:** WS-Q.5.4a.
 
 ---
 
-## WS-Q.6 Cross-cutting: migration validation, docs, and rollout
+### WS-Q.5.5 Offline cache schema bump + queued-submission reconciliation
+**ID:** WS-Q.5.5 | **Ref:** Section 6.9
+
+**Description:** Bump the offline IndexedDB record-schema version so pre-WS-Q cached feed/story/room shapes (no `room_id`/`visibility`/binary room visibility) are evicted and refetched, never mis-parsed; adopt the new shapes in the read-through cache and the zod integrity layer. Reconcile pre-WS-Q queued offline submissions (no room) on sync by surfacing them for home-room selection — never silently dropped, never auto-posted to Commons without consent.
+
+**Acceptance criteria:**
+- Stale cached records evict on the version bump; no parse error reaches the UI.
+- A pre-WS-Q queued submission without a room is surfaced for room selection, not lost and not auto-posted.
+
+**Testing:** Unit (`fake-indexeddb`) — version-bump eviction; queued-submission reconciliation.
+
+**Dependencies:** WS-Q.1.1a, WS-Q.1.3a.
+
+---
+
+## WS-Q.6 Cross-cutting: migration validation, rollout, docs
 
 ### WS-Q.6.1 End-to-end migration validation harness
-**ID:** WS-Q.6.1
-**Ref:** Sections 14.5, 16.1, 22.1
+**ID:** WS-Q.6.1 | **Ref:** Sections 14.5, 16.1, 22.1
 
-**Description:**
-A gated integration harness that seeds a realistic pre-WS-Q dataset (public/restricted/expert_led rooms; thread-roomed and room-less stories; link/brief/question/evidence stories; public near-dup clusters) and runs the full WS-Q migration chain (`001A`–`001C` + Commons seed), then asserts the global safety property: **the set of (item, viewer) pairs that can read or be-distributed an item never grows for any existing item, and never shrinks for any item that was publicly visible.** Concretely: every formerly global story remains global iff its (mapped) room is public; every restricted/expert_led-room story becomes `room_only`; no story is left room-less; no public near-dup invariants are violated by the tier-scoped indexes. Include a dry-run report mode (counts per backfill branch) for operational confidence before the real run.
+**Description:** A gated integration harness that seeds a realistic pre-WS-Q dataset (public/restricted/expert_led rooms; thread-roomed and room-less stories; link/brief/question/evidence stories; public near-dup clusters), runs the full chain (`0014`–`0020` + Commons seed), and asserts the global safety property: **the (item, viewer) read/distribute set never grows for any existing item and never shrinks for any item that was publicly visible.** Concretely: every formerly-global story stays global iff its mapped room is public; every restricted/expert_led story becomes `room_only`; no story is room-less; no public near-dup invariant is violated by the tier-scoped indexes. Include a dry-run report mode (per-branch counts) for operational confidence.
 
 **Acceptance criteria:**
-- The harness passes on the seeded dataset and emits a per-branch count report.
-- The monotonic-visibility property holds (no widening of existing items; no loss of public reach).
-- Re-running the chain is a no-op (idempotent), including the Commons seed.
+- Passes on the seeded dataset; emits a per-branch count report; the monotonic-visibility property holds; re-running the chain is a no-op (idempotent), including the Commons seed.
 
-**Testing:**
-- Gated integration (Postgres + Redis service containers, as in CI).
+**Testing:** Gated integration (Postgres + Redis service containers).
 
-**Dependencies:** WS-Q.1.3, WS-Q.1.4, WS-Q.1.5, WS-Q.1.6.
+**Dependencies:** WS-Q.1.2, WS-Q.1.4a, WS-Q.1.4b, WS-Q.1.4c, WS-Q.1.5, WS-Q.1.6.
 
 ---
 
-### WS-Q.6.2 Documentation, status, and roadmap updates
-**ID:** WS-Q.6.2
-**Ref:** Documentation rules (CLAUDE.md)
+### WS-Q.6.2 Feature-flag rollout and reversibility
+**ID:** WS-Q.6.2 | **Ref:** Sections 30.8, 30.9
 
-**Description:**
-In the SAME change set as the implementation, update: `docs/SPEC.md` (already carries the v0.7 model — keep in sync if implementation forces refinements); `docs/forum/README.md` and `docs/ingestion/README.md` and `docs/ranking/README.md` (the room-ownership, visibility, media-post, and containment behaviors); `README.md` (status line + the new submission types); `CLAUDE.md` and `AGENTS.md` kept **byte-identical** (current-status summary, source-layout deltas, the new event topic, the WS-Q row in the roadmap table); and `docs/planning/00-index.md` (register `18-content-and-room-model.md` as WS-Q with its task count, milestone, wave, and dependency-graph edge). Bump the root `package.json` PATCH version.
+**Description:** Gate the user-visible surface behind fail-closed flags so behavior rolls out/back independently of the additive schema: `content.media_posts_enabled` (image/video submission), `content.in_room_visibility_enabled` (the public/in-room author choice — off ⇒ public rooms behave pre-WS-Q with all content public; private rooms STILL force `room_only`), `rooms.binary_visibility_ui` (the new room controls). The distribution-side gate (WS-Q.4.2a) and the read bar (WS-Q.3.2) are ALWAYS ON — there is no off switch, since disabling them could leak in-room content. Document the rollback: disabling the author-choice flag stops new in-room items while existing ones stay contained by the always-on gate.
 
 **Acceptance criteria:**
-- `pnpm check:policy` and all doc-touching gates pass; CLAUDE.md and AGENTS.md are byte-identical (`diff` is empty).
-- The master index lists WS-Q with an accurate task count and the dependency edge from WS-I/WS-F/WS-G.
-- No `claude.ai/code/session_*` URL appears in any doc or PR body (PR-authoring policy).
+- Flags fail closed (unreadable ⇒ feature off ⇒ pre-WS-Q behavior, except containment/read-bar which are unconditionally on and privacy which is never flagged off).
+- A test asserts no flag can widen in-room reach (containment is not flaggable).
 
-**Testing:**
-- `pnpm check:policy`; a CI/byte-identical assertion for CLAUDE.md ≡ AGENTS.md.
+**Testing:** Unit — flag fail-closed defaults; containment-not-flaggable assertion.
 
-**Dependencies:** all WS-Q implementation tasks (lands with them).
+**Dependencies:** WS-Q.4.2a, WS-Q.3.2, WS-Q.5.1b.
 
 ---
 
-### WS-Q.6.3 Feature-flag rollout and reversibility
-**ID:** WS-Q.6.3
-**Ref:** Sections 30.8, 30.9
+### WS-Q.6.3 Documentation, status, index, version
+**ID:** WS-Q.6.3 | **Ref:** Documentation rules (CLAUDE.md)
 
-**Description:**
-Gate the user-visible surface area behind a fail-closed feature flag set so the remodel rolls out and back independently of the schema migration (the schema is additive and backward-compatible; the flag controls behavior): `content.media_posts_enabled` (image/video submission), `content.in_room_visibility_enabled` (the public/in-room author choice — when off, public rooms behave exactly as pre-WS-Q with all content public), and `rooms.binary_visibility_ui` (the new room creation/settings controls). The distribution-side containment gate (WS-Q.4.2) and the read bar (WS-Q.3.2) are ALWAYS ON (they are safety/correctness, never flagged off — turning them off could leak in-room content, so there is no off switch). Document the rollback: disabling the author-choice flag stops new in-room items; existing in-room items remain correctly contained because the always-on gate enforces them regardless of the flag.
+**Description:** In the same change set as the implementation, update: `docs/SPEC.md` (keep in sync if implementation forces refinements); `docs/forum/README.md`, `docs/ingestion/README.md`, `docs/ranking/README.md` (room-ownership, visibility, media-post, containment behaviors); `README.md` (status + new submission types); `CLAUDE.md`/`AGENTS.md` kept byte-identical (current-status summary, source-layout deltas, the new event topic, the WS-Q roadmap row — per the file's no-workstream-reference convention, keep WS-Q to the one-line status row only); `docs/planning/00-index.md` (WS-Q registered). Bump the root `package.json` PATCH version.
 
 **Acceptance criteria:**
-- Flags are fail-closed (unreadable ⇒ feature off ⇒ pre-WS-Q behavior, except containment which is unconditionally on).
-- With `content.in_room_visibility_enabled` off, the composer offers no in-room choice and the server forces `public` in public rooms (private rooms still force `room_only` — privacy is never flag-gated off).
-- Containment and the read bar have no disable path; a test asserts no flag can widen in-room reach.
+- `pnpm check:policy` and doc gates pass; `CLAUDE.md` ≡ `AGENTS.md` (empty `diff`); the master index lists WS-Q accurately; no `claude.ai/code/session_*` URL in any doc or PR body.
 
-**Testing:**
-- Unit: flag fail-closed defaults; containment-not-flaggable assertion.
+**Testing:** `pnpm check:policy`; the CLAUDE.md ≡ AGENTS.md byte-identical assertion.
 
-**Dependencies:** WS-Q.4.2, WS-Q.3.2, WS-Q.5.1.
+**Dependencies:** all WS-Q implementation cards (lands with them).
 
 ---
 
 ## Dependency graph (within WS-Q)
 
 ```
-WS-Q.1.1 (room enum) ──┬─ WS-Q.1.2a (story room+visibility) ─ WS-Q.1.2b (media types)
-                       ├─ WS-Q.1.3 (rooms migration) ─ WS-Q.1.6 (Commons) ─ WS-Q.1.4 (stories migration) ─ WS-Q.1.5 (threads)
-                       └─ WS-Q.1.7 (visibility event)
-WS-Q.1.* ─ WS-Q.2.1 (submission guards) ─┬─ WS-Q.2.2 (tier dedup)
-                                         ├─ WS-Q.2.3a (image) ─ WS-Q.2.3b (video)
-                                         ├─ WS-Q.2.4 (transitions) ─ WS-Q.2.5 (search)
-                                         └─ WS-Q.2.6 (takedown reach)
-WS-Q.3.1 (read bar) ─ WS-Q.3.2 (item bar) ─ WS-Q.3.3 (governance) ─ WS-Q.3.4 (cascade) ─ WS-Q.3.5 (DSAR)
-WS-Q.4.1 (candidate) ─ WS-Q.4.2 (dist gate) ─ WS-Q.4.3 (feature/log) ─ WS-Q.4.4 (neutrality)
-WS-Q.5.1 (composer) ─ WS-Q.5.2 (media UI) ─ WS-Q.5.3 (room UI) ─ WS-Q.5.4 (visibility mgmt) ─ WS-Q.5.5 (offline)
-WS-Q.6.1 (migration harness) ─ WS-Q.6.2 (docs) ─ WS-Q.6.3 (rollout)
+Q.1.1a ─ Q.1.1b ─ Q.1.2 ──────────────────────────────────────────┐
+Q.1.1a ─ Q.1.3a ─ Q.1.3b                                            │
+            └──── Q.1.3c                                            │
+Q.1.2 + Q.1.3a + Q.1.3c ─ Q.1.4a ─ Q.1.4b ─ Q.1.4c                 │
+Q.1.4a ─ Q.1.6 (Commons app-ensure)                                │
+Q.1.4b ─ Q.1.5 (threads NOT NULL + trigger)                        │
+Q.1.3a ─ Q.1.7a ─ Q.1.7b ;  Q.1.3a ─ Q.1.7c                        │
+                                                                   ▼
+Q.3.1a ─ Q.3.1b ─ Q.3.1c ;  Q.3.1a ─ Q.3.2 ─ Q.3.5                 (read bar)
+Q.3.1a ─ Q.3.3a ─ Q.3.3b ;  Q.2.4a ─ Q.3.4a ─ Q.3.4b               (rooms/cascade)
+Q.2.1a ─ Q.2.1b ─ Q.2.1c ─┬─ Q.2.2a ─ Q.2.2b ; Q.2.2a ─ Q.2.2c     (submission/dedup)
+                          ├─ Q.2.3a ─ Q.2.3b ; Q.2.3c ─ Q.2.3d ─ Q.2.3e
+                          ├─ Q.2.4a ─ Q.2.4b
+                          └─ Q.2.5a ─ Q.2.5b ; Q.2.1c ─ Q.2.6
+Q.1.4a ─ Q.4.1a ─ Q.4.1b ─ Q.4.2a ─ Q.4.2b ─ Q.4.3 ─ Q.4.4a ─ Q.4.4b
+Q.5.1a ─ Q.5.1b ─ Q.5.2a ─ Q.5.2b ─ Q.5.2c ; Q.5.3a ─ Q.5.3b ─ Q.5.3c
+Q.5.3b ─ Q.5.4a ─ Q.5.4b ; Q.1.1a/Q.1.3a ─ Q.5.5
+Q.1.* ─ Q.6.1 ; Q.4.2a + Q.3.2 + Q.5.1b ─ Q.6.2 ; (all) ─ Q.6.3
 ```
 
-Cross-stream order: WS-Q.1 (schemas/migrations) → WS-Q.2/3 (server) in parallel → WS-Q.4 (ranking, after the read bar) → WS-Q.5 (client, after the wire shapes) → WS-Q.6 (validation/docs/rollout, last).
+Cross-stream order: **Q.1** (shared schemas → rooms migration → stories expand/backfill/contract → threads → events/audit) → **Q.3** read bar + **Q.2** submission/dedup/media/search in parallel → **Q.4** ranking (after the read bar and candidate visibility) → **Q.5** client (after the wire shapes) → **Q.6** validation/rollout/docs (last). The eight expand/contract migrations (`0014`–`0020`) are strictly ordered; nothing sets NOT NULL or a tier-scoped unique index before its backfill completes.
 
 ## Milestone gate additions
 
-| Gate | Task | Requirement |
+| Gate | Cards | Requirement |
 |---|---|---|
-| Home room required | WS-Q.2.1 | No content can be created without a home room; `Story.room_id` NOT NULL. |
-| Two-tier containment | WS-Q.4.2, WS-Q.4.4 | In-room content never reaches a global surface (ranked or fallback), proven in CI. |
-| Private-room read bar | WS-Q.3.2 | Outsiders/pending see only tier one; content reads 404. |
-| Visibility forcing | WS-Q.1.2a, WS-Q.2.1 | Private rooms force `room_only`; no override path. |
-| Media safety | WS-Q.2.3a/b | Image/video posts EXIF/metadata-stripped, scan-gated, alt-text required, no autoplay. |
-| Migration monotonicity | WS-Q.6.1 | No existing item gains reach; no public item loses it. |
-| Neutrality preserved | WS-Q.4.3, WS-Q.4.4 | Visibility never scores; financial denylist + BFS isolation still green. |
-| Docs byte-identical | WS-Q.6.2 | CLAUDE.md ≡ AGENTS.md; index + READMEs updated; version bumped. |
+| Home room required | Q.2.1a, Q.2.1c, Q.1.5 | No content without a home room; `Story.room_id` and `Thread.room_id` NOT NULL. |
+| Two-tier containment | Q.4.2a, Q.4.2b, Q.4.4a/b | In-room content never reaches a global surface (ranked or fallback), proven in CI. |
+| Private-room read bar | Q.3.2 | Outsiders/pending see only tier one; content reads 404. |
+| Visibility forcing | Q.1.3b, Q.2.1c | Private rooms force `room_only`; no override path. |
+| Media safety | Q.2.3a–e | Image/video EXIF/metadata-stripped, scan-gated, alt-text required, no autoplay. |
+| Migration monotonicity | Q.6.1 | No existing item gains reach; no public item loses it; chain idempotent. |
+| Neutrality preserved | Q.4.3, Q.4.4a/b | Visibility never scores; financial denylist + BFS isolation still green. |
+| Docs byte-identical | Q.6.3 | CLAUDE.md ≡ AGENTS.md; index + READMEs updated; version bumped. |
 
 ## Definition of done (workstream)
 
-- Every content item has exactly one home room (`Story.room_id` NOT NULL), and every thread's room matches its story's room.
-- Room visibility is binary (`public`/`private`) with orthogonal join-model and posting-policy axes; the legacy three-value enum is fully migrated with no read-access widening.
+- Every content item has exactly one home room (`Story.room_id` NOT NULL); every thread's room equals its story's room (trigger-enforced).
+- Room visibility is binary with orthogonal join-model/posting-policy axes; the legacy three-value enum is fully migrated with no read-access widening.
 - Content visibility is `public`/`room_only`, derived by the single shared helper; private rooms force `room_only`; transitions are bounded, audited, and emit `content.visibility.changed`.
-- Image and video posts are first-class submission types through the scan-gated, metadata-stripping media pipeline, with required alt text and no autoplay.
-- Global surfaces (front page, topic, global search, embedding similarity, share previews) serve public content only; room surfaces serve the room pool to readers who pass the bar; the distribution-side gate is always-on, fail-closed, and applies to ranked and fallback paths.
-- The neutrality + containment CI gate proves no in-room leak and that visibility is not a ranking signal; the financial denylist and wallet↔ranking BFS isolation remain green on the modified schemas.
-- All client states (compose, media, room shells, visibility management, offline) pass WCAG 2.2 AA and the no-applause/prohibited-language gates; the offline cache is version-bumped and reconciles pre-WS-Q queued submissions.
-- The migration is idempotent, resumable where it sweeps, and validated by the monotonic-visibility harness; the user-visible surface is feature-flagged and reversible while containment and the read bar are unconditionally enforced.
+- Image and video posts are first-class submission types through the scan-gated, metadata-stripping pipeline, with required alt text and no autoplay.
+- Global surfaces serve public content only; room surfaces serve the room pool behind the read bar; the distribution-side gate is always-on, fail-closed, and applies to ranked and fallback paths.
+- The neutrality + containment CI gate proves no in-room leak and that visibility is not a ranking signal; the financial denylist and wallet↔ranking BFS isolation remain green.
+- All client states pass WCAG 2.2 AA and the no-applause/prohibited-language gates; the offline cache is version-bumped and reconciles pre-WS-Q queued submissions.
+- The migration is idempotent, online-safe (expand/contract; CONCURRENTLY indexes; batched backfills), resumable where it sweeps, and validated by the monotonic-visibility harness; the user-visible surface is feature-flagged and reversible while containment and the read bar are unconditionally enforced.
 - `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm lint:security`, `pnpm check:deps`, `pnpm check:workspace-deps`, `pnpm check:no-applause`, `pnpm check:no-raw-egress`, `pnpm check:neutrality`, and `pnpm check:policy` all pass; docs are updated in the same change set and the PATCH version is bumped.

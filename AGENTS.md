@@ -665,7 +665,7 @@ licio/
 ├── docs/
 │   ├── SPEC.md                  -- canonical design specification
 │   ├── planning/                -- per-workstream planning documents
-│   │   ├── 00-index.md          --   master index (~678 atomic tasks)
+│   │   ├── 00-index.md          --   master index (~706 atomic tasks)
 │   │   ├── 01-repository-foundation.md  -- WS-0
 │   │   ├── 02-doctrine-and-policy.md    -- WS-A
 │   │   ├── 03-design-system.md          -- WS-B
@@ -1063,7 +1063,7 @@ Status:
 
 Read the per-workstream planning document under `docs/planning/`
 before starting new work.  The master index at
-`docs/planning/00-index.md` lists all ~678 atomic tasks.
+`docs/planning/00-index.md` lists all ~706 atomic tasks.
 
 ## Documentation rules
 
