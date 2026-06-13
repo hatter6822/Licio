@@ -8,6 +8,7 @@ import type {
   BranchId,
   FeedMode,
   NotificationPreferences,
+  RoomCreateRequest,
   SignalLedgerResponse,
   StoryDetail,
   UserSettings,
@@ -151,6 +152,18 @@ export function useJoinRoomMutation(roomId: string) {
     mutationFn: () => api.joinRoom(roomId),
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.room(roomId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.rooms() });
+    },
+  });
+}
+
+/** WS-Q.5.3c — create a room with the visibility/join/posting axes; refreshes
+ *  the directory on success. */
+export function useCreateRoomMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (request: RoomCreateRequest) => api.createRoom(request),
+    onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.rooms() });
     },
   });

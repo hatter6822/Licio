@@ -5,8 +5,9 @@
 // sub-route that renders RestrictedState when `governanceEnabled` is off
 // (fail-closed, WS-C.1.1d) — the URL stays shareable but inert.
 import type { RoomDetail } from '@licio/shared';
-import { Link, useParams } from '@tanstack/react-router';
-import { useEffect } from 'react';
+import { Link, useNavigate, useParams } from '@tanstack/react-router';
+import { useEffect, useState } from 'react';
+import { RoomCreateForm } from '../../components/rooms/RoomCreateForm/index.js';
 import { feedItemToCard } from '../../components/story/feed-card.js';
 import { StoryCard } from '../../components/story/StoryCard/index.js';
 import { Button } from '../../components/ui/Button/index.js';
@@ -29,10 +30,19 @@ import { usePageFocus } from './usePageFocus.js';
 export function RoomsPage(): React.ReactElement {
   const t = useT();
   usePageFocus(t('nav.rooms', 'Rooms'));
+  const navigate = useNavigate();
   const rooms = useRoomsQuery();
+  const [showCreate, setShowCreate] = useState(false);
   return (
     <PageScaffold
       title={t('nav.rooms', 'Rooms')}
+      actions={
+        <Button variant="secondary" onClick={() => setShowCreate((v) => !v)}>
+          {showCreate
+            ? t('rooms.create.cancel', 'Cancel')
+            : t('rooms.create.open', 'Create a room')}
+        </Button>
+      }
       query={rooms}
       isEmpty={(data) => data.items.length === 0}
       emptyTitle={t('rooms.empty.title', 'No rooms yet')}
@@ -42,26 +52,38 @@ export function RoomsPage(): React.ReactElement {
       )}
     >
       {(data) => (
-        <ul className="flex flex-col gap-2">
-          {data.items.map((room) => (
-            <li key={room.room_id}>
-              <Link
-                to="/rooms/$roomId"
-                params={{ roomId: room.room_id }}
-                className="flex items-center justify-between gap-2 rounded-lg border border-line p-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-              >
-                <span className="font-medium text-ink">{room.name}</span>
-                {/* Private rooms are discoverable at tier one (existence is
+        <div className="flex flex-col gap-4">
+          {showCreate ? (
+            <div className="rounded-lg border border-line p-4">
+              <RoomCreateForm
+                onCreated={(roomId) => {
+                  setShowCreate(false);
+                  void navigate({ to: '/rooms/$roomId', params: { roomId } });
+                }}
+              />
+            </div>
+          ) : null}
+          <ul className="flex flex-col gap-2">
+            {data.items.map((room) => (
+              <li key={room.room_id}>
+                <Link
+                  to="/rooms/$roomId"
+                  params={{ roomId: room.room_id }}
+                  className="flex items-center justify-between gap-2 rounded-lg border border-line p-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                >
+                  <span className="font-medium text-ink">{room.name}</span>
+                  {/* Private rooms are discoverable at tier one (existence is
                     universal); counts are public-only (no oracle). */}
-                {room.visibility === 'private' ? (
-                  <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 font-medium text-ink-muted text-xs">
-                    {t('room.badge.private', 'Private room')}
-                  </span>
-                ) : null}
-              </Link>
-            </li>
-          ))}
-        </ul>
+                  {room.visibility === 'private' ? (
+                    <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 font-medium text-ink-muted text-xs">
+                      {t('room.badge.private', 'Private room')}
+                    </span>
+                  ) : null}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </PageScaffold>
   );
