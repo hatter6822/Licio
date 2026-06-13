@@ -9,6 +9,9 @@ const chromiumExecutable = process.env['PLAYWRIGHT_CHROMIUM_EXECUTABLE'];
 
 export default defineConfig({
   testDir: './e2e',
+  // The BFF-in-the-loop specs need the API e2e-server + proxied preview; they run
+  // under playwright.bff.config.ts, never this frontend-only suite.
+  testIgnore: /\.bff\.spec\.ts$/,
   fullyParallel: true,
   forbidOnly: isCI,
   retries: isCI ? 2 : 0,

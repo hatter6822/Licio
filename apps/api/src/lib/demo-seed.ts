@@ -18,7 +18,7 @@ import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
 import { DEMO_IDS } from './demo-data.js';
 
-const SEED_USER = {
+export const SEED_USER = {
   userId: '5f5e0000-0000-4000-8000-000000000001',
   handle: 'licio-demo',
   displayName: 'Licio Demo',
@@ -35,21 +35,27 @@ export async function seedForumDemoData(
 ): Promise<void> {
   if (await forum.rooms.getById(DEMO_IDS.ROOM_1)) return; // already seeded
 
-  // The demo author (a real user row so author handles resolve).
+  // The demo author (a real user row so author handles resolve). Backdated ~90
+  // days so it is a normal aged account that clears the submission account-age
+  // gate (WS-F prechecks) — the demo/E2E user can submit content immediately.
   if (!(await identityStore.getUser(SEED_USER.userId))) {
-    await identityStore.createUser({
-      userId: SEED_USER.userId,
-      handle: SEED_USER.handle,
-      displayName: SEED_USER.displayName,
-      email: null,
-      accountState: 'active',
-      locale: 'en',
-      ageBand: 'adult',
-      privacySettings: defaultPrivacySettings(),
-      personalizationSettings: defaultPersonalizationSettings(),
-      reputationSummary: emptyReputationSummary(),
-      roles: ['user'],
-    });
+    const ninetyDaysAgo = forum.now() - 90 * 24 * 60 * 60 * 1000;
+    await identityStore.createUser(
+      {
+        userId: SEED_USER.userId,
+        handle: SEED_USER.handle,
+        displayName: SEED_USER.displayName,
+        email: null,
+        accountState: 'active',
+        locale: 'en',
+        ageBand: 'adult',
+        privacySettings: defaultPrivacySettings(),
+        personalizationSettings: defaultPersonalizationSettings(),
+        reputationSummary: emptyReputationSummary(),
+        roles: ['user'],
+      },
+      ninetyDaysAgo,
+    );
   }
 
   await forum.rooms.insert({

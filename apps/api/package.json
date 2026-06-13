@@ -7,6 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -b",
     "start": "node dist/index.js",
+    "e2e:server": "tsx src/e2e-server.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
