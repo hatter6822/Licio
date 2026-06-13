@@ -51,7 +51,8 @@ Schema change follows the **expand/contract** pattern so the running system is n
 |---|---|---|---|
 | `0014` | WS-Q.1.2 | rooms: enum recreate + columns + CHECKs + backfill | one txn; rooms table is small (bounded by room count) so the rewrite is cheap |
 | `0015` | WS-Q.1.4a | stories: ADD nullable `room_id`/`visibility`(default `public`)/`media_upload_ref`/`canonical_public_story_id`; append enum values; Commons seed | additive + defaulted; no rewrite of existing rows' data; `ADD VALUE` is non-locking |
-| `0016` | WS-Q.1.4b | stories: BACKFILL `room_id`/`visibility` in batches, then `SET NOT NULL` | batched UPDATE (keyset by `created_at`); NOT NULL only after backfill completes |
+| *(deploy)* | WS-Q.2.1c + 1.4a | deploy the dual-write serving code (every insert path writes `room_id`/`visibility`) | required BETWEEN `0015` and `0016` — see "Deploy ordering" below |
+| `0016` | WS-Q.1.4b | stories: BACKFILL `room_id`/`visibility` in batches, then `SET NOT NULL` | batched UPDATE (keyset by `created_at`); NOT NULL only after the dual-write deploy AND the backfill complete |
 | `0017` | WS-Q.1.4c | stories: drop global URL unique; add the two partial unique indexes | `CREATE INDEX CONCURRENTLY` (outside a txn) to avoid write locks |
 | `0018` | WS-Q.1.5 | threads: backfill `room_id`, `SET NOT NULL`, consistency trigger | batched backfill before NOT NULL/trigger |
 | `0019` | WS-Q.1.7b | audit enum: `ADD VALUE` the two new audit types | non-locking enum extension |
@@ -59,7 +60,9 @@ Schema change follows the **expand/contract** pattern so the running system is n
 
 Every migration ships an idempotent down path; where a down path is lossy (e.g. rooms created with `invite` after `0014`) the card documents it explicitly. Each gated integration test runs the REAL chain in CI's Postgres service container (the WS-D…WS-I precedent).
 
-**Transient-default safety.** `0015` adds `stories.visibility` as `NOT NULL DEFAULT 'public'`, so between `0015` and the `0016` backfill an existing private-room story is briefly stamped `public` at rest. This is never a live over-exposure window because (a) the chain `0014`–`0020` is applied as a unit ahead of the serving code that depends on it (standard deploy ordering), and (b) the runtime distribution gate (WS-Q.4.2a) and read bar (WS-Q.3.2) ship with that code and re-derive containment from `room.visibility` at serve time, so even a mislabeled row cannot leak from a private room. New rows written during the window go through the submission guard (WS-Q.2.1c), which sets the correct value. The migration harness (WS-Q.6.1) asserts the post-`0016` end state, not the transient.
+**Deploy ordering (expand → dual-write → contract).** The `NOT NULL` and uniqueness contracts are NOT applied in the same window as the additive expand, because the currently-shipped insert paths do not write `stories.room_id` (`apps/api/src/ingestion/drizzle-ingestion-stores.ts` story insert) and the in-memory thread shell still sets `roomId: null` (`apps/api/src/ingestion/stores.ts`). If `0016`'s `SET NOT NULL` ran while an old API instance is still live, that instance's NULL-`room_id` inserts would fail (or, before NOT NULL, would re-introduce NULL rows the backfill just cleared). The required order is therefore: (1) ship `0015` (additive, nullable — old code keeps working); (2) **deploy the dual-write serving code** — WS-Q.2.1c plus the store-level insert paths above, every one of which now writes `room_id`/`visibility` (private/old submissions default to the Commons room and `deriveStoryVisibility`); (3) once no old instance remains, run `0016` (batched backfill, then `SET NOT NULL`) and `0017`/`0018`. WS-Q.2.1c updates those store insert paths (`drizzle-ingestion-stores.ts` story insert; the in-memory `stores.ts` thread shell) so the dual-write deploy is real, and WS-Q.6.2's rollout plan gates `0016` on that deploy being live everywhere.
+
+**Transient-default safety.** `0015` adds `stories.visibility` as `NOT NULL DEFAULT 'public'`, so between `0015` and the `0016` backfill an existing private-room story is briefly stamped `public` at rest. This is never a live over-exposure window because the runtime distribution gate (WS-Q.4.2a) and read bar (WS-Q.3.2) — deployed with the dual-write code, before `0016` — re-derive containment from `room.visibility` at serve time, so even a `public`-stamped row in a private room is dropped from every global surface and gated on reads. The migration harness (WS-Q.6.1) asserts the post-`0016` end state, not the transient.
 
 ### Conventions for this workstream
 
@@ -115,7 +118,7 @@ Every migration ships an idempotent down path; where a down path is lossy (e.g. 
 ### WS-Q.1.2 DB room schema + migration 0014 (enum recreate + axes + backfill)
 **ID:** WS-Q.1.2 | **Ref:** Sections 16.1, 16.2, 22.1
 
-**Description:** In `packages/db/src/schema/room.ts` recreate `roomVisibilityEnum` as `('public','private')`; add `joinModelEnum`, `postingPolicyEnum`, and the `join_model`/`posting_policy` NOT NULL columns; add CHECKs `(visibility = 'private' OR join_model = 'open')` and `(room_type <> 'steward' OR visibility = 'private')`. Migration `0014` (one txn, following the 0008 enum-recreation precedent): create the new enum, `ALTER COLUMN ... USING` map (`restricted→private`, `expert_led→private`), backfill `join_model`/`posting_policy` from the OLD visibility value with the `mapLegacyRoomVisibility` semantics expressed in SQL, drop the old enum, add the CHECKs. The rooms table is bounded by room count, so the rewrite is cheap and a single txn is safe.
+**Description:** In `packages/db/src/schema/room.ts` recreate `roomVisibilityEnum` as `('public','private')`; add `joinModelEnum`, `postingPolicyEnum`, and the `join_model`/`posting_policy` NOT NULL columns; add CHECKs `(visibility = 'private' OR join_model = 'open')` and `(room_type <> 'steward' OR visibility = 'private')`. Migration `0014` (one txn, following the 0008 enum-recreation precedent) must derive the new axes **from the legacy value BEFORE that value is collapsed**, in this exact order: (1) add `join_model`/`posting_policy` as nullable; (2) backfill them from the still-present three-value `visibility` per `mapLegacyRoomVisibility` (`public→open/all_members`, `restricted→request_approval/all_members`, `expert_led→request_approval/experts_and_stewards`) — this is the only step that can still distinguish `expert_led`, so it MUST precede the enum change; (3) only then recreate the enum and `ALTER COLUMN visibility ... USING` map (`restricted→private`, `expert_led→private`); (4) set the two columns NOT NULL and add the CHECKs. Reordering — collapsing the enum first — would erase the `expert_led` distinction and silently widen those rooms' top-level posting to `all_members`; the row-order above prevents that. The rooms table is bounded by room count, so the rewrite is cheap and a single txn is safe.
 
 **Acceptance criteria:**
 - Migration is green on a DB seeded with all three legacy values; the mapped triples are asserted row-by-row.
@@ -204,9 +207,11 @@ Every migration ships an idempotent down path; where a down path is lossy (e.g. 
 - Re-running 0016 is idempotent (already-backfilled rows are skipped).
 - Down migration drops NOT NULL (data backfill is not reverted — documented).
 
-**Testing:** Gated integration — every backfill branch on seeded data; the monotonic-visibility property (asserted fully in WS-Q.6.1).
+**Online-rollout guard:** `0016` runs ONLY after the WS-Q.2.1c dual-write deploy is live on every API instance (see "Deploy ordering"). Until then, an old instance could insert a NULL `room_id` and either fail the new constraint or re-introduce a NULL row after the backfill; the deploy gate (WS-Q.6.2) closes that window. The backfill is re-runnable, so a late straggler row is caught by re-running the batch before `SET NOT NULL`.
 
-**Dependencies:** WS-Q.1.4a, WS-Q.1.6 (Commons app-ensure is parallel; the seed row is created in 0015).
+**Testing:** Gated integration — every backfill branch on seeded data; a NULL-insert-during-window simulation proving `SET NOT NULL` is reached only after dual-write; the monotonic-visibility property (asserted fully in WS-Q.6.1).
+
+**Dependencies:** WS-Q.1.4a, WS-Q.2.1c (dual-write must deploy first), WS-Q.1.6 (Commons app-ensure is parallel; the seed row is created in 0015).
 
 ---
 
@@ -215,14 +220,17 @@ Every migration ships an idempotent down path; where a down path is lossy (e.g. 
 
 **Description:** Migration `0017` replaces the global canonical-URL partial unique index with the tier-scoped pair, created `CONCURRENTLY` (outside a txn) to avoid blocking writes: `UNIQUE (canonical_url) WHERE canonical_url IS NOT NULL AND visibility = 'public' AND hidden_state IS NULL` and `UNIQUE (canonical_url, room_id) WHERE canonical_url IS NOT NULL AND visibility = 'room_only' AND hidden_state IS NULL`. Drop the old global index after the new public index is valid.
 
+**Takedown-bypass guard (regression vs. the shipped global index).** The old index covered ALL non-null URLs, so a taken-down/safety-hidden URL stayed blocked from re-submission. The `hidden_state IS NULL` predicate above is required (a hidden row must not occupy the live unique slot) but, on its own, would let the same URL be re-submitted as a fresh public or room-only story — bypassing the takedown. To preserve the takedown decision, the **submission guard (WS-Q.2.2a) consults a canonical-URL takedown/tombstone denylist** on every insert path: a URL whose prior story was removed by takedown (not merely author-narrowed) is rejected at submission regardless of tier. The denylist keys on the normalized canonical URL and is written by the takedown actioning path (WS-Q.2.6); it is the companion the partial index requires.
+
 **Acceptance criteria:**
 - Two public stories with one canonical URL are impossible; the same URL may exist `room_only` in two rooms; a `room_only` row never blocks a public insert.
+- A URL taken down on a prior story is rejected on re-submission in BOTH tiers (the denylist check), proving no takedown bypass via the `hidden_state` predicate.
 - Index creation does not hold a write lock (CONCURRENTLY; migration marked non-transactional).
 - Down migration restores the global unique index (valid only when no tier-duplicate URLs exist — documented).
 
-**Testing:** Gated integration — concurrent public-insert race (exactly one wins, the rest 409 at the service layer, WS-Q.2.2a); same-URL-different-rooms both succeed.
+**Testing:** Gated integration — concurrent public-insert race (exactly one wins, the rest 409 at the service layer, WS-Q.2.2a); same-URL-different-rooms both succeed; re-submitting a taken-down URL is rejected in both tiers.
 
-**Dependencies:** WS-Q.1.4b.
+**Dependencies:** WS-Q.1.4b. Soft: WS-Q.2.6 (takedown writes the denylist).
 
 ---
 
@@ -289,19 +297,20 @@ Every migration ships an idempotent down path; where a down path is lossy (e.g. 
 
 ---
 
-### WS-Q.1.7c `content.submitted`/`content.normalized` gain room + visibility
-**ID:** WS-Q.1.7c | **Ref:** Sections 14.5, 21.3
+### WS-Q.1.7c `content.submitted`/`content.normalized` gain room + visibility (classification tracks visibility)
+**ID:** WS-Q.1.7c | **Ref:** Sections 14.5, 14.5.7, 21.3
 
-**Description:** Add `room_id: uuidSchema` and `visibility: storyVisibilitySchema` to the shared `contentShape` in `events/content.ts` (covers both `content.submitted` and `content.normalized`). This is an additive event-field change; update the consumers that read these events (lifecycle init, search-index population, ranking feature population) to thread the new fields, and the firewall/parse tests.
+**Description:** Add `room_id` and `visibility` to the content events AND make their privacy classification track the content's visibility — the two changes ship together. Today `contentShape` hardcodes `privacy_classification: z.literal('public')` / `retention_tier: z.literal('public_contribution')`, which assert "the author intends this public." For a `room_only` submission that assertion is FALSE: a `public`-classified `content.submitted` is consumable by generic public/scoring consumers, so naively adding `room_id`/`canonical_url`/`topics`/`submitted_by` would disclose in-room metadata past the room read bar. Therefore: a `public`-visibility submission keeps `privacy_classification: 'public'` / `public_contribution` (unchanged); a `room_only` submission emits with a non-public **in-room** classification (the restricted first-party tier) so the generic public consumers do not read it, while the visibility-aware internal consumers that legitimately need it (lifecycle init, search-index population scoped by visibility, ranking feature population that must EXCLUDE room_only from global) subscribe explicitly and honor the bar. Implementation choice (separate in-room classification on the existing union vs. a redacted public variant + a full in-room variant) is settled in this card's design step; the binding requirement is that **no in-room story's URL/topics/submitter ever flow to a consumer that treats the event as public.** Update the firewall/parse tests accordingly.
 
 **Acceptance criteria:**
-- Both content events carry `room_id`+`visibility`; strict parsing still holds.
-- Downstream consumers compile and receive the fields; no consumer treats `visibility` as a behavioral signal.
+- A `room_only` submission's `content.submitted`/`content.normalized` is NOT classified `public`; a test proves a generic public-topic consumer never receives a `room_only` event's `canonical_url`/`topics`/`submitted_by`.
+- A `public` submission's events are byte-compatible with today's shape (no regression for public content).
+- The visibility-aware internal consumers (lifecycle, search, ranking feature population) receive the new fields and honor visibility; no consumer treats `visibility` as a behavioral signal.
 - The pay-to-rank firewall test still passes (no financial field introduced).
 
-**Testing:** Unit — content-event parse with the new fields; consumer wiring smoke tests.
+**Testing:** Unit — content-event parse for both visibilities; the "public consumer never sees in-room metadata" assertion; consumer wiring smoke tests.
 
-**Dependencies:** WS-Q.1.3a.
+**Dependencies:** WS-Q.1.3a. Related: WS-E topic registry (classification/retention taxonomy) — if a new in-room first-party classification value is required, it is added here with the registry count/firewall tests updated.
 
 ---
 
@@ -491,12 +500,13 @@ Every migration ships an idempotent down path; where a down path is lossy (e.g. 
 ### WS-Q.2.4b Widen transition (`room_only → public`)
 **ID:** WS-Q.2.4b | **Ref:** Section 14.5.2
 
-**Description:** Extend the same endpoint to widen, allowed ONLY when the home room is public (private-room widen ⇒ 422 citing 14.5.1). Widening re-runs public-admission synchronously: tier-scoped exact-URL dedup (409 + pointer to the existing public story on collision), spam-title/malware pre-checks, freshness-baseline (re)init, and a search/feature reindex enqueue. Audit + `content.visibility.changed` (`trigger='author'`).
+**Description:** Extend the same endpoint to widen, allowed ONLY when the home room is public (private-room widen ⇒ 422 citing 14.5.1). Widening re-runs the FULL public-admission path synchronously — the same checks a fresh public submission gets — because WS-Q.2.2c deliberately kept the item out of the public near-dup/syndication clusters while it was `room_only`: tier-scoped exact-URL dedup (409 + pointer to the existing public story on collision), **`findNearDuplicates`/`classifyDuplicate` against the public cluster** (so a near-duplicate-but-not-exact item gets the same MERI/syndication flagging and auto-link/candidate routing as any public submission — its stored signature from WS-Q.2.2c makes this a query, not a recompute), spam-title/malware pre-checks, freshness-baseline (re)init, and a search/feature reindex enqueue. Audit + `content.visibility.changed` (`trigger='author'`).
 
 **Acceptance criteria:**
 - Widen in a private room ⇒ 422; widen colliding with an existing public URL ⇒ 409 + pointer (no silent merge); otherwise the item becomes `public` and globally eligible on the next serve.
+- A `room_only` item that is a NEAR-duplicate (not exact-URL) of a public story is evaluated by `findNearDuplicates`/`classifyDuplicate` on widen and receives the normal near-dup/syndication outcome — it cannot enter the public tier unscreened.
 
-**Testing:** Unit — widen matrix (public/private room × URL-collision). Gated integration — widen re-runs dedup against live partial indexes.
+**Testing:** Unit — widen matrix (public/private room × exact-URL collision × near-dup). Gated integration — widen re-runs exact AND near-dup dedup against the live public cluster.
 
 **Dependencies:** WS-Q.2.4a, WS-Q.2.2a.
 
@@ -505,12 +515,13 @@ Every migration ships an idempotent down path; where a down path is lossy (e.g. 
 ### WS-Q.2.5a Global search tier predicate (both adapters)
 **ID:** WS-Q.2.5a | **Ref:** Sections 14.5.3, 14.5.4
 
-**Description:** Add `visibility = 'public'` to the server-side visibility predicate of global search in BOTH `SearchIndex` adapters (in-memory FTS semantics and the Drizzle FTS) alongside the existing hidden/retracted exclusions. Embedding-similarity reads feeding GLOBAL surfaces (related stories, public claim pages) filter to the public tier. Keyset pagination is unchanged.
+**Description:** Section 14.5 scopes global surfaces to "public content **from public rooms**," so the predicate is BOTH conditions, not just the item flag: global search in both `SearchIndex` adapters (in-memory FTS semantics and the Drizzle FTS) filters `story.visibility = 'public' AND room.visibility = 'public'` (the Drizzle adapter joins or `EXISTS`-checks `rooms`; the in-memory adapter checks the room record), alongside the existing hidden/retracted exclusions. Embedding-similarity reads feeding GLOBAL surfaces (related stories, public claim pages) apply the same two-condition filter. The room-visibility conjunct is deliberate defense-in-depth: a story is only ever `public` in a public room in steady state (private rooms force `room_only`), but the migration window (0015 default `public` before the 0016 backfill) and any future cascade bug could transiently leave a private-room row stamped `public`; checking the room closes that gap so a mislabeled row never surfaces even to a reader who passes that room's bar. Keyset pagination is unchanged.
 
 **Acceptance criteria:**
 - A `room_only` story never appears in any global FTS or vector result in either adapter (adversarial twin-title test: identical-title public + room_only ⇒ only public returns globally).
+- A story stamped `public` whose home room is `private` (the transient/cascade-bug case) ALSO never appears on a global surface — the room-visibility conjunct excludes it.
 
-**Testing:** Unit — both adapters' predicate + the twin-title test. Gated integration — Drizzle FTS predicate + pagination.
+**Testing:** Unit — both adapters' two-condition predicate; the twin-title test; the mislabeled-row (public story / private room) exclusion. Gated integration — Drizzle FTS join predicate + pagination.
 
 **Dependencies:** WS-Q.1.4a.
 
@@ -551,13 +562,14 @@ Every migration ships an idempotent down path; where a down path is lossy (e.g. 
 ### WS-Q.3.1a Adapt the room read bar to binary visibility
 **ID:** WS-Q.3.1a | **Ref:** Sections 16.1, 16.2
 
-**Description:** Retarget the two existing bar functions in `apps/api/src/forum/rooms.ts` to the binary enum WITHOUT changing their call-site contract. `roomVisibleToUser` (tier one): `true` for `public`; for `private`, any subscription (active OR pending) or steward role. `roomContentVisibleToUser` (tier two): `true` for `public`; for `private`, ACTIVE membership or steward role. Logic is unchanged — only the `=== 'public'` discriminator replaces the three-value check.
+**Description:** Retarget the two existing bar functions in `apps/api/src/forum/rooms.ts` to the binary enum. This is a **deliberate semantic change** from the shipped restricted-room behavior, required by SPEC §16.1/§16.2: tier one (room *existence* — name, description, visibility class, join affordance) is visible to ALL so private rooms are discoverable and joinable. `roomVisibleToUser` (tier one) therefore returns `true` for every non-archived room — public AND private — to everyone, signed-in or not (the old code returned `false` for a non-subscribed restricted room, which would hide private rooms and strand the join affordance; that hiding is dropped). `roomContentVisibleToUser` (tier two — content) is unchanged in spirit: `true` for `public`; for `private`, ACTIVE membership or steward role. Net: existence is universal; content is members-only. (Steward rooms are private and thus discoverable-by-existence per the SPEC; if "unlisted/secret" rooms are later wanted, that is a new SPEC axis, out of scope here — see the WS-Q summary note.)
 
 **Acceptance criteria:**
-- Behavior parity for migrated rooms: a former `restricted`/`expert_led` room (now `private`) gates reads exactly as before.
-- Signed-out users pass neither bar for private rooms; they see only tier one.
+- `roomVisibleToUser` is `true` for any non-archived room for any user including signed-out (tier-one existence is universal); it is NOT gated by subscription.
+- `roomContentVisibleToUser` is `true` for public rooms (all) and private rooms (active member/steward only); pending applicants and outsiders fail tier two.
+- A signed-out user can resolve a private room's tier-one shell and reach its join affordance (the WS-Q.5.3a dependency holds); they read no content.
 
-**Testing:** Unit — bar truth tables over visibility × membership-state × steward.
+**Testing:** Unit — tier-one universality (incl. signed-out + non-member) and tier-two truth table over visibility × membership-state × steward.
 
 **Dependencies:** WS-Q.1.1a, WS-Q.1.2.
 
@@ -702,10 +714,11 @@ Every migration ships an idempotent down path; where a down path is lossy (e.g. 
 ### WS-Q.4.1b Visibility-scoped retrievers
 **ID:** WS-Q.4.1b | **Ref:** Sections 13.2, 14.5.3
 
-**Description:** Scope retrieval by surface: the EIGHT organic retrievers that feed the front page/topic (`subscribed_rooms_v1`, `local_news_v1`, `global_pwatt_v1`, `emerging_discussions_v1`, `independent_additions_v1`, `cross_community_bridges_v1`, `expert_explanations_v1`, `chronological_catch_up_v1`) gain a `visibility='public'` predicate (so even a user's own subscribed private-room content is excluded from the public front page); `RoomSurfaceRetriever` queries the target room's full pool (`public` + `room_only`).
+**Description:** Scope retrieval by surface: the EIGHT organic retrievers that feed the front page/topic (`subscribed_rooms_v1`, `local_news_v1`, `global_pwatt_v1`, `emerging_discussions_v1`, `independent_additions_v1`, `cross_community_bridges_v1`, `expert_explanations_v1`, `chronological_catch_up_v1`) gain the global predicate `story.visibility='public' AND room.visibility='public'` — both conjuncts, matching the global-search rule (WS-Q.2.5a), so a transiently-mislabeled `public` story in a private room is excluded here too and even a user's own subscribed private-room content stays off the public front page; `RoomSurfaceRetriever` queries the target room's full pool (`public` + `room_only`).
 
 **Acceptance criteria:**
 - A `room_only` story matching every front-page heuristic appears in NONE of the eight organic retrievers (adversarial sweep).
+- A `public`-stamped story whose home room is `private` also appears in none of the eight (the room-visibility conjunct).
 - The room scoper emits the room's `room_only` items for a reader who passes the bar.
 
 **Testing:** Unit — per-retriever public predicate; the adversarial exclusion sweep across all eight; room-scoper inclusion.
@@ -717,10 +730,10 @@ Every migration ships an idempotent down path; where a down path is lossy (e.g. 
 ### WS-Q.4.2a Surface-aware distribution gate (`filterByVisibility`)
 **ID:** WS-Q.4.2a | **Ref:** Sections 13.2, 14.5.3
 
-**Description:** Rename `filterByRoomVisibility`→`filterByVisibility` and add the item-tier clause as the authoritative always-on backstop: on `front_page`/`topic`, drop every `room_only` candidate; on `room`, keep `room_only` only for the surface's own room. Keep the existing per-distinct-room `roomContentVisibleToUser` clause. Remove the dead "room-less items pass through" branch (every item now has a room; unknown room ⇒ fail closed). Each drop is logged with a reason (`item_visibility` vs `room_bar`).
+**Description:** Rename `filterByRoomVisibility`→`filterByVisibility` and add the item-tier clause as the authoritative always-on backstop. On `front_page`/`topic` the rule is the SAME two-condition test the retrievers and search use — drop a candidate unless `item.visibility='public' AND its room.visibility='public'` — so a `room_only` item OR a `public`-stamped item in a private room (the migration-transient/cascade-bug case) is dropped even if a buggy retriever emitted it; on `room`, keep `room_only` only for the surface's own room. Keep the existing per-distinct-room `roomContentVisibleToUser` clause. Remove the dead "room-less items pass through" branch (every item now has a room; unknown room ⇒ fail closed). Each drop is logged with a reason (`item_visibility` / `room_private_on_global` / `room_bar`). The per-distinct-room lookup the gate already does supplies `room.visibility` cheaply (no extra query).
 
 **Acceptance criteria:**
-- A force-injected `room_only` candidate cannot appear on `front_page`/`topic`; on `room`, foreign-room `room_only` is dropped and own-room `room_only` passes (behind the bar); unknown room fails closed on every surface.
+- A force-injected `room_only` candidate cannot appear on `front_page`/`topic`; a force-injected `public` candidate whose room is `private` also cannot; on `room`, foreign-room `room_only` is dropped and own-room `room_only` passes (behind the bar); unknown room fails closed on every surface.
 
 **Testing:** Unit — surface × visibility × membership matrix; force-injected `room_only` on front_page is dropped; reason-coded logging.
 
