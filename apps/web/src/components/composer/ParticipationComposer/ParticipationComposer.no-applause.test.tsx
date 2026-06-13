@@ -49,7 +49,7 @@ describe('ParticipationComposer no-applause guarantee (WS-B.2.10)', () => {
     }
   });
 
-  it('has no submit-for-applause button — the only submit verb is "Add contribution"', async () => {
+  it('has no submit-for-applause button — draft save is not a submit control', async () => {
     const user = userEvent.setup();
     const { container, getByRole } = render(<ParticipationComposer />);
     await user.click(
@@ -57,7 +57,9 @@ describe('ParticipationComposer no-applause guarantee (WS-B.2.10)', () => {
         /^Ask/i.test(b.textContent ?? ''),
       ) as HTMLButtonElement,
     );
+    const draft = getByRole('button', { name: /save draft/i });
     const submit = getByRole('button', { name: /add contribution/i });
+    expect(draft).toHaveAttribute('type', 'button');
     expect(submit).toHaveAttribute('type', 'submit');
     // There is exactly one submit-type control and it is not an applause action.
     const submits = Array.from(container.querySelectorAll('button[type="submit"]'));

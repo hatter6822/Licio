@@ -189,6 +189,17 @@ describe('ParticipationComposer privacy (WS-G.3.6b)', () => {
 });
 
 describe('ParticipationComposer draft handling (WS-G.3.7c seam)', () => {
+  it('offers every contribution mode both an explicit draft save and submit action', () => {
+    for (const type of CONTRIBUTION_TYPES) {
+      const { unmount } = render(<ParticipationComposer defaultMode={type} />);
+      expect(screen.getByRole('button', { name: /save draft/i })).toHaveAttribute('type', 'button');
+      expect(screen.getByRole('button', { name: /add contribution/i })).toHaveAttribute(
+        'type',
+        'submit',
+      );
+      unmount();
+    }
+  });
   it('fires onDraftChange on every edit with the live values', async () => {
     const user = userEvent.setup();
     const onDraftChange = vi.fn();
@@ -199,6 +210,49 @@ describe('ParticipationComposer draft handling (WS-G.3.7c seam)', () => {
       'question',
       expect.objectContaining({ body: 'Hi' }),
     );
+  });
+
+  it('saves the current contribution as a draft without submitting or validating required fields', async () => {
+    const user = userEvent.setup();
+    const onSaveDraft = vi.fn();
+    const onSubmit = vi.fn();
+    render(<ParticipationComposer onSaveDraft={onSaveDraft} onSubmit={onSubmit} />);
+    await chooseMode(user, /^Ask/i);
+    await user.type(screen.getByLabelText(/^Question/i), 'Draft this question');
+
+    await user.click(screen.getByRole('button', { name: /save draft/i }));
+
+    expect(onSaveDraft).toHaveBeenCalledWith(
+      'question',
+      expect.objectContaining({ body: 'Draft this question' }),
+    );
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('keeps draft saving available for gated modes while submit is still blocked', async () => {
+    const user = userEvent.setup();
+    const onSaveDraft = vi.fn();
+    const onSubmit = vi.fn();
+    render(<ParticipationComposer onSaveDraft={onSaveDraft} onSubmit={onSubmit} />);
+    await chooseMode(user, /^Experience/i);
+    await user.type(
+      screen.getByLabelText(/What you directly experienced/i),
+      'I attended the hearing.',
+    );
+    await user.type(screen.getByLabelText(/Your vantage point/i), 'Hearing attendee');
+
+    const submit = screen.getByRole('button', { name: /add contribution/i });
+    expect(submit).toHaveAttribute('aria-disabled', 'true');
+    await user.click(screen.getByRole('button', { name: /save draft/i }));
+
+    expect(onSaveDraft).toHaveBeenCalledWith(
+      'direct_experience',
+      expect.objectContaining({
+        body: 'I attended the hearing.',
+        scope: 'Hearing attendee',
+      }),
+    );
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it('preserves a draft when switching modes and back', async () => {

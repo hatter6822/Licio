@@ -10,7 +10,9 @@
 //
 // Field state lives in this component, keyed by mode, so a draft survives
 // re-render AND survives switching modes and back. `onDraftChange` fires on
-// every edit (hand the draft to autosave); `onSubmit` reports the final values.
+// every edit (hand the draft to autosave); `onSaveDraft` lets the user
+// explicitly keep an incomplete or complete draft; `onSubmit` reports the final
+// values for validation and publishing.
 //
 // Doctrine (no applause): there is intentionally no submit-for-applause action
 // and no reaction / like / vote control anywhere here. Asserted in the
@@ -45,6 +47,8 @@ export interface ParticipationComposerProps {
   onModeChange?: (mode: ComposerMode) => void;
   /** Called on submit with the active mode and its field values. */
   onSubmit?: (mode: ComposerMode, values: ComposerValues) => void;
+  /** Called when the user explicitly saves the active mode as a draft. */
+  onSaveDraft?: (mode: ComposerMode, values: ComposerValues) => void;
   /** Called on EVERY field change — pass the draft straight to autosave. */
   onDraftChange?: (mode: ComposerMode, values: ComposerValues) => void;
   /**
@@ -70,6 +74,7 @@ export function ParticipationComposer({
   defaultMode,
   onModeChange,
   onSubmit,
+  onSaveDraft,
   onDraftChange,
   errors,
   initialValues,
@@ -142,6 +147,13 @@ export function ParticipationComposer({
       return t('composer.error.required', 'This field is required.');
     }
     return undefined;
+  };
+
+  const handleSaveDraft = (): void => {
+    if (!activeMode) {
+      return;
+    }
+    onSaveDraft?.(activeMode, activeValues);
   };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>): void => {
@@ -332,6 +344,7 @@ export function ParticipationComposer({
           mode={activeMode}
           values={activeValues}
           onSubmit={handleSubmit}
+          onSaveDraft={handleSaveDraft}
           renderField={renderField}
         />
       ) : (
@@ -347,14 +360,16 @@ interface ComposerFormProps {
   mode: ComposerMode;
   values: ComposerValues;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSaveDraft: () => void;
   renderField: (field: ModeField) => React.ReactElement;
 }
 
-/** The active mode's prompt heading + its fields + a submit (contribute) button. */
+/** The active mode's prompt heading + its fields + explicit draft and submit actions. */
 function ComposerForm({
   mode,
   values,
   onSubmit,
+  onSaveDraft,
   renderField,
 }: ComposerFormProps): React.ReactElement {
   const t = useT();
@@ -378,9 +393,12 @@ function ComposerForm({
 
       <div className="flex flex-col gap-4">{definition.fields.map(renderField)}</div>
 
-      {/* The submit verb is "Contribute" — never "Post" / "Like". This adds a
-          structured contribution; it is not an applause action. */}
-      <div className="flex">
+      {/* The actions are explicit: save a recoverable draft, or submit the
+          structured contribution. Neither is an applause action. */}
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" variant="secondary" onClick={onSaveDraft}>
+          {t('composer.saveDraft', 'Save draft')}
+        </Button>
         <Button type="submit" variant="primary" disabled={ackPending}>
           {t('composer.submit', 'Add contribution')}
         </Button>
