@@ -170,6 +170,10 @@ jobs:
           key: playwright-${{ hashFiles('apps/web/node_modules/@playwright/test/package.json') }}
       - run: pnpm --filter web exec playwright install --with-deps chromium firefox webkit
       - run: pnpm --filter web test:e2e
+      # BFF-in-the-loop authenticated WS-Q flows (WS-P harness): the config boots
+      # the in-memory API e2e-server + the proxied preview itself — no extra
+      # service containers needed (in-memory stores only).
+      - run: pnpm --filter web test:e2e:bff
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:

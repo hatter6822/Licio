@@ -181,10 +181,11 @@ Background-Sync `sync` event (wakes a client to run the validated queue replay).
 
 A thin typed Promise wrapper over **raw IndexedDB** (no `idb` dependency).
 
-- **Five object stores (2.2a):** `saved-stories`, `draft-contributions`,
-  `thread-snapshots`, `signal-ledger`, `pending-queue`, with the documented
-  indexes. Versioned migrations run inside the single `onupgradeneeded`
-  transaction, so a failed migration aborts atomically (never half-migrated).
+- **Six object stores (2.2a):** `saved-stories`, `draft-contributions`,
+  `draft-stories`, `thread-snapshots`, `signal-ledger`, `pending-queue`, with the
+  documented indexes. Versioned migrations run inside the single `onupgradeneeded`
+  transaction, so a failed migration aborts atomically (never half-migrated). The
+  v3 bump adds `draft-stories` additively (user data preserved).
 - **Integrity layer (2.2c):** every read AND write is zod-validated. A record
   that fails read validation is **quarantined** (counted, excluded, left in place
   for recovery), never silently deleted.
@@ -195,7 +196,12 @@ A thin typed Promise wrapper over **raw IndexedDB** (no `idb` dependency).
   exportable, or at rest in any readable form (no JWK to dump), and plaintext never
   reaches the draft store. Best-effort — where Web Crypto is absent the draft is
   stored plaintext so it is never lost; a transient key-store failure never
-  permanently downgrades the session to plaintext.
+  permanently downgrades the session to plaintext. The **story composer**
+  (WS-Q.5.1b) autosaves to `draft-stories` the same way: mode/room/visibility are
+  plaintext metadata that round-trip on restore, the text body is encrypted, and a
+  failed/offline submit keeps the exact draft (stories are draft-preserved, never
+  queued to a default room). Share-target intake (`?share_url=`) with no thread
+  target seeds a link post in the story composer.
 - **Pending queue + sync (2.3):** the single source of truth for unsynced writes.
   Server-wins conflict policy — a 4xx rejection (e.g. a locked thread) is terminal
   (notify + preserve the draft); transient failures retry up to 5 times; an

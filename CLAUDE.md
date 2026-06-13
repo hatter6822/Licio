@@ -205,11 +205,16 @@ DSAR/anonymization across both tiers; takedown reach over room-tier content;
 fail-closed content rollout flags (containment is NOT flaggable); the gated
 end-to-end migration-validation harness (monotonic-visibility property, verified
 against live pgvector); and the full WS-Q.5 client surface — the story-submission
-composer (home-room picker, visibility lock, image/video modes), native media
-rendering (no autoplay), the room shell/feed/in-room chip/create form, the author
-visibility control, the participation-weighted front-page framing, and the
-offline cache-version bump.  Workstreams WS-J through WS-P are planned (planning
-documents exist under `docs/planning/`; implementation not yet started).  See
+composer (home-room picker, visibility lock, image/video modes, encrypted draft
+autosave that round-trips room + visibility, and share-target link prefill),
+native media rendering (no autoplay), the room shell/feed/in-room chip/create
+form, the author visibility control, the participation-weighted front-page
+framing (now also under the route-scanning no-applause gate), and the offline
+cache-version bump.  An authenticated **BFF-in-the-loop E2E harness** (the WS-P
+seed: an in-memory API `e2e-server` + a gated test-only login + a proxied
+preview) drives the WS-Q flows in real browsers with axe.  Workstreams WS-J
+through WS-P are planned (planning documents exist under `docs/planning/`;
+implementation not yet started, beyond that E2E-harness seed).  See
 "Implementation roadmap" below for the full status table.
 
 ## Build and run
@@ -225,6 +230,7 @@ pnpm build                          # shared → db/invariants → web/api
 pnpm test                           # Vitest across all workspaces (80% coverage gate)
 pnpm test -- --coverage             # with coverage report
 pnpm test:e2e                       # Playwright E2E (Chromium, Firefox, WebKit)
+pnpm --filter web test:e2e:bff      # BFF-in-the-loop authenticated E2E (in-memory API)
 pnpm lint                           # Biome check (format + lint)
 pnpm lint:fix                       # auto-fix lint issues
 pnpm typecheck                      # TypeScript strict-mode across all workspaces
@@ -236,7 +242,7 @@ pnpm check:deps                     # dependency-budget enforcement
 pnpm check:workspace-deps           # workspace boundary enforcement (pkg.json + imports)
 pnpm check:policy                   # doctrine/policy document validation
 pnpm check:neutrality               # the ten WS-I.3 ranking-neutrality tests
-pnpm check:no-applause              # no likes/votes/karma/reactions in components
+pnpm check:no-applause              # no likes/votes/karma/reactions in components + routes
 pnpm check:no-raw-egress            # no raw attention traces leaving the browser
 pnpm check:sw                       # SW security scan (run after build)
 
@@ -289,7 +295,8 @@ After any source change, also run:
 * `pnpm check:workspace-deps` — fails if a package imports across
   a forbidden workspace boundary (e.g. web importing `@licio/db`).
 * `pnpm check:no-applause` — fails if like/vote/karma/reaction
-  affordances appear in `apps/web/src/components/`.
+  affordances appear in `apps/web/src/components/` or `apps/web/src/routes/`
+  (the latter covers route-level page copy, e.g. the front-page framing).
 * `pnpm check:no-raw-egress` — fails if raw attention traces
   (scrollX, clientY, dwellMs, etc.) appear in the signals layer or
   if the signals layer imports anything other than the bucketed
@@ -374,11 +381,11 @@ licio/
 │   │       │   ├── time.ts              --   time utilities
 │   │       │   └── cn.ts               --   class-name merger
 │   │       ├── offline/                 -- offline-first (IndexedDB)
-│   │       │   ├── db.ts                --   5 object stores, versioned migrations
+│   │       │   ├── db.ts                --   6 object stores, versioned migrations
 │   │       │   ├── store.ts             --   zod-validated integrity layer
 │   │       │   ├── queue.ts             --   pending-operation sync queue
 │   │       │   ├── sync.ts              --   sync engine
-│   │       │   ├── drafts.ts            --   draft management
+│   │       │   ├── drafts.ts            --   contribution + story draft management
 │   │       │   ├── draft-crypto.ts      --   AES-256-GCM (non-extractable key)
 │   │       │   ├── read-through.ts      --   cache read-through mapping
 │   │       │   ├── schemas.ts           --   offline record schemas
@@ -430,9 +437,11 @@ licio/
 │   └── api/                     -- Hono BFF server
 │       └── src/
 │           ├── app.ts                   -- Hono app (middleware stack)
-│           ├── index.ts                 -- server entry point
+│           ├── index.ts                 -- server entry point (Postgres/Redis)
+│           ├── e2e-server.ts            -- in-memory BFF for the E2E harness (gated)
 │           ├── routes/
 │           │   ├── v1.ts                --   /v1/* API routes
+│           │   ├── test-auth.ts         --   test-ONLY login (e2e-server only, gated)
 │           │   ├── auth.ts              --   /v1/auth/* (WS-D auth surface)
 │           │   ├── privacy.ts           --   /v1/privacy/* (WS-D privacy controls)
 │           │   ├── events.ts            --   POST /v1/events/attention (WS-E.1.3)
@@ -1159,8 +1168,8 @@ file counts at current state:
 
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
-| apps/web | ~113 unit + 6 E2E | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~84 (incl. WS-D identity + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
+| apps/web | ~116 unit + 7 E2E (6 frontend-only + the BFF-in-the-loop spec) | jsdom / Playwright | `pnpm --filter web test` |
+| apps/api | ~85 (incl. WS-D identity + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-Q E2E test-auth route + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
 | packages/shared | ~19 (incl. WS-D–WS-H schemas, URL/lifecycle utils, the UGC pipeline + XSS-vector suite) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~4 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |
 | packages/invariants | ~18 (PWAtt/MinHash/freshness + the WS-H invariant mathematics: matroid/fiber/GW/sheaf/holonomy/supporting property suites + the regression harness) | node | `pnpm --filter @licio/invariants test` |
@@ -1182,7 +1191,15 @@ Only monotonic growth is enforced — no global gate pins the count.
 **E2E configuration.**  Playwright runs against Chromium, Firefox,
 and WebKit.  Base URL: `http://localhost:4173` (Vite preview).
 Fully parallel in local mode; single worker in CI with 2 retries.
-axe-core accessibility assertions on every page load.
+axe-core accessibility assertions on every page load.  Two configs:
+`playwright.config.ts` is the frontend-only suite against the static
+preview; `playwright.bff.config.ts` (`pnpm --filter web test:e2e:bff`,
+spec glob `*.bff.spec.ts`) is the **BFF-in-the-loop** harness — it boots
+the in-memory API `e2e-server` (no Postgres/Redis) plus the preview with
+its API proxy enabled (`E2E_API_PROXY=1`) so the browser drives REAL
+authenticated flows over one same-origin host, using a test-only login
+route that mints a session cookie (gated to the e2e-server, never the
+production app).  Both run in CI's E2E job.
 
 **CI pipeline.**  `.github/workflows/ci.yml` runs 8 jobs on every PR:
 

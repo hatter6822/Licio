@@ -172,9 +172,10 @@ references.
 ## Testing
 
 ```sh
-pnpm test                  # Vitest — six projects (shared, db, invariants, api, web, policy)
+pnpm test                  # Vitest — seven projects (shared, db, invariants, ranking, api, web, policy)
 pnpm test -- --coverage    # adds the 80% cross-workspace coverage gate
 pnpm test:e2e              # Playwright + axe-core (Chromium, Firefox, WebKit)
+pnpm --filter web test:e2e:bff  # authenticated BFF-in-the-loop E2E (in-memory API)
 pnpm typecheck             # tsc -b across all project references
 pnpm lint                  # Biome format + lint
 pnpm build && pnpm check:sw   # production build, bundle budgets, SW scan
