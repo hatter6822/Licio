@@ -32,6 +32,23 @@ describe('StoryMedia (WS-Q.5.2c)', () => {
     expect(screen.getByText('Speaker outlines the maintenance schedule.')).toBeInTheDocument();
   });
 
+  it('renders a poster + an uploaded caption track when present', () => {
+    const { container } = render(
+      <StoryMedia
+        uploadRef="vid-1"
+        kind="video"
+        altText={null}
+        captionsUploadRef="cap-1"
+        posterUploadRef="poster-1"
+      />,
+    );
+    const video = container.querySelector('video');
+    expect(video?.getAttribute('poster')).toContain('/v1/uploads/poster-1');
+    const track = video?.querySelector('track');
+    expect(track?.getAttribute('kind')).toBe('captions');
+    expect(track?.getAttribute('src')).toContain('/v1/uploads/cap-1');
+  });
+
   it('collapses to an honest message when the media fails to load', () => {
     render(<StoryMedia uploadRef="gone" kind="image" altText="Removed" />);
     fireEvent.error(screen.getByRole('img'));

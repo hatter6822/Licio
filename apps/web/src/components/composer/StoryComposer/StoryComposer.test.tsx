@@ -159,6 +159,25 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
   });
 });
 
+describe('StoryComposer video captions (WS-Q.5.2b)', () => {
+  it('rejects captions text AND an uploaded track together (XOR)', async () => {
+    fetchRooms.mockResolvedValue({ items: [], nextCursor: null });
+    const user = userEvent.setup();
+    renderComposer();
+    await screen.findByText('Commons');
+    await user.click(screen.getByRole('radio', { name: /a video/i }));
+    await user.type(screen.getByLabelText(/^title/i), 'A clip');
+    const video = new File([new Uint8Array([1])], 'c.mp4', { type: 'video/mp4' });
+    await user.upload(screen.getByLabelText(/video file/i), video);
+    await user.type(screen.getByLabelText(/captions text/i), 'Spoken intro.');
+    const vtt = new File(['WEBVTT'], 'c.vtt', { type: 'text/vtt' });
+    await user.upload(screen.getByLabelText(/caption track/i), vtt);
+    await user.click(screen.getByRole('button', { name: /post/i }));
+    expect(await screen.findByText(/captions as text or a file, not both/i)).toBeInTheDocument();
+    expect(createStory).not.toHaveBeenCalled();
+  });
+});
+
 describe('StoryComposer flag gating (WS-Q.6.2)', () => {
   it('hides media modes when content.media_posts_enabled is off', async () => {
     useFeatureFlagStore.getState().hydrate({

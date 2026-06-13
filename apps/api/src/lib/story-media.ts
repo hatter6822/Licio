@@ -12,11 +12,13 @@ export function feedMediaOf(story: StoryRecord): FeedMedia | null {
   if (story.mediaType !== 'image' && story.mediaType !== 'video') return null;
   const meta = story.submissionMetadata;
   const altText = meta.submission_type === 'image_post' ? meta.alt_text : null;
-  const captionsText = meta.submission_type === 'video_post' ? (meta.captions_text ?? null) : null;
+  const isVideo = meta.submission_type === 'video_post';
   return {
     upload_ref: story.mediaUploadRef,
     kind: story.mediaType,
     alt_text: altText,
-    captions_text: captionsText,
+    captions_text: isVideo ? (meta.captions_text ?? null) : null,
+    captions_upload_ref: isVideo ? (meta.captions_upload_id ?? null) : null,
+    poster_upload_ref: isVideo ? (meta.poster_upload_id ?? null) : null,
   };
 }

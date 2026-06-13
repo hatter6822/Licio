@@ -153,6 +153,8 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 kind={data.media.kind}
                 altText={data.media.alt_text}
                 captionsText={data.media.captions_text}
+                captionsUploadRef={data.media.captions_upload_ref}
+                posterUploadRef={data.media.poster_upload_ref}
               />
             ) : null}
             <p className="text-base text-ink">{data.body_summary}</p>

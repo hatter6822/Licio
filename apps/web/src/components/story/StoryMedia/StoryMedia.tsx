@@ -16,6 +16,10 @@ export interface StoryMediaProps {
   kind: 'image' | 'video';
   altText: string | null;
   captionsText?: string | null;
+  /** Gated upload ref for an uploaded WebVTT caption track. */
+  captionsUploadRef?: string | null;
+  /** Gated upload ref for a video poster image. */
+  posterUploadRef?: string | null;
   className?: string;
 }
 
@@ -24,11 +28,19 @@ export function StoryMedia({
   kind,
   altText,
   captionsText,
+  captionsUploadRef,
+  posterUploadRef,
   className,
 }: StoryMediaProps): React.ReactElement {
   const t = useT();
   const [failed, setFailed] = useState(false);
   const src = mediaUrl(uploadRef);
+  const captionTrackSrc =
+    captionsUploadRef !== undefined && captionsUploadRef !== null
+      ? mediaUrl(captionsUploadRef)
+      : null;
+  const posterSrc =
+    posterUploadRef !== undefined && posterUploadRef !== null ? mediaUrl(posterUploadRef) : null;
 
   if (failed) {
     return (
@@ -61,15 +73,19 @@ export function StoryMedia({
 
   return (
     <figure className={cn('flex flex-col gap-1', className)}>
-      {/* No autoplay, ever. preload=metadata respects data + reduced motion. */}
-      {/* biome-ignore lint/a11y/useMediaCaption: text captions render below; an uploaded VTT track is a follow-up. */}
+      {/* No autoplay, ever. preload=metadata respects data + reduced motion. A
+          poster (if provided) shows before playback; text captions render below. */}
       <video
         controls
         preload="metadata"
+        {...(posterSrc !== null ? { poster: posterSrc } : {})}
         onError={() => setFailed(true)}
         className="max-h-[32rem] w-full rounded-md bg-black"
       >
         <source src={src} />
+        {captionTrackSrc !== null ? (
+          <track kind="captions" src={captionTrackSrc} default label="Captions" />
+        ) : null}
         {t('storymedia.noVideo', 'Your browser cannot play this video.')}
       </video>
       {captionsText !== undefined && captionsText !== null && captionsText.length > 0 ? (

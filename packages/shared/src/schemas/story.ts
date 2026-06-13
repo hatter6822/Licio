@@ -191,8 +191,10 @@ const videoMetadataShape = {
   upload_id: uuidSchema,
   /** Optional inline caption text (mutually exclusive with the upload). */
   captions_text: z.string().min(1).max(20_000).optional(),
-  /** Optional uploaded caption track (mutually exclusive with the text). */
+  /** Optional uploaded WebVTT caption track (mutually exclusive with the text). */
   captions_upload_id: uuidSchema.optional(),
+  /** Optional poster image shown before playback (WS-Q.5.2c). */
+  poster_upload_id: uuidSchema.optional(),
 } as const;
 
 /** captions are text XOR an uploaded track (both optional, never both). */

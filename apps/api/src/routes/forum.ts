@@ -24,6 +24,7 @@ import {
   feedPreferencesPatchSchema,
   feedPreferencesSchema,
   linkBlocklistResponseSchema,
+  MAX_CAPTION_BYTES,
   MAX_DOCUMENT_BYTES,
   MAX_IMAGE_BYTES,
   MAX_VIDEO_BYTES,
@@ -37,6 +38,7 @@ import {
   threadConversationStateSchema,
   threadDetailSchema,
   threadSafetyStateSchema,
+  UPLOAD_CAPTION_TYPES,
   UPLOAD_DOCUMENT_TYPES,
   UPLOAD_IMAGE_TYPES,
   UPLOAD_VIDEO_TYPES,
@@ -647,9 +649,10 @@ export function createForumRoutes() {
           const isImage = (UPLOAD_IMAGE_TYPES as readonly string[]).includes(contentType);
           const isDocument = (UPLOAD_DOCUMENT_TYPES as readonly string[]).includes(contentType);
           const isVideo = (UPLOAD_VIDEO_TYPES as readonly string[]).includes(contentType);
-          if (!isImage && !isDocument && !isVideo) {
+          const isCaption = (UPLOAD_CAPTION_TYPES as readonly string[]).includes(contentType);
+          if (!isImage && !isDocument && !isVideo && !isCaption) {
             return c.json(
-              deny('unsupported_type', 'Allowed: JPEG, PNG, WebP, AVIF, PDF, MP4, WebM'),
+              deny('unsupported_type', 'Allowed: JPEG, PNG, WebP, AVIF, PDF, MP4, WebM, VTT'),
               415,
             );
           }
@@ -657,7 +660,13 @@ export function createForumRoutes() {
           // clamped to the hard DB ceiling (it may lower it, never raise it).
           const videoCfg = getIngestionServices().config();
           const maxVideoBytes = Math.min(videoCfg.videoMaxBytes, MAX_VIDEO_BYTES);
-          const maxBytes = isImage ? MAX_IMAGE_BYTES : isVideo ? maxVideoBytes : MAX_DOCUMENT_BYTES;
+          const maxBytes = isImage
+            ? MAX_IMAGE_BYTES
+            : isVideo
+              ? maxVideoBytes
+              : isCaption
+                ? MAX_CAPTION_BYTES
+                : MAX_DOCUMENT_BYTES;
           if (file.size > maxBytes) {
             return c.json(deny('payload_too_large', 'Upload exceeds the size limit'), 413);
           }

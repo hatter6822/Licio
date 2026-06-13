@@ -109,6 +109,12 @@ export function StoryCard({
           kind={media.kind}
           altText={media.altText}
           {...(media.captionsText !== undefined ? { captionsText: media.captionsText } : {})}
+          {...(media.captionsUploadRef !== undefined
+            ? { captionsUploadRef: media.captionsUploadRef }
+            : {})}
+          {...(media.posterUploadRef !== undefined
+            ? { posterUploadRef: media.posterUploadRef }
+            : {})}
         />
       ) : null}
 

@@ -48,6 +48,9 @@ export function matchesMagic(contentType: string, bytes: Uint8Array): boolean {
       return bytes.length > 12 && ascii(4, 'ftyp');
     case 'application/pdf':
       return ascii(0, '%PDF-');
+    case 'text/vtt':
+      // WebVTT files begin with the "WEBVTT" signature (optionally BOM-prefixed).
+      return ascii(0, 'WEBVTT') || (bytes.length > 3 && ascii(3, 'WEBVTT'));
     default:
       return false;
   }
@@ -213,6 +216,9 @@ export function stripUploadMetadata(contentType: string, bytes: Uint8Array): Str
     case 'image/avif':
       return checkAvif(bytes);
     case 'application/pdf':
+      return { ok: true, bytes, stripped: false };
+    case 'text/vtt':
+      // Plain text — no container metadata to strip (the magic check ran above).
       return { ok: true, bytes, stripped: false };
     default:
       return { ok: false, reason: 'type_mismatch' };

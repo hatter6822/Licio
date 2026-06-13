@@ -323,21 +323,126 @@ function jpegWithExif(): Uint8Array {
   ]);
 }
 
-async function uploadJpeg(cookie: string): Promise<string> {
-  const bytes = jpegWithExif();
+async function uploadRaw(
+  cookie: string,
+  bytes: Uint8Array,
+  type: string,
+  name: string,
+  altText?: string,
+): Promise<{ status: number; uploadId: string | null }> {
   const form = new FormData();
   const buf = bytes.buffer.slice(
     bytes.byteOffset,
     bytes.byteOffset + bytes.byteLength,
   ) as ArrayBuffer;
-  form.set('file', new File([buf], 'photo.jpg', { type: 'image/jpeg' }));
-  form.set('alt_text', 'A reservoir gauge');
+  form.set('file', new File([buf], name, { type }));
+  if (altText !== undefined) form.set('alt_text', altText);
   const res = await app().request(
     new Request('http://local/v1/uploads', { method: 'POST', headers: { cookie }, body: form }),
   );
-  expect(res.status).toBe(201);
-  return ((await res.json()) as { upload_id: string }).upload_id;
+  const uploadId =
+    res.status === 201 ? ((await res.json()) as { upload_id: string }).upload_id : null;
+  return { status: res.status, uploadId };
 }
+
+async function uploadJpeg(cookie: string): Promise<string> {
+  const { uploadId } = await uploadRaw(
+    cookie,
+    jpegWithExif(),
+    'image/jpeg',
+    'photo.jpg',
+    'A gauge',
+  );
+  if (uploadId === null) throw new Error('jpeg upload failed');
+  return uploadId;
+}
+
+/** A minimal well-formed MP4 (ftyp + moov/mvhd + mdat). */
+function mp4Bytes(): Uint8Array {
+  const a = (s: string): number[] => [...s].map((c) => c.charCodeAt(0));
+  const u32 = (n: number): number[] => [
+    (n >>> 24) & 0xff,
+    (n >>> 16) & 0xff,
+    (n >>> 8) & 0xff,
+    n & 0xff,
+  ];
+  const box = (type: string, payload: number[]): number[] => [
+    ...u32(payload.length + 8),
+    ...a(type),
+    ...payload,
+  ];
+  const ftyp = box('ftyp', [...a('isom'), ...u32(0x200), ...a('isom')]);
+  const moov = box(
+    'moov',
+    box('mvhd', [0, 0, 0, 0, ...u32(0), ...u32(0), ...u32(600), ...u32(1200)]),
+  );
+  return new Uint8Array([...ftyp, ...moov, ...box('mdat', a('MEDIA'))]);
+}
+
+describe('WS-Q.5.2c video-post sub-uploads (captions track + poster)', () => {
+  it('accepts a video post with an owned caption track + poster and exposes them', async () => {
+    const author = await seedUserWithSession(fixture.identity, { handle: 'cinema' });
+    const video = await uploadRaw(author.cookie, mp4Bytes(), 'video/mp4', 'clip.mp4');
+    const captions = await uploadRaw(
+      author.cookie,
+      new TextEncoder().encode('WEBVTT\n\n'),
+      'text/vtt',
+      'c.vtt',
+    );
+    const poster = await uploadRaw(author.cookie, jpegWithExif(), 'image/jpeg', 'p.jpg', 'Poster');
+    expect([video.status, captions.status, poster.status]).toEqual([201, 201, 201]);
+    const created = await app().request(
+      post(
+        '/v1/stories',
+        {
+          submission_type: 'video_post',
+          upload_id: video.uploadId,
+          captions_upload_id: captions.uploadId,
+          poster_upload_id: poster.uploadId,
+          title: 'A clip',
+          topic_ids: [randomUUID()],
+          room_id: COMMONS_ROOM_ID,
+        },
+        author.cookie,
+      ),
+    );
+    expect(created.status).toBe(201);
+    const { story_id } = (await created.json()) as { story_id: string };
+    const detail = await app().request(`http://local/v1/stories/${story_id}`);
+    const media = (
+      (await detail.json()) as { media: { captions_upload_ref: string; poster_upload_ref: string } }
+    ).media;
+    expect(media.captions_upload_ref).toBe(captions.uploadId);
+    expect(media.poster_upload_ref).toBe(poster.uploadId);
+  });
+
+  it('rejects a video post referencing a caption upload owned by someone else', async () => {
+    const author = await seedUserWithSession(fixture.identity, { handle: 'dir' });
+    const other = await seedUserWithSession(fixture.identity, { handle: 'stranger' });
+    const video = await uploadRaw(author.cookie, mp4Bytes(), 'video/mp4', 'clip.mp4');
+    const foreignCaptions = await uploadRaw(
+      other.cookie,
+      new TextEncoder().encode('WEBVTT\n'),
+      'text/vtt',
+      'x.vtt',
+    );
+    const res = await app().request(
+      post(
+        '/v1/stories',
+        {
+          submission_type: 'video_post',
+          upload_id: video.uploadId,
+          captions_upload_id: foreignCaptions.uploadId,
+          title: 'A clip',
+          topic_ids: [randomUUID()],
+          room_id: COMMONS_ROOM_ID,
+        },
+        author.cookie,
+      ),
+    );
+    expect(res.status).toBe(400);
+  });
+});
 
 describe('WS-Q.2.3b image-post serving — EXIF-absence through the story path', () => {
   it('serves image bytes (via the story media ref) with no EXIF/GPS', async () => {

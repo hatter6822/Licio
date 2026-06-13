@@ -120,6 +120,9 @@ function metadataOf(request: StoryCreateRequest): StoryRecord['submissionMetadat
         ...(request.captions_upload_id !== undefined
           ? { captions_upload_id: request.captions_upload_id }
           : {}),
+        ...(request.poster_upload_id !== undefined
+          ? { poster_upload_id: request.poster_upload_id }
+          : {}),
       };
   }
 }
@@ -393,6 +396,42 @@ export async function submitStory(
     // Media is never URL-normalized or crawled (§14.2 not_applicable).
     extractionState = 'not_applicable';
     heldForScan = upload.scanState === 'pending';
+  }
+
+  // 7b. Optional video sub-uploads (WS-Q.5.2c): a WebVTT caption track and/or a
+  //     poster image must each be OWNED, the right type, and scan-cleared (a
+  //     pending scan holds the story; a flagged one rejects it).
+  if (request.submission_type === 'video_post') {
+    const subUploads: Array<[string | undefined, string]> = [
+      [request.captions_upload_id, 'text/vtt'],
+      [request.poster_upload_id, 'image/'],
+    ];
+    for (const [id, typePrefix] of subUploads) {
+      if (id === undefined) continue;
+      const sub = await forum.uploads.getRecord(id);
+      if (sub === null || sub.ownerUserId !== userId || !sub.contentType.startsWith(typePrefix)) {
+        return {
+          ok: false,
+          rejection: {
+            status: 400,
+            code: 'unknown_upload',
+            message: 'A referenced caption or poster upload is invalid',
+          },
+        };
+      }
+      if (sub.scanState === 'flagged') {
+        ingestion.metrics.increment('submission.media_flagged');
+        return {
+          ok: false,
+          rejection: {
+            status: 403,
+            code: 'held_for_review',
+            message: 'A referenced upload did not pass a safety check',
+          },
+        };
+      }
+      if (sub.scanState === 'pending') heldForScan = true;
+    }
   }
 
   // 8. Tier-scoped exact-URL duplicate (WS-Q.2.2a, §14.5.6) + the takedown

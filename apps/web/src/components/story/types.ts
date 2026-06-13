@@ -47,6 +47,8 @@ export interface StoryMediaData {
   kind: 'image' | 'video';
   altText: string | null;
   captionsText?: string | null;
+  captionsUploadRef?: string | null;
+  posterUploadRef?: string | null;
 }
 
 export interface StoryCardData {

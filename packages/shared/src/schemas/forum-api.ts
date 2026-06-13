@@ -90,8 +90,11 @@ export const UPLOAD_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'ima
 export const UPLOAD_DOCUMENT_TYPES = ['application/pdf'] as const;
 /** WS-Q.2.3c native video containers (mp4/webm only; the DB CHECK mirrors this). */
 export const UPLOAD_VIDEO_TYPES = ['video/mp4', 'video/webm'] as const;
+/** WS-Q.5.2c WebVTT caption tracks for video posts (text; no metadata to strip). */
+export const UPLOAD_CAPTION_TYPES = ['text/vtt'] as const;
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 export const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
+export const MAX_CAPTION_BYTES = 1 * 1024 * 1024;
 /** WS-Q.2.3c hard ceiling (mirrors the DB `uploads_byte_size_range` CHECK);
  *  the steward-tunable `ingestion.video_max_bytes` may only LOWER it. */
 export const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
@@ -99,7 +102,12 @@ export const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
 export const uploadPublicSchema = z
   .object({
     upload_id: uuidSchema,
-    content_type: z.enum([...UPLOAD_IMAGE_TYPES, ...UPLOAD_DOCUMENT_TYPES, ...UPLOAD_VIDEO_TYPES]),
+    content_type: z.enum([
+      ...UPLOAD_IMAGE_TYPES,
+      ...UPLOAD_DOCUMENT_TYPES,
+      ...UPLOAD_VIDEO_TYPES,
+      ...UPLOAD_CAPTION_TYPES,
+    ]),
     byte_size: z.number().int().min(1).max(MAX_VIDEO_BYTES),
     /** Required for images (WCAG); null for documents. */
     alt_text: z.string().min(1).max(500).nullable(),

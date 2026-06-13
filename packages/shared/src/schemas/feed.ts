@@ -75,6 +75,10 @@ export const feedMediaSchema = z.object({
   alt_text: z.string().max(1_000).nullable(),
   /** Video captions as text (rendered beneath the player); null otherwise. */
   captions_text: z.string().max(20_000).nullable().default(null),
+  /** Gated upload ref for an uploaded WebVTT caption track; null otherwise. */
+  captions_upload_ref: uuidSchema.nullable().default(null),
+  /** Gated upload ref for a video poster image; null otherwise. */
+  poster_upload_ref: uuidSchema.nullable().default(null),
 });
 export type FeedMedia = z.infer<typeof feedMediaSchema>;
 

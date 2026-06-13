@@ -83,6 +83,8 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
   const [body, setBody] = useState('');
   const [altText, setAltText] = useState('');
   const [captionsText, setCaptionsText] = useState('');
+  const [captionsFile, setCaptionsFile] = useState<File | null>(null);
+  const [posterFile, setPosterFile] = useState<File | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [uploadPct, setUploadPct] = useState(0);
@@ -184,6 +186,13 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
     if (mode === 'video_post' && file !== null && file.size > content.video_max_bytes) {
       next['file'] = t('storyComposer.err.videoSize', 'This video exceeds the size limit.');
     }
+    // Captions are text XOR an uploaded track — never both (mirrors the schema).
+    if (mode === 'video_post' && captionsText.trim().length > 0 && captionsFile !== null) {
+      next['captions'] = t(
+        'storyComposer.err.captionsXor',
+        'Provide captions as text OR a file, not both.',
+      );
+    }
     return next;
   }
 
@@ -192,10 +201,11 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
     const found = validate();
     // Video duration is an async, best-effort pre-check against the SERVER cap
     // (skipped when the browser can't read metadata; the server is authoritative).
+    // Only probe when nothing else is already wrong (avoids a needless wait).
     if (
+      Object.keys(found).length === 0 &&
       mode === 'video_post' &&
       file !== null &&
-      found['file'] === undefined &&
       (await readVideoDurationSeconds(file)) > content.video_max_seconds
     ) {
       found['file'] = t('storyComposer.err.videoLength', 'This video exceeds the length limit.');
@@ -236,10 +246,17 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
           ...base,
         };
       } else {
+        // Optional video sub-uploads: a WebVTT caption track and/or a poster.
+        const captionsUploadId =
+          captionsFile !== null ? (await uploadMedia(captionsFile)).upload_id : undefined;
+        const posterUploadId =
+          posterFile !== null ? (await uploadMedia(posterFile)).upload_id : undefined;
         request = {
           submission_type: 'video_post',
           upload_id: uploadId ?? '',
           ...(captionsText.trim().length > 0 ? { captions_text: captionsText.trim() } : {}),
+          ...(captionsUploadId !== undefined ? { captions_upload_id: captionsUploadId } : {}),
+          ...(posterUploadId !== undefined ? { poster_upload_id: posterUploadId } : {}),
           ...base,
         };
       }
@@ -275,6 +292,8 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
           setMode(value as StoryComposerMode);
           setErrors({});
           onPickFile(null); // clear any chosen media + preview when switching modes
+          setCaptionsFile(null);
+          setPosterFile(null);
         }}
         options={[
           { value: 'link', label: t('storyComposer.mode.link', 'A link') },
@@ -400,12 +419,40 @@ export function StoryComposer({ onSubmitted }: StoryComposerProps): React.ReactE
       ) : null}
 
       {mode === 'video_post' ? (
-        <TextArea
-          label={t('storyComposer.captions.label', 'Captions (optional)')}
-          value={captionsText}
-          onChange={(e) => setCaptionsText(e.target.value)}
-          helperText={t('storyComposer.captions.help', 'Captions improve access for everyone.')}
-        />
+        <>
+          <TextArea
+            label={t('storyComposer.captions.label', 'Captions text (optional)')}
+            value={captionsText}
+            onChange={(e) => setCaptionsText(e.target.value)}
+            disabled={captionsFile !== null}
+            helperText={t('storyComposer.captions.help', 'Captions improve access for everyone.')}
+            {...(errors['captions'] ? { error: errors['captions'] } : {})}
+          />
+          <div className="flex flex-col gap-1">
+            <label htmlFor={`${formId}-captions`} className="font-medium text-ink text-sm">
+              {t('storyComposer.captions.file', 'Or upload a caption track (.vtt)')}
+            </label>
+            <input
+              id={`${formId}-captions`}
+              type="file"
+              accept="text/vtt,.vtt"
+              onChange={(e) => setCaptionsFile(e.target.files?.[0] ?? null)}
+              className="text-sm text-ink"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label htmlFor={`${formId}-poster`} className="font-medium text-ink text-sm">
+              {t('storyComposer.poster.file', 'Poster image (optional)')}
+            </label>
+            <input
+              id={`${formId}-poster`}
+              type="file"
+              accept={UPLOAD_IMAGE_TYPES.join(',')}
+              onChange={(e) => setPosterFile(e.target.files?.[0] ?? null)}
+              className="text-sm text-ink"
+            />
+          </div>
+        </>
       ) : null}
 
       <p id={`${formId}-status`} role="status" className="text-ink-muted text-sm">
