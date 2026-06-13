@@ -19,15 +19,18 @@ const mocks = vi.hoisted(() => ({
   enqueue: vi.fn(),
   getQueuedOperation: vi.fn(),
   saveDraft: vi.fn(),
+  loadDraft: vi.fn(),
   deleteDraft: vi.fn(),
   listDraftsForThread: vi.fn(),
   processPendingQueue: vi.fn(),
+  savedDrafts: new Map<string, unknown>(),
 }));
 
 const {
   enqueue,
   getQueuedOperation,
   saveDraft,
+  loadDraft,
   deleteDraft,
   listDraftsForThread,
   processPendingQueue,
@@ -54,6 +57,7 @@ vi.mock('../../perf/marks.js', () => ({
 
 vi.mock('../../offline/index.js', () => ({
   deleteDraft: mocks.deleteDraft,
+  loadDraft: mocks.loadDraft,
   listDraftsForThread: mocks.listDraftsForThread,
   queue: {
     enqueue: mocks.enqueue,
@@ -80,10 +84,27 @@ describe('SubmitPage contribution submission', () => {
       delete searchState[key];
     }
     searchState.threadId = THREAD_ID;
+    searchState.branch = 'questions';
+    mocks.savedDrafts.clear();
     enqueue.mockResolvedValue('queued-op-1');
     getQueuedOperation.mockResolvedValue(undefined);
-    saveDraft.mockResolvedValue(undefined);
-    deleteDraft.mockResolvedValue(undefined);
+    saveDraft.mockImplementation(async (input) => {
+      mocks.savedDrafts.set(input.draftId, {
+        schemaVersion: 1,
+        draftId: input.draftId,
+        storyId: input.storyId,
+        threadId: input.threadId,
+        branch: input.branch,
+        contributionType: input.contributionType,
+        values: input.values,
+        updatedAt: Date.now(),
+        encrypted: false,
+      });
+    });
+    loadDraft.mockImplementation(async (draftId) => mocks.savedDrafts.get(draftId));
+    deleteDraft.mockImplementation(async (draftId) => {
+      mocks.savedDrafts.delete(draftId);
+    });
     listDraftsForThread.mockResolvedValue([]);
     processPendingQueue.mockResolvedValue({ sent: 1, retried: 0, failed: 0 });
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
@@ -114,6 +135,7 @@ describe('SubmitPage contribution submission', () => {
     expect(saveDraft).toHaveBeenCalledWith(
       expect.objectContaining({
         threadId: THREAD_ID,
+        branch: 'questions',
         contributionType: 'question',
         values: expect.objectContaining({ body: 'What context is missing?' }),
       }),
@@ -122,6 +144,25 @@ describe('SubmitPage contribution submission', () => {
     await waitFor(() => expect(getQueuedOperation).toHaveBeenCalledWith('queued-op-1'));
     await waitFor(() => expect(deleteDraft).toHaveBeenCalledTimes(1));
     expect(screen.getByText('Contribution submitted.')).toBeInTheDocument();
+  });
+
+  it('does not turn Submit into a draft save when no thread target exists', async () => {
+    delete searchState.threadId;
+    delete searchState.branch;
+    const user = userEvent.setup();
+    renderSubmitPage();
+
+    await user.click(screen.getByRole('button', { name: /^Ask/i }));
+    await user.type(screen.getByLabelText(/^Question/i), 'Where should this go?');
+    await user.click(screen.getByRole('button', { name: /Add contribution/i }));
+
+    expect(saveDraft).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(
+      screen.getByText(
+        'Choose a thread before submitting. Use Save draft to keep this contribution for later.',
+      ),
+    ).toBeInTheDocument();
   });
 
   it('saves a contribution draft without enqueueing or deleting when Save draft is selected', async () => {
@@ -136,6 +177,7 @@ describe('SubmitPage contribution submission', () => {
       expect(saveDraft).toHaveBeenCalledWith(
         expect.objectContaining({
           threadId: THREAD_ID,
+          branch: 'questions',
           contributionType: 'question',
           values: expect.objectContaining({ body: 'Save this for later?' }),
         }),
@@ -145,6 +187,53 @@ describe('SubmitPage contribution submission', () => {
     expect(processPendingQueue).not.toHaveBeenCalled();
     expect(deleteDraft).not.toHaveBeenCalled();
     expect(screen.getByText('Saved as a draft on this device.')).toBeInTheDocument();
+  });
+
+  it('keeps a newer active draft when an earlier submitted snapshot is acknowledged', async () => {
+    let resolveProcess: (value: { sent: number; retried: number; failed: number }) => void =
+      () => {};
+    processPendingQueue.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveProcess = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    renderSubmitPage();
+
+    await user.click(screen.getByRole('button', { name: /^Ask/i }));
+    const question = screen.getByLabelText(/^Question/i);
+    await user.type(question, 'Submit this snapshot');
+    await user.click(screen.getByRole('button', { name: /Add contribution/i }));
+    await waitFor(() => expect(enqueue).toHaveBeenCalledTimes(1));
+
+    await user.clear(question);
+    await user.type(question, 'Keep this newer draft');
+    resolveProcess({ sent: 1, retried: 0, failed: 0 });
+
+    await waitFor(() => expect(getQueuedOperation).toHaveBeenCalledWith('queued-op-1'));
+    expect(deleteDraft).not.toHaveBeenCalled();
+    expect(
+      screen.getByText('Contribution submitted. Your newer draft changes were kept.'),
+    ).toBeInTheDocument();
+  });
+
+  it('surfaces queue failures without deleting the saved draft', async () => {
+    enqueue.mockRejectedValue(new Error('indexeddb unavailable'));
+    const user = userEvent.setup();
+    renderSubmitPage();
+
+    await user.click(screen.getByRole('button', { name: /^Ask/i }));
+    await user.type(screen.getByLabelText(/^Question/i), 'Try submitting this');
+    await user.click(screen.getByRole('button', { name: /Add contribution/i }));
+
+    await waitFor(() => expect(enqueue).toHaveBeenCalledTimes(1));
+    expect(deleteDraft).not.toHaveBeenCalled();
+    expect(
+      screen.getByText(
+        'Could not queue this contribution. Your draft is kept so you can try again.',
+      ),
+    ).toBeInTheDocument();
   });
 
   it('keeps the draft when the queued contribution has not been acknowledged yet', async () => {

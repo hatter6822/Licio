@@ -30,7 +30,13 @@ import { useToast } from '../../components/ui/Toast/index.js';
 import { useT } from '../../i18n/index.js';
 import { checkLinkSafety } from '../../lib/link-safety.js';
 import { useStoryInterpretationsQuery, useThreadQuery } from '../../lib/queries.js';
-import { deleteDraft, listDraftsForThread, queue, saveDraft } from '../../offline/index.js';
+import {
+  deleteDraft,
+  listDraftsForThread,
+  loadDraft,
+  queue,
+  saveDraft,
+} from '../../offline/index.js';
 import type { DraftContributionRecord } from '../../offline/schemas.js';
 import { processPendingQueue } from '../../offline/sync.js';
 import { markInteractionStart, measureInteraction } from '../../perf/marks.js';
@@ -46,6 +52,23 @@ function newDraftId(): string {
 const DRAFT_DEBOUNCE_MS = 800;
 /** Recovery offers the most recent drafts, not just one. */
 const MAX_RECOVERABLE_DRAFTS = 3;
+
+function sameComposerValues(left: ComposerValues, right: ComposerValues): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => left[key] === right[key]);
+}
+
+function sameDraftSnapshot(
+  snapshot: { mode: ComposerMode; values: ComposerValues } | null,
+  submitted: { mode: ComposerMode; values: ComposerValues },
+): boolean {
+  return (
+    snapshot !== null &&
+    snapshot.mode === submitted.mode &&
+    sameComposerValues(snapshot.values, submitted.values)
+  );
+}
 
 function shareHost(url: string): string {
   try {
@@ -129,39 +152,74 @@ export function SubmitPage(): React.ReactElement {
   }, [threadId]);
 
   const persistDraft = useCallback(
-    (composerMode: ComposerMode, values: ComposerValues): Promise<void> => {
+    (
+      composerMode: ComposerMode,
+      values: ComposerValues,
+      targetDraftId: string = draftId.current,
+    ): Promise<void> => {
       markInteractionStart('draft-save');
       return saveDraft({
-        draftId: draftId.current,
+        draftId: targetDraftId,
         storyId: null,
         threadId: threadId ?? null,
-        branch: null,
+        branch: search.branch ?? null,
         contributionType: composerMode,
         values,
       }).then(() => {
         measureInteraction('draft-save');
       });
     },
-    [threadId],
+    [search.branch, threadId],
   );
 
-  const flushDraft = useCallback((): Promise<void> => {
-    if (debounceTimer.current !== null) {
-      clearTimeout(debounceTimer.current);
-      debounceTimer.current = null;
-    }
-    if (latest.current) return persistDraft(latest.current.mode, latest.current.values);
-    return Promise.resolve();
-  }, [persistDraft]);
+  const flushDraft = useCallback(
+    (targetDraftId: string = draftId.current): Promise<void> => {
+      if (debounceTimer.current !== null) {
+        clearTimeout(debounceTimer.current);
+        debounceTimer.current = null;
+      }
+      if (latest.current) {
+        return persistDraft(latest.current.mode, latest.current.values, targetDraftId);
+      }
+      return Promise.resolve();
+    },
+    [persistDraft],
+  );
 
-  const clearSubmittedDraft = useCallback(async (): Promise<void> => {
-    if (debounceTimer.current !== null) {
-      clearTimeout(debounceTimer.current);
-      debounceTimer.current = null;
-    }
-    latest.current = null;
-    await deleteDraft(draftId.current);
-  }, []);
+  const clearSubmittedDraft = useCallback(
+    async (
+      submittedDraftId: string,
+      submitted: { mode: ComposerMode; values: ComposerValues },
+    ): Promise<boolean> => {
+      const submittedDraftIsStillActive = draftId.current === submittedDraftId;
+      if (submittedDraftIsStillActive && !sameDraftSnapshot(latest.current, submitted)) {
+        return false;
+      }
+      if (submittedDraftIsStillActive && debounceTimer.current !== null) {
+        clearTimeout(debounceTimer.current);
+        debounceTimer.current = null;
+      }
+
+      const stored = await loadDraft(submittedDraftId);
+      if (
+        stored !== undefined &&
+        (stored.contributionType !== submitted.mode ||
+          !sameComposerValues(stored.values, submitted.values))
+      ) {
+        return false;
+      }
+      if (submittedDraftIsStillActive && !sameDraftSnapshot(latest.current, submitted)) {
+        return false;
+      }
+
+      await deleteDraft(submittedDraftId);
+      if (submittedDraftIsStillActive) {
+        latest.current = null;
+      }
+      return true;
+    },
+    [],
+  );
 
   // WS-G.3.7c flush triggers beyond the debounce: app backgrounding and
   // unmount both persist the LATEST state immediately.
@@ -191,7 +249,7 @@ export function SubmitPage(): React.ReactElement {
 
   const onSaveDraft = (composerMode: ComposerMode, values: ComposerValues): void => {
     latest.current = { mode: composerMode, values };
-    void persistDraft(composerMode, values)
+    void flushDraft()
       .then(() => {
         toast({
           tone: 'success',
@@ -210,17 +268,20 @@ export function SubmitPage(): React.ReactElement {
     setServerErrors({});
     latest.current = { mode: composerMode, values };
     if (!threadId) {
-      // No thread context yet: the draft is preserved locally for later.
-      void flushDraft();
       toast({
-        tone: 'success',
-        message: t('submit.draftSaved', 'Saved as a draft on this device.'),
+        tone: 'error',
+        message: t(
+          'submit.missingThread',
+          'Choose a thread before submitting. Use Save draft to keep this contribution for later.',
+        ),
       });
       return;
     }
+    const submittedDraftId = draftId.current;
+    const submittedSnapshot = { mode: composerMode, values };
     const built = buildContributionPayload(composerMode, values, {
       threadId,
-      clientDraftId: draftId.current,
+      clientDraftId: submittedDraftId,
       ...(search['parentId'] !== undefined ? { parentContributionId: search['parentId'] } : {}),
       ...(search['targetId'] !== undefined ? { targetContributionId: search['targetId'] } : {}),
       ...(shareCitation !== null ? { seedCitations: [shareCitation] } : {}),
@@ -230,33 +291,50 @@ export function SubmitPage(): React.ReactElement {
       return;
     }
     void (async () => {
-      // Persist the exact submitted state before networking. If the server cannot
-      // acknowledge the write (offline, transient error, or terminal rejection),
-      // the draft remains recoverable for retry/editing.
-      await flushDraft().catch(() => undefined);
-      const operationId = await queue.enqueue('contribution', built.payload);
-      toast({
-        tone: 'success',
-        message: t('submit.queued', 'Queued — this will sync when you are online.'),
-      });
-      await processPendingQueue({
-        onTerminalFailure: (operation) => {
-          if (operation.operationId !== operationId) return;
-          toast({
-            tone: 'error',
-            message: t(
-              'submit.rejected',
-              'The server could not accept this. Your draft is kept so you can try again.',
-            ),
-          });
-        },
-      });
-      const queuedOperation = await queue.get(operationId);
-      if (queuedOperation === undefined) {
-        await clearSubmittedDraft();
+      try {
+        // Persist the exact submitted state before networking. If the server cannot
+        // acknowledge the write (offline, transient error, or terminal rejection),
+        // the draft remains recoverable for retry/editing.
+        await flushDraft(submittedDraftId);
+        const operationId = await queue.enqueue('contribution', built.payload);
         toast({
           tone: 'success',
-          message: t('submit.published', 'Contribution submitted.'),
+          message: t('submit.queued', 'Queued — this will sync when you are online.'),
+        });
+        await processPendingQueue({
+          onTerminalFailure: (operation) => {
+            if (operation.operationId !== operationId) return;
+            toast({
+              tone: 'error',
+              message: t(
+                'submit.rejected',
+                'The server could not accept this. Your draft is kept so you can try again.',
+              ),
+            });
+          },
+        });
+        const queuedOperation = await queue.get(operationId);
+        if (queuedOperation === undefined) {
+          const cleared = await clearSubmittedDraft(submittedDraftId, submittedSnapshot).catch(
+            () => false,
+          );
+          toast({
+            tone: 'success',
+            message: cleared
+              ? t('submit.published', 'Contribution submitted.')
+              : t(
+                  'submit.publishedDraftKept',
+                  'Contribution submitted. Your newer draft changes were kept.',
+                ),
+          });
+        }
+      } catch {
+        toast({
+          tone: 'error',
+          message: t(
+            'submit.queueFailed',
+            'Could not queue this contribution. Your draft is kept so you can try again.',
+          ),
         });
       }
     })();
