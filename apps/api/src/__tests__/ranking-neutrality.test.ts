@@ -36,6 +36,7 @@ import {
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ingestAttentionEvents } from '../events/ingest.js';
+import { changeStoryVisibility } from '../ingestion/visibility.js';
 import { assembleFeatureVector, runFeatureBatch } from '../ranking/features.js';
 import { engageKillSwitch } from '../ranking/killswitch.js';
 import { serveFeed } from '../ranking/service.js';
@@ -714,5 +715,145 @@ describe('Test 10 — product-health metrics separate from revenue metrics (WS-I
     walk(body);
     expect(keys.length).toBeGreaterThan(3); // the walk really saw the payload
     expect(keys.filter((key) => isFinancialFieldName(key))).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WS-Q two-tier containment (WS-Q.4.4a/b): the no-applause neutrality gate is
+// extended so the SAME CI step proves in-room content never reaches a global
+// surface (ranked OR fallback) and that visibility gates candidacy, never
+// scores. The distribution gate (filterByVisibility) is the authoritative
+// always-on backstop.
+// ---------------------------------------------------------------------------
+
+async function insertRoom(visibility: 'public' | 'private'): Promise<string> {
+  const roomId = randomUUID();
+  await fixture.forum.rooms.insert({
+    roomId,
+    name: `Containment ${roomId.slice(0, 8)}`,
+    slug: `containment-${roomId.slice(0, 8)}`,
+    description: null,
+    roomType: 'global_topic',
+    visibility,
+    joinModel: visibility === 'public' ? 'open' : 'request_approval',
+    postingPolicy: 'all_members',
+    createdBy: null,
+    governanceMode: 'ordinary',
+    charterSummary: null,
+    typeMetadata: {},
+    latestActivityAt: null,
+  });
+  return roomId;
+}
+
+describe('Test 11 — WS-Q two-tier containment (in-room content never reaches a global surface)', () => {
+  it('a room_only story is on NO global surface, ranked OR fallback, nor in the candidate log', async () => {
+    const room = await insertRoom('private');
+    const planted = await seedStory(fixture.ingestion, { roomId: room, visibility: 'room_only' });
+    const publicStory = await seedStory(fixture.ingestion);
+    // RANKED front page.
+    const ranked = await serveFeed(fixture.ranking, {
+      userId: null,
+      surface: 'front_page',
+      surfaceRoomId: null,
+      surfaceTopicId: null,
+      mode: undefined,
+    });
+    expect(ranked.items.map((i) => i.story_id)).not.toContain(planted.storyId);
+    expect(ranked.items.map((i) => i.story_id)).toContain(publicStory.storyId);
+    const rankedLog = await fixture.ranking.decisionLogs.getByRequestId(ranked.requestId);
+    expect(rankedLog?.candidate_ids).not.toContain(planted.storyId);
+    // FALLBACK front page (chronological mode forces the safe ranker).
+    const fallback = await serveFeed(fixture.ranking, {
+      userId: null,
+      surface: 'front_page',
+      surfaceRoomId: null,
+      surfaceTopicId: null,
+      mode: 'chronological',
+    });
+    expect(fallback.fallback).toBe(true);
+    expect(fallback.items.map((i) => i.story_id)).not.toContain(planted.storyId);
+  });
+
+  it('a transiently-mislabeled PUBLIC story in a PRIVATE room is excluded too (room conjunct)', async () => {
+    const room = await insertRoom('private');
+    // The store-level seed bypasses deriveStoryVisibility, simulating the
+    // migration-transient / cascade-bug case: visibility public, room private.
+    const mislabeled = await seedStory(fixture.ingestion, { roomId: room, visibility: 'public' });
+    const served = await serveFeed(fixture.ranking, {
+      userId: null,
+      surface: 'front_page',
+      surfaceRoomId: null,
+      surfaceTopicId: null,
+      mode: undefined,
+    });
+    expect(served.items.map((i) => i.story_id)).not.toContain(mislabeled.storyId);
+  });
+
+  it("a private room's content is absent from a NON-member's every global surface", async () => {
+    const room = await insertRoom('private');
+    const inRoom = await seedStory(fixture.ingestion, { roomId: room, visibility: 'room_only' });
+    const outsider = await seedUserWithSession(fixture.identity, { handle: 'outsider' });
+    for (const surface of ['front_page', 'topic'] as const) {
+      const served = await serveFeed(fixture.ranking, {
+        userId: outsider.userId,
+        surface,
+        surfaceRoomId: null,
+        surfaceTopicId: surface === 'topic' ? 'civics' : null,
+        mode: undefined,
+      });
+      expect(served.items.map((i) => i.story_id)).not.toContain(inRoom.storyId);
+    }
+  });
+});
+
+describe('Test 12 — WS-Q visibility is NOT a ranking signal (eligibility only)', () => {
+  it('narrow removes an item from the next serve; widen restores it (eligibility flip)', async () => {
+    const author = await seedUserWithSession(fixture.identity, { handle: 'flip' });
+    const story = await seedStory(fixture.ingestion, { submittedBy: author.userId });
+    const present = () =>
+      serveFeed(fixture.ranking, {
+        userId: null,
+        surface: 'front_page',
+        surfaceRoomId: null,
+        surfaceTopicId: null,
+        mode: undefined,
+      }).then((s) => s.items.map((i) => i.story_id).includes(story.storyId));
+    expect(await present()).toBe(true);
+    // Narrow → off the global surface on the next serve.
+    await changeStoryVisibility(
+      fixture.ingestion,
+      fixture.events,
+      fixture.identity,
+      fixture.forum,
+      author.userId,
+      story.storyId,
+      'room_only',
+    );
+    expect(await present()).toBe(false);
+    // Widen → back on (the home room is the public Commons).
+    await changeStoryVisibility(
+      fixture.ingestion,
+      fixture.events,
+      fixture.identity,
+      fixture.forum,
+      author.userId,
+      story.storyId,
+      'public',
+    );
+    expect(await present()).toBe(true);
+  });
+});
+
+describe('Test 13 — every global retrieval path routes through the visibility gate (WS-Q.4.4b)', () => {
+  it('the feed service applies filterByVisibility and the retrievers apply the public predicate', () => {
+    const here = dirname(new URL(import.meta.url).pathname);
+    const serviceSrc = readFileSync(resolve(here, '../ranking/service.ts'), 'utf8');
+    const retrieversSrc = readFileSync(resolve(here, '../ranking/retrievers.ts'), 'utf8');
+    // The always-on distribution gate runs on the surface pool BEFORE the
+    // ranked/fallback split, so both inherit it.
+    expect(serviceSrc).toMatch(/filterByVisibility\(/);
+    // The eight organic retrievers apply the two-condition global predicate.
+    expect(retrieversSrc).toMatch(/globallyRetrievable\(/);
   });
 });
