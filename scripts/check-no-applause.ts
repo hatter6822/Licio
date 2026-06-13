@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Static no-applause scan (WS-B.2.1b / Sections 2.4, 5.1). Greps the web
-// component tree for applause affordances so a future change cannot silently
-// reintroduce likes, votes, karma, follower counts, or reaction bars. This is
-// defense in depth alongside the type-level and runtime tests in
+// component AND route trees for applause affordances so a future change cannot
+// silently reintroduce likes, votes, karma, follower counts, or reaction bars —
+// including in route-level page copy such as the front-page framing (WS-Q.5.4b).
+// This is defense in depth alongside the type-level and runtime tests in
 // StoryCard.no-applause.test.tsx.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
-const SCAN_DIR = resolve(ROOT, 'apps/web/src/components');
+const SCAN_DIRS = [resolve(ROOT, 'apps/web/src/components'), resolve(ROOT, 'apps/web/src/routes')];
 
 // Curated to avoid false positives ("looks like", "Save", "Bridge Active").
 const FORBIDDEN: Array<{ pattern: RegExp; message: string }> = [
@@ -56,7 +57,8 @@ function stripComments(line: string): string {
 
 function main(): void {
   const errors: string[] = [];
-  for (const file of collect(SCAN_DIR)) {
+  const files = SCAN_DIRS.flatMap(collect);
+  for (const file of files) {
     const lines = readFileSync(file, 'utf-8').split('\n');
     lines.forEach((line, i) => {
       const code = stripComments(line);
@@ -74,7 +76,7 @@ function main(): void {
     for (const error of errors) console.error(`  - ${error}`);
     process.exit(1);
   }
-  console.log('No-applause scan passed: no applause affordances in the component tree.');
+  console.log('No-applause scan passed: no applause affordances in the component or route trees.');
 }
 
 main();

@@ -8,6 +8,7 @@ import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiClientError } from '../../../lib/api.js';
+import { checkA11y } from '../../../test/axe.js';
 import { AuthorVisibilityControl } from './AuthorVisibilityControl.js';
 
 vi.mock('@tanstack/react-router', () => ({
@@ -56,5 +57,17 @@ describe('AuthorVisibilityControl (WS-Q.5.4a)', () => {
     await user.click(screen.getByRole('button', { name: /make public/i }));
     const link = screen.getByRole('link', { name: /view it/i });
     expect(link).toHaveAttribute('href', '#existing-1');
+  });
+
+  it('has no accessibility violations (narrow + widen + locked states)', async () => {
+    for (const props of [
+      { visibility: 'public', roomVisibility: 'public' } as const,
+      { visibility: 'room_only', roomVisibility: 'public' } as const,
+      { visibility: 'room_only', roomVisibility: 'private' } as const,
+    ]) {
+      const { container, unmount } = render(<AuthorVisibilityControl storyId="s1" {...props} />);
+      expect(await checkA11y(container)).toHaveNoViolations();
+      unmount();
+    }
   });
 });

@@ -9,6 +9,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { checkA11y } from '../../test/axe.js';
 import { RoomDetailBody } from './rooms.js';
 
 vi.mock('@tanstack/react-router', () => ({
@@ -117,5 +118,22 @@ describe('RoomDetailBody (WS-Q.5.3a/b)', () => {
     expect(screen.getByText('Public item')).toBeInTheDocument();
     expect(screen.getByText('In-room item')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /join/i })).not.toBeInTheDocument();
+  });
+
+  it('has no accessibility violations (tier-one shell + member feed)', async () => {
+    roomFeed.mockReturnValue({ isPending: false, data: undefined });
+    const shell = renderBody(baseRoom({ visibility: 'private', joined: false }));
+    expect(await checkA11y(shell.container)).toHaveNoViolations();
+    shell.unmount();
+
+    roomFeed.mockReturnValue({
+      isPending: false,
+      data: {
+        items: [feedItem({ story_id: 's-room', title: 'In-room item', visibility: 'room_only' })],
+        nextCursor: null,
+      },
+    });
+    const feed = renderBody(baseRoom({ visibility: 'private', joined: true }));
+    expect(await checkA11y(feed.container)).toHaveNoViolations();
   });
 });

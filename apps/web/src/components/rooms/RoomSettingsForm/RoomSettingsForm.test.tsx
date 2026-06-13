@@ -7,6 +7,7 @@ import type { RoomDetail } from '@licio/shared';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { checkA11y } from '../../../test/axe.js';
 import { RoomSettingsForm } from './RoomSettingsForm.js';
 
 const updateSettings = vi.hoisted(() => vi.fn());
@@ -78,5 +79,15 @@ describe('RoomSettingsForm (WS-Q.5.3c)', () => {
     );
     expect(screen.getByRole('combobox', { name: /how members join/i })).not.toBeDisabled();
     expect(screen.getByRole('button', { name: /make room public/i })).toBeInTheDocument();
+  });
+
+  it('has no accessibility violations (public + private)', async () => {
+    for (const visibility of ['public', 'private'] as const) {
+      const { container, unmount } = render(
+        <RoomSettingsForm roomId="r1" room={room({ visibility })} />,
+      );
+      expect(await checkA11y(container)).toHaveNoViolations();
+      unmount();
+    }
   });
 });

@@ -331,6 +331,22 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
     setErrors(found);
     if (Object.keys(found).length > 0) return;
 
+    // WS-Q.5.5 — persist the EXACT submitted state before networking. Stories are
+    // draft-preserved, never queued to a default room: if the post fails (offline
+    // or a server error) the precise draft (room + visibility + text) survives for
+    // retry, surfaced by the resume prompt — never lost, never auto-posted.
+    if (debounceTimer.current !== null) {
+      clearTimeout(debounceTimer.current);
+      debounceTimer.current = null;
+    }
+    await saveStoryDraft({
+      draftId: draftId.current,
+      mode,
+      roomId,
+      visibility: requestedVisibility,
+      values: { title, url, reason, body, altText, captionsText },
+    }).catch(() => undefined);
+
     try {
       const topicIds = [crypto.randomUUID()]; // WS-K taxonomy seam: a placeholder topic.
       let uploadId: string | null = null;
@@ -395,7 +411,10 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
       const message =
         error instanceof ApiClientError
           ? error.message
-          : t('storyComposer.err.generic', 'Could not submit. Please try again.');
+          : t(
+              'storyComposer.err.generic',
+              'Could not submit — your draft is kept on this device. Try again when you are online.',
+            );
       setStatus('idle');
       setErrors({ form: `${code}: ${message}` });
     }

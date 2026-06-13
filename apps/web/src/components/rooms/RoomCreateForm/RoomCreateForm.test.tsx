@@ -6,6 +6,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { checkA11y } from '../../../test/axe.js';
 import { RoomCreateForm } from './RoomCreateForm.js';
 
 const mutate = vi.hoisted(() => vi.fn());
@@ -61,5 +62,10 @@ describe('RoomCreateForm (WS-Q.5.3c)', () => {
     await user.click(screen.getByRole('button', { name: /create room/i }));
     expect(mutate).not.toHaveBeenCalled();
     expect(screen.getByText(/a room name is required/i)).toBeInTheDocument();
+  });
+
+  it('has no accessibility violations', async () => {
+    const { container } = render(<RoomCreateForm />);
+    expect(await checkA11y(container)).toHaveNoViolations();
   });
 });

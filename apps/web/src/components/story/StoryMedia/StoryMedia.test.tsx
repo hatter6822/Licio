@@ -56,10 +56,14 @@ describe('StoryMedia (WS-Q.5.2c)', () => {
     expect(screen.queryByRole('img')).toBeNull(); // no broken element left behind
   });
 
-  it('has no accessibility violations', async () => {
+  it('has no accessibility violations (image)', async () => {
     const { container } = render(
       <StoryMedia uploadRef="abc" kind="image" altText="A labeled chart" />,
     );
-    await checkA11y(container);
+    expect(await checkA11y(container)).toHaveNoViolations();
   });
+  // Video-element axe (controls, captions track, no-autoplay) runs in the
+  // Playwright E2E suite against real browsers — jsdom has no media engine, so
+  // axe-core stalls on a <video> here (see test/axe.ts). The video's structural
+  // a11y (controls, <track>, no autoplay) is asserted in the cases above.
 });

@@ -10,7 +10,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DB_NAME, resetDbConnection, saveStoryDraft } from '../../../offline/index.js';
+import {
+  DB_NAME,
+  listStoryDrafts,
+  resetDbConnection,
+  saveStoryDraft,
+} from '../../../offline/index.js';
 import { useFeatureFlagStore } from '../../../stores/index.js';
 import { StoryComposer } from './StoryComposer.js';
 
@@ -116,6 +121,30 @@ describe('StoryComposer draft restore (WS-Q.5.1b)', () => {
     // …and visibility round-trips: room_only was the author's choice in a PUBLIC
     // room, so it is restored (not forced) and shown checked.
     expect(screen.getByRole('radio', { name: /this room only/i })).toBeChecked();
+  });
+
+  // WS-Q.5.5 — stories are draft-preserved, not queued: a failed/offline submit
+  // keeps the EXACT user-chosen room (never auto-posted to a default, never lost).
+  it('preserves the chosen room + text when a submit fails (reconciliation)', async () => {
+    createStory.mockRejectedValue(new Error('network down'));
+    const user = userEvent.setup();
+    renderComposer();
+    await screen.findByText('Commons');
+    await user.click(screen.getByRole('combobox', { name: /home room/i }));
+    await user.click(screen.getByRole('option', { name: /open forum/i }));
+    await user.type(screen.getByLabelText(/^title/i), 'Half-written post');
+    await user.type(screen.getByLabelText(/link url/i), 'https://example.org/q');
+    await user.type(screen.getByLabelText(/why this matters/i), 'Worth keeping');
+    await user.click(screen.getByRole('button', { name: /post/i }));
+
+    await waitFor(() => expect(createStory).toHaveBeenCalledTimes(1));
+    // The draft survived with the USER-CHOSEN room (not Commons) and the text.
+    await waitFor(async () => {
+      const drafts = await listStoryDrafts();
+      const kept = drafts.find((d) => d.values['title'] === 'Half-written post');
+      expect(kept?.roomId).toBe(PUBLIC_ROOM);
+    });
+    expect(screen.getByText(/your draft is kept/i)).toBeInTheDocument();
   });
 
   it('discards a saved draft on request (prompt clears, no resume)', async () => {

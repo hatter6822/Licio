@@ -10,6 +10,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useFeatureFlagStore } from '../../../stores/index.js';
+import { checkA11y } from '../../../test/axe.js';
 import { StoryComposer } from './StoryComposer.js';
 
 const fetchRooms = vi.hoisted(() => vi.fn());
@@ -157,6 +158,17 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
       visibility: 'public',
     });
     await waitFor(() => expect(onSubmitted).toHaveBeenCalled());
+  });
+
+  it('has no accessibility violations (link + video modes)', async () => {
+    fetchRooms.mockResolvedValue({ items: [], nextCursor: null });
+    const user = userEvent.setup();
+    const { container } = renderComposer();
+    await screen.findByText('Commons');
+    expect(await checkA11y(container)).toHaveNoViolations();
+    // The video mode adds the captions/poster controls — exercise them too.
+    await user.click(screen.getByRole('radio', { name: /a video/i }));
+    expect(await checkA11y(container)).toHaveNoViolations();
   });
 });
 
