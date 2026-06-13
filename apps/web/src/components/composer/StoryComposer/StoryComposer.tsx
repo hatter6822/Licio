@@ -61,17 +61,17 @@ function newStoryDraftId(): string {
 
 /**
  * A same-origin object URL for a local preview/probe. Returns ONLY a
- * browser-minted `blob:` URL (the invariant `createObjectURL` guarantees) and
- * rejects anything else as null. A blob URL assigned to an `<img>`/`<video>`
- * `src` LOADS A RESOURCE — it cannot be a `javascript:` URL, inject markup, or
- * run script — so this is purely a defensive scheme assertion that also serves
- * as the CodeQL `js/xss-through-dom` sanitizer (clears the false positive on
- * these object-URL previews without weakening the global security scan).
+ * browser-minted blob-scheme URL (the invariant `createObjectURL` guarantees)
+ * and rejects anything else as null. Such a URL assigned to an `<img>`/`<video>`
+ * `src` LOADS A RESOURCE — it can carry no script scheme, inject no markup, and
+ * run no code — so this is a defensive scheme assertion (and the recognized
+ * sanitizer for the object-URL previews) rather than an actual risk.
  */
 function blobObjectUrl(file: File): string | null {
   if (typeof URL.createObjectURL !== 'function') return null;
   const url = URL.createObjectURL(file);
-  if (url.startsWith('blob:')) return url;
+  // Accept only the browser blob scheme; anything else is revoked + rejected.
+  if (new URL(url, 'http://localhost').protocol === 'blob:') return url;
   URL.revokeObjectURL(url);
   return null;
 }

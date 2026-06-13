@@ -897,6 +897,19 @@ describe('WS-H public story drawers honor the room read bar (WS-Q.3.2)', () => {
     }
   });
 
+  it('the drawers 404 (fail-closed) when the story’s room cannot be resolved', async () => {
+    // A story stamped with a non-existent room id ⇒ storyReadableTo finds no
+    // room ⇒ unreadable (the fail-closed branch), so the drawers 404.
+    const { storyId } = await seedStory(fixture.ingestion, {
+      roomId: randomUUID(),
+      visibility: 'room_only',
+    });
+    const app = new Hono().route('/v1', createV1Routes());
+    for (const drawer of ['interpretations', 'independent-sources'] as const) {
+      expect((await app.request(`/v1/stories/${storyId}/${drawer}`)).status).toBe(404);
+    }
+  });
+
   it('a public story never leaks a room_only near-duplicate co-member', async () => {
     const sharedText =
       'The regional water board released the full nitrate testing dataset with its methodology appendix.';

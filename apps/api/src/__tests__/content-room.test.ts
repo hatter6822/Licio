@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { COMMONS_ROOM_ID, type RoomCreateRequest } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { changeRoomVisibility } from '../forum/room-visibility.js';
+import { changeRoomVisibility, updateRoomGovernanceSettings } from '../forum/room-visibility.js';
 import { resolveRoomCreateAxes } from '../forum/rooms.js';
 import { setContentFlagByName } from '../ingestion/content-flags.js';
 import { createV1Routes } from '../routes/v1.js';
@@ -756,5 +756,81 @@ describe('WS-Q room-axis coherence (a public room is always open-join)', () => {
     expect(after?.visibility).toBe('public');
     // A public room MUST be open (rooms_public_join_open) — the cascade resets it.
     expect(after?.joinModel).toBe('open');
+  });
+});
+
+describe('WS-Q room-visibility cascade + governance settings', () => {
+  it('public → private forces existing public stories room_only and collapses an open join model', async () => {
+    const room = await makeRoom('public'); // open join
+    const author = await seedUserWithSession(fixture.identity, { handle: 'casc' });
+    const created = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission('https://example.com/casc', { room_id: room }),
+        author.cookie,
+      ),
+    );
+    expect(created.status).toBe(201);
+    const storyId = ((await created.json()) as { story: { story_id: string } }).story.story_id;
+
+    const steward = await seedUserWithSession(fixture.identity, { handle: 'casc-sw' });
+    const out = await changeRoomVisibility(
+      fixture.forum,
+      fixture.ingestion,
+      fixture.events,
+      fixture.identity,
+      steward.userId,
+      room,
+      'private',
+    );
+    expect(out.ok && out.converted).toBe(1);
+    const story = await fixture.ingestion.stories.getById(storyId);
+    expect(story?.visibility).toBe('room_only'); // forced by the cascade
+    const after = await fixture.forum.rooms.getById(room);
+    expect(after?.visibility).toBe('private');
+    expect(after?.joinModel).toBe('request_approval'); // open collapsed
+  });
+
+  it('changing visibility to the current value is a no-op (converted: 0)', async () => {
+    const room = await makeRoom('public');
+    const sw = await seedUserWithSession(fixture.identity, { handle: 'noop' });
+    const out = await changeRoomVisibility(
+      fixture.forum,
+      fixture.ingestion,
+      fixture.events,
+      fixture.identity,
+      sw.userId,
+      room,
+      'public',
+    );
+    expect(out).toEqual({ ok: true, converted: 0 });
+  });
+
+  it('the settings write rejects a visibility change (422) and forces open on a public room', async () => {
+    const room = await makeRoom('public');
+    const sw = await seedUserWithSession(fixture.identity, { handle: 'gov' });
+    const denied = await updateRoomGovernanceSettings(
+      fixture.forum,
+      fixture.identity,
+      sw.userId,
+      room,
+      {
+        visibility: 'private',
+      },
+    );
+    expect(denied.ok).toBe(false);
+    expect(denied.ok === false && denied.status).toBe(422);
+    // A public room ignores a request_approval join write — coherence forces open.
+    const ok = await updateRoomGovernanceSettings(
+      fixture.forum,
+      fixture.identity,
+      sw.userId,
+      room,
+      {
+        joinModel: 'request_approval',
+      },
+    );
+    expect(ok.ok).toBe(true);
+    expect((await fixture.forum.rooms.getById(room))?.joinModel).toBe('open');
   });
 });

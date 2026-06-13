@@ -56,6 +56,24 @@ describe('StoryMedia (WS-Q.5.2c)', () => {
     expect(screen.queryByRole('img')).toBeNull(); // no broken element left behind
   });
 
+  it('preview mode (in a card link) shows a video poster image, NOT interactive controls', () => {
+    const { container } = render(
+      <StoryMedia uploadRef="vid-7" kind="video" altText={null} posterUploadRef="pos-7" preview />,
+    );
+    // No <video controls> nested in the link; a non-interactive poster instead.
+    expect(container.querySelector('video')).toBeNull();
+    const img = screen.getByRole('img');
+    expect(img.getAttribute('src')).toContain('/v1/uploads/pos-7');
+  });
+
+  it('preview mode without a poster shows a non-interactive placeholder (no <video>)', () => {
+    const { container } = render(
+      <StoryMedia uploadRef="vid-8" kind="video" altText={null} preview />,
+    );
+    expect(container.querySelector('video')).toBeNull();
+    expect(screen.getByText(/open to play/i)).toBeInTheDocument();
+  });
+
   it('has no accessibility violations (image)', async () => {
     const { container } = render(
       <StoryMedia uploadRef="abc" kind="image" altText="A labeled chart" />,

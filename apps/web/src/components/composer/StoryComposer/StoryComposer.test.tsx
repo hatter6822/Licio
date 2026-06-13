@@ -170,6 +170,30 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
     await user.click(screen.getByRole('radio', { name: /a video/i }));
     expect(await checkA11y(container)).toHaveNoViolations();
   });
+
+  it('shows an image preview via a verified blob: object URL (the scheme guard)', async () => {
+    fetchRooms.mockResolvedValue({ items: [], nextCursor: null });
+    const origCreate = URL.createObjectURL;
+    const origRevoke = URL.revokeObjectURL;
+    URL.createObjectURL = vi.fn(() => 'blob:http://localhost/preview-uuid');
+    URL.revokeObjectURL = vi.fn();
+    try {
+      const user = userEvent.setup();
+      const { unmount } = renderComposer();
+      await screen.findByText('Commons');
+      await user.click(screen.getByRole('radio', { name: /an image/i }));
+      const file = new File([new Uint8Array([1, 2, 3])], 'p.jpg', { type: 'image/jpeg' });
+      await user.upload(screen.getByLabelText(/image file/i), file);
+      // The blob-scheme guard accepted the object URL and it reached the <img>.
+      const preview = await screen.findByRole('img', { name: /selected image preview/i });
+      expect(preview.getAttribute('src')).toBe('blob:http://localhost/preview-uuid');
+      unmount(); // revokes the object URL on cleanup
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:http://localhost/preview-uuid');
+    } finally {
+      URL.createObjectURL = origCreate;
+      URL.revokeObjectURL = origRevoke;
+    }
+  });
 });
 
 describe('StoryComposer share-target prefill (WS-Q.5.1c)', () => {
