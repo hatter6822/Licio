@@ -65,6 +65,7 @@ import {
   setPreferences,
 } from '../lib/push-service.js';
 import { rateLimit } from '../lib/rate-limit.js';
+import { feedMediaOf } from '../lib/story-media.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { serveFeed } from '../ranking/service.js';
 import { getRankingServices } from '../ranking/services.js';
@@ -139,6 +140,7 @@ function realStoryToDetail(story: StoryRecord, thread: { threadId: string } | nu
     source: story.publisher ?? story.canonicalUrl ?? 'Community submission',
     origin: 'independent' as const,
     ...(story.canonicalUrl !== null ? { url: story.canonicalUrl } : {}),
+    media: feedMediaOf(story),
     // Best-effort estimate from the bounded excerpt (the full body is never
     // stored, WS-F.1.4f) — a floor, not a measurement.
     reading_minutes: Math.max(1, Math.ceil(excerptWords / 200)),

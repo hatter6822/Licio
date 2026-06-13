@@ -66,12 +66,26 @@ export const feedContextCardSchema = z.object({
 });
 export type FeedContextCard = z.infer<typeof feedContextCardSchema>;
 
+/** WS-Q.5.2c — native image/video post media (the scan-gated upload + alt text).
+ *  Null for non-media stories; the client builds the gated read URL from
+ *  `upload_ref`. Images carry required alt text; videos carry none here. */
+export const feedMediaSchema = z.object({
+  upload_ref: uuidSchema,
+  kind: z.enum(['image', 'video']),
+  alt_text: z.string().max(1_000).nullable(),
+  /** Video captions as text (rendered beneath the player); null otherwise. */
+  captions_text: z.string().max(20_000).nullable().default(null),
+});
+export type FeedMedia = z.infer<typeof feedMediaSchema>;
+
 export const feedItemSchema = z.object({
   story_id: uuidSchema,
   title: z.string().min(1),
   source: z.string().min(1),
   origin: storyOriginSchema,
   url: httpUrlSchema.optional(),
+  /** WS-Q.5.2c native media (image/video posts); absent for non-media stories. */
+  media: feedMediaSchema.nullish(),
   reading_minutes: z.number().int().nonnegative(),
   rating_label: ratingLabelKindSchema,
   /** Human-readable distribution reason; never a raw numeric score. */

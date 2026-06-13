@@ -39,6 +39,16 @@ function toStoryCardData(item: FeedItem): StoryCardData {
       const icon = asIconName(chip.icon);
       return { id: chip.id, label: chip.label, ...(icon ? { icon } : {}) };
     }),
+    ...(item.media
+      ? {
+          media: {
+            uploadRef: item.media.upload_ref,
+            kind: item.media.kind,
+            altText: item.media.alt_text,
+            captionsText: item.media.captions_text,
+          },
+        }
+      : {}),
   };
 }
 

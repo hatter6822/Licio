@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from 'react';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
 import { IndependentSourcesDrawer } from '../../components/story/IndependentSourcesDrawer/index.js';
 import { ShareStoryButton } from '../../components/story/ShareStoryButton/index.js';
+import { StoryMedia } from '../../components/story/StoryMedia/index.js';
 import { TopicRepeatsPreference } from '../../components/story/TopicRepeatsPreference/index.js';
 import { WhereInterpretationsDiffer } from '../../components/story/WhereInterpretationsDiffer/index.js';
 import { Button } from '../../components/ui/Button/index.js';
@@ -145,6 +146,14 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 {t('story.inspectSignals', 'Inspect your reading signals')}
               </Link>
             </div>
+            {data.media ? (
+              <StoryMedia
+                uploadRef={data.media.upload_ref}
+                kind={data.media.kind}
+                altText={data.media.alt_text}
+                captionsText={data.media.captions_text}
+              />
+            ) : null}
             <p className="text-base text-ink">{data.body_summary}</p>
             <div className="flex flex-wrap gap-2">
               {data.url ? (

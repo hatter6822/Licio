@@ -40,6 +40,15 @@ export interface BranchPreviewItem {
   title: string;
 }
 
+/** WS-Q.5.2c native media (image/video post); descriptive, never a popularity
+ *  signal. The card renders it through the scan-gated upload URL. */
+export interface StoryMediaData {
+  uploadRef: string;
+  kind: 'image' | 'video';
+  altText: string | null;
+  captionsText?: string | null;
+}
+
 export interface StoryCardData {
   /** MERI exposure label (WS-H.2.3a) — absent until analysis covers the story. */
   exposureLabel?: MeriExposureLabelWire;
@@ -49,4 +58,8 @@ export interface StoryCardData {
   distributionReason: string;
   contextChips?: ContextChip[];
   branchPreview?: BranchPreviewItem[];
+  /** WS-Q.5.3b — in-room chip on non-public items (room feeds). */
+  inRoom?: boolean;
+  /** WS-Q.5.2c — native image/video post media. */
+  media?: StoryMediaData;
 }

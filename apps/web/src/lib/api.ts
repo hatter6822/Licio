@@ -38,22 +38,32 @@ import {
   okAckSchema,
   type PushSubscriptionJson,
   type ReportAck,
+  type RoomCreateRequest,
   type RoomDetail,
+  type RoomGovernanceSettingsRequest,
   type RoomJoinResponse,
   type RoomListResponse,
+  type RoomSummary,
   reportAckSchema,
   roomDetailSchema,
   roomJoinResponseSchema,
   roomListResponseSchema,
+  roomSummarySchema,
   type SignalLedgerResponse,
+  type StoryCreateRequest,
+  type StoryCreateResponse,
   type StoryDetail,
   type StoryInterpretationsResponse,
   signalLedgerResponseSchema,
+  storyCreateResponseSchema,
   storyDetailSchema,
+  storyDuplicateResponseSchema,
   storyInterpretationsResponseSchema,
   type ThreadDetail,
   threadDetailSchema,
+  type UploadPublic,
   type UserSettings,
+  uploadPublicSchema,
   userSettingsSchema,
   vapidPublicKeyResponseSchema,
 } from '@licio/shared';
@@ -352,4 +362,111 @@ export async function updateNotificationPreferences(
 ): Promise<NotificationPreferences> {
   const response = await client.v1.notifications.preferences.$patch({ json: patch });
   return parseResponse(response, notificationPreferencesSchema);
+}
+
+// --- WS-Q content–room surface --------------------------------------------
+
+/** Same-origin gated read URL for a scan-cleared media upload (image/video). */
+export function mediaUrl(uploadRef: string): string {
+  return `${API_BASE}/v1/uploads/${uploadRef}`;
+}
+
+/** Submit a story (link/brief/image/video/…) to a home room (WS-F/WS-Q). */
+export async function createStory(request: StoryCreateRequest): Promise<StoryCreateResponse> {
+  const response = await client.v1.stories.$post({ json: request });
+  return parseResponse(response, storyCreateResponseSchema);
+}
+
+/**
+ * Upload media bytes (image/video) through the scan-gated upload path. EXIF/GPS
+ * is stripped server-side before storage; video containers are sniffed. Goes
+ * through the CSRF-serialized fetch (FormData; the browser sets the multipart
+ * boundary). Upload progress is reported as an indeterminate state — `fetch`
+ * cannot surface byte progress.
+ */
+export async function uploadMedia(file: File, altText?: string): Promise<UploadPublic> {
+  const form = new FormData();
+  form.set('file', file);
+  if (altText !== undefined && altText.length > 0) form.set('alt_text', altText);
+  const response = await apiFetch(`${API_BASE}/v1/uploads`, { method: 'POST', body: form });
+  return parseResponse(response, uploadPublicSchema);
+}
+
+const visibilityChangeResponseSchema = z.object({
+  visibility: z.enum(['public', 'room_only']),
+  changed: z.boolean(),
+});
+export type VisibilityChangeResult = z.infer<typeof visibilityChangeResponseSchema>;
+
+/**
+ * Narrow (public → room_only) or widen (room_only → public) a story's
+ * visibility (author-only, WS-Q.2.4). A widen that collides with an existing
+ * public story for the same URL throws an {@link ApiClientError} carrying the
+ * existing story id (code `duplicate_story`).
+ */
+export async function changeStoryVisibility(
+  storyId: string,
+  visibility: 'public' | 'room_only',
+): Promise<VisibilityChangeResult> {
+  const response = await client.v1.stories[':storyId'].visibility.$patch({
+    param: { storyId },
+    json: { visibility },
+  });
+  if (response.status === 409) {
+    const body = storyDuplicateResponseSchema.safeParse(await response.json());
+    const existing = body.success ? body.data.existing_story_id : undefined;
+    const err = new ApiClientError(
+      'duplicate_story',
+      'A public story already exists for this link',
+      409,
+    );
+    if (existing !== undefined) {
+      (err as ApiClientError & { existingStoryId?: string }).existingStoryId = existing;
+    }
+    throw err;
+  }
+  return parseResponse(response, visibilityChangeResponseSchema);
+}
+
+/** Room feed (WS-I room surface; gated by the WS-G content bar). */
+export async function fetchRoomFeed(roomId: string, cursor?: string): Promise<FeedResponse> {
+  const response = await client.v1.rooms[':roomId'].feed.$get({
+    param: { roomId },
+    query: cursor ? { cursor } : {},
+  });
+  return parseResponse(response, feedResponseSchema);
+}
+
+/** Create a room with the WS-Q visibility/join/posting axes (WS-G.2.3c). */
+export async function createRoom(request: RoomCreateRequest): Promise<RoomSummary> {
+  const response = await client.v1.rooms.$post({ json: request });
+  return parseResponse(response, roomSummarySchema);
+}
+
+/** Steward: change join_model / posting_policy (NOT visibility) (WS-Q.3.3b). */
+export async function updateRoomSettings(
+  roomId: string,
+  patch: RoomGovernanceSettingsRequest,
+): Promise<void> {
+  const response = await client.v1.rooms[':roomId'].settings.$patch({
+    param: { roomId },
+    json: patch,
+  });
+  await parseResponse(response, z.object({ ok: z.literal(true) }));
+}
+
+/** Steward: the audited public⇄private room-visibility cascade (WS-Q.3.4). */
+export async function changeRoomVisibility(
+  roomId: string,
+  visibility: 'public' | 'private',
+): Promise<{ converted: number }> {
+  const response = await client.v1.rooms[':roomId'].visibility.$post({
+    param: { roomId },
+    json: { visibility },
+  });
+  const result = await parseResponse(
+    response,
+    z.object({ visibility: z.enum(['public', 'private']), converted: z.number().int().min(0) }),
+  );
+  return { converted: result.converted };
 }
