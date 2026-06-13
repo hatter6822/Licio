@@ -8,6 +8,7 @@ import type { StoryDetail } from '@licio/shared';
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
+import { AuthorVisibilityControl } from '../../components/story/AuthorVisibilityControl/index.js';
 import { IndependentSourcesDrawer } from '../../components/story/IndependentSourcesDrawer/index.js';
 import { ShareStoryButton } from '../../components/story/ShareStoryButton/index.js';
 import { StoryMedia } from '../../components/story/StoryMedia/index.js';
@@ -169,6 +170,14 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 contextStatusPending={interpretations.isPending}
               />
             </div>
+            {/* WS-Q.5.4a — the author's visibility control (owner only). */}
+            {data.is_owner ? (
+              <AuthorVisibilityControl
+                storyId={data.story_id}
+                visibility={data.visibility ?? 'public'}
+                {...(data.room_visibility ? { roomVisibility: data.room_visibility } : {})}
+              />
+            ) : null}
             {topicIds?.[0] ? <TopicRepeatsPreference topicId={topicIds[0]} /> : null}
             {interpretations.data ? (
               <WhereInterpretationsDiffer data={interpretations.data} />

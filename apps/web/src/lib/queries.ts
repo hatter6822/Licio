@@ -132,6 +132,43 @@ export function useRoomQuery(roomId: string) {
   });
 }
 
+/** WS-Q.5.3b — the room feed (gated by the WS-G content bar; `enabled` lets the
+ *  caller defer the fetch until the reader has passed the tier-two bar). */
+export function useRoomFeedQuery(roomId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.roomFeed(roomId),
+    queryFn: () => api.fetchRoomFeed(roomId),
+    enabled,
+    ...cachePolicy.feed,
+  });
+}
+
+/** WS-Q.5.3a — join a room from the tier-one shell (open ⇒ active; otherwise a
+ *  pending request). Refreshes the room so the membership state updates. */
+export function useJoinRoomMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.joinRoom(roomId),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.room(roomId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.rooms() });
+    },
+  });
+}
+
+/** WS-Q.5.4a — author narrow/widen of a story's visibility; refreshes the story
+ *  on success (a 409 collision rejects with the existing public story id). */
+export function useChangeStoryVisibilityMutation(storyId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (visibility: 'public' | 'room_only') =>
+      api.changeStoryVisibility(storyId, visibility),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.story(storyId) });
+    },
+  });
+}
+
 export function useSettingsQuery() {
   return useQuery({
     queryKey: queryKeys.settings(),

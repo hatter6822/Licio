@@ -84,6 +84,9 @@ export const feedItemSchema = z.object({
   source: z.string().min(1),
   origin: storyOriginSchema,
   url: httpUrlSchema.optional(),
+  /** WS-Q.5.3b — item visibility tier; lets a room feed mark non-public items
+   *  with the in-room chip. Absent ⇒ public (global feeds carry only public). */
+  visibility: z.enum(['public', 'room_only']).optional(),
   /** WS-Q.5.2c native media (image/video posts); absent for non-media stories. */
   media: feedMediaSchema.nullish(),
   reading_minutes: z.number().int().nonnegative(),
@@ -126,5 +129,11 @@ export const storyDetailSchema = feedItemSchema.extend({
   thread_id: uuidSchema.nullable(),
   /** Topic-cluster ids (WS-H.6.1a client loop tracking; descriptive only). */
   topic_ids: z.array(z.string().min(1).max(128)).max(8).default([]),
+  /** WS-Q.5.4a — true when the requesting user authored this story (gates the
+   *  author visibility control). Absent ⇒ not the owner. */
+  is_owner: z.boolean().optional(),
+  /** WS-Q.5.4a — the home room's visibility (widen is impossible in a private
+   *  room). Absent on the legacy demo contract. */
+  room_visibility: z.enum(['public', 'private']).optional(),
 });
 export type StoryDetail = z.infer<typeof storyDetailSchema>;

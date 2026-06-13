@@ -4,12 +4,22 @@
 // lenses; the detail route shows a room. Room governance is a flag-gated
 // sub-route that renders RestrictedState when `governanceEnabled` is off
 // (fail-closed, WS-C.1.1d) — the URL stays shareable but inert.
+import type { RoomDetail } from '@licio/shared';
 import { Link, useParams } from '@tanstack/react-router';
 import { useEffect } from 'react';
+import { feedItemToCard } from '../../components/story/feed-card.js';
+import { StoryCard } from '../../components/story/StoryCard/index.js';
+import { Button } from '../../components/ui/Button/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { RestrictedState } from '../../components/ui/RestrictedState/index.js';
 import { useT } from '../../i18n/index.js';
-import { useRoomQuery, useRoomsQuery } from '../../lib/queries.js';
+import { cn } from '../../lib/cn.js';
+import {
+  useJoinRoomMutation,
+  useRoomFeedQuery,
+  useRoomQuery,
+  useRoomsQuery,
+} from '../../lib/queries.js';
 import { track } from '../../lib/telemetry.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { selectGovernanceEnabled, useFeatureFlagStore } from '../../stores/index.js';
@@ -38,9 +48,16 @@ export function RoomsPage(): React.ReactElement {
               <Link
                 to="/rooms/$roomId"
                 params={{ roomId: room.room_id }}
-                className="block rounded-lg border border-line p-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                className="flex items-center justify-between gap-2 rounded-lg border border-line p-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
               >
                 <span className="font-medium text-ink">{room.name}</span>
+                {/* Private rooms are discoverable at tier one (existence is
+                    universal); counts are public-only (no oracle). */}
+                {room.visibility === 'private' ? (
+                  <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 font-medium text-ink-muted text-xs">
+                    {t('room.badge.private', 'Private room')}
+                  </span>
+                ) : null}
               </Link>
             </li>
           ))}
@@ -72,21 +89,105 @@ export function RoomDetailPage(): React.ReactElement {
 
   return (
     <PageScaffold title={room.data?.name ?? t('room.title', 'Room')} query={room}>
-      {(data) => (
-        <div className="flex flex-col gap-3">
-          {data.description ? <p className="text-ink-muted">{data.description}</p> : null}
-          {data.governance !== null ? (
-            <Link
-              to="/rooms/$roomId/governance"
-              params={{ roomId }}
-              className="text-primary-on-soft underline"
-            >
-              {t('room.governance.link', 'Room governance')}
-            </Link>
-          ) : null}
-        </div>
-      )}
+      {(data) => <RoomDetailBody roomId={roomId} room={data} />}
     </PageScaffold>
+  );
+}
+
+/** WS-Q.5.3a/b — tier-one shell (always) + the content bar; the room feed (with
+ *  the in-room chip) renders only once the reader passes the tier-two bar. */
+export function RoomDetailBody({
+  roomId,
+  room,
+}: {
+  roomId: string;
+  room: RoomDetail;
+}): React.ReactElement {
+  const t = useT();
+  const isPrivate = room.visibility === 'private';
+  // Tier two: public rooms are readable by all; private rooms need membership.
+  const contentVisible = !isPrivate || room.joined;
+  const feed = useRoomFeedQuery(roomId, contentVisible);
+  const join = useJoinRoomMutation(roomId);
+
+  return (
+    <div className="flex flex-col gap-4">
+      {/* Tier-one shell: name (in the header), visibility badge, description. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span
+          className={cn(
+            'inline-flex items-center rounded-full px-2 py-0.5 font-medium text-xs',
+            isPrivate ? 'bg-surface-strong text-ink' : 'bg-surface text-ink-muted',
+          )}
+        >
+          {isPrivate
+            ? t('room.badge.private', 'Private room')
+            : t('room.badge.public', 'Public room')}
+        </span>
+      </div>
+      {room.description ? <p className="text-ink-muted">{room.description}</p> : null}
+
+      {/* Non-members of a private room: join affordance + honest-limits notice;
+          NO content renders until the bar passes (WS-Q.5.3a). */}
+      {isPrivate && !room.joined ? (
+        <div className="flex flex-col gap-2 rounded-lg border border-line bg-surface-sunken p-4">
+          {room.join_pending ? (
+            <p className="text-ink text-sm">
+              {t('room.join.pending', 'Your request to join is pending a steward decision.')}
+            </p>
+          ) : room.join_model === 'invite' ? (
+            <p className="text-ink text-sm">{t('room.join.invite', 'This room is invite only.')}</p>
+          ) : (
+            <Button variant="primary" onClick={() => join.mutate()} disabled={join.isPending}>
+              {room.join_model === 'open'
+                ? t('room.join.open', 'Join room')
+                : t('room.join.request', 'Request to join')}
+            </Button>
+          )}
+          <p className="text-ink-muted text-xs">
+            {t(
+              'room.join.notice',
+              'Private from the public — not from moderation, and not encrypted.',
+            )}
+          </p>
+        </div>
+      ) : null}
+
+      {room.governance !== null ? (
+        <Link
+          to="/rooms/$roomId/governance"
+          params={{ roomId }}
+          className="text-primary-on-soft underline"
+        >
+          {t('room.governance.link', 'Room governance')}
+        </Link>
+      ) : null}
+
+      {/* Tier two: the room feed (in-room chip on every room_only item). */}
+      {contentVisible ? (
+        feed.isPending ? (
+          <p className="text-ink-muted text-sm">{t('room.feed.loading', 'Loading room…')}</p>
+        ) : feed.data && feed.data.items.length > 0 ? (
+          <ul className="flex flex-col gap-3">
+            {feed.data.items.map((item) => (
+              <li key={item.story_id}>
+                <Link
+                  to="/stories/$storyId"
+                  params={{ storyId: item.story_id }}
+                  className="block rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                >
+                  <StoryCard {...feedItemToCard(item)} />
+                </Link>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-ink-muted text-sm">
+            {t('room.feed.empty', 'No posts in this room yet.')}
+          </p>
+        )
+      ) : null}
+    </div>
   );
 }
 

@@ -132,7 +132,11 @@ const LIFECYCLE_TO_RATING_LABEL: Readonly<Record<StoryRecord['lifecycleState'], 
 /** Map a REAL ingested story onto the established WS-C story-detail wire
  *  shape (the client validates against storyDetailSchema; real submissions
  *  appear through the same contract the demo fixtures established). */
-function realStoryToDetail(story: StoryRecord, thread: { threadId: string } | null) {
+function realStoryToDetail(
+  story: StoryRecord,
+  thread: { threadId: string } | null,
+  viewer: { isOwner: boolean; roomVisibility: 'public' | 'private' },
+) {
   const excerptWords = story.excerpt === null ? 0 : story.excerpt.split(/\s+/).length;
   return {
     story_id: story.storyId,
@@ -140,6 +144,7 @@ function realStoryToDetail(story: StoryRecord, thread: { threadId: string } | nu
     source: story.publisher ?? story.canonicalUrl ?? 'Community submission',
     origin: 'independent' as const,
     ...(story.canonicalUrl !== null ? { url: story.canonicalUrl } : {}),
+    visibility: story.visibility,
     media: feedMediaOf(story),
     // Best-effort estimate from the bounded excerpt (the full body is never
     // stored, WS-F.1.4f) — a floor, not a measurement.
@@ -151,6 +156,9 @@ function realStoryToDetail(story: StoryRecord, thread: { threadId: string } | nu
     body_summary: story.excerpt ?? '',
     thread_id: thread?.threadId ?? null,
     topic_ids: story.topicIds.slice(0, 8),
+    // WS-Q.5.4a — the owner-only author visibility control + widen eligibility.
+    is_owner: viewer.isOwner,
+    room_visibility: viewer.roomVisibility,
   };
 }
 
@@ -311,7 +319,14 @@ export function createV1Routes() {
               return c.json(notFound, 404);
             }
             const thread = await ingestion.stories.getThreadByStoryId(storyId);
-            return c.json(storyDetailSchema.parse(realStoryToDetail(real, thread)));
+            return c.json(
+              storyDetailSchema.parse(
+                realStoryToDetail(real, thread, {
+                  isOwner: userId !== null && userId === real.submittedBy,
+                  roomVisibility: room.visibility,
+                }),
+              ),
+            );
           }
           const story = demoStory(storyId);
           return story ? c.json(storyDetailSchema.parse(story)) : c.json(notFound, 404);

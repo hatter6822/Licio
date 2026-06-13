@@ -252,6 +252,7 @@ async function buildFeedItems(
         source: story.publisher ?? story.canonicalUrl ?? 'Community submission',
         origin: 'independent' as const,
         ...(story.canonicalUrl !== null ? { url: story.canonicalUrl } : {}),
+        visibility: story.visibility,
         media: feedMediaOf(story),
         reading_minutes: Math.max(1, Math.ceil(excerptWords / 200)),
         rating_label: ratingLabel,
