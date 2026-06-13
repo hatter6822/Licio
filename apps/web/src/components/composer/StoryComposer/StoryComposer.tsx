@@ -60,18 +60,17 @@ function newStoryDraftId(): string {
 }
 
 /**
- * A same-origin object URL for a local preview/probe. Returns ONLY a
- * browser-minted blob-scheme URL (the invariant `createObjectURL` guarantees)
- * and rejects anything else as null. Such a URL assigned to an `<img>`/`<video>`
- * `src` LOADS A RESOURCE — it can carry no script scheme, inject no markup, and
- * run no code — so this is a defensive scheme assertion (and the recognized
- * sanitizer for the object-URL previews) rather than an actual risk.
+ * A same-origin object URL for a local preview. Returns ONLY a browser-minted
+ * blob-scheme URL and rejects anything else as null. Callers ALSO re-assert the
+ * `blob:` scheme with an allowlist guard right at the DOM sink (so the sanitizer
+ * dominates the sink intra-procedurally). Such a URL on an `<img>`/`<video>`
+ * `src` loads a resource — it can carry no script scheme, inject no markup, and
+ * run no code.
  */
 function blobObjectUrl(file: File): string | null {
   if (typeof URL.createObjectURL !== 'function') return null;
   const url = URL.createObjectURL(file);
-  // Accept only the browser blob scheme; anything else is revoked + rejected.
-  if (new URL(url, 'http://localhost').protocol === 'blob:') return url;
+  if (url.startsWith('blob:')) return url;
   URL.revokeObjectURL(url);
   return null;
 }
@@ -79,8 +78,15 @@ function blobObjectUrl(file: File): string | null {
 /** Best-effort client duration probe (0 when the browser can't read metadata). */
 function readVideoDurationSeconds(file: File): Promise<number> {
   return new Promise((resolve) => {
-    const url = typeof document === 'undefined' ? null : blobObjectUrl(file);
-    if (url === null) {
+    if (typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') {
+      resolve(0);
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    // Sanitize the URL AT THE SINK: only a browser `blob:` URL is ever assigned
+    // to video.src — an allowlist guard dominating the sink in this function.
+    if (!url.startsWith('blob:')) {
+      URL.revokeObjectURL(url);
       resolve(0);
       return;
     }
@@ -586,8 +592,10 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
             className="text-sm text-ink"
             {...(errors['file'] ? { 'aria-invalid': true } : {})}
           />
-          {/* WS-Q.5.2a — client-side image preview before upload. */}
-          {previewUrl !== null ? (
+          {/* WS-Q.5.2a — client-side image preview before upload. The src is
+              sanitized AT THE SINK: an allowlist guard (`blob:`) dominates the
+              <img> so only a browser object URL is ever rendered. */}
+          {previewUrl !== null && previewUrl.startsWith('blob:') ? (
             <img
               src={previewUrl}
               alt={t('storyComposer.preview.alt', 'Selected image preview')}
