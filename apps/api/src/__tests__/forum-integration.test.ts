@@ -36,6 +36,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
   let secondUserId: string;
   let threadId: string;
   let claimId: string;
+  let defaultRoomId: string;
   let contributions: DrizzleContributionStore;
   let roomsStore: DrizzleRoomStore;
   let lenses: DrizzleLensStore;
@@ -75,6 +76,10 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
         titleHash: randomUUID().replaceAll('-', ''),
         submittedBy: authorId,
         sourceId: null,
+        roomId: defaultRoomId,
+        visibility: 'public',
+        mediaUploadRef: null,
+        canonicalPublicStoryId: null,
         language: 'en',
         topicIds: [randomUUID()],
         locationScope: null,
@@ -128,6 +133,8 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       description: 'Adapter integration room.',
       roomType: 'global_topic',
       visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'all_members',
       createdBy: authorId,
       governanceMode: 'ordinary',
       charterSummary: null,
@@ -149,6 +156,11 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     summaries = new DrizzleSummaryStore(db);
     uploads = new DrizzleUploadStore(db, null);
     const stories = new DrizzleStoryStore(db);
+    // WS-Q — seedThread's stories need a home room (FK + NOT NULL).
+    const defaultRoom = await roomsStore.insert(roomInput());
+    if (!defaultRoom.ok) throw new Error('default room insert failed');
+    defaultRoomId = defaultRoom.room.roomId;
+    roomIds.push(defaultRoomId);
     threadId = await seedThread(stories);
     const claims = new DrizzleClaimStore(db);
     const claim = await claims.insert({

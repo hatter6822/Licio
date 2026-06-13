@@ -113,7 +113,9 @@ export async function assembleFeatureVector(
   const vector: FeatureVector = {
     item_id: story.storyId,
     item_type: 'story',
-    room_id: thread?.roomId ?? null,
+    room_id: thread?.roomId ?? story.roomId,
+    // WS-Q.4.3 — record visibility (a non-scoring eligibility/audit field).
+    visibility: story.visibility,
     topic_ids: story.topicIds.slice(0, 16),
     source_id: story.sourceId,
     created_at: story.publishedAt ?? story.createdAt,

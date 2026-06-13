@@ -35,8 +35,12 @@ export interface CandidateDataPorts {
   subscribedRoomIds(userId: string): Promise<string[]>;
   /** Most recent threads of a room (newest first). */
   threadsByRoom(roomId: string, limit: number): Promise<ThreadShellRecord[]>;
-  /** Rooms with `expert_led` visibility (expert-explanation retrieval). */
+  /** Public rooms with the `experts_and_stewards` posting policy (the WS-Q
+   *  successor to legacy expert_led rooms on the public front page). */
   expertLedRoomIds(limit: number): Promise<string[]>;
+  /** WS-Q.4.1b — a room's visibility (`null` for an unknown room ⇒ fail-closed
+   *  to non-public). The global retrievers require a PUBLIC room. */
+  roomVisibility(roomId: string): Promise<'public' | 'private' | null>;
   /** storyId → last-seen ISO instant from the user's OWN attention rows. */
   userSeenStories(userId: string): Promise<Map<string, string>>;
   /** Latest SCOI signal for a story (null before coverage). */
@@ -85,9 +89,26 @@ function recencyScore(freshnessIso: string, nowMs: number, horizonHours: number)
   return clamp01(1 - ageMs / (horizonHours * 3_600_000));
 }
 
-/** True when the story may be retrieved at all (visibility + lifecycle). */
+/** True when the story may be retrieved at all (not hidden / not archived). */
 function retrievable(story: StoryRecord): boolean {
   return story.hiddenState === null && story.lifecycleState !== 'archived';
+}
+
+/**
+ * WS-Q.4.1b — GLOBAL retrievability (the eight organic front-page/topic
+ * sources): retrievable AND `story.visibility = 'public'` AND its home room is
+ * public — BOTH conjuncts, so a room_only item OR a transiently-mislabeled
+ * public item in a private room appears in NONE of the eight. The authoritative
+ * always-on backstop is the distribution gate (filterByVisibility); this keeps
+ * in-room content out at the source too.
+ */
+async function globallyRetrievable(
+  ports: CandidateDataPorts,
+  story: StoryRecord,
+): Promise<boolean> {
+  if (!retrievable(story)) return false;
+  if (story.visibility !== 'public') return false;
+  return (await ports.roomVisibility(story.roomId)) === 'public';
 }
 
 function storyFreshnessIso(story: StoryRecord): string {
@@ -95,19 +116,21 @@ function storyFreshnessIso(story: StoryRecord): string {
 }
 
 async function storyToCandidate(
-  ports: CandidateDataPorts,
+  _ports: CandidateDataPorts,
   story: StoryRecord,
   sourceType: CandidateSourceType,
   origin: string,
   retrievalScore: number,
   bridgeContext: BridgeContext | null = null,
 ): Promise<Candidate> {
-  const thread = await ports.threadByStoryId(story.storyId);
   return candidateSchema.parse({
     item_id: story.storyId,
     item_type: 'story',
     source_type: sourceType,
-    room_id: thread?.roomId ?? null,
+    // WS-Q — the home room is authoritative on the story (NOT NULL); no thread
+    // lookup is needed, and the item carries its visibility for the gate.
+    room_id: story.roomId,
+    visibility: story.visibility,
     topic_ids: story.topicIds.slice(0, 16),
     source_id: story.sourceId,
     freshness_timestamp: storyFreshnessIso(story),
@@ -133,7 +156,7 @@ export class SubscribedRoomsRetriever implements CandidateRetriever {
       for (const thread of threads) {
         const storyId = await this.ports.storyIdByThreadId(thread.threadId);
         if (storyId === null) continue;
-        const story = await storyIfRetrievable(this.ports, storyId);
+        const story = await storyIfGloballyRetrievable(this.ports, storyId);
         if (story === null) continue;
         out.push(
           await storyToCandidate(
@@ -166,7 +189,7 @@ export class LocalNewsRetriever implements CandidateRetriever {
     const stories = await this.ports.recentStories(context.limit * 4);
     const out: Candidate[] = [];
     for (const story of stories) {
-      if (!retrievable(story)) continue;
+      if (!(await globallyRetrievable(this.ports, story))) continue;
       const scope = story.locationScope;
       if (scope === null || scope.type === 'global') continue;
       // Coarse v1 match: country scope against the locale region subtag.
@@ -210,7 +233,7 @@ export class GlobalCandidatesRetriever implements CandidateRetriever {
     const stories = await this.ports.recentStories(context.limit * 4);
     const out: Candidate[] = [];
     for (const story of stories) {
-      if (!retrievable(story)) continue;
+      if (!(await globallyRetrievable(this.ports, story))) continue;
       const components = await this.ports.latestPwattComponents(story.storyId);
       const freshness = recencyScore(storyFreshnessIso(story), context.nowMs, 48);
       if (components !== null) {
@@ -254,7 +277,7 @@ export class EmergingDiscussionsRetriever implements CandidateRetriever {
     const stories = await this.ports.recentStories(context.limit * 4);
     const out: Candidate[] = [];
     for (const story of stories) {
-      if (!retrievable(story)) continue;
+      if (!(await globallyRetrievable(this.ports, story))) continue;
       const window = await this.ports.latestDayWindow(story.storyId);
       if (window === null) continue;
       const counts = window.contributionCounts;
@@ -293,7 +316,7 @@ export class IndependentSourceAdditionsRetriever implements CandidateRetriever {
     const stories = await this.ports.recentStories(context.limit * 4);
     const out: Candidate[] = [];
     for (const story of stories) {
-      if (!retrievable(story)) continue;
+      if (!(await globallyRetrievable(this.ports, story))) continue;
       const lastSeen = seen.get(story.storyId);
       if (lastSeen === undefined) continue;
       if (story.lastMaterialUpdateAt <= lastSeen) continue;
@@ -325,7 +348,7 @@ export class CrossCommunityBridgesRetriever implements CandidateRetriever {
     const stories = await this.ports.recentStories(context.limit * 4);
     const out: Candidate[] = [];
     for (const story of stories) {
-      if (!retrievable(story)) continue;
+      if (!(await globallyRetrievable(this.ports, story))) continue;
       const scoi = await this.ports.latestScoi(story.storyId);
       if (scoi === null) continue;
       if (scoi.contextState !== 'split' && scoi.contextState !== 'obstructed') continue;
@@ -365,7 +388,7 @@ export class ExpertExplanationsRetriever implements CandidateRetriever {
         const storyId = await this.ports.storyIdByThreadId(thread.threadId);
         if (storyId === null || seen.has(storyId)) continue;
         seen.add(storyId);
-        const story = await storyIfRetrievable(this.ports, storyId);
+        const story = await storyIfGloballyRetrievable(this.ports, storyId);
         if (story === null) continue;
         out.push(
           await storyToCandidate(
@@ -381,7 +404,7 @@ export class ExpertExplanationsRetriever implements CandidateRetriever {
     }
     // Steward-curated summaries outside expert rooms.
     for (const story of await this.ports.recentStories(context.limit * 2)) {
-      if (!retrievable(story) || seen.has(story.storyId)) continue;
+      if (seen.has(story.storyId) || !(await globallyRetrievable(this.ports, story))) continue;
       const thread = await this.ports.threadByStoryId(story.storyId);
       if (thread === null || !(await this.ports.hasHumanSummary(thread.threadId))) continue;
       seen.add(story.storyId);
@@ -400,13 +423,24 @@ export class ExpertExplanationsRetriever implements CandidateRetriever {
   }
 }
 
-/** Direct story lookup honoring visibility (helper for thread-led paths). */
+/** Direct story lookup honoring retrievability (room-surface thread-led path). */
 async function storyIfRetrievable(
   ports: CandidateDataPorts,
   storyId: string,
 ): Promise<StoryRecord | null> {
   const story = await ports.storyById(storyId);
   return story !== null && retrievable(story) ? story : null;
+}
+
+/** WS-Q.4.1b — GLOBAL-surface thread-led lookup: also applies the two-condition
+ *  public predicate, so a subscribed/expert thread in a private room (or a
+ *  room_only item) never reaches the public front page. */
+async function storyIfGloballyRetrievable(
+  ports: CandidateDataPorts,
+  storyId: string,
+): Promise<StoryRecord | null> {
+  const story = await ports.storyById(storyId);
+  return story !== null && (await globallyRetrievable(ports, story)) ? story : null;
 }
 
 /** 8. Chronological catch-up: recent unseen items in time order, respecting
@@ -434,7 +468,7 @@ export class ChronologicalCatchUpRetriever implements CandidateRetriever {
     }
     const out: Candidate[] = [];
     for (const story of stories) {
-      if (!retrievable(story)) continue;
+      if (!(await globallyRetrievable(this.ports, story))) continue;
       if (seen.has(story.storyId)) continue;
       const thread = await this.ports.threadByStoryId(story.storyId);
       const roomMark = thread?.roomId != null ? lastSeenByRoom.get(thread.roomId) : undefined;
@@ -475,6 +509,8 @@ export class RoomSurfaceRetriever implements CandidateRetriever {
     for (const thread of await this.ports.threadsByRoom(context.surfaceRoomId, context.limit)) {
       const storyId = await this.ports.storyIdByThreadId(thread.threadId);
       if (storyId === null) continue;
+      // The room surface serves the room's FULL pool (public + room_only of
+      // this room) — NOT the global predicate. The route enforced the read bar.
       const story = await storyIfRetrievable(this.ports, storyId);
       if (story === null) continue;
       out.push(

@@ -5,7 +5,7 @@
 // and contribution builders.  `settle()` on both bundles makes detached event
 // publication deterministic in tests.
 import { randomUUID } from 'node:crypto';
-import type { ContributionCreate } from '@licio/shared';
+import { COMMONS_ROOM_ID, type ContributionCreate } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumRuntimeConfig } from '../forum/config.js';
 import {
@@ -59,7 +59,13 @@ export function freshWsGServices(
 /** Create a story (with its thread shell) directly through the stores. */
 export async function seedThread(
   fixture: { ingestion: IngestionServices },
-  options: { storyId?: string; threadId?: string; roomId?: string | null; title?: string } = {},
+  options: {
+    storyId?: string;
+    threadId?: string;
+    roomId?: string | null;
+    title?: string;
+    visibility?: 'public' | 'room_only';
+  } = {},
 ): Promise<{ storyId: string; threadId: string }> {
   const storyId = options.storyId ?? randomUUID();
   const threadId = options.threadId ?? randomUUID();
@@ -71,6 +77,11 @@ export async function seedThread(
       titleHash: `hash-${storyId}`,
       submittedBy: randomUUID(),
       sourceId: null,
+      // WS-Q — every story has a home room (defaults to Commons) + visibility.
+      roomId: options.roomId ?? COMMONS_ROOM_ID,
+      visibility: options.visibility ?? 'public',
+      mediaUploadRef: null,
+      canonicalPublicStoryId: null,
       language: 'en',
       topicIds: [randomUUID()],
       locationScope: null,
@@ -89,9 +100,6 @@ export async function seedThread(
     threadId,
   );
   if (!created.ok) throw new Error('seedThread: story creation failed');
-  if (options.roomId !== undefined && options.roomId !== null) {
-    await fixture.ingestion.stories.updateThread(threadId, { roomId: options.roomId });
-  }
   return { storyId, threadId };
 }
 

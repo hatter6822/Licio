@@ -52,7 +52,7 @@ function featureDeps() {
   };
 }
 
-async function insertRoom(visibility: 'public' | 'restricted' | 'expert_led'): Promise<string> {
+async function insertRoom(visibility: 'public' | 'private'): Promise<string> {
   const roomId = randomUUID();
   await fixture.forum.rooms.insert({
     roomId,
@@ -61,6 +61,8 @@ async function insertRoom(visibility: 'public' | 'restricted' | 'expert_led'): P
     description: null,
     roomType: 'global_topic',
     visibility,
+    joinModel: visibility === 'public' ? 'open' : 'request_approval',
+    postingPolicy: 'all_members',
     createdBy: null,
     governanceMode: 'ordinary',
     charterSummary: null,
@@ -123,7 +125,7 @@ describe('room feed route (WS-I room surface; WS-G content visibility)', () => {
   });
 
   it('restricted rooms read 404 for signed-out and PENDING users; active members serve', async () => {
-    const roomId = await insertRoom('restricted');
+    const roomId = await insertRoom('private');
     await seedStory(fixture.ingestion, { roomId });
     const pending = await seedUserWithSession(fixture.identity);
     const active = await seedUserWithSession(fixture.identity);
@@ -179,17 +181,17 @@ describe('room feed route (WS-I room surface; WS-G content visibility)', () => {
     expect(replay.match).toBe(true);
   });
 
-  it('restricted-room content NEVER leaks into public front-page/topic feeds (§16.2)', async () => {
-    // The WS-G content-visibility bar holds on the DISTRIBUTION side too:
-    // a story whose thread lives in a restricted room is room content, and
-    // the front page serves it only to readers the room route would serve.
-    const roomId = await insertRoom('restricted');
-    const hidden = await seedStory(fixture.ingestion, { roomId });
-    const visible = await seedStory(fixture.ingestion);
+  it('private-room content NEVER leaks into public front-page/topic feeds, even for members (WS-Q §14.5.3)', async () => {
+    // WS-Q strengthens containment: a `room_only` story in a private room is
+    // off EVERY global surface — for signed-out, non-members, AND its own room
+    // members. In-room content reaches a member only through the ROOM feed.
+    const roomId = await insertRoom('private');
+    const inRoom = await seedStory(fixture.ingestion, { roomId, visibility: 'room_only' });
+    const publicStory = await seedStory(fixture.ingestion);
     const member = await seedUserWithSession(fixture.identity);
     await subscribe(roomId, member.userId, 'active');
-    // Signed out: the restricted story is filtered BEFORE the pipeline —
-    // it appears in neither the served items nor the logged candidate set.
+    // Signed out: the room_only story is filtered BEFORE the pipeline — it
+    // appears in neither the served items nor the logged candidate set.
     const anonymous = await serveFeed(fixture.ranking, {
       userId: null,
       surface: 'front_page',
@@ -197,9 +199,9 @@ describe('room feed route (WS-I room surface; WS-G content visibility)', () => {
       surfaceTopicId: null,
       mode: undefined,
     });
-    expect(anonymous.items.map((i) => i.story_id)).toEqual([visible.storyId]);
+    expect(anonymous.items.map((i) => i.story_id)).toEqual([publicStory.storyId]);
     const anonymousLog = await fixture.ranking.decisionLogs.getByRequestId(anonymous.requestId);
-    expect(anonymousLog?.candidate_ids).not.toContain(hidden.storyId);
+    expect(anonymousLog?.candidate_ids).not.toContain(inRoom.storyId);
     // A signed-in NON-member reads the same public-only feed.
     const outsider = await seedUserWithSession(fixture.identity);
     const outsiderFeed = await serveFeed(fixture.ranking, {
@@ -209,8 +211,8 @@ describe('room feed route (WS-I room surface; WS-G content visibility)', () => {
       surfaceTopicId: null,
       mode: undefined,
     });
-    expect(outsiderFeed.items.map((i) => i.story_id)).toEqual([visible.storyId]);
-    // An ACTIVE member's front page may carry the room's content.
+    expect(outsiderFeed.items.map((i) => i.story_id)).toEqual([publicStory.storyId]);
+    // An ACTIVE member's FRONT PAGE is still public-only (containment is global).
     const memberFeed = await serveFeed(fixture.ranking, {
       userId: member.userId,
       surface: 'front_page',
@@ -218,9 +220,16 @@ describe('room feed route (WS-I room surface; WS-G content visibility)', () => {
       surfaceTopicId: null,
       mode: undefined,
     });
-    expect(memberFeed.items.map((i) => i.story_id).sort()).toEqual(
-      [hidden.storyId, visible.storyId].sort(),
-    );
+    expect(memberFeed.items.map((i) => i.story_id)).toEqual([publicStory.storyId]);
+    // The member DOES see the room_only story — but only on the ROOM feed.
+    const roomFeed = await serveFeed(fixture.ranking, {
+      userId: member.userId,
+      surface: 'room',
+      surfaceRoomId: roomId,
+      surfaceTopicId: null,
+      mode: undefined,
+    });
+    expect(roomFeed.items.map((i) => i.story_id)).toContain(inRoom.storyId);
   });
 });
 

@@ -4,7 +4,7 @@
 // invariant platform (installed as the module singleton) with its consumers
 // and hook closures registered.
 import { randomUUID } from 'node:crypto';
-import type { SensitivityLabel } from '@licio/shared';
+import { COMMONS_ROOM_ID, type SensitivityLabel } from '@licio/shared';
 import {
   createInMemoryInvariantServices,
   type InvariantPlatformServices,
@@ -64,6 +64,10 @@ export async function seedStory(
       titleHash: `hash-${storyId}`,
       submittedBy: randomUUID(),
       sourceId: options.sourceId ?? null,
+      roomId: COMMONS_ROOM_ID,
+      visibility: 'public',
+      mediaUploadRef: null,
+      canonicalPublicStoryId: null,
       language: 'en',
       topicIds: options.topicIds ?? ['topic-default'],
       locationScope: null,

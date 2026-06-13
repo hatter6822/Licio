@@ -21,6 +21,7 @@ import type {
   SourceCorrection,
   StoryLifecycleState,
   StoryLifecycleTrigger,
+  StoryVisibility,
   SubmissionMetadata,
   SubmissionType,
   SyndicationRelationshipType,
@@ -43,6 +44,13 @@ export interface StoryRecord {
   titleHash: string;
   submittedBy: string;
   sourceId: string | null;
+  /** WS-Q — the home room (NOT NULL); item visibility (§3.4/§14.5). */
+  roomId: string;
+  visibility: StoryVisibility;
+  /** WS-Q.2.3 — scan-gated media upload (image/video posts); null otherwise. */
+  mediaUploadRef: string | null;
+  /** WS-Q.2.2b — the canonical PUBLIC story for the same URL (room_only rows). */
+  canonicalPublicStoryId: string | null;
   language: string | null;
   topicIds: string[];
   locationScope: LocationScope | null;
@@ -71,7 +79,8 @@ export interface StoryRecord {
 export interface ThreadShellRecord {
   threadId: string;
   storyId: string;
-  roomId: string | null;
+  /** WS-Q.1.5 — NOT NULL, denormalized from (and equal to) the story's room. */
+  roomId: string;
   branchIndex: number;
   currentSummaryId: string | null;
   /** WS-G.1.1 canonical vocabularies (the 0008 migration retired the WS-F
@@ -86,6 +95,14 @@ export interface ThreadShellRecord {
 export type StoryCreateOutcome =
   | { ok: true; story: StoryRecord; thread: ThreadShellRecord }
   | { ok: false; reason: 'duplicate_canonical_url'; existingStoryId: string };
+
+/**
+ * WS-Q.2.2a — the tier a canonical-URL dedup lookup is scoped to (§14.5.6):
+ * the public tier is GLOBAL (one public story per URL); the room tier is
+ * per-room (one room_only story per (URL, room)). Mirrors the two partial
+ * unique indexes; only NON-hidden rows occupy a slot.
+ */
+export type StoryDedupTier = { visibility: 'public' } | { visibility: 'room_only'; roomId: string };
 
 export interface SourceRecord {
   sourceId: string;
@@ -248,7 +265,23 @@ export interface StoryStore {
   /** Batch read (the WS-I safety filter / feed mapping — one query per
    *  pool, never one per item). Unknown ids simply have no map entry. */
   getByIds(storyIds: readonly string[]): Promise<Map<string, StoryRecord>>;
-  getByCanonicalUrl(canonicalUrl: string): Promise<StoryRecord | null>;
+  /** WS-Q.2.2a — tier-scoped exact-URL lookup (the live, non-hidden slot). */
+  getByCanonicalUrl(canonicalUrl: string, tier: StoryDedupTier): Promise<StoryRecord | null>;
+  /** WS-Q.2.2b — VISIBLE room_only stories sharing a canonical URL (cross-tier
+   *  back-linking when a public story becomes canonical). */
+  listRoomOnlyByCanonicalUrl(canonicalUrl: string): Promise<StoryRecord[]>;
+  /** WS-Q.2.3a — the story (if any) already anchored to a media upload (a
+   *  media upload anchors at most one story; claim-uniqueness). */
+  getByMediaUploadRef(uploadId: string): Promise<StoryRecord | null>;
+  /**
+   * WS-Q.2.2a/2.6 — the canonical-URL TAKEDOWN denylist (the companion the
+   * `hidden_state IS NULL` partial unique index requires): true iff any story
+   * for this URL is currently hidden (takedown OR safety), GLOBALLY across both
+   * tiers. A taken-down URL is rejected on re-submission in every tier, so the
+   * tier-scoped index can never be used to bypass a takedown. Derived from
+   * existing `hidden_state` data — no separate denylist table.
+   */
+  hasHiddenForUrl(canonicalUrl: string): Promise<boolean>;
   getThreadByStoryId(storyId: string): Promise<ThreadShellRecord | null>;
   /** Batch thread-shell read keyed by STORY id (WS-I safety filter). */
   getThreadsByStoryIds(storyIds: readonly string[]): Promise<Map<string, ThreadShellRecord>>;
@@ -295,6 +328,9 @@ export interface StoryStore {
         | 'lifecycleState'
         | 'lastMaterialUpdateAt'
         | 'topicIds'
+        | 'visibility'
+        | 'canonicalPublicStoryId'
+        | 'mediaUploadRef'
       >
     >,
   ): Promise<StoryRecord | null>;
@@ -543,7 +579,11 @@ function nowIso(now: () => number): string {
 export class InMemoryStoryStore implements StoryStore {
   readonly #stories = new Map<string, StoryRecord>();
   readonly #threads = new Map<string, ThreadShellRecord>();
-  readonly #byUrl = new Map<string, string>();
+  // WS-Q.2.2a — tier-scoped URL slots, faithful to the two partial unique
+  // indexes: a slot is held only by a VISIBLE (non-hidden) story. Public is
+  // global (key = url); room is per-room (key = `${roomId} ${url}`).
+  readonly #publicByUrl = new Map<string, string>();
+  readonly #roomByUrl = new Map<string, string>();
   readonly #sourceLinks = new Map<
     string,
     Array<{ sourceId: string; linkType: 'primary' | 'syndicated'; viaCanonicalUrl: string | null }>
@@ -554,12 +594,41 @@ export class InMemoryStoryStore implements StoryStore {
     this.#now = now;
   }
 
+  /** The tier URL-slot key a story occupies, or null when it holds no slot
+   *  (no canonical URL, or hidden — matching `hidden_state IS NULL`). */
+  #slotFor(story: StoryRecord): { map: Map<string, string>; key: string } | null {
+    if (story.canonicalUrl === null || story.hiddenState !== null) return null;
+    return story.visibility === 'public'
+      ? { map: this.#publicByUrl, key: story.canonicalUrl }
+      : { map: this.#roomByUrl, key: `${story.roomId} ${story.canonicalUrl}` };
+  }
+
+  /** Re-evaluate a story's URL slot occupancy (idempotent; de-indexes stale). */
+  #reindexUrl(previous: StoryRecord | null, next: StoryRecord): void {
+    if (previous !== null) {
+      const prevSlot = this.#slotFor(previous);
+      if (prevSlot !== null && prevSlot.map.get(prevSlot.key) === previous.storyId) {
+        prevSlot.map.delete(prevSlot.key);
+      }
+    }
+    const slot = this.#slotFor(next);
+    if (slot !== null) slot.map.set(slot.key, next.storyId);
+  }
+
   async createWithThread(
     story: Omit<StoryRecord, 'createdAt' | 'updatedAt' | 'lastMaterialUpdateAt'>,
     threadId: string,
   ): Promise<StoryCreateOutcome> {
+    // WS-Q.2.2a — TIER-SCOPED exact-URL uniqueness (race backstop). A visible
+    // public story collides globally; a visible room_only story collides only
+    // within the same room. A room_only twin never blocks a public insert.
     if (story.canonicalUrl !== null) {
-      const existing = this.#byUrl.get(story.canonicalUrl);
+      const map = story.visibility === 'public' ? this.#publicByUrl : this.#roomByUrl;
+      const key =
+        story.visibility === 'public'
+          ? story.canonicalUrl
+          : `${story.roomId} ${story.canonicalUrl}`;
+      const existing = map.get(key);
       if (existing !== undefined) {
         return { ok: false, reason: 'duplicate_canonical_url', existingStoryId: existing };
       }
@@ -574,7 +643,8 @@ export class InMemoryStoryStore implements StoryStore {
     const thread: ThreadShellRecord = {
       threadId,
       storyId: story.storyId,
-      roomId: null,
+      // WS-Q.1.5 — the thread's room is the story's room (both-or-neither stamp).
+      roomId: story.roomId,
       branchIndex: 0,
       currentSummaryId: null,
       conversationState: 'active',
@@ -585,7 +655,7 @@ export class InMemoryStoryStore implements StoryStore {
     // Both-or-neither: all validation happened above, so both writes commit.
     this.#stories.set(record.storyId, record);
     this.#threads.set(record.storyId, thread);
-    if (record.canonicalUrl !== null) this.#byUrl.set(record.canonicalUrl, record.storyId);
+    this.#reindexUrl(null, record);
     return { ok: true, story: record, thread };
   }
 
@@ -602,9 +672,39 @@ export class InMemoryStoryStore implements StoryStore {
     return out;
   }
 
-  async getByCanonicalUrl(canonicalUrl: string): Promise<StoryRecord | null> {
-    const id = this.#byUrl.get(canonicalUrl);
+  async getByCanonicalUrl(canonicalUrl: string, tier: StoryDedupTier): Promise<StoryRecord | null> {
+    const key = tier.visibility === 'public' ? canonicalUrl : `${tier.roomId} ${canonicalUrl}`;
+    const map = tier.visibility === 'public' ? this.#publicByUrl : this.#roomByUrl;
+    const id = map.get(key);
     return id === undefined ? null : (this.#stories.get(id) ?? null);
+  }
+
+  async listRoomOnlyByCanonicalUrl(canonicalUrl: string): Promise<StoryRecord[]> {
+    const out: StoryRecord[] = [];
+    for (const story of this.#stories.values()) {
+      if (
+        story.canonicalUrl === canonicalUrl &&
+        story.visibility === 'room_only' &&
+        story.hiddenState === null
+      ) {
+        out.push(story);
+      }
+    }
+    return out;
+  }
+
+  async getByMediaUploadRef(uploadId: string): Promise<StoryRecord | null> {
+    for (const story of this.#stories.values()) {
+      if (story.mediaUploadRef === uploadId) return story;
+    }
+    return null;
+  }
+
+  async hasHiddenForUrl(canonicalUrl: string): Promise<boolean> {
+    for (const story of this.#stories.values()) {
+      if (story.canonicalUrl === canonicalUrl && story.hiddenState !== null) return true;
+    }
+    return false;
   }
 
   async getThreadByStoryId(storyId: string): Promise<ThreadShellRecord | null> {
@@ -686,6 +786,8 @@ export class InMemoryStoryStore implements StoryStore {
     if (!current) return null;
     const updated: StoryRecord = { ...current, ...patch, updatedAt: nowIso(this.#now) };
     this.#stories.set(storyId, updated);
+    // WS-Q.2.2a/2.4 — visibility or hidden_state changes move the URL slot.
+    this.#reindexUrl(current, updated);
     return updated;
   }
 
@@ -777,12 +879,15 @@ export class InMemoryStoryStore implements StoryStore {
     let count = 0;
     for (const [storyId, record] of this.#stories) {
       if (record.sourceId !== sourceId || record.hiddenState !== null) continue;
-      this.#stories.set(storyId, {
+      const updated: StoryRecord = {
         ...record,
         hiddenState,
         excerpt: null,
         updatedAt: nowIso(this.#now),
-      });
+      };
+      this.#stories.set(storyId, updated);
+      // Hiding frees the URL slot (matches the `hidden_state IS NULL` predicate).
+      this.#reindexUrl(record, updated);
       count += 1;
     }
     return count;
@@ -791,7 +896,8 @@ export class InMemoryStoryStore implements StoryStore {
   async clear(): Promise<void> {
     this.#stories.clear();
     this.#threads.clear();
-    this.#byUrl.clear();
+    this.#publicByUrl.clear();
+    this.#roomByUrl.clear();
     this.#sourceLinks.clear();
   }
 }

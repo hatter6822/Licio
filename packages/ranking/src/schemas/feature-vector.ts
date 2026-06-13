@@ -68,6 +68,11 @@ export const featureVectorSchema = z
     item_id: z.string().uuid(),
     item_type: z.enum(['story', 'thread']),
     room_id: z.string().uuid().nullable(),
+    /** WS-Q.4.3 — item visibility recorded as a NON-SCORING eligibility/audit
+     *  field (the scoring stage ignores it; the distribution gate reads it).
+     *  Defaulted to `public` so pre-WS-Q feature snapshots replay correctly
+     *  (every pre-WS-Q served item was public). */
+    visibility: z.enum(['public', 'room_only']).default('public'),
     topic_ids: z.array(z.string().min(1).max(128)).max(16),
     source_id: z.string().uuid().nullable(),
     created_at: z.string(),

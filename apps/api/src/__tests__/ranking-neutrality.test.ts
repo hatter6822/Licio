@@ -232,6 +232,8 @@ describe('Test 1 — feed replay with/without wallet links is identical (WS-I.3.
       description: null,
       roomType: 'global_topic',
       visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'all_members',
       createdBy: null,
       governanceMode: 'ordinary',
       charterSummary: null,

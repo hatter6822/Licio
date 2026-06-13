@@ -136,8 +136,19 @@ export function createCandidateDataPorts(
     },
     threadsByRoom: (roomId, limit) => ingestion.stories.listThreadsByRoom(roomId, null, limit),
     async expertLedRoomIds(limit) {
-      const rooms = await forum.rooms.list({ visibilities: ['expert_led'], limit });
-      return rooms.map((r) => r.roomId);
+      // WS-Q.4.1b — the successor to legacy `expert_led` rooms on the front
+      // page is a PUBLIC room with the `experts_and_stewards` posting policy
+      // (private rooms force room_only and never reach the public surface). The
+      // global predicate on the retriever then keeps only its public content.
+      const rooms = await forum.rooms.list({ visibilities: ['public'], limit: limit * 8 });
+      return rooms
+        .filter((r) => r.postingPolicy === 'experts_and_stewards')
+        .slice(0, limit)
+        .map((r) => r.roomId);
+    },
+    async roomVisibility(roomId) {
+      const room = await forum.rooms.getById(roomId);
+      return room === null ? null : room.visibility;
     },
     async userSeenStories(userId) {
       // Bounded to the catch-up horizon (30d): seen-history serves the

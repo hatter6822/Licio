@@ -41,11 +41,17 @@ export const uploads = pgTable(
   (t) => [
     index('uploads_owner_idx').on(t.ownerUserId),
     index('uploads_scan_idx').on(t.scanState),
+    // WS-Q.2.3c — the allowlist gains the two video containers (mp4/webm); the
+    // shared allowlist (forum/safety.ts) mirrors this exactly (parity-tested).
     check(
       'uploads_content_type_allowed',
-      sql`${t.contentType} in ('image/jpeg','image/png','image/webp','image/avif','application/pdf')`,
+      sql`${t.contentType} in ('image/jpeg','image/png','image/webp','image/avif','application/pdf','video/mp4','video/webm')`,
     ),
-    check('uploads_byte_size_range', sql`${t.byteSize} between 1 and 10485760`),
+    // Video posts are larger than images; the per-type byte cap (image 10 MB,
+    // video 200 MB) is enforced at the API layer (ingestion.video_max_bytes).
+    // The table CHECK keeps a hard 200 MB ceiling so a bad write cannot store
+    // an unbounded blob.
+    check('uploads_byte_size_range', sql`${t.byteSize} between 1 and 209715200`),
     check(
       'uploads_alt_len',
       sql`${t.altText} is null or char_length(${t.altText}) between 1 and 500`,

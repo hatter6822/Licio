@@ -515,6 +515,8 @@ describe('WS-D hooks closed by WS-G (anonymize)', () => {
       description: null,
       roomType: 'global_topic',
       visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'all_members',
       createdBy: session.userId,
       governanceMode: 'ordinary',
       charterSummary: null,

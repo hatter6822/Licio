@@ -101,6 +101,8 @@ describe('WS-I.1.1a retrievers', () => {
       description: null,
       roomType: 'global_topic',
       visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'all_members',
       createdBy: null,
       governanceMode: 'ordinary',
       charterSummary: null,
@@ -316,8 +318,30 @@ describe('WS-I.1.1a retrievers', () => {
 
   it('chronological catch-up skips seen stories and respects the per-room mark', async () => {
     const { userId } = await seedUserWithSession(fixture.identity);
-    const seen = await seedStory(fixture.ingestion);
-    const unseen = await seedStory(fixture.ingestion);
+    // WS-Q — every story has a home room; seed the two in DISTINCT public rooms
+    // so the per-room last-seen mark of the seen story does not also filter the
+    // unseen one (and so the global public predicate passes for both).
+    const insertPublicRoom = async (): Promise<string> => {
+      const roomId = randomUUID();
+      await fixture.forum.rooms.insert({
+        roomId,
+        name: `Room ${roomId.slice(0, 8)}`,
+        slug: `room-${roomId.slice(0, 8)}`,
+        description: null,
+        roomType: 'global_topic',
+        visibility: 'public',
+        joinModel: 'open',
+        postingPolicy: 'all_members',
+        createdBy: null,
+        governanceMode: 'ordinary',
+        charterSummary: null,
+        typeMetadata: {},
+        latestActivityAt: null,
+      });
+      return roomId;
+    };
+    const seen = await seedStory(fixture.ingestion, { roomId: await insertPublicRoom() });
+    const unseen = await seedStory(fixture.ingestion, { roomId: await insertPublicRoom() });
     await markSeen(userId, seen.storyId);
     const candidates = await new ChronologicalCatchUpRetriever(ports()).retrieve(
       retrieveContext({ userId }),
@@ -335,6 +359,7 @@ describe('WS-I.1.1b quotas', () => {
       item_type: 'story',
       source_type: 'global',
       room_id: null,
+      visibility: 'public',
       topic_ids: ['t'],
       source_id: `00000000-0000-4000-8000-${String(9000 + n).padStart(12, '0')}`,
       freshness_timestamp: new Date().toISOString(),

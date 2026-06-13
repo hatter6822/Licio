@@ -103,6 +103,9 @@ describe('WS-I.2.1a feature vector schema', () => {
         'topic_relevance',
         'tropical_cascade_rank',
         'updated_at',
+        // WS-Q.4.3 — reviewed addition: a NON-SCORING eligibility/audit field
+        // (the scoring stage ignores it; the distribution gate reads it).
+        'visibility',
       ].sort(),
     );
   });

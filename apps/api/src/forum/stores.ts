@@ -8,6 +8,7 @@
 // dedup uniqueness, transactional contribution+evidence co-creation,
 // case-insensitive room-name uniqueness, `(room_id, lens_type)` uniqueness —
 // so unit tests catch contract violations, not adapter quirks.
+
 import type {
   Citation,
   ContributionMetadata,
@@ -17,12 +18,15 @@ import type {
   EvidenceRelationshipType,
   GovernanceMode,
   LensType,
+  RoomJoinModel,
   RoomNotificationPreferences,
+  RoomPostingPolicy,
   RoomStewardRole,
   RoomType,
   RoomVisibility,
   SummaryLayer,
 } from '@licio/shared';
+import { COMMONS_ROOM_ID, COMMONS_SLUG } from '@licio/shared';
 
 // ---------------------------------------------------------------------------
 // Records (storage shape; ISO timestamps on this side of the boundary).
@@ -66,6 +70,9 @@ export interface RoomRecord {
   description: string | null;
   roomType: RoomType;
   visibility: RoomVisibility;
+  /** WS-Q.1.2 — the two orthogonal §16.2 axes (binary visibility model). */
+  joinModel: RoomJoinModel;
+  postingPolicy: RoomPostingPolicy;
   createdBy: string | null;
   governanceMode: GovernanceMode;
   charterSummary: string | null;
@@ -551,6 +558,34 @@ export class InMemoryRoomStore implements RoomStore {
 
   constructor(now: Clock = Date.now) {
     this.#now = now;
+    // WS-Q.1.6 — the in-memory store self-seeds the system Commons room so it
+    // mirrors the Postgres 0015 seed: every backfilled/room-less story has a
+    // home, and the distribution gate resolves a real public room. Idempotent.
+    this.#seedCommons();
+  }
+
+  /** Synchronously seed the pinned system Commons room (the 0015 analogue). */
+  #seedCommons(): void {
+    if (this.#rooms.has(COMMONS_ROOM_ID)) return;
+    const at = iso(this.#now);
+    this.#rooms.set(COMMONS_ROOM_ID, {
+      roomId: COMMONS_ROOM_ID,
+      name: 'Commons',
+      slug: COMMONS_SLUG,
+      description:
+        'The shared public square — the default home for content without a more specific room.',
+      roomType: 'global_topic',
+      visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'all_members',
+      createdBy: null,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+      createdAt: at,
+      updatedAt: at,
+    });
   }
 
   #subKey(roomId: string, userId: string): string {
@@ -705,6 +740,9 @@ export class InMemoryRoomStore implements RoomStore {
     this.#rooms.clear();
     this.#stewards.length = 0;
     this.#subscriptions.clear();
+    // Commons is a system room — it survives a clear (re-seeded), so the
+    // distribution gate always resolves a real public default room.
+    this.#seedCommons();
   }
 }
 

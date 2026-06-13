@@ -40,6 +40,7 @@ const DB_URL = process.env['DATABASE_URL'];
 describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () => {
   let db: ReturnType<typeof createDbClient>;
   let submitterId: string;
+  let roomId: string;
   let stories: DrizzleStoryStore;
   let sources: DrizzleSourceStore;
   let claims: DrizzleClaimStore;
@@ -61,6 +62,10 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
       titleHash: randomUUID().replaceAll('-', ''),
       submittedBy: submitterId,
       sourceId: null,
+      roomId,
+      visibility: 'public' as const,
+      mediaUploadRef: null,
+      canonicalPublicStoryId: null,
       language: 'en',
       topicIds: [randomUUID()],
       locationScope: null,
@@ -99,6 +104,20 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
       })
       .returning();
     submitterId = (inserted[0] as { userId: string }).userId;
+    // WS-Q — every story needs a home room (FK + NOT NULL); seed one public room.
+    const { rooms } = await import('@licio/db');
+    const room = await db
+      .insert(rooms)
+      .values({
+        name: `WS-F API Room ${randomUUID().slice(0, 8)}`,
+        slug: `wsfapi-${randomUUID().slice(0, 8)}`,
+        roomType: 'global_topic',
+        visibility: 'public',
+        joinModel: 'open',
+        postingPolicy: 'all_members',
+      })
+      .returning();
+    roomId = (room[0] as { roomId: string }).roomId;
     stories = new DrizzleStoryStore(db);
     sources = new DrizzleSourceStore(db);
     claims = new DrizzleClaimStore(db);
@@ -155,6 +174,7 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
       await db.delete(dbSchema.sources).where(inArray(dbSchema.sources.sourceId, createdSourceIds));
     }
     await db.delete(dbSchema.users).where(sql`${dbSchema.users.userId} = ${submitterId}`);
+    if (roomId) await db.delete(dbSchema.rooms).where(sql`${dbSchema.rooms.roomId} = ${roomId}`);
     const client = (db as unknown as { $client: { end: () => Promise<void> } }).$client;
     await client.end();
   });

@@ -89,6 +89,11 @@ export interface IngestionServices {
   reviewQueue: ReviewQueueStore;
   embeddings: EmbeddingStore;
   searchIndex: SearchIndex;
+  /** WS-Q.2.5a — late-bound hook the forum boot sets so the in-memory global
+   *  search predicate can resolve each story's home-room visibility. */
+  setSearchRoomVisibilityProvider: (
+    provider: () => Promise<Map<string, 'public' | 'private'>>,
+  ) => void;
   submissionLimiter: SubmissionRateLimiter;
   urlSafety: UrlSafetyProvider;
   claimExtractor: ClaimExtractor;
@@ -120,17 +125,44 @@ export interface InMemoryIngestionOptions {
 }
 
 /** Build the in-memory search-document provider over the live stores. */
+/** The per-story search-visibility coordinates a claim/evidence hit inherits. */
+interface StoryDocMeta {
+  visible: boolean;
+  roomId: string | null;
+  storyVisibility: 'public' | 'room_only';
+  roomVisibility: 'public' | 'private';
+}
+
+/** A null-story (cross-story / user-experience) hit: global-eligible, never
+ *  room-scoped (its roomId is null, so `?room=` excludes it). */
+const FREE_DOC_META: StoryDocMeta = {
+  visible: true,
+  roomId: null,
+  storyVisibility: 'public',
+  roomVisibility: 'public',
+};
+
 export function buildSearchDocuments(
   allStories: () => Promise<StoryRecordLike[]>,
   allClaims: () => Promise<ClaimRecordLike[]>,
   allEvidence: () => Promise<EvidenceRecordLike[]>,
+  /** WS-Q.2.5a — resolves each story's home-room visibility (fail-closed: an
+   *  unknown room is treated as `private`, so a row whose room can't be
+   *  resolved never surfaces globally). */
+  roomVisibilityById: () => Promise<Map<string, 'public' | 'private'>>,
 ): () => Promise<SearchDocument[]> {
   return async () => {
     const documents: SearchDocument[] = [];
-    const storyVisibility = new Map<string, boolean>();
+    const roomVis = await roomVisibilityById();
+    const storyMeta = new Map<string, StoryDocMeta>();
     for (const story of await allStories()) {
-      const visible = story.hiddenState === null;
-      storyVisibility.set(story.storyId, visible);
+      const meta: StoryDocMeta = {
+        visible: story.hiddenState === null,
+        roomId: story.roomId,
+        storyVisibility: story.visibility,
+        roomVisibility: roomVis.get(story.roomId) ?? 'private',
+      };
+      storyMeta.set(story.storyId, meta);
       documents.push({
         resultType: 'story',
         id: story.storyId,
@@ -142,12 +174,15 @@ export function buildSearchDocuments(
         sourceId: story.sourceId,
         language: story.language,
         createdAt: story.createdAt,
-        visible,
+        visible: meta.visible,
+        roomId: meta.roomId,
+        storyVisibility: meta.storyVisibility,
+        roomVisibility: meta.roomVisibility,
       });
     }
     for (const claim of await allClaims()) {
-      const storyVisible =
-        claim.storyId === null ? true : (storyVisibility.get(claim.storyId) ?? true);
+      const meta =
+        claim.storyId === null ? FREE_DOC_META : (storyMeta.get(claim.storyId) ?? FREE_DOC_META);
       documents.push({
         resultType: 'claim',
         id: claim.claimId,
@@ -159,14 +194,17 @@ export function buildSearchDocuments(
         sourceId: null,
         language: null,
         createdAt: claim.createdAt,
-        visible: claim.claimStatus !== 'retracted' && storyVisible,
+        visible: claim.claimStatus !== 'retracted' && meta.visible,
+        roomId: meta.roomId,
+        storyVisibility: meta.storyVisibility,
+        roomVisibility: meta.roomVisibility,
       });
     }
     for (const card of await allEvidence()) {
       // Evidence on a hidden story is excluded too (null story_id ⇒
       // user-experience evidence, always visible). Mirrors the claim path.
-      const storyVisible =
-        card.storyId === null ? true : (storyVisibility.get(card.storyId) ?? true);
+      const meta =
+        card.storyId === null ? FREE_DOC_META : (storyMeta.get(card.storyId) ?? FREE_DOC_META);
       documents.push({
         resultType: 'evidence',
         id: card.evidenceId,
@@ -178,7 +216,10 @@ export function buildSearchDocuments(
         sourceId: card.sourceId,
         language: null,
         createdAt: card.createdAt,
-        visible: card.verificationState !== 'retracted' && storyVisible,
+        visible: card.verificationState !== 'retracted' && meta.visible,
+        roomId: meta.roomId,
+        storyVisibility: meta.storyVisibility,
+        roomVisibility: meta.roomVisibility,
       });
     }
     return documents;
@@ -196,6 +237,9 @@ interface StoryRecordLike {
   language: string | null;
   createdAt: string;
   hiddenState: 'takedown' | 'safety' | null;
+  /** WS-Q.2.5a — the home room + item visibility (the global tier predicate). */
+  roomId: string;
+  visibility: 'public' | 'room_only';
 }
 interface ClaimRecordLike {
   claimId: string;
@@ -228,6 +272,12 @@ export function createInMemoryIngestionServices(
   /** Search-corpus bound for the in-memory index (the Drizzle search adapter
    *  queries the full FTS index instead). */
   const SEARCH_CORPUS_LIMIT = 10_000;
+  // WS-Q.2.5a — the in-memory global search predicate needs each story's
+  // home-room visibility. Ingestion is constructed before forum, so the
+  // provider is a late-bound hook the forum boot sets (default fail-closed:
+  // all rooms unknown ⇒ private ⇒ nothing surfaces globally until wired).
+  let roomVisibilityProvider: () => Promise<Map<string, 'public' | 'private'>> = async () =>
+    new Map();
 
   const services: IngestionServices = {
     stories,
@@ -242,6 +292,7 @@ export function createInMemoryIngestionServices(
     reviewQueue: new InMemoryReviewQueueStore(now),
     embeddings: new InMemoryEmbeddingStore(now),
     searchIndex: undefined as unknown as SearchIndex, // assigned below
+    setSearchRoomVisibilityProvider: () => {}, // assigned below
     submissionLimiter: new SubmissionRateLimiter(new InMemorySlidingWindowStore()),
     urlSafety: undefined as unknown as UrlSafetyProvider, // assigned below (reads config)
     claimExtractor: options.claimExtractor ?? new HeuristicClaimExtractor(),
@@ -285,11 +336,15 @@ export function createInMemoryIngestionServices(
   };
 
   services.urlSafety = new LocalDenylistUrlSafety(() => config.malwareDomains);
+  services.setSearchRoomVisibilityProvider = (provider) => {
+    roomVisibilityProvider = provider;
+  };
   services.searchIndex = new InMemorySearchIndex(
     buildSearchDocuments(
       () => stories.listRecent(SEARCH_CORPUS_LIMIT),
       () => claims.listRecent(SEARCH_CORPUS_LIMIT),
       () => evidence.listRecent(SEARCH_CORPUS_LIMIT),
+      () => roomVisibilityProvider(),
     ),
   );
 
@@ -335,7 +390,11 @@ export function registerIngestionConsumers(
   events.router.register({
     name: 'ingestion-pipeline',
     topics: ['content.submitted'],
-    accessClassifications: ['public'],
+    // WS-Q.1.7c — the extraction pipeline is a visibility-aware INTERNAL
+    // consumer: it normalizes BOTH public and room_only content, so it holds
+    // `restricted` access (non-scoring) to receive in-room submissions while
+    // generic public/scoring consumers do not.
+    accessClassifications: ['public', 'restricted'],
     scoring: false,
     durable: true,
     handle: async (event) => {
@@ -346,7 +405,10 @@ export function registerIngestionConsumers(
   events.router.register({
     name: 'ingestion-embeddings',
     topics: ['content.normalized', 'evidence.added'],
-    accessClassifications: ['public'],
+    // WS-Q.1.7c — embeddings are computed for BOTH tiers (room-scoped search
+    // similarity needs room_only vectors); the GLOBAL exclusion is the search
+    // tier predicate, not the consumer. Holds `restricted` (non-scoring).
+    accessClassifications: ['public', 'restricted'],
     scoring: false,
     durable: true,
     handle: async (event) => {

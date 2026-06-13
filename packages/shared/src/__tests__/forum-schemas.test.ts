@@ -17,7 +17,7 @@ import {
   contributionCreateSchema,
   contributionUpdateSchema,
 } from '../schemas/contribution.js';
-import { roomCreateRequestSchema } from '../schemas/room.js';
+import { mapLegacyRoomVisibility, roomCreateRequestSchema } from '../schemas/room.js';
 import { summaryCreateRequestSchema, summaryPublicSchema } from '../schemas/summary.js';
 import {
   isLegalConversationTransition,
@@ -371,7 +371,7 @@ describe('WS-G.2.3c room creation — per-type required fields', () => {
       },
     ],
     ['learning', { ...roomBase, room_type: 'learning', curriculum_outline: 'Week 1: sources.' }],
-    ['steward', { ...roomBase, room_type: 'steward', visibility: 'restricted' }],
+    ['steward', { ...roomBase, room_type: 'steward', visibility: 'private' }],
   ])('accepts a valid %s room', (_t, payload) => {
     expect(roomCreateRequestSchema.safeParse(payload).success).toBe(true);
   });
@@ -394,6 +394,83 @@ describe('WS-G.2.3c room creation — per-type required fields', () => {
     ['learning without curriculum', { ...roomBase, room_type: 'learning' }],
   ])('rejects %s', (_name, payload) => {
     expect(roomCreateRequestSchema.safeParse(payload).success).toBe(false);
+  });
+});
+
+describe('WS-Q.1.1a binary visibility + join/posting coherence', () => {
+  const roomBase = {
+    name: 'Public Health',
+    description: 'Evidence-led discussion.',
+    room_type: 'global_topic' as const,
+    initial_topics: ['health'],
+  };
+
+  it('accepts the binary visibility values and rejects the legacy three-value enum', () => {
+    expect(roomCreateRequestSchema.safeParse({ ...roomBase, visibility: 'public' }).success).toBe(
+      true,
+    );
+    expect(roomCreateRequestSchema.safeParse({ ...roomBase, visibility: 'private' }).success).toBe(
+      true,
+    );
+    for (const legacy of ['restricted', 'expert_led']) {
+      expect(roomCreateRequestSchema.safeParse({ ...roomBase, visibility: legacy }).success).toBe(
+        false,
+      );
+    }
+  });
+
+  it('carries join_model/posting_policy and rejects incoherent public combinations', () => {
+    // private rooms admit every join model + posting policy.
+    expect(
+      roomCreateRequestSchema.safeParse({
+        ...roomBase,
+        visibility: 'private',
+        join_model: 'invite',
+        posting_policy: 'experts_and_stewards',
+      }).success,
+    ).toBe(true);
+    expect(
+      roomCreateRequestSchema.safeParse({
+        ...roomBase,
+        visibility: 'private',
+        join_model: 'request_approval',
+      }).success,
+    ).toBe(true);
+    // public rooms only allow the open join model.
+    expect(
+      roomCreateRequestSchema.safeParse({ ...roomBase, visibility: 'public', join_model: 'open' })
+        .success,
+    ).toBe(true);
+    for (const badJoin of ['request_approval', 'invite']) {
+      expect(
+        roomCreateRequestSchema.safeParse({
+          ...roomBase,
+          visibility: 'public',
+          join_model: badJoin,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it('mapLegacyRoomVisibility never widens read access (no-op property)', () => {
+    expect(mapLegacyRoomVisibility('public')).toEqual({
+      visibility: 'public',
+      join_model: 'open',
+      posting_policy: 'all_members',
+    });
+    expect(mapLegacyRoomVisibility('restricted')).toEqual({
+      visibility: 'private',
+      join_model: 'request_approval',
+      posting_policy: 'all_members',
+    });
+    expect(mapLegacyRoomVisibility('expert_led')).toEqual({
+      visibility: 'private',
+      join_model: 'request_approval',
+      posting_policy: 'experts_and_stewards',
+    });
+    for (const legacy of ['restricted', 'expert_led'] as const) {
+      expect(mapLegacyRoomVisibility(legacy).visibility).not.toBe('public');
+    }
   });
 });
 

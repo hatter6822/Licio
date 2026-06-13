@@ -96,14 +96,16 @@ describe('WS-G.2.3c — room creation', () => {
     }
   });
 
-  it('rejects restricted visibility for ordinary users (403) and steward rooms for non-staff', async () => {
-    const restricted = await createRoom({ ...PUBLIC_ROOM, name: 'R1', visibility: 'restricted' });
-    expect(restricted.status).toBe(403);
+  it('allows PRIVATE rooms for ordinary users (WS-Q.3.3a); steward rooms require staff (403)', async () => {
+    // WS-Q.3.3a — a private room is a first-class user affordance (no longer
+    // steward-gated). Only `steward`-type rooms still require platform staff.
+    const privateRoom = await createRoom({ ...PUBLIC_ROOM, name: 'R1', visibility: 'private' });
+    expect(privateRoom.status).toBe(201);
     const stewardRoom = await createRoom({
       room_type: 'steward',
       name: 'Steward HQ',
       description: 'd',
-      visibility: 'restricted',
+      visibility: 'private',
     });
     expect(stewardRoom.status).toBe(403);
   });
@@ -151,9 +153,11 @@ describe('WS-G.2.3a — listing, filters, recommendation (no applause)', () => {
         )
       ).json(),
     );
-    expect(secondPage.items).toHaveLength(5);
+    // WS-Q.1.6 — the system Commons room (a public global_topic) is always
+    // present, so the global_topic listing is the 25 created rooms + Commons.
+    expect(secondPage.items).toHaveLength(6);
     const all = new Set([...firstPage.items, ...secondPage.items].map((r) => r.room_id));
-    expect(all.size).toBe(25);
+    expect(all.size).toBe(26);
 
     const search = roomListResponseSchema.parse(
       await (await app().request('http://local/v1/rooms?q=water')).json(),
@@ -203,18 +207,20 @@ describe('WS-G.2.3a — listing, filters, recommendation (no applause)', () => {
     }
   });
 
-  it('anonymous listing excludes restricted/expert_led rooms', async () => {
-    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+  it('anonymous listing INCLUDES private rooms — tier-one existence is universal (WS-Q.3.1a)', async () => {
     await createRoom({ ...PUBLIC_ROOM, name: 'Open' });
-    const restricted = await createRoom(
-      { ...PUBLIC_ROOM, name: 'Closed', visibility: 'restricted' },
-      steward.cookie,
-    );
-    expect(restricted.status).toBe(201);
+    // A private room is discoverable + joinable by anyone (a non-member never
+    // reads its CONTENT, but its shell — name, visibility, join CTA — is listed).
+    const privateRoom = await createRoom({ ...PUBLIC_ROOM, name: 'Closed', visibility: 'private' });
+    expect(privateRoom.status).toBe(201);
     const anonymous = roomListResponseSchema.parse(
       await (await app().request('http://local/v1/rooms')).json(),
     );
-    expect(anonymous.items.map((r) => r.name)).toEqual(['Open']);
+    const names = anonymous.items.map((r) => r.name);
+    expect(names).toContain('Open');
+    expect(names).toContain('Closed');
+    const closed = anonymous.items.find((r) => r.name === 'Closed');
+    expect(closed?.visibility).toBe('private');
   });
 });
 
@@ -238,19 +244,38 @@ describe('WS-G.2.3b — room detail and §16.5 governance presence', () => {
     expect(detail.governance).toBeNull(); // ordinary ⇒ omitted (§16.5)
   });
 
-  it('enforces restricted access (403 to strangers; member and room steward pass)', async () => {
+  it('private-room detail shows the tier-one shell to all; CONTENT (lenses) is members-only (WS-Q.3.1a)', async () => {
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const created = (await (
-      await createRoom({ ...PUBLIC_ROOM, name: 'Closed', visibility: 'restricted' }, steward.cookie)
+      await createRoom({ ...PUBLIC_ROOM, name: 'Closed', visibility: 'private' }, steward.cookie)
     ).json()) as { room_id: string };
+    // Give the room a lens (CONTENT) the creator can see but a stranger cannot.
+    await app().request(
+      jsonRequest(
+        `/v1/rooms/${created.room_id}/lenses`,
+        'POST',
+        { name: 'Locals', lens_type: 'local_resident' },
+        steward.cookie,
+      ),
+    );
+    // A stranger gets the tier-one SHELL (200), but no lens content.
     const stranger = await app().request(`http://local/v1/rooms/${created.room_id}`);
-    expect(stranger.status).toBe(403);
+    expect(stranger.status).toBe(200);
+    const strangerDetail = roomDetailSchema.parse(await stranger.json());
+    expect(strangerDetail.name).toBe('Closed');
+    expect(strangerDetail.visibility).toBe('private');
+    expect(strangerDetail.lenses).toHaveLength(0); // content withheld
+    // The creator (active member + steward) sees the content.
     const asCreator = await app().request(
       new Request(`http://local/v1/rooms/${created.room_id}`, {
         headers: { cookie: steward.cookie },
       }),
     );
     expect(asCreator.status).toBe(200);
+    expect(roomDetailSchema.parse(await asCreator.json()).lenses).toHaveLength(1);
+    // The room's THREADS remain 404 to a stranger (CONTENT, tier two).
+    const threads = await app().request(`http://local/v1/rooms/${created.room_id}/threads`);
+    expect(threads.status).toBe(404);
   });
 });
 
@@ -296,10 +321,10 @@ describe('WS-G.2.3d — subscriptions', () => {
     expect(await fixture.forum.rooms.getSubscription(created.room_id, reader.userId)).toBeNull();
   });
 
-  it('restricted join → pending → steward approve → active', async () => {
+  it('private (request_approval) join → pending → steward approve → active', async () => {
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const created = (await (
-      await createRoom({ ...PUBLIC_ROOM, name: 'Closed', visibility: 'restricted' }, steward.cookie)
+      await createRoom({ ...PUBLIC_ROOM, name: 'Closed', visibility: 'private' }, steward.cookie)
     ).json()) as { room_id: string };
     const applicant = await seedUserWithSession(fixture.identity, { handle: 'applicant' });
     const join = roomJoinResponseSchema.parse(

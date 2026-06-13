@@ -255,6 +255,7 @@ export function emptyFeatureVector(candidate: Candidate, nowMs: number): Feature
     item_id: candidate.item_id,
     item_type: candidate.item_type,
     room_id: candidate.room_id,
+    visibility: candidate.visibility,
     topic_ids: [...candidate.topic_ids],
     source_id: candidate.source_id,
     created_at: candidate.freshness_timestamp,

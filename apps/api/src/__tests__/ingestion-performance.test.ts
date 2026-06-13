@@ -69,6 +69,7 @@ function makeVector(rng: () => number, center: number): number[] {
 describe.skipIf(!ENABLED)('WS-F performance + recall (gated: DATABASE_URL + RUN_PERF)', () => {
   let db: ReturnType<typeof createDbClient>;
   let submitterId: string;
+  let roomId: string;
   let stories: DrizzleStoryStore;
   let embeddings: DrizzleEmbeddingStore;
   const version = `perf-${randomUUID().slice(0, 8)}`;
@@ -95,6 +96,20 @@ describe.skipIf(!ENABLED)('WS-F performance + recall (gated: DATABASE_URL + RUN_
       })
       .returning();
     submitterId = (inserted[0] as { userId: string }).userId;
+    // WS-Q — every story needs a home room (FK + NOT NULL).
+    const { rooms } = await import('@licio/db');
+    const room = await db
+      .insert(rooms)
+      .values({
+        name: `Perf Room ${randomUUID().slice(0, 8)}`,
+        slug: `perf-${randomUUID().slice(0, 8)}`,
+        roomType: 'global_topic',
+        visibility: 'public',
+        joinModel: 'open',
+        postingPolicy: 'all_members',
+      })
+      .returning();
+    roomId = (room[0] as { roomId: string }).roomId;
 
     const rng = mulberry32(20260611);
     const clusters = Math.max(8, Math.floor(N / 40));
@@ -111,6 +126,8 @@ describe.skipIf(!ENABLED)('WS-F performance + recall (gated: DATABASE_URL + RUN_
           title: `Perf story ${i}`,
           titleHash: randomUUID().replaceAll('-', ''),
           submittedBy: submitterId,
+          roomId,
+          visibility: 'public' as const,
           topicIds: [randomUUID()],
           sensitivityLabels: ['none'],
           submissionType: 'original_brief' as const,
@@ -157,6 +174,10 @@ describe.skipIf(!ENABLED)('WS-F performance + recall (gated: DATABASE_URL + RUN_
       );
     await db.delete(storiesTable).where(rawSql`${storiesTable.submittedBy} = ${submitterId}`);
     await db.delete(users).where(rawSql`${users.userId} = ${submitterId}`);
+    if (roomId) {
+      const { rooms } = await import('@licio/db');
+      await db.delete(rooms).where(rawSql`${rooms.roomId} = ${roomId}`);
+    }
     const client = (db as unknown as { $client: { end: () => Promise<void> } }).$client;
     await client.end();
   });
@@ -167,7 +188,7 @@ describe.skipIf(!ENABLED)('WS-F performance + recall (gated: DATABASE_URL + RUN_
     for (let q = 0; q < QUERIES; q += 1) {
       const url = urls[Math.floor(rng() * urls.length)] as string;
       const start = performance.now();
-      const hit = await stories.getByCanonicalUrl(url);
+      const hit = await stories.getByCanonicalUrl(url, { visibility: 'public' });
       latencies.push(performance.now() - start);
       expect(hit).not.toBeNull();
     }

@@ -8,6 +8,7 @@
 // server boots, through exactly the production read paths.
 
 import {
+  DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
   defaultPersonalizationSettings,
   defaultPrivacySettings,
   emptyReputationSummary,
@@ -58,6 +59,8 @@ export async function seedForumDemoData(
     description: 'Evidence-led discussion of public-health reporting.',
     roomType: 'global_topic',
     visibility: 'public',
+    joinModel: 'open',
+    postingPolicy: 'all_members',
     createdBy: SEED_USER.userId,
     governanceMode: 'ordinary',
     charterSummary: 'Platform-wide rules apply. Cite primary sources where possible.',
@@ -71,11 +74,47 @@ export async function seedForumDemoData(
     description: 'Local news and civic decisions for the Riverside district.',
     roomType: 'local_geographic',
     visibility: 'public',
+    joinModel: 'open',
+    postingPolicy: 'all_members',
     createdBy: SEED_USER.userId,
     governanceMode: 'ordinary',
     charterSummary: null,
     typeMetadata: { geographic_scope: 'Riverside district' },
     latestActivityAt: null,
+  });
+  // WS-Q.1.6 — a PRIVATE demo room (request-to-join) whose content is forced
+  // `room_only`, exercising the read-bar / containment paths end-to-end.
+  await forum.rooms.insert({
+    roomId: DEMO_IDS.ROOM_3,
+    name: 'Transit Working Group',
+    slug: 'transit-working-group',
+    description: 'A members-only space coordinating local transit analysis.',
+    roomType: 'professional_domain',
+    visibility: 'private',
+    joinModel: 'request_approval',
+    postingPolicy: 'all_members',
+    createdBy: SEED_USER.userId,
+    governanceMode: 'ordinary',
+    charterSummary: null,
+    typeMetadata: { domain_descriptor: 'Urban transit planning' },
+    latestActivityAt: null,
+  });
+  // The demo author is an ACTIVE member + steward of the private room (so the
+  // room_only content is readable through the production read paths).
+  await forum.rooms.addSteward({
+    roomId: DEMO_IDS.ROOM_3,
+    userId: SEED_USER.userId,
+    role: 'community_steward',
+    assignedAt: new Date(forum.now()).toISOString(),
+  });
+  await forum.rooms.upsertSubscription({
+    roomId: DEMO_IDS.ROOM_3,
+    userId: SEED_USER.userId,
+    status: 'active',
+    requestId: '5f5e8000-0000-4000-8000-000000000001',
+    notificationPreferences: { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCES },
+    requestedAt: new Date(forum.now()).toISOString(),
+    joinedAt: new Date(forum.now()).toISOString(),
   });
   await forum.lenses.insert({
     lensId: LENS_LOCAL,
@@ -90,6 +129,7 @@ export async function seedForumDemoData(
       storyId: DEMO_IDS.STORY_1,
       threadId: DEMO_IDS.THREAD_1,
       roomId: DEMO_IDS.ROOM_1,
+      visibility: 'public' as const,
       title: 'Regional water board publishes the full testing dataset',
       body: 'The board released raw and processed results alongside the sampling methodology.',
     },
@@ -97,13 +137,16 @@ export async function seedForumDemoData(
       storyId: DEMO_IDS.STORY_2,
       threadId: DEMO_IDS.THREAD_2,
       roomId: DEMO_IDS.ROOM_2,
+      visibility: 'public' as const,
       title: 'Two neighbourhoods read the same zoning proposal very differently',
       body: 'The proposal text is identical, but two rooms summarise its effects differently.',
     },
     {
+      // WS-Q.1.6 — STORY_3 lives in the PRIVATE room and is forced room_only.
       storyId: DEMO_IDS.STORY_3,
       threadId: DEMO_IDS.THREAD_3,
-      roomId: null,
+      roomId: DEMO_IDS.ROOM_3,
+      visibility: 'room_only' as const,
       title: 'Claim about the new transit timetable is missing a key caveat',
       body: 'The timetable claim omits a service-frequency caveat.',
     },
@@ -117,6 +160,12 @@ export async function seedForumDemoData(
         titleHash: `demo-${story.storyId}`,
         submittedBy: SEED_USER.userId,
         sourceId: null,
+        // WS-Q — every demo story has a home room + visibility; the thread's
+        // room is stamped from the story inside createWithThread.
+        roomId: story.roomId,
+        visibility: story.visibility,
+        mediaUploadRef: null,
+        canonicalPublicStoryId: null,
         language: 'en',
         topicIds: ['5f5e6000-0000-4000-8000-000000000001'],
         locationScope: null,
@@ -134,8 +183,7 @@ export async function seedForumDemoData(
       },
       story.threadId,
     );
-    if (created.ok && story.roomId !== null) {
-      await ingestion.stories.updateThread(story.threadId, { roomId: story.roomId });
+    if (created.ok) {
       await forum.rooms.touchActivity(story.roomId, created.thread.createdAt);
     }
   }

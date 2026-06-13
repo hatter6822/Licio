@@ -8,7 +8,11 @@
 // boundary rather than silently routing them.
 import { z } from 'zod';
 import { attentionAggregateEventSchema, sourceOpenedAggregateEventSchema } from './attention.js';
-import { contentNormalizedEventSchema, contentSubmittedEventSchema } from './content.js';
+import {
+  contentNormalizedEventSchema,
+  contentSubmittedEventSchema,
+  contentVisibilityChangedEventSchema,
+} from './content.js';
 import {
   claimUpdatedEventSchema,
   contributionCreatedEventSchema,
@@ -33,10 +37,12 @@ import {
   threadStateChangedEventSchema,
 } from './system.js';
 
-/** The fourteen core (non-Knomosis) topics (SPEC §21.3). */
+/** The fifteen core (non-Knomosis) topics (SPEC §21.3; WS-Q.1.7a added
+ *  `content.visibility.changed`). */
 export const CORE_EVENT_SCHEMAS = {
   'content.submitted': contentSubmittedEventSchema,
   'content.normalized': contentNormalizedEventSchema,
+  'content.visibility.changed': contentVisibilityChangedEventSchema,
   'source.opened.aggregate': sourceOpenedAggregateEventSchema,
   'attention.aggregate': attentionAggregateEventSchema,
   'contribution.created': contributionCreatedEventSchema,
@@ -65,6 +71,7 @@ export type EventTopic = CoreTopic | KnomosisTopic;
 export const licioEventSchema = z.discriminatedUnion('event_type', [
   contentSubmittedEventSchema,
   contentNormalizedEventSchema,
+  contentVisibilityChangedEventSchema,
   sourceOpenedAggregateEventSchema,
   attentionAggregateEventSchema,
   contributionCreatedEventSchema,
@@ -133,6 +140,15 @@ function entry(
 export const TOPIC_REGISTRY: Readonly<Record<EventTopic, TopicRegistryEntry>> = {
   'content.submitted': entry(contentSubmittedEventSchema, 'public', 'public_contribution', false),
   'content.normalized': entry(contentNormalizedEventSchema, 'public', 'public_contribution', false),
+  // WS-Q.1.7a — the topic's BASE classification is `public` (a public sample
+  // round-trips against it); a `room_only` content event carries `restricted`
+  // and the router's per-event check withholds it from public-only consumers.
+  'content.visibility.changed': entry(
+    contentVisibilityChangedEventSchema,
+    'public',
+    'public_contribution',
+    false,
+  ),
   'source.opened.aggregate': entry(
     sourceOpenedAggregateEventSchema,
     'aggregated',

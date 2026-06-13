@@ -20,8 +20,10 @@ import { randomUUID } from 'node:crypto';
 import {
   type ContentSubmittedEvent,
   canonicalizeBcp47,
+  contentEventClassification,
   contentSubmittedEventSchema,
   DEFAULT_TRACKER_DENYLIST,
+  deriveStoryVisibility,
   evidenceAddedEventSchema,
   normalizeUrl,
   type StoryCreateRequest,
@@ -29,19 +31,29 @@ import {
   type TrackerDenylist,
 } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
+import { joinRoom, roomContentVisibleToUser, userMayPostTopLevel } from '../forum/rooms.js';
+import type { ForumServices } from '../forum/services.js';
 import { accountRef } from '../identity/crypto.js';
 import type { IdentityServices } from '../identity/services.js';
 import { findNearDuplicates, signatureStory } from './dedup.js';
 import { submissionText } from './pipeline.js';
 import { evaluatePrechecks, titleHash } from './prechecks.js';
 import type { IngestionServices } from './services.js';
-import type { StoryRecord } from './stores.js';
+import type { StoryDedupTier, StoryRecord } from './stores.js';
 
 export type SubmissionRejection =
   | { status: 429; code: 'rate_limited'; message: string; retryAfterSec: number }
+  | { status: 404; code: string; message: string }
   | { status: 403; code: string; message: string }
   | { status: 400; code: string; message: string }
   | { status: 409; code: 'duplicate_story'; message: string; existingStoryId: string };
+
+/** WS-Q.2.1a — an unknown room OR a private-room outsider/pending applicant get
+ *  the SAME 404 (tier one is universal; tier two never confirms membership —
+ *  the WS-D.1.6a 404-over-403 house rule, no content/membership oracle). */
+function roomNotFoundRejection(): SubmissionRejection {
+  return { status: 404, code: 'not_found', message: 'Resource not found' };
+}
 
 export type SubmissionOutcome =
   | {
@@ -93,6 +105,21 @@ function metadataOf(request: StoryCreateRequest): StoryRecord['submissionMetadat
         time_reference: request.time_reference,
         moderation_mode: request.moderation_mode,
       };
+    case 'image_post':
+      return {
+        submission_type: 'image_post',
+        upload_id: request.upload_id,
+        alt_text: request.alt_text,
+      };
+    case 'video_post':
+      return {
+        submission_type: 'video_post',
+        upload_id: request.upload_id,
+        ...(request.captions_text !== undefined ? { captions_text: request.captions_text } : {}),
+        ...(request.captions_upload_id !== undefined
+          ? { captions_upload_id: request.captions_upload_id }
+          : {}),
+      };
   }
 }
 
@@ -121,13 +148,61 @@ export async function submitStory(
   ingestion: IngestionServices,
   events: EventPipelineServices,
   identity: IdentityServices,
+  forum: ForumServices,
   userId: string,
   request: StoryCreateRequest,
 ): Promise<SubmissionOutcome> {
   const config = ingestion.config();
   const nowMs = ingestion.now();
+  const nowIso = new Date(nowMs).toISOString();
 
-  // 1. Rate limit (per-account sliding windows; non-reversible key, §19.1).
+  // 0. Submitter (roles for the posting-policy gate; account age for the WS-F
+  //    pre-checks below).
+  const user = await identity.store.getUser(userId);
+  if (!user) {
+    return {
+      ok: false,
+      rejection: { status: 403, code: 'forbidden', message: 'Account unavailable' },
+    };
+  }
+
+  // --- WS-Q room guards (before the WS-F pre-checks; §14.1/§14.5/§16.1) ------
+  // 1. Destination room exists (404 on unknown — never confirm beyond tier one).
+  const room = await forum.rooms.getById(request.room_id);
+  if (room === null) return { ok: false, rejection: roomNotFoundRejection() };
+  // 2. Read bar + ACTIVE membership. A public room is open-join: posting to it
+  //    (the composer's required room pick is the consent) auto-joins the author.
+  //    A private-room outsider/pending applicant gets 404 (no membership oracle).
+  if (room.visibility === 'public') {
+    const subscription = await forum.rooms.getSubscription(room.roomId, userId);
+    if (subscription === null || subscription.status !== 'active') {
+      await joinRoom(forum, room, userId, nowIso);
+      ingestion.metrics.increment('submission.room_autojoined');
+    }
+  } else if (!(await roomContentVisibleToUser(forum, room, userId))) {
+    return { ok: false, rejection: roomNotFoundRejection() };
+  }
+  // 3. Posting policy (WS-Q.2.1b): `experts_and_stewards` rooms admit only
+  //    stewards/experts; a read-capable member who cannot post gets a DISTINCT
+  //    in-room error (403, never 404 — they can see the room).
+  if (!(await userMayPostTopLevel(forum, room, userId, user.roles))) {
+    ingestion.metrics.increment('submission.posting_restricted');
+    return {
+      ok: false,
+      rejection: {
+        status: 403,
+        code: 'posting_restricted',
+        message: "Posting here is limited to this room's stewards and experts",
+      },
+    };
+  }
+  // 4. Visibility derivation (WS-Q.2.1c): a private room FORCES room_only.
+  const visibility = deriveStoryVisibility(room.visibility, request.visibility);
+  if (request.visibility === 'public' && visibility === 'room_only') {
+    ingestion.metrics.increment('submission.visibility_forced');
+  }
+
+  // 5. Rate limit (per-account sliding windows; non-reversible key, §19.1).
   const decision = await ingestion.submissionLimiter.hit(
     accountRef(identity.config.masterSecret, userId),
     { perHour: config.submissionPerHour, perDay: config.submissionPerDay },
@@ -167,14 +242,7 @@ export async function submitStory(
     canonicalDomain = normalized.canonicalDomain;
   }
 
-  // 3. Pre-checks (WS-F.1.4c): account age, spam title pattern, URL safety.
-  const user = await identity.store.getUser(userId);
-  if (!user) {
-    return {
-      ok: false,
-      rejection: { status: 403, code: 'forbidden', message: 'Account unavailable' },
-    };
-  }
+  // 6. Pre-checks (WS-F.1.4c): account age, spam title pattern, URL safety.
   const hash = titleHash(request.title);
   const windowStart = new Date(nowMs - config.duplicateTitleWindowMinutes * 60_000).toISOString();
   const rejection = evaluatePrechecks({
@@ -241,20 +309,89 @@ export async function submitStory(
     }
   }
 
-  // 5. Exact-URL duplicate (WS-F.1.3b): index lookup, then the create path's
-  //    unique-index outcome closes the concurrent race.
+  // 7. Media intake (WS-Q.2.3a/e): image/video posts anchor a previously
+  //    uploaded, scan-gated, metadata-stripped object. Verify it exists, is
+  //    OWNED by the submitter, is the right media type, and is not already
+  //    claimed; `flagged` ⇒ rejected; `pending` ⇒ the story is held for review
+  //    (fail-toward-caution), never published-then-hidden.
+  let mediaUploadRef: string | null = null;
+  let mediaType: StoryRecord['mediaType'] = null;
+  let extractionState: StoryRecord['extractionState'] = 'pending';
+  let heldForScan = false;
+  if (request.submission_type === 'image_post' || request.submission_type === 'video_post') {
+    const wantImage = request.submission_type === 'image_post';
+    const upload = await forum.uploads.getRecord(request.upload_id);
+    if (upload === null || upload.ownerUserId !== userId) {
+      return {
+        ok: false,
+        rejection: {
+          status: 400,
+          code: 'unknown_upload',
+          message: 'The referenced upload does not exist or is not owned by you',
+        },
+      };
+    }
+    const isImage = upload.contentType.startsWith('image/');
+    const isVideo = upload.contentType.startsWith('video/');
+    if ((wantImage && !isImage) || (!wantImage && !isVideo)) {
+      return {
+        ok: false,
+        rejection: {
+          status: 400,
+          code: 'upload_type_mismatch',
+          message: 'The upload type does not match the post type',
+        },
+      };
+    }
+    if ((await ingestion.stories.getByMediaUploadRef(upload.uploadId)) !== null) {
+      return {
+        ok: false,
+        rejection: {
+          status: 400,
+          code: 'upload_already_used',
+          message: 'This upload is already attached to another post',
+        },
+      };
+    }
+    if (upload.scanState === 'flagged') {
+      ingestion.metrics.increment('submission.media_flagged');
+      return {
+        ok: false,
+        rejection: {
+          status: 403,
+          code: 'held_for_review',
+          message: 'This upload did not pass a safety check',
+        },
+      };
+    }
+    mediaUploadRef = upload.uploadId;
+    mediaType = wantImage ? 'image' : 'video';
+    // Media is never URL-normalized or crawled (§14.2 not_applicable).
+    extractionState = 'not_applicable';
+    heldForScan = upload.scanState === 'pending';
+  }
+
+  // 8. Tier-scoped exact-URL duplicate (WS-Q.2.2a, §14.5.6) + the takedown
+  //    denylist (WS-Q.2.6, the companion the `hidden_state IS NULL` partial
+  //    unique index requires). The create path's tier-scoped unique index
+  //    closes the concurrent race.
+  const dedupTier: StoryDedupTier =
+    visibility === 'public'
+      ? { visibility: 'public' }
+      : { visibility: 'room_only', roomId: room.roomId };
+  let canonicalPublicStoryId: string | null = null;
   if (canonicalUrl !== null) {
-    const existing = await ingestion.stories.getByCanonicalUrl(canonicalUrl);
+    // (a) A hidden (taken-down/safety) story for this URL — in ANY tier — blocks
+    //     re-submission and is reported with a generic, non-identifying
+    //     rejection (no hidden-discussion oracle; no takedown bypass).
+    if (await ingestion.stories.hasHiddenForUrl(canonicalUrl)) {
+      ingestion.metrics.increment('dedup.exact_url_hidden');
+      return { ok: false, rejection: hiddenDuplicateRejection() };
+    }
+    // (b) A live duplicate in the SAME tier ⇒ 409 + the existing story id.
+    const existing = await ingestion.stories.getByCanonicalUrl(canonicalUrl, dedupTier);
     if (existing !== null) {
       ingestion.metrics.increment('dedup.exact_url_409');
-      // A takedown-/safety-hidden duplicate must NOT have its id (or its
-      // existence) revealed — that would leak a non-visible discussion and
-      // confirm a hidden story exists for the URL. Return a generic,
-      // non-identifying rejection instead (WS-F.1.4f privacy posture).
-      if (existing.hiddenState !== null) {
-        ingestion.metrics.increment('dedup.exact_url_hidden');
-        return { ok: false, rejection: hiddenDuplicateRejection() };
-      }
       ingestion.log('ingestion.duplicate_url', {
         existing_story_id: existing.storyId,
         submitted_by: userId,
@@ -269,9 +406,18 @@ export async function submitStory(
         },
       };
     }
+    // (c) Cross-tier link (WS-Q.2.2b): a room_only submission whose URL matches
+    //     an existing public story records the canonical-public pointer.
+    if (visibility === 'room_only') {
+      const canonicalPublic = await ingestion.stories.getByCanonicalUrl(canonicalUrl, {
+        visibility: 'public',
+      });
+      if (canonicalPublic !== null) canonicalPublicStoryId = canonicalPublic.storyId;
+    }
   }
 
-  // 6. Transactional create (story + thread shell, WS-F.1.4d).
+  // 9. Transactional create (story + thread shell, WS-F.1.4d): both rows are
+  //    stamped with the home room and the derived visibility (WS-Q.2.1c).
   const storyId = randomUUID();
   const threadId = randomUUID();
   const created = await ingestion.stories.createWithThread(
@@ -282,6 +428,10 @@ export async function submitStory(
       titleHash: hash,
       submittedBy: userId,
       sourceId: null,
+      roomId: room.roomId,
+      visibility,
+      mediaUploadRef,
+      canonicalPublicStoryId,
       language: request.language !== undefined ? canonicalizeBcp47(request.language) : null,
       topicIds: [...request.topic_ids],
       locationScope: request.location_scope ?? null,
@@ -293,9 +443,11 @@ export async function submitStory(
       publisher: null,
       author: null,
       publishedAt: null,
-      mediaType: null,
-      extractionState: 'pending',
-      hiddenState: null,
+      mediaType,
+      extractionState,
+      // A pending-scan media post is HELD (fail-toward-caution) until the scan
+      // clears — never published-then-hidden (the serving path also gates bytes).
+      hiddenState: heldForScan ? 'safety' : null,
     },
     threadId,
   );
@@ -318,6 +470,37 @@ export async function submitStory(
     };
   }
   ingestion.metrics.increment(`submissions.${request.submission_type}`);
+
+  // 9b. WS-Q.2.2b cross-tier back-link: a NEW public story for a URL that
+  //     already has room_only twins becomes their canonical public story
+  //     (opportunistic; not transaction-coupled).
+  if (visibility === 'public' && canonicalUrl !== null) {
+    const roomOnlyTwins = await ingestion.stories.listRoomOnlyByCanonicalUrl(canonicalUrl);
+    for (const twin of roomOnlyTwins) {
+      if (twin.canonicalPublicStoryId === null) {
+        await ingestion.stories.update(twin.storyId, {
+          canonicalPublicStoryId: created.story.storyId,
+        });
+      }
+    }
+  }
+
+  // 9c. WS-Q.2.3a media hold: a pending-scan media post is parked in the WS-F
+  //     review queue (fail-toward-caution) and its story stays held until a
+  //     steward clears it.
+  if (heldForScan) {
+    await ingestion.reviewQueue.insert({
+      kind: 'contribution_safety_hold',
+      storyId: created.story.storyId,
+      context: { reason: 'media_scan_pending', media_upload_ref: mediaUploadRef },
+      status: 'pending',
+      resolution: null,
+      resolvedBy: null,
+      resolvedAt: null,
+      notBefore: null,
+    });
+    ingestion.metrics.increment('submission.media_held_for_scan');
+  }
 
   // 6b. Evidence-card submissions create the actual EvidenceCard row in the
   //     same request (WS-F.2.5a), then emit `evidence.added` so the
@@ -452,6 +635,9 @@ export async function submitStory(
   //    the extraction pipeline in-process) is detached so the 201 returns
   //    within the pre-check latency budget. Crash between insert and publish
   //    is recovered by the durable consumer's checkpoint replay at boot.
+  // WS-Q.1.7c — the content event carries the home room + visibility, and the
+  // classification TRACKS that visibility (public⟺public, room_only⟺restricted)
+  // so an in-room story's URL/topics/submitter never reach a public consumer.
   const event: ContentSubmittedEvent = contentSubmittedEventSchema.parse({
     event_id: randomUUID(),
     event_type: 'content.submitted',
@@ -462,18 +648,21 @@ export async function submitStory(
     submission_type: created.story.submissionType,
     canonical_url: created.story.canonicalUrl,
     topic_ids: created.story.topicIds,
-    privacy_classification: 'public',
+    room_id: created.story.roomId,
+    visibility: created.story.visibility,
+    privacy_classification: contentEventClassification(created.story.visibility),
     retention_tier: 'public_contribution',
   });
-  const registryEntry = TOPIC_REGISTRY['content.submitted'];
   await events.eventStore.insertMany([
     {
       eventId: event.event_id,
       eventType: event.event_type,
       topic: event.event_type,
       timestamp: event.timestamp,
-      privacyClassification: registryEntry.privacy_classification,
-      retentionTier: registryEntry.retention_tier,
+      // Persist the EVENT's actual classification (restricted for room_only),
+      // not the topic's public base — so the storage tier matches the content.
+      privacyClassification: event.privacy_classification,
+      retentionTier: event.retention_tier,
       payload: event as unknown as Record<string, unknown>,
       ownerUserId: userId,
       purgeAfter: null,

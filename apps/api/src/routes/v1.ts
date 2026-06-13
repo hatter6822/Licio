@@ -49,7 +49,7 @@ import {
 } from '../events/ingest.js';
 import { getEventPipelineServices } from '../events/services.js';
 import type { SignalLedgerRecord } from '../events/stores.js';
-import { roomContentVisibleToUser } from '../forum/rooms.js';
+import { roomContentVisibleToUser, storyReadableByUser } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
 import { accountRef } from '../identity/crypto.js';
 import { getIdentityServices } from '../identity/services.js';
@@ -299,6 +299,15 @@ export function createV1Routes() {
             // Takedown-removed / safety-hidden stories are not served (404,
             // not 403 — no existence oracle; WS-F.1.4f).
             if (real.hiddenState !== null) return c.json(notFound, 404);
+            // WS-Q.3.2 — the item read bar: a room_only story in a private room
+            // is 404 to outsiders/pending applicants (no oracle); a public story
+            // is readable by anyone who can reach its (public) room.
+            const forum = getForumServices();
+            const userId = await resolveOptionalUserId(c.req.header('cookie'));
+            const room = await forum.rooms.getById(real.roomId);
+            if (room === null || !(await storyReadableByUser(forum, real, room, userId))) {
+              return c.json(notFound, 404);
+            }
             const thread = await ingestion.stories.getThreadByStoryId(storyId);
             return c.json(storyDetailSchema.parse(realStoryToDetail(real, thread)));
           }

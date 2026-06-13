@@ -25,6 +25,7 @@
 import type { LocationScope, SubmissionMetadata } from '@licio/shared';
 import { sql } from 'drizzle-orm';
 import {
+  type AnyPgColumn,
   bigint,
   check,
   doublePrecision,
@@ -40,7 +41,9 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 import { bytea, tsvector } from './_custom.js';
+import { rooms } from './room.js';
 import { sources } from './source.js';
+import { uploads } from './upload.js';
 import { users } from './user.js';
 
 // Mirrors of the closed shared enums (packages/shared story schemas) — the
@@ -64,7 +67,13 @@ export const submissionTypeEnum = pgEnum('story_submission_type', [
   'evidence_card',
   'local_update',
   'live_thread',
+  // WS-Q.1.3c — native media posts (appended; migration 0015 `ADD VALUE`s them).
+  'image_post',
+  'video_post',
 ]);
+
+/** WS-Q.1.4a — item visibility (§14.5); mirrors the shared storyVisibilitySchema. */
+export const storyVisibilityEnum = pgEnum('story_visibility', ['public', 'room_only']);
 
 export const mediaTypeEnum = pgEnum('story_media_type', [
   'article',
@@ -109,6 +118,31 @@ export const stories = pgTable(
       .references(() => users.userId),
     /** Resolved source profile (WS-F.2.2a); null until resolved / non-link. */
     sourceId: uuid('source_id').references(() => sources.sourceId),
+    /**
+     * WS-Q — the home room every content item belongs to (§3.4). NOT NULL in
+     * the final state (migration 0016 backfills then sets the constraint); the
+     * 0015 expand step adds it nullable so old code keeps working until the
+     * dual-write deploy lands (see docs/planning/18-content-and-room-model.md).
+     */
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.roomId),
+    /** WS-Q — item visibility (§14.5); a private room forces `room_only`. */
+    visibility: storyVisibilityEnum('visibility').notNull().default('public'),
+    /** WS-Q.2.3 — scan-gated media upload for image/video posts; null else. */
+    mediaUploadRef: uuid('media_upload_ref').references(() => uploads.uploadId, {
+      onDelete: 'set null',
+    }),
+    /**
+     * WS-Q.2.2b — cross-tier link: a `room_only` story for the same canonical
+     * URL points at the canonical PUBLIC story (self-FK). Null when none / this
+     * IS the public canonical. ON DELETE SET NULL so removing the public story
+     * does not cascade-delete the in-room discussion.
+     */
+    canonicalPublicStoryId: uuid('canonical_public_story_id').references(
+      (): AnyPgColumn => stories.storyId,
+      { onDelete: 'set null' },
+    ),
     /** BCP 47 (canonical casing); null until detected. */
     language: text('language'),
     topicIds: uuid('topic_ids').array().notNull(),
@@ -146,17 +180,35 @@ export const stories = pgTable(
     ),
   },
   (t) => [
-    // Exact-URL dedup (WS-F.1.3b): many NULL canonical URLs (non-link types),
-    // never a duplicate non-null one. O(log n) duplicate lookups.
-    uniqueIndex('stories_canonical_url_uq')
+    // WS-Q.1.4c — TIER-SCOPED exact-URL dedup (§14.5.6), replacing the global
+    // unique index. Public tier: at most one VISIBLE public story per URL,
+    // globally. Room tier: at most one VISIBLE room_only story per (URL, room).
+    // `hidden_state IS NULL` keeps a taken-down/safety-hidden row from holding
+    // the live slot; the submission guard's canonical-URL takedown denylist
+    // (WS-Q.2.2a/2.6) is the companion that preserves the takedown decision.
+    uniqueIndex('stories_canonical_url_public_uq')
       .on(t.canonicalUrl)
-      .where(sql`${t.canonicalUrl} is not null`),
+      .where(
+        sql`${t.canonicalUrl} is not null and ${t.visibility} = 'public' and ${t.hiddenState} is null`,
+      ),
+    uniqueIndex('stories_canonical_url_room_uq')
+      .on(t.canonicalUrl, t.roomId)
+      .where(
+        sql`${t.canonicalUrl} is not null and ${t.visibility} = 'room_only' and ${t.hiddenState} is null`,
+      ),
     index('stories_source_idx').on(t.sourceId),
     index('stories_topic_gin').using('gin', t.topicIds),
     index('stories_lifecycle_idx').on(t.lifecycleState, t.updatedAt),
     index('stories_title_hash_idx').on(t.titleHash, t.createdAt),
     index('stories_created_idx').on(t.createdAt),
     index('stories_search_gin').using('gin', t.searchTsv),
+    // WS-Q.1.4a — room feed pagination + global-visibility filtering.
+    index('stories_room_created_idx').on(t.roomId, t.createdAt),
+    index('stories_visibility_lifecycle_idx').on(t.visibility, t.lifecycleState),
+    // WS-Q.2.3a — a media upload anchors at most one story (race-safe claim).
+    uniqueIndex('stories_media_upload_ref_uq')
+      .on(t.mediaUploadRef)
+      .where(sql`${t.mediaUploadRef} is not null`),
     check('stories_title_len', sql`char_length(${t.title}) between 1 and 300`),
     // cardinality(): 0 for the empty array (array_length is NULL there, and a
     // NULL CHECK silently PASSES — the classic Postgres trap).

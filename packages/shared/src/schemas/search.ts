@@ -22,6 +22,11 @@ export const searchRequestSchema = z
     type: searchResultTypeSchema.optional(),
     topic_id: uuidSchema.optional(),
     source_id: uuidSchema.optional(),
+    // WS-Q.2.5b — room-scoped search: when present, results are restricted to
+    // this room's pool (public + room_only of THIS room). The caller must pass
+    // the room read bar first (the route 404s otherwise). Absent ⇒ the GLOBAL
+    // surface (public content from public rooms only — WS-Q.2.5a).
+    room: uuidSchema.optional(),
     language: bcp47Schema.optional(),
     date_from: isoTimestampSchema.optional(),
     date_to: isoTimestampSchema.optional(),

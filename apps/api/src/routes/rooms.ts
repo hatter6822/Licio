@@ -13,6 +13,7 @@ import {
   DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
   lensCreateRequestSchema,
   lensPublicSchema,
+  RESERVED_ROOM_SLUGS,
   roomCreateRequestSchema,
   roomDetailSchema,
   roomJoinRequestDecisionSchema,
@@ -33,6 +34,7 @@ import {
   isRoomSteward,
   joinRoom,
   mergeNotificationPreferences,
+  resolveRoomCreateAxes,
   roomContentVisibleToUser,
   roomMatchesQuery,
   roomTypeMetadata,
@@ -229,13 +231,22 @@ export function createRoomsRoutes() {
           const authz = authorizeRoomCreate(request, auth.roles);
           if (!authz.ok) return c.json(deny(authz.code, authz.message), 403);
           const forum = getForumServices();
+          const slug = slugify(request.name);
+          // WS-Q.1.6 — the `commons` slug is reserved for the system Commons room.
+          if (RESERVED_ROOM_SLUGS.includes(slug)) {
+            return c.json(deny('reserved_slug', 'That room name is reserved'), 422);
+          }
+          // WS-Q.3.3a — apply the documented visibility/join/posting defaults.
+          const axes = resolveRoomCreateAxes(request);
           const created = await forum.rooms.insert({
             roomId: randomUUID(),
             name: request.name,
-            slug: slugify(request.name),
+            slug,
             description: request.description,
             roomType: request.room_type,
-            visibility: request.visibility,
+            visibility: axes.visibility,
+            joinModel: axes.joinModel,
+            postingPolicy: axes.postingPolicy,
             createdBy: auth.userId,
             governanceMode: 'ordinary', // ALWAYS the default (§17.4)
             charterSummary: null,
@@ -291,20 +302,15 @@ export function createRoomsRoutes() {
         const userId = await softUserId(c.req.header('cookie'), identity);
         const room = await forum.rooms.getById(roomId);
         if (!room) return c.json(notFound, 404);
-        // Restricted/expert_led detail: members and that room's stewards only
-        // (403 per WS-G.2.3b — the room's existence is listed nowhere for
-        // non-members, but a direct id probe gets the documented 403).
-        if (room.visibility !== 'public') {
-          const member =
-            userId !== null &&
-            ((await forum.rooms.getSubscription(roomId, userId))?.status === 'active' ||
-              (await forum.rooms.stewardRolesFor(roomId, userId)).length > 0 ||
-              (userId !== null && (await isPlatformSteward(identity, userId))));
-          if (!member) return c.json(deny('forbidden', 'This room is restricted'), 403);
-        }
+        // WS-Q.3.1a — TIER ONE (existence) is universal: the room's shell
+        // (name, description, visibility, stewards, join affordance) is visible
+        // to ALL, so a private room is discoverable and joinable. TIER TWO
+        // (content) — the lenses (interpretation contexts) — is members-only;
+        // a non-member of a private room sees the shell with NO lens content.
+        const canReadContent = await roomContentVisibleToUser(forum, room, userId);
         const threadCount = await ingestion.stories.countThreadsByRoom(roomId);
         const summary = await toRoomSummary(forum, room, threadCount, userId);
-        const lenses = await forum.lenses.listByRoom(roomId);
+        const lenses = canReadContent ? await forum.lenses.listByRoom(roomId) : [];
         const stewards = await forum.rooms.listStewards(roomId);
         const resolveHandles = new Map<string, { handle: string; displayName: string | null }>();
         for (const steward of stewards) {
@@ -353,11 +359,10 @@ export function createRoomsRoutes() {
           const userId = await softUserId(c.req.header('cookie'), identity);
           const room = await forum.rooms.getById(roomId);
           if (!room) return c.json(notFound, 404);
-          if (
-            room.visibility !== 'public' &&
-            !(await roomContentVisibleToUser(forum, room, userId))
-          ) {
-            return c.json(deny('forbidden', 'This room is restricted'), 403);
+          // WS-Q.3.2 — room threads are CONTENT (tier two): a private-room
+          // outsider/pending applicant gets 404 (404-over-403; no membership oracle).
+          if (!(await roomContentVisibleToUser(forum, room, userId))) {
+            return c.json(notFound, 404);
           }
           let before: { createdAt: string; threadId: string } | null = null;
           if (cursor !== undefined) {
@@ -551,11 +556,9 @@ export function createRoomsRoutes() {
           const userId = await softUserId(c.req.header('cookie'), identity);
           const room = await forum.rooms.getById(roomId);
           if (!room) return c.json(notFound, 404);
-          if (
-            room.visibility !== 'public' &&
-            !(await roomContentVisibleToUser(forum, room, userId))
-          ) {
-            return c.json(deny('forbidden', 'This room is restricted'), 403);
+          // WS-Q.3.2 — lenses are CONTENT (tier two): private-room outsiders 404.
+          if (!(await roomContentVisibleToUser(forum, room, userId))) {
+            return c.json(notFound, 404);
           }
           const lenses = await forum.lenses.listByRoom(roomId);
           return c.json({
@@ -649,11 +652,6 @@ export function createRoomsRoutes() {
         },
       )
   );
-}
-
-async function isPlatformSteward(identity: IdentityServices, userId: string): Promise<boolean> {
-  const user = await identity.store.getUser(userId);
-  return user !== null && (user.roles.includes('steward') || user.roles.includes('admin'));
 }
 
 export type RoomsRoutes = ReturnType<typeof createRoomsRoutes>;

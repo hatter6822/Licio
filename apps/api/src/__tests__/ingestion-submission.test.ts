@@ -5,6 +5,7 @@
 // safety pre-checks (rate limit, account age, spam titles, malware denylist),
 // the transactional thread shell, content.submitted emission, and the
 // synchronous near-duplicate pass.
+import { COMMONS_ROOM_ID } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
@@ -51,12 +52,14 @@ describe('POST /v1/stories — submission types (WS-F.1.4a/b)', () => {
       briefSubmission(),
       {
         submission_type: 'question',
+        room_id: COMMONS_ROOM_ID,
         question: 'What does the new bill change for renters?',
         title: 'Renters bill question',
         topic_ids: [topic],
       },
       {
         submission_type: 'evidence_card',
+        room_id: COMMONS_ROOM_ID,
         citation_url_or_ref: 'https://example.com/study',
         claim_id: claimSeed.claimId,
         relevance_note: 'Replicates the headline finding',
@@ -65,6 +68,7 @@ describe('POST /v1/stories — submission types (WS-F.1.4a/b)', () => {
       },
       {
         submission_type: 'local_update',
+        room_id: COMMONS_ROOM_ID,
         location_scope: { type: 'city', value: 'Lisbon' },
         source_or_experience_disclosure: 'I live two blocks from the bridge',
         title: 'Bridge closure update',
@@ -72,6 +76,7 @@ describe('POST /v1/stories — submission types (WS-F.1.4a/b)', () => {
       },
       {
         submission_type: 'live_thread',
+        room_id: COMMONS_ROOM_ID,
         event_description: 'Election night count',
         time_reference: 'tonight 20:00 UTC',
         moderation_mode: 'breaking',
@@ -133,6 +138,7 @@ describe('POST /v1/stories — submission types (WS-F.1.4a/b)', () => {
         '/v1/stories',
         {
           submission_type: 'evidence_card',
+          room_id: COMMONS_ROOM_ID,
           citation_url_or_ref: 'https://example.com/study',
           claim_id: '99999999-9999-4999-8999-999999999999',
           relevance_note: 'dangling reference',
@@ -231,6 +237,7 @@ describe('POST /v1/stories — evidence-card routing (WS-F.2.5a)', () => {
         '/v1/stories',
         {
           submission_type: 'evidence_card',
+          room_id: COMMONS_ROOM_ID,
           citation_url_or_ref: 'https://example.com/study',
           claim_id: claims[0]?.claimId,
           relevance_note: 'Independent replication of the figure',

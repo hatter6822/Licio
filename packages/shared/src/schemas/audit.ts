@@ -75,6 +75,12 @@ export const AUDIT_EVENT_TYPES = [
   'ranking_killswitch_change',
   'ranking_decision_query',
   'ranking_replay_run',
+  // WS-Q content–room model: content-visibility transitions (author
+  // narrow/widen, migration) and room public⇄private visibility cascades.
+  // Join-model/posting-policy governance writes keep using
+  // `forum_config_change`; only visibility transitions use these two.
+  'story_visibility_change',
+  'room_visibility_change',
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
 export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);

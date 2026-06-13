@@ -21,8 +21,8 @@ import { createHash } from 'node:crypto';
 import {
   type ContentNormalizedEvent,
   type ContentSubmittedEvent,
+  contentEventClassification,
   contentNormalizedEventSchema,
-  TOPIC_REGISTRY,
 } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import { type ClaimEmbeddingDedup, persistCandidateClaims } from './claims.js';
@@ -57,15 +57,17 @@ export async function emitIngestionEvent(
   ownerUserId: string | null,
 ): Promise<void> {
   try {
-    const registryEntry = TOPIC_REGISTRY[event.event_type];
+    // WS-Q.1.7c — persist the EVENT's actual classification (restricted for a
+    // room_only content event), not the topic's public base, so the storage
+    // tier matches the content's visibility.
     const { inserted } = await events.eventStore.insertMany([
       {
         eventId: event.event_id,
         eventType: event.event_type,
         topic: event.event_type,
         timestamp: event.timestamp,
-        privacyClassification: registryEntry.privacy_classification,
-        retentionTier: registryEntry.retention_tier,
+        privacyClassification: event.privacy_classification,
+        retentionTier: event.retention_tier,
         payload: event as unknown as Record<string, unknown>,
         ownerUserId,
         purgeAfter: null,
@@ -98,6 +100,12 @@ export function submissionBodyText(story: StoryRecord): string {
       return metadata.source_or_experience_disclosure;
     case 'live_thread':
       return metadata.event_description;
+    case 'image_post':
+      // The accessible alt text is the only first-party text on an image post.
+      return metadata.alt_text;
+    case 'video_post':
+      // Inline caption text when present (an uploaded track is not inlined here).
+      return metadata.captions_text ?? '';
   }
 }
 
@@ -142,6 +150,9 @@ async function emitNormalized(
     submission_type: story.submissionType,
     canonical_url: story.canonicalUrl,
     topic_ids: story.topicIds,
+    // WS-Q.1.7c — carry room + visibility; the classification tracks visibility.
+    room_id: story.roomId,
+    visibility: story.visibility,
     source_id: outputs.sourceId,
     language: outputs.language,
     sensitivity_labels: outputs.sensitivityLabels,
@@ -150,7 +161,7 @@ async function emitNormalized(
     embedding_ref: hasEmbedding
       ? `embeddings/story/${story.storyId}@${ingestion.embeddingProvider.modelVersion}`
       : null,
-    privacy_classification: 'public',
+    privacy_classification: contentEventClassification(story.visibility),
     retention_tier: 'public_contribution',
   });
   await emitIngestionEvent(events, ingestion, event, story.submittedBy);

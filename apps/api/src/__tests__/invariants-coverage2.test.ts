@@ -570,6 +570,8 @@ describe('SCOI surface edge branches', () => {
       description: null,
       roomType: 'global_topic',
       visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'all_members',
       createdBy: null,
       governanceMode: 'ordinary',
       charterSummary: null,

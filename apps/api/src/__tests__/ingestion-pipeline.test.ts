@@ -7,6 +7,7 @@
 // redelivery, deterministic normalized-event ids, the lifecycle/freshness
 // consumers, and the low-activity sweep.
 import { randomUUID } from 'node:crypto';
+import { COMMONS_ROOM_ID } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { sweepLowActivity } from '../ingestion/lifecycle.js';
@@ -279,6 +280,7 @@ describe('lifecycle + freshness consumers (WS-F.1.1c / WS-F.1.4g)', () => {
         '/v1/stories',
         {
           submission_type: 'original_brief',
+          room_id: COMMONS_ROOM_ID,
           body: 'Body for the lifecycle test story.',
           title: 'Lifecycle test',
           topic_ids: [randomUUID()],
@@ -312,6 +314,7 @@ describe('lifecycle + freshness consumers (WS-F.1.1c / WS-F.1.4g)', () => {
         '/v1/stories',
         {
           submission_type: 'original_brief',
+          room_id: COMMONS_ROOM_ID,
           body: 'Soon to be idle.',
           title: 'Idle story',
           topic_ids: [randomUUID()],

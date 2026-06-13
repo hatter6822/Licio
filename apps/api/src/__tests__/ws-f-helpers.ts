@@ -6,8 +6,13 @@
 // bodies. The ingestion bundle's `settle()` makes the detached pipeline
 // deterministic in tests.
 import { randomUUID } from 'node:crypto';
-import type { StoryCreateRequest } from '@licio/shared';
+import { COMMONS_ROOM_ID, type StoryCreateRequest } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
+import {
+  createInMemoryForumServices,
+  type ForumServices,
+  setForumServices,
+} from '../forum/services.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionRuntimeConfig } from '../ingestion/config.js';
 import type { SafeFetchResult } from '../ingestion/safe-fetch.js';
@@ -25,6 +30,7 @@ export interface WsFFixture {
   identity: IdentityServices;
   events: EventPipelineServices;
   ingestion: IngestionServices;
+  forum: ForumServices;
   /** Per-URL fetch fixtures (status/body); unlisted URLs 404. `finalUrl`
    *  simulates a redirect — the fetcher reports it as the post-redirect URL. */
   pages: Map<string, { status: number; body: string; contentType?: string; finalUrl?: string }>;
@@ -69,7 +75,12 @@ export function freshWsFServices(
   });
   registerIngestionConsumers(events, ingestion);
   setIngestionServices(ingestion);
-  return { identity, events, ingestion, pages, robots, fetchedUrls };
+  // WS-Q — the submission guards + the in-memory global-search room-visibility
+  // predicate need a forum (its room store self-seeds the public Commons room
+  // and wires the search room-visibility provider via the ingestion hook).
+  const forum = createInMemoryForumServices({ events, ingestion });
+  setForumServices(forum);
+  return { identity, events, ingestion, forum, pages, robots, fetchedUrls };
 }
 
 /** Canonical valid bodies for each §14.1 submission type. */
@@ -80,6 +91,9 @@ export function linkSubmission(url: string, over: Partial<StoryCreateRequest> = 
     reason: 'Primary source for the development',
     title: `Linked story ${randomUUID().slice(0, 8)}`,
     topic_ids: [randomUUID()],
+    // WS-Q — every submission picks a home room (Commons by default; the
+    // in-memory store self-seeds it and the public+open room auto-joins).
+    room_id: COMMONS_ROOM_ID,
     ...over,
   };
 }
@@ -90,6 +104,7 @@ export function briefSubmission(over: Record<string, unknown> = {}) {
     body: 'The council voted 7 to 2 to approve the new reservoir bond on Tuesday evening.',
     title: `Brief ${randomUUID().slice(0, 8)}`,
     topic_ids: [randomUUID()],
+    room_id: COMMONS_ROOM_ID,
     ...over,
   };
 }

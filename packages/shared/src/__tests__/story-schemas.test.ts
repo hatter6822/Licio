@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import {
   bcp47Schema,
   canonicalizeBcp47,
+  deriveStoryVisibility,
   locationScopeSchema,
   storyCreateRequestSchema,
   storyCreateResponseSchema,
@@ -25,6 +26,7 @@ const randomUUID = (): string => {
 };
 
 const TOPIC = randomUUID();
+const ROOM = randomUUID();
 
 function linkBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -33,6 +35,7 @@ function linkBody(overrides: Record<string, unknown> = {}): Record<string, unkno
     reason: 'Primary source on the new policy',
     title: 'Example article',
     topic_ids: [TOPIC],
+    room_id: ROOM,
     ...overrides,
   };
 }
@@ -119,6 +122,7 @@ describe('storyCreateRequestSchema — per-type requirements (WS-F.1.4b)', () =>
       question: 'What changed in the final bill?',
       title: 'Final bill changes',
       topic_ids: [TOPIC],
+      room_id: ROOM,
       url: 'https://example.com/x',
     };
     expect(storyCreateRequestSchema.safeParse(question).success).toBe(false);
@@ -129,6 +133,7 @@ describe('storyCreateRequestSchema — per-type requirements (WS-F.1.4b)', () =>
       submission_type: 'original_brief',
       title: 'What I saw at the council meeting',
       topic_ids: [TOPIC],
+      room_id: ROOM,
     };
     expect(storyCreateRequestSchema.safeParse(base).success).toBe(false);
     expect(
@@ -147,6 +152,7 @@ describe('storyCreateRequestSchema — per-type requirements (WS-F.1.4b)', () =>
       relevance_note: 'Replicates the headline finding',
       title: 'Replication study',
       topic_ids: [TOPIC],
+      room_id: ROOM,
     };
     const result = storyCreateRequestSchema.safeParse(noClaim);
     expect(result.success).toBe(false);
@@ -164,6 +170,7 @@ describe('storyCreateRequestSchema — per-type requirements (WS-F.1.4b)', () =>
       source_or_experience_disclosure: 'I live two blocks away',
       title: 'Bridge closure update',
       topic_ids: [TOPIC],
+      room_id: ROOM,
     };
     const result = storyCreateRequestSchema.safeParse(noScope);
     expect(result.success).toBe(false);
@@ -184,6 +191,7 @@ describe('storyCreateRequestSchema — per-type requirements (WS-F.1.4b)', () =>
       event_description: 'Election night count',
       title: 'Election night live',
       topic_ids: [TOPIC],
+      room_id: ROOM,
     };
     expect(storyCreateRequestSchema.safeParse(base).success).toBe(false);
     expect(
@@ -198,6 +206,114 @@ describe('storyCreateRequestSchema — per-type requirements (WS-F.1.4b)', () =>
         ...base,
         time_reference: 'tonight',
         moderation_mode: 'unmoderated',
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('WS-Q.1.3a — home room is required on every branch', () => {
+  it.each([
+    () => {
+      const { room_id: _r, ...rest } = linkBody();
+      return rest;
+    },
+    () => ({
+      submission_type: 'question',
+      question: 'q?',
+      title: 't',
+      topic_ids: [TOPIC],
+    }),
+    () => ({
+      submission_type: 'original_brief',
+      body: 'body',
+      title: 't',
+      topic_ids: [TOPIC],
+    }),
+  ])('rejects a payload without room_id, naming the field', (build) => {
+    const result = storyCreateRequestSchema.safeParse(build());
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((issue) => issue.path.includes('room_id'))).toBe(true);
+    }
+  });
+
+  it('accepts an optional visibility on input (server derives it)', () => {
+    expect(storyCreateRequestSchema.safeParse(linkBody({ visibility: 'room_only' })).success).toBe(
+      true,
+    );
+    expect(storyCreateRequestSchema.safeParse(linkBody({ visibility: 'secret' })).success).toBe(
+      false,
+    );
+  });
+});
+
+describe('WS-Q.1.3b — deriveStoryVisibility (§14.5 forcing)', () => {
+  it.each([
+    ['private', 'public', 'room_only'],
+    ['private', 'room_only', 'room_only'],
+    ['private', undefined, 'room_only'],
+    ['public', 'public', 'public'],
+    ['public', 'room_only', 'room_only'],
+    ['public', undefined, 'public'],
+  ] as const)('room=%s requested=%s -> %s', (room, requested, expected) => {
+    expect(deriveStoryVisibility(room, requested)).toBe(expected);
+  });
+});
+
+describe('WS-Q.1.3c — media submission branches', () => {
+  const mediaBase = { title: 'Media', topic_ids: [TOPIC], room_id: ROOM };
+
+  it('image_post requires alt text', () => {
+    const upload = randomUUID();
+    expect(
+      storyCreateRequestSchema.safeParse({
+        ...mediaBase,
+        submission_type: 'image_post',
+        upload_id: upload,
+      }).success,
+    ).toBe(false);
+    expect(
+      storyCreateRequestSchema.safeParse({
+        ...mediaBase,
+        submission_type: 'image_post',
+        upload_id: upload,
+        alt_text: 'A chart of reservoir levels',
+      }).success,
+    ).toBe(true);
+  });
+
+  it('video_post accepts captions as text XOR upload, never both', () => {
+    const upload = randomUUID();
+    const captionUpload = randomUUID();
+    const ok = {
+      ...mediaBase,
+      submission_type: 'video_post',
+      upload_id: upload,
+    };
+    expect(storyCreateRequestSchema.safeParse(ok).success).toBe(true);
+    expect(storyCreateRequestSchema.safeParse({ ...ok, captions_text: 'transcript' }).success).toBe(
+      true,
+    );
+    expect(
+      storyCreateRequestSchema.safeParse({ ...ok, captions_upload_id: captionUpload }).success,
+    ).toBe(true);
+    expect(
+      storyCreateRequestSchema.safeParse({
+        ...ok,
+        captions_text: 'transcript',
+        captions_upload_id: captionUpload,
+      }).success,
+    ).toBe(false);
+  });
+
+  it('media posts reject a canonical url field (no crawling)', () => {
+    expect(
+      storyCreateRequestSchema.safeParse({
+        ...mediaBase,
+        submission_type: 'image_post',
+        upload_id: randomUUID(),
+        alt_text: 'x',
+        url: 'https://example.com',
       }).success,
     ).toBe(false);
   });
@@ -237,6 +353,11 @@ describe('storyPublicSchema + responses (WS-F.1.1b)', () => {
     submission_type: 'link' as const,
     canonical_url: 'https://example.com/a',
     source_id: randomUUID(),
+    room_id: ROOM,
+    visibility: 'public' as const,
+    media_upload_ref: null,
+    media_alt_text: null,
+    canonical_public_story_id: null,
     submitted_by: randomUUID(),
     language: 'en',
     topic_ids: [TOPIC],

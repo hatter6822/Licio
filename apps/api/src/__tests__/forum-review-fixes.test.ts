@@ -62,7 +62,7 @@ describe('restricted content requires ACTIVE membership (not a pending applicati
         jsonRequest(
           '/v1/rooms',
           'POST',
-          { ...ROOM, name: 'Closed Wing', visibility: 'restricted' },
+          { ...ROOM, name: 'Closed Wing', visibility: 'private' },
           steward.cookie,
         ),
       )
@@ -85,19 +85,20 @@ describe('restricted content requires ACTIVE membership (not a pending applicati
     ).json()) as { items: Array<{ room_id: string }> };
     expect(listing.items.some((room) => room.room_id === created.room_id)).toBe(true);
 
-    // …but content is not: threads and lenses stay closed until approval.
+    // …but content is not: threads and lenses 404 until approval (WS-Q.3.2
+    // 404-over-403 — a pending applicant gets no content/membership oracle).
     const threads = await app().request(
       new Request(`http://local/v1/rooms/${created.room_id}/threads`, {
         headers: { cookie: applicant.cookie },
       }),
     );
-    expect(threads.status).toBe(403);
+    expect(threads.status).toBe(404);
     const lenses = await app().request(
       new Request(`http://local/v1/rooms/${created.room_id}/lenses`, {
         headers: { cookie: applicant.cookie },
       }),
     );
-    expect(lenses.status).toBe(403);
+    expect(lenses.status).toBe(404);
 
     // Approval opens the content reads.
     const requests = (await (
@@ -381,6 +382,8 @@ describe('rooms directory pagination beyond a single scan batch', () => {
         description: null,
         roomType: 'global_topic',
         visibility: 'public',
+        joinModel: 'open',
+        postingPolicy: 'all_members',
         createdBy: null,
         governanceMode: 'ordinary',
         charterSummary: null,
@@ -406,7 +409,8 @@ describe('rooms directory pagination beyond a single scan batch', () => {
       expect(pages).toBeLessThan(12);
     }
     expect(new Set(seen).size).toBe(seen.length);
-    expect(seen.length).toBe(total);
+    // WS-Q.1.6 — the always-present system Commons room is in the directory too.
+    expect(seen.length).toBe(total + 1);
   });
 
   it('joined=true enumerates the requester’s own memberships completely', async () => {

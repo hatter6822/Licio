@@ -35,6 +35,8 @@ describe('SCOI full lens pipeline (WS-H.4.1a/b)', () => {
       description: null,
       roomType: 'global_topic',
       visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'all_members',
       createdBy: null,
       governanceMode: 'ordinary',
       charterSummary: null,

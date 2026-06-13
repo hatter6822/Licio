@@ -186,6 +186,9 @@ describe('search scoring + cursor math (WS-F.3.1a/b)', () => {
     language: 'en',
     createdAt: '2026-06-11T00:00:00.000Z',
     visible: true,
+    roomId: null,
+    storyVisibility: 'public' as const,
+    roomVisibility: 'public' as const,
   };
 
   it('weights title over body, requires every token (AND), supports prefix on the last token', () => {

@@ -12,13 +12,20 @@
 import { randomUUID } from 'node:crypto';
 import type {
   RoomCreateRequest,
+  RoomJoinModel,
   RoomNotificationPreferences,
+  RoomPostingPolicy,
   RoomStewardRole,
   RoomSummary,
   RoomType,
   RoomVisibility,
+  StoryVisibility,
 } from '@licio/shared';
-import { DEFAULT_ROOM_NOTIFICATION_PREFERENCES } from '@licio/shared';
+import {
+  COMMONS_ROOM_ID,
+  COMMONS_SLUG,
+  DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
+} from '@licio/shared';
 import type { Role } from '../identity/rbac.js';
 import type { ForumServices } from './services.js';
 import type { RoomRecord, RoomSubscriptionRecord } from './stores.js';
@@ -51,6 +58,33 @@ export function compareRecommended(a: RoomRecord, b: RoomRecord): number {
   return a.roomId.localeCompare(b.roomId);
 }
 
+/**
+ * WS-Q.1.6 — boot-time idempotent ensure of the system Commons room (the
+ * application-level analogue of the Postgres 0015 seed; the in-memory store
+ * self-seeds it in its constructor). Safe to call repeatedly: returns early if
+ * Commons already exists, and tolerates a concurrent insert race (the unique
+ * index turns a lost race into a no-op).
+ */
+export async function ensureCommonsRoom(forum: ForumServices): Promise<void> {
+  if ((await forum.rooms.getById(COMMONS_ROOM_ID)) !== null) return;
+  await forum.rooms.insert({
+    roomId: COMMONS_ROOM_ID,
+    name: 'Commons',
+    slug: COMMONS_SLUG,
+    description:
+      'The shared public square — the default home for content without a more specific room.',
+    roomType: 'global_topic',
+    visibility: 'public',
+    joinModel: 'open',
+    postingPolicy: 'all_members',
+    createdBy: null,
+    governanceMode: 'ordinary',
+    charterSummary: null,
+    typeMetadata: {},
+    latestActivityAt: null,
+  });
+}
+
 /** Build a slug from a room name (stable, URL-safe). */
 export function slugify(name: string): string {
   const slug = name
@@ -65,19 +99,18 @@ export function slugify(name: string): string {
 
 export type RoomCreateAuthz =
   | { ok: true }
-  | { ok: false; code: 'forbidden_visibility' | 'forbidden_steward_room'; message: string };
+  | { ok: false; code: 'forbidden_steward_room'; message: string };
 
 /**
- * WS-G.2.3c authorization: authenticated users create PUBLIC rooms;
- * restricted/expert_led visibility requires an elevated role (platform
- * steward/moderator/admin); `steward` rooms require platform staff (admin).
+ * WS-Q.3.3a authorization: any verified account may create a PUBLIC or PRIVATE
+ * room (private-room creation is no longer steward-gated — §16.1 makes private
+ * rooms a first-class user affordance, rate-limited like public). Only
+ * `steward` rooms still require platform staff (admin).
  */
 export function authorizeRoomCreate(
   request: RoomCreateRequest,
   roles: readonly Role[],
 ): RoomCreateAuthz {
-  const elevated =
-    roles.includes('steward') || roles.includes('moderator') || roles.includes('admin');
   const staff = roles.includes('admin');
   if (request.room_type === 'steward' && !staff) {
     return {
@@ -86,14 +119,27 @@ export function authorizeRoomCreate(
       message: 'Steward rooms require platform staff',
     };
   }
-  if (request.visibility !== 'public' && !elevated) {
-    return {
-      ok: false,
-      code: 'forbidden_visibility',
-      message: 'Restricted and expert-led rooms require a steward role',
-    };
-  }
   return { ok: true };
+}
+
+/**
+ * WS-Q.3.3a — apply the documented room-axis defaults (the schema is a pure
+ * validator; defaults live here). Steward rooms default to private; everything
+ * else to public. `join_model` defaults per visibility (public→open,
+ * private→request_approval); `posting_policy` defaults to `all_members`. The
+ * shared coherence refinement has already rejected incoherent EXPLICIT combos.
+ */
+export function resolveRoomCreateAxes(request: RoomCreateRequest): {
+  visibility: RoomVisibility;
+  joinModel: RoomJoinModel;
+  postingPolicy: RoomPostingPolicy;
+} {
+  const visibility: RoomVisibility =
+    request.visibility ?? (request.room_type === 'steward' ? 'private' : 'public');
+  const joinModel: RoomJoinModel =
+    request.join_model ?? (visibility === 'public' ? 'open' : 'request_approval');
+  const postingPolicy: RoomPostingPolicy = request.posting_policy ?? 'all_members';
+  return { visibility, joinModel, postingPolicy };
 }
 
 /** Per-type creation fields → the room's type_metadata JSONB. */
@@ -132,6 +178,8 @@ export async function toRoomSummary(
     slug: room.slug,
     room_type: room.roomType,
     visibility: room.visibility,
+    join_model: room.joinModel,
+    posting_policy: room.postingPolicy,
     description: room.description,
     thread_count: threadCount,
     member_count: memberCount,
@@ -153,28 +201,29 @@ export function roomMatchesQuery(room: RoomRecord, q: string): boolean {
   );
 }
 
-/** EXISTENCE visibility (listings, join status): anonymous and non-members
- *  see PUBLIC rooms only; members/stewards AND pending applicants see their
- *  own non-public rooms — an applicant must be able to find the room they
- *  applied to.  Never use this for content-bearing reads: that is
- *  `roomContentVisibleToUser`. */
+/**
+ * WS-Q.3.1a — TIER ONE (room EXISTENCE): the room's shell — name, description,
+ * visibility class, join affordance — is visible to ALL, so private rooms are
+ * DISCOVERABLE and JOINABLE (§16.1). This is a deliberate semantic change from
+ * the shipped restricted-room behavior: `roomVisibleToUser` now returns true
+ * for every room, public or private, for any user including signed-out. It is
+ * NOT gated by subscription. Never use this for content-bearing reads — that is
+ * `roomContentVisibleToUser` (tier two). ("Unlisted/secret" rooms would be a
+ * new SPEC axis, out of WS-Q scope.)
+ */
 export async function roomVisibleToUser(
-  forum: ForumServices,
-  room: RoomRecord,
-  userId: string | null,
+  _forum: ForumServices,
+  _room: RoomRecord,
+  _userId: string | null,
 ): Promise<boolean> {
-  if (room.visibility === 'public') return true;
-  if (userId === null) return false;
-  const subscription = await forum.rooms.getSubscription(room.roomId, userId);
-  if (subscription !== null) return true; // active OR pending (they applied)
-  const roles = await forum.rooms.stewardRolesFor(room.roomId, userId);
-  return roles.length > 0;
+  return true;
 }
 
-/** CONTENT visibility (threads, lenses, detail): ACTIVE membership or a
- *  steward role.  A pending applicant may know the room exists but reads
- *  none of its content until a steward approves the request
- *  (WS-G.2.3b/§16.2 — the same bar `threadVisibleToUser` enforces). */
+/** CONTENT visibility (threads, lenses, detail): public rooms are readable by
+ *  all; a PRIVATE room requires ACTIVE membership or a steward role. A pending
+ *  applicant may know the room exists (tier one) but reads none of its content
+ *  until a steward approves the request (§16.2 — the bar `storyReadableByUser`
+ *  and `threadVisibleToUser` compose). */
 export async function roomContentVisibleToUser(
   forum: ForumServices,
   room: RoomRecord,
@@ -188,13 +237,60 @@ export async function roomContentVisibleToUser(
   return roles.length > 0;
 }
 
+/**
+ * WS-Q.3.1b — the single chokepoint for "may create top-level content here":
+ * the user passes the content bar AND (the room admits all members OR the user
+ * holds a steward role / is an expert-lens assignee). Consumed by the
+ * submission guard (WS-Q.2.1b) and the composer's postable-room filter
+ * (WS-Q.5.1a). (Per-user expert-lens assignment is the WS-J seam; today the
+ * `experts_and_stewards` bar is satisfied by room or platform stewards.)
+ */
+export async function userMayPostTopLevel(
+  forum: ForumServices,
+  room: RoomRecord,
+  userId: string | null,
+  platformRoles: readonly Role[] = [],
+): Promise<boolean> {
+  if (!(await roomContentVisibleToUser(forum, room, userId))) return false;
+  if (room.postingPolicy === 'all_members') return true;
+  if (userId === null) return false;
+  return isRoomSteward(forum, room.roomId, userId, platformRoles);
+}
+
+/**
+ * WS-Q.3.2 — the SINGLE item-level read bar (§14.5.3/§15.3). A story is
+ * readable when it is not hidden AND the reader passes the room CONTENT bar.
+ * Both visibility tiers gate on the room bar: a `public` story is readable by
+ * anyone who can reach its (necessarily public) room; a `room_only` story
+ * requires active membership of its room. Item visibility governs DISTRIBUTION
+ * (global surfaces), enforced by the ranking gate + search predicate — it never
+ * WIDENS the read bar, so a public story mislabeled into a private room fails
+ * closed for a non-member. Every direct-read path (story, thread, branch,
+ * subtree, contribution) calls this; an unknown room/story is unreadable (404).
+ */
+export async function storyReadableByUser(
+  forum: ForumServices,
+  story: { hiddenState: 'takedown' | 'safety' | null; visibility: StoryVisibility },
+  room: RoomRecord,
+  userId: string | null,
+): Promise<boolean> {
+  if (story.hiddenState !== null) return false;
+  return roomContentVisibleToUser(forum, room, userId);
+}
+
 export type JoinOutcome =
   | { ok: true; status: 'active' | 'pending'; subscription: RoomSubscriptionRecord }
-  | { ok: false; code: 'not_found'; message: string };
+  | { ok: false; code: 'not_found'; message: string }
+  | { ok: false; code: 'invite_only'; message: string };
 
-/** WS-G.2.3d join: public rooms join immediately; restricted/expert_led
- *  create a pending request.  Idempotent: re-joining returns the existing
- *  subscription unchanged. */
+/**
+ * WS-Q.3.1c — join branches on the room's `join_model` (not visibility):
+ *   • `open`             ⇒ immediate `active`;
+ *   • `request_approval` ⇒ a `pending` request (steward approves);
+ *   • `invite`           ⇒ self-join rejected (invitations are a separate
+ *                          steward action — the WS-J seam).
+ * Idempotent: re-joining returns the existing subscription unchanged.
+ */
 export async function joinRoom(
   forum: ForumServices,
   room: RoomRecord,
@@ -203,8 +299,15 @@ export async function joinRoom(
 ): Promise<JoinOutcome> {
   const existing = await forum.rooms.getSubscription(room.roomId, userId);
   if (existing) return { ok: true, status: existing.status, subscription: existing };
-  const status: RoomSubscriptionRecord['status'] =
-    room.visibility === 'public' ? 'active' : 'pending';
+  if (room.joinModel === 'invite') {
+    forum.metrics.increment('rooms.join_invite_only');
+    return {
+      ok: false,
+      code: 'invite_only',
+      message: 'This room is invite-only; ask a steward for an invitation',
+    };
+  }
+  const status: RoomSubscriptionRecord['status'] = room.joinModel === 'open' ? 'active' : 'pending';
   const subscription = await forum.rooms.upsertSubscription({
     roomId: room.roomId,
     userId,
