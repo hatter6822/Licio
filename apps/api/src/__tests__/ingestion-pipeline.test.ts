@@ -14,26 +14,26 @@ import { sweepLowActivity } from '../ingestion/lifecycle.js';
 import { deterministicEventId, retryDueExtractions } from '../ingestion/pipeline.js';
 import { runIngestionTick } from '../ingestion/scheduler.js';
 import { createV1Routes } from '../routes/v1.js';
-import { attentionEvent } from './ws-e-helpers.js';
+import { attentionEvent } from './event-test-helpers.js';
 import {
   articleHtml,
-  freshWsFServices,
+  freshIngestionServices,
+  type IngestionServicesFixture,
   linkSubmission,
   post,
   seedUserWithSession,
-  type WsFFixture,
-} from './ws-f-helpers.js';
+} from './ingestion-test-helpers.js';
 
 function app() {
   return new Hono().route('/v1', createV1Routes());
 }
 
-let fixture: WsFFixture;
+let fixture: IngestionServicesFixture;
 let nowMs: number;
 
 beforeEach(() => {
   nowMs = Date.parse('2026-06-11T12:00:00.000Z');
-  fixture = freshWsFServices({
+  fixture = freshIngestionServices({
     config: { minAccountAgeMinutes: 0 },
     now: () => nowMs,
   });
@@ -88,7 +88,7 @@ describe('robots.txt compliance (WS-F.1.4f)', () => {
   it('fails CLOSED when robots.txt is unreachable: deferred, never fetched now', async () => {
     // A fixture whose robots fetcher reports a NETWORK error (vs a 404): the
     // RobotsCache must treat the origin as unreachable and defer the fetch.
-    const fx = freshWsFServices({ config: { minAccountAgeMinutes: 0 }, now: () => nowMs });
+    const fx = freshIngestionServices({ config: { minAccountAgeMinutes: 0 }, now: () => nowMs });
     const { RobotsCache } = await import('../ingestion/robots.js');
     fx.ingestion.robots = new RobotsCache(
       async () => ({ error: 'network down' }),

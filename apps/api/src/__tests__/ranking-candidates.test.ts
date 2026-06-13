@@ -29,8 +29,8 @@ import {
   SubscribedRoomsRetriever,
 } from '../ranking/retrievers.js';
 import { createCandidateDataPorts } from '../ranking/services.js';
+import { attentionEvent, seedUserWithSession } from './event-test-helpers.js';
 import { freshRankingServices, type RankingFixture, seedStory } from './ranking-helpers.js';
-import { attentionEvent, seedUserWithSession } from './ws-e-helpers.js';
 
 let fixture: RankingFixture;
 

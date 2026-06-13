@@ -22,7 +22,12 @@ import {
   InMemoryReviewQueueStore,
 } from '../ingestion/stores.js';
 import { createV1Routes } from '../routes/v1.js';
-import { freshWsFServices, post, seedUserWithSession, type WsFFixture } from './ws-f-helpers.js';
+import {
+  freshIngestionServices,
+  type IngestionServicesFixture,
+  post,
+  seedUserWithSession,
+} from './ingestion-test-helpers.js';
 
 function v1Routes() {
   return new Hono().route('/v1', createV1Routes());
@@ -41,10 +46,10 @@ function unitVector(axis: number, blend = 0): Float32Array {
   return v;
 }
 
-let fixture: WsFFixture;
+let fixture: IngestionServicesFixture;
 
 beforeEach(() => {
-  fixture = freshWsFServices({ config: { minAccountAgeMinutes: 0 } });
+  fixture = freshIngestionServices({ config: { minAccountAgeMinutes: 0 } });
 });
 
 describe('A1: anonymous takedown intake through the FULL app (WS-F.1.4f)', () => {

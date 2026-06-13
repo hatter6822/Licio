@@ -8,7 +8,11 @@ import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createV1Routes } from '../routes/v1.js';
-import { freshWsEServices, seedUserWithSession, type WsEFixture } from './ws-e-helpers.js';
+import {
+  type EventServicesFixture,
+  freshEventServices,
+  seedUserWithSession,
+} from './event-test-helpers.js';
 
 function app() {
   return new Hono().route('/v1', createV1Routes());
@@ -22,10 +26,10 @@ function request(path: string, method: string, body: unknown, cookie?: string): 
   });
 }
 
-let fixture: WsEFixture;
+let fixture: EventServicesFixture;
 
 beforeEach(() => {
-  fixture = freshWsEServices();
+  fixture = freshEventServices();
 });
 
 describe('steward gating', () => {

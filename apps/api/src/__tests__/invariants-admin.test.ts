@@ -12,11 +12,11 @@ import { describe, expect, it } from 'vitest';
 import { hourWindow } from '../invariants/runner.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
-  freshWsHServices,
+  freshInvariantServices,
+  type InvariantServicesFixture,
   seedStory,
   seedUserWithSession,
-  type WsHFixture,
-} from './ws-h-helpers.js';
+} from './invariant-test-helpers.js';
 
 function app() {
   // Bare v1 mounting (the house admin-test pattern): the CSRF/CORS layers
@@ -25,7 +25,7 @@ function app() {
 }
 
 async function adminRequest(
-  fixture: WsHFixture,
+  fixture: InvariantServicesFixture,
   cookie: string,
   path: string,
   init: RequestInit = {},
@@ -43,7 +43,7 @@ async function adminRequest(
 
 describe('steward gating', () => {
   it('rejects anonymous and non-steward access', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const anonymous = await app().request('http://local/v1/invariants/admin/health');
     expect(anonymous.status).toBe(401);
     const user = await seedUserWithSession(fixture.identity);
@@ -54,7 +54,7 @@ describe('steward gating', () => {
 
 describe('health + outputs + comparison', () => {
   it('reports all eleven invariants with cards, tiers, and shadow status', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const response = await adminRequest(fixture, steward.cookie, '/health');
     expect(response.status).toBe(200);
@@ -67,7 +67,7 @@ describe('health + outputs + comparison', () => {
   });
 
   it('version comparison returns paired outputs filtered by window (WS-H.1.1b)', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const targetId = randomUUID();
     const window = { start: '2026-06-10T00:00:00.000Z', end: '2026-06-10T01:00:00.000Z' };
@@ -124,7 +124,7 @@ describe('promotion endpoint (WS-H.1.2e)', () => {
   };
 
   it('rejects an under-evidenced promotion with 422 and applies a valid one', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const rejected = await adminRequest(fixture, steward.cookie, '/promotions', {
       method: 'POST',
@@ -179,7 +179,7 @@ describe('promotion endpoint (WS-H.1.2e)', () => {
 
 describe('config endpoint (fail closed)', () => {
   it('422s invalid values at configuration time and applies valid ones', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const invalid = await adminRequest(fixture, steward.cookie, '/config', {
       method: 'PUT',
@@ -202,7 +202,7 @@ describe('config endpoint (fail closed)', () => {
 
 describe('MFCI analyst queue (WS-H.3.4b) + freeze clearing (WS-H.3.3d)', () => {
   it('resolving a case as cleared lifts the safety freeze and audits the actor', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const { storyId } = await seedStory(fixture);
     // Frozen item + open case.
@@ -269,7 +269,7 @@ describe('MFCI analyst queue (WS-H.3.4b) + freeze clearing (WS-H.3.3d)', () => {
   });
 
   it('a fixed_margins_ref dereferences to the persisted conditioning (MFCI-4)', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     await fixture.invariants.mfciMargins.put({
       marginsRef: 'margins:2026-06-11T00:00:00.000Z:abc123',
@@ -296,7 +296,7 @@ describe('MFCI analyst queue (WS-H.3.4b) + freeze clearing (WS-H.3.3d)', () => {
 
 describe('GWEI transparency export (WS-H.5.2d)', () => {
   it('publishes parity statements only — no cohort metrics, no suppressed detail', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const window = hourWindow(Date.now());
     await fixture.events.invariantStore.upsert({
@@ -358,7 +358,7 @@ describe('GWEI transparency export (WS-H.5.2d)', () => {
 
 describe('public WS-H read surfaces', () => {
   it('interpretations 404 on hidden stories and answer empty before SCOI runs', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { storyId } = await seedStory(fixture);
     const empty = await app().request(`http://local/v1/stories/${storyId}/interpretations`);
     expect(empty.status).toBe(200);
@@ -376,7 +376,7 @@ describe('public WS-H read surfaces', () => {
   });
 
   it('the independent-sources drawer serves lineage context from stored data', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const wire = await fixture.ingestion.sources.upsertByDomain('wire.example', { name: 'Wire' });
     const { storyId } = await seedStory(fixture, {
       canonicalUrl: 'https://wire.example/a',
@@ -397,7 +397,7 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
   /** A room with two lenses reading the SAME story divergently, plus a
    * multi-lens participant (the bridge candidate), with the acting user as
    * the room's steward. */
-  async function seedSplitRoom(fixture: WsHFixture, stewardUserId: string) {
+  async function seedSplitRoom(fixture: InvariantServicesFixture, stewardUserId: string) {
     const roomId = randomUUID();
     const inserted = await fixture.forum.rooms.insert({
       roomId,
@@ -460,7 +460,7 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
   }
 
   it('steward reports are room-scoped with states, lenses, and recommendations', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const { roomId, storyId, threadId } = await seedSplitRoom(fixture, steward.userId);
     // Store a SCOI output so the report has a measurement to show.
@@ -514,7 +514,7 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
   });
 
   it('annotation measurably reduces SCOI and is audited with a ratified code (SCOI-4)', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const { storyId, threadId } = await seedSplitRoom(fixture, steward.userId);
     // Baseline measurement (stored so the action has a before).
@@ -581,7 +581,7 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
   });
 
   it('bridge requests route multi-lens candidates; a reducing contribution credits (SCOI-2)', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const { threadId, lensIds, bridgeUserId } = await seedSplitRoom(fixture, steward.userId);
     const opened = await adminRequest(
@@ -653,7 +653,7 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
   });
 
   it('a moderator annotation rebaselines the open request — credit is never inherited', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const { threadId, lensIds, bridgeUserId } = await seedSplitRoom(fixture, steward.userId);
     const opened = await adminRequest(
@@ -719,7 +719,7 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
   });
 
   it('merge requires the actor to steward the RELATED thread too', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const outsider = await seedUserWithSession(fixture.identity, { steward: true });
     const mine = await seedSplitRoom(fixture, steward.userId);
@@ -765,7 +765,7 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
 
 describe('WS-H client wire surfaces (feed labels, lens names, co-group)', () => {
   it('feed items carry the MERI exposure label from stored gains', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const demoId = '5f5e1000-0000-4000-8000-000000000001';
     await fixture.events.invariantStore.upsert({
       invariantType: 'MERI',
@@ -802,7 +802,7 @@ describe('WS-H client wire surfaces (feed labels, lens names, co-group)', () => 
   });
 
   it('interpretations resolve human lens names through the room', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const { storyId } = await (async () => {
       const roomId = randomUUID();
@@ -889,7 +889,7 @@ describe('WS-H client wire surfaces (feed labels, lens names, co-group)', () => 
   });
 
   it('the drawer lists visible co-group stories (syndication siblings)', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const wire = await fixture.ingestion.sources.upsertByDomain('wire.example', { name: 'Wire' });
     const mirror = await fixture.ingestion.sources.upsertByDomain('mirror.example', {
       name: 'Mirror',

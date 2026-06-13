@@ -13,21 +13,21 @@ import { createV1Routes } from '../routes/v1.js';
 import {
   articleHtml,
   briefSubmission,
-  freshWsFServices,
+  freshIngestionServices,
+  type IngestionServicesFixture,
   linkSubmission,
   post,
   seedUserWithSession,
-  type WsFFixture,
-} from './ws-f-helpers.js';
+} from './ingestion-test-helpers.js';
 
 function app() {
   return new Hono().route('/v1', createV1Routes());
 }
 
-let fixture: WsFFixture;
+let fixture: IngestionServicesFixture;
 
 beforeEach(() => {
-  fixture = freshWsFServices({ config: { minAccountAgeMinutes: 0 } });
+  fixture = freshIngestionServices({ config: { minAccountAgeMinutes: 0 } });
 });
 
 describe('POST /v1/stories — submission types (WS-F.1.4a/b)', () => {
@@ -263,7 +263,7 @@ describe('POST /v1/stories — evidence-card routing (WS-F.2.5a)', () => {
 
 describe('POST /v1/stories — safety pre-checks (WS-F.1.4c)', () => {
   it('enforces the per-account submission rate limit with Retry-After', async () => {
-    fixture = freshWsFServices({
+    fixture = freshIngestionServices({
       config: { minAccountAgeMinutes: 0, submissionPerHour: 2, submissionPerDay: 50 },
     });
     const { cookie } = await seedUserWithSession(fixture.identity);
@@ -275,7 +275,7 @@ describe('POST /v1/stories — safety pre-checks (WS-F.1.4c)', () => {
   });
 
   it('rejects very new accounts with the waiting-period message', async () => {
-    fixture = freshWsFServices({ config: { minAccountAgeMinutes: 60 } });
+    fixture = freshIngestionServices({ config: { minAccountAgeMinutes: 60 } });
     const { cookie } = await seedUserWithSession(fixture.identity, { accountAgeMs: 0 });
     const res = await app().request(post('/v1/stories', briefSubmission(), cookie));
     expect(res.status).toBe(403);
@@ -285,7 +285,7 @@ describe('POST /v1/stories — safety pre-checks (WS-F.1.4c)', () => {
   });
 
   it('rejects repeated identical titles within the window (spam pattern)', async () => {
-    fixture = freshWsFServices({
+    fixture = freshIngestionServices({
       config: { minAccountAgeMinutes: 0, duplicateTitleLimit: 2 },
     });
     const { cookie } = await seedUserWithSession(fixture.identity);
@@ -308,7 +308,7 @@ describe('POST /v1/stories — safety pre-checks (WS-F.1.4c)', () => {
   });
 
   it('rejects URLs on the malware denylist, including subdomains, with 403', async () => {
-    fixture = freshWsFServices({
+    fixture = freshIngestionServices({
       config: { minAccountAgeMinutes: 0, malwareDomains: ['evil.example'] },
     });
     const { cookie } = await seedUserWithSession(fixture.identity);

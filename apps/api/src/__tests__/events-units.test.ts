@@ -36,17 +36,17 @@ import { rankFrontPageV0 } from '../pwatt/ranking-v0.js';
 import { startEventPipelineScheduler } from '../pwatt/scheduler.js';
 import { deterministicEventId } from '../pwatt/scoring.js';
 import { isShadowOutput } from '../pwatt/shadow.js';
-import { freshWsEServices, type WsEFixture } from './ws-e-helpers.js';
+import { type EventServicesFixture, freshEventServices } from './event-test-helpers.js';
 
 const T0 = Date.UTC(2026, 5, 10, 10, 0, 0);
 const IN_WINDOW = new Date(T0 + 5 * 60_000).toISOString();
 
-let fixture: WsEFixture;
+let fixture: EventServicesFixture;
 let rejections: Array<Record<string, unknown>>;
 
 beforeEach(() => {
   rejections = [];
-  fixture = freshWsEServices({
+  fixture = freshEventServices({
     log: (event, meta) => {
       if (event === 'pwatt.config.rejected') rejections.push(meta);
     },

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Shared WS-E test fixtures: fresh in-memory identity + event-pipeline
-// bundles, seeded users with session cookies, and canonical event builders.
+// Identity + event-pipeline in-memory test fixtures: fresh service bundles
+// installed as the module singletons, seeded users with session cookies, and
+// canonical event builders.
 
 import { randomUUID } from 'node:crypto';
 import {
@@ -36,13 +37,15 @@ export const TEST_IDENTITY_CONFIG: IdentityConfig = {
   siwe: { domain: 'localhost', uri: 'http://localhost', chainAllowlist: [1] },
 };
 
-export interface WsEFixture {
+export interface EventServicesFixture {
   identity: IdentityServices;
   events: EventPipelineServices;
 }
 
 /** Fresh in-memory bundles, installed as the module singletons. */
-export function freshWsEServices(options: InMemoryEventServicesOptions = {}): WsEFixture {
+export function freshEventServices(
+  options: InMemoryEventServicesOptions = {},
+): EventServicesFixture {
   const identity = createInMemoryIdentityServices(TEST_IDENTITY_CONFIG);
   const events = createInMemoryEventPipelineServices(options);
   setIdentityServices(identity);

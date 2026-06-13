@@ -13,15 +13,15 @@ import { describe, expect, it, vi } from 'vitest';
 import { assembleMeriCandidates, sessionEventsFromSequence } from '../invariants/data.js';
 import { hourWindow } from '../invariants/runner.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
-import { attentionEvent } from './ws-e-helpers.js';
+import { attentionEvent } from './event-test-helpers.js';
 import {
-  freshWsHServices,
+  freshInvariantServices,
+  type InvariantServicesFixture,
   seedStory,
   seedUserWithSession,
-  type WsHFixture,
-} from './ws-h-helpers.js';
+} from './invariant-test-helpers.js';
 
-async function seedSyndicatedPair(fixture: WsHFixture): Promise<{
+async function seedSyndicatedPair(fixture: InvariantServicesFixture): Promise<{
   originalId: string;
   copyId: string;
   freshId: string;
@@ -60,7 +60,7 @@ async function seedSyndicatedPair(fixture: WsHFixture): Promise<{
 
 describe('MERI service (WS-H.2)', () => {
   it('groups syndicated lineage and scores the pool below 1', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { originalId, copyId, freshId } = await seedSyndicatedPair(fixture);
     const candidates = await assembleMeriCandidates(fixture.ingestion, null, 100, 0.7);
     const byId = new Map(candidates.map((c) => [c.id, c]));
@@ -82,7 +82,7 @@ describe('MERI service (WS-H.2)', () => {
   });
 
   it('closes the WS-E redundancy hook from the latest MERI output', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { copyId } = await seedSyndicatedPair(fixture);
     const window = hourWindow(Date.now());
     const target = { targetType: 'feed' as const, targetId: GLOBAL_FEED_TARGET_ID };
@@ -118,7 +118,7 @@ describe('MERI service (WS-H.2)', () => {
 
 describe('MFCI service (WS-H.3)', () => {
   it('cheap-statistic intake opens a case on concentrated reporting and clearing lifts it', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { storyId, threadId } = await seedStory(fixture, {
       canonicalUrl: 'https://example.org/target',
     });
@@ -176,7 +176,7 @@ describe('MFCI service (WS-H.3)', () => {
   });
 
   it('batch fiber test attributes per-target scores under one shared conditioning', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { userId } = await seedUserWithSession(fixture.identity);
     const { storyId } = await seedStory(fixture, { topicIds: ['water'] });
     const { storyId: quietId } = await seedStory(fixture, { topicIds: ['water'] });
@@ -261,7 +261,7 @@ describe('MFCI service (WS-H.3)', () => {
   });
 
   async function runBurstAndClearScenario(): Promise<void> {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { userId } = await seedUserWithSession(fixture.identity);
     const { storyId: hot } = await seedStory(fixture, { topicIds: ['water'] });
     const others: string[] = [];
@@ -327,7 +327,7 @@ describe('MFCI service (WS-H.3)', () => {
 
 describe('SCOI service (WS-H.4)', () => {
   it('reports INSUFFICIENT_COVERAGE without two interpreted lenses', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { storyId } = await seedStory(fixture);
     const [output] = await fixture.invariants.scoi.computeBatch(
       [{ targetType: 'story', targetId: storyId }],
@@ -339,7 +339,11 @@ describe('SCOI service (WS-H.4)', () => {
 });
 
 describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
-  async function seedSession(fixture: WsHFixture, topicA: string, topicB: string): Promise<string> {
+  async function seedSession(
+    fixture: InvariantServicesFixture,
+    topicA: string,
+    topicB: string,
+  ): Promise<string> {
     const { userId } = await seedUserWithSession(fixture.identity);
     const { storyId: storyA } = await seedStory(fixture, { topicIds: [topicA] });
     const { storyId: storyB } = await seedStory(fixture, { topicIds: [topicB] });
@@ -358,7 +362,7 @@ describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
   }
 
   it('the consumer stores topic ids, timing, and §22.1-coarse buckets ONLY (privacy)', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     await seedSession(fixture, 'topic-a', 'topic-b');
     const live = await fixture.invariants.sessions.listLive(Date.now());
     expect(live.length).toBe(1);
@@ -385,7 +389,7 @@ describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
   });
 
   it('a ping-pong revisit walk scores PHI 0 honestly (no cycle content)', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     await seedSession(fixture, 'topic-a', 'topic-b');
     const outputs = await fixture.invariants.phi.computeBatch([], hourWindow(Date.now()));
     expect(outputs.length).toBe(1);
@@ -403,7 +407,7 @@ describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
   /** Seed a genuine 3-topic cycle a → b → c → a → b → c → a with enough
    * per-topic stories to estimate behavioral structures. */
   async function seedCycleSession(
-    fixture: WsHFixture,
+    fixture: InvariantServicesFixture,
     topics: readonly string[],
     options: { structureStories?: number; sensitivityLabels?: SensitivityLabel[] } = {},
   ): Promise<void> {
@@ -436,7 +440,7 @@ describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
   }
 
   it('a genuine 3-topic cycle yields pair-transport holonomy', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     await seedCycleSession(fixture, ['cycle-a', 'cycle-b', 'cycle-c']);
     const outputs = await fixture.invariants.phi.computeBatch([], hourWindow(Date.now()));
     expect(outputs.length).toBe(1);
@@ -480,7 +484,7 @@ describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
   });
 
   it('sensitive topics are detected at the stricter repeat threshold (PHI-3)', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { userId } = await seedUserWithSession(fixture.identity);
     // The flagged cluster repeats only TWICE — under the base threshold (3),
     // at the sensitive-adjusted threshold (2).
@@ -521,7 +525,7 @@ describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
   });
 
   it('path-signature classifies the same session data without content', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     await seedSession(fixture, 'topic-a', 'topic-b');
     const outputs = await fixture.invariants.pathsig.computeBatch([], hourWindow(Date.now()));
     expect(outputs.length).toBe(1);
@@ -535,7 +539,7 @@ describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
   });
 
   it('source-seeking sessions carry coarse action kinds and reach CONSTRUCTIVE', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { userId } = await seedUserWithSession(fixture.identity);
     const base = Date.now() - 25 * 60_000;
     // Distinct topics opened with the source each time: deliberate,
@@ -575,7 +579,7 @@ describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
   });
 
   it('expired sequences sweep away (session-scoped retention)', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     await seedSession(fixture, 'topic-a', 'topic-b');
     const future = Date.now() + 7 * 3_600_000;
     expect(await fixture.invariants.sessions.sweepExpired(future)).toBe(1);
@@ -585,7 +589,7 @@ describe('PHI sessions (WS-H.6) + path signature (WS-H.7.6)', () => {
 
 describe('supporting invariant services (WS-H.7)', () => {
   it('Hodge labels a seeded conversation without hostility penalty', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { threadId } = await seedStory(fixture);
     const alice = randomUUID();
     const bob = randomUUID();
@@ -630,7 +634,7 @@ describe('supporting invariant services (WS-H.7)', () => {
   });
 
   it('CID certifies the attribute-blind v0 ranking with CID = 0', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     await seedStory(fixture);
     const [output] = await fixture.invariants.cid.computeBatch([], hourWindow(Date.now()));
     expect(output?.score_vector['cid']).toBe(0);
@@ -638,7 +642,7 @@ describe('supporting invariant services (WS-H.7)', () => {
   });
 
   it('tropical + braid + reeb run on seeded data without errors', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     await seedStory(fixture, { topicIds: ['water'] });
     await seedStory(fixture, { topicIds: ['water'] });
     await seedStory(fixture, { topicIds: ['transit'] });

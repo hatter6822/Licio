@@ -17,19 +17,19 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { createV1Routes } from '../routes/v1.js';
 import {
   contributionBody,
-  freshWsGServices,
+  type ForumServicesFixture,
+  freshForumServices,
   jsonRequest,
   seedClaim,
   seedThread,
   seedUserWithSession,
-  type WsGFixture,
-} from './ws-g-helpers.js';
+} from './forum-test-helpers.js';
 
 function app() {
   return new Hono().route('/v1', createV1Routes());
 }
 
-let fixture: WsGFixture;
+let fixture: ForumServicesFixture;
 let cookie: string;
 let userId: string;
 let threadId: string;
@@ -41,7 +41,7 @@ beforeEach(async () => {
   // The default fixture raises the per-minute cap (the clock is frozen, so
   // the sliding window never advances); the rate-limit test below builds its
   // own fixture at the REAL default of 10/minute.
-  fixture = freshWsGServices({ now: () => nowMs, forumConfig: { contributionsPerMinute: 100 } });
+  fixture = freshForumServices({ now: () => nowMs, forumConfig: { contributionsPerMinute: 100 } });
   const session = await seedUserWithSession(fixture.identity);
   cookie = session.cookie;
   userId = session.userId;
@@ -260,7 +260,7 @@ describe('WS-G.3.1 — dedup, rate limit, thread state', () => {
   });
 
   it('enforces 10/minute with 429 + Retry-After (the WS-G.3.1 default)', async () => {
-    const limited = freshWsGServices({ now: () => nowMs });
+    const limited = freshForumServices({ now: () => nowMs });
     const session = await seedUserWithSession(limited.identity);
     const seeded = await seedThread(limited);
     for (let index = 0; index < 10; index += 1) {
@@ -310,7 +310,7 @@ describe('WS-G.3.1 — dedup, rate limit, thread state', () => {
 
 describe('WS-G.3.1 — safety holds + report intake (§18.4)', () => {
   it('flags malware-domain citations into under_review + the review queue', async () => {
-    const flagged = freshWsGServices({
+    const flagged = freshForumServices({
       now: () => nowMs,
       config: { malwareDomains: ['evil.example'] },
     });

@@ -336,6 +336,12 @@ export const storyCreateResponseSchema = z
   .strict();
 export type StoryCreateResponse = z.infer<typeof storyCreateResponseSchema>;
 
+/** WS-Q.2.4 — PATCH /v1/stories/{id}/visibility request (author narrow/widen). */
+export const storyVisibilityPatchRequestSchema = z
+  .object({ visibility: storyVisibilitySchema })
+  .strict();
+export type StoryVisibilityPatchRequest = z.infer<typeof storyVisibilityPatchRequestSchema>;
+
 /** 409 body when the canonical URL already exists (WS-F.1.3b). */
 export const storyDuplicateResponseSchema = z
   .object({

@@ -41,7 +41,7 @@ import {
   resetRankingServices,
   setRankingServices,
 } from '../ranking/services.js';
-import { TEST_IDENTITY_CONFIG } from './ws-e-helpers.js';
+import { TEST_IDENTITY_CONFIG } from './event-test-helpers.js';
 
 export interface RankingFixture {
   identity: IdentityServices;

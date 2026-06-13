@@ -16,7 +16,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { type EventConsumer, EventRouter, RouterPolicyViolation } from '../events/router.js';
 import { createInMemoryEventPipelineServices } from '../events/services.js';
 import { InMemoryConsumerCheckpointStore, InMemoryDeadLetterStore } from '../events/stores.js';
-import { attentionEvent, sourceOpenEvent } from './ws-e-helpers.js';
+import { attentionEvent, sourceOpenEvent } from './event-test-helpers.js';
 
 const U1 = '11111111-1111-4111-8111-111111111111';
 const U2 = '22222222-2222-4222-8222-222222222222';

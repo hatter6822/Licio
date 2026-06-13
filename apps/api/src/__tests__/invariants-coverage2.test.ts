@@ -21,15 +21,19 @@ import {
 import { runBatchTier } from '../invariants/scheduler.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
 import { createV1Routes } from '../routes/v1.js';
-import { attentionEvent } from './ws-e-helpers.js';
-import { freshWsHServices, seedStory, seedUserWithSession } from './ws-h-helpers.js';
+import { attentionEvent } from './event-test-helpers.js';
+import {
+  freshInvariantServices,
+  seedStory,
+  seedUserWithSession,
+} from './invariant-test-helpers.js';
 
 function app() {
   return new Hono().route('/v1', createV1Routes());
 }
 
 async function upsertOutput(
-  fixture: ReturnType<typeof freshWsHServices>,
+  fixture: ReturnType<typeof freshInvariantServices>,
   row: {
     invariantType: string;
     targetType: string;
@@ -58,7 +62,7 @@ async function upsertOutput(
 
 describe('public surfaces with stored data', () => {
   it('serves populated interpretations with the needs-context gate', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { storyId } = await seedStory(fixture);
     await upsertOutput(fixture, {
       invariantType: 'SCOI',
@@ -90,7 +94,7 @@ describe('public surfaces with stored data', () => {
   });
 
   it('maps all four exposure-label tiers on the drawer endpoint', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const gains: Record<string, number> = {};
     const cases: Array<{ gain: number; label: string }> = [
       { gain: 1, label: 'independent_source' },
@@ -130,7 +134,7 @@ describe('public surfaces with stored data', () => {
 
 describe('admin validation branches', () => {
   it('422s malformed queries and filters outputs by reason code', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const headers = { cookie: steward.cookie, 'content-type': 'application/json' };
     const targetId = randomUUID();
@@ -191,7 +195,7 @@ describe('admin validation branches', () => {
 
 describe('scheduler failure isolation per invariant', () => {
   it('a throwing service records an error without blocking the others', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     await seedStory(fixture);
     // Break ALL eleven services; the batch tier must complete regardless.
     for (const service of fixture.invariants.all()) {
@@ -210,7 +214,7 @@ describe('scheduler failure isolation per invariant', () => {
 
 describe('MERI assembly through real MinHash signatures', () => {
   it('groups near-duplicates detected by LSH band collisions', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const text =
       'The water board released raw and processed sampling results alongside the methodology notes for independent verification by community laboratories across the region this week.';
     const nearCopy = `${text} Minor syndication footer.`;
@@ -251,7 +255,7 @@ describe('MERI assembly through real MinHash signatures', () => {
 
 describe('degraded supporting-service branches', () => {
   it('hodge reports INSUFFICIENT_COVERAGE for reply-free threads', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { threadId } = await seedStory(fixture);
     const [output] = await fixture.invariants.hodge.computeBatch(
       [{ targetType: 'thread', targetId: threadId }],
@@ -261,7 +265,7 @@ describe('degraded supporting-service branches', () => {
   });
 
   it('braid and reeb degrade honestly on empty pools', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const window = hourWindow(Date.now());
     const [braid] = await fixture.invariants.braid.computeBatch([], window);
     expect(braid?.reason_codes).toContain('INSUFFICIENT_COVERAGE');
@@ -286,7 +290,7 @@ describe('runner internals', () => {
   });
 
   it('persistComputations records versionMetadata when provided', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const targetId = randomUUID();
     await persistComputations(
       fixture.events.invariantStore,
@@ -396,7 +400,7 @@ describe('config validator matrix (fail-closed, every key)', () => {
 
 describe('remaining service/data branches', () => {
   it('redundancyOf handles missing/malformed/maximal stored outputs', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     expect(await fixture.invariants.meri.redundancyOf(randomUUID())).toBe(0);
     await upsertOutput(fixture, {
       invariantType: 'MERI',
@@ -415,7 +419,7 @@ describe('remaining service/data branches', () => {
   });
 
   it('PHI degrades when topic structures cannot be estimated for a cycle', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { userId } = await seedUserWithSession(fixture.identity);
     // ONE story per topic — far fewer than the preference dimension, so no
     // behavioral structure is estimable for any cluster in the cycle.
@@ -441,7 +445,7 @@ describe('remaining service/data branches', () => {
   });
 
   it('braid/reeb/data consume seeded aggregation windows', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const a = await seedStory(fixture, { topicIds: ['alpha'] });
     const b = await seedStory(fixture, { topicIds: ['beta'] });
     const hourMs = 3_600_000;
@@ -475,7 +479,7 @@ describe('remaining service/data branches', () => {
   });
 
   it('MFCI actions accept thread-target payloads and stored calibrations', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { threadId, storyId } = await seedStory(fixture);
     const nowMs = Date.now();
     await fixture.events.eventStore.insertMany(
@@ -516,7 +520,7 @@ describe('SCOI surface edge branches', () => {
   it('route guards: invalid ids, missing bodies, scope and 404 paths', async () => {
     const { Hono } = await import('hono');
     const { createV1Routes } = await import('../routes/v1.js');
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const app = new Hono().route('/v1', createV1Routes());
     const req = (path: string, init: RequestInit = {}) =>
@@ -648,7 +652,7 @@ describe('SCOI surface edge branches', () => {
   });
 
   it('bridge stores and consumer edges: single-shot credit, no-decrease, missing payloads', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { InMemoryBridgeAttemptStore, InMemoryScoiContextActionStore } = await import(
       '../invariants/stores.js'
     );
@@ -700,7 +704,7 @@ describe('SCOI surface edge branches', () => {
 
 describe('guarded SCOI recompute (WS-H.1.2c on the on-demand path)', () => {
   it('a hanging compute degrades at the wrapper timeout instead of stalling the caller', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     await fixture.events.configStore.set('invariants.wrapperTimeoutMs', { value: 200 });
     await fixture.invariants.reloadConfig();
     const { recomputeScoiFor } = await import('../invariants/scoi-actions.js');

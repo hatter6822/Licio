@@ -19,11 +19,16 @@ import { extractMetadata } from '../ingestion/extraction.js';
 import { runIngestionTick, startIngestionScheduler } from '../ingestion/scheduler.js';
 import { InMemoryEmbeddingStore } from '../ingestion/stores.js';
 import { createV1Routes } from '../routes/v1.js';
-import { briefSubmission, freshWsFServices, post, seedUserWithSession } from './ws-f-helpers.js';
+import {
+  briefSubmission,
+  freshIngestionServices,
+  post,
+  seedUserWithSession,
+} from './ingestion-test-helpers.js';
 
 describe('scheduler edges', () => {
   it('a lease-store ERROR fails closed: the tick is skipped entirely', async () => {
-    const fixture = freshWsFServices();
+    const fixture = freshIngestionServices();
     const failures: string[] = [];
     let ticked = false;
     const origReload = fixture.ingestion.reloadConfig;
@@ -53,7 +58,10 @@ describe('scheduler edges', () => {
 
   it('an ACTIVE backfill resolves text for story/claim/evidence targets', async () => {
     let nowMs = Date.parse('2026-06-11T12:00:00.000Z');
-    const fixture = freshWsFServices({ config: { minAccountAgeMinutes: 0 }, now: () => nowMs });
+    const fixture = freshIngestionServices({
+      config: { minAccountAgeMinutes: 0 },
+      now: () => nowMs,
+    });
     const app = new Hono().route('/v1', createV1Routes());
     const { userId, cookie } = await seedUserWithSession(fixture.identity);
     const res = await app.request(

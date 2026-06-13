@@ -23,6 +23,7 @@ import {
   storyCreateResponseSchema,
   storyDuplicateResponseSchema,
   storyPublicSchema,
+  storyVisibilityPatchRequestSchema,
   takedownCreateRequestSchema,
   takedownCreateResponseSchema,
   uuidSchema,
@@ -42,6 +43,7 @@ import type {
   StoryRecord,
 } from '../ingestion/stores.js';
 import { submitStory } from '../ingestion/submission.js';
+import { changeStoryVisibility } from '../ingestion/visibility.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 
@@ -206,6 +208,40 @@ export function createStoriesRoutes() {
             }),
             201,
           );
+        },
+      )
+
+      // --- Author visibility transition (WS-Q.2.4a/b) --------------------
+      .patch(
+        '/stories/:storyId/visibility',
+        authMiddleware(),
+        zValidator('param', z.object({ storyId: uuidSchema })),
+        zValidator('json', storyVisibilityPatchRequestSchema),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const outcome = await changeStoryVisibility(
+            getIngestionServices(),
+            getEventPipelineServices(),
+            getIdentityServices(),
+            getForumServices(),
+            auth.userId,
+            c.req.valid('param').storyId,
+            c.req.valid('json').visibility,
+          );
+          if (!outcome.ok) {
+            if (outcome.status === 409) {
+              return c.json(
+                storyDuplicateResponseSchema.parse({
+                  error: { code: 'duplicate_story', message: outcome.message },
+                  existing_story_id: outcome.existingStoryId,
+                }),
+                409,
+              );
+            }
+            return c.json(deny(outcome.code, outcome.message), outcome.status);
+          }
+          return c.json({ visibility: outcome.visibility, changed: outcome.changed });
         },
       )
 

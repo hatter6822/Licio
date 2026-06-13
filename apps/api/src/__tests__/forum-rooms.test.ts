@@ -17,25 +17,25 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { RECOMMENDATION_INPUT_KEYS } from '../forum/rooms.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
-  freshWsGServices,
+  type ForumServicesFixture,
+  freshForumServices,
   jsonRequest,
   seedThread,
   seedUserWithSession,
-  type WsGFixture,
-} from './ws-g-helpers.js';
+} from './forum-test-helpers.js';
 
 function app() {
   return new Hono().route('/v1', createV1Routes());
 }
 
-let fixture: WsGFixture;
+let fixture: ForumServicesFixture;
 let cookie: string;
 let userId: string;
 let nowMs: number;
 
 beforeEach(async () => {
   nowMs = Date.parse('2026-06-11T12:00:00.000Z');
-  fixture = freshWsGServices({
+  fixture = freshForumServices({
     now: () => {
       nowMs += 211;
       return nowMs;

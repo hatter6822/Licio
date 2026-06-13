@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Shared WS-F test fixtures: fresh in-memory identity + events + ingestion
+// Ingestion in-memory test fixtures: fresh identity + events + ingestion
 // bundles (installed as the module singletons), a stubbed document fetcher
 // with per-URL HTML fixtures, robots control, and canonical submission
 // bodies. The ingestion bundle's `settle()` makes the detached pipeline
@@ -22,11 +22,11 @@ import {
   registerIngestionConsumers,
   setIngestionServices,
 } from '../ingestion/services.js';
-import { freshWsEServices, seedUserWithSession } from './ws-e-helpers.js';
+import { freshEventServices, seedUserWithSession } from './event-test-helpers.js';
 
 export { seedUserWithSession };
 
-export interface WsFFixture {
+export interface IngestionServicesFixture {
   identity: IdentityServices;
   events: EventPipelineServices;
   ingestion: IngestionServices;
@@ -40,10 +40,10 @@ export interface WsFFixture {
 }
 
 /** Fresh in-memory WS-D + WS-E + WS-F bundles with consumers registered. */
-export function freshWsFServices(
+export function freshIngestionServices(
   options: { config?: Partial<IngestionRuntimeConfig>; now?: () => number } = {},
-): WsFFixture {
-  const { identity, events } = freshWsEServices(options.now ? { now: options.now } : {});
+): IngestionServicesFixture {
+  const { identity, events } = freshEventServices(options.now ? { now: options.now } : {});
   const pages = new Map<
     string,
     { status: number; body: string; contentType?: string; finalUrl?: string }

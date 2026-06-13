@@ -315,6 +315,9 @@ async function duplicateClusterId(
     if (signature === null) continue;
     const hits = await findNearDuplicates(
       ingestion.signatures,
+      // WS-Q.2.2c — the public near-dup cluster is scoped to public stories;
+      // the feed only serves public content, so the cluster matches it.
+      ingestion.stories,
       current,
       signature.minhash,
       lshBandHashes(signature.minhash),

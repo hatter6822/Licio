@@ -20,13 +20,13 @@ import { assembleFeatureVector } from '../ranking/features.js';
 import { runRankingTick, startRankingScheduler } from '../ranking/scheduler.js';
 import { serveFeed } from '../ranking/service.js';
 import { InMemoryDecisionLogStore } from '../ranking/stores.js';
+import { attentionEvent, seedUserWithSession } from './event-test-helpers.js';
 import {
   freshRankingServices,
   type RankingFixture,
   seedInvariantOutput,
   seedStory,
 } from './ranking-helpers.js';
-import { attentionEvent, seedUserWithSession } from './ws-e-helpers.js';
 
 let fixture: RankingFixture;
 

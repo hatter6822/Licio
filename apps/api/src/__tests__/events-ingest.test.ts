@@ -19,12 +19,12 @@ import { PRIVACY_BUCKET } from '../events/stores.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
   attentionEvent,
-  freshWsEServices,
+  type EventServicesFixture,
+  freshEventServices,
   legacyAggregate,
   seedUserWithSession,
   sourceOpenEvent,
-  type WsEFixture,
-} from './ws-e-helpers.js';
+} from './event-test-helpers.js';
 
 function app() {
   return new Hono().route('/v1', createV1Routes());
@@ -38,12 +38,12 @@ function post(path: string, body: unknown, cookie?: string): Request {
   });
 }
 
-let fixture: WsEFixture;
+let fixture: EventServicesFixture;
 let logged: Array<{ event: string; meta: Record<string, unknown> }>;
 
 beforeEach(() => {
   logged = [];
-  fixture = freshWsEServices({
+  fixture = freshEventServices({
     log: (event, meta) => logged.push({ event, meta }),
   });
 });
@@ -144,7 +144,7 @@ describe('POST /v1/events/attention (WS-E.1.3a)', () => {
   });
 
   it('enforces the per-user rate limit with 429 + Retry-After (WS-E.1.3c)', async () => {
-    fixture = freshWsEServices({ limits: { perMinute: 2, perHour: 100 } });
+    fixture = freshEventServices({ limits: { perMinute: 2, perHour: 100 } });
     const { userId, cookie } = await seedUserWithSession(fixture.identity);
     expect(
       (await app().request(post('/v1/events/attention', attentionEvent(userId), cookie))).status,
@@ -162,7 +162,7 @@ describe('POST /v1/events/attention (WS-E.1.3a)', () => {
   });
 
   it('malformed bodies consume the rate-limit budget (no free validation hammering)', async () => {
-    fixture = freshWsEServices({ limits: { perMinute: 2, perHour: 100 } });
+    fixture = freshEventServices({ limits: { perMinute: 2, perHour: 100 } });
     const { userId, cookie } = await seedUserWithSession(fixture.identity);
     // Two schema-invalid requests: rejected 400, but each consumed a hit —
     // the limiter runs BEFORE validation (the documented guard chain).
@@ -357,7 +357,7 @@ describe('legacy batch wire (WS-E.1.3e: identical pipeline)', () => {
   });
 
   it('malformed batches consume the rate-limit budget (identical guard order, WS-E.1.3e)', async () => {
-    fixture = freshWsEServices({ limits: { perMinute: 2, perHour: 100 } });
+    fixture = freshEventServices({ limits: { perMinute: 2, perHour: 100 } });
     const { userId, cookie } = await seedUserWithSession(fixture.identity);
     expect(
       (await app().request(post('/v1/attention/aggregates', { aggregates: 'junk' }, cookie)))
@@ -450,7 +450,7 @@ describe('rate limiter degradation (WS-E.1.3c fail-closed)', () => {
   });
 
   it('uses true sliding windows (no burst-at-boundary reset)', async () => {
-    const { events } = freshWsEServices({ limits: { perMinute: 3, perHour: 100 } });
+    const { events } = freshEventServices({ limits: { perMinute: 3, perHour: 100 } });
     const t0 = Date.now();
     expect((await events.ingestLimiter.hit('u', t0)).allowed).toBe(true);
     expect((await events.ingestLimiter.hit('u', t0 + 1_000)).allowed).toBe(true);
@@ -471,7 +471,7 @@ describe('rate limiter degradation (WS-E.1.3c fail-closed)', () => {
 
 describe('endpoint load smoke (WS-E.1.3a)', () => {
   it('sustains a 300-request burst through the full guard chain', async () => {
-    fixture = freshWsEServices({ limits: { perMinute: 1_000, perHour: 10_000 } });
+    fixture = freshEventServices({ limits: { perMinute: 1_000, perHour: 10_000 } });
     const { userId, cookie } = await seedUserWithSession(fixture.identity);
     const a = app();
     const startedAt = Date.now();

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Shared WS-G test fixtures: a fresh in-memory identity + events + ingestion
+// Forum in-memory test fixtures: a fresh identity + events + ingestion
 // + FORUM bundle (installed as the module singletons), plus canonical thread
 // and contribution builders.  `settle()` on both bundles makes detached event
 // publication deterministic in tests.
@@ -17,24 +17,28 @@ import {
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionRuntimeConfig } from '../ingestion/config.js';
 import type { IngestionServices } from '../ingestion/services.js';
-import { freshWsFServices, seedUserWithSession, type WsFFixture } from './ws-f-helpers.js';
+import {
+  freshIngestionServices,
+  type IngestionServicesFixture,
+  seedUserWithSession,
+} from './ingestion-test-helpers.js';
 
 export { seedUserWithSession };
 
-export interface WsGFixture extends WsFFixture {
+export interface ForumServicesFixture extends IngestionServicesFixture {
   forum: ForumServices;
   /** Settle BOTH detached queues (ingestion pipeline + forum events). */
   settleAll: () => Promise<void>;
 }
 
-export function freshWsGServices(
+export function freshForumServices(
   options: {
     config?: Partial<IngestionRuntimeConfig>;
     forumConfig?: Partial<ForumRuntimeConfig>;
     now?: () => number;
   } = {},
-): WsGFixture {
-  const base = freshWsFServices({
+): ForumServicesFixture {
+  const base = freshIngestionServices({
     ...(options.config ? { config: options.config } : {}),
     ...(options.now ? { now: options.now } : {}),
   });

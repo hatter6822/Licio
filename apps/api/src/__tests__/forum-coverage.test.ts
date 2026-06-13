@@ -14,24 +14,24 @@ import { seedForumDemoData } from '../lib/demo-seed.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
   contributionBody,
-  freshWsGServices,
+  type ForumServicesFixture,
+  freshForumServices,
   jsonRequest,
   seedClaim,
   seedThread,
   seedUserWithSession,
-  type WsGFixture,
-} from './ws-g-helpers.js';
+} from './forum-test-helpers.js';
 
 function app() {
   return new Hono().route('/v1', createV1Routes());
 }
 
-let fixture: WsGFixture;
+let fixture: ForumServicesFixture;
 let cookie: string;
 let threadId: string;
 
 beforeEach(async () => {
-  fixture = freshWsGServices({ forumConfig: { contributionsPerMinute: 100 } });
+  fixture = freshForumServices({ forumConfig: { contributionsPerMinute: 100 } });
   const session = await seedUserWithSession(fixture.identity);
   cookie = session.cookie;
   ({ threadId } = await seedThread(fixture));

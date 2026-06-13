@@ -21,11 +21,11 @@ import {
 import { type NewStoredEvent, PRIVACY_BUCKET, PSEUDONYMOUS_USER_ID } from '../events/stores.js';
 import {
   attentionEvent,
-  freshWsEServices,
+  type EventServicesFixture,
+  freshEventServices,
   seedUserWithSession,
   sourceOpenEvent,
-  type WsEFixture,
-} from './ws-e-helpers.js';
+} from './event-test-helpers.js';
 
 const DAY = 86_400_000;
 
@@ -44,10 +44,10 @@ function eventRow(overrides: Partial<NewStoredEvent>): NewStoredEvent {
   };
 }
 
-let fixture: WsEFixture;
+let fixture: EventServicesFixture;
 
 beforeEach(() => {
-  fixture = freshWsEServices();
+  fixture = freshEventServices();
 });
 
 describe('retention sweeps (WS-E.1.4)', () => {
@@ -269,7 +269,7 @@ describe('retention sweeps (WS-E.1.4)', () => {
   });
 
   it('applies jurisdiction overrides that only ever SHORTEN windows (WS-N hook)', async () => {
-    fixture = freshWsEServices({
+    fixture = freshEventServices({
       retention: { overrides: { maxDays: { attention_aggregated: 30, ranking_log: 9_999 } } },
     });
     expect(effectiveMaxDays(fixture.events, 'attention_aggregated')).toBe(30);

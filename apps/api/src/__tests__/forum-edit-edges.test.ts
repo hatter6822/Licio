@@ -13,19 +13,19 @@ import {
 } from '../forum/contributions.js';
 import {
   contributionBody,
-  freshWsGServices,
+  type ForumServicesFixture,
+  freshForumServices,
   seedClaim,
   seedThread,
   seedUserWithSession,
-  type WsGFixture,
-} from './ws-g-helpers.js';
+} from './forum-test-helpers.js';
 
-let fixture: WsGFixture;
+let fixture: ForumServicesFixture;
 let userId: string;
 let threadId: string;
 
 beforeEach(async () => {
-  fixture = freshWsGServices({ forumConfig: { contributionsPerMinute: 100 } });
+  fixture = freshForumServices({ forumConfig: { contributionsPerMinute: 100 } });
   const session = await seedUserWithSession(fixture.identity);
   userId = session.userId;
   ({ threadId } = await seedThread(fixture));

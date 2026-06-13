@@ -60,7 +60,7 @@ import {
   InMemoryEmbeddingStore,
   InMemoryReviewQueueStore,
 } from '../ingestion/stores.js';
-import { articleHtml } from './ws-f-helpers.js';
+import { articleHtml } from './ingestion-test-helpers.js';
 
 describe('HTML scanning + metadata extraction (WS-F.1.4e)', () => {
   it('extracts every supported channel from a realistic article', () => {

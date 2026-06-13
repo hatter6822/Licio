@@ -413,7 +413,10 @@ export async function processSubmittedStory(
   });
   const current = updated ?? story;
 
-  // Near-duplicate detection on the FETCHED text (WS-F.1.3c/d).
+  // Near-duplicate detection on the FETCHED text (WS-F.1.3c/d). WS-Q.2.2c — the
+  // signature is stored for EVERY story (so a later widen joins the public
+  // cluster without a recompute), but the public near-dup / syndication
+  // clustering runs only for PUBLIC stories.
   let duplicateGroupId: string | null = null;
   const { signature, bands } = await signatureStory(
     ingestion.signatures,
@@ -421,14 +424,18 @@ export async function processSubmittedStory(
     text,
     'extracted',
   );
-  const hits = await findNearDuplicates(
-    ingestion.signatures,
-    story.storyId,
-    signature,
-    bands,
-    config.nearDuplicateThreshold,
-    5,
-  );
+  const hits =
+    current.visibility === 'public'
+      ? await findNearDuplicates(
+          ingestion.signatures,
+          ingestion.stories,
+          story.storyId,
+          signature,
+          bands,
+          config.nearDuplicateThreshold,
+          5,
+        )
+      : [];
   for (const hit of hits) {
     const classification = await classifyDuplicate(
       ingestion.stories,

@@ -26,6 +26,7 @@ import { engageKillSwitch } from '../ranking/killswitch.js';
 import { replayDecision, serveFeed } from '../ranking/service.js';
 import { registerRankingConsumers } from '../ranking/services.js';
 import { createV1Routes } from '../routes/v1.js';
+import { seedUserWithSession } from './event-test-helpers.js';
 import {
   freshRankingServices,
   promoteInvariant,
@@ -33,7 +34,6 @@ import {
   seedInvariantOutput,
   seedStory,
 } from './ranking-helpers.js';
-import { seedUserWithSession } from './ws-e-helpers.js';
 
 let fixture: RankingFixture;
 

@@ -19,19 +19,19 @@ import { orderDepthFirst, sectionOfType } from '../forum/tree.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
   contributionBody,
-  freshWsGServices,
+  type ForumServicesFixture,
+  freshForumServices,
   jsonRequest,
   seedClaim,
   seedThread,
   seedUserWithSession,
-  type WsGFixture,
-} from './ws-g-helpers.js';
+} from './forum-test-helpers.js';
 
 function app() {
   return new Hono().route('/v1', createV1Routes());
 }
 
-let fixture: WsGFixture;
+let fixture: ForumServicesFixture;
 let cookie: string;
 let threadId: string;
 let claimId: string;
@@ -39,7 +39,7 @@ let nowMs: number;
 
 beforeEach(async () => {
   nowMs = Date.parse('2026-06-11T12:00:00.000Z');
-  fixture = freshWsGServices({
+  fixture = freshForumServices({
     now: () => {
       nowMs += 137; // strictly increasing timestamps → deterministic order
       return nowMs;

@@ -597,6 +597,10 @@ export async function submitStory(
 
   // 7. SYNC near-duplicate pass on the locally available text (WS-F.1.3c):
   //    informs the submitter immediately; link stories re-check post-fetch.
+  // WS-Q.2.2c — ALWAYS sign (so a later widen joins the public cluster without
+  // a recompute), but only run the PUBLIC near-dup pass for PUBLIC submissions:
+  // a room_only twin is neither flagged nor flags others (room-tier dedup is
+  // out of v1 scope).
   const localText = submissionText(created.story);
   const { signature, bands } = await signatureStory(
     ingestion.signatures,
@@ -604,31 +608,35 @@ export async function submitStory(
     localText,
     'submitted',
   );
-  const similar = await findNearDuplicates(
-    ingestion.signatures,
-    created.story.storyId,
-    signature,
-    bands,
-    config.nearDuplicateThreshold,
-    5,
-  );
   const reviewFlags: Array<'near_duplicate' | 'syndicated_copy_candidate'> = [];
-  if (similar.length > 0) {
-    reviewFlags.push('near_duplicate');
-    await ingestion.reviewQueue.insert({
-      kind: 'near_duplicate',
-      storyId: created.story.storyId,
-      context: {
-        similar: similar.map((s) => ({ story_id: s.storyId, estimate: s.estimatedJaccard })),
-        text_source: 'submitted',
-      },
-      status: 'pending',
-      resolution: null,
-      resolvedBy: null,
-      resolvedAt: null,
-      notBefore: null,
-    });
-    ingestion.metrics.increment('dedup.flagged_near_duplicate_sync');
+  let similar: Awaited<ReturnType<typeof findNearDuplicates>> = [];
+  if (created.story.visibility === 'public') {
+    similar = await findNearDuplicates(
+      ingestion.signatures,
+      ingestion.stories,
+      created.story.storyId,
+      signature,
+      bands,
+      config.nearDuplicateThreshold,
+      5,
+    );
+    if (similar.length > 0) {
+      reviewFlags.push('near_duplicate');
+      await ingestion.reviewQueue.insert({
+        kind: 'near_duplicate',
+        storyId: created.story.storyId,
+        context: {
+          similar: similar.map((s) => ({ story_id: s.storyId, estimate: s.estimatedJaccard })),
+          text_source: 'submitted',
+        },
+        status: 'pending',
+        resolution: null,
+        resolvedBy: null,
+        resolvedAt: null,
+        notBefore: null,
+      });
+      ingestion.metrics.increment('dedup.flagged_near_duplicate_sync');
+    }
   }
 
   // 8. Emit content.submitted: durable insert NOW; publication (which runs

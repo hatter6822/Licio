@@ -41,13 +41,13 @@ import { engageKillSwitch } from '../ranking/killswitch.js';
 import { serveFeed } from '../ranking/service.js';
 import { registerRankingConsumers } from '../ranking/services.js';
 import { createV1Routes } from '../routes/v1.js';
+import { attentionEvent, seedUserWithSession } from './event-test-helpers.js';
 import {
   freshRankingServices,
   type RankingFixture,
   seedInvariantOutput,
   seedStory,
 } from './ranking-helpers.js';
-import { attentionEvent, seedUserWithSession } from './ws-e-helpers.js';
 
 let fixture: RankingFixture;
 
