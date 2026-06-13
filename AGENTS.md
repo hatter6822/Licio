@@ -187,9 +187,16 @@ introspected health payloads, the room-surface leg).  WS-I performs the
 documented §30.5 lift: `PWATT_V0_SHADOW_MODE` is now `false` (a code
 change; reverting it or engaging the kill switch restores the pre-lift
 posture).
-Workstreams WS-J through WS-P are planned (planning documents
-exist under `docs/planning/`; implementation not yet started).  See
-"Implementation roadmap" below for the full status table.
+Workstreams WS-J through WS-Q are planned (planning documents
+exist under `docs/planning/`; implementation not yet started).  WS-Q
+(content–room ownership and visibility, `docs/planning/18-content-and-room-model.md`)
+captures the SPEC v0.7 model — rooms own content, content owns
+conversation, binary public/private rooms with orthogonal join-model/
+posting-policy axes, per-item public/in-room visibility with private-room
+forcing, native image/video posts, and visibility-scoped distribution —
+as a remodel of the shipped WS-F/WS-G/WS-I surfaces; the current code
+still ships the pre-v0.7 model (global stories, three-value room
+visibility).  See "Implementation roadmap" below for the full status table.
 
 ## Build and run
 
@@ -658,12 +665,13 @@ licio/
 ├── docs/
 │   ├── SPEC.md                  -- canonical design specification
 │   ├── planning/                -- per-workstream planning documents
-│   │   ├── 00-index.md          --   master index (~646 atomic tasks)
+│   │   ├── 00-index.md          --   master index (~706 atomic tasks)
 │   │   ├── 01-repository-foundation.md  -- WS-0
 │   │   ├── 02-doctrine-and-policy.md    -- WS-A
 │   │   ├── 03-design-system.md          -- WS-B
 │   │   ├── 04-pwa-client.md             -- WS-C
-│   │   └── 05–17-*.md                   -- WS-D through WS-P
+│   │   ├── 05–17-*.md                   -- WS-D through WS-P
+│   │   └── 18-content-and-room-model.md -- WS-Q (room-owned content + visibility)
 │   ├── design-system/           -- design system documentation
 │   ├── pwa-client/              -- PWA implementation documentation
 │   ├── identity/                -- WS-D implementation reference
@@ -1029,7 +1037,7 @@ No Lean or Rust toolchains.  This is a pure TypeScript monorepo.
 
 ## Implementation roadmap
 
-The specification defines 17 workstreams (WS-0 through WS-P).
+The specification defines 18 workstreams (WS-0 through WS-Q).
 Status:
 
 | Workstream | Title | Status |
@@ -1051,10 +1059,11 @@ Status:
 | WS-N | Compliance | Planned |
 | WS-O | Security and reliability | Planned |
 | WS-P | Experimentation and launch | Planned |
+| WS-Q | Content–room ownership and visibility | Planned |
 
 Read the per-workstream planning document under `docs/planning/`
 before starting new work.  The master index at
-`docs/planning/00-index.md` lists all ~646 atomic tasks.
+`docs/planning/00-index.md` lists all ~706 atomic tasks.
 
 ## Documentation rules
 
@@ -1077,6 +1086,15 @@ engineering conventions; `README.md` owns the top-level introduction.
 per-workstream completion details belong in commit messages and PR
 descriptions.  This file describes the *current state*, not the path
 that got us here.
+
+**No workstream-reference section.**  Per-workstream plans, design
+rationale, sub-area breakdowns, and per-task detail live exclusively in
+the relevant `docs/planning/` document (indexed by
+`docs/planning/00-index.md`) and the per-workstream `docs/*/README.md`
+implementation references.  Do **not** reintroduce a "Workstream
+reference" section or equivalent per-WS index/detail tables into this
+file.  The only workstream-level material this file keeps is the
+one-line-per-workstream status table under "Implementation roadmap."
 
 ## Pull request authoring policy (ABSOLUTE)
 
@@ -1158,237 +1176,6 @@ axe-core accessibility assertions on every page load.
 
 CodeQL (`.github/workflows/codeql.yml`) runs `security-extended`
 queries on push to main, PRs, and weekly.
-
-## Workstream reference
-
-Each workstream's detailed plan, design rationale, and per-task
-breakdown live in the relevant `docs/planning/` document.  This
-section is a concise index.
-
-### WS-0: Repository foundation
-
-Plan: `docs/planning/01-repository-foundation.md`
-
-Monorepo scaffold, CI/CD pipeline, security baseline, dependency
-management, workspace boundaries.
-
-### WS-A: Doctrine and policy
-
-Plan: `docs/planning/02-doctrine-and-policy.md`
-
-9 policy documents under `docs/policy/`: moderation taxonomy, signal
-matrix, privacy regulation map, crypto feature matrix, jurisdiction
-matrix, transparency dictionary, steward roles, signal test map.
-Validated by `pnpm check:policy` (counts, ID disjointness,
-severity-SLA consistency, cross-document references).
-
-### WS-B: Design system
-
-Plan: `docs/planning/03-design-system.md`
-
-55-token design-token SSOT (`design-system/tokens.ts`), light/dark
-palettes with WCAG contrast validation, 32 reusable UI primitives
-under `components/ui/`, accessibility components (`RouteAnnouncer`,
-`SkipToContent`), cognitive-load reduction (`DefinedTerm`,
-`ProgressiveDisclosure`).
-
-### WS-C: PWA client application
-
-Plan: `docs/planning/04-pwa-client.md`
-Documentation: `docs/pwa-client/README.md`
-
-| Sub-area | Key surface | Status |
-|----------|-------------|--------|
-| Routing | TanStack Router file-based, 18 route files, auto code-splitting | Complete |
-| State | 3 Zustand stores (auth, ui, feature-flags), zod-validated persistence | Complete |
-| Offline | IndexedDB integrity layer, read-through cache, draft encryption, eviction detection | Complete |
-| Push | VAPID ES256, contextual permission, renew-on-load, per-room mute, notification budget | Complete |
-| Signals | Attention pipeline, bucketed aggregates, no-raw-egress, rage-loop dampening | Complete |
-| Telemetry | Privacy-safe RUM, closed event enum, sendBeacon + keepalive fallback | Complete |
-| Security | Trusted Types, CSP, CSRF serialization, SW TT injection, rate limiting | Complete |
-| Performance | initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz, Core Web Vitals targets, performance marks | Complete |
-
-### WS-D: Identity, accounts, and privacy
-
-Plan: `docs/planning/05-identity-and-privacy.md`
-Documentation: `docs/identity/README.md`
-
-Complete.  WebAuthn-first, **passwordless always** — there is no
-password column, hashing, or reset flow anywhere.
-
-| Sub-area | Key surface | Status |
-|----------|-------------|--------|
-| Schemas | User/privacy/session/credential/wallet zod + Drizzle, migration with partial indexes/CHECK/triggers | Complete |
-| Auth | WebAuthn (`@simplewebauthn`), email-OTP, SIWE (viem); sessions, rotation, step-up, rate limiting; account-state gate at the session mint (suspended accounts never get a session) | Complete |
-| Authorization | RBAC + object-level (404-over-403), append-only audit log, fail-closed middleware | Complete |
-| Age gating | Under-13 block, teen privacy floor (server-clamped), `requireAdult` fail-closed | Complete |
-| Privacy controls | Settings get/patch (clamped/audited/propagated), attention delete, DSAR export (assemble → encrypt → expiry-capped signed token → read-time expiry + hourly sweep), account deletion + 30-day grace + hard purge (anonymize/tombstone/revoke; all archives removed) | Complete |
-| Steward MFA | TOTP enroll/verify/disable, per-session `mfa_verified`, reduced-assurance-until-MFA steward guard | Complete |
-| Wallet isolation | `wallet.wallet_accounts` schema + undirected-BFS isolation test (WS-D.3.2) | Complete |
-| Privacy | **No IP and no location are ever recorded — or even read** (SPEC §19.1): no code path reads the client address (statically tested); rate limiting is per-account + per-target-mailbox + global identity-free budgets; new-device alerts and request logs carry a coarse device descriptor only (never the full user-agent) | Complete |
-| Durable stores | `DrizzleIdentityStore`/`DrizzleAuditStore` Postgres adapters behind the same interfaces as the in-memory adapters, wired in production alongside the Redis session/ephemeral/rate-limit stores; gated integration tests run the real migration chain | Complete |
-| Job scheduler | Durable distributed privacy scheduler: every instance ticks hourly, a Postgres job lease (`job_leases`, atomic insert-or-steal) grants at most one executor per window, crashed holders self-heal via lease expiry, lease outage fails closed (read-time expiry still bounds retention) | Complete |
-| Export delivery | S3-compatible `ObjectStore` (AWS/R2/MinIO; SigV4 on `node:crypto`, pinned to the official AWS vectors — no SDK dep): bucket bodies are client-side SecretBox ciphertext, expiry enforced at read time, paginated sweep; all-or-none `S3_*` env group (partial fails boot; absent falls back in-memory with a production warning) | Complete |
-| Client auth | Login/registration page: passkey-first sign-in + signup (WebAuthn L3 JSON with manual fallback, no client webauthn dep), email-code fallback, enumeration-safe registration outcome, allowlisted post-login redirect, best-effort server-side sign-out | Complete |
-| Client security | `/profile/security`: sessions list/revoke/revoke-others, passkey add/rename/remove, email-factor add/verify/change/disable, wallet unlink, TOTP enroll → recovery codes → disable, owner activity feed; sensitive actions run through the step-up retry gate (challenge → dialog → SAME action retries) and a step-up 401 never expires the session | Complete |
-| Client data rights | Privacy page wired to the real `/v1/privacy/*`: export request → poll → step-up-gated archive download, attention-history deletion, account deletion (confirm → step-up → sign-out) with grace-period cancel on the login page (emailed `?cancel_token=` link AND deactivated re-login path) | Complete |
-| Email delivery | Production `Mailer` over the SES v2 HTTP API (SigV4 on `node:crypto`, no SDK dep; all-or-none `SES_*` env group, partial fails boot): login/verify code templates and the WS-D.2.4a deletion notice (grace window, `/login?cancel_token=…` link, irreversibility); never logs recipient/code; without SES, production still fails closed unless `ALLOW_INSECURE_NULL_MAILER=true` | Complete |
-| Residuals | The WS-E hooks (`purgeAttention`, `exportAttention`, `onPrivacyChange`) AND the WS-G hooks (`anonymizeContributions` tombstones forum contributions on purge; `exportContributions` composes WS-F stories + forum contributions + evidence + room subscriptions) are CLOSED with real implementations; the only remaining residual is browser-level auth E2E scenarios (the Playwright harness serves only the static preview — a BFF-in-the-loop harness lands with WS-P launch testing) | Tracked elsewhere |
-
-Pure crypto is mathematically validated: TOTP against the RFC 6238
-Appendix B vectors, real WebAuthn attestation/assertion via a pure-crypto
-software authenticator, real SIWE EOA signatures via viem.
-
-### WS-E: Event pipeline and PWAtt
-
-Plan: `docs/planning/06-event-pipeline-and-pwatt.md`
-Documentation: `docs/events/README.md`
-
-Complete.  The §30.5 shadow stage was **LIFTED by WS-I**: PWAtt v0/v1
-outputs are now stored `shadow_mode: false` and serve the WS-I pipeline as
-BOUNDED ranking inputs (`PWATT_V0_SHADOW_MODE = false` in
-`@licio/invariants` — still a code-level constant, reviewed like any other
-change, never a configuration flip; reverting it, or engaging the WS-I
-kill switch, restores the pre-lift posture because the safe fallback
-ranker is provably score-blind).  Rows stored before the lift remain
-powerless (the feature pipeline accepts components only from
-`shadow_mode: false` rows).
-
-| Sub-area | Key surface | Status |
-|----------|-------------|--------|
-| Schemas + registry | Strict envelope + retention tiers (§22.4); 14 core + 18 Knomosis topics (separate bounded context, never in the client bundle); single `TOPIC_REGISTRY` SSOT; discriminated union rejects unknown topics; §22.1 field-name mapping unit-asserted | Complete |
-| Ingestion | `POST /v1/events/attention` (online window) + the WS-C batch wire (offline 7d window) through ONE pipeline: auth, ownership, two-layer replay (nonce + durable event-id), per-user sliding-window limits with fail-closed in-memory fallback, server-side privacy gate (personalization off → 204; retention `none` → real-time only; `minimal` → 90d; the durable `attention_privacy_level` floor clamps every event's identification level); logs/metrics carry ids + counts only (redaction-tested) | Complete |
-| Storage | `events` LIST-partitioned by retention tier (partition drop = provable deletion); NOT NULL classification/tier (storage-layer defense); `attention_aggregates` §22.1 field-exact; minimum-privacy rows pseudonymized at rest (owner null, payload user id rewritten) | Complete |
-| Real-time | Rebuildable 1h acceleration layer; HyperLogLog uniques (~0.81% error, documented); every key TTL'd; hourly reconciliation vs the durable aggregation within ~3σ | Complete |
-| Router + firewall | At-least-once with event-id idempotency, bounded retries → DLQ (one letter per consumer+event, accumulating attempts, steward redrive), durable-consumer checkpoints + startup replay, exact real-time rebuild at boot, lag metrics; Knomosis topics can NEVER reach scoring consumers; scoring consumers hold public+aggregated only; the fail-closed crypto flag withholds Knomosis topics from EVERY consumer; all enforced at subscription AND delivery | Complete |
-| Retention | Hourly lease-guarded sweeps per tier with batched settings reads; aggregates anonymize at the CURRENT preference's window, delete at the hard cap; moderation rows flagged for annual review (never auto-deleted); jurisdiction overrides shorten-only (WS-N hook); counts-only audit record + `retentionComplianceReport` (zero over-retained rows); WS-D hooks closed — `purgeAttention`, `onPrivacyChange`, and a COMPLETE `exportAttention` (all aggregates, all ledger pages, owned attention events incl. source-opens) | Complete |
-| PWAtt v0 (shadow) | Per-user-per-window dedup fold; ActiveAttention (dwell caps, idle/bounce filtering, source>headline, clickbait zero-weight) + ConstructiveParticipation (diminishing returns, low save weight, uniform v0 type weights, `low_info_reply`=0); pure/total functions; deterministic property tests pin "genuine attention never decreases / anti-signals never increase" | Complete |
-| Anti-signals | Coordinated bursts conditioned on the item's own base rate (active communities never flagged for volume alone) + distinct-actor guard → integrity event + MFCI/review hooks; conservative lexical accusation classifier (hedges/questions/opinions never flagged; WS-K seam); harassment cascades → restricted integrity signal + `MOD_HARASS_002` safety case + growth freeze; detection side effects deterministic per (item, window) | Complete |
-| Signal Ledger | Owner-only `GET /v1/signal-ledger` (401 unauthenticated; no other-user path); ONE canonical entry per (owner, item, 1h window) — larger windows live in invariant_outputs — with bucketed breakdown, applied anti-signals, shadow score, plain-language summary; cap status honestly omitted server-side (client-known only; optional on the wire); purge deadlines coupled to retention preference; rendered on the profile page | Complete |
-| PWAtt v1 | INTEGRATED live stage (`computePwattV1Components`): per-user diminishing curves at the contribution hierarchy's weights (evidence > correction > … > low_info_reply=0; accusation downweight at the accusing type's weight), item dimensions through `applySaturation` (log + tanh curves; total/monotone/concave; 50% dominance cap; exact sum-to-100); §5.5-guardrailed profiles (selection context has no payment/wallet field); penalties as separate nonnegative coefficients that can drive totals below zero (pM real from burst confidence, pR via MERI hook, pH/pT pinned-zero placeholders); v0 weights AND the full v1 stage runtime-tunable via `pwatt_config` (fail-closed loader + steward write endpoint with config-time 422 rejection) | Complete |
-| Fallback verification | CI-gated equivalence (retargeted at the §30.5 lift): the SAFE FALLBACK ordering is byte-identical with/without (and with mutated) PWAtt scores; the fallback boundary rejects PWAtt rows even if the flag were mislabeled — engaging the WS-I kill switch provably restores the pre-lift posture; the empty-store demo `/v1/feed` contract stays score-invariant | Complete |
-| Scheduler | Hourly tick under a Postgres job lease (`events_hourly`); freshness-aware `windowsNeedingCompute` (a window recomputes only when events ARRIVED after its computedAt — fresh windows compute once, late offline events re-open theirs, unchanged windows skip; lookback ~26h/36h/8d/14d per size), retention sweeps, real-time reconciliation; the volume-threshold trigger is wired in production boot (early 1h scoring for hot items); startup recovery (checkpoint replay + real-time rebuild) runs at boot | Complete |
-| Production bindings | Drizzle adapters for all nine durable stores + Redis adapters (nonces `SET NX PX`, ZSET sliding windows, native PFADD/PFCOUNT HLL); gated integration tests run the REAL migration chain (incl. the partitioned DDL) against live Postgres/Redis | Complete |
-| System events | `invariant.run.completed` emitted once per item/window (deterministic name-based UUIDv8/SHA-256 ids; idempotent re-runs); `thread.state.changed` (safety dimension) on every freeze/resolution; `privacy.request.created` from the WS-D privacy routes (export/deletion/cancel/attention-reset); steward admin surface at `/v1/events/admin` (safety-state, validated config writes, DLQ list/redrive, manual recovery) | Complete |
-| Residuals | story emission is CLOSED (WS-F emits `content.submitted`/`content.normalized`; ledger titles resolve from the real story store); the WS-G residuals are CLOSED (forum contributions emit `contribution.created`/`evidence.added` with real correlation, and `classifyLowInfoReplyV0` in `@licio/invariants` classifies replies at creation); WS-H invariant providers + burst covariates behind existing hooks; the WS-I residuals are CLOSED (the ranking boundary consumes PWAtt as a bounded input and the §30.5 shadow lift shipped); WS-J case lifecycle behind hooks; WS-K classifier seam; `notification.sent` producer (no in-repo dispatch path exists); client-side `source.opened.aggregate` + `cap_reached` emitters (server paths complete); cross-instance stream binding behind the `EventRouter` surface (WS-O) | Tracked elsewhere |
-
-### WS-F: Ingestion, source model, and search
-
-Plan: `docs/planning/07-ingestion-and-search.md`
-Documentation: `docs/ingestion/README.md`
-
-Complete.  The source model exposes context and history only — NO truth
-score exists anywhere (enforced by schema strictness, shared-schema tests,
-and a db column assertion), and no WS-F table can carry a financial column
-(WS-F.2.5b denylist + the wallet↔ranking BFS proof).
-
-| Sub-area | Key surface | Status |
-|----------|-------------|--------|
-| Submission | `POST /v1/stories` (six §14.1 types, discriminated-union validation), pre-checks (rate limit/account age/spam titles/local malware denylist; fail-toward-caution hold), transactional thread shell, `content.submitted` emission with detached publication | Complete |
-| URL + dedup | Shared pure normalizer (idempotent; paths keep case per RFC 3986 — documented deviation), exact-URL 409 via partial unique index (race-safe), MinHash(128)/LSH(32×4) near-duplicates with the corrected detection curve (retrieval recall ≈ 0.9998 at J=0.7; estimate makes the decision), source-aware syndication (confirmed edges auto-link; unknown publishers flag) | Complete |
-| Lifecycle | Pure shared transition function (exhaustively tested table), append-only `story_lifecycle_audits`, WS-E-event triggers + hourly low-activity sweep + steward endpoint; WS-G's real `contribution.created`/`evidence.added` events now drive the activity triggers; SCOI triggers remain the WS-H seam | Complete |
-| Extraction | SSRF-hardened fetcher (per-resolution lookup gate, redirect re-validation, streaming byte cap), RFC 9309 robots compliance (fail-closed unreachable, crawl-delay deferral), quote-aware HTML scanning + JSON-LD, declared-first language detection + conservative sensitivity lexicons (WS-K seams), copyright-bounded excerpt (full body never persisted), non-blocking failures with scheduled retries | Complete |
-| Source model | §14.3 profiles (auto-created idempotently, incrementally aggregated), steward editing with per-field audit, append-mostly corrections, canonicalized unique syndication edges | Complete |
-| Claims/evidence | Claim + EvidenceCard schemas with shared `independence_group_id` (MERI), heuristic extractor with provenance + confidence floor → review queue, claim↔evidence navigable both directions, evidence-card submissions create real cards | Complete |
-| Search | Generated weighted tsvectors (title>excerpt>byline; English/simple per row, OR-matched at query time), GIN-indexed, tokenization-only query building (injection-safe), filters + keyset pagination, server-side visibility (takedown/safety-hidden/retracted excluded) | Complete |
-| Embeddings | pgvector `vector(384)` + HNSW (documented IVFFlat trade-off), unique `(type, id, model_version)`, self-hosted HTTP provider (all-or-none `EMBEDDING_*`) with honest deterministic lexical fallback, similarity helpers (stories/claims/interpretations/evidence) on the ANN index, resumable backfill → drift validation → atomic cutover → cleanup | Complete |
-| Freshness | Versioned exponential-decay baseline in topic-cadence units (property-tested monotonicity with the exact IEEE-754 statement), recomputed on events + sweep, consumable by WS-I.2.3d | Complete |
-| Takedowns | Public structured intake (rate-limited) → steward review → actioning hides the target everywhere + audit + best-effort submitter notice | Complete |
-| Admin | `/v1/ingestion/admin/*` (steward + TOTP): review queue, syndication create/confirm, source editing, takedowns, lifecycle triggers, validated config writes (422), backfill controls, metrics | Complete |
-| Residuals | the WS-G residuals are CLOSED (threads carry real conversation/safety states and contributions; room visibility gates thread/contribution reads); WS-H similarity consumption (semantic conclusions gated on a self-hosted model); WS-I freshness/ranking consumption; WS-J queue ownership; WS-K governed extractor/classifiers/registry + topic taxonomy behind existing seams; client submission/search UI + BFF-in-the-loop browser E2E (WS-P precedent); full-scale (1M) load validation (latency/recall benchmarks measured + operating point recorded at N=20K, `RUN_PERF`-gated; 1M is WS-P) | Tracked elsewhere |
-
-### WS-G: Forum, conversation, rooms, and lenses
-
-Plan: `docs/planning/08-forum-and-conversation.md`
-Documentation: `docs/forum/README.md`
-
-Complete.  Conversation is structured — there is no generic "comment":
-every contribution is one of the eleven §15.2 types, validated by ONE
-shared discriminated union on both client and server, and rendered
-through ONE sanctioned UGC sink.
-
-| Sub-area | Key surface | Status |
-|----------|-------------|--------|
-| Schemas | 11-type `contributionCreateSchema` discriminated union (per-type body limits, citation bounds, the direct-experience privacy acknowledgment, ratified WS-A reason codes for moderation concerns), §15.4 thread conversation/safety state machines as table-driven legal-transition functions, room/lens/steward/subscription/governance enums, §24.3 summary schemas, forum wire contracts — all in `@licio/shared` (client/server rule identity) | Complete |
-| Storage | `contributions` (materialized JSONB ancestor path + GIN containment for subtree reads, depth ≤ 10 CHECK, path/parent consistency CHECK, `(user_id, client_draft_id)` partial unique for idempotent create, append-only edit history, author tombstones), `rooms`/`room_stewards`/`room_subscriptions`/`lenses`, `summaries` (§24.3 uncertainty CHECK), `uploads` (content-type allow-list CHECK, scan gate); migration 0008 recreates the thread enums with USING maps and splits evidence into material × relationship dimensions | Complete |
-| Contributions | Guard chain (auth → thread/room visibility → per-account sliding-window rate limit → shared-schema validation → per-type semantic guards → attachment/lens validation → safety pre-screen hold) → transactional insert WITH the evidence card (both-or-neither) → `contribution.created`/`evidence.added` emission — safety-HELD rows emit nothing and bump no room activity (emission on release is the WS-J approval seam); §15.5 edit (snapshot history, type immutable, per-type caps re-enforced, the safety classifier RE-RUNS on edited content and flags hold for review) and author removal (tombstone, idempotent, 404-over-403) | Complete |
-| Threads | Branch-aware reads on the §15.3 structured sections (`sectionOfType`), depth-first subtree ordering, visibility-aware row filtering (removed/hidden collapse honestly), keyset pagination for branches AND subtrees (complete over arbitrarily large subtrees; an invisible root gates every page), room-visibility gating on every read | Complete |
-| State evolution | Organic system transitions ride the same audited path as the steward surface: structural `active → deepening` at contribution creation (volume + evidence + live multi-level depth, `forum.deepening*` config) and WS-E harassment-cascade escalation (`safety normal → elevated`, `conversation active → tense`) via the durable `forum-thread-posture` router consumer (idempotent under redelivery; bursts ignored; de-escalation stays human through `under_review`) | Complete |
-| Rooms + lenses | §16.2 join models per visibility (public auto-active, restricted request → steward approval, expert-led), two-tier visibility (a pending applicant sees a room EXISTS but reads no content until approved), steward roles (WS-A taxonomy), audited governance-settings writes, `RECOMMENDATION_INPUT_KEYS` transparency (what room recommendations may ever consume — no applause, no payment), one lens per `(room, lens_type)`, lens-tagged contribution surfacing, directory listing that walks the store keyset (no fetch-prefix cap) with VISIBLE-only thread counts | Complete |
-| Summaries | §24.3 three layers (automated_draft / community_synthesis / steward_summary) with REQUIRED unresolved-uncertainty disclosure for human layers (CHECK + service), supersede semantics (an automated draft can never displace a human summary), provenance validated at write time (cited branches AND evidence must be real, thread-scoped records) | Complete |
-| UGC pipeline | WS-G.4: strict Markdown-lite parser → closed AST (no raw-HTML node kind) → constrained serializer → DOMPurify behind the `licio-ugc` Trusted Types policy → TrustedHTML → the SINGLE sanctioned `UgcBody` sink; `normalizeUgcLink` drops javascript/data/vbscript/file schemes at parse time; the XSS-vector suite (script/event-handler/scheme/mXSS payloads) walks the rendered DOM; fail-closed degraded mode (no DOM ⇒ escaped plain text) | Complete |
-| Link safety | WS-G.4.2c interstitial on suspicious external links: drainer blocklist, contract-interaction URL patterns, dApp-mimicry edit distance; click interception via native event delegation (sanitized HTML carries no handlers); verdicts NEVER await the network (cached blocklist + bootstrap warm-up + background refresh — transient user activation survives to `window.open`); openers severed on the returned proxy so popup blocking is detectable and falls back to the interstitial; verdicts never tied to identity | Complete |
-| Uploads | WS-G.4.4 byte-level EXIF/GPS/XMP stripping for JPEG/PNG/WebP/AVIF BEFORE storage, alt text required for images (WCAG), the injectable `UploadScanner` seam gates attachment AND serving (`clear`/`pending`/`flagged`; default = local checks, WS-J.2.6b swaps in shared intelligence behind the same interface), bytes in S3 when configured (records survive either way) | Complete |
-| Composer | 11 modes in 5 groups with type-specific fields, char counters, citation capture, acknowledgment-gates-submit; the payload builder validates through the SHARED schema (drift impossible) with field-level error mapping; encrypted IndexedDB drafts (trailing 800ms debounce — one encrypt+write per pause — plus visibility/unmount flushes, per-draft resume-or-discard recovery, draft id doubles as the server idempotency key); PWA share-target intake builds a STRUCTURED citation (url + title + accessed_at) with a safety-checked preview chip, merged at payload build only while its textarea line survives; VoiceDictation behind feature detection | Complete |
-| Safety intake | `moderation_concern` requires a ratified WS-A reason code (fabricated codes 422), routes to the review queue (WS-J seam), never auto-actions; the heuristic contribution pre-screen can only HOLD for review (fail-toward-caution); harassment-cascade and burst anti-signals remain WS-E's | Complete |
-| Health metrics | Per-thread conversation-health rollup (question→answer coverage, evidence density, correction uptake, accusation rate) — descriptive, owner/steward-facing, never a ranking input | Complete |
-| Events | `contribution.created` (with `low_info_reply` classification via `classifyLowInfoReplyV0` in `@licio/invariants`), `evidence.added` (real correlation ids), `thread.state.changed` (both dimensions, audited transitions); WS-F lifecycle activity triggers now fire from real conversation events | Complete |
-| Privacy hooks | WS-D.2.4 closed: `anonymizeContributions` tombstones contributions/evidence/uploads and REMOVES room memberships + steward rows (membership is personal data); `exportContributions` composes stories + contributions + evidence cards + room subscriptions + upload records with retrieval URLs (keyset-complete, §19.3/GDPR Art. 15) | Complete |
-| Production bindings | Drizzle adapters for all five forum stores behind the same interfaces; gated integration tests (`forum-integration.test.ts`) prove them against the REAL migration chain — the drizzle-wrapped unique-violation mapping, transactional evidence co-create rollback, GIN subtree reads with keyset continuation, CHECK enforcement at the storage layer, DSAR `listByOwner`, exact keyset-cursor round-trips (adapters write millisecond-precision timestamps so cursors round-trip through ISO strings), and the S3 byte path against a fake bucket (SigV4-verified) — and these now RUN IN CI via the test job's service containers | Complete |
-| Real-browser E2E | `ugc-safety.spec.ts` + `composer.spec.ts` against the preview's ENFORCING CSP in Chromium/Firefox/WebKit: the `licio-ugc` policy under real `require-trusted-types-for`, inert attack fixtures, interstitial interception + safe-link popup under intact activation, the 11-mode chooser with shared-schema validation + ack-gating, axe on every state (fixtures live in the styleguide workbench) | Complete |
-| Residuals | WS-H Hodge/SCOI consumption of branch structure behind existing hooks; WS-I ranking consumption of health metrics (descriptive until then); WS-J queue ownership + the shared malware intelligence behind the `UploadScanner` seam; WS-K governed summary generation (the automated_draft layer stays heuristic until then); authenticated thread/submit browser E2E with a BFF-in-the-loop harness (WS-P — the composer + UGC sink are already real-browser covered via the workbench); cross-room bridge tooling (WS-I/WS-J) | Tracked elsewhere |
-
-### WS-H: Core invariant services
-
-Plan: `docs/planning/09-invariant-services.md`
-Documentation: `docs/invariants/README.md`
-
-Complete.  All eleven invariants run **shadow-only** (SPEC §30.4 / the
-M2 "no hidden sanctions" gate): every output is stored observational,
-the ranking boundary independently rejects shadow rows, and the ONLY
-path to any effect is the WS-H.1.2e promotion gate (append-only
-records, checklist-validated one-step promotions, always-available
-owner-signed demotion).
-
-| Sub-area | Key surface | Status |
-|----------|-------------|--------|
-| Platform | `invariant_outputs` envelope (coverage, registry-validated reason codes, fallback flag, version metadata, jsonb time_window + the §22.1/WS-H.1.1a index set and closed type/target CHECK vocabularies), per-type score-vector zod validation before insert, eleven validated invariant cards, the fallback execution wrapper (timeout/error → degraded reason-coded envelope + gap log/metric/run row; ranking proceeds with features OMITTED — proven with all eleven failing), compute tiers under the `invariants_hourly` lease with bounded batch concurrency, uniform health metrics, fail-closed `invariants.*` runtime config (write-time 422), CI + nightly regression/drift over deterministic synthetic datasets with pinned baselines | Complete |
-| MERI | Exact partition-matroid rank (exact-URL > near-dup > source-lineage > evidence classes; monotone/submodular property-tested; greedy = brute-force optimum), §7.5 marginal gains + §7.4 dimensions, MinHash/LSH + confirmed-syndication/ownership assembly, similarity fallback flagged `MATROID_FALLBACK`, WS-H.2.4a coverage/confidence, the WS-E `hooks.redundancy` closure, exposure labels + the independent-sources drawer + the per-topic repeats preference | Complete |
-| MFCI | Five-axis tables with the account-age bucket as the privacy-preserving group axis, the degree-2 Markov basis (connectivity brute-force-verified) driving the MH fiber sampler (stationary = the generalized hypergeometric; margins/nonnegativity invariant-tested), the add-one p̂ (`MFCI = −log p̂`, always finite), synchrony/target-concentration/phrase-repetition statistics, volume-conditioned cheap statistics + versioned null calibrations (`NULL_CALIBRATION_STALE`), risk states with held downward transitions, identifier-free `mfci_cases` whose clearing lifts the safety freeze (WS-H.3.3d), the WS-E `hooks.mfci` closure, MFCI-4 margin refs + MFCI-5 appeal summaries | Complete |
-| GWEI | Locale/tenure cohorts from owned attention aggregates (user-provided metadata only), log-domain Sinkhorn + coupling rounding so every reported GW₂ is an exact-marginal upper bound with a seed/regularization stability interval, the seven §9.4 metrics, k-anonymity suppression (`SUPPRESSED_K_ANONYMITY`, distinguishable from zero) before ANY surface, the release-gate decision (override requires a documented owner), the parity-statements-only transparency export | Complete |
-| SCOI | Embedding-captured lens interpretations (unit ball validated), identity restriction maps (v1 configuration, documented), normalized Dirichlet energy ∈ [0, 1] with the attained per-overlap normalizer, PSD Laplacian property-tested, context states (weaponized REQUIRES a safety signal), §10.6 ranking actions as promotion-gated descriptions, the H¹ structural diagnostic + harmonic-representative norm (v2, batch-only), "Where interpretations differ" + the needs-context gate + the composer warning | Complete |
-| PHI | Privacy-preserving session sequences (opaque digest keys; topic-cluster ids + timestamps ONLY; TTL'd; capped) fed by the durable attention consumer, v0 narrow-loop/compulsive detection (same pure math client + server), embedding-derived orthonormal frames → exact orthogonal transports → gauge-invariant holonomy scores (spectral extraction; near-π/det = −1 `MATRIX_LOG_FALLBACK`), the conjugation verifier + output-boundary scan (frame-dependent fields throw), fail-closed sensitive/minor strictness, the non-blocking narrow-loop prompt + PHI-4 reset/reduce controls | Complete |
-| Supporting | Hodge Helmholtz decomposition (CG on consistent normal equations; exact range orthogonality; `HarmfulTensionRisk ≡ 0` absent hostility — the WS-J seam defaults to 0), tropical min-plus earliest arrival + synchronized-cascade detection (documented arrival-profile rank), braid words from activity rankings with the Burau-at-−1 entropy bound (figure-eight anchor; braid relation verified), Reeb join/split landscapes with fragile-saddle bridge prompts, CID over verified permutation groups (v0 ranking certified attribute-blind; gate blocks above threshold), depth-3 path signatures via Chen (exactness tested) with session-health classification | Complete |
-| Surfaces | `/v1/invariants/admin/*` (steward + MFA): health, reason-code-filterable outputs, WS-H.1.1b version comparison, the observational MFCI dashboard + case resolution, GWEI dashboards + transparency export, promotions, validated config writes, on-demand regression; public visibility-gated interpretation/lineage reads (stored shadow outputs only — no compute on page load) | Complete |
-| Production bindings | Drizzle adapters for promotions/calibrations/run-metadata/mfci-cases behind the in-memory interfaces; gated integration tests run the real migration chain including a live-Postgres proof of the 0009 `time_window` text→jsonb USING conversion; the boot path swaps adapters, registers the durable consumers (`invariant-phi-sessions`, `invariant-mfci-intake`), and starts the lease-guarded scheduler | Complete |
-| Residuals | the WS-I seam is CLOSED (the ranking boundary consults `effectsEnabled` per invariant: promoted effects enforce, shadow effects are computed and logged with `enforced: false`); WS-J owns queue UX, the hostility signal behind the Hodge seam, and the appeals flow over `appeal_summary`; WS-K owns learned restriction maps, framing/misleading classifiers, governed summaries; WS-P wires the GWEI/CID gates into the experiment framework and the transparency pipeline | Tracked elsewhere |
-
-### WS-I: Ranking and distribution
-
-Plan: `docs/planning/10-ranking-and-distribution.md`
-Documentation: `docs/ranking/README.md`
-
-Complete.  The SPEC §13.3 pipeline serves `GET /v1/feed` (front page +
-`?topic=`) and `GET /v1/rooms/:roomId/feed` (WS-G-visibility-gated) end
-to end, with PWAtt as a BOUNDED input (the §30.5 lift), invariant
-effects gated on the WS-H promotion service, and the safe chronological
-fallback one runtime kill-switch write away.
-
-| Sub-area | Key surface | Status |
-|----------|-------------|--------|
-| Candidates | Eight organic retrievers behind the `CandidateRetriever` interface + closed registry (subscribed rooms, locale-region local news, PWAtt-threshold global with honest cold start, constructive-velocity emerging discussions, seen-story evidence additions, SCOI bridge candidates with context metadata, expert-led/human-summary explanations, per-room chronological catch-up) + the `room_surface_v1` scoper (inert outside room feeds); hidden/archived stories never retrieve; the orchestrator merges/dedupes (origins merged, max score kept), isolates failures with per-retriever timing, budgets, and re-validates the strict `Candidate` boundary; quotas reserve ceil(pct·budget) slots (fresh 15% / independent 20% / local 10%) with JOINT class protection (filling one class never breaks another's reserve), logged graceful degradation, and always-reported targets carrying an `applicable` flag | Complete |
-| Surfaces | `front_page`; `topic` (`?topic=` scopes the pool and derives profile sensitivity from the topic — sensitive topics always select the conservative profile); `room` (`/v1/rooms/:roomId/feed` behind `roomContentVisibleToUser` — restricted/expert-led rooms read 404 for signed-out and pending users; the pool scopes to the room; lens balancing runs on REAL per-item assignments: each item's most frequent lens-tagged `lens_id`, ties lexicographic, pinned in the decision log for replay); the SAME visibility bar filters every pool per distinct room (restricted-room content never leaks into public feeds); seen-aware `?cursor=` pagination on all surfaces (cursor = the previous page's request id; the next page re-runs the pipeline excluding the bounded parent chain's served items; unknown/swept cursors serve page one; `nextCursor` honest about exhaustion; the chronological fallback paginates identically) | Complete |
-| Feature store | Strict-closed WS-I.2.1a vector (every invariant field OPTIONAL — degraded ⇒ ABSENT, never zero) + the WS-I.2.1b denylist (the SHARED WS-A.1.1 list pinned to the versioned `denylist.config.json` artifact with a load-time drift assertion; typed `DeniedFinancialFieldError`; case-insensitive nested/camelCase matching) inside `upsert` on BOTH adapters; append-only `(item_id, revision)` history with optimistic concurrency + by-timestamp `getAt` snapshots + one-query DISTINCT ON bulk reads; `invariant_versions` (version/timestamp/config-hash) per row with batch-logged version distribution; populated by the durable `ranking-feature-store` consumer (story/thread-target `invariant.run.completed` AND `integrity.signal.detected` for the MFCI intake path's sub-minute freshness) + the hourly batch; `duplicate_cluster_id` from a bounded BFS over MinHash hits (chains A↔B↔C share one key); source reliability from the real §14.3 aggregates (correction frequency, evidence-type diversity, notes, the citation seam); per-request topic relevance never persisted | Complete |
-| Safety filter | Authoritative, BEFORE scoring, never overridable (§24.4): WS-F hidden state, WS-E integrity removals, WS-G thread restriction, age gating (graphic/crisis excluded for teens AND unknown-age — fail closed), the WS-N jurisdiction seam, the BATCHED WS-J `ModerationStateProvider` seam (three bulk reads per request; unknown items fail closed); every exclusion logged with `policy_reason` + case ref; a feasibility assertion proves scoring cannot re-admit | Complete |
-| Scoring | §5.4 exactly: convex §5.5 weights (validated through the SAME guardrail code WS-E uses; integer percents summing to exactly 100), baseline = profile-configured integer-percent weights over freshness/source-reliability/relevance (evergreen 50/30/20, breaking 60/25/15; schema-defaulted so pre-upgrade log snapshots replay identically; renormalized when personalization is off; Licio-internal history only — never popularity, never a truth score; cold-start nonzero), penalties pM=max(MFCI ladder, tropical) with inclusive-tie enforcement / pH (sensitive topics get stricter thresholds) / pT (reads ONLY Hodge `harmful_tension_risk`, zero absent hostility) / pR (MERI redundancy) — all nonnegative, enforced ONLY via `effectsEnabled`, able to drive totals below zero; constraints (MFCI cross-community exclusion, SCOI card/reduce/pause ladder, PHI per-user diversification over the max of recent session buckets, the recency-windowed suppression-aware GWEI deployment gate with TTL cache + the `ranking.gwei_override` documented-owner override) hard-limit the feasible set; `rankFeasibleSet` is clockless/seedless — byte-identical output for identical inputs | Complete |
-| Diversification | MERI duplicate-cluster cap (default 2/page; demoted siblings ride the wire as `more_on_this_story` on the cluster representative), source ≤ 15% / topic ≤ 25% page shares with deterministic backfill + logged graceful degradation, lens representation (≥ 2 when available; real assignments on room surfaces), PHI tightening halves topic caps; SCOI-flagged items carry the compact `context_card` (level, lens count, open bridge attempts) and read `needs-context` | Complete |
-| Decision logs + replay | EXACTLY one `RankingDecisionLog` per served request (ranked AND fallback; a failed write — log insert OR the §21.3 event batch — is a counted auditability incident, never a serving failure); `parent_request_id` links pagination chains for audit lineage; privacy-bucketed requester (`bucket:<2 hex>`/`anonymous` — zod refinement AND a db CHECK reject identifier shapes); full per-item score/penalty breakdowns, per-feasible-item feature revisions, the profile SNAPSHOT, enforcement flags, resolved per-item relevance (the interest list itself is never persisted), per-item lens assignments; §22.4 retention 180–365d (clamped, swept); `replayDecision` re-executes the pure core at the recorded versions → structured diff (backward-compatible with pre-baseline_weights snapshots via schema defaults); a scheduled replay-regression sample alerts after deploys and verifies logged template ids still exist; `ranking.decision.logged` event per selected item (ONE batched insertMany) | Complete |
-| Explanations | Closed template registry (positive/contextual/constraint/safety + honest fallback reasons), parameter zod validation, priority selection from the item's REAL signal profile (slowing reasons outrank positive; no raw statistics or thresholds in any rendered string; room counts claimed only when genuinely multi-room); LOCALE-READY rendering (`renderTemplate(id, params, locale)` guards prohibited language on the EN canonical then localizes; the `x-pseudo` two-language proof is CI-tested; catalogs slot into `LOCALE_CATALOGS`); the story page links each reason to the reader's own Signal Ledger; the §13.6/§30.6 prohibited-language list is ONE shared artifact enforced at render time, in the package suite, and by neutrality test 9 | Complete |
-| Kill switch + fallback | Runtime config control (global/per-surface/per-profile scopes; §30.8 owner/trigger/rollback/review fields; audited engage/release; UNREADABLE state fails closed to the fallback); the fallback serves chronological order over the SAFETY-FILTERED set with no PWAtt/personalization/financial anything, an honest "ranking is paused" reason, and a `fallback: true` decision log | Complete |
-| Neutrality suite | All ten WS-I.3 tests in CI on every PR (`pnpm check:neutrality` is a named test-job step): wallet-link feed equivalence on the front-page, topic, AND room surfaces (incl. the fallback + candidate sets, with synthesized wallet credentials and payment events in the durable log under the crypto flag), deep schema field walks, TRANSITIVE import-closure + runtime donor neutrality, treasury side-channel equivalence, governance-vote claim-label immutability (durable-log AND live-router-published legs), paid-status bypass checks, the ML feature audit (add → fail naming the field, remove → pass), the closed organic source enum (no `sponsored`), endorsement-language scans over templates + web copy, and financially-clean product-health metrics with the ACTUAL admin health payload introspected; complemented by the db table denylist + the wallet↔ranking BFS isolation targets | Complete |
-| Admin surface | `/v1/ranking/admin/*` (steward + per-session MFA): decision queries on all six audit dimensions (TRUE SQL keyset pagination — composite `(timestamp, request_id)` row comparison; every read META-AUDITED as `ranking_decision_query`), decision detail, replay (`ranking_replay_run`), feature snapshots (`/features/:itemId[?at=ISO]`), the kill switch (`ranking_killswitch_change`), validated config writes (422; `ranking_config_change`), profiles, health | Complete |
-| Config + scheduler | Fail-closed `ranking.scalars`/`ranking.profiles`/`ranking.gwei_override` keys (invalid stored values logged, reviewed defaults kept; profile sets all-or-none through the §5.5 loader; an unreadable override never overrides); hourly tick under the `ranking_hourly` Postgres lease: config reload, feature batch (+ version-distribution and staleness-needle logs), decision-log sweep, replay-regression sample + explanation-template existence check (per-task error isolation) | Complete |
-| Production bindings | `DrizzleFeatureStore` (append-only PK realizes optimistic concurrency; DISTINCT ON bulk reads; by-timestamp snapshots) + `DrizzleDecisionLogStore` (jsonb containment queries for the audit dimensions; SQL keyset pagination) behind the in-memory interfaces; gated integration tests run the REAL migration chain (0012 tables + CHECKs, 0013 audit-enum extension) in CI's service containers, incl. the bulk serving-path reads on the WS-E/WS-F adapters; an opt-in RUN_PERF benchmark records the 10k-candidate core budget + decision-log query latency at depth; boot wires the adapters, registers the durable consumer, and starts the scheduler | Complete |
-| Residuals | WS-J replaces the default `ModerationStateProvider` + supplies the Hodge hostility signal and coordinated-reporting detection behind existing seams; WS-N supplies the jurisdiction engine (defaults: none restricted); WS-K supplies governed topic classification + learned relevance; WS-L/WS-M plug real staging financial events into the neutrality harness (§30.6 pre-pilot requirement) and own sponsored surfaces (quarantined by the closed enum); WS-P wires experiment ids (field exists), the GWEI experiment-gate integration, and BFF-in-the-loop feed E2E; a first-class WS-D location preference can replace locale-region matching behind the same port | Tracked elsewhere |
-
-### WS-J through WS-P
-
-Plans: `docs/planning/11-trust-and-safety.md` through
-`docs/planning/17-experimentation-and-launch.md`
-
-Not yet started.  Read the relevant planning document and the
-master index (`docs/planning/00-index.md`) before beginning
-implementation.
 
 ## Vulnerability reporting
 

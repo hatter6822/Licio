@@ -11,7 +11,7 @@
   <a href="https://github.com/hatter6822/Licio/actions/workflows/ci.yml">
     <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/hatter6822/Licio/ci.yml?branch=main&label=CI" />
   </a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.2.2-blue" />
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.2.3-blue" />
   <img alt="Node.js" src="https://img.shields.io/badge/Node.js-22-339933" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-6.0-3178c6" />
   <img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0--or--later-informational" />
@@ -38,12 +38,12 @@ pay-to-rank — is enforced by the type system, runtime guards, and CI gates.
 
 | Attribute | Value |
 |-----------|-------|
-| Version | `v0.2.2` |
-| Specification | [`docs/SPEC.md`](docs/SPEC.md) `v0.6` |
+| Version | `v0.2.3` |
+| Specification | [`docs/SPEC.md`](docs/SPEC.md) `v0.7` |
 | Node.js | `22` (pinned in [`.nvmrc`](.nvmrc)) |
 | pnpm | `9.15.4` via Corepack (pinned in `package.json`) |
 | Language | TypeScript `6.0.3`, strict everywhere (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) |
-| Milestone | WS-0 – WS-I complete; **WS-J (trust and safety) is next** |
+| Milestone | WS-0 – WS-I complete; **WS-J (trust and safety) and WS-Q (content–room ownership/visibility) are next** |
 | Test gate | 80% cross-workspace coverage (lines, functions, branches, statements) |
 | Bundle budgets | initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz (CI-enforced) |
 
@@ -227,7 +227,7 @@ licenses are checked for AGPL compatibility at SBOM time (`pnpm sbom`).
 ## Planning & design
 
 - **Specification:** [`docs/SPEC.md`](docs/SPEC.md) — the canonical design spec (v0.6).
-- **Implementation plan:** [`docs/planning/00-index.md`](docs/planning/00-index.md) — 17 workstreams (WS-0 – WS-P), ~646 atomic tasks.
+- **Implementation plan:** [`docs/planning/00-index.md`](docs/planning/00-index.md) — 18 workstreams (WS-0 – WS-Q), ~706 atomic tasks.
 - **Completed-workstream references:** [`docs/design-system/`](docs/design-system/README.md), [`docs/pwa-client/`](docs/pwa-client/README.md), [`docs/identity/`](docs/identity/README.md), [`docs/events/`](docs/events/README.md), [`docs/ingestion/`](docs/ingestion/README.md), [`docs/forum/`](docs/forum/README.md), and the policy corpus under [`docs/policy/`](docs/policy/).
 - **Conventions:** [`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md) (kept byte-identical).
 
