@@ -265,6 +265,13 @@ export interface StoryStore {
       Pick<ThreadShellRecord, 'roomId' | 'currentSummaryId' | 'conversationState' | 'safetyState'>
     >,
   ): Promise<ThreadShellRecord | null>;
+  /** Keyset page of visible public threads across rooms, `(created_at, thread_id)`
+   *  DESCENDING (most recent first). Hidden stories are excluded so the public
+   *  thread tab cannot become a hidden-story oracle. */
+  listThreads(
+    before: { createdAt: string; threadId: string } | null,
+    limit: number,
+  ): Promise<ThreadShellRecord[]>;
   /** Keyset page of a room's threads, `(created_at, thread_id)` DESCENDING
    *  (most recent first, WS-G.2.3b). */
   listThreadsByRoom(
@@ -645,6 +652,26 @@ export class InMemoryStoryStore implements StoryStore {
     Object.assign(thread, patch);
     thread.updatedAt = nowIso(this.#now);
     return thread;
+  }
+
+  async listThreads(
+    before: { createdAt: string; threadId: string } | null,
+    limit: number,
+  ): Promise<ThreadShellRecord[]> {
+    return [...this.#threads.values()]
+      .filter((t) => this.#stories.get(t.storyId)?.hiddenState === null)
+      .filter(
+        (t) =>
+          before === null ||
+          t.createdAt < before.createdAt ||
+          (t.createdAt === before.createdAt && t.threadId < before.threadId),
+      )
+      .sort((a, b) =>
+        a.createdAt === b.createdAt
+          ? b.threadId.localeCompare(a.threadId)
+          : b.createdAt.localeCompare(a.createdAt),
+      )
+      .slice(0, limit);
   }
 
   async listThreadsByRoom(

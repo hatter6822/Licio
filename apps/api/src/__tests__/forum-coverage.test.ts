@@ -395,6 +395,17 @@ describe('Dev demo seed (real stores, idempotent)', () => {
 
     const room = await fixture.forum.rooms.getById(DEMO_IDS.ROOM_1);
     expect(room?.name).toBe('Public Health');
+    const list = await app().request('http://local/v1/threads');
+    expect(list.status).toBe(200);
+    const listed = (await list.json()) as {
+      threads: Array<{ thread_id: string; title: string }>;
+      next_cursor: string | null;
+    };
+    expect(listed.threads.map((item) => item.thread_id)).toContain(DEMO_IDS.THREAD_1);
+    expect(listed.threads.map((item) => item.title)).toContain(
+      'Two neighbourhoods read the same zoning proposal very differently',
+    );
+
     const thread = await app().request(`http://local/v1/threads/${DEMO_IDS.THREAD_1}`);
     expect(thread.status).toBe(200);
     const detail = (await thread.json()) as {

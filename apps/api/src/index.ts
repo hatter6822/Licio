@@ -110,6 +110,7 @@ import {
   setInvariantServices,
 } from './invariants/services.js';
 import { demoStory } from './lib/demo-data.js';
+import { seedForumDemoData } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
 import { loadPwattRuntimeConfig } from './pwatt/config.js';
 import {
@@ -281,6 +282,14 @@ forumServices.summaries = new DrizzleSummaryStore(db);
 forumServices.uploads = new DrizzleUploadStore(db, s3ConfigFromEnv(env));
 await forumServices.reloadConfig();
 setForumServices(forumServices);
+if (env.NODE_ENV === 'development') {
+  try {
+    await seedForumDemoData(forumServices, ingestionServices, identityServices.store);
+    logger.info('Development forum demo data is ready');
+  } catch (err) {
+    logger.warn({ err }, 'Development forum demo data could not be seeded');
+  }
+}
 // Thread-posture consumer (durable; handlers first run at recovery replay,
 // which happens after the identity singleton is installed below).
 registerForumConsumers(eventServices, ingestionServices, forumServices);

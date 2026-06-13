@@ -184,6 +184,26 @@ export class DrizzleStoryStore implements StoryStore {
     return rows[0] ? this.#toThread(rows[0]) : null;
   }
 
+  async listThreads(
+    before: { createdAt: string; threadId: string } | null,
+    limit: number,
+  ): Promise<ThreadShellRecord[]> {
+    const conditions = [isNull(storiesTable.hiddenState)];
+    if (before !== null) {
+      conditions.push(
+        sql`(${threadsTable.createdAt}, ${threadsTable.threadId}) < (${before.createdAt}::timestamptz, ${before.threadId}::uuid)`,
+      );
+    }
+    const rows = await this.#db
+      .select({ thread: threadsTable })
+      .from(threadsTable)
+      .innerJoin(storiesTable, eq(threadsTable.storyId, storiesTable.storyId))
+      .where(and(...conditions))
+      .orderBy(desc(threadsTable.createdAt), desc(threadsTable.threadId))
+      .limit(limit);
+    return rows.map((row) => this.#toThread(row.thread));
+  }
+
   async listThreadsByRoom(
     roomId: string,
     before: { createdAt: string; threadId: string } | null,

@@ -71,6 +71,14 @@ export function useIndependentSourcesQuery(storyId: string, enabled = true) {
   });
 }
 
+export function useThreadsQuery() {
+  return useQuery({
+    queryKey: queryKeys.threads(),
+    queryFn: () => api.fetchThreads(),
+    ...cachePolicy.thread,
+  });
+}
+
 export function useThreadQuery(threadId: string, enabled = true) {
   return useQuery({
     queryKey: queryKeys.thread(threadId),

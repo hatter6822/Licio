@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Threads (WS-C.1.1a/b). The primary /threads tab lists active conversations;
-// the detail route reads a thread through the six WS-B.2.12 semantic branches,
-// with the active branch in a shareable `?branch=` search param. Visiting a
-// branch records nonredundant traversal (WS-C.4.3).
-import type { BranchId, ContributionPublic } from '@licio/shared';
+// Threads (WS-C.1.1a/b). The primary /threads tab lists active conversations
+// and provides the lowest-friction thread starter: a first-class question/brief
+// form that reuses POST /v1/stories, because story ingestion is the canonical
+// place that transactionally creates a thread shell. The detail route reads a
+// thread through the six WS-B.2.12 semantic branches, with the active branch in
+// a shareable `?branch=` search param. Visiting a branch records nonredundant
+// traversal (WS-C.4.3).
+import type { BranchId, ContributionPublic, ThreadSummary } from '@licio/shared';
 import { useNavigate, useParams, useSearch } from '@tanstack/react-router';
-import { useEffect, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import { ThreadBranchNav } from '../../components/thread/ThreadBranchNav/index.js';
 import { UgcBody } from '../../components/ugc/UgcBody.js';
 import { Badge } from '../../components/ui/Badge/index.js';
@@ -15,8 +18,10 @@ import { EmptyState } from '../../components/ui/EmptyState/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { Skeleton } from '../../components/ui/Skeleton/index.js';
+import { useToast } from '../../components/ui/Toast/index.js';
 import { useT } from '../../i18n/index.js';
-import { useThreadBranchQuery, useThreadQuery } from '../../lib/queries.js';
+import { ApiClientError, createStory } from '../../lib/api.js';
+import { useThreadBranchQuery, useThreadQuery, useThreadsQuery } from '../../lib/queries.js';
 import { readThreadSnapshot } from '../../offline/read-through.js';
 import type { ThreadSnapshotRecord } from '../../offline/schemas.js';
 import { markInteractionStart, measureInteraction } from '../../perf/marks.js';
@@ -24,6 +29,8 @@ import { isValidUuidParam } from '../../routing/guards.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
 import { PageScaffold } from './PageScaffold.js';
 import { usePageFocus } from './usePageFocus.js';
+
+const GENERAL_TOPIC_ID = '5f5e6000-0000-4000-8000-000000000001';
 
 /** Read a cached thread summary once the live query has failed (offline). */
 function useThreadSnapshot(threadId: string, enabled: boolean): ThreadSnapshotRecord | undefined {
@@ -64,21 +71,196 @@ function OfflineThreadSummary({ record }: { record: ThreadSnapshotRecord }): Rea
   );
 }
 
+function ThreadStarter(): React.ReactElement {
+  const t = useT();
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [asQuestion, setAsQuestion] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const canSubmit = title.trim().length > 0 && body.trim().length > 0;
+
+  const onSubmit = (event: FormEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    if (!canSubmit || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    void (async () => {
+      try {
+        const response = await createStory(
+          asQuestion
+            ? {
+                submission_type: 'question',
+                title: title.trim(),
+                question: body.trim(),
+                topic_ids: [GENERAL_TOPIC_ID],
+                language: 'en',
+              }
+            : {
+                submission_type: 'original_brief',
+                title: title.trim(),
+                body: body.trim(),
+                topic_ids: [GENERAL_TOPIC_ID],
+                language: 'en',
+              },
+        );
+        toast({ tone: 'success', message: t('threads.start.created', 'Thread created.') });
+        await navigate({
+          to: '/threads/$threadId',
+          params: { threadId: response.thread_id },
+          search: { branch: 'overview' },
+        });
+      } catch (caught) {
+        const message =
+          caught instanceof ApiClientError
+            ? caught.message
+            : t('threads.start.failed', 'Could not create this thread.');
+        setError(message);
+      } finally {
+        setSubmitting(false);
+      }
+    })();
+  };
+
+  return (
+    <section
+      className="mb-4 rounded-xl border border-line bg-surface p-4"
+      aria-labelledby="start-thread-title"
+    >
+      <div className="mb-3 flex flex-col gap-1">
+        <h2 id="start-thread-title" className="font-semibold text-ink text-lg">
+          {t('threads.start.title', 'Start a thread')}
+        </h2>
+        <p className="text-ink-muted text-sm">
+          {t(
+            'threads.start.description',
+            'Open a focused question or brief. Licio creates the discussion thread from the submitted story shell, so all moderation, deduplication, and source checks stay in one path.',
+          )}
+        </p>
+      </div>
+      <form className="flex flex-col gap-3" onSubmit={onSubmit}>
+        <label className="flex flex-col gap-1 text-sm text-ink">
+          <span className="font-medium">{t('threads.start.titleLabel', 'Thread title')}</span>
+          <input
+            value={title}
+            onChange={(event) => setTitle(event.currentTarget.value)}
+            maxLength={300}
+            className="rounded-md border border-line bg-surface px-3 py-2 text-ink"
+            placeholder={t('threads.start.titlePlaceholder', 'What should readers help examine?')}
+            required
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-sm text-ink">
+          <span className="font-medium">
+            {asQuestion
+              ? t('threads.start.questionLabel', 'Question')
+              : t('threads.start.briefLabel', 'Brief')}
+          </span>
+          <textarea
+            value={body}
+            onChange={(event) => setBody(event.currentTarget.value)}
+            maxLength={asQuestion ? 2000 : 20000}
+            rows={4}
+            className="rounded-md border border-line bg-surface px-3 py-2 text-ink"
+            placeholder={
+              asQuestion
+                ? t(
+                    'threads.start.questionPlaceholder',
+                    'What context would help others answer well?',
+                  )
+                : t(
+                    'threads.start.briefPlaceholder',
+                    'Share the concise background readers need first.',
+                  )
+            }
+            required
+          />
+        </label>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <label className="inline-flex items-center gap-2 text-ink text-sm">
+            <input
+              type="checkbox"
+              checked={!asQuestion}
+              onChange={(event) => setAsQuestion(!event.currentTarget.checked)}
+            />
+            {t('threads.start.briefToggle', 'Start from a brief instead of a question')}
+          </label>
+          <Button
+            type="submit"
+            variant="primary"
+            loading={submitting}
+            disabled={!canSubmit}
+            loadingLabel={t('threads.start.loading', 'Creating thread…')}
+          >
+            {t('threads.start.submit', 'Create thread')}
+          </Button>
+        </div>
+        {error ? (
+          <p role="alert" className="rounded-md border border-danger p-2 text-danger text-sm">
+            {error}
+          </p>
+        ) : null}
+      </form>
+    </section>
+  );
+}
+
+function ThreadListItem({ thread }: { thread: ThreadSummary }): React.ReactElement {
+  const t = useT();
+  return (
+    <li className="rounded-xl border border-line bg-surface p-4">
+      <a href={`/threads/${thread.thread_id}`} className="block focus-visible:outline-focus">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <Badge>{t(`thread.state.${thread.conversation_state}`, thread.conversation_state)}</Badge>
+          {thread.safety_state !== 'normal' ? (
+            <Badge tone="warning">
+              {t(`thread.safety.${thread.safety_state}`, thread.safety_state)}
+            </Badge>
+          ) : null}
+        </div>
+        <h2 className="font-semibold text-ink text-lg">{thread.title}</h2>
+        <p className="mt-1 text-ink-muted text-sm">
+          {t('threads.list.meta', '{count} contributions · opened {date}', {
+            count: thread.contribution_count,
+            date: new Date(thread.created_at).toLocaleDateString(),
+          })}
+        </p>
+      </a>
+    </li>
+  );
+}
+
 export function ThreadsPage(): React.ReactElement {
   const t = useT();
+  const threads = useThreadsQuery();
   usePageFocus(t('nav.threads', 'Threads'));
   return (
     <>
       <PageHeader title={t('nav.threads', 'Threads')} />
       <div className="mx-auto w-full max-w-2xl p-4">
-        <EmptyState
-          icon="threads"
-          title={t('threads.empty.title', 'No active conversations yet')}
-          description={t(
-            'threads.empty.description',
-            'Conversations you join, your replies, and saved drafts will appear here.',
-          )}
-        />
+        <ThreadStarter />
+        {threads.isLoading ? <Skeleton className="h-24 w-full" count={3} /> : null}
+        {threads.isError ? <ErrorState onRetry={() => threads.refetch()} /> : null}
+        {threads.data && threads.data.threads.length > 0 ? (
+          <ul className="flex flex-col gap-3">
+            {threads.data.threads.map((thread) => (
+              <ThreadListItem key={thread.thread_id} thread={thread} />
+            ))}
+          </ul>
+        ) : null}
+        {threads.data && threads.data.threads.length === 0 ? (
+          <EmptyState
+            icon="threads"
+            title={t('threads.empty.title', 'No active conversations yet')}
+            description={t(
+              'threads.empty.description',
+              'Create the first thread above. Your replies and saved drafts will still appear in their relevant discussions.',
+            )}
+          />
+        ) : null}
       </div>
     </>
   );

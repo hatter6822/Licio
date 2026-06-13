@@ -46,13 +46,18 @@ import {
   roomJoinResponseSchema,
   roomListResponseSchema,
   type SignalLedgerResponse,
+  type StoryCreateRequest,
+  type StoryCreateResponse,
   type StoryDetail,
   type StoryInterpretationsResponse,
   signalLedgerResponseSchema,
+  storyCreateResponseSchema,
   storyDetailSchema,
   storyInterpretationsResponseSchema,
   type ThreadDetail,
+  type ThreadListResponse,
   threadDetailSchema,
+  threadListResponseSchema,
   type UserSettings,
   userSettingsSchema,
   vapidPublicKeyResponseSchema,
@@ -231,6 +236,11 @@ export async function fetchIndependentSources(
   return parseResponse(response, independentSourcesResponseSchema);
 }
 
+export async function fetchThreads(cursor?: string): Promise<ThreadListResponse> {
+  const response = await client.v1.threads.$get({ query: cursor ? { cursor } : {} });
+  return parseResponse(response, threadListResponseSchema);
+}
+
 export async function fetchThread(threadId: string): Promise<ThreadDetail> {
   const response = await client.v1.threads[':threadId'].$get({ param: { threadId } });
   return parseResponse(response, threadDetailSchema);
@@ -304,6 +314,11 @@ export async function fetchSignalLedger(cursor?: string): Promise<SignalLedgerRe
 export async function fetchFeatureFlags(): Promise<FeatureFlags> {
   const response = await client.v1['feature-flags'].$get();
   return parseResponse(response, featureFlagsResponseSchema);
+}
+
+export async function createStory(request: StoryCreateRequest): Promise<StoryCreateResponse> {
+  const response = await client.v1.stories.$post({ json: request });
+  return parseResponse(response, storyCreateResponseSchema);
 }
 
 export async function createContribution(

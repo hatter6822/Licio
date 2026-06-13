@@ -32,10 +32,13 @@ import {
   summaryCreateRequestSchema,
   summaryPublicSchema,
   type ThreadSafetyState,
+  type ThreadSummary,
   TOPIC_REGISTRY,
   threadConversationStateSchema,
   threadDetailSchema,
+  threadListResponseSchema,
   threadSafetyStateSchema,
+  threadSummarySchema,
   UPLOAD_DOCUMENT_TYPES,
   UPLOAD_IMAGE_TYPES,
   uploadPublicSchema,
@@ -115,6 +118,26 @@ function makeAuthorResolver(identity: IdentityServices) {
   };
 }
 
+function encodeThreadCursor(thread: { createdAt: string; threadId: string }): string {
+  return Buffer.from(JSON.stringify({ c: thread.createdAt, i: thread.threadId }), 'utf8').toString(
+    'base64url',
+  );
+}
+
+function decodeThreadCursor(
+  cursor: string | undefined,
+): { createdAt: string; threadId: string } | null {
+  if (cursor === undefined) return null;
+  try {
+    const parsed = z
+      .object({ c: z.string().datetime(), i: uuidSchema })
+      .parse(JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')));
+    return { createdAt: parsed.c, threadId: parsed.i };
+  } catch {
+    return null;
+  }
+}
+
 /** Bundle the three service containers a forum handler needs. */
 function bundles() {
   return {
@@ -128,6 +151,60 @@ export function createForumRoutes() {
   return (
     new Hono<AuthEnv>()
       // --- Thread reading (WS-G.3.3) -----------------------------------------
+      .get(
+        '/threads',
+        zValidator('query', z.object({ cursor: z.string().min(1).max(512).optional() })),
+        async (c) => {
+          const { cursor } = c.req.valid('query');
+          const before = decodeThreadCursor(cursor);
+          if (cursor !== undefined && before === null) {
+            return c.json(deny('invalid_cursor', 'Cursor is not valid'), 400);
+          }
+          const bundle = bundles();
+          const identity = getIdentityServices();
+          const userId = await softUserId(c.req.header('cookie'), identity);
+          const pageSize = 25;
+          const threads = await bundle.ingestion.stories.listThreads(before, pageSize + 1);
+          const visible: ThreadSummary[] = [];
+          for (const thread of threads) {
+            if (!(await threadVisibleToUser(bundle, thread, userId))) continue;
+            const story = await bundle.ingestion.stories.getById(thread.storyId);
+            if (!story) continue;
+            const overview = await threadOverview(
+              bundle,
+              thread,
+              story.title,
+              makeAuthorResolver(identity),
+            );
+            visible.push(
+              threadSummarySchema.parse({
+                thread_id: overview.thread_id,
+                story_id: overview.story_id,
+                room_id: overview.room_id,
+                branch_index: overview.branch_index,
+                title: overview.title,
+                conversation_state: overview.conversation_state,
+                safety_state: overview.safety_state,
+                contribution_count: overview.contribution_count,
+                created_at: overview.created_at,
+                updated_at: overview.updated_at,
+              }),
+            );
+            if (visible.length === pageSize) break;
+          }
+          const last = visible.at(-1);
+          return c.json(
+            threadListResponseSchema.parse({
+              threads: visible,
+              next_cursor:
+                threads.length > pageSize && last !== undefined
+                  ? encodeThreadCursor({ createdAt: last.created_at, threadId: last.thread_id })
+                  : null,
+            }),
+          );
+        },
+      )
+
       .get(
         '/threads/:threadId',
         zValidator('param', z.object({ threadId: uuidSchema })),

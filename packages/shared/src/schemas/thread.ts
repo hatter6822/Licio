@@ -126,6 +126,15 @@ export const threadSummarySchema = z
   .strict();
 export type ThreadSummary = z.infer<typeof threadSummarySchema>;
 
+/** Active-conversation list (GET /v1/threads): keyset-paginated summaries. */
+export const threadListResponseSchema = z
+  .object({
+    threads: z.array(threadSummarySchema).max(50),
+    next_cursor: z.string().min(1).max(512).nullable(),
+  })
+  .strict();
+export type ThreadListResponse = z.infer<typeof threadListResponseSchema>;
+
 /** Current-summary status shown in the overview (§15.4 three layers). */
 export const threadSummaryStatusSchema = z.enum([
   'none',
