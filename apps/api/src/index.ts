@@ -110,6 +110,7 @@ import {
   setInvariantServices,
 } from './invariants/services.js';
 import { demoStory } from './lib/demo-data.js';
+import { seedForumDemoData } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
 import { loadPwattRuntimeConfig } from './pwatt/config.js';
 import {
@@ -378,6 +379,19 @@ if (s3Config) {
   );
 }
 setIdentityServices(identityServices);
+
+// Development demo seed (NEVER in production): populate rooms, stories, threads,
+// and multi-author comments through the REAL stores so a fresh dev database
+// renders end-to-end data on boot. Idempotent (a no-op once seeded) and
+// best-effort (a seed failure never blocks serving).
+if (env.NODE_ENV !== 'production') {
+  try {
+    await seedForumDemoData(forumServices, ingestionServices, identityServices.store);
+    logger.info('demo data seeded (development)');
+  } catch (err) {
+    logger.warn({ err }, 'demo seed skipped (non-fatal)');
+  }
+}
 
 // Hourly privacy jobs: the 72h export sweep and the 30-day deletion purge
 // (WS-D.2.2c / WS-D.2.4a).  Expiry is ALSO enforced at read time, so a missed

@@ -225,7 +225,7 @@ corepack enable && corepack prepare pnpm@9.15.4 --activate
 pnpm install
 
 # Daily commands.
-pnpm dev                            # web (5173) + api (3001) concurrently
+pnpm dev                            # web (5173) + api (3001); seeds demo data (non-prod)
 pnpm build                          # shared → db/invariants → web/api
 pnpm test                           # Vitest across all workspaces (80% coverage gate)
 pnpm test -- --coverage             # with coverage report
@@ -579,7 +579,8 @@ licio/
 │           │   ├── logger.ts            --   pino logger setup
 │           │   ├── story-media.ts       --   WS-Q.5.2c story→feed media projection
 │           │   ├── demo-data.ts         --   demo feed fixtures + stable demo ids
-│           │   └── demo-seed.ts         --   dev seed through the real forum/ingestion stores
+│           │   └── demo-seed.ts         --   rich dev seed (rooms/stories/threads/comments)
+│           │                                  through the real stores; runs on non-prod boot
 │           └── __tests__/               -- route/middleware/service tests (WS-C – WS-G)
 ├── packages/
 │   ├── shared/                  -- shared schemas, types, constants (leaf)

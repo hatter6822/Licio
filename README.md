@@ -64,6 +64,12 @@ DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev \
 pnpm dev                       # web on :5173, API on :3001
 ```
 
+On a non-production boot, `pnpm dev` seeds a rich demo corpus through the real
+stores — several authors, public/private/expert-gated rooms, stories of varied
+submission types and visibility tiers, and threads with several nested,
+multi-author comments — so the PWA renders real end-to-end data immediately
+(idempotent; never runs in production).
+
 A fresh clone is green with just `pnpm install --frozen-lockfile && pnpm test`
 — the unit suite runs against in-memory stores, so the database stack is only
 needed for `pnpm dev` persistence and the gated integration tests.
