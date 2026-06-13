@@ -120,6 +120,44 @@ describe('migrations', () => {
     await deleteDatabase(name);
   });
 
+  it('WS-Q.5.5 — the v2 bump evicts the read-model cache but keeps user data', async () => {
+    const name = `licio-wsq55-${Math.random().toString(36).slice(2)}`;
+    const v1 = await openDb(name, 1);
+    await new Promise<void>((resolve, reject) => {
+      const tx = v1.transaction(
+        [STORE.threadSnapshots, STORE.draftContributions, STORE.pendingQueue],
+        'readwrite',
+      );
+      // A pre-WS-Q cached read model (must be evicted on the bump)…
+      tx.objectStore(STORE.threadSnapshots).put({
+        schemaVersion: 1,
+        threadId: 't-stale',
+        detail: { legacy: true },
+        cachedAt: 1,
+      });
+      // …and user data that must SURVIVE (a draft + a queued submission).
+      tx.objectStore(STORE.draftContributions).put({ draftId: 'd-keep', updatedAt: 1 });
+      tx.objectStore(STORE.pendingQueue).put({ operationId: 'op-keep', createdAt: 1 });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    v1.close();
+
+    // Reopen at the REAL v2 (the production MIGRATIONS).
+    const v2 = await openDb(name, 2, MIGRATIONS);
+    const get = (store: string, key: string) =>
+      new Promise<unknown>((resolve, reject) => {
+        const req = v2.transaction(store, 'readonly').objectStore(store).get(key);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    expect(await get(STORE.threadSnapshots, 't-stale')).toBeUndefined(); // evicted
+    expect(await get(STORE.draftContributions, 'd-keep')).toBeDefined(); // preserved
+    expect(await get(STORE.pendingQueue, 'op-keep')).toBeDefined(); // never dropped
+    v2.close();
+    await deleteDatabase(name);
+  });
+
   it('aborts atomically and keeps the old version when a migration throws', async () => {
     const name = `licio-fail-${Math.random().toString(36).slice(2)}`;
     const v1 = await openDb(name, 1);

@@ -24,7 +24,9 @@ export const savedStoryRecordSchema = z.object({
   title: z.string().min(1),
   source: z.string().min(1),
   url: z.string().url().nullable(),
-  roomId: z.string().uuid().nullable(),
+  // WS-Q.5.5 — `roomId` is nullish so a pre-WS-Q saved record (no room) stays
+  // readable (gracefully widened) rather than being quarantined on read.
+  roomId: z.string().uuid().nullish(),
   savedAt: z.number().int().nonnegative(),
 });
 export type SavedStoryRecord = z.infer<typeof savedStoryRecordSchema>;
