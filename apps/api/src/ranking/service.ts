@@ -65,6 +65,7 @@ import {
 import type { NewStoredEvent } from '../events/stores.js';
 import { roomContentVisibleToUser } from '../forum/rooms.js';
 import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
+import { makeMediaUrlMinter } from '../lib/media-urls.js';
 import { feedMediaOf } from '../lib/story-media.js';
 import { exposureLabelForGain, latestMeriGains } from '../routes/invariants-public.js';
 import { killSwitchDecision } from './killswitch.js';
@@ -253,7 +254,7 @@ async function buildFeedItems(
         origin: 'independent' as const,
         ...(story.canonicalUrl !== null ? { url: story.canonicalUrl } : {}),
         visibility: story.visibility,
-        media: feedMediaOf(story),
+        media: feedMediaOf(story, makeMediaUrlMinter()),
         reading_minutes: Math.max(1, Math.ceil(excerptWords / 200)),
         rating_label: ratingLabel,
         distribution_reason: entry.explanation.distributionReason,

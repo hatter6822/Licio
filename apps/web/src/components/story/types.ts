@@ -41,14 +41,14 @@ export interface BranchPreviewItem {
 }
 
 /** WS-Q.5.2c native media (image/video post); descriptive, never a popularity
- *  signal. The card renders it through the scan-gated upload URL. */
+ *  signal. URLs are server-minted read paths (signed for room_only media). */
 export interface StoryMediaData {
-  uploadRef: string;
+  url: string;
   kind: 'image' | 'video';
   altText: string | null;
   captionsText?: string | null;
-  captionsUploadRef?: string | null;
-  posterUploadRef?: string | null;
+  captionsUrl?: string | null;
+  posterUrl?: string | null;
 }
 
 export interface StoryCardData {

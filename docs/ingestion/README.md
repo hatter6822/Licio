@@ -507,7 +507,12 @@ tier-aware.
   `video/webm` up to the 200 MB ceiling), be unreferenced by any other story,
   and have cleared scanning — a flagged upload is `403`, a still-pending scan
   holds the story (`hiddenState='safety'` + a review item) instead of
-  publishing it.
+  publishing it.  At creation each media upload (main media, caption track,
+  poster) is back-linked to the story (`uploads.owner_story_id`) so the
+  serving route can re-derive its visibility: a `room_only` story's media is
+  served ONLY through a short-lived signed URL minted after the read-bar check,
+  and a taken-down story's media is refused at fetch time (WS-Q.5.2c; see
+  `docs/forum/README.md` → restricted-media serving gate).
 - **Author visibility transitions.** `changeStoryVisibility` (in
   `ingestion/visibility.ts`) is the author-only narrow/widen: narrowing
   `public → room_only` always succeeds; widening `room_only → public` is

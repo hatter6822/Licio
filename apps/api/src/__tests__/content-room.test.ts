@@ -449,10 +449,14 @@ describe('WS-Q.5.2c video-post sub-uploads (captions track + poster)', () => {
     const { story_id } = (await created.json()) as { story_id: string };
     const detail = await app().request(`http://local/v1/stories/${story_id}`);
     const media = (
-      (await detail.json()) as { media: { captions_upload_ref: string; poster_upload_ref: string } }
+      (await detail.json()) as {
+        media: { url: string; captions_url: string; poster_url: string };
+      }
     ).media;
-    expect(media.captions_upload_ref).toBe(captions.uploadId);
-    expect(media.poster_upload_ref).toBe(poster.uploadId);
+    // Public (Commons) story ⇒ bare, stable read URLs (no signed query).
+    expect(media.url).toBe(`/v1/uploads/${video.uploadId}`);
+    expect(media.captions_url).toBe(`/v1/uploads/${captions.uploadId}`);
+    expect(media.poster_url).toBe(`/v1/uploads/${poster.uploadId}`);
   });
 
   it('rejects a video post referencing a caption upload owned by someone else', async () => {
@@ -514,6 +518,79 @@ describe('WS-Q.2.3b image-post serving — EXIF-absence through the story path',
       String.fromCharCode(b),
     ).join('');
     expect(text).not.toContain('GPSLatitude'); // stripped at upload, proven through the story path
+  });
+});
+
+describe('WS-Q.5.2c restricted media serving gate', () => {
+  it('gates room_only media behind a valid signed URL (bare/expired/tampered/takedown refused)', async () => {
+    const room = await makeRoom('private');
+    const author = await seedUserWithSession(fixture.identity, { handle: 'vault' });
+    await joinAsMember(room, author.userId);
+    const uploadId = await uploadJpeg(author.cookie);
+    const created = await app().request(
+      post(
+        '/v1/stories',
+        {
+          submission_type: 'image_post',
+          upload_id: uploadId,
+          alt_text: 'Members-only chart',
+          title: 'Members only',
+          topic_ids: [randomUUID()],
+          room_id: room,
+        },
+        author.cookie,
+      ),
+    );
+    expect(created.status).toBe(201);
+    const { story_id } = (await created.json()) as { story_id: string };
+    const story = await fixture.ingestion.stories.getById(story_id);
+    expect(story?.visibility).toBe('room_only'); // a private room forces it
+
+    // The member's story detail carries a SIGNED, expiring media URL.
+    const detail = await app().request(
+      new Request(`http://local/v1/stories/${story_id}`, { headers: { cookie: author.cookie } }),
+    );
+    expect(detail.status).toBe(200);
+    const signedUrl = ((await detail.json()) as { media: { url: string } }).media.url;
+    expect(signedUrl).toMatch(/^\/v1\/uploads\/[\w-]+\?e=\d+&t=[0-9a-f]+$/);
+
+    // The signature authorizes the fetch — even with NO session.
+    expect((await app().request(`http://local${signedUrl}`)).status).toBe(200);
+
+    // A bare URL (the leak the gate closes): a UUID-knower is refused.
+    expect((await app().request(`http://local/v1/uploads/${uploadId}`)).status).toBe(404);
+
+    // A tampered token is refused (constant-time signature check).
+    const tampered = signedUrl.replace(/t=([0-9a-f])/, (_m, c: string) =>
+      c === '0' ? 't=1' : 't=0',
+    );
+    expect((await app().request(`http://local${tampered}`)).status).toBe(404);
+
+    // Takedown revokes immediately at fetch time, even with the valid URL.
+    await fixture.ingestion.stories.update(story_id, { hiddenState: 'takedown' });
+    expect((await app().request(`http://local${signedUrl}`)).status).toBe(404);
+  });
+
+  it('serves a public story’s media from a stable bare URL with no session', async () => {
+    const author = await seedUserWithSession(fixture.identity, { handle: 'pub' });
+    const uploadId = await uploadJpeg(author.cookie);
+    const created = await app().request(
+      post(
+        '/v1/stories',
+        {
+          submission_type: 'image_post',
+          upload_id: uploadId,
+          alt_text: 'Public chart',
+          title: 'Public chart',
+          topic_ids: [randomUUID()],
+          room_id: COMMONS_ROOM_ID,
+        },
+        author.cookie,
+      ),
+    );
+    expect(created.status).toBe(201);
+    // Public media stays a bare, shareable URL served to anyone.
+    expect((await app().request(`http://local/v1/uploads/${uploadId}`)).status).toBe(200);
   });
 });
 

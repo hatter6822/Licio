@@ -66,19 +66,30 @@ export const feedContextCardSchema = z.object({
 });
 export type FeedContextCard = z.infer<typeof feedContextCardSchema>;
 
-/** WS-Q.5.2c — native image/video post media (the scan-gated upload + alt text).
- *  Null for non-media stories; the client builds the gated read URL from
- *  `upload_ref`. Images carry required alt text; videos carry none here. */
+/** A same-origin, relative media read path the client renders directly. Public
+ *  media is a bare `/v1/uploads/:id`; a `room_only` item carries a short-lived
+ *  signed query (`?e=…&t=…`) minted per response (WS-Q.5.2c serving gate). It is
+ *  validated as a same-origin `/v1/uploads/` path, so the wire can never carry an
+ *  off-origin or script URL into an `<img>`/`<video>` `src`. */
+export const mediaPathSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^\/v1\/uploads\//, 'must be a same-origin /v1/uploads/ path');
+
+/** WS-Q.5.2c — native image/video post media. Null for non-media stories. The
+ *  server mints each read URL after the read-bar check (signed for room_only),
+ *  so the client renders `url` directly. Images carry required alt text. */
 export const feedMediaSchema = z.object({
-  upload_ref: uuidSchema,
+  url: mediaPathSchema,
   kind: z.enum(['image', 'video']),
   alt_text: z.string().max(1_000).nullable(),
   /** Video captions as text (rendered beneath the player); null otherwise. */
   captions_text: z.string().max(20_000).nullable().default(null),
-  /** Gated upload ref for an uploaded WebVTT caption track; null otherwise. */
-  captions_upload_ref: uuidSchema.nullable().default(null),
-  /** Gated upload ref for a video poster image; null otherwise. */
-  poster_upload_ref: uuidSchema.nullable().default(null),
+  /** Read URL for an uploaded WebVTT caption track; null otherwise. */
+  captions_url: mediaPathSchema.nullable().default(null),
+  /** Read URL for a video poster image; null otherwise. */
+  poster_url: mediaPathSchema.nullable().default(null),
 });
 export type FeedMedia = z.infer<typeof feedMediaSchema>;
 

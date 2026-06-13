@@ -13,8 +13,10 @@
 //     conflict outcomes (the API's 409).
 //
 // Upload BYTES live in S3-compatible object storage when the all-or-none
-// S3_* env group is configured (plain objects — uploads are public content;
-// metadata was stripped BEFORE storage).  Without S3, bytes are held
+// S3_* env group is configured (plain objects; metadata was stripped BEFORE
+// storage). Authorization is enforced at the serving route, not the object ACL:
+// restricted (room_only) media is reached only through a signed, expiring URL
+// minted after the read-bar check (WS-Q.5.2c).  Without S3, bytes are held
 // in-memory and production logs a loud warning (the same posture as the
 // WS-D DSAR archives): records survive, bytes do not survive a restart.
 
@@ -949,11 +951,15 @@ export class DrizzleUploadStore implements UploadStore {
       storageRef: row.storageRef,
       metadataStripped: row.metadataStripped,
       scanState: row.scanState,
+      ownerStoryId: row.ownerStoryId,
       createdAt: iso(row.createdAt),
     };
   }
 
-  async put(record: Omit<UploadRecord, 'createdAt'>, bytes: Uint8Array): Promise<UploadRecord> {
+  async put(
+    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId'> & { ownerStoryId?: string | null },
+    bytes: Uint8Array,
+  ): Promise<UploadRecord> {
     if (this.#s3) {
       const res = await this.#s3Request('PUT', this.#objectUrl(record.storageRef), bytes);
       if (!res.ok) throw new Error(`S3 upload put failed: ${res.status}`);
@@ -971,6 +977,7 @@ export class DrizzleUploadStore implements UploadStore {
         storageRef: record.storageRef,
         metadataStripped: record.metadataStripped,
         scanState: record.scanState,
+        ownerStoryId: record.ownerStoryId ?? null,
       })
       .returning();
     const row = rows[0];
@@ -1003,6 +1010,13 @@ export class DrizzleUploadStore implements UploadStore {
     await this.#db
       .update(uploadsTable)
       .set({ scanState: state })
+      .where(eq(uploadsTable.uploadId, uploadId));
+  }
+
+  async setOwnerStory(uploadId: string, storyId: string): Promise<void> {
+    await this.#db
+      .update(uploadsTable)
+      .set({ ownerStoryId: storyId })
       .where(eq(uploadsTable.uploadId, uploadId));
   }
 

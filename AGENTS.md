@@ -372,6 +372,7 @@ licio/
 │   │       │   ├── webauthn.ts          --   WebAuthn JSON↔ArrayBuffer plumbing
 │   │       │   ├── privacy-api.ts       --   WS-D data-rights flows (export, deletion)
 │   │       │   ├── link-safety.ts       --   WS-G external-link verdicts (shared heuristics)
+│   │       │   ├── blob-url.ts          --   WS-Q.5.2c object-URL sanitizer (local media preview)
 │   │       │   ├── queries.ts           --   TanStack Query hooks
 │   │       │   ├── query-keys.ts        --   query-key factory
 │   │       │   ├── query-client.ts      --   SWR defaults (30s stale, 5min gc)
@@ -578,6 +579,7 @@ licio/
 │           │   ├── vapid.ts             --   VAPID key management
 │           │   ├── logger.ts            --   pino logger setup
 │           │   ├── story-media.ts       --   WS-Q.5.2c story→feed media projection
+│           │   ├── media-urls.ts        --   WS-Q.5.2c signed media read URLs (mint/verify)
 │           │   ├── demo-data.ts         --   demo feed fixtures + stable demo ids
 │           │   └── demo-seed.ts         --   rich dev seed (rooms/stories/threads/comments)
 │           │                                  through the real stores; runs on non-prod boot

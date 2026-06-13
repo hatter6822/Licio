@@ -59,6 +59,7 @@ import { loadContentFlags } from '../ingestion/content-flags.js';
 import { getIngestionServices } from '../ingestion/services.js';
 import type { StoryRecord } from '../ingestion/stores.js';
 import { DEMO_FEED, demoStory } from '../lib/demo-data.js';
+import { makeMediaUrlMinter } from '../lib/media-urls.js';
 import {
   getPreferences,
   getVapidConfig,
@@ -147,7 +148,7 @@ function realStoryToDetail(
     origin: 'independent' as const,
     ...(story.canonicalUrl !== null ? { url: story.canonicalUrl } : {}),
     visibility: story.visibility,
-    media: feedMediaOf(story),
+    media: feedMediaOf(story, makeMediaUrlMinter()),
     // Best-effort estimate from the bounded excerpt (the full body is never
     // stored, WS-F.1.4f) — a floor, not a measurement.
     reading_minutes: Math.max(1, Math.ceil(excerptWords / 200)),

@@ -8,18 +8,19 @@
 // element. Video captions render beneath the player when present.
 import { useState } from 'react';
 import { useT } from '../../../i18n/index.js';
-import { mediaUrl } from '../../../lib/api.js';
+import { mediaSrc } from '../../../lib/api.js';
 import { cn } from '../../../lib/cn.js';
 
 export interface StoryMediaProps {
-  uploadRef: string;
+  /** Server-minted read path for the media bytes (signed for room_only). */
+  url: string;
   kind: 'image' | 'video';
   altText: string | null;
   captionsText?: string | null;
-  /** Gated upload ref for an uploaded WebVTT caption track. */
-  captionsUploadRef?: string | null;
-  /** Gated upload ref for a video poster image. */
-  posterUploadRef?: string | null;
+  /** Server-minted read path for an uploaded WebVTT caption track. */
+  captionsUrl?: string | null;
+  /** Server-minted read path for a video poster image. */
+  posterUrl?: string | null;
   /** Non-interactive preview (WS-Q.5.2c): used INSIDE a card link, where an
    *  interactive `<video controls>` subtree would nest controls in the link
    *  (invalid for assistive tech + click conflicts with navigation). A video
@@ -30,24 +31,21 @@ export interface StoryMediaProps {
 }
 
 export function StoryMedia({
-  uploadRef,
+  url,
   kind,
   altText,
   captionsText,
-  captionsUploadRef,
-  posterUploadRef,
+  captionsUrl,
+  posterUrl,
   preview = false,
   className,
 }: StoryMediaProps): React.ReactElement {
   const t = useT();
   const [failed, setFailed] = useState(false);
-  const src = mediaUrl(uploadRef);
+  const src = mediaSrc(url);
   const captionTrackSrc =
-    captionsUploadRef !== undefined && captionsUploadRef !== null
-      ? mediaUrl(captionsUploadRef)
-      : null;
-  const posterSrc =
-    posterUploadRef !== undefined && posterUploadRef !== null ? mediaUrl(posterUploadRef) : null;
+    captionsUrl !== undefined && captionsUrl !== null ? mediaSrc(captionsUrl) : null;
+  const posterSrc = posterUrl !== undefined && posterUrl !== null ? mediaSrc(posterUrl) : null;
 
   if (failed) {
     return (

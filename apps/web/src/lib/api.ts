@@ -366,9 +366,16 @@ export async function updateNotificationPreferences(
 
 // --- WS-Q content–room surface --------------------------------------------
 
-/** Same-origin gated read URL for a scan-cleared media upload (image/video). */
-export function mediaUrl(uploadRef: string): string {
-  return `${API_BASE}/v1/uploads/${uploadRef}`;
+/**
+ * Absolute src for a server-minted media read path (`media.url`/`captions_url`/
+ * `poster_url`). The server builds the `/v1/uploads/:id` path AND any signed,
+ * expiring query for restricted (room_only) media after its read-bar check
+ * (WS-Q.5.2c); the client only prefixes the API origin. The wire value is
+ * validated as a same-origin uploads path (`mediaPathSchema`), so this can never
+ * point off-origin.
+ */
+export function mediaSrc(path: string): string {
+  return `${API_BASE}${path}`;
 }
 
 /** Submit a story (link/brief/image/video/…) to a home room (WS-F/WS-Q). */

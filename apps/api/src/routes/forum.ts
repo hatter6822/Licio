@@ -80,6 +80,7 @@ import { accountRef } from '../identity/crypto.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { getIngestionServices } from '../ingestion/services.js';
+import { verifyMediaToken } from '../lib/media-urls.js';
 import {
   type AuthEnv,
   authMiddleware,
@@ -738,6 +739,9 @@ export function createForumRoutes() {
               storageRef: `uploads/${uploadId}`,
               metadataStripped: metadataStripped || isImage,
               scanState: scan.state,
+              // Linked to its owning story at submission (WS-Q.5.2c); a
+              // contribution attachment stays null and serves unrestricted.
+              ownerStoryId: null,
             },
             storedBytes,
           );
@@ -757,10 +761,40 @@ export function createForumRoutes() {
           const record = await forum.uploads.getRecord(uploadId);
           // Only scan-cleared uploads are served (WS-G.3.7b acceptance).
           if (record?.scanState !== 'clear') return c.json(notFound, 404);
+
+          // WS-Q.5.2c — story-scoped authorization. An upload linked to a story
+          // is gated by that story: a taken-down/safety-hidden story's media is
+          // refused outright (re-checked here, so removal is immediate), and a
+          // room_only story's media is served ONLY through a valid, unexpired
+          // signed URL. Contribution attachments (ownerStoryId null) keep their
+          // unrestricted serving. Public-story media stays a stable bare URL.
+          let restricted = false;
+          if (record.ownerStoryId !== null) {
+            const story = await getIngestionServices().stories.getById(record.ownerStoryId);
+            if (story === null || story.hiddenState !== null) return c.json(notFound, 404);
+            if (story.visibility === 'room_only') {
+              const expiresAt = Number(c.req.query('e') ?? '');
+              const ok = verifyMediaToken(
+                getIdentityServices().config.masterSecret,
+                uploadId,
+                expiresAt,
+                c.req.query('t') ?? '',
+                Date.now(),
+              );
+              if (!ok) return c.json(notFound, 404);
+              restricted = true;
+            }
+          }
+
           const bytes = await forum.uploads.getBytes(uploadId);
           if (!bytes) return c.json(notFound, 404);
           c.header('Content-Type', record.contentType);
-          c.header('Cache-Control', 'public, max-age=31536000, immutable');
+          // A signed room_only URL is per-response + short-lived, so it must not
+          // be shared-cached; public/contribution media stays immutable.
+          c.header(
+            'Cache-Control',
+            restricted ? 'private, no-store' : 'public, max-age=31536000, immutable',
+          );
           // PDFs download rather than render inline (embedded-JS viewers).
           c.header(
             'Content-Disposition',

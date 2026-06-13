@@ -239,6 +239,23 @@ scanners at the route level, so the seam swap needs no route changes.
 `scan_state` rides the wire (`uploadPublicSchema`) so clients can show a
 pending hold.
 
+**Restricted-media serving gate** (WS-Q.5.2c).  Authorization for media bytes
+is enforced at the serving route, not the object ACL.  An upload linked to a
+story carries that story's id in `owner_story_id` (set at submission for the
+main media, caption track, and poster; null for contribution attachments).
+`GET /v1/uploads/:id` then resolves the owning story and gates on it: a PUBLIC
+story's media keeps a stable, shareable bare URL; a `room_only` story's media
+is served ONLY through a short-lived (2 h), HMAC-signed URL (`?e=…&t=…`) minted
+AFTER the read-bar check (`lib/media-urls`), so an outsider who guesses the
+upload id is refused (404).  The owning story's takedown/safety-hidden state is
+re-checked at fetch time, so moderation/legal removal revokes media
+immediately; rotating `SESSION_SECRET` invalidates every outstanding token.
+Honest limit (§14.5.7): a member already holding a valid URL can fetch until it
+expires — in-room visibility bounds distribution, it is not a secrecy
+guarantee.  The wire carries server-minted read URLs (`feedMediaSchema.url`/
+`captions_url`/`poster_url`), validated as same-origin `/v1/uploads/` paths so
+no off-origin or script URL can reach an `<img>`/`<video>` `src`.
+
 ## WS-G.4 UGC safety (defense in depth)
 
 ```

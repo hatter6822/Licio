@@ -37,12 +37,12 @@ export function feedItemToCard(item: FeedItem): StoryCardData {
     ...(item.media
       ? {
           media: {
-            uploadRef: item.media.upload_ref,
+            url: item.media.url,
             kind: item.media.kind,
             altText: item.media.alt_text,
             captionsText: item.media.captions_text,
-            captionsUploadRef: item.media.captions_upload_ref,
-            posterUploadRef: item.media.poster_upload_ref,
+            captionsUrl: item.media.captions_url,
+            posterUrl: item.media.poster_url,
           },
         }
       : {}),

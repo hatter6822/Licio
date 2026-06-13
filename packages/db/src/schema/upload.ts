@@ -36,11 +36,22 @@ export const uploads = pgTable(
     storageRef: text('storage_ref').notNull(),
     metadataStripped: boolean('metadata_stripped').notNull(),
     scanState: uploadScanStateEnum('scan_state').notNull().default('pending'),
+    /**
+     * WS-Q.5.2c — back-reference to the story whose media this upload is (main
+     * media, caption track, or poster). Set at story submission; `null` for
+     * contribution attachments. The gated serving path uses it to re-derive the
+     * upload's visibility (a `room_only` story requires a signed URL) and to
+     * re-check takedown at fetch time. Declared without a Drizzle `.references()`
+     * to avoid a circular uploads↔stories schema import; the FK is added in the
+     * migration SQL (ON DELETE SET NULL).
+     */
+    ownerStoryId: uuid('owner_story_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index('uploads_owner_idx').on(t.ownerUserId),
     index('uploads_scan_idx').on(t.scanState),
+    index('uploads_owner_story_idx').on(t.ownerStoryId),
     // WS-Q.2.3c — the allowlist gains the two video containers (mp4/webm); the
     // shared allowlist (forum/safety.ts) mirrors this exactly (parity-tested).
     check(

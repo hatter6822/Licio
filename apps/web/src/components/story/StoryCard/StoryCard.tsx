@@ -108,17 +108,13 @@ export function StoryCard({
           link); the full player lives on the story page. */}
       {media ? (
         <StoryMedia
-          uploadRef={media.uploadRef}
+          url={media.url}
           kind={media.kind}
           altText={media.altText}
           preview
           {...(media.captionsText !== undefined ? { captionsText: media.captionsText } : {})}
-          {...(media.captionsUploadRef !== undefined
-            ? { captionsUploadRef: media.captionsUploadRef }
-            : {})}
-          {...(media.posterUploadRef !== undefined
-            ? { posterUploadRef: media.posterUploadRef }
-            : {})}
+          {...(media.captionsUrl !== undefined ? { captionsUrl: media.captionsUrl } : {})}
+          {...(media.posterUrl !== undefined ? { posterUrl: media.posterUrl } : {})}
         />
       ) : null}
 

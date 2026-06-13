@@ -133,6 +133,10 @@ export interface UploadRecord {
   storageRef: string;
   metadataStripped: boolean;
   scanState: 'pending' | 'clear' | 'flagged';
+  /** WS-Q.5.2c — the story this upload is media for (main media, caption track,
+   *  or poster); set at story submission, `null` for contribution attachments.
+   *  The serving gate uses it to re-derive visibility + re-check takedown. */
+  ownerStoryId: string | null;
   createdAt: string;
 }
 
@@ -300,11 +304,18 @@ export interface SummaryStore {
 }
 
 export interface UploadStore {
-  /** Persist the (already metadata-stripped) bytes + the metadata record. */
-  put(record: Omit<UploadRecord, 'createdAt'>, bytes: Uint8Array): Promise<UploadRecord>;
+  /** Persist the (already metadata-stripped) bytes + the metadata record. An
+   *  upload is created unlinked; `ownerStoryId` defaults to null and is set
+   *  later via {@link UploadStore.setOwnerStory} at story submission. */
+  put(
+    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId'> & { ownerStoryId?: string | null },
+    bytes: Uint8Array,
+  ): Promise<UploadRecord>;
   getRecord(uploadId: string): Promise<UploadRecord | null>;
   getBytes(uploadId: string): Promise<Uint8Array | null>;
   setScanState(uploadId: string, state: UploadRecord['scanState']): Promise<void>;
+  /** WS-Q.5.2c — link an upload to the story it is media for (idempotent). */
+  setOwnerStory(uploadId: string, storyId: string): Promise<void>;
   /** All of a user's upload records (DSAR export, §19.3/GDPR Art. 15). */
   listByOwner(userId: string): Promise<UploadRecord[]>;
   anonymizeUser(userId: string): Promise<void>;
@@ -846,8 +857,15 @@ export class InMemoryUploadStore implements UploadStore {
     this.#now = now;
   }
 
-  async put(record: Omit<UploadRecord, 'createdAt'>, bytes: Uint8Array): Promise<UploadRecord> {
-    const full: UploadRecord = { ...record, createdAt: iso(this.#now) };
+  async put(
+    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId'> & { ownerStoryId?: string | null },
+    bytes: Uint8Array,
+  ): Promise<UploadRecord> {
+    const full: UploadRecord = {
+      ...record,
+      ownerStoryId: record.ownerStoryId ?? null,
+      createdAt: iso(this.#now),
+    };
     this.#records.set(full.uploadId, full);
     this.#bytes.set(full.uploadId, new Uint8Array(bytes));
     return full;
@@ -864,6 +882,11 @@ export class InMemoryUploadStore implements UploadStore {
   async setScanState(uploadId: string, state: UploadRecord['scanState']): Promise<void> {
     const record = this.#records.get(uploadId);
     if (record) record.scanState = state;
+  }
+
+  async setOwnerStory(uploadId: string, storyId: string): Promise<void> {
+    const record = this.#records.get(uploadId);
+    if (record) record.ownerStoryId = storyId;
   }
 
   async listByOwner(userId: string): Promise<UploadRecord[]> {

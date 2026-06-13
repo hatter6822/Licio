@@ -534,6 +534,23 @@ export async function submitStory(
   }
   ingestion.metrics.increment(`submissions.${request.submission_type}`);
 
+  // 9a2. WS-Q.5.2c — back-link the story's media uploads (main media, caption
+  //      track, poster) so the gated serving path can re-derive each upload's
+  //      visibility (room_only ⇒ signed URL required) and re-check takedown at
+  //      fetch time. Contribution attachments keep a null owner and serve bare.
+  if (mediaUploadRef !== null) {
+    const mediaUploadIds = [mediaUploadRef];
+    if (request.submission_type === 'video_post') {
+      if (request.captions_upload_id !== undefined) {
+        mediaUploadIds.push(request.captions_upload_id);
+      }
+      if (request.poster_upload_id !== undefined) mediaUploadIds.push(request.poster_upload_id);
+    }
+    for (const id of mediaUploadIds) {
+      await forum.uploads.setOwnerStory(id, created.story.storyId);
+    }
+  }
+
   // 9b. WS-Q.2.2b cross-tier back-link: a NEW public story for a URL that
   //     already has room_only twins becomes their canonical public story
   //     (opportunistic; not transaction-coupled).
