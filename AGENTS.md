@@ -339,7 +339,7 @@ licio/
 │   │       │   │                           payload builder, VoiceDictation (WS-G.3),
 │   │       │   │                           StoryComposer (WS-Q.5.1/5.2 story submission)
 │   │       │   ├── feed/                -- FeedModeSwitcher, DiminishingReturnsPrompt
-│   │       │   ├── rooms/               -- RoomCreateForm (WS-Q.5.3c)
+│   │       │   ├── rooms/               -- RoomCreateForm + RoomSettingsForm (WS-Q.5.3c)
 │   │       │   ├── story/               -- StoryCard, ContextCard, RatingLabel,
 │   │       │   │                           ExposureLabel, IndependentSourcesDrawer,
 │   │       │   │                           WhereInterpretationsDiffer (WS-H), StoryMedia +

@@ -8,6 +8,7 @@ import type { RoomDetail } from '@licio/shared';
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { RoomCreateForm } from '../../components/rooms/RoomCreateForm/index.js';
+import { RoomSettingsForm } from '../../components/rooms/RoomSettingsForm/index.js';
 import { feedItemToCard } from '../../components/story/feed-card.js';
 import { StoryCard } from '../../components/story/StoryCard/index.js';
 import { Button } from '../../components/ui/Button/index.js';
@@ -184,6 +185,10 @@ export function RoomDetailBody({
           {t('room.governance.link', 'Room governance')}
         </Link>
       ) : null}
+
+      {/* WS-Q.5.3c — steward-only room settings (join/posting) + the audited
+          public⇄private visibility cascade. */}
+      {room.is_steward ? <RoomSettingsForm roomId={roomId} room={room} /> : null}
 
       {/* Tier two: the room feed (in-room chip on every room_only item). */}
       {contentVisible ? (

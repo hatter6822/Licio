@@ -9,6 +9,8 @@ import type {
   FeedMode,
   NotificationPreferences,
   RoomCreateRequest,
+  RoomJoinModel,
+  RoomPostingPolicy,
   SignalLedgerResponse,
   StoryDetail,
   UserSettings,
@@ -164,6 +166,33 @@ export function useCreateRoomMutation() {
   return useMutation({
     mutationFn: (request: RoomCreateRequest) => api.createRoom(request),
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.rooms() });
+    },
+  });
+}
+
+/** WS-Q.5.3c — steward change of a room's join_model / posting_policy; refreshes
+ *  the room on success. */
+export function useUpdateRoomSettingsMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: { join_model?: RoomJoinModel; posting_policy?: RoomPostingPolicy }) =>
+      api.updateRoomSettings(roomId, patch),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.room(roomId) });
+    },
+  });
+}
+
+/** WS-Q.5.3c — steward public⇄private room-visibility cascade; refreshes the
+ *  room AND its feed (content visibility may have changed). */
+export function useChangeRoomVisibilityMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (visibility: 'public' | 'private') => api.changeRoomVisibility(roomId, visibility),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.room(roomId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.roomFeed(roomId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.rooms() });
     },
   });

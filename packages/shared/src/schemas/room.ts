@@ -217,6 +217,9 @@ export const roomDetailSchema = roomSummarySchema
     charter_summary: z.string().max(5_000).nullable(),
     /** Pending join request for the requesting user (private rooms). */
     join_pending: z.boolean(),
+    /** WS-Q.5.3c — true when the requesting user is a steward of this room
+     *  (gates the steward-only governance/visibility controls). */
+    is_steward: z.boolean().optional(),
   })
   .strict();
 export type RoomDetail = z.infer<typeof roomDetailSchema>;

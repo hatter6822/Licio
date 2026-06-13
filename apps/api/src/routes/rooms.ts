@@ -345,6 +345,8 @@ export function createRoomsRoutes() {
             governance: governanceInfo(room),
             charter_summary: room.charterSummary,
             join_pending: subscription?.status === 'pending',
+            // WS-Q.5.3c — gates the steward-only room-settings UI.
+            is_steward: userId !== null && stewards.some((s) => s.userId === userId),
           }),
         );
       })
