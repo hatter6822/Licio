@@ -45,7 +45,7 @@ export function TopicRepeatsPreference({
     <label className="flex flex-wrap items-center gap-2 text-xs text-ink-muted">
       <span>{t('repeats.label', 'Repeats on this topic')}</span>
       <select
-        className="rounded-md border border-line bg-surface px-2 py-1 text-xs text-ink"
+        className="rounded-md border border-edge bg-surface px-2 py-1 text-xs text-ink"
         value={value}
         onChange={(event) => {
           const next = event.target.value as TopicRepeatPreference;

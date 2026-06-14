@@ -142,7 +142,7 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
               <p className="text-sm text-ink">{data.distribution_reason}</p>
               <Link
                 to="/profile/signal-ledger"
-                className="text-sm text-primary-on-soft underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                className="text-sm text-link underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
               >
                 {t('story.inspectSignals', 'Inspect your reading signals')}
               </Link>

@@ -575,7 +575,7 @@ function TotpSection({ gate }: { gate: StepUpGate }): React.ReactElement {
               'Add this to your authenticator app, then confirm with a code:',
             )}
           </p>
-          <code className="break-all rounded-md border border-line bg-surface-sunken p-2 text-xs text-ink">
+          <code className="break-all rounded-md border border-line bg-canvas-raised p-2 text-xs text-ink">
             {uri}
           </code>
           <form
@@ -616,7 +616,7 @@ function TotpSection({ gate }: { gate: StepUpGate }): React.ReactElement {
               'Recovery codes — store these somewhere safe. Each works once; this is the only time they are shown.',
             )}
           </p>
-          <ul className="grid grid-cols-2 gap-1 rounded-md border border-line bg-surface-sunken p-3 font-mono text-xs text-ink">
+          <ul className="grid grid-cols-2 gap-1 rounded-md border border-line bg-canvas-raised p-3 font-mono text-xs text-ink">
             {recoveryCodes.map((recoveryCode) => (
               <li key={recoveryCode}>{recoveryCode}</li>
             ))}
