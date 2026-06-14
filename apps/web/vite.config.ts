@@ -44,6 +44,14 @@ export default defineConfig({
     VitePWA({
       registerType: 'prompt',
       injectRegister: null,
+      // The brand icons live in public/assets and are already precached by the
+      // Workbox `globPatterns` below (with a content revision). Disable the
+      // separate manifest-icon injection, which would otherwise add the SAME
+      // URLs a second time with `revision: null` — Workbox's addToCacheList then
+      // throws `add-to-cache-list-conflicting-entries` at registration time and
+      // the production service worker never installs (breaking offline precache,
+      // updates, background sync, and push).
+      includeManifestIcons: false,
       workbox: {
         // Precache the app shell + static assets (revision-hashed manifest).
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
