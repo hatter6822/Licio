@@ -34,9 +34,14 @@ export interface Mailer {
 
 /**
  * A mailer that only emits structured observability — it NEVER logs the code or
- * the recipient address (§19.1 minimization).  Production swaps a real SMTP/email
- * provider behind the {@link Mailer} interface; this keeps dev/observability honest
- * without leaking secrets or PII into logs.
+ * the recipient address (§19.1 minimization).  It is the SILENT mailer used for
+ * CI / NODE_ENV=test and for an explicit mail-less deployment
+ * (`ALLOW_INSECURE_NULL_MAILER`); a real SMTP/email provider swaps in behind the
+ * {@link Mailer} interface in production.  Genuine LOCAL development instead uses
+ * {@link createDevMailer} (which surfaces the code so the email flows are
+ * testable without a mail server) — selected only under NODE_ENV=development by
+ * {@link selectMailer}.  This keeps observability honest without leaking secrets
+ * or PII into logs anywhere a log line could outlive the developer's machine.
  */
 export function createLoggingMailer(
   log: (event: string, meta: Record<string, unknown>) => void,
@@ -53,15 +58,56 @@ export function createLoggingMailer(
 }
 
 /**
+ * A DEVELOPMENT-ONLY mailer that SURFACES one-time codes and notice payloads to
+ * the local server log instead of delivering email.  Without it, a `pnpm dev`
+ * machine has no mail provider, so the passwordless email flows are dead ends:
+ * an email registration logs the account in with a REDUCED-capability,
+ * unconfirmed-email session (WS-D.1.1a) that can never become verified, and an
+ * email sign-in code can never be redeemed.  Surfacing the code lets the
+ * developer read it from the API terminal and complete the SAME real,
+ * rate-limited, attempt-bound verify flow production uses (`/profile/security`
+ * "Verify", or the sign-in code panel) — no special-case verification bypass,
+ * so dev exercises the production path exactly.
+ *
+ * SECURITY: reachable ONLY through {@link selectMailer} under
+ * NODE_ENV=development with no SES binding and no `ALLOW_INSECURE_NULL_MAILER`
+ * opt-out — never in production, staging, CI, or test (where the silent
+ * {@link createLoggingMailer} / {@link RecordingMailer} are used instead).
+ * Logging the code + recipient is therefore not a §19.1 leak: the data is the
+ * developer's own ephemeral in-memory test account on their own machine, and the
+ * environment gate guarantees these lines can never appear in a deployed system.
+ */
+export function createDevMailer(
+  log: (event: string, meta: Record<string, unknown>) => void,
+): Mailer {
+  const note = 'DEV ONLY — no email was sent; use this to continue the flow locally.';
+  return {
+    async sendCode(to: string, code: string, kind: 'login' | 'verify'): Promise<void> {
+      log('auth.mail.dev_code', { to, kind, code, note });
+    },
+    async sendNotice(to: string, kind: string, payload?: Record<string, string>): Promise<void> {
+      log('auth.mail.dev_notice', { to, kind, ...(payload ?? {}), note });
+    },
+  };
+}
+
+/**
  * Select the production mailer, FAILING CLOSED.  With an SES config (the
  * all-or-none `SES_*` env group) the real provider binding is used in any
- * environment.  Without one, the only implementation is the dev/CI logging
- * mailer (which sends nothing) — returning that in production would let email
- * login/verification/deletion-cancel flows report success while no mail is
- * ever delivered, a silent, dangerous no-op.  So in production we refuse to
- * boot unless the operator EXPLICITLY opts into a mail-less deployment
- * (`ALLOW_INSECURE_NULL_MAILER=true`, e.g. a passkey/wallet-only instance), in
- * which case we log a prominent warning.
+ * environment.  Without one:
+ *
+ *   - production refuses to boot — returning a sendless mailer would let email
+ *     login/verification/deletion-cancel flows report success while no mail is
+ *     ever delivered, a silent, dangerous no-op — unless the operator EXPLICITLY
+ *     opts into a mail-less deployment (`ALLOW_INSECURE_NULL_MAILER=true`, e.g. a
+ *     passkey/wallet-only instance), in which case it warns loudly and stays
+ *     silent;
+ *   - local development (NODE_ENV=development) uses {@link createDevMailer},
+ *     which SURFACES the one-time code to the API log so the passwordless email
+ *     flows (sign-in, email-factor verification, deletion-cancel) are testable
+ *     end-to-end without a mail server — there is otherwise no way to become a
+ *     verified account on a `pnpm dev` box;
+ *   - every other case (CI / NODE_ENV=test) uses the silent logging mailer.
  */
 export function selectMailer(opts: {
   nodeEnv: string;
@@ -79,11 +125,19 @@ export function selectMailer(opts: {
         '(passkey/wallet-only) deployment.',
     );
   }
+  // An explicit mail-less opt-out wins over the dev convenience: it means "this
+  // instance intentionally sends nothing", so stay silent even in development.
   if (opts.allowNullMailer) {
     opts.warn(
       'Email delivery is DISABLED (ALLOW_INSECURE_NULL_MAILER): email-based ' +
         'login/verification/deletion links will NOT be sent.',
     );
+    return createLoggingMailer(opts.log);
+  }
+  // No real provider and not production: surface codes locally so dev email
+  // flows work; production never reaches here (it threw above).
+  if (opts.nodeEnv === 'development') {
+    return createDevMailer(opts.log);
   }
   return createLoggingMailer(opts.log);
 }

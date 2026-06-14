@@ -433,11 +433,11 @@ covered in detail in Section 15.
 | Variable(s) | Effect when unset |
 |-------------|-------------------|
 | `DEV_HTTPS=true` | HTTP dev (no local TLS). Set to `true` to serve HTTPS (Section 10). Read directly from `process.env`, not the schema |
-| `ALLOW_INSECURE_NULL_MAILER=true` | Only relevant in `production`; lets the API boot without SES. Irrelevant in development. Read directly from `process.env` |
+| `ALLOW_INSECURE_NULL_MAILER=true` | In `production`, lets the API boot without SES (and stays silent). In development it is an explicit opt-out that silences the dev mailer — codes are no longer surfaced to the log. Read directly from `process.env` |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | Web Push disabled; push endpoints report "unconfigured" |
 | `CHAIN_RPC_URLS` | Only EOA wallet sign-in is available (no contract-wallet EIP-1271/6492 verification) |
 | `S3_*` group | DSAR export archives use an **in-memory** store (fine for dev) |
-| `SES_*` group | A logging mailer is used in dev (records observability only, never the code/recipient) |
+| `SES_*` group | A **dev mailer** surfaces the one-time code + recipient to the API log (no email is sent) so the passwordless email flows — sign-in, email-factor verification, deletion-cancel — are testable end-to-end; this is the only way to become a verified account on a `pnpm dev` box. CI / `NODE_ENV=test` use the silent logging mailer (never the code/recipient) |
 | `EMBEDDING_*` group | A deterministic **lexical** embedding provider is used (fine for dedup; not a real semantic model) |
 
 ### 7.5 Generate a real `SESSION_SECRET`
@@ -892,10 +892,17 @@ the export), **not** browser/end-to-end encryption. Unset → in-memory store
 
 `SES_REGION`, `SES_ACCESS_KEY_ID`, `SES_SECRET_ACCESS_KEY`,
 `SES_FROM_ADDRESS` (and optional `SES_ENDPOINT` for local SES-compatible
-stacks). Unset in development → a logging mailer (records observability
-only, never the code or recipient). In **production**, an unset group fails
-boot unless `ALLOW_INSECURE_NULL_MAILER=true` (for passkey/wallet-only
-deployments).
+stacks). Unset in development (`NODE_ENV=development`) → a **dev mailer**
+that surfaces the one-time code and notice payloads (e.g. the
+deletion-cancel token) to the API log instead of delivering email. Read the
+`auth.mail.dev_code` line from the API terminal and finish the *real* verify
+flow — `/profile/security` → **Verify** (or the sign-in code panel) — to
+become a verified account with no mail server. This is gated strictly to
+`NODE_ENV=development`: CI / `NODE_ENV=test` use the silent logging mailer
+(records observability only, never the code or recipient), and in
+**production** an unset group fails boot unless
+`ALLOW_INSECURE_NULL_MAILER=true` (for passkey/wallet-only deployments,
+which also stays silent).
 
 ### Self-hosted embeddings (`EMBEDDING_*`)
 

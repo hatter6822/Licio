@@ -135,8 +135,10 @@ const logger = createLogger(env.LOG_LEVEL);
 // (WS-D.1.6a). The live session, ephemeral-secret, and rate-limit stores are
 // Redis-backed (durable across restarts). The mailer FAILS CLOSED in production
 // (selectMailer) so an email flow never silently "succeeds" without a real
-// provider; dev/CI use the logging mailer that records observability only and
-// never the code/recipient (§19.1).
+// provider; local development surfaces the one-time code to this log (so the
+// passwordless email flows are testable without a mail server), while CI /
+// NODE_ENV=test use the silent logging mailer that records observability only
+// and never the code/recipient (§19.1).
 const identityServices = buildIdentityServicesFromEnv(env, {
   mailer: selectMailer({
     nodeEnv: env.NODE_ENV,
