@@ -368,3 +368,68 @@ describe('account deletion lifecycle', () => {
     expect(replay.status).toBe(404);
   });
 });
+
+describe('development-only verification shortcut (POST /v1/auth/dev/verify)', () => {
+  /** Register a NEW email account; returns its (unverified) session cookie. */
+  async function registerUnverified(
+    app: ReturnType<typeof createApp>,
+    email: string,
+    handle: string,
+  ): Promise<string> {
+    const reg = await app.request('/v1/auth/register', {
+      method: 'POST',
+      headers: jsonHeaders(),
+      body: JSON.stringify({
+        handle,
+        display_name: 'Dev User',
+        email,
+        date_of_birth: '1990-01-01',
+      }),
+    });
+    expect(reg.status).toBe(200);
+    return extractCookie(reg, '__Host-sid') as string;
+  }
+
+  it('clears the unverified 403 on verified-only routes, so capabilities are testable', async () => {
+    const app = createApp();
+    const sid = await registerUnverified(app, 'devverify@example.com', 'devverify');
+    expect(sid).toBeTruthy();
+
+    // A freshly email-registered account is active but UNVERIFIED — the exact
+    // first-sign-in state that 403s GET /v1/privacy/settings.
+    const before = await app.request('/v1/privacy/settings', { headers: { cookie: sid } });
+    expect(before.status).toBe(403);
+
+    // The dev shortcut flips it to verified (and rotates the session id).
+    const verify = await app.request('/v1/auth/dev/verify', {
+      method: 'POST',
+      headers: jsonHeaders(sid),
+    });
+    expect(verify.status).toBe(200);
+    expect((await readJson<{ status: string }>(verify)).status).toBe('verified');
+    const rotated = extractCookie(verify, '__Host-sid') ?? sid;
+
+    // The same capability now succeeds.
+    const after = await app.request('/v1/privacy/settings', { headers: { cookie: rotated } });
+    expect(after.status).toBe(200);
+  });
+
+  it('is fail-closed: returns 404 in production (never a verification bypass)', async () => {
+    const app = createApp();
+    const sid = await registerUnverified(app, 'prodgate@example.com', 'prodgate');
+    const original = process.env['NODE_ENV'];
+    try {
+      process.env['NODE_ENV'] = 'production';
+      const res = await app.request('/v1/auth/dev/verify', {
+        method: 'POST',
+        headers: jsonHeaders(sid),
+      });
+      expect(res.status).toBe(404);
+    } finally {
+      process.env['NODE_ENV'] = original;
+    }
+    // The account is still unverified (the production-gated call did nothing).
+    const settings = await app.request('/v1/privacy/settings', { headers: { cookie: sid } });
+    expect(settings.status).toBe(403);
+  });
+});

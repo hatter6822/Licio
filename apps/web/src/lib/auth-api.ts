@@ -304,6 +304,18 @@ export async function resendEmailCode(): Promise<void> {
   await parseResponse(res, sentSchema);
 }
 
+/**
+ * DEVELOPMENT ONLY: mark the signed-in account verified without the email OTP,
+ * so verified-only capabilities (e.g. GET /v1/privacy/settings, which 403s for
+ * an unconfirmed email-registration) are exercisable locally. The server route
+ * is fail-closed to non-production (404 otherwise); the calling control is gated
+ * to `import.meta.env.DEV`, so this is unreachable in a production build.
+ */
+export async function devVerifyAccount(): Promise<void> {
+  const res = await client.v1.auth.dev.verify.$post();
+  await parseResponse(res, z.object({ status: z.literal('verified') }).strict());
+}
+
 /** Disable the email factor (step-up + the server's last-method guard). */
 export async function disableEmail(): Promise<void> {
   const res = await client.v1.auth.email.disable.$post();

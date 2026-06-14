@@ -95,6 +95,12 @@ interfaces.
   account state, and **fails closed** (a store error → 503, never pass-through).
 - Capability guards: `requireVerifiedAccount`, `requireStepUp`, `requireSteward`
   (role **and** active MFA), `requireAdult` (fails closed on teen/unknown age).
+  A freshly **email-registered** account is `active` but unverified, so
+  `requireVerifiedAccount` surfaces (e.g. `GET /v1/privacy/settings`) answer 403
+  until the email is confirmed. For local development a dev-only shortcut,
+  `POST /v1/auth/dev/verify`, flips the signed-in account to verified without the
+  OTP so the verified-only capabilities are testable; it is **fail-closed** (404
+  in production) and the calling control is gated to `import.meta.env.DEV`.
 - `/v1/auth/*`: status, registration (age-gated), email-OTP start/verify,
   WebAuthn register/authenticate, wallet nonce/verify, session list/revoke,
   security-activity.

@@ -26,6 +26,7 @@ import {
   addEmail,
   addPasskey,
   confirmTotp,
+  devVerifyAccount,
   disableEmail,
   disableTotp,
   enrollTotp,
@@ -363,6 +364,22 @@ function EmailSection({ gate }: { gate: StepUpGate }): React.ReactElement {
           >
             {t('security.email.resend', 'Resend code')}
           </Button>
+          {/* DEVELOPMENT ONLY: the OTP is only logged to the server in dev, so
+              this shortcut flips the account to verified (no code) to make the
+              verified-only capabilities testable. Tree-shaken out of production
+              builds (import.meta.env.DEV) AND fail-closed on the server (404). */}
+          {import.meta.env.DEV ? (
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => {
+                setError(null);
+                devVerifyAccount().then(refresh, fail);
+              }}
+            >
+              {t('security.email.devVerify', 'Verify now (dev)')}
+            </Button>
+          ) : null}
         </form>
       ) : null}
 
