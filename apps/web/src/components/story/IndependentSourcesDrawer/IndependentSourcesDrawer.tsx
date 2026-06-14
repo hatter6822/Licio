@@ -20,7 +20,7 @@ export function IndependentSourcesDrawer({
 }: IndependentSourcesDrawerProps): React.ReactElement {
   const t = useT();
   return (
-    <details className="rounded-lg border border-edge bg-surface p-3">
+    <details className="rounded-lg border border-line bg-surface p-3">
       <summary className="cursor-pointer text-sm font-medium text-ink">
         {t('exposure.drawer.title', 'Independent sources')}
       </summary>

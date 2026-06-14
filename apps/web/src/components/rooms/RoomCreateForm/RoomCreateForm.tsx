@@ -138,7 +138,7 @@ export function RoomCreateForm({ onCreated }: RoomCreateFormProps): React.ReactE
           },
         ]}
       />
-      {errors['form'] ? <p className="text-danger text-sm">{errors['form']}</p> : null}
+      {errors['form'] ? <p className="text-error-on-soft text-sm">{errors['form']}</p> : null}
       <Button id={`${formId}-submit`} type="submit" variant="primary" disabled={mutation.isPending}>
         {t('roomCreate.submit', 'Create room')}
       </Button>

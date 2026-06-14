@@ -126,7 +126,7 @@ export function VoiceDictation({
       {listening ? (
         <span className="flex items-center gap-2 text-sm text-ink-muted" aria-live="polite">
           <span
-            className="inline-block size-2 animate-pulse rounded-full bg-danger"
+            className="inline-block size-2 animate-pulse rounded-full bg-error"
             aria-hidden="true"
           />
           {t('dictation.listening', 'Listening…')}
