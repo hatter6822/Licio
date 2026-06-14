@@ -34,7 +34,7 @@ type ButtonAsAnchor = ButtonBaseProps & { href: string } & Omit<
 export type ButtonProps = ButtonAsButton | ButtonAsAnchor;
 
 const base =
-  'relative inline-flex min-h-touch items-center justify-center gap-2 rounded-md font-medium leading-none whitespace-nowrap select-none transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
+  'relative inline-flex min-h-touch items-center justify-center gap-2 rounded-md font-medium leading-none whitespace-nowrap select-none transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
 
 const sizeClasses: Record<ButtonSize, string> = {
   md: 'text-base',
@@ -53,6 +53,17 @@ const variantInteraction: Record<ButtonVariant, string> = {
   secondary: 'hover:bg-surface-strong active:bg-surface-strong',
   ghost: 'hover:bg-surface active:bg-surface-strong',
   destructive: 'hover:bg-error-hover active:bg-error-hover',
+};
+
+// Neumorphic lighting (WS-B fabric theme): surfaced variants extrude from the
+// fabric and depress on press. Ghost has no surface, so it stays flat (a soft
+// shadow with no fill reads as a stray glow). Flattens under high-contrast /
+// forced-colors via the token layer.
+const variantNeu: Record<ButtonVariant, string> = {
+  primary: 'neu-raised-sm active:neu-pressed-sm',
+  secondary: 'neu-raised-sm active:neu-pressed-sm',
+  ghost: '',
+  destructive: 'neu-raised-sm active:neu-pressed-sm',
 };
 
 export function Button(props: ButtonProps): React.ReactElement {
@@ -87,6 +98,7 @@ export function Button(props: ButtonProps): React.ReactElement {
     sizeClasses[size],
     variantFill[variant],
     !inactive && variantInteraction[variant],
+    !inactive && variantNeu[variant],
     iconOnly ? 'min-w-touch px-0' : size === 'lg' ? 'px-5 py-3' : 'px-4 py-2',
     inactive && 'cursor-not-allowed opacity-60',
     className,

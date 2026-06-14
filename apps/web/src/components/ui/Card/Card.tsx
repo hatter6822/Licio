@@ -18,12 +18,16 @@ export interface CardProps {
   children: ReactNode;
 }
 
-const base = 'block rounded-lg border border-line bg-canvas';
+// Cards are extruded from the fabric canvas with a soft neumorphic shadow (WS-B
+// fabric theme); the hairline border keeps a crisp edge (and the only visible
+// boundary under forced-colors, where the shadow flattens).
+const base = 'block rounded-lg border border-line bg-canvas neu-raised';
 
-// Interactive surfaces get a hover affordance and the system focus ring. The
-// focus ring matches the other primitives (Button/Input) for consistency.
+// Interactive surfaces depress into the surface on press and carry the system
+// focus ring. The focus ring matches the other primitives (Button/Input) for
+// consistency; the shadow transition is reduced-motion-aware via the token layer.
 const interactiveClasses =
-  'text-start transition-colors hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
+  'text-start transition-shadow active:neu-pressed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
 
 /**
  * Semantic container (WS-B.1.4). Renders the chosen element (`article` by

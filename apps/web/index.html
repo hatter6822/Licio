@@ -3,8 +3,27 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#1a1a2e" />
+    <!-- Theme-color matches the neumorphic fabric canvas in each colour scheme. -->
+    <meta name="theme-color" content="#EAEDF3" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#15171E" media="(prefers-color-scheme: dark)" />
     <meta name="description" content="Licio — social news without popularity voting" />
+    <!-- Theme-aware brand favicons: the dark-ink mark on light UI, the white
+         mark on dark UI (matches the in-app BrandLogo swap). -->
+    <link
+      rel="icon"
+      type="image/png"
+      sizes="192x192"
+      href="/assets/light_192.png"
+      media="(prefers-color-scheme: light)"
+    />
+    <link
+      rel="icon"
+      type="image/png"
+      sizes="192x192"
+      href="/assets/dark_192.png"
+      media="(prefers-color-scheme: dark)"
+    />
+    <link rel="apple-touch-icon" href="/assets/dark_192.png" />
     <title>Licio</title>
   </head>
   <body>

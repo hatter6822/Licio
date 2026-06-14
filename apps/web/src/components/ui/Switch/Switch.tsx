@@ -60,15 +60,16 @@ export function Switch({
           if (!disabled) onCheckedChange(!checked);
         }}
         className={cn(
-          'relative inline-flex min-h-touch min-w-touch shrink-0 items-center rounded-full p-1 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
+          'relative inline-flex min-h-touch min-w-touch shrink-0 items-center rounded-full p-1 neu-inset transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
           checked ? 'bg-primary' : 'bg-surface-strong',
           disabled && 'cursor-not-allowed opacity-60',
         )}
       >
+        {/* The knob extrudes from the recessed track (WS-B fabric theme). */}
         <span
           aria-hidden="true"
           className={cn(
-            'pointer-events-none block size-6 rounded-full bg-canvas shadow-sm transition-transform',
+            'pointer-events-none block size-6 rounded-full bg-canvas neu-raised-sm transition-transform',
             checked ? 'translate-x-6' : 'translate-x-0',
           )}
         />

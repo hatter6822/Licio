@@ -41,7 +41,7 @@ export interface SelectProps {
 }
 
 const triggerBase =
-  'flex min-h-touch w-full items-center justify-between gap-2 rounded-md border bg-canvas px-3 py-2 text-start text-base text-ink transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
+  'flex min-h-touch w-full items-center justify-between gap-2 rounded-md border bg-canvas px-3 py-2 text-start text-base text-ink neu-raised-sm transition active:neu-pressed-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
 
 const optionBase =
   'flex min-h-touch cursor-pointer items-center justify-between gap-2 px-3 py-2 text-base text-ink';

@@ -34,8 +34,9 @@ const APPROACHING = 0.9;
 const textareaBase =
   // `field-sizing: content` grows the textarea with its content (no JS, no CLS).
   // Browsers without support get the `autosize` JS fallback below; either way
-  // `max-h-80` + `overflow-auto` cap the growth and then scroll.
-  'block min-h-touch w-full resize-none rounded-md border bg-canvas px-3 py-2 text-base text-ink transition-colors [field-sizing:content] max-h-80 overflow-auto focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
+  // `max-h-80` + `overflow-auto` cap the growth and then scroll. `neu-inset`
+  // recesses the field into the fabric (WS-B fabric theme).
+  'block min-h-touch w-full resize-none rounded-md border bg-canvas px-3 py-2 text-base text-ink neu-inset transition-colors [field-sizing:content] max-h-80 overflow-auto focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
 
 export function TextArea({
   label,

@@ -334,12 +334,14 @@ licio/
 │   │   ├── playwright.config.ts --   E2E config (Chromium, Firefox, WebKit)
 │   │   ├── index.html           --   entry HTML (no inline scripts)
 │   │   ├── public/
-│   │   │   └── sw-push.js       --   push + background-sync + share-target handler
+│   │   │   ├── sw-push.js       --   push + background-sync + share-target handler
+│   │   │   └── assets/          --   brand lockups: light_/dark_ {192,512}.png
+│   │   │                              (theme-adaptive logo, favicons, PWA icons)
 │   │   └── src/
 │   │       ├── main.tsx                 -- app entry point
 │   │       ├── routeTree.gen.ts         -- auto-generated route tree
 │   │       ├── components/
-│   │       │   ├── ui/                  -- 32 reusable UI primitives
+│   │       │   ├── ui/                  -- 33 reusable UI primitives (incl. BrandLogo)
 │   │       │   ├── a11y/                -- RouteAnnouncer, SkipToContent, useSpaFocus
 │   │       │   ├── cognitive/           -- DefinedTerm, ProgressiveDisclosure, jargon
 │   │       │   ├── composer/            -- 11-mode ParticipationComposer + shared-schema
@@ -419,7 +421,9 @@ licio/
 │   │       │   ├── submit.tsx           --   content submission (auth-guarded)
 │   │       │   └── -pages/              --   internal page components
 │   │       ├── design-system/           -- design-token SSOT
-│   │       │   ├── tokens.ts            --   55 color tokens, light/dark palettes
+│   │       │   ├── tokens.ts            --   color tokens (neumorphic fabric
+│   │       │   │                              surfaces), neu soft-UI shadows +
+│   │       │   │                              fabric-thread texture, light/dark
 │   │       │   ├── css.ts               --   CSS utility generation
 │   │       │   └── contrast.ts          --   WCAG contrast validation
 │   │       ├── i18n/                    -- internationalization
@@ -842,6 +846,15 @@ foreground agent has already modified the same files.
 
 - **No inline styles.**  Use Tailwind CSS utility classes (static
   CSS, zero JS runtime).
+
+- **Neumorphic fabric theme.**  Surfaces are soft, tinted neutrals — the
+  canvas is intentionally **not** pure white/black (a white neumorphic
+  highlight is invisible on white).  Apply soft-UI depth with the
+  `neu-raised`/`neu-pressed`/`neu-inset` utilities (theme-aware
+  `--licio-shadow-*` tokens), never ad-hoc `box-shadow`; the fabric texture
+  and brand logo (`BrandLogo`, `public/assets/`) are theme-adaptive.  The
+  lighting is decorative: keep solid borders + focus rings, and never relax
+  the token contrast ratios verified in `tokens.test.ts`.
 
 - **No secrets in client bundle.**  Only `VITE_`-prefixed env vars
   reach the client.  No wallet seed phrases or private keys in logs

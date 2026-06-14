@@ -43,11 +43,12 @@ tree and supplies resolved props.
 
 `design-system/tokens.ts` is the **single source of truth** for every token:
 colour (light / dark / high-contrast), typography, spacing, radius, elevation,
-z-index, motion, and touch-target values. `design-system/css.ts` renders those
-values into `styles/tokens.generated.css` as `--licio-*` custom properties plus
-a Tailwind `@theme inline` mapping, so utilities such as `bg-canvas` and
-`text-ink` resolve directly to `var(--licio-*)` and flip at runtime under the
-dark / high-contrast / reduced-motion media queries.
+**neumorphic soft-UI shadows + fabric texture**, z-index, motion, and
+touch-target values. `design-system/css.ts` renders those values into
+`styles/tokens.generated.css` as `--licio-*` custom properties plus a Tailwind
+`@theme inline` mapping, so utilities such as `bg-canvas` and `text-ink` resolve
+directly to `var(--licio-*)` and flip at runtime under the dark / high-contrast /
+reduced-motion media queries.
 
 - **Regenerate:** `pnpm --filter web gen:tokens` (also runs at the start of
   `pnpm --filter web build`).
@@ -94,6 +95,48 @@ achievable for that hex. We implement the **WCAG 1.4.11 intent** correctly:
 
 The contrast test asserts `border-strong` (and the focus ring) rather than
 reproducing an impossible figure.
+
+### Neumorphic fabric theme
+
+The surface treatment is a **soft, tactile neumorphism over a woven fabric
+canvas**, driven entirely from the token SSOT (no images, no runtime JS):
+
+- **Soft surfaces, not pure white.** Authentic neumorphism needs paired *light*
+  and *dark* shadows, and a white highlight is invisible on white — so the
+  canvas sits a few percent below it: `bg-default` `#EAEDF3` (light) / `#15171E`
+  (dark). Body-text contrast stays AAA (recomputed at **15.16:1** light,
+  ~14:1 dark in `tokens.test.ts`); `border-strong` was darkened to keep the
+  functional control boundary ≥3:1 on the tinted surfaces.
+- **Paired lighting, theme-aware.** Two source colours (`--licio-neu-highlight`
+  / `--licio-neu-shadow`) flip per colour mode; the composed
+  `--licio-shadow-{raised,raised-sm,pressed,pressed-sm,inset}` tokens reference
+  them, so the geometry is defined **once** and adapts to light/dark
+  automatically. Surfaced via the `neu-*` utilities (`styles/app.css`):
+  `neu-raised`/`-sm` extrude (cards, buttons, the Switch knob), `neu-pressed`/
+  `-sm` recess on press (`active:neu-pressed-sm`, the active nav tab), and
+  `neu-inset` carves form wells (Input/TextArea/Switch track).
+- **Fabric texture.** A faint, theme-aware woven-thread tint
+  (`--licio-fabric-thread`) is layered over the canvas with two perpendicular
+  `repeating-linear-gradient`s on `body` (and the `fabric-surface` utility) —
+  low-contrast enough never to affect text legibility, and CSP-safe (pure CSS,
+  no `data:` images).
+- **`color-scheme`** is set per mode so native controls, scrollbars, and form
+  widgets match the surface.
+- **Accessibility is preserved.** The soft lighting is *decorative*: every
+  control keeps its solid border and the 2px focus-visible outline. Under
+  `prefers-contrast: more` / `forced-colors: active` the composed shadow tokens
+  and the thread tint are zeroed in **one place** (the var override at the foot
+  of `app.css`), flattening every `neu-*` utility (base **and** interactive
+  states) and the texture at once — so the low-contrast lighting can never
+  undermine an explicit accessibility preference.
+
+The **brand lockup** (`BrandLogo`, woven mark + wordmark) is theme-adaptive: the
+dark-ink mark (`public/assets/light_*.png`) shows on light surfaces and the
+white mark (`dark_*.png`) on dark, via a CSS-only swap that mirrors the token
+layer's resolution (honouring both `prefers-color-scheme` and the manual
+`data-theme` toggle). It anchors the desktop side rail and the mobile front-page
+header; the same assets supply the theme-aware favicons and the PWA `any`-purpose
+app icons.
 
 ## Conventions
 

@@ -141,8 +141,8 @@ self.addEventListener('push', (event) => {
         body: typeof payload.body === 'string' ? payload.body : 'You have a new update.',
         // Same tag collapses repeated same-thread notifications (grouping default).
         tag: typeof payload.tag === 'string' ? payload.tag : 'licio-notification',
-        icon: '/icon-192.png',
-        badge: '/icon-192.png',
+        icon: '/assets/light_192.png',
+        badge: '/assets/light_192.png',
         // WS-H.6.1c: looped topics deliver silently (no sound/vibration).
         silent: quiet,
         data: { url: safeNavigationUrl(payload.url) },

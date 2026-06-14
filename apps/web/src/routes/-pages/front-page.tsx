@@ -4,9 +4,10 @@
 // with the no-applause feed-mode switcher (WS-B.2.9) wired to the UI store and a
 // shareable `?mode=` search param. Each card links to the story detail.
 import type { FeedMode } from '@licio/shared';
-import { useNavigate, useSearch } from '@tanstack/react-router';
+import { Link, useNavigate, useSearch } from '@tanstack/react-router';
 import { FeedModeSwitcher } from '../../components/feed/FeedModeSwitcher/index.js';
 import { StoryFeedLink } from '../../components/story/StoryFeedLink/index.js';
+import { BrandLogo } from '../../components/ui/BrandLogo/index.js';
 import { useT } from '../../i18n/index.js';
 import { useFeedQuery, useUpdateDurablePrivacyMutation } from '../../lib/queries.js';
 import { useAuthStore, useUIStore } from '../../stores/index.js';
@@ -49,24 +50,36 @@ export function FrontPage(): React.ReactElement {
   };
 
   return (
-    <PageScaffold
-      title={t('nav.frontPage', 'Front Page')}
-      actions={<FeedModeSwitcher value={mode} onValueChange={onModeChange} />}
-      query={feed}
-      isEmpty={(data) => data.items.length === 0}
-      emptyTitle={t('feed.empty.title', 'No stories yet')}
-      emptyDescription={t('feed.empty.description', FRONT_PAGE_EMPTY_DESCRIPTION)}
-    >
-      {(data) => (
-        <ul className="flex flex-col gap-3">
-          <li>
-            <p className="text-ink-muted text-sm">{t('feed.framing', FRONT_PAGE_FRAMING)}</p>
-          </li>
-          {data.items.map((item) => (
-            <StoryFeedLink key={item.story_id} item={item} />
-          ))}
-        </ul>
-      )}
-    </PageScaffold>
+    <>
+      {/* Brand presence on the mobile landing screen; the desktop side rail
+          carries the logo at lg+, so this is hidden there to avoid duplication. */}
+      <div className="flex justify-center pt-4 lg:hidden">
+        <Link
+          to="/"
+          className="block rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+        >
+          <BrandLogo className="h-12" priority />
+        </Link>
+      </div>
+      <PageScaffold
+        title={t('nav.frontPage', 'Front Page')}
+        actions={<FeedModeSwitcher value={mode} onValueChange={onModeChange} />}
+        query={feed}
+        isEmpty={(data) => data.items.length === 0}
+        emptyTitle={t('feed.empty.title', 'No stories yet')}
+        emptyDescription={t('feed.empty.description', FRONT_PAGE_EMPTY_DESCRIPTION)}
+      >
+        {(data) => (
+          <ul className="flex flex-col gap-3">
+            <li>
+              <p className="text-ink-muted text-sm">{t('feed.framing', FRONT_PAGE_FRAMING)}</p>
+            </li>
+            {data.items.map((item) => (
+              <StoryFeedLink key={item.story_id} item={item} />
+            ))}
+          </ul>
+        )}
+      </PageScaffold>
+    </>
   );
 }

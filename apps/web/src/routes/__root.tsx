@@ -10,6 +10,7 @@ import { createRootRoute, Link, Outlet, useRouterState } from '@tanstack/react-r
 import { useEffect } from 'react';
 import { AppShell } from '../components/ui/AppShell/index.js';
 import { BottomNav, defaultNavItems } from '../components/ui/BottomNav/index.js';
+import { BrandLogo } from '../components/ui/BrandLogo/index.js';
 import { useToast } from '../components/ui/Toast/index.js';
 import { useT } from '../i18n/index.js';
 import { EVICTION_EVENT } from '../lib/bootstrap.js';
@@ -109,6 +110,14 @@ function RootLayout(): React.ReactElement {
         <BottomNav
           items={items}
           activeId={activeId}
+          railHeader={
+            <Link
+              to="/"
+              className="block rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+            >
+              <BrandLogo className="h-14 w-full justify-center" priority />
+            </Link>
+          }
           renderLink={({ item, isActive, className, children }) => (
             <Link to={item.href} aria-current={isActive ? 'page' : undefined} className={className}>
               {children}
