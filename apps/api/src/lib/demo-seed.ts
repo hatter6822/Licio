@@ -7,7 +7,16 @@
 // synthesis — so the PWA renders real end-to-end data the moment the dev
 // server boots, through exactly the production read paths.
 
+import { randomUUID } from 'node:crypto';
 import {
+  lshBandHashes,
+  MINHASH_FAMILY_VERSION,
+  MINHASH_NUM_HASHES,
+  MINHASH_SHINGLE_K,
+  minhashSignature,
+} from '@licio/invariants';
+import {
+  attentionAggregateEventSchema,
   type ContributionType,
   DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
   defaultPersonalizationSettings,
@@ -19,13 +28,16 @@ import {
   type SubmissionMetadata,
 } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
-import type { InvariantOutputRecord, SignalLedgerRecord } from '../events/stores.js';
+import type { NewStoredEvent } from '../events/stores.js';
 import type { ForumServices } from '../forum/services.js';
 import type { Role } from '../identity/rbac.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
+import { runBatchTier } from '../invariants/scheduler.js';
 import type { InvariantPlatformServices } from '../invariants/services.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
+import { windowStartMs } from '../pwatt/aggregation.js';
+import { runPwattWindow } from '../pwatt/scoring.js';
 import { DEMO_IDS } from './demo-data.js';
 
 export const SEED_USER = {
@@ -987,6 +999,29 @@ export async function seedForumDemoData(
     excerpt: 'Schedule change with the bulletin attached; the room is adding context.',
     topicIds: [topics.local],
   });
+  // S25 — a NEAR-DUPLICATE repost of the winter-rate filing (S21): same content,
+  // a different URL. Its MinHash signature collides with S21's (seeded below), so
+  // the REAL MERI batch groups them and labels the second copy `duplicate_context`
+  // — ten reposts never count as ten independent exposures (SPEC §7.1).
+  await seedStory({
+    n: 25,
+    lifecycle: 'submitted',
+    roomId: R(4),
+    visibility: 'public',
+    author: maya,
+    // Same title + excerpt as S21 (so the MinHash signatures collide), different
+    // URL — a verbatim repost. The MERI batch groups them; the ranking pipeline
+    // folds the duplicate into "more on this story".
+    title: 'New filing: utility requests a winter rate adjustment',
+    submissionType: 'link',
+    submissionMetadata: link(
+      'https://example.org/energy/winter-rate-filing-repost',
+      'The same filing as submitted to the regulator, reposted.',
+    ),
+    canonicalUrl: 'https://example.org/energy/winter-rate-filing-repost',
+    excerpt: 'Just submitted; reading is beginning. No interpretation has formed yet.',
+    topicIds: [topics.climate],
+  });
 
   // Thread safety states (descriptive postures, never sanctions): S19 is under
   // coordination review (⇒ "Under Review"); S7 carries an elevated signal
@@ -1022,7 +1057,9 @@ export async function seedForumDemoData(
       normalizedTextHash: `demo-claim-${claimN}`,
       claimStatus: 'candidate',
       firstSeenStoryId: storyId,
-      independenceGroupId: null,
+      // A real claim independence group so MERI's claim-extraction input is
+      // present for these stories (the real batch computes their exposure).
+      independenceGroupId: `demo-claim-indep-${claimN}`,
       createdBy: null,
       extractionSource: 'steward',
       extractionConfidence: null,
@@ -1485,297 +1522,239 @@ export async function seedForumDemoData(
     approvedBy: null,
   });
   await ingestion.stories.updateThread(T(20), { currentSummaryId: recallSummary.summaryId });
+
+  // MinHash signatures for every seeded story (over the title + excerpt). These
+  // are the SAME signatures the WS-F dedup pipeline writes, so the REAL MERI
+  // batch — and the independent-sources drawer — detect near-duplicates from
+  // genuine signature collisions (S21 ↔ S25) rather than hand-authored groups.
+  for (const story of await ingestion.stories.listRecent(200)) {
+    if (await ingestion.signatures.getByStoryId(story.storyId)) continue;
+    const text = `${story.title} ${story.excerpt ?? ''}`.trim();
+    const minhash = minhashSignature(text);
+    await ingestion.signatures.upsert(
+      {
+        storyId: story.storyId,
+        minhash,
+        shingleK: MINHASH_SHINGLE_K,
+        numHashes: MINHASH_NUM_HASHES,
+        familyVersion: MINHASH_FAMILY_VERSION,
+        textSource: 'submitted',
+      },
+      lshBandHashes(minhash),
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Shadow invariant signals + reading signals (DEVELOPMENT only).
+// Operational signals: REAL invariant computation + reading signals (DEV only).
 //
-// The reader-facing invariant surfaces (feed exposure labels, the §5.6
-// Well-Sourced label, the independent-sources drawer, the SCOI "Where
-// interpretations differ" drawer, the per-story safety posture) read STORED
-// shadow outputs through exactly the production read paths. This seeds those
-// stored outputs — and the owner-scoped Signal Ledger — with values consistent
-// with the content above, so a tester sees the invariants behaving the moment
-// the dev server boots. The hourly batch + PWAtt scorer also run on the dev box
-// and recompute from the shaped content, so these seeds are a head start, not a
-// substitute. NEVER runs in production (guarded by NODE_ENV in index.ts).
+// Unlike a fixture, this COMPUTES the demo's invariant outputs and reading
+// signals by running the actual production engines over the shaped content:
+//   • the WS-H invariant batch (MERI exposure, SCOI divergence, …) reads the
+//     seeded signatures / evidence groups / lens contributions;
+//   • the WS-E PWAtt scorer reads seeded bucketed attention aggregates and
+//     PRODUCES the owner-scoped Signal Ledger exactly as it does for a reader.
+// The reader-facing surfaces then read these stored outputs through the same
+// paths as production. The hourly schedulers recompute from the same content,
+// so this is a head start, not a divergent fixture. The single legitimately
+// direct signal is the S19 MFCI risk STATE (a coordinated freeze cannot be
+// manufactured by a static seed). NEVER runs in production (NODE_ENV-guarded).
 // ---------------------------------------------------------------------------
-export async function seedShadowSignals(
+export async function seedOperationalSignals(
   events: EventPipelineServices,
   invariants: InvariantPlatformServices,
+  identity: IdentityServices,
   ingestion: IngestionServices,
 ): Promise<void> {
-  // Idempotent: a prior boot already seeded the MERI feed output.
+  // Idempotent: a prior boot already computed the feed MERI output.
   if (await events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID)) return;
-
   const nowMs = Date.now();
-  const nowIso = new Date(nowMs).toISOString();
-  const hourStart = new Date(Math.floor(nowMs / 3_600_000) * 3_600_000 - 3_600_000);
-  const window = { start: hourStart.toISOString(), end: new Date(nowMs).toISOString() };
-  const purgeAfter = new Date(nowMs + 30 * 24 * 3_600_000).toISOString();
-  const envelope = {
-    timeWindow: window,
-    explanationSummary: null,
-    confidence: 0.9,
-    coverage: 1,
-    reasonCodes: [] as string[],
-    fallbackUsed: false,
-    versionMetadata: null,
-    shadowMode: true,
-    createdAt: nowIso,
-  };
 
-  // MERI exposure (SPEC §7.6): one feed-level output whose `marginal_gains` map
-  // each story to a redundancy class. ≥1 ⇒ independent_source, ≥0.5 ⇒ new_angle,
-  // >0 ⇒ same_claim_new_evidence, 0 ⇒ duplicate_context. The Well-Sourced
-  // stories (S1/S13/S22, which also carry ≥2 evidence cards) are independent.
-  const meriOutput: InvariantOutputRecord = {
-    invariantType: 'MERI',
-    targetType: 'feed',
-    targetId: GLOBAL_FEED_TARGET_ID,
-    version: invariants.meri.getCard().version,
-    scoreVector: {
-      meri: 0.78,
-      approximation: false,
-      marginal_gains: {
-        [DEMO_IDS.STORY_1]: 1.5, // independent_source → Well-Sourced
-        [S(13)]: 1.2, // independent_source → Well-Sourced
-        [S(22)]: 2, // independent_source → Well-Sourced
-        [S(9)]: 0.7, // new_angle
-        [S(11)]: 0.6, // new_angle
-        [S(12)]: 0.55, // new_angle
-        [S(4)]: 0.3, // same_claim_new_evidence
-        [S(8)]: 0.35, // same_claim_new_evidence
-        [S(5)]: 0, // duplicate_context
-      },
-      per_class_bounds: { near_duplicate: 1, shared_source_lineage: 2, shared_primary_evidence: 2 },
-      group_ids: [DEMO_IDS.STORY_1, S(13), S(22), S(9), S(11)],
-    },
-    ...envelope,
-  };
-  await events.invariantStore.upsert(meriOutput);
+  // 1. The REAL WS-H batch over the shaped content: MERI exposure (from genuine
+  //    MinHash-signature near-dup groups + evidence/claim independence groups),
+  //    SCOI divergence (from the lens-tagged contributions' embeddings), and the
+  //    rest — COMPUTED, never hand-authored. Every reader-facing invariant
+  //    surface reads these stored shadow outputs through the production paths.
+  await runBatchTier(invariants, events, ingestion, nowMs);
 
-  // SCOI context obstruction (SPEC §10): the tariff story (S10) carries two
-  // lenses (skeptical vs industry, seeded above) whose readings genuinely
-  // diverge — energy above the needs-context threshold, context_state "split".
-  const scoiOutput: InvariantOutputRecord = {
-    invariantType: 'SCOI',
-    targetType: 'story',
-    targetId: S(10),
-    version: invariants.scoi.getCard().version,
-    scoreVector: {
-      scoi: 0.62,
-      normalizer: 4,
-      overlap_count: 1,
-      lens_count: 2,
-      context_state: 'split',
-      per_overlap_energy: { [`${LENS(2)}~${LENS(4)}`]: 2.5 },
-    },
-    ...envelope,
-  };
-  await events.invariantStore.upsert(scoiOutput);
-
-  // MFCI risk (SPEC §8): the coordination-review story (S19) carries a high
-  // per-target risk; the story-detail read surfaces this as "Under Review",
-  // consistent with its thread's under_review posture seeded above.
+  // 2. MFCI per-target risk on the coordination-review story (S19). A genuine
+  //    MFCI freeze needs coordinated actors a static seed cannot manufacture, so
+  //    the demo sets the durable risk STATE directly — the one legitimately
+  //    direct operational signal (a state, not a fabricated computation),
+  //    consistent with S19's `under_review` thread posture.
   await invariants.mfciRiskStates.set({
     targetId: S(19),
     state: 'high',
     score: 3.4,
     reason: 'demo_seed_coordination_review',
-    updatedAt: nowIso,
+    updatedAt: new Date(nowMs).toISOString(),
   });
 
-  // Owner-scoped Signal Ledger (SPEC §22.1, WS-E.2.1d): each test account's
-  // OWN bounded attention record — coarse buckets only, never raw traces, never
-  // another user's. Pre-populated so the surface is non-empty on first sign-in;
-  // the in-browser pipeline adds more as the tester reads.
-  const titleOf = async (storyId: string): Promise<string> =>
-    (await ingestion.stories.getById(storyId))?.title ?? 'A Licio story';
-  type Sig = {
+  // 3. Reading signals through the REAL PWAtt scorer. Seed bucketed attention
+  //    AGGREGATES (the §22.1 records — coarse buckets only, never raw traces)
+  //    owned by the test accounts in the current hour window, then run the
+  //    actual hourly PWAtt window so the owner-scoped Signal Ledger is PRODUCED
+  //    by the scorer exactly as it is for a real reader (the in-browser pipeline
+  //    adds more as a tester reads).
+  const hourStart = windowStartMs(nowMs, '1h');
+  const at = new Date(hourStart + 60_000).toISOString();
+  const sessionBucket = new Date(hourStart).toISOString();
+  type Att = {
+    owner: string;
     item: string;
     dwell: 'glance' | 'short' | 'medium' | 'long' | 'extended';
     source: boolean;
     context: boolean;
     branch: 'none' | 'shallow' | 'moderate' | 'deep';
     returns: 'none' | 'few' | 'several';
-    cap: boolean;
-    anti?: string[];
-    pwatt: number;
   };
-  // Each ledger owner is one of the login-able accounts (the demo author plus
-  // the three named test accounts), so whoever a tester signs in as sees data.
-  const owners: ReadonlyArray<{ userId: string; entries: readonly Sig[] }> = [
+  // Each owner is a login-able account, so whoever a tester signs in as sees
+  // their own (and only their own) reading record.
+  const attention: readonly Att[] = [
     {
-      userId: SEED_USER.userId,
-      entries: [
-        {
-          item: DEMO_IDS.STORY_1,
-          dwell: 'long',
-          source: true,
-          context: true,
-          branch: 'moderate',
-          returns: 'few',
-          cap: false,
-          pwatt: 0.62,
-        },
-        {
-          item: S(9),
-          dwell: 'medium',
-          source: true,
-          context: false,
-          branch: 'shallow',
-          returns: 'none',
-          cap: false,
-          pwatt: 0.44,
-        },
-        {
-          item: S(2),
-          dwell: 'extended',
-          source: false,
-          context: true,
-          branch: 'deep',
-          returns: 'several',
-          cap: true,
-          pwatt: 0.71,
-        },
-      ],
+      owner: SEED_USER.userId,
+      item: DEMO_IDS.STORY_1,
+      dwell: 'long',
+      source: true,
+      context: true,
+      branch: 'moderate',
+      returns: 'few',
     },
     {
-      userId: U(20), // admin
-      entries: [
-        {
-          item: S(22),
-          dwell: 'long',
-          source: true,
-          context: true,
-          branch: 'moderate',
-          returns: 'few',
-          cap: false,
-          pwatt: 0.66,
-        },
-        {
-          item: S(11),
-          dwell: 'medium',
-          source: true,
-          context: true,
-          branch: 'shallow',
-          returns: 'none',
-          cap: false,
-          pwatt: 0.48,
-        },
-        {
-          item: S(19),
-          dwell: 'short',
-          source: false,
-          context: true,
-          branch: 'none',
-          returns: 'none',
-          cap: false,
-          anti: ['coordinated_burst_placeholder_dampening'],
-          pwatt: 0.21,
-        },
-      ],
+      owner: SEED_USER.userId,
+      item: S(9),
+      dwell: 'medium',
+      source: true,
+      context: false,
+      branch: 'shallow',
+      returns: 'none',
     },
     {
-      userId: U(21), // steward
-      entries: [
-        {
-          item: S(19),
-          dwell: 'extended',
-          source: false,
-          context: true,
-          branch: 'deep',
-          returns: 'several',
-          cap: true,
-          anti: ['harassment_cascade_review'],
-          pwatt: 0.18,
-        },
-        {
-          item: S(13),
-          dwell: 'long',
-          source: true,
-          context: true,
-          branch: 'moderate',
-          returns: 'few',
-          cap: false,
-          pwatt: 0.64,
-        },
-        {
-          item: S(4),
-          dwell: 'medium',
-          source: true,
-          context: false,
-          branch: 'shallow',
-          returns: 'none',
-          cap: false,
-          pwatt: 0.4,
-        },
-      ],
+      owner: SEED_USER.userId,
+      item: S(2),
+      dwell: 'extended',
+      source: false,
+      context: true,
+      branch: 'deep',
+      returns: 'several',
     },
     {
-      userId: U(22), // expert
-      entries: [
-        {
-          item: S(22),
-          dwell: 'extended',
-          source: true,
-          context: true,
-          branch: 'deep',
-          returns: 'few',
-          cap: false,
-          pwatt: 0.69,
-        },
-        {
-          item: S(13),
-          dwell: 'long',
-          source: true,
-          context: true,
-          branch: 'moderate',
-          returns: 'several',
-          cap: false,
-          pwatt: 0.6,
-        },
-        {
-          item: S(10),
-          dwell: 'medium',
-          source: false,
-          context: true,
-          branch: 'moderate',
-          returns: 'few',
-          cap: false,
-          pwatt: 0.41,
-        },
-      ],
+      owner: U(20),
+      item: S(22),
+      dwell: 'long',
+      source: true,
+      context: true,
+      branch: 'moderate',
+      returns: 'few',
+    },
+    {
+      owner: U(20),
+      item: S(11),
+      dwell: 'medium',
+      source: true,
+      context: true,
+      branch: 'shallow',
+      returns: 'none',
+    },
+    {
+      owner: U(20),
+      item: S(19),
+      dwell: 'short',
+      source: false,
+      context: true,
+      branch: 'none',
+      returns: 'none',
+    },
+    {
+      owner: U(21),
+      item: S(13),
+      dwell: 'long',
+      source: true,
+      context: true,
+      branch: 'moderate',
+      returns: 'few',
+    },
+    {
+      owner: U(21),
+      item: S(4),
+      dwell: 'medium',
+      source: true,
+      context: false,
+      branch: 'shallow',
+      returns: 'none',
+    },
+    {
+      owner: U(21),
+      item: S(8),
+      dwell: 'glance',
+      source: false,
+      context: false,
+      branch: 'none',
+      returns: 'none',
+    },
+    {
+      owner: U(22),
+      item: S(22),
+      dwell: 'extended',
+      source: true,
+      context: true,
+      branch: 'deep',
+      returns: 'few',
+    },
+    {
+      owner: U(22),
+      item: S(13),
+      dwell: 'long',
+      source: true,
+      context: true,
+      branch: 'moderate',
+      returns: 'several',
+    },
+    {
+      owner: U(22),
+      item: S(10),
+      dwell: 'medium',
+      source: false,
+      context: true,
+      branch: 'moderate',
+      returns: 'few',
     },
   ];
-  const ledgerRows: SignalLedgerRecord[] = [];
-  let entryN = 0;
-  for (const owner of owners) {
-    for (const sig of owner.entries) {
-      entryN += 1;
-      ledgerRows.push({
-        entryId: `5f5eb000-0000-4000-8000-${String(entryN).padStart(12, '0')}`,
-        ownerUserId: owner.userId,
-        itemId: sig.item,
-        storyTitle: await titleOf(sig.item),
-        windowStart: window.start,
-        windowSize: '1h',
-        signals: {
-          active_dwell_bucket: sig.dwell,
-          source_opened: sig.source,
-          context_opened: sig.context,
-          branch_depth_bucket: sig.branch,
-          return_visit_count_bucket: sig.returns,
-          cap_reached: sig.cap,
+  const rows: NewStoredEvent[] = attention.map((a) => {
+    const event = attentionAggregateEventSchema.parse({
+      event_id: randomUUID(),
+      event_type: 'attention.aggregate',
+      timestamp: at,
+      schema_version: '1',
+      nonce: randomUUID(),
+      user_id: a.owner,
+      privacy_level: 'standard',
+      session_bucket: sessionBucket,
+      items: [
+        {
+          story_id: a.item,
+          active_dwell_bucket: a.dwell,
+          source_opened: a.source,
+          context_opened: a.context,
+          branch_depth_bucket: a.branch,
+          return_visit_count_bucket: a.returns,
         },
-        antiSignals: sig.anti ?? [],
-        pwattScore: sig.pwatt,
-        summary: 'Bounded active attention was counted for this story — never an endorsement.',
-        recordedAt: new Date(nowMs - entryN * 60_000).toISOString(),
-        purgeAfter,
-      });
-    }
-  }
-  await events.ledgerStore.upsertMany(ledgerRows);
+      ],
+      privacy_classification: 'aggregated',
+      retention_tier: 'attention_aggregated',
+    });
+    return {
+      eventId: event.event_id,
+      eventType: 'attention.aggregate',
+      topic: 'attention.aggregate',
+      timestamp: event.timestamp,
+      privacyClassification: 'aggregated',
+      retentionTier: 'attention_aggregated',
+      payload: event as unknown as Record<string, unknown>,
+      ownerUserId: a.owner,
+      purgeAfter: null,
+    };
+  });
+  await events.eventStore.insertMany(rows);
+  await runPwattWindow(events, identity, hourStart, '1h');
 }

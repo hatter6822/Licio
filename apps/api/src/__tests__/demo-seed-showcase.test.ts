@@ -11,7 +11,12 @@ import type { RatingLabelKind } from '@licio/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { userMayPostTopLevel } from '../forum/rooms.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
-import { DEV_ACCOUNTS, SEED_USER, seedForumDemoData, seedShadowSignals } from '../lib/demo-seed.js';
+import {
+  DEV_ACCOUNTS,
+  SEED_USER,
+  seedForumDemoData,
+  seedOperationalSignals,
+} from '../lib/demo-seed.js';
 import { serveFeed } from '../ranking/service.js';
 import { freshRankingServices, type RankingFixture } from './ranking-helpers.js';
 
@@ -23,7 +28,7 @@ let fx: RankingFixture;
 beforeEach(async () => {
   fx = freshRankingServices();
   await seedForumDemoData(fx.forum, fx.ingestion, fx.identity.store);
-  await seedShadowSignals(fx.events, fx.invariants, fx.ingestion);
+  await seedOperationalSignals(fx.events, fx.invariants, fx.identity, fx.ingestion);
 });
 
 /** Page the front-page feed to exhaustion, returning every served item. */
@@ -106,12 +111,19 @@ describe('demo seed — the feed shows every rating label', () => {
     expect(ids.has(S(13)) || ids.has(S(22))).toBe(true);
   });
 
-  it('carries MERI exposure labels (honest source-independence signal)', async () => {
+  it('carries COMPUTED MERI exposure labels (honest source-independence signal)', async () => {
     const items = await fullFrontPage();
     const byId = new Map(items.map((i) => [i.story_id, i]));
+    // The well-sourced stories are MERI-independent on the feed (real batch).
     expect(byId.get(S(1))?.exposure_label).toBe('independent_source');
     expect(byId.get(S(22))?.exposure_label).toBe('independent_source');
-    expect(byId.get(S(5))?.exposure_label).toBe('duplicate_context');
+    // A verbatim repost (S25 ≡ S21) is a DUPLICATE exposure, not a fresh one —
+    // redundancy never inflates exposure (§7.1). Asserted on the COMPUTED MERI
+    // output (the ranking pipeline folds the duplicate into "more on this story").
+    const meri = await fx.events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID);
+    const gains = meri?.scoreVector['marginal_gains'] as Record<string, number>;
+    expect(gains[S(25)] ?? 1).toBeLessThan(gains[S(21)] ?? 1);
+    expect(Object.values(gains).some((g) => g <= 0)).toBe(true);
   });
 
   it('surfaces the coordination-review story as Under Review (descriptive)', async () => {
@@ -123,23 +135,35 @@ describe('demo seed — the feed shows every rating label', () => {
 });
 
 describe('demo seed — SCOI divergence + reading signals', () => {
-  it('stores a SCOI output for the tariff story with divergent lens overlap energy', async () => {
+  it('computes a SCOI output for the tariff story with divergent lens overlap energy', async () => {
     const scoi = await fx.events.invariantStore.latest('SCOI', S(10));
     expect(scoi).not.toBeNull();
-    expect(scoi?.scoreVector['context_state']).toBe('split');
+    // The skeptical vs industry lenses read S10 differently → a NON-coherent
+    // context state computed from their contributions' embeddings.
+    expect(['ambiguous', 'split', 'obstructed', 'weaponized']).toContain(
+      scoi?.scoreVector['context_state'],
+    );
+    expect(scoi?.scoreVector['scoi'] as number).toBeGreaterThan(0);
     const overlaps = scoi?.scoreVector['per_overlap_energy'] as Record<string, number>;
     expect(Object.values(overlaps).some((energy) => energy > 0)).toBe(true);
     expect(scoi?.reasonCodes).not.toContain('INSUFFICIENT_COVERAGE');
+    // It is a real computation, never the degraded fallback envelope.
+    expect(scoi?.fallbackUsed).toBe(false);
   });
 
-  it('stores a feed-level MERI output the exposure reads resolve against', async () => {
+  it('computes a feed-level MERI output the exposure reads resolve against', async () => {
     const meri = await fx.events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID);
     expect(meri).not.toBeNull();
+    // A real computation (never the fallback): the well-sourced story is
+    // independent. Coverage is honestly limited because most demo stories are
+    // briefs/questions without full source/claim/evidence metadata — graceful
+    // degradation, not a failure (the exposure signal is still computed).
+    expect(meri?.fallbackUsed).toBe(false);
     const gains = meri?.scoreVector['marginal_gains'] as Record<string, number>;
     expect(gains[S(1)]).toBeGreaterThanOrEqual(1);
   });
 
-  it('pre-populates the owner-scoped Signal Ledger for every test account', async () => {
+  it('produces the owner-scoped Signal Ledger via the REAL PWAtt scorer', async () => {
     for (const account of [...DEV_ACCOUNTS]) {
       const page = await fx.events.ledgerStore.listForUser(account.userId, 50);
       expect(page.entries.length).toBeGreaterThan(0);
