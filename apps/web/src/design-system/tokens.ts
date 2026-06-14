@@ -324,7 +324,7 @@ export const shadowScale = {
 } as const;
 
 /* -------------------------------------------------------------------------- *
- * Neumorphic "soft UI" shadows + fabric texture (WS-B fabric theme)
+ * Neumorphic "soft UI" shadows (WS-B fabric theme)
  * -------------------------------------------------------------------------- *
  * A paired light highlight (top-left) and dark depth (bottom-right) give every
  * surface a soft, extruded — or, when inset, recessed — feel. The two SOURCE
@@ -351,26 +351,6 @@ export const neumorphicInk = {
   light: { highlight: 'rgb(255 255 255 / 0.55)', shadow: 'rgb(106 90 76 / 0.20)' },
   dark: { highlight: 'rgb(141 133 121 / 0.38)', shadow: 'rgb(0 0 0 / 0.55)' },
 } as const satisfies Record<'light' | 'dark', NeumorphicInk>;
-
-/**
- * Theme-aware fabric-weave tints. Each woven thread is a darker shaded edge
- * (`thread`) next to a lit edge (`sheen`); the `--licio-fabric-weave` recipe
- * (styles/app.css) lays warp and weft threads at coprime periods with a slight
- * angle drift and overlays two soft diagonal "slub" clouds, so the combined
- * texture reads as organic hand-woven linen rather than a mechanical grid. Both
- * tints are very low-contrast (and flattened entirely under prefers-contrast /
- * forced colors), so they never touch text legibility.
- */
-export const fabricThread = {
-  light: 'rgb(124 102 70 / 0.10)',
-  dark: 'rgb(206 190 158 / 0.055)',
-} as const satisfies Record<'light' | 'dark', string>;
-
-/** The lit edge of each woven thread (paired with {@link fabricThread}). */
-export const fabricSheen = {
-  light: 'rgb(255 251 243 / 0.32)',
-  dark: 'rgb(172 162 142 / 0.05)',
-} as const satisfies Record<'light' | 'dark', string>;
 
 /**
  * The maximum distance (px) a RAISED neumorphic shadow may extend beyond its
