@@ -111,7 +111,7 @@ import {
   setInvariantServices,
 } from './invariants/services.js';
 import { demoStory } from './lib/demo-data.js';
-import { seedForumDemoData } from './lib/demo-seed.js';
+import { seedForumDemoData, seedShadowSignals } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
 import { loadPwattRuntimeConfig } from './pwatt/config.js';
 import {
@@ -421,6 +421,11 @@ setIdentityServices(identityServices);
 if (env.NODE_ENV !== 'production') {
   try {
     await seedForumDemoData(forumServices, ingestionServices, identityServices.store);
+    // Shadow invariant outputs + reading-signal ledger so the invariant
+    // surfaces and the Signal Ledger render on first boot (read through the
+    // production read paths; the hourly batch/PWAtt scorer recompute from the
+    // same shaped content).
+    await seedShadowSignals(eventServices, invariantServices, ingestionServices);
     logger.info('demo data seeded (development)');
   } catch (err) {
     logger.warn({ err }, 'demo seed skipped (non-fatal)');

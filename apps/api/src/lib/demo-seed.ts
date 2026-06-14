@@ -12,13 +12,20 @@ import {
   DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
   defaultPersonalizationSettings,
   defaultPrivacySettings,
+  type EvidenceCardType,
   emptyReputationSummary,
   type LocationScope,
+  type StoryLifecycleState,
   type SubmissionMetadata,
 } from '@licio/shared';
+import type { EventPipelineServices } from '../events/services.js';
+import type { InvariantOutputRecord, SignalLedgerRecord } from '../events/stores.js';
 import type { ForumServices } from '../forum/services.js';
+import type { Role } from '../identity/rbac.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
+import type { InvariantPlatformServices } from '../invariants/services.js';
+import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
 import { DEMO_IDS } from './demo-data.js';
 
 export const SEED_USER = {
@@ -41,9 +48,58 @@ const T = (n: number): string => `5f5e2000-0000-4000-8000-${String(n).padStart(1
 const LENS = (n: number): string => `5f5e5000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const SUM = (n: number): string => `5f5e7000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const SUB = (n: number): string => `5f5e8000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const CLAIM = (n: number): string => `5f5e9000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const EVID = (n: number): string => `5f5ea000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const TOPIC = (n: number): string => `5f5e6000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
+
+/**
+ * The named DEVELOPMENT test accounts (NEVER seeded in production — the seed is
+ * guarded by NODE_ENV in index.ts). Each is a real, login-able account: Licio is
+ * passwordless, so a tester signs in with the email below and reads the
+ * one-time code from the `pnpm dev` API log (`auth.mail.dev_code`). The roles
+ * give each account a distinct slice of the product to exercise. Credentials and
+ * the sign-in walkthrough live in DEVELOPMENT.md.
+ *
+ * `expert` carries no platform role: a domain "expert" today is a ROOM steward
+ * of an expert-gated room (the `experts_and_stewards` posting bar is satisfied
+ * by room/platform stewards — per-user expert-lens assignment is the WS-J seam),
+ * so this account is made a steward of the Open Science room below.
+ */
+export const DEV_ACCOUNTS: ReadonlyArray<{
+  userId: string;
+  handle: string;
+  displayName: string;
+  email: string;
+  roles: readonly Role[];
+  purpose: string;
+}> = [
+  {
+    userId: U(20),
+    handle: 'licio-admin',
+    displayName: 'Ada Admin',
+    email: 'admin@licio.test',
+    roles: ['user', 'admin'],
+    purpose: 'Platform administrator — full RBAC, every steward/admin surface.',
+  },
+  {
+    userId: U(21),
+    handle: 'licio-steward',
+    displayName: 'Sam Steward',
+    email: 'steward@licio.test',
+    roles: ['user', 'steward'],
+    purpose: 'Platform steward — moderation queues, governance, ranking/audit reads.',
+  },
+  {
+    userId: U(22),
+    handle: 'licio-expert',
+    displayName: 'Dr. Erin Expert',
+    email: 'expert@licio.test',
+    roles: ['user'],
+    purpose: 'Domain expert — steward of the expert-gated Open Science room.',
+  },
+] as const;
 
 /** Idempotent: re-running against existing data is a no-op. */
 export async function seedForumDemoData(
@@ -53,11 +109,13 @@ export async function seedForumDemoData(
 ): Promise<void> {
   if (await forum.rooms.getById(DEMO_IDS.ROOM_1)) return; // already seeded
 
-  // The demo author (a real user row so author handles resolve). Backdated ~90
-  // days so it is a normal aged account that clears the submission account-age
-  // gate (WS-F prechecks) — the demo/E2E user can submit content immediately.
+  // Every demo account is backdated ~90 days so it is a normal aged account that
+  // clears the submission account-age gate (WS-F prechecks) — content can be
+  // submitted immediately.
+  const backdated = forum.now() - NINETY_DAYS_MS;
+
+  // The demo author (a real user row so author handles resolve).
   if (!(await identityStore.getUser(SEED_USER.userId))) {
-    const ninetyDaysAgo = forum.now() - 90 * 24 * 60 * 60 * 1000;
     await identityStore.createUser(
       {
         userId: SEED_USER.userId,
@@ -72,8 +130,36 @@ export async function seedForumDemoData(
         reputationSummary: emptyReputationSummary(),
         roles: ['user'],
       },
-      ninetyDaysAgo,
+      backdated,
     );
+  }
+
+  // The named DEVELOPMENT test accounts (admin / steward / expert). Each is a
+  // real, login-able passwordless account with a verified email so the
+  // email-OTP sign-in (code surfaced to the dev API log) works immediately and
+  // verified-only surfaces are reachable. See DEVELOPMENT.md.
+  for (const account of DEV_ACCOUNTS) {
+    if (await identityStore.getUser(account.userId)) continue;
+    await identityStore.createUser(
+      {
+        userId: account.userId,
+        handle: account.handle,
+        displayName: account.displayName,
+        email: account.email,
+        accountState: 'active',
+        locale: 'en',
+        ageBand: 'adult',
+        privacySettings: defaultPrivacySettings(),
+        personalizationSettings: defaultPersonalizationSettings(),
+        reputationSummary: emptyReputationSummary(),
+        roles: [...account.roles],
+      },
+      backdated,
+    );
+    await identityStore.setAuth(account.userId, {
+      emailVerified: true,
+      emailVerifiedAt: new Date(backdated).toISOString(),
+    });
   }
 
   await forum.rooms.insert({
@@ -154,6 +240,8 @@ export async function seedForumDemoData(
       threadId: DEMO_IDS.THREAD_1,
       roomId: DEMO_IDS.ROOM_1,
       visibility: 'public' as const,
+      // Deepening + seeded evidence cards + MERI independence ⇒ "Well-Sourced".
+      lifecycle: 'deepening' as StoryLifecycleState,
       title: 'Regional water board publishes the full testing dataset',
       body: 'The board released raw and processed results alongside the sampling methodology.',
     },
@@ -162,6 +250,8 @@ export async function seedForumDemoData(
       threadId: DEMO_IDS.THREAD_2,
       roomId: DEMO_IDS.ROOM_2,
       visibility: 'public' as const,
+      // Two communities reconciling divergent readings ⇒ "Bridge Active".
+      lifecycle: 'bridging' as StoryLifecycleState,
       title: 'Two neighbourhoods read the same zoning proposal very differently',
       body: 'The proposal text is identical, but two rooms summarise its effects differently.',
     },
@@ -171,6 +261,8 @@ export async function seedForumDemoData(
       threadId: DEMO_IDS.THREAD_3,
       roomId: DEMO_IDS.ROOM_3,
       visibility: 'room_only' as const,
+      // A clarifying question awaiting evidence ⇒ "Needs Context".
+      lifecycle: 'context_needed' as StoryLifecycleState,
       title: 'Claim about the new transit timetable is missing a key caveat',
       body: 'The timetable claim omits a service-frequency caveat.',
     },
@@ -194,7 +286,7 @@ export async function seedForumDemoData(
         topicIds: ['5f5e6000-0000-4000-8000-000000000001'],
         locationScope: null,
         sensitivityLabels: [],
-        lifecycleState: 'gathering_attention',
+        lifecycleState: story.lifecycle,
         submissionType: 'original_brief',
         submissionMetadata: { submission_type: 'original_brief', body: story.body },
         excerpt: story.body,
@@ -293,7 +385,6 @@ export async function seedForumDemoData(
   // every surface (feeds, room shells, threads, ranking, visibility containment)
   // renders real end-to-end data. Idempotency is the top-of-function guard.
   // -------------------------------------------------------------------------
-  const backdated = forum.now() - NINETY_DAYS_MS;
   const nowIso = new Date(forum.now()).toISOString();
   const demo = SEED_USER.userId;
   const [maya, theo, lena, raj, samd, nadia] = [U(2), U(3), U(4), U(5), U(6), U(7)] as const;
@@ -475,6 +566,14 @@ export async function seedForumDemoData(
     role: 'community_steward',
     assignedAt: nowIso,
   });
+  // The DEVELOPMENT "expert" account stewards the expert-gated Open Science room
+  // (R6) so it can post top-level there — the product's current expert model.
+  await forum.rooms.addSteward({
+    roomId: R(6),
+    userId: U(22),
+    role: 'community_steward',
+    assignedAt: nowIso,
+  });
 
   await forum.lenses.insert({
     lensId: LENS(2),
@@ -491,7 +590,12 @@ export async function seedForumDemoData(
     description: 'What the story implies for governance and rule-making.',
   });
 
-  // --- Stories (varied submission types + visibility tiers) -----------------
+  // --- Stories (varied submission types + visibility tiers + lifecycle) -----
+  // The lifecycle state is the BASE of the §5.6 rating label, so varying it
+  // across the corpus is what makes the feed show every label rather than a
+  // monotone "Getting Attention". Live invariant signals (evidence + MERI →
+  // well-sourced, thread safety → under-review) are layered on in
+  // seedShadowSignals below.
   const seedStory = async (spec: {
     n: number;
     roomId: string;
@@ -502,6 +606,7 @@ export async function seedForumDemoData(
     submissionMetadata: SubmissionMetadata;
     excerpt: string;
     topicIds: string[];
+    lifecycle?: StoryLifecycleState;
     canonicalUrl?: string;
     locationScope?: LocationScope;
   }): Promise<void> => {
@@ -521,7 +626,7 @@ export async function seedForumDemoData(
         topicIds: spec.topicIds,
         locationScope: spec.locationScope ?? null,
         sensitivityLabels: [],
-        lifecycleState: 'gathering_attention',
+        lifecycleState: spec.lifecycle ?? 'gathering_attention',
         submissionType: spec.submissionType,
         submissionMetadata: spec.submissionMetadata,
         excerpt: spec.excerpt,
@@ -563,6 +668,7 @@ export async function seedForumDemoData(
 
   await seedStory({
     n: 4,
+    lifecycle: 'deepening',
     roomId: DEMO_IDS.ROOM_1,
     visibility: 'public',
     author: theo,
@@ -578,6 +684,7 @@ export async function seedForumDemoData(
   });
   await seedStory({
     n: 5,
+    lifecycle: 'stable',
     roomId: DEMO_IDS.ROOM_1,
     visibility: 'public',
     author: maya,
@@ -591,6 +698,7 @@ export async function seedForumDemoData(
   });
   await seedStory({
     n: 6,
+    lifecycle: 'context_needed',
     roomId: DEMO_IDS.ROOM_1,
     visibility: 'room_only',
     author: demo,
@@ -620,6 +728,7 @@ export async function seedForumDemoData(
   });
   await seedStory({
     n: 8,
+    lifecycle: 'deepening',
     roomId: DEMO_IDS.ROOM_2,
     visibility: 'public',
     author: raj,
@@ -635,6 +744,7 @@ export async function seedForumDemoData(
   });
   await seedStory({
     n: 9,
+    lifecycle: 'stable',
     roomId: R(4),
     visibility: 'public',
     author: samd,
@@ -648,6 +758,7 @@ export async function seedForumDemoData(
   });
   await seedStory({
     n: 10,
+    lifecycle: 'context_needed',
     roomId: R(4),
     visibility: 'public',
     author: theo,
@@ -662,6 +773,7 @@ export async function seedForumDemoData(
   });
   await seedStory({
     n: 11,
+    lifecycle: 'stable',
     roomId: R(5),
     visibility: 'public',
     author: raj,
@@ -677,6 +789,7 @@ export async function seedForumDemoData(
   });
   await seedStory({
     n: 12,
+    lifecycle: 'deepening',
     roomId: R(5),
     visibility: 'public',
     author: nadia,
@@ -690,6 +803,7 @@ export async function seedForumDemoData(
   });
   await seedStory({
     n: 13,
+    lifecycle: 'deepening',
     roomId: R(6),
     visibility: 'public',
     author: nadia,
@@ -720,6 +834,7 @@ export async function seedForumDemoData(
   });
   await seedStory({
     n: 15,
+    lifecycle: 'deepening',
     roomId: R(8),
     visibility: 'room_only',
     author: theo,
@@ -762,6 +877,7 @@ export async function seedForumDemoData(
   });
   await seedStory({
     n: 18,
+    lifecycle: 'deepening',
     roomId: R(9),
     visibility: 'room_only',
     author: demo,
@@ -773,6 +889,219 @@ export async function seedForumDemoData(
     excerpt: 'A members-only variance summary in the Budget Review group.',
     topicIds: [topics.elections],
   });
+
+  // --- Stories authored by the DEVELOPMENT test accounts ---------------------
+  // These cover the rating-label / lifecycle states the corpus above does not,
+  // and give the admin/steward/expert accounts authored content to test with.
+  const [admin, steward, expert] = [U(20), U(21), U(22)] as const;
+  // S19 — flagged for coordination review (its thread is placed under_review
+  // below) ⇒ "Under Review". Authored by the steward who would triage it.
+  await seedStory({
+    n: 19,
+    lifecycle: 'deepening',
+    roomId: DEMO_IDS.ROOM_1,
+    visibility: 'public',
+    author: steward,
+    title: 'Sudden burst of near-identical posts about the clinic-closure rumour',
+    submissionType: 'original_brief',
+    submissionMetadata: brief(
+      'A cluster of accounts posted the same unsourced claim within minutes. Flagged for a coordination check before it spreads.',
+    ),
+    excerpt:
+      'Descriptive only: a coordination signal is being reviewed — not a verdict on the content.',
+    topicIds: [topics.water],
+  });
+  // S20 — an older, resolved explainer ⇒ "Resolved Context" (archived).
+  await seedStory({
+    n: 20,
+    lifecycle: 'archived',
+    roomId: R(5),
+    visibility: 'public',
+    author: admin,
+    title: 'How we counted the recall petition signatures (final write-up)',
+    submissionType: 'original_brief',
+    submissionMetadata: brief(
+      'The verification method, the rejection reasons, and the certified total. Closed with a high-quality synthesis.',
+    ),
+    excerpt: 'A previously ambiguous process, now resolved with a cited synthesis.',
+    topicIds: [topics.elections],
+  });
+  // S21 — brand-new submission ⇒ "Getting Attention" (submitted).
+  await seedStory({
+    n: 21,
+    lifecycle: 'submitted',
+    roomId: R(4),
+    visibility: 'public',
+    author: admin,
+    title: 'New filing: utility requests a winter rate adjustment',
+    submissionType: 'link',
+    submissionMetadata: link(
+      'https://example.org/energy/winter-rate-filing',
+      'The full filing as submitted to the regulator.',
+    ),
+    canonicalUrl: 'https://example.org/energy/winter-rate-filing',
+    excerpt: 'Just submitted; reading is beginning. No interpretation has formed yet.',
+    topicIds: [topics.climate],
+  });
+  // S22 — an expert-room post with independent evidence ⇒ "Well-Sourced"
+  // (evidence cards seeded below + a MERI independence signal in seedShadowSignals).
+  await seedStory({
+    n: 22,
+    lifecycle: 'deepening',
+    roomId: R(6),
+    visibility: 'public',
+    author: expert,
+    title: 'Three independent labs report the same aquifer drawdown',
+    submissionType: 'link',
+    submissionMetadata: link(
+      'https://example.org/science/aquifer-drawdown-multilab',
+      'Three independent measurement series, each with open data.',
+    ),
+    canonicalUrl: 'https://example.org/science/aquifer-drawdown-multilab',
+    excerpt: 'Independent primary sources converge on the same drawdown estimate.',
+    topicIds: [topics.science],
+  });
+  // S23 — an expert's open question ⇒ "Getting Attention".
+  await seedStory({
+    n: 23,
+    roomId: R(4),
+    visibility: 'public',
+    author: expert,
+    title: 'What measurement would distinguish weather noise from a real demand shift?',
+    submissionType: 'question',
+    submissionMetadata: question(
+      'Looking for a falsifiable indicator the room could agree on in advance.',
+      'Methodology question, posted before the next data release.',
+    ),
+    excerpt: 'An open methodological question inviting evidence.',
+    topicIds: [topics.climate],
+  });
+  // S24 — a steward's local update ⇒ "Deepening".
+  await seedStory({
+    n: 24,
+    lifecycle: 'deepening',
+    roomId: R(7),
+    visibility: 'public',
+    author: steward,
+    title: 'Harbor ferry adds a second morning sailing',
+    submissionType: 'local_update',
+    submissionMetadata: localUpdate(
+      { type: 'city', value: 'Harbor District' },
+      'Source: the port authority service bulletin.',
+    ),
+    locationScope: { type: 'city', value: 'Harbor District' },
+    excerpt: 'Schedule change with the bulletin attached; the room is adding context.',
+    topicIds: [topics.local],
+  });
+
+  // Thread safety states (descriptive postures, never sanctions): S19 is under
+  // coordination review (⇒ "Under Review"); S7 carries an elevated signal
+  // (⇒ a "caution" badge while keeping its lifecycle label).
+  await ingestion.stories.updateThread(T(19), { safetyState: 'under_review' });
+  await ingestion.stories.updateThread(T(7), { safetyState: 'elevated' });
+
+  // A second lens on the Climate room so the tariff story (S10) has TWO lenses
+  // whose readings diverge — the SCOI "Where interpretations differ" showcase
+  // (the divergent energy itself is the seeded SCOI output in seedShadowSignals).
+  await forum.lenses.insert({
+    lensId: LENS(4),
+    roomId: R(4),
+    name: 'Industry lens',
+    lensType: 'policy',
+    description: 'How the story reads for the firms the tariff regulates.',
+  });
+
+  // Evidence cards make the "Well-Sourced" stories genuinely well-sourced: a
+  // claim per story with ≥2 independent evidence cards (counted by the ranking
+  // evidence path through claims → evidence). Combined with a MERI independence
+  // signal (seedShadowSignals) the §5.6 cascade promotes them to Well-Sourced.
+  const seedEvidence = async (
+    storyId: string,
+    claimN: number,
+    claimText: string,
+    cards: ReadonlyArray<{ type: EvidenceCardType; url: string; note: string }>,
+  ): Promise<void> => {
+    const claim = await ingestion.claims.insert({
+      claimId: CLAIM(claimN),
+      storyId,
+      canonicalText: claimText,
+      normalizedTextHash: `demo-claim-${claimN}`,
+      claimStatus: 'candidate',
+      firstSeenStoryId: storyId,
+      independenceGroupId: null,
+      createdBy: null,
+      extractionSource: 'steward',
+      extractionConfidence: null,
+      modelVersion: null,
+    });
+    for (const [i, card] of cards.entries()) {
+      await ingestion.evidence.insert({
+        evidenceId: EVID(claimN * 10 + i),
+        claimId: claim.claimId,
+        sourceId: null,
+        contributionId: null,
+        submittedBy: SEED_USER.userId,
+        evidenceType: card.type,
+        relationshipType: 'supports',
+        citationUrlOrRef: card.url,
+        relevanceNote: card.note,
+        verificationState: 'verified',
+        independenceGroupId: `demo-indep-${claimN}-${i}`,
+        storyId,
+      });
+    }
+  };
+  await seedEvidence(DEMO_IDS.STORY_1, 1, 'Nitrate levels are within the regional legal limit.', [
+    {
+      type: 'dataset',
+      url: 'https://example.org/water/raw-results.csv',
+      note: 'The raw measurement series.',
+    },
+    {
+      type: 'report',
+      url: 'https://example.org/water/independent-lab',
+      note: 'An independent lab’s corroboration.',
+    },
+    {
+      type: 'primary_source',
+      url: 'https://example.org/water/methodology',
+      note: 'The sampling methodology.',
+    },
+  ]);
+  await seedEvidence(
+    S(13),
+    2,
+    'The soil-carbon estimate replicates within its confidence interval.',
+    [
+      {
+        type: 'primary_source',
+        url: 'https://example.org/science/soil-carbon-replication#data',
+        note: 'Open replication data.',
+      },
+      {
+        type: 'expert_reference',
+        url: 'https://example.org/science/soil-carbon-prereg',
+        note: 'The pre-registration.',
+      },
+    ],
+  );
+  await seedEvidence(S(22), 3, 'Three independent labs report the same aquifer drawdown.', [
+    {
+      type: 'dataset',
+      url: 'https://example.org/science/lab-a-series.csv',
+      note: 'Lab A’s series.',
+    },
+    {
+      type: 'dataset',
+      url: 'https://example.org/science/lab-b-series.csv',
+      note: 'Lab B’s series.',
+    },
+    {
+      type: 'dataset',
+      url: 'https://example.org/science/lab-c-series.csv',
+      note: 'Lab C’s series.',
+    },
+  ]);
 
   // --- Threads with several nested, multi-author comments --------------------
   const at = <X>(arr: readonly X[], i: number): X => {
@@ -940,7 +1269,9 @@ export async function seedForumDemoData(
     },
   ]);
 
-  // Tariff question (public climate): a couple of cited answers.
+  // Tariff question (public climate): a couple of cited answers, PLUS two
+  // lens-tagged readings that genuinely diverge (skeptical vs industry) — the
+  // raw material for the SCOI "Where interpretations differ" drawer on S10.
   await tree(T(10), 160, [
     {
       type: 'answer',
@@ -954,6 +1285,18 @@ export async function seedForumDemoData(
       parent: 0,
       body: 'A neighboring market saw intensity fall WITHOUT a tariff — confounding the read.',
       metadata: { relevance_explanation: 'Suggests other factors may drive the change.' },
+    },
+    {
+      type: 'local_context',
+      author: maya,
+      body: 'Skeptical read: the early drop is within normal year-to-year noise; the tariff has not been shown to do anything yet.',
+      metadata: { lens_id: LENS(2), scope: 'Skeptical read' },
+    },
+    {
+      type: 'local_context',
+      author: raj,
+      body: 'Industry read: the tariff is already raising input costs and forcing real operational changes on the ground.',
+      metadata: { lens_id: LENS(4), scope: 'Industry lens' },
     },
   ]);
 
@@ -1055,6 +1398,54 @@ export async function seedForumDemoData(
       body: 'Two requests are overdue; I will escalate both this week.',
     },
   ]);
+  // The DEVELOPMENT-account stories get discussion too.
+  await tree(T(19), 270, [
+    {
+      type: 'meta_discussion',
+      author: steward,
+      body: 'Holding this for a coordination check: same wording, many new accounts, all within a few minutes. No action taken yet.',
+    },
+    {
+      type: 'question',
+      author: maya,
+      parent: 0,
+      body: 'Is there an original source for the closure claim, or only the reposts?',
+    },
+    {
+      type: 'answer',
+      author: steward,
+      parent: 1,
+      body: 'No primary source so far. If one appears the review clears; if not, the burst pattern stands on its own.',
+    },
+  ]);
+  await tree(T(22), 280, [
+    {
+      type: 'evidence',
+      author: expert,
+      body: 'Each lab measured independently with its own instrumentation; the three series overlap within error.',
+      citations: [{ url: 'https://example.org/science/aquifer-drawdown-multilab#methods' }],
+      metadata: { evidence_type: 'dataset' },
+    },
+    {
+      type: 'answer',
+      author: samd,
+      parent: 0,
+      body: 'Independent replication across labs is exactly what raises confidence here.',
+    },
+  ]);
+  await tree(T(24), 290, [
+    {
+      type: 'question',
+      author: lena,
+      body: 'Does the second sailing run on weekends too, or weekdays only?',
+    },
+    {
+      type: 'answer',
+      author: steward,
+      parent: 0,
+      body: 'Weekdays only for now; the bulletin says weekend service is under review for spring.',
+    },
+  ]);
 
   // A couple of community syntheses on the richer new threads.
   const briefSummary = await forum.summaries.insert({
@@ -1084,4 +1475,313 @@ export async function seedForumDemoData(
     approvedBy: null,
   });
   await ingestion.stories.updateThread(T(11), { currentSummaryId: turnoutSummary.summaryId });
+
+  // The archived recall-petition write-up (S20) carries the high-quality
+  // synthesis that makes "Resolved Context" honest.
+  const recallSummary = await forum.summaries.insert({
+    summaryId: SUM(4),
+    threadId: T(20),
+    layer: 'community_synthesis',
+    body: 'Signatures were verified against the voter file; duplicates and out-of-district entries were rejected with reasons; the certified total cleared the threshold.',
+    citedBranchIds: [],
+    citedEvidenceIds: [],
+    unresolvedUncertainty: null,
+    minorityViewsNote: null,
+    authoredBy: admin,
+    approvedBy: null,
+  });
+  await ingestion.stories.updateThread(T(20), { currentSummaryId: recallSummary.summaryId });
+}
+
+// ---------------------------------------------------------------------------
+// Shadow invariant signals + reading signals (DEVELOPMENT only).
+//
+// The reader-facing invariant surfaces (feed exposure labels, the §5.6
+// Well-Sourced label, the independent-sources drawer, the SCOI "Where
+// interpretations differ" drawer, the per-story safety posture) read STORED
+// shadow outputs through exactly the production read paths. This seeds those
+// stored outputs — and the owner-scoped Signal Ledger — with values consistent
+// with the content above, so a tester sees the invariants behaving the moment
+// the dev server boots. The hourly batch + PWAtt scorer also run on the dev box
+// and recompute from the shaped content, so these seeds are a head start, not a
+// substitute. NEVER runs in production (guarded by NODE_ENV in index.ts).
+// ---------------------------------------------------------------------------
+export async function seedShadowSignals(
+  events: EventPipelineServices,
+  invariants: InvariantPlatformServices,
+  ingestion: IngestionServices,
+): Promise<void> {
+  // Idempotent: a prior boot already seeded the MERI feed output.
+  if (await events.invariantStore.latest('MERI', GLOBAL_FEED_TARGET_ID)) return;
+
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const hourStart = new Date(Math.floor(nowMs / 3_600_000) * 3_600_000 - 3_600_000);
+  const window = { start: hourStart.toISOString(), end: new Date(nowMs).toISOString() };
+  const purgeAfter = new Date(nowMs + 30 * 24 * 3_600_000).toISOString();
+  const envelope = {
+    timeWindow: window,
+    explanationSummary: null,
+    confidence: 0.9,
+    coverage: 1,
+    reasonCodes: [] as string[],
+    fallbackUsed: false,
+    versionMetadata: null,
+    shadowMode: true,
+    createdAt: nowIso,
+  };
+
+  // MERI exposure (SPEC §7.6): one feed-level output whose `marginal_gains` map
+  // each story to a redundancy class. ≥1 ⇒ independent_source, ≥0.5 ⇒ new_angle,
+  // >0 ⇒ same_claim_new_evidence, 0 ⇒ duplicate_context. The Well-Sourced
+  // stories (S1/S13/S22, which also carry ≥2 evidence cards) are independent.
+  const meriOutput: InvariantOutputRecord = {
+    invariantType: 'MERI',
+    targetType: 'feed',
+    targetId: GLOBAL_FEED_TARGET_ID,
+    version: invariants.meri.getCard().version,
+    scoreVector: {
+      meri: 0.78,
+      approximation: false,
+      marginal_gains: {
+        [DEMO_IDS.STORY_1]: 1.5, // independent_source → Well-Sourced
+        [S(13)]: 1.2, // independent_source → Well-Sourced
+        [S(22)]: 2, // independent_source → Well-Sourced
+        [S(9)]: 0.7, // new_angle
+        [S(11)]: 0.6, // new_angle
+        [S(12)]: 0.55, // new_angle
+        [S(4)]: 0.3, // same_claim_new_evidence
+        [S(8)]: 0.35, // same_claim_new_evidence
+        [S(5)]: 0, // duplicate_context
+      },
+      per_class_bounds: { near_duplicate: 1, shared_source_lineage: 2, shared_primary_evidence: 2 },
+      group_ids: [DEMO_IDS.STORY_1, S(13), S(22), S(9), S(11)],
+    },
+    ...envelope,
+  };
+  await events.invariantStore.upsert(meriOutput);
+
+  // SCOI context obstruction (SPEC §10): the tariff story (S10) carries two
+  // lenses (skeptical vs industry, seeded above) whose readings genuinely
+  // diverge — energy above the needs-context threshold, context_state "split".
+  const scoiOutput: InvariantOutputRecord = {
+    invariantType: 'SCOI',
+    targetType: 'story',
+    targetId: S(10),
+    version: invariants.scoi.getCard().version,
+    scoreVector: {
+      scoi: 0.62,
+      normalizer: 4,
+      overlap_count: 1,
+      lens_count: 2,
+      context_state: 'split',
+      per_overlap_energy: { [`${LENS(2)}~${LENS(4)}`]: 2.5 },
+    },
+    ...envelope,
+  };
+  await events.invariantStore.upsert(scoiOutput);
+
+  // MFCI risk (SPEC §8): the coordination-review story (S19) carries a high
+  // per-target risk; the story-detail read surfaces this as "Under Review",
+  // consistent with its thread's under_review posture seeded above.
+  await invariants.mfciRiskStates.set({
+    targetId: S(19),
+    state: 'high',
+    score: 3.4,
+    reason: 'demo_seed_coordination_review',
+    updatedAt: nowIso,
+  });
+
+  // Owner-scoped Signal Ledger (SPEC §22.1, WS-E.2.1d): each test account's
+  // OWN bounded attention record — coarse buckets only, never raw traces, never
+  // another user's. Pre-populated so the surface is non-empty on first sign-in;
+  // the in-browser pipeline adds more as the tester reads.
+  const titleOf = async (storyId: string): Promise<string> =>
+    (await ingestion.stories.getById(storyId))?.title ?? 'A Licio story';
+  type Sig = {
+    item: string;
+    dwell: 'glance' | 'short' | 'medium' | 'long' | 'extended';
+    source: boolean;
+    context: boolean;
+    branch: 'none' | 'shallow' | 'moderate' | 'deep';
+    returns: 'none' | 'few' | 'several';
+    cap: boolean;
+    anti?: string[];
+    pwatt: number;
+  };
+  // Each ledger owner is one of the login-able accounts (the demo author plus
+  // the three named test accounts), so whoever a tester signs in as sees data.
+  const owners: ReadonlyArray<{ userId: string; entries: readonly Sig[] }> = [
+    {
+      userId: SEED_USER.userId,
+      entries: [
+        {
+          item: DEMO_IDS.STORY_1,
+          dwell: 'long',
+          source: true,
+          context: true,
+          branch: 'moderate',
+          returns: 'few',
+          cap: false,
+          pwatt: 0.62,
+        },
+        {
+          item: S(9),
+          dwell: 'medium',
+          source: true,
+          context: false,
+          branch: 'shallow',
+          returns: 'none',
+          cap: false,
+          pwatt: 0.44,
+        },
+        {
+          item: S(2),
+          dwell: 'extended',
+          source: false,
+          context: true,
+          branch: 'deep',
+          returns: 'several',
+          cap: true,
+          pwatt: 0.71,
+        },
+      ],
+    },
+    {
+      userId: U(20), // admin
+      entries: [
+        {
+          item: S(22),
+          dwell: 'long',
+          source: true,
+          context: true,
+          branch: 'moderate',
+          returns: 'few',
+          cap: false,
+          pwatt: 0.66,
+        },
+        {
+          item: S(11),
+          dwell: 'medium',
+          source: true,
+          context: true,
+          branch: 'shallow',
+          returns: 'none',
+          cap: false,
+          pwatt: 0.48,
+        },
+        {
+          item: S(19),
+          dwell: 'short',
+          source: false,
+          context: true,
+          branch: 'none',
+          returns: 'none',
+          cap: false,
+          anti: ['coordinated_burst_placeholder_dampening'],
+          pwatt: 0.21,
+        },
+      ],
+    },
+    {
+      userId: U(21), // steward
+      entries: [
+        {
+          item: S(19),
+          dwell: 'extended',
+          source: false,
+          context: true,
+          branch: 'deep',
+          returns: 'several',
+          cap: true,
+          anti: ['harassment_cascade_review'],
+          pwatt: 0.18,
+        },
+        {
+          item: S(13),
+          dwell: 'long',
+          source: true,
+          context: true,
+          branch: 'moderate',
+          returns: 'few',
+          cap: false,
+          pwatt: 0.64,
+        },
+        {
+          item: S(4),
+          dwell: 'medium',
+          source: true,
+          context: false,
+          branch: 'shallow',
+          returns: 'none',
+          cap: false,
+          pwatt: 0.4,
+        },
+      ],
+    },
+    {
+      userId: U(22), // expert
+      entries: [
+        {
+          item: S(22),
+          dwell: 'extended',
+          source: true,
+          context: true,
+          branch: 'deep',
+          returns: 'few',
+          cap: false,
+          pwatt: 0.69,
+        },
+        {
+          item: S(13),
+          dwell: 'long',
+          source: true,
+          context: true,
+          branch: 'moderate',
+          returns: 'several',
+          cap: false,
+          pwatt: 0.6,
+        },
+        {
+          item: S(10),
+          dwell: 'medium',
+          source: false,
+          context: true,
+          branch: 'moderate',
+          returns: 'few',
+          cap: false,
+          pwatt: 0.41,
+        },
+      ],
+    },
+  ];
+  const ledgerRows: SignalLedgerRecord[] = [];
+  let entryN = 0;
+  for (const owner of owners) {
+    for (const sig of owner.entries) {
+      entryN += 1;
+      ledgerRows.push({
+        entryId: `5f5eb000-0000-4000-8000-${String(entryN).padStart(12, '0')}`,
+        ownerUserId: owner.userId,
+        itemId: sig.item,
+        storyTitle: await titleOf(sig.item),
+        windowStart: window.start,
+        windowSize: '1h',
+        signals: {
+          active_dwell_bucket: sig.dwell,
+          source_opened: sig.source,
+          context_opened: sig.context,
+          branch_depth_bucket: sig.branch,
+          return_visit_count_bucket: sig.returns,
+          cap_reached: sig.cap,
+        },
+        antiSignals: sig.anti ?? [],
+        pwattScore: sig.pwatt,
+        summary: 'Bounded active attention was counted for this story — never an endorsement.',
+        recordedAt: new Date(nowMs - entryN * 60_000).toISOString(),
+        purgeAfter,
+      });
+    }
+  }
+  await events.ledgerStore.upsertMany(ledgerRows);
 }
