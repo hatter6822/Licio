@@ -457,6 +457,13 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
 - **Notification dispatch** for bridge invitations awaits a platform
   dispatch path (`notification.sent` has no in-repo producer); bridge
   routing produces records for steward visibility only.
+- **Development demo:** the dev seed (`lib/demo-seed.ts`) computes SCOI from
+  real lens contributions and surfaces the divergence on the story-page
+  "Where interpretations differ" drawer, but does NOT seed the feed-card
+  SCOI `context_card` (it rides the WS-I ranking feature chain, which the
+  WS-H batch does not feed directly) nor the bridge-attempt records that
+  drive a *computed* "Bridge Active" (the demo uses the `bridging` lifecycle
+  state for that label). Both are demo-corpus gaps, not production gaps.
 - **Calibration contamination hardening:** the nightly MFCI null rebuild
   does not yet exclude windows overlapping coordinated bursts, so a
   sustained attack could gradually lift the cheap path's q99. The exact

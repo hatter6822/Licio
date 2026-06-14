@@ -68,7 +68,7 @@ interfaces.
 | `codes.ts` | Crockford-base32 one-time codes (bias-free), confusable folding |
 | `totp.ts` | RFC 6238 TOTP/HOTP (validated against the official Appendix B vectors), RFC 4648 base32, recovery codes |
 | `auth-methods.ts` | `countAuthMethods`, last-method guard, verified-credential check |
-| `rbac.ts` | role→action policy table, `assertOwns`, 404-over-403 for private resources |
+| `rbac.ts` | role→action policy table (`user`, `expert`, `moderator`, `steward`, `admin`), `assertOwns`, 404-over-403 for private resources. `expert` is least-privilege — identical platform grants to `user`; its one capability (top-level posting in expert-gated rooms) is a forum authorization decided in `userMayPostTopLevel`, never a platform action |
 | `audit.ts` | append-only audit store + context redactor (masks IP/secrets) |
 | `rate-limit-auth.ts` | identity-free progressive limiter: per-account 5→30s, 10→2m, 20→30m lock, plus a global spray backstop — NO per-IP dimension (§19.1) |
 | `sessions.ts` | session lifecycle: hashed tokens, sliding TTL under a 90-day cap, rotation, step-up, `__Host-sid` cookie |

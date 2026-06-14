@@ -51,8 +51,8 @@ cannot be pre-seeded, so the development accounts below sign in with the
 | Role chip | Display name      | Email                 | What it exercises |
 |-----------|-------------------|-----------------------|-------------------|
 | **admin** | Ada Admin         | `admin@licio.test`    | Full RBAC: every steward **and** admin surface. |
-| **steward** | Sam Steward     | `steward@licio.test`  | Moderation queues, governance, ranking/audit reads. |
-| **expert** | Dr. Erin Expert  | `expert@licio.test`   | Domain expert: steward of the expert-gated *Open Science* room (can post where ordinary members cannot). |
+| **steward** | Sam Steward     | `steward@licio.test`  | Moderation review queue, governance, ranking/audit reads. |
+| **expert** | Dr. Erin Expert  | `expert@licio.test`   | The platform `expert` role (least-privilege): may post top-level in expert-gated rooms (e.g. *Open Science*) where ordinary members cannot — but holds no moderation/admin power. |
 
 There is also a plain demo author, `demo@…`-less `licio_demo`, that owns most
 of the seeded content. The three accounts above are the ones to test *roles*
@@ -111,13 +111,15 @@ something to show.
   public room (Open Science — only experts/stewards may post top-level), and
   **private rooms** (Transit Working Group, Newsroom Desk, Budget Review) with
   request-to-join and invite join models.
-- **Stories of every §14.1 submission type** (link, original brief, question,
-  evidence card, local update, native image/video) across the **public** and
-  **`room_only`** visibility tiers.
-- **Threads with nested, multi-author contributions** spanning the eleven-type
-  contribution taxonomy (questions, answers, evidence, corrections,
-  counterexamples, syntheses, local context, direct experience, …), plus
-  community syntheses.
+- **Stories of varied §14.1 submission types** (link, original brief, question,
+  local update, and a **native image post** with a real served PNG) across the
+  **public** and **`room_only`** visibility tiers. (Video posts are best tested
+  live via the composer — sign in and upload one.)
+- **Threads with nested, multi-author contributions** spanning the contribution
+  taxonomy (questions, answers, evidence, corrections, counterexamples,
+  syntheses, local context, direct experience, …), plus community syntheses.
+- **A non-empty moderation review queue** (pending `moderation_concern` items
+  with ratified reason codes) for the steward/admin review surface.
 
 ### 3.2 The seven rating labels
 
@@ -141,25 +143,35 @@ that **all seven** labels appear in the feed:
 
 ### 3.3 Invariant signals you can see
 
-- **MERI exposure labels** ("independent source", "new angle", …) on feed cards
-  and in the **independent-sources drawer** on a story page.
-- **SCOI "Needs Context"** context and the **"Where interpretations differ"**
-  drawer, driven by lens interpretations that genuinely diverge.
+These are **computed**, not hand-authored: the seed runs the real WS-H invariant
+batch over the shaped content (and the real WS-E PWAtt scorer for §3.4), so the
+signals are exactly what production produces.
+
+- **MERI exposure labels** ("independent source", "duplicate context", …) on
+  feed cards and in the **independent-sources drawer**. A verbatim repost is
+  computed as a *duplicate* exposure, and the drawer lists it as a
+  near-duplicate co-member — ten reposts never count as ten (SPEC §7.1).
+- **SCOI divergence** in the **"Where interpretations differ"** drawer, driven
+  by two lenses (skeptical vs industry) whose contributions genuinely read a
+  story differently.
 - **Safety posture** (`caution` / `under review`) surfaced descriptively on the
   affected threads.
 
-These read from stored shadow outputs exactly as production does. The hourly
-invariant batch (and the PWAtt scorer) also run on the dev box, so the signals
-stay live as you interact.
+MERI runs at *honestly limited coverage* here because most demo stories are
+briefs/questions without full source/claim/evidence metadata — that is graceful
+degradation, not a failure: the exposure signal is still computed and the
+well-sourced stories come out independent. The hourly schedulers recompute from
+the same content as you interact.
 
 ### 3.4 Reading signals (your Signal Ledger)
 
 **Profile → Signal Ledger** shows *your own* bounded attention record —
 coarse buckets only (active-dwell bucket, source/context opened, branch depth,
-return-visit bucket), never raw traces, never anyone else's. The seed
-pre-populates ledger entries for the test accounts so the surface is non-empty
-the moment you sign in; as you read stories, the real in-browser pipeline adds
-more.
+return-visit bucket), never raw traces, never anyone else's. The seed feeds
+bucketed attention aggregates for the test accounts through the **real PWAtt
+scorer** (the same engine production uses), so the ledger you see on first
+sign-in was *produced* by the scorer, not written by hand; as you read stories,
+the in-browser pipeline adds more.
 
 ---
 

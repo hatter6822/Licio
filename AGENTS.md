@@ -589,9 +589,11 @@ licio/
 │           │   └── demo-seed.ts         --   rich dev seed: dev test accounts
 │           │                                  (admin/steward/expert), rooms/stories across
 │           │                                  every lifecycle state, evidence + divergent
-│           │                                  lenses, and seedShadowSignals (MERI/SCOI
-│           │                                  outputs, safety, owner-scoped Signal Ledger)
-│           │                                  through the real stores; runs on non-prod boot
+│           │                                  lenses + signatures + a native image post +
+│           │                                  a moderation review queue; seedOperationalSignals
+│           │                                  COMPUTES the invariant outputs (real WS-H batch)
+│           │                                  and PRODUCES the Signal Ledger (real WS-E PWAtt
+│           │                                  scorer); runs on non-prod boot
 │           └── __tests__/               -- route/middleware/service tests (WS-C – WS-G)
 ├── packages/
 │   ├── shared/                  -- shared schemas, types, constants (leaf)
@@ -1267,7 +1269,7 @@ file counts at current state:
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
 | apps/web | ~116 unit + 7 E2E (6 frontend-only + the BFF-in-the-loop spec) | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~87 (incl. WS-D identity + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-Q E2E test-auth route + the dev-seed showcase integration test + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
+| apps/api | ~88 (incl. WS-D identity + the `expert` RBAC role + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-Q E2E test-auth route + the dev-seed showcase integration test + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
 | packages/shared | ~20 (incl. WS-D–WS-H schemas, URL/lifecycle utils, the §5.6 rating-label SSOT, the UGC pipeline + XSS-vector suite) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~4 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |
 | packages/invariants | ~19 (PWAtt/MinHash/freshness + the WS-H invariant mathematics: matroid/fiber/GW/sheaf/holonomy/supporting property suites + the regression harness + the SPEC-purpose oracle suite) | node | `pnpm --filter @licio/invariants test` |
