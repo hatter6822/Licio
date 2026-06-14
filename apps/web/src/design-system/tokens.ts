@@ -22,7 +22,6 @@ export type ColorToken =
   | 'bg-default'
   | 'bg-subtle'
   | 'bg-muted'
-  | 'bg-sunken'
   | 'bg-inverse'
   | 'fg-default'
   | 'fg-muted'
@@ -76,12 +75,6 @@ export const lightColors: ColorPalette = {
   'bg-default': '#F4ECDF',
   'bg-subtle': '#EEE5D4',
   'bg-muted': '#E5DAC5',
-  // Recessed "well" surface — a touch DARKER than the canvas so an inset panel
-  // (the link-safety URL box, media placeholders, in-form info panels) reads as
-  // sunken below the cloth even before a neu-inset shadow is applied. Tuned so
-  // secondary text still clears AA: fg-muted ≈ 4.74:1 (recomputed in
-  // tokens.test.ts).
-  'bg-sunken': '#EADFCB',
   'bg-inverse': '#1B1713',
   // Foreground
   'fg-default': '#16181C',
@@ -134,10 +127,6 @@ export const darkColors: ColorOverrides = {
   'bg-default': '#1A1713',
   'bg-subtle': '#221F1A',
   'bg-muted': '#2E2924',
-  // The night-side well: DARKER than the dark canvas, so a recessed panel reads
-  // as carved below the cloth. Light text only gains contrast here (fg-muted ≈
-  // 8.7:1), so legibility is unconditionally safe.
-  'bg-sunken': '#14110C',
   'bg-inverse': '#F9F5EC',
   'fg-default': '#F2F3F5',
   'fg-muted': '#ABB1B9',
@@ -348,65 +337,42 @@ export interface NeumorphicInk {
  * extrusion reads as cloth catching light — coherent with the warm linen canvas.
  */
 export const neumorphicInk = {
-  light: { highlight: 'rgb(255 255 255 / 0.55)', shadow: 'rgb(106 90 76 / 0.20)' },
-  dark: { highlight: 'rgb(141 133 121 / 0.38)', shadow: 'rgb(0 0 0 / 0.55)' },
+  light: { highlight: 'rgb(255 255 255 / 0.85)', shadow: 'rgb(106 90 76 / 0.28)' },
+  dark: { highlight: 'rgb(141 133 121 / 0.42)', shadow: 'rgb(0 0 0 / 0.60)' },
 } as const satisfies Record<'light' | 'dark', NeumorphicInk>;
 
 /**
- * Theme-aware fabric-weave tints. Each woven thread is a darker shaded edge
- * (`thread`) next to a lit edge (`sheen`); the `--licio-fabric-weave` recipe
- * (styles/app.css) lays warp and weft threads at coprime periods with a slight
- * angle drift and overlays two soft diagonal "slub" clouds, so the combined
- * texture reads as organic hand-woven linen rather than a mechanical grid. Both
- * tints are very low-contrast (and flattened entirely under prefers-contrast /
- * forced colors), so they never touch text legibility.
+ * Theme-aware fabric-weave tints. The weave is a paired thread: a darker shaded
+ * edge (`thread`) next to a lit edge (`sheen`), repeated as fine warp + weft
+ * lines, so the texture reads as woven linen rather than a flat grid. Both are
+ * very low-contrast (and flattened entirely under prefers-contrast / forced
+ * colors), so they never touch text legibility.
  */
 export const fabricThread = {
-  light: 'rgb(124 102 70 / 0.10)',
-  dark: 'rgb(206 190 158 / 0.055)',
+  light: 'rgb(120 100 72 / 0.06)',
+  dark: 'rgb(196 180 150 / 0.05)',
 } as const satisfies Record<'light' | 'dark', string>;
 
 /** The lit edge of each woven thread (paired with {@link fabricThread}). */
 export const fabricSheen = {
-  light: 'rgb(255 251 243 / 0.32)',
-  dark: 'rgb(172 162 142 / 0.05)',
+  light: 'rgb(255 255 255 / 0.55)',
+  dark: 'rgb(150 140 122 / 0.05)',
 } as const satisfies Record<'light' | 'dark', string>;
-
-/**
- * The maximum distance (px) a RAISED neumorphic shadow may extend beyond its
- * element, i.e. `max(|offsetX|, |offsetY|) + blur` for every outer layer. This
- * is the contract that stops the soft lighting bleeding onto adjacent content:
- * as long as two raised surfaces sit at least this far apart (the layout floor
- * is `space-4` = 16px / `gap-4`), one surface's halo can never wash over its
- * neighbour. `tokens.test.ts` re-derives the reach from the composed strings
- * below and fails if any outer layer exceeds this budget, so the halos can never
- * be silently re-inflated. Inset layers (`pressed`/`inset`) are clipped to the
- * border-box by construction and so are exempt — they cannot reach a neighbour.
- */
-export const NEU_OUTER_REACH_BUDGET_PX = 16;
 
 /**
  * Composed neumorphic box-shadows. `raised`/`raised-sm` extrude a surface;
  * `pressed`/`pressed-sm` and `inset` recess it (active feedback / form wells).
  * Each references the theme-aware `--licio-neu-*` source colours.
- *
- * Geometry is deliberately TIGHT (a close bevel, not a wide halo): the outer
- * layers stay within {@link NEU_OUTER_REACH_BUDGET_PX}, and the inset layers
- * hug the edge so they fall inside a control's padding rather than washing over
- * its label. Combined with the lowered highlight alpha (see {@link neumorphicInk}),
- * this keeps the soft-UI lift readable without bleeding into content.
  */
 export const neumorphicShadows = {
-  // reach = 5 + 11 = 16 (== budget): the largest extruded surface (cards, sheets).
-  raised: '-5px -5px 11px var(--licio-neu-highlight), 5px 5px 11px var(--licio-neu-shadow)',
-  // reach = 3 + 7 = 10: buttons, the Switch knob, chips — safe even at gap-3 (12px).
-  'raised-sm': '-3px -3px 7px var(--licio-neu-highlight), 3px 3px 7px var(--licio-neu-shadow)',
+  raised: '-10px -10px 24px var(--licio-neu-highlight), 10px 10px 24px var(--licio-neu-shadow)',
+  'raised-sm': '-6px -6px 16px var(--licio-neu-highlight), 6px 6px 16px var(--licio-neu-shadow)',
   pressed:
-    'inset 4px 4px 9px var(--licio-neu-shadow), inset -4px -4px 9px var(--licio-neu-highlight)',
+    'inset 7px 7px 16px var(--licio-neu-shadow), inset -7px -7px 16px var(--licio-neu-highlight)',
   'pressed-sm':
-    'inset 2px 2px 5px var(--licio-neu-shadow), inset -2px -2px 5px var(--licio-neu-highlight)',
+    'inset 4px 4px 10px var(--licio-neu-shadow), inset -4px -4px 10px var(--licio-neu-highlight)',
   inset:
-    'inset 3px 3px 7px var(--licio-neu-shadow), inset -3px -3px 7px var(--licio-neu-highlight)',
+    'inset 6px 6px 14px var(--licio-neu-shadow), inset -6px -6px 14px var(--licio-neu-highlight)',
 } as const;
 
 export const zIndexScale = {
