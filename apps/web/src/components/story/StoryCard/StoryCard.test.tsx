@@ -33,8 +33,10 @@ describe('StoryCard layout (WS-B.2.1a)', () => {
     const article = container.querySelector('article');
     expect(article).toHaveAccessibleName(sample.story.title);
 
+    // The title is plain heading text — feed navigation is the wrapper's job
+    // (StoryFeedLink), so the card never nests an <a> inside the route link.
     const heading = screen.getByRole('heading', { level: 3, name: sample.story.title });
-    expect(within(heading).getByRole('link')).toHaveAttribute('href', sample.story.url);
+    expect(within(heading).queryByRole('link')).toBeNull();
 
     expect(screen.getByText('Delta Observer')).toBeInTheDocument();
     expect(screen.getByText('Independent')).toBeInTheDocument();

@@ -59,37 +59,40 @@ function renderItem(item: FeedItem) {
 }
 
 describe('StoryFeedLink', () => {
-  it('never nests the source link inside the discussion link (no <a> in <a>)', () => {
+  it('opens the discussion for the whole card without wrapping it (no <a> in <a>)', () => {
     const { container } = renderItem(
       feedItem({ url: 'https://example.org/health/readmissions-q1' }),
     );
-    // The exact defect reported: an anchor descending from another anchor.
+    // No anchor may descend from another (the reported hydration defect)...
     expect(container.querySelector('a a')).toBeNull();
+    // ...and the discussion link must not WRAP the card content either.
+    const link = screen.getByRole('link', { name: /open the discussion for/i });
+    expect(link).toHaveAttribute('href', '/stories/$storyId');
+    expect(link.querySelector('article')).toBeNull();
   });
 
-  it('exposes two distinct links: the card opens the discussion, the title opens the source', () => {
+  it('routes the title to the discussion too — the card has no separate source link', () => {
     renderItem(feedItem({ url: 'https://example.org/health/readmissions-q1' }));
-    // The stretched overlay → discussion (distinct accessible name).
-    expect(screen.getByRole('link', { name: /open the discussion for/i })).toHaveAttribute(
-      'href',
-      '/stories/$storyId',
-    );
-    // The title → external source.
-    expect(
-      screen.getByRole('link', {
-        name: 'River levels stabilize after upstream coordination',
-      }),
-    ).toHaveAttribute('href', 'https://example.org/health/readmissions-q1');
-  });
-
-  it('still wraps the card in a discussion link when the item has no source URL', () => {
-    renderItem(feedItem({})); // no url → StoryCard renders the title as plain text
+    // The ONLY link is the discussion overlay; the title is plain heading text.
+    expect(screen.getAllByRole('link')).toHaveLength(1);
     expect(
       screen.queryByRole('link', {
         name: 'River levels stabilize after upstream coordination',
       }),
     ).toBeNull();
-    expect(screen.getByRole('link', { name: /open the discussion for/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', {
+        name: 'River levels stabilize after upstream coordination',
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it('wraps the card in the discussion link regardless of a source URL', () => {
+    renderItem(feedItem({})); // no url
+    expect(screen.getByRole('link', { name: /open the discussion for/i })).toHaveAttribute(
+      'href',
+      '/stories/$storyId',
+    );
   });
 
   it('has no accessibility violations', async () => {

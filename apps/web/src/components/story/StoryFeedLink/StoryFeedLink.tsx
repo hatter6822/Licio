@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // StoryFeedLink — the feed-card link wrapper shared by the front page, the topic
-// surface, and room feeds. The WHOLE card opens the story detail (the
-// discussion) through a "stretched" overlay link, while the card's own title
-// link (to the external source) stays clickable above it (the title carries
-// `relative z-10` inside StoryCard).
+// surface, and room feeds. The WHOLE card — title included — opens the story
+// detail (the discussion) through a single "stretched" overlay link; the source
+// URL is reached from the story page's in-app reader, so the card carries no
+// competing inner link.
 //
-// Why an overlay SIBLING and not an <a> WRAPPING the card: StoryCard's title is
-// itself an <a> (→ source). Wrapping the card in the detail <a> would nest one
-// anchor inside another — invalid HTML that React reports as a hydration error
-// ("In HTML, <a> cannot be a descendant of <a>" / "<a> cannot contain a nested
-// <a>"). The overlay sits beside the card instead, so the two links never nest.
-// This is the standard "stretched link" pattern (cf. Bootstrap .stretched-link).
+// Why an overlay SIBLING and not an <a> WRAPPING the card:
+//   1. Accessibility — the overlay's accessible name is just the title, so the
+//      card reads as one concise link, not a giant link folding in every line
+//      of card text (source, rating, reason, chips, estimate).
+//   2. Safety — the card is never a DESCENDANT of the link, so an inner anchor
+//      can never nest inside it. (The original defect was a route <a> wrapping
+//      StoryCard, whose title was itself an <a>: "<a> cannot be a descendant of
+//      <a>", a React hydration error.) This is the standard "stretched link"
+//      pattern (cf. Bootstrap .stretched-link).
 import type { FeedItem } from '@licio/shared';
 import { Link } from '@tanstack/react-router';
 import { useT } from '../../../i18n/index.js';
@@ -22,10 +25,9 @@ export function StoryFeedLink({ item }: { item: FeedItem }): React.ReactElement 
   const t = useT();
   return (
     <li className="relative">
-      {/* The stretched overlay covers the whole card and opens the discussion.
-          Its accessible name is deliberately DISTINCT from the title's source
-          link, so screen readers announce two clearly different destinations
-          (card → discussion, title → source) rather than two same-named links. */}
+      {/* The stretched overlay covers the whole card and opens the discussion;
+          its accessible name is the story title, so the card reads as a single
+          concise "Open the discussion for …" link. */}
       <Link
         to="/stories/$storyId"
         params={{ storyId: item.story_id }}
