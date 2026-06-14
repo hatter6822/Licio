@@ -1023,6 +1023,101 @@ export async function seedForumDemoData(
     topicIds: [topics.climate],
   });
 
+  // S26 — a NATIVE IMAGE post, so the media-rendering surface (StoryMedia, the
+  // gated /v1/uploads serving path) has real content. The bytes are a tiny valid
+  // PNG, already metadata-stripped + scan-clear (the upload pipeline's output).
+  const imageUploadId = '5f5ec000-0000-4000-8000-000000000001';
+  const pngBytes = new Uint8Array(
+    Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    ),
+  );
+  await forum.uploads.put(
+    {
+      uploadId: imageUploadId,
+      ownerUserId: lena,
+      contentType: 'image/png',
+      byteSize: pngBytes.byteLength,
+      altText: 'A chart of harbor water-clarity readings rising over the quarter.',
+      storageRef: `demo/${imageUploadId}.png`,
+      metadataStripped: true,
+      scanState: 'clear',
+    },
+    pngBytes,
+  );
+  const imageStory = await ingestion.stories.createWithThread(
+    {
+      storyId: S(26),
+      canonicalUrl: null,
+      title: 'Harbor water-clarity readings, charted for the quarter',
+      titleHash: `demo-${S(26)}`,
+      submittedBy: lena,
+      sourceId: null,
+      roomId: R(7),
+      visibility: 'public',
+      mediaUploadRef: imageUploadId,
+      canonicalPublicStoryId: null,
+      language: 'en',
+      topicIds: [topics.local],
+      locationScope: { type: 'city', value: 'Harbor District' },
+      sensitivityLabels: [],
+      lifecycleState: 'gathering_attention',
+      submissionType: 'image_post',
+      submissionMetadata: {
+        submission_type: 'image_post',
+        upload_id: imageUploadId,
+        alt_text: 'A chart of harbor water-clarity readings rising over the quarter.',
+      },
+      excerpt: 'A native image post: the quarter’s water-clarity readings as a chart.',
+      publisher: null,
+      author: null,
+      publishedAt: null,
+      mediaType: 'image',
+      extractionState: 'not_applicable',
+      hiddenState: null,
+    },
+    T(26),
+  );
+  if (imageStory.ok) {
+    await forum.uploads.setOwnerStory(imageUploadId, S(26));
+    await forum.rooms.touchActivity(R(7), imageStory.thread.createdAt);
+  }
+
+  // Moderation review queue (WS-J seam): a couple of PENDING items so the
+  // steward/admin review surface is non-empty for testing. Ratified WS-A reason
+  // codes; descriptive, never pre-judged.
+  await ingestion.reviewQueue.insert({
+    kind: 'moderation_concern',
+    storyId: S(19),
+    context: {
+      thread_id: T(19),
+      reason_code: 'MOD_SPAM_002',
+      urgency: 'elevated',
+      note: 'A burst of near-identical posts flagged for a coordination check.',
+    },
+    status: 'pending',
+    resolution: null,
+    resolvedBy: null,
+    resolvedAt: null,
+    notBefore: null,
+  });
+  await ingestion.reviewQueue.insert({
+    kind: 'moderation_concern',
+    storyId: S(8),
+    context: {
+      thread_id: T(8),
+      reason_code: 'MOD_MISINFO_002',
+      urgency: 'normal',
+      note: 'A reader asked whether the rezoning map omits the floodplain boundary.',
+    },
+    status: 'pending',
+    resolution: null,
+    resolvedBy: null,
+    resolvedAt: null,
+    notBefore: null,
+  });
+
   // Thread safety states (descriptive postures, never sanctions): S19 is under
   // coordination review (⇒ "Under Review"); S7 carries an elevated signal
   // (⇒ a "caution" badge while keeping its lifecycle label).

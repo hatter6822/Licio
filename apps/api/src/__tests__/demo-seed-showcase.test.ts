@@ -172,3 +172,20 @@ describe('demo seed — SCOI divergence + reading signals', () => {
     }
   });
 });
+
+describe('demo seed — media + moderation surfaces', () => {
+  it('seeds a native image post the media-rendering surface can serve', async () => {
+    const media = (await fullFrontPage()).find((i) => i.media?.kind === 'image');
+    expect(media).toBeDefined();
+    expect(media?.media?.alt_text).toBeTruthy(); // accessibility text present
+    // The bytes are actually stored, so /v1/uploads serves real content.
+    const bytes = await fx.forum.uploads.getBytes('5f5ec000-0000-4000-8000-000000000001');
+    expect(bytes?.byteLength ?? 0).toBeGreaterThan(0);
+  });
+
+  it('seeds pending moderation items for the steward/admin review queue', async () => {
+    const pending = await fx.ingestion.reviewQueue.list({ status: 'pending' }, 50);
+    expect(pending.length).toBeGreaterThanOrEqual(2);
+    expect(pending.every((r) => r.kind === 'moderation_concern')).toBe(true);
+  });
+});
