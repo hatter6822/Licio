@@ -54,6 +54,8 @@ import {
   topicRelevance,
 } from '@licio/ranking';
 import {
+  deriveRatingLabel,
+  deriveStorySafetyState,
   type FeedContextCard,
   type FeedItem,
   type FeedMode,
@@ -64,7 +66,7 @@ import {
 } from '@licio/shared';
 import type { NewStoredEvent } from '../events/stores.js';
 import { roomContentVisibleToUser } from '../forum/rooms.js';
-import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
+import type { ThreadShellRecord } from '../ingestion/stores.js';
 import { makeMediaUrlMinter } from '../lib/media-urls.js';
 import { feedMediaOf } from '../lib/story-media.js';
 import { exposureLabelForGain, latestMeriGains } from '../routes/invariants-public.js';
@@ -72,17 +74,6 @@ import { killSwitchDecision } from './killswitch.js';
 import { assembleCandidatePool } from './orchestrator.js';
 import { applySafetyFilter } from './safety-filter.js';
 import { type RankingServices, SEEN_HISTORY_WINDOW_MS } from './services.js';
-
-/** WS-F lifecycle states → the WS-C rating-label vocabulary (read mapping). */
-export const LIFECYCLE_TO_RATING_LABEL: Readonly<Record<StoryRecord['lifecycleState'], string>> = {
-  submitted: 'getting-attention',
-  gathering_attention: 'getting-attention',
-  deepening: 'deepening',
-  context_needed: 'needs-context',
-  bridging: 'bridge-active',
-  stable: 'resolved-context',
-  archived: 'resolved-context',
-};
 
 /**
  * The locale explanations are served in. The renderer is catalog-ready
@@ -162,18 +153,19 @@ function poolFreshnessClass(
   return 'evergreen';
 }
 
-/** Story safety posture for the wire (descriptive, never a sanction). */
+/** Story safety posture for the wire (descriptive, never a sanction). Thin
+ *  adapter over the shared `deriveStorySafetyState` so the feed and the
+ *  story-detail read derive the posture identically. */
 function feedSafetyState(
   features: FeatureVector | undefined,
   thread: ThreadShellRecord | undefined,
   frozen: boolean,
 ): FeedItem['safety_state'] {
-  if (frozen) return 'under-review';
-  const risk = features?.mfci_risk_state;
-  if (risk === 'severe' || risk === 'high') return 'under-review';
-  if (thread?.safetyState === 'under_review') return 'under-review';
-  if (risk === 'elevated' || thread?.safetyState === 'elevated') return 'caution';
-  return 'ok';
+  return deriveStorySafetyState({
+    frozen,
+    mfciRiskState: features?.mfci_risk_state,
+    threadSafetyState: thread?.safetyState,
+  });
 }
 
 /** One selected entry on its way to the wire. */
@@ -240,12 +232,25 @@ async function buildFeedItems(
         label: `+${entry.moreOnThisStory.length} more on this story`,
       });
     }
-    // §10.5: the feed-card label says "Needs Context" when SCOI is elevated
-    // (the live signal outranks the slower lifecycle-state mapping).
-    const ratingLabel =
-      entry.contextCard !== null
-        ? 'needs-context'
-        : LIFECYCLE_TO_RATING_LABEL[story.lifecycleState];
+    const safetyState = feedSafetyState(
+      entry.features,
+      thread,
+      safeties.get(entry.itemId)?.safetyState === 'frozen',
+    );
+    const exposureLabel = exposureLabelForGain(meriGains[entry.itemId] ?? null);
+    // SPEC §5.6 — the SINGLE rating-label derivation (shared with the
+    // story-detail read). Live invariant signals — safety review, SCOI
+    // interpretation divergence, and MERI source independence — outrank the
+    // slow lifecycle state (the §10.5 principle generalised to all seven
+    // labels), so e.g. a thread under coordination review reads "Under Review"
+    // and a fresh thread with independent evidence reads "Well-Sourced".
+    const ratingLabel = deriveRatingLabel({
+      lifecycleState: story.lifecycleState,
+      safetyState,
+      interpretationsDiverge: entry.contextCard !== null,
+      evidenceCount,
+      meriExposure: exposureLabel,
+    });
     items.push(
       feedItemSchema.parse({
         story_id: story.storyId,
@@ -259,12 +264,8 @@ async function buildFeedItems(
         rating_label: ratingLabel,
         distribution_reason: entry.explanation.distributionReason,
         context_chips: chips,
-        safety_state: feedSafetyState(
-          entry.features,
-          thread,
-          safeties.get(entry.itemId)?.safetyState === 'frozen',
-        ),
-        exposure_label: exposureLabelForGain(meriGains[entry.itemId] ?? null),
+        safety_state: safetyState,
+        exposure_label: exposureLabel,
         more_on_this_story: [...entry.moreOnThisStory].slice(0, 12),
         context_card: entry.contextCard,
       }),
