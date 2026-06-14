@@ -60,6 +60,11 @@ export interface IngestionRuntimeConfig {
   embeddingBackfillBatch: number;
   /** Superseded-version cleanup retention window (days, WS-F.3.2f). */
   embeddingCleanupRetentionDays: number;
+  /** WS-Q.2.3c native-video caps (steward-tunable, fail-closed). The byte cap
+   *  may only LOWER the hard DB ceiling; the duration cap is enforced when the
+   *  container declares a duration. */
+  videoMaxBytes: number;
+  videoMaxSeconds: number;
 }
 
 export const DEFAULT_INGESTION_CONFIG: IngestionRuntimeConfig = {
@@ -84,6 +89,8 @@ export const DEFAULT_INGESTION_CONFIG: IngestionRuntimeConfig = {
   embeddingActiveVersion: 'lexical-fnv-v1',
   embeddingBackfillBatch: 200,
   embeddingCleanupRetentionDays: 30,
+  videoMaxBytes: 200 * 1024 * 1024,
+  videoMaxSeconds: 600,
 };
 
 const positiveInt = z.number().int().min(1);
@@ -119,6 +126,10 @@ const KEY_SCHEMAS: Record<keyof IngestionRuntimeConfig, z.ZodType<unknown>> = {
   embeddingActiveVersion: z.string().min(1).max(128),
   embeddingBackfillBatch: positiveInt.max(10_000),
   embeddingCleanupRetentionDays: positiveInt.max(365),
+  // The byte cap is bounded by the hard DB ceiling (200 MB); it may lower it
+  // but never raise it. The duration cap is minutes-to-hours of seconds.
+  videoMaxBytes: positiveInt.min(1024).max(200 * 1024 * 1024),
+  videoMaxSeconds: positiveInt.max(24 * 60 * 60),
 };
 
 export const INGESTION_CONFIG_KEYS = Object.keys(KEY_SCHEMAS) as ReadonlyArray<

@@ -8,6 +8,9 @@ import type {
   BranchId,
   FeedMode,
   NotificationPreferences,
+  RoomCreateRequest,
+  RoomJoinModel,
+  RoomPostingPolicy,
   SignalLedgerResponse,
   StoryDetail,
   UserSettings,
@@ -129,6 +132,82 @@ export function useRoomQuery(roomId: string) {
     queryKey: queryKeys.room(roomId),
     queryFn: () => api.fetchRoom(roomId),
     ...cachePolicy.room,
+  });
+}
+
+/** WS-Q.5.3b — the room feed (gated by the WS-G content bar; `enabled` lets the
+ *  caller defer the fetch until the reader has passed the tier-two bar). */
+export function useRoomFeedQuery(roomId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.roomFeed(roomId),
+    queryFn: () => api.fetchRoomFeed(roomId),
+    enabled,
+    ...cachePolicy.feed,
+  });
+}
+
+/** WS-Q.5.3a — join a room from the tier-one shell (open ⇒ active; otherwise a
+ *  pending request). Refreshes the room so the membership state updates. */
+export function useJoinRoomMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.joinRoom(roomId),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.room(roomId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.rooms() });
+    },
+  });
+}
+
+/** WS-Q.5.3c — create a room with the visibility/join/posting axes; refreshes
+ *  the directory on success. */
+export function useCreateRoomMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (request: RoomCreateRequest) => api.createRoom(request),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.rooms() });
+    },
+  });
+}
+
+/** WS-Q.5.3c — steward change of a room's join_model / posting_policy; refreshes
+ *  the room on success. */
+export function useUpdateRoomSettingsMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: { join_model?: RoomJoinModel; posting_policy?: RoomPostingPolicy }) =>
+      api.updateRoomSettings(roomId, patch),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.room(roomId) });
+    },
+  });
+}
+
+/** WS-Q.5.3c — steward public⇄private room-visibility cascade; refreshes the
+ *  room AND its feed (content visibility may have changed). */
+export function useChangeRoomVisibilityMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (visibility: 'public' | 'private') => api.changeRoomVisibility(roomId, visibility),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.room(roomId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.roomFeed(roomId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.rooms() });
+    },
+  });
+}
+
+/** WS-Q.5.4a — author narrow/widen of a story's visibility; refreshes the story
+ *  on success (a 409 collision rejects with the existing public story id). */
+export function useChangeStoryVisibilityMutation(storyId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (visibility: 'public' | 'room_only') =>
+      api.changeStoryVisibility(storyId, visibility),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.story(storyId) });
+    },
   });
 }
 

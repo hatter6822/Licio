@@ -6,6 +6,7 @@ import { Button } from '../../ui/Button/index.js';
 import { Icon } from '../../ui/Icon/index.js';
 import { ExposureLabel } from '../ExposureLabel/index.js';
 import { RatingLabel } from '../RatingLabel/index.js';
+import { StoryMedia } from '../StoryMedia/index.js';
 import type { StoryCardData, StoryOrigin } from '../types.js';
 
 export interface StoryCardProps extends StoryCardData {
@@ -44,6 +45,8 @@ export function StoryCard({
   distributionReason,
   contextChips,
   branchPreview,
+  inRoom,
+  media,
   headingLevel = 3,
   onOpenContext,
   onSave,
@@ -85,13 +88,35 @@ export function StoryCard({
         )}
       </Heading>
 
-      {/* 2. Source + origin badge */}
+      {/* 2. Source + origin badge (+ the WS-Q.5.3b in-room chip on non-public
+          items in a room feed; public items carry no chip) */}
       <p className="flex flex-wrap items-center gap-2 text-sm text-ink-muted">
         <span>{story.source}</span>
         <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 text-xs font-medium text-ink">
           {t(origin.key, origin.text)}
         </span>
+        {inRoom ? (
+          <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 text-xs font-medium text-ink-muted">
+            {t('storycard.inRoom', 'In room')}
+          </span>
+        ) : null}
       </p>
+
+      {/* 2.5 Native media (image/video post) — gated URL, no autoplay. The card
+          is rendered inside the route-level <Link>, so media is a NON-interactive
+          preview (a video shows its poster, never <video controls> nested in a
+          link); the full player lives on the story page. */}
+      {media ? (
+        <StoryMedia
+          url={media.url}
+          kind={media.kind}
+          altText={media.altText}
+          preview
+          {...(media.captionsText !== undefined ? { captionsText: media.captionsText } : {})}
+          {...(media.captionsUrl !== undefined ? { captionsUrl: media.captionsUrl } : {})}
+          {...(media.posterUrl !== undefined ? { posterUrl: media.posterUrl } : {})}
+        />
+      ) : null}
 
       {/* 3. Rating label (conversation state) + MERI exposure label
           (WS-H.2.3a; exposure nonredundancy — never truth-by-repetition) */}

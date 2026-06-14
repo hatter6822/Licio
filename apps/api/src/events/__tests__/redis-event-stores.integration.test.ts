@@ -6,7 +6,7 @@
 import { randomUUID } from 'node:crypto';
 import IORedis from 'ioredis';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { attentionEvent, sourceOpenEvent } from '../../__tests__/ws-e-helpers.js';
+import { attentionEvent, sourceOpenEvent } from '../../__tests__/event-test-helpers.js';
 import { IngestRateLimiter } from '../ingest-limiter.js';
 import { realtimeWindowStart } from '../realtime.js';
 import {

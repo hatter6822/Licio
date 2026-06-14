@@ -13,8 +13,10 @@ import {
   DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
   lensCreateRequestSchema,
   lensPublicSchema,
+  RESERVED_ROOM_SLUGS,
   roomCreateRequestSchema,
   roomDetailSchema,
+  roomGovernanceSettingsRequestSchema,
   roomJoinRequestDecisionSchema,
   roomJoinRequestPublicSchema,
   roomJoinResponseSchema,
@@ -22,22 +24,27 @@ import {
   roomNotificationPreferencesSchema,
   roomSummarySchema,
   roomTypeSchema,
+  roomVisibilityChangeRequestSchema,
   storyLensesResponseSchema,
   uuidSchema,
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { getEventPipelineServices } from '../events/services.js';
+import { changeRoomVisibility, updateRoomGovernanceSettings } from '../forum/room-visibility.js';
 import {
   authorizeRoomCreate,
   compareRecommended,
   isRoomSteward,
   joinRoom,
   mergeNotificationPreferences,
+  resolveRoomCreateAxes,
   roomContentVisibleToUser,
   roomMatchesQuery,
   roomTypeMetadata,
   roomVisibleToUser,
   slugify,
+  storyReadableByUser,
   toRoomSummary,
 } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
@@ -229,13 +236,22 @@ export function createRoomsRoutes() {
           const authz = authorizeRoomCreate(request, auth.roles);
           if (!authz.ok) return c.json(deny(authz.code, authz.message), 403);
           const forum = getForumServices();
+          const slug = slugify(request.name);
+          // WS-Q.1.6 — the `commons` slug is reserved for the system Commons room.
+          if (RESERVED_ROOM_SLUGS.includes(slug)) {
+            return c.json(deny('reserved_slug', 'That room name is reserved'), 422);
+          }
+          // WS-Q.3.3a — apply the documented visibility/join/posting defaults.
+          const axes = resolveRoomCreateAxes(request);
           const created = await forum.rooms.insert({
             roomId: randomUUID(),
             name: request.name,
-            slug: slugify(request.name),
+            slug,
             description: request.description,
             roomType: request.room_type,
-            visibility: request.visibility,
+            visibility: axes.visibility,
+            joinModel: axes.joinModel,
+            postingPolicy: axes.postingPolicy,
             createdBy: auth.userId,
             governanceMode: 'ordinary', // ALWAYS the default (§17.4)
             charterSummary: null,
@@ -291,20 +307,15 @@ export function createRoomsRoutes() {
         const userId = await softUserId(c.req.header('cookie'), identity);
         const room = await forum.rooms.getById(roomId);
         if (!room) return c.json(notFound, 404);
-        // Restricted/expert_led detail: members and that room's stewards only
-        // (403 per WS-G.2.3b — the room's existence is listed nowhere for
-        // non-members, but a direct id probe gets the documented 403).
-        if (room.visibility !== 'public') {
-          const member =
-            userId !== null &&
-            ((await forum.rooms.getSubscription(roomId, userId))?.status === 'active' ||
-              (await forum.rooms.stewardRolesFor(roomId, userId)).length > 0 ||
-              (userId !== null && (await isPlatformSteward(identity, userId))));
-          if (!member) return c.json(deny('forbidden', 'This room is restricted'), 403);
-        }
+        // WS-Q.3.1a — TIER ONE (existence) is universal: the room's shell
+        // (name, description, visibility, stewards, join affordance) is visible
+        // to ALL, so a private room is discoverable and joinable. TIER TWO
+        // (content) — the lenses (interpretation contexts) — is members-only;
+        // a non-member of a private room sees the shell with NO lens content.
+        const canReadContent = await roomContentVisibleToUser(forum, room, userId);
         const threadCount = await ingestion.stories.countThreadsByRoom(roomId);
         const summary = await toRoomSummary(forum, room, threadCount, userId);
-        const lenses = await forum.lenses.listByRoom(roomId);
+        const lenses = canReadContent ? await forum.lenses.listByRoom(roomId) : [];
         const stewards = await forum.rooms.listStewards(roomId);
         const resolveHandles = new Map<string, { handle: string; displayName: string | null }>();
         for (const steward of stewards) {
@@ -335,6 +346,8 @@ export function createRoomsRoutes() {
             governance: governanceInfo(room),
             charter_summary: room.charterSummary,
             join_pending: subscription?.status === 'pending',
+            // WS-Q.5.3c — gates the steward-only room-settings UI.
+            is_steward: userId !== null && stewards.some((s) => s.userId === userId),
           }),
         );
       })
@@ -353,11 +366,10 @@ export function createRoomsRoutes() {
           const userId = await softUserId(c.req.header('cookie'), identity);
           const room = await forum.rooms.getById(roomId);
           if (!room) return c.json(notFound, 404);
-          if (
-            room.visibility !== 'public' &&
-            !(await roomContentVisibleToUser(forum, room, userId))
-          ) {
-            return c.json(deny('forbidden', 'This room is restricted'), 403);
+          // WS-Q.3.2 — room threads are CONTENT (tier two): a private-room
+          // outsider/pending applicant gets 404 (404-over-403; no membership oracle).
+          if (!(await roomContentVisibleToUser(forum, room, userId))) {
+            return c.json(notFound, 404);
           }
           let before: { createdAt: string; threadId: string } | null = null;
           if (cursor !== undefined) {
@@ -540,6 +552,70 @@ export function createRoomsRoutes() {
         },
       )
 
+      // --- Governance settings (WS-Q.3.3b): steward join/posting write -------
+      .patch(
+        '/rooms/:roomId/settings',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        zValidator('param', z.object({ roomId: uuidSchema })),
+        zValidator('json', roomGovernanceSettingsRequestSchema),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const { roomId } = c.req.valid('param');
+          const forum = getForumServices();
+          if (!(await isRoomSteward(forum, roomId, auth.userId, auth.roles))) {
+            return c.json(deny('forbidden', 'Steward role required'), 403);
+          }
+          const body = c.req.valid('json');
+          const outcome = await updateRoomGovernanceSettings(
+            forum,
+            getIdentityServices(),
+            auth.userId,
+            roomId,
+            {
+              ...(body.join_model !== undefined ? { joinModel: body.join_model } : {}),
+              ...(body.posting_policy !== undefined ? { postingPolicy: body.posting_policy } : {}),
+            },
+          );
+          if (!outcome.ok) return c.json(deny(outcome.code, outcome.message), outcome.status);
+          return c.json({ ok: true });
+        },
+      )
+
+      // --- Visibility cascade (WS-Q.3.4): steward public⇄private -------------
+      .post(
+        '/rooms/:roomId/visibility',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        zValidator('param', z.object({ roomId: uuidSchema })),
+        zValidator('json', roomVisibilityChangeRequestSchema),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const { roomId } = c.req.valid('param');
+          const forum = getForumServices();
+          // Governance-capable steward only; others get 404 (no oracle).
+          if (!(await isRoomSteward(forum, roomId, auth.userId, auth.roles))) {
+            return c.json(notFound, 404);
+          }
+          const outcome = await changeRoomVisibility(
+            forum,
+            getIngestionServices(),
+            getEventPipelineServices(),
+            getIdentityServices(),
+            auth.userId,
+            roomId,
+            c.req.valid('json').visibility,
+          );
+          if (!outcome.ok) return c.json(deny(outcome.code, outcome.message), outcome.status);
+          return c.json({
+            visibility: c.req.valid('json').visibility,
+            converted: outcome.converted,
+          });
+        },
+      )
+
       // --- Lenses (WS-G.2.2 / WS-G.2.4) ----------------------------------------
       .get(
         '/rooms/:roomId/lenses',
@@ -551,11 +627,9 @@ export function createRoomsRoutes() {
           const userId = await softUserId(c.req.header('cookie'), identity);
           const room = await forum.rooms.getById(roomId);
           if (!room) return c.json(notFound, 404);
-          if (
-            room.visibility !== 'public' &&
-            !(await roomContentVisibleToUser(forum, room, userId))
-          ) {
-            return c.json(deny('forbidden', 'This room is restricted'), 403);
+          // WS-Q.3.2 — lenses are CONTENT (tier two): private-room outsiders 404.
+          if (!(await roomContentVisibleToUser(forum, room, userId))) {
+            return c.json(notFound, 404);
           }
           const lenses = await forum.lenses.listByRoom(roomId);
           return c.json({
@@ -608,28 +682,18 @@ export function createRoomsRoutes() {
           const userId = await softUserId(c.req.header('cookie'), identity);
           const story = await ingestion.stories.getById(storyId);
           if (!story || story.hiddenState !== null) return c.json(notFound, 404);
+          // WS-Q.3.2 — the item read bar: a room_only story in a private room is
+          // 404 to non-members (404-over-403, consistent with the story detail —
+          // no existence oracle, unlike the prior empty-200 for outsiders).
+          const room = await forum.rooms.getById(story.roomId);
+          if (room === null || !(await storyReadableByUser(forum, story, room, userId))) {
+            return c.json(notFound, 404);
+          }
           const thread = await ingestion.stories.getThreadByStoryId(storyId);
           if (!thread) {
             return c.json(
               storyLensesResponseSchema.parse({ story_id: storyId, groups: [], divergence: null }),
             );
-          }
-          // Visibility: restricted-room lenses are hidden from non-members.
-          if (thread.roomId !== null) {
-            const room = await forum.rooms.getById(thread.roomId);
-            if (
-              room &&
-              room.visibility !== 'public' &&
-              !(await roomContentVisibleToUser(forum, room, userId))
-            ) {
-              return c.json(
-                storyLensesResponseSchema.parse({
-                  story_id: storyId,
-                  groups: [],
-                  divergence: null,
-                }),
-              );
-            }
           }
           const lenses = thread.roomId !== null ? await forum.lenses.listByRoom(thread.roomId) : [];
           const tagged = await forum.contributions.listLensTagged([thread.threadId], 700);
@@ -649,11 +713,6 @@ export function createRoomsRoutes() {
         },
       )
   );
-}
-
-async function isPlatformSteward(identity: IdentityServices, userId: string): Promise<boolean> {
-  const user = await identity.store.getUser(userId);
-  return user !== null && (user.roles.includes('steward') || user.roles.includes('admin'));
 }
 
 export type RoomsRoutes = ReturnType<typeof createRoomsRoutes>;

@@ -36,6 +36,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
   let secondUserId: string;
   let threadId: string;
   let claimId: string;
+  let defaultRoomId: string;
   let contributions: DrizzleContributionStore;
   let roomsStore: DrizzleRoomStore;
   let lenses: DrizzleLensStore;
@@ -64,7 +65,10 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     return (inserted[0] as { userId: string }).userId;
   }
 
-  async function seedThread(stories: DrizzleStoryStore): Promise<string> {
+  async function seedThread(
+    stories: DrizzleStoryStore,
+    roomId: string = defaultRoomId,
+  ): Promise<string> {
     const storyId = randomUUID();
     const newThreadId = randomUUID();
     const created = await stories.createWithThread(
@@ -75,6 +79,10 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
         titleHash: randomUUID().replaceAll('-', ''),
         submittedBy: authorId,
         sourceId: null,
+        roomId,
+        visibility: 'public',
+        mediaUploadRef: null,
+        canonicalPublicStoryId: null,
         language: 'en',
         topicIds: [randomUUID()],
         locationScope: null,
@@ -128,6 +136,8 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       description: 'Adapter integration room.',
       roomType: 'global_topic',
       visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'all_members',
       createdBy: authorId,
       governanceMode: 'ordinary',
       charterSummary: null,
@@ -149,6 +159,11 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     summaries = new DrizzleSummaryStore(db);
     uploads = new DrizzleUploadStore(db, null);
     const stories = new DrizzleStoryStore(db);
+    // WS-Q — seedThread's stories need a home room (FK + NOT NULL).
+    const defaultRoom = await roomsStore.insert(roomInput());
+    if (!defaultRoom.ok) throw new Error('default room insert failed');
+    defaultRoomId = defaultRoom.room.roomId;
+    roomIds.push(defaultRoomId);
     threadId = await seedThread(stories);
     const claims = new DrizzleClaimStore(db);
     const claim = await claims.insert({
@@ -759,9 +774,9 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     const stories = new DrizzleStoryStore(db);
     const threadIds: string[] = [];
     for (let i = 0; i < 5; i += 1) {
-      const tid = await seedThread(stories);
-      await stories.updateThread(tid, { roomId: room.roomId });
-      threadIds.push(tid);
+      // Seed the story+thread directly IN this room (the WS-Q consistency
+      // trigger forbids moving a thread to a room its story is not in).
+      threadIds.push(await seedThread(stories, room.roomId));
     }
     const walked: string[] = [];
     let before: { createdAt: string; threadId: string } | null = null;

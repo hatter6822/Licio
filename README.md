@@ -11,7 +11,7 @@
   <a href="https://github.com/hatter6822/Licio/actions/workflows/ci.yml">
     <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/hatter6822/Licio/ci.yml?branch=main&label=CI" />
   </a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.2.3-blue" />
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.2.5-blue" />
   <img alt="Node.js" src="https://img.shields.io/badge/Node.js-22-339933" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-6.0-3178c6" />
   <img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0--or--later-informational" />
@@ -43,7 +43,7 @@ pay-to-rank — is enforced by the type system, runtime guards, and CI gates.
 | Node.js | `22` (pinned in [`.nvmrc`](.nvmrc)) |
 | pnpm | `9.15.4` via Corepack (pinned in `package.json`) |
 | Language | TypeScript `6.0.3`, strict everywhere (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) |
-| Milestone | WS-0 – WS-I complete; **WS-J (trust and safety) and WS-Q (content–room ownership/visibility) are next** |
+| Milestone | WS-0 – WS-I and **WS-Q (content–room ownership/visibility) complete** — rooms own content, binary room visibility + join/posting axes, public/`room_only` content with private-room forcing, native image/video posts, always-on two-tier containment, the full client surface (story composer, media rendering, room shell/feed/create, author visibility control), and a gated migration-validation harness; WS-J (trust and safety) next |
 | Test gate | 80% cross-workspace coverage (lines, functions, branches, statements) |
 | Bundle budgets | initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz (CI-enforced) |
 
@@ -63,6 +63,12 @@ DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev \
 
 pnpm dev                       # web on :5173, API on :3001
 ```
+
+On a non-production boot, `pnpm dev` seeds a rich demo corpus through the real
+stores — several authors, public/private/expert-gated rooms, stories of varied
+submission types and visibility tiers, and threads with several nested,
+multi-author comments — so the PWA renders real end-to-end data immediately
+(idempotent; never runs in production).
 
 A fresh clone is green with just `pnpm install --frozen-lockfile && pnpm test`
 — the unit suite runs against in-memory stores, so the database stack is only
@@ -172,9 +178,10 @@ references.
 ## Testing
 
 ```sh
-pnpm test                  # Vitest — six projects (shared, db, invariants, api, web, policy)
+pnpm test                  # Vitest — seven projects (shared, db, invariants, ranking, api, web, policy)
 pnpm test -- --coverage    # adds the 80% cross-workspace coverage gate
 pnpm test:e2e              # Playwright + axe-core (Chromium, Firefox, WebKit)
+pnpm --filter web test:e2e:bff  # authenticated BFF-in-the-loop E2E (in-memory API)
 pnpm typecheck             # tsc -b across all project references
 pnpm lint                  # Biome format + lint
 pnpm build && pnpm check:sw   # production build, bundle budgets, SW scan

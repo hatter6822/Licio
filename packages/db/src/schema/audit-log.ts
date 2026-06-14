@@ -60,6 +60,9 @@ export const auditEventTypeEnum = pgEnum('audit_event_type', [
   'ranking_killswitch_change',
   'ranking_decision_query',
   'ranking_replay_run',
+  // WS-Q content–room model: visibility transitions (migration 0019).
+  'story_visibility_change',
+  'room_visibility_change',
 ]);
 
 export const auditLog = pgTable(

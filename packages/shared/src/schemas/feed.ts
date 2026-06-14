@@ -66,12 +66,44 @@ export const feedContextCardSchema = z.object({
 });
 export type FeedContextCard = z.infer<typeof feedContextCardSchema>;
 
+/** A same-origin, relative media read path the client renders directly. Public
+ *  media is a bare `/v1/uploads/:id`; a `room_only` item carries a short-lived
+ *  signed query (`?e=…&t=…`) minted per response (WS-Q.5.2c serving gate). It is
+ *  validated as a same-origin `/v1/uploads/` path, so the wire can never carry an
+ *  off-origin or script URL into an `<img>`/`<video>` `src`. */
+export const mediaPathSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^\/v1\/uploads\//, 'must be a same-origin /v1/uploads/ path');
+
+/** WS-Q.5.2c — native image/video post media. Null for non-media stories. The
+ *  server mints each read URL after the read-bar check (signed for room_only),
+ *  so the client renders `url` directly. Images carry required alt text. */
+export const feedMediaSchema = z.object({
+  url: mediaPathSchema,
+  kind: z.enum(['image', 'video']),
+  alt_text: z.string().max(1_000).nullable(),
+  /** Video captions as text (rendered beneath the player); null otherwise. */
+  captions_text: z.string().max(20_000).nullable().default(null),
+  /** Read URL for an uploaded WebVTT caption track; null otherwise. */
+  captions_url: mediaPathSchema.nullable().default(null),
+  /** Read URL for a video poster image; null otherwise. */
+  poster_url: mediaPathSchema.nullable().default(null),
+});
+export type FeedMedia = z.infer<typeof feedMediaSchema>;
+
 export const feedItemSchema = z.object({
   story_id: uuidSchema,
   title: z.string().min(1),
   source: z.string().min(1),
   origin: storyOriginSchema,
   url: httpUrlSchema.optional(),
+  /** WS-Q.5.3b — item visibility tier; lets a room feed mark non-public items
+   *  with the in-room chip. Absent ⇒ public (global feeds carry only public). */
+  visibility: z.enum(['public', 'room_only']).optional(),
+  /** WS-Q.5.2c native media (image/video posts); absent for non-media stories. */
+  media: feedMediaSchema.nullish(),
   reading_minutes: z.number().int().nonnegative(),
   rating_label: ratingLabelKindSchema,
   /** Human-readable distribution reason; never a raw numeric score. */
@@ -112,5 +144,11 @@ export const storyDetailSchema = feedItemSchema.extend({
   thread_id: uuidSchema.nullable(),
   /** Topic-cluster ids (WS-H.6.1a client loop tracking; descriptive only). */
   topic_ids: z.array(z.string().min(1).max(128)).max(8).default([]),
+  /** WS-Q.5.4a — true when the requesting user authored this story (gates the
+   *  author visibility control). Absent ⇒ not the owner. */
+  is_owner: z.boolean().optional(),
+  /** WS-Q.5.4a — the home room's visibility (widen is impossible in a private
+   *  room). Absent on the legacy demo contract. */
+  room_visibility: z.enum(['public', 'private']).optional(),
 });
 export type StoryDetail = z.infer<typeof storyDetailSchema>;

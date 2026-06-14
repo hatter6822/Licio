@@ -8,8 +8,10 @@ import type { StoryDetail } from '@licio/shared';
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
+import { AuthorVisibilityControl } from '../../components/story/AuthorVisibilityControl/index.js';
 import { IndependentSourcesDrawer } from '../../components/story/IndependentSourcesDrawer/index.js';
 import { ShareStoryButton } from '../../components/story/ShareStoryButton/index.js';
+import { StoryMedia } from '../../components/story/StoryMedia/index.js';
 import { TopicRepeatsPreference } from '../../components/story/TopicRepeatsPreference/index.js';
 import { WhereInterpretationsDiffer } from '../../components/story/WhereInterpretationsDiffer/index.js';
 import { Button } from '../../components/ui/Button/index.js';
@@ -145,6 +147,16 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 {t('story.inspectSignals', 'Inspect your reading signals')}
               </Link>
             </div>
+            {data.media ? (
+              <StoryMedia
+                url={data.media.url}
+                kind={data.media.kind}
+                altText={data.media.alt_text}
+                captionsText={data.media.captions_text}
+                captionsUrl={data.media.captions_url}
+                posterUrl={data.media.poster_url}
+              />
+            ) : null}
             <p className="text-base text-ink">{data.body_summary}</p>
             <div className="flex flex-wrap gap-2">
               {data.url ? (
@@ -160,6 +172,14 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 contextStatusPending={interpretations.isPending}
               />
             </div>
+            {/* WS-Q.5.4a — the author's visibility control (owner only). */}
+            {data.is_owner ? (
+              <AuthorVisibilityControl
+                storyId={data.story_id}
+                visibility={data.visibility ?? 'public'}
+                {...(data.room_visibility ? { roomVisibility: data.room_visibility } : {})}
+              />
+            ) : null}
             {topicIds?.[0] ? <TopicRepeatsPreference topicId={topicIds[0]} /> : null}
             {interpretations.data ? (
               <WhereInterpretationsDiffer data={interpretations.data} />

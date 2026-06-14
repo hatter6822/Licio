@@ -9,12 +9,13 @@
 // (never half-migrated, WS-C.2.2c).
 
 export const DB_NAME = 'licio';
-export const DB_VERSION = 1;
+export const DB_VERSION = 3;
 
 /** Object-store names (WS-C.2.2a object-store table). */
 export const STORE = {
   savedStories: 'saved-stories',
   draftContributions: 'draft-contributions',
+  draftStories: 'draft-stories',
   threadSnapshots: 'thread-snapshots',
   signalLedger: 'signal-ledger',
   pendingQueue: 'pending-queue',
@@ -56,6 +57,23 @@ export const MIGRATIONS: MigrationMap = {
     queue.createIndex('createdAt', 'createdAt');
     queue.createIndex('operationType', 'operationType');
     queue.createIndex('status', 'status');
+  },
+  // WS-Q.5.5 — the content–room model changed server read shapes (room_id +
+  // visibility on stories; binary room visibility). Evict the read-model CACHE
+  // (thread snapshots) so pre-WS-Q shapes are refetched, never mis-parsed. User
+  // data is preserved: drafts, the pending queue, saved stories, and the signal
+  // ledger are NOT cleared — a queued submission is never silently dropped.
+  2: (_db, tx) => {
+    tx.objectStore(STORE.threadSnapshots).clear();
+  },
+  // WS-Q.5.1b — the story composer autosaves an encrypted draft (room +
+  // visibility + the text fields) so a half-written post survives a reload or a
+  // tab switch. A dedicated store: story modes are NOT contribution types, so
+  // the draft-contributions store (keyed on a strict contribution-type enum)
+  // cannot hold them.
+  3: (db) => {
+    const stories = db.createObjectStore(STORE.draftStories, { keyPath: 'draftId' });
+    stories.createIndex('updatedAt', 'updatedAt');
   },
 };
 

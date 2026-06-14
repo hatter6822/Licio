@@ -39,11 +39,13 @@ const {
 vi.mock('@tanstack/react-router', () => ({
   useRouterState: () => '/submit',
   useSearch: () => searchState,
+  useNavigate: () => vi.fn(),
 }));
 
 vi.mock('../../lib/queries.js', () => ({
   useStoryInterpretationsQuery: () => ({ data: undefined }),
   useThreadQuery: () => ({ data: { story_id: null } }),
+  useRoomsQuery: () => ({ data: { items: [], nextCursor: null } }),
 }));
 
 vi.mock('../../lib/link-safety.js', () => ({
@@ -64,6 +66,11 @@ vi.mock('../../offline/index.js', () => ({
     get: mocks.getQueuedOperation,
   },
   saveDraft: mocks.saveDraft,
+  // The story composer (no-thread path) autosaves through its own store; stub
+  // the story-draft API as inert so the page renders without real IndexedDB.
+  listStoryDrafts: vi.fn(async () => []),
+  saveStoryDraft: vi.fn(async () => undefined),
+  deleteStoryDraft: vi.fn(async () => undefined),
 }));
 
 vi.mock('../../offline/sync.js', () => ({
@@ -146,23 +153,16 @@ describe('SubmitPage contribution submission', () => {
     expect(screen.getByText('Contribution submitted.')).toBeInTheDocument();
   });
 
-  it('does not turn Submit into a draft save when no thread target exists', async () => {
+  it('renders the story composer (not the contribution composer) when no thread target exists', async () => {
     delete searchState.threadId;
     delete searchState.branch;
-    const user = userEvent.setup();
     renderSubmitPage();
 
-    await user.click(screen.getByRole('button', { name: /^Ask/i }));
-    await user.type(screen.getByLabelText(/^Question/i), 'Where should this go?');
-    await user.click(screen.getByRole('button', { name: /Add contribution/i }));
-
-    expect(saveDraft).not.toHaveBeenCalled();
-    expect(enqueue).not.toHaveBeenCalled();
-    expect(
-      screen.getByText(
-        'Choose a thread before submitting. Use Save draft to keep this contribution for later.',
-      ),
-    ).toBeInTheDocument();
+    // WS-Q.5.1 — no thread ⇒ the STORY-submission composer (room picker + the
+    // four content modes), never the thread-reply contribution composer.
+    expect(await screen.findByText('Commons')).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /a link/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Add contribution/i })).not.toBeInTheDocument();
   });
 
   it('saves a contribution draft without enqueueing or deleting when Save draft is selected', async () => {

@@ -12,22 +12,22 @@ import { createV1Routes } from '../routes/v1.js';
 import {
   articleHtml,
   briefSubmission,
-  freshWsFServices,
+  freshIngestionServices,
+  type IngestionServicesFixture,
   jsonHeaders,
   linkSubmission,
   post,
   seedUserWithSession,
-  type WsFFixture,
-} from './ws-f-helpers.js';
+} from './ingestion-test-helpers.js';
 
 function app() {
   return new Hono().route('/v1', createV1Routes());
 }
 
-let fixture: WsFFixture;
+let fixture: IngestionServicesFixture;
 
 beforeEach(() => {
-  fixture = freshWsFServices({ config: { minAccountAgeMinutes: 0 } });
+  fixture = freshIngestionServices({ config: { minAccountAgeMinutes: 0 } });
 });
 
 async function submitBrief(cookie: string, over: Record<string, unknown> = {}): Promise<string> {

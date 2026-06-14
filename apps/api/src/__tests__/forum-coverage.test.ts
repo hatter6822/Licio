@@ -14,24 +14,24 @@ import { seedForumDemoData } from '../lib/demo-seed.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
   contributionBody,
-  freshWsGServices,
+  type ForumServicesFixture,
+  freshForumServices,
   jsonRequest,
   seedClaim,
   seedThread,
   seedUserWithSession,
-  type WsGFixture,
-} from './ws-g-helpers.js';
+} from './forum-test-helpers.js';
 
 function app() {
   return new Hono().route('/v1', createV1Routes());
 }
 
-let fixture: WsGFixture;
+let fixture: ForumServicesFixture;
 let cookie: string;
 let threadId: string;
 
 beforeEach(async () => {
-  fixture = freshWsGServices({ forumConfig: { contributionsPerMinute: 100 } });
+  fixture = freshForumServices({ forumConfig: { contributionsPerMinute: 100 } });
   const session = await seedUserWithSession(fixture.identity);
   cookie = session.cookie;
   ({ threadId } = await seedThread(fixture));
@@ -60,6 +60,27 @@ function jpegBytes(): Uint8Array {
     0xff,
     0xd9,
   ]);
+}
+
+/** A minimal well-formed MP4 (ftyp + moov/mvhd + mdat); 2.0s at timescale 600. */
+function mp4Bytes(): Uint8Array {
+  const ascii = (s: string): number[] => [...s].map((c) => c.charCodeAt(0));
+  const u32 = (n: number): number[] => [
+    (n >>> 24) & 0xff,
+    (n >>> 16) & 0xff,
+    (n >>> 8) & 0xff,
+    n & 0xff,
+  ];
+  const box = (type: string, payload: number[]): number[] => [
+    ...u32(payload.length + 8),
+    ...ascii(type),
+    ...payload,
+  ];
+  const ftyp = box('ftyp', [...ascii('isom'), ...u32(0x200), ...ascii('isom')]);
+  const mvhd = box('mvhd', [0, 0, 0, 0, ...u32(0), ...u32(0), ...u32(600), ...u32(1200)]);
+  const moov = box('moov', mvhd);
+  const mdat = box('mdat', ascii('MEDIA-SAMPLE-BYTES-FOR-RANGE-TESTS'));
+  return new Uint8Array([...ftyp, ...moov, ...mdat]);
 }
 
 function uploadRequest(
@@ -205,6 +226,85 @@ describe('WS-G.3.7b — uploads route', () => {
     await fixture.forum.uploads.setScanState(upload_id, 'flagged');
     const served = await app().request(`http://local/v1/uploads/${upload_id}`);
     expect(served.status).toBe(404);
+  });
+});
+
+describe('WS-Q.2.3c/e — native video uploads + range serving', () => {
+  it('accepts a well-formed MP4 (no alt text) and advertises range serving', async () => {
+    const res = await app().request(
+      uploadRequest({ bytes: mp4Bytes(), type: 'video/mp4', name: 'clip.mp4' }, {}),
+    );
+    expect(res.status).toBe(201);
+    const body = uploadPublicSchema.parse(await res.json());
+    expect(body.content_type).toBe('video/mp4');
+    expect(body.alt_text).toBeNull();
+    const served = await app().request(`http://local${body.url}`);
+    expect(served.status).toBe(200);
+    expect(served.headers.get('accept-ranges')).toBe('bytes');
+    expect(served.headers.get('content-type')).toBe('video/mp4');
+  });
+
+  it('honors a single byte-range request (206 + Content-Range)', async () => {
+    const up = await app().request(
+      uploadRequest({ bytes: mp4Bytes(), type: 'video/mp4', name: 'clip.mp4' }, {}),
+    );
+    const { url } = uploadPublicSchema.parse(await up.json());
+    const total = mp4Bytes().length;
+    const partial = await app().request(
+      new Request(`http://local${url}`, { headers: { range: 'bytes=0-9' } }),
+    );
+    expect(partial.status).toBe(206);
+    expect(partial.headers.get('content-range')).toBe(`bytes 0-9/${total}`);
+    expect(partial.headers.get('content-length')).toBe('10');
+    expect(new Uint8Array(await partial.arrayBuffer()).length).toBe(10);
+  });
+
+  it('returns 416 for an unsatisfiable range', async () => {
+    const up = await app().request(
+      uploadRequest({ bytes: mp4Bytes(), type: 'video/mp4', name: 'clip.mp4' }, {}),
+    );
+    const { url } = uploadPublicSchema.parse(await up.json());
+    const total = mp4Bytes().length;
+    const res = await app().request(
+      new Request(`http://local${url}`, { headers: { range: `bytes=${total + 100}-` } }),
+    );
+    expect(res.status).toBe(416);
+    expect(res.headers.get('content-range')).toBe(`bytes */${total}`);
+  });
+
+  it('rejects a spoofed video container (415)', async () => {
+    const res = await app().request(
+      uploadRequest({ bytes: jpegBytes(), type: 'video/mp4', name: 'fake.mp4' }, {}),
+    );
+    expect(res.status).toBe(415);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('invalid_file');
+  });
+
+  it('rejects an over-duration video against the steward cap (413 video_too_long)', async () => {
+    // The MP4 fixture is 2.0s; cap at 1s ⇒ rejected pre-storage.
+    fixture = freshForumServices({
+      forumConfig: { contributionsPerMinute: 100 },
+      config: { videoMaxSeconds: 1 },
+    });
+    const session = await seedUserWithSession(fixture.identity);
+    const res = await app().request(
+      new Request('http://local/v1/uploads', {
+        method: 'POST',
+        headers: { cookie: session.cookie },
+        body: (() => {
+          const form = new FormData();
+          const bytes = mp4Bytes();
+          const buf = bytes.buffer.slice(
+            bytes.byteOffset,
+            bytes.byteOffset + bytes.byteLength,
+          ) as ArrayBuffer;
+          form.set('file', new File([buf], 'long.mp4', { type: 'video/mp4' }));
+          return form;
+        })(),
+      }),
+    );
+    expect(res.status).toBe(413);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('video_too_long');
   });
 });
 

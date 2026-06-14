@@ -9,24 +9,24 @@ import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createV1Routes } from '../routes/v1.js';
 import {
-  freshWsGServices,
+  type ForumServicesFixture,
+  freshForumServices,
   jsonRequest,
   seedThread,
   seedUserWithSession,
-  type WsGFixture,
-} from './ws-g-helpers.js';
+} from './forum-test-helpers.js';
 
 function app() {
   return new Hono().route('/v1', createV1Routes());
 }
 
-let fixture: WsGFixture;
+let fixture: ForumServicesFixture;
 let cookie: string;
 let nowMs: number;
 
 beforeEach(async () => {
   nowMs = Date.parse('2026-06-11T12:00:00.000Z');
-  fixture = freshWsGServices({
+  fixture = freshForumServices({
     now: () => {
       nowMs += 97;
       return nowMs;
@@ -92,7 +92,7 @@ describe('room route edges', () => {
           name: 'Gated',
           description: 'd',
           initial_topics: ['t'],
-          visibility: 'restricted',
+          visibility: 'private',
         },
         steward.cookie,
       ),
@@ -137,7 +137,7 @@ describe('room route edges', () => {
     expect(stranger.status).toBe(403);
   });
 
-  it('lens creation requires a steward of THAT room; restricted lens list is gated', async () => {
+  it('lens creation requires a steward of THAT room; private lens list 404s for outsiders', async () => {
     const roomId = await makeRoom('Lensy');
     const other = await seedUserWithSession(fixture.identity, { handle: 'not-steward' });
     const denied = await app().request(
@@ -160,14 +160,15 @@ describe('room route edges', () => {
           name: 'Hidden lenses',
           description: 'd',
           initial_topics: ['t'],
-          visibility: 'restricted',
+          visibility: 'private',
         },
         steward.cookie,
       ),
     );
     const hiddenRoom = ((await restricted.json()) as { room_id: string }).room_id;
+    // WS-Q.3.2 — lenses are CONTENT (tier two): an outsider gets 404 (no oracle).
     const anonymous = await app().request(`http://local/v1/rooms/${hiddenRoom}/lenses`);
-    expect(anonymous.status).toBe(403);
+    expect(anonymous.status).toBe(404);
   });
 
   it('room threads page lists visible threads most-recent-first with a cursor', async () => {

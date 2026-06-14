@@ -17,16 +17,16 @@ import {
   InMemorySessionTopicSequenceStore,
   SESSION_SEQUENCE_TTL_MS,
 } from '../invariants/stores.js';
-import { attentionEvent } from './ws-e-helpers.js';
+import { attentionEvent } from './event-test-helpers.js';
 import {
-  freshWsHServices,
+  freshInvariantServices,
+  type InvariantServicesFixture,
   seedStory,
   seedUserWithSession,
-  type WsHFixture,
-} from './ws-h-helpers.js';
+} from './invariant-test-helpers.js';
 
 describe('SCOI full lens pipeline (WS-H.4.1a/b)', () => {
-  async function seedLensedStory(fixture: WsHFixture): Promise<string> {
+  async function seedLensedStory(fixture: InvariantServicesFixture): Promise<string> {
     const roomId = randomUUID();
     const inserted = await fixture.forum.rooms.insert({
       roomId,
@@ -35,6 +35,8 @@ describe('SCOI full lens pipeline (WS-H.4.1a/b)', () => {
       description: null,
       roomType: 'global_topic',
       visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'all_members',
       createdBy: null,
       governanceMode: 'ordinary',
       charterSummary: null,
@@ -82,7 +84,7 @@ describe('SCOI full lens pipeline (WS-H.4.1a/b)', () => {
   }
 
   it('captures per-lens interpretations and scores the overlap', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const storyId = await seedLensedStory(fixture);
     const [output] = await fixture.invariants.scoi.computeBatch(
       [{ targetType: 'story', targetId: storyId }],
@@ -106,7 +108,7 @@ describe('SCOI full lens pipeline (WS-H.4.1a/b)', () => {
 
 describe('GWEI cohort comparison end-to-end (WS-H.5)', () => {
   it('compares eligible cohorts and suppresses below-k pairs', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     // Lower the cohort thresholds through the VALIDATED config path.
     await fixture.events.configStore.set('invariants.gweiMinCohortSize', { value: 2 });
     await fixture.events.configStore.set('invariants.gweiKAnonymity', { value: 2 });
@@ -185,7 +187,7 @@ describe('GWEI cohort comparison end-to-end (WS-H.5)', () => {
   });
 
   it('assembles REAL experience features: depth, lenses, evidence, familiarity, age bands', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { assembleCohorts } = await import('../invariants/data.js');
     const { defaultPersonalizationSettings, defaultPrivacySettings } = await import(
       '@licio/shared'
@@ -338,7 +340,7 @@ describe('GWEI cohort comparison end-to-end (WS-H.5)', () => {
 
 describe('scheduler branches (WS-H.1.2f)', () => {
   it('isolates task errors and runs the nightly regression at 00 UTC', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     await seedStory(fixture);
     const drift: Array<Record<string, unknown>> = [];
     fixture.invariants.log = () => {};
@@ -366,7 +368,7 @@ describe('scheduler branches (WS-H.1.2f)', () => {
   });
 
   it('the interval scheduler ticks only when the lease grants (fail closed)', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     let granted = false;
     let leaseChecks = 0;
     const stop = startInvariantsScheduler(
@@ -439,7 +441,7 @@ describe('store edge cases', () => {
 
 describe('config + promotion + realtime branches', () => {
   it('loader accepts non-envelope stored objects (direct value rows)', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     // An object value stored WITHOUT the { value: … } envelope.
     await fixture.events.configStore.set('invariants.mfciRiskThresholds', {
       elevated: 2,
@@ -451,7 +453,7 @@ describe('config + promotion + realtime branches', () => {
   });
 
   it('promotion history coerces partial evidence and rejects unknown types', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     await fixture.invariants.promotions.append({
       invariantType: 'PHI',
       fromStatus: 'shadow',
@@ -484,7 +486,7 @@ describe('config + promotion + realtime branches', () => {
   });
 
   it('batch-only invariants answer real-time calls with an honest degraded output', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const result = await fixture.invariants.gwei.computeRealtime({
       targetType: 'cohort',
       targetId: randomUUID(),
@@ -501,7 +503,7 @@ describe('config + promotion + realtime branches', () => {
   });
 
   it('the MFCI intake ignores low-concentration activity (no case opened)', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const stories = await Promise.all(Array.from({ length: 10 }, () => seedStory(fixture)));
     const nowMs = Date.now();
     await fixture.events.eventStore.insertMany(
@@ -524,7 +526,7 @@ describe('config + promotion + realtime branches', () => {
   });
 
   it('the PHI session consumer skips events without topics or session context', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { userId } = await seedUserWithSession(fixture.identity);
     // Unknown story (no topics resolvable) — nothing is recorded.
     await fixture.events.router.publish(attentionEvent(userId, { storyId: randomUUID() }));

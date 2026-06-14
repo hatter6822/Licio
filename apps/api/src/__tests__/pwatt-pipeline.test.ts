@@ -21,11 +21,11 @@ import { assertRankingInputAllowed, RankingBoundaryViolation } from '../pwatt/sh
 import { createV1Routes } from '../routes/v1.js';
 import {
   attentionEvent,
-  freshWsEServices,
+  type EventServicesFixture,
+  freshEventServices,
   seedUserWithSession,
   sourceOpenEvent,
-  type WsEFixture,
-} from './ws-e-helpers.js';
+} from './event-test-helpers.js';
 
 /** Narrow an unknown score-vector component for matcher arguments. */
 const asNumber = (value: unknown, fallback: number): number =>
@@ -33,7 +33,7 @@ const asNumber = (value: unknown, fallback: number): number =>
 
 const HOUR = 3_600_000;
 
-let fixture: WsEFixture;
+let fixture: EventServicesFixture;
 /** A fixed, complete window: [T0, T0 + 1h). */
 const T0 = Date.UTC(2026, 5, 10, 10, 0, 0);
 const IN_WINDOW = new Date(T0 + 10 * 60_000).toISOString();
@@ -87,7 +87,7 @@ async function ingestAttention(
 }
 
 beforeEach(() => {
-  fixture = freshWsEServices({ storyTitle: () => 'Water main study' });
+  fixture = freshEventServices({ storyTitle: () => 'Water main study' });
 });
 
 describe('aggregation per item/window (WS-E.2.1a)', () => {
@@ -296,7 +296,7 @@ describe('coordinated-burst detection (WS-E.2.2a)', () => {
   it('flags a synthetic burst, emits the integrity signal, and routes to the hooks', async () => {
     const mfci: string[] = [];
     const review: string[] = [];
-    fixture = freshWsEServices({
+    fixture = freshEventServices({
       hooks: {
         mfci: (signal) => {
           mfci.push(signal.signal_type);
@@ -385,7 +385,7 @@ describe('harassment-cascade freeze (WS-E.2.2c + WS-E.2.3e)', () => {
 
   it('opens a high-priority safety case, freezes growth, and keeps the ledger recording', async () => {
     const safetyCases: string[] = [];
-    fixture = freshWsEServices({
+    fixture = freshEventServices({
       hooks: {
         safetyQueue: (moderationCase) => {
           safetyCases.push(moderationCase.reason_code);
@@ -558,7 +558,7 @@ describe('scheduler windows (WS-E.2.1a scheduling)', () => {
     // A controllable clock drives BOTH ingestion receipt (created_at) and
     // window computedAt, so the freshness comparison is deterministic.
     let clock = T0 + 2 * HOUR; // the [T0, T0+1h) window completed an hour ago
-    fixture = freshWsEServices({ now: () => clock });
+    fixture = freshEventServices({ now: () => clock });
     const now = clock;
     // Nothing ingested: nothing is due (no empty-window churn).
     expect(await windowsNeedingCompute(fixture.events, now)).toEqual([]);

@@ -239,6 +239,28 @@ scanners at the route level, so the seam swap needs no route changes.
 `scan_state` rides the wire (`uploadPublicSchema`) so clients can show a
 pending hold.
 
+**Restricted-media serving gate** (WS-Q.5.2c).  Authorization for media bytes
+is enforced at the serving route, not the object ACL.  An upload linked to a
+story carries that story's id in `owner_story_id`: set at submission for story
+media (main media, caption track, poster) AND at contribution creation for
+attachments (a thread inherits its story's visibility, §14.5.6), so evidence/
+attachment bytes are gated exactly like story media.  `GET /v1/uploads/:id`
+resolves the owning story and gates on it: a PUBLIC story's media keeps a
+stable, shareable bare URL; a `room_only` story's media is served ONLY through a
+short-lived (2 h), HMAC-signed URL (`?e=…&t=…`) minted AFTER the read-bar check
+(`lib/media-urls`) OR to its **authenticated owner** (so a user can always
+retrieve their own upload — e.g. a DSAR export link — without a signed URL),
+while an outsider who guesses the upload id is refused (404).  The owning
+story's takedown/safety-hidden state is re-checked at fetch time, so
+moderation/legal removal revokes media immediately (for everyone, owner
+included); rotating `SESSION_SECRET` invalidates every outstanding token.  An
+upload with no owning story (not yet linked) serves unrestricted.  Honest limit
+(§14.5.7): a member already holding a valid URL can fetch until it expires —
+in-room visibility bounds distribution, it is not a secrecy guarantee.  The feed
+wire carries server-minted read URLs (`feedMediaSchema.url`/`captions_url`/
+`poster_url`), validated as same-origin `/v1/uploads/` paths so no off-origin or
+script URL can reach an `<img>`/`<video>` `src`.
+
 ## WS-G.4 UGC safety (defense in depth)
 
 ```
@@ -366,3 +388,75 @@ reload, submit→sync round-trips).
 * Migration 0008's enum recreation takes table-rewrite locks — fine for a
   pre-production database; a live deployment would need a staged
   (add-value/backfill/swap) variant.
+
+## WS-Q deltas — room ownership and binary visibility
+
+WS-Q remodels the room layer to the SPEC v0.7 ownership tree (rooms own
+content, content owns conversation).  This supersedes the WS-G.2 line above
+("six room types, three visibilities"): the room type/topic stays
+descriptive, but visibility is now **binary** and join/posting are
+**orthogonal** axes.
+
+- **Binary room visibility (`public | private`).** The room tier governs
+  *existence*: a public room and its membership roster are discoverable by
+  anyone; a private room's content is members-only, but the room still
+  appears in listings (`roomVisibleToUser` is unconditionally true — the
+  pre-WS-Q "restricted/expert_led can't be seen" rule is gone, so the
+  directory no longer leaks a membership oracle through omission).  The
+  legacy three-value enum (`public`/`restricted`/`expert_led`) maps forward
+  via `mapLegacyRoomVisibility` (public→{public, open, all_members};
+  restricted→{private, request_approval, all_members};
+  expert_led→{private, request_approval, experts_and_stewards}) — the
+  migration backfill that preserves every shipped room's behavior.
+- **Orthogonal axes.** `join_model ∈ {open, request_approval, invite}`
+  decides how members are admitted; `posting_policy ∈ {all_members,
+  experts_and_stewards}` decides who may open top-level content.
+  `resolveRoomCreateAxes` fills defaults and enforces coherence: a
+  **public** room admits only the `open` join model, and only staff may
+  create a room at all in the steward/governance posture.  Reserved slugs
+  (incl. `commons`) are rejected at create.
+- **The Commons.** A single seeded default room (`COMMONS_ROOM_ID`, slug
+  `commons`, public/open/all_members) owns all content that predates an
+  explicit room choice; the in-memory store self-seeds it (and re-seeds on
+  `clear()`), the Drizzle path seeds it idempotently in migration 0015
+  (`INSERT … ON CONFLICT DO NOTHING`), and `ensureCommonsRoom` is the
+  boot-time guarantee.
+- **Two-tier read bar.** `storyReadableByUser` is the authoritative content
+  gate: a `public` story in a `public` room is world-readable; a `room_only`
+  story (or any story in a `private` room) requires an ACTIVE membership or a
+  steward role.  Unknown rooms fail closed.  Every reader path (story
+  detail, thread, claims/evidence, lenses) routes through it, and absence is
+  always **404-over-403** — never a 403 that would confirm a resource exists.
+- **Top-level posting guard.** `userMayPostTopLevel` enforces `posting_policy`
+  for new content (a member who is neither an expert nor a steward in an
+  `experts_and_stewards` room is `403 posting_restricted`); `joinRoom` admits
+  per `join_model` (open → immediate ACTIVE; request_approval → pending;
+  invite → pending, no self-serve).
+- **Governance writes (steward+TOTP).** `PATCH /v1/rooms/:id/settings`
+  (`updateRoomGovernanceSettings`) changes `join_model`/`posting_policy`
+  freely and audits `forum_config_change`, but **rejects a visibility change
+  with 422** (`visibility_not_settable`) and points at the cascade endpoint —
+  visibility is not a plain settings write.
+- **The visibility cascade.** `POST /v1/rooms/:id/visibility`
+  (`changeRoomVisibility`) is the audited public⇄private transition.
+  *public → private* forces every public story `room_only` through an
+  idempotent, resumable per-story sweep (each emits
+  `content.visibility.changed` with `trigger=room_visibility_change`), flips
+  the room, and collapses an `open` join model to `request_approval` (active
+  memberships are retained); *private → public* makes the room world-readable
+  and publishes NO content (each story stays `room_only` until its author
+  widens it).  One summary `room_visibility_change` audit record carries the
+  converted count.
+- **Native video admission (`forum/video.ts`).** Uploaded `video/mp4` /
+  `video/webm` ride a validate-only probe: byte-level MP4-box / WebM-EBML
+  sniffing (a spoofed extension/MIME is caught by content), duration extraction
+  for the `ingestion.video_max_seconds` cap, and OFFSET-PRESERVING metadata
+  neutralization (MP4 `udta`→`free`, WebM `Tags`→`Void`) so sample-offset
+  tables / cue points stay valid with no re-encode.  The gated upload-serving
+  path advertises `Accept-Ranges` and honors single byte-range requests (206)
+  for native `<video>` seeking.
+- **Data-rights across both tiers (`forum/data-rights.ts`, WS-Q.3.5).**
+  `exportUserContent` returns the user's own stories/contributions regardless of
+  visibility (room_only included), each tagged `room_ref`+`visibility`, plus
+  private-room subscriptions; `anonymizeUserContent` tombstones contributions
+  across tiers and strips private-room memberships/steward rows.

@@ -22,23 +22,23 @@ import { getIngestionServices } from '../ingestion/services.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
   briefSubmission,
-  freshWsFServices,
+  freshIngestionServices,
+  type IngestionServicesFixture,
   linkSubmission,
   post,
   seedUserWithSession,
-  type WsFFixture,
-} from './ws-f-helpers.js';
+} from './ingestion-test-helpers.js';
 
 function app() {
   return new Hono().route('/v1', createV1Routes());
 }
 
-let fixture: WsFFixture;
+let fixture: IngestionServicesFixture;
 let nowMs: number;
 
 beforeEach(() => {
   nowMs = Date.parse('2026-06-11T12:00:00.000Z');
-  fixture = freshWsFServices({ config: { minAccountAgeMinutes: 0 }, now: () => nowMs });
+  fixture = freshIngestionServices({ config: { minAccountAgeMinutes: 0 }, now: () => nowMs });
 });
 
 afterEach(() => {
@@ -106,7 +106,7 @@ describe('ingestion-signals consumer (WS-F.1.1c via WS-E events)', () => {
   });
 
   it('the activity threshold drives deepening / renewed / reactivation by state', async () => {
-    fixture = freshWsFServices({
+    fixture = freshIngestionServices({
       config: { minAccountAgeMinutes: 0, lifecycleSustainedContributions: 2 },
       now: () => nowMs,
     });

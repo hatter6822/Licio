@@ -14,11 +14,35 @@
 import { z } from 'zod';
 import { STORY_LIFECYCLE_STATES, type StoryLifecycleState } from '../utils/story-lifecycle.js';
 import { httpUrlSchema, isoTimestampSchema, uuidSchema } from './common.js';
-import { SUBMISSION_TYPES, submissionTypeSchema } from './events/content.js';
+import {
+  STORY_VISIBILITIES,
+  type StoryVisibility,
+  SUBMISSION_TYPES,
+  storyVisibilitySchema,
+  submissionTypeSchema,
+} from './events/content.js';
+import type { RoomVisibility } from './room.js';
 
-export { SUBMISSION_TYPES, submissionTypeSchema };
+export type { StoryVisibility };
+export { STORY_VISIBILITIES, SUBMISSION_TYPES, storyVisibilitySchema, submissionTypeSchema };
 export const storyLifecycleStateSchema = z.enum(STORY_LIFECYCLE_STATES);
 export type { StoryLifecycleState };
+
+/**
+ * WS-Q.1.3b — the SINGLE Section 14.5 visibility-forcing rule. A `private`
+ * room ALWAYS forces `room_only` (silently — never an error, the composer
+ * locks the control); a `public` room honors the author's request, defaulting
+ * to `public`. This is the ONLY place the rule lives: the server guard
+ * (WS-Q.2.1c) and the client composer (WS-Q.5.1b) both call it, so the shown
+ * value always equals the stored value (parity-tested).
+ */
+export function deriveStoryVisibility(
+  roomVisibility: RoomVisibility,
+  requested?: StoryVisibility,
+): StoryVisibility {
+  if (roomVisibility === 'private') return 'room_only';
+  return requested ?? 'public';
+}
 
 /** Sensitivity labels (SPEC §14.2 classification; content warnings + age gating). */
 export const SENSITIVITY_LABELS = ['none', 'graphic', 'medical', 'political', 'crisis'] as const;
@@ -145,6 +169,49 @@ export const liveThreadMetadataSchema = z
   })
   .strict();
 
+// WS-Q.1.3c — native media posts. Both reference a previously-uploaded,
+// EXIF-stripped, scan-gated object (the WS-G.4.4 upload pipeline) and carry NO
+// canonical_url (exempt from URL normalization and crawling). Image posts
+// REQUIRE alt text (WCAG); video posts take optional captions as text XOR an
+// uploaded track (never both).
+export const imageMetadataSchema = z
+  .object({
+    submission_type: z.literal('image_post'),
+    /** The owned, scan-gated image upload this post renders. */
+    upload_id: uuidSchema,
+    /** REQUIRED accessibility text for the image (WCAG; §15.5). */
+    alt_text: z.string().min(1).max(1_000),
+  })
+  .strict();
+
+/** The video-post shape (reused by the create request after `.extend`). */
+const videoMetadataShape = {
+  submission_type: z.literal('video_post'),
+  /** The owned, scan-gated video upload this post renders. */
+  upload_id: uuidSchema,
+  /** Optional inline caption text (mutually exclusive with the upload). */
+  captions_text: z.string().min(1).max(20_000).optional(),
+  /** Optional uploaded WebVTT caption track (mutually exclusive with the text). */
+  captions_upload_id: uuidSchema.optional(),
+  /** Optional poster image shown before playback (WS-Q.5.2c). */
+  poster_upload_id: uuidSchema.optional(),
+} as const;
+
+/** captions are text XOR an uploaded track (both optional, never both). */
+const captionsExclusive = (v: {
+  captions_text?: string | undefined;
+  captions_upload_id?: string | undefined;
+}): boolean => !(v.captions_text !== undefined && v.captions_upload_id !== undefined);
+const captionsExclusiveError: { message: string; path: string[] } = {
+  message: 'Provide captions as text OR an uploaded track, not both',
+  path: ['captions_text'],
+};
+
+export const videoMetadataSchema = z
+  .object(videoMetadataShape)
+  .strict()
+  .refine(captionsExclusive, captionsExclusiveError);
+
 /** The §14.1 per-type payload union — stored verbatim as submission_metadata. */
 export const submissionMetadataSchema = z.discriminatedUnion('submission_type', [
   linkMetadataSchema,
@@ -153,6 +220,8 @@ export const submissionMetadataSchema = z.discriminatedUnion('submission_type', 
   evidenceCardMetadataSchema,
   localUpdateMetadataSchema,
   liveThreadMetadataSchema,
+  imageMetadataSchema,
+  videoMetadataSchema,
 ]);
 export type SubmissionMetadata = z.infer<typeof submissionMetadataSchema>;
 
@@ -170,6 +239,13 @@ const storyCreateBaseShape = {
   language: bcp47Schema.optional(),
   sensitivity_labels: z.array(sensitivityLabelSchema).max(5).optional(),
   location_scope: locationScopeSchema.nullable().optional(),
+  // WS-Q.1.3a — every content item is posted in exactly one home room
+  // (§3.4): `room_id` is REQUIRED on every branch (the `.extend()` below
+  // propagates it to all eight). `visibility` is OPTIONAL on input — the
+  // server DERIVES it via `deriveStoryVisibility` (a private room forces
+  // `room_only`; a public room honors the request, default `public`).
+  room_id: uuidSchema,
+  visibility: storyVisibilitySchema.optional(),
 } as const;
 
 export const storyCreateRequestSchema = z.discriminatedUnion('submission_type', [
@@ -183,6 +259,13 @@ export const storyCreateRequestSchema = z.discriminatedUnion('submission_type', 
     location_scope: locationScopeSchema,
   }),
   liveThreadMetadataSchema.extend(storyCreateBaseShape),
+  imageMetadataSchema.extend(storyCreateBaseShape),
+  // The video branch is a refined object (captions XOR); `.extend` on a
+  // ZodEffects is unavailable, so the base shape is spread before the refine.
+  z
+    .object({ ...videoMetadataShape, ...storyCreateBaseShape })
+    .strict()
+    .refine(captionsExclusive, captionsExclusiveError),
 ]);
 export type StoryCreateRequest = z.infer<typeof storyCreateRequestSchema>;
 
@@ -203,6 +286,17 @@ export const storyPublicSchema = z
     submission_type: submissionTypeSchema,
     canonical_url: httpUrlSchema.nullable(),
     source_id: uuidSchema.nullable(),
+    /** WS-Q — the home room (NOT NULL) and item visibility (§3.4/§14.5). */
+    room_id: uuidSchema,
+    visibility: storyVisibilitySchema,
+    /** WS-Q.2.3 — the scan-gated media upload (image/video posts); null else.
+     *  The client builds the gated read URL from this id; `media_alt_text`
+     *  carries the required accessibility text without a second round-trip. */
+    media_upload_ref: uuidSchema.nullable(),
+    media_alt_text: z.string().max(1_000).nullable(),
+    /** WS-Q.2.2b — pointer to the canonical PUBLIC story for the same link,
+     *  surfaced to room readers only; null when none / this IS public. */
+    canonical_public_story_id: uuidSchema.nullable(),
     submitted_by: uuidSchema,
     language: bcp47Schema.nullable(),
     topic_ids: z.array(uuidSchema).min(1).max(20),
@@ -243,6 +337,12 @@ export const storyCreateResponseSchema = z
   })
   .strict();
 export type StoryCreateResponse = z.infer<typeof storyCreateResponseSchema>;
+
+/** WS-Q.2.4 — PATCH /v1/stories/{id}/visibility request (author narrow/widen). */
+export const storyVisibilityPatchRequestSchema = z
+  .object({ visibility: storyVisibilitySchema })
+  .strict();
+export type StoryVisibilityPatchRequest = z.infer<typeof storyVisibilityPatchRequestSchema>;
 
 /** 409 body when the canonical URL already exists (WS-F.1.3b). */
 export const storyDuplicateResponseSchema = z

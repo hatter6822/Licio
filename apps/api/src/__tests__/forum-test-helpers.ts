@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Shared WS-G test fixtures: a fresh in-memory identity + events + ingestion
+// Forum in-memory test fixtures: a fresh identity + events + ingestion
 // + FORUM bundle (installed as the module singletons), plus canonical thread
 // and contribution builders.  `settle()` on both bundles makes detached event
 // publication deterministic in tests.
 import { randomUUID } from 'node:crypto';
-import type { ContributionCreate } from '@licio/shared';
+import { COMMONS_ROOM_ID, type ContributionCreate } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumRuntimeConfig } from '../forum/config.js';
 import {
@@ -17,24 +17,28 @@ import {
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionRuntimeConfig } from '../ingestion/config.js';
 import type { IngestionServices } from '../ingestion/services.js';
-import { freshWsFServices, seedUserWithSession, type WsFFixture } from './ws-f-helpers.js';
+import {
+  freshIngestionServices,
+  type IngestionServicesFixture,
+  seedUserWithSession,
+} from './ingestion-test-helpers.js';
 
 export { seedUserWithSession };
 
-export interface WsGFixture extends WsFFixture {
+export interface ForumServicesFixture extends IngestionServicesFixture {
   forum: ForumServices;
   /** Settle BOTH detached queues (ingestion pipeline + forum events). */
   settleAll: () => Promise<void>;
 }
 
-export function freshWsGServices(
+export function freshForumServices(
   options: {
     config?: Partial<IngestionRuntimeConfig>;
     forumConfig?: Partial<ForumRuntimeConfig>;
     now?: () => number;
   } = {},
-): WsGFixture {
-  const base = freshWsFServices({
+): ForumServicesFixture {
+  const base = freshIngestionServices({
     ...(options.config ? { config: options.config } : {}),
     ...(options.now ? { now: options.now } : {}),
   });
@@ -59,7 +63,14 @@ export function freshWsGServices(
 /** Create a story (with its thread shell) directly through the stores. */
 export async function seedThread(
   fixture: { ingestion: IngestionServices },
-  options: { storyId?: string; threadId?: string; roomId?: string | null; title?: string } = {},
+  options: {
+    storyId?: string;
+    threadId?: string;
+    roomId?: string | null;
+    title?: string;
+    visibility?: 'public' | 'room_only';
+    submittedBy?: string;
+  } = {},
 ): Promise<{ storyId: string; threadId: string }> {
   const storyId = options.storyId ?? randomUUID();
   const threadId = options.threadId ?? randomUUID();
@@ -69,8 +80,13 @@ export async function seedThread(
       canonicalUrl: null,
       title: options.title ?? `Story ${storyId.slice(0, 8)}`,
       titleHash: `hash-${storyId}`,
-      submittedBy: randomUUID(),
+      submittedBy: options.submittedBy ?? randomUUID(),
       sourceId: null,
+      // WS-Q — every story has a home room (defaults to Commons) + visibility.
+      roomId: options.roomId ?? COMMONS_ROOM_ID,
+      visibility: options.visibility ?? 'public',
+      mediaUploadRef: null,
+      canonicalPublicStoryId: null,
       language: 'en',
       topicIds: [randomUUID()],
       locationScope: null,
@@ -89,9 +105,6 @@ export async function seedThread(
     threadId,
   );
   if (!created.ok) throw new Error('seedThread: story creation failed');
-  if (options.roomId !== undefined && options.roomId !== null) {
-    await fixture.ingestion.stories.updateThread(threadId, { roomId: options.roomId });
-  }
   return { storyId, threadId };
 }
 

@@ -39,6 +39,7 @@ import type {
   SearchRequest,
   SearchResult,
   StoryLifecycleState,
+  StoryVisibility,
   VerificationState,
 } from '@licio/shared';
 import {
@@ -81,6 +82,7 @@ import type {
   SourceRecord,
   SourceStore,
   StoryCreateOutcome,
+  StoryDedupTier,
   StoryRecord,
   StorySignatureRecord,
   StoryStore,
@@ -127,6 +129,10 @@ export class DrizzleStoryStore implements StoryStore {
       titleHash: row.titleHash,
       submittedBy: row.submittedBy,
       sourceId: row.sourceId,
+      roomId: row.roomId,
+      visibility: row.visibility,
+      mediaUploadRef: row.mediaUploadRef,
+      canonicalPublicStoryId: row.canonicalPublicStoryId,
       language: row.language,
       topicIds: row.topicIds,
       locationScope: row.locationScope ?? null,
@@ -237,6 +243,11 @@ export class DrizzleStoryStore implements StoryStore {
             titleHash: story.titleHash,
             submittedBy: story.submittedBy,
             sourceId: story.sourceId,
+            // WS-Q dual-write — every story insert stamps the home room + visibility.
+            roomId: story.roomId,
+            visibility: story.visibility,
+            mediaUploadRef: story.mediaUploadRef,
+            canonicalPublicStoryId: story.canonicalPublicStoryId,
             language: story.language,
             topicIds: story.topicIds,
             locationScope: story.locationScope,
@@ -257,7 +268,14 @@ export class DrizzleStoryStore implements StoryStore {
           .returning();
         const thread = await tx
           .insert(threadsTable)
-          .values({ threadId, storyId: story.storyId, createdAt: now, updatedAt: now })
+          // WS-Q.1.5 — stamp the room on the thread (== the story's room).
+          .values({
+            threadId,
+            storyId: story.storyId,
+            roomId: story.roomId,
+            createdAt: now,
+            updatedAt: now,
+          })
           .returning();
         const storyRow = inserted[0];
         const threadRow = thread[0];
@@ -273,7 +291,11 @@ export class DrizzleStoryStore implements StoryStore {
       // losing transaction rolls back WHOLE (no orphan thread) and reports
       // the surviving story (WS-F.1.3b/1.4d).
       if (isUniqueViolation(error) && story.canonicalUrl !== null) {
-        const existing = await this.getByCanonicalUrl(story.canonicalUrl);
+        const tier: StoryDedupTier =
+          story.visibility === 'public'
+            ? { visibility: 'public' }
+            : { visibility: 'room_only', roomId: story.roomId };
+        const existing = await this.getByCanonicalUrl(story.canonicalUrl, tier);
         if (existing) {
           return {
             ok: false,
@@ -306,13 +328,75 @@ export class DrizzleStoryStore implements StoryStore {
     return out;
   }
 
-  async getByCanonicalUrl(canonicalUrl: string): Promise<StoryRecord | null> {
+  async getByCanonicalUrl(canonicalUrl: string, tier: StoryDedupTier): Promise<StoryRecord | null> {
+    // WS-Q.2.2a — tier-scoped lookup matching the two partial unique indexes:
+    // a VISIBLE (hidden_state IS NULL) public story (global) or room_only story
+    // (this room). `hidden_state IS NULL` keeps a taken-down row from masking a
+    // re-submission slot — the takedown denylist (WS-Q.2.6) is the companion.
+    const conditions = [
+      eq(storiesTable.canonicalUrl, canonicalUrl),
+      eq(storiesTable.visibility, tier.visibility),
+      isNull(storiesTable.hiddenState),
+    ];
+    if (tier.visibility === 'room_only') {
+      conditions.push(eq(storiesTable.roomId, tier.roomId));
+    }
     const rows = await this.#db
       .select()
       .from(storiesTable)
-      .where(eq(storiesTable.canonicalUrl, canonicalUrl))
+      .where(and(...conditions))
       .limit(1);
     return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async listRoomOnlyByCanonicalUrl(canonicalUrl: string): Promise<StoryRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(storiesTable)
+      .where(
+        and(
+          eq(storiesTable.canonicalUrl, canonicalUrl),
+          eq(storiesTable.visibility, 'room_only'),
+          isNull(storiesTable.hiddenState),
+        ),
+      );
+    return rows.map((row) => this.#toRecord(row));
+  }
+
+  async getByMediaUploadRef(uploadId: string): Promise<StoryRecord | null> {
+    const rows = await this.#db
+      .select()
+      .from(storiesTable)
+      .where(eq(storiesTable.mediaUploadRef, uploadId))
+      .limit(1);
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async listByRoom(
+    roomId: string,
+    limit: number,
+    visibility?: StoryVisibility,
+  ): Promise<StoryRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(storiesTable)
+      .where(
+        visibility === undefined
+          ? eq(storiesTable.roomId, roomId)
+          : and(eq(storiesTable.roomId, roomId), eq(storiesTable.visibility, visibility)),
+      )
+      .orderBy(desc(storiesTable.createdAt))
+      .limit(limit);
+    return rows.map((row) => this.#toRecord(row));
+  }
+
+  async hasHiddenForUrl(canonicalUrl: string): Promise<boolean> {
+    const rows = await this.#db
+      .select({ id: storiesTable.storyId })
+      .from(storiesTable)
+      .where(and(eq(storiesTable.canonicalUrl, canonicalUrl), isNotNull(storiesTable.hiddenState)))
+      .limit(1);
+    return rows.length > 0;
   }
 
   async getThreadByStoryId(storyId: string): Promise<ThreadShellRecord | null> {
@@ -365,6 +449,15 @@ export class DrizzleStoryStore implements StoryStore {
       values['lastMaterialUpdateAt'] = new Date(patch.lastMaterialUpdateAt);
     }
     if (patch.topicIds !== undefined) values['topicIds'] = patch.topicIds;
+    // WS-Q.2.4 — the author narrow/widen + the room private⇄public cascade patch
+    // these fields; omitting them here made a visibility-only patch a silent
+    // no-op in Postgres (the no-op-on-empty-values guard returned the unchanged
+    // row), so narrowed content stayed publicly distributed in production.
+    if (patch.visibility !== undefined) values['visibility'] = patch.visibility;
+    if (patch.canonicalPublicStoryId !== undefined) {
+      values['canonicalPublicStoryId'] = patch.canonicalPublicStoryId;
+    }
+    if (patch.mediaUploadRef !== undefined) values['mediaUploadRef'] = patch.mediaUploadRef;
     if (Object.keys(values).length === 0) return this.getById(storyId);
     const rows = await this.#db
       .update(storiesTable)
@@ -1573,6 +1666,22 @@ export class PostgresSearchIndex implements SearchIndex {
     const match = sql`(to_tsquery('simple', ${tsquery}) || to_tsquery('english', ${tsquery}))`;
     const types = request.type !== undefined ? [request.type] : ['story', 'claim', 'evidence'];
 
+    // WS-Q.2.5a/b — two-tier visibility. Room-scoped (`?room=`): only this
+    // room's pool (the route enforced the read bar). Global: only PUBLIC
+    // content from PUBLIC rooms — BOTH conjuncts (a mislabeled public story in
+    // a private room is excluded by the room join).
+    const roomScoped = request.room !== undefined;
+    const storyVisibilityFilter = roomScoped
+      ? sql`s.room_id = ${request.room}::uuid`
+      : sql`s.visibility = 'public' and exists (select 1 from rooms r where r.room_id = s.room_id and r.visibility = 'public')`;
+    // For claim/evidence hits, the OWNING story's visibility governs. A
+    // null-story (cross-story / user-experience) row is global-eligible but
+    // never room-scoped.
+    const ownerVisibilityFilter = (col: ReturnType<typeof sql>) =>
+      roomScoped
+        ? sql`exists (select 1 from stories sv where sv.story_id = ${col} and sv.hidden_state is null and sv.room_id = ${request.room}::uuid)`
+        : sql`(${col} is null or exists (select 1 from stories sv join rooms rv on rv.room_id = sv.room_id where sv.story_id = ${col} and sv.hidden_state is null and sv.visibility = 'public' and rv.visibility = 'public'))`;
+
     const rows: Array<{
       result_type: 'story' | 'claim' | 'evidence';
       id: string;
@@ -1595,7 +1704,11 @@ export class PostgresSearchIndex implements SearchIndex {
             or (${rank} = ${cursor.relevance} and ${createdAt} = ${cursor.createdAt}::timestamptz and ${id} < ${cursor.id}::uuid))`;
 
     if (types.includes('story')) {
-      const filters = [sql`s.hidden_state is null`, sql`s.search_tsv @@ ${match}`];
+      const filters = [
+        sql`s.hidden_state is null`,
+        sql`s.search_tsv @@ ${match}`,
+        storyVisibilityFilter,
+      ];
       if (request.topic_id !== undefined) {
         filters.push(sql`s.topic_ids @> array[${request.topic_id}]::uuid[]`);
       }
@@ -1629,7 +1742,7 @@ export class PostgresSearchIndex implements SearchIndex {
       const filters = [
         sql`c.claim_status <> 'retracted'`,
         sql`c.search_tsv @@ ${match}`,
-        sql`(c.story_id is null or exists (select 1 from stories sv where sv.story_id = c.story_id and sv.hidden_state is null))`,
+        ownerVisibilityFilter(sql`c.story_id`),
       ];
       if (request.date_from !== undefined)
         filters.push(sql`c.created_at >= ${request.date_from}::timestamptz`);
@@ -1657,10 +1770,10 @@ export class PostgresSearchIndex implements SearchIndex {
       const filters = [
         sql`ec.verification_state <> 'retracted'`,
         sql`ec.search_tsv @@ ${match}`,
-        // Evidence attached to a takedown/safety-hidden story is excluded too
-        // (its story_id is nullable for user-experience evidence — that is
-        // always visible). Mirrors the claim predicate above.
-        sql`(ec.story_id is null or exists (select 1 from stories sv where sv.story_id = ec.story_id and sv.hidden_state is null))`,
+        // Evidence attached to a takedown/safety-hidden OR in-room story is
+        // excluded from global results (its story_id is nullable for
+        // user-experience evidence — that is always global-visible).
+        ownerVisibilityFilter(sql`ec.story_id`),
       ];
       if (request.source_id !== undefined) filters.push(sql`ec.source_id = ${request.source_id}`);
       if (request.date_from !== undefined)

@@ -32,6 +32,7 @@ import { replayDecision, serveFeed } from '../ranking/service.js';
 import { registerRankingConsumers } from '../ranking/services.js';
 import { InMemoryFeatureStore } from '../ranking/stores.js';
 import { createV1Routes } from '../routes/v1.js';
+import { seedUserWithSession } from './event-test-helpers.js';
 import {
   freshRankingServices,
   promoteInvariant,
@@ -39,7 +40,6 @@ import {
   seedInvariantOutput,
   seedStory,
 } from './ranking-helpers.js';
-import { seedUserWithSession } from './ws-e-helpers.js';
 
 let fixture: RankingFixture;
 
@@ -240,6 +240,7 @@ describe('safety filter (WS-I.2.2a, non-overridable)', () => {
       item_type: 'story' as const,
       source_type: 'global' as const,
       room_id: null,
+      visibility: 'public' as const,
       topic_ids: [],
       source_id: null,
       freshness_timestamp: new Date().toISOString(),
@@ -272,6 +273,7 @@ describe('safety filter (WS-I.2.2a, non-overridable)', () => {
       item_type: 'story' as const,
       source_type: 'global' as const,
       room_id: null,
+      visibility: 'public' as const,
       topic_ids: [],
       source_id: null,
       freshness_timestamp: new Date().toISOString(),

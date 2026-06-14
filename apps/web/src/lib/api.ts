@@ -38,22 +38,32 @@ import {
   okAckSchema,
   type PushSubscriptionJson,
   type ReportAck,
+  type RoomCreateRequest,
   type RoomDetail,
+  type RoomGovernanceSettingsRequest,
   type RoomJoinResponse,
   type RoomListResponse,
+  type RoomSummary,
   reportAckSchema,
   roomDetailSchema,
   roomJoinResponseSchema,
   roomListResponseSchema,
+  roomSummarySchema,
   type SignalLedgerResponse,
+  type StoryCreateRequest,
+  type StoryCreateResponse,
   type StoryDetail,
   type StoryInterpretationsResponse,
   signalLedgerResponseSchema,
+  storyCreateResponseSchema,
   storyDetailSchema,
+  storyDuplicateResponseSchema,
   storyInterpretationsResponseSchema,
   type ThreadDetail,
   threadDetailSchema,
+  type UploadPublic,
   type UserSettings,
+  uploadPublicSchema,
   userSettingsSchema,
   vapidPublicKeyResponseSchema,
 } from '@licio/shared';
@@ -352,4 +362,152 @@ export async function updateNotificationPreferences(
 ): Promise<NotificationPreferences> {
   const response = await client.v1.notifications.preferences.$patch({ json: patch });
   return parseResponse(response, notificationPreferencesSchema);
+}
+
+// --- WS-Q content–room surface --------------------------------------------
+
+/**
+ * Absolute src for a server-minted media read path (`media.url`/`captions_url`/
+ * `poster_url`). The server builds the `/v1/uploads/:id` path AND any signed,
+ * expiring query for restricted (room_only) media after its read-bar check
+ * (WS-Q.5.2c); the client only prefixes the API origin. The wire value is
+ * validated as a same-origin uploads path (`mediaPathSchema`), so this can never
+ * point off-origin.
+ */
+export function mediaSrc(path: string): string {
+  return `${API_BASE}${path}`;
+}
+
+/** Submit a story (link/brief/image/video/…) to a home room (WS-F/WS-Q). */
+export async function createStory(request: StoryCreateRequest): Promise<StoryCreateResponse> {
+  const response = await client.v1.stories.$post({ json: request });
+  return parseResponse(response, storyCreateResponseSchema);
+}
+
+/**
+ * Upload media bytes (image/video/captions) through the scan-gated upload path.
+ * EXIF/GPS is stripped server-side before storage; video containers are sniffed.
+ * Uses `XMLHttpRequest` (not `fetch`) so real byte progress is reported via
+ * `onProgress` (0–1); a fresh single-use CSRF token is attached and credentials
+ * ride the cookie, matching the mutation contract.
+ */
+export async function uploadMedia(
+  file: File,
+  altText?: string,
+  onProgress?: (fraction: number) => void,
+): Promise<UploadPublic> {
+  const form = new FormData();
+  form.set('file', file);
+  if (altText !== undefined && altText.length > 0) form.set('alt_text', altText);
+  const token = await fetchCsrfToken();
+  const raw = await new Promise<{ status: number; body: unknown }>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${API_BASE}/v1/uploads`);
+    xhr.withCredentials = true;
+    if (token) xhr.setRequestHeader('x-csrf-token', token);
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(e.loaded / e.total);
+      };
+    }
+    xhr.onload = () => {
+      let body: unknown;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        body = null;
+      }
+      resolve({ status: xhr.status, body });
+    };
+    xhr.onerror = () => reject(new ApiClientError('network_error', 'Upload failed'));
+    xhr.send(form);
+  });
+  if (raw.status < 200 || raw.status >= 300) {
+    const parsed = apiErrorSchema.safeParse(raw.body);
+    throw parsed.success
+      ? new ApiClientError(parsed.data.error.code, parsed.data.error.message, raw.status)
+      : new ApiClientError(`http_${raw.status}`, 'Upload failed', raw.status);
+  }
+  const parsed = uploadPublicSchema.safeParse(raw.body);
+  if (!parsed.success) throw new ApiClientError('invalid_response', 'Malformed upload response');
+  return parsed.data;
+}
+
+const visibilityChangeResponseSchema = z.object({
+  visibility: z.enum(['public', 'room_only']),
+  changed: z.boolean(),
+});
+export type VisibilityChangeResult = z.infer<typeof visibilityChangeResponseSchema>;
+
+/**
+ * Narrow (public → room_only) or widen (room_only → public) a story's
+ * visibility (author-only, WS-Q.2.4). A widen that collides with an existing
+ * public story for the same URL throws an {@link ApiClientError} carrying the
+ * existing story id (code `duplicate_story`).
+ */
+export async function changeStoryVisibility(
+  storyId: string,
+  visibility: 'public' | 'room_only',
+): Promise<VisibilityChangeResult> {
+  const response = await client.v1.stories[':storyId'].visibility.$patch({
+    param: { storyId },
+    json: { visibility },
+  });
+  if (response.status === 409) {
+    const body = storyDuplicateResponseSchema.safeParse(await response.json());
+    const existing = body.success ? body.data.existing_story_id : undefined;
+    const err = new ApiClientError(
+      'duplicate_story',
+      'A public story already exists for this link',
+      409,
+    );
+    if (existing !== undefined) {
+      (err as ApiClientError & { existingStoryId?: string }).existingStoryId = existing;
+    }
+    throw err;
+  }
+  return parseResponse(response, visibilityChangeResponseSchema);
+}
+
+/** Room feed (WS-I room surface; gated by the WS-G content bar). */
+export async function fetchRoomFeed(roomId: string, cursor?: string): Promise<FeedResponse> {
+  const response = await client.v1.rooms[':roomId'].feed.$get({
+    param: { roomId },
+    query: cursor ? { cursor } : {},
+  });
+  return parseResponse(response, feedResponseSchema);
+}
+
+/** Create a room with the WS-Q visibility/join/posting axes (WS-G.2.3c). */
+export async function createRoom(request: RoomCreateRequest): Promise<RoomSummary> {
+  const response = await client.v1.rooms.$post({ json: request });
+  return parseResponse(response, roomSummarySchema);
+}
+
+/** Steward: change join_model / posting_policy (NOT visibility) (WS-Q.3.3b). */
+export async function updateRoomSettings(
+  roomId: string,
+  patch: RoomGovernanceSettingsRequest,
+): Promise<void> {
+  const response = await client.v1.rooms[':roomId'].settings.$patch({
+    param: { roomId },
+    json: patch,
+  });
+  await parseResponse(response, z.object({ ok: z.literal(true) }));
+}
+
+/** Steward: the audited public⇄private room-visibility cascade (WS-Q.3.4). */
+export async function changeRoomVisibility(
+  roomId: string,
+  visibility: 'public' | 'private',
+): Promise<{ converted: number }> {
+  const response = await client.v1.rooms[':roomId'].visibility.$post({
+    param: { roomId },
+    json: { visibility },
+  });
+  const result = await parseResponse(
+    response,
+    z.object({ visibility: z.enum(['public', 'private']), converted: z.number().int().min(0) }),
+  );
+  return { converted: result.converted };
 }

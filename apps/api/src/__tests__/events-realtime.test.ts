@@ -21,11 +21,11 @@ import { reconcileRealtimeWindow } from '../pwatt/scheduler.js';
 import { runPwattWindow } from '../pwatt/scoring.js';
 import {
   attentionEvent,
-  freshWsEServices,
+  type EventServicesFixture,
+  freshEventServices,
   seedUserWithSession,
   sourceOpenEvent,
-  type WsEFixture,
-} from './ws-e-helpers.js';
+} from './event-test-helpers.js';
 
 describe('HyperLogLog (WS-E.3.2 bounded-memory unique counts)', () => {
   it('estimates small cardinalities exactly via linear counting', () => {
@@ -53,10 +53,10 @@ describe('HyperLogLog (WS-E.3.2 bounded-memory unique counts)', () => {
 });
 
 describe('real-time counters (WS-E.3.2)', () => {
-  let fixture: WsEFixture;
+  let fixture: EventServicesFixture;
 
   beforeEach(() => {
-    fixture = freshWsEServices();
+    fixture = freshEventServices();
     registerDefaultConsumers(fixture.events);
   });
 
@@ -164,7 +164,7 @@ describe('real-time counters (WS-E.3.2)', () => {
 
   it('fires the volume-threshold trigger exactly once per item-window', async () => {
     const triggered: string[] = [];
-    fixture = freshWsEServices();
+    fixture = freshEventServices();
     registerDefaultConsumers(fixture.events, {
       triggerThreshold: 2,
       onVolumeTrigger: (itemId) => triggered.push(itemId),

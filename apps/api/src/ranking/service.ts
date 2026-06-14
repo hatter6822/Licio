@@ -65,6 +65,8 @@ import {
 import type { NewStoredEvent } from '../events/stores.js';
 import { roomContentVisibleToUser } from '../forum/rooms.js';
 import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
+import { makeMediaUrlMinter } from '../lib/media-urls.js';
+import { feedMediaOf } from '../lib/story-media.js';
 import { exposureLabelForGain, latestMeriGains } from '../routes/invariants-public.js';
 import { killSwitchDecision } from './killswitch.js';
 import { assembleCandidatePool } from './orchestrator.js';
@@ -251,6 +253,8 @@ async function buildFeedItems(
         source: story.publisher ?? story.canonicalUrl ?? 'Community submission',
         origin: 'independent' as const,
         ...(story.canonicalUrl !== null ? { url: story.canonicalUrl } : {}),
+        visibility: story.visibility,
+        media: feedMediaOf(story, makeMediaUrlMinter()),
         reading_minutes: Math.max(1, Math.ceil(excerptWords / 200)),
         rating_label: ratingLabel,
         distribution_reason: entry.explanation.distributionReason,
@@ -454,38 +458,70 @@ async function contextCardsFor(
 }
 
 /**
- * WS-G two-tier visibility on the DISTRIBUTION side (§16.2): content in a
- * restricted/expert-led room never reaches a feed its requester cannot read
- * — the SAME `roomContentVisibleToUser` bar the room routes enforce (rule
- * identity), evaluated once per DISTINCT room in the pool (bounded by pool
- * diversity, never per item). Unknown rooms fail closed. Room-less items
- * (no thread room) pass through; the room surface re-verifies its own room
- * cheaply, keeping serveFeed safe for any caller that bypasses the route.
+ * WS-Q.4.2a — the surface-aware DISTRIBUTION gate (§14.5.3/§16.2), the
+ * authoritative ALWAYS-ON containment backstop. Evaluated once per DISTINCT
+ * room in the pool (bounded by pool diversity, never per item); an unknown room
+ * fails closed (every item now has a room — there is no room-less pass-through).
+ *
+ *   • front_page / topic: the SAME two-condition global test the retrievers and
+ *     search use — drop a candidate unless `item.visibility = 'public'` AND its
+ *     room is public. A room_only item, OR a transiently-mislabeled public item
+ *     in a private room, is dropped even if a buggy retriever emitted it.
+ *   • room: keep this room's full pool behind the content bar; a FOREIGN-room
+ *     room_only item is dropped (own-room room_only passes).
+ *
+ * Each drop is reason-coded (`item_visibility` / `room_private_on_global` /
+ * `room_bar`); the excluded count rides the decision log (WS-Q.4.2b).
  */
-async function filterByRoomVisibility(
+async function filterByVisibility(
   services: RankingServices,
   pool: readonly Candidate[],
   userId: string | null,
   requestId: string,
-): Promise<Candidate[]> {
+  surface: 'front_page' | 'room' | 'topic',
+  surfaceRoomId: string | null,
+): Promise<{ filtered: Candidate[]; excludedCount: number }> {
   const roomIds = [
     ...new Set(pool.map((c) => c.room_id).filter((id): id is string => id !== null)),
   ];
-  if (roomIds.length === 0) return [...pool];
-  const visible = new Set<string>();
+  const roomPublic = new Map<string, boolean>();
+  const roomReadable = new Map<string, boolean>();
   for (const roomId of roomIds) {
     const room = await services.forum.rooms.getById(roomId);
-    if (room === null) continue; // unknown room ⇒ fail closed
-    if (await roomContentVisibleToUser(services.forum, room, userId)) visible.add(roomId);
+    if (room === null) continue; // unknown room ⇒ fail closed (absent ⇒ false)
+    roomPublic.set(roomId, room.visibility === 'public');
+    roomReadable.set(roomId, await roomContentVisibleToUser(services.forum, room, userId));
   }
-  const filtered = pool.filter((c) => c.room_id === null || visible.has(c.room_id));
-  if (filtered.length < pool.length) {
-    services.log('ranking.room_visibility.filtered', {
+  const reasons = new Map<string, number>();
+  const drop = (reason: string): false => {
+    reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
+    return false;
+  };
+  const onGlobal = surface !== 'room';
+  const filtered = pool.filter((c) => {
+    const roomId = c.room_id;
+    if (roomId === null) return drop('missing_room'); // fail closed
+    if (onGlobal) {
+      // Two-condition global containment: public item from a public room.
+      if (c.visibility !== 'public') return drop('item_visibility');
+      if (roomPublic.get(roomId) !== true) return drop('room_private_on_global');
+      return true;
+    }
+    // Room surface: the room content bar, then drop FOREIGN-room room_only.
+    if (roomReadable.get(roomId) !== true) return drop('room_bar');
+    if (c.visibility === 'room_only' && roomId !== surfaceRoomId) return drop('item_visibility');
+    return true;
+  });
+  const excludedCount = pool.length - filtered.length;
+  if (excludedCount > 0) {
+    services.log('ranking.visibility.filtered', {
       request_id: requestId,
-      excluded_count: pool.length - filtered.length,
+      surface,
+      excluded_count: excludedCount,
+      reasons: Object.fromEntries(reasons),
     });
   }
-  return filtered;
+  return { filtered, excludedCount };
 }
 
 /** Serve one feed request through the full WS-I pipeline. */
@@ -541,7 +577,18 @@ export async function serveFeed(
     const topicId = request.surfaceTopicId;
     surfacePool = surfacePool.filter((c) => c.topic_ids.includes(topicId));
   }
-  surfacePool = await filterByRoomVisibility(services, surfacePool, request.userId, requestId);
+  // WS-Q.4.2a — the always-on distribution gate runs BEFORE the ranked/fallback
+  // split, so both paths inherit identical containment (WS-Q.4.2b).
+  const visibilityGate = await filterByVisibility(
+    services,
+    surfacePool,
+    request.userId,
+    requestId,
+    request.surface,
+    request.surfaceRoomId,
+  );
+  surfacePool = visibilityGate.filtered;
+  const visibilityExcludedCount = visibilityGate.excludedCount;
 
   // Seen-aware pagination: items the cursor's page chain already served
   // leave the pool BEFORE profile selection and the safety filter, so the
@@ -635,6 +682,7 @@ export async function serveFeed(
       reason: fallbackReason,
       gweiApplication: gwei.application,
       retentionDays: config.decisionLogRetentionDays,
+      visibilityExcludedCount,
     });
   }
 
@@ -792,6 +840,7 @@ export async function serveFeed(
     invariant_versions: invariantVersions,
     constraints_applied: ranked.applications,
     safety_exclusions: safety.exclusions,
+    visibility_excluded_count: visibilityExcludedCount,
     quota_outcomes: assembled.quotaOutcomes,
     explanation_ids: explanationIds,
     experiment_ids: [],
@@ -861,6 +910,9 @@ interface FallbackArgs {
   reason: FallbackReason;
   gweiApplication: RankingDecisionLog['constraints_applied'][number] | null;
   retentionDays: number;
+  /** WS-Q.4.2b — visibility-gate drops (the gate ran before the ranked/fallback
+   *  split, so this count is identical on both paths). */
+  visibilityExcludedCount: number;
 }
 
 /**
@@ -903,6 +955,7 @@ async function serveFallback(
     invariant_versions: {},
     constraints_applied: args.gweiApplication === null ? [] : [args.gweiApplication],
     safety_exclusions: [...args.safetyExclusions],
+    visibility_excluded_count: args.visibilityExcludedCount,
     quota_outcomes: [...args.quotaOutcomes],
     explanation_ids: explanationIds,
     experiment_ids: [],
@@ -997,6 +1050,9 @@ export async function replayDecision(
         item_type: snapshot.item_type,
         source_type: 'global',
         room_id: snapshot.room_id,
+        // WS-Q.4.3 — legacy snapshots default to `public` (the schema default),
+        // since every pre-WS-Q served item was public.
+        visibility: snapshot.visibility,
         topic_ids: snapshot.topic_ids,
         source_id: snapshot.source_id,
         freshness_timestamp: snapshot.created_at,

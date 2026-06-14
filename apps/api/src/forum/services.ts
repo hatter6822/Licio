@@ -154,6 +154,19 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
     };
   }
 
+  // WS-Q.2.5a — wire the in-memory global-search room-visibility resolver now
+  // that the room store exists (ingestion was constructed first). The Drizzle
+  // search adapter resolves this with a SQL join instead.
+  if (ingestion) {
+    ingestion.setSearchRoomVisibilityProvider(async () => {
+      const map = new Map<string, 'public' | 'private'>();
+      for (const room of await services.rooms.list({ limit: 100_000 })) {
+        map.set(room.roomId, room.visibility);
+      }
+      return map;
+    });
+  }
+
   return services;
 }
 

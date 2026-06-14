@@ -28,6 +28,7 @@ import { EVENT_FIXTURES } from './event-fixtures.js';
 const SPEC_21_3_CORE_TOPICS = [
   'content.submitted',
   'content.normalized',
+  'content.visibility.changed',
   'source.opened.aggregate',
   'attention.aggregate',
   'contribution.created',

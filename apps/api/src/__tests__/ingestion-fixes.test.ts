@@ -6,6 +6,7 @@
 // similarity claim dedup (B6 / WS-F.1.2b soft dep), and source
 // evidence-type-frequency population (E18 / WS-F.2.1a).
 import { randomUUID } from 'node:crypto';
+import { COMMONS_ROOM_ID } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
@@ -21,7 +22,12 @@ import {
   InMemoryReviewQueueStore,
 } from '../ingestion/stores.js';
 import { createV1Routes } from '../routes/v1.js';
-import { freshWsFServices, post, seedUserWithSession, type WsFFixture } from './ws-f-helpers.js';
+import {
+  freshIngestionServices,
+  type IngestionServicesFixture,
+  post,
+  seedUserWithSession,
+} from './ingestion-test-helpers.js';
 
 function v1Routes() {
   return new Hono().route('/v1', createV1Routes());
@@ -40,10 +46,10 @@ function unitVector(axis: number, blend = 0): Float32Array {
   return v;
 }
 
-let fixture: WsFFixture;
+let fixture: IngestionServicesFixture;
 
 beforeEach(() => {
-  fixture = freshWsFServices({ config: { minAccountAgeMinutes: 0 } });
+  fixture = freshIngestionServices({ config: { minAccountAgeMinutes: 0 } });
 });
 
 describe('A1: anonymous takedown intake through the FULL app (WS-F.1.4f)', () => {
@@ -77,6 +83,7 @@ describe('A1: anonymous takedown intake through the FULL app (WS-F.1.4f)', () =>
         headers: { 'content-type': 'application/json', cookie },
         body: JSON.stringify({
           submission_type: 'original_brief',
+          room_id: COMMONS_ROOM_ID,
           body: 'A body.',
           title: 'A title',
           topic_ids: [randomUUID()],
@@ -108,6 +115,7 @@ describe('A2: evidence-card submissions get embedded via evidence.added (WS-F.3.
         '/v1/stories',
         {
           submission_type: 'evidence_card',
+          room_id: COMMONS_ROOM_ID,
           citation_url_or_ref: 'https://journal.example/study-42',
           claim_id: claim.claimId,
           relevance_note: 'Replicates the headline finding with a larger sample.',
@@ -155,6 +163,10 @@ describe('A3: DSAR export is COMPLETE across page boundaries (WS-D §19.3)', () 
           titleHash: randomUUID().replaceAll('-', ''),
           submittedBy: me,
           sourceId: null,
+          roomId: COMMONS_ROOM_ID,
+          visibility: 'public',
+          mediaUploadRef: null,
+          canonicalPublicStoryId: null,
           language: 'en',
           topicIds: [randomUUID()],
           locationScope: null,
@@ -181,6 +193,10 @@ describe('A3: DSAR export is COMPLETE across page boundaries (WS-D §19.3)', () 
           titleHash: randomUUID().replaceAll('-', ''),
           submittedBy: other,
           sourceId: null,
+          roomId: COMMONS_ROOM_ID,
+          visibility: 'public',
+          mediaUploadRef: null,
+          canonicalPublicStoryId: null,
           language: 'en',
           topicIds: [randomUUID()],
           locationScope: null,
@@ -358,6 +374,7 @@ describe('E18: evidence-card citations populate source evidence-type frequency (
           '/v1/stories',
           {
             submission_type: 'evidence_card',
+            room_id: COMMONS_ROOM_ID,
             citation_url_or_ref: citation,
             claim_id: claim.claimId,
             relevance_note: 'A relevance note about the citation.',

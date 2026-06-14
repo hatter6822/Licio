@@ -38,6 +38,7 @@ function vectorOf(itemId: string, revision: number): FeatureVector {
     item_id: itemId,
     item_type: 'story',
     room_id: null,
+    visibility: 'public',
     topic_ids: ['civics'],
     source_id: null,
     created_at: '2026-06-10T00:00:00.000Z',
@@ -84,6 +85,7 @@ function logOf(requestId: string, timestampIso: string): RankingDecisionLog {
       },
     ],
     safety_exclusions: [],
+    visibility_excluded_count: 0,
     quota_outcomes: [],
     explanation_ids: {},
     experiment_ids: ['exp-1'],
@@ -300,6 +302,7 @@ describe.skipIf(!DB_URL)('WS-I serving-path reads on the WS-E/WS-F Drizzle adapt
   let safetyStore: DrizzleItemSafetyStateStore;
   let stories: DrizzleStoryStore;
   let submitterId: string;
+  let roomId: string;
   const safetyItemIds: string[] = [];
   // The invariant_outputs type vocabulary is a CLOSED db CHECK — synthetic
   // types are impossible. The gate-read test uses the real 'GWEI' type with
@@ -327,6 +330,20 @@ describe.skipIf(!DB_URL)('WS-I serving-path reads on the WS-E/WS-F Drizzle adapt
       })
       .returning();
     submitterId = (inserted[0] as { userId: string }).userId;
+    // WS-Q — stories need a home room (FK + NOT NULL).
+    const { rooms } = await import('@licio/db');
+    const room = await db
+      .insert(rooms)
+      .values({
+        name: `WS-I API Room ${randomUUID().slice(0, 8)}`,
+        slug: `wsiapi-${randomUUID().slice(0, 8)}`,
+        roomType: 'global_topic',
+        visibility: 'public',
+        joinModel: 'open',
+        postingPolicy: 'all_members',
+      })
+      .returning();
+    roomId = (room[0] as { roomId: string }).roomId;
   });
 
   afterAll(async () => {
@@ -353,6 +370,7 @@ describe.skipIf(!DB_URL)('WS-I serving-path reads on the WS-E/WS-F Drizzle adapt
       await db.delete(dbSchema.stories).where(inArray(dbSchema.stories.storyId, storyIds));
     }
     await db.delete(dbSchema.users).where(sql`${dbSchema.users.userId} = ${submitterId}`);
+    if (roomId) await db.delete(dbSchema.rooms).where(sql`${dbSchema.rooms.roomId} = ${roomId}`);
     const client = (db as unknown as { $client: { end: () => Promise<void> } }).$client;
     await client.end();
   });
@@ -440,6 +458,10 @@ describe.skipIf(!DB_URL)('WS-I serving-path reads on the WS-E/WS-F Drizzle adapt
           titleHash: randomUUID().replaceAll('-', ''),
           submittedBy: submitterId,
           sourceId: null,
+          roomId,
+          visibility: 'public' as const,
+          mediaUploadRef: null,
+          canonicalPublicStoryId: null,
           language: 'en',
           topicIds: [randomUUID()],
           locationScope: null,

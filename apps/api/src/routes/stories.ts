@@ -23,6 +23,7 @@ import {
   storyCreateResponseSchema,
   storyDuplicateResponseSchema,
   storyPublicSchema,
+  storyVisibilityPatchRequestSchema,
   takedownCreateRequestSchema,
   takedownCreateResponseSchema,
   uuidSchema,
@@ -30,7 +31,10 @@ import {
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getEventPipelineServices } from '../events/services.js';
+import { roomContentVisibleToUser, storyReadableByUser } from '../forum/rooms.js';
+import { getForumServices } from '../forum/services.js';
 import { getIdentityServices } from '../identity/services.js';
+import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { getIngestionServices } from '../ingestion/services.js';
 import type {
   ClaimRecord,
@@ -39,19 +43,59 @@ import type {
   StoryRecord,
 } from '../ingestion/stores.js';
 import { submitStory } from '../ingestion/submission.js';
+import { changeStoryVisibility } from '../ingestion/visibility.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
 
+/** Soft session resolution (anonymous on any failure; never an error/access). */
+async function softUserId(cookieHeader: string | undefined): Promise<string | null> {
+  const token = readSessionToken(cookieHeader);
+  if (!token) return null;
+  try {
+    const identity = getIdentityServices();
+    return (await validateSession(identity.sessions, token))?.record.user_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * WS-Q.3.2 — the item read bar for a story-scoped read: 404 unless the story is
+ * readable (not hidden AND the reader passes the room content bar). A story-less
+ * (cross-story) claim/evidence row is public. Returns true when the read may
+ * proceed.
+ */
+async function storyReadGate(
+  story: StoryRecord,
+  cookieHeader: string | undefined,
+): Promise<boolean> {
+  const forum = getForumServices();
+  const room = await forum.rooms.getById(story.roomId);
+  if (room === null) return false; // fail closed
+  return storyReadableByUser(forum, story, room, await softUserId(cookieHeader));
+}
+
 /** Map a stored story to the public projection (the ONLY read shape). */
 export function toStoryPublic(story: StoryRecord, threadId: string | null): StoryPublic {
+  // WS-Q — the image post's required alt text is the accessible media text;
+  // video captions are carried separately (the player renders them).
+  const mediaAltText =
+    story.submissionMetadata.submission_type === 'image_post'
+      ? story.submissionMetadata.alt_text
+      : null;
   return storyPublicSchema.parse({
     story_id: story.storyId,
     title: story.title,
     submission_type: story.submissionType,
     canonical_url: story.canonicalUrl,
     source_id: story.sourceId,
+    room_id: story.roomId,
+    visibility: story.visibility,
+    media_upload_ref: story.mediaUploadRef,
+    media_alt_text: mediaAltText,
+    canonical_public_story_id: story.canonicalPublicStoryId,
     submitted_by: story.submittedBy,
     language: story.language,
     topic_ids: story.topicIds,
@@ -132,6 +176,7 @@ export function createStoriesRoutes() {
             ingestion,
             getEventPipelineServices(),
             getIdentityServices(),
+            getForumServices(),
             auth.userId,
             c.req.valid('json'),
           );
@@ -166,6 +211,40 @@ export function createStoriesRoutes() {
         },
       )
 
+      // --- Author visibility transition (WS-Q.2.4a/b) --------------------
+      .patch(
+        '/stories/:storyId/visibility',
+        authMiddleware(),
+        zValidator('param', z.object({ storyId: uuidSchema })),
+        zValidator('json', storyVisibilityPatchRequestSchema),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const outcome = await changeStoryVisibility(
+            getIngestionServices(),
+            getEventPipelineServices(),
+            getIdentityServices(),
+            getForumServices(),
+            auth.userId,
+            c.req.valid('param').storyId,
+            c.req.valid('json').visibility,
+          );
+          if (!outcome.ok) {
+            if (outcome.status === 409) {
+              return c.json(
+                storyDuplicateResponseSchema.parse({
+                  error: { code: 'duplicate_story', message: outcome.message },
+                  existing_story_id: outcome.existingStoryId,
+                }),
+                409,
+              );
+            }
+            return c.json(deny(outcome.code, outcome.message), outcome.status);
+          }
+          return c.json({ visibility: outcome.visibility, changed: outcome.changed });
+        },
+      )
+
       // --- Claim/evidence navigability (WS-F.1.2a / WS-F.2.5a) -----------
       .get(
         '/stories/:storyId/claims',
@@ -173,7 +252,9 @@ export function createStoriesRoutes() {
         async (c) => {
           const ingestion = getIngestionServices();
           const story = await ingestion.stories.getById(c.req.valid('param').storyId);
-          if (!story || story.hiddenState !== null) {
+          // WS-Q.3.2 — the story's claims inherit its read bar (room_only in a
+          // private room ⇒ 404 to outsiders).
+          if (story === null || !(await storyReadGate(story, c.req.header('cookie')))) {
             return c.json(deny('not_found', 'Resource not found'), 404);
           }
           const claims = await ingestion.claims.listByStory(story.storyId);
@@ -189,6 +270,15 @@ export function createStoriesRoutes() {
           const ingestion = getIngestionServices();
           const claim = await ingestion.claims.getById(c.req.valid('param').claimId);
           if (!claim) return c.json(deny('not_found', 'Resource not found'), 404);
+          // WS-Q.3.2 — a claim that belongs to a story inherits its read bar
+          // (a room_only story's evidence is 404 to outsiders). A story-less
+          // (cross-story / user-experience) claim is public.
+          if (claim.storyId !== null) {
+            const story = await ingestion.stories.getById(claim.storyId);
+            if (story === null || !(await storyReadGate(story, c.req.header('cookie')))) {
+              return c.json(deny('not_found', 'Resource not found'), 404);
+            }
+          }
           const cards = await ingestion.evidence.listByClaim(claim.claimId);
           return c.json(
             claimEvidenceResponseSchema.parse({
@@ -221,7 +311,27 @@ export function createStoriesRoutes() {
         zValidator('query', searchRequestSchema),
         async (c) => {
           const ingestion = getIngestionServices();
-          const result = await ingestion.searchIndex.search(c.req.valid('query'));
+          const query = c.req.valid('query');
+          // WS-Q.2.5b — a room-scoped query must pass the room read bar first
+          // (existence is tier one; CONTENT search is tier two → 404 otherwise).
+          if (query.room !== undefined) {
+            const forum = getForumServices();
+            const identity = getIdentityServices();
+            const token = readSessionToken(c.req.header('cookie'));
+            let userId: string | null = null;
+            if (token) {
+              try {
+                userId = (await validateSession(identity.sessions, token))?.record.user_id ?? null;
+              } catch {
+                userId = null;
+              }
+            }
+            const room = await forum.rooms.getById(query.room);
+            if (room === null || !(await roomContentVisibleToUser(forum, room, userId))) {
+              return c.json(deny('not_found', 'Resource not found'), 404);
+            }
+          }
+          const result = await ingestion.searchIndex.search(query);
           ingestion.metrics.increment('search.requests');
           return c.json(
             searchResponseSchema.parse({ items: result.items, nextCursor: result.nextCursor }),

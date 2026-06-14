@@ -21,10 +21,10 @@ import { realtimeWindowStart } from '../events/realtime.js';
 import { recoverEventPipeline, redriveDeadLetters } from '../events/recovery.js';
 import {
   attentionEvent,
-  freshWsEServices,
+  type EventServicesFixture,
+  freshEventServices,
   seedUserWithSession,
-  type WsEFixture,
-} from './ws-e-helpers.js';
+} from './event-test-helpers.js';
 
 function integritySignal(
   targetId: string,
@@ -44,7 +44,7 @@ function integritySignal(
   });
 }
 
-async function storeEvent(fixture: WsEFixture, event: LicioEvent): Promise<void> {
+async function storeEvent(fixture: EventServicesFixture, event: LicioEvent): Promise<void> {
   const entry = TOPIC_REGISTRY[event.event_type];
   await fixture.events.eventStore.insertMany([
     {
@@ -61,12 +61,12 @@ async function storeEvent(fixture: WsEFixture, event: LicioEvent): Promise<void>
   ]);
 }
 
-let fixture: WsEFixture;
+let fixture: EventServicesFixture;
 let mfciIntake: string[];
 
 beforeEach(() => {
   mfciIntake = [];
-  fixture = freshWsEServices({
+  fixture = freshEventServices({
     hooks: {
       mfci: (signal) => {
         mfciIntake.push(signal.event_id);
@@ -241,7 +241,7 @@ describe('crypto feature flag gate (WS-E.1.2, fail-closed)', () => {
 
   it('delivers to authorized non-scoring consumers when the flag is on', async () => {
     let enabled = false;
-    fixture = freshWsEServices({ cryptoFlagEnabled: () => enabled });
+    fixture = freshEventServices({ cryptoFlagEnabled: () => enabled });
     const received: string[] = [];
     fixture.events.router.register({
       name: 'wallet-indexer',

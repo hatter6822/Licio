@@ -26,6 +26,7 @@ import {
   EMBEDDING_DIMENSION,
   embeddings,
   evidenceCards,
+  rooms,
   sourceSyndications,
   sources,
   stories,
@@ -61,6 +62,9 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
   let client: ReturnType<typeof postgres>;
   let db: PostgresJsDatabase<typeof schema>;
   let submitterId: string;
+  // WS-Q — every story/thread now belongs to a home room (NOT NULL); this
+  // suite seeds one public room and stamps it on every fixture insert.
+  let roomId: string;
 
   beforeAll(async () => {
     client = postgres(DB_URL as string, { max: 1 });
@@ -83,6 +87,22 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
       )[0],
     );
     submitterId = user.userId;
+    const room = must(
+      (
+        await db
+          .insert(rooms)
+          .values({
+            name: `WS-F Room ${randomUUID().slice(0, 8)}`,
+            slug: `wsf-${randomUUID().slice(0, 8)}`,
+            roomType: 'global_topic',
+            visibility: 'public',
+            joinModel: 'open',
+            postingPolicy: 'all_members',
+          })
+          .returning()
+      )[0],
+    );
+    roomId = room.roomId;
   });
 
   afterAll(async () => {
@@ -121,6 +141,7 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
       );
     }
     await db.delete(users).where(sql`${users.userId} = ${submitterId}`);
+    if (roomId) await db.delete(rooms).where(sql`${rooms.roomId} = ${roomId}`);
     await client?.end();
   });
 
@@ -133,6 +154,7 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
       title: 'Integration story title',
       titleHash: randomUUID().replaceAll('-', ''),
       submittedBy: submitterId,
+      roomId,
       topicIds: [randomUUID()],
       submissionType: 'original_brief' as const,
       submissionMetadata: {
@@ -176,11 +198,13 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
         `SET LOCAL enable_seqscan = off; EXPLAIN SELECT story_id FROM stories WHERE topic_ids @> ARRAY['${topic}']::uuid[]`,
       ),
       client.unsafe(
-        `SET LOCAL enable_seqscan = off; EXPLAIN SELECT story_id FROM stories WHERE canonical_url = 'https://example.com/x'`,
+        // WS-Q.1.4c — the public-tier partial unique backs the public exact-URL
+        // dedup lookup (the query carries the same predicate the app uses).
+        `SET LOCAL enable_seqscan = off; EXPLAIN SELECT story_id FROM stories WHERE canonical_url = 'https://example.com/x' AND visibility = 'public' AND hidden_state IS NULL`,
       ),
     ]);
     expect(JSON.stringify(topicPlan)).toMatch(/stories_topic_gin/);
-    expect(JSON.stringify(urlPlan)).toMatch(/stories_canonical_url_uq/);
+    expect(JSON.stringify(urlPlan)).toMatch(/stories_canonical_url_public_uq/);
   });
 
   it('populates the weighted generated tsvector and ranks title over excerpt (WS-F.3.1a)', async () => {
@@ -238,7 +262,7 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
               .returning()
           )[0],
         );
-        await tx.insert(threads).values({ storyId: created.storyId });
+        await tx.insert(threads).values({ storyId: created.storyId, roomId });
         // Force a failure AFTER the thread insert: duplicate canonical URL.
         await tx.insert(stories).values(storyInsert({ canonicalUrl: url }));
       }),
@@ -250,8 +274,97 @@ describe.skipIf(!DB_URL)('WS-F Postgres integration', () => {
 
     // The unique shell: a second thread for the same story is rejected.
     const story = must((await db.insert(stories).values(storyInsert()).returning())[0]);
-    await db.insert(threads).values({ storyId: story.storyId });
-    await expect(db.insert(threads).values({ storyId: story.storyId })).rejects.toThrow();
+    await db.insert(threads).values({ storyId: story.storyId, roomId });
+    await expect(db.insert(threads).values({ storyId: story.storyId, roomId })).rejects.toThrow();
+  });
+
+  it('WS-Q.1.5 — the thread/story room-consistency trigger rejects divergent rooms', async () => {
+    const otherRoom = must(
+      (
+        await db
+          .insert(rooms)
+          .values({
+            name: `WS-F Other ${randomUUID().slice(0, 8)}`,
+            slug: `wsf-other-${randomUUID().slice(0, 8)}`,
+            roomType: 'global_topic',
+            visibility: 'public',
+            joinModel: 'open',
+            postingPolicy: 'all_members',
+          })
+          .returning()
+      )[0],
+    );
+    const story = must((await db.insert(stories).values(storyInsert()).returning())[0]);
+    // A thread whose room differs from its story's room is rejected by the trigger.
+    await expect(
+      db.insert(threads).values({ storyId: story.storyId, roomId: otherRoom.roomId }),
+    ).rejects.toThrow();
+    await db.delete(rooms).where(sql`${rooms.roomId} = ${otherRoom.roomId}`);
+  });
+
+  it('WS-Q.1.4c — tier-scoped canonical-URL uniqueness (public global, room_only per-room)', async () => {
+    const url = `https://example.com/tier-${randomUUID()}`;
+    // Two PUBLIC stories with one URL: the public partial unique rejects the 2nd.
+    await db.insert(stories).values(storyInsert({ canonicalUrl: url, visibility: 'public' }));
+    await expect(
+      db.insert(stories).values(storyInsert({ canonicalUrl: url, visibility: 'public' })),
+    ).rejects.toThrow();
+    // The SAME url may exist room_only in two different rooms.
+    const roomA = must(
+      (
+        await db
+          .insert(rooms)
+          .values({
+            name: `WS-F A ${randomUUID().slice(0, 8)}`,
+            slug: `wsf-a-${randomUUID().slice(0, 8)}`,
+            roomType: 'global_topic',
+            visibility: 'private',
+            joinModel: 'request_approval',
+            postingPolicy: 'all_members',
+          })
+          .returning()
+      )[0],
+    );
+    const roomB = must(
+      (
+        await db
+          .insert(rooms)
+          .values({
+            name: `WS-F B ${randomUUID().slice(0, 8)}`,
+            slug: `wsf-b-${randomUUID().slice(0, 8)}`,
+            roomType: 'global_topic',
+            visibility: 'private',
+            joinModel: 'request_approval',
+            postingPolicy: 'all_members',
+          })
+          .returning()
+      )[0],
+    );
+    const roomUrl = `https://example.com/room-tier-${randomUUID()}`;
+    await db
+      .insert(stories)
+      .values(
+        storyInsert({ canonicalUrl: roomUrl, visibility: 'room_only', roomId: roomA.roomId }),
+      );
+    // Same URL, different room, room_only: allowed.
+    await db
+      .insert(stories)
+      .values(
+        storyInsert({ canonicalUrl: roomUrl, visibility: 'room_only', roomId: roomB.roomId }),
+      );
+    // Same URL, SAME room, room_only: rejected by the room partial unique.
+    await expect(
+      db
+        .insert(stories)
+        .values(
+          storyInsert({ canonicalUrl: roomUrl, visibility: 'room_only', roomId: roomA.roomId }),
+        ),
+    ).rejects.toThrow();
+    // A room_only row never blocks a public submission for the same URL.
+    await db.insert(stories).values(storyInsert({ canonicalUrl: roomUrl, visibility: 'public' }));
+    await db.execute(sql`delete from threads where room_id in (${roomA.roomId}, ${roomB.roomId})`);
+    await db.execute(sql`delete from stories where room_id in (${roomA.roomId}, ${roomB.roomId})`);
+    await db.execute(sql`delete from rooms where room_id in (${roomA.roomId}, ${roomB.roomId})`);
   });
 
   it('round-trips claims/evidence and navigates both directions (WS-F.1.2a/2.5a)', async () => {

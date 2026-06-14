@@ -9,12 +9,14 @@
 // thread builds the canonical payload (validated through the SHARED schema —
 // identical client/server rules) and enqueues it in the durable pending
 // queue with the draft id as the server-side idempotency key (WS-G.3.1
-// dedup).  Share-target intake (WS-G.3.7a): `?share_url=`/`?share_title=`
-// become a STRUCTURED citation (url + title + accessed_at) shown as a
-// preview chip — checked against the link-safety heuristics — and merged
-// into the payload when the citation line survives in the composer.
+// dedup).  Share-target intake (WS-G.3.7a): with a thread target,
+// `?share_url=`/`?share_title=` become a STRUCTURED citation (url + title +
+// accessed_at) shown as a preview chip — checked against the link-safety
+// heuristics — and merged into the payload when the citation line survives in
+// the composer.  With NO thread target (WS-Q.5.1c) the same params seed a LINK
+// post in the story composer instead.
 import type { Citation } from '@licio/shared';
-import { useSearch } from '@tanstack/react-router';
+import { useNavigate, useSearch } from '@tanstack/react-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ContextWarning } from '../../components/composer/ComposerAffordances/ContextWarning.js';
 import {
@@ -24,6 +26,7 @@ import {
   ParticipationComposer,
 } from '../../components/composer/ParticipationComposer/index.js';
 import { buildContributionPayload } from '../../components/composer/ParticipationComposer/payload.js';
+import { StoryComposer } from '../../components/composer/StoryComposer/index.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { useToast } from '../../components/ui/Toast/index.js';
@@ -83,6 +86,7 @@ export function SubmitPage(): React.ReactElement {
   usePageFocus(t('nav.submit', 'Submit'));
   const search = useSearch({ from: '/submit' });
   const threadId = search.threadId;
+  const navigate = useNavigate();
   const { toast } = useToast();
   // SCOI composer warning (WS-H.4.3c): when the reply target's story is
   // read differently across communities, surface a dismissible note.
@@ -247,6 +251,18 @@ export function SubmitPage(): React.ReactElement {
   // SEES (and controls) the line; the structured chip enriches it at build.
   const shareSeed = shareCitation !== null ? { citations: shareCitation.url } : undefined;
 
+  // Story-submission share intake (WS-Q.5.1c): with no thread target a shared
+  // URL/title seeds a LINK post in the story composer (not a thread citation).
+  const storyShare =
+    threadId === undefined && search.share_url !== undefined
+      ? {
+          url: search.share_url,
+          ...(search.share_title !== undefined && search.share_title.trim().length > 0
+            ? { title: search.share_title.trim() }
+            : {}),
+        }
+      : undefined;
+
   const onSaveDraft = (composerMode: ComposerMode, values: ComposerValues): void => {
     latest.current = { mode: composerMode, values };
     void flushDraft()
@@ -344,7 +360,24 @@ export function SubmitPage(): React.ReactElement {
     <>
       <PageHeader title={t('nav.submit', 'Submit')} />
       <div className="mx-auto w-full max-w-2xl p-4">
-        {recoverable.length > 0 ? (
+        {/* WS-Q.5.1 — no thread target ⇒ the STORY-submission composer (room
+            picker + visibility + link/brief/image/video). A thread target ⇒
+            the WS-G contribution composer (reply to a conversation). */}
+        {threadId === undefined ? (
+          <StoryComposer
+            {...(storyShare !== undefined ? { share: storyShare } : {})}
+            onSubmitted={({ storyId, pendingScan }) => {
+              toast({
+                tone: 'success',
+                message: pendingScan
+                  ? t('submit.story.pending', 'Posted — pending a safety check.')
+                  : t('submit.story.posted', 'Story posted.'),
+              });
+              void navigate({ to: '/stories/$storyId', params: { storyId } });
+            }}
+          />
+        ) : null}
+        {threadId !== undefined && recoverable.length > 0 ? (
           <div
             role="status"
             className="mb-4 flex flex-col gap-2 rounded-lg border border-line bg-surface-sunken p-3"
@@ -386,7 +419,7 @@ export function SubmitPage(): React.ReactElement {
             ))}
           </div>
         ) : null}
-        {shareCitation !== null ? (
+        {threadId !== undefined && shareCitation !== null ? (
           <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface-sunken p-3">
             <div className="min-w-0">
               <p className="truncate font-medium text-ink text-sm">
@@ -408,17 +441,19 @@ export function SubmitPage(): React.ReactElement {
           </div>
         ) : null}
         {showContextWarning ? <ContextWarning className="mb-3" /> : null}
-        <ParticipationComposer
-          {...(mode !== undefined ? { mode } : {})}
-          onModeChange={setMode}
-          onDraftChange={onDraftChange}
-          onSaveDraft={onSaveDraft}
-          onSubmit={onSubmit}
-          errors={serverErrors}
-          {...(initialValues !== undefined || shareSeed !== undefined
-            ? { initialValues: { ...shareSeed, ...initialValues } }
-            : {})}
-        />
+        {threadId !== undefined ? (
+          <ParticipationComposer
+            {...(mode !== undefined ? { mode } : {})}
+            onModeChange={setMode}
+            onDraftChange={onDraftChange}
+            onSaveDraft={onSaveDraft}
+            onSubmit={onSubmit}
+            errors={serverErrors}
+            {...(initialValues !== undefined || shareSeed !== undefined
+              ? { initialValues: { ...shareSeed, ...initialValues } }
+              : {})}
+          />
+        ) : null}
       </div>
     </>
   );

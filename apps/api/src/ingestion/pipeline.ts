@@ -21,8 +21,8 @@ import { createHash } from 'node:crypto';
 import {
   type ContentNormalizedEvent,
   type ContentSubmittedEvent,
+  contentEventClassification,
   contentNormalizedEventSchema,
-  TOPIC_REGISTRY,
 } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import { type ClaimEmbeddingDedup, persistCandidateClaims } from './claims.js';
@@ -57,15 +57,17 @@ export async function emitIngestionEvent(
   ownerUserId: string | null,
 ): Promise<void> {
   try {
-    const registryEntry = TOPIC_REGISTRY[event.event_type];
+    // WS-Q.1.7c — persist the EVENT's actual classification (restricted for a
+    // room_only content event), not the topic's public base, so the storage
+    // tier matches the content's visibility.
     const { inserted } = await events.eventStore.insertMany([
       {
         eventId: event.event_id,
         eventType: event.event_type,
         topic: event.event_type,
         timestamp: event.timestamp,
-        privacyClassification: registryEntry.privacy_classification,
-        retentionTier: registryEntry.retention_tier,
+        privacyClassification: event.privacy_classification,
+        retentionTier: event.retention_tier,
         payload: event as unknown as Record<string, unknown>,
         ownerUserId,
         purgeAfter: null,
@@ -98,6 +100,12 @@ export function submissionBodyText(story: StoryRecord): string {
       return metadata.source_or_experience_disclosure;
     case 'live_thread':
       return metadata.event_description;
+    case 'image_post':
+      // The accessible alt text is the only first-party text on an image post.
+      return metadata.alt_text;
+    case 'video_post':
+      // Inline caption text when present (an uploaded track is not inlined here).
+      return metadata.captions_text ?? '';
   }
 }
 
@@ -142,6 +150,9 @@ async function emitNormalized(
     submission_type: story.submissionType,
     canonical_url: story.canonicalUrl,
     topic_ids: story.topicIds,
+    // WS-Q.1.7c — carry room + visibility; the classification tracks visibility.
+    room_id: story.roomId,
+    visibility: story.visibility,
     source_id: outputs.sourceId,
     language: outputs.language,
     sensitivity_labels: outputs.sensitivityLabels,
@@ -150,7 +161,7 @@ async function emitNormalized(
     embedding_ref: hasEmbedding
       ? `embeddings/story/${story.storyId}@${ingestion.embeddingProvider.modelVersion}`
       : null,
-    privacy_classification: 'public',
+    privacy_classification: contentEventClassification(story.visibility),
     retention_tier: 'public_contribution',
   });
   await emitIngestionEvent(events, ingestion, event, story.submittedBy);
@@ -402,7 +413,10 @@ export async function processSubmittedStory(
   });
   const current = updated ?? story;
 
-  // Near-duplicate detection on the FETCHED text (WS-F.1.3c/d).
+  // Near-duplicate detection on the FETCHED text (WS-F.1.3c/d). WS-Q.2.2c — the
+  // signature is stored for EVERY story (so a later widen joins the public
+  // cluster without a recompute), but the public near-dup / syndication
+  // clustering runs only for PUBLIC stories.
   let duplicateGroupId: string | null = null;
   const { signature, bands } = await signatureStory(
     ingestion.signatures,
@@ -410,14 +424,18 @@ export async function processSubmittedStory(
     text,
     'extracted',
   );
-  const hits = await findNearDuplicates(
-    ingestion.signatures,
-    story.storyId,
-    signature,
-    bands,
-    config.nearDuplicateThreshold,
-    5,
-  );
+  const hits =
+    current.visibility === 'public'
+      ? await findNearDuplicates(
+          ingestion.signatures,
+          ingestion.stories,
+          story.storyId,
+          signature,
+          bands,
+          config.nearDuplicateThreshold,
+          5,
+        )
+      : [];
   for (const hit of hits) {
     const classification = await classifyDuplicate(
       ingestion.stories,

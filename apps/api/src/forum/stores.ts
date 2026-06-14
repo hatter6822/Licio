@@ -8,6 +8,7 @@
 // dedup uniqueness, transactional contribution+evidence co-creation,
 // case-insensitive room-name uniqueness, `(room_id, lens_type)` uniqueness —
 // so unit tests catch contract violations, not adapter quirks.
+
 import type {
   Citation,
   ContributionMetadata,
@@ -17,12 +18,15 @@ import type {
   EvidenceRelationshipType,
   GovernanceMode,
   LensType,
+  RoomJoinModel,
   RoomNotificationPreferences,
+  RoomPostingPolicy,
   RoomStewardRole,
   RoomType,
   RoomVisibility,
   SummaryLayer,
 } from '@licio/shared';
+import { COMMONS_ROOM_ID, COMMONS_SLUG } from '@licio/shared';
 
 // ---------------------------------------------------------------------------
 // Records (storage shape; ISO timestamps on this side of the boundary).
@@ -66,6 +70,9 @@ export interface RoomRecord {
   description: string | null;
   roomType: RoomType;
   visibility: RoomVisibility;
+  /** WS-Q.1.2 — the two orthogonal §16.2 axes (binary visibility model). */
+  joinModel: RoomJoinModel;
+  postingPolicy: RoomPostingPolicy;
   createdBy: string | null;
   governanceMode: GovernanceMode;
   charterSummary: string | null;
@@ -126,6 +133,10 @@ export interface UploadRecord {
   storageRef: string;
   metadataStripped: boolean;
   scanState: 'pending' | 'clear' | 'flagged';
+  /** WS-Q.5.2c — the story this upload is media for (main media, caption track,
+   *  or poster); set at story submission, `null` for contribution attachments.
+   *  The serving gate uses it to re-derive visibility + re-check takedown. */
+  ownerStoryId: string | null;
   createdAt: string;
 }
 
@@ -241,7 +252,17 @@ export interface RoomStore {
   }): Promise<RoomRecord[]>;
   update(
     roomId: string,
-    patch: Partial<Pick<RoomRecord, 'description' | 'charterSummary' | 'latestActivityAt'>>,
+    patch: Partial<
+      Pick<
+        RoomRecord,
+        | 'description'
+        | 'charterSummary'
+        | 'latestActivityAt'
+        | 'visibility'
+        | 'joinModel'
+        | 'postingPolicy'
+      >
+    >,
   ): Promise<RoomRecord | null>;
   /** Bump latest_activity_at monotonically (never backwards). */
   touchActivity(roomId: string, atIso: string): Promise<void>;
@@ -283,11 +304,18 @@ export interface SummaryStore {
 }
 
 export interface UploadStore {
-  /** Persist the (already metadata-stripped) bytes + the metadata record. */
-  put(record: Omit<UploadRecord, 'createdAt'>, bytes: Uint8Array): Promise<UploadRecord>;
+  /** Persist the (already metadata-stripped) bytes + the metadata record. An
+   *  upload is created unlinked; `ownerStoryId` defaults to null and is set
+   *  later via {@link UploadStore.setOwnerStory} at story submission. */
+  put(
+    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId'> & { ownerStoryId?: string | null },
+    bytes: Uint8Array,
+  ): Promise<UploadRecord>;
   getRecord(uploadId: string): Promise<UploadRecord | null>;
   getBytes(uploadId: string): Promise<Uint8Array | null>;
   setScanState(uploadId: string, state: UploadRecord['scanState']): Promise<void>;
+  /** WS-Q.5.2c — link an upload to the story it is media for (idempotent). */
+  setOwnerStory(uploadId: string, storyId: string): Promise<void>;
   /** All of a user's upload records (DSAR export, §19.3/GDPR Art. 15). */
   listByOwner(userId: string): Promise<UploadRecord[]>;
   anonymizeUser(userId: string): Promise<void>;
@@ -551,6 +579,34 @@ export class InMemoryRoomStore implements RoomStore {
 
   constructor(now: Clock = Date.now) {
     this.#now = now;
+    // WS-Q.1.6 — the in-memory store self-seeds the system Commons room so it
+    // mirrors the Postgres 0015 seed: every backfilled/room-less story has a
+    // home, and the distribution gate resolves a real public room. Idempotent.
+    this.#seedCommons();
+  }
+
+  /** Synchronously seed the pinned system Commons room (the 0015 analogue). */
+  #seedCommons(): void {
+    if (this.#rooms.has(COMMONS_ROOM_ID)) return;
+    const at = iso(this.#now);
+    this.#rooms.set(COMMONS_ROOM_ID, {
+      roomId: COMMONS_ROOM_ID,
+      name: 'Commons',
+      slug: COMMONS_SLUG,
+      description:
+        'The shared public square — the default home for content without a more specific room.',
+      roomType: 'global_topic',
+      visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'all_members',
+      createdBy: null,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+      createdAt: at,
+      updatedAt: at,
+    });
   }
 
   #subKey(roomId: string, userId: string): string {
@@ -605,7 +661,17 @@ export class InMemoryRoomStore implements RoomStore {
 
   async update(
     roomId: string,
-    patch: Partial<Pick<RoomRecord, 'description' | 'charterSummary' | 'latestActivityAt'>>,
+    patch: Partial<
+      Pick<
+        RoomRecord,
+        | 'description'
+        | 'charterSummary'
+        | 'latestActivityAt'
+        | 'visibility'
+        | 'joinModel'
+        | 'postingPolicy'
+      >
+    >,
   ): Promise<RoomRecord | null> {
     const room = this.#rooms.get(roomId);
     if (!room) return null;
@@ -705,6 +771,9 @@ export class InMemoryRoomStore implements RoomStore {
     this.#rooms.clear();
     this.#stewards.length = 0;
     this.#subscriptions.clear();
+    // Commons is a system room — it survives a clear (re-seeded), so the
+    // distribution gate always resolves a real public default room.
+    this.#seedCommons();
   }
 }
 
@@ -788,8 +857,15 @@ export class InMemoryUploadStore implements UploadStore {
     this.#now = now;
   }
 
-  async put(record: Omit<UploadRecord, 'createdAt'>, bytes: Uint8Array): Promise<UploadRecord> {
-    const full: UploadRecord = { ...record, createdAt: iso(this.#now) };
+  async put(
+    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId'> & { ownerStoryId?: string | null },
+    bytes: Uint8Array,
+  ): Promise<UploadRecord> {
+    const full: UploadRecord = {
+      ...record,
+      ownerStoryId: record.ownerStoryId ?? null,
+      createdAt: iso(this.#now),
+    };
     this.#records.set(full.uploadId, full);
     this.#bytes.set(full.uploadId, new Uint8Array(bytes));
     return full;
@@ -806,6 +882,11 @@ export class InMemoryUploadStore implements UploadStore {
   async setScanState(uploadId: string, state: UploadRecord['scanState']): Promise<void> {
     const record = this.#records.get(uploadId);
     if (record) record.scanState = state;
+  }
+
+  async setOwnerStory(uploadId: string, storyId: string): Promise<void> {
+    const record = this.#records.get(uploadId);
+    if (record) record.ownerStoryId = storyId;
   }
 
   async listByOwner(userId: string): Promise<UploadRecord[]> {

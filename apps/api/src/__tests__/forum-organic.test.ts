@@ -27,20 +27,20 @@ import { applyConversationTransition } from '../forum/transitions.js';
 import { getIdentityServices } from '../identity/services.js';
 import {
   contributionBody,
-  freshWsGServices,
+  type ForumServicesFixture,
+  freshForumServices,
   seedClaim,
   seedThread,
   seedUserWithSession,
-  type WsGFixture,
-} from './ws-g-helpers.js';
+} from './forum-test-helpers.js';
 
-let fixture: WsGFixture;
+let fixture: ForumServicesFixture;
 let userId: string;
 let threadId: string;
 let storyId: string;
 
 beforeEach(async () => {
-  fixture = freshWsGServices({
+  fixture = freshForumServices({
     forumConfig: {
       contributionsPerMinute: 1_000,
       contributionsPerHour: 5_000,
@@ -276,7 +276,7 @@ describe('subtree keyset pagination (WS-G.1.2d-2 / WS-G.3.3)', () => {
   const resolveNoAuthor = async () => null;
 
   it('walks the whole subtree exactly once; the root heads the first page only', async () => {
-    fixture = freshWsGServices({
+    fixture = freshForumServices({
       forumConfig: { contributionsPerMinute: 1_000, branchPageSize: 4 },
     });
     const session = await seedUserWithSession(fixture.identity);

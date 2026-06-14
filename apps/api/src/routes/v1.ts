@@ -22,6 +22,7 @@ import {
   DEFAULT_USER_SETTINGS,
   FAIL_CLOSED_FLAGS,
   type FeedResponse,
+  featureFlagsResponseSchema,
   feedQuerySchema,
   feedResponseSchema,
   notificationPreferencesSchema,
@@ -49,14 +50,16 @@ import {
 } from '../events/ingest.js';
 import { getEventPipelineServices } from '../events/services.js';
 import type { SignalLedgerRecord } from '../events/stores.js';
-import { roomContentVisibleToUser } from '../forum/rooms.js';
+import { roomContentVisibleToUser, storyReadableByUser } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
 import { accountRef } from '../identity/crypto.js';
 import { getIdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
+import { loadContentFlags } from '../ingestion/content-flags.js';
 import { getIngestionServices } from '../ingestion/services.js';
 import type { StoryRecord } from '../ingestion/stores.js';
 import { DEMO_FEED, demoStory } from '../lib/demo-data.js';
+import { makeMediaUrlMinter } from '../lib/media-urls.js';
 import {
   getPreferences,
   getVapidConfig,
@@ -65,6 +68,7 @@ import {
   setPreferences,
 } from '../lib/push-service.js';
 import { rateLimit } from '../lib/rate-limit.js';
+import { feedMediaOf } from '../lib/story-media.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { serveFeed } from '../ranking/service.js';
 import { getRankingServices } from '../ranking/services.js';
@@ -131,7 +135,11 @@ const LIFECYCLE_TO_RATING_LABEL: Readonly<Record<StoryRecord['lifecycleState'], 
 /** Map a REAL ingested story onto the established WS-C story-detail wire
  *  shape (the client validates against storyDetailSchema; real submissions
  *  appear through the same contract the demo fixtures established). */
-function realStoryToDetail(story: StoryRecord, thread: { threadId: string } | null) {
+function realStoryToDetail(
+  story: StoryRecord,
+  thread: { threadId: string } | null,
+  viewer: { isOwner: boolean; roomVisibility: 'public' | 'private' },
+) {
   const excerptWords = story.excerpt === null ? 0 : story.excerpt.split(/\s+/).length;
   return {
     story_id: story.storyId,
@@ -139,6 +147,8 @@ function realStoryToDetail(story: StoryRecord, thread: { threadId: string } | nu
     source: story.publisher ?? story.canonicalUrl ?? 'Community submission',
     origin: 'independent' as const,
     ...(story.canonicalUrl !== null ? { url: story.canonicalUrl } : {}),
+    visibility: story.visibility,
+    media: feedMediaOf(story, makeMediaUrlMinter()),
     // Best-effort estimate from the bounded excerpt (the full body is never
     // stored, WS-F.1.4f) — a floor, not a measurement.
     reading_minutes: Math.max(1, Math.ceil(excerptWords / 200)),
@@ -149,6 +159,9 @@ function realStoryToDetail(story: StoryRecord, thread: { threadId: string } | nu
     body_summary: story.excerpt ?? '',
     thread_id: thread?.threadId ?? null,
     topic_ids: story.topicIds.slice(0, 8),
+    // WS-Q.5.4a — the owner-only author visibility control + widen eligibility.
+    is_owner: viewer.isOwner,
+    room_visibility: viewer.roomVisibility,
   };
 }
 
@@ -299,8 +312,24 @@ export function createV1Routes() {
             // Takedown-removed / safety-hidden stories are not served (404,
             // not 403 — no existence oracle; WS-F.1.4f).
             if (real.hiddenState !== null) return c.json(notFound, 404);
+            // WS-Q.3.2 — the item read bar: a room_only story in a private room
+            // is 404 to outsiders/pending applicants (no oracle); a public story
+            // is readable by anyone who can reach its (public) room.
+            const forum = getForumServices();
+            const userId = await resolveOptionalUserId(c.req.header('cookie'));
+            const room = await forum.rooms.getById(real.roomId);
+            if (room === null || !(await storyReadableByUser(forum, real, room, userId))) {
+              return c.json(notFound, 404);
+            }
             const thread = await ingestion.stories.getThreadByStoryId(storyId);
-            return c.json(storyDetailSchema.parse(realStoryToDetail(real, thread)));
+            return c.json(
+              storyDetailSchema.parse(
+                realStoryToDetail(real, thread, {
+                  isOwner: userId !== null && userId === real.submittedBy,
+                  roomVisibility: room.visibility,
+                }),
+              ),
+            );
           }
           const story = demoStory(storyId);
           return story ? c.json(storyDetailSchema.parse(story)) : c.json(notFound, 404);
@@ -374,10 +403,30 @@ export function createV1Routes() {
       })
 
       // --- Feature flags (WS-C.1.3c, fail-closed) ---------------------------
-      .get('/feature-flags', (c) => {
-        // Production default is fail-closed; per-region enablement is wired by
-        // WS-D/compliance. Crypto/governance never default on (SPEC §0.5).
-        return c.json(FAIL_CLOSED_FLAGS);
+      .get('/feature-flags', async (c) => {
+        // Crypto/governance stay fail-closed (per-region enablement is WS-D/
+        // compliance; SPEC §0.5). The WS-Q content surface IS populated: the
+        // fail-closed rollout flags + the video caps the composer pre-checks
+        // against (the server remains authoritative).
+        const events = getEventPipelineServices();
+        const ingestion = getIngestionServices();
+        const flags = await loadContentFlags(events.configStore);
+        const cfg = ingestion.config();
+        return c.json(
+          featureFlagsResponseSchema.parse({
+            ...FAIL_CLOSED_FLAGS,
+            content: {
+              media_posts_enabled: flags.mediaPostsEnabled,
+              in_room_visibility_enabled: flags.inRoomVisibilityEnabled,
+              binary_visibility_ui: flags.binaryVisibilityUi,
+              video_max_bytes: Math.min(
+                cfg.videoMaxBytes,
+                FAIL_CLOSED_FLAGS.content.video_max_bytes,
+              ),
+              video_max_seconds: cfg.videoMaxSeconds,
+            },
+          }),
+        );
       })
 
       // --- Reports (§18.4 report mechanism; queued offline, WS-C.2.3) -------

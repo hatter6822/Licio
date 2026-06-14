@@ -5,6 +5,7 @@
 // installed as the module singletons, plus story/invariant-output seeders.
 
 import { randomUUID } from 'node:crypto';
+import { COMMONS_ROOM_ID } from '@licio/shared';
 import {
   createInMemoryEventPipelineServices,
   type EventPipelineServices,
@@ -40,7 +41,7 @@ import {
   resetRankingServices,
   setRankingServices,
 } from '../ranking/services.js';
-import { TEST_IDENTITY_CONFIG } from './ws-e-helpers.js';
+import { TEST_IDENTITY_CONFIG } from './event-test-helpers.js';
 
 export interface RankingFixture {
   identity: IdentityServices;
@@ -92,6 +93,7 @@ export interface SeedStoryOptions {
   submittedBy?: string;
   canonicalUrl?: string | null;
   roomId?: string | null;
+  visibility?: StoryRecord['visibility'];
 }
 
 export interface SeededStory {
@@ -114,6 +116,11 @@ export async function seedStory(
       titleHash: `hash-${storyId}`,
       submittedBy: options.submittedBy ?? randomUUID(),
       sourceId: options.sourceId === undefined ? null : options.sourceId,
+      // WS-Q — every story has a home room (defaults to Commons) + visibility.
+      roomId: options.roomId ?? COMMONS_ROOM_ID,
+      visibility: options.visibility ?? 'public',
+      mediaUploadRef: null,
+      canonicalPublicStoryId: null,
       language: 'en',
       topicIds: options.topicIds ?? ['civics'],
       locationScope: options.locationScope ?? null,
@@ -136,9 +143,8 @@ export async function seedStory(
     threadId,
   );
   if (!outcome.ok) throw new Error(`seedStory failed: ${outcome.reason}`);
-  if (options.roomId !== undefined && options.roomId !== null) {
-    await ingestion.stories.updateThread(threadId, { roomId: options.roomId });
-  }
+  // The thread's room is stamped from the story inside createWithThread — no
+  // post-hoc updateThread (the consistency trigger forbids divergence).
   return { storyId, threadId };
 }
 

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Shared WS-H test fixtures: the full in-memory WS-D/E/F/G bundle plus the
-// invariant platform (installed as the module singleton) with its consumers
+// Invariant-platform in-memory test fixtures: the full identity/events/
+// ingestion/forum bundle plus the invariant platform (module singleton) with its
 // and hook closures registered.
 import { randomUUID } from 'node:crypto';
-import type { SensitivityLabel } from '@licio/shared';
+import { COMMONS_ROOM_ID, type SensitivityLabel } from '@licio/shared';
 import {
   createInMemoryInvariantServices,
   type InvariantPlatformServices,
@@ -12,24 +12,24 @@ import {
   setInvariantServices,
 } from '../invariants/services.js';
 import {
-  freshWsGServices,
+  type ForumServicesFixture,
+  freshForumServices,
   seedThread,
   seedUserWithSession,
-  type WsGFixture,
-} from './ws-g-helpers.js';
+} from './forum-test-helpers.js';
 
 export { seedThread, seedUserWithSession };
 
-export interface WsHFixture extends WsGFixture {
+export interface InvariantServicesFixture extends ForumServicesFixture {
   invariants: InvariantPlatformServices;
 }
 
-export function freshWsHServices(
-  options: Parameters<typeof freshWsGServices>[0] & {
+export function freshInvariantServices(
+  options: Parameters<typeof freshForumServices>[0] & {
     invariantsNow?: () => number;
   } = {},
-): WsHFixture {
-  const base = freshWsGServices(options);
+): InvariantServicesFixture {
+  const base = freshForumServices(options);
   const invariants = createInMemoryInvariantServices(
     base.events,
     base.identity,
@@ -44,7 +44,7 @@ export function freshWsHServices(
 
 /** Seed a story with explicit grouping inputs for MERI assembly. */
 export async function seedStory(
-  fixture: WsHFixture,
+  fixture: InvariantServicesFixture,
   options: {
     storyId?: string;
     canonicalUrl?: string | null;
@@ -64,6 +64,10 @@ export async function seedStory(
       titleHash: `hash-${storyId}`,
       submittedBy: randomUUID(),
       sourceId: options.sourceId ?? null,
+      roomId: COMMONS_ROOM_ID,
+      visibility: 'public',
+      mediaUploadRef: null,
+      canonicalPublicStoryId: null,
       language: 'en',
       topicIds: options.topicIds ?? ['topic-default'],
       locationScope: null,

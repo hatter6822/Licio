@@ -20,13 +20,13 @@ import { assembleFeatureVector } from '../ranking/features.js';
 import { runRankingTick, startRankingScheduler } from '../ranking/scheduler.js';
 import { serveFeed } from '../ranking/service.js';
 import { InMemoryDecisionLogStore } from '../ranking/stores.js';
+import { attentionEvent, seedUserWithSession } from './event-test-helpers.js';
 import {
   freshRankingServices,
   type RankingFixture,
   seedInvariantOutput,
   seedStory,
 } from './ranking-helpers.js';
-import { attentionEvent, seedUserWithSession } from './ws-e-helpers.js';
 
 let fixture: RankingFixture;
 
@@ -450,6 +450,7 @@ describe('replay + serving edge branches', () => {
       item_type: 'story' as const,
       source_type: 'global' as const,
       room_id: null,
+      visibility: 'public' as const,
       topic_ids: [],
       source_id: null,
       freshness_timestamp: new Date().toISOString(),
@@ -606,7 +607,11 @@ describe('remaining retrieval branches', () => {
       slug: 'hydrology-experts',
       description: null,
       roomType: 'professional_domain',
-      visibility: 'expert_led',
+      // WS-Q — the successor to legacy expert_led on the front page is a PUBLIC
+      // room with the experts_and_stewards posting policy.
+      visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'experts_and_stewards',
       createdBy: null,
       governanceMode: 'ordinary',
       charterSummary: null,
@@ -669,6 +674,8 @@ describe('feed mapping variants', () => {
       description: null,
       roomType: 'global_topic',
       visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'all_members',
       createdBy: null,
       governanceMode: 'ordinary',
       charterSummary: null,

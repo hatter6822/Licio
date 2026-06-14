@@ -36,6 +36,7 @@ import {
   setEventPipelineServices,
 } from './events/services.js';
 import { ContributionRateLimiter } from './forum/contributions.js';
+import { anonymizeUserContent, exportUserContent } from './forum/data-rights.js';
 import {
   DrizzleContributionStore,
   DrizzleLensStore,
@@ -82,7 +83,6 @@ import {
   PostgresSearchIndex,
 } from './ingestion/drizzle-ingestion-stores.js';
 import { HttpEmbeddingProvider } from './ingestion/embeddings.js';
-import { submissionText } from './ingestion/pipeline.js';
 import { SubmissionRateLimiter } from './ingestion/prechecks.js';
 import { INGESTION_SCHEDULER_INTERVAL_MS, startIngestionScheduler } from './ingestion/scheduler.js';
 import {
@@ -110,6 +110,7 @@ import {
   setInvariantServices,
 } from './invariants/services.js';
 import { demoStory } from './lib/demo-data.js';
+import { seedForumDemoData } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
 import { loadPwattRuntimeConfig } from './pwatt/config.js';
 import {
@@ -350,108 +351,15 @@ setRankingServices(rankingServices);
 // account hard purge (attention deleted + remaining owned rows de-linked).
 identityServices.purgeAttention = (userId, mode) => purgeUserAttention(eventServices, userId, mode);
 identityServices.exportAttention = (userId) => exportUserAttention(eventServices, userId);
-// WS-F closes the CONTENT half of the export hook for stories: a user's DSAR
-// export now includes ALL of their submitted stories. The export must be
-// COMPLETE (§19.3 / GDPR Art. 15), so it keyset-paginates the submitter's
-// stories to exhaustion rather than scanning a capped "recent" window. WS-G
-// composes forum contributions, evidence cards, and room memberships into
-// the same hook below.
-identityServices.exportContributions = async (userId) => {
-  const PAGE = 500;
-  const out: Array<Record<string, unknown>> = [];
-  let after: { createdAt: string; storyId: string } | null = null;
-  for (;;) {
-    const page = await ingestionServices.stories.listBySubmitter(userId, after, PAGE);
-    for (const story of page) {
-      out.push({
-        kind: 'story',
-        story_id: story.storyId,
-        title: story.title,
-        submission_type: story.submissionType,
-        canonical_url: story.canonicalUrl,
-        body: submissionText(story),
-        created_at: story.createdAt,
-      });
-    }
-    if (page.length < PAGE) break;
-    const last = page[page.length - 1];
-    if (last === undefined) break;
-    after = { createdAt: last.createdAt, storyId: last.storyId };
-  }
-  // WS-G closes the forum half of the hook: every contribution (keyset-
-  // paginated to exhaustion — the export must be COMPLETE, §19.3/GDPR
-  // Art. 15), the user's evidence cards, and room memberships.
-  let cAfter: { createdAt: string; id: string } | null = null;
-  for (;;) {
-    const page = await forumServices.contributions.listByUser(userId, cAfter, PAGE);
-    for (const row of page) {
-      out.push({
-        kind: 'contribution',
-        contribution_id: row.contributionId,
-        thread_id: row.threadId,
-        type: row.type,
-        body: row.body,
-        citations: row.citations,
-        metadata: row.metadata,
-        moderation_state: row.moderationState,
-        created_at: row.createdAt,
-      });
-    }
-    if (page.length < PAGE) break;
-    const last = page[page.length - 1];
-    if (last === undefined) break;
-    cAfter = { createdAt: last.createdAt, id: last.contributionId };
-  }
-  for (const card of await ingestionServices.evidence.listBySubmitter(userId)) {
-    out.push({
-      kind: 'evidence_card',
-      evidence_id: card.evidenceId,
-      claim_id: card.claimId,
-      evidence_type: card.evidenceType,
-      relationship_type: card.relationshipType,
-      citation_url_or_ref: card.citationUrlOrRef,
-      relevance_note: card.relevanceNote,
-      created_at: card.createdAt,
-    });
-  }
-  for (const sub of await forumServices.rooms.listSubscriptionsByUser(userId)) {
-    out.push({
-      kind: 'room_subscription',
-      room_id: sub.roomId,
-      status: sub.status,
-      notification_preferences: sub.notificationPreferences,
-      requested_at: sub.requestedAt,
-    });
-  }
-  // Uploads are personal data the user provided (their images/documents):
-  // the export lists every record with its same-origin retrieval URL — the
-  // bytes themselves stay in the upload store (publicly served once scan-
-  // cleared), so the archive stays proportionate without omitting access.
-  for (const upload of await forumServices.uploads.listByOwner(userId)) {
-    out.push({
-      kind: 'upload',
-      upload_id: upload.uploadId,
-      content_type: upload.contentType,
-      byte_size: upload.byteSize,
-      alt_text: upload.altText,
-      url: `/v1/uploads/${upload.uploadId}`,
-      metadata_stripped: upload.metadataStripped,
-      scan_state: upload.scanState,
-      created_at: upload.createdAt,
-    });
-  }
-  return out;
-};
-// WS-G closes the WS-D.2.4 anonymize hook: tombstone the author on every
-// contribution/evidence card/upload (bodies persist per §22.4 — the
-// tombstoned user row is the anonymization) and REMOVE room memberships
-// and steward assignments (membership is personal data).
-identityServices.anonymizeContributions = async (userId) => {
-  await forumServices.contributions.anonymizeUser(userId);
-  await ingestionServices.evidence.anonymizeUser(userId);
-  await forumServices.uploads.anonymizeUser(userId);
-  await forumServices.rooms.anonymizeUser(userId);
-};
+// The CONTENT half of the data-rights hooks (WS-F stories + WS-G forum/
+// evidence/rooms/uploads, WS-Q.3.5 tier tagging) is composed in the testable
+// forum/data-rights module. Export is COMPLETE (§19.3 / GDPR Art. 15) and
+// covers BOTH visibility tiers; anonymize tombstones the author across tiers
+// and removes (private-room) memberships + steward rows.
+identityServices.exportContributions = (userId) =>
+  exportUserContent(ingestionServices, forumServices, userId);
+identityServices.anonymizeContributions = (userId) =>
+  anonymizeUserContent(ingestionServices, forumServices, userId);
 identityServices.onPrivacyChange = (change) => {
   void applyRetentionPreferenceChange(eventServices, change.userId, change.retention).catch((err) =>
     logger.error({ err }, 'retention preference propagation failed'),
@@ -471,6 +379,19 @@ if (s3Config) {
   );
 }
 setIdentityServices(identityServices);
+
+// Development demo seed (NEVER in production): populate rooms, stories, threads,
+// and multi-author comments through the REAL stores so a fresh dev database
+// renders end-to-end data on boot. Idempotent (a no-op once seeded) and
+// best-effort (a seed failure never blocks serving).
+if (env.NODE_ENV !== 'production') {
+  try {
+    await seedForumDemoData(forumServices, ingestionServices, identityServices.store);
+    logger.info('demo data seeded (development)');
+  } catch (err) {
+    logger.warn({ err }, 'demo seed skipped (non-fatal)');
+  }
+}
 
 // Hourly privacy jobs: the 72h export sweep and the 30-day deletion purge
 // (WS-D.2.2c / WS-D.2.4a).  Expiry is ALSO enforced at read time, so a missed

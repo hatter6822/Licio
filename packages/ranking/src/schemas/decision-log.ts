@@ -132,6 +132,10 @@ export const rankingDecisionLogSchema = z
     invariant_versions: z.record(z.string().min(1).max(64), invariantVersionEntrySchema),
     constraints_applied: z.array(constraintApplicationSchema),
     safety_exclusions: z.array(safetyExclusionSchema),
+    /** WS-Q.4.2b — candidates dropped by the always-on visibility distribution
+     *  gate (item-tier + room-tier containment). Defaulted so pre-WS-Q logs
+     *  still parse and replay. */
+    visibility_excluded_count: z.number().int().nonnegative().default(0),
     quota_outcomes: z.array(quotaOutcomeSchema),
     /** item id → explanation template id (WS-I.2.6). */
     explanation_ids: z.record(uuid, z.string().min(1).max(64)),

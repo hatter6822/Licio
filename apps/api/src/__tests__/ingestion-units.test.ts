@@ -60,7 +60,7 @@ import {
   InMemoryEmbeddingStore,
   InMemoryReviewQueueStore,
 } from '../ingestion/stores.js';
-import { articleHtml } from './ws-f-helpers.js';
+import { articleHtml } from './ingestion-test-helpers.js';
 
 describe('HTML scanning + metadata extraction (WS-F.1.4e)', () => {
   it('extracts every supported channel from a realistic article', () => {
@@ -186,6 +186,9 @@ describe('search scoring + cursor math (WS-F.3.1a/b)', () => {
     language: 'en',
     createdAt: '2026-06-11T00:00:00.000Z',
     visible: true,
+    roomId: null,
+    storyVisibility: 'public' as const,
+    roomVisibility: 'public' as const,
   };
 
   it('weights title over body, requires every token (AND), supports prefix on the last token', () => {
@@ -249,6 +252,21 @@ describe('runtime config (WS-F admin; fail-closed loader)', () => {
     const loaded = await loadIngestionConfig(store, (key) => invalid.push(key));
     expect(loaded.submissionPerHour).toBe(DEFAULT_INGESTION_CONFIG.submissionPerHour);
     expect(invalid).toEqual(['submissionPerHour']);
+  });
+
+  it('WS-Q.2.3c — video caps validate, clamp to the hard ceiling, and fail closed', async () => {
+    // The byte cap may only LOWER the 200 MB DB ceiling.
+    expect(validateIngestionConfigValue('videoMaxBytes', 50 * 1024 * 1024)).toBeNull();
+    expect(validateIngestionConfigValue('videoMaxBytes', 300 * 1024 * 1024)).not.toBeNull();
+    expect(validateIngestionConfigValue('videoMaxSeconds', 120)).toBeNull();
+    expect(validateIngestionConfigValue('videoMaxSeconds', 0)).not.toBeNull();
+
+    const store = new InMemoryPwattConfigStore();
+    await store.set('ingestion.videoMaxBytes', { value: 999 * 1024 * 1024 }); // over the ceiling
+    const invalid: string[] = [];
+    const loaded = await loadIngestionConfig(store, (key) => invalid.push(key));
+    expect(loaded.videoMaxBytes).toBe(DEFAULT_INGESTION_CONFIG.videoMaxBytes);
+    expect(invalid).toEqual(['videoMaxBytes']);
   });
 });
 

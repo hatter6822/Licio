@@ -10,6 +10,7 @@ import {
   contributionTypeSchema,
   dwellBucketSchema,
   returnVisitBucketSchema,
+  storyVisibilitySchema,
 } from '@licio/shared';
 import { z } from 'zod';
 
@@ -24,7 +25,9 @@ export const savedStoryRecordSchema = z.object({
   title: z.string().min(1),
   source: z.string().min(1),
   url: z.string().url().nullable(),
-  roomId: z.string().uuid().nullable(),
+  // WS-Q.5.5 — `roomId` is nullish so a pre-WS-Q saved record (no room) stays
+  // readable (gracefully widened) rather than being quarantined on read.
+  roomId: z.string().uuid().nullish(),
   savedAt: z.number().int().nonnegative(),
 });
 export type SavedStoryRecord = z.infer<typeof savedStoryRecordSchema>;
@@ -63,6 +66,44 @@ export const draftContributionRecordSchema = z
     message: 'encrypted and cipher must agree (cipher present iff encrypted)',
   });
 export type DraftContributionRecord = z.infer<typeof draftContributionRecordSchema>;
+
+/**
+ * The four story-composer modes (a subset of the §14.1 submission types: the
+ * composer offers link/brief/image/video). This tuple is the single source of
+ * truth for both the persisted draft and the component's `StoryComposerMode`.
+ */
+export const STORY_DRAFT_MODES = ['link', 'original_brief', 'image_post', 'video_post'] as const;
+export const storyDraftModeSchema = z.enum(STORY_DRAFT_MODES);
+export type StoryDraftMode = (typeof STORY_DRAFT_MODES)[number];
+
+/**
+ * An autosaved story-composer draft (key: draftId). Mirrors the contribution
+ * draft: structural fields (mode, room, visibility) are plaintext metadata so
+ * room + visibility round-trip on restore; the free-text body lives encrypted in
+ * `cipher` (AES-256-GCM, §6.8) with `values` empty when Web Crypto is available,
+ * else plaintext in `values`. Files are NOT persisted — a restored draft keeps
+ * the text + room + visibility, and the user re-picks any media.
+ */
+export const draftStoryRecordSchema = z
+  .object({
+    schemaVersion,
+    draftId: z.string().min(1),
+    mode: storyDraftModeSchema,
+    /** The chosen home room: COMMONS_ROOM_ID or a room UUID. */
+    roomId: z.string().uuid(),
+    visibility: storyVisibilitySchema,
+    values: z.record(z.string(), z.string()),
+    updatedAt: z.number().int().nonnegative(),
+    /** True when the draft body is encrypted at rest in `cipher` (§6.8). */
+    encrypted: z.boolean(),
+    /** Present iff `encrypted`: the AES-GCM ciphertext of the draft values. */
+    cipher: draftCipherSchema.optional(),
+  })
+  // Same invariant as the contribution draft: `cipher` present iff `encrypted`.
+  .refine((record) => record.encrypted === (record.cipher !== undefined), {
+    message: 'encrypted and cipher must agree (cipher present iff encrypted)',
+  });
+export type DraftStoryRecord = z.infer<typeof draftStoryRecordSchema>;
 
 /** A cached thread summary for offline reading (key: threadId). */
 export const threadSnapshotRecordSchema = z.object({

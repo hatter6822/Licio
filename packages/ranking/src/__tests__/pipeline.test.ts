@@ -47,6 +47,40 @@ describe('WS-I.2.3e deterministic scoring orchestrator', () => {
     expect(JSON.stringify(run())).toBe(JSON.stringify(run()));
   });
 
+  it('WS-Q.4.3 — visibility is NOT a ranking signal (flipping it changes no score)', () => {
+    // Two same-room items scored identically; flipping ONLY `visibility` on
+    // both candidates and feature vectors changes neither order nor scores —
+    // the scoring stage treats visibility as a non-scoring eligibility field.
+    const candidates = [1, 2, 3].map((n) => makeCandidate(n));
+    const features = featureMap(
+      [1, 2, 3].map((n) => makeFeatures(n, { active_attention: 0.1 * n })),
+    );
+    const asPublic = rankFeasibleSet(
+      candidates,
+      features,
+      EVERGREEN_PROFILE,
+      FULL_ENFORCEMENT,
+      makeContext(),
+    );
+    const flippedCandidates = candidates.map((c) => ({ ...c, visibility: 'room_only' as const }));
+    const flippedFeatures = featureMap(
+      [1, 2, 3].map((n) => makeFeatures(n, { active_attention: 0.1 * n, visibility: 'room_only' })),
+    );
+    const asRoomOnly = rankFeasibleSet(
+      flippedCandidates,
+      flippedFeatures,
+      EVERGREEN_PROFILE,
+      FULL_ENFORCEMENT,
+      makeContext(),
+    );
+    expect(asRoomOnly.selected.map((s) => s.item_id)).toEqual(
+      asPublic.selected.map((s) => s.item_id),
+    );
+    expect(asRoomOnly.selected.map((s) => s.pwatt_score)).toEqual(
+      asPublic.selected.map((s) => s.pwatt_score),
+    );
+  });
+
   it('input order does not change the result (deterministic merge)', () => {
     const candidates = [1, 2, 3].map((n) => makeCandidate(n));
     const features = featureMap([1, 2, 3].map((n) => makeFeatures(n)));

@@ -59,9 +59,18 @@ describe('content events (WS-E.1.1a)', () => {
     ).toBe(false);
   });
 
-  it('submission_type enum is exhaustive per SPEC §14.1', () => {
+  it('submission_type enum is exhaustive per SPEC §14.1 (+ WS-Q media)', () => {
     expect([...SUBMISSION_TYPES].sort()).toEqual(
-      ['link', 'original_brief', 'question', 'evidence_card', 'local_update', 'live_thread'].sort(),
+      [
+        'link',
+        'original_brief',
+        'question',
+        'evidence_card',
+        'local_update',
+        'live_thread',
+        'image_post',
+        'video_post',
+      ].sort(),
     );
     for (const submissionType of SUBMISSION_TYPES) {
       expect(
@@ -71,6 +80,47 @@ describe('content events (WS-E.1.1a)', () => {
         }).success,
       ).toBe(true);
     }
+  });
+
+  it('WS-Q.1.7c — classification TRACKS visibility (public⟺public, room_only⟺restricted)', () => {
+    // public visibility must carry the public classification (the fixture).
+    expect(
+      contentSubmittedEventSchema.safeParse({
+        ...EVENT_FIXTURES['content.submitted'],
+        visibility: 'public',
+        privacy_classification: 'public',
+      }).success,
+    ).toBe(true);
+    // room_only visibility REQUIRES the restricted first-party classification.
+    expect(
+      contentSubmittedEventSchema.safeParse({
+        ...EVENT_FIXTURES['content.submitted'],
+        visibility: 'room_only',
+        privacy_classification: 'restricted',
+      }).success,
+    ).toBe(true);
+    // A room_only event labeled `public` is structurally rejected — a buggy
+    // emitter cannot leak in-room content onto a public consumer path.
+    expect(
+      contentSubmittedEventSchema.safeParse({
+        ...EVENT_FIXTURES['content.submitted'],
+        visibility: 'room_only',
+        privacy_classification: 'public',
+      }).success,
+    ).toBe(false);
+    // Likewise a public event labeled restricted is rejected (coupling is iff).
+    expect(
+      contentSubmittedEventSchema.safeParse({
+        ...EVENT_FIXTURES['content.submitted'],
+        visibility: 'public',
+        privacy_classification: 'restricted',
+      }).success,
+    ).toBe(false);
+  });
+
+  it('WS-Q.1.7c — content events require room_id', () => {
+    const { room_id: _r, ...noRoom } = EVENT_FIXTURES['content.submitted'];
+    expect(contentSubmittedEventSchema.safeParse(noRoom).success).toBe(false);
   });
 
   it('rejects a javascript: canonical_url (XSS defense in the URL schema)', () => {

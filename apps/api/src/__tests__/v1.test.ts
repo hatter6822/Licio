@@ -15,8 +15,8 @@ import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resetPushState } from '../lib/push-service.js';
 import { createV1Routes, resetSettingsState } from '../routes/v1.js';
-import { freshWsEServices, legacyAggregate, seedUserWithSession } from './ws-e-helpers.js';
-import { freshWsGServices, seedThread } from './ws-g-helpers.js';
+import { freshEventServices, legacyAggregate, seedUserWithSession } from './event-test-helpers.js';
+import { freshForumServices, seedThread } from './forum-test-helpers.js';
 
 // Mount the v1 router on a bare app: this unit-tests the contract handlers in
 // isolation. CSRF/CORS/security middleware is exercised by their own suites.
@@ -58,7 +58,7 @@ describe('v1 read models', () => {
   });
 
   it('returns a known demo story', async () => {
-    freshWsGServices();
+    freshForumServices();
     const res = await app().request('/v1/stories/5f5e1000-0000-4000-8000-000000000001');
     expect(res.status).toBe(200);
     const body = storyDetailSchema.parse(await res.json());
@@ -66,7 +66,7 @@ describe('v1 read models', () => {
   });
 
   it('serves schema-valid thread / branch / room bodies from the REAL stores', async () => {
-    const fixture = freshWsGServices();
+    const fixture = freshForumServices();
     const a = app();
     const { threadId } = await seedThread(fixture);
     // Each body must satisfy its shared schema (the server re-validates on
@@ -84,7 +84,7 @@ describe('v1 read models', () => {
   });
 
   it('serves an authenticated user their own (initially empty) Signal Ledger', async () => {
-    const { identity } = freshWsEServices();
+    const { identity } = freshEventServices();
     const { cookie } = await seedUserWithSession(identity);
     const res = await app().request(
       new Request('http://local/v1/signal-ledger', { headers: { cookie } }),
@@ -123,19 +123,28 @@ describe('v1 auth + settings + flags', () => {
     expect(body.personalization_enabled).toBe(true);
   });
 
-  it('serves fail-closed feature flags', async () => {
+  it('serves fail-closed crypto/governance + the WS-Q content surface', async () => {
     const res = await app().request('/v1/feature-flags');
     expect(await res.json()).toEqual({
       cryptoEnabled: false,
       governanceEnabled: false,
       regionFlags: {},
+      // WS-Q.6.2 — content flags default ON (the live model); the video caps
+      // mirror ingestion config (defaults). Crypto/governance stay fail-closed.
+      content: {
+        media_posts_enabled: true,
+        in_room_visibility_enabled: true,
+        binary_visibility_ui: true,
+        video_max_bytes: 200 * 1024 * 1024,
+        video_max_seconds: 600,
+      },
     });
   });
 });
 
 describe('v1 writes', () => {
   it('requires authentication for contribution creation (WS-G.3.1)', async () => {
-    freshWsGServices();
+    freshForumServices();
     const res = await app().request(
       jsonRequest('/v1/contributions', 'POST', {
         thread_id: VALID_UUID,
@@ -148,7 +157,7 @@ describe('v1 writes', () => {
   });
 
   it('rejects a malformed unauthenticated contribution with 401 (auth precedes validation)', async () => {
-    freshWsGServices();
+    freshForumServices();
     const res = await app().request(
       jsonRequest('/v1/contributions', 'POST', { thread_id: 'nope', type: 'evidence' }),
     );
@@ -191,7 +200,7 @@ describe('v1 writes', () => {
   });
 
   it('ingests an authenticated attention aggregate batch through the WS-E pipeline', async () => {
-    const { identity } = freshWsEServices();
+    const { identity } = freshEventServices();
     const { userId, cookie } = await seedUserWithSession(identity);
     const aggregate = legacyAggregate(userId);
     const res = await app().request(

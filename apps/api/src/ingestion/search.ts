@@ -52,7 +52,15 @@ export interface SearchDocument {
   sourceId: string | null;
   language: string | null;
   createdAt: string;
+  /** Not hidden (takedown/safety) and not retracted (the existing bar). */
   visible: boolean;
+  // WS-Q.2.5a/b — the two-tier visibility coordinates of the owning story.
+  /** The home room of the owning story (null only for legacy/orphan rows). */
+  roomId: string | null;
+  /** The owning story's item visibility (§14.5). */
+  storyVisibility: 'public' | 'room_only';
+  /** The home room's visibility (§16.1). */
+  roomVisibility: 'public' | 'private';
 }
 
 /** Title hits weigh A=1.0, body hits B=0.4 (mirrors setweight A/B). */
@@ -104,6 +112,18 @@ export class InMemorySearchIndex implements SearchIndex {
     const scored: Array<{ doc: SearchDocument; relevance: number }> = [];
     for (const doc of await this.#documents()) {
       if (!doc.visible) continue;
+      // WS-Q.2.5a/b — two-tier visibility:
+      //   • room-scoped (`?room=`): only this room's pool (public + room_only of
+      //     THIS room); the route has already enforced the room read bar.
+      //   • global (no `?room=`): only PUBLIC content from PUBLIC rooms — BOTH
+      //     conjuncts (defense-in-depth: a mislabeled public story in a private
+      //     room, or a migration-transient row, is excluded even from a reader
+      //     who could pass that room's bar).
+      if (request.room !== undefined) {
+        if (doc.roomId !== request.room) continue;
+      } else if (doc.storyVisibility !== 'public' || doc.roomVisibility !== 'public') {
+        continue;
+      }
       if (request.type !== undefined && doc.resultType !== request.type) continue;
       if (request.topic_id !== undefined && !doc.topicIds.includes(request.topic_id)) continue;
       if (request.source_id !== undefined && doc.sourceId !== request.source_id) continue;

@@ -65,3 +65,11 @@ export function selectGovernanceEnabled(state: FeatureFlagState): boolean {
 export function selectRegionEnabled(state: FeatureFlagState, key: string): boolean {
   return state.flags.regionFlags[key] === true;
 }
+
+/** WS-Q.6.2 — the content-room rollout surface (flags + video caps). Fail-closed
+ *  by construction: an un-hydrated store returns the OFF/hard-ceiling defaults. */
+export function selectContentSurface(
+  state: FeatureFlagState,
+): FeatureFlagState['flags']['content'] {
+  return state.flags.content;
+}

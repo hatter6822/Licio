@@ -30,6 +30,12 @@ import {
   storeIngestionConfigValue,
   validateIngestionConfigValue,
 } from '../ingestion/config.js';
+import {
+  CONTENT_FLAG_NAMES,
+  loadContentFlags,
+  setContentFlagByName,
+  validateContentFlagValue,
+} from '../ingestion/content-flags.js';
 import { getBackfillProgress, startBackfill, validateBackfill } from '../ingestion/embeddings.js';
 import { applyLifecycleTrigger } from '../ingestion/lifecycle.js';
 import { getIngestionServices } from '../ingestion/services.js';
@@ -405,6 +411,35 @@ export function createIngestionAdminRoutes() {
             context: { setting: key },
           });
           return c.json({ ok: true, key });
+        },
+      )
+
+      // --- WS-Q.6.2 content rollout flags (fail-closed; audited) -----------
+      .get('/content-flags', async (c) => {
+        const events = getEventPipelineServices();
+        const flags = await loadContentFlags(events.configStore);
+        return c.json({ flags, names: CONTENT_FLAG_NAMES });
+      })
+      .patch(
+        '/content-flags',
+        zValidator(
+          'json',
+          z.object({ name: z.string().min(1).max(64), value: z.boolean() }).strict(),
+        ),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const { name, value } = c.req.valid('json');
+          const problem = validateContentFlagValue(name, value);
+          if (problem !== null) return c.json(deny('invalid_flag', problem), 422);
+          const events = getEventPipelineServices();
+          await setContentFlagByName(events.configStore, name, value);
+          await getIdentityServices().audit.append({
+            actorUserId: auth.userId,
+            eventType: 'ingestion_config_change',
+            context: { setting: name },
+          });
+          return c.json({ ok: true, name });
         },
       )
 

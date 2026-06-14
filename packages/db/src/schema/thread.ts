@@ -43,7 +43,16 @@ export const threads = pgTable(
     storyId: uuid('story_id')
       .notNull()
       .references(() => stories.storyId, { onDelete: 'cascade' }),
-    roomId: uuid('room_id').references(() => rooms.roomId, { onDelete: 'set null' }),
+    /**
+     * WS-Q.1.5 — the thread's room is DENORMALIZED from its owning story and is
+     * NOT NULL (migration 0018 backfills then sets the constraint). A trigger
+     * (also 0018) rejects any row where `threads.room_id <> stories.room_id` (a
+     * programming-error guard; story room moves are out of v1 scope). No
+     * onDelete: a room is archived, never deleted while it owns threads.
+     */
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.roomId),
     branchIndex: integer('branch_index').notNull().default(0),
     /** FK added by the 0008 migration (summaries table; avoids a TS module
      *  cycle thread→summary→thread — the constraint lives in SQL). */

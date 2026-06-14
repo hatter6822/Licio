@@ -52,6 +52,10 @@ export const candidateSchema = z
     item_type: z.enum(['story', 'thread']),
     source_type: candidateSourceTypeSchema,
     room_id: z.string().uuid().nullable(),
+    /** WS-Q.4.1a — item visibility (§14.5): a non-scoring ELIGIBILITY field the
+     *  surface-aware distribution gate reads (it gates candidacy, never scores
+     *  — proven by the WS-Q.4.3 not-a-signal property). */
+    visibility: z.enum(['public', 'room_only']),
     topic_ids: z.array(z.string().min(1).max(128)).max(16),
     source_id: z.string().uuid().nullable(),
     /** ISO instant used for freshness/chronological ordering. */

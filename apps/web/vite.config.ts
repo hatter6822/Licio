@@ -159,6 +159,20 @@ export default defineConfig({
     },
   },
   preview: {
+    // BFF-in-the-loop E2E (WS-P harness): when E2E_API_PROXY=1, the preview
+    // server proxies the API surface to the in-memory e2e-server so the browser
+    // sees a SINGLE same-origin host (:4173) — a prerequisite for the
+    // SameSite=Strict `__Host-` session cookie. Off by default (normal preview
+    // is frontend-only, exactly as before).
+    ...(process.env['E2E_API_PROXY'] === '1'
+      ? {
+          proxy: {
+            '/v1': { target: 'http://localhost:3001', changeOrigin: true },
+            '/api': { target: 'http://localhost:3001', changeOrigin: true },
+            '/health': { target: 'http://localhost:3001', changeOrigin: true },
+          },
+        }
+      : {}),
     headers: {
       'Content-Security-Policy': [
         "default-src 'self'",

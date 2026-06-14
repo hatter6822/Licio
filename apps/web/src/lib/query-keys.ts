@@ -15,6 +15,7 @@ export const queryKeys = {
     ['thread', threadId, 'branch', branch] as const,
   rooms: () => ['rooms'] as const,
   room: (roomId: string) => ['room', roomId] as const,
+  roomFeed: (roomId: string) => ['room', roomId, 'feed'] as const,
   authStatus: () => ['auth-status'] as const,
   settings: () => ['settings'] as const,
   signalLedger: () => ['signal-ledger'] as const,

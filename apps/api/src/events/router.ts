@@ -60,6 +60,10 @@ export interface ConsumerMetrics {
   deadLettered: number;
   /** Knomosis events withheld because the crypto flag is off (observability). */
   withheldByCryptoFlag: number;
+  /** WS-Q.1.7c — events withheld because their (per-event) classification is
+   *  outside this consumer's access (e.g. a room_only `restricted` content
+   *  event reaching a public-only consumer). */
+  withheldByClassification: number;
   /** ISO timestamp of the newest event delivered (lag observability). */
   lastDeliveredEventAt: string | null;
 }
@@ -161,6 +165,7 @@ export class EventRouter {
       failed: 0,
       deadLettered: 0,
       withheldByCryptoFlag: 0,
+      withheldByClassification: 0,
       lastDeliveredEventAt: null,
     });
   }
@@ -172,6 +177,16 @@ export class EventRouter {
       // Delivery-time re-check (defense in depth; never trust registration
       // alone — a registry change between boot and now must still hold).
       assertDeliverable(consumer, event.event_type);
+      // WS-Q.1.7c — PER-EVENT classification routing: an event may be MORE
+      // restrictive than its topic's base (a room_only content event is
+      // `restricted`, not the topic's `public`). A consumer that does not hold
+      // the event's actual classification is silently withheld, so an in-room
+      // story's URL/topics/submitter never flow to a public/scoring consumer.
+      if (!consumer.accessClassifications.includes(event.privacy_classification)) {
+        const metrics = this.#metrics.get(consumer.name);
+        if (metrics) metrics.withheldByClassification += 1;
+        continue;
+      }
       // Crypto-flag gate (WS-E.1.2): with the fail-closed flag off, Knomosis
       // events are withheld from EVERY consumer, however authorized.
       if (isKnomosisTopic(event.event_type) && !this.#knomosisEnabled()) {
@@ -195,6 +210,8 @@ export class EventRouter {
     for (const event of events) {
       if (!consumer.topics.includes(event.event_type)) continue;
       assertDeliverable(consumer, event.event_type);
+      // WS-Q.1.7c per-event classification gate (mirrors publish()).
+      if (!consumer.accessClassifications.includes(event.privacy_classification)) continue;
       if (isKnomosisTopic(event.event_type) && !this.#knomosisEnabled()) continue;
       const before = this.#metrics.get(consumerName)?.delivered ?? 0;
       await this.#deliver(consumer, event);
@@ -212,6 +229,8 @@ export class EventRouter {
     const consumer = this.#consumers.get(consumerName);
     if (!consumer) throw new RouterPolicyViolation(`unknown consumer "${consumerName}"`);
     assertDeliverable(consumer, event.event_type);
+    // WS-Q.1.7c per-event classification gate (mirrors publish()).
+    if (!consumer.accessClassifications.includes(event.privacy_classification)) return false;
     if (isKnomosisTopic(event.event_type) && !this.#knomosisEnabled()) return false;
     this.#seen.get(consumerName)?.delete(event.event_id);
     const before = this.#metrics.get(consumerName)?.deadLettered ?? 0;

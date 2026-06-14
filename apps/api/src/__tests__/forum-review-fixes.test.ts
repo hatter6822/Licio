@@ -18,25 +18,25 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { createV1Routes } from '../routes/v1.js';
 import {
   contributionBody,
-  freshWsGServices,
+  type ForumServicesFixture,
+  freshForumServices,
   jsonRequest,
   seedClaim,
   seedThread,
   seedUserWithSession,
-  type WsGFixture,
-} from './ws-g-helpers.js';
+} from './forum-test-helpers.js';
 
 function app() {
   return new Hono().route('/v1', createV1Routes());
 }
 
-let fixture: WsGFixture;
+let fixture: ForumServicesFixture;
 let cookie: string;
 let nowMs: number;
 
 beforeEach(async () => {
   nowMs = Date.parse('2026-06-11T12:00:00.000Z');
-  fixture = freshWsGServices({
+  fixture = freshForumServices({
     now: () => {
       nowMs += 137;
       return nowMs;
@@ -62,7 +62,7 @@ describe('restricted content requires ACTIVE membership (not a pending applicati
         jsonRequest(
           '/v1/rooms',
           'POST',
-          { ...ROOM, name: 'Closed Wing', visibility: 'restricted' },
+          { ...ROOM, name: 'Closed Wing', visibility: 'private' },
           steward.cookie,
         ),
       )
@@ -85,19 +85,20 @@ describe('restricted content requires ACTIVE membership (not a pending applicati
     ).json()) as { items: Array<{ room_id: string }> };
     expect(listing.items.some((room) => room.room_id === created.room_id)).toBe(true);
 
-    // …but content is not: threads and lenses stay closed until approval.
+    // …but content is not: threads and lenses 404 until approval (WS-Q.3.2
+    // 404-over-403 — a pending applicant gets no content/membership oracle).
     const threads = await app().request(
       new Request(`http://local/v1/rooms/${created.room_id}/threads`, {
         headers: { cookie: applicant.cookie },
       }),
     );
-    expect(threads.status).toBe(403);
+    expect(threads.status).toBe(404);
     const lenses = await app().request(
       new Request(`http://local/v1/rooms/${created.room_id}/lenses`, {
         headers: { cookie: applicant.cookie },
       }),
     );
-    expect(lenses.status).toBe(403);
+    expect(lenses.status).toBe(404);
 
     // Approval opens the content reads.
     const requests = (await (
@@ -129,7 +130,7 @@ describe('restricted content requires ACTIVE membership (not a pending applicati
 
 describe('edits re-run the safety classifier (WS-G.3.1 parity)', () => {
   it('an edit that introduces a denylisted URL is held for review + queued', async () => {
-    const flagged = freshWsGServices({
+    const flagged = freshForumServices({
       now: () => nowMs,
       config: { malwareDomains: ['evil.example'] },
       forumConfig: { contributionsPerMinute: 1_000 },
@@ -200,7 +201,7 @@ describe('edits re-run the safety classifier (WS-G.3.1 parity)', () => {
 
 describe('held contributions are invisible to every downstream system', () => {
   it('a safety-held create emits NO events and bumps no room activity', async () => {
-    const flagged = freshWsGServices({
+    const flagged = freshForumServices({
       now: () => nowMs,
       config: { malwareDomains: ['evil.example'] },
       forumConfig: { contributionsPerMinute: 1_000 },
@@ -324,7 +325,7 @@ describe('room thread counts exclude hidden stories', () => {
 
 describe('branch pagination walks arbitrarily large sections', () => {
   it('visits every contribution exactly once across keyset pages', async () => {
-    const paged = freshWsGServices({
+    const paged = freshForumServices({
       now: () => {
         nowMs += 137;
         return nowMs;
@@ -381,6 +382,8 @@ describe('rooms directory pagination beyond a single scan batch', () => {
         description: null,
         roomType: 'global_topic',
         visibility: 'public',
+        joinModel: 'open',
+        postingPolicy: 'all_members',
         createdBy: null,
         governanceMode: 'ordinary',
         charterSummary: null,
@@ -406,7 +409,8 @@ describe('rooms directory pagination beyond a single scan batch', () => {
       expect(pages).toBeLessThan(12);
     }
     expect(new Set(seen).size).toBe(seen.length);
-    expect(seen.length).toBe(total);
+    // WS-Q.1.6 — the always-present system Commons room is in the directory too.
+    expect(seen.length).toBe(total + 1);
   });
 
   it('joined=true enumerates the requester’s own memberships completely', async () => {

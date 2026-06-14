@@ -81,4 +81,21 @@ describe('DwellCapTracker', () => {
   it('defaults the cap to the long/extended boundary', () => {
     expect(DEFAULT_DWELL_CAP_MS).toBe(300_000);
   });
+
+  // WS-Q.5.2c — a video post is just an item id to the signals layer: there is
+  // NO per-second video credit and no media-aware path, so a video item is
+  // capped EXACTLY like any other (re-asserting §5.3 for the new content type).
+  it('caps a video-post item identically to any other item (no video credit)', () => {
+    const cap = new DwellCapTracker();
+    const videoItem = 'video-story-1';
+    const articleItem = 'article-story-1';
+    // Pour well past the default cap into both; both stop at the same boundary.
+    for (let i = 0; i < 10; i += 1) {
+      cap.add(videoItem, 60_000);
+      cap.add(articleItem, 60_000);
+    }
+    expect(cap.get(videoItem)).toBe(DEFAULT_DWELL_CAP_MS);
+    expect(cap.get(videoItem)).toBe(cap.get(articleItem));
+    expect(cap.isCapped(videoItem)).toBe(true);
+  });
 });

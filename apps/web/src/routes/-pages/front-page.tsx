@@ -3,44 +3,27 @@
 // Front Page (WS-C.1.1a landing route, eager). Ranked feed of stories/discussions
 // with the no-applause feed-mode switcher (WS-B.2.9) wired to the UI store and a
 // shareable `?mode=` search param. Each card links to the story detail.
-import type { FeedItem, FeedMode } from '@licio/shared';
+import type { FeedMode } from '@licio/shared';
 import { Link, useNavigate, useSearch } from '@tanstack/react-router';
 import { FeedModeSwitcher } from '../../components/feed/FeedModeSwitcher/index.js';
+import { feedItemToCard } from '../../components/story/feed-card.js';
 import { StoryCard } from '../../components/story/StoryCard/index.js';
-import type { StoryCardData } from '../../components/story/types.js';
-import { type IconName, iconNames } from '../../components/ui/Icon/index.js';
 import { useT } from '../../i18n/index.js';
 import { useFeedQuery, useUpdateDurablePrivacyMutation } from '../../lib/queries.js';
 import { useAuthStore, useUIStore } from '../../stores/index.js';
 import { PageScaffold } from './PageScaffold.js';
 import { usePageFocus } from './usePageFocus.js';
 
-function asIconName(value: string | undefined): IconName | undefined {
-  return value && (iconNames as readonly string[]).includes(value)
-    ? (value as IconName)
-    : undefined;
-}
-
-/** Map the validated wire FeedItem to the WS-B StoryCard presentation props. */
-function toStoryCardData(item: FeedItem): StoryCardData {
-  return {
-    story: {
-      id: item.story_id,
-      title: item.title,
-      source: item.source,
-      origin: item.origin,
-      ...(item.url ? { url: item.url } : {}),
-      readingMinutes: item.reading_minutes,
-    },
-    ratingLabel: item.rating_label,
-    ...(item.exposure_label ? { exposureLabel: item.exposure_label } : {}),
-    distributionReason: item.distribution_reason,
-    contextChips: item.context_chips.map((chip) => {
-      const icon = asIconName(chip.icon);
-      return { id: chip.id, label: chip.label, ...(icon ? { icon } : {}) };
-    }),
-  };
-}
+/**
+ * WS-Q.5.4b — front-page framing. The front page shows PUBLIC stories earning
+ * the most meaningful, participation-weighted attention — never popularity.
+ * Deliberately free of any applause vocabulary (no likes/votes/upvotes/karma);
+ * the FRONT_PAGE_COPY no-applause test pins this.
+ */
+export const FRONT_PAGE_FRAMING =
+  'Public stories earning the most meaningful, participation-weighted attention — never by popularity.';
+export const FRONT_PAGE_EMPTY_DESCRIPTION =
+  'When stories arrive, the most thoughtfully discussed appear here — ranked by participation-weighted attention, never by popularity.';
 
 export function FrontPage(): React.ReactElement {
   const t = useT();
@@ -73,13 +56,13 @@ export function FrontPage(): React.ReactElement {
       query={feed}
       isEmpty={(data) => data.items.length === 0}
       emptyTitle={t('feed.empty.title', 'No stories yet')}
-      emptyDescription={t(
-        'feed.empty.description',
-        'When stories arrive, the most thoughtfully discussed appear here — never the most liked.',
-      )}
+      emptyDescription={t('feed.empty.description', FRONT_PAGE_EMPTY_DESCRIPTION)}
     >
       {(data) => (
         <ul className="flex flex-col gap-3">
+          <li>
+            <p className="text-ink-muted text-sm">{t('feed.framing', FRONT_PAGE_FRAMING)}</p>
+          </li>
           {data.items.map((item) => (
             <li key={item.story_id}>
               <Link
@@ -87,7 +70,7 @@ export function FrontPage(): React.ReactElement {
                 params={{ storyId: item.story_id }}
                 className="block rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
               >
-                <StoryCard {...toStoryCardData(item)} />
+                <StoryCard {...feedItemToCard(item)} />
               </Link>
             </li>
           ))}

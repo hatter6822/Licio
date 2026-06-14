@@ -21,9 +21,9 @@ import { runInvariantsTick } from '../invariants/scheduler.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
 import { rankFrontPageV0 } from '../pwatt/ranking-v0.js';
 import { selectRankingInputs } from '../pwatt/shadow.js';
-import { freshWsHServices, seedStory } from './ws-h-helpers.js';
+import { freshInvariantServices, seedStory } from './invariant-test-helpers.js';
 
-function runnerDeps(fixture: ReturnType<typeof freshWsHServices>) {
+function runnerDeps(fixture: ReturnType<typeof freshInvariantServices>) {
   return {
     runMetadata: fixture.invariants.runMetadata,
     metrics: fixture.events.metrics,
@@ -34,7 +34,7 @@ function runnerDeps(fixture: ReturnType<typeof freshWsHServices>) {
 
 describe('WS-H.1.2c fallback execution wrapper', () => {
   it('a throwing invariant yields a degraded envelope and a gap record', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const result = await runGuarded(
       runnerDeps(fixture),
       'MERI',
@@ -60,7 +60,7 @@ describe('WS-H.1.2c fallback execution wrapper', () => {
   });
 
   it('a timeout triggers the fallback path with the TIMEOUT reason code', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const result = await runGuarded(
       runnerDeps(fixture),
       'GWEI',
@@ -78,7 +78,7 @@ describe('WS-H.1.2c fallback execution wrapper', () => {
   });
 
   it('ranking produces valid output when one, two, or ALL invariants fail', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const candidates = [
       { storyId: '11111111-1111-4111-8111-111111111111', createdAt: '2026-06-10T10:00:00.000Z' },
       { storyId: '22222222-2222-4222-8222-222222222222', createdAt: '2026-06-11T10:00:00.000Z' },
@@ -127,7 +127,7 @@ describe('WS-H.1.2c fallback execution wrapper', () => {
 
 describe('WS-H.1.1d score-vector validation at persistence', () => {
   it('rejects an invalid vector (never lands) and accepts a valid one', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const window = hourWindow(Date.now());
     const written = await persistComputations(
       fixture.events.invariantStore,
@@ -178,7 +178,7 @@ describe('WS-H.1.1d score-vector validation at persistence', () => {
   });
 
   it('the ranking boundary rejects WS-H shadow rows even if handed in directly', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     await persistComputations(
       fixture.events.invariantStore,
       { log: () => {}, metrics: fixture.events.metrics },
@@ -220,7 +220,7 @@ describe('WS-H.1.2e promotion service', () => {
   };
 
   it('status starts shadow; effects stay disabled without a valid promotion', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     expect(await fixture.invariants.promotionService.statusOf('MERI')).toBe('shadow');
     expect(await fixture.invariants.promotionService.effectsEnabled('MERI')).toBe(false);
     const rejected = await fixture.invariants.promotionService.apply(
@@ -239,7 +239,7 @@ describe('WS-H.1.2e promotion service', () => {
   });
 
   it('promotion enables effects; demotion (kill switch) disables without redeploy', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const promote = await fixture.invariants.promotionService.apply(
       {
         invariantType: 'SCOI',
@@ -272,7 +272,7 @@ describe('WS-H.1.2e promotion service', () => {
 
 describe('WS-H runtime config (fail closed)', () => {
   it('write-time validation rejects bad values; loader keeps defaults on bad rows', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     expect(validateInvariantsConfigValue('invariants.mfciSamples', 50)).toMatch(/>=100|100/);
     expect(validateInvariantsConfigValue('invariants.nope', 1)).toMatch(/unknown/);
     expect(
@@ -301,7 +301,7 @@ describe('WS-H runtime config (fail closed)', () => {
 
 describe('WS-H.1.2f scheduler tick', () => {
   it('runs the batch tier for all invariants, persists shadow rows, records health', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     await seedStory(fixture, { canonicalUrl: 'https://example.org/a' });
     await seedStory(fixture, { canonicalUrl: 'https://example.org/b' });
     const errors: unknown[] = [];
@@ -408,7 +408,7 @@ describe('upward promotions are regression-gated (WS-H.1.2e + WS-H.1.2d)', () =>
 
 describe('real-time tier latency budget (WS-H.1.2f)', () => {
   it('a slow computation times out at the budget into the degraded path', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     await fixture.events.configStore.set('invariants.realtimeLatencyBudgetMs', { value: 50 });
     await fixture.invariants.reloadConfig();
     const { runRealtimeTier } = await import('../invariants/scheduler.js');
@@ -440,7 +440,7 @@ describe('real-time tier latency budget (WS-H.1.2f)', () => {
 
 describe('tropical → MFCI feature feed (WS-H.7.2b)', () => {
   it('a detected synchronized cascade routes the topic through the MFCI intake', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const sources: Array<{ sourceId: string }> = [];
     for (const domain of ['wire-a.example', 'wire-b.example', 'wire-c.example']) {
       sources.push(await fixture.ingestion.sources.upsertByDomain(domain, { name: domain }));
@@ -488,7 +488,7 @@ describe('tropical → MFCI feature feed (WS-H.7.2b)', () => {
 
 describe('nightly MFCI calibration rebuild (WS-H.3.1a)', () => {
   it('builds volume-conditioned nulls from trailing organic windows', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { rebuildMfciCalibrations } = await import('../invariants/scheduler.js');
     const nowMs = Date.now();
     const { storyId } = await seedStory(fixture);
@@ -524,7 +524,7 @@ describe('nightly MFCI calibration rebuild (WS-H.3.1a)', () => {
   });
 
   it('keeps the previous calibration when the baseline is too thin', async () => {
-    const fixture = freshWsHServices();
+    const fixture = freshInvariantServices();
     const { rebuildMfciCalibrations } = await import('../invariants/scheduler.js');
     await fixture.invariants.calibrations.upsert({
       calibrationKey: 'mfci:target_concentration',

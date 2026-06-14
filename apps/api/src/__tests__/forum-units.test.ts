@@ -24,22 +24,22 @@ import { supersedesCurrent } from '../forum/summaries.js';
 import { applyConversationTransition, applyThreadSafetyTransition } from '../forum/transitions.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
-  freshWsGServices,
+  type ForumServicesFixture,
+  freshForumServices,
   jsonRequest,
   seedThread,
   seedUserWithSession,
-  type WsGFixture,
-} from './ws-g-helpers.js';
+} from './forum-test-helpers.js';
 
 function app() {
   return new Hono().route('/v1', createV1Routes());
 }
 
-let fixture: WsGFixture;
+let fixture: ForumServicesFixture;
 let threadId: string;
 
 beforeEach(async () => {
-  fixture = freshWsGServices();
+  fixture = freshForumServices();
   ({ threadId } = await seedThread(fixture));
 });
 
@@ -515,6 +515,8 @@ describe('WS-D hooks closed by WS-G (anonymize)', () => {
       description: null,
       roomType: 'global_topic',
       visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'all_members',
       createdBy: session.userId,
       governanceMode: 'ordinary',
       charterSummary: null,

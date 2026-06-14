@@ -53,9 +53,17 @@ export async function signatureStory(
  * LSH candidates → estimate filter (WS-F.1.3c): sub-linear retrieval, then
  * the configurable Jaccard threshold decides. Only candidates signed with
  * the SAME family version are comparable (re-signature safety).
+ *
+ * WS-Q.2.2c — candidate matching is scoped to the PUBLIC tier: in-room content
+ * never feeds the public near-dup / syndication clusters and is never flagged
+ * against them. Signatures still EXIST for room_only stories (signatureStory
+ * signs everything), so a later widen joins the public clusters without a
+ * recompute — but the candidate set here drops any non-public / hidden story.
+ * Room-tier near-dup detection is out of scope for v1.
  */
 export async function findNearDuplicates(
   signatures: SignatureStore,
+  stories: StoryStore,
   storyId: string,
   signature: Uint32Array,
   bands: Uint32Array,
@@ -63,8 +71,15 @@ export async function findNearDuplicates(
   limit: number,
 ): Promise<NearDuplicateHit[]> {
   const candidates = await signatures.candidatesByBands(bands, storyId);
+  if (candidates.length === 0) return [];
+  // Scope the candidate set to live PUBLIC stories (one batch read).
+  const candidateStories = await stories.getByIds(candidates);
   const hits: NearDuplicateHit[] = [];
   for (const candidateId of candidates) {
+    const story = candidateStories.get(candidateId);
+    if (story === undefined || story.visibility !== 'public' || story.hiddenState !== null) {
+      continue;
+    }
     const candidate = await signatures.getByStoryId(candidateId);
     if (!candidate || candidate.familyVersion !== MINHASH_FAMILY_VERSION) continue;
     const estimate = estimateJaccard(signature, candidate.minhash);

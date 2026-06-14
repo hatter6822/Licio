@@ -181,10 +181,11 @@ Background-Sync `sync` event (wakes a client to run the validated queue replay).
 
 A thin typed Promise wrapper over **raw IndexedDB** (no `idb` dependency).
 
-- **Five object stores (2.2a):** `saved-stories`, `draft-contributions`,
-  `thread-snapshots`, `signal-ledger`, `pending-queue`, with the documented
-  indexes. Versioned migrations run inside the single `onupgradeneeded`
-  transaction, so a failed migration aborts atomically (never half-migrated).
+- **Six object stores (2.2a):** `saved-stories`, `draft-contributions`,
+  `draft-stories`, `thread-snapshots`, `signal-ledger`, `pending-queue`, with the
+  documented indexes. Versioned migrations run inside the single `onupgradeneeded`
+  transaction, so a failed migration aborts atomically (never half-migrated). The
+  v3 bump adds `draft-stories` additively (user data preserved).
 - **Integrity layer (2.2c):** every read AND write is zod-validated. A record
   that fails read validation is **quarantined** (counted, excluded, left in place
   for recovery), never silently deleted.
@@ -195,7 +196,12 @@ A thin typed Promise wrapper over **raw IndexedDB** (no `idb` dependency).
   exportable, or at rest in any readable form (no JWK to dump), and plaintext never
   reaches the draft store. Best-effort — where Web Crypto is absent the draft is
   stored plaintext so it is never lost; a transient key-store failure never
-  permanently downgrades the session to plaintext.
+  permanently downgrades the session to plaintext. The **story composer**
+  (WS-Q.5.1b) autosaves to `draft-stories` the same way: mode/room/visibility are
+  plaintext metadata that round-trip on restore, the text body is encrypted, and a
+  failed/offline submit keeps the exact draft (stories are draft-preserved, never
+  queued to a default room). Share-target intake (`?share_url=`) with no thread
+  target seeds a link post in the story composer.
 - **Pending queue + sync (2.3):** the single source of truth for unsynced writes.
   Server-wins conflict policy — a 4xx rejection (e.g. a locked thread) is terminal
   (notify + preserve the draft); transient failures retry up to 5 times; an
@@ -363,6 +369,47 @@ acknowledges the accepted count.
 - **Static gates:** `check-sw-security`, `check-bundle-size`, `lint:security`,
   `check:no-applause`, **`check:no-raw-egress`**, `check:workspace-deps`, strict
   `tsc`.
+
+## WS-Q client surface — content–room ownership and visibility
+
+The content–room model (rooms own content; binary public/private rooms;
+per-item `public`/`room_only` visibility) reaches the client through these
+surfaces. Containment is never weakened on the client — it relays the
+server's bars, it does not re-decide them.
+
+- **Story-submission composer** (`components/composer/StoryComposer`, hosted by
+  `/submit` when there is no thread target; the WS-G contribution composer still
+  handles thread replies). A REQUIRED home-room picker (Commons default;
+  non-postable rooms shown with the reason, submit disabled); a public/in-room
+  visibility control whose displayed value equals the SHARED
+  `deriveStoryVisibility` output and is LOCKED to in-room for private rooms; and
+  four modes — link, brief, image post (alt text required), video post (optional
+  text captions; oversize/overlong rejected before upload). Media uploads through
+  the scan-gated path first; a still-pending scan shows "pending a safety
+  check", never a failure. The form uses `noValidate` so the accessible JS
+  validation (not native bubbles) drives the UX.
+- **Native media rendering** (`components/story/StoryMedia`, wired into
+  `StoryCard` and the story page via the shared `feed-card` mapper). Image/video
+  load ONLY through the scan-gated upload URL; video is a native
+  `<video controls preload="metadata">` with NO autoplay in any state; a load
+  failure collapses to an honest message, never a broken element; text captions
+  render beneath the player.
+- **Rooms** (`routes/-pages/rooms.tsx`, `components/rooms/RoomCreateForm`). The
+  room detail renders the tier-one shell (visibility badge, description, join
+  affordance per `join_model`, pending state, honest-limits notice) for
+  everyone; the room feed (with the in-room chip on every `room_only` item)
+  renders only once the reader passes the content bar. The directory marks
+  private rooms at tier one. The create form enforces the shared coherence rule
+  (a public room locks the join model to `open`).
+- **Author visibility control** (`components/story/AuthorVisibilityControl`,
+  owner-only on the story page): narrow always; widen only from a public room; a
+  widen collision (409) links to the existing public story.
+- **Front-page framing** affirms participation-weighted attention, never
+  popularity (no applause vocabulary; a copy test pins it).
+- **Offline** (`offline/db.ts` at `DB_VERSION` 2): the version bump evicts the
+  read-model cache (stale pre-WS-Q server shapes) while PRESERVING user data —
+  drafts, the pending queue, saved stories, and the signal ledger are never
+  cleared, so a queued submission is never silently dropped.
 
 ## Commands
 

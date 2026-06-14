@@ -462,3 +462,91 @@ the same `applyLifecycleTrigger` seam.
   concern.  Topic classification stays unmapped until the WS-K topic taxonomy
   exists (the field accepts submitter-supplied topics meanwhile, the soft
   WS-K.1.3a dependency).
+
+## WS-Q deltas — room-owned content, visibility, and media
+
+WS-Q makes every story belong to a room and carry a visibility tier, and
+adds native image/video posts.  The submission flow above gains room and
+visibility guards; dedup, search, and event classification all become
+tier-aware.
+
+- **Room ownership (`Story.room_id` NOT NULL).** `submitStory` now takes the
+  target room and runs a room guard chain before any safety pre-check: room
+  existence (absent → 404), access (an outsider to a **private** room → 404,
+  no oracle; a public room auto-joins the submitter), and posting policy (a
+  member who fails `userMayPostTopLevel` → `403 posting_restricted`).  The
+  story's thread shell is stamped with the same `room_id` (a DB trigger,
+  `enforce_thread_room_consistency`, makes the thread↔story room agreement a
+  schema invariant).  Pre-WS-Q content backfills to the Commons room.
+- **Visibility forcing.** `deriveStoryVisibility(roomVisibility, requested?)`
+  computes the stored tier: a story in a **private** room is forced
+  `room_only` regardless of request (a `forced` metric fires when a requested
+  `public` is clamped); in a public room the author chooses
+  `public | room_only` (default `public`).
+- **Tier-scoped canonical-URL dedup.** Exact-URL uniqueness is now scoped by
+  tier — `public` stories are unique **globally**, `room_only` stories are
+  unique **per room** — enforced by two partial unique indexes
+  (`stories_canonical_url_public_uq`, `stories_canonical_url_room_uq`) and the
+  matching `getByCanonicalUrl(url, tier)` store split.  A duplicate in the
+  same tier is the usual `409` carrying the existing story id; when a
+  `room_only` submission matches a live **public** story the new row is
+  cross-linked via `canonical_public_story_id` (the "this also exists publicly"
+  pointer) rather than rejected.
+- **Takedown reach across tiers.** The canonical-URL takedown denylist is
+  re-checked on every submission and every widen through `hasHiddenForUrl`
+  (no new table — it reads the existing hidden-state rows), so a URL taken
+  down in one tier cannot re-enter through the other.
+- **Near-duplicate scope.** MinHash/LSH near-dup flagging runs **only for
+  public stories** (`findNearDuplicates(signatures, stores, …)` filters
+  candidates to live public content); `room_only` content is never
+  near-dup-correlated across rooms, preserving room containment.
+- **Media intake (`image_post` / `video_post`).** The two new §14.1
+  submission types carry an owned, correctly-typed, scan-gated,
+  claim-unique `media_upload_ref`: the upload must belong to the submitter,
+  match the post type's content-type allowlist (images, or `video/mp4` /
+  `video/webm` up to the 200 MB ceiling), be unreferenced by any other story,
+  and have cleared scanning — a flagged upload is `403`, a still-pending scan
+  holds the story (`hiddenState='safety'` + a review item) instead of
+  publishing it.  At creation each media upload (main media, caption track,
+  poster) is back-linked to the story (`uploads.owner_story_id`) so the
+  serving route can re-derive its visibility: a `room_only` story's media is
+  served ONLY through a short-lived signed URL minted after the read-bar check,
+  and a taken-down story's media is refused at fetch time (WS-Q.5.2c; see
+  `docs/forum/README.md` → restricted-media serving gate).
+- **Author visibility transitions.** `changeStoryVisibility` (in
+  `ingestion/visibility.ts`) is the author-only narrow/widen: narrowing
+  `public → room_only` always succeeds; widening `room_only → public` is
+  `422` inside a private room, and otherwise re-runs the full public-entry
+  gate (takedown denylist, tier dedup → `409` + pointer, public near-dup)
+  before flipping the tier.  Every transition audits `story_visibility_change`
+  and emits `content.visibility.changed` (`trigger=author`).
+- **Two-tier search predicate.** The search index carries each document's
+  story visibility and its room's visibility.  A query with no `?room=`
+  returns only `public`-from-a-`public`-room documents; `?room=<id>` returns
+  that room's documents (subject to the caller's content bar).  Both the
+  in-memory and Postgres (`storyVisibilityFilter`/`ownerVisibilityFilter`)
+  indexes enforce the same predicate.
+- **Content-event classification firewall (WS-Q.1.7c).**
+  `content.submitted` / `content.normalized` / `content.visibility.changed`
+  carry a `privacy_classification` coupled to the story tier
+  (`public → 'public'`, `room_only → 'restricted'`, via
+  `contentEventClassification`), and the consumer router delivers each event
+  only to consumers cleared for its classification.  In-room content thus
+  never reaches a `public`-only consumer — the same containment the
+  distribution side enforces, applied at the event boundary.  The stored
+  event row is persisted with the event's own classification (not a static
+  topic default), so replay/redrive preserve containment too.
+- **Video caps + rollout flags (`ingestion/config.ts`, `content-flags.ts`).**
+  Steward-tunable, fail-closed `ingestion.video_max_bytes` (clamped to the hard
+  200 MB DB ceiling) and `ingestion.video_max_seconds` bound native video.
+  Three fail-closed WS-Q.6.2 rollout flags — `content.media_posts_enabled`,
+  `content.in_room_visibility_enabled`, `rooms.binary_visibility_ui` — gate the
+  user-visible surface (ON by default, steward-toggleable, audited); CONTAINMENT
+  IS NOT FLAGGABLE (a private room still forces `room_only` with the flag off,
+  and the distribution gate/read bar have no off switch).
+- **Migration validation harness** (`packages/db/.../migration-harness.test.ts`,
+  gated): seeds a pre-WS-Q dataset (public/restricted/expert_led rooms;
+  thread-roomed, room-less, near-duplicate public stories) in a throwaway
+  database, runs the WS-Q chain, and asserts the monotonic-visibility property
+  (a story is public iff its home room is public), no room-less story, axis
+  derivation, near-dup survival, and backfill/seed idempotency.

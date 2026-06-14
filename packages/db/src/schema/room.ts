@@ -32,7 +32,19 @@ export const roomTypeEnum = pgEnum('room_type', [
   'steward',
 ]);
 
-export const roomVisibilityEnum = pgEnum('room_visibility', ['public', 'restricted', 'expert_led']);
+// WS-Q.1.2 — binary visibility (§16.1); the legacy three-value enum is
+// recreated by migration 0014, deriving the two orthogonal axes below from the
+// old value BEFORE collapsing it (mirrors @licio/shared mapLegacyRoomVisibility).
+export const roomVisibilityEnum = pgEnum('room_visibility', ['public', 'private']);
+
+/** §16.2 join model — how a member is admitted (orthogonal to visibility). */
+export const joinModelEnum = pgEnum('room_join_model', ['open', 'request_approval', 'invite']);
+
+/** §16.2 posting policy — who may create top-level content (orthogonal). */
+export const postingPolicyEnum = pgEnum('room_posting_policy', [
+  'all_members',
+  'experts_and_stewards',
+]);
 
 /** §17.4 governance lifecycle; `ordinary` is always the default. */
 export const governanceModeEnum = pgEnum('governance_mode', [
@@ -73,6 +85,11 @@ export const rooms = pgTable(
     description: text('description'),
     roomType: roomTypeEnum('room_type').notNull(),
     visibility: roomVisibilityEnum('visibility').notNull().default('public'),
+    // WS-Q.1.2 — the two orthogonal §16.2 axes. Defaults match the documented
+    // service defaults (public→open; all_members) as a NOT-NULL backstop; the
+    // route/service still sets them explicitly per visibility.
+    joinModel: joinModelEnum('join_model').notNull().default('open'),
+    postingPolicy: postingPolicyEnum('posting_policy').notNull().default('all_members'),
     createdBy: uuid('created_by').references(() => users.userId, { onDelete: 'set null' }),
     governanceMode: governanceModeEnum('governance_mode').notNull().default('ordinary'),
     charterSummary: text('charter_summary'),
@@ -102,6 +119,11 @@ export const rooms = pgTable(
       'rooms_charter_len',
       sql`${t.charterSummary} is null or char_length(${t.charterSummary}) <= 5000`,
     ),
+    // WS-Q.1.2 coherence (§16.2): a PUBLIC room is openly joinable; only a
+    // private room may gate membership (request_approval/invite).
+    check('rooms_public_join_open', sql`${t.visibility} = 'private' OR ${t.joinModel} = 'open'`),
+    // WS-Q.1.2 (§16.1): steward rooms are private.
+    check('rooms_steward_private', sql`${t.roomType} <> 'steward' OR ${t.visibility} = 'private'`),
   ],
 );
 

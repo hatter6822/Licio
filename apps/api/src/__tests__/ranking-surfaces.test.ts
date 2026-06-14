@@ -26,6 +26,7 @@ import { engageKillSwitch } from '../ranking/killswitch.js';
 import { replayDecision, serveFeed } from '../ranking/service.js';
 import { registerRankingConsumers } from '../ranking/services.js';
 import { createV1Routes } from '../routes/v1.js';
+import { seedUserWithSession } from './event-test-helpers.js';
 import {
   freshRankingServices,
   promoteInvariant,
@@ -33,7 +34,6 @@ import {
   seedInvariantOutput,
   seedStory,
 } from './ranking-helpers.js';
-import { seedUserWithSession } from './ws-e-helpers.js';
 
 let fixture: RankingFixture;
 
@@ -52,7 +52,7 @@ function featureDeps() {
   };
 }
 
-async function insertRoom(visibility: 'public' | 'restricted' | 'expert_led'): Promise<string> {
+async function insertRoom(visibility: 'public' | 'private'): Promise<string> {
   const roomId = randomUUID();
   await fixture.forum.rooms.insert({
     roomId,
@@ -61,6 +61,8 @@ async function insertRoom(visibility: 'public' | 'restricted' | 'expert_led'): P
     description: null,
     roomType: 'global_topic',
     visibility,
+    joinModel: visibility === 'public' ? 'open' : 'request_approval',
+    postingPolicy: 'all_members',
     createdBy: null,
     governanceMode: 'ordinary',
     charterSummary: null,
@@ -123,7 +125,7 @@ describe('room feed route (WS-I room surface; WS-G content visibility)', () => {
   });
 
   it('restricted rooms read 404 for signed-out and PENDING users; active members serve', async () => {
-    const roomId = await insertRoom('restricted');
+    const roomId = await insertRoom('private');
     await seedStory(fixture.ingestion, { roomId });
     const pending = await seedUserWithSession(fixture.identity);
     const active = await seedUserWithSession(fixture.identity);
@@ -179,17 +181,17 @@ describe('room feed route (WS-I room surface; WS-G content visibility)', () => {
     expect(replay.match).toBe(true);
   });
 
-  it('restricted-room content NEVER leaks into public front-page/topic feeds (§16.2)', async () => {
-    // The WS-G content-visibility bar holds on the DISTRIBUTION side too:
-    // a story whose thread lives in a restricted room is room content, and
-    // the front page serves it only to readers the room route would serve.
-    const roomId = await insertRoom('restricted');
-    const hidden = await seedStory(fixture.ingestion, { roomId });
-    const visible = await seedStory(fixture.ingestion);
+  it('private-room content NEVER leaks into public front-page/topic feeds, even for members (WS-Q §14.5.3)', async () => {
+    // WS-Q strengthens containment: a `room_only` story in a private room is
+    // off EVERY global surface — for signed-out, non-members, AND its own room
+    // members. In-room content reaches a member only through the ROOM feed.
+    const roomId = await insertRoom('private');
+    const inRoom = await seedStory(fixture.ingestion, { roomId, visibility: 'room_only' });
+    const publicStory = await seedStory(fixture.ingestion);
     const member = await seedUserWithSession(fixture.identity);
     await subscribe(roomId, member.userId, 'active');
-    // Signed out: the restricted story is filtered BEFORE the pipeline —
-    // it appears in neither the served items nor the logged candidate set.
+    // Signed out: the room_only story is filtered BEFORE the pipeline — it
+    // appears in neither the served items nor the logged candidate set.
     const anonymous = await serveFeed(fixture.ranking, {
       userId: null,
       surface: 'front_page',
@@ -197,9 +199,9 @@ describe('room feed route (WS-I room surface; WS-G content visibility)', () => {
       surfaceTopicId: null,
       mode: undefined,
     });
-    expect(anonymous.items.map((i) => i.story_id)).toEqual([visible.storyId]);
+    expect(anonymous.items.map((i) => i.story_id)).toEqual([publicStory.storyId]);
     const anonymousLog = await fixture.ranking.decisionLogs.getByRequestId(anonymous.requestId);
-    expect(anonymousLog?.candidate_ids).not.toContain(hidden.storyId);
+    expect(anonymousLog?.candidate_ids).not.toContain(inRoom.storyId);
     // A signed-in NON-member reads the same public-only feed.
     const outsider = await seedUserWithSession(fixture.identity);
     const outsiderFeed = await serveFeed(fixture.ranking, {
@@ -209,8 +211,8 @@ describe('room feed route (WS-I room surface; WS-G content visibility)', () => {
       surfaceTopicId: null,
       mode: undefined,
     });
-    expect(outsiderFeed.items.map((i) => i.story_id)).toEqual([visible.storyId]);
-    // An ACTIVE member's front page may carry the room's content.
+    expect(outsiderFeed.items.map((i) => i.story_id)).toEqual([publicStory.storyId]);
+    // An ACTIVE member's FRONT PAGE is still public-only (containment is global).
     const memberFeed = await serveFeed(fixture.ranking, {
       userId: member.userId,
       surface: 'front_page',
@@ -218,9 +220,16 @@ describe('room feed route (WS-I room surface; WS-G content visibility)', () => {
       surfaceTopicId: null,
       mode: undefined,
     });
-    expect(memberFeed.items.map((i) => i.story_id).sort()).toEqual(
-      [hidden.storyId, visible.storyId].sort(),
-    );
+    expect(memberFeed.items.map((i) => i.story_id)).toEqual([publicStory.storyId]);
+    // The member DOES see the room_only story — but only on the ROOM feed.
+    const roomFeed = await serveFeed(fixture.ranking, {
+      userId: member.userId,
+      surface: 'room',
+      surfaceRoomId: roomId,
+      surfaceTopicId: null,
+      mode: undefined,
+    });
+    expect(roomFeed.items.map((i) => i.story_id)).toContain(inRoom.storyId);
   });
 });
 
@@ -863,5 +872,64 @@ describe('/v1/feed stability under the kill switch (real stories)', () => {
     const log = await fixture.ranking.decisionLogs.getByRequestId(body.request_id as string);
     expect(log?.fallback).toBe(true);
     expect(log?.fallback_reason).toBe('kill_switch');
+  });
+});
+
+describe('WS-H public story drawers honor the room read bar (WS-Q.3.2)', () => {
+  it('interpretations + independent-sources + lenses 404 for non-members of a private room', async () => {
+    const roomId = await insertRoom('private');
+    const { storyId } = await seedStory(fixture.ingestion, { roomId, visibility: 'room_only' });
+    const member = await seedUserWithSession(fixture.identity);
+    const outsider = await seedUserWithSession(fixture.identity);
+    await subscribe(roomId, member.userId, 'active');
+    const app = new Hono().route('/v1', createV1Routes());
+
+    // The story-detail drawers + the SCOI lens read all gate on the SAME item
+    // read bar (no existence oracle): 404 to outsiders, 200 to active members.
+    for (const drawer of ['interpretations', 'independent-sources', 'lenses'] as const) {
+      const path = `/v1/stories/${storyId}/${drawer}`;
+      // Signed out → 404 (no existence oracle).
+      expect((await app.request(path)).status).toBe(404);
+      // A non-member with a valid session → 404.
+      expect((await app.request(path, { headers: { cookie: outsider.cookie } })).status).toBe(404);
+      // An active member reads it (200; the body may be empty pre-computation).
+      expect((await app.request(path, { headers: { cookie: member.cookie } })).status).toBe(200);
+    }
+  });
+
+  it('the drawers 404 (fail-closed) when the story’s room cannot be resolved', async () => {
+    // A story stamped with a non-existent room id ⇒ storyReadableTo finds no
+    // room ⇒ unreadable (the fail-closed branch), so the drawers 404.
+    const { storyId } = await seedStory(fixture.ingestion, {
+      roomId: randomUUID(),
+      visibility: 'room_only',
+    });
+    const app = new Hono().route('/v1', createV1Routes());
+    for (const drawer of ['interpretations', 'independent-sources'] as const) {
+      expect((await app.request(`/v1/stories/${storyId}/${drawer}`)).status).toBe(404);
+    }
+  });
+
+  it('a public story never leaks a room_only near-duplicate co-member', async () => {
+    const sharedText =
+      'The regional water board released the full nitrate testing dataset with its methodology appendix.';
+    const publicRoom = await insertRoom('public');
+    const privateRoom = await insertRoom('private');
+    const pub = await seedStory(fixture.ingestion, { roomId: publicRoom, visibility: 'public' });
+    const hidden = await seedStory(fixture.ingestion, {
+      roomId: privateRoom,
+      visibility: 'room_only',
+    });
+    // Identical signature text ⇒ the room_only story is a near-duplicate CANDIDATE
+    // of the public one (the raw MinHash band set is NOT tier-scoped).
+    await signatureStory(fixture.ingestion.signatures, pub.storyId, sharedText, 'submitted');
+    await signatureStory(fixture.ingestion.signatures, hidden.storyId, sharedText, 'submitted');
+    const app = new Hono().route('/v1', createV1Routes());
+    const res = await app.request(`/v1/stories/${pub.storyId}/independent-sources`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { co_group_stories?: Array<{ story_id: string }> };
+    const coIds = (body.co_group_stories ?? []).map((m) => m.story_id);
+    // The contained near-duplicate must NOT appear to an anonymous reader.
+    expect(coIds).not.toContain(hidden.storyId);
   });
 });
