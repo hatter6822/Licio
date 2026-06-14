@@ -591,7 +591,7 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
               className="max-h-48 w-auto rounded-md object-contain"
             />
           ) : null}
-          {errors['file'] ? <p className="text-danger text-sm">{errors['file']}</p> : null}
+          {errors['file'] ? <p className="text-error-on-soft text-sm">{errors['file']}</p> : null}
         </div>
       ) : null}
 
@@ -658,7 +658,7 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
           : null}
         {status === 'done' ? t('storyComposer.status.done', 'Posted.') : null}
       </p>
-      {errors['form'] ? <p className="text-danger text-sm">{errors['form']}</p> : null}
+      {errors['form'] ? <p className="text-error-on-soft text-sm">{errors['form']}</p> : null}
 
       <Button
         type="submit"

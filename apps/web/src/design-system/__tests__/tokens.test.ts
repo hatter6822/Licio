@@ -11,6 +11,8 @@ import {
   effectivePalettes,
   fontWeights,
   motionDurations,
+  NEU_OUTER_REACH_BUDGET_PX,
+  neumorphicShadows,
   radiusScale,
   spacingScale,
   touchTarget,
@@ -88,6 +90,14 @@ describe.each(modes)('colour mode: %s', (mode) => {
     expect(ratio(mode, 'fg-placeholder', 'bg-default')).toBeGreaterThanOrEqual(WCAG.AA_NORMAL_TEXT);
   });
 
+  // The recessed-well surface (`bg-sunken`, the `bg-surface-sunken` utility) hosts
+  // body and secondary text (link-safety URL box, media placeholders, info
+  // panels), so it must clear the same legibility bars as the other surfaces.
+  it(`body text (fg-default) ≥ ${bodyMin}:1 and secondary text ≥ 4.5:1 on the sunken well`, () => {
+    expect(ratio(mode, 'fg-default', 'bg-sunken')).toBeGreaterThanOrEqual(bodyMin);
+    expect(ratio(mode, 'fg-muted', 'bg-sunken')).toBeGreaterThanOrEqual(WCAG.AA_NORMAL_TEXT);
+  });
+
   it('inverse surface text ≥ 4.5:1 (tooltips, toasts)', () => {
     expect(ratio(mode, 'fg-inverse', 'bg-inverse')).toBeGreaterThanOrEqual(WCAG.AA_NORMAL_TEXT);
   });
@@ -131,6 +141,44 @@ describe.each(modes)('colour mode: %s', (mode) => {
         WCAG.AA_NORMAL_TEXT,
       );
     }
+  });
+});
+
+// The soft neumorphic lighting must never wash over neighbouring content. Inset
+// layers are clipped to the border-box by construction; the OUTER (raised) layers
+// are the only ones that extend past the element, so their reach
+// (max(|offsetX|, |offsetY|) + blur) is capped at the documented budget. As long
+// as two raised surfaces sit at least that far apart (the layout floor is gap-4 =
+// 16px), one surface's halo can never bleed onto its neighbour. This test fails
+// if any future edit re-inflates a raised shadow past the budget.
+describe('neumorphic raised shadows cannot bleed past the reach budget', () => {
+  /** Outward reach of one box-shadow layer, or null for an inset (contained) layer. */
+  function outerReach(layer: string): number | null {
+    const trimmed = layer.trim();
+    if (trimmed.startsWith('inset')) return null;
+    // box-shadow: <offset-x> <offset-y> [blur] [spread] <color>
+    const lengths = [...trimmed.matchAll(/(-?\d+)px/g)].map((m) => Number(m[1]));
+    const [ox = 0, oy = 0, blur = 0] = lengths;
+    return Math.max(Math.abs(ox), Math.abs(oy)) + blur;
+  }
+
+  for (const [name, shadow] of Object.entries(neumorphicShadows)) {
+    it(`${name}: every outer layer stays within ${NEU_OUTER_REACH_BUDGET_PX}px`, () => {
+      // Split on commas that are NOT inside a var(...) — robust even if a source
+      // colour token ever gains an internal comma.
+      const layers = shadow.split(/,(?![^(]*\))/);
+      const reaches = layers.map(outerReach).filter((r): r is number => r !== null);
+      // raised/raised-sm have outer layers; pressed/inset are fully inset.
+      for (const reach of reaches) {
+        expect(reach).toBeLessThanOrEqual(NEU_OUTER_REACH_BUDGET_PX);
+      }
+    });
+  }
+
+  it('the budget is one spacing unit (gap-4) so adjacent raised surfaces never overlap', () => {
+    // space-4 == 1rem == 16px at the default root font size.
+    expect(NEU_OUTER_REACH_BUDGET_PX).toBe(16);
+    expect(spacingScale['4']).toBe('1rem');
   });
 });
 

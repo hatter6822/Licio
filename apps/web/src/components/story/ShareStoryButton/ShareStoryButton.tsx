@@ -69,7 +69,7 @@ export function ShareStoryButton({
       <div
         role="group"
         aria-label={t('share.promptLabel', 'Share options for a context-sensitive story')}
-        className="flex flex-wrap items-center gap-2 rounded-lg border border-edge bg-surface p-2"
+        className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface p-2"
       >
         <span className="text-xs text-ink">
           {t('share.contextSensitive', 'This item is context-sensitive. Include origin context?')}
