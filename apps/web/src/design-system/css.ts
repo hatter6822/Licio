@@ -12,6 +12,7 @@ import {
   type ColorToken,
   darkColors,
   darkHighContrast,
+  fabricNoise,
   fabricSheen,
   fabricThread,
   fontFamilies,
@@ -124,6 +125,7 @@ function scaleVars(indent: string): string {
   lines.push(`${indent}--licio-neu-shadow: ${neumorphicInk.light.shadow};`);
   lines.push(`${indent}--licio-fabric-thread: ${fabricThread.light};`);
   lines.push(`${indent}--licio-fabric-sheen: ${fabricSheen.light};`);
+  lines.push(`${indent}--licio-fabric-noise: ${fabricNoise.light};`);
   for (const [key, value] of Object.entries(neumorphicShadows)) {
     lines.push(`${indent}--licio-shadow-${key}: ${value};`);
   }
@@ -170,6 +172,7 @@ function darkSurfaceVars(indent: string): string {
     `${indent}--licio-neu-shadow: ${neumorphicInk.dark.shadow};`,
     `${indent}--licio-fabric-thread: ${fabricThread.dark};`,
     `${indent}--licio-fabric-sheen: ${fabricSheen.dark};`,
+    `${indent}--licio-fabric-noise: ${fabricNoise.dark};`,
   ].join('\n');
 }
 

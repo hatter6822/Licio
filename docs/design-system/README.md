@@ -129,15 +129,25 @@ canvas**, driven entirely from the token SSOT (no images, no runtime JS):
   (`styles/app.css`): `neu-raised`/`-sm` extrude (cards, buttons, the Switch
   knob), `neu-pressed`/`-sm` recess on press (`active:neu-pressed-sm`, the active
   nav tab), and `neu-inset` carves form wells (Input/TextArea/Switch track).
-- **Fabric texture — organic woven linen.** A faint, theme-aware weave
-  (`--licio-fabric-weave`, built from `--licio-fabric-thread` / `-sheen`) is
-  layered over the canvas on `body` (and shared by the `fabric-surface` utility).
-  To read as hand-woven cloth rather than mechanical graph-paper it stacks soft
-  diagonal "slub" clouds with warp/weft threads at **coprime periods**
-  (5/8px and 7/11px) and a slight per-pass angle drift, so the spacing beats into
-  natural irregularity and the visual repeat is large. Raised panels add a richer
-  diagonal-twill `fabric-card`. Low-contrast enough never to affect text
-  legibility, and CSP-safe (pure CSS gradients, no `data:` images).
+- **Fabric texture — organic woven linen.** Two cooperating layers over the
+  canvas on `body` (both shared by the `fabric-surface` utility):
+  1. a gradient **weave** (`--licio-fabric-weave`, built from
+     `--licio-fabric-thread` / `-sheen`) — warp/weft threads at **coprime
+     periods** (5/8px and 7/11px) with a slight per-pass angle drift plus soft
+     diagonal "slub" clouds, giving the woven warp/weft structure without
+     mechanical graph-paper; and
+  2. an organic **grain** (`--licio-fabric-noise`) — a tiny inline-SVG
+     `feTurbulence` (Perlin) tile, multi-octave and slightly anisotropic so it
+     spans large slubs down to fine fibre, painted in the linen's own warm hue
+     (a `feColorMatrix` modulates only the alpha) so it deepens the cloth instead
+     of laying a gray veil, and `stitchTiles='stitch'` so it tiles seamlessly.
+
+  Raised panels add a richer diagonal-twill `fabric-card`. Every layer is faint
+  enough never to affect text legibility. The grain is a `data:` SVG, which is
+  CSP-safe here: `img-src 'self' data:` admits `data:` image URIs (a CSS `url()`
+  is governed by `img-src`, never `script-src`), the SVG carries no script, and
+  Trusted Types only guards script sinks. Both layers flatten to nothing under
+  `prefers-contrast: more` / `forced-colors: active`.
 - **`color-scheme`** is set per mode so native controls, scrollbars, and form
   widgets match the surface.
 - **Accessibility is preserved.** The soft lighting is *decorative*: every

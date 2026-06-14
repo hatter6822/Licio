@@ -31,7 +31,10 @@
    * factor, the combined pattern's visual repeat is large enough to read as
    * non-repeating cloth. Every layer is a theme-aware tint that flips with the
    * colour mode and is zeroed under prefers-contrast / forced colors (so it can
-   * never touch text legibility); it tiles seamlessly as the page scrolls. */
+   * never touch text legibility); it tiles seamlessly as the page scrolls. On the
+   * canvas an organic-grain layer (`--licio-fabric-noise`, an inline-SVG
+   * turbulence tile; see tokens.ts) composes OVER this weave for the hand-woven
+   * unevenness gradients alone cannot give. */
   :root {
     --licio-fabric-weave:
       repeating-linear-gradient(
@@ -88,7 +91,8 @@
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizelegibility;
     background-color: var(--licio-bg-default);
-    background-image: var(--licio-fabric-weave);
+    /* Organic grain (inline-SVG turbulence) over the gradient weave. */
+    background-image: var(--licio-fabric-noise), var(--licio-fabric-weave);
   }
 
   /* Focus appearance — WCAG 2.4.13 (new in 2.2): a 2px ring offset from the
@@ -181,7 +185,7 @@
  * default; this is for opaque panels that want the weave on top of their own
  * background, e.g. the styleguide canvas). Reuses the body's shared linen weave. */
 @utility fabric-surface {
-  background-image: var(--licio-fabric-weave);
+  background-image: var(--licio-fabric-noise), var(--licio-fabric-weave);
 }
 
 /* Richer woven texture for raised panels (cards, sheets). A diagonal twill
@@ -270,9 +274,11 @@
     --licio-shadow-pressed: none;
     --licio-shadow-pressed-sm: none;
     --licio-shadow-inset: none;
-    /* Neutralise the shared weave AND its source tints, so the body canvas, the
-     * `fabric-surface` utility, and the twill `fabric-card` all flatten at once. */
+    /* Neutralise the shared weave, the organic-grain layer, AND the source tints,
+     * so the body canvas, the `fabric-surface` utility, and the twill
+     * `fabric-card` all flatten at once. */
     --licio-fabric-weave: none;
+    --licio-fabric-noise: none;
     --licio-fabric-thread: transparent;
     --licio-fabric-sheen: transparent;
   }
