@@ -145,9 +145,10 @@ apps/api            → shared, db, invariants, ranking
 **What needs what:**
 
 - **`apps/web` dev server** runs standalone — it only needs the toolchain.
-  It proxies same-origin `/api/*` calls to the API and (with
-  `VITE_API_URL` set) calls `/v1/*` cross-origin. Without the API running,
-  pages render but data calls fail.
+  It proxies same-origin `/api/*` **and `/v1/*`** calls to the API (:3001)
+  by default, so the zero-setup path reaches the API with no `VITE_API_URL`
+  or CORS (mirroring production, where the PWA and API share one origin).
+  Without the API running, pages render but data calls fail.
 - **`apps/api`** validates its environment at boot. Without `DATABASE_URL`/
   `REDIS_URL` (the default for `pnpm dev`) it serves entirely from in-memory
   stores and seeds the demo corpus — no database required. When those URLs are
@@ -403,21 +404,25 @@ reach the client bundle (a guard rejects anything else).
 
 | Variable | Example | Purpose |
 |----------|---------|---------|
-| `VITE_API_URL` | `http://localhost:3001` | API base URL the client calls for `/v1/*`. Set this so the web app reaches the API |
+| `VITE_API_URL` | `http://localhost:3001` | API base URL the client calls for `/v1/*`. **Optional in dev** — the dev server proxies `/v1/*` same-origin to the API by default. Set it only to call a **cross-origin** API |
 | `VITE_APP_URL` | `http://localhost:5173` | The app's own public URL |
 
-> In dev, the Vite server proxies same-origin `/api/*` (e.g. the CSRF-token
-> endpoint) to `http://localhost:3001`, and the typed API client sends
-> `/v1/*` to `VITE_API_URL` cross-origin — allowed because `CORS_ORIGIN`
-> matches the web origin. **Caveat:** a few client modules fetch `/v1/*`
-> *same-origin* instead of through the API client (e.g. the link-safety
-> blocklist in `apps/web/src/lib/link-safety.ts`), so they bypass
-> `VITE_API_URL` and the dev proxy doesn't forward `/v1`. If you exercise
-> those paths locally, add a `/v1` entry to the `server.proxy` block in
-> `apps/web/vite.config.ts` (mirroring `/api`) so they reach the API too.
-> Keep `CORS_ORIGIN`, `VITE_API_URL`, and `VITE_APP_URL` consistent (all
-> `http://` for plain dev; all `https://` if you enable `DEV_HTTPS`,
-> Section 10).
+> In dev, the Vite server proxies **both** same-origin `/api/*` (e.g. the
+> CSRF-token endpoint) and `/v1/*` (every data call) to the API
+> (`http://localhost:3001`) — see the `server.proxy` block in
+> `apps/web/vite.config.ts`. So with `VITE_API_URL` **unset** the whole app
+> works same-origin through the proxy, no CORS involved — this is the
+> recommended setup and the one that mirrors production (PWA and API on one
+> origin). This matters because a few client modules fetch `/v1/*`
+> *same-origin* rather than through the typed API client (e.g. the
+> link-safety blocklist in `apps/web/src/lib/link-safety.ts`, telemetry in
+> `apps/web/src/lib/telemetry.ts`); they ignore `VITE_API_URL`, so the proxy
+> is what gets them to the API. **Set `VITE_API_URL` only to call a
+> cross-origin API** — then the typed client sends `/v1/*` to that origin
+> (allowed because `CORS_ORIGIN` matches the web origin), while the
+> same-origin fetchers still ride the proxy. Either way keep `CORS_ORIGIN`,
+> `VITE_API_URL`, and `VITE_APP_URL` consistent (all `http://` for plain dev;
+> all `https://` if you enable `DEV_HTTPS`, Section 10).
 
 ### 7.4 Optional / feature-gating variables
 
@@ -926,7 +931,8 @@ CHAIN_RPC_URLS='{"1":"https://...","8453":"https://..."}'
 | `corepack: command not found` or wrong pnpm version | Corepack not enabled / pnpm not pinned | `corepack enable && corepack prepare pnpm@9.15.4 --activate` (Section 3) |
 | `pnpm install` fails on a frozen lockfile | Lockfile and `package.json` diverge | Intentional dep change? install without `--frozen-lockfile` and commit the lockfile. Otherwise check your branch is up to date |
 | Port already in use (5432 / 6379 / 5173 / 3001) | Another process/stack is bound | Stop the other process, or remap: change `PORT` (API) / the Compose port mappings, and keep `CORS_ORIGIN`/`VITE_*` consistent |
-| Web loads but `/v1/*` calls fail (CORS or 404) | `VITE_API_URL` unset/mismatched, or `CORS_ORIGIN` ≠ web origin | Set `VITE_API_URL=http://localhost:3001` and `CORS_ORIGIN=http://localhost:5173`; re-export env; restart `pnpm dev` (Section 7.3) |
+| Web loads but `/v1/*` calls 404 (e.g. `:5173/v1/telemetry`, `:5173/v1/security/link-blocklist`) | The API (:3001) isn't running, so the dev proxy has nothing to forward to | The dev server proxies `/v1/*` to :3001 by default — just start the API (`pnpm dev` runs both). The 404 origin being `:5173` means the request reached Vite but the API was down/unreachable |
+| `/v1/*` calls fail with a CORS error | You set a **cross-origin** `VITE_API_URL` and `CORS_ORIGIN` ≠ web origin | For same-origin dev leave `VITE_API_URL` unset (use the proxy). For a cross-origin API, set `VITE_API_URL=http://localhost:3001` and `CORS_ORIGIN=http://localhost:5173`; re-export env; restart `pnpm dev` (Section 7.3) |
 | Vite doesn't see your `VITE_*` values | Vite's env dir is `apps/web`, not the repo root | Export the root `.env` into your shell (Section 7.7) so the `VITE_`-prefixed values are in `process.env` |
 | Login/session flows misbehave on `http://localhost` | `__Host-`/`Secure` cookies require HTTPS | Use the local HTTPS workflow (Section 10) |
 | `redis connection error` warnings in the API log | Redis briefly unreachable | The API connects lazily and the ingest limiter fails closed to a stricter in-memory budget; start Redis (`docker compose up -d redis`) to clear it |

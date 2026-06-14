@@ -1133,6 +1133,79 @@ reference" section or equivalent per-WS index/detail tables into this
 file.  The only workstream-level material this file keeps is the
 one-line-per-workstream status table under "Implementation roadmap."
 
+## Implement-the-improvement rule
+
+When an audit, code review, or any reading of the codebase surfaces a
+discrepancy between the **code** and the **documentation, docstring,
+comment, type signature, or design intent** that describes it, and the
+description represents an *improvement* over the actual code (a more
+complete behaviour, a more symmetric API, a stronger invariant, a routed
+dispatch where the code is a stub, a function that "should" exist but does
+not), the remediation is **always** to implement the improvement so the
+description becomes true.
+
+It is **forbidden** to weaken, dilute, qualify, or rewrite the
+documentation to match inferior code.  Documenting incorrect or incomplete
+code in lieu of fixing it is not an acceptable engineering outcome on this
+project.
+
+Concretely:
+
+- A comment referencing a function `X` that does not exist → **implement
+  `X`**, never "remove the reference."
+- A docstring describing a complete spec while the implementation is
+  truncated → **complete the implementation**, never "document the
+  truncation."
+- A stub that throws `not implemented` (or returns a placeholder) while the
+  design says it should route to a verified entry point → **wire up the
+  routing.**
+- Two API call paths handling the same condition asymmetrically → **make
+  them symmetric**, never "document the asymmetry" (e.g. the two
+  attention-ingestion routes through the shared pipeline, or client- vs.
+  server-side validation of the same shared zod schema).
+- An implicit invariant maintained only by convention → **enforce it
+  structurally** (a zod schema at the trust boundary, a branded/opaque type
+  whose constructors discharge the obligation, a discriminated union, a
+  database `CHECK` constraint, or a CI static gate such as
+  `check:no-applause` / `check:no-raw-egress` / `check:neutrality`), never
+  "add an inline comment about the convention."
+- A computed-and-validated data structure that the surrounding code does
+  not consume → **wire it into the consumer** so the guarantee carries
+  through to runtime, never "remove the unwired structure."
+- Deferred items buried in source comments → **fix them** if the current
+  scope permits; otherwise lift them into the relevant `docs/planning/`
+  workstream document or the per-workstream `docs/*/README.md` residual
+  note (where this project already tracks residuals).  Never leave in-source
+  TODOs that age out with the surrounding workstream.
+- A capability or status claim (a "Complete" workstream in the
+  Implementation-roadmap table, a "production binding", a lifted shadow
+  gate) while the path is non-functional → **make the path functional**,
+  never qualify the claim with a stub-status caveat.
+
+The single legitimate exception is when the documentation describes a
+**worse** state than the code (e.g. a stale "shadow mode" or "planned"
+marker on a feature that has since been wired into production, or a
+deprecation note on a function the project has decided to keep).  In that
+direction the documentation is the inferior artefact and updating it to
+match the better code is correct.
+
+**Audit reports and remediation plans must apply this rule.**  Findings of
+the form "documentation describes feature X; code lacks feature X;
+recommendation: weaken the documentation" are not acceptable.  The
+recommendation must instead be "implement feature X" — and where the
+implementation is non-trivial, the audit must split the work into the
+proper sequence of PRs (each a coherent slice that passes `pnpm typecheck`,
+`pnpm lint`, and `pnpm test`) rather than treating documentation surgery as
+a substitute for the code change.
+
+When the optimal implementation is genuinely out of scope for the current
+cut, the correct outcome is to **defer the release**, not to ship a
+documentation-only patch.  Forced deferrals must be recorded as tracked
+debt with an explicit closure target in the relevant `docs/planning/`
+document, not absorbed silently into a weaker public claim.
+
+*Adopted from the seLe4n project's `CLAUDE.md` (`hatter6822/seLe4n`).*
+
 ## Pull request authoring policy (ABSOLUTE)
 
 **Forbidden in PR summaries / descriptions / bodies:** session URLs

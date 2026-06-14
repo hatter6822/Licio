@@ -15,6 +15,11 @@ function getHttpsConfig(): { key: Buffer; cert: Buffer } | undefined {
   return { key: readFileSync(keyPath), cert: readFileSync(certPath) };
 }
 
+// The BFF (Hono API) the dev server proxies to. HTTPS dev (DEV_HTTPS=true)
+// serves the API over TLS on the same port (Section 10 of docs/DEVELOPMENT.md).
+const API_PROXY_TARGET =
+  process.env['DEV_HTTPS'] === 'true' ? 'https://localhost:3001' : 'http://localhost:3001';
+
 export default defineConfig({
   base: '/',
   plugins: [
@@ -149,13 +154,16 @@ export default defineConfig({
   server: {
     port: 5173,
     https: getHttpsConfig(),
+    // Proxy the BFF surface SAME-ORIGIN to the API (:3001) so the zero-setup
+    // `pnpm dev` path works without VITE_API_URL or CORS — exactly mirroring
+    // production, where the PWA and API share one origin and the client calls
+    // `/v1/*` relative. `/api/*` carries the CSRF-token + CSP-report endpoints;
+    // `/v1/*` carries every data call, including the modules that fetch
+    // same-origin and so bypass VITE_API_URL (telemetry, the link-safety
+    // blocklist). Without the `/v1` entry those requests 404 against Vite.
     proxy: {
-      '/api': {
-        target:
-          process.env['DEV_HTTPS'] === 'true' ? 'https://localhost:3001' : 'http://localhost:3001',
-        changeOrigin: true,
-        secure: false,
-      },
+      '/api': { target: API_PROXY_TARGET, changeOrigin: true, secure: false },
+      '/v1': { target: API_PROXY_TARGET, changeOrigin: true, secure: false },
     },
   },
   preview: {
