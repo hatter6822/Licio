@@ -7,7 +7,8 @@ development workflow, quality gates, and security requirements.
 
 - Node.js 22+ (see `.nvmrc`)
 - pnpm 9+ (enforced via Corepack and the `packageManager` field)
-- Docker & Docker Compose (for local PostgreSQL and Redis)
+- Docker & Docker Compose — optional, only for running dev against a real
+  PostgreSQL/Redis (basic `pnpm dev` uses in-memory stores)
 
 ## Getting Started
 
@@ -16,8 +17,16 @@ git clone https://github.com/hatter6822/temp_licio.git
 cd temp_licio
 corepack enable
 pnpm install
+pnpm dev   # zero setup: in-memory stores + seeded demo data
+```
+
+To run dev against a real database/cache instead, start the stack and pass the
+connection URLs (see the README "Quick start"):
+
+```bash
 docker compose up -d
-pnpm dev
+DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev \
+REDIS_URL=redis://localhost:6379 pnpm dev
 ```
 
 ## Branch & PR Workflow

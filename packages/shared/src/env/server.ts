@@ -45,13 +45,26 @@ function refineGroup(
 }
 
 export const serverEnvSchema = z.object({
-  DATABASE_URL: z.string().url({ message: 'DATABASE_URL must be a valid URL' }),
-  REDIS_URL: z.string().url({ message: 'REDIS_URL must be a valid URL' }),
+  // Postgres + Redis are REQUIRED in production (enforced in the refinement
+  // below). In development/test they are OPTIONAL: when unset the API boots on
+  // its in-memory stores (zero-setup `pnpm dev` with seeded demo data), and
+  // setting either switches that subsystem to the durable adapter.
+  DATABASE_URL: z.string().url({ message: 'DATABASE_URL must be a valid URL' }).optional(),
+  REDIS_URL: z.string().url({ message: 'REDIS_URL must be a valid URL' }).optional(),
   PORT: z.coerce.number().int().positive().default(3001),
+  // REQUIRED (no default): a production deploy must set this explicitly, so a
+  // missing NODE_ENV can never silently select the relaxed dev posture below.
+  // The dev script sets NODE_ENV=development.
   NODE_ENV: z.enum(['development', 'production', 'test']),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
-  CORS_ORIGIN: z.string().url({ message: 'CORS_ORIGIN must be a valid URL' }),
-  SESSION_SECRET: z.string().min(32, { message: 'SESSION_SECRET must be at least 32 characters' }),
+  // Required in production; in dev/test a localhost default is filled below.
+  CORS_ORIGIN: z.string().url({ message: 'CORS_ORIGIN must be a valid URL' }).optional(),
+  // Required in production; in dev/test a fixed non-secret dev value is filled
+  // below (never reachable in production — the refinement requires a real one).
+  SESSION_SECRET: z
+    .string()
+    .min(32, { message: 'SESSION_SECRET must be at least 32 characters' })
+    .optional(),
   // Optional per-chain JSON-RPC endpoints for contract-wallet (EIP-1271/6492)
   // sign-in verification, as JSON: {"1":"https://...","8453":"https://..."}.
   // When unset, only EOA wallet sign-in is available.
@@ -103,15 +116,54 @@ export const serverEnvSchema = z.object({
   EMBEDDING_DIMENSION: z.coerce.number().int().min(8).max(4096).optional(),
 });
 
-export type ServerEnv = z.infer<typeof serverEnvSchema>;
+/** Infrastructure + secrets that MUST be configured in production but may be
+ *  omitted in development/test (where the in-memory stores + dev defaults take
+ *  over). Listed here so the refinement and the dev-default transform agree. */
+const PRODUCTION_REQUIRED_KEYS = [
+  'DATABASE_URL',
+  'REDIS_URL',
+  'CORS_ORIGIN',
+  'SESSION_SECRET',
+] as const;
 
-/** Rejects a PARTIAL S3 group: silently falling back to the in-memory store
- *  on a typo'd deployment would discard export archives on every restart. */
-export const serverEnvSchemaRefined = serverEnvSchema.superRefine((env, ctx) => {
-  refineGroup(env, ctx, S3_REQUIRED_KEYS, 'S3');
-  refineGroup(env, ctx, SES_REQUIRED_KEYS, 'SES');
-  refineGroup(env, ctx, EMBEDDING_REQUIRED_KEYS, 'EMBEDDING');
-});
+/** A fixed, NON-SECRET development session secret. It is only ever applied when
+ *  NODE_ENV !== 'production' (production requires a real one, below), so it can
+ *  never sign a production session. 32+ chars to satisfy the field constraint. */
+const DEV_SESSION_SECRET = 'licio-development-only-insecure-session-secret';
+const DEV_CORS_ORIGIN = 'http://localhost:5173';
+
+/**
+ * Rejects a PARTIAL S3/SES/EMBEDDING group (a typo'd deployment silently
+ * falling back would discard data), AND requires the full infrastructure +
+ * secret set in production. Then fills dev/test defaults for the secret + CORS
+ * origin so a zero-config `pnpm dev` boots (Postgres/Redis simply stay unset and
+ * the in-memory stores serve).
+ */
+export const serverEnvSchemaRefined = serverEnvSchema
+  .superRefine((env, ctx) => {
+    refineGroup(env, ctx, S3_REQUIRED_KEYS, 'S3');
+    refineGroup(env, ctx, SES_REQUIRED_KEYS, 'SES');
+    refineGroup(env, ctx, EMBEDDING_REQUIRED_KEYS, 'EMBEDDING');
+    if (env.NODE_ENV === 'production') {
+      for (const key of PRODUCTION_REQUIRED_KEYS) {
+        if (env[key] === undefined) {
+          ctx.addIssue({
+            code: 'custom',
+            message: `${key} is required in production`,
+            path: [key],
+          });
+        }
+      }
+    }
+  })
+  .transform((env) => ({
+    ...env,
+    // Non-production only: production reached the refinement above with both set.
+    SESSION_SECRET: env.SESSION_SECRET ?? DEV_SESSION_SECRET,
+    CORS_ORIGIN: env.CORS_ORIGIN ?? DEV_CORS_ORIGIN,
+  }));
+
+export type ServerEnv = z.infer<typeof serverEnvSchemaRefined>;
 
 export function validateServerEnv(env: Record<string, string | undefined>): ServerEnv {
   return serverEnvSchemaRefined.parse(env);
