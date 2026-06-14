@@ -373,36 +373,6 @@ export const fabricSheen = {
 } as const satisfies Record<'light' | 'dark', string>;
 
 /**
- * Theme-aware organic-grain layer: an inline-SVG fractal-noise (Perlin) tile
- * that breaks up the gradient weave's residual periodicity so the canvas reads
- * as hand-woven cloth rather than a repeating pattern. Two `feTurbulence`s —
- * one stretched along each axis — are multiplied so the grain itself looks woven
- * (crossing warp/weft fibres), and the low base frequency gives broad, irregular
- * slubs; `feColorMatrix` paints the result in the linen's OWN warm hue (a brown
- * fibre on the light canvas, a cream fibre on the dark) and modulates only the
- * alpha by the noise — so the grain deepens the cloth instead of laying the gray
- * veil a neutral black/white speck would. It tiles seamlessly
- * (`stitchTiles='stitch'`) and is faint enough never to touch text legibility;
- * it flattens with the rest of the weave under prefers-contrast / forced-colors.
- *
- * Tile size (1024px) is a deliberate balance: a `feTurbulence` background is
- * rasterised at its displayed size × DPR, so a larger tile means a heavier
- * resident bitmap. 1024px keeps the slubs from repeating within a typical
- * viewport while keeping that bitmap bounded.
- *
- * CSP/security: this is a `data:` image URI, admitted by `img-src 'self' data:`
- * (CSS `url()` is governed by `img-src`, not `script-src`); the SVG carries no
- * script, `<script>`/`on*` are absent, and Trusted Types only governs script
- * sinks — never a CSS background. The `%`/`<`/`>`/`#` literals are percent-encoded
- * so the value is a valid CSS `url()` token.
- */
-export const fabricNoise = {
-  light:
-    "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1024' height='1024'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.0024 0.012' numOctaves='5' seed='7' stitchTiles='stitch' result='a'/%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.012 0.0024' numOctaves='5' seed='4' stitchTiles='stitch' result='b'/%3E%3CfeBlend in='a' in2='b' mode='multiply' result='w'/%3E%3CfeColorMatrix in='w' type='matrix' values='0 0 0 0 0.49 0 0 0 0 0.4 0 0 0 0 0.27 0.62 0 0 0 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E\")",
-  dark: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1024' height='1024'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.0024 0.012' numOctaves='5' seed='7' stitchTiles='stitch' result='a'/%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.012 0.0024' numOctaves='5' seed='4' stitchTiles='stitch' result='b'/%3E%3CfeBlend in='a' in2='b' mode='multiply' result='w'/%3E%3CfeColorMatrix in='w' type='matrix' values='0 0 0 0 0.81 0 0 0 0 0.75 0 0 0 0 0.62 0.4 0 0 0 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E\")",
-} as const satisfies Record<'light' | 'dark', string>;
-
-/**
  * The maximum distance (px) a RAISED neumorphic shadow may extend beyond its
  * element, i.e. `max(|offsetX|, |offsetY|) + blur` for every outer layer. This
  * is the contract that stops the soft lighting bleeding onto adjacent content:
