@@ -50,5 +50,12 @@ createRoot(rootElement).render(
 // best-effort hydration in the background).
 startRuntime();
 
-// Register the service worker and wire its update lifecycle (WS-C.2.1c).
-registerServiceWorker();
+// Register the service worker and wire its update lifecycle (WS-C.2.1c) — in
+// production builds ONLY. `vite dev` does not emit /sw.js (VitePWA generates the
+// worker at build time and devOptions stay disabled), so registering in dev
+// would fetch the SPA-fallback index.html and the browser would reject it:
+// "The script has an unsupported MIME type ('text/html')". The preview server
+// and production both serve the real built worker, where PROD is true.
+if (import.meta.env.PROD) {
+  registerServiceWorker();
+}

@@ -74,18 +74,13 @@ export function StoryCard({
         className,
       )}
     >
-      {/* 1. Title (heading; links to the thread/source when a URL is present) */}
+      {/* 1. Title (heading, plain text). The whole feed card — title included —
+          opens the discussion through the StoryFeedLink overlay; the source is
+          reached from the story page's in-app reader. Keeping the title as text
+          (never a nested <a>) is what prevents the "<a> cannot be a descendant
+          of <a>" hydration error when the card sits inside a route link. */}
       <Heading id={titleId} className="text-xl font-semibold text-ink">
-        {story.url ? (
-          <a
-            href={story.url}
-            className="rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus hover:underline"
-          >
-            {story.title}
-          </a>
-        ) : (
-          story.title
-        )}
+        {story.title}
       </Heading>
 
       {/* 2. Source + origin badge (+ the WS-Q.5.3b in-room chip on non-public

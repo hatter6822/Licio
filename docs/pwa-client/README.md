@@ -176,6 +176,12 @@ Background-Sync `sync` event (wakes a client to run the validated queue replay).
   dispatches an event; the root surfaces a non-blocking "Update available" toast
   (`aria-live="polite"`). Accepting posts `SKIP_WAITING`; `controllerchange`
   reloads **exactly once** (loop-guarded). Drafts in IndexedDB survive the update.
+- **Registration is production-only:** `main.tsx` calls `registerServiceWorker()`
+  behind `import.meta.env.PROD`. `vite dev` emits no worker (VitePWA builds
+  `sw.js` only at build time; devOptions stay off), so a dev registration would
+  fetch the SPA-fallback `index.html` and the browser would reject it
+  (`unsupported MIME type 'text/html'`). The preview server and production both
+  serve the real built worker, where `PROD` is true.
 
 ## Offline store and background sync (WS-C.2.2, WS-C.2.3)
 
