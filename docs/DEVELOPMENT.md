@@ -47,43 +47,54 @@ wins — it is the source of truth for every script.
 
 ## 1. TL;DR — the fastest path
 
-If you have **Node 22**, **Corepack**, and **Docker** already installed,
-this is the whole setup from a fresh clone:
+With **Node 22** and **Corepack**, `pnpm dev` runs with **zero setup** — no
+Docker, no `.env`:
 
 ```sh
-# 1. Toolchain
 corepack enable && corepack prepare pnpm@9.15.4 --activate
 pnpm install --frozen-lockfile
+pnpm dev        # web :5173 + API :3001 — in-memory stores, seeded demo data
+```
 
-# 2. Backing services (PostgreSQL 16 + pgvector, Redis 7)
+Open <http://localhost:5173>. The API answers on <http://localhost:3001>
+(health check: `curl http://localhost:3001/health`). With no `DATABASE_URL`/
+`REDIS_URL` set, the API boots on its in-memory stores and seeds a rich demo
+corpus (rooms, stories, threads with nested comments) so the PWA renders real
+end-to-end data immediately. The in-memory data is ephemeral — each restart
+re-seeds a fresh corpus.
+
+### Optional: run against a real Postgres + Redis (durable data)
+
+For durable data and a setup closer to production:
+
+```sh
+# 1. Backing services (PostgreSQL 16 + pgvector, Redis 7)
 docker compose up -d
 
-# 3. Environment — copy the template and load it into your shell
+# 2. Environment — copy the template and load it into your shell
 cp .env.example .env
 # Generate a real session secret (the template value is a placeholder):
 printf 'SESSION_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
 set -a && . ./.env && set +a        # export every var into THIS shell (bash/zsh)
 
-# 4. Apply the database migration chain (installs pgvector, creates all tables)
+# 3. Apply the database migration chain (installs pgvector, creates all tables)
 pnpm db:migrate
 
-# 5. Run the web client (:5173) and the API (:3001) together
+# 4. Run with the durable stores (DATABASE_URL/REDIS_URL now in the shell)
 pnpm dev
 ```
 
-Open <http://localhost:5173>. The API answers on
-<http://localhost:3001> (health check: `curl http://localhost:3001/health`).
-
-> **The one non-obvious step is `set -a && . ./.env && set +a`.** The dev
-> scripts read `process.env` directly — **nothing in the repo auto-loads
-> `.env`** — so you must export the variables into the shell that runs
-> `pnpm dev` / `pnpm db:migrate`. Section 7 explains this in full and
-> lists alternatives (`direnv`, `node --env-file`, inline prefixes).
+> **`pnpm dev` does not auto-load `.env`.** The dev script sets
+> `NODE_ENV=development` for you, but to point dev at Postgres/Redis you must
+> export `DATABASE_URL`/`REDIS_URL` into the shell that runs `pnpm dev` /
+> `pnpm db:migrate` — `set -a && . ./.env && set +a` (bash/zsh), `direnv`, or
+> inline prefixes. Section 7 explains this in full. Setting either URL switches
+> that subsystem from the in-memory store to its durable adapter.
 
 A fresh clone is also green with **just** `pnpm install --frozen-lockfile
 && pnpm test` — the unit suite runs entirely against in-memory stores, so
-Docker and the database are only needed for `pnpm dev` and the gated
-integration tests.
+Docker and the database are only needed for durable `pnpm dev` data and the
+gated integration tests.
 
 ---
 
@@ -137,11 +148,14 @@ apps/api            → shared, db, invariants, ranking
   It proxies same-origin `/api/*` calls to the API and (with
   `VITE_API_URL` set) calls `/v1/*` cross-origin. Without the API running,
   pages render but data calls fail.
-- **`apps/api`** validates its environment, then opens PostgreSQL and Redis
-  connections and runs startup recovery + config reads **at boot**. It
-  therefore needs a **reachable, migrated** PostgreSQL before it will serve
-  traffic. Redis connects lazily and degrades gracefully if briefly
-  unavailable, but you should run it.
+- **`apps/api`** validates its environment at boot. Without `DATABASE_URL`/
+  `REDIS_URL` (the default for `pnpm dev`) it serves entirely from in-memory
+  stores and seeds the demo corpus — no database required. When those URLs are
+  set it instead opens PostgreSQL + Redis connections and runs startup recovery
+  + config reads, so it then needs a **reachable, migrated** PostgreSQL before
+  it will serve traffic (Redis connects lazily and degrades gracefully).
+  **Production requires both** (and `SESSION_SECRET`/`CORS_ORIGIN`): the server
+  refuses to boot without them.
 - **The unit test suite** needs none of the above — it uses in-memory
   stores. Only the *gated integration tests* talk to real Postgres/Redis.
 
@@ -154,7 +168,7 @@ apps/api            → shared, db, invariants, ranking
 | **Node.js** | `22.x` (pinned in [`.nvmrc`](../.nvmrc); `engines` requires `>=22`) | Runtime for the API, build tools, and tests | `node --version` |
 | **pnpm** | `9.15.4` (pinned in `package.json` `packageManager`) | The only supported package manager; workspaces depend on it | `pnpm --version` |
 | **Corepack** | Bundled with Node 22 | Installs and pins the exact pnpm version automatically | `corepack --version` |
-| **Docker + Compose** | Any recent version | Runs local PostgreSQL (pgvector) and Redis | `docker --version && docker compose version` |
+| **Docker + Compose** | Optional | Only for running dev against a real PostgreSQL (pgvector) + Redis; `pnpm dev` runs in-memory without it | `docker --version && docker compose version` |
 | **Git** | Any recent version | Version control + the Lefthook git hooks | `git --version` |
 | **mkcert** | Optional | Trusted local certs for HTTPS dev (Section 10) | `mkcert -version` |
 | **OpenSSL** | Optional but handy | Generating `SESSION_SECRET` (Section 7) | `openssl version` |
@@ -263,6 +277,11 @@ pnpm exec lefthook install
 
 ## 6. Start the backing services (Postgres + Redis)
 
+> **Optional for development.** `pnpm dev` runs on in-memory stores when
+> `DATABASE_URL`/`REDIS_URL` are unset (Section 1). Follow this section only
+> when you want durable dev data or are running the gated integration tests.
+> Production always requires both.
+
 The repository ships a [`docker-compose.yml`](../docker-compose.yml) that
 provisions both services with development credentials:
 
@@ -339,22 +358,32 @@ cp .env.example .env
 `.env` is **gitignored** and a commit hook blocks it (Section 13) — never
 commit it.
 
+For a basic in-memory dev run you can **skip this section entirely** — `pnpm
+dev` works with no `.env` (Section 1). Configure these variables when you want
+durable Postgres/Redis data, the optional production bindings (Section 15), or
+to run a production build.
+
 The server environment is validated at boot by a zod schema
 ([`packages/shared/src/env/server.ts`](../packages/shared/src/env/server.ts)).
-If a **required** variable is missing or malformed, the API **refuses to
-start** with a descriptive error. This is deliberate fail-closed behavior.
+If a variable that is **required for the current `NODE_ENV`** is missing or
+malformed, the API **refuses to start** with a descriptive error. This is
+deliberate fail-closed behavior.
 
-### 7.1 Required server variables
+### 7.1 Server variables: required in production, relaxed in development
 
-These have **no defaults** — the API will not boot without them:
+In **production** these four are mandatory — the API refuses to boot without
+them. In **development/test** they are optional: omit `DATABASE_URL`/`REDIS_URL`
+to use the in-memory stores, and `SESSION_SECRET`/`CORS_ORIGIN` fall back to dev
+defaults. `NODE_ENV` is always required (the `pnpm dev` script sets it to
+`development` for you).
 
 | Variable | Example | Notes |
 |----------|---------|-------|
-| `DATABASE_URL` | `postgresql://licio:licio_dev@localhost:5432/licio_dev` | Must be a valid URL matching your Postgres (the Docker default shown) |
-| `REDIS_URL` | `redis://localhost:6379` | Must be a valid URL |
-| `NODE_ENV` | `development` | One of `development` \| `production` \| `test` |
-| `CORS_ORIGIN` | `http://localhost:5173` | The browser origin allowed by CORS — must equal the web origin exactly |
-| `SESSION_SECRET` | *(32+ random chars)* | Session signing + identity master secret; **minimum 32 characters**. Generate a real one — see 7.5 |
+| `DATABASE_URL` | `postgresql://licio:licio_dev@localhost:5432/licio_dev` | Valid URL matching your Postgres (Docker default shown). Omit in dev → in-memory store |
+| `REDIS_URL` | `redis://localhost:6379` | Valid URL. Omit in dev → in-memory store |
+| `NODE_ENV` | `development` | One of `development` \| `production` \| `test`; always required (no default) |
+| `CORS_ORIGIN` | `http://localhost:5173` | Browser origin allowed by CORS — must equal the web origin exactly. Dev default: `http://localhost:5173` |
+| `SESSION_SECRET` | *(32+ random chars)* | Session signing + identity master secret; **minimum 32 characters**. Generate a real one (7.5). A dev default applies when unset — never reachable in production |
 
 ### 7.2 Server variables with sensible defaults
 
@@ -433,11 +462,13 @@ to exercise the production bindings (Section 15).
 
 ### 7.7 How environment variables get loaded — important
 
-**The dev scripts do not auto-load `.env`.** `apps/api` reads
-`process.env` directly (`validateServerEnv(process.env)`), and the
-`tsx`/`vite`/`drizzle-kit` commands are launched without any `.env`-file
-flag. There is no `dotenv` dependency anywhere in the repo. So you must
-make the variables available in the **shell** that runs the commands.
+**The dev scripts do not auto-load `.env`.** `apps/api` reads `process.env`
+directly (`validateServerEnv(process.env)`); the `pnpm dev` API script sets
+`NODE_ENV=development` for you, but no command passes a `.env`-file flag and
+there is no `dotenv` dependency anywhere in the repo. For a basic in-memory dev
+run that is all you need — no `.env` required. To point dev at Postgres/Redis
+(or to set any other variable) you must make those values available in the
+**shell** that runs the commands.
 
 **Recommended (bash/zsh): export `.env` into your current shell.**
 

@@ -57,22 +57,35 @@ pay-to-rank — is enforced by the type system, runtime guards, and CI gates.
 corepack enable && corepack prepare pnpm@9.15.4 --activate
 pnpm install --frozen-lockfile
 
-docker compose up -d           # PostgreSQL 16 + Redis 7 (optional local stack)
-DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev \
-  pnpm db:migrate              # apply the Drizzle migration chain
-
-pnpm dev                       # web on :5173, API on :3001
+pnpm dev                       # web on :5173, API on :3001 — zero setup
 ```
 
-On a non-production boot, `pnpm dev` seeds a rich demo corpus through the real
+`pnpm dev` works out of the box: with no `DATABASE_URL`/`REDIS_URL` the API
+boots on its in-memory stores and seeds a rich demo corpus through the real
 stores — several authors, public/private/expert-gated rooms, stories of varied
 submission types and visibility tiers, and threads with several nested,
 multi-author comments — so the PWA renders real end-to-end data immediately
-(idempotent; never runs in production).
+(idempotent; never runs in production). The in-memory stores are ephemeral: a
+restart re-seeds a fresh corpus.
+
+To run dev against a real Postgres/Redis instead (durable data, closer to
+production), start the stack and set the connection URLs:
+
+```sh
+docker compose up -d           # PostgreSQL 16 + Redis 7
+DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev \
+REDIS_URL=redis://localhost:6379 \
+  pnpm db:migrate              # apply the Drizzle migration chain
+DATABASE_URL=postgres://licio:licio_dev@localhost:5432/licio_dev \
+REDIS_URL=redis://localhost:6379 \
+  pnpm dev
+```
 
 A fresh clone is green with just `pnpm install --frozen-lockfile && pnpm test`
 — the unit suite runs against in-memory stores, so the database stack is only
-needed for `pnpm dev` persistence and the gated integration tests.
+needed for durable `pnpm dev` persistence and the gated integration tests.
+Production REQUIRES `DATABASE_URL`, `REDIS_URL`, `SESSION_SECRET`, and
+`CORS_ORIGIN` (the server refuses to boot without them).
 
 `package.json` is the source of truth for every command; [`CLAUDE.md`](CLAUDE.md)
 documents the full developer workflow and [`CONTRIBUTING.md`](CONTRIBUTING.md)

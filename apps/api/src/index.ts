@@ -54,6 +54,7 @@ import {
   DrizzleIdentityStore,
   DrizzleJobLeaseStore,
 } from './identity/drizzle-store.js';
+import { InMemoryJobLeaseStore } from './identity/job-lease.js';
 import { sesConfigFromEnv } from './identity/mailer-ses.js';
 import { S3ObjectStore, s3ConfigFromEnv } from './identity/object-store-s3.js';
 import { PRIVACY_SCHEDULER_INTERVAL_MS, startPrivacyScheduler } from './identity/privacy-jobs.js';
@@ -157,7 +158,17 @@ const eventServices = createInMemoryEventPipelineServices({
   storyTitle: (storyId) => storyTitleCache.get(storyId) ?? demoStory(storyId)?.title ?? null,
   log: (event, meta) => logger.info(meta, event),
 });
-{
+// Durable backends are wired in only when configured. In development/test
+// without DATABASE_URL/REDIS_URL the API serves entirely from its in-memory
+// stores (zero-setup `pnpm dev` with the seeded demo data); production requires
+// both (enforced in validateServerEnv), so these branches always run there.
+if (!env.DATABASE_URL || !env.REDIS_URL) {
+  logger.warn(
+    { hasPostgres: env.DATABASE_URL !== undefined, hasRedis: env.REDIS_URL !== undefined },
+    'running with in-memory stores (no DATABASE_URL/REDIS_URL) — data is ephemeral; development only',
+  );
+}
+if (env.REDIS_URL !== undefined) {
   const IORedis = (await import('ioredis')).default;
   const redis = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
   redis.on('error', (err) => logger.warn({ err }, 'Redis connection error (identity stores)'));
@@ -179,21 +190,27 @@ const eventServices = createInMemoryEventPipelineServices({
 // Durable identity + audit projection (WS-D): Postgres-backed behind the same
 // IdentityStore/AuditStore interfaces the in-memory adapters satisfy.  The
 // schema must be migrated (`pnpm db:migrate`) before serving traffic.
-const db = createDbClient(env.DATABASE_URL);
-identityServices.store = new DrizzleIdentityStore(db);
-identityServices.audit = new DrizzleAuditStore(db);
-// WS-E durable stores (Postgres, WS-E.3.1): the partitioned event log, §22.1
-// aggregates, aggregation windows, invariant outputs (shadow), the owner-only
-// Signal Ledger, safety states, tunable config, dead letters, and checkpoints.
-eventServices.eventStore = new DrizzleEventStore(db);
-eventServices.attentionStore = new DrizzleAttentionAggregateStore(db);
-eventServices.windowStore = new DrizzleAggregationWindowStore(db);
-eventServices.invariantStore = new DrizzleInvariantOutputStore(db);
-eventServices.ledgerStore = new DrizzleSignalLedgerStore(db);
-eventServices.safetyStore = new DrizzleItemSafetyStateStore(db);
-eventServices.configStore = new DrizzlePwattConfigStore(db);
-eventServices.deadLetters = new DrizzleDeadLetterStore(db);
-eventServices.checkpoints = new DrizzleConsumerCheckpointStore(db);
+const db = env.DATABASE_URL !== undefined ? createDbClient(env.DATABASE_URL) : null;
+// The distributed scheduler lease is Postgres-backed in production; without a
+// database (dev/test) it falls back to the in-memory lease so the hourly
+// maintenance ticks still run on a single instance.
+const makeJobLease = () => (db ? new DrizzleJobLeaseStore(db) : new InMemoryJobLeaseStore());
+if (db) {
+  identityServices.store = new DrizzleIdentityStore(db);
+  identityServices.audit = new DrizzleAuditStore(db);
+  // WS-E durable stores (Postgres, WS-E.3.1): the partitioned event log, §22.1
+  // aggregates, aggregation windows, invariant outputs (shadow), the owner-only
+  // Signal Ledger, safety states, tunable config, dead letters, and checkpoints.
+  eventServices.eventStore = new DrizzleEventStore(db);
+  eventServices.attentionStore = new DrizzleAttentionAggregateStore(db);
+  eventServices.windowStore = new DrizzleAggregationWindowStore(db);
+  eventServices.invariantStore = new DrizzleInvariantOutputStore(db);
+  eventServices.ledgerStore = new DrizzleSignalLedgerStore(db);
+  eventServices.safetyStore = new DrizzleItemSafetyStateStore(db);
+  eventServices.configStore = new DrizzlePwattConfigStore(db);
+  eventServices.deadLetters = new DrizzleDeadLetterStore(db);
+  eventServices.checkpoints = new DrizzleConsumerCheckpointStore(db);
+}
 // The production volume-threshold trigger (WS-E.2.1a "triggered computation"):
 // when an item's real-time volume crosses the configured threshold, the
 // CURRENT 1h window is scored early (fire-and-forget; the scheduled boundary
@@ -237,7 +254,7 @@ const ingestionServices = createInMemoryIngestionServices({
   ...(embeddingProvider !== undefined ? { embeddingProvider } : {}),
   log: (event, meta) => logger.info(meta, event),
 });
-{
+if (env.REDIS_URL !== undefined) {
   const IORedis = (await import('ioredis')).default;
   const redis = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
   redis.on('error', (err) => logger.warn({ err }, 'Redis connection error (ingestion limiter)'));
@@ -245,18 +262,20 @@ const ingestionServices = createInMemoryIngestionServices({
     new RedisSlidingWindowStore(redis),
   );
 }
-ingestionServices.stories = new DrizzleStoryStore(db);
-ingestionServices.sources = new DrizzleSourceStore(db);
-ingestionServices.syndications = new DrizzleSyndicationStore(db);
-ingestionServices.claims = new DrizzleClaimStore(db);
-ingestionServices.evidence = new DrizzleEvidenceCardStore(db);
-ingestionServices.signatures = new DrizzleSignatureStore(db);
-ingestionServices.lifecycleAudits = new DrizzleLifecycleAuditStore(db);
-ingestionServices.freshness = new DrizzleFreshnessStore(db);
-ingestionServices.takedowns = new DrizzleTakedownStore(db);
-ingestionServices.reviewQueue = new DrizzleReviewQueueStore(db);
-ingestionServices.embeddings = new DrizzleEmbeddingStore(db);
-ingestionServices.searchIndex = new PostgresSearchIndex(db);
+if (db) {
+  ingestionServices.stories = new DrizzleStoryStore(db);
+  ingestionServices.sources = new DrizzleSourceStore(db);
+  ingestionServices.syndications = new DrizzleSyndicationStore(db);
+  ingestionServices.claims = new DrizzleClaimStore(db);
+  ingestionServices.evidence = new DrizzleEvidenceCardStore(db);
+  ingestionServices.signatures = new DrizzleSignatureStore(db);
+  ingestionServices.lifecycleAudits = new DrizzleLifecycleAuditStore(db);
+  ingestionServices.freshness = new DrizzleFreshnessStore(db);
+  ingestionServices.takedowns = new DrizzleTakedownStore(db);
+  ingestionServices.reviewQueue = new DrizzleReviewQueueStore(db);
+  ingestionServices.embeddings = new DrizzleEmbeddingStore(db);
+  ingestionServices.searchIndex = new PostgresSearchIndex(db);
+}
 await ingestionServices.reloadConfig();
 registerIngestionConsumers(eventServices, ingestionServices);
 setIngestionServices(ingestionServices);
@@ -267,7 +286,7 @@ const forumServices = createInMemoryForumServices({
   ingestion: ingestionServices,
   log: (event, meta) => logger.info(meta, event),
 });
-{
+if (env.REDIS_URL !== undefined) {
   const IORedis = (await import('ioredis')).default;
   const redis = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
   redis.on('error', (err) => logger.warn({ err }, 'Redis connection error (forum limiter)'));
@@ -275,11 +294,13 @@ const forumServices = createInMemoryForumServices({
     new RedisSlidingWindowStore(redis),
   );
 }
-forumServices.contributions = new DrizzleContributionStore(db);
-forumServices.rooms = new DrizzleRoomStore(db);
-forumServices.lenses = new DrizzleLensStore(db);
-forumServices.summaries = new DrizzleSummaryStore(db);
-forumServices.uploads = new DrizzleUploadStore(db, s3ConfigFromEnv(env));
+if (db) {
+  forumServices.contributions = new DrizzleContributionStore(db);
+  forumServices.rooms = new DrizzleRoomStore(db);
+  forumServices.lenses = new DrizzleLensStore(db);
+  forumServices.summaries = new DrizzleSummaryStore(db);
+  forumServices.uploads = new DrizzleUploadStore(db, s3ConfigFromEnv(env));
+}
 await forumServices.reloadConfig();
 setForumServices(forumServices);
 // Thread-posture consumer (durable; handlers first run at recovery replay,
@@ -296,14 +317,16 @@ const invariantServices = createInMemoryInvariantServices(
   forumServices,
   { log: (event, meta) => logger.info(meta, event) },
 );
-invariantServices.promotions = new DrizzlePromotionStore(db);
-invariantServices.calibrations = new DrizzleCalibrationStore(db);
-invariantServices.runMetadata = new DrizzleRunMetadataStore(db);
-invariantServices.mfciCases = new DrizzleMfciCaseStore(db);
-invariantServices.mfciMargins = new DrizzleMfciMarginsStore(db);
-invariantServices.mfciRiskStates = new DrizzleMfciRiskStateStore(db);
-invariantServices.scoiActions = new DrizzleScoiContextActionStore(db);
-invariantServices.bridgeAttempts = new DrizzleBridgeAttemptStore(db);
+if (db) {
+  invariantServices.promotions = new DrizzlePromotionStore(db);
+  invariantServices.calibrations = new DrizzleCalibrationStore(db);
+  invariantServices.runMetadata = new DrizzleRunMetadataStore(db);
+  invariantServices.mfciCases = new DrizzleMfciCaseStore(db);
+  invariantServices.mfciMargins = new DrizzleMfciMarginsStore(db);
+  invariantServices.mfciRiskStates = new DrizzleMfciRiskStateStore(db);
+  invariantServices.scoiActions = new DrizzleScoiContextActionStore(db);
+  invariantServices.bridgeAttempts = new DrizzleBridgeAttemptStore(db);
+}
 await invariantServices.reloadConfig();
 setInvariantServices(invariantServices);
 // PHI session consumer + MFCI cheap-statistic intake + the WS-E hook
@@ -325,8 +348,10 @@ const rankingServices = createInMemoryRankingServices(
   invariantServices,
   { log: (event, meta) => logger.info(meta, event) },
 );
-rankingServices.featureStore = new DrizzleFeatureStore(db);
-rankingServices.decisionLogs = new DrizzleDecisionLogStore(db);
+if (db) {
+  rankingServices.featureStore = new DrizzleFeatureStore(db);
+  rankingServices.decisionLogs = new DrizzleDecisionLogStore(db);
+}
 await rankingServices.reloadConfig();
 // Real-time feature-store path: the durable invariant.run.completed consumer.
 registerRankingConsumers(rankingServices);
@@ -402,7 +427,7 @@ startPrivacyScheduler(
   identityServices,
   (err, task) => logger.error({ err, task }, 'privacy scheduler task failed'),
   PRIVACY_SCHEDULER_INTERVAL_MS,
-  { lease: new DrizzleJobLeaseStore(db) },
+  { lease: makeJobLease() },
 );
 
 // Startup recovery (WS-E.1.5 at-least-once): replay durable consumers from
@@ -422,7 +447,7 @@ startIngestionScheduler(
   eventServices,
   (err, task) => logger.error({ err, task }, 'ingestion scheduler task failed'),
   INGESTION_SCHEDULER_INTERVAL_MS,
-  { lease: new DrizzleJobLeaseStore(db) },
+  { lease: makeJobLease() },
 );
 
 // Hourly WS-H batch tier: all eleven invariants, guarded + shadow-persisted,
@@ -433,7 +458,7 @@ startInvariantsScheduler(
   ingestionServices,
   (err, task) => logger.error({ err, task }, 'invariants scheduler task failed'),
   INVARIANTS_SCHEDULER_INTERVAL_MS,
-  { lease: new DrizzleJobLeaseStore(db) },
+  { lease: makeJobLease() },
 );
 
 // Hourly WS-E pipeline: aggregation windows + PWAtt scoring (WS-E.2.1, a
@@ -446,7 +471,7 @@ startEventPipelineScheduler(
   identityServices,
   (err, task) => logger.error({ err, task }, 'event pipeline scheduler task failed'),
   EVENT_PIPELINE_SCHEDULER_INTERVAL_MS,
-  { lease: new DrizzleJobLeaseStore(db) },
+  { lease: makeJobLease() },
 );
 
 // Hourly WS-I maintenance: feature-store batch refresh, the §22.4
@@ -456,7 +481,7 @@ startRankingScheduler(
   rankingServices,
   (err, task) => logger.error({ err, task }, 'ranking scheduler task failed'),
   RANKING_SCHEDULER_INTERVAL_MS,
-  { lease: new DrizzleJobLeaseStore(db) },
+  { lease: makeJobLease() },
 );
 
 const app = createApp();

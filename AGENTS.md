@@ -225,7 +225,7 @@ corepack enable && corepack prepare pnpm@9.15.4 --activate
 pnpm install
 
 # Daily commands.
-pnpm dev                            # web (5173) + api (3001); seeds demo data (non-prod)
+pnpm dev                            # web (5173) + api (3001); in-memory + seeds demo data (no DB/Redis)
 pnpm build                          # shared → db/invariants → web/api
 pnpm test                           # Vitest across all workspaces (80% coverage gate)
 pnpm test -- --coverage             # with coverage report

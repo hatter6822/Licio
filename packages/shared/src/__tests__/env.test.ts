@@ -19,9 +19,30 @@ describe('validateServerEnv', () => {
     expect(result.NODE_ENV).toBe('development');
   });
 
-  it('should reject missing DATABASE_URL', () => {
-    const { DATABASE_URL: _, ...env } = validEnv;
-    expect(() => validateServerEnv(env)).toThrow('DATABASE_URL');
+  it('allows missing DATABASE_URL/REDIS_URL outside production (in-memory dev boot)', () => {
+    const { DATABASE_URL: _d, REDIS_URL: _r, ...env } = validEnv;
+    const result = validateServerEnv(env);
+    expect(result.DATABASE_URL).toBeUndefined();
+    expect(result.REDIS_URL).toBeUndefined();
+  });
+
+  it('requires the full infra + secret in production', () => {
+    const prod = { ...validEnv, NODE_ENV: 'production' };
+    // The complete production env validates …
+    expect(() => validateServerEnv(prod)).not.toThrow();
+    // … but omitting any required key fails (no silent dev fallback in prod).
+    for (const key of ['DATABASE_URL', 'REDIS_URL', 'CORS_ORIGIN', 'SESSION_SECRET'] as const) {
+      const env = { ...prod };
+      delete (env as Record<string, unknown>)[key];
+      expect(() => validateServerEnv(env)).toThrow(key);
+    }
+  });
+
+  it('fills dev defaults for SESSION_SECRET and CORS_ORIGIN when absent (non-production)', () => {
+    const { SESSION_SECRET: _s, CORS_ORIGIN: _c, ...env } = validEnv;
+    const result = validateServerEnv(env);
+    expect(result.SESSION_SECRET.length).toBeGreaterThanOrEqual(32);
+    expect(result.CORS_ORIGIN).toBe('http://localhost:5173');
   });
 
   it('should reject short SESSION_SECRET', () => {
