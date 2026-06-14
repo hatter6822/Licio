@@ -18,10 +18,12 @@ export interface CardProps {
   children: ReactNode;
 }
 
-// Cards are extruded from the fabric canvas with a soft neumorphic shadow (WS-B
-// fabric theme); the hairline border keeps a crisp edge (and the only visible
-// boundary under forced-colors, where the shadow flattens).
-const base = 'block rounded-lg border border-line bg-canvas neu-raised';
+// Cards are extruded from the fabric canvas with a soft neumorphic shadow and
+// carry a faint diagonal-twill weave (WS-B fabric theme), so each reads as a
+// cushion of cloth lifted off the woven canvas; the hairline border keeps a
+// crisp edge (and the only visible boundary under forced-colors, where the
+// shadow and weave both flatten).
+const base = 'block rounded-lg border border-line bg-canvas fabric-card neu-raised';
 
 // Interactive surfaces depress into the surface on press and carry the system
 // focus ring. The focus ring matches the other primitives (Button/Input) for

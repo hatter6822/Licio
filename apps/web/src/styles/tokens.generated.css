@@ -6,10 +6,10 @@
  */
 
 :root {
-  --licio-bg-default: #EAEDF3;
-  --licio-bg-subtle: #E2E6EE;
-  --licio-bg-muted: #D6DBE5;
-  --licio-bg-inverse: #16181C;
+  --licio-bg-default: #F4ECDF;
+  --licio-bg-subtle: #EEE5D4;
+  --licio-bg-muted: #E5DAC5;
+  --licio-bg-inverse: #1B1713;
   --licio-fg-default: #16181C;
   --licio-fg-muted: #5B6168;
   --licio-fg-inverse: #FFFFFF;
@@ -86,14 +86,15 @@
   --licio-shadow-lg: 0 18px 34px -8px rgb(40 48 80 / 0.18), 0 6px 12px -6px rgb(40 48 80 / 0.10);
   /* Neumorphic soft-UI + fabric texture (WS-B fabric theme) */
   color-scheme: light;
-  --licio-neu-highlight: rgb(255 255 255 / 0.90);
-  --licio-neu-shadow: rgb(70 82 120 / 0.20);
-  --licio-fabric-thread: rgb(70 82 120 / 0.05);
-  --licio-shadow-raised: -6px -6px 14px var(--licio-neu-highlight), 6px 6px 16px var(--licio-neu-shadow);
-  --licio-shadow-raised-sm: -3px -3px 7px var(--licio-neu-highlight), 3px 3px 8px var(--licio-neu-shadow);
-  --licio-shadow-pressed: inset 4px 4px 9px var(--licio-neu-shadow), inset -4px -4px 9px var(--licio-neu-highlight);
-  --licio-shadow-pressed-sm: inset 2px 2px 5px var(--licio-neu-shadow), inset -2px -2px 5px var(--licio-neu-highlight);
-  --licio-shadow-inset: inset 3px 3px 6px var(--licio-neu-shadow), inset -3px -3px 6px var(--licio-neu-highlight);
+  --licio-neu-highlight: rgb(255 255 255 / 0.85);
+  --licio-neu-shadow: rgb(106 90 76 / 0.28);
+  --licio-fabric-thread: rgb(120 100 72 / 0.06);
+  --licio-fabric-sheen: rgb(255 255 255 / 0.55);
+  --licio-shadow-raised: -10px -10px 24px var(--licio-neu-highlight), 10px 10px 24px var(--licio-neu-shadow);
+  --licio-shadow-raised-sm: -6px -6px 16px var(--licio-neu-highlight), 6px 6px 16px var(--licio-neu-shadow);
+  --licio-shadow-pressed: inset 7px 7px 16px var(--licio-neu-shadow), inset -7px -7px 16px var(--licio-neu-highlight);
+  --licio-shadow-pressed-sm: inset 4px 4px 10px var(--licio-neu-shadow), inset -4px -4px 10px var(--licio-neu-highlight);
+  --licio-shadow-inset: inset 6px 6px 14px var(--licio-neu-shadow), inset -6px -6px 14px var(--licio-neu-highlight);
   --licio-z-base: 0;
   --licio-z-dropdown: 100;
   --licio-z-sticky: 200;
@@ -117,10 +118,10 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --licio-bg-default: #15171E;
-    --licio-bg-subtle: #1C1F28;
-    --licio-bg-muted: #252A34;
-    --licio-bg-inverse: #F4F5F7;
+    --licio-bg-default: #1A1713;
+    --licio-bg-subtle: #221F1A;
+    --licio-bg-muted: #2E2924;
+    --licio-bg-inverse: #F9F5EC;
     --licio-fg-default: #F2F3F5;
     --licio-fg-muted: #ABB1B9;
     --licio-fg-inverse: #16181C;
@@ -141,17 +142,18 @@
     --licio-info-soft: #16243E;
     --licio-info-on-soft: #AEC6F2;
     color-scheme: dark;
-    --licio-neu-highlight: rgb(74 84 112 / 0.45);
-    --licio-neu-shadow: rgb(0 0 0 / 0.55);
-    --licio-fabric-thread: rgb(184 194 224 / 0.05);
+    --licio-neu-highlight: rgb(141 133 121 / 0.42);
+    --licio-neu-shadow: rgb(0 0 0 / 0.60);
+    --licio-fabric-thread: rgb(196 180 150 / 0.05);
+    --licio-fabric-sheen: rgb(150 140 122 / 0.05);
   }
 }
 
 :root[data-theme="dark"] {
-  --licio-bg-default: #15171E;
-  --licio-bg-subtle: #1C1F28;
-  --licio-bg-muted: #252A34;
-  --licio-bg-inverse: #F4F5F7;
+  --licio-bg-default: #1A1713;
+  --licio-bg-subtle: #221F1A;
+  --licio-bg-muted: #2E2924;
+  --licio-bg-inverse: #F9F5EC;
   --licio-fg-default: #F2F3F5;
   --licio-fg-muted: #ABB1B9;
   --licio-fg-inverse: #16181C;
@@ -172,9 +174,10 @@
   --licio-info-soft: #16243E;
   --licio-info-on-soft: #AEC6F2;
   color-scheme: dark;
-  --licio-neu-highlight: rgb(74 84 112 / 0.45);
-  --licio-neu-shadow: rgb(0 0 0 / 0.55);
-  --licio-fabric-thread: rgb(184 194 224 / 0.05);
+  --licio-neu-highlight: rgb(141 133 121 / 0.42);
+  --licio-neu-shadow: rgb(0 0 0 / 0.60);
+  --licio-fabric-thread: rgb(196 180 150 / 0.05);
+  --licio-fabric-sheen: rgb(150 140 122 / 0.05);
 }
 
 @media (prefers-color-scheme: light) and (prefers-contrast: more) {
