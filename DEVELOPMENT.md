@@ -54,7 +54,7 @@ cannot be pre-seeded, so the development accounts below sign in with the
 | **steward** | Sam Steward     | `steward@licio.test`  | Moderation queues, governance, ranking/audit reads. |
 | **expert** | Dr. Erin Expert  | `expert@licio.test`   | Domain expert: steward of the expert-gated *Open Science* room (can post where ordinary members cannot). |
 
-There is also a plain demo author, `demo@…`-less `licio-demo`, that owns most
+There is also a plain demo author, `demo@…`-less `licio_demo`, that owns most
 of the seeded content. The three accounts above are the ones to test *roles*
 with.
 
@@ -70,13 +70,16 @@ the only place this happens, and only when `NODE_ENV=development`.
 1. Open **http://localhost:5173** and go to **Sign in**.
 2. Choose **email**, enter one of the addresses above (e.g. `admin@licio.test`),
    and submit.
-3. Look at the `pnpm dev` terminal for a log line like:
+3. Look at the `pnpm dev` terminal for an `auth.mail.dev_code` log line like:
 
-   ```json
-   {"event":"auth.mail.dev_code","to":"admin@licio.test","kind":"login","code":"482913"}
+   ```
+   INFO: auth.mail.dev_code
+       to: "admin@licio.test"
+       kind: "login"
+       code: "Y3A2KY5D"
    ```
 
-   The 6-digit `code` is your one-time code.
+   The 8-character `code` is your one-time code.
 4. Enter the code in the app. You are now signed in as that account.
 
 The code is single-use, expires in 10 minutes, and is bound to the browser

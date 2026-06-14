@@ -42,7 +42,7 @@ import { DEMO_IDS } from './demo-data.js';
 
 export const SEED_USER = {
   userId: '5f5e0000-0000-4000-8000-000000000001',
-  handle: 'licio-demo',
+  handle: 'licio_demo',
   displayName: 'Licio Demo',
 } as const;
 
@@ -89,7 +89,7 @@ export const DEV_ACCOUNTS: ReadonlyArray<{
 }> = [
   {
     userId: U(20),
-    handle: 'licio-admin',
+    handle: 'licio_admin',
     displayName: 'Ada Admin',
     email: 'admin@licio.test',
     roles: ['user', 'admin'],
@@ -97,7 +97,7 @@ export const DEV_ACCOUNTS: ReadonlyArray<{
   },
   {
     userId: U(21),
-    handle: 'licio-steward',
+    handle: 'licio_steward',
     displayName: 'Sam Steward',
     email: 'steward@licio.test',
     roles: ['user', 'steward'],
@@ -105,7 +105,7 @@ export const DEV_ACCOUNTS: ReadonlyArray<{
   },
   {
     userId: U(22),
-    handle: 'licio-expert',
+    handle: 'licio_expert',
     displayName: 'Dr. Erin Expert',
     email: 'expert@licio.test',
     roles: ['user', 'expert'],
@@ -408,12 +408,12 @@ export async function seedForumDemoData(
     displayName: string;
     steward?: boolean;
   }> = [
-    { userId: maya, handle: 'maya-rivers', displayName: 'Maya Okonkwo' },
-    { userId: theo, handle: 'theo-desk', displayName: 'Theo Vance' },
-    { userId: lena, handle: 'lena-ward', displayName: 'Lena Park' },
-    { userId: raj, handle: 'raj-policy', displayName: 'Raj Mehta' },
-    { userId: samd, handle: 'sam-data', displayName: 'Sam Ellison' },
-    { userId: nadia, handle: 'nadia-steward', displayName: 'Nadia Rahman', steward: true },
+    { userId: maya, handle: 'maya_rivers', displayName: 'Maya Okonkwo' },
+    { userId: theo, handle: 'theo_desk', displayName: 'Theo Vance' },
+    { userId: lena, handle: 'lena_ward', displayName: 'Lena Park' },
+    { userId: raj, handle: 'raj_policy', displayName: 'Raj Mehta' },
+    { userId: samd, handle: 'sam_data', displayName: 'Sam Ellison' },
+    { userId: nadia, handle: 'nadia_steward', displayName: 'Nadia Rahman', steward: true },
   ];
   for (const a of EXTRA_AUTHORS) {
     if (await identityStore.getUser(a.userId)) continue;
