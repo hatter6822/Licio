@@ -26,7 +26,7 @@ export function NarrowLoopPrompt({
   return (
     <output
       // role=status: announced politely; never steals focus (non-blocking).
-      className={`flex flex-wrap items-center gap-3 rounded-lg border border-edge bg-surface p-3 text-sm text-ink ${className ?? ''}`}
+      className={`flex flex-wrap items-center gap-3 rounded-lg border border-line bg-surface p-3 text-sm text-ink ${className ?? ''}`}
     >
       <Icon name="circle-info" className="size-4 shrink-0" />
       <span className="min-w-0 flex-1">

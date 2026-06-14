@@ -65,7 +65,8 @@ reduced-motion media queries.
 | Reduced motion | `prefers-reduced-motion: reduce` zeroes every duration token |
 
 Tailwind utility names map to tokens via `tailwindColorMap` in `css.ts`
-(`canvas`, `surface`, `ink`, `ink-muted`, `line`, `line-strong`, `focus`,
+(`canvas`, `surface`, `surface-strong`, `surface-sunken`, `ink`, `ink-muted`,
+`line`, `line-strong`, `focus`,
 `primary`/`success`/`warning`/`error`/`info` with `-fg`/`-soft`/`-on-soft`
 variants). Rating labels reuse the status palette (solid vs `-soft` chips for
 ≥3:1 distinctness) rather than dedicated shade tokens. The named
@@ -108,20 +109,37 @@ canvas**, driven entirely from the token SSOT (no images, no runtime JS):
   charcoal). The warm steps are luminance-matched to the prior cool greys, so
   body-text contrast is unchanged — still AAA (recomputed at **15.16:1** light,
   ~16:1 dark in `tokens.test.ts`); `border-strong` keeps the functional control
-  boundary ≥3:1 on the tinted surfaces.
-- **Paired lighting, theme-aware.** Two source colours (`--licio-neu-highlight`
-  / `--licio-neu-shadow`) flip per colour mode; the composed
-  `--licio-shadow-{raised,raised-sm,pressed,pressed-sm,inset}` tokens reference
-  them, so the geometry is defined **once** and adapts to light/dark
-  automatically. Surfaced via the `neu-*` utilities (`styles/app.css`):
-  `neu-raised`/`-sm` extrude (cards, buttons, the Switch knob), `neu-pressed`/
-  `-sm` recess on press (`active:neu-pressed-sm`, the active nav tab), and
-  `neu-inset` carves form wells (Input/TextArea/Switch track).
-- **Fabric texture.** A faint, theme-aware woven-thread tint
-  (`--licio-fabric-thread`) is layered over the canvas with two perpendicular
-  `repeating-linear-gradient`s on `body` (and the `fabric-surface` utility) —
-  low-contrast enough never to affect text legibility, and CSP-safe (pure CSS,
-  no `data:` images).
+  boundary ≥3:1 on the tinted surfaces. A fourth recessed surface,
+  `surface-sunken` (`bg-surface-sunken`), is a touch darker than the canvas so an
+  inset panel (the link-safety URL box, media placeholders, in-form info panels)
+  reads as a well below the cloth; secondary text on it still clears AA
+  (≈4.74:1 light), asserted in `tokens.test.ts`.
+- **Paired lighting, theme-aware — and bleed-proof.** Two source colours
+  (`--licio-neu-highlight` / `--licio-neu-shadow`) flip per colour mode; the
+  composed `--licio-shadow-{raised,raised-sm,pressed,pressed-sm,inset}` tokens
+  reference them, so the geometry is defined **once** and adapts to light/dark
+  automatically. The geometry is deliberately TIGHT (a close bevel, low-alpha
+  highlight) rather than a wide halo: each raised layer's outward reach
+  (`max(|offset|) + blur`) is capped at `NEU_OUTER_REACH_BUDGET_PX` (16px =
+  `gap-4`) so one surface's lighting can never wash over a neighbour that sits at
+  least one spacing unit away; inset layers are clipped to the border-box by
+  construction and tightened to fall inside a control's padding, never over its
+  label. `tokens.test.ts` re-derives the reach from the composed strings and
+  fails if any edit re-inflates it. Surfaced via the `neu-*` utilities
+  (`styles/app.css`): `neu-raised`/`-sm` extrude (cards, buttons, the Switch
+  knob), `neu-pressed`/`-sm` recess on press (`active:neu-pressed-sm`, the active
+  nav tab), and `neu-inset` carves form wells (Input/TextArea/Switch track).
+- **Fabric texture — organic woven linen (pure CSS).** A single theme-aware
+  weave (`--licio-fabric-weave`, built from `--licio-fabric-thread` / `-sheen`)
+  over the canvas on `body` and the `fabric-surface` utility — no images, so
+  there is no resident raster to pay for. To read as hand-woven cloth rather than
+  mechanical graph-paper it layers **three broad diagonal "slub" clouds**
+  (different angles, coprime periods 47/61/73px) for low-frequency, non-
+  directional unevenness, over **warp/weft threads at coprime periods** (5/8px
+  and 7/11px) with a slight per-pass angle drift. Because every period is
+  coprime, the visual repeat is large. Raised panels add a richer diagonal-twill
+  `fabric-card`. Every layer is faint enough never to affect text legibility and
+  flattens to nothing under `prefers-contrast: more` / `forced-colors: active`.
 - **`color-scheme`** is set per mode so native controls, scrollbars, and form
   widgets match the surface.
 - **Accessibility is preserved.** The soft lighting is *decorative*: every

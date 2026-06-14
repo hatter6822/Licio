@@ -38,6 +38,7 @@ export const tailwindColorMap: Record<string, ColorToken> = {
   canvas: 'bg-default',
   surface: 'bg-subtle',
   'surface-strong': 'bg-muted',
+  'surface-sunken': 'bg-sunken',
   inverse: 'bg-inverse',
   ink: 'fg-default',
   'ink-muted': 'fg-muted',

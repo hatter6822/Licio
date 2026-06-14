@@ -427,7 +427,7 @@ export function SubmitPage(): React.ReactElement {
               </p>
               <p className="truncate text-ink-muted text-xs">{shareCitation.url}</p>
               {shareCaution ? (
-                <p className="text-danger text-xs">
+                <p className="text-error-on-soft text-xs">
                   {t(
                     'submit.share.caution',
                     'This link matches suspicious patterns — double-check before citing it.',

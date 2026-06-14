@@ -22,7 +22,7 @@ export function WhereInterpretationsDiffer({
   return (
     <section
       aria-labelledby="interpretations-heading"
-      className="rounded-lg border border-edge bg-surface p-3"
+      className="rounded-lg border border-line bg-surface p-3"
     >
       <h2
         id="interpretations-heading"
@@ -43,7 +43,7 @@ export function WhereInterpretationsDiffer({
         {data.interpretations.map((interpretation) => (
           <li
             key={`${interpretation.lens_a}~${interpretation.lens_b}`}
-            className="border-s-2 border-edge ps-3"
+            className="border-s-2 border-line ps-3"
           >
             <p className="text-sm font-medium text-ink">
               {interpretation.lens_a_name && interpretation.lens_b_name
