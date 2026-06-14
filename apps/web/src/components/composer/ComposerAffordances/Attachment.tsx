@@ -7,6 +7,7 @@
 import { useId, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
+import { fileInputClasses } from '../../../lib/controls.js';
 import { Button } from '../../ui/Button/index.js';
 import { Icon } from '../../ui/Icon/index.js';
 import { PrivacyWarning } from './PrivacyWarning.js';
@@ -74,7 +75,7 @@ export function Attachment({
           accept={accept}
           multiple={multiple}
           onChange={handleChange}
-          className="block w-full text-sm text-ink file:me-3 file:min-h-touch file:rounded-md file:border file:border-line-strong file:bg-surface file:px-4 file:py-2 file:text-sm file:font-medium file:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+          className={fileInputClasses}
         />
       </div>
 
