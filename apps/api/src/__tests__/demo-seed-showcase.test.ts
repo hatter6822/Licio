@@ -9,8 +9,9 @@
 // signals were empty".
 import type { RatingLabelKind } from '@licio/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { userMayPostTopLevel } from '../forum/rooms.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
-import { DEV_ACCOUNTS, seedForumDemoData, seedShadowSignals } from '../lib/demo-seed.js';
+import { DEV_ACCOUNTS, SEED_USER, seedForumDemoData, seedShadowSignals } from '../lib/demo-seed.js';
 import { serveFeed } from '../ranking/service.js';
 import { freshRankingServices, type RankingFixture } from './ranking-helpers.js';
 
@@ -64,12 +65,16 @@ describe('demo seed — development test accounts', () => {
     }
   });
 
-  it('makes the expert a steward of the expert-gated Open Science room', async () => {
+  it('gives the expert the platform role so it can post in the expert-gated room', async () => {
     // R(6) is the Open Science room (experts_and_stewards posting policy).
     const r6 = '5f5e3000-0000-4000-8000-000000000006';
-    const stewards = await fx.forum.rooms.listStewards(r6);
+    const room = await fx.forum.rooms.getById(r6);
     const expert = await fx.identity.store.getUserByEmail('expert@licio.test');
-    expect(stewards.some((s) => s.userId === expert?.userId)).toBe(true);
+    expect(expert?.roles).toContain('expert');
+    if (!room || !expert) throw new Error('seed missing expert/room');
+    // The expert may post top-level there via the role; a plain user may not.
+    expect(await userMayPostTopLevel(fx.forum, room, expert.userId, expert.roles)).toBe(true);
+    expect(await userMayPostTopLevel(fx.forum, room, SEED_USER.userId, ['user'])).toBe(false);
   });
 });
 

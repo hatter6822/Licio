@@ -143,6 +143,15 @@ describe('WS-Q.2.1 submission guards', () => {
       'posting_restricted',
     );
   });
+
+  it('an experts_and_stewards room ACCEPTS a platform expert (WS-D expert role)', async () => {
+    const room = await makeRoom('public', { postingPolicy: 'experts_and_stewards' });
+    const expert = await seedUserWithSession(fixture.identity, { handle: 'erin', expert: true });
+    const res = await app().request(
+      post('/v1/stories', briefSubmission({ room_id: room }), expert.cookie),
+    );
+    expect(res.status).toBe(201);
+  });
 });
 
 describe('WS-Q.2.2 tier-scoped dedup + cross-tier linking', () => {

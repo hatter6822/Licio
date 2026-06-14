@@ -62,10 +62,10 @@ const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
  * give each account a distinct slice of the product to exercise. Credentials and
  * the sign-in walkthrough live in DEVELOPMENT.md.
  *
- * `expert` carries no platform role: a domain "expert" today is a ROOM steward
- * of an expert-gated room (the `experts_and_stewards` posting bar is satisfied
- * by room/platform stewards — per-user expert-lens assignment is the WS-J seam),
- * so this account is made a steward of the Open Science room below.
+ * `expert` holds the platform `expert` role (least-privilege, WS-D RBAC): it
+ * may post top-level in expert-gated (`experts_and_stewards`) rooms but has no
+ * moderation/governance/admin powers — so it can post in Open Science without
+ * being a steward of it.
  */
 export const DEV_ACCOUNTS: ReadonlyArray<{
   userId: string;
@@ -96,8 +96,8 @@ export const DEV_ACCOUNTS: ReadonlyArray<{
     handle: 'licio-expert',
     displayName: 'Dr. Erin Expert',
     email: 'expert@licio.test',
-    roles: ['user'],
-    purpose: 'Domain expert — steward of the expert-gated Open Science room.',
+    roles: ['user', 'expert'],
+    purpose: 'Domain expert — the platform `expert` role: may post in expert-gated rooms.',
   },
 ] as const;
 
@@ -566,14 +566,8 @@ export async function seedForumDemoData(
     role: 'community_steward',
     assignedAt: nowIso,
   });
-  // The DEVELOPMENT "expert" account stewards the expert-gated Open Science room
-  // (R6) so it can post top-level there — the product's current expert model.
-  await forum.rooms.addSteward({
-    roomId: R(6),
-    userId: U(22),
-    role: 'community_steward',
-    assignedAt: nowIso,
-  });
+  // The DEVELOPMENT "expert" account posts in the expert-gated Open Science room
+  // (R6) through the platform `expert` ROLE — no room-steward grant needed.
 
   await forum.lenses.insert({
     lensId: LENS(2),

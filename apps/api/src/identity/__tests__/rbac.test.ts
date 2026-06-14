@@ -16,6 +16,9 @@ describe('RBAC policy matrix', () => {
   // The expected grants — kept here independently so a drift in POLICY is caught.
   const expected: Record<Role, Action[]> = {
     user: ['self.manage'],
+    // `expert` is least-privilege: identical platform grants to `user` (its only
+    // distinct power — expert-room posting — is a forum authorization, not an action).
+    expert: ['self.manage'],
     moderator: ['self.manage', 'moderation.act'],
     steward: ['self.manage', 'moderation.act', 'steward.audit.read'],
     admin: ['self.manage', 'moderation.act', 'steward.audit.read', 'admin.role.assign'],
@@ -79,5 +82,6 @@ describe('isSteward', () => {
     expect(isSteward(['admin'])).toBe(true);
     expect(isSteward(['moderator'])).toBe(false);
     expect(isSteward(['user'])).toBe(false);
+    expect(isSteward(['expert'])).toBe(false);
   });
 });

@@ -9,7 +9,7 @@
 //     cross-user reference to a PRIVATE object resolves to `not_found`, never
 //     `forbidden`, so existence is not confirmed (no enumeration oracle).
 
-export const ROLES = ['user', 'moderator', 'steward', 'admin'] as const;
+export const ROLES = ['user', 'expert', 'moderator', 'steward', 'admin'] as const;
 export type Role = (typeof ROLES)[number];
 
 export const ACTIONS = [
@@ -20,9 +20,21 @@ export const ACTIONS = [
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 
-/** The authoritative role → capability grants.  Reviewed by a policy-matrix test. */
+/**
+ * The authoritative role → capability grants.  Reviewed by a policy-matrix test.
+ *
+ * `expert` is a LEAST-PRIVILEGE content role: at the platform-RBAC layer it holds
+ * exactly the `user` grants and NONE of the moderation/audit/admin actions. Its
+ * one distinct capability — posting top-level in expert-gated
+ * (`experts_and_stewards`) rooms — is a FORUM authorization decided in
+ * `userMayPostTopLevel` (apps/api/src/forum/rooms.ts), exactly where steward
+ * room-posting is already decided; it is deliberately not a platform action, so
+ * the expert role can never reach moderation, governance, audit, or role
+ * assignment.
+ */
 export const POLICY: Readonly<Record<Role, readonly Action[]>> = {
   user: ['self.manage'],
+  expert: ['self.manage'],
   moderator: ['self.manage', 'moderation.act'],
   steward: ['self.manage', 'moderation.act', 'steward.audit.read'],
   admin: ['self.manage', 'moderation.act', 'steward.audit.read', 'admin.role.assign'],

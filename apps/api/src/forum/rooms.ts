@@ -253,10 +253,11 @@ export async function roomContentVisibleToUser(
 /**
  * WS-Q.3.1b — the single chokepoint for "may create top-level content here":
  * the user passes the content bar AND (the room admits all members OR the user
- * holds a steward role / is an expert-lens assignee). Consumed by the
- * submission guard (WS-Q.2.1b) and the composer's postable-room filter
- * (WS-Q.5.1a). (Per-user expert-lens assignment is the WS-J seam; today the
- * `experts_and_stewards` bar is satisfied by room or platform stewards.)
+ * is a room/platform steward OR the user holds the platform `expert` role).
+ * Consumed by the submission guard (WS-Q.2.1b) and the composer's postable-room
+ * filter (WS-Q.5.1a). The `experts_and_stewards` bar is satisfied by room or
+ * platform stewards and by platform experts; finer per-user expert-lens
+ * assignment remains the WS-J seam.
  */
 export async function userMayPostTopLevel(
   forum: ForumServices,
@@ -267,7 +268,10 @@ export async function userMayPostTopLevel(
   if (!(await roomContentVisibleToUser(forum, room, userId))) return false;
   if (room.postingPolicy === 'all_members') return true;
   if (userId === null) return false;
-  return isRoomSteward(forum, room.roomId, userId, platformRoles);
+  // experts_and_stewards: room/platform stewards, or a platform expert.
+  return (
+    platformRoles.includes('expert') || isRoomSteward(forum, room.roomId, userId, platformRoles)
+  );
 }
 
 /**
