@@ -80,13 +80,13 @@ export function AuthorVisibilityControl({
           <Link
             to="/stories/$storyId"
             params={{ storyId: collisionStoryId }}
-            className="text-link underline-offset-2 hover:underline"
+            className="text-primary-on-soft underline-offset-2 hover:underline"
           >
             {t('storyVisibility.collisionLink', 'view it')}
           </Link>
         </p>
       ) : null}
-      {message !== null ? <p className="text-danger text-sm">{message}</p> : null}
+      {message !== null ? <p className="text-error-on-soft text-sm">{message}</p> : null}
     </div>
   );
 }

@@ -41,11 +41,16 @@ const sizeClasses: Record<ButtonSize, string> = {
   lg: 'text-lg',
 };
 
+// Every variant carries an opaque fill (or, for ghost, a transparent fill) AND a
+// solid border, so each button is a clearly-bounded control on the woven canvas
+// and stays defined when the neumorphic shadow flattens under forced-colors. The
+// filled variants border in a slightly darker shade of their own hue (a crisp
+// edge, not a heavy outline); ghost is an outline button that fills on hover.
 const variantFill: Record<ButtonVariant, string> = {
-  primary: 'bg-primary text-primary-fg',
+  primary: 'border border-primary-active bg-primary text-primary-fg',
   secondary: 'border border-line-strong bg-surface text-ink',
-  ghost: 'bg-transparent text-ink',
-  destructive: 'bg-error text-error-fg',
+  ghost: 'border border-line-strong bg-transparent text-ink',
+  destructive: 'border border-error-hover bg-error text-error-fg',
 };
 
 const variantInteraction: Record<ButtonVariant, string> = {
@@ -55,10 +60,10 @@ const variantInteraction: Record<ButtonVariant, string> = {
   destructive: 'hover:bg-error-hover active:bg-error-hover',
 };
 
-// Neumorphic lighting (WS-B fabric theme): surfaced variants extrude from the
-// fabric and depress on press. Ghost has no surface, so it stays flat (a soft
-// shadow with no fill reads as a stray glow). Flattens under high-contrast /
-// forced-colors via the token layer.
+// Neumorphic lighting (WS-B fabric theme): filled variants extrude from the
+// fabric and depress on press. Ghost has no fill, so it stays flat (a soft shadow
+// with no fill reads as a stray glow) — its border alone defines it. Flattens
+// under high-contrast / forced-colors via the token layer.
 const variantNeu: Record<ButtonVariant, string> = {
   primary: 'neu-raised-sm active:neu-pressed-sm',
   secondary: 'neu-raised-sm active:neu-pressed-sm',
