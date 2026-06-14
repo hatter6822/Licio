@@ -57,7 +57,13 @@ validation of all six §14.1 types):
    the non-reversible account ref (10/h, 50/d defaults; 429 + Retry-After)
 2. URL normalization (link stories; typed 400s)
 3. pre-checks: account age (default 60 min), repeated-identical-title spam
-   pattern, locally-maintained malware/phishing domain denylist (403)
+   pattern, locally-maintained malware/phishing domain denylist (403). The
+   account-age gate has a fail-closed DEV/TEST escape hatch
+   (`skipAccountAgeGate`, set at boot from a `development`/`test` `NODE_ENV`
+   allowlist — never production/staging/unset) so a freshly created local
+   account can post immediately; it is the ingestion-side parallel of the
+   `POST /v1/auth/dev/verify` verification shortcut, and it relaxes ONLY the
+   account-age gate (the spam-title and URL-safety checks still apply)
 4. evidence-card claim-reference existence (400)
 5. exact-URL duplicate via the partial unique index (409 + existing story id;
    the create path's unique-violation handler closes the concurrent race)
