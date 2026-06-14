@@ -334,5 +334,63 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           return c.json({ status: 'sent' as const });
         },
       )
+
+      // --- DEVELOPMENT ONLY: become verified (NEVER in production) -----------
+      // A freshly EMAIL-registered account is active but UNVERIFIED (reduced
+      // capability, WS-D.1.6a): verified-only surfaces such as GET
+      // /v1/privacy/settings answer 403 until the email is confirmed. In local
+      // development the one-time code is only surfaced to the SERVER log, so
+      // there is no in-browser way to clear that state and exercise the verified
+      // capabilities. This dev-only shortcut flips the account to verified
+      // WITHOUT the code, mirroring /email/verify (marks the email factor
+      // verified, audits, rotates the session id on the privilege change).
+      //
+      // FAIL-CLOSED: the gate runs BEFORE auth and ALLOWLISTS only an explicit
+      // development/test NODE_ENV. Production, a staging/preview environment, or an
+      // UNSET NODE_ENV all read 404, so the route is indistinguishable from "not
+      // found" on any deployed environment and can never be a verification bypass
+      // (an allowlist, not merely "deny production"). The calling control is ALSO
+      // gated to `import.meta.env.DEV` in the client (defense in depth).
+      .post(
+        '/dev/verify',
+        async (c, next) => {
+          const nodeEnv = process.env['NODE_ENV'];
+          if (nodeEnv !== 'development' && nodeEnv !== 'test') {
+            return c.json(err('not_found', 'Not found.'), 404);
+          }
+          await next();
+          return;
+        },
+        authMiddleware(resolve),
+        async (c) => {
+          const services = resolve();
+          const auth = c.get('auth');
+          if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
+          const user = await services.store.getUser(auth.userId);
+          if (!user) return c.json(err('unauthenticated', 'Authentication required'), 401);
+          // Only an email factor becomes verified this way; a passkey/wallet
+          // account already holds a verified credential, so this is a no-op for it.
+          if (user.email && !(await services.store.getAuth(auth.userId))?.emailVerified) {
+            await services.store.setAuth(auth.userId, {
+              emailVerified: true,
+              emailVerifiedAt: new Date().toISOString(),
+            });
+            await services.audit.append({
+              actorUserId: auth.userId,
+              eventType: 'auth_method_add',
+              context: { auth_method: 'email_otp', reason: 'dev_verify' },
+            });
+            // Privilege change ⇒ rotate the session id (mirrors /email/verify).
+            const token = readSessionToken(c.req.header('cookie'));
+            const rotated = token ? await rotateSession(services.sessions, token) : null;
+            if (rotated) {
+              c.header('Set-Cookie', buildSessionCookie(rotated.token, rotated.maxAgeSec), {
+                append: true,
+              });
+            }
+          }
+          return c.json({ status: 'verified' as const });
+        },
+      )
   );
 }

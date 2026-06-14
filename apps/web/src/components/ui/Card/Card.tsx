@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { MouseEvent, ReactNode } from 'react';
 import { cn } from '../../../lib/cn.js';
+import { raisedInteractive, raisedSurface } from '../../../lib/surfaces.js';
 
 export type CardElement = 'article' | 'section' | 'div';
 
@@ -18,20 +19,18 @@ export interface CardProps {
   children: ReactNode;
 }
 
-// Cards are extruded from the fabric canvas with a soft neumorphic shadow and
-// carry a faint diagonal-twill weave (WS-B fabric theme), so each reads as a
-// cushion of cloth lifted off the woven canvas; the hairline border keeps a
-// crisp edge (and the only visible boundary under forced-colors, where the
-// shadow and weave both flatten). `p-4` is the default content inset (matching
-// the rest of the card surfaces, e.g. StoryCard `p-4`) so children never sit
-// flush against the edge.
-const base = 'block rounded-lg border border-line bg-canvas fabric-card neu-raised p-4';
+// Cards are extruded from the canvas with a soft neumorphic shadow (WS-B fabric
+// theme), so each reads as a surface lifted off the page; the hairline border
+// keeps a crisp edge (and the only visible boundary under forced-colors, where
+// the shadow flattens). `p-4` is the default content inset (matching the rest of
+// the card surfaces, e.g. StoryCard `p-4`) so children never sit flush against
+// the edge.
+const base = cn('block p-4', raisedSurface);
 
 // Interactive surfaces depress into the surface on press and carry the system
-// focus ring. The focus ring matches the other primitives (Button/Input) for
-// consistency; the shadow transition is reduced-motion-aware via the token layer.
-const interactiveClasses =
-  'text-start transition-shadow active:neu-pressed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
+// focus ring (the shared `raisedInteractive` treatment, reused by the profile /
+// rooms list rows so every tappable surface reads the same and never ghosts).
+const interactiveClasses = cn('text-start', raisedInteractive);
 
 /**
  * Semantic container (WS-B.1.4). Renders the chosen element (`article` by

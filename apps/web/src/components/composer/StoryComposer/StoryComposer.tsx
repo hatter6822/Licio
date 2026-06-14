@@ -22,6 +22,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { ApiClientError, createStory, uploadMedia } from '../../../lib/api.js';
 import { mintObjectUrl, sanitizeBlobUrl } from '../../../lib/blob-url.js';
+import { fileInputClasses } from '../../../lib/controls.js';
 import { useRoomsQuery } from '../../../lib/queries.js';
 import {
   type DraftStoryRecord,
@@ -578,7 +579,7 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
             type="file"
             accept={acceptTypes}
             onChange={(e) => onPickFile(e.target.files?.[0] ?? null)}
-            className="text-sm text-ink"
+            className={fileInputClasses}
             {...(errors['file'] ? { 'aria-invalid': true } : {})}
           />
           {/* WS-Q.5.2a — client-side image preview before upload. The src is
@@ -628,7 +629,7 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
               type="file"
               accept="text/vtt,.vtt"
               onChange={(e) => setCaptionsFile(e.target.files?.[0] ?? null)}
-              className="text-sm text-ink"
+              className={fileInputClasses}
             />
           </div>
           <div className="flex flex-col gap-1">
@@ -640,7 +641,7 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
               type="file"
               accept={UPLOAD_IMAGE_TYPES.join(',')}
               onChange={(e) => setPosterFile(e.target.files?.[0] ?? null)}
-              className="text-sm text-ink"
+              className={fileInputClasses}
             />
           </div>
         </>

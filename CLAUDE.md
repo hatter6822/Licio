@@ -422,8 +422,8 @@ licio/
 │   │       │   └── -pages/              --   internal page components
 │   │       ├── design-system/           -- design-token SSOT
 │   │       │   ├── tokens.ts            --   color tokens (neumorphic fabric
-│   │       │   │                              surfaces), neu soft-UI shadows +
-│   │       │   │                              fabric-thread texture, light/dark
+│   │       │   │                              surfaces), neu soft-UI shadows,
+│   │       │   │                              light/dark
 │   │       │   ├── css.ts               --   CSS utility generation
 │   │       │   └── contrast.ts          --   WCAG contrast validation
 │   │       ├── i18n/                    -- internationalization
@@ -851,10 +851,12 @@ foreground agent has already modified the same files.
   canvas is intentionally **not** pure white/black (a white neumorphic
   highlight is invisible on white).  Apply soft-UI depth with the
   `neu-raised`/`neu-pressed`/`neu-inset` utilities (theme-aware
-  `--licio-shadow-*` tokens), never ad-hoc `box-shadow`; the fabric texture
-  and brand logo (`BrandLogo`, `public/assets/`) are theme-adaptive.  The
-  lighting is decorative: keep solid borders + focus rings, and never relax
-  the token contrast ratios verified in `tokens.test.ts`.
+  `--licio-shadow-*` tokens), never ad-hoc `box-shadow`; the brand logo
+  (`BrandLogo`, `public/assets/`) is theme-adaptive.  The decorative woven
+  background texture was removed pending a redesign of the background theme —
+  the canvas is currently a solid theme-aware surface colour.  The lighting is
+  decorative: keep solid borders + focus rings, and never relax the token
+  contrast ratios verified in `tokens.test.ts`.
 
 - **No secrets in client bundle.**  Only `VITE_`-prefixed env vars
   reach the client.  No wallet seed phrases or private keys in logs

@@ -129,17 +129,16 @@ canvas**, driven entirely from the token SSOT (no images, no runtime JS):
   (`styles/app.css`): `neu-raised`/`-sm` extrude (cards, buttons, the Switch
   knob), `neu-pressed`/`-sm` recess on press (`active:neu-pressed-sm`, the active
   nav tab), and `neu-inset` carves form wells (Input/TextArea/Switch track).
-- **Fabric texture — organic woven linen (pure CSS).** A single theme-aware
-  weave (`--licio-fabric-weave`, built from `--licio-fabric-thread` / `-sheen`)
-  over the canvas on `body` and the `fabric-surface` utility — no images, so
-  there is no resident raster to pay for. To read as hand-woven cloth rather than
-  mechanical graph-paper it layers **three broad diagonal "slub" clouds**
-  (different angles, coprime periods 47/61/73px) for low-frequency, non-
-  directional unevenness, over **warp/weft threads at coprime periods** (5/8px
-  and 7/11px) with a slight per-pass angle drift. Because every period is
-  coprime, the visual repeat is large. Raised panels add a richer diagonal-twill
-  `fabric-card`. Every layer is faint enough never to affect text legibility and
-  flattens to nothing under `prefers-contrast: more` / `forced-colors: active`.
+- **Background texture — removed (pending redesign).** The canvas is currently a
+  solid theme-aware surface colour (`bg-default`); the decorative woven-fabric
+  background texture (the former `--licio-fabric-weave` / `fabric-surface` /
+  `fabric-card` recipe and its `--licio-fabric-thread` / `-sheen` tints) was
+  stripped out so the background theme can be reworked from a clean slate. The
+  neumorphic soft-UI depth and the theme-adaptive brand logo are unaffected. When
+  a new background is introduced, apply it on `body { background-image }` (and a
+  shared utility) so the whole canvas adapts from one source, and keep it faint
+  enough never to affect text legibility and flattened under
+  `prefers-contrast: more` / `forced-colors: active`.
 - **`color-scheme`** is set per mode so native controls, scrollbars, and form
   widgets match the surface.
 - **Accessibility is preserved.** The soft lighting is *decorative*: every

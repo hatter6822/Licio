@@ -26,6 +26,7 @@ import {
   addEmail,
   addPasskey,
   confirmTotp,
+  devVerifyAccount,
   disableEmail,
   disableTotp,
   enrollTotp,
@@ -38,12 +39,14 @@ import {
   StepUpRequiredError,
   verifyEmail,
 } from '../../lib/auth-api.js';
+import { cn } from '../../lib/cn.js';
 import {
   useAuthCredentialsQuery,
   useAuthSessionsQuery,
   useSecurityActivityQuery,
 } from '../../lib/queries.js';
 import { queryKeys } from '../../lib/query-keys.js';
+import { raisedSurface } from '../../lib/surfaces.js';
 import { isWebAuthnAvailable } from '../../lib/webauthn.js';
 import { usePageFocus } from './usePageFocus.js';
 
@@ -117,11 +120,11 @@ function SessionsSection(): React.ReactElement {
   return (
     <Section title={t('security.sessions', 'Active sessions')}>
       {sessions.data ? (
-        <ul className="flex flex-col gap-3">
+        <ul className="flex flex-col gap-4">
           {sessions.data.map((session) => (
             <li
               key={session.session_ref}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line p-3"
+              className={cn('flex flex-wrap items-center justify-between gap-2 p-3', raisedSurface)}
             >
               <div className="flex flex-col gap-1">
                 <span className="flex items-center gap-2 text-sm text-ink">
@@ -201,11 +204,11 @@ function PasskeysSection({ gate }: { gate: StepUpGate }): React.ReactElement {
   return (
     <Section title={t('security.passkeys', 'Passkeys')}>
       {credentials.data && credentials.data.passkeys.length > 0 ? (
-        <ul className="flex flex-col gap-3">
+        <ul className="flex flex-col gap-4">
           {credentials.data.passkeys.map((passkey) => (
             <li
               key={passkey.credential_id}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line p-3"
+              className={cn('flex flex-wrap items-center justify-between gap-2 p-3', raisedSurface)}
             >
               <div className="flex flex-col gap-1">
                 <span className="text-sm text-ink">
@@ -363,6 +366,22 @@ function EmailSection({ gate }: { gate: StepUpGate }): React.ReactElement {
           >
             {t('security.email.resend', 'Resend code')}
           </Button>
+          {/* DEVELOPMENT ONLY: the OTP is only logged to the server in dev, so
+              this shortcut flips the account to verified (no code) to make the
+              verified-only capabilities testable. Tree-shaken out of production
+              builds (import.meta.env.DEV) AND fail-closed on the server (404). */}
+          {import.meta.env.DEV ? (
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => {
+                setError(null);
+                devVerifyAccount().then(refresh, fail);
+              }}
+            >
+              {t('security.email.devVerify', 'Verify now (dev)')}
+            </Button>
+          ) : null}
         </form>
       ) : null}
 
@@ -467,11 +486,11 @@ function WalletsSection({ gate }: { gate: StepUpGate }): React.ReactElement | nu
 
   return (
     <Section title={t('security.wallets', 'Linked wallets')}>
-      <ul className="flex flex-col gap-3">
+      <ul className="flex flex-col gap-4">
         {wallets.map((wallet) => (
           <li
             key={wallet.credential_id}
-            className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line p-3"
+            className={cn('flex flex-wrap items-center justify-between gap-2 p-3', raisedSurface)}
           >
             <div className="flex flex-col gap-1">
               <span className="font-mono text-sm text-ink">{wallet.address_truncated}</span>

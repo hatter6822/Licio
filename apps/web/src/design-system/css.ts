@@ -12,8 +12,6 @@ import {
   type ColorToken,
   darkColors,
   darkHighContrast,
-  fabricSheen,
-  fabricThread,
   fontFamilies,
   fontWeights,
   lightColors,
@@ -113,17 +111,15 @@ function scaleVars(indent: string): string {
     lines.push(`${indent}--licio-shadow-${key}: ${value};`);
   }
 
-  // Neumorphic soft-UI shadows + fabric texture (WS-B fabric theme). The two
-  // source colours are light-mode values here and overridden in each dark block
-  // (see darkSurfaceVars); the composed shadows reference them so they flip with
-  // the colour mode automatically. `color-scheme` keeps native controls,
-  // scrollbars, and form widgets matched to the surface.
-  lines.push(`${indent}/* Neumorphic soft-UI + fabric texture (WS-B fabric theme) */`);
+  // Neumorphic soft-UI shadows (WS-B fabric theme). The two source colours are
+  // light-mode values here and overridden in each dark block (see
+  // darkSurfaceVars); the composed shadows reference them so they flip with the
+  // colour mode automatically. `color-scheme` keeps native controls, scrollbars,
+  // and form widgets matched to the surface.
+  lines.push(`${indent}/* Neumorphic soft-UI shadows (WS-B fabric theme) */`);
   lines.push(`${indent}color-scheme: light;`);
   lines.push(`${indent}--licio-neu-highlight: ${neumorphicInk.light.highlight};`);
   lines.push(`${indent}--licio-neu-shadow: ${neumorphicInk.light.shadow};`);
-  lines.push(`${indent}--licio-fabric-thread: ${fabricThread.light};`);
-  lines.push(`${indent}--licio-fabric-sheen: ${fabricSheen.light};`);
   for (const [key, value] of Object.entries(neumorphicShadows)) {
     lines.push(`${indent}--licio-shadow-${key}: ${value};`);
   }
@@ -160,16 +156,14 @@ function reducedMotionVars(indent: string): string {
 
 /**
  * Dark-mode, non-colour surface extras: flip `color-scheme` and the theme-aware
- * neumorphic / fabric source colours so the composed `--licio-shadow-*` neu
- * tokens and the fabric texture adapt without redefining their geometry.
+ * neumorphic source colours so the composed `--licio-shadow-*` neu tokens adapt
+ * without redefining their geometry.
  */
 function darkSurfaceVars(indent: string): string {
   return [
     `${indent}color-scheme: dark;`,
     `${indent}--licio-neu-highlight: ${neumorphicInk.dark.highlight};`,
     `${indent}--licio-neu-shadow: ${neumorphicInk.dark.shadow};`,
-    `${indent}--licio-fabric-thread: ${fabricThread.dark};`,
-    `${indent}--licio-fabric-sheen: ${fabricSheen.dark};`,
   ].join('\n');
 }
 

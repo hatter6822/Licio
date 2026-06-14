@@ -3,9 +3,12 @@
 // Feed-mode switcher (WS-B.2.9). Lets the reader choose how the feed is ordered
 // without any popularity/applause signal. Built on the `Select` primitive: the
 // current mode is shown on the trigger and the chosen option carries
-// aria-selected, so no separate live region is needed. Presentation only — the
-// controlled `value`/`onValueChange` are owned by the caller; persistence is
-// WS-C.
+// aria-selected, so no separate live region is needed. The "Feed order" field
+// label is VISUALLY HIDDEN (`hideLabel`) — the trigger already names the control
+// for sighted users, keeping the surface (front-page header / settings) clean —
+// but it stays in the DOM as the select's accessible name for assistive tech.
+// Presentation only — the controlled `value`/`onValueChange` are owned by the
+// caller; persistence is WS-C.
 import { useT } from '../../../i18n/index.js';
 import { Select, type SelectOption } from '../../ui/Select/index.js';
 
@@ -60,6 +63,7 @@ export function FeedModeSwitcher({
     <Select
       {...(id !== undefined ? { id } : {})}
       label={t('feed.mode.label', 'Feed order')}
+      hideLabel
       value={value}
       onValueChange={(next) => onValueChange(next as FeedMode)}
       options={options}
