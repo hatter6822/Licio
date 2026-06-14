@@ -7,6 +7,7 @@
 // argue it does not measure what it claims. A failure here means an invariant is
 // mathematically sound but does not do its job.
 import { describe, expect, it } from 'vitest';
+import { braidWordFromSnapshots, detectGaming } from '../braid/index.js';
 import {
   type AttributePermutation,
   counterfactualInvarianceDefect,
@@ -19,11 +20,15 @@ import {
   type GweiItemFeatures,
   type MetricMeasureSpace,
 } from '../gwei/index.js';
+import { assessTension, buildConversationComplex, helmholtzDecompose } from '../hodge/index.js';
 import type { Matrix } from '../math/linalg.js';
 import { computeMeri, type MeriCandidateInput } from '../meri/index.js';
 import { type AxisDef, buildSparseTable, fiberTest, fiberTestMulti } from '../mfci/index.js';
+import { classifySessionHealth, type SessionPathEvent } from '../pathsig/index.js';
 import { detectNarrowLoop, holonomy, phiScore } from '../phi/index.js';
+import { reebGraph } from '../reeb/index.js';
 import { contextStateForScore, type SheafStructure, scoiEnergy } from '../scoi/index.js';
+import { buildTimingMatrix, detectSynchronizedCascade } from '../tropical/index.js';
 
 // ---------------------------------------------------------------------------
 // MERI — "nonredundant exposure, not raw count" (SPEC §7.1)
@@ -375,5 +380,228 @@ describe('CID fulfils its purpose for any protected attribute, not just one (§1
       group,
     );
     expect(biased.cid).toBeCloseTo(0.5, 12);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hodge — "healthy disagreement vs locked HOSTILE conflict" (SPEC §12.1)
+//
+// Structural disagreement alone is never penalised; only harmonic tension that
+// coincides with a hostility signal is harmful.
+// ---------------------------------------------------------------------------
+
+describe('Hodge fulfils its purpose: only hostile locked conflict is penalised (§12.1)', () => {
+  it('maximal STRUCTURAL disagreement with zero hostility never routes to moderators', () => {
+    // A triangle-free 4-cycle of pure disagreement: structurally locked (it
+    // cannot be resolved by any single synthesis) — maximal harmonic tension.
+    const complex = buildConversationComplex([
+      { from: 'a', to: 'b', kind: 'disagreement', weight: 1 },
+      { from: 'b', to: 'c', kind: 'disagreement', weight: 1 },
+      { from: 'c', to: 'd', kind: 'disagreement', weight: 1 },
+      { from: 'd', to: 'a', kind: 'disagreement', weight: 1 },
+    ]);
+    const decomp = helmholtzDecompose(complex);
+    expect(decomp.harmonicFraction).toBeGreaterThan(0.9); // genuinely locked
+    // With NO hostility signal, the harmful-tension risk is EXACTLY zero — a
+    // heated-but-civil disagreement is never sanctioned.
+    const civil = assessTension({
+      harmonicFraction: decomp.harmonicFraction,
+      curlFraction: 0,
+      hostilitySignal: 0,
+    });
+    expect(civil.harmfulTensionRisk).toBe(0);
+    expect(civil.routeToModerators).toBe(false);
+    expect(civil.label).toBe('high_disagreement_low_hostility');
+    // The SAME structure WITH hostility is what gets routed for review.
+    const hostile = assessTension({
+      harmonicFraction: decomp.harmonicFraction,
+      curlFraction: 0,
+      hostilitySignal: 0.8,
+    });
+    expect(hostile.harmfulTensionRisk).toBeGreaterThan(0);
+    expect(hostile.routeToModerators).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tropical — "coordinated cascade timing vs organic spread" (SPEC §12.2)
+// ---------------------------------------------------------------------------
+
+describe('Tropical fulfils its purpose: synchronized link-drops are caught, organic spread is not (§12.2)', () => {
+  it('independent seeds delivering to the same nodes at the same instant are flagged', () => {
+    const synchronized = buildTimingMatrix(
+      ['s1', 's2', 's3'].flatMap((seedId) =>
+        ['n1', 'n2', 'n3', 'n4'].map((nodeId) => ({ seedId, nodeId, arrivalMs: 1000 })),
+      ),
+    );
+    const hot = detectSynchronizedCascade(synchronized);
+    expect(hot.detected).toBe(true);
+    expect(hot.coordinatedDropNodes.length).toBe(4);
+
+    const organic = buildTimingMatrix(
+      ['s1', 's2', 's3'].flatMap((seedId, s) =>
+        ['n1', 'n2', 'n3', 'n4'].map((nodeId, n) => ({
+          seedId,
+          nodeId,
+          arrivalMs: 1000 + s * 900_000 + n * 350_000 + s * n * 120_000,
+        })),
+      ),
+    );
+    expect(detectSynchronizedCascade(organic).detected).toBe(false);
+  });
+
+  it('adversarial: it does not cry wolf on a single sharer (insufficient independence)', () => {
+    // One or two seeds is not enough independent evidence to call coordination.
+    const lone = buildTimingMatrix([
+      { seedId: 's1', nodeId: 'n1', arrivalMs: 1000 },
+      { seedId: 's2', nodeId: 'n1', arrivalMs: 1001 },
+    ]);
+    expect(detectSynchronizedCascade(lone).detected).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Braid — "manufactured agenda churn / threshold gaming" (SPEC §12.3)
+// ---------------------------------------------------------------------------
+
+describe('Braid fulfils its purpose: gaming the visibility threshold is caught (§12.3)', () => {
+  it('repeated oscillation ACROSS the visibility boundary is flagged; a stable agenda is not', () => {
+    const oscillating = Array.from({ length: 12 }, (_, i) => ({
+      atMs: i,
+      topicIdsByRank: i % 2 === 0 ? ['a', 'b', 'c', 'd'] : ['a', 'c', 'b', 'd'],
+    }));
+    const gaming = detectGaming(oscillating, 2, {
+      organicCrossingRate: 0.1,
+      churnFactor: 3,
+      boundaryCrossThreshold: 4,
+    });
+    expect(gaming.manufacturedChurn).toBe(true);
+    expect(gaming.thresholdGamingTopics.map((t) => t.topicId).sort()).toEqual(['b', 'c']);
+
+    const stable = braidWordFromSnapshots([
+      { atMs: 0, topicIdsByRank: ['a', 'b', 'c', 'd'] },
+      { atMs: 1, topicIdsByRank: ['a', 'b', 'c', 'd'] },
+    ]);
+    expect(stable.crossingNumber).toBe(0);
+  });
+
+  it('the SAME oscillation away from the visibility boundary is not threshold-gaming', () => {
+    // b/c swap repeatedly, but at ranks 1/2 the boundary is at rank 3 — the
+    // churn never crosses the cutoff that controls visibility.
+    const oscillating = Array.from({ length: 12 }, (_, i) => ({
+      atMs: i,
+      topicIdsByRank: i % 2 === 0 ? ['b', 'c', 'a', 'd'] : ['c', 'b', 'a', 'd'],
+    }));
+    const result = detectGaming(oscillating, 3, {
+      organicCrossingRate: 0.1,
+      churnFactor: 3,
+      boundaryCrossThreshold: 4,
+    });
+    expect(result.thresholdGamingTopics).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reeb — "narrative basins and fragile bridges" (SPEC §12.4)
+// ---------------------------------------------------------------------------
+
+describe('Reeb fulfils its purpose: it finds the fragile bridge between two basins (§12.4)', () => {
+  it('two attention basins joined by a fragile saddle yield a bridge prompt; consensus yields none', () => {
+    const bimodal = reebGraph(
+      [
+        { id: 'p1', value: 10 },
+        { id: 'v', value: 2 },
+        { id: 'p2', value: 9 },
+      ],
+      [
+        { a: 'p1', b: 'v' },
+        { a: 'v', b: 'p2' },
+      ],
+    );
+    expect(bimodal.peaks.map((p) => p.basin).sort()).toEqual(['p1', 'p2']);
+    expect(bimodal.merges[0]?.fragile).toBe(true);
+    expect(bimodal.bridgePrompts.length).toBe(1);
+
+    const consensus = reebGraph(
+      [
+        { id: 'p', value: 10 },
+        { id: 'q', value: 6 },
+      ],
+      [{ a: 'p', b: 'q' }],
+    );
+    expect(consensus.peaks.length).toBe(1);
+    expect(consensus.bridgePrompts).toEqual([]);
+  });
+
+  it('a robustly connected merge is NOT fragile — no spurious bridge prompt', () => {
+    const robust = reebGraph(
+      [
+        { id: 'p1', value: 10 },
+        { id: 'p2', value: 9 },
+        { id: 'v1', value: 4 },
+        { id: 'v2', value: 4 },
+        { id: 'v3', value: 4 },
+      ],
+      [
+        { a: 'p1', b: 'v1' },
+        { a: 'p1', b: 'v2' },
+        { a: 'p1', b: 'v3' },
+        { a: 'v1', b: 'p2' },
+        { a: 'v2', b: 'p2' },
+        { a: 'v3', b: 'p2' },
+      ],
+      { fragileEdgeThreshold: 1 },
+    );
+    expect(robust.merges[0]?.fragile).toBe(false);
+    expect(robust.bridgePrompts).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path signature — "session shape, not session content" (SPEC §12.6)
+// ---------------------------------------------------------------------------
+
+describe('Path signature fulfils its purpose: it reads session SHAPE without content (§12.6)', () => {
+  const ev = (
+    kind: SessionPathEvent['kind'],
+    atMs: number,
+    engagement = 0.5,
+  ): SessionPathEvent => ({
+    kind,
+    topicOrdinal: 0,
+    atMs,
+    engagement,
+  });
+
+  it('the SAME actions ordered constructively vs compulsively classify differently', () => {
+    // read → open the source → ask a question: a constructive arc.
+    const constructive = [
+      ev('read', 0),
+      ev('open_source', 120_000, 0.8),
+      ev('question', 300_000, 0.9),
+    ];
+    expect(classifySessionHealth(constructive).classification).toBe('constructive');
+    // The compulsive arc: read then rapid, shallow re-returns to the same topic.
+    const compulsive = [
+      ev('read', 0, 0.4),
+      ev('return', 20_000, 0.3),
+      ev('return', 45_000, 0.3),
+      ev('return', 70_000, 0.2),
+    ];
+    expect(classifySessionHealth(compulsive).classification).toBe('compulsive');
+  });
+
+  it('a rage arc is flagged, and the event shape carries NO content (privacy)', () => {
+    const rage = [
+      ev('read', 0),
+      ev('reply', 10_000, 0.6),
+      ev('reply', 20_000, 0.7),
+      ev('reply', 30_000, 0.8),
+    ];
+    expect(classifySessionHealth(rage).classification).toBe('rage');
+    // The classifier input is a closed enum + ordinal + timing + engagement —
+    // no story id, no text, no other user. Privacy is structural.
+    const event = ev('read', 0);
+    expect(Object.keys(event).sort()).toEqual(['atMs', 'engagement', 'kind', 'topicOrdinal']);
   });
 });
