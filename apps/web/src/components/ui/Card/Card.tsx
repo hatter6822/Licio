@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { MouseEvent, ReactNode } from 'react';
 import { cn } from '../../../lib/cn.js';
+import { raisedInteractive, raisedSurface } from '../../../lib/surfaces.js';
 
 export type CardElement = 'article' | 'section' | 'div';
 
@@ -24,13 +25,12 @@ export interface CardProps {
 // the shadow flattens). `p-4` is the default content inset (matching the rest of
 // the card surfaces, e.g. StoryCard `p-4`) so children never sit flush against
 // the edge.
-const base = 'block rounded-lg border border-line bg-canvas neu-raised p-4';
+const base = cn('block p-4', raisedSurface);
 
 // Interactive surfaces depress into the surface on press and carry the system
-// focus ring. The focus ring matches the other primitives (Button/Input) for
-// consistency; the shadow transition is reduced-motion-aware via the token layer.
-const interactiveClasses =
-  'text-start transition-shadow active:neu-pressed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
+// focus ring (the shared `raisedInteractive` treatment, reused by the profile /
+// rooms list rows so every tappable surface reads the same and never ghosts).
+const interactiveClasses = cn('text-start', raisedInteractive);
 
 /**
  * Semantic container (WS-B.1.4). Renders the chosen element (`article` by

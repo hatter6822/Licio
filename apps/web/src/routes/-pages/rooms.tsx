@@ -11,6 +11,7 @@ import { RoomCreateForm } from '../../components/rooms/RoomCreateForm/index.js';
 import { RoomSettingsForm } from '../../components/rooms/RoomSettingsForm/index.js';
 import { StoryFeedLink } from '../../components/story/StoryFeedLink/index.js';
 import { Button } from '../../components/ui/Button/index.js';
+import { Icon } from '../../components/ui/Icon/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { RestrictedState } from '../../components/ui/RestrictedState/index.js';
 import { useT } from '../../i18n/index.js';
@@ -21,6 +22,7 @@ import {
   useRoomQuery,
   useRoomsQuery,
 } from '../../lib/queries.js';
+import { raisedInteractive, raisedSurface } from '../../lib/surfaces.js';
 import { track } from '../../lib/telemetry.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import {
@@ -71,22 +73,29 @@ export function RoomsPage(): React.ReactElement {
               />
             </div>
           ) : null}
-          <ul className="flex flex-col gap-2">
+          <ul className="flex flex-col gap-4">
             {data.items.map((room) => (
               <li key={room.room_id}>
                 <Link
                   to="/rooms/$roomId"
                   params={{ roomId: room.room_id }}
-                  className="flex items-center justify-between gap-2 rounded-lg border border-line p-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                  className={cn(
+                    'flex items-center justify-between gap-3 p-4',
+                    raisedSurface,
+                    raisedInteractive,
+                  )}
                 >
                   <span className="font-medium text-ink">{room.name}</span>
-                  {/* Private rooms are discoverable at tier one (existence is
-                    universal); counts are public-only (no oracle). */}
-                  {room.visibility === 'private' ? (
-                    <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 font-medium text-ink-muted text-xs">
-                      {t('room.badge.private', 'Private room')}
-                    </span>
-                  ) : null}
+                  <span className="flex items-center gap-2 text-ink-muted">
+                    {/* Private rooms are discoverable at tier one (existence is
+                      universal); counts are public-only (no oracle). */}
+                    {room.visibility === 'private' ? (
+                      <span className="inline-flex items-center rounded-full bg-surface-strong px-2 py-0.5 font-medium text-ink-muted text-xs">
+                        {t('room.badge.private', 'Private room')}
+                      </span>
+                    ) : null}
+                    <Icon name="chevron-right" className="size-5" />
+                  </span>
                 </Link>
               </li>
             ))}

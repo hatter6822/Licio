@@ -16,6 +16,7 @@ import {
   type SignalLedgerItem,
 } from '../../components/profile/SignalLedger/index.js';
 import { Button } from '../../components/ui/Button/index.js';
+import { Icon } from '../../components/ui/Icon/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { RadioGroup } from '../../components/ui/RadioGroup/index.js';
 import { RestrictedState } from '../../components/ui/RestrictedState/index.js';
@@ -26,6 +27,7 @@ import { NotificationBudget } from '../../components/wellbeing/NotificationBudge
 import { QuietHoursSetting } from '../../components/wellbeing/QuietHoursSetting/index.js';
 import { useT } from '../../i18n/index.js';
 import { revokeCurrentSession } from '../../lib/auth-api.js';
+import { cn } from '../../lib/cn.js';
 import {
   useNotificationBudgetQuery,
   useNotificationPreferencesQuery,
@@ -38,6 +40,7 @@ import {
   useUpdateNotificationPreferencesMutation,
   useUpdateSettingsMutation,
 } from '../../lib/queries.js';
+import { raisedInteractive, raisedSurface } from '../../lib/surfaces.js';
 import { track } from '../../lib/telemetry.js';
 import { hhmmToMinutes, minutesToHHMM } from '../../lib/time.js';
 import { clearQuietTopics } from '../../offline/notification-meter.js';
@@ -139,14 +142,19 @@ export function ProfilePage(): React.ReactElement {
       <PageHeader title={t('nav.profile', 'Profile')} />
       <div className="mx-auto w-full max-w-2xl p-4">
         {user ? <p className="mb-4 text-ink">{user.display_name}</p> : null}
-        <ul className="flex flex-col gap-2">
+        <ul className="flex flex-col gap-4">
           {links.map((link) => (
             <li key={link.to}>
               <Link
                 to={link.to}
-                className="block rounded-lg border border-line p-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                className={cn(
+                  'flex items-center justify-between gap-3 p-4',
+                  raisedSurface,
+                  raisedInteractive,
+                )}
               >
-                {link.label}
+                <span className="font-medium text-ink">{link.label}</span>
+                <Icon name="chevron-right" className="size-5 text-ink-muted" />
               </Link>
             </li>
           ))}
@@ -477,11 +485,11 @@ export function SavedStoriesPage(): React.ReactElement {
       )}
     >
       {(data) => (
-        <ul className="flex flex-col gap-2">
+        <ul className="flex flex-col gap-4">
           {data.map((record) => (
             <li
               key={record.storyId}
-              className="flex items-center justify-between gap-3 rounded-lg border border-line p-4"
+              className={cn('flex items-center justify-between gap-3 p-4', raisedSurface)}
             >
               <Link
                 to="/stories/$storyId"
