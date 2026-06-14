@@ -308,8 +308,9 @@ export async function resendEmailCode(): Promise<void> {
  * DEVELOPMENT ONLY: mark the signed-in account verified without the email OTP,
  * so verified-only capabilities (e.g. GET /v1/privacy/settings, which 403s for
  * an unconfirmed email-registration) are exercisable locally. The server route
- * is fail-closed to non-production (404 otherwise); the calling control is gated
- * to `import.meta.env.DEV`, so this is unreachable in a production build.
+ * is fail-closed — it answers only when NODE_ENV is development/test, 404
+ * otherwise (production, staging/preview, or unset) — and the calling control is
+ * gated to `import.meta.env.DEV`, so this is unreachable in a production build.
  */
 export async function devVerifyAccount(): Promise<void> {
   const res = await client.v1.auth.dev.verify.$post();

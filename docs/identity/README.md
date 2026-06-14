@@ -99,8 +99,10 @@ interfaces.
   `requireVerifiedAccount` surfaces (e.g. `GET /v1/privacy/settings`) answer 403
   until the email is confirmed. For local development a dev-only shortcut,
   `POST /v1/auth/dev/verify`, flips the signed-in account to verified without the
-  OTP so the verified-only capabilities are testable; it is **fail-closed** (404
-  in production) and the calling control is gated to `import.meta.env.DEV`.
+  OTP so the verified-only capabilities are testable; it is **fail-closed** — an
+  allowlist that answers only when `NODE_ENV` is `development`/`test` and 404s on
+  any other value (production, a staging/preview env, or unset) — and the calling
+  control is gated to `import.meta.env.DEV`.
 - `/v1/auth/*`: status, registration (age-gated), email-OTP start/verify,
   WebAuthn register/authenticate, wallet nonce/verify, session list/revoke,
   security-activity.

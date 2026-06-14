@@ -414,21 +414,27 @@ describe('development-only verification shortcut (POST /v1/auth/dev/verify)', ()
     expect(after.status).toBe(200);
   });
 
-  it('is fail-closed: returns 404 in production (never a verification bypass)', async () => {
+  it('is fail-closed: 404 outside development/test — production, staging, OR unset', async () => {
     const app = createApp();
     const sid = await registerUnverified(app, 'prodgate@example.com', 'prodgate');
     const original = process.env['NODE_ENV'];
-    try {
-      process.env['NODE_ENV'] = 'production';
-      const res = await app.request('/v1/auth/dev/verify', {
-        method: 'POST',
-        headers: jsonHeaders(sid),
-      });
-      expect(res.status).toBe(404);
-    } finally {
-      process.env['NODE_ENV'] = original;
+    // An ALLOWLIST, not a denylist: every non-dev/test value must 404 — including
+    // a staging/preview env and an UNSET NODE_ENV (the Codex P1: a deployment that
+    // is not exactly "production" must still not expose the verification bypass).
+    for (const value of ['production', 'staging', undefined] as const) {
+      try {
+        if (value === undefined) delete process.env['NODE_ENV'];
+        else process.env['NODE_ENV'] = value;
+        const res = await app.request('/v1/auth/dev/verify', {
+          method: 'POST',
+          headers: jsonHeaders(sid),
+        });
+        expect(res.status).toBe(404);
+      } finally {
+        process.env['NODE_ENV'] = original;
+      }
     }
-    // The account is still unverified (the production-gated call did nothing).
+    // The account is still unverified (every gated call did nothing).
     const settings = await app.request('/v1/privacy/settings', { headers: { cookie: sid } });
     expect(settings.status).toBe(403);
   });

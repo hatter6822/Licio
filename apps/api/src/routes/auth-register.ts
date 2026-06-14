@@ -345,14 +345,17 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
       // WITHOUT the code, mirroring /email/verify (marks the email factor
       // verified, audits, rotates the session id on the privilege change).
       //
-      // FAIL-CLOSED: the gate runs BEFORE auth and returns 404 in production, so
-      // the route is indistinguishable from "not found" there and can never be a
-      // production verification bypass. The calling control is ALSO gated to
-      // `import.meta.env.DEV` in the client (defense in depth).
+      // FAIL-CLOSED: the gate runs BEFORE auth and ALLOWLISTS only an explicit
+      // development/test NODE_ENV. Production, a staging/preview environment, or an
+      // UNSET NODE_ENV all read 404, so the route is indistinguishable from "not
+      // found" on any deployed environment and can never be a verification bypass
+      // (an allowlist, not merely "deny production"). The calling control is ALSO
+      // gated to `import.meta.env.DEV` in the client (defense in depth).
       .post(
         '/dev/verify',
         async (c, next) => {
-          if (process.env['NODE_ENV'] === 'production') {
+          const nodeEnv = process.env['NODE_ENV'];
+          if (nodeEnv !== 'development' && nodeEnv !== 'test') {
             return c.json(err('not_found', 'Not found.'), 404);
           }
           await next();
