@@ -32,7 +32,7 @@ pay-to-rank — is enforced by the type system, runtime guards, and CI gates.
 - **Passwordless identity** — WebAuthn-first with email-OTP and SIWE; there is no password column anywhere; RBAC with object-level authorization, an append-only audit log, steward TOTP MFA.
 - **Privacy by construction** — the client address and location are never read (statically tested); rate limiting is identity-free; DSAR export ships an encrypted signed-URL archive; account deletion has a 30-day grace then hard purge.
 - **Defense-in-depth web security** — Trusted Types + DOMPurify, a strict CSP with no `unsafe-inline`/`unsafe-eval`, serialized single-use CSRF tokens, `__Host-` session cookies, and a post-build service-worker scan.
-- **An offline-first, accessible PWA** — IndexedDB integrity layer with AES-256-GCM draft encryption (non-extractable key), background sync, push with a per-day notification budget, a 55-token design system with WCAG-validated palettes, axe-core assertions in E2E.
+- **An offline-first, accessible PWA** — IndexedDB integrity layer with AES-256-GCM draft encryption (non-extractable key), background sync, push with a per-day notification budget, a token-driven design system with WCAG-validated palettes and a soft **neumorphic fabric theme** (theme-adaptive brand, paired-shadow surfaces, accessibility-flattened under high-contrast/forced-colors), axe-core assertions in E2E.
 
 ## Current state
 

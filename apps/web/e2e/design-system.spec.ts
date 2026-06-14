@@ -14,6 +14,30 @@ async function gotoStyleguide(page: Page): Promise<void> {
   await expect(page.getByRole('heading', { level: 1, name: 'Component workbench' })).toBeVisible();
 }
 
+/**
+ * After a runtime theme toggle, the neumorphic fabric theme animates
+ * `background-color` (~150ms). Wait for those finite CSS transitions to finish
+ * so axe samples the SETTLED palette: sampling a mid-transition frame caught
+ * already-flipped dark text over a still-transitioning light background and
+ * produced a false-positive contrast violation on WebKit/Firefox (Chromium
+ * happened to settle first). The workbench's perpetual animations (skeleton
+ * pulse, spinners) have `Infinity` iterations and are excluded so this never
+ * hangs. Engine-agnostic — uses only `getAnimations()` + `getComputedTiming()`.
+ */
+async function settleThemeTransition(page: Page): Promise<void> {
+  // One frame lets the toggle's transitions register before we await them.
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await page.waitForFunction(() =>
+    document
+      .getAnimations()
+      .filter(
+        (animation) =>
+          animation.effect?.getComputedTiming().iterations !== Number.POSITIVE_INFINITY,
+      )
+      .every((animation) => animation.playState === 'finished'),
+  );
+}
+
 test.describe('design system — accessibility', () => {
   test('has zero axe violations in light mode (incl. colour-contrast, target-size)', async ({
     page,
@@ -26,6 +50,8 @@ test.describe('design system — accessibility', () => {
   test('has zero axe violations in dark mode', async ({ page }) => {
     await gotoStyleguide(page);
     await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
+    // Sample the settled dark palette, not a mid-transition frame (see helper).
+    await settleThemeTransition(page);
     const results = await new AxeBuilder({ page }).withTags(WCAG_TAGS).analyze();
     expect(results.violations).toEqual([]);
   });

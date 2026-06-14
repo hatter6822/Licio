@@ -171,7 +171,16 @@ same single-use CSRF flow, for rotation while the app is closed) and the
 Background-Sync `sync` event (wakes a client to run the validated queue replay).
 
 - **Manifest (2.1b):** standalone, `display_override`, attributed `start_url`,
-  `lang`/`dir`, categories, app shortcuts, and separate maskable + any icons.
+  `lang`/`dir`, categories, app shortcuts, fabric-canvas `theme_color`/
+  `background_color` (`#EAEDF3`), and the brand lockup as `any`-purpose icons
+  (`public/assets/light_{192,512}.png`). Index `<head>` also wires theme-aware
+  favicons (dark-ink mark on light UI, white mark on dark) and an
+  `apple-touch-icon`. **Follow-up:** the lockups are transparent, so no
+  `maskable` icon is declared (a maskable icon must paint the full safe area
+  edge-to-edge); a dedicated opaque, safe-zone-padded maskable asset is the
+  tracked closure item — it needs image tooling not available to the agent
+  runtime, so it is deferred rather than shipped as a cropped/transparent
+  maskable.
 - **Update lifecycle (2.1c):** `sw-register.ts` detects a waiting worker and
   dispatches an event; the root surfaces a non-blocking "Update available" toast
   (`aria-live="polite"`). Accepting posts `SKIP_WAITING`; `controllerchange`

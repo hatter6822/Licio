@@ -44,6 +44,14 @@ export default defineConfig({
     VitePWA({
       registerType: 'prompt',
       injectRegister: null,
+      // The brand icons live in public/assets and are already precached by the
+      // Workbox `globPatterns` below (with a content revision). Disable the
+      // separate manifest-icon injection, which would otherwise add the SAME
+      // URLs a second time with `revision: null` — Workbox's addToCacheList then
+      // throws `add-to-cache-list-conflicting-entries` at registration time and
+      // the production service worker never installs (breaking offline precache,
+      // updates, background sync, and push).
+      includeManifestIcons: false,
       workbox: {
         // Precache the app shell + static assets (revision-hashed manifest).
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
@@ -98,18 +106,23 @@ export default defineConfig({
           'Social news and forum discussion built on participation-weighted attention, not popularity voting.',
         display: 'standalone',
         display_override: ['standalone', 'minimal-ui'],
-        theme_color: '#1a1a2e',
-        background_color: '#0f0f23',
+        // Match the neumorphic fabric canvas (light surface; see tokens.ts).
+        theme_color: '#EAEDF3',
+        background_color: '#EAEDF3',
         scope: '/',
         start_url: '/?source=pwa',
         lang: 'en',
         dir: 'ltr',
         categories: ['news', 'social'],
+        // The brand lockup (woven mark + wordmark) on a transparent field. Only
+        // `purpose: 'any'` is declared: these are transparent lockups, so they
+        // must NOT be marked `maskable` (a maskable icon is expected to paint the
+        // full safe area edge-to-edge — a transparent one renders as a bare mark
+        // inside the OS mask). A dedicated opaque, safe-zone-padded maskable icon
+        // is tracked as a follow-up in docs/pwa-client/README.md.
         icons: [
-          { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
-          { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
-          { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'maskable' },
-          { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+          { src: '/assets/light_192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+          { src: '/assets/light_512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
         ],
         shortcuts: [
           { name: 'Submit', short_name: 'Submit', url: '/submit?source=pwa-shortcut' },

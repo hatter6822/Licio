@@ -32,6 +32,11 @@ export interface BottomNavProps {
    * `aria-current="page"` when `isActive`.
    */
   renderLink?: (props: NavLinkRenderProps) => ReactNode;
+  /**
+   * Optional brand chrome shown at the TOP of the desktop side rail only (lg+).
+   * Hidden on the mobile thumb-zone bar, where vertical space is at a premium.
+   */
+  railHeader?: ReactNode;
   className?: string;
 }
 
@@ -44,6 +49,7 @@ export function BottomNav({
   items,
   activeId,
   renderLink,
+  railHeader,
   className,
 }: BottomNavProps): React.ReactElement {
   const t = useT();
@@ -51,18 +57,21 @@ export function BottomNav({
     <nav
       aria-label={t('nav.primary', 'Primary navigation')}
       className={cn(
-        'fixed inset-x-0 bottom-0 z-sticky border-t border-line bg-canvas pb-[env(safe-area-inset-bottom)] lg:static lg:h-full lg:w-56 lg:border-t-0 lg:border-e lg:pb-0',
+        'fixed inset-x-0 bottom-0 z-sticky border-t border-line bg-canvas pb-[env(safe-area-inset-bottom)] lg:static lg:flex lg:h-full lg:w-56 lg:flex-col lg:border-t-0 lg:border-e lg:pb-0',
         className,
       )}
     >
+      {railHeader ? <div className="hidden px-3 py-4 lg:block">{railHeader}</div> : null}
       <ul className="flex items-stretch justify-around lg:flex-col lg:gap-1 lg:p-2">
         {items.map((item) => {
           const isActive = item.id === activeId;
           const linkClassName = cn(
-            'flex min-h-touch flex-col items-center justify-center gap-0.5 rounded-md px-2 py-1 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus lg:flex-row lg:justify-start lg:gap-3 lg:py-2 lg:text-base',
+            'flex min-h-touch flex-col items-center justify-center gap-0.5 rounded-md px-2 py-1 text-xs font-medium transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus lg:flex-row lg:justify-start lg:gap-3 lg:py-2 lg:text-base',
             // `text-primary-on-soft` is ≥4.5:1 on the canvas in light AND dark
             // (the solid `text-primary` is only ~3.3:1 on the dark canvas).
             isActive || item.prominent ? 'text-primary-on-soft' : 'text-ink-muted hover:text-ink',
+            // The active tab is pressed into the fabric (WS-B fabric theme).
+            isActive && 'neu-pressed-sm',
           );
           const content = (
             <>

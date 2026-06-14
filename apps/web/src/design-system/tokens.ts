@@ -58,23 +58,32 @@ export type ColorPalette = Record<ColorToken, string>;
 export type ColorOverrides = Partial<ColorPalette>;
 
 /**
- * Light mode — the complete palette and base layer. All anchor values from the
- * WS-B.1.1a token table are reproduced verbatim here.
+ * Light mode — the complete palette and base layer. Anchor values come from the
+ * WS-B.1.1a token table, with the neutral SURFACES and `border-strong` retuned
+ * for the neumorphic fabric theme (a soft, non-white canvas; see the per-token
+ * comments below). Every documented contrast ratio is recomputed in
+ * `__tests__/tokens.test.ts`, so the retune cannot silently regress legibility.
  */
 export const lightColors: ColorPalette = {
-  // Surfaces
-  'bg-default': '#FFFFFF',
-  'bg-subtle': '#F4F5F7',
-  'bg-muted': '#E7E9EE',
+  // Surfaces — soft neumorphic "fabric" neutrals (WS-B fabric theme). The canvas
+  // is intentionally NOT pure white: a paired neumorphic highlight (white) is
+  // invisible on white, so the base sits a few percent below it, letting both
+  // the light highlight and the dark depth read. Body-text contrast stays AAA
+  // (15.16:1, recomputed in tokens.test.ts).
+  'bg-default': '#EAEDF3',
+  'bg-subtle': '#E2E6EE',
+  'bg-muted': '#D6DBE5',
   'bg-inverse': '#16181C',
   // Foreground
   'fg-default': '#16181C',
   'fg-muted': '#5B6168',
   'fg-inverse': '#FFFFFF',
   'fg-placeholder': '#5B6168',
-  // Lines & focus
-  border: '#C4C8CE',
-  'border-strong': '#7E848D',
+  // Lines & focus. `border-strong` is darkened from the pre-fabric palette so
+  // the functional control boundary keeps ≥3:1 (WCAG 1.4.11) on the now-tinted
+  // surfaces; `border` stays a decorative cool hairline.
+  border: '#C6CCD8',
+  'border-strong': '#6B7280',
   'focus-ring': '#0B4FCB',
   // Primary
   primary: '#1F5FD6',
@@ -108,16 +117,19 @@ export const lightColors: ColorPalette = {
 
 /** Dark mode overrides (applied on top of {@link lightColors}). */
 export const darkColors: ColorOverrides = {
-  'bg-default': '#101216',
-  'bg-subtle': '#181B21',
-  'bg-muted': '#23272F',
+  // Soft dark-slate surfaces, lifted just enough above black that the neumorphic
+  // highlight reads, while the solid brand hues keep ≥3:1 on the canvas
+  // (verified in tokens.test.ts).
+  'bg-default': '#15171E',
+  'bg-subtle': '#1C1F28',
+  'bg-muted': '#252A34',
   'bg-inverse': '#F4F5F7',
   'fg-default': '#F2F3F5',
   'fg-muted': '#ABB1B9',
   'fg-inverse': '#16181C',
   'fg-placeholder': '#ABB1B9',
-  border: '#363B43',
-  'border-strong': '#6A727D',
+  border: '#31353F',
+  'border-strong': '#6E7682',
   'focus-ring': '#6FA3FF',
   // Solid semantic colours keep their light values: each is dark enough for
   // white text (≥4.5) yet light enough to be visible on the dark canvas (≥3).
@@ -209,9 +221,9 @@ export interface DocumentedPair {
 // We therefore assert the functional boundary (`border-strong`) rather than
 // reproduce an impossible figure. See docs/design-system/README.md.
 export const documentedPairs: readonly DocumentedPair[] = [
-  { fg: 'fg-default', bg: 'bg-default', stated: 16.9, wcag: '1.4.3', note: 'Body text' },
-  { fg: 'fg-muted', bg: 'bg-default', stated: 5.6, wcag: '1.4.3', note: 'Secondary text' },
-  { fg: 'fg-default', bg: 'bg-subtle', stated: 15.8, wcag: '1.4.3', note: 'Text on cards' },
+  { fg: 'fg-default', bg: 'bg-default', stated: 15.0, wcag: '1.4.3', note: 'Body text' },
+  { fg: 'fg-muted', bg: 'bg-default', stated: 5.3, wcag: '1.4.3', note: 'Secondary text' },
+  { fg: 'fg-default', bg: 'bg-subtle', stated: 14.0, wcag: '1.4.3', note: 'Text on cards' },
   { fg: 'primary-fg', bg: 'primary', stated: 4.8, wcag: '1.4.3', note: 'Text on primary' },
   { fg: 'success-fg', bg: 'success', stated: 4.9, wcag: '1.4.3', note: 'Text on success' },
   { fg: 'warning-fg', bg: 'warning', stated: 5.4, wcag: '1.4.3', note: 'Text on warning' },
@@ -287,10 +299,60 @@ export const radiusScale = {
   full: '9999px',
 } as const;
 
+// Elevation shadows for FLOATING layers (dropdowns, sheets, dialogs, toasts,
+// tooltips). Softened and cooled to a fabric-blue tone so they sit coherently
+// with the neumorphic surface treatment below.
 export const shadowScale = {
-  sm: '0 1px 2px 0 rgb(16 24 40 / 0.05)',
-  md: '0 4px 8px -2px rgb(16 24 40 / 0.10), 0 2px 4px -2px rgb(16 24 40 / 0.06)',
-  lg: '0 12px 16px -4px rgb(16 24 40 / 0.10), 0 4px 6px -2px rgb(16 24 40 / 0.05)',
+  sm: '0 1px 2px 0 rgb(40 48 80 / 0.06)',
+  md: '0 6px 16px -4px rgb(40 48 80 / 0.12), 0 2px 6px -2px rgb(40 48 80 / 0.07)',
+  lg: '0 18px 34px -8px rgb(40 48 80 / 0.18), 0 6px 12px -6px rgb(40 48 80 / 0.10)',
+} as const;
+
+/* -------------------------------------------------------------------------- *
+ * Neumorphic "soft UI" shadows + fabric texture (WS-B fabric theme)
+ * -------------------------------------------------------------------------- *
+ * A paired light highlight (top-left) and dark depth (bottom-right) give every
+ * surface a soft, extruded — or, when inset, recessed — feel. The two SOURCE
+ * colours are theme-aware (emitted per colour mode by css.ts as the
+ * `--licio-neu-highlight` / `--licio-neu-shadow` custom properties); the
+ * composed box-shadow strings below reference those vars, so the geometry is
+ * defined ONCE and flips with the colour mode automatically. High-contrast and
+ * forced-colors flatten these treatments (see styles/app.css) so the soft, low-
+ * contrast lighting never undermines an accessibility preference. */
+
+export interface NeumorphicInk {
+  /** Top-left highlight — the lit edge. */
+  readonly highlight: string;
+  /** Bottom-right cast shadow — the depth. */
+  readonly shadow: string;
+}
+
+/** Theme-aware source colours for the neumorphic highlight/shadow pair. */
+export const neumorphicInk = {
+  light: { highlight: 'rgb(255 255 255 / 0.90)', shadow: 'rgb(70 82 120 / 0.20)' },
+  dark: { highlight: 'rgb(74 84 112 / 0.45)', shadow: 'rgb(0 0 0 / 0.55)' },
+} as const satisfies Record<'light' | 'dark', NeumorphicInk>;
+
+/** Theme-aware woven-thread tint for the fabric surface texture. */
+export const fabricThread = {
+  light: 'rgb(70 82 120 / 0.05)',
+  dark: 'rgb(184 194 224 / 0.05)',
+} as const satisfies Record<'light' | 'dark', string>;
+
+/**
+ * Composed neumorphic box-shadows. `raised`/`raised-sm` extrude a surface;
+ * `pressed`/`pressed-sm` and `inset` recess it (active feedback / form wells).
+ * Each references the theme-aware `--licio-neu-*` source colours.
+ */
+export const neumorphicShadows = {
+  raised: '-6px -6px 14px var(--licio-neu-highlight), 6px 6px 16px var(--licio-neu-shadow)',
+  'raised-sm': '-3px -3px 7px var(--licio-neu-highlight), 3px 3px 8px var(--licio-neu-shadow)',
+  pressed:
+    'inset 4px 4px 9px var(--licio-neu-shadow), inset -4px -4px 9px var(--licio-neu-highlight)',
+  'pressed-sm':
+    'inset 2px 2px 5px var(--licio-neu-shadow), inset -2px -2px 5px var(--licio-neu-highlight)',
+  inset:
+    'inset 3px 3px 6px var(--licio-neu-shadow), inset -3px -3px 6px var(--licio-neu-highlight)',
 } as const;
 
 export const zIndexScale = {

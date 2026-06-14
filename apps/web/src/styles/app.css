@@ -18,13 +18,20 @@
   body {
     margin: 0;
     min-height: 100dvh;
-    background-color: var(--licio-bg-default);
     color: var(--licio-fg-default);
     font-family: var(--licio-font-sans);
     font-size: var(--licio-text-base);
     line-height: var(--licio-leading-base);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizelegibility;
+    /* Fabric canvas (WS-B fabric theme): a faint, theme-aware woven-thread
+     * texture over the neumorphic base. The thread tint is so low-contrast it
+     * never affects text legibility (and is removed under prefers-contrast:
+     * more / forced-colors below). The pattern tiles seamlessly as it scrolls. */
+    background-color: var(--licio-bg-default);
+    background-image:
+      repeating-linear-gradient(90deg, var(--licio-fabric-thread) 0 1px, transparent 1px 6px),
+      repeating-linear-gradient(0deg, var(--licio-fabric-thread) 0 1px, transparent 1px 6px);
   }
 
   /* Focus appearance — WCAG 2.4.13 (new in 2.2): a 2px ring offset from the
@@ -81,6 +88,78 @@
 }
 
 /* ===================================================================== *
+ * Neumorphic "soft UI" surface utilities (WS-B fabric theme).
+ *
+ * Each reads a composed, theme-aware `--licio-shadow-*` token (defined in the
+ * token layer; the highlight/shadow source colours flip per colour mode), so a
+ * single class adapts to light and dark automatically. `raised`/`raised-sm`
+ * extrude a surface; `pressed`/`pressed-sm` and `inset` recess it. Standard
+ * Tailwind variants compose, e.g. `neu-raised-sm active:neu-pressed-sm` for a
+ * button that depresses on press, or `lg:neu-raised` for a desktop-only rail.
+ *
+ * Accessibility: these are decorative lighting only — components keep their
+ * solid borders and the 2px focus-visible outline for definition. Under
+ * `prefers-contrast: more` / `forced-colors: active` every neumorphic shadow
+ * and the fabric texture flatten in ONE place (the var override at the foot of
+ * this file), so the soft, low-contrast lighting can never undermine an
+ * explicit accessibility preference.
+ * ===================================================================== */
+@utility neu-raised {
+  box-shadow: var(--licio-shadow-raised);
+}
+@utility neu-raised-sm {
+  box-shadow: var(--licio-shadow-raised-sm);
+}
+@utility neu-pressed {
+  box-shadow: var(--licio-shadow-pressed);
+}
+@utility neu-pressed-sm {
+  box-shadow: var(--licio-shadow-pressed-sm);
+}
+@utility neu-inset {
+  box-shadow: var(--licio-shadow-inset);
+}
+
+/* Explicit fabric texture for a self-contained surface (the body carries it by
+ * default; this is for opaque panels that want the weave on top of their own
+ * background, e.g. the styleguide canvas). */
+@utility fabric-surface {
+  background-image:
+    repeating-linear-gradient(90deg, var(--licio-fabric-thread) 0 1px, transparent 1px 6px),
+    repeating-linear-gradient(0deg, var(--licio-fabric-thread) 0 1px, transparent 1px 6px);
+}
+
+/* ===================================================================== *
+ * Brand-logo theme swap (BrandLogo component). Mirrors the token layer's
+ * EXACT colour-mode resolution so the visible mark always matches the active
+ * theme — both the system `prefers-color-scheme` and the manual
+ * `data-theme` override. `light_*` is the dark-ink mark for light surfaces;
+ * `dark_*` is the white mark for dark surfaces. Only one <img> is ever
+ * `display:block`, so assistive tech (the role="img" wrapper carries the
+ * name) and layout both see a single mark.
+ * ===================================================================== */
+.brand-logo__img--light {
+  display: block;
+}
+.brand-logo__img--dark {
+  display: none;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .brand-logo__img--light {
+    display: none;
+  }
+  :root:not([data-theme="light"]) .brand-logo__img--dark {
+    display: block;
+  }
+}
+:root[data-theme="dark"] .brand-logo__img--light {
+  display: none;
+}
+:root[data-theme="dark"] .brand-logo__img--dark {
+  display: block;
+}
+
+/* ===================================================================== *
  * Reduced motion — defense in depth. The token layer already zeroes
  * --licio-duration-*; this also neutralises Tailwind utility transitions
  * and any animation, keeping only instantaneous (0ms) state changes.
@@ -104,4 +183,28 @@
   animation-iteration-count: 1 !important;
   transition-duration: 0.01ms !important;
   scroll-behavior: auto !important;
+}
+
+/* ===================================================================== *
+ * Accessibility flatten (WS-B fabric theme). When the user asks for more
+ * contrast or the OS is in a forced-colors mode, neutralise the soft
+ * neumorphic lighting and the fabric texture at the SOURCE: zeroing the
+ * composed shadow tokens and the thread tint flattens every `neu-*` utility
+ * (base AND interactive states like `active:neu-pressed-sm`) and the fabric
+ * surface in one place — no per-class maintenance, no specificity battles.
+ * Components retain their solid borders + focus rings, so every control stays
+ * clearly perceivable.
+ * ===================================================================== */
+@media (prefers-contrast: more), (forced-colors: active) {
+  :root {
+    --licio-shadow-raised: none;
+    --licio-shadow-raised-sm: none;
+    --licio-shadow-pressed: none;
+    --licio-shadow-pressed-sm: none;
+    --licio-shadow-inset: none;
+    --licio-fabric-thread: transparent;
+  }
+  body {
+    background-image: none;
+  }
 }

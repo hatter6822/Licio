@@ -12,12 +12,15 @@ import {
   type ColorToken,
   darkColors,
   darkHighContrast,
+  fabricThread,
   fontFamilies,
   fontWeights,
   lightColors,
   lightHighContrast,
   motionDurations,
   motionEasings,
+  neumorphicInk,
+  neumorphicShadows,
   radiusScale,
   shadowScale,
   spacingScale,
@@ -107,6 +110,21 @@ function scaleVars(indent: string): string {
   for (const [key, value] of Object.entries(shadowScale)) {
     lines.push(`${indent}--licio-shadow-${key}: ${value};`);
   }
+
+  // Neumorphic soft-UI shadows + fabric texture (WS-B fabric theme). The two
+  // source colours are light-mode values here and overridden in each dark block
+  // (see darkSurfaceVars); the composed shadows reference them so they flip with
+  // the colour mode automatically. `color-scheme` keeps native controls,
+  // scrollbars, and form widgets matched to the surface.
+  lines.push(`${indent}/* Neumorphic soft-UI + fabric texture (WS-B fabric theme) */`);
+  lines.push(`${indent}color-scheme: light;`);
+  lines.push(`${indent}--licio-neu-highlight: ${neumorphicInk.light.highlight};`);
+  lines.push(`${indent}--licio-neu-shadow: ${neumorphicInk.light.shadow};`);
+  lines.push(`${indent}--licio-fabric-thread: ${fabricThread.light};`);
+  for (const [key, value] of Object.entries(neumorphicShadows)) {
+    lines.push(`${indent}--licio-shadow-${key}: ${value};`);
+  }
+
   lines.push(`${indent}--licio-z-base: 0;`);
   lines.push(`${indent}--licio-z-dropdown: 100;`);
   lines.push(`${indent}--licio-z-sticky: 200;`);
@@ -135,6 +153,20 @@ function reducedMotionVars(indent: string): string {
   return Object.keys(motionDurations)
     .map((key) => `${indent}--licio-duration-${key}: 0ms;`)
     .join('\n');
+}
+
+/**
+ * Dark-mode, non-colour surface extras: flip `color-scheme` and the theme-aware
+ * neumorphic / fabric source colours so the composed `--licio-shadow-*` neu
+ * tokens and the fabric texture adapt without redefining their geometry.
+ */
+function darkSurfaceVars(indent: string): string {
+  return [
+    `${indent}color-scheme: dark;`,
+    `${indent}--licio-neu-highlight: ${neumorphicInk.dark.highlight};`,
+    `${indent}--licio-neu-shadow: ${neumorphicInk.dark.shadow};`,
+    `${indent}--licio-fabric-thread: ${fabricThread.dark};`,
+  ].join('\n');
 }
 
 function themeMapping(): string {
@@ -208,11 +240,19 @@ export function renderTokensCss(): string {
       '@media (prefers-color-scheme: dark) {',
       `${INDENT}:root:not([data-theme="light"]) {`,
       overrideVars(darkColors, INDENT + INDENT),
+      darkSurfaceVars(INDENT + INDENT),
       `${INDENT}}`,
       '}',
     ].join('\n'),
   );
-  blocks.push([':root[data-theme="dark"] {', overrideVars(darkColors, INDENT), '}'].join('\n'));
+  blocks.push(
+    [
+      ':root[data-theme="dark"] {',
+      overrideVars(darkColors, INDENT),
+      darkSurfaceVars(INDENT),
+      '}',
+    ].join('\n'),
+  );
 
   // High contrast (prefers-contrast: more), composed with the effective theme.
   // Light-HC: system light (and not manually dark) OR manually light.

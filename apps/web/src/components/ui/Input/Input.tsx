@@ -20,8 +20,11 @@ export interface InputProps
   inputClassName?: string;
 }
 
+// Form fields are recessed wells in the fabric (WS-B fabric theme): a neumorphic
+// inset shadow plus the existing border (the visible boundary under
+// forced-colors) and the 2px focus-visible ring.
 const inputBase =
-  'block min-h-touch w-full rounded-md border bg-canvas px-3 py-2 text-base text-ink transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
+  'block min-h-touch w-full rounded-md border bg-canvas px-3 py-2 text-base text-ink neu-inset transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
 
 export function Input({
   label,
