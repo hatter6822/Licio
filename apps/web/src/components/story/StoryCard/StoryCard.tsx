@@ -74,12 +74,15 @@ export function StoryCard({
         className,
       )}
     >
-      {/* 1. Title (heading; links to the thread/source when a URL is present) */}
+      {/* 1. Title (heading). Links to the source when a URL is present; the
+          `relative z-10` keeps that link clickable ABOVE the feed's stretched
+          overlay link (see StoryFeedLink) so the card surface opens the
+          discussion while the title opens the source. No effect standalone. */}
       <Heading id={titleId} className="text-xl font-semibold text-ink">
         {story.url ? (
           <a
             href={story.url}
-            className="rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus hover:underline"
+            className="relative z-10 rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus hover:underline"
           >
             {story.title}
           </a>

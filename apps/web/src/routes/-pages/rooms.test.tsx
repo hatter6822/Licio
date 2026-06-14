@@ -13,7 +13,21 @@ import { checkA11y } from '../../test/axe.js';
 import { RoomDetailBody } from './rooms.js';
 
 vi.mock('@tanstack/react-router', () => ({
-  Link: ({ children }: { children: ReactNode }) => <a href="#test">{children}</a>,
+  // Forward className + aria-label so StoryFeedLink's stretched overlay link
+  // keeps an accessible name in the test DOM (axe link-name).
+  Link: ({
+    children,
+    className,
+    'aria-label': ariaLabel,
+  }: {
+    children?: ReactNode;
+    className?: string;
+    'aria-label'?: string;
+  }) => (
+    <a href="#test" className={className} aria-label={ariaLabel}>
+      {children}
+    </a>
+  ),
   useParams: () => ({ roomId: 'r1' }),
 }));
 

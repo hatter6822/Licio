@@ -4,10 +4,9 @@
 // with the no-applause feed-mode switcher (WS-B.2.9) wired to the UI store and a
 // shareable `?mode=` search param. Each card links to the story detail.
 import type { FeedMode } from '@licio/shared';
-import { Link, useNavigate, useSearch } from '@tanstack/react-router';
+import { useNavigate, useSearch } from '@tanstack/react-router';
 import { FeedModeSwitcher } from '../../components/feed/FeedModeSwitcher/index.js';
-import { feedItemToCard } from '../../components/story/feed-card.js';
-import { StoryCard } from '../../components/story/StoryCard/index.js';
+import { StoryFeedLink } from '../../components/story/StoryFeedLink/index.js';
 import { useT } from '../../i18n/index.js';
 import { useFeedQuery, useUpdateDurablePrivacyMutation } from '../../lib/queries.js';
 import { useAuthStore, useUIStore } from '../../stores/index.js';
@@ -64,15 +63,7 @@ export function FrontPage(): React.ReactElement {
             <p className="text-ink-muted text-sm">{t('feed.framing', FRONT_PAGE_FRAMING)}</p>
           </li>
           {data.items.map((item) => (
-            <li key={item.story_id}>
-              <Link
-                to="/stories/$storyId"
-                params={{ storyId: item.story_id }}
-                className="block rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-              >
-                <StoryCard {...feedItemToCard(item)} />
-              </Link>
-            </li>
+            <StoryFeedLink key={item.story_id} item={item} />
           ))}
         </ul>
       )}

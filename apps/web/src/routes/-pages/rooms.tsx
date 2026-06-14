@@ -9,8 +9,7 @@ import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { RoomCreateForm } from '../../components/rooms/RoomCreateForm/index.js';
 import { RoomSettingsForm } from '../../components/rooms/RoomSettingsForm/index.js';
-import { feedItemToCard } from '../../components/story/feed-card.js';
-import { StoryCard } from '../../components/story/StoryCard/index.js';
+import { StoryFeedLink } from '../../components/story/StoryFeedLink/index.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { RestrictedState } from '../../components/ui/RestrictedState/index.js';
@@ -213,15 +212,7 @@ export function RoomDetailBody({
         ) : feed.data && feed.data.items.length > 0 ? (
           <ul className="flex flex-col gap-3">
             {feed.data.items.map((item) => (
-              <li key={item.story_id}>
-                <Link
-                  to="/stories/$storyId"
-                  params={{ storyId: item.story_id }}
-                  className="block rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-                >
-                  <StoryCard {...feedItemToCard(item)} />
-                </Link>
-              </li>
+              <StoryFeedLink key={item.story_id} item={item} />
             ))}
           </ul>
         ) : (
