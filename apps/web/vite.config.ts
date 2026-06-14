@@ -15,6 +15,13 @@ function getHttpsConfig(): { key: Buffer; cert: Buffer } | undefined {
   return { key: readFileSync(keyPath), cert: readFileSync(certPath) };
 }
 
+// The API dev server origin (honors local HTTPS). Without VITE_API_URL the PWA
+// makes same-origin relative requests, so the dev server must proxy the WHOLE
+// API surface to it: /v1 (feed/auth/data), /api (uploads, CSP report), /health.
+const DEV_API_TARGET =
+  process.env['DEV_HTTPS'] === 'true' ? 'https://localhost:3001' : 'http://localhost:3001';
+const devApiProxyEntry = { target: DEV_API_TARGET, changeOrigin: true, secure: false } as const;
+
 export default defineConfig({
   base: '/',
   plugins: [
@@ -150,12 +157,9 @@ export default defineConfig({
     port: 5173,
     https: getHttpsConfig(),
     proxy: {
-      '/api': {
-        target:
-          process.env['DEV_HTTPS'] === 'true' ? 'https://localhost:3001' : 'http://localhost:3001',
-        changeOrigin: true,
-        secure: false,
-      },
+      '/v1': devApiProxyEntry,
+      '/api': devApiProxyEntry,
+      '/health': devApiProxyEntry,
     },
   },
   preview: {

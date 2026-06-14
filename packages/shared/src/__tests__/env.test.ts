@@ -45,6 +45,12 @@ describe('validateServerEnv', () => {
     expect(result.CORS_ORIGIN).toBe('http://localhost:5173');
   });
 
+  it('uses an https dev CORS_ORIGIN default when DEV_HTTPS=true', () => {
+    const { CORS_ORIGIN: _c, ...env } = validEnv;
+    const result = validateServerEnv({ ...env, DEV_HTTPS: 'true' });
+    expect(result.CORS_ORIGIN).toBe('https://localhost:5173');
+  });
+
   it('should reject short SESSION_SECRET', () => {
     expect(() => validateServerEnv({ ...validEnv, SESSION_SECRET: 'short' })).toThrow(
       'SESSION_SECRET',

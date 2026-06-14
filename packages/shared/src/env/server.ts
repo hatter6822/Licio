@@ -114,6 +114,11 @@ export const serverEnvSchema = z.object({
   EMBEDDING_MODEL: z.string().min(1).optional(),
   EMBEDDING_MODEL_VERSION: z.string().min(1).optional(),
   EMBEDDING_DIMENSION: z.coerce.number().int().min(8).max(4096).optional(),
+  // Local HTTPS dev (mkcert certs): when 'true' the web + API dev servers run
+  // over https, so the dev CORS_ORIGIN default becomes https://localhost:5173
+  // to match the browser's WebAuthn origin. Also read directly by the Vite
+  // config and the server bootstrap.
+  DEV_HTTPS: z.string().optional(),
 });
 
 /** Infrastructure + secrets that MUST be configured in production but may be
@@ -131,6 +136,7 @@ const PRODUCTION_REQUIRED_KEYS = [
  *  never sign a production session. 32+ chars to satisfy the field constraint. */
 const DEV_SESSION_SECRET = 'licio-development-only-insecure-session-secret';
 const DEV_CORS_ORIGIN = 'http://localhost:5173';
+const DEV_CORS_ORIGIN_HTTPS = 'https://localhost:5173';
 
 /**
  * Rejects a PARTIAL S3/SES/EMBEDDING group (a typo'd deployment silently
@@ -158,9 +164,12 @@ export const serverEnvSchemaRefined = serverEnvSchema
   })
   .transform((env) => ({
     ...env,
-    // Non-production only: production reached the refinement above with both set.
+    // Non-production only: production reached the refinement above with all set.
     SESSION_SECRET: env.SESSION_SECRET ?? DEV_SESSION_SECRET,
-    CORS_ORIGIN: env.CORS_ORIGIN ?? DEV_CORS_ORIGIN,
+    // Honor DEV_HTTPS so the WebAuthn expectedOrigin matches the browser when
+    // local HTTPS dev is enabled without an explicit CORS_ORIGIN.
+    CORS_ORIGIN:
+      env.CORS_ORIGIN ?? (env.DEV_HTTPS === 'true' ? DEV_CORS_ORIGIN_HTTPS : DEV_CORS_ORIGIN),
   }));
 
 export type ServerEnv = z.infer<typeof serverEnvSchemaRefined>;

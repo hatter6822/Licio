@@ -71,25 +71,25 @@ For durable data and a setup closer to production:
 # 1. Backing services (PostgreSQL 16 + pgvector, Redis 7)
 docker compose up -d
 
-# 2. Environment — copy the template and load it into your shell
+# 2. Environment — copy the template (a real SESSION_SECRET is not required in
+#    dev, but generate one if you want stable sessions across restarts):
 cp .env.example .env
-# Generate a real session secret (the template value is a placeholder):
 printf 'SESSION_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
-set -a && . ./.env && set +a        # export every var into THIS shell (bash/zsh)
 
 # 3. Apply the database migration chain (installs pgvector, creates all tables)
-pnpm db:migrate
+pnpm db:migrate     # auto-loads .env from the repo root
 
-# 4. Run with the durable stores (DATABASE_URL/REDIS_URL now in the shell)
-pnpm dev
+# 4. Run with the durable stores
+pnpm dev            # auto-loads .env from the repo root
 ```
 
-> **`pnpm dev` does not auto-load `.env`.** The dev script sets
-> `NODE_ENV=development` for you, but to point dev at Postgres/Redis you must
-> export `DATABASE_URL`/`REDIS_URL` into the shell that runs `pnpm dev` /
-> `pnpm db:migrate` — `set -a && . ./.env && set +a` (bash/zsh), `direnv`, or
-> inline prefixes. Section 7 explains this in full. Setting either URL switches
-> that subsystem from the in-memory store to its durable adapter.
+> **`pnpm dev` and the `db:*` scripts auto-load the repo-root `.env`.** The API
+> dev server and `drizzle-kit` both read `../../.env` if it exists (and the dev
+> script also sets `NODE_ENV=development`), so copying `.env` is enough —
+> setting `DATABASE_URL`/`REDIS_URL` switches each subsystem from the in-memory
+> store to its durable adapter. For commands that don't auto-load it, export the
+> file into your shell (`set -a && . ./.env && set +a`), use `direnv`, or inline
+> prefixes; Section 7 covers this.
 
 A fresh clone is also green with **just** `pnpm install --frozen-lockfile
 && pnpm test` — the unit suite runs entirely against in-memory stores, so
@@ -462,15 +462,17 @@ to exercise the production bindings (Section 15).
 
 ### 7.7 How environment variables get loaded — important
 
-**The dev scripts do not auto-load `.env`.** `apps/api` reads `process.env`
-directly (`validateServerEnv(process.env)`); the `pnpm dev` API script sets
-`NODE_ENV=development` for you, but no command passes a `.env`-file flag and
-there is no `dotenv` dependency anywhere in the repo. For a basic in-memory dev
-run that is all you need — no `.env` required. To point dev at Postgres/Redis
-(or to set any other variable) you must make those values available in the
-**shell** that runs the commands.
+**`pnpm dev` and the `db:*` scripts auto-load the repo-root `.env`.** The API
+dev server runs `tsx watch --env-file-if-exists=../../.env` (and sets
+`NODE_ENV=development`), and `drizzle.config.ts` calls `process.loadEnvFile` on
+the same file — so copying `.env` to the repo root is enough for `pnpm dev`,
+`pnpm db:migrate`, `pnpm db:generate`, and `pnpm db:push`. There is no `dotenv`
+dependency; this uses Node's native env-file support and is a no-op when the
+file is absent (the in-memory dev path needs no `.env`).
 
-**Recommended (bash/zsh): export `.env` into your current shell.**
+For **other** commands (or to override per-invocation) make the values
+available in the **shell** yourself. Export `.env` into your current shell
+(bash/zsh):
 
 ```sh
 set -a && . ./.env && set +a
@@ -919,7 +921,9 @@ CHAIN_RPC_URLS='{"1":"https://...","8453":"https://..."}'
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| API exits at boot with a zod error naming `DATABASE_URL`/`SESSION_SECRET`/etc. | The env wasn't loaded into the shell (nothing auto-loads `.env`) | Run `set -a && . ./.env && set +a`, then retry (Section 7.7). Check `SESSION_SECRET` is ≥ 32 chars |
+| API exits at boot with a zod error naming `DATABASE_URL`/`REDIS_URL`/`SESSION_SECRET`/`CORS_ORIGIN` | `NODE_ENV=production` is set (those are required in production) | For local dev, unset `NODE_ENV` or set it to `development` (the `pnpm dev` script does this) — dev boots in-memory without them. For a real prod run, supply all four |
+| `pnpm dev` runs but the page shows no data; `/v1/*` calls 404 from `:5173` | Stale build of the Vite proxy, or `VITE_API_URL` pointing elsewhere | The dev server proxies `/v1`, `/api`, `/health` to the API — restart `pnpm dev`; ensure the API is up on `:3001` (`curl localhost:3001/health`) |
+| Edited `.env` but `pnpm dev`/`db:migrate` don't see it | `.env` is not at the **repo root** (the scripts load `../../.env`) | Put `.env` at the repo root, or export it into the shell (`set -a && . ./.env && set +a`, Section 7.7) |
 | `Incomplete S3/SES/EMBEDDING configuration: missing …` at boot | A partial all-or-none group is set | Set the whole group or unset all of it (Section 7.6) |
 | API boots but errors connecting to the database, or relation/table "… does not exist" | Postgres not running, or migrations not applied | `docker compose up -d`, then `pnpm db:migrate` (Sections 6, 8) |
 | Migration fails at `CREATE EXTENSION "vector"` | Postgres image lacks pgvector | Use `pgvector/pgvector:pg16` (the Compose default); if running native PG, install pgvector |
