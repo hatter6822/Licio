@@ -253,6 +253,13 @@ if (embeddingProvider === undefined && env.NODE_ENV === 'production') {
 }
 const ingestionServices = createInMemoryIngestionServices({
   events: eventServices,
+  // DEV/TEST ONLY: drop the account-age ("account too new") submission gate so a
+  // freshly created local account can post immediately — the ingestion-side
+  // parallel of the /v1/auth/dev/verify verification shortcut. Fail-closed
+  // ALLOWLIST (same posture as that route): ON in development/test, OFF for
+  // production, a staging/preview env, or an unset NODE_ENV. `pnpm dev` runs the
+  // API with NODE_ENV=development, so the local relaxation applies there.
+  skipAccountAgeGate: env.NODE_ENV === 'development' || env.NODE_ENV === 'test',
   ...(embeddingProvider !== undefined ? { embeddingProvider } : {}),
   log: (event, meta) => logger.info(meta, event),
 });

@@ -115,6 +115,16 @@ export interface PrecheckInputs {
   accountCreatedAtIso: string;
   nowMs: number;
   minAccountAgeMinutes: number;
+  /**
+   * DEVELOPMENT/TEST ONLY: when true, the account-age ("account too new") gate
+   * is skipped entirely so a freshly created local account can submit
+   * immediately. This is the ingestion-side parallel of the
+   * `POST /v1/auth/dev/verify` verification shortcut: both relax a new-account
+   * friction point for local development. It is fail-closed — the boot path
+   * derives it from a development/test `NODE_ENV` allowlist and it is NEVER set
+   * in production/staging (or an unset `NODE_ENV`).
+   */
+  skipAccountAgeGate?: boolean;
   /** Identical-title submissions already seen in the window (store count). */
   duplicateTitleCount: number;
   duplicateTitleLimit: number;
@@ -128,12 +138,16 @@ export interface PrecheckInputs {
  * → URL safety. Returns the FIRST rejection or null when clear.
  */
 export function evaluatePrechecks(inputs: PrecheckInputs): PrecheckRejection | null {
-  const ageMinutes = (inputs.nowMs - Date.parse(inputs.accountCreatedAtIso)) / 60_000;
-  if (ageMinutes < inputs.minAccountAgeMinutes) {
-    return {
-      code: 'account_too_new',
-      waitMinutes: Math.ceil(inputs.minAccountAgeMinutes - ageMinutes),
-    };
+  // The account-age gate is bypassed only under the dev/test escape hatch (see
+  // `skipAccountAgeGate`); the spam-title and URL-safety gates below ALWAYS run.
+  if (inputs.skipAccountAgeGate !== true) {
+    const ageMinutes = (inputs.nowMs - Date.parse(inputs.accountCreatedAtIso)) / 60_000;
+    if (ageMinutes < inputs.minAccountAgeMinutes) {
+      return {
+        code: 'account_too_new',
+        waitMinutes: Math.ceil(inputs.minAccountAgeMinutes - ageMinutes),
+      };
+    }
   }
   if (inputs.duplicateTitleCount >= inputs.duplicateTitleLimit) {
     return { code: 'duplicate_title_spam' };

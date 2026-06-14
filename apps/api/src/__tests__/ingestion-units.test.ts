@@ -453,6 +453,37 @@ describe('pre-checks units (WS-F.1.4c)', () => {
       }),
     ).toBeNull();
   });
+
+  it('skipAccountAgeGate bypasses the account-age gate but not the others', () => {
+    const base = {
+      accountCreatedAtIso: '2026-06-11T00:00:00.000Z',
+      nowMs: Date.parse('2026-06-11T00:30:00.000Z'),
+      minAccountAgeMinutes: 60,
+      duplicateTitleCount: 0,
+      duplicateTitleLimit: 3,
+      canonicalDomain: null,
+      urlVerdict: null,
+    };
+    // A brand-new account that would normally be `account_too_new` clears.
+    expect(evaluatePrechecks({ ...base, skipAccountAgeGate: true })).toBeNull();
+    // The escape hatch is account-age ONLY — spam-title and URL safety still bite.
+    expect(
+      evaluatePrechecks({ ...base, skipAccountAgeGate: true, duplicateTitleCount: 3 }),
+    ).toEqual({ code: 'duplicate_title_spam' });
+    expect(
+      evaluatePrechecks({
+        ...base,
+        skipAccountAgeGate: true,
+        canonicalDomain: 'x.example',
+        urlVerdict: 'malicious',
+      }),
+    ).toEqual({ code: 'malicious_url' });
+    // Default (omitted / false) keeps the gate ON.
+    expect(evaluatePrechecks({ ...base, skipAccountAgeGate: false })).toEqual({
+      code: 'account_too_new',
+      waitMinutes: 30,
+    });
+  });
 });
 
 describe('claim extraction units (WS-F.1.2b)', () => {

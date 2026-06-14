@@ -95,6 +95,14 @@ export interface IngestionServices {
     provider: () => Promise<Map<string, 'public' | 'private'>>,
   ) => void;
   submissionLimiter: SubmissionRateLimiter;
+  /**
+   * DEVELOPMENT/TEST ONLY: when true, the account-age ("account too new")
+   * submission gate is dropped so a freshly created local account can post
+   * immediately — the ingestion-side parallel of the `POST /v1/auth/dev/verify`
+   * verification shortcut. Set fail-closed at boot from a development/test
+   * `NODE_ENV` allowlist (apps/api/src/index.ts); never true in production.
+   */
+  skipAccountAgeGate: boolean;
   urlSafety: UrlSafetyProvider;
   claimExtractor: ClaimExtractor;
   embeddingProvider: EmbeddingProvider;
@@ -120,6 +128,10 @@ export interface InMemoryIngestionOptions {
   claimExtractor?: ClaimExtractor;
   embeddingProvider?: EmbeddingProvider;
   config?: Partial<IngestionRuntimeConfig>;
+  /** DEV/TEST escape hatch: drop the account-age submission gate (default
+   *  false). The boot path sets this from a development/test NODE_ENV
+   *  allowlist; tests set it explicitly to exercise either posture. */
+  skipAccountAgeGate?: boolean;
   log?: (event: string, meta: Record<string, unknown>) => void;
   now?: () => number;
 }
@@ -294,6 +306,9 @@ export function createInMemoryIngestionServices(
     searchIndex: undefined as unknown as SearchIndex, // assigned below
     setSearchRoomVisibilityProvider: () => {}, // assigned below
     submissionLimiter: new SubmissionRateLimiter(new InMemorySlidingWindowStore()),
+    // Fail-closed: the account-age gate stays ON unless the caller (boot path)
+    // opts out for a development/test environment.
+    skipAccountAgeGate: options.skipAccountAgeGate ?? false,
     urlSafety: undefined as unknown as UrlSafetyProvider, // assigned below (reads config)
     claimExtractor: options.claimExtractor ?? new HeuristicClaimExtractor(),
     embeddingProvider: options.embeddingProvider ?? new DeterministicLexicalProvider(),

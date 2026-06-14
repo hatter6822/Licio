@@ -276,6 +276,9 @@ export async function submitStory(
     accountCreatedAtIso: user.createdAt,
     nowMs,
     minAccountAgeMinutes: config.minAccountAgeMinutes,
+    // DEV/TEST: drop the account-age gate so a fresh local account can post
+    // (parallels the /v1/auth/dev/verify shortcut). Always false in production.
+    skipAccountAgeGate: ingestion.skipAccountAgeGate,
     duplicateTitleCount: await ingestion.stories.countByTitleHashSince(hash, windowStart),
     duplicateTitleLimit: config.duplicateTitleLimit,
     canonicalDomain,

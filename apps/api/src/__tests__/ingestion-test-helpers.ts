@@ -41,7 +41,12 @@ export interface IngestionServicesFixture {
 
 /** Fresh in-memory WS-D + WS-E + WS-F bundles with consumers registered. */
 export function freshIngestionServices(
-  options: { config?: Partial<IngestionRuntimeConfig>; now?: () => number } = {},
+  options: {
+    config?: Partial<IngestionRuntimeConfig>;
+    now?: () => number;
+    /** Mirror the boot-path dev/test escape hatch (default false ⇒ gate ON). */
+    skipAccountAgeGate?: boolean;
+  } = {},
 ): IngestionServicesFixture {
   const { identity, events } = freshEventServices(options.now ? { now: options.now } : {});
   const pages = new Map<
@@ -72,6 +77,9 @@ export function freshIngestionServices(
     },
     ...(options.config ? { config: options.config } : {}),
     ...(options.now ? { now: options.now } : {}),
+    ...(options.skipAccountAgeGate !== undefined
+      ? { skipAccountAgeGate: options.skipAccountAgeGate }
+      : {}),
   });
   registerIngestionConsumers(events, ingestion);
   setIngestionServices(ingestion);

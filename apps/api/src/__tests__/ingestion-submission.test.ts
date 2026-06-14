@@ -284,6 +284,18 @@ describe('POST /v1/stories — safety pre-checks (WS-F.1.4c)', () => {
     expect(body.error.message).toMatch(/waiting period/);
   });
 
+  it('skipAccountAgeGate (dev/test) lets a brand-new account submit immediately', async () => {
+    // Mirrors the boot-path dev/test escape hatch: the SAME 60-minute gate and a
+    // zero-age account that 403s above now passes when the gate is dropped.
+    fixture = freshIngestionServices({
+      config: { minAccountAgeMinutes: 60 },
+      skipAccountAgeGate: true,
+    });
+    const { cookie } = await seedUserWithSession(fixture.identity, { accountAgeMs: 0 });
+    const res = await app().request(post('/v1/stories', briefSubmission(), cookie));
+    expect(res.status).toBe(201);
+  });
+
   it('rejects repeated identical titles within the window (spam pattern)', async () => {
     fixture = freshIngestionServices({
       config: { minAccountAgeMinutes: 0, duplicateTitleLimit: 2 },

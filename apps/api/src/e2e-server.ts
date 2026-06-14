@@ -72,6 +72,10 @@ setEventPipelineServices(eventServices);
 
 const ingestionServices = createInMemoryIngestionServices({
   events: eventServices,
+  // Same dev/test allowlist as src/index.ts: drop the account-age submission
+  // gate so freshly created accounts can post in the E2E harness. This entry
+  // already refuses NODE_ENV=production above, so the flag is never production.
+  skipAccountAgeGate: env.NODE_ENV === 'development' || env.NODE_ENV === 'test',
   log: (event, meta) => logger.info(meta, event),
 });
 await ingestionServices.reloadConfig();
