@@ -24,14 +24,27 @@
     line-height: var(--licio-leading-base);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizelegibility;
-    /* Fabric canvas (WS-B fabric theme): a faint, theme-aware woven-thread
-     * texture over the neumorphic base. The thread tint is so low-contrast it
-     * never affects text legibility (and is removed under prefers-contrast:
-     * more / forced-colors below). The pattern tiles seamlessly as it scrolls. */
+    /* Fabric canvas (WS-B fabric theme): a faint, theme-aware woven-LINEN
+     * texture over the neumorphic base. Each warp/weft line is a PAIRED thread —
+     * a shaded edge (`--licio-fabric-thread`) next to a lit edge
+     * (`--licio-fabric-sheen`) — so the fine 5px weave reads as rounded threads
+     * catching light, not a flat grid. The tints are so low-contrast they never
+     * affect text legibility (and are removed under prefers-contrast: more /
+     * forced-colors below). The pattern tiles seamlessly as it scrolls. */
     background-color: var(--licio-bg-default);
     background-image:
-      repeating-linear-gradient(90deg, var(--licio-fabric-thread) 0 1px, transparent 1px 6px),
-      repeating-linear-gradient(0deg, var(--licio-fabric-thread) 0 1px, transparent 1px 6px);
+      repeating-linear-gradient(
+        90deg,
+        var(--licio-fabric-thread) 0 1px,
+        var(--licio-fabric-sheen) 1px 2px,
+        transparent 2px 5px
+      ),
+      repeating-linear-gradient(
+        0deg,
+        var(--licio-fabric-thread) 0 1px,
+        var(--licio-fabric-sheen) 1px 2px,
+        transparent 2px 5px
+      );
   }
 
   /* Focus appearance — WCAG 2.4.13 (new in 2.2): a 2px ring offset from the
@@ -122,11 +135,34 @@
 
 /* Explicit fabric texture for a self-contained surface (the body carries it by
  * default; this is for opaque panels that want the weave on top of their own
- * background, e.g. the styleguide canvas). */
+ * background, e.g. the styleguide canvas). Matches the body's paired-thread weave. */
 @utility fabric-surface {
   background-image:
-    repeating-linear-gradient(90deg, var(--licio-fabric-thread) 0 1px, transparent 1px 6px),
-    repeating-linear-gradient(0deg, var(--licio-fabric-thread) 0 1px, transparent 1px 6px);
+    repeating-linear-gradient(
+      90deg,
+      var(--licio-fabric-thread) 0 1px,
+      var(--licio-fabric-sheen) 1px 2px,
+      transparent 2px 5px
+    ),
+    repeating-linear-gradient(
+      0deg,
+      var(--licio-fabric-thread) 0 1px,
+      var(--licio-fabric-sheen) 1px 2px,
+      transparent 2px 5px
+    );
+}
+
+/* Richer woven texture for raised panels (cards, sheets). A diagonal twill
+ * cross-weave with a soft top-left sheen, so a card reads as a cushion of cloth
+ * lifted off the canvas. Texture only (no background-color): it composes over
+ * the element's own surface colour, and — like every fabric tint — it flattens
+ * under prefers-contrast / forced-colors via the var override at the foot of
+ * this file. */
+@utility fabric-card {
+  background-image:
+    radial-gradient(135% 120% at 18% 0%, var(--licio-fabric-sheen) 0%, transparent 44%),
+    repeating-linear-gradient(35deg, var(--licio-fabric-thread) 0 1px, transparent 1px 6px),
+    repeating-linear-gradient(-35deg, var(--licio-fabric-thread) 0 1px, transparent 1px 7px);
 }
 
 /* ===================================================================== *
@@ -203,6 +239,7 @@
     --licio-shadow-pressed-sm: none;
     --licio-shadow-inset: none;
     --licio-fabric-thread: transparent;
+    --licio-fabric-sheen: transparent;
   }
   body {
     background-image: none;

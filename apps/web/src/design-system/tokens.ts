@@ -65,15 +65,17 @@ export type ColorOverrides = Partial<ColorPalette>;
  * `__tests__/tokens.test.ts`, so the retune cannot silently regress legibility.
  */
 export const lightColors: ColorPalette = {
-  // Surfaces — soft neumorphic "fabric" neutrals (WS-B fabric theme). The canvas
-  // is intentionally NOT pure white: a paired neumorphic highlight (white) is
-  // invisible on white, so the base sits a few percent below it, letting both
-  // the light highlight and the dark depth read. Body-text contrast stays AAA
-  // (15.16:1, recomputed in tokens.test.ts).
-  'bg-default': '#EAEDF3',
-  'bg-subtle': '#E2E6EE',
-  'bg-muted': '#D6DBE5',
-  'bg-inverse': '#16181C',
+  // Surfaces — soft neumorphic "fabric" neutrals (WS-B fabric theme). A warm
+  // LINEN canvas: intentionally NOT pure white (a paired white highlight is
+  // invisible on white) and intentionally WARM, so the surface reads as woven
+  // cloth rather than cold plastic. The three steps are luminance-matched to the
+  // prior cool greys (0.845 / 0.790 / 0.708), so every documented contrast pair
+  // is unchanged — only the hue shifts (warm sand, oklch hue ≈ 83). Body-text
+  // contrast stays AAA (15.16:1, recomputed in tokens.test.ts).
+  'bg-default': '#F4ECDF',
+  'bg-subtle': '#EEE5D4',
+  'bg-muted': '#E5DAC5',
+  'bg-inverse': '#1B1713',
   // Foreground
   'fg-default': '#16181C',
   'fg-muted': '#5B6168',
@@ -117,13 +119,15 @@ export const lightColors: ColorPalette = {
 
 /** Dark mode overrides (applied on top of {@link lightColors}). */
 export const darkColors: ColorOverrides = {
-  // Soft dark-slate surfaces, lifted just enough above black that the neumorphic
-  // highlight reads, while the solid brand hues keep ≥3:1 on the canvas
+  // Warm dark-CHARCOAL surfaces (the night side of the linen): lifted just enough
+  // above black that the neumorphic highlight reads, warm-tinted to match the
+  // light linen, and luminance-matched to the prior cool slate so every dark-mode
+  // contrast pair is unchanged. The solid brand hues keep ≥3:1 on the canvas
   // (verified in tokens.test.ts).
-  'bg-default': '#15171E',
-  'bg-subtle': '#1C1F28',
-  'bg-muted': '#252A34',
-  'bg-inverse': '#F4F5F7',
+  'bg-default': '#1A1713',
+  'bg-subtle': '#221F1A',
+  'bg-muted': '#2E2924',
+  'bg-inverse': '#F9F5EC',
   'fg-default': '#F2F3F5',
   'fg-muted': '#ABB1B9',
   'fg-inverse': '#16181C',
@@ -327,16 +331,32 @@ export interface NeumorphicInk {
   readonly shadow: string;
 }
 
-/** Theme-aware source colours for the neumorphic highlight/shadow pair. */
+/**
+ * Theme-aware source colours for the neumorphic highlight/shadow pair. The
+ * depth is a WARM taupe (oklch ≈ 0.48 0.03 65) rather than a cool blue, so the
+ * extrusion reads as cloth catching light — coherent with the warm linen canvas.
+ */
 export const neumorphicInk = {
-  light: { highlight: 'rgb(255 255 255 / 0.90)', shadow: 'rgb(70 82 120 / 0.20)' },
-  dark: { highlight: 'rgb(74 84 112 / 0.45)', shadow: 'rgb(0 0 0 / 0.55)' },
+  light: { highlight: 'rgb(255 255 255 / 0.85)', shadow: 'rgb(106 90 76 / 0.28)' },
+  dark: { highlight: 'rgb(141 133 121 / 0.42)', shadow: 'rgb(0 0 0 / 0.60)' },
 } as const satisfies Record<'light' | 'dark', NeumorphicInk>;
 
-/** Theme-aware woven-thread tint for the fabric surface texture. */
+/**
+ * Theme-aware fabric-weave tints. The weave is a paired thread: a darker shaded
+ * edge (`thread`) next to a lit edge (`sheen`), repeated as fine warp + weft
+ * lines, so the texture reads as woven linen rather than a flat grid. Both are
+ * very low-contrast (and flattened entirely under prefers-contrast / forced
+ * colors), so they never touch text legibility.
+ */
 export const fabricThread = {
-  light: 'rgb(70 82 120 / 0.05)',
-  dark: 'rgb(184 194 224 / 0.05)',
+  light: 'rgb(120 100 72 / 0.06)',
+  dark: 'rgb(196 180 150 / 0.05)',
+} as const satisfies Record<'light' | 'dark', string>;
+
+/** The lit edge of each woven thread (paired with {@link fabricThread}). */
+export const fabricSheen = {
+  light: 'rgb(255 255 255 / 0.55)',
+  dark: 'rgb(150 140 122 / 0.05)',
 } as const satisfies Record<'light' | 'dark', string>;
 
 /**
@@ -345,14 +365,14 @@ export const fabricThread = {
  * Each references the theme-aware `--licio-neu-*` source colours.
  */
 export const neumorphicShadows = {
-  raised: '-6px -6px 14px var(--licio-neu-highlight), 6px 6px 16px var(--licio-neu-shadow)',
-  'raised-sm': '-3px -3px 7px var(--licio-neu-highlight), 3px 3px 8px var(--licio-neu-shadow)',
+  raised: '-10px -10px 24px var(--licio-neu-highlight), 10px 10px 24px var(--licio-neu-shadow)',
+  'raised-sm': '-6px -6px 16px var(--licio-neu-highlight), 6px 6px 16px var(--licio-neu-shadow)',
   pressed:
-    'inset 4px 4px 9px var(--licio-neu-shadow), inset -4px -4px 9px var(--licio-neu-highlight)',
+    'inset 7px 7px 16px var(--licio-neu-shadow), inset -7px -7px 16px var(--licio-neu-highlight)',
   'pressed-sm':
-    'inset 2px 2px 5px var(--licio-neu-shadow), inset -2px -2px 5px var(--licio-neu-highlight)',
+    'inset 4px 4px 10px var(--licio-neu-shadow), inset -4px -4px 10px var(--licio-neu-highlight)',
   inset:
-    'inset 3px 3px 6px var(--licio-neu-shadow), inset -3px -3px 6px var(--licio-neu-highlight)',
+    'inset 6px 6px 14px var(--licio-neu-shadow), inset -6px -6px 14px var(--licio-neu-highlight)',
 } as const;
 
 export const zIndexScale = {

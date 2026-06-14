@@ -106,9 +106,9 @@ export default defineConfig({
           'Social news and forum discussion built on participation-weighted attention, not popularity voting.',
         display: 'standalone',
         display_override: ['standalone', 'minimal-ui'],
-        // Match the neumorphic fabric canvas (light surface; see tokens.ts).
-        theme_color: '#EAEDF3',
-        background_color: '#EAEDF3',
+        // Match the neumorphic fabric canvas (warm linen light surface; see tokens.ts).
+        theme_color: '#F4ECDF',
+        background_color: '#F4ECDF',
         scope: '/',
         start_url: '/?source=pwa',
         lang: 'en',

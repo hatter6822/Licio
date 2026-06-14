@@ -171,8 +171,8 @@ same single-use CSRF flow, for rotation while the app is closed) and the
 Background-Sync `sync` event (wakes a client to run the validated queue replay).
 
 - **Manifest (2.1b):** standalone, `display_override`, attributed `start_url`,
-  `lang`/`dir`, categories, app shortcuts, fabric-canvas `theme_color`/
-  `background_color` (`#EAEDF3`), and the brand lockup as `any`-purpose icons
+  `lang`/`dir`, categories, app shortcuts, warm-linen fabric-canvas `theme_color`/
+  `background_color` (`#F4ECDF`), and the brand lockup as `any`-purpose icons
   (`public/assets/light_{192,512}.png`). Index `<head>` also wires theme-aware
   favicons (dark-ink mark on light UI, white mark on dark) and an
   `apple-touch-icon`. **Follow-up:** the lockups are transparent, so no

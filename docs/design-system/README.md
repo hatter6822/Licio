@@ -101,12 +101,14 @@ reproducing an impossible figure.
 The surface treatment is a **soft, tactile neumorphism over a woven fabric
 canvas**, driven entirely from the token SSOT (no images, no runtime JS):
 
-- **Soft surfaces, not pure white.** Authentic neumorphism needs paired *light*
-  and *dark* shadows, and a white highlight is invisible on white — so the
-  canvas sits a few percent below it: `bg-default` `#EAEDF3` (light) / `#15171E`
-  (dark). Body-text contrast stays AAA (recomputed at **15.16:1** light,
-  ~14:1 dark in `tokens.test.ts`); `border-strong` was darkened to keep the
-  functional control boundary ≥3:1 on the tinted surfaces.
+- **Soft warm surfaces, not pure white.** Authentic neumorphism needs paired
+  *light* and *dark* shadows, and a white highlight is invisible on white — so
+  the canvas sits a few percent below it AND warm, reading as woven linen rather
+  than cold plastic: `bg-default` `#F4ECDF` (light linen) / `#1A1713` (dark
+  charcoal). The warm steps are luminance-matched to the prior cool greys, so
+  body-text contrast is unchanged — still AAA (recomputed at **15.16:1** light,
+  ~16:1 dark in `tokens.test.ts`); `border-strong` keeps the functional control
+  boundary ≥3:1 on the tinted surfaces.
 - **Paired lighting, theme-aware.** Two source colours (`--licio-neu-highlight`
   / `--licio-neu-shadow`) flip per colour mode; the composed
   `--licio-shadow-{raised,raised-sm,pressed,pressed-sm,inset}` tokens reference

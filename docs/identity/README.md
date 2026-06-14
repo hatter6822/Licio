@@ -84,7 +84,7 @@ interfaces.
 | `mailer-ses.ts` | production `Mailer` over the SES v2 HTTP API (SigV4 over fetch): code + notice templates incl. the WS-D.2.4a deletion notice with its `/login?cancel_token=…` link; never logs recipient/code; unknown notice kinds fail loud |
 | `privacy-jobs.ts` | DSAR export assembly (own data only), export job process/retry/sweep, deletion hard-purge (anonymize/tombstone) |
 | `store.ts` | the `IdentityStore` interface + in-memory adapter (mirrors the Drizzle schema) |
-| `services.ts` | injectable service container + config derivation |
+| `services.ts` | injectable service container + config derivation; `selectMailer` (fail-closed: SES in any env, else throws in production unless `ALLOW_INSECURE_NULL_MAILER`; a **dev mailer** surfaces the one-time code to the log under `NODE_ENV=development` so email flows are testable without a mail server; CI/test stay silent) |
 | `job-lease.ts` | `JobLeaseStore` interface + in-memory adapter (distributed-scheduler window claim) |
 | `redis-stores.ts` | production Redis adapters (gated integration test) |
 | `drizzle-store.ts` | production Postgres adapters: `DrizzleIdentityStore`, `DrizzleAuditStore`, `DrizzleJobLeaseStore` (gated integration test) |
