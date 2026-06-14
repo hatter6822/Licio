@@ -20,8 +20,8 @@
    * resident raster), built for an ORGANIC, not mechanical, cloth: rather than a
    * single regular grid it stacks
    *   - THREE broad, soft "slub" clouds on different diagonals (24/-53/-9deg) at
-   *     coprime periods (47/61/73px), whose interference gives the low-frequency,
-   *     non-directional luminance unevenness of hand-woven linen;
+   *     large coprime periods (211/283/367px), whose interference gives the
+   *     low-frequency, non-directional luminance unevenness of hand-woven linen;
    *   - warp threads as TWO near-vertical passes at coprime periods (5px / 8px)
    *     whose beat makes the column spacing read as naturally irregular; and
    *   - weft threads as two near-horizontal passes at coprime periods (7px /
@@ -39,20 +39,20 @@
       repeating-linear-gradient(
         24deg,
         transparent 0,
-        var(--licio-fabric-sheen) 23px,
-        transparent 47px
+        var(--licio-fabric-sheen) 105px,
+        transparent 211px
       ),
       repeating-linear-gradient(
         -53deg,
         transparent 0,
-        var(--licio-fabric-thread) 31px,
-        transparent 61px
+        var(--licio-fabric-thread) 141px,
+        transparent 283px
       ),
       repeating-linear-gradient(
         -9deg,
         transparent 0,
-        var(--licio-fabric-thread) 37px,
-        transparent 73px
+        var(--licio-fabric-thread) 183px,
+        transparent 367px
       ),
       repeating-linear-gradient(
         90.8deg,
