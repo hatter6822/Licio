@@ -325,6 +325,7 @@ licio/
 ├── .nvmrc                       -- Node 22 pin
 ├── CLAUDE.md                    -- this file
 ├── README.md                    -- project entry point
+├── DEVELOPMENT.md               -- local dev + user-testing (dev accounts, sign-in)
 ├── SECURITY.md                  -- vulnerability disclosure policy
 ├── CONTRIBUTING.md              -- contribution guidelines
 ├── CODE_OF_CONDUCT.md           -- community standards
@@ -585,7 +586,11 @@ licio/
 │           │   ├── story-media.ts       --   WS-Q.5.2c story→feed media projection
 │           │   ├── media-urls.ts        --   WS-Q.5.2c signed media read URLs (mint/verify)
 │           │   ├── demo-data.ts         --   demo feed fixtures + stable demo ids
-│           │   └── demo-seed.ts         --   rich dev seed (rooms/stories/threads/comments)
+│           │   └── demo-seed.ts         --   rich dev seed: dev test accounts
+│           │                                  (admin/steward/expert), rooms/stories across
+│           │                                  every lifecycle state, evidence + divergent
+│           │                                  lenses, and seedShadowSignals (MERI/SCOI
+│           │                                  outputs, safety, owner-scoped Signal Ledger)
 │           │                                  through the real stores; runs on non-prod boot
 │           └── __tests__/               -- route/middleware/service tests (WS-C – WS-G)
 ├── packages/
@@ -1130,6 +1135,8 @@ same PR:
    change.
 4. `CLAUDE.md` (and `AGENTS.md` — keep them byte-identical) — if
    conventions, build commands, or current-status summary change.
+5. `DEVELOPMENT.md` — if the change affects the local dev environment,
+   the seeded demo data, or the dev test accounts / sign-in flow.
 
 Canonical ownership: `docs/SPEC.md` owns the design; this file owns
 engineering conventions; `README.md` owns the top-level introduction.
@@ -1260,10 +1267,10 @@ file counts at current state:
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
 | apps/web | ~116 unit + 7 E2E (6 frontend-only + the BFF-in-the-loop spec) | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~85 (incl. WS-D identity + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-Q E2E test-auth route + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
-| packages/shared | ~19 (incl. WS-D–WS-H schemas, URL/lifecycle utils, the UGC pipeline + XSS-vector suite) | node | `pnpm --filter @licio/shared test` |
+| apps/api | ~87 (incl. WS-D identity + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-Q E2E test-auth route + the dev-seed showcase integration test + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
+| packages/shared | ~20 (incl. WS-D–WS-H schemas, URL/lifecycle utils, the §5.6 rating-label SSOT, the UGC pipeline + XSS-vector suite) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~4 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |
-| packages/invariants | ~18 (PWAtt/MinHash/freshness + the WS-H invariant mathematics: matroid/fiber/GW/sheaf/holonomy/supporting property suites + the regression harness) | node | `pnpm --filter @licio/invariants test` |
+| packages/invariants | ~19 (PWAtt/MinHash/freshness + the WS-H invariant mathematics: matroid/fiber/GW/sheaf/holonomy/supporting property suites + the regression harness + the SPEC-purpose oracle suite) | node | `pnpm --filter @licio/invariants test` |
 | packages/ranking | ~7 (denylist + versioned-artifact pinning, strict schemas, §5.5 profile fuzzing + baseline weights, §5.4 arithmetic, penalties/constraints incl. tie enforcement, dedup/balancing, templates + x-pseudo localization, pipeline determinism, replay diff) | node | `pnpm --filter @licio/ranking test` |
 | scripts | ~4 | node | via root `pnpm test` (policy project) |
 

@@ -332,6 +332,18 @@ Because there are no likes or upvotes, the app uses descriptive labels, none of 
 | Resolved Context | A previously ambiguous issue has a high-quality synthesis. |
 | Bridge Active | Multiple communities are engaging with improving coherence. |
 
+Exactly one label is shown per item, derived as a **priority cascade** in which
+the live invariant signals outrank the slower lifecycle state (Section 14.4):
+safety/coordination review (Under Review) → interpretation divergence (Needs
+Context, from SCOI or the `context_needed` state) → cross-community
+reconciliation (Bridge Active) → a resolved synthesis (Resolved Context) →
+independent evidence (Well-Sourced, requiring independent evidence cards **and**
+a MERI source-independence signal) → ongoing contribution (Deepening) → the
+default (Getting Attention). Well-Sourced and Under Review are reachable only
+through the live signal — the lifecycle state alone never produces them. This
+derivation is implemented once and shared by every reader-facing surface so the
+feed card and the story page can never disagree about an item's label.
+
 # 6. Progressive Web App: requirements and client architecture
 
 ## 6.1 PWA-first design philosophy

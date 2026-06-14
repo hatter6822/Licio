@@ -399,13 +399,25 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
 
 ## Testing
 
-- `packages/invariants`: 330+ unit/property tests — matroid
+- `packages/invariants`: 340+ unit/property tests — matroid
   monotonicity/submodularity and greedy-vs-brute-force exactness, fiber
   connectivity by enumeration, sampler margin/nonnegativity invariants,
   Jacobi eigenpair residuals, Sinkhorn marginals + rounding exactness,
   Helmholtz orthogonality, Chen-identity exactness, gauge invariance under
   random conjugation, the regression suite against pinned baselines (an
   intentional drift is flagged with its magnitude).
+- `packages/invariants/__tests__/invariant-purpose.test.ts`: the PURPOSE
+  suite — where the per-module suites prove the mathematics is correct, this
+  proves each invariant fulfils its STATED SPEC purpose (and the adversarial
+  cases a skeptic would use against it): MERI collapses ten near-identical
+  sources to ~one exposure (§7.1); MFCI does not flag an active community
+  proportional to its base rates and leaves a burst's innocent neighbour at
+  the null (§8.4); GWEI calls two cohorts with different items but the same
+  relational geometry equivalent and blocks a degraded protected cohort
+  (§9.2); SCOI rises when a post is detached into a divergent community
+  without being "weaponized" absent a safety signal (§10.1); PHI separates a
+  flat loop from a steered one (§11.4); CID catches a locale-biased ranker as
+  readily as a gender-biased one (§12.5).
 - `apps/api`: platform tests (wrapper, promotion, config, scheduler,
   shadow/ranking boundary), service tests on seeded WS-D/E/F/G data
   (including the real MinHash near-duplicate path and the full SCOI lens
