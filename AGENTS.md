@@ -713,14 +713,18 @@ licio/
 │   └── policy/                  --   policy validation utilities + tests
 ├── docs/
 │   ├── SPEC.md                  -- canonical design specification
+│   ├── OFFLINE_SPEC.md          -- LCAP v0.2 delay-tolerant sync (WS-R extension spec)
+│   ├── PRIVATE_SPEC.md          -- E2EE private P2P rooms (WS-S extension spec)
 │   ├── planning/                -- per-workstream planning documents
-│   │   ├── 00-index.md          --   master index (~706 atomic tasks)
+│   │   ├── 00-index.md          --   master index (~839 atomic tasks)
 │   │   ├── 01-repository-foundation.md  -- WS-0
 │   │   ├── 02-doctrine-and-policy.md    -- WS-A
 │   │   ├── 03-design-system.md          -- WS-B
 │   │   ├── 04-pwa-client.md             -- WS-C
 │   │   ├── 05–17-*.md                   -- WS-D through WS-P
-│   │   └── 18-content-and-room-model.md -- WS-Q (room-owned content + visibility)
+│   │   ├── 18-content-and-room-model.md -- WS-Q (room-owned content + visibility)
+│   │   ├── 19-offline-content-availability.md -- WS-R (LCAP v0.2; ext of OFFLINE_SPEC.md)
+│   │   └── 20-private-p2p-rooms.md      -- WS-S (E2EE P2P rooms; ext of PRIVATE_SPEC.md)
 │   ├── design-system/           -- design system documentation
 │   ├── pwa-client/              -- PWA implementation documentation
 │   ├── identity/                -- WS-D implementation reference
@@ -1097,7 +1101,12 @@ No Lean or Rust toolchains.  This is a pure TypeScript monorepo.
 
 ## Implementation roadmap
 
-The specification defines 18 workstreams (WS-0 through WS-Q).
+The core specification defines 18 workstreams (WS-0 through WS-Q).
+Two **extension workstreams** — WS-R and WS-S — derive from the
+standalone `docs/OFFLINE_SPEC.md` (LCAP v0.2) and `docs/PRIVATE_SPEC.md`
+specifications rather than `docs/SPEC.md`; both are post-M3
+resilience/privacy extensions and are not launch-blocking for the core
+social product.
 Status:
 
 | Workstream | Title | Status |
@@ -1120,10 +1129,12 @@ Status:
 | WS-O | Security and reliability | Planned (WS-O.4.5 adversarial hardening shipped) |
 | WS-P | Experimentation and launch | Planned |
 | WS-Q | Content–room ownership and visibility | Complete |
+| WS-R | Offline content availability (LCAP v0.2) | Planned (extension; `docs/OFFLINE_SPEC.md`) |
+| WS-S | Private P2P rooms (E2EE) | Planned (extension; `docs/PRIVATE_SPEC.md`) |
 
 Read the per-workstream planning document under `docs/planning/`
 before starting new work.  The master index at
-`docs/planning/00-index.md` lists all ~706 atomic tasks.
+`docs/planning/00-index.md` lists all ~839 atomic tasks.
 
 ## Documentation rules
 
