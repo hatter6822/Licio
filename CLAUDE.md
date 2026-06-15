@@ -785,6 +785,17 @@ dependency:
 4. License — must be AGPL-3.0-or-later compatible (MIT, ISC, BSD, Apache-2.0)
 5. Web-API alternative — can a built-in browser/Node.js API replace it?
 
+**Pinned transitive override (`ws`).**  `pnpm.overrides` pins `ws` to
+`^8.21.0`.  `viem` (the WS-D SIWE / EIP-4361 verifier) pins `ws@8.20.1`
+*exactly*, which carries GHSA-96hv-2xvq-fx4p (a WebSocket-server
+memory-exhaustion DoS).  `viem@2.52.2` is the latest release and no `viem`
+version yet pins a patched `ws`, so the override is the only remediation
+(8.20.1 → 8.21.0 is an API-compatible patch; `pnpm audit --audit-level=high`
+is clean with it).  `ws` is viem's RPC WebSocket transport; Licio uses
+`viem` only for offline SIWE signature verification and runs no `ws`
+server, so exploitability is low regardless.  Remove this override once
+`viem` ships a release pinning `ws >= 8.21.0`.
+
 ## Reading large files
 
 `docs/SPEC.md` and `docs/planning/00-index.md` (~858 tasks) are large.
