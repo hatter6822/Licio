@@ -362,6 +362,8 @@ describe('config validator matrix (fail-closed, every key)', () => {
       'invariants.thresholdHuggingBandFraction': 0.15,
       'invariants.thresholdHuggingMinPopulation': 12,
       'invariants.thresholdHuggingExcess': 2.5,
+      'invariants.mfciCalibrationDriftMaxRatio': 1.5,
+      'invariants.mfciExcludeFlaggedWindows': true,
     };
     const invalid: Record<string, unknown> = {
       'invariants.wrapperTimeoutMs': -1,
@@ -393,6 +395,8 @@ describe('config validator matrix (fail-closed, every key)', () => {
       'invariants.thresholdHuggingBandFraction': 1.5,
       'invariants.thresholdHuggingMinPopulation': 1,
       'invariants.thresholdHuggingExcess': 0.5,
+      'invariants.mfciCalibrationDriftMaxRatio': 0.5,
+      'invariants.mfciExcludeFlaggedWindows': 'nope',
     };
     for (const key of INVARIANTS_CONFIG_KEYS) {
       expect(validateInvariantsConfigValue(key, valid[key]), `${key} valid sample`).toBeNull();

@@ -66,6 +66,12 @@ export interface InvariantsRuntimeConfig {
   thresholdHuggingMinPopulation: number;
   /** Minimum observed/expected band excess to flag hugging. */
   thresholdHuggingExcess: number;
+  /** MFCI calibration drift guard (WS-O.4.5): retain the previous calibration
+   *  when a new q99 jumps beyond this ratio over the same-volume bucket. */
+  mfciCalibrationDriftMaxRatio: number;
+  /** Exclude hourly windows touching an under-case target from the MFCI
+   *  baseline (anti-poisoning, WS-O.4.5). */
+  mfciExcludeFlaggedWindows: boolean;
 }
 
 export const DEFAULT_INVARIANTS_CONFIG: InvariantsRuntimeConfig = {
@@ -92,6 +98,8 @@ export const DEFAULT_INVARIANTS_CONFIG: InvariantsRuntimeConfig = {
   thresholdHuggingBandFraction: 0.15,
   thresholdHuggingMinPopulation: 12,
   thresholdHuggingExcess: 2.5,
+  mfciCalibrationDriftMaxRatio: 1.5,
+  mfciExcludeFlaggedWindows: true,
 };
 
 const positiveInt = z.number().int().positive();
@@ -145,6 +153,8 @@ const CONFIG_VALIDATORS: Record<string, z.ZodType> = {
   'invariants.thresholdHuggingBandFraction': z.number().gt(0).lt(1),
   'invariants.thresholdHuggingMinPopulation': positiveInt.gte(5).lte(10_000),
   'invariants.thresholdHuggingExcess': positiveNum.gte(1),
+  'invariants.mfciCalibrationDriftMaxRatio': positiveNum.gte(1),
+  'invariants.mfciExcludeFlaggedWindows': z.boolean(),
 };
 
 export const INVARIANTS_CONFIG_KEYS = Object.keys(
@@ -184,6 +194,8 @@ const KEY_TO_FIELD: Record<string, keyof InvariantsRuntimeConfig> = {
   'invariants.thresholdHuggingBandFraction': 'thresholdHuggingBandFraction',
   'invariants.thresholdHuggingMinPopulation': 'thresholdHuggingMinPopulation',
   'invariants.thresholdHuggingExcess': 'thresholdHuggingExcess',
+  'invariants.mfciCalibrationDriftMaxRatio': 'mfciCalibrationDriftMaxRatio',
+  'invariants.mfciExcludeFlaggedWindows': 'mfciExcludeFlaggedWindows',
 };
 
 /**

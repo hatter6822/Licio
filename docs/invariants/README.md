@@ -502,11 +502,15 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
   WS-H batch does not feed directly) nor the bridge-attempt records that
   drive a *computed* "Bridge Active" (the demo uses the `bridging` lifecycle
   state for that label). Both are demo-corpus gaps, not production gaps.
-- **Calibration contamination hardening:** the nightly MFCI null rebuild
-  does not yet exclude windows overlapping coordinated bursts, so a
-  sustained attack could gradually lift the cheap path's q99. The exact
-  fiber test is the calibration-independent backstop; window exclusion
-  keyed on opened cases lands with the WS-J case lifecycle.
+- **Calibration anti-poisoning (WS-O.4.5, SHIPPED):** the nightly MFCI null
+  rebuild (`rebuildMfciCalibrations`) now (1) EXCLUDES any hourly window
+  touching a target under an OPEN MFCI case (`mfciExcludeFlaggedWindows`), so an
+  attacker's own flagged activity can never fold into the "normal" it is judged
+  against, and (2) emits an `invariants.mfci.calibration_drift` alert and
+  RETAINS the previous (more sensitive) calibration when a new per-volume-bucket
+  q99 jumps beyond `mfciCalibrationDriftMaxRatio` — a poisoning signature can no
+  longer desensitize the cheap path. The exact fiber test remains the
+  authoritative, calibration-independent backstop.
 - **WS-P** wires the GWEI release gate and the CID model-release gate into
   the experiment framework, and owns the transparency-report pipeline the
   export feeds.

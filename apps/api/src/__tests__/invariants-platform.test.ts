@@ -565,4 +565,91 @@ describe('nightly MFCI calibration rebuild (WS-H.3.1a)', () => {
     const kept = await fixture.invariants.calibrations.get('mfci:target_concentration');
     expect(kept?.version).toBe('v-previous');
   });
+
+  // WS-O.4.5 — a contribution.created event on `storyId` at `atMs`.
+  const calibEvent = (storyId: string, atMs: number) => ({
+    eventId: randomUUID(),
+    eventType: 'contribution.created' as const,
+    topic: 'contribution.created',
+    timestamp: new Date(atMs).toISOString(),
+    privacyClassification: 'public' as const,
+    retentionTier: 'public_contribution' as const,
+    payload: { story_id: storyId },
+    ownerUserId: null,
+    purgeAfter: null,
+  });
+
+  it('EXCLUDES windows touching an under-case target (anti-poisoning, WS-O.4.5)', async () => {
+    const fixture = freshInvariantServices();
+    const { rebuildMfciCalibrations } = await import('../invariants/scheduler.js');
+    const nowMs = Date.now();
+    const organic = await seedStory(fixture);
+    const attacked = await seedStory(fixture);
+    // An OPEN case on the attacked target → its windows must be dropped.
+    await fixture.invariants.mfciCases.insert({
+      caseId: randomUUID(),
+      targetType: 'story',
+      targetId: attacked.storyId,
+      riskState: 'high',
+      statistic: 'target_concentration',
+      mfciScore: 6,
+      pHat: 0.002,
+      sampleCount: 100,
+      fixedMarginsRef: 'cheap:test',
+      summary: '{}',
+      appealSummary: '',
+      status: 'open',
+      openedAt: new Date(nowMs).toISOString(),
+      resolvedAt: null,
+      resolvedBy: null,
+    });
+    const rows = [];
+    for (let h = 1; h <= 8; h += 1) {
+      const windowStart = nowMs - h * 3_600_000;
+      for (let i = 0; i < 6; i += 1)
+        rows.push(calibEvent(organic.storyId, windowStart + i * 90_000));
+    }
+    // One poisoned window: a concentrated burst on the under-case target.
+    const poisonStart = nowMs - 9 * 3_600_000;
+    for (let i = 0; i < 20; i += 1)
+      rows.push(calibEvent(attacked.storyId, poisonStart + i * 60_000));
+    await fixture.events.eventStore.insertMany(rows);
+    await rebuildMfciCalibrations(fixture.invariants, fixture.events, nowMs);
+    // Only the 8 organic windows contributed; the poisoned window was excluded.
+    const row = await fixture.invariants.calibrations.get('mfci:target_concentration');
+    expect(row?.sampleCount).toBe(8);
+  });
+
+  it('ALERTS and RETAINS the previous calibration on a poisoning q99 jump (WS-O.4.5)', async () => {
+    const fixture = freshInvariantServices();
+    const { rebuildMfciCalibrations } = await import('../invariants/scheduler.js');
+    const nowMs = Date.now();
+    // A SENSITIVE previous calibration (low q99 in the small-volume bucket).
+    await fixture.invariants.calibrations.upsert({
+      calibrationKey: 'mfci:target_concentration',
+      version: 'v-sensitive',
+      data: {
+        statistic: 'target_concentration',
+        version: 'v-sensitive',
+        computedAtMs: nowMs,
+        buckets: [{ minVolume: 0, q50: 0.1, q90: 0.15, q99: 0.2, sampleCount: 50 }],
+      },
+      sampleCount: 50,
+      computedAt: new Date(nowMs).toISOString(),
+    });
+    // A POISONED baseline: every window concentrates on one target →
+    // target_concentration ≈ 1 → the new q99 ≫ 1.5 × 0.2.
+    const story = await seedStory(fixture);
+    const rows = [];
+    for (let h = 1; h <= 8; h += 1) {
+      const windowStart = nowMs - h * 3_600_000;
+      for (let i = 0; i < 6; i += 1) rows.push(calibEvent(story.storyId, windowStart + i * 90_000));
+    }
+    await fixture.events.eventStore.insertMany(rows);
+    await rebuildMfciCalibrations(fixture.invariants, fixture.events, nowMs);
+    // The drift alert fired and the SENSITIVE calibration was retained.
+    expect(fixture.events.metrics.counter('invariants.mfci.calibration_drift')).toBeGreaterThan(0);
+    const kept = await fixture.invariants.calibrations.get('mfci:target_concentration');
+    expect(kept?.version).toBe('v-sensitive');
+  });
 });
