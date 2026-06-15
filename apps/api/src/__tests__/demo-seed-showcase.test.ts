@@ -7,7 +7,8 @@
 // the owner-scoped Signal Ledger is non-empty for each test account. This is
 // the regression guard for "every story said Getting Attention" / "reading
 // signals were empty".
-import type { RatingLabelKind } from '@licio/shared';
+import { handleSchema, type RatingLabelKind } from '@licio/shared';
+import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { userMayPostTopLevel } from '../forum/rooms.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
@@ -18,6 +19,7 @@ import {
   seedOperationalSignals,
 } from '../lib/demo-seed.js';
 import { serveFeed } from '../ranking/service.js';
+import { createV1Routes } from '../routes/v1.js';
 import { freshRankingServices, type RankingFixture } from './ranking-helpers.js';
 
 /** Reconstruct the stable demo story-id factory (pinned by the seed contract). */
@@ -67,6 +69,17 @@ describe('demo seed — development test accounts', () => {
     // The email factor is verified so verified-only surfaces work on first login.
     for (const account of DEV_ACCOUNTS) {
       expect((await fx.identity.store.getAuth(account.userId))?.emailVerified).toBe(true);
+    }
+  });
+
+  it('every login-able account has a SCHEMA-VALID handle (guards the OTP-login 500 bug)', async () => {
+    // The seed writes the store directly, bypassing registration's handle
+    // validation; an invalid handle only fails when the account signs in (the
+    // session response re-validates the user). Assert each is valid up front.
+    for (const account of DEV_ACCOUNTS) {
+      const user = await fx.identity.store.getUserByEmail(account.email);
+      expect(user).not.toBeNull();
+      expect(() => handleSchema.parse(user?.handle)).not.toThrow();
     }
   });
 
@@ -170,6 +183,36 @@ describe('demo seed — SCOI divergence + reading signals', () => {
       // Owner isolation: every entry belongs to the requesting account only.
       expect(page.entries.every((e) => e.ownerUserId === account.userId)).toBe(true);
     }
+  });
+});
+
+describe('demo seed — the story-detail read agrees with the feed', () => {
+  /** Read a story through the real GET /v1/stories/:id route. */
+  async function detail(storyId: string): Promise<{ rating_label: string; safety_state: string }> {
+    const app = new Hono().route('/v1', createV1Routes());
+    const res = await app.request(new Request(`http://localhost/v1/stories/${storyId}`));
+    expect(res.status).toBe(200);
+    return (await res.json()) as { rating_label: string; safety_state: string };
+  }
+
+  it('derives the same label on the detail route as on the feed (well-sourced, under-review)', async () => {
+    const items = await fullFrontPage();
+    const feedLabel = (id: string) => items.find((i) => i.story_id === id)?.rating_label;
+    // The detail-route signal assembly (safety + SCOI + evidence + MERI) feeds
+    // the SAME shared cascade, so non-trivial labels match the feed.
+    const s1 = await detail(S(1)); // evidence-rich + MERI-independent → well-sourced
+    expect(s1.rating_label).toBe('well-sourced');
+    expect(s1.rating_label).toBe(feedLabel(S(1)));
+
+    const s19 = await detail(S(19)); // under coordination review
+    expect(s19.rating_label).toBe('under-review');
+    expect(s19.safety_state).toBe('under-review');
+    expect(s19.rating_label).toBe(feedLabel(S(19)));
+  });
+
+  it('a freshly-submitted story with no signals reads getting-attention on both', async () => {
+    const s21 = await detail(S(21)); // submitted lifecycle, no live signals
+    expect(s21.rating_label).toBe('getting-attention');
   });
 });
 

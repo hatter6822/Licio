@@ -27,6 +27,7 @@ import {
   type StoryLifecycleState,
   type SubmissionMetadata,
 } from '@licio/shared';
+import { attentionPurgeAfterIso } from '../events/privacy-gate.js';
 import type { EventPipelineServices } from '../events/services.js';
 import type { NewStoredEvent } from '../events/stores.js';
 import type { ForumServices } from '../forum/services.js';
@@ -1692,8 +1693,13 @@ export async function seedOperationalSignals(
   //    by the scorer exactly as it is for a real reader (the in-browser pipeline
   //    adds more as a tester reads).
   const hourStart = windowStartMs(nowMs, '1h');
-  const at = new Date(hourStart + 60_000).toISOString();
+  const eventMs = hourStart + 60_000;
+  const at = new Date(eventMs).toISOString();
   const sessionBucket = new Date(hourStart).toISOString();
+  // Purge deadline computed exactly as the real ingest path does (the dev
+  // accounts hold default retention settings at seed time), so the seeded rows
+  // carry a proper retention deadline rather than lingering unbounded.
+  const purgeAfter = attentionPurgeAfterIso('default', eventMs, nowMs);
   type Att = {
     owner: string;
     item: string;
@@ -1847,7 +1853,7 @@ export async function seedOperationalSignals(
       retentionTier: 'attention_aggregated',
       payload: event as unknown as Record<string, unknown>,
       ownerUserId: a.owner,
-      purgeAfter: null,
+      purgeAfter,
     };
   });
   await events.eventStore.insertMany(rows);

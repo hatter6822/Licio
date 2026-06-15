@@ -351,7 +351,10 @@ Two §23.3 wire fields carry the diversification/context outputs:
   Cards are built from STORED rows only — never computed on request.
 - **`rating_label`** — the §5.6 conversation-state label, derived by the
   single shared `deriveRatingLabel` (`@licio/shared`, also used by the
-  story-detail read so the two surfaces never disagree). It is a strict
+  story-detail read so the surfaces agree on every dimension; the SCOI
+  interpretation-divergence input is surface-specific — the feed uses this
+  profile-aware `context_card`, the detail uses SCOI energy ≥ the needs-context
+  threshold — so they can differ only at the SCOI margin). It is a strict
   priority cascade in which the LIVE invariant signals outrank the slower
   lifecycle-state mapping (the §10.5 principle generalised to all seven
   labels): safety review → SCOI interpretation divergence → bridging →

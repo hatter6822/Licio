@@ -137,8 +137,12 @@ interface StoryReadSignals {
  * Assemble the live rating signals for ONE story from STORED shadow outputs (a
  * detail read never triggers invariant computation): the item safety state +
  * MFCI risk + thread posture, the latest SCOI energy (interpretation
- * divergence), the thread's independent evidence-card count, and the latest
- * MERI exposure. The story-detail read and the feed thus agree on the label.
+ * divergence — SCOI energy ≥ the needs-context threshold, matching the
+ * story-page "Where interpretations differ" drawer), the thread's independent
+ * evidence-card count, and the latest MERI exposure. Fed through the SAME shared
+ * `deriveRatingLabel`/`deriveStorySafetyState` the feed uses, so the surfaces
+ * agree on every dimension except the SCOI margin (the feed uses its
+ * profile-aware context card there instead).
  */
 async function assembleStoryReadSignals(
   story: StoryRecord,

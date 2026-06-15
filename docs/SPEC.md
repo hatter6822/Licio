@@ -341,8 +341,11 @@ independent evidence (Well-Sourced, requiring independent evidence cards **and**
 a MERI source-independence signal) → ongoing contribution (Deepening) → the
 default (Getting Attention). Well-Sourced and Under Review are reachable only
 through the live signal — the lifecycle state alone never produces them. This
-derivation is implemented once and shared by every reader-facing surface so the
-feed card and the story page can never disagree about an item's label.
+derivation is implemented once and shared by every reader-facing surface, so the
+feed card and the story page agree on every dimension; the one input that is
+surface-specific is interpretation divergence (the feed reads its profile-aware
+SCOI context card, the story page reads SCOI energy against the needs-context
+threshold), which can differ only at the SCOI margin.
 
 # 6. Progressive Web App: requirements and client architecture
 

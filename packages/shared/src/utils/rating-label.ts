@@ -4,8 +4,13 @@
 // for mapping a story's CONVERSATION STATE onto one of the seven descriptive
 // labels — never popularity, never a score. Both the WS-I feed path
 // (apps/api/src/ranking/service.ts) and the story-detail read
-// (apps/api/src/routes/v1.ts) call this, so the two surfaces can never disagree
-// about a story's label.
+// (apps/api/src/routes/v1.ts) call this SAME cascade, so they agree on the
+// safety, lifecycle, evidence, and MERI dimensions. The one input that is NOT
+// identical is `interpretationsDiverge`: the feed supplies its profile-aware
+// SCOI context card, while the detail supplies SCOI energy ≥ the needs-context
+// threshold (matching the story-page "Where interpretations differ" drawer's
+// stricter signal). The two can therefore differ only at the SCOI margin —
+// every other label is surface-invariant.
 //
 // The function is PURE and TOTAL: every input yields exactly one label, the same
 // input always yields the same label, and it has no clock, I/O, or financial
@@ -63,11 +68,13 @@ export interface StorySafetyStateInputs {
 
 /**
  * Derive a story's wire-facing safety posture (SPEC §22.1 `safety_state`) — the
- * SINGLE source of truth shared by the WS-I feed and the story-detail read, so
- * the two surfaces never disagree. Descriptive, never a sanction: `under-review`
- * means a coordination/safety/policy signal warrants review, not that the
- * content is false or banned. A frozen item or a high/severe MFCI risk is
- * `under-review`; an elevated signal is `caution`; otherwise `ok`.
+ * SINGLE derivation shared by the WS-I feed and the story-detail read, applied
+ * to each surface's view of the same underlying state (the feed reads the
+ * MFCI-risk ranking feature, the detail reads the durable MFCI risk-state store
+ * it caches), so they agree by construction. Descriptive, never a sanction:
+ * `under-review` means a coordination/safety/policy signal warrants review, not
+ * that the content is false or banned. A frozen item or a high/severe MFCI risk
+ * is `under-review`; an elevated signal is `caution`; otherwise `ok`.
  */
 export function deriveStorySafetyState(input: StorySafetyStateInputs): StorySafetyState {
   if (input.frozen) return 'under-review';
