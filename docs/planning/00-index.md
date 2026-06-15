@@ -266,6 +266,18 @@ Note: WS-L.1 (due diligence, document-only) starts in Wave 1 alongside WS-A. See
 
 - WS-S (private P2P rooms: room-class model + server non-storage gates → private schemas/canonical encoding → MLS/HPKE/Ed25519/HKDF crypto → private Helia/libp2p profile → op-log + deterministic reducer → sync/blind-rendezvous → private-room UI → media → migration → update-channel transparency → audit/launch) -- `20-private-p2p-rooms.md`. New `packages/private-p2p` + lazily code-split `apps/web/src/private-p2p` + `private_room_stubs`/`private_rendezvous_records` tables + defensive guards on existing server surfaces. WS-S.1 (server non-storage gates) is landable first, independent of the crypto/P2P stack.
 
+### Extension workstreams: execution order (WS-R / WS-S)
+
+WS-R and WS-S depend only on completed core workstreams (WS-C/D/E/F/G/Q), are **largely independent** (different crypto suites — ES256 vs Ed25519/MLS — and different canonical encoders — LDC vs DAG-CBOR — so no shared crypto code), and couple only softly: WS-S.6.5 MAY reuse the WS-R `.licio-bundle` pack as its CAR (falling back to IPLD CAR), and WS-R.16.1 is a thin carrier that defers all key authority to WS-S. Recommended sequence:
+
+1. **WS-S.1 first, immediately** — the server non-storage gates + seven CI checks. Cheapest, lowest-risk, independent of the whole crypto/P2P stack; landing it early makes it structurally impossible for any later code to leak private content server-side.
+2. **In parallel from the start:** WS-R.0 (LCAP foundations) **and** the WS-S long-lead due-diligence — select/audit the MLS/HPKE/curve libraries (§30.1–§30.2), confirm the dependency-budget isolation (S.2.1), and kick off the external cryptography review. Also schedule the **WS-O reproducible-build + transparency-log slice** that S.10 depends on.
+3. **WS-R in full** (Wave 10) — the content-addressed availability substrate. Lower risk, WebCrypto-native, no exotic deps, and shortest path to visible value (offline outbox + honest trust labels by Phase 1). Its pack/CAR + lane scheduler + liveness UX then make WS-S cheaper.
+4. **WS-S core** (Wave 11) — the E2EE plane. Can overlap Wave 10 once S.1/S.2 and the library selection are done; with two teams it runs concurrently (WS-S is the long pole, ~18–24 wks), with one team it follows WS-R.
+5. **Converge at the close:** WS-R.16 (private-room carrier) + WS-S.6.5 (LCAP-bundle CAR) co-land once the WS-S envelope (S.3.3a/b) exists, then the external audits + WS-R §36 / WS-S §29 launch gates.
+
+Hard constraints: **WS-R.0 and WS-S.2 gate everything** within their workstreams (start nothing ahead of them); both intra-workstream graphs are **acyclic** (the two first-cut cycles were removed). **WS-S.10 (update channel) ⟶ WS-O** — if the WS-O reproducible-build/transparency slice is not ready, ship WS-S at **Tier 1** with the documented "no defense against a malicious web update" limitation and backfill Tier 2/3. The MLS/HPKE library audit and the external crypto review **gate the close, not the start** — begin them in Wave 10a. Per-card ordering within each workstream is fixed by the dependency graph at the end of each document.
+
 ### Wave 7 (Week 16-22): Knomosis
 **Estimated team:** 3-4 engineers
 
