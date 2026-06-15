@@ -241,7 +241,7 @@ describe('MERI assembly through real MinHash signatures', () => {
     await sign(a.storyId, text);
     await sign(b.storyId, nearCopy);
     await sign(c.storyId, distinct);
-    const candidates = await assembleMeriCandidates(fixture.ingestion, null, 100, 0.7);
+    const candidates = await assembleMeriCandidates(fixture.ingestion, null, 100, 0.7, 0.85);
     const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
     expect(byId.get(a.storyId)?.nearDuplicateGroupId).not.toBeNull();
     expect(byId.get(a.storyId)?.nearDuplicateGroupId).toBe(
@@ -249,7 +249,9 @@ describe('MERI assembly through real MinHash signatures', () => {
     );
     expect(byId.get(c.storyId)?.nearDuplicateGroupId).toBeNull();
     // Topic filtering branch: no candidates for an unknown topic.
-    expect(await assembleMeriCandidates(fixture.ingestion, 'no-such-topic', 100, 0.7)).toEqual([]);
+    expect(
+      await assembleMeriCandidates(fixture.ingestion, 'no-such-topic', 100, 0.7, 0.85),
+    ).toEqual([]);
   });
 });
 
@@ -338,6 +340,7 @@ describe('config validator matrix (fail-closed, every key)', () => {
       'invariants.batchConcurrency': 2,
       'invariants.meriCandidateLimit': 100,
       'invariants.meriNearDuplicateThreshold': 0.7,
+      'invariants.meriSemanticDuplicateThreshold': 0.85,
       'invariants.mfciSamples': 500,
       'invariants.mfciBurnIn': 500,
       'invariants.mfciThinning': 2,
@@ -371,6 +374,7 @@ describe('config validator matrix (fail-closed, every key)', () => {
       'invariants.batchConcurrency': 0,
       'invariants.meriCandidateLimit': 1e9,
       'invariants.meriNearDuplicateThreshold': 1.5,
+      'invariants.meriSemanticDuplicateThreshold': 0,
       'invariants.mfciSamples': 1,
       'invariants.mfciBurnIn': -5,
       'invariants.mfciThinning': 0,

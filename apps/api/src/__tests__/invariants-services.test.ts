@@ -62,7 +62,7 @@ describe('MERI service (WS-H.2)', () => {
   it('groups syndicated lineage and scores the pool below 1', async () => {
     const fixture = freshInvariantServices();
     const { originalId, copyId, freshId } = await seedSyndicatedPair(fixture);
-    const candidates = await assembleMeriCandidates(fixture.ingestion, null, 100, 0.7);
+    const candidates = await assembleMeriCandidates(fixture.ingestion, null, 100, 0.7, 0.85);
     const byId = new Map(candidates.map((c) => [c.id, c]));
     // Confirmed syndication joins the two sources into one lineage group.
     expect(byId.get(originalId)?.sourceLineageGroupId).not.toBeNull();

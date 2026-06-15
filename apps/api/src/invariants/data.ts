@@ -49,6 +49,7 @@ export async function assembleMeriCandidates(
   topicId: string | null,
   limit: number,
   nearDuplicateThreshold: number,
+  semanticThreshold: number,
 ): Promise<MeriCandidateInput[]> {
   const recent = await ingestion.stories.listRecent(limit * 2);
   const stories = (topicId ? recent.filter((s) => s.topicIds.includes(topicId)) : recent).slice(
@@ -87,6 +88,26 @@ export async function assembleMeriCandidates(
       if (estimateJaccard(signature.minhash, other.minhash) >= nearDuplicateThreshold) {
         union(story.storyId, candidateId);
       }
+    }
+  }
+  // WS-O.4.5 — SEMANTIC near-duplicate union: a hard paraphrase that beats the
+  // lexical MinHash threshold is still grouped when its embedding cosine clears
+  // `semanticThreshold`, so exposure can't be inflated by paraphrasing harder.
+  // Graceful when embeddings are absent (the store returns no matches →
+  // MinHash-only). NOTE: the STRENGTH of this signal depends on the deployed
+  // embedding provider — the DEFAULT provider is LEXICAL (n-gram-correlated), so
+  // the genuine semantic benefit needs a semantic EMBEDDING_URL provider.
+  const modelVersion = ingestion.embeddingProvider.modelVersion;
+  for (const story of stories) {
+    const similar = await ingestion.embeddings.findSimilar(
+      'story',
+      story.storyId,
+      modelVersion,
+      semanticThreshold,
+      limit,
+    );
+    for (const match of similar) {
+      if (inSet.has(match.targetId)) union(story.storyId, match.targetId);
     }
   }
   const nearDupGroupOf = (storyId: string): string | null => {

@@ -82,7 +82,15 @@ greedy **fallback**, flagged `MATROID_FALLBACK` with halved confidence and
 the 1−1/e / 1/2 guarantees documented in the card.
 
 Data assembly: near-duplicate groups union MinHash/LSH signature collisions
-at the configured Jaccard threshold; lineage groups union confirmed
+at the configured Jaccard threshold AND (WS-O.4.5) embedding-cosine matches
+above `meriSemanticDuplicateThreshold` (via the WS-F embedding store's
+`findSimilar`), so a hard paraphrase that beats the LEXICAL MinHash threshold
+is still collapsed into one exposure — exposure can't be inflated by
+paraphrasing harder. The semantic union degrades gracefully when embeddings
+are absent (MinHash-only). NOTE: its strength depends on the deployed
+embedding provider — the DEFAULT provider is lexical (n-gram-correlated), so
+the genuine semantic benefit is realized only with a semantic `EMBEDDING_URL`
+provider; the seam is provider-agnostic. Lineage groups union confirmed
 syndication edges and shared outermost publisher ownership; evidence groups
 come from claim/evidence `independence_group_id`. The WS-E
 `hooks.redundancy` seam is closed from the latest stored marginal gains

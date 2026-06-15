@@ -29,8 +29,14 @@ export interface InvariantsRuntimeConfig {
   batchConcurrency: number;
   /** Candidate-set size cap per MERI evaluation. */
   meriCandidateLimit: number;
-  /** Near-duplicate Jaccard threshold for MERI grouping. */
+  /** Near-duplicate Jaccard threshold for MERI grouping (lexical, MinHash). */
   meriNearDuplicateThreshold: number;
+  /** Semantic (embedding cosine) near-duplicate threshold for MERI grouping
+   *  (WS-O.4.5): unions hard paraphrases MinHash misses. Its strength depends
+   *  on the deployed embedding provider — the DEFAULT provider is LEXICAL
+   *  (n-gram-correlated), so the semantic benefit is realized only with a
+   *  semantic EMBEDDING_URL provider. */
+  meriSemanticDuplicateThreshold: number;
   /** MFCI sampler parameters (WS-H.3.3b). */
   mfciSamples: number;
   mfciBurnIn: number;
@@ -80,6 +86,7 @@ export const DEFAULT_INVARIANTS_CONFIG: InvariantsRuntimeConfig = {
   batchConcurrency: 2,
   meriCandidateLimit: 200,
   meriNearDuplicateThreshold: 0.7,
+  meriSemanticDuplicateThreshold: 0.85,
   mfciSamples: 2_000,
   mfciBurnIn: 2_000,
   mfciThinning: 2,
@@ -112,6 +119,7 @@ const CONFIG_VALIDATORS: Record<string, z.ZodType> = {
   'invariants.batchConcurrency': positiveInt.lte(16),
   'invariants.meriCandidateLimit': positiveInt.lte(2_000),
   'invariants.meriNearDuplicateThreshold': z.number().gt(0).lt(1),
+  'invariants.meriSemanticDuplicateThreshold': z.number().gt(0).lte(1),
   'invariants.mfciSamples': positiveInt.gte(100).lte(100_000),
   'invariants.mfciBurnIn': positiveInt.lte(100_000),
   'invariants.mfciThinning': positiveInt.lte(100),
@@ -176,6 +184,7 @@ const KEY_TO_FIELD: Record<string, keyof InvariantsRuntimeConfig> = {
   'invariants.batchConcurrency': 'batchConcurrency',
   'invariants.meriCandidateLimit': 'meriCandidateLimit',
   'invariants.meriNearDuplicateThreshold': 'meriNearDuplicateThreshold',
+  'invariants.meriSemanticDuplicateThreshold': 'meriSemanticDuplicateThreshold',
   'invariants.mfciSamples': 'mfciSamples',
   'invariants.mfciBurnIn': 'mfciBurnIn',
   'invariants.mfciThinning': 'mfciThinning',

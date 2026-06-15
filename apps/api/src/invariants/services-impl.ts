@@ -190,6 +190,7 @@ export class MeriService extends BaseInvariantService {
         null,
         config.meriCandidateLimit,
         config.meriNearDuplicateThreshold,
+        config.meriSemanticDuplicateThreshold,
       );
       const result = computeMeri(candidates, {
         similarityThreshold: config.meriNearDuplicateThreshold,
