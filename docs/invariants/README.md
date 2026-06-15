@@ -303,6 +303,31 @@ weaken either (factor > 1) is rejected at write time.
   (constructive/casual/narrowing/compulsive/rage) reads event kinds, topic
   ordinals, and timing only.
 
+### Threshold-hugging meta-monitor (WS-O.4.5)
+
+Because every operating point is public (the project's chosen posture), an
+attacker can read each invariant's threshold and tune activity to sit a hair
+below the cliff to stay individually under-flagged. The cross-invariant
+**threshold-hugging meta-monitor** turns that knowledge into a liability. The
+pure primitive `detectThresholdHugging(values, threshold, cfg)`
+(`packages/invariants/src/braid/index.ts`, alongside Braid's TEMPORAL
+boundary-crossing `boundaryCrossingsByEntity`) flags an anomalous mass of scores
+in `[threshold − band, threshold)` against a uniform-over-observed-range null —
+scale/translation invariant and FAIL-CLOSED (a small population, no observed
+spread, or an everything-hugging distribution is never flagged). The scheduler
+step `runThresholdHuggingScan` (`apps/api/src/invariants/scheduler.ts`) applies
+it each tick to the recent `invariant_outputs` score population of each
+threshold-bearing invariant (MFCI `mfci`, SCOI `scoi`, PHI `phi`), with the band
+a configured FRACTION of each invariant's public threshold (so it scales across
+their different score scales). A detection emits the
+`invariants.threshold_hugging.detected` metric and routes the flagged SCOI/PHI
+targets to the EXACT MFCI fiber test (the calibration-independent backstop,
+reusing the Tropical→MFCI intake hook) — never a direct action, since the
+invariants are shadow-only. MFCI's own borderline targets are not re-routed
+(their `mfci` IS the exact statistic). Tunables: `thresholdHuggingBandFraction`
+(0.15), `thresholdHuggingMinPopulation` (12), `thresholdHuggingExcess` (2.5),
+all fail-closed under `invariants.*`.
+
 ## Platform mechanics
 
 - **Fallback wrapper (WS-H.1.2c).** Every computation runs under

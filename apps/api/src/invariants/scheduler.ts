@@ -10,6 +10,7 @@
 
 import {
   buildNullCalibration,
+  detectThresholdHugging,
   type InvariantTarget,
   runRegressionSuite,
   synchronyScore,
@@ -29,6 +30,7 @@ export const INVARIANTS_SCHEDULER_INTERVAL_MS = 3_600_000;
 export type InvariantsSchedulerTask =
   | 'config_reload'
   | 'batch_compute'
+  | 'threshold_hugging_scan'
   | 'session_sweep'
   | 'nightly_regression'
   | 'calibration_rebuild';
@@ -93,6 +95,12 @@ export async function runInvariantsTick(
   }
 
   try {
+    await runThresholdHuggingScan(invariants, events, nowMs);
+  } catch (err) {
+    onError(err, 'threshold_hugging_scan');
+  }
+
+  try {
     await invariants.sessions.sweepExpired(nowMs);
   } catch (err) {
     onError(err, 'session_sweep');
@@ -120,6 +128,104 @@ export async function runInvariantsTick(
       await rebuildMfciCalibrations(invariants, events, nowMs);
     } catch (err) {
       onError(err, 'calibration_rebuild');
+    }
+  }
+}
+
+/** How far back the meta-monitor reads each invariant's recent outputs. */
+const THRESHOLD_HUGGING_LOOKBACK_MS = 24 * 3_600_000;
+/** Cap on outputs read per invariant type (a bounded, targeted read). */
+const THRESHOLD_HUGGING_READ_LIMIT = 2_000;
+
+/**
+ * Threshold-bearing invariants the meta-monitor scans: the score key in the
+ * `score_vector`, the public threshold from config, and whether a detection
+ * routes the flagged targets to the exact MFCI fiber test. Cross-invariant
+ * hugging of SCOI/PHI suggests manufactured near-divergence/near-loop worth a
+ * COORDINATION re-check; MFCI's own borderline targets were already fiber-tested
+ * (their `mfci` is the exact statistic), so MFCI only emits the metric.
+ */
+const THRESHOLD_BEARING: ReadonlyArray<{
+  type: string;
+  scoreKey: string;
+  threshold: (c: InvariantsRuntimeConfig) => number;
+  routeToMfci: boolean;
+}> = [
+  {
+    type: 'MFCI',
+    scoreKey: 'mfci',
+    threshold: (c) => c.mfciRiskThresholds.elevated,
+    routeToMfci: false,
+  },
+  {
+    type: 'SCOI',
+    scoreKey: 'scoi',
+    threshold: (c) => c.scoiNeedsContextThreshold,
+    routeToMfci: true,
+  },
+  {
+    type: 'PHI',
+    scoreKey: 'phi',
+    threshold: (c) => c.phiThresholds.baseThreshold,
+    routeToMfci: true,
+  },
+];
+
+/**
+ * WS-O.4.5 — the cross-invariant THRESHOLD-HUGGING meta-monitor. For each
+ * threshold-bearing invariant it reads the recent score population across
+ * targets and flags an anomalous mass JUST UNDER the (public, deterministic)
+ * threshold — the signature of an attacker who read the open-source threshold
+ * and tuned activity to sit a hair below the cliff. Knowing the threshold thus
+ * becomes a LIABILITY: a detection emits a metric and routes the flagged targets
+ * to the EXACT MFCI fiber test (the calibration-independent backstop), never a
+ * direct action (the invariants are shadow-only). Read-only over
+ * `invariant_outputs`, bounded per type, and FAIL-CLOSED (the primitive declines
+ * to flag a small population or a no-spread/all-hugging distribution).
+ */
+export async function runThresholdHuggingScan(
+  invariants: InvariantPlatformServices,
+  events: EventPipelineServices,
+  nowMs: number,
+): Promise<void> {
+  const config = invariants.config();
+  const sinceIso = new Date(nowMs - THRESHOLD_HUGGING_LOOKBACK_MS).toISOString();
+  for (const spec of THRESHOLD_BEARING) {
+    const rows = await events.invariantStore.listByTypeSince(
+      spec.type,
+      sinceIso,
+      THRESHOLD_HUGGING_READ_LIMIT,
+    );
+    // Latest score per target (rows are newest-first) — never count a target twice.
+    const latestByTarget = new Map<string, number>();
+    for (const row of rows) {
+      if (latestByTarget.has(row.targetId)) continue;
+      const raw = row.scoreVector[spec.scoreKey];
+      if (typeof raw === 'number' && Number.isFinite(raw)) latestByTarget.set(row.targetId, raw);
+    }
+    const threshold = spec.threshold(config);
+    const band = config.thresholdHuggingBandFraction * threshold;
+    const result = detectThresholdHugging([...latestByTarget.values()], threshold, {
+      band,
+      minPopulation: config.thresholdHuggingMinPopulation,
+      excessThreshold: config.thresholdHuggingExcess,
+    });
+    if (!result.detected) continue;
+    const flagged = [...latestByTarget.entries()]
+      .filter(([, score]) => score >= threshold - band && score < threshold)
+      .map(([targetId]) => targetId);
+    invariants.log('invariants.threshold_hugging.detected', {
+      invariant: spec.type,
+      excess: result.excess,
+      band_count: result.bandCount,
+      population: result.population,
+      flagged: flagged.length,
+    });
+    events.metrics.increment('invariants.threshold_hugging.detected');
+    // Cross-invariant escalation: route the hugging targets to the exact MFCI
+    // fiber test (fail-toward-caution; never an auto-action).
+    if (spec.routeToMfci && flagged.length > 0 && events.hooks.mfci) {
+      await events.hooks.mfci({ target_ids: flagged.slice(0, 10) } as never);
     }
   }
 }

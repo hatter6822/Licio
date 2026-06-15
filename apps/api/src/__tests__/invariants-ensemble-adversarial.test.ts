@@ -23,6 +23,7 @@ import {
   counterfactualInvarianceDefect,
   detectNarrowLoop,
   detectSynchronizedCascade,
+  detectThresholdHugging,
   entropicGw,
   evaluateReleaseGate,
   fiberTest,
@@ -206,6 +207,33 @@ describe('ensemble: manufactured divergence cannot be weaponized via SCOI alone'
       ['g2', 't2', 'b1', 'reply', 'y'],
     ]);
     expect(fiberTest(coordinated, 'target_concentration', SAMPLER).pHat).toBeLessThan(0.1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3b. Threshold-hugging — knowing the PUBLIC threshold, the attacker tunes many
+//     targets to sit a hair below the cliff to stay individually under-flagged;
+//     the distributional meta-signal sees the cluster and routes them to the
+//     exact MFCI fiber test (the scheduler wiring is proven in
+//     invariants-threshold-hugging.test.ts). (Catalog §3.)
+// ---------------------------------------------------------------------------
+describe('ensemble: knowing the threshold is a liability (distributional hugging)', () => {
+  const CFG = { band: 0.06, minPopulation: 12, excessThreshold: 2.5 };
+  it('a population massed just under a known threshold is flagged; a diffuse one is not', () => {
+    const threshold = 0.4; // e.g. the SCOI needs-context cliff
+    // A diffuse population spread across the whole range is NOT flagged.
+    const diffuse = Array.from({ length: 34 }, (_, i) => (i / 34) * threshold);
+    expect(detectThresholdHugging(diffuse, threshold, CFG).detected).toBe(false);
+
+    // The attacker keeps a diffuse background BELOW the band, then tunes 16
+    // targets to sit in [0.34, 0.4) to dodge the per-item flag — the cluster
+    // itself is the tell.
+    const background = Array.from({ length: 18 }, (_, i) => (i / 18) * (threshold - CFG.band));
+    const hugging = [
+      ...background,
+      ...Array.from({ length: 16 }, () => threshold - CFG.band * 0.4),
+    ];
+    expect(detectThresholdHugging(hugging, threshold, CFG).detected).toBe(true);
   });
 });
 

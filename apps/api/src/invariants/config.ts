@@ -58,6 +58,14 @@ export interface InvariantsRuntimeConfig {
   promotionMinShadowDays: number;
   /** "Needs Context" feed threshold (WS-H.4.3a). */
   scoiNeedsContextThreshold: number;
+  /** Threshold-hugging meta-monitor (WS-O.4.5): the sub-threshold "hug band"
+   *  width as a FRACTION of each invariant's public threshold (relative so it
+   *  scales uniformly across the MFCI/SCOI/PHI score scales). */
+  thresholdHuggingBandFraction: number;
+  /** Minimum score population for the meta-monitor to judge (fail-closed). */
+  thresholdHuggingMinPopulation: number;
+  /** Minimum observed/expected band excess to flag hugging. */
+  thresholdHuggingExcess: number;
 }
 
 export const DEFAULT_INVARIANTS_CONFIG: InvariantsRuntimeConfig = {
@@ -81,6 +89,9 @@ export const DEFAULT_INVARIANTS_CONFIG: InvariantsRuntimeConfig = {
   gweiMinCohortSize: 25,
   promotionMinShadowDays: DEFAULT_PROMOTION_POLICY.minShadowDays,
   scoiNeedsContextThreshold: 0.4,
+  thresholdHuggingBandFraction: 0.15,
+  thresholdHuggingMinPopulation: 12,
+  thresholdHuggingExcess: 2.5,
 };
 
 const positiveInt = z.number().int().positive();
@@ -131,6 +142,9 @@ const CONFIG_VALIDATORS: Record<string, z.ZodType> = {
   'invariants.gweiMinCohortSize': positiveInt.gte(2),
   'invariants.promotionMinShadowDays': positiveInt.lte(365),
   'invariants.scoiNeedsContextThreshold': z.number().gt(0).lt(1),
+  'invariants.thresholdHuggingBandFraction': z.number().gt(0).lt(1),
+  'invariants.thresholdHuggingMinPopulation': positiveInt.gte(5).lte(10_000),
+  'invariants.thresholdHuggingExcess': positiveNum.gte(1),
 };
 
 export const INVARIANTS_CONFIG_KEYS = Object.keys(
@@ -167,6 +181,9 @@ const KEY_TO_FIELD: Record<string, keyof InvariantsRuntimeConfig> = {
   'invariants.gweiMinCohortSize': 'gweiMinCohortSize',
   'invariants.promotionMinShadowDays': 'promotionMinShadowDays',
   'invariants.scoiNeedsContextThreshold': 'scoiNeedsContextThreshold',
+  'invariants.thresholdHuggingBandFraction': 'thresholdHuggingBandFraction',
+  'invariants.thresholdHuggingMinPopulation': 'thresholdHuggingMinPopulation',
+  'invariants.thresholdHuggingExcess': 'thresholdHuggingExcess',
 };
 
 /**

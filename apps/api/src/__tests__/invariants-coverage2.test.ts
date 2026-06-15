@@ -359,6 +359,9 @@ describe('config validator matrix (fail-closed, every key)', () => {
       'invariants.gweiMinCohortSize': 25,
       'invariants.promotionMinShadowDays': 14,
       'invariants.scoiNeedsContextThreshold': 0.4,
+      'invariants.thresholdHuggingBandFraction': 0.15,
+      'invariants.thresholdHuggingMinPopulation': 12,
+      'invariants.thresholdHuggingExcess': 2.5,
     };
     const invalid: Record<string, unknown> = {
       'invariants.wrapperTimeoutMs': -1,
@@ -387,6 +390,9 @@ describe('config validator matrix (fail-closed, every key)', () => {
       'invariants.gweiMinCohortSize': 0,
       'invariants.promotionMinShadowDays': 9_999,
       'invariants.scoiNeedsContextThreshold': 2,
+      'invariants.thresholdHuggingBandFraction': 1.5,
+      'invariants.thresholdHuggingMinPopulation': 1,
+      'invariants.thresholdHuggingExcess': 0.5,
     };
     for (const key of INVARIANTS_CONFIG_KEYS) {
       expect(validateInvariantsConfigValue(key, valid[key]), `${key} valid sample`).toBeNull();

@@ -297,6 +297,34 @@ describe('WS-H runtime config (fail closed)', () => {
     const updated = await loadInvariantsConfig(fixture.events.configStore);
     expect(updated.batchConcurrency).toBe(4);
   });
+
+  it('validates and round-trips the threshold-hugging meta-monitor keys (WS-O.4.5)', async () => {
+    const fixture = freshInvariantServices();
+    // Out-of-range values are rejected at write time.
+    expect(
+      validateInvariantsConfigValue('invariants.thresholdHuggingBandFraction', 1.5),
+    ).not.toBeNull();
+    expect(
+      validateInvariantsConfigValue('invariants.thresholdHuggingMinPopulation', 1),
+    ).not.toBeNull();
+    expect(validateInvariantsConfigValue('invariants.thresholdHuggingExcess', 0.5)).not.toBeNull();
+    // Valid values round-trip through the fail-closed loader.
+    await fixture.events.configStore.set('invariants.thresholdHuggingBandFraction', { value: 0.2 });
+    await fixture.events.configStore.set('invariants.thresholdHuggingExcess', { value: 3 });
+    const config = await loadInvariantsConfig(fixture.events.configStore);
+    expect(config.thresholdHuggingBandFraction).toBe(0.2);
+    expect(config.thresholdHuggingExcess).toBe(3);
+    // A poisoned row keeps the reviewed default.
+    await fixture.events.configStore.set('invariants.thresholdHuggingMinPopulation', { value: 0 });
+    const rejected: string[] = [];
+    const reloaded = await loadInvariantsConfig(fixture.events.configStore, (key) =>
+      rejected.push(key),
+    );
+    expect(reloaded.thresholdHuggingMinPopulation).toBe(
+      DEFAULT_INVARIANTS_CONFIG.thresholdHuggingMinPopulation,
+    );
+    expect(rejected).toContain('invariants.thresholdHuggingMinPopulation');
+  });
 });
 
 describe('WS-H.1.2f scheduler tick', () => {
