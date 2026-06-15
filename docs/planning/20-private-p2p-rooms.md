@@ -1,6 +1,6 @@
 # WS-S: Private P2P Rooms (End-to-End Encrypted)
 
-**Milestone:** Post-M3 privacy extension (a separate storage/sync/trust/authority plane; not launch-blocking for the core social product) | **Priority:** P3 | **Dependencies:** WS-C (PWA shell, service worker, IndexedDB), WS-D (account login, sessions, identity-free rate limiting), WS-G (the eleven-type contribution taxonomy + UGC pipeline, mirrored locally), WS-Q (room model + binary visibility — extended with new axes), WS-O (reproducible builds, CSP/Trusted Types, transparency log — for the update channel) — all complete; optional reuse of WS-R (LCAP) packs for offline transport | **Source spec:** `docs/PRIVATE_SPEC.md` | **Wave:** 11 (parallelizable with WS-R; independent except the optional LCAP-pack CAR reuse) | **Estimated duration:** 18-24 weeks | **Task count:** 56 atomic cards
+**Milestone:** Post-M3 privacy extension (a separate storage/sync/trust/authority plane; not launch-blocking for the core social product) | **Priority:** P3 | **Dependencies:** WS-C (PWA shell, service worker, IndexedDB), WS-D (account login, sessions, identity-free rate limiting), WS-G (the eleven-type contribution taxonomy + UGC pipeline, mirrored locally), WS-Q (room model + binary visibility — extended with new axes), WS-O (reproducible builds, CSP/Trusted Types, transparency log — for the update channel) — all complete; optional reuse of WS-R (LCAP) packs for offline transport | **Source spec:** `docs/PRIVATE_SPEC.md` | **Wave:** 11 (parallelizable with WS-R; independent except the optional LCAP-pack CAR reuse) | **Estimated duration:** 18-24 weeks | **Task count:** 62 atomic cards
 
 ---
 
@@ -234,7 +234,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 **Acceptance criteria:**
 - Every schema is `.strict()`; unknown fields reject; forward compat is by schema-version bump.
 - Contribution ops enforce the same typed requirements as the shipped WS-G server schema.
-- The envelope's authenticated metadata matches the AAD inputs (WS-S.3.3) exactly.
+- The envelope's authenticated metadata matches the AAD inputs (WS-S.3.3a) exactly.
 
 **Testing:** Unit — accept/reject per schema; WS-G-parity matrix for contribution ops; envelope↔AAD field alignment.
 
@@ -244,19 +244,35 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 ## WS-S.3 Cryptographic foundation
 
-### WS-S.3.1 MLS integration + exporter + epoch secret
-**ID:** WS-S.3.1 | **Ref:** PRIVATE_SPEC §10.2, §30.1
+### WS-S.3.1a MLS library integration + cipher-suite pin + group lifecycle
+**ID:** WS-S.3.1a | **Ref:** PRIVATE_SPEC §10.2, §30.1; §10.7
 
-**Description:** Integrate the chosen audited TypeScript/WASM MLS implementation (RFC 9420) behind `packages/private-p2p/src/crypto/mls.ts`, mapping one room = one MLS group, one device = one MLS client, room epoch = MLS epoch, add/remove/commit/welcome to membership transitions. Derive `room_epoch_secret = MLS-Exporter("licio.private-room.v1.epoch", canonical([room_id_commitment, epoch, manifest_commitment]), 32)` (§8.5). Pin the cipher suite from audited library defaults and test with official MLS vectors where available.
+**Description:** Integrate the chosen audited TypeScript/WASM MLS implementation (RFC 9420) behind a **minimal reviewed wrapper** `packages/private-p2p/src/crypto/mls.ts` exposing only `createGroup`, `generateKeyPackage`, `addMember(keyPackage)`, `removeMember(leafIndex)`, `commit`, `processWelcome`, `currentEpoch`, and `epochAuthenticator`. Pin the cipher suite explicitly (the X25519/AES-128-GCM-or-ChaCha20/SHA-256/**Ed25519** suite that aligns with §10.7's signature choice) — never "library default" at runtime. Map one room = one MLS group, one device = one MLS client. Replay official MLS test vectors where the library exposes them. The wrapper surface is the only MLS API the rest of `packages/private-p2p` may call (a lint rule forbids deep imports of the MLS library).
 
 **Acceptance criteria:**
-- Add/remove/commit produce a new epoch with a fresh exporter secret; Welcome admits a new device.
-- `room_epoch_secret` is reproducible from the exporter and bound to the epoch; cipher suite is pinned.
-- MLS library vectors pass where available; the wrapper exposes only the minimal reviewed surface.
+- `addMember`/`removeMember`/`commit` advance `currentEpoch`; `processWelcome` admits a new device into the group at the committing epoch.
+- The cipher suite is pinned in code and asserted; an unexpected suite from the library aborts initialization.
+- Only the wrapper surface is reachable; a deep MLS-library import fails the lint gate. Official vectors pass where available.
 
-**Testing:** Unit/gated — MLS add/remove/commit across simulated devices; exporter determinism; official-vector replay.
+**Testing:** Unit/gated — add/remove/commit/welcome across simulated devices; suite-pin assertion; deep-import lint; official-vector replay.
 
 **Dependencies:** WS-S.2.3.
+
+---
+
+### WS-S.3.1b Epoch exporter → `room_epoch_secret` + epoch-transition wiring
+**ID:** WS-S.3.1b | **Ref:** PRIVATE_SPEC §10.2, §10.9
+
+**Description:** Implement `roomEpochSecret(epoch)` = `MLS-Exporter("licio.private-room.v1.epoch", canonical([room_id_commitment, epoch, manifest_commitment]), 32)` (RFC 9420 §8.5) over the current group's exporter secret, and the **epoch-transition event** that fires whenever a commit changes the epoch: it recomputes `room_epoch_secret`, triggers the §10.2 key schedule (WS-S.3.2) to rotate all five operational keys atomically, rotates the sync topic and rendezvous blind ids (WS-S.6.1a), and bumps the manifest commitment. The exporter context binds `manifest_commitment` so a fork of the manifest yields a different secret. Determinism: the same group state + epoch yields the identical `room_epoch_secret` on every device.
+
+**Acceptance criteria:**
+- `room_epoch_secret` is reproducible from the exporter and bound to `(room, epoch, manifest_commitment)`; identical across devices at the same epoch.
+- A commit emits exactly one epoch-transition event that rotates keys + topics + blind ids atomically (no window where old and new coexist).
+- A manifest fork (different `manifest_commitment`) produces a different secret, so cross-fork content cannot be opened.
+
+**Testing:** Unit/gated — exporter determinism across devices; one-event-per-commit atomic rotation; manifest-fork divergence.
+
+**Dependencies:** WS-S.3.1a.
 
 ---
 
@@ -272,24 +288,39 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit — derivation vectors; domain-separation independence; epoch rotation rotates all keys.
 
-**Dependencies:** WS-S.3.1.
+**Dependencies:** WS-S.3.1b.
 
 ---
 
-### WS-S.3.3 Object-body + key-wrap AEAD with canonical AAD
-**ID:** WS-S.3.3 | **Ref:** PRIVATE_SPEC §10.4, §10.5, §10.6
+### WS-S.3.3a Object-body AEAD + canonical `body_aad` + padding
+**ID:** WS-S.3.3a | **Ref:** PRIVATE_SPEC §10.5, §10.6, §25.4
 
-**Description:** Implement the two-layer AEAD: a fresh per-object content key encrypts the plaintext (AES-256-GCM or XChaCha20-Poly1305, fresh nonce) under the §10.5 `body_aad` (canonical fixed-shape array binding envelope version, room_id_commitment, epoch, object_type, plaintext_schema, sorted parent_op_ids, author_device_id_blind, author_seq, capability_root_at_seq, chunk_index/total); the object key is wrapped under `content_wrap_key` with a fresh `wrap_nonce` and the `wrap_aad` (binding wrapping_epoch, room_id_commitment, object_type). Enforce the §10.6 rules: fresh object key + nonce per object, no nonce reuse (fatal), no deterministic/convergent encryption, compression-before-encryption forbidden across the secret/attacker boundary (pad instead, §25.4).
+**Description:** Implement the inner AEAD in `packages/private-p2p/src/crypto/aead.ts`: `sealBody(plaintext, meta) → { object_key, nonce, ciphertext }` with a **fresh random 32-byte `object_key` per object** and a fresh nonce (96-bit for AES-256-GCM, 192-bit for XChaCha20-Poly1305) under the §10.5 `body_aad` = `canonical(["licio-priv1.body", envelope_version, room_id_commitment, room_epoch, object_type, plaintext_schema, sorted(parent_op_ids), author_device_id_blind, author_seq, capability_root_at_seq, chunk_index, chunk_total])`. Before sealing an op/contribution body, **pad to its size bucket** (§25.4) — compression-before-encryption is forbidden across the secret/attacker boundary (WS-S's §10.6 rule), so op bodies are padded, never compressed. `openBody` reconstructs `body_aad` from authenticated metadata + local epoch and fails closed on any mismatch.
 
 **Acceptance criteria:**
-- Both AADs are canonical-encoded; reconstructing them from envelope metadata + local epoch is the only way to open.
-- A fresh object key + nonce is used per object; a nonce-reuse attempt is a hard error (assertion in tests).
-- `wrapping_epoch` binding prevents replaying an object key into an envelope claiming another epoch.
-- Contribution/op bodies are never compressed; padding to a size bucket is applied instead.
+- A fresh `object_key` + nonce is used per object; a test harness asserts nonce/key uniqueness across a generated workload (reuse is a hard error).
+- `body_aad` is canonical-encoded (fixed-shape array, never `||`); `openBody` succeeds only when the reconstructed AAD byte-matches.
+- Op/contribution bodies are padded to a size bucket and never compressed; a compression attempt on a secret body throws.
 
-**Testing:** Unit — encrypt/open round-trip; AAD-mismatch rejection; nonce-reuse fatal; no-compression-on-secret assertion.
+**Testing:** Unit — seal/open round-trip; AAD-field-flip rejection (each field); nonce/key-uniqueness invariant; pad-not-compress assertion.
 
 **Dependencies:** WS-S.3.2.
+
+---
+
+### WS-S.3.3b Object-key wrap AEAD + epoch-bound replay defense
+**ID:** WS-S.3.3b | **Ref:** PRIVATE_SPEC §10.4, §10.5
+
+**Description:** Implement the outer AEAD wrapping the per-object `object_key` under the epoch `content_wrap_key`: `wrapKey(object_key, meta) → wrapped_object_key` where `wrap_nonce` is fresh, `wrap_aad = canonical(["licio-priv1.keywrap", wrapping_epoch, room_id_commitment, object_type])`, and the wire form is `wrapped_object_key = wrap_nonce || AEAD-Seal(content_wrap_key, wrap_nonce, object_key, wrap_aad)`. `unwrapKey` binds `wrapping_epoch` so an object key sealed at one epoch cannot be replayed into an envelope claiming another. This is the `key_wrap` field of `PrivateEncryptedEnvelopeV1` (WS-S.2.3). The full envelope = body ciphertext (S.3.3a) + `wrapped_object_key` (here) + author signature (WS-S.3.5).
+
+**Acceptance criteria:**
+- The object key round-trips through wrap/unwrap under `content_wrap_key`; the wire form prefixes the wrap nonce.
+- An object key wrapped at epoch E fails to unwrap when the envelope claims epoch E′≠E (epoch-bound replay defense).
+- The wrap is independent per object; no `content_wrap_key` nonce is reused (asserted).
+
+**Testing:** Unit — wrap/unwrap round-trip; cross-epoch replay rejection; wrap-nonce uniqueness.
+
+**Dependencies:** WS-S.3.3a.
 
 ---
 
@@ -305,7 +336,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit — seal/open round-trip; fragment-only assertion; vector replay; tamper rejection.
 
-**Dependencies:** WS-S.3.1.
+**Dependencies:** WS-S.3.1a.
 
 ---
 
@@ -337,7 +368,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit — per-tier protect/unlock; recovery-kit round-trip; threshold-count enforcement; lost-all-keys is terminal.
 
-**Dependencies:** WS-S.3.1, WS-S.3.5.
+**Dependencies:** WS-S.3.1a, WS-S.3.5.
 
 ---
 
@@ -353,7 +384,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Property + fuzz suite; vector replay; nonce/key-uniqueness invariant.
 
-**Dependencies:** WS-S.3.3, WS-S.3.4, WS-S.3.5.
+**Dependencies:** WS-S.3.3a, WS-S.3.3b, WS-S.3.4, WS-S.3.5.
 
 ---
 
@@ -387,7 +418,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit (`fake-indexeddb`) — store/retrieve by CID; ciphertext-only-CID assertion; chunk-size selection.
 
-**Dependencies:** WS-S.3.3, WS-S.4.1.
+**Dependencies:** WS-S.3.3a, WS-S.4.1.
 
 ---
 
@@ -428,7 +459,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 ### WS-S.5.1 Membership / role / capability ops + epoch enforcement
 **ID:** WS-S.5.1 | **Ref:** PRIVATE_SPEC §11.3, §12, §13.2
 
-**Description:** Implement the membership/authority ops — `member.add`/`member.remove`/`device.remove`/`role.grant`/`role.revoke`/`member.invite.create` — and the capability model (`read|post|invite|moderate|summarize|admin|rotate_keys|recover`) with the suggested role→capability mapping. Each op is signed and authorized by room capability state, not platform roles (§11.4). Add/remove drive MLS commits (WS-S.3.1) and epoch rotation; the manifest's `membership_change` policy (`admin|threshold`) gates who may commit.
+**Description:** Implement the membership/authority ops — `member.add`/`member.remove`/`device.remove`/`role.grant`/`role.revoke`/`member.invite.create` — and the capability model (`read|post|invite|moderate|summarize|admin|rotate_keys|recover`) with the suggested role→capability mapping. Each op is signed and authorized by room capability state, not platform roles (§11.4). Add/remove drive MLS commits (WS-S.3.1a) and epoch rotation; the manifest's `membership_change` policy (`admin|threshold`) gates who may commit.
 
 **Acceptance criteria:**
 - Every membership/role op is capability-checked; no platform role can authorize one.
@@ -437,7 +468,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit — capability gate per op; epoch-rotation-on-membership-change; threshold enforcement.
 
-**Dependencies:** WS-S.2.3, WS-S.3.1.
+**Dependencies:** WS-S.2.3, WS-S.3.1a.
 
 ---
 
@@ -457,35 +488,83 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 ---
 
-### WS-S.5.3 Operation validation pipeline
-**ID:** WS-S.5.3 | **Ref:** PRIVATE_SPEC §14.2
+### WS-S.5.3a Op validation stage 1 — decode + crypto open (steps 1-5)
+**ID:** WS-S.5.3a | **Ref:** PRIVATE_SPEC §14.2 (1-5)
 
-**Description:** Implement the §14.2 thirteen-step per-op validation: CID present in blockstore → envelope decodes under the private CID profile → envelope signature verifies → AEAD opens under an authorized epoch key → plaintext schema validates strictly → `room_id` matches → epoch valid for the op type → author device existed and was not removed at the op epoch → author sequence monotonic per device → parents present or queued as missing deps → capability check for the op type → type-specific semantic validation → insert into the accepted DAG or quarantine with reason. Quarantined ops MUST NOT render.
+**Description:** Implement the cryptographic front of the §14.2 pipeline in `packages/private-p2p/src/reducer/validate-op.ts`: (1) the op's CID is present in the local blockstore; (2) the envelope decodes under the private CIDv1 profile (WS-S.4.2); (3) the envelope signature verifies (WS-S.3.5) over the canonical bytes + public metadata; (4) the AEAD **opens** under an authorized epoch key — unwrap the object key (WS-S.3.3b) then open the body (WS-S.3.3a), reconstructing both AADs from authenticated metadata; (5) the decrypted plaintext schema validates strictly (WS-S.2.3). Any failure → quarantine with a typed reason; nothing past a failed step is trusted. This stage needs no membership/sequence state, so it runs on any fetched block.
 
 **Acceptance criteria:**
-- Every step runs in order; failure routes to quarantine with a reason, never a silent accept or render.
-- An op from a since-removed device at a post-removal epoch is rejected; a non-monotonic author sequence is rejected.
-- Missing parents queue as dependencies and resolve when the parent arrives.
+- A wrong signature, an AAD mismatch, a wrong-epoch key, or a schema violation each quarantines with the exact reason — never a silent accept.
+- The AEAD opens only when both reconstructed AADs byte-match; a tampered public field breaks the open.
+- Stage 1 is pure over (block bytes, local epoch keys); it performs no DAG mutation.
 
-**Testing:** Unit — per-step accept/reject; removed-device-at-epoch rejection; missing-parent queue/resolve.
+**Testing:** Unit — steps 1-5 accept/reject matrix; AAD-tamper and wrong-epoch rejection; quarantine-reason coverage.
 
-**Dependencies:** WS-S.5.2, WS-S.3.3.
+**Dependencies:** WS-S.5.2, WS-S.3.3a, WS-S.3.3b, WS-S.3.5, WS-S.4.2.
 
 ---
 
-### WS-S.5.4 Deterministic reducer (Lamport total order)
-**ID:** WS-S.5.4 | **Ref:** PRIVATE_SPEC §14.3
+### WS-S.5.3b Op validation stage 2 — authority, epoch, and sequence (steps 6-11)
+**ID:** WS-S.5.3b | **Ref:** PRIVATE_SPEC §14.2 (6-11), §10.9
 
-**Description:** Implement the pure fold over accepted ops in the §14.3 canonical total order: validate `lamport` (decimal-string non-negative integer; strictly greater than every parent, else reject) so the Lamport order is a linear extension of causality, then sort ascending by `(lamport as big integer, created_at_bucket, author_device_id, op_id)` and fold through the per-type transitions, producing room/story/thread/contribution/member/overlay/replication state. The fold MUST NOT depend on wall-clock, arrival order, map iteration order, or floating point; "latest valid author edit wins" is decided by total-order position.
+**Description:** Implement the authority stage over the decrypted op: (6) `room_id` matches the room; (7) the epoch is valid for the op type; (8) the author device **existed and was not removed at the op epoch** (consults the membership log up to that epoch — a post-removal op fails); (9) the author sequence number is monotonic per device (a gap or replay fails); (10) parents are present or queued as missing dependencies; (11) the capability check passes for the op type (read/post/invite/moderate/admin/rotate/recover per WS-S.5.1, never a platform role). Each failure quarantines with its reason; missing parents queue and resolve on arrival.
 
 **Acceptance criteria:**
-- An op whose `lamport` ≤ a parent's is rejected; the sort + fold is deterministic and byte-identical across devices.
-- Two devices with the same accepted set produce identical state regardless of delivery order (property test).
-- Canonical encoding governs every hashed/compared structure.
+- An op from a device removed at/before the op epoch is rejected; a non-monotonic/replayed author sequence is rejected.
+- A capability-insufficient op (e.g. a `member`-role moderation op) is rejected; no platform role can satisfy the check.
+- Missing parents queue as dependencies and re-enter validation when the parent arrives.
 
-**Testing:** Unit/property — shuffled-delivery byte-identical state; lamport-monotonicity enforcement; LWW-by-order.
+**Testing:** Unit — removed-device-at-epoch, sequence-replay, capability-insufficiency rejection; missing-parent queue/resolve.
 
-**Dependencies:** WS-S.5.3, WS-S.2.2.
+**Dependencies:** WS-S.5.3a, WS-S.5.1.
+
+---
+
+### WS-S.5.3c Op validation stage 3 — semantic checks + DAG insertion
+**ID:** WS-S.5.3c | **Ref:** PRIVATE_SPEC §14.2 (12-13)
+
+**Description:** Implement the semantic stage and the accept/quarantine commit: (12) type-specific semantic validation (the WS-G-parity rules — typed body caps, citations for evidence/corrections, answer→question parent, depth cap, lens-in-room, `client_draft_id` dedup); (13) insert the op into the **accepted DAG** or quarantine it with a reason. Quarantined ops MUST NOT render; the accepted DAG is the reducer's (WS-S.5.4a/b) input. This stage is the single place an op becomes "accepted," so the "quarantined never renders" invariant is enforced here.
+
+**Acceptance criteria:**
+- A semantically-invalid op (missing required citation, wrong parent type, over-depth) is quarantined; a valid op enters the accepted DAG exactly once.
+- Quarantined/unsupported ops are never returned to the reducer or rendered.
+- Insertion is idempotent per op CID; re-validating an accepted op is a no-op.
+
+**Testing:** Unit — semantic-rule matrix (WS-G parity); accepted-DAG idempotency; quarantine-never-renders property.
+
+**Dependencies:** WS-S.5.3b.
+
+---
+
+### WS-S.5.4a Lamport validation + canonical total order
+**ID:** WS-S.5.4a | **Ref:** PRIVATE_SPEC §14.3.1, §14.3.2
+
+**Description:** Implement `lamport` handling and the canonical ordering in `packages/private-p2p/src/reducer/order.ts`: `lamport` is a non-negative integer serialized as a **decimal string** (exact beyond 2^53); on creation `lamport(op) = 1 + max(parent lamports ∪ local_lamport)`; validation REQUIRES `lamport(op)` strictly greater than every parent's (else the op is rejected upstream in WS-S.5.3b's parent check), making the Lamport order a linear extension of causality. `totalOrder(acceptedOps)` sorts ascending by the tuple `(lamport as big integer, created_at_bucket, author_device_id, op_id)` — because `lamport(child) > lamport(parent)` always holds, this single sort respects every causal edge and the remaining components only break concurrent ties, each fully determined by op content.
+
+**Acceptance criteria:**
+- An op with `lamport ≤` any parent is rejected; the comparator parses the decimal string as a big integer (no 2^53 loss).
+- `totalOrder` is a linear extension of the causal DAG for every input; concurrent ties break deterministically by `(bucket, device, op_id)`.
+- The order is identical across devices for the same accepted set.
+
+**Testing:** Unit/property — lamport-monotonicity; causal-extension property; big-integer comparator above 2^53; tie-break determinism.
+
+**Dependencies:** WS-S.5.3c, WS-S.2.2.
+
+---
+
+### WS-S.5.4b Deterministic fold + cross-device convergence
+**ID:** WS-S.5.4b | **Ref:** PRIVATE_SPEC §14.3.2, §14.3.3
+
+**Description:** Implement the pure fold `reduceRoom(orderedOps, policy, settings)` in `packages/private-p2p/src/reducer/reduce-room.ts`: fold the WS-S.5.4a-ordered ops through the per-type transition functions, producing room/story-list/thread/contribution-tree/member-capability/overlay/replication state. The fold MUST NOT read wall-clock, network arrival order, map/object iteration order, or floating point; "latest valid author edit wins" (WS-S.5.5) is decided by total-order position, not `created_at`. Canonical encoding (WS-S.2.2) governs every hashed/compared structure so equal logical state yields equal bytes. Two devices with the same accepted set produce byte-identical state.
+
+**Acceptance criteria:**
+- The fold is a pure function of (ordered ops, policy, settings); no nondeterministic input is read.
+- Shuffled op-delivery orders yield byte-identical reducer state (property test over generated DAGs).
+- LWW and tombstone effects follow total-order position, never timestamps.
+
+**Testing:** Unit/property — shuffled-delivery byte-identical state; purity (no clock/iteration-order dependence); LWW-by-order.
+
+**Dependencies:** WS-S.5.4a.
 
 ---
 
@@ -497,11 +576,11 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 **Acceptance criteria:**
 - Each conflict class resolves per the table; encrypted history is always retained.
 - A post-removal-epoch op is rejected; an unknown-schema op stores but never renders.
-- Resolution is a function of the deterministic order (WS-S.5.4), not timestamps.
+- Resolution is a function of the deterministic order (WS-S.5.4a), not timestamps.
 
 **Testing:** Unit — conflict-class matrix; history retention; unknown-schema non-render.
 
-**Dependencies:** WS-S.5.4.
+**Dependencies:** WS-S.5.4b.
 
 ---
 
@@ -517,7 +596,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit — snapshot verify-before-use; retain-history default; cadence triggers.
 
-**Dependencies:** WS-S.5.4.
+**Dependencies:** WS-S.5.4b.
 
 ---
 
@@ -549,25 +628,41 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit — local index build/query; encrypted-at-rest assertion; no-server-search assertion.
 
-**Dependencies:** WS-S.5.4.
+**Dependencies:** WS-S.5.4b.
 
 ---
 
 ## WS-S.6 P2P sync and rendezvous
 
-### WS-S.6.1 Blind rendezvous (derivation + records + authz + metadata)
-**ID:** WS-S.6.1 | **Ref:** PRIVATE_SPEC §15.2, §15.3, §15.3.1, §15.3.2
+### WS-S.6.1a Blind-id derivation + rendezvous records
+**ID:** WS-S.6.1a | **Ref:** PRIVATE_SPEC §15.2, §15.3
 
-**Description:** Implement blind rendezvous: `room_blind_id = HMAC(rendezvous_key, canonical(["room", epoch, time_bucket]))`, `peer_blind_id = HMAC(rendezvous_key, canonical(["peer", device_id, epoch, time_bucket]))` (inputs canonical-encoded, never `||`). Knowledge of `rendezvous_key` IS the rendezvous capability (only current-epoch members can derive/poll; removed members lose it at the next epoch). Implement the §15.3.2 metadata mitigations: coarse time buckets, per-peer announcement jitter, optional cover traffic for high-risk rooms, and the choice of `member_rendezvous`/`manual` discovery to avoid Licio seeing even approximate size.
+**Description:** Implement blind-id derivation in `apps/web/src/private-p2p/sync/rendezvous-client.ts`: `room_blind_id = HMAC-SHA256(rendezvous_key, canonical(["room", epoch, time_bucket]))` and `peer_blind_id = HMAC-SHA256(rendezvous_key, canonical(["peer", device_id, epoch, time_bucket]))` — inputs canonical-encoded (WS-S.2.2), never `||`. `rendezvous_key` is the per-epoch key from the §10.2 schedule (WS-S.3.2). Build the `BlindRendezvousRecord` (room_blind_id, peer_blind_id, `encrypted_announcement` sealed under `rendezvous_key`, `expires_at`) with a short TTL (5-30 min), and the four discovery modes (local mDNS explicit, Licio blind rendezvous, member rendezvous, manual). The blind ids and announcement are the only things the server ever sees for an unlisted/detached room.
 
 **Acceptance criteria:**
-- Only current-epoch members can compute a room's blind id; a removed member cannot after rotation.
-- Polling an unknown blind id is not a room-existence oracle for outsiders.
-- The residual-metadata mitigations (buckets/jitter/cover/member-rendezvous) are implemented and documented.
+- Blind-id derivation is deterministic for `(rendezvous_key, epoch, time_bucket)` and uses canonical encoding, never `||`.
+- The announcement is sealed under `rendezvous_key`; the server stores only blind ids + ciphertext + TTL.
+- TTL is short; expired records are not returned (enforced with WS-S.6.6).
 
-**Testing:** Unit — blind-id derivation determinism + member-only; removed-member-loses-access; no-existence-oracle property.
+**Testing:** Unit — derivation determinism; canonical-input assertion; announcement seal/open; TTL handling.
 
 **Dependencies:** WS-S.3.2.
+
+---
+
+### WS-S.6.1b Rendezvous authorization model + metadata-leakage mitigations
+**ID:** WS-S.6.1b | **Ref:** PRIVATE_SPEC §15.3.1, §15.3.2, §5.4
+
+**Description:** Implement and test the §15.3.1 authorization property — knowledge of `rendezvous_key` **is** the rendezvous capability: only a current-epoch member can compute a room's `room_blind_id` to announce or poll; the server performs no ACL (it cannot map blind ids to rooms/accounts); a removed member loses the capability at the next epoch (rotation via WS-S.3.1b); polling an unknown blind id returns the same bounded opaque result whether or not records exist, so it is not a room-existence oracle for outsiders. Implement the §15.3.2 metadata mitigations and document their residual leakage: coarse `time_bucket`s + per-peer announcement jitter (blunt the "approximate concurrent size" inference a server could draw from distinct `peer_blind_id`s under one `room_blind_id`), optional cover/dummy traffic for high-risk rooms, and steering high-risk rooms to `member_rendezvous`/`manual` so Licio sees nothing.
+
+**Acceptance criteria:**
+- A non-member cannot derive a room's blind id; a removed member cannot after the next epoch; polling is not an existence oracle.
+- The size-inference mitigation is implemented (bucket granularity + jitter configurable per room) and its residual leakage is documented honestly in the §5.4 metadata table.
+- High-risk rooms can disable Licio blind rendezvous entirely in favor of member/manual discovery.
+
+**Testing:** Unit/property — member-only derivation; removed-member-loses-access after rotation; no-existence-oracle; size-inference mitigation under a server-observer model.
+
+**Dependencies:** WS-S.6.1a, WS-S.3.1b.
 
 ---
 
@@ -583,7 +678,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit — signal encryption (server sees ciphertext only); relay-only IP suppression. Gated — two peers connect via encrypted signaling.
 
-**Dependencies:** WS-S.6.1.
+**Dependencies:** WS-S.6.1a.
 
 ---
 
@@ -599,7 +694,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit/gated — member handshake succeeds, non-member fails; transcript-binding replay rejection.
 
-**Dependencies:** WS-S.3.5, WS-S.6.1.
+**Dependencies:** WS-S.3.5, WS-S.6.1a.
 
 ---
 
@@ -615,14 +710,14 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit — head-exchange + missing-ancestor fetch; verify-before-use; fetch-order priority.
 
-**Dependencies:** WS-S.6.3, WS-S.5.3.
+**Dependencies:** WS-S.6.3, WS-S.5.3a.
 
 ---
 
 ### WS-S.6.5 Offline CAR exchange (+ optional LCAP bundle)
 **ID:** WS-S.6.5 | **Ref:** PRIVATE_SPEC §15.9
 
-**Description:** Implement encrypted CAR export/import (export selected encrypted blocks → CAR → share via USB/AirDrop/manual → import → verify → reduce). The container MAY be a standard IPLD CAR or the WS-R LCAP `.licio-bundle` pack (streaming parse under caps, dependency-first ordering, range resume, quarantine-before-render). CAR exports contain **ciphertext only**; the importer re-runs the full WS-S.5.3 validation before any block renders. Export UI distinguishes encrypted member backup / decrypted personal archive / voluntary report package.
+**Description:** Implement encrypted CAR export/import (export selected encrypted blocks → CAR → share via USB/AirDrop/manual → import → verify → reduce). The container MAY be a standard IPLD CAR or the WS-R LCAP `.licio-bundle` pack (streaming parse under caps, dependency-first ordering, range resume, quarantine-before-render). CAR exports contain **ciphertext only**; the importer re-runs the full WS-S.5.3a–c validation before any block renders. Export UI distinguishes encrypted member backup / decrypted personal archive / voluntary report package.
 
 **Acceptance criteria:**
 - CAR/bundle exports are ciphertext-only; import re-validates every block (no container-conferred trust).
@@ -631,7 +726,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit — CAR/bundle export/import round-trip; ciphertext-only assertion; re-validation-on-import.
 
-**Dependencies:** WS-S.5.3 (optional: WS-R.4.2).
+**Dependencies:** WS-S.5.3a (optional: WS-R.4.2).
 
 ---
 
@@ -647,7 +742,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Gated integration — opaque-only enforcement; TTL/size/rate limits; aggregate-only-metrics assertion; no-IP-read assertion.
 
-**Dependencies:** WS-S.1.2, WS-S.6.1.
+**Dependencies:** WS-S.1.2, WS-S.6.1a.
 
 ---
 
@@ -665,7 +760,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** E2E (Playwright + axe) — full creation flow incl. acknowledgment gating + bundle-verify gate; no-server-content request assertion.
 
-**Dependencies:** WS-S.5.4, WS-S.3.6, WS-S.10.2.
+**Dependencies:** WS-S.5.4b, WS-S.3.6, WS-S.10.2.
 
 ---
 
@@ -681,7 +776,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit — status/indicator rendering from reducer state. E2E (axe) — shell accessibility + no server-content fetch.
 
-**Dependencies:** WS-S.5.4, WS-S.7.4.
+**Dependencies:** WS-S.5.4b, WS-S.7.4.
 
 ---
 
@@ -738,7 +833,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 ### WS-S.8.1 Local media pipeline (sniff / strip / chunk / encrypt / manifest)
 **ID:** WS-S.8.1 | **Ref:** PRIVATE_SPEC §17.1, §17.2, §13.6
 
-**Description:** Implement the local-only media pipeline in a worker (no server scan gate / object storage): file selection → local MIME sniff + size checks → local metadata stripping (reuse the WS-G byte-level EXIF stripper + video container neutralization) → optional local thumbnail/poster → required alt text (image) / captions (video) → chunk → encrypt (WS-S.3.3, per-chunk) → encrypted `PrivateAttachmentManifestPlainV1` → P2P block sync. If a type cannot be safely stripped, show the §17.2 warning.
+**Description:** Implement the local-only media pipeline in a worker (no server scan gate / object storage): file selection → local MIME sniff + size checks → local metadata stripping (reuse the WS-G byte-level EXIF stripper + video container neutralization) → optional local thumbnail/poster → required alt text (image) / captions (video) → chunk → encrypt (WS-S.3.3a, per-chunk) → encrypted `PrivateAttachmentManifestPlainV1` → P2P block sync. If a type cannot be safely stripped, show the §17.2 warning.
 
 **Acceptance criteria:**
 - Media is stripped + chunked + encrypted locally; no server upload/scan endpoint is touched.
@@ -747,7 +842,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit — sniff/strip/chunk/encrypt/manifest; no-server-call assertion; padding hides small exact sizes.
 
-**Dependencies:** WS-S.3.3, WS-S.5.2.
+**Dependencies:** WS-S.3.3a, WS-S.5.2.
 
 ---
 
@@ -985,20 +1080,22 @@ S.0.1 ─ S.1.1 ─┬─ S.1.2 ─┐
                ├─ S.1.3  ├─ S.1.5            (server non-storage gates)
                └─ S.1.4 ─┘
 S.2.1 ─ S.2.2 ─ S.2.3
-S.2.3 ─ S.3.1 ─ S.3.2 ─ S.3.3 ; S.3.1 ─ S.3.4 ; S.2.2 ─ S.3.5 ; S.3.1/3.5 ─ S.3.6 ; S.3.3/3.4/3.5 ─ S.3.7
+S.2.3 ─ S.3.1a ─ S.3.1b ─ S.3.2 ─ S.3.3a ─ S.3.3b        (MLS → exporter → HKDF → body AEAD → key-wrap)
+S.3.1a ─ S.3.4 ; S.2.2 ─ S.3.5 ; S.3.1a/3.5 ─ S.3.6 ; S.3.3a/3.3b/3.4/3.5 ─ S.3.7
 S.2.1 ─ S.4.1 ─ S.4.2 ─ S.4.4 ; S.4.1 + S.6.3 ─ S.4.3
-S.2.3/S.3.1 ─ S.5.1 ─ S.5.2 ─ S.5.3 ─ S.5.4 ─┬─ S.5.5 ─ S.5.6
-                                              ├─ S.5.7
-                                              └─ S.5.8
-S.3.2 ─ S.6.1 ─┬─ S.6.2 ; S.3.5/S.6.1 ─ S.6.3 ─ S.6.4 ; S.5.3 ─ S.6.5 ; S.1.2/S.6.1 ─ S.6.6
-S.5.4/S.3.6/S.10.2 ─ S.7.1 ; S.7.4 ─ S.7.2 ─ S.7.3 ; S.3.4/S.5.1 ─ S.7.4 ; S.7.2/S.10.2 ─ S.7.5
-S.3.3/S.5.2 ─ S.8.1 ─ S.8.2 ; S.8.1 ─ S.8.3
+S.2.3/S.3.1a ─ S.5.1 ─ S.5.2 ─ S.5.3a ─ S.5.3b ─ S.5.3c ─ S.5.4a ─ S.5.4b   (ops → validate ×3 → order → fold)
+S.5.4b ─ S.5.5 ─ S.5.6 ; S.5.4b ─ S.5.8 ; S.5.2 ─ S.5.7
+S.3.2 ─ S.6.1a ─ S.6.1b ; S.6.1a ─ S.6.2 ; S.3.5/S.6.1a ─ S.6.3 ─ S.6.4 ; S.5.3a ─ S.6.5 ; S.1.2/S.6.1a ─ S.6.6
+S.5.4b/S.3.6/S.10.2 ─ S.7.1 ; S.7.4 ─ S.7.2 ─ S.7.3 ; S.3.4/S.5.1 ─ S.7.4 ; S.7.2/S.10.2 ─ S.7.5
+S.3.3a/S.5.2 ─ S.8.1 ─ S.8.2 ; S.8.1 ─ S.8.3
 S.0.2 ─ S.9.1 ; S.7.1/S.7.4 ─ S.9.2 ─ S.9.3
 S.2.1 ─ S.10.1 ─ S.10.2 ─ S.10.3
 S.3.7/S.5.5 ─ S.11.1 ; S.7.4/S.6.6/S.8.1 ─ S.11.2 ; S.1.5/S.6.4 ─ S.11.3 ; S.10.2/S.10.3 ─ S.11.4 ; S.1.5/S.3.6 ─ S.11.5 ; (all) ─ S.11.6
 ```
 
-Cross-stream order: **S.0** (model/terminology) and **S.1** (server non-storage gates — landable immediately, independent of the crypto/P2P stack) come first; **S.2** (schemas/canonical) gates **S.3** (crypto) and **S.5** (ops/reducer); **S.4** (Helia/libp2p) and **S.6** (sync/rendezvous) build the transport on the crypto + reducer; **S.7** (UI) and **S.8** (media) ride the validated local state; **S.9** (migration) follows the UI; **S.10** (update channel) is foundational for **S.7.1**'s create-time bundle gate and lands alongside the UI; **S.11** (audit/tests/launch) runs continuously and gates the close. **S.1 can ship and harden well before the rest of WS-S** — defensive server gates first, so a partially-built P2P client can never accidentally write server content.
+The graph is acyclic. Note the one apparent back-edge `S.4.1 + S.6.3 ─ S.4.3`: the private block-exchange protocols (S.4.3) gate on the membership-proving handshake (S.6.3), which depends on S.6.1a and S.3.5, not on S.4.3 — so the order is S.4.1/S.3.5/S.6.1a → S.6.3 → S.4.3, with no loop.
+
+Cross-stream order: **S.0** (model/terminology) and **S.1** (server non-storage gates — landable immediately, independent of the crypto/P2P stack) come first; **S.2** (schemas/canonical) gates **S.3** (crypto: MLS → exporter → HKDF → body/key-wrap AEAD) and **S.5** (ops → 3-stage validate → Lamport order → fold); **S.4** (Helia/libp2p) and **S.6** (sync/rendezvous) build the transport on the crypto + reducer; **S.7** (UI) and **S.8** (media) ride the validated local state; **S.9** (migration) follows the UI; **S.10** (update channel) is foundational for **S.7.1**'s create-time bundle gate and lands alongside the UI; **S.11** (audit/tests/launch) runs continuously and gates the close. **S.1 can ship and harden well before the rest of WS-S** — defensive server gates first, so a partially-built P2P client can never accidentally write server content.
 
 ## Milestone gate additions
 
@@ -1006,9 +1103,9 @@ Cross-stream order: **S.0** (model/terminology) and **S.1** (server non-storage 
 |---|---|---|
 | Server non-storage | S.1.3, S.1.4, S.1.5 | P2P rooms cannot create server stories/contributions/uploads, never enter ranking/search, emit no content events; DB assertion proves zero rows after E2E. |
 | Encrypt-before-CID | S.4.2, S.4.4 | Every private CID is over ciphertext; no plaintext CID; public-gateway URL construction for a private CID is unreachable. |
-| Group-key authority | S.3.1, S.5.1 | MLS add/remove rotates the epoch; no platform role authorizes any private-room op; removed devices cannot decrypt future epochs. |
-| Canonical determinism | S.2.2, S.5.4 | One DAG-CBOR profile pins AAD/signatures/CIDs/reducer; reducer output is byte-identical across shuffled delivery. |
-| AAD/nonce discipline | S.3.3, S.3.7 | AADs are canonical fixed-shape; fresh object key + nonce per object; nonce reuse is impossible (asserted). |
+| Group-key authority | S.3.1a, S.3.1b, S.5.1 | MLS add/remove rotates the epoch (one atomic key/topic/blind-id rotation); no platform role authorizes any private-room op; removed devices cannot decrypt future epochs. |
+| Canonical determinism | S.2.2, S.5.4a, S.5.4b | One DAG-CBOR profile pins AAD/signatures/CIDs/reducer; the Lamport order extends causality; reducer output is byte-identical across shuffled delivery. |
+| AAD/nonce discipline | S.3.3a, S.3.3b, S.3.7 | Body and key-wrap AADs are canonical fixed-shape; fresh object key + nonce per object; `wrapping_epoch`-bound wrap; nonce reuse is impossible (asserted). |
 | No metadata egress | S.11.2 | No outbound request carries private title/body/URL/CID/op-id/thread-id/member-list/invite-fragment/key/exact-unlisted-room-id. |
 | Update-channel trust | S.10.1, S.10.2 | Reproducible signed private bundle in a transparency log; keys never unlock on an unverified bundle; rooms lock. |
 | Honest non-goals | S.0.3, S.7.5 | Creation/removal disclosures + Tier-1 limitation + replication/recovery honesty shown in-product. |

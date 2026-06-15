@@ -716,7 +716,7 @@ licio/
 │   ├── OFFLINE_SPEC.md          -- LCAP v0.2 delay-tolerant sync (WS-R extension spec)
 │   ├── PRIVATE_SPEC.md          -- E2EE private P2P rooms (WS-S extension spec)
 │   ├── planning/                -- per-workstream planning documents
-│   │   ├── 00-index.md          --   master index (~839 atomic tasks)
+│   │   ├── 00-index.md          --   master index (~856 atomic tasks)
 │   │   ├── 01-repository-foundation.md  -- WS-0
 │   │   ├── 02-doctrine-and-policy.md    -- WS-A
 │   │   ├── 03-design-system.md          -- WS-B
@@ -1134,7 +1134,7 @@ Status:
 
 Read the per-workstream planning document under `docs/planning/`
 before starting new work.  The master index at
-`docs/planning/00-index.md` lists all ~839 atomic tasks.
+`docs/planning/00-index.md` lists all ~856 atomic tasks.
 
 ## Documentation rules
 

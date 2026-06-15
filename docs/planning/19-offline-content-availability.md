@@ -1,6 +1,6 @@
 # WS-R: Offline Content Availability (LCAP v0.2)
 
-**Milestone:** Post-M3 resilience extension (lands after the WS-Q content model; not launch-blocking for the core social product) | **Priority:** P3 | **Dependencies:** WS-C (PWA shell, offline/IndexedDB, service worker), WS-D (account authority, device keys, sessions), WS-E (event/topic registry, attention doctrine), WS-F (stories/sources), WS-G (forum/rooms), WS-Q (room-owned content + visibility) — all complete | **Source spec:** `docs/OFFLINE_SPEC.md` (LCAP v0.2) | **Wave:** 10 (parallelizable with WS-S after WS-R.0) | **Estimated duration:** 12-16 weeks | **Task count:** 77 atomic cards
+**Milestone:** Post-M3 resilience extension (lands after the WS-Q content model; not launch-blocking for the core social product) | **Priority:** P3 | **Dependencies:** WS-C (PWA shell, offline/IndexedDB, service worker), WS-D (account authority, device keys, sessions), WS-E (event/topic registry, attention doctrine), WS-F (stories/sources), WS-G (forum/rooms), WS-Q (room-owned content + visibility) — all complete | **Source spec:** `docs/OFFLINE_SPEC.md` (LCAP v0.2) | **Wave:** 10 (parallelizable with WS-S after WS-R.0) | **Estimated duration:** 12-16 weeks | **Task count:** 88 atomic cards
 
 ---
 
@@ -74,19 +74,51 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 ---
 
-### WS-R.0.2 LDC deterministic CBOR codec + conformance vectors
-**ID:** WS-R.0.2 | **Ref:** OFFLINE_SPEC §9.1
+### WS-R.0.2a LDC encoder
+**ID:** WS-R.0.2a | **Ref:** OFFLINE_SPEC §9.1.1, §9.1.2, §9.1.3
 
-**Description:** Implement the LCAP Deterministic CBOR profile (LDC) in `packages/lcap/src/cbor/`: an encoder and a strict decoder over the closed grammar — major types 0–5 plus the three simple values, shortest-form integers, definite-length only, map keys sorted in ascending bytewise-lexicographic order of their encodings, duplicate-key rejection, no floats, no tags, no `undefined`, optional fields omitted (never `null`-filled), UTF-8/NFC text validation. The decoder rejects (does not normalize) any non-LDC input. Hand-rolled — no general CBOR dependency (§31.1).
+**Description:** Implement `packages/lcap/src/cbor/encode.ts`: `encode(value: LdcValue): Uint8Array` over the closed LDC grammar. Per major type: **uint (0)** / **nint (1)** use the shortest argument form — inline for `0..23`, then 1/2/4/8-byte forms at the exact thresholds `24`, `256`, `65536`, `2^32` (a table-driven `writeArgument(major, n)`); **bstr (2)** / **tstr (3)** are definite-length, length prefixed by the same shortest-argument rule, text validated as UTF-8 and, in identifier positions, NFC (WS-R.0.2c flags the position set); **array (4)** / **map (5)** are definite-length; **map keys are sorted by the bytewise-lexicographic order of their *encoded* key bytes** — encode every key, sort `(encodedKey, encodedValue)` pairs by `encodedKey`, then concatenate (RFC 8949 §4.2.1); **simple (7)** emits only `false`(0xf4)/`true`(0xf5)/`null`(0xf6). Optional fields are omitted by the caller (the schema layer), never encoded as `null`. The encoder MUST refuse to emit floats, tags, `undefined`, indefinite lengths, or BigInt outside the representable integer range. Hand-rolled — no CBOR dependency (§31.1).
 
 **Acceptance criteria:**
-- Round-trip identity for every supported logical value; two encoders produce byte-identical output.
-- Decoder rejects: indefinite-length items, non-shortest integers, out-of-order/duplicate map keys, floats, tags, invalid UTF-8, non-NFC identifier text.
-- A `test-vectors/cbor.json` corpus (logical value → hex) is committed and asserted both directions.
+- The integer boundary set `{0, 23, 24, 255, 256, 65535, 65536, 2^32−1, 2^32, −1, −24, −256}` each encodes to the documented shortest byte sequence (pinned in the §9.1.5 table).
+- Map output is independent of input insertion order (keys re-sorted by encoded-key bytes); empty `bstr`/`tstr`/array/map encode to the canonical one-byte head.
+- Attempting to encode a float/tag/`undefined`/out-of-range integer throws `LdcEncodeError` with the offending path.
 
-**Testing:** Unit — encode/decode/reject matrix; property test "same logical value ⇒ identical bytes"; vector replay.
+**Testing:** Unit — per-major-type byte assertions; integer-boundary table; insertion-order-independence of maps; reject-float/tag/undefined.
 
 **Dependencies:** WS-R.0.1.
+
+---
+
+### WS-R.0.2b LDC strict decoder
+**ID:** WS-R.0.2b | **Ref:** OFFLINE_SPEC §9.1.1, §9.1.4, §27.1
+
+**Description:** Implement `packages/lcap/src/cbor/decode.ts`: `decode(bytes, { maxDepth, maxBytes }): LdcValue` as a bounded recursive-descent parser that **rejects (never normalizes) any non-canonical input** with a typed `LdcDecodeError(reason, offset)`. Rejections: additional-info `28..30` (reserved) and `31` (indefinite); a non-shortest argument (e.g. `0x18 0x05` for the value 5); major type 6 (tags); major type 7 anything other than `0xf4/0xf5/0xf6` (so all floats and other simple values fail); a map whose successive encoded keys are not **strictly** increasing in bytewise-lexicographic order (catches both duplicates and mis-ordering in one check); invalid UTF-8; and, in identifier positions, non-NFC text. The parser enforces the §27.1 resource caps (`maxDepth`, `maxBytes`, total item budget) and rejects trailing bytes after the top-level item. `decode` is total over its bounded input.
+
+**Acceptance criteria:**
+- Each non-canonical fixture — indefinite length, non-shortest int, tag, float, out-of-order key, duplicate key, invalid UTF-8, trailing bytes, over-depth — yields the correct `LdcDecodeError.reason` and byte `offset`.
+- `decode(encode(v))` is structurally identical to `v`; `encode(decode(b))` is byte-identical to canonical `b`.
+- A depth/size-bomb input aborts at the cap, not by exhausting memory.
+
+**Testing:** Unit — the full rejection matrix with offset assertions; round-trip with the encoder; depth/size-cap abort.
+
+**Dependencies:** WS-R.0.2a.
+
+---
+
+### WS-R.0.2c LDC conformance vectors + determinism property suite
+**ID:** WS-R.0.2c | **Ref:** OFFLINE_SPEC §9.1.5, §32.1, §32.2
+
+**Description:** Commit the normative `packages/lcap/src/test-vectors/cbor.json` corpus (one entry per record/proof shape and per edge case: logical value → canonical hex) and the determinism property suite: **(P1)** equal logical value ⇒ identical bytes across runs and across the browser and Node runtimes; **(P2)** `decode∘encode = id` on values and `encode∘decode = id` on canonical bytes; **(P3)** every non-canonical fixture fails closed. Define the **identifier-position set** (the map keys and string fields that must be NFC — domain separators, ids, kinds, network) as data consumed by the encoder/decoder, so the NFC rule is enforced uniformly and tested. Any change that alters a published vector is breaking and bumps the LDC profile version.
+
+**Acceptance criteria:**
+- The corpus covers every record/proof body shape plus the integer-boundary and reject cases; CI replays it both directions in both runtimes.
+- The identifier-position set is the single source for NFC enforcement; a non-NFC identifier fixture is rejected, a non-identifier free-text value is not (it lives in a block anyway, §9.1.2).
+- Altering any vector fails CI until the profile version is bumped.
+
+**Testing:** Unit/property — corpus replay (browser + Node); P1/P2/P3 properties via `fast-check`; vector-stability guard.
+
+**Dependencies:** WS-R.0.2b.
 
 ---
 
@@ -102,7 +134,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Unit — construct/parse/verify/reject matrix; vector replay; cross-check that a record digest cannot be reparsed as a block CID.
 
-**Dependencies:** WS-R.0.2.
+**Dependencies:** WS-R.0.2a.
 
 ---
 
@@ -118,40 +150,71 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Unit — grammar accept/reject; AAD byte-stability vector; differential test that any field change perturbs the bytes.
 
-**Dependencies:** WS-R.0.2.
+**Dependencies:** WS-R.0.2a.
 
 ---
 
-### WS-R.0.5 ES256 low-S sign/verify + browser↔Node interop vectors
-**ID:** WS-R.0.5 | **Ref:** OFFLINE_SPEC §10.1, §10.1.1
+### WS-R.0.5a ECDSA P-256 low-S sign/verify core
+**ID:** WS-R.0.5a | **Ref:** OFFLINE_SPEC §10.1, §10.1.1
 
-**Description:** Implement `packages/lcap/src/cose/ecdsa.ts` over WebCrypto `ECDSA P-256/SHA-256`: `sign` normalizes to low-S (`s := n − s` when `s > n/2`) and emits raw `r||s` (64 bytes); `verify` rejects (`rejected_high_s_signature`) unless `0 < r < n` and `0 < s ≤ n/2`, rejects DER, `r=0`/`s=0`, and `r,s ≥ n`. Keys are non-extractable `CryptoKey`s where supported (§10.5). Ship interop vectors proving a signature made in the browser verifies in Node and vice versa.
+**Description:** Implement `packages/lcap/src/cose/ecdsa.ts` over WebCrypto `ECDSA {name:'ECDSA', hash:'SHA-256', namedCurve:'P-256'}`. Pin the group order `n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551` and `n/2`. `signEs256(privKey, message): Uint8Array` calls `crypto.subtle.sign` (which already emits IEEE-P1363 raw `r||s`, 64 bytes), parses `r||s`, and **normalizes low-S** (`if s > n/2: s := n − s`), re-serializing 32-byte big-endian `r||s`. `verifyEs256(pubKey, message, sig): boolean` REJECTS before calling `crypto.subtle.verify`: a non-64-byte/DER-shaped input (`rejected_bad_signature`), `r == 0 || s == 0 || r >= n || s >= n` (out of range), and `s > n/2` (`rejected_high_s_signature`); only a canonical low-S `r||s` proceeds to cryptographic verification. The message is the already-hashed-by-WebCrypto input (SHA-256 applied internally).
 
 **Acceptance criteria:**
-- High-S, DER-wrapped, zero, and out-of-range signatures are all rejected; only canonical low-S raw `r||s` verifies.
-- Browser-generated and Node-generated vectors cross-verify (§32.5).
-- Private keys are non-extractable where the runtime supports it; `exportKey` of a private key rejects.
+- A signature is always emitted low-S; round-trip `verify(sign(m)) == true`.
+- The rejection matrix is exact: high-S → `rejected_high_s_signature`; DER/length-wrong → `rejected_bad_signature`; `r`/`s` zero or `≥ n` → out-of-range rejection; only canonical low-S verifies.
+- No code path accepts a DER-encoded signature on the wire.
 
-**Testing:** Unit — canonicalization + rejection matrix; gated cross-runtime interop vector replay.
+**Testing:** Unit — sign-is-low-S property; the five-case rejection matrix; known-answer vectors for `r||s` boundaries (`s = n/2`, `s = n/2 + 1`).
 
 **Dependencies:** WS-R.0.1.
 
 ---
 
-### WS-R.0.6 COSE_Sign1 detached proof build/verify
-**ID:** WS-R.0.6 | **Ref:** OFFLINE_SPEC §10.2, §10.2.3, §10.2.4
+### WS-R.0.5b Device key lifecycle + runtime adapter + interop vectors
+**ID:** WS-R.0.5b | **Ref:** OFFLINE_SPEC §10.5, §32.5
 
-**Description:** Implement `packages/lcap/src/cose/sign1.ts`: build the protected header (`{1: -7}` for ES256), assemble `Sig_structure = ["Signature1", cose_protected, external_aad, deterministic_record_body]`, `ToBeSigned = LDC(Sig_structure)`, and sign/verify with WS-R.0.5. Verification follows §10.2.4 exactly: recompute and match `record_cid`; reject absent/unknown/downgraded alg from the **protected** header; rebuild and byte-match `external_aad`; verify low-S; verify ECDSA. The algorithm lives only in the protected header.
+**Description:** Implement `packages/lcap/src/cose/keys.ts`: `generateDeviceKey()` producing a **non-extractable** P-256 `CryptoKey` pair where the runtime supports it (`extractable:false`; `exportKey('jwk'|'raw')` of the private key rejects); `exportPublicKeyCose(pub)` / `importPublicKeyCose(bytes)` round-tripping the public key as a COSE_Key (EC2, P-256, `x`/`y`) for embedding in `device_certificate.public_key_cose`; and a tiny runtime adapter resolving `crypto.subtle` from `globalThis.crypto` (browser) or `node:crypto`'s `webcrypto` (Node) so `packages/lcap` stays runtime-agnostic. Commit the §32.5 interop vectors: a message + key where a signature produced under WebCrypto-in-browser verifies under Node and vice versa.
 
 **Acceptance criteria:**
-- A valid detached proof over a record body verifies; flipping any of body / alg / AAD / signature fails with the correct status code.
-- Stripping the alg or moving it to the unprotected header is rejected (no downgrade, §10.3).
-- One record body carries multiple proofs (device + witness) without changing `record_cid`.
-- `test-vectors/sign1.json` (body + key → proof) committed and replayed.
+- A generated private key is non-extractable where supported; `exportKey` of it rejects; the public key round-trips through COSE_Key bytes.
+- The same `packages/lcap` build runs unmodified in both runtimes via the adapter (no `node:` import leaks into a browser bundle).
+- Browser↔Node interop vectors cross-verify in CI.
 
-**Testing:** Unit — build/verify happy path + six tamper cases; multi-proof identity; vector replay.
+**Testing:** Unit — key gen + non-extractability; COSE_Key round-trip. Gated cross-runtime — interop vector replay (Node unit + Playwright/WebCrypto).
 
-**Dependencies:** WS-R.0.3, WS-R.0.4, WS-R.0.5.
+**Dependencies:** WS-R.0.5a.
+
+---
+
+### WS-R.0.6a COSE_Sign1 builder + detached signer
+**ID:** WS-R.0.6a | **Ref:** OFFLINE_SPEC §10.2, §10.2.1, §10.2.3
+
+**Description:** Implement `packages/lcap/src/cose/sign1.ts` `buildAndSign({ privKey, signer_key_id, proof_kind, record_kind, record_body, network_id })`: encode the protected header `cose_protected = LDC({1: -7})` (ES256; the algorithm lives ONLY in the protected header); build `external_aad` via WS-R.0.4; assemble `Sig_structure = ["Signature1", cose_protected, external_aad, deterministic_record_body]`; compute `ToBeSigned = LDC(Sig_structure)`; sign with WS-R.0.5a; and return a `DetachedProofV2` (`proof_version:2`, `proof_kind`, `record_cid` = `cidFor('record', record_body)`, `record_kind`, `cose_protected`, `external_aad`, `signature`, `signer_key_id`). The payload signed is the deterministic record body bytes (so any off-the-shelf COSE_Sign1 verifier interoperates), while `record_cid` binds the proof to a stable identity.
+
+**Acceptance criteria:**
+- The produced proof's `record_cid` equals `cidFor('record', record_body)`; the signed `ToBeSigned` matches the §10.2.3 layout byte-for-byte (pinned vector).
+- The algorithm appears only in `cose_protected`; `cose_unprotected` (if present) is never part of `ToBeSigned`.
+- The same body signed by two different device keys yields two proofs with distinct `proof_cid`s and the identical `record_cid` (multi-proof identity).
+
+**Testing:** Unit — `ToBeSigned` byte layout vs vector; multi-proof identity; protected-header-only-alg assertion.
+
+**Dependencies:** WS-R.0.3, WS-R.0.4, WS-R.0.5a.
+
+---
+
+### WS-R.0.6b COSE_Sign1 detached verifier + status mapping
+**ID:** WS-R.0.6b | **Ref:** OFFLINE_SPEC §10.2.4, §10.3, §16.11
+
+**Description:** Implement `verifyDetached(proof, record_body, { network_id, expected_record_kind }): { ok: true } | { ok: false, status }` executing the §10.2.4 six steps in order with exact `ObjectStatusV2` mapping: (1) recompute `record_cid'` and compare → `rejected_bad_cid`; (2) parse `cose_protected`, require a known, enabled, non-downgraded alg (via WS-R.0.8) → `rejected_bad_signature` on absent/unknown/disabled; (3) rebuild `external_aad` from local params and byte-compare → `rejected_bad_signature` on mismatch; (4) rebuild `Sig_structure`/`ToBeSigned`; (5) canonical low-S check → `rejected_high_s_signature`; (6) `verifyEs256` → `rejected_bad_signature` on failure. Returns `ok` only when all six pass.
+
+**Acceptance criteria:**
+- Each of the six failure modes returns its exact status code; a fully valid proof returns `ok:true`.
+- Moving the alg to the unprotected header, or advertising a disabled suite, is rejected at step 2 (no downgrade, §10.3).
+- `test-vectors/sign1.json` (body + key → proof, plus six tamper variants) is committed and replayed in CI in both runtimes.
+
+**Testing:** Unit — six-step failure matrix with status assertions; downgrade rejection; vector replay (browser + Node).
+
+**Dependencies:** WS-R.0.6a, WS-R.0.8.
 
 ---
 
@@ -167,7 +230,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Unit — accept/reject matrix per schema; unknown-field rejection; `expectTypeOf` inference checks.
 
-**Dependencies:** WS-R.0.2.
+**Dependencies:** WS-R.0.2b.
 
 ---
 
@@ -183,7 +246,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Unit — negotiation/downgrade matrix; reserved-id placeholder test.
 
-**Dependencies:** WS-R.0.6.
+**Dependencies:** WS-R.0.1. (Consumed by WS-R.0.6b; foundational registry, no COSE dependency.)
 
 ---
 
@@ -201,7 +264,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Unit — cert build + authority-proof verify; expired/forged-proof rejection. Gated integration — authority issuance path.
 
-**Dependencies:** WS-R.0.6, WS-R.0.7.
+**Dependencies:** WS-R.0.6a, WS-R.0.6b, WS-R.0.7.
 
 ---
 
@@ -265,7 +328,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Unit — full-chain accept; each broken-link case (missing/expired/forged/revoked) with the right status + missing CIDs.
 
-**Dependencies:** WS-R.1.1, WS-R.1.2, WS-R.1.3, WS-R.1.4, WS-R.0.6.
+**Dependencies:** WS-R.1.1, WS-R.1.2, WS-R.1.3, WS-R.1.4, WS-R.0.6b.
 
 ---
 
@@ -404,7 +467,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 ### WS-R.4.1 Streaming pack writer
 **ID:** WS-R.4.1 | **Ref:** OFFLINE_SPEC §14.3, §14.4, §14.5
 
-**Description:** Implement `packages/lcap/src/pack/writer.ts` producing the §14.3 layout: magic `LCAPACK2\n`, LDC `PackHeaderV2`, LDC `PackTableV2` (object table **before** frames so a receiver can decide to import/skip/range-fetch), then `PackFrameV2`s, optional trailer. The writer streams (bounded memory), emits the table in transfer order from the scheduler (WS-R.5), and labels privacy (`privacy_label`) and lanes.
+**Description:** Implement `packages/lcap/src/pack/writer.ts` producing the §14.3 layout: magic `LCAPACK2\n`, LDC `PackHeaderV2`, LDC `PackTableV2` (object table **before** frames so a receiver can decide to import/skip/range-fetch), then `PackFrameV2`s, optional trailer. The writer streams (bounded memory) and is **parameterized by a caller-provided ordered object list** — the scheduler (WS-R.5.2c) produces that order at integration time (WS-R.15.1), so the writer build-depends only on the schemas/codec, not the scheduler. It labels privacy (`privacy_label`) and lanes from the entries it is given.
 
 **Acceptance criteria:**
 - Output starts with the magic, then header, then table, then frames; table precedes frames.
@@ -413,7 +476,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Unit — byte-layout assertion; streaming memory bound; table-before-frames invariant.
 
-**Dependencies:** WS-R.0.2, WS-R.0.3, WS-R.5.2.
+**Dependencies:** WS-R.0.2a, WS-R.0.3, WS-R.0.7.
 
 ---
 
@@ -429,7 +492,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Unit — frame-check matrix; cap enforcement; truncated/oversized pack handling. Security — fuzz corpus (WS-R.18.4).
 
-**Dependencies:** WS-R.4.1, WS-R.0.6, WS-R.0.7.
+**Dependencies:** WS-R.4.1, WS-R.0.6b, WS-R.0.7.
 
 ---
 
@@ -461,7 +524,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Unit — manifest build/verify; "manifest ≠ content trust" assertion; filename-privacy option.
 
-**Dependencies:** WS-R.4.1, WS-R.0.6.
+**Dependencies:** WS-R.4.1, WS-R.0.6a, WS-R.0.6b.
 
 ---
 
@@ -483,19 +546,51 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 ---
 
-### WS-R.5.2 Dependency-aware deficit-round-robin scheduler
-**ID:** WS-R.5.2 | **Ref:** OFFLINE_SPEC §15.4
+### WS-R.5.2a Candidate assembly, policy filtering, and dependency-closure promotion
+**ID:** WS-R.5.2a | **Ref:** OFFLINE_SPEC §15.4 (steps 1-3), §17.5
 
-**Description:** Implement the §15.4 scheduler: build the candidate set (wants/interests/outbox/missing deps), remove privacy/budget/capability-forbidden objects, **promote missing dependencies of selected objects**, assign lane+score, reserve C0 bytes, run deficit round robin with lane weights, within a lane use shortest-verifiable-object-first with deadline boost, stop before budget overflow, emit the pack table in transfer order. The score factors are clamped to strictly-positive finite ranges (or computed log-additively) so no single zero factor un-schedules an object; C0 + dependency closure cannot starve regardless of weights.
+**Description:** Implement the §15.4 front of the scheduler in `packages/lcap/src/scheduler/candidates.ts`: (1) build the candidate set from explicit wants, room interests, the local outbox, and known missing dependencies; (2) **remove** objects forbidden by privacy policy (`privacy_flags`/interest privacy level), the storage/transfer budget, or capability; (3) for each surviving renderable object, **promote its minimal trust/render dependency closure** (WS-R.7.2) into the candidate set and record the `requires` edges so the allocator (WS-R.5.2b) can never place a dependent before a dependency. Output is a `ScheduledCandidate[]` with `{ cid, lane, priority, bytes, requires[], reason }`. This card owns the closure-completeness invariant; the allocator and scorer consume its output.
 
 **Acceptance criteria:**
-- Dependencies of every selected object are promoted ahead of it.
-- The scheduler never overflows the budget and always emits a valid transfer order.
-- Score factors are clamped; scoring only breaks intra-lane ties after reservations + dependency promotion.
+- A renderable object pulled into the candidate set drags in its full minimal closure (cert/capability/proof/body/parent/checkpoint-summary); a property test asserts no candidate has an unsatisfied `requires` edge after assembly.
+- Privacy/budget/capability-forbidden objects are removed *before* closure promotion, and their closures are not pulled in gratuitously.
+- The output is a pure function of (wants, interests, outbox, local store, policy) — deterministic for a fixed input.
 
-**Testing:** Unit — dependency promotion; budget-stop correctness; clamped-score finiteness; deterministic order for fixed input.
+**Testing:** Unit — closure completeness property; policy-filter matrix; determinism for fixed input.
 
-**Dependencies:** WS-R.5.1, WS-R.4.1.
+**Dependencies:** WS-R.5.1, WS-R.7.2.
+
+---
+
+### WS-R.5.2b Deficit-round-robin lane allocation + C0 reservation
+**ID:** WS-R.5.2b | **Ref:** OFFLINE_SPEC §15.2, §15.3, §15.4 (steps 5-6)
+
+**Description:** Implement the byte allocator in `packages/lcap/src/scheduler/allocate.ts`: reserve the C0 minimum first (first 8 KiB, then ≥25% until C0 is drained), then run **deficit round robin (DRR)** over the lanes with the §15.3 lane weights — each lane carries a byte "deficit counter" incremented by its weighted quantum each round; a lane may emit its next (topologically-eligible) object only when its deficit ≥ the object's size; leftover deficit carries to the next round. The allocator honors the `requires` edges from WS-R.5.2a (a candidate is *eligible* only once all its `requires` are already placed) and stops before budget overflow. This card owns the **C0-and-dependency-cannot-starve** invariant structurally: the C0 reservation is taken before any DRR round, and eligibility enforces closure ordering.
+
+**Acceptance criteria:**
+- C0 bytes are reserved before any M3/B4 byte is allocated, across every budget size and adversarial candidate mix.
+- DRR allocation matches a reference table for fixed weights/sizes; an object is emitted only after all its `requires` are placed.
+- The allocator never exceeds the budget and is deterministic for fixed input.
+
+**Testing:** Unit — C0-reservation-before-media property; DRR reference table; eligibility (no dependent before dependency); budget-stop.
+
+**Dependencies:** WS-R.5.2a.
+
+---
+
+### WS-R.5.2c Intra-lane scoring, ordering, and pack-table emission
+**ID:** WS-R.5.2c | **Ref:** OFFLINE_SPEC §15.4 (steps 4, 7-9)
+
+**Description:** Implement the intra-lane ordering in `packages/lcap/src/scheduler/score.ts`: within a lane, order eligible candidates by **shortest-verifiable-object-first with a deadline boost**, breaking ties by the §15.4 score. Every score factor (priority/want/dependency/freshness/interest/scarcity/trust/deadline and the byte/cpu/privacy divisors) is **clamped to a strictly-positive finite range** (e.g. each weight in `[0.01, 100]`, divisors `≥ 1`), or the score is computed in log-additive form, so a single zero/∞ factor can never un-schedule or NaN an object — scoring only breaks ties *after* the C0 reservation and DRR eligibility (WS-R.5.2b) have run. Emit the final `PackTableV2` in transfer order for the writer (WS-R.4.1).
+
+**Acceptance criteria:**
+- The score is always finite; no single factor zeroes/NaNs it; scoring changes only intra-lane order, never the C0/closure guarantees.
+- Shortest-verifiable-first + deadline boost are applied within a lane; the emitted table is in valid transfer order.
+- The full scheduler (5.2a→b→c) is deterministic for a fixed input and feeds the writer unchanged.
+
+**Testing:** Unit — clamped-score finiteness (incl. zero/∞ inputs); shortest-first + deadline ordering; end-to-end determinism; table-shape for the writer.
+
+**Dependencies:** WS-R.5.2b, WS-R.0.7.
 
 ---
 
@@ -510,7 +605,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Unit — scarcity monotonicity in replica count; pin-after-C0 ordering.
 
-**Dependencies:** WS-R.5.2, WS-R.10.2.
+**Dependencies:** WS-R.5.2c, WS-R.10.2.
 
 ---
 
@@ -526,7 +621,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** The gate itself (property + fixture suite); CI wiring.
 
-**Dependencies:** WS-R.5.2.
+**Dependencies:** WS-R.5.2b, WS-R.5.2c.
 
 ---
 
@@ -560,7 +655,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Unit — request/response assembly; budget-shrink matrix; status handling.
 
-**Dependencies:** WS-R.6.1, WS-R.5.2.
+**Dependencies:** WS-R.6.1, WS-R.5.2c.
 
 ---
 
@@ -633,16 +728,16 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 ### WS-R.7.2 Dependency-closure assembly
 **ID:** WS-R.7.2 | **Ref:** OFFLINE_SPEC §17.5
 
-**Description:** Implement `minimalClosure(record)` returning the minimal trust/render closure for a renderable contribution — device cert + authority proof, capability + authority proof, contribution + device proof, body text block, parent/root records where needed for context, and the latest known room-checkpoint summary. Large media and old ancestor context are omitted unless explicitly requested.
+**Description:** Implement `minimalClosure(record)` as a **pure function** returning the minimal trust/render closure for a renderable contribution — device cert + authority proof, capability + authority proof, contribution + device proof, body text block, parent/root records where needed for context, and the latest known room-checkpoint summary. Large media and old ancestor context are omitted unless explicitly requested. The scheduler (WS-R.5.2a) *consumes* this; closure does not depend on the scheduler.
 
 **Acceptance criteria:**
 - The closure is sufficient to reach `authorized_provisional` (or better) for the target without media.
 - Old ancestors / large media are excluded by default and only added on explicit want.
-- Closure interacts with the scheduler so dependencies precede dependents (WS-R.5.2).
+- The closure feeds WS-R.5.2a so the allocator can keep dependencies ahead of dependents; closure itself is scheduler-independent.
 
 **Testing:** Unit — closure minimality; sufficiency for trust projection; omission of media/ancestors.
 
-**Dependencies:** WS-R.1.5, WS-R.5.2.
+**Dependencies:** WS-R.1.5.
 
 ---
 
@@ -679,19 +774,51 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 ---
 
-### WS-R.8.2 Validation algorithm (`validate(record_cid)`)
-**ID:** WS-R.8.2 | **Ref:** OFFLINE_SPEC §18.3
+### WS-R.8.2a Validation stage 1 — integrity + proof (steps 1-5)
+**ID:** WS-R.8.2a | **Ref:** OFFLINE_SPEC §18.3 (1-5)
 
-**Description:** Implement the §18.3 fifteen-step `validate(record_cid)`: load body → verify CID → strict schema (reject unknown critical) → load proofs → verify ≥1 applicable proof → load signer key + device cert → verify cert authority proof → load capability → verify capability authority proof → check operation/scope/room/visibility/policy/quotas → check revocations → check device-sequence/fork → check checkpoint inclusion if available → check checkpoint consistency if available → return trust state + missing deps. This is the single entry point both client and server call.
+**Description:** Implement the first stage of `validate(record_cid)` in `packages/lcap/src/validate/`: (1) load the deterministic record body; (2) verify `record_cid == cidFor('record', body)` → else `rejected_bad_cid`; (3) strict LDC decode + closed-schema parse, rejecting unknown critical fields → `rejected_bad_schema`; (4) load proofs referencing `record_cid`, declaring any missing as `quarantined_missing_dependency`; (5) verify ≥1 applicable detached proof via WS-R.0.6b → `proof_verified`, else `rejected_bad_signature`/`rejected_high_s_signature`. Returns a partial `ValidationResult { state, missing_cids, facts }` at `integrity_verified`/`proof_verified` (or a terminal rejection). This stage needs **no** identity/authority state, so it runs on any object including ones whose certs/caps are not yet present.
 
 **Acceptance criteria:**
-- The algorithm runs the steps in order and returns `(trust_state, missing_cids)`; no step is skippable.
-- Client and server share the identical implementation (one in `packages/lcap/src/validate/`).
-- Each failure routes to the precise status code (`rejected_*`/`quarantined_*`/`conflicting`/`revoked`).
+- A body whose CID or schema is wrong is rejected at step 2/3 with the exact code; a body with no loadable proof quarantines (not rejects) when the proof CID is merely missing.
+- A valid proof advances the record to `proof_verified` with the signer key id recorded in `facts`.
+- Stage 1 is pure over (body, proofs) — no store reads beyond the referenced proof objects.
 
-**Testing:** Unit — per-step success/failure; client≡server output on shared fixtures; missing-deps reporting.
+**Testing:** Unit — steps 1-5 success/failure matrix; missing-proof quarantine vs bad-proof reject; `facts` contents.
 
-**Dependencies:** WS-R.8.1, WS-R.2.4, WS-R.9.3.
+**Dependencies:** WS-R.8.1, WS-R.0.6b.
+
+---
+
+### WS-R.8.2b Validation stage 2 — authority chain (steps 6-10)
+**ID:** WS-R.8.2b | **Ref:** OFFLINE_SPEC §18.3 (6-10)
+
+**Description:** Implement the authority-chain stage by composing `validateIdentityChain` (WS-R.1.5): (6) load signer key + device certificate; (7) verify the certificate authority proof; (8) load the cited capability; (9) verify the capability authority proof; (10) check operation/scope/room/visibility/policy-epoch/quota. Missing cert/capability → `quarantined_unknown_key`/`quarantined_missing_dependency` with precise `missing_cids`; a scope/operation/quota violation → `rejected_policy_denied`/`rejected_quota`; success → `authorized_provisional`. Consumes the stage-1 `facts`.
+
+**Acceptance criteria:**
+- A record reaching `authorized_provisional` has a fully-verified cert+capability chain whose operation/scope/policy admit it.
+- Each missing link quarantines with the exact missing CID; each policy/quota breach rejects with the exact code — never a false accept.
+- Stage 2 reuses WS-R.1.5 verbatim (no second authority implementation).
+
+**Testing:** Unit — steps 6-10 per-link success/missing/violation matrix; `authorized_provisional` only on full chain.
+
+**Dependencies:** WS-R.8.2a, WS-R.1.5.
+
+---
+
+### WS-R.8.2c Validation stage 3 — consensus (steps 11-15) + the single entry point
+**ID:** WS-R.8.2c | **Ref:** OFFLINE_SPEC §18.3 (11-15), §18.2
+
+**Description:** Implement the consensus stage and the public `validate(record_cid)` that runs 8.2a→b→c and returns `(trust_state, missing_cids)`: (11) check known revocations (WS-R.1.4) → `revoked`; (12) check device-sequence/fork (WS-R.2.4) → `conflicting`; (13) check checkpoint inclusion if available (WS-R.9.3) → toward `checkpointed`; (14) check checkpoint consistency if available → `conflicting` on a fork; (15) fold all facts into the final state (incl. `stale_authorized` when the local revocation/checkpoint frontier is behind, and `witnessed` when a witness statement is present). `validate` is the **single entry point both client and server call** (one implementation), persisting to `trust_projection`.
+
+**Acceptance criteria:**
+- The final state is the lub of all discharged facts; revocation/fork/stale/witnessed are reflected exactly; nothing upgrades past missing evidence.
+- Client and server import the same `validate` (a static check forbids a second copy); output is identical on shared fixtures.
+- Each terminal routes to the precise status (`revoked`/`conflicting`/`checkpointed`/`stale_authorized`/`witnessed`).
+
+**Testing:** Unit — steps 11-15 matrix; full-pipeline state lub; client≡server output on shared fixtures; missing-deps reporting.
+
+**Dependencies:** WS-R.8.2b, WS-R.2.4, WS-R.9.3, WS-R.1.4.
 
 ---
 
@@ -706,7 +833,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Unit/property — source-independence of trust state; no-render-before-validation; malformed-pack property.
 
-**Dependencies:** WS-R.8.2, WS-R.4.2.
+**Dependencies:** WS-R.8.2c, WS-R.4.2.
 
 ---
 
@@ -724,7 +851,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Gated integration (Postgres) — append ordering; idempotent re-append; topological constraint.
 
-**Dependencies:** WS-R.12.1.
+**Dependencies:** WS-R.12.2. (Append is a DB primitive the WS-R.12.1c commit stage calls after validation — the runtime ordering, not a build dependency.)
 
 ---
 
@@ -740,7 +867,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Unit — tree-hash vectors (both algorithms); checkpoint build/verify; cross-algorithm-proof rejection.
 
-**Dependencies:** WS-R.0.6, WS-R.9.1.
+**Dependencies:** WS-R.0.6a, WS-R.0.6b, WS-R.9.1.
 
 ---
 
@@ -853,7 +980,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 - Persistent storage is requested where supported; pressure is shown honestly, not hidden.
 - Under pressure the client degrades to C0/T1 and pauses media prefetch.
 
-**Testing:** Unit — mode budget/prefetch policy; pressure-degradation path. E2E — persistent-storage request + pressure UI (WS-R.18.3).
+**Testing:** Unit — mode budget/prefetch policy; pressure-degradation path. E2E — persistent-storage request + pressure UI (WS-R.18.3b storage-pressure scenario).
 
 **Dependencies:** WS-R.11.1.
 
@@ -909,19 +1036,51 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 ## WS-R.12 Server ingestion and reconciliation
 
-### WS-R.12.1 Ingestion pipeline + quarantine-before-commit
-**ID:** WS-R.12.1 | **Ref:** OFFLINE_SPEC §24.1, §24.2
+### WS-R.12.1a Ingestion stage 1 — bounded parse + CAS store
+**ID:** WS-R.12.1a | **Ref:** OFFLINE_SPEC §24.1 (parse/CID/schema/store), §27.1
 
-**Description:** Implement `apps/api/src/lcap/ingest.ts` running the §24.1 pipeline: receive pack/request → parse under resource caps → verify CIDs → strict schema → store raw verified records/proofs/blocks in CAS → resolve dependencies → verify proofs + authority chain → check revocations/policy epochs → check capability scopes/quotas → check device sequence/forks → quarantine or accept → append accepted records to the room log → update checkpoint schedule → return statuses/receipts/wants. The server MAY store pending dependencies but MUST NOT emit a record into canonical Licio application state until validation + policy pass (§24.2).
+**Description:** Implement the front of `apps/api/src/lcap/ingest.ts`: receive a pack/request → stream-parse under the §27.1 resource caps (WS-R.4.2 reader) → verify CIDs → strict schema → store the raw, CID-verified records/proofs/blocks in the content-addressed store (`lcap_records`/`_proofs`/`_blocks`/`_chunks`) marked `validation_state = stored_unverified`. This stage establishes byte/CID/schema integrity and durability **without** asserting any authority or canonical acceptance; it is safe to run on a hostile pack because nothing it stores is yet trusted or emitted.
 
 **Acceptance criteria:**
-- A record is never promoted to canonical state before full validation; partials sit in quarantine.
-- The pipeline runs under §27.1 caps and shares the `validate` core with the client (WS-R.8.2).
-- Dependency resolution is topological (WS-R.9.1); outputs include statuses + receipts + wants.
+- Every stored object is CID- and schema-verified; an object failing either is rejected (not stored) with the exact code.
+- All §27.1 caps are enforced at this boundary; an oversized/bombed pack aborts before CAS writes balloon.
+- Stored objects are `stored_unverified`; nothing is yet in canonical state or the room log.
 
-**Testing:** Gated integration — full pipeline accept/quarantine; cap enforcement; canonical-emission-only-after-validation.
+**Testing:** Gated integration — parse+store under caps; CID/schema rejection; bomb abort. Unit — CAS write idempotency by CID.
 
-**Dependencies:** WS-R.8.2, WS-R.4.2, WS-R.12.2.
+**Dependencies:** WS-R.4.2, WS-R.12.2.
+
+---
+
+### WS-R.12.1b Ingestion stage 2 — dependency resolution + authority/policy validation
+**ID:** WS-R.12.1b | **Ref:** OFFLINE_SPEC §24.1 (resolve/verify/check), §24.4
+
+**Description:** Implement the validation stage: resolve dependencies **topologically** (certs/capabilities/revocations/checkpoints first; parents before children; moderation policy before affected content) and run the shared `validate(record_cid)` (WS-R.8.2c — the *same* core the client uses) over each resolved record, checking proofs + authority chain + revocations/policy epochs + capability scopes/quotas + device sequence/forks. Each record emerges as accept-eligible, `quarantined_*` (with precise `missing_cids`), `conflict_device_fork`, or `rejected_*`. No canonical emission happens here — this stage only computes verdicts.
+
+**Acceptance criteria:**
+- Resolution is topological; a child is never validated before a required parent/cert/capability.
+- The server reuses the client `validate` verbatim (a static check forbids a divergent server copy); verdicts match the client on shared fixtures.
+- A missing dependency quarantines with exact `missing_cids`; a fork yields `conflict_device_fork`; nothing is accepted yet.
+
+**Testing:** Gated integration — topological order; verdict matrix; client≡server verdict on shared fixtures.
+
+**Dependencies:** WS-R.12.1a, WS-R.8.2c.
+
+---
+
+### WS-R.12.1c Ingestion stage 3 — accept, room-log append, checkpoint trigger, receipts/wants
+**ID:** WS-R.12.1c | **Ref:** OFFLINE_SPEC §24.1 (accept/append/return), §24.2, §24.5
+
+**Description:** Implement the commit stage: for accept-eligible records, idempotently accept by `record_cid` + semantic uniqueness (WS-R.12.3), **append to the room log** (WS-R.9.1) under a transaction, mark `validation_state = server_accepted`, and **trigger the checkpoint schedule** (WS-R.9.2 runs on the maintenance tick). Emit signed/authenticated receipts (WS-R.10.2) for stored/accepted/rejected/quarantined_missing_dependency/checkpointed, and return the per-object `ObjectStatusV2[]` plus `WantRequestV2[]` for the precise missing dependencies. The MUST-NOT-emit-before-validation rule (§24.2) holds because acceptance is the only path that writes the room log.
+
+**Acceptance criteria:**
+- Canonical emission (room-log append + `server_accepted`) happens only for records that passed stage 2; quarantined/rejected records never reach the log.
+- Acceptance is idempotent by `record_cid`; receipts + statuses + wants are returned for every object.
+- The append and state transition are transactional; a crash mid-commit leaves no half-accepted record.
+
+**Testing:** Gated integration — accept-only-after-validation; idempotent re-accept; transactional append; receipts/wants correctness.
+
+**Dependencies:** WS-R.12.1b, WS-R.9.1, WS-R.12.3, WS-R.10.2.
 
 ---
 
@@ -953,7 +1112,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Gated integration — idempotent re-accept; fork detection; quota enforcement.
 
-**Dependencies:** WS-R.12.1, WS-R.2.4.
+**Dependencies:** WS-R.12.2, WS-R.2.4, WS-R.1.3. (Acceptance primitive consumed by the WS-R.12.1c commit stage.)
 
 ---
 
@@ -969,7 +1128,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Gated integration — endpoint contract + status-code matrix; bundle-import-uses-same-validator; rate-limit `429`.
 
-**Dependencies:** WS-R.12.1, WS-R.6.2, WS-R.9.3.
+**Dependencies:** WS-R.12.1c, WS-R.6.2, WS-R.9.3.
 
 ---
 
@@ -987,7 +1146,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Unit — conflict-class dispatch matrix; "no silent discard" property.
 
-**Dependencies:** WS-R.8.2, WS-R.2.4, WS-R.9.4.
+**Dependencies:** WS-R.8.2c, WS-R.2.4, WS-R.9.4.
 
 ---
 
@@ -1035,7 +1194,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 - Stealth mode disables discovery/advertising/background sync and uses generic filenames.
 - No private-room membership/contact/social-graph leaks to unknown peers or relays.
 
-**Testing:** Unit — disclosure completeness; stealth-mode toggles. E2E — export-warning flow (WS-R.18.3).
+**Testing:** Unit — disclosure completeness; stealth-mode toggles. E2E — export-warning flow (WS-R.15.1 import/export E2E).
 
 **Dependencies:** WS-R.6.3, WS-R.4.4.
 
@@ -1231,11 +1390,11 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Acceptance criteria:**
 - Every listed vector exists and is asserted both directions where applicable.
-- The corpus is the normative pin for determinism (referenced by WS-R.0.2/0.3/0.6 and WS-R.9.2/9.3).
+- The corpus is the normative pin for determinism (referenced by WS-R.0.2c/0.3/0.6a/0.6b and WS-R.9.2/9.3).
 
 **Testing:** Unit — vector replay across the codec/CID/COSE/Merkle modules.
 
-**Dependencies:** WS-R.0.6, WS-R.9.3.
+**Dependencies:** WS-R.0.6b, WS-R.9.3.
 
 ---
 
@@ -1254,19 +1413,35 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 ---
 
-### WS-R.18.3 Network simulator + delivery metrics
-**ID:** WS-R.18.3 | **Ref:** OFFLINE_SPEC §32.3
+### WS-R.18.3a Deterministic discrete-event network simulator engine
+**ID:** WS-R.18.3a | **Ref:** OFFLINE_SPEC §32.3
 
-**Description:** Build a deterministic network simulator with random partitions, short contacts, asymmetric links, loss, duplicate/replay delivery, malicious relays, storage pressure, wrong clocks, stale revocation state, device-key compromise, and server checkpoint equivocation. Capture metrics: P0 propagation time, P1 text convergence, bytes per accepted record, outbox age, quarantine ratio, checkpoint freshness, fork-detection latency, media-starvation prevention, battery/storage budget compliance.
+**Description:** Build the seeded discrete-event simulation engine in `packages/lcap/src/test-vectors/sim/`: a virtual clock, a set of `SimNode`s each running the real LCAP client/server/relay logic over an in-memory transport, and a seeded PRNG driving the link model — random partitions, short contacts, asymmetric links, message loss, duplicate/replay delivery, wrong device clocks, and storage pressure. Adversarial node behaviors are pluggable strategies (malicious relay withholds/floods/lies; equivocating authority; compromised device key). The engine is fully deterministic from `(seed, scenario)` so any failure reproduces exactly, and it exposes hooks to sample the §32.3 metrics without touching attention/IP data.
 
 **Acceptance criteria:**
-- The simulator reproduces each scenario deterministically from a seed.
-- Metrics are emitted and thresholds asserted (e.g. P0 propagates ahead of media; fork detection bounded).
-- Equivocation/compromise scenarios surface fork evidence / revocation as designed.
+- `run(seed, scenario)` is byte-reproducible; the same seed yields the identical event trace and outcomes.
+- Nodes execute the REAL LCAP logic (no simulator-only shortcuts through validation/scheduling).
+- Link/adversary behaviors are pluggable strategies; the engine emits the metric hooks but stores no raw attention/IP data.
 
-**Testing:** Simulation suite (node) — scenario + metric assertions; seeded determinism.
+**Testing:** Unit — seed reproducibility; real-logic-in-the-loop assertion; pluggable-adversary wiring.
 
 **Dependencies:** WS-R.8.3, WS-R.9.4, WS-R.5.4.
+
+---
+
+### WS-R.18.3b Scenario library + delivery-metric assertions
+**ID:** WS-R.18.3b | **Ref:** OFFLINE_SPEC §32.3, §38
+
+**Description:** Build the scenario library and metric thresholds on top of WS-R.18.3a: the named scenarios (brief mobile window, manual ferry, clinic relay, checkpoint fork, key compromise, revocation race, all-media flood) and the captured metrics with asserted bounds — P0 propagation time, P1 text convergence, bytes per accepted record, outbox age, quarantine ratio, checkpoint freshness, fork-detection latency, media-starvation prevention, and battery/storage budget compliance. Equivocation/compromise scenarios MUST surface fork evidence / revocation as designed; media MUST never beat P0 to delivery.
+
+**Acceptance criteria:**
+- Each named scenario runs and asserts its metric bounds (e.g. P0 propagates ahead of media; fork detection within a bounded number of contacts).
+- Equivocation surfaces gossiped fork evidence; a compromised key is contained at the next revocation contact.
+- Metric thresholds map to the §38 risk register so a regression names the risk it reopens.
+
+**Testing:** Simulation suite (node) — per-scenario metric assertions; seeded determinism; risk-register linkage.
+
+**Dependencies:** WS-R.18.3a.
 
 ---
 
@@ -1320,42 +1495,48 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 ## Dependency graph (within WS-R)
 
 ```
-R.0.1 ─ R.0.2 ─┬─ R.0.3 ─┬─ R.0.4 ─┐
-               │         │         ├─ R.0.6 ─ R.0.8
-               │         └─────────┘   │
-               └─ R.0.7 ───────────────┘
-R.0.5 ──────────────────────────────── R.0.6
-R.0.6/0.7 ─ R.1.1 ─ R.1.2 ─ R.1.3 ─ R.1.4 ─ R.1.5      (identity/capability/revocation)
+R.0.1 ─ R.0.2a ─ R.0.2b ─ R.0.2c                          (LDC encoder → decoder → vectors)
+R.0.2a ─┬─ R.0.3 ─┐                                        (CID)
+        └─ R.0.4 ─┤                                        (AAD)
+R.0.1 ─ R.0.5a ─ R.0.5b   ;   R.0.1 ─ R.0.8                (ECDSA core/keys ; suite registry)
+R.0.3 + R.0.4 + R.0.5a ─ R.0.6a ─ R.0.6b   ;   R.0.8 ─ R.0.6b   (COSE build → verify; verify uses suites)
+R.0.2b ─ R.0.7                                             (closed-schema zod)
+R.0.6a/0.6b/0.7 ─ R.1.1 ─ R.1.2 ─ R.1.3 ─ R.1.4 ─ R.1.5    (identity/capability/revocation)
 R.1.2 ─ R.2.1 ─ R.2.2 ; R.2.1 ─ R.2.3 ; R.2.1/R.1.3 ─ R.2.4
 R.0.3 ─ R.3.1 ─ R.3.2 ; R.3.1 ─ R.3.3 ; R.0.3 ─ R.3.4
-R.5.1 ─ R.5.2 ─┬─ R.4.1 ─ R.4.2 ─ R.4.3 ; R.4.1 ─ R.4.4   (writer needs scheduler order)
-               └─ R.5.3 (needs R.10.2) ; R.5.2 ─ R.5.4
+R.1.5 ─ R.7.2 ; R.5.1 + R.7.2 ─ R.5.2a ─ R.5.2b ─ R.5.2c   (closure → scheduler front → DRR → score/emit)
+R.5.2c ─ R.5.3 (needs R.10.2) ; R.5.2b + R.5.2c ─ R.5.4
+R.0.2a/0.3/0.7 ─ R.4.1 ─ R.4.2 ─ R.4.3 ; R.4.1 ─ R.4.4     (pack writer takes a caller-provided order)
 R.6.1 ─ R.6.2 ─ R.6.3 ; R.6.2 ─ R.6.4 ; R.6.2/R.2.4 ─ R.6.5
-R.6.1/R.1.4 ─ R.7.1 ─ R.7.3 ; R.1.5/R.5.2 ─ R.7.2
-R.1.4/R.1.5 ─ R.8.1 ─ R.8.2 ─ R.8.3
-R.12.2 ─ R.12.1 ─ R.9.1 ─ R.9.2 ─ R.9.3 ─ R.9.4 ; R.12.1 ─ R.12.3 ; R.12.1/R.6.2/R.9.3 ─ R.12.4
+R.6.1/R.1.4 ─ R.7.1 ─ R.7.3
+R.1.4/R.1.5 ─ R.8.1 ─ R.8.2a ─ R.8.2b ─ R.8.2c ─ R.8.3     (validate: integrity → authority → consensus)
+R.12.2 ─ R.9.1 ─ R.9.2 ─ R.9.3 ─ R.9.4                     (room log → Merkle/checkpoint → proofs → witness)
+R.12.2 ─ R.12.1a ─ R.12.1b (←R.8.2c) ─ R.12.1c (←R.9.1, R.12.3, R.10.2)   ;   R.12.2 ─ R.12.3
+R.12.1c/R.6.2/R.9.3 ─ R.12.4
 R.10.2 ─ R.10.1 ; R.11.3 ─ R.10.3
 R.11.3 ─ R.11.1 ─ R.11.2 ─ R.11.4 ; R.2.1/R.1.2 ─ R.11.5
-R.8.2/R.2.4/R.9.4 ─ R.13.1 ─ R.13.2
+R.8.2c/R.2.4/R.9.4 ─ R.13.1 ─ R.13.2
 R.4.2 ─ R.14.1 ; R.6.3/R.4.4 ─ R.14.2 ; R.0.7 ─ R.14.3 ; R.15.3 ─ R.14.4
 R.4.* ─ R.15.1 ─ R.15.4 ; R.6.1 ─ R.15.2 ; R.12.4 ─ R.15.3 ; (defer) R.15.5
 R.2.1/R.11.5 ─ R.16.1  (bridge to WS-S)
 R.8.1/R.10.1 ─ R.17.1 ─ R.17.3 ; R.11.2/R.6.2 ─ R.17.2
-R.0.6/R.9.3 ─ R.18.1 ; R.5.4/R.8.3/R.10.3 ─ R.18.2 ; R.8.3/R.9.4 ─ R.18.3
+R.0.6b/R.9.3 ─ R.18.1 ; R.5.4/R.8.3/R.10.3 ─ R.18.2 ; R.8.3/R.9.4/R.5.4 ─ R.18.3a ─ R.18.3b
 R.14.1/R.0.8/R.4.2 ─ R.18.4 ; R.18.1/R.15.1 ─ R.18.5 ; (all) ─ R.18.6
 ```
 
-Cross-stream order: **R.0** (codec → CID → AAD → ES256 → COSE → schemas → suites) is the gate for everything. Then **R.1** (identity/capabilities/revocations) and **R.2/R.3** (records/blocks) in parallel; **R.5** (scheduler) ↔ **R.4** (pack) co-develop because the writer emits the scheduler's transfer order; **R.6/R.7/R.8** (sync/reconciliation/trust) build on records + scheduler; **R.9** (checkpoints) sits on the server **R.12** + DB; **R.10/R.11** (liveness/storage) underpin the client; **R.13/R.14** (conflict/privacy-DoS) harden; **R.15/R.16** (transports/private bridge) and **R.17** (UI) ride the validated core; **R.18** (tests/sim/acceptance) runs continuously and gates the close. The phase mapping to OFFLINE_SPEC §35 is: Phase 0 = R.0; Phase 1 = R.1/R.6/R.11/R.12; Phase 2 = R.3/R.4/R.5/R.15.1–2; Phase 3 = R.9/R.10; Phase 4 = R.15.3; Phase 5 = R.15.4; Phase 6 = R.7.3/R.16/witness hardening/PQ reservation.
+The graph is acyclic. Two cycles present in the first cut were removed: the pack writer (R.4.1) now takes a **caller-provided** object order rather than build-depending on the scheduler (R.5.2c), and the room-log append (R.9.1) is a DB primitive that the ingestion commit stage (R.12.1c) *calls* rather than the reverse; the dependency-closure helper (R.7.2) is scheduler-independent and feeds R.5.2a.
+
+Cross-stream order: **R.0** (LDC codec → CID → AAD → ECDSA → COSE → schemas → suites) is the gate for everything. Then **R.1** (identity/capabilities/revocations) and **R.2/R.3** (records/blocks) in parallel; **R.5** (closure → scheduler front → DRR → score) and **R.4** (pack) co-develop but are decoupled (the writer consumes the scheduler's emitted order at integration in R.15.1); **R.6/R.7/R.8** (sync/reconciliation/trust) build on records + scheduler; **R.9** (checkpoints) sits on the server **R.12** DB; **R.10/R.11** (liveness/storage) underpin the client; **R.13/R.14** (conflict/privacy-DoS) harden; **R.15/R.16** (transports/private bridge) and **R.17** (UI) ride the validated core; **R.18** (tests/sim/acceptance) runs continuously and gates the close. The phase mapping to OFFLINE_SPEC §35 is: Phase 0 = R.0; Phase 1 = R.1/R.6/R.11/R.12; Phase 2 = R.3/R.4/R.5/R.15.1–2; Phase 3 = R.9/R.10; Phase 4 = R.15.3; Phase 5 = R.15.4; Phase 6 = R.7.3/R.16/witness hardening/PQ reservation.
 
 ## Milestone gate additions
 
 | Gate | Cards | Requirement |
 |---|---|---|
-| Record/proof separation | R.0.3, R.0.6, R.18.2 | `record_cid` is independent of signature bytes; multi-proof never changes identity. |
-| Deterministic encoding | R.0.2, R.18.1 | LDC vectors stable; same logical value ⇒ identical bytes; closed-schema unknown-field rejection. |
-| Crypto interop | R.0.5, R.18.5 | Browser↔Node ES256 low-S sign/verify and bundle round-trip pass. |
-| No transport trust | R.8.3 | Every ingress funnels through `validate`; hostile relay ≡ trusted friend in trust state. |
-| C0 cannot starve | R.5.4 | `check:lcap-scheduler` proves control/dependency closure never preempted by media/bulk. |
+| Record/proof separation | R.0.3, R.0.6a, R.18.2 | `record_cid` is independent of signature bytes; multi-proof never changes identity. |
+| Deterministic encoding | R.0.2a, R.0.2c, R.18.1 | LDC vectors stable; same logical value ⇒ identical bytes; closed-schema unknown-field rejection. |
+| Crypto interop | R.0.5a, R.0.5b, R.18.5 | Browser↔Node ES256 low-S sign/verify and bundle round-trip pass. |
+| No transport trust | R.8.2c, R.8.3 | Every ingress funnels through the single `validate`; hostile relay ≡ trusted friend in trust state. |
+| C0 cannot starve | R.5.2b, R.5.4 | C0 reservation precedes DRR; `check:lcap-scheduler` proves control/dependency closure never preempted by media/bulk. |
 | Outbox durability | R.10.3 | Hard pins survive eviction; signed-unsent records retry on every opportunity. |
 | Revocation propagation | R.1.4, R.7.1 | Revocations are P0/C0, reconciled before content; stale frontiers labelled. |
 | Checkpoint consistency | R.9.2, R.9.3, R.9.4 | Inclusion/consistency verify (RFC 9162-compatible); equivocation → gossiped fork evidence. |
