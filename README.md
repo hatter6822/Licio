@@ -1,5 +1,12 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="apps/web/public/assets/dark_512.png" />
+    <img src="apps/web/public/assets/light_512.png" alt="licio logo" width="200" />
+  </picture>
+</p>
+
 <h1 align="center">Licio</h1>
 
 <p align="center">
