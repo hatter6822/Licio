@@ -1,7 +1,8 @@
 # LCAP v0.2 — Licio Content Availability Protocol
 
-**Document status:** Improved draft implementation specification  
+**Document status:** Reviewed and refined draft implementation specification (protocol v0.2)  
 **Prepared date:** June 13, 2026  
+**Last refined:** June 15, 2026  
 **Target project:** [`hatter6822/Licio`](https://github.com/hatter6822/Licio)  
 **Primary platform:** Licio Progressive Web App, with optional future courier and relay components  
 **Primary objective:** maximize useful verified data availability, liveness, and throughput under intermittent connectivity, hostile networks, cheap older smartphones, limited battery, limited storage, and incomplete trust
@@ -95,9 +96,9 @@ The design goal is **maximum useful convergence under interruption**, not maximu
 
 ## 2. Normative language
 
-The capitalized words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, **RECOMMENDED**, **MAY**, and **OPTIONAL** are to be interpreted as described by BCP 14 when they appear in uppercase.
+The capitalized words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**, **SHOULD**, **SHOULD NOT**, **RECOMMENDED**, **MAY**, and **OPTIONAL** are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) — and only when, per RFC 8174, they appear in all uppercase.
 
-Lowercase uses are descriptive.
+Lowercase uses are descriptive. TypeScript type sketches are illustrative; the **zod schemas in `packages/lcap/src/schemas/` and the conformance vectors in `packages/lcap/src/test-vectors/` are normative** where a sketch and an implementation could diverge.
 
 ---
 
@@ -172,6 +173,63 @@ A bounded signed authorization: subject device, scope, operations, room, validit
 
 **Liveness state**  
 A local state describing how far a record has propagated: local, packed, exported, peer-stored, relay-stored, server-stored, accepted, checkpointed, witnessed.
+
+### 4.1 Common type aliases
+
+These aliases are referenced throughout the schemas below. They are gathered here so every later type is self-contained.
+
+```ts
+// Scheduling.
+type LcapLane = "C0" | "T1" | "E2" | "M3" | "B4";        // §15.1
+type LcapPriority = 0 | 1 | 2 | 3 | 4;                    // §15.1.1, lower = sooner
+
+// Every deterministic record body's `kind`.
+type LcapRecordKind =
+  | "contribution_event" | "device_certificate" | "room_capability"
+  | "revocation" | "bundle_manifest" | "room_checkpoint"
+  | "inclusion_proof" | "consistency_proof" | "witness_statement"
+  | "receipt" | "fork_evidence" | "availability_advertisement"
+  | "policy_object";
+
+// Operations a room capability may authorize (gates contribution `event_type`s and roles).
+type LcapOperation =
+  | "post" | "reply" | "edit" | "tombstone" | "moderate"
+  | "source_snapshot" | "summary" | "invite";
+
+// Crypto / compression negotiation identifiers.
+type CryptoSuiteId = "ES256" | "Ed25519";                // Ed25519 reserved, §10.3/§10.4
+type CompressionId = "none" | "gzip" | "deflate" | "zstd";
+
+// A serialized pack (§14) as transferred over any transport.
+type PackBytes = Uint8Array;
+
+// Proof helper types (§10.2).
+type CoseUnprotectedHeader = Record<string, unknown>;    // never signature-covered
+type ProofScope = { room_id_hash?: Uint8Array; not_after_ms?: number };
+
+// Block helper types (§13).
+type ChunkingDescriptorV2 = {
+  chunk_size: number; chunk_count: number; chunk_cids: string[];
+};
+type CompressionDescriptorV2 = {
+  algorithm: CompressionId; compressed_size: number; uncompressed_size: number;
+  uncompressed_sha256: Uint8Array; max_expansion_ratio: number;
+};
+
+// Sync-pulse helper types (§16.2).
+type CapabilityFrontierV2 = {
+  room_id_hash: Uint8Array; capability_id: string; not_after_ms: number;
+};
+type LaneSummaryV2 = {
+  lane: LcapLane; pending_count: number; pending_bytes: number;
+};
+type ExchangeWarningV2 = {
+  code:
+    | "stale_checkpoint" | "stale_revocation" | "quota_near_limit"
+    | "private_metadata_stripped" | "budget_truncated";
+  detail?: string;
+};
+```
 
 ---
 
@@ -389,42 +447,78 @@ Transport never decides trust.
 
 ### 9.1 Deterministic encoding
 
-LCAP record bodies MUST be encoded using a deterministic CBOR profile.
+LCAP record bodies, proof bodies, and every object whose CID or signature must be reproducible MUST be encoded with the **LCAP Deterministic CBOR profile (LDC)**. LDC is RFC 8949 §4.2.1 *Core Deterministic Encoding* plus the additional restrictions below. Two conforming encoders MUST produce byte-identical output for the same logical value, and a decoder MUST reject any input that is not in LDC form when the context requires determinism (anything that is hashed into a CID or covered by a signature).
 
-The profile MUST define:
+#### 9.1.1 Core rules (RFC 8949 §4.2.1)
 
-- exact integer ranges;
-- map key ordering;
-- no duplicate map keys;
-- no indefinite-length encodings;
-- no floats in v0.2 schemas unless explicitly permitted;
-- UTF-8 normalization policy for user-controlled identifiers;
-- deterministic byte-string representation;
-- exact treatment of optional fields;
-- rejection of unknown critical fields.
+- Integers and all length/count arguments use the **shortest-form (preferred) encoding**: `23` is one byte, never a 2/4/8-byte form, and there are no leading-zero argument bytes.
+- Only **definite-length** encodings are used for byte strings, text strings, arrays, and maps. Indefinite-length items (`0x5f`, `0x7f`, `0x9f`, `0xbf`) MUST be rejected.
+- **Map keys are sorted in ascending bytewise lexicographic order of their deterministic CBOR encodings.** Duplicate keys (equal encoded key bytes) MUST be rejected, never merged or last-wins.
 
-### 9.2 Record CID
+#### 9.1.2 LCAP restrictions (beyond core)
+
+- **No floating point.** Major-type-7 floats (half/single/double) MUST NOT appear in any v0.2 record, proof, or pack schema. All quantities are integers; time is integer milliseconds since the Unix epoch. NaN/Infinity therefore cannot occur.
+- **No CBOR tags** except those on an explicit per-schema allowlist. v0.2 defines no permitted tags inside record bodies, so any tag fails closed.
+- **No `undefined` and no simple values** other than `false`, `true`, and `null`. `null` is permitted only where a field's schema explicitly allows it and MUST NOT stand in for an absent optional field (see 9.1.3).
+- **Text strings** (major type 3) that act as identifiers, map keys, domain separators, or any value covered by a signature or CID MUST be valid UTF-8 and **Unicode NFC-normalized**; invalid UTF-8 MUST be rejected. Identity-bearing text is the only text allowed in a deterministic body. Free-form human text (a note, a body) is carried in a **block**, not in the record body, so normalization choices can never perturb a `record_cid`.
+- **Byte strings** (major type 2) carry every binary value (public keys, signatures, hashes, nonces). Binary MUST NOT be smuggled as base64 text inside a deterministic body.
+
+#### 9.1.3 Optional fields
+
+An optional field is encoded by **omitting its map key** when absent; it MUST NOT be encoded as `key: null`. "Absent" and "present-but-null" are therefore distinct, and there is exactly one canonical byte sequence per logical record.
+
+#### 9.1.4 Unknown and critical fields
+
+Record, proof, capability, certificate, revocation, and checkpoint bodies are **closed schemas**: a map key not defined by the object's schema MUST cause rejection (`rejected_bad_schema`), never silent acceptance. This "reject unknown critical fields" rule is what lets a verifier treat a successfully parsed body as fully understood *before* computing trust. Forward-compatible extension is introduced by **bumping `record_version`** (a new closed schema), never by adding stray keys to an existing version.
+
+#### 9.1.5 Conformance vectors
+
+LDC is normatively pinned by the `packages/lcap/src/test-vectors/` corpus (§32.1): for each record kind, a logical value, its canonical LDC bytes (hex), and the resulting `record_cid`. Any encoder/decoder change that alters a published vector is a breaking change and MUST bump the profile version.
+
+### 9.2 CID construction
+
+All LCAP CIDs share one binary layout and one string form, so a single verified routine produces and checks every CID kind.
+
+**Binary form.**
 
 ```text
-record_cid = base32url(multicodec-like-prefix || sha256(deterministic_record_body))
+cid_bytes = lcap_prefix || multihash
+lcap_prefix = 0x01 (cid_format_version) || kind_code
+kind_code   = 0x01 record | 0x02 proof | 0x03 block | 0x04 chunk
+multihash   = 0x12 (sha2-256) || 0x20 (digest length = 32) || digest[32]
 ```
 
-The precise textual encoding MAY be project-specific, but the binary CID input MUST be only the deterministic record body.
+**String form.**
+
+```text
+cid_string = human_prefix || base32(cid_bytes)
+human_prefix = "lcapr_" record | "lcapp_" proof | "lcapb_" block | "lcapc_" chunk
+base32       = RFC 4648 §6 lower-case, no padding (alphabet a–z 2–7, URL-safe)
+```
+
+The `kind_code` is bound into the hash preimage's CID, not just the string, so a record digest can never be reinterpreted as a block digest. `sha2-256` is fixed in v0.2; the multihash code/length bytes reserve agility for a future hash without changing the layout.
+
+```text
+record_cid = "lcapr_" || base32(0x01 0x01 || 0x12 0x20 || sha256(deterministic_record_body))
+```
+
+The CID input MUST be **only** the deterministic record body (§9.1) — never the proof bytes, transfer framing, or compression wrapper.
 
 ### 9.3 Proof CID
 
 ```text
-proof_cid = base32url(prefix || sha256(deterministic_proof_body))
+proof_cid = "lcapp_" || base32(0x01 0x02 || 0x12 0x20 || sha256(deterministic_proof_body))
 ```
 
-A proof object references the `record_cid` it proves.
+A proof object references by value the `record_cid` it proves. The proof body that is hashed for `proof_cid` includes the `record_cid`, the protected header, and the signature bytes, so the same record may carry several distinct proofs (multi-witness) with distinct `proof_cid`s.
 
 ### 9.4 Block CID
 
 For ordinary blocks:
 
 ```text
-block_cid = base32url(prefix || sha256(block_bytes))
+block_cid = "lcapb_" || base32(0x01 0x03 || 0x12 0x20 || sha256(block_bytes))
+chunk_cid = "lcapc_" || base32(0x01 0x04 || 0x12 0x20 || sha256(chunk_bytes))
 ```
 
 If a block declares compression as canonical, the block descriptor MUST include:
@@ -442,10 +536,13 @@ v0.2 SHOULD avoid canonical compressed blocks for small text. Prefer pack-level 
 
 ### 9.5 Domain separation
 
-Every hash and signature context MUST include a domain separator:
+Every signature context MUST include a domain separator. The separator is a US-ASCII string with this exact grammar:
 
 ```text
-LCAP-v0.2:<network-id>:<object-kind>:<purpose>
+separator = "LCAP-v0.2:" network_id ":" object_kind ":" purpose
+network_id  = "prod" | "staging" | "test" | <deployment label, [a-z0-9_-]+>
+object_kind = "record" | "proof" | "checkpoint" | "bundle" | "receipt"
+purpose     = <lower_snake_case label, e.g. contribution_event, device_signature>
 ```
 
 Examples:
@@ -457,7 +554,7 @@ LCAP-v0.2:prod:checkpoint:room_log
 LCAP-v0.2:prod:bundle:manifest
 ```
 
-Domain separation prevents accidental cross-protocol signature reuse.
+The separator is never concatenated ad hoc with payload bytes. It is carried as the **first element of the `external_aad` structure** (§10.2), which is itself LDC-encoded so that the bound context — separator, protocol version, network id, and record kind — has exactly one byte representation. Domain separation prevents a signature minted for one network, object kind, or protocol version from validating in another, and it closes cross-protocol signature-reuse attacks.
 
 ---
 
@@ -477,23 +574,39 @@ Malleability rule: reject high-S signatures; normalize client-generated signatur
 AEAD:       AES-256-GCM for local draft/block encryption where already used by Licio
 ```
 
-The P-256 baseline is chosen because it is practical in the browser and Node runtimes. Ed25519 MAY be added as an optional suite only after browser support, dependency footprint, and audit posture are acceptable.
+The P-256 baseline is chosen because `ECDSA P-256 / SHA-256` is available in **WebCrypto on every target browser and in Node `crypto`** with no added dependency, satisfying §3.1 (PWA-first) and §3.2 (old-phone viability). Ed25519 MAY be added as an optional suite only after browser support, dependency footprint, and audit posture are acceptable (see §10.3). Note that the private P2P-rooms plane (`docs/PRIVATE_SPEC.md`) standardizes on Ed25519 to align with its MLS cipher suite; the two planes are independent and each pins its own suite.
+
+#### 10.1.1 ECDSA canonicalization (mandatory)
+
+ECDSA signatures are malleable: `(r, s)` and `(r, n − s)` both verify. LCAP removes that freedom so a signature has exactly one valid encoding.
+
+```text
+let n = the P-256 group order (0xFFFF...BCE6FAADA7179E84F3B9CAC2FC632551)
+signature bytes = r (32-byte big-endian) || s (32-byte big-endian)   // 64 bytes total
+
+On signing:
+  if s > n/2 then s := n − s          // low-S normalization
+On verifying, REJECT (status rejected_high_s_signature) unless:
+  0 < r < n  and  0 < s ≤ n/2          // r,s in range AND s is low
+```
+
+Implementations MUST reject the DER-wrapped form on the wire (raw `r || s` only), MUST reject `r = 0` or `s = 0`, and MUST reject any `r`/`s` ≥ `n`. WebCrypto's `ECDSA` already emits raw `r || s`; the low-S check is applied on top.
 
 ### 10.2 Detached proof shape
 
-A proof object SHOULD have this logical shape:
+A proof object has this logical shape:
 
 ```ts
 type DetachedProofV2 = {
   proof_version: 2;
   proof_kind: "device_signature" | "authority_signature" | "witness_signature";
-  record_cid: string;
+  record_cid: string;            // the record this proof authenticates
   record_kind: LcapRecordKind;
 
-  cose_protected: Uint8Array;
+  cose_protected: Uint8Array;    // LDC-encoded protected header map, e.g. {1: -7}
   cose_unprotected?: CoseUnprotectedHeader;
-  external_aad: Uint8Array;
-  signature: Uint8Array;
+  external_aad: Uint8Array;      // LDC-encoded context array (see 10.2.2)
+  signature: Uint8Array;         // raw r||s, low-S (64 bytes for ES256)
 
   signer_key_id: string;
   created_at_claim_ms?: number;
@@ -501,7 +614,63 @@ type DetachedProofV2 = {
 };
 ```
 
-`external_aad` MUST include the LCAP domain separator, record kind, network ID, and protocol version.
+LCAP signs with **COSE_Sign1 detached payload** semantics (RFC 9052 §4.4). The fields above are not concatenated by hand; the signature is computed over a canonical `Sig_structure`.
+
+#### 10.2.1 Protected header
+
+`cose_protected` is the LDC encoding of a COSE header map whose only mandatory entry is the algorithm (label `1`):
+
+```text
+ES256 (P-256 / SHA-256)  -> { 1: -7 }
+EdDSA (Ed25519, future)  -> { 1: -8 }
+```
+
+The algorithm is in the **protected** (signed) header, never the unprotected one, so it cannot be stripped or downgraded (§10.3). `cose_unprotected` MAY carry non-security hints (e.g. a key-id echo) and is never covered by the signature.
+
+#### 10.2.2 External AAD
+
+`external_aad` is the LDC encoding of a fixed-shape array that binds the signing context:
+
+```text
+external_aad = LDC([
+  domain_separator,   // tstr, §9.5 grammar, e.g. "LCAP-v0.2:prod:proof:device_signature"
+  protocol_version,   // uint, 2
+  network_id,         // tstr, e.g. "prod"
+  record_kind,        // tstr, e.g. "contribution_event"
+  proof_kind          // tstr, e.g. "device_signature"
+])
+```
+
+Because the array is LDC-encoded, the bound context has exactly one byte representation, eliminating canonicalization ambiguity in the AAD itself.
+
+#### 10.2.3 What is signed
+
+The COSE detached **payload is the deterministic record body bytes** (the same `deterministic_record_body` that produced `record_cid` in §9.2). The signer builds and signs:
+
+```text
+Sig_structure = [
+  "Signature1",                 // context, COSE_Sign1
+  cose_protected,               // bstr: the protected header bytes
+  external_aad,                 // bstr: the §10.2.2 context bytes
+  deterministic_record_body     // bstr: the detached payload
+]
+ToBeSigned = LDC(Sig_structure)
+signature  = ECDSA-low-S( signer_private_key, SHA-256, ToBeSigned )   // §10.1.1
+```
+
+#### 10.2.4 Verification
+
+```text
+1. Recompute record_cid' = CID(deterministic_record_body); REJECT if record_cid' != proof.record_cid.
+2. Parse cose_protected; REJECT if alg is absent, unknown, or a disabled/weaker suite (no downgrade, §10.3).
+3. Rebuild external_aad from local (protocol_version, network_id, record_kind, proof_kind, expected separator);
+   REJECT if it does not byte-match proof.external_aad.
+4. Rebuild Sig_structure and ToBeSigned exactly as in 10.2.3.
+5. REJECT (rejected_high_s_signature) unless the signature is canonical low-S (§10.1.1).
+6. Verify ECDSA(signer_public_key, ToBeSigned, signature); REJECT (rejected_bad_signature) on failure.
+```
+
+Signing the body (not just the CID) keeps LCAP proofs verifiable by any off-the-shelf COSE_Sign1 implementation, while step 1 still binds the proof to the stable `record_cid`. Because `record_cid` is independent of the signature bytes (§5.1), one record body MAY carry multiple proofs (device + witnesses) without changing its identity.
 
 ### 10.3 Algorithm agility
 
@@ -618,7 +787,9 @@ Capability consumption is keyed by:
 capability_id + subject_device_key_id + device_seq
 ```
 
-A server MUST treat repeated valid submissions of the same event as idempotent and MUST treat conflicting records at the same device sequence as fork evidence.
+`device_seq` is a **single monotonic counter per `device_key_id`, global across all of that device's capabilities and rooms** (§12.2). It is the device's signing-sequence number, not a per-capability counter, so the sequence a device emits may interleave records authorized by different capabilities. Quota accounting is therefore independent of the sequence: each accepted record debits its `capability_cid`'s `quotas` (event count, payload bytes, media bytes), while `device_seq` exists only to make the device's signing history a verifiable hash chain.
+
+A server MUST treat repeated valid submissions of the same event (same `record_cid`) as idempotent (§24.3) and MUST treat two distinct `record_cid`s sharing the same `(subject_device_key_id, device_seq)` as device-fork evidence (§12.2) — regardless of whether they cite the same capability.
 
 ### 11.5 Revocation record
 
@@ -990,6 +1161,20 @@ B4 bulk         nonessential cache, debug, analytics-safe aggregate material
 
 Priority and lane are related but not identical. A P0 record is normally in C0. A P1 text body is normally in T1. A source snapshot might be P2 in E2.
 
+#### 15.1.1 Canonical priority ↔ lane mapping
+
+Three names for the same axis appear across this spec: the wire field `priority: 0 | 1 | 2 | 3 | 4`, the replication **priority class** `P0–P4` (§21.1), and the **lane** `C0–B4`. They are one ordering. This table is the single source of truth; `Pn` and `priority: n` are identical, and the lane is the default scheduling class for that priority.
+
+| `priority` | Class | Default lane | Meaning | Typical objects |
+|---:|---|---|---|---|
+| 0 | P0 | C0 | Emergency / trust control | revocations, checkpoints, fork evidence, device/capability updates, safety notices |
+| 1 | P1 | T1 | Text and core semantics | contribution records, edits, corrections, moderation actions, body text |
+| 2 | P2 | E2 | Evidence / context | source snapshots, citations, thumbnails, compact summaries |
+| 3 | P3 | M3 | Media | images, video, large attachments |
+| 4 | P4 | B4 | Nonessential bulk | debug-safe aggregates, old cache, optional material |
+
+The lane is a **default**, not a lock: an object MAY be scheduled in a lane other than its priority's default when the closure rules require it (a P1 text body that depends on a P0 capability still ships behind C0), but an object MUST NOT be promoted into C0 unless it is genuinely P0 trust/liveness material. Lower `priority` number = scheduled earlier and protected from starvation (§15.2).
+
 ### 15.2 Mandatory ordering invariant
 
 A sender MUST NOT send M3/B4 data before all currently schedulable C0 objects in the same budget are sent.
@@ -1049,7 +1234,7 @@ score =
   ÷ (bytes × estimated_cpu × privacy_risk)
 ```
 
-The exact numeric weights MAY be tuned, but the invariant is that C0 and dependencies cannot starve.
+Every factor MUST be clamped to a strictly positive finite range before use (e.g. each weight in `[0.01, 100]`, every divisor `≥ 1`) so the score is always finite and an object is never permanently un-schedulable by a single zero factor; the C0 byte reservation (§15.3), not the score, is what guarantees control traffic moves. Equivalently, implementations MAY compute the score in log-additive form to avoid underflow. The exact numeric weights MAY be tuned, but two invariants hold regardless of weights: **C0 and dependency closure cannot starve**, and scoring is applied **only to break ties within a lane after** the byte reservations and dependency-promotion rules (§15.3–§15.4 steps 3, 5–7) have run.
 
 ### 15.5 Scarcity boost
 
@@ -1441,6 +1626,32 @@ Each room SHOULD maintain an append-only canonical log of accepted records.
 
 The room log sequence is not the same as creation time. It is the canonical acceptance order for that room.
 
+#### 19.1.1 Merkle tree definition
+
+A room log is a Merkle tree over its accepted records, using **RFC 6962 / RFC 9162 domain-separated hashing** to prevent second-preimage and leaf/node confusion attacks:
+
+```text
+empty tree hash : MTH({})        = SHA-256("")
+leaf hash       : MTH({ d })     = SHA-256(0x00 || record_cid_bytes(d))
+node hash       : MTH(D)         = SHA-256(0x01 || MTH(D_left) || MTH(D_right))
+```
+
+where the leaf input is the 36-byte `cid_bytes` of the accepted record (§9.2: `0x01 || kind_code || 0x12 || 0x20 || digest[32]`), and the split point follows RFC 6962 §2.1 (largest power of two strictly less than the leaf count). `tree_size` is the number of leaves; `merkle_root` is `MTH` over all of them.
+
+`tree_algorithm` selects the hashing/proof rules:
+
+- **`RFC9162_SHA256`** (RECOMMENDED) — the rules above, byte-for-byte compatible with RFC 9162 so a standard Certificate-Transparency verifier can check LCAP inclusion and consistency proofs unchanged.
+- **`LCAP_MERKLE_V2`** — identical leaf/node hashing, but the leaf prefix is `0x00 || domain_separator_hash || record_cid_bytes` where `domain_separator_hash = SHA-256("LCAP-v0.2:" || network_id || ":checkpoint:room_log")`. This binds a tree to one network and rejects cross-network proof replay, at the cost of off-the-shelf CT interop. Deployments that do not need CT-tool interop SHOULD prefer it.
+
+A verifier MUST use the `tree_algorithm` named in the checkpoint and MUST reject a proof computed under a different algorithm.
+
+#### 19.1.2 Proof verification
+
+Inclusion and consistency proofs are verified by the standard RFC 9162 algorithms:
+
+- **Inclusion** (§2.1.3): from `(leaf_index, tree_size, proof_hashes, leaf_cid)`, recompute a candidate root and REQUIRE it equals the checkpoint's `merkle_root`.
+- **Consistency** (§2.1.4): from `(old_tree_size, new_tree_size, proof_hashes)`, REQUIRE that the new root provably extends the old root with no leaf rewritten or removed. A failed consistency check between two checkpoints the same authority signed is **fork/equivocation evidence** (§19.6).
+
 ### 19.2 Checkpoint record
 
 ```ts
@@ -1733,6 +1944,25 @@ The `exchange` endpoint SHOULD be the main path. The `pulse` endpoint is for ult
 
 HTTPS transport SHOULD use app-level chunk/range resume. HTTP/2 or HTTP/3 MAY improve performance where available, but correctness MUST NOT depend on a particular HTTP version.
 
+#### 22.1.1 HTTP status mapping
+
+Transport-level HTTP status is **separate** from per-object `ObjectStatusV2` (§16.11): a `200` exchange routinely carries a body in which individual objects are `quarantined_*` or `rejected_*`. The request-level mapping is:
+
+| HTTP | When | Body |
+|---:|---|---|
+| `200 OK` | Exchange/pulse processed; per-object outcomes inside | `ExchangeResponseV2` / `PulseResponse` |
+| `202 Accepted` | Pack accepted for asynchronous reconciliation | `PackIngestResponse` with `pack_status: "partial"` |
+| `400 Bad Request` | Malformed framing, bad magic, undecodable header/table | error object |
+| `401 Unauthorized` | Endpoint requires a Licio session the caller lacks | error object |
+| `403 Forbidden` | Authenticated but capability/policy forbids the operation | error object |
+| `409 Conflict` | Device/checkpoint fork detected at the request level | `ObjectStatusV2[]` incl. `conflict_device_fork` |
+| `413 Payload Too Large` | Request exceeds `max_request_bytes`/`max_frame_bytes` (§16.5) | error object |
+| `422 Unprocessable` | Schema-valid framing but a hard semantic violation | error object |
+| `429 Too Many Requests` | Rate/quota limited; MUST set `Retry-After` and `retry_after_ms` | `{ status: "rate_limited", retry_after_ms }` |
+| `503 Service Unavailable` | Server shedding load; client SHOULD back off and retry C0 first | `{ status: "retry_later", retry_after_ms }` |
+
+A client MUST treat `429`/`503` as retriable with exponential backoff and MUST NOT treat `400`/`422` as retriable without changing the request. Per-object `rejected_*` outcomes are **not** retriable; per-object `quarantined_*` outcomes become retriable once the named `missing_cids` are supplied.
+
 ### 22.2 Manual bundle profile
 
 Manual bundle exchange is REQUIRED.
@@ -1846,7 +2076,7 @@ Deferred. LCAP uses content addressing internally. A public IPFS/libp2p bridge M
 
 ### 23.1 IndexedDB stores
 
-The PWA SHOULD create an `lcap_v2` IndexedDB database with stores:
+LCAP uses a **dedicated `lcap_v2` IndexedDB database, separate from Licio's existing `licio` offline database** (`apps/web/src/offline/db.ts`, which holds saved stories, drafts, thread snapshots, the signal ledger, and the sync queue). Keeping the databases separate lets LCAP versioning, hard-pin GC (§20.5/§21.2), and quarantine evolve without migrating the established WS-C offline stores, and keeps LCAP's content-addressed objects out of the application-level caches. The PWA SHOULD create `lcap_v2` with stores:
 
 ```text
 records
@@ -2148,6 +2378,8 @@ Proof-of-work is NOT RECOMMENDED for client posting in v0.2 because it wastes ba
 
 v0.2 should focus on public and in-room plaintext robustness first. Private-room offline replication MUST be conservative.
 
+> **Relationship to `docs/PRIVATE_SPEC.md`.** Fully end-to-end-encrypted, member-hosted **Private P2P rooms** are specified separately in `docs/PRIVATE_SPEC.md`, which owns the room-key authority, MLS group keying, blind rendezvous, and server non-storage contract. The two specs compose rather than overlap: PRIVATE_SPEC is the E2EE *authority and confidentiality* plane; LCAP is a delay-tolerant *availability and transport* substrate. A Private P2P room MAY reuse LCAP mechanisms — the `.licio-bundle` pack as its encrypted offline-exchange (CAR-equivalent) format, the lane scheduler so control/membership material outruns media, liveness states and receipts for replication-health UI, and the "no transport trust / honest trust labels" doctrine — provided LCAP only ever sees **ciphertext blocks and opaque room hints** for such rooms. The encrypted-payload envelope of §28.2 is the minimal LCAP-side carrier; the authoritative private-room envelope, key schedule, and AAD construction are PRIVATE_SPEC §10. Where the two disagree for private-room content, PRIVATE_SPEC wins.
+
 ### 28.2 Encrypted payload envelope
 
 ```ts
@@ -2419,6 +2651,15 @@ packages/db/src/schema/lcap.ts
 ```
 
 `apps/web` MUST NOT import `@licio/db`. `packages/lcap` SHOULD be a pure shared package with no database dependency.
+
+### 31.1 Dependency budget and bundle strategy
+
+LCAP MUST fit Licio's existing budgets (CLAUDE.md): `apps/web` < 15 and `apps/api` < 20 direct production dependencies, initial JS < 200 KB gz, and the `check:workspace-deps` boundaries.
+
+- **Prefer Web platform APIs.** SHA-256 and ECDSA come from **WebCrypto** (`crypto.subtle`); pack/HTTP compression comes from **Compression Streams** (§13.5); chunk storage from **IndexedDB**. None of these is an npm dependency.
+- **Hand-roll the deterministic CBOR subset.** LDC (§9.1) is a small, closed grammar — integers, byte/text strings, arrays, maps, three simple values. A purpose-built encoder/decoder in `packages/lcap/src/cbor/` is a few hundred lines, avoids a general-purpose CBOR/COSE dependency, and is easier to pin to the conformance vectors than a third-party library. The same applies to the COSE_Sign1 `Sig_structure` (§10.2), which is one fixed array shape.
+- **Keep heavy/optional work out of the core web bundle.** `packages/lcap` itself is `workspace:*` (excluded from the `apps/web` direct-dep count). The web LCAP module (`apps/web/src/lcap/`) MUST be **code-split** and loaded only when sync/bundle features are used, so the initial-load bundle-size gate is unaffected. Any genuinely large optional transport (future WebTransport/WebRTC/courier) MUST be a separately chunked, lazily loaded module.
+- **No new `any`, no raw egress.** LCAP schemas pass the same trust-boundary zod validation as the rest of Licio and MUST satisfy `check:no-raw-egress` and `check:no-applause` (§3.7): no attention traces, no client IP/location, no like/vote/karma fields anywhere in LCAP records, proofs, or receipts.
 
 ---
 
@@ -2767,11 +3008,14 @@ Rejected. `record_cid` must be independent of proof bytes for deduplication, mul
 
 These are anchors for implementers. The LCAP spec should cite exact versions when merged into the repository.
 
-- RFC 8949 — Concise Binary Object Representation (CBOR), especially deterministic encoding.
+- BCP 14 (RFC 2119, RFC 8174) — normative keyword interpretation.
+- RFC 4648 — Base16/Base32/Base64 data encodings, especially base32 (§6) used for CID string form.
+- RFC 8949 — Concise Binary Object Representation (CBOR), especially §4.2.1 core deterministic encoding.
 - RFC 9052 / RFC 9053 — CBOR Object Signing and Encryption (COSE) structures and algorithms.
 - RFC 9171 — Bundle Protocol Version 7, especially store-carry-forward and convergence-layer separation.
 - RFC 9172 — Bundle Protocol Security, especially the lesson that disrupted networks need object/bundle-layer integrity and confidentiality.
-- RFC 9162 — Certificate Transparency v2, especially Merkle inclusion and consistency proofs.
+- RFC 6962 — Certificate Transparency v1, the origin of the domain-separated leaf/node Merkle hashing reused in §19.1.1.
+- RFC 9162 — Certificate Transparency v2, especially Merkle inclusion and consistency proofs (§2.1.3/§2.1.4).
 - RFC 9420 / RFC 9750 — Messaging Layer Security protocol and architecture for future private-room group keying.
 - RFC 9000 / RFC 9114 — QUIC and HTTP/3, optional transport performance improvements.
 - RFC 8878 / RFC 9659 — zstd media/content coding and window limits, optional negotiated compression.
