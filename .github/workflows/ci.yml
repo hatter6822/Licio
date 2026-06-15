@@ -118,6 +118,12 @@ jobs:
       # before every crypto release, SPEC §30.6).
       - name: Ranking-neutrality gate (WS-I.3)
         run: pnpm check:neutrality
+      # WS-O.4.5: the ensemble adversarial suite as an EXPLICIT, named gate —
+      # proves the COMBINED invariants catch each catalogued attack even when
+      # the primary invariant is individually fooled (it also runs inside the
+      # full suite above). See docs/invariants/ADVERSARIAL-THREATS.md.
+      - name: Adversarial ensemble gate (WS-O.4.5)
+        run: pnpm check:adversarial
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:

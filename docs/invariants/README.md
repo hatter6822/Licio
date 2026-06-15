@@ -425,6 +425,19 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
   tests (DATABASE_URL) that run the real migration chain — including a
   live-Postgres proof of the 0009 `time_window` text→jsonb USING
   conversion. CI's service containers run the gated suites.
+- `apps/api/src/__tests__/invariants-ensemble-adversarial.test.ts`: the
+  ENSEMBLE adversarial suite (the named `pnpm check:adversarial` CI gate,
+  WS-O.4.5). Where the purpose suite proves each invariant in ISOLATION, this
+  proves the ensemble property the open-source threat model rests on — evading
+  one invariant trips another, because they measure orthogonal (contradictory)
+  facets of the same attack: a Sybil brigade cannot both concentrate (MFCI
+  catches) and spread-but-synchronize (Tropical catches); a paraphrase flood
+  with distinct URLs stays bounded by MERI's claim/lineage classes; manufactured
+  divergence cannot be weaponized via SCOI without a safety signal yet its
+  coordinated authorship trips MFCI; attribute bias is caught by both CID and
+  GWEI; a low-holonomy session with a compulsive re-entry loop is still flagged;
+  and no single evasion zeroes the ensemble. The attack catalog the scenarios
+  map to is `docs/invariants/ADVERSARIAL-THREATS.md`.
 - `packages/invariants` performance (RUN_PERF-gated, the WS-F precedent):
   batch-tier budgets MEASURED at production-like sizes — MERI 200
   candidates ≈ 5 ms, MFCI 800 observations × 60 targets at the production

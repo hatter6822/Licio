@@ -242,6 +242,7 @@ pnpm check:deps                     # dependency-budget enforcement
 pnpm check:workspace-deps           # workspace boundary enforcement (pkg.json + imports)
 pnpm check:policy                   # doctrine/policy document validation
 pnpm check:neutrality               # the ten WS-I.3 ranking-neutrality tests
+pnpm check:adversarial              # the WS-O.4.5 ensemble adversarial suite
 pnpm check:no-applause              # no likes/votes/karma/reactions in components + routes
 pnpm check:no-raw-egress            # no raw attention traces leaving the browser
 pnpm check:sw                       # SW security scan (run after build)

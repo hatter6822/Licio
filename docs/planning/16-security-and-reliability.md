@@ -852,6 +852,19 @@ Reduce the gameability of ranking and invariant features. Components: (1) featur
 - Randomized audits run on a schedule and surface anomalies to the integrity queue.
 - Results gate ranking-power promotion at M3.
 
+**Status (component 3 — the adversarial corpus — IMPLEMENTED):** the
+ensemble adversarial suite ships as the named `pnpm check:adversarial` CI gate
+(`apps/api/src/__tests__/invariants-ensemble-adversarial.test.ts`), documented
+by the attack catalog `docs/invariants/ADVERSARIAL-THREATS.md`. It proves the
+ENSEMBLE property — evading one invariant trips another — over the catalogued
+strategies (Sybil brigade, paraphrase/near-dup flood, threshold-hugging,
+synchronized cascade, context-collapse, path-steering, bias evasion,
+coordinated-report abuse, multi-front evasion). The catalog and suite grow with
+each invariant-hardening slice (the threshold-hugging meta-signal, the MFCI
+calibration anti-poisoning, the MERI semantic independence signal, and the
+account-age weighting). Components (1) feature-cap stress, (2) randomized
+audits, and (4) the detection→integrity-queue feedback loop remain follow-ups.
+
 **Testing:**
 - Integration: Run the adversarial corpus against the scoring pipeline; assert reach bounds hold. Run a randomized audit; assert anomalies are surfaced.
 
