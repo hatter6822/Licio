@@ -37,14 +37,14 @@ import {
   notificationPreferencesSchema,
   okAckSchema,
   type PushSubscriptionJson,
-  type ReportAck,
+  type ReportCreatedResponse,
   type RoomCreateRequest,
   type RoomDetail,
   type RoomGovernanceSettingsRequest,
   type RoomJoinResponse,
   type RoomListResponse,
   type RoomSummary,
-  reportAckSchema,
+  reportCreatedResponseSchema,
   roomDetailSchema,
   roomJoinResponseSchema,
   roomListResponseSchema,
@@ -323,9 +323,9 @@ export async function createContribution(
   return parseResponse(response, contributionCreateResponseSchema);
 }
 
-export async function createReport(request: CreateReportRequest): Promise<ReportAck> {
+export async function createReport(request: CreateReportRequest): Promise<ReportCreatedResponse> {
   const response = await client.v1.reports.$post({ json: request });
-  return parseResponse(response, reportAckSchema);
+  return parseResponse(response, reportCreatedResponseSchema);
 }
 
 export async function uploadAttentionAggregates(

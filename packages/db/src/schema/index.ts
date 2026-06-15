@@ -13,6 +13,7 @@ export * from './events.js';
 export * from './ingestion-review.js';
 export * from './invariants.js';
 export * from './job-lease.js';
+export * from './moderation.js';
 export * from './privacy.js';
 export * from './ranking.js';
 export * from './room.js';

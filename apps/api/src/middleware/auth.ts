@@ -5,7 +5,13 @@
 // FAILS CLOSED: any error loading/validating the session denies rather than
 // allows.  Routes never re-parse cookies — AuthContext is the single identity
 // source.
-import type { AgeBand, AuthAssurance, AuthMethod, UserAccountState } from '@licio/shared';
+import type {
+  AgeBand,
+  AuthAssurance,
+  AuthMethod,
+  StewardRoleId,
+  UserAccountState,
+} from '@licio/shared';
 import type { MiddlewareHandler } from 'hono';
 import { hasVerifiedCredential } from '../identity/auth-methods.js';
 import { isSteward, type Role } from '../identity/rbac.js';
@@ -25,6 +31,8 @@ export interface AuthContext {
   userId: string;
   accountState: UserAccountState;
   roles: Role[];
+  /** Doctrine steward-role grants (WS-J console authorization). */
+  stewardRoles: StewardRoleId[];
   authMethod: AuthMethod;
   authAssurance: AuthAssurance;
   emailVerified: boolean;
@@ -86,6 +94,7 @@ export function authMiddleware(
       userId: user.userId,
       accountState: user.accountState,
       roles: user.roles,
+      stewardRoles: user.stewardRoles,
       authMethod: validated.record.auth_method,
       authAssurance: validated.record.auth_assurance,
       emailVerified: auth?.emailVerified ?? false,

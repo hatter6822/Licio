@@ -387,21 +387,11 @@ export const contributionAnchorSchema = z
 export type ContributionAnchor = z.infer<typeof contributionAnchorSchema>;
 
 // ---------------------------------------------------------------------------
-// Reports (SPEC §23.2 /reports — §18.4 report mechanism; unchanged contract).
+// Reports (SPEC §23.2 /reports — §18.4 report mechanism).
+//
+// The canonical report contract now lives in `moderation-api.ts` (WS-J.1.1a):
+// it is taxonomy-bound (`reason_code`) and returns a `report_id`/severity/
+// routing.  The WS-C-era free-text stub that lived here was replaced when WS-J
+// took ownership of the report mechanism (the offline-queue idempotency key
+// `local_operation_id` carried forward into the new contract).
 // ---------------------------------------------------------------------------
-
-/** Safety report (SPEC §23.2 /reports; topic moderation.case.created). */
-export const createReportRequestSchema = z.object({
-  target_type: z.enum(['story', 'thread', 'contribution', 'account']),
-  target_id: uuidSchema,
-  reason: z.string().min(1).max(2_000),
-  local_operation_id: z.string().min(1),
-});
-export type CreateReportRequest = z.infer<typeof createReportRequestSchema>;
-
-/** Acknowledgement that a safety report was received (queued for review). */
-export const reportAckSchema = z.object({
-  status: z.literal('received'),
-  local_operation_id: z.string().min(1),
-});
-export type ReportAck = z.infer<typeof reportAckSchema>;

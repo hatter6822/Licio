@@ -35,9 +35,11 @@ import {
   defaultPersonalizationSettings,
   defaultPrivacySettings,
   emptyReputationSummary,
+  isStewardRoleId,
   migratePersonalizationSettings,
   migratePrivacySettings,
   type SecurityActivityEntry,
+  type StewardRoleId,
 } from '@licio/shared';
 import { and, desc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
 import {
@@ -89,6 +91,7 @@ function rowToUser(r: typeof users.$inferSelect): StoredUser {
     personalizationSettings: migratePersonalizationSettings(r.personalizationSettings),
     reputationSummary: r.reputationSummaryPrivate,
     roles: r.roles.filter((x): x is Role => ROLE_SET.has(x)),
+    stewardRoles: r.stewardRoles.filter((x): x is StewardRoleId => isStewardRoleId(x)),
     createdAt: iso(r.createdAt),
     updatedAt: iso(r.updatedAt),
   };
@@ -156,7 +159,10 @@ export class DrizzleIdentityStore implements IdentityStore {
 
   // --- Users ---------------------------------------------------------------
   async createUser(
-    input: Omit<StoredUser, 'userId' | 'createdAt' | 'updatedAt'> & { userId?: string },
+    input: Omit<StoredUser, 'userId' | 'createdAt' | 'updatedAt' | 'stewardRoles'> & {
+      userId?: string;
+      stewardRoles?: StewardRoleId[];
+    },
     now: number = Date.now(),
   ): Promise<StoredUser> {
     const userId = input.userId ?? randomUUID();
@@ -173,6 +179,7 @@ export class DrizzleIdentityStore implements IdentityStore {
           locale: input.locale,
           ageBandIfKnown: input.ageBand,
           roles: input.roles,
+          stewardRoles: input.stewardRoles ?? [],
           privacySettings: input.privacySettings,
           personalizationSettings: input.personalizationSettings,
           reputationSummaryPrivate: input.reputationSummary,
@@ -233,6 +240,7 @@ export class DrizzleIdentityStore implements IdentityStore {
     if (patch.locale !== undefined) set.locale = patch.locale;
     if (patch.ageBand !== undefined) set.ageBandIfKnown = patch.ageBand;
     if (patch.roles !== undefined) set.roles = patch.roles;
+    if (patch.stewardRoles !== undefined) set.stewardRoles = patch.stewardRoles;
     if (patch.privacySettings !== undefined) set.privacySettings = patch.privacySettings;
     if (patch.personalizationSettings !== undefined)
       set.personalizationSettings = patch.personalizationSettings;

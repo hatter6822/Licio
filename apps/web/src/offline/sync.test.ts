@@ -115,9 +115,10 @@ describe('processPendingQueue', () => {
     await queue.enqueue(
       'report',
       {
-        target_type: 'contribution',
+        target_type: 'content',
         target_id: '11111111-1111-4111-8111-111111111111',
-        reason: 'spam',
+        content_kind: 'contribution',
+        reason_code: 'MOD_SPAM_001',
         local_operation_id: 'op-4',
       },
       'op-4',

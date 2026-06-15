@@ -15,6 +15,7 @@
 import { z } from 'zod';
 import { isoTimestampSchema, uuidSchema } from './common.js';
 import { personalizationSettingsSchema, privacySettingsSchema } from './privacy-settings.js';
+import { stewardRoleIdSchema } from './steward-roles.js';
 
 // ---------------------------------------------------------------------------
 // Enumerations (the §22.1 column domains).
@@ -214,6 +215,9 @@ export const userRecordSchema = z
     privacy_settings: privacySettingsSchema,
     personalization_settings: personalizationSettingsSchema,
     reputation_summary_private: reputationSummaryPrivateSchema,
+    /** Doctrine steward-role grants (WS-J / STEWARD_ROLES.md); empty for a
+     *  non-steward.  Private — excluded from `userPublicSchema` by allowlist. */
+    steward_roles: z.array(stewardRoleIdSchema).default([]),
     created_at: isoTimestampSchema,
     updated_at: isoTimestampSchema,
   })
