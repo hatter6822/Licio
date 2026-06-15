@@ -20,7 +20,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "dompurify": "^3.4.8",
+    "dompurify": "^3.4.10",
     "zod": "^4.4.3"
   },
   "devDependencies": {
