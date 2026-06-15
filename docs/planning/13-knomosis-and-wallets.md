@@ -17,7 +17,7 @@ These invariants are repeated here so every task author can verify their work ag
 - **No private-key custody.** Licio never requests, stores, transmits, logs, or recovers seed phrases or private keys (Sections 17.3.1, 25.6). This includes log redaction and crash-report scrubbing.
 - **Separate cryptographic planes.** Wallet identity keys (ECDSA / EIP-712 / SIWE) are the only signing material this workstream touches. The WS-R LCAP device keys (ES256/COSE, room-scoped, WebCrypto; `docs/OFFLINE_SPEC.md`) and the WS-S private-P2P room keys (MLS / HPKE / Ed25519; `docs/PRIVATE_SPEC.md`) are distinct planes: they share no keys with wallet identity, create no wallet↔ranking or wallet↔content linkage, never feed the pay-to-rank firewall or the financial denylist, and must never be treated as a financial signal. `private_p2p` rooms have no treasury, wallet, or financial surface at all. WS-R derives its certificates from WS-D account authority (read-only) plus new device keys; WS-S derives room authority from its own MLS `room_keys` — neither obtains keys from WS-L.
 - **Idempotent and replay-resistant.** Every write endpoint requires an idempotency key; every signed write binds a per-(user, deployment) anti-replay nonce, a chain ID, and an expiration into the typed data (Sections 23.5, 25.6).
-- **Reorg-aware and reconciliation-safe.** On-chain state is treated as provisional until the configured confirmation depth; product-side state derived from reorged events is reverted; three-source reconciliation (product DB / Knomosis receipts / chain) must converge to a zero or explained gap (Sections 17.6, 28.3, 23.5).
+- **Reorg-aware and reconciliation-safe.** On-chain state is treated as provisional until the configured confirmation depth; product-side state derived from reorged events is reverted; three-source reconciliation (product DB / Knomosis receipts / chain) must converge to a zero or explained gap (Sections 17.6, 28.3, 23.5). Under the `knomosis-gateway` contract (WS-L.3 intro), confirmation depth and reorg handling are **upstream** (Knomosis `l1-ingest` + kernel); Licio consumes a post-reorg event stream and enforces this invariant over the gateway's eventual-consistency primitives (`X-Knomosis-Seq` monotonicity, exact SSE resume), with the third reconciliation source mediated by the gateway indexer rather than by direct chain observation.
 
 ### Bounded-context and dependency map
 
@@ -990,6 +990,26 @@ Request biometric/WebAuthn re-authentication before high-value signing where ava
 
 ## WS-L.3 Knomosis gateway
 
+### Gateway transport contract (`knomosis-gateway` HTTP/JSON+SSE)
+
+The Licio↔Knomosis boundary is now defined by a concrete `knomosis-gateway` service (Knomosis project, `docs/planning/gateway_integration_plan.md` v0.4 draft; authoritative contract `docs/api/gateway.openapi.yaml`, OpenAPI 3.1): a thread-based (no-`tokio`) HTTP/JSON + Server-Sent-Events bridge from Knomosis's binary socket protocols to a BFF-consumable API. **Licio's BFF is the gateway's first consumer.** Two endpoint families coexist:
+
+- **Web-facing (Licio BFF → browser):** the `/v1/knomosis/*` routes in this sub-area (preflight, submit, status, …), consumed by the PWA over the same-origin BFF with session auth + CSRF.
+- **Service-facing (Licio BFF → gateway):** the gateway's `/v1/*` endpoints the BFF calls server-to-server.
+
+**Endpoints Licio consumes** (`/v1` prefix; additive-only within v1): `POST /v1/actions` (submit a signed action → verdict); `GET /v1/actors/{actorId}/balances[/{resource}]`, `/budget`, `GET /v1/pools/{poolId}` (eventual-consistent standing reads); `GET /v1/events` (cursor backfill) and `GET /v1/events/stream` (live SSE); `GET /v1/info` (deployment/kernel metadata + config echoes); `/healthz`, `/readyz`.
+
+**Semantics that shape this sub-area:**
+- **Synchronous verdict, not a chain receipt.** `POST /v1/actions` returns `{ accepted, verdict, reason?, admissionStage, seq }`. "Processing succeeded but the kernel declined" is **`200` with `accepted:false`** (e.g. `NotAdmissible`/`InsufficientBudget`) so client libraries do not error-retry; `ParseError`→`400`, `Busy`→`503`+`Retry-After`, an **unknown verdict byte → `502` (fail-closed)**, oversize→`413`, rate-limit→`429`, auth→`401/403`, upstream→`502/504`.
+- **No post-submit seq today; reconcile via events.** The verdict carries no sequence number (a host-side seq is a measured future, gateway OQ-GW-6). Clients confirm an action by watching `GET /v1/events/stream` for the matching event (by actor/nonce/seq-group) and/or polling the standing reads until the `X-Knomosis-Seq` response header advances.
+- **Eventual-consistent reads.** Balances/budget/pools are indexer snapshots tagged with `X-Knomosis-Seq` and a weak `ETag`; budget carries `isLowerBound:true` until the gateway's authoritative host read path (gateway phase G6). Absent cells read `"0"`; amounts/ids are decimal strings, opaque bytes are `0x`-hex.
+- **SSE resume is exact.** Stream event ids are composite `"<seq>.<index>"`; on reconnect the browser replays `Last-Event-ID` so a mid-seq-group disconnect neither loses nor duplicates. The stream emits heartbeats and the steer events `error{behind,oldestSeq}` / `error{lag_exceeded}` / `error{server_shutdown}`; the client backfills via `GET /v1/events?since=` then reconnects.
+- **Service auth, no gateway key custody.** BFF→gateway calls authenticate with a file-loaded bearer token (constant-time compare) or, hardened, mTLS (TLS 1.3); `/healthz`/`/readyz` are exempt. The gateway **never holds user keys or constructs signatures**: the user signs the opaque `SignedAction` client-side (SIWE/wallet path; a custodial signer, if ever used, stays at the BFF edge), and the BFF forwards the bytes — the gateway frames them without decoding. Idempotency is a client-supplied `Idempotency-Key` (the BFF derives it from the action nonce); the kernel's per-actor nonce gate is the independent anti-replay safeguard.
+- **The gateway is L1-agnostic.** Chain pinning, confirmation depth, reorg handling, and L1 ingestion live **upstream** in Knomosis (`l1-ingest` → `knomosis-host` → indexer); the gateway only reads the indexer and writes the host. Licio therefore consumes a **post-reorg** event stream and handles **eventual consistency** (X-Knomosis-Seq monotonicity, exact SSE resume), not raw chain reorg — see the alignment notes on WS-L.3.3a/3.3b/3.4a.
+- **Phased rollout, dark-launched.** The gateway plan sequences **G1 read-only standing → G2 signed-action submit → G3 live SSE stream** (then G4 hardening / G6 authoritative reads). The whole surface stays behind Licio's fail-closed `/v1/feature-flags` "crypto" flag (WS-C.1.3), so the gateway can be deployed and validated end-to-end while the flag is off. `GET /v1/info` config echoes (`freeTier`, `actionCost`, `epochLengthBlocks`, `gasPoolActor`, `indexerIdentifier`, protocol versions) are surfaced so deployment drift is observable; unknown event tags (≥23) render as `type:"unknown"` (forward-compatible).
+
+**Doctrine boundary — no pay-to-rank (ABSOLUTE).** The Knomosis gateway plan frames its first slice as "pay-to-rank … an additive, crypto-gated ranking signal." **Licio does not adopt that framing.** Knomosis standing read through the gateway is consumed **only inside the `knomosis` bounded context** (governance weight resolution, treasury views, action eligibility/topic-gating) and is **firewalled from ranking** by the WS-I.2.1b financial denylist and the wallet↔ranking BFS isolation (WS-D.3.2): no balance, budget, pool, deposit, or stake value may reach any ranking/search/notification/trend/recommendation feature (WS-M invariant 4; SPEC §17.1 boundary 1). This divergence from the gateway plan's product framing is to be reconciled with the Knomosis project; Licio's no-pay-to-rank invariant prevails. WS-L.3.6 implements the firewalled standing-read seam.
+
 ### WS-L.3.1a Preflight validation pipeline
 **ID:** WS-L.3.1a
 **Ref:** Sections 23.4, 23.5, 25.6
@@ -1112,6 +1132,8 @@ Define the preflight response format. On success: return a preflight token (shor
 
 Implement `POST /v1/knomosis/actions/submit`. Requires a valid, unexpired preflight token (from WS-L.3.1c). Requires an idempotency key (client-generated UUID) to prevent duplicate submissions. Validates the signed action payload against the preflighted action (the typed-data hash must equal the one preflighted). Creates a `KnomosisActionRecord` with `submission_state = submitted`. Submits to the Knomosis runtime. Returns the `action_record_id` and initial status. The Drizzle `KnomosisActionRecord` schema matches Section 22.2: `action_record_id` (UUID, PK), `deployment_id` (FK), `action_type` (enum), `room_id` (FK), `actor_ref` (wallet/user reference), `payload_hash` (bytes32), `typed_data_hash` (bytes32), `signed_action_ref` (reference to stored signed payload), `submission_state` (enum: submitted, accepted, settled, finalized, challenged, reverted, frozen, failed -- per Section 23.5), `indexed_event_ref` (nullable FK to OnChainEvent), `reconciliation_state` (enum).
 
+**Gateway-contract alignment (v0.4):** "Submits to the Knomosis runtime" is concretely `POST /v1/actions` on the `knomosis-gateway` — the BFF forwards the opaque, user-wallet-signed `SignedAction` bytes with an `Idempotency-Key` header over bearer-token/mTLS service auth, and receives a **synchronous verdict** (`Ok`→`accepted:true`; `NotAdmissible`+`reason`→`200 accepted:false`; unknown verdict→`502`). The verdict carries no chain receipt or seq; `submission_state` is advanced from the verdict and then from the gateway SSE event stream (WS-L.3.2b/3.3a), not from a direct chain observation. The preflight token / typed-data-hash binding stays a Licio BFF concern (the gateway never decodes the body).
+
 **Acceptance criteria:**
 - Submission requires a valid, unexpired, unused preflight token.
 - Submission requires an idempotency key.
@@ -1143,6 +1165,8 @@ Implement `POST /v1/knomosis/actions/submit`. Requires a valid, unexpired prefli
 **Ref:** Sections 23.4, 23.5
 
 Implement `GET /v1/knomosis/actions/:id`. Return the current state of a submitted action. State machine (Section 23.5): `submitted -> accepted -> settled -> finalized` (happy path), with `challenged`, `reverted`, `frozen`, and `failed` as additional states. The endpoint returns: `action_record_id`, `action_type`, `room_id`, `submission_state`, `indexed_event_ref` (if available), `reconciliation_state`, `created_at`, `updated_at`. State transitions are event-driven from the indexer (WS-L.3.3a) and reorg handler (WS-L.3.3b). Users can poll this endpoint or receive push notifications on state changes.
+
+**Gateway-contract alignment (v0.4):** the driving events are the gateway's `GET /v1/events/stream` (SSE; composite `Last-Event-ID` `"<seq>.<index>"`) matched to the action by actor/nonce/seq-group, plus eventual-consistent standing reads (`X-Knomosis-Seq`). Because the verdict returns no seq today, `settled`/`finalized` are inferred from the gateway's post-reorg event stream and the `admissionStage` it echoes, not from Licio-side chain finality.
 
 **Acceptance criteria:**
 - Endpoint returns all fields from `KnomosisActionRecord`.
@@ -1201,6 +1225,8 @@ Implement anti-replay nonce management for gateway submissions. Each action subm
 **ID:** WS-L.3.3a
 **Ref:** Sections 22.2, 25.6
 
+**Gateway-contract alignment (v0.4):** under the gateway contract Licio does **not** tail L1 over its own RPC; it consumes the gateway's already-decoded Knomosis log events via `GET /v1/events` (cursor backfill, `since=<seq>`) and `GET /v1/events/stream` (live SSE). Events are ordered by `seq` (with an intra-frame `index`), already typed/decoded by the Knomosis indexer, and **already post-reorg** (reorg is upstream — WS-L.3.3b). In the gateway path the `OnChainEvent` record is populated from the validated gateway event payload keyed by `seq` rather than `(block_number, log_index)`, and "backfill" is a `since=` cursor replay (a `409` with `oldestSeq` when the cursor is behind the retained window → backoff and restart from a later point). The "subscribe via read-only RPC + decode ABI" design below is retained only as the contingency for a no-gateway deployment.
+
 Implement the on-chain event indexer. Subscribe to events from the Knomosis deployment using a least-privilege, read-only RPC. For each event: decode the event type from the pinned ABI, parse the payload, and create an `OnChainEvent` record (WS-L.3.3c) with `reorg_state = pending` until it reaches confirmation depth, then `confirmed`. Event types include: deposits, withdrawals, proposal executions, grant payouts, governance state changes. The decoded payload is stored as structured JSON, not raw ABI-encoded bytes, and validated against the expected schema before persistence.
 
 **Acceptance criteria:**
@@ -1230,6 +1256,8 @@ Implement the on-chain event indexer. Subscribe to events from the Knomosis depl
 ### WS-L.3.3b Reorg detection
 **ID:** WS-L.3.3b
 **Ref:** Sections 22.2, 25.6
+
+**Gateway-contract alignment (v0.4):** raw L1 reorg detection and confirmation-depth are **upstream** in Knomosis (`l1-ingest` + kernel); the gateway is L1-agnostic and surfaces only **eventual consistency**. Licio's client therefore does not compare canonical block hashes — it relies on (a) `X-Knomosis-Seq` monotonicity on reads, (b) exact SSE resume (composite `Last-Event-ID`), and (c) the gateway steer events `error{behind,oldestSeq}` / `error{lag_exceeded}`, after which it backfills via `GET /v1/events?since=` and reconnects. A Knomosis-side revert reaches Licio **as an event in the post-reorg stream**; the `reverted` reconciliation below is driven by that event (and the indexer's authoritative state), not by Licio-side chain observation. The block-hash / confirmation-depth machinery below applies only to a no-gateway deployment.
 
 Implement reorg detection in the event indexer as an explicit state machine over event `reorg_state` (`pending -> confirmed`, or `pending/confirmed -> reorged`). Track block hashes for each indexed event. When a reorg is detected (a previously indexed block is replaced by a different block at the same height), mark all events from the reorged block and its descendants as `reorg_state = reorged` and stamp `reorg_detected_at`. Trigger state reconciliation: revert any product-side state changes that were based on reorged events (e.g., treasury balance updates, proposal execution status) and move affected `KnomosisActionRecord`s to `reverted`. Alert operators on reorg detection. Confirmation depth is configurable per chain, set from the validated finality data (WS-L.1.1b-1).
 
@@ -1289,6 +1317,8 @@ Define the `OnChainEvent` Drizzle schema exactly matching Section 22.2 with a ma
 ### WS-L.3.4a Three-source reconciliation
 **ID:** WS-L.3.4a
 **Ref:** Sections 17.6, 28.3
+
+**Gateway-contract alignment (v0.4):** under the gateway contract the third source — "L1/L2 on-chain observations" — is **mediated by Knomosis**: Licio reconciles its product DB against the gateway's authoritative indexer views (`/v1/actors/{id}/balances`, `/budget`, `/pools/{id}`, each tagged with `X-Knomosis-Seq`) and event stream, which already reflect post-reorg L1 truth; Licio does not independently observe the chain. "Only `confirmed` events are authoritative" becomes "reconcile only up to the latest reads' `X-Knomosis-Seq`, treating not-yet-reflected submissions as in-flight, not as a mismatch." The zero-or-explained treasury-reconciliation-gap invariant (Section 28.3) is unchanged.
 
 Implement the reconciliation engine that compares three sources: (1) the product database state (treasury balances, proposal states, grant payouts), (2) Knomosis receipts (`KnomosisActionRecord`s and their confirmed states), and (3) L1/L2 on-chain observations (`OnChainEvent` records). The reconciliation runs after every sequenced action and on a periodic schedule. For each reconciled entity, the engine produces a match/mismatch result with details and updates `reconciliation_state`.
 
@@ -1537,6 +1567,34 @@ Implement the shared kill-switch substrate that the five switches (WS-L.3.5a-e) 
 **Security considerations:**
 - A consistent, audited, fail-closed substrate is what makes the five switches trustworthy under incident pressure; divergent per-switch logic is itself a risk.
 - Requiring a reviewed action to deactivate prevents an attacker who compromises one operator from re-enabling a frozen surface.
+
+---
+
+### WS-L.3.6a Knomosis standing reads — client (balances, budget, pools; ranking-firewalled)
+**ID:** WS-L.3.6a
+**Ref:** Sections 17.2, 21.5, 22.2; Knomosis gateway plan §1.4 (G1), §4
+
+Implement the BFF-side read client for the gateway's eventual-consistent standing endpoints — `GET /v1/actors/{actorId}/balances[/{resource}]`, `GET /v1/actors/{actorId}/budget`, `GET /v1/pools/{poolId}` — resolving the Licio account's SIWE address to a Knomosis `actorId` (a BFF address→id map). This is the gateway plan's **G1 first slice**: read-only, no key custody, no write risk. Responses are `zod`-validated (decimal-string amounts/ids, `0x`-hex bytes, absent cell → `"0"`), capture the `X-Knomosis-Seq` cursor and a weak `ETag` for conditional `304` reads, and surface `budget.isLowerBound` honestly until the gateway's authoritative read path (G6). All reads honour the `/v1/feature-flags` crypto flag (off → endpoints withhold) and the wallet-connection kill switch. **The data lands only in the `knomosis` bounded context** and is consumed for governance weight resolution (WS-M.4.2c), treasury/budget views (WS-M.2), and action eligibility / topic-gating — **never** as a ranking, search, notification, trend, or recommendation input.
+
+**Acceptance criteria:**
+- The client reads balances/budget/pools, validating shapes through `zod` before use; absent cells read `"0"`; amounts/ids are decimal strings.
+- `X-Knomosis-Seq` is captured per read (for reconciliation, WS-L.3.4a); `ETag`/`If-None-Match` conditional reads are honoured.
+- `budget.isLowerBound` is surfaced honestly; the UI never presents a lower-bound budget as exact.
+- Reads are withheld when the crypto feature flag is off and under the wallet-connection kill switch (WS-L.3.5a); a gateway failure degrades to "standing unavailable," never fails open.
+- **Ranking firewall:** standing values live only in the `knomosis` bounded context; the WS-D.3.2 isolation test (extended) proves there is no FK/view/join path from balances/budget/pools to any ranking/attention table, and the WS-I.2.1b financial denylist rejects any attempt to register them as a ranking feature. A deliberately-added standing→ranking path fails CI.
+- No pay-to-rank is introduced: there is no code path by which a balance/budget/pool value influences feed ranking, search, notifications, trends, or recommendation eligibility (WS-M invariant 4; SPEC §17.1 boundary 1).
+
+**Testing:**
+- Unit: `zod` validation of each response shape; `"0"` absent-cell handling; `X-Knomosis-Seq`/`ETag` capture; lower-bound budget surfaced as such.
+- Unit: reads withheld under flag-off and the wallet kill switch; gateway failure degrades closed.
+- Security/isolation: WS-D.3.2 isolation test extended to the standing tables; a standing→ranking join fails; `check:neutrality` and the financial denylist stay green with standing data present.
+- Integration: address→`actorId` resolution; conditional `304` read; eventual consistency (a stale read carries an older `X-Knomosis-Seq`).
+
+**Dependencies:** WS-L.2.3 (SIWE address), WS-L.3 gateway transport contract, WS-D.3.2 (isolation test), WS-I.2.1b (financial denylist), WS-M.2 / WS-M.4.2c (governance/treasury consumers), WS-L.3.5a (wallet kill switch).
+
+**Security considerations:**
+- This is the doctrine-sensitive seam: the Knomosis gateway plan frames standing reads as "pay-to-rank," but Licio consumes them strictly for governance/treasury and firewalls them from ranking. The isolation test + denylist are the structural enforcement; the no-pay-to-rank neutrality suite (WS-I.3) must stay green with standing data live.
+- Read-only and key-custody-free (G1): no signing, no write path, so the only risk surface is over-exposure of standing data and the ranking firewall — both covered above.
 
 ---
 
