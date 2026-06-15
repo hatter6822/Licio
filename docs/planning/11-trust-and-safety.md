@@ -1,6 +1,6 @@
 # WS-J. Trust, Safety, and Abuse Operations
 
-**Milestone:** M1 | **Priority:** 0-1 | **Dependencies:** WS-D.1 | **Wave:** 3-4 | **Estimated duration:** 3-4 weeks
+**Milestone:** M1 | **Priority:** 0-1 | **Dependencies:** WS-D.1 | **Wave:** 3-4 | **Estimated duration:** 3-4 weeks | **Task count:** 29 atomic cards
 
 ## Overview
 
@@ -19,6 +19,7 @@ This workstream depends on WS-D.1 (accounts, sessions, role grants, MFA for stew
 - **Auditability.** Every steward action and every automated block emits a structured audit record (WS-J.2.5 fields). Bulk actions emit one record per affected item.
 - **Accessibility.** All console and user-facing safety surfaces meet WCAG 2.2 AA: keyboard-operable, screen-reader-labeled, non-color-only status, ≥48×48px touch targets.
 - **Observability.** Each task defines the metrics, alerts, and dashboards it emits; safety SLAs, queue depth, false-positive rates, and appeal-overturn rate are continuously monitored and feed WS-A.1.3a.
+- **Room-class scope (server-hosted vs Private P2P).** WS-J's moderation authority — the report queue, the console, the action palette, and the automated pre-checks — covers **server-hosted content only**: the `public_server` ("Public room") and `restricted_server` ("Members-only server room") classes (WS-Q; the latter renamed from WS-Q's "private room" by WS-S §20.1). For `private_p2p` ("Private P2P room", WS-S) the platform never possesses content, keys, op heads, or membership and therefore **cannot read, alter, recover, moderate, add members to, or delete** in-room content (PRIVATE_SPEC §11.4 — no platform-role or emergency-key authority); the platform's only levers are **delisting a listed directory stub** and **suspending a Licio account's access to Licio-hosted services**, and in-room moderation is performed locally by the room's key holders (MLS epoch operations). This is an honest, by-design boundary — **not** a reduction of WS-J's authority over server-hosted content, where the M6 moderation-override gate ("the platform can moderate harmful content regardless of local governance votes") holds in full. Content reconciled from the WS-R / LCAP offline transport lands in the **same** canonical server state and traverses the identical validation pipeline, so it is fully moderable server-side once reconciled — offline ingress never bypasses reports or moderation.
 
 ### API conventions
 
@@ -520,7 +521,7 @@ All appeal decisions are recorded in the audit log with the reviewer identity, o
 
 ## WS-J.2 Moderation console
 
-The moderation console is the steward and safety-moderator workspace. Every view and action is authorized by steward role (WS-A.2.2) and audited (WS-J.2.5). The console comprises: the report queue (WS-J.2.1), the content review interface (WS-J.2.2), the action palette (WS-J.2.3), the appeal review interface (WS-J.2.4), the audit log viewer (WS-J.2.5), and the automated pre-checks that feed the queue (WS-J.2.6).
+The moderation console is the steward and safety-moderator workspace. Every view and action is authorized by steward role (WS-A.2.2) and audited (WS-J.2.5). The console comprises: the report queue (WS-J.2.1), the content review interface (WS-J.2.2), the action palette (WS-J.2.3), the appeal review interface (WS-J.2.4), the audit log viewer (WS-J.2.5), and the automated pre-checks that feed the queue (WS-J.2.6). The console and its pre-checks operate over **server-hosted** content (Public and Members-only server rooms); `private_p2p` content (WS-S) is never enqueued because the server holds nothing to enqueue, and the automated pre-checks (WS-J.2.6) cannot run on it (the server never sees its plaintext) — the only private-room items reachable from the console are **directory-stub reports**, whose only outcomes are stub delisting or account action.
 
 ### WS-J.2.1a Queue layout
 **ID:** WS-J.2.1a
@@ -1260,7 +1261,7 @@ This detection drives the coordination-incident workflow (SPEC 29.3): detect →
 | WS-J.2.6d | Policy-risk flagging | WS-K, WS-A.1.2a, WS-J.1.1b, WS-J.2.5a | Flag, never auto-remove |
 | WS-J.2.6e | Coordinated-report detection | WS-J.1.1d, WS-H.3, WS-A.1.1c, WS-J.2.2c, WS-J.2.5a | MFCI-2; SPEC 29.3 workflow |
 
-Sequencing notes: WS-J.1.1a-e and WS-J.1.2a-b are the Wave-3 user-safety set and depend only on WS-D.1 (plus WS-A doctrine), so they ship before WS-G. WS-J.1.3a-d (appeals) follow the report set. The WS-J.2 console (queues, review, palette, appeal interface, audit) is the Wave-4 set; the audit writer (WS-J.2.5a) precedes its viewer (WS-J.2.5b) and is a dependency of every action producer. The automated pre-checks (WS-J.2.6a-e) attach to content submission (WS-G.3) and the invariant services (WS-H), degrading gracefully to cheap statistics before MFCI/MERI are live.
+Sequencing notes: WS-J.1.1a-e and WS-J.1.2a-b are the Wave-3 user-safety set and depend only on WS-D.1 (plus WS-A doctrine), so they ship before WS-G. WS-J.1.3a-d (appeals) follow the report set. The WS-J.2 console (queues, review, palette, appeal interface, audit) is the Wave-4 set; the audit writer (WS-J.2.5a) precedes its viewer (WS-J.2.5b) and is a dependency of every action producer. The automated pre-checks (WS-J.2.6a-e) attach to content submission (WS-G.3) and the invariant services (WS-H), degrading gracefully to cheap statistics before MFCI/MERI are live. Directionally, WS-J ships in M1 and is a **prerequisite** for the later extension workstreams' moderation interactions, not a dependent of them: WS-J's report queue and console ship first, in M1 (Waves 3-4); **WS-Q** (Wave 9) later remodels content into rooms, extending what that already-shipped queue/console must cover (room-scoped, visibility-aware content) without delaying it; **WS-R** (Wave 10) routes offline-reconciled content through WS-J's existing server-side pipeline (no new WS-J work — only the post-reconciliation moderability invariant); and **WS-S** (Wave 11) establishes that `private_p2p` content is **outside** WS-J's queue/console/pre-check scope (platform levers limited to stub delisting + account suspension). These are scope statements, not new `Depends on` edges — no WS-Q/R/S row is added to the dependency table above.
 
 ---
 
@@ -1281,3 +1282,5 @@ WS-J is complete when ALL of the following conditions hold:
 6. **Coordinated-report detection.** MFCI-backed coordinated-report detection (WS-J.2.6e) is active, identifying temporal clustering and account-correlation patterns conditioned on base rates (MFCI-1) so authentic communities are not mislabeled, delaying volume-driven enforcement pending integrity review (MFCI-2), protecting targets and reporter identities, and following the coordination-incident workflow (SPEC 29.3) with transparency logging.
 
 7. **Auditability and observability.** Every steward action, automated block, assignment, appeal decision, and revert writes a complete, append-only audit record (WS-J.2.5a); safety SLAs, queue depths, false-positive rates, and appeal-overturn rate are continuously monitored and feed the transparency dictionary (WS-A.1.3a / WS-P.2). No financial data appears on any moderation surface, and no reporter identity, private moderation data, or minors' data is ever placed on-chain.
+
+8. **Room-class scope (honest boundary).** WS-J's queue, console, action palette, and automated pre-checks govern **server-hosted** content only (`public_server` / `restricted_server`). `private_p2p` ("Private P2P room", WS-S) content is structurally out of reach — the platform never holds it (PRIVATE_SPEC §8/§11.4) — so it is never enqueued, scanned, or actioned in-room; the platform's only private-room levers are directory-stub delisting and account suspension, and in-room moderation is room-local. WS-R / LCAP-reconciled content is moderated through the same server-side pipeline once it reconciles to canonical state. This boundary is documented as by-design, not a coverage gap.

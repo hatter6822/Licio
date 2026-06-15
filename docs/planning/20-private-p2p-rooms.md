@@ -932,7 +932,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 ### WS-S.10.1 Reproducible private-mode bundle + signed manifest
 **ID:** WS-S.10.1 | **Ref:** PRIVATE_SPEC §1, §3.2; WS-O reproducible-build reuse
 
-**Description:** Make the lazily code-split private-p2p chunk (WS-S.2.1) a **reproducible build** with a deterministic output hash, and produce a signed release manifest (maintainer signatures over the chunk hash) reusing the WS-O reproducible-build + provenance machinery. This is the well-bounded artifact the transparency log and SW pinning attest. Tier 1 protects against passive server-storage compromise + ordinary administration; this card is the foundation for the Tier 2/3 update-channel protections.
+**Description:** Make the lazily code-split private-p2p chunk (WS-S.2.1) a **reproducible build** with a deterministic output hash, and produce a signed release manifest (maintainer signatures over the chunk hash) reusing the WS-O reproducible-build + provenance machinery (WS-O.3.1a deterministic build; WS-O.3.2b per-chunk in-toto attestation + append-only transparency log). This is the well-bounded artifact the transparency log and SW pinning attest. Tier 1 protects against passive server-storage compromise + ordinary administration; this card is the foundation for the Tier 2/3 update-channel protections.
 
 **Acceptance criteria:**
 - The private-mode chunk builds reproducibly to a stable hash across environments; the manifest is signed by the required maintainers.
@@ -948,7 +948,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 ### WS-S.10.2 Transparency log + SW update pinning + room lock
 **ID:** WS-S.10.2 | **Ref:** PRIVATE_SPEC §20.6, §22.4, §27.5
 
-**Description:** Implement the code-transparency log of signed private-mode bundle hashes and the service-worker update pinning that verifies the running private chunk against the pinned, signed, logged hash before unlocking room keys. If the bundle is unsigned / not in the log / hash-mismatched, private rooms LOCK before any key unlock with the §20.6 message; CSP/Trusted Types/no-dynamic-remote-code stay enforced. Add `check:private-bundle-transparency` to CI. On a verified-safe client after an incident, rotate room keys (§27.5).
+**Description:** Implement the code-transparency log of signed private-mode bundle hashes and the service-worker update pinning that verifies the running private chunk against the pinned, signed, logged hash — via the WS-O.3.2e runtime verification primitive (fail-closed lookup + signature verification against the WS-O.3.2b transparency log) — before unlocking room keys. If the bundle is unsigned / not in the log / hash-mismatched, private rooms LOCK before any key unlock with the §20.6 message; CSP/Trusted Types/no-dynamic-remote-code stay enforced. Add `check:private-bundle-transparency` to CI. On a verified-safe client after an incident, rotate room keys (§27.5).
 
 **Acceptance criteria:**
 - Room keys never unlock until the running private chunk matches a signed, transparency-logged hash.
@@ -957,7 +957,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit — verify-before-unlock; lock-on-mismatch. E2E — unsigned/mismatched bundle locks the room; CSP blocks inline/eval (WS-S.11.4).
 
-**Dependencies:** WS-S.10.1.
+**Dependencies:** WS-S.10.1, WS-O.3.2e (runtime verification primitive), WS-O.3.2b (per-chunk attestation + transparency log).
 
 ---
 

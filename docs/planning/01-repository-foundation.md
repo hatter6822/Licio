@@ -221,7 +221,7 @@ Initialize the pnpm monorepo workspace with the directory structure specified in
 ```
 licio/
 ├── apps/
-│   ├── web/                 # React 19 PWA (Vite 6)
+│   ├── web/                 # React 19 PWA (Vite 8)
 │   │   ├── src/
 │   │   ├── public/
 │   │   ├── package.json
@@ -444,13 +444,13 @@ The spec mandates a hard dependency budget -- the client bundle targets fewer th
 
 ## WS-0.3 Build tooling and framework initialization
 
-### WS-0.3.1a Vite 6 base configuration
+### WS-0.3.1a Vite 8 base configuration
 
 **ID:** WS-0.3.1a
 **Ref:** Section 6.12.2
 
 **Description:**
-Install Vite 6 in `apps/web/` and create the base `vite.config.ts`. Vite is chosen over Next.js, Webpack, and other bundlers for specific security reasons: it produces no inline scripts (enabling strict CSP without `'unsafe-inline'`), has a small auditable dependency tree (an order of magnitude smaller than Next.js), and produces deterministic content-hashed output suitable for reproducible builds and SRI.
+Install Vite 8 in `apps/web/` and create the base `vite.config.ts`. Vite is chosen over Next.js, Webpack, and other bundlers for specific security reasons: it produces no inline scripts (enabling strict CSP without `'unsafe-inline'`), has a small auditable dependency tree (an order of magnitude smaller than Next.js), and produces deterministic content-hashed output suitable for reproducible builds and SRI.
 
 **Configuration requirements (`apps/web/vite.config.ts`):**
 ```ts
@@ -470,9 +470,9 @@ export default defineConfig({
         entryFileNames: 'assets/[name]-[hash].js',
         chunkFileNames: 'assets/[name]-[hash].js',
         assetFileNames: 'assets/[name]-[hash][extname]',
-        manualChunks: {
-          react: ['react', 'react-dom'],
-        },
+        // Vite 8 / Rolldown: manualChunks must be a function (object form removed)
+        manualChunks: (id) =>
+          /[\\/]node_modules[\\/](react|react-dom)[\\/]/.test(id) ? 'react' : undefined,
       },
     },
   },
@@ -515,13 +515,13 @@ export default defineConfig({
 
 ---
 
-### WS-0.3.1b Vite 6 production build validation
+### WS-0.3.1b Vite 8 production build validation
 
 **ID:** WS-0.3.1b
 **Ref:** Sections 6.12.2, 20.2, 25.2
 
 **Description:**
-Validate that the Vite 6 production build meets the security requirements for strict CSP and supply-chain integrity. This is a critical security gate: a single inline script in the build output would require `'unsafe-inline'` in the CSP, which would undermine the entire XSS defense strategy for a platform that connects wallets.
+Validate that the Vite 8 production build meets the security requirements for strict CSP and supply-chain integrity. This is a critical security gate: a single inline script in the build output would require `'unsafe-inline'` in the CSP, which would undermine the entire XSS defense strategy for a platform that connects wallets.
 
 **Validation requirements:**
 - Zero inline `<script>` blocks in the built `index.html` -- verify with a build script that parses the HTML and fails if any `<script>` tag lacks a `src` attribute.
@@ -2140,7 +2140,7 @@ The table lists every atomic task, its group, and its direct task-level dependen
 | WS-0.2.2 | TypeScript strict mode | WS-0.2.1 |
 | WS-0.2.3 | Workspace dependency boundaries | WS-0.2.1, WS-0.2.2 |
 | WS-0.2.4 | Dependency-budget enforcement | WS-0.2.1, WS-0.3.2, WS-0.3.3 |
-| WS-0.3.1a | Vite 6 base config | WS-0.2.1, WS-0.2.2 |
+| WS-0.3.1a | Vite 8 base config | WS-0.2.1, WS-0.2.2 |
 | WS-0.3.1b | Vite production build validation | WS-0.3.1a, WS-0.3.2 |
 | WS-0.3.1c | SRI manifest & bundle-size scripts | WS-0.3.1a, WS-0.3.1b |
 | WS-0.3.2 | Initialize React 19 | WS-0.3.1a |
@@ -2192,7 +2192,7 @@ WS-0 is complete when ALL of the following conditions hold. Each clause maps to 
 
 2. **Monorepo structure:** pnpm workspace is initialized with all five workspaces (`apps/web`, `apps/api`, `packages/shared`, `packages/db`, `packages/invariants`); `pnpm install --frozen-lockfile` succeeds (WS-0.2.1). Phantom dependencies are prevented and Corepack enforces the pnpm version. TypeScript strict mode (`strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, plus the hardening flags) passes across all workspaces (WS-0.2.2). Dependency boundaries are enforced, including the hard rule that `apps/web` cannot import `@licio/db` (WS-0.2.3). The dependency-budget check passes and is wired into CI, with `apps/web` < 15 and `apps/api` < 20 production deps (WS-0.2.4).
 
-3. **Build tooling:** Vite 6 produces builds with content-hashed, deterministic filenames and no production source maps (WS-0.3.1a); the build validation gate enforces zero inline scripts, styles, and event-handler attributes (WS-0.3.1b); an SRI manifest and a within-budget bundle-size report are generated every build (WS-0.3.1c). React 19 renders in dev and production with a clean inline-script-free `index.html` (WS-0.3.2). Hono BFF responds on `/health` via the factory pattern (WS-0.3.3). Tailwind CSS 4 compiles to static CSS using `@import "tailwindcss"` CSS-first config with no `tailwind.config.js`, design tokens, and dark/reduced-motion/high-contrast support (WS-0.3.4a/b). The shared (zod), db (Drizzle, SQL-first), and invariants packages build and export types correctly, with `InvariantOutput` carrying confidence/coverage/reason-codes/fallback (WS-0.3.5/6/7). Structured pino logging is operational with explicit redaction of auth headers, cookies, secrets, and wallet seed phrases/keys (WS-0.3.8). TanStack Router/Query and Zustand are wired within the dependency budget, with the zod-validated-response convention documented (WS-0.3.9). vite-plugin-pwa (Workbox 7) emits a scope-locked service worker and a same-origin standalone manifest with prompt-based updates and no inline registration script (WS-0.3.10). Root-level dependency-ordered orchestration scripts work (WS-0.3.11).
+3. **Build tooling:** Vite 8 produces builds with content-hashed, deterministic filenames and no production source maps (WS-0.3.1a); the build validation gate enforces zero inline scripts, styles, and event-handler attributes (WS-0.3.1b); an SRI manifest and a within-budget bundle-size report are generated every build (WS-0.3.1c). React 19 renders in dev and production with a clean inline-script-free `index.html` (WS-0.3.2). Hono BFF responds on `/health` via the factory pattern (WS-0.3.3). Tailwind CSS 4 compiles to static CSS using `@import "tailwindcss"` CSS-first config with no `tailwind.config.js`, design tokens, and dark/reduced-motion/high-contrast support (WS-0.3.4a/b). The shared (zod), db (Drizzle, SQL-first), and invariants packages build and export types correctly, with `InvariantOutput` carrying confidence/coverage/reason-codes/fallback (WS-0.3.5/6/7). Structured pino logging is operational with explicit redaction of auth headers, cookies, secrets, and wallet seed phrases/keys (WS-0.3.8). TanStack Router/Query and Zustand are wired within the dependency budget, with the zod-validated-response convention documented (WS-0.3.9). vite-plugin-pwa (Workbox 7) emits a scope-locked service worker and a same-origin standalone manifest with prompt-based updates and no inline registration script (WS-0.3.10). Root-level dependency-ordered orchestration scripts work (WS-0.3.11).
 
 4. **Code quality:** Biome formatter is configured (WS-0.4.1a). Biome security lint rules block `eval`, `new Function`, `dangerouslySetInnerHTML`, `innerHTML`/`outerHTML` assignment, `document.write`, `javascript:` URLs, and explicit `any` (outside designated type-utility files) at `error` severity (WS-0.4.1b). Import organization, strict equality, `node:` import protocol, and no-`console.log`-in-BFF rules are enforced (WS-0.4.1c). Vitest runs across all workspaces with an 80% coverage threshold (WS-0.4.2). Playwright runs E2E across Chromium/Firefox/WebKit with axe-core WCAG 2.2 AA checks and a real-browser CSP-enforcement assertion (WS-0.4.3). lockfile-lint validates registry and integrity (WS-0.4.4). Pre-commit/pre-push hooks provide fast local lint/secret/typecheck gating (WS-0.4.5).
 

@@ -17,6 +17,7 @@ Security is a release gate at every milestone. This is a continuous workstream, 
 - No secret, signing key, or seed phrase is ever embedded in or handled by the client bundle (Section 25.2 #7).
 - The integrity model assumes the browser is hostile-adjacent and every wallet signature is a high-risk action (Section 25.1).
 - Emergency feature flags (WS-O.2.2) are the universal "stop" control and underpin rollback (WS-O.2.1c) and treasury incident response (WS-O.2.1d).
+- WS-O is the **upstream provider** for two post-M3 extension workstreams. WS-O.3 (reproducible builds + provenance/transparency log) underpins **WS-S.10** (the private-mode update channel — per-chunk hash-pinning, service-worker update pinning, room-lock-on-unverified-bundle; `docs/planning/20-private-p2p-rooms.md`) and **WS-R** bundle integrity; if the WS-O.3.2b transparency-log slice is not ready, WS-S ships at **Tier 1** with a documented "no defense against a malicious web update" limitation and backfills Tier 2/3 (00-index execution-order constraint; the slice is pulled forward into Wave 10a). The security tests, CSP/Trusted Types coverage, SW scan (`check:sw`), and supply-chain scans here **extend to the new code trees** — `packages/lcap`, `packages/private-p2p`, and `apps/web/src/{lcap,private-p2p}` — and the integrity-defense + adversarial surface (WS-O.4) absorbs the WS-R LCAP fuzz/dependency-bomb suite and the WS-S P2P/blind-rendezvous gates.
 
 ---
 
@@ -687,7 +688,7 @@ Integrate Sigstore/cosign signing into the CI/CD pipeline to sign build artifact
 **Ref:** Section 20.2
 
 **Description:**
-Generate in-toto attestations for each build step in the CI/CD pipeline. Attestations record: (1) the source commit hash; (2) the build command and arguments; (3) the environment (Node.js version, pnpm version, OS); (4) input materials (source files, dependency lockfile hash); (5) output products (dist/ files with hashes); (6) build timestamps. Attestations are signed using the same OIDC identity as cosign signatures. Attestations are published to an append-only transparency log so that any modification to the build pipeline or its outputs is publicly visible. The attestation chain allows verification that a served bundle was produced from a specific source commit via a specific build process.
+Generate in-toto attestations for each build step in the CI/CD pipeline. Attestations record: (1) the source commit hash; (2) the build command and arguments; (3) the environment (Node.js version, pnpm version, OS); (4) input materials (source files, dependency lockfile hash); (5) output products (dist/ files with hashes); (6) build timestamps. Attestations are signed using the same OIDC identity as cosign signatures. Attestations are published to an append-only transparency log so that any modification to the build pipeline or its outputs is publicly visible. The attestation chain allows verification that a served bundle was produced from a specific source commit via a specific build process. The transparency log records **per-content-hashed-artifact entries (individual code-split chunks, not only the whole `dist/` tarball)** so a single lazily-loaded chunk — e.g. the WS-S `private-p2p` chunk or the WS-R `lcap` chunk — can be independently hash-pinned and verified at runtime (WS-O.3.2e).
 
 **Acceptance criteria:**
 - In-toto attestations are generated for every production build.
@@ -695,12 +696,13 @@ Generate in-toto attestations for each build step in the CI/CD pipeline. Attesta
 - Attestations are signed and published to an append-only log.
 - The attestation chain links source commit to final output.
 - Attestation verification is documented and executable.
+- Individual content-hashed chunks are independently attestable/verifiable against the log (supports WS-S.10.1/10.2 private-bundle hash-pinning and WS-R bundle integrity).
 
 **Testing:**
 - CI: Verify attestations are generated and signed after production builds. Verify attestation includes correct source commit and output hashes.
 - Manual: Verify the attestation chain from a served bundle back to the source commit.
 
-**Dependencies:** WS-O.3.2a (cosign signing), WS-O.3.2c (SBOM as input material).
+**Dependencies:** WS-O.3.2a (cosign signing), WS-O.3.2c (SBOM as input material). **Downstream consumers:** WS-O.3.2e (runtime pinning hook), WS-S.10.1/10.2 (private-mode reproducible chunk + transparency log + SW update pinning), WS-R bundle integrity.
 
 ---
 
@@ -748,9 +750,30 @@ Implement an automated license compatibility check that verifies all dependencie
 
 ---
 
+### WS-O.3.2e Build-attestation verification API and runtime pinning hook
+**ID:** WS-O.3.2e
+**Ref:** Section 20.2; PRIVATE_SPEC §1, §3.2 (WS-S.10 reuse)
+
+**Description:**
+Provide a runtime-callable verification primitive that resolves a content-hashed artifact (a built chunk) against the signed, append-only transparency log (WS-O.3.2b): given a chunk's hash, it performs a log lookup + signature verification and returns a verified/unverified verdict with a **fail-closed** contract ("unverified ⇒ do not trust / do not unlock"). The **trusted, already-verified** service worker / app bootstrap calls it to fetch-and-hash a private-mode / LCAP chunk's bytes (or check its signed manifest) and verify them against the log **before importing or executing the chunk** — a chunk cannot verify itself (its module evaluation would run before any caller could trust it), so verification is the importer's responsibility and a tampered chunk is rejected at the import boundary, before any room-key-unlock code can run. This is the precise build↔runtime bridge WS-S.10.2 depends on for SW update pinning and "lock private rooms before any room-key unlock," and is available to WS-R for bundle integrity. The primitive ships under the same reproducible-build posture (no remote `importScripts`, no `eval`; `check:sw` stays green) and adds no new client dependency.
+
+**Acceptance criteria:**
+- The **trusted service worker / bootstrap** verifies a chunk's bytes (or its signed manifest) against the signed transparency-log entry **before importing/executing it** — never relying on the chunk to verify itself — and **fails closed** (refuses the import) on a mismatch or an unreadable log.
+- The verdict is consumed by WS-S.10.2 (SW update pinning + room-lock-before-key-unlock) and is available to WS-R bundle integrity; an unverified private-mode chunk locks private rooms and never unlocks room keys.
+- The primitive introduces no remote code loading and no new runtime dependency; `check:sw` remains green.
+
+**Testing:**
+- Unit: verdict logic (match → verified; mismatch / missing / unreadable-log → fail-closed).
+- Integration: tamper a chunk hash and verify the SW/loader refuses to trust it; verify a genuine chunk verifies against a Rekor / in-toto fixture.
+- Security: confirm an unverified private-mode bundle cannot unlock room keys (the WS-S.10 Tier-2 guarantee).
+
+**Dependencies:** WS-O.3.2b (per-chunk attestation + transparency log), WS-O.3.1b (content-hashed filenames), WS-C.2 (service worker).
+
+---
+
 ## WS-O.4 Integrity and abuse defense (no device attestation)
 
-Because a PWA cannot use native device attestation, abuse defense is server-side and behavioral (Section 25.5). These tasks build the non-attestation defenses and the test harnesses that prove them.
+Because a PWA cannot use native device attestation, abuse defense is server-side and behavioral (Section 25.5). These tasks build the non-attestation defenses and the test harnesses that prove them. The extension workstreams enlarge this surface: **WS-R** adds a delay-tolerant, content-addressed ingress whose adversary model (pack/dependency bombs, signature malleability, downgrade, replay, no-transport-trust) is defended in WS-R.18.4 plus the `check:lcap-scheduler` / `check:lcap-schema-egress` gates; **WS-S** adds an E2EE P2P plane with blind rendezvous, malicious-peer ops, and seven CI gates (`check:no-p2p-server-content`, `check:no-private-cid-egress`, `check:private-rendezvous-schema`, `check:private-bundle-transparency`, `check:p2p-endpoint-rejections`, `check:p2p-ranking-exclusion`, `check:p2p-search-exclusion`). WS-O treats these as part of the integrity-defense and adversarial-testing surface (WS-O.4.5).
 
 ### WS-O.4.1 Bot/sock-account resistance
 **ID:** WS-O.4.1
@@ -988,7 +1011,7 @@ Define SLOs and stand up monitoring/alerting so availability and latency regress
 **Ref:** Section 25.4
 
 **Description:**
-Implement backups and prove recoverability. Components: (1) automated, encrypted backups of PostgreSQL (and any durable state) with a documented RPO; (2) point-in-time recovery configured where supported; (3) periodic restore drills into an isolated environment that verify backups are usable and measure RTO; (4) documented runbooks for partial (single-table) and full restore; (5) backup integrity checks (restore + checksum) so a silently-corrupt backup is detected. Database migration rollback (WS-O.2.1c) depends on tested down migrations plus these backups as a safety net.
+Implement backups and prove recoverability. Components: (1) automated, encrypted backups of PostgreSQL (and any durable state) with a documented RPO; (2) point-in-time recovery configured where supported; (3) periodic restore drills into an isolated environment that verify backups are usable and measure RTO; (4) documented runbooks for partial (single-table) and full restore; (5) backup integrity checks (restore + checksum) so a silently-corrupt backup is detected. Database migration rollback (WS-O.2.1c) depends on tested down migrations plus these backups as a safety net. **DR-scope boundary.** Private P2P room content (WS-S) is member-hosted and end-to-end encrypted — it is **not** stored on the server (server non-storage contract, WS-S.1; `check:no-p2p-server-content`), so server backups/restore neither cover nor can recover it; private-room durability and recovery are the members' recovery-kit / MLS-epoch-rotation path (WS-S), not WS-O.6.2. WS-R / LCAP durable server state lives in the new `lcap_*` Postgres tables and **is** in backup scope; the client-side `lcap_v2` IndexedDB hard-pins are the user's local durability, outside server DR.
 
 **Acceptance criteria:**
 - Encrypted backups run automatically on a schedule meeting the documented RPO.
@@ -1080,6 +1103,7 @@ Operationalize external security assurance. Components: (1) scope and schedule e
 | WS-O.3.2b | In-toto attestations | WS-O.3.2a, WS-O.3.2c |
 | WS-O.3.2c | SBOM generation | WS-0.2.1, WS-0.4.4 |
 | WS-O.3.2d | License cross-check | WS-O.3.2c, WS-0.1.2 |
+| WS-O.3.2e | Build-attestation verification API + runtime pinning hook | WS-O.3.2b, WS-O.3.1b, WS-C.2 |
 | WS-O.4.1 | Bot/sock-account resistance | WS-D.1.1/1.2, WS-E.1.3c, WS-H.3 |
 | WS-O.4.2 | Forged-attention-event defense | WS-E.1.3, WS-I.2.1b, WS-H.3, WS-C.4 |
 | WS-O.4.3 | Coordinated-abuse/brigading hooks | WS-H.3, WS-H.7.2, WS-I.2.7, WS-J.1/2 |
@@ -1118,7 +1142,7 @@ WS-O is complete when ALL of the following conditions hold:
 
 9. **Reliability and DR:** SLOs with error budgets, monitoring/alerting, synthetic journey checks, automated encrypted backups, and a recorded restore drill (measured RTO/RPO) are in place; chain monitoring feeds treasury incident response (WS-O.6.1-6.3).
 
-10. **Reproducible builds with provenance:** Two builds from one commit are byte-identical; all served scripts/styles carry SRI; production builds are cosign-signed with in-toto attestations in an append-only log; an SBOM is generated and license-cross-checked against AGPL-3.0-or-later; zero inline scripts/styles ship (WS-O.3.1a-d, WS-O.3.2a-d).
+10. **Reproducible builds with provenance:** Two builds from one commit are byte-identical; all served scripts/styles carry SRI; production builds are cosign-signed with in-toto attestations in an append-only log; an SBOM is generated and license-cross-checked against AGPL-3.0-or-later; zero inline scripts/styles ship; individual content-hashed chunks are independently attestable, and a runtime verification primitive lets the service worker / a lazily-loaded chunk verify its own hash against the signed transparency-log entry and fail closed on mismatch — the substrate WS-S.10 (private-mode update channel) and WS-R bundle integrity depend on (WS-O.3.1a-d, WS-O.3.2a-e).
 
 11. **External assurance:** External audit scope is defined and a clean audit plus a live bug bounty gate the M5 real-funds pilot (WS-O.6.4).
 
