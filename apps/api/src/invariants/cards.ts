@@ -251,7 +251,7 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
     ],
     fallback_behavior: 'No churn/gaming flags emitted for the affected windows.',
     approximation_notes:
-      'Entropy is the classical homological LOWER bound log ρ(reduced Burau at t = −1) — exact integer arithmetic; over/under signs follow the documented displacement convention (rank data carries no physical crossing).',
+      'Entropy is the classical homological LOWER bound log ρ(reduced Burau at t = −1) — exact integer arithmetic; over/under signs follow the documented displacement convention (rank data carries no physical crossing). threshold_hugging_detected/_excess (WS-O.4.5) flag topics massed at crossing-counts just under the gaming flag — the distributional companion to the temporal threshold_gaming_count.',
     shadow_status: 'shadow',
     dependencies: ['WS-E aggregation windows (activity ranking until WS-I positions land)'],
   }),

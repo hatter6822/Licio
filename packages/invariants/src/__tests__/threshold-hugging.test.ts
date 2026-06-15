@@ -53,6 +53,24 @@ describe('detectThresholdHugging — flags mass just under the cliff', () => {
     const values = [...diffuse(30, 1), 0.99]; // one straggler near the cliff
     expect(detectThresholdHugging(values, 1, CFG).detected).toBe(false);
   });
+
+  it('flags topics massed just under an INTEGER gaming threshold (the Braid-local use)', () => {
+    // Many topics oscillating exactly 3 times to dodge a gaming flag of 4, over a
+    // diffuse 1..6 background — the Braid-local crossing-count distribution.
+    const counts = [1, 1, 2, 2, 5, 6, ...Array.from({ length: 12 }, () => 3)];
+    const result = detectThresholdHugging(counts, 4, {
+      band: 1,
+      minPopulation: 8,
+      excessThreshold: 2,
+    });
+    expect(result.detected).toBe(true);
+    // A diffuse spread of crossing counts is NOT flagged.
+    const diffuseCounts = [1, 1, 2, 2, 3, 3, 4, 5, 5, 6];
+    expect(
+      detectThresholdHugging(diffuseCounts, 4, { band: 1, minPopulation: 8, excessThreshold: 2 })
+        .detected,
+    ).toBe(false);
+  });
 });
 
 describe('detectThresholdHugging — invariances', () => {

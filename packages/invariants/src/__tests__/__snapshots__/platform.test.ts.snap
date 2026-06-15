@@ -55,6 +55,8 @@ exports[`score-vector schemas (WS-H.1.1d) > score-vector shapes are pinned by sn
     "manufactured_churn",
     "strands",
     "threshold_gaming_count",
+    "threshold_hugging_detected",
+    "threshold_hugging_excess",
   ],
   "counterfactual_defect": [
     "blocked",

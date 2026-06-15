@@ -141,10 +141,13 @@ const THRESHOLD_HUGGING_READ_LIMIT = 2_000;
 /**
  * Threshold-bearing invariants the meta-monitor scans: the score key in the
  * `score_vector`, the public threshold from config, and whether a detection
- * routes the flagged targets to the exact MFCI fiber test. Cross-invariant
- * hugging of SCOI/PHI suggests manufactured near-divergence/near-loop worth a
- * COORDINATION re-check; MFCI's own borderline targets were already fiber-tested
- * (their `mfci` is the exact statistic), so MFCI only emits the metric.
+ * routes the flagged targets to the exact MFCI fiber test. Routing is reserved
+ * for invariants whose targets are STORY/THREAD ids the MFCI coordination intake
+ * can evaluate: SCOI hugging (manufactured near-divergence on a story) is worth a
+ * coordination re-check. MFCI's own borderline targets were already fiber-tested
+ * (their `mfci` is the exact statistic), and PHI targets are SESSION-scoped
+ * (a wellbeing signal, not a story the coordination test can score) — both only
+ * emit the metric, never route.
  */
 const THRESHOLD_BEARING: ReadonlyArray<{
   type: string;
@@ -165,10 +168,12 @@ const THRESHOLD_BEARING: ReadonlyArray<{
     routeToMfci: true,
   },
   {
+    // Session-scoped target ids: a wellbeing/near-loop signal, NOT a story the
+    // MFCI coordination test can evaluate — metric only, never routed.
     type: 'PHI',
     scoreKey: 'phi',
     threshold: (c) => c.phiThresholds.baseThreshold,
-    routeToMfci: true,
+    routeToMfci: false,
   },
 ];
 
@@ -224,9 +229,18 @@ export async function runThresholdHuggingScan(
     });
     events.metrics.increment('invariants.threshold_hugging.detected');
     // Cross-invariant escalation: route the hugging targets to the exact MFCI
-    // fiber test (fail-toward-caution; never an auto-action).
+    // fiber test (fail-toward-caution; never an auto-action). COOLDOWN — a
+    // target already under an OPEN case is not re-routed, so a persistently
+    // hugging population is not re-flagged every hourly tick.
     if (spec.routeToMfci && flagged.length > 0 && events.hooks.mfci) {
-      await events.hooks.mfci({ target_ids: flagged.slice(0, 10) } as never);
+      const fresh: string[] = [];
+      for (const targetId of flagged) {
+        if (fresh.length >= 10) break;
+        const existing = await invariants.mfciCases.latestForTarget(targetId);
+        if (existing?.status === 'open') continue;
+        fresh.push(targetId);
+      }
+      if (fresh.length > 0) await events.hooks.mfci({ target_ids: fresh } as never);
     }
   }
 }

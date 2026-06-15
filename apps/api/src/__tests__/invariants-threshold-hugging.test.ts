@@ -116,4 +116,54 @@ describe('threshold-hugging meta-monitor (WS-O.4.5)', () => {
     await runThresholdHuggingScan(fixture.invariants, fixture.events, nowMs);
     expect(captured.length).toBe(0);
   });
+
+  it('does NOT route PHI hugging — session-scoped targets, metric only', async () => {
+    const nowMs = Date.UTC(2026, 5, 10, 12);
+    const threshold = fixture.invariants.config().phiThresholds.baseThreshold;
+    const band = fixture.invariants.config().thresholdHuggingBandFraction * threshold;
+    for (let i = 0; i < 18; i += 1) {
+      await seedScore('PHI', 'phi', (i / 18) * (threshold - band), nowMs);
+    }
+    for (let i = 0; i < 14; i += 1) await seedScore('PHI', 'phi', threshold - band * 0.4, nowMs);
+    const captured = captureMfciRouting();
+    await runThresholdHuggingScan(fixture.invariants, fixture.events, nowMs);
+    // PHI targets are sessions, not stories the coordination test can score.
+    expect(captured.length).toBe(0);
+  });
+
+  it('does NOT re-route a hugging target already under an OPEN case (cooldown)', async () => {
+    const nowMs = Date.UTC(2026, 5, 10, 12);
+    const threshold = fixture.invariants.config().scoiNeedsContextThreshold;
+    const band = fixture.invariants.config().thresholdHuggingBandFraction * threshold;
+    for (let i = 0; i < 18; i += 1) {
+      await seedScore('SCOI', 'scoi', (i / 18) * (threshold - band), nowMs);
+    }
+    const hugging: string[] = [];
+    for (let i = 0; i < 14; i += 1) {
+      hugging.push(await seedScore('SCOI', 'scoi', threshold - band * 0.4, nowMs));
+    }
+    // Every hugging target already has an open case → none is re-routed.
+    for (const targetId of hugging) {
+      await fixture.invariants.mfciCases.insert({
+        caseId: randomUUID(),
+        targetType: 'story',
+        targetId,
+        riskState: 'elevated',
+        statistic: 'target_concentration',
+        mfciScore: 3,
+        pHat: 0.05,
+        sampleCount: 50,
+        fixedMarginsRef: 'cheap:x',
+        summary: '{}',
+        appealSummary: '',
+        status: 'open',
+        openedAt: new Date(nowMs).toISOString(),
+        resolvedAt: null,
+        resolvedBy: null,
+      });
+    }
+    const captured = captureMfciRouting();
+    await runThresholdHuggingScan(fixture.invariants, fixture.events, nowMs);
+    expect(captured.flat().length).toBe(0);
+  });
 });

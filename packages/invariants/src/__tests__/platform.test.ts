@@ -141,6 +141,8 @@ describe('score-vector schemas (WS-H.1.1d)', () => {
         strands: 5,
         manufactured_churn: false,
         threshold_gaming_count: 0,
+        threshold_hugging_detected: false,
+        threshold_hugging_excess: 0,
       },
       [InvariantType.ReebLandscape]: {
         peak_count: 2,
