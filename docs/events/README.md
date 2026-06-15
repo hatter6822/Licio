@@ -257,7 +257,15 @@ randomness):
   volume alone — SPEC §8 fairness), with a minimum-distinct-actors guard and a
   volume floor; emits `integrity.signal.detected` with monotone confidence,
   forwards to the MFCI + review-queue hooks, and applies only the v0
-  placeholder participation dampening (shadow).
+  placeholder participation dampening (shadow). **Account-age weighting
+  (WS-O.4.5):** the detection threshold is scaled by the average account-age
+  TRUST factor of the window's actors (`trustWeights`, a bounded monotone curve,
+  never zero — `new:0.5 … established:1.0`), so a brigade of disposable fresh
+  accounts is flagged at lower volume (raising its cost) while an aged community
+  is unaffected. The factor is a coarse, non-financial signal (the
+  `check:neutrality` gate stays green); anonymity is never penalized (the
+  privacy-bucket actor is treated as established) and the weight never zeroes a
+  legitimate new user's participation.
 - *Source-free accusation* (b): the conservative lexical classifier
   (`classifyAccusationV0`) runs where the body text exists (the contribution
   route) and only its boolean travels on the event; hedges, questions,

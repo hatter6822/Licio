@@ -38,6 +38,7 @@ import {
   scoiEnergy,
 } from '@licio/invariants';
 import { describe, expect, it } from 'vitest';
+import { detectCoordinatedBurst } from '../pwatt/anti-signals.js';
 
 const MERI_FULL_INPUTS = {
   canonicalUrl: true,
@@ -116,6 +117,15 @@ describe('ensemble: a Sybil brigade cannot evade both MFCI and Tropical', () => 
       ),
     );
     expect(detectSynchronizedCascade(synchronized).detected).toBe(true);
+  });
+
+  it('raises the cost: a FRESH-account brigade is flagged at a volume an AGED one is not', () => {
+    // WS-O.4.5 account-age weighting: the same borderline burst volume (11, no
+    // history → threshold 4×3 = 12) is NOT a burst for an established community
+    // but IS for a throwaway-account brigade (trust 0.5 → threshold 6).
+    const burst = { eventCount: 11, distinctActors: 6, trailingEventCounts: [] as number[] };
+    expect(detectCoordinatedBurst({ ...burst, trustFactor: 1 }).detected).toBe(false);
+    expect(detectCoordinatedBurst({ ...burst, trustFactor: 0.5 }).detected).toBe(true);
   });
 
   it('an organic, evenly spread, desynchronized community is flagged by NEITHER', () => {

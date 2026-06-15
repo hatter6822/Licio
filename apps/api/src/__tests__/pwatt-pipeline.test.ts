@@ -372,6 +372,35 @@ describe('coordinated-burst detection (WS-E.2.2a)', () => {
   });
 });
 
+describe('account-age trust weighting end-to-end (WS-O.4.5)', () => {
+  // 11 one-event actors on a no-history item: volume 11. Full threshold
+  // (4 × baseRateFloor 3) = 12, so an AGED community is NOT a burst; a
+  // FRESH-account brigade (trust 0.5) has its threshold scaled to 6 and IS.
+  async function brigade(handlePrefix: string, accountAgeMs: number): Promise<string> {
+    const storyId = randomUUID();
+    for (let i = 0; i < 11; i += 1) {
+      const { userId } = await seedUserWithSession(fixture.identity, {
+        handle: `${handlePrefix}${i}b`,
+        accountAgeMs,
+      });
+      await ingestAttention(userId, storyId);
+    }
+    return storyId;
+  }
+
+  it('does NOT flag an AGED community of borderline volume', async () => {
+    await brigade('aged', 500 * 86_400_000); // established → trust 1.0
+    const report = await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
+    expect(report.burstsDetected).toBe(0);
+  });
+
+  it('DOES flag a FRESH-account brigade of the SAME volume (raised cost)', async () => {
+    await brigade('newb', 1 * 86_400_000); // new → trust 0.5
+    const report = await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
+    expect(report.burstsDetected).toBe(1);
+  });
+});
+
 describe('harassment-cascade freeze (WS-E.2.2c + WS-E.2.3e)', () => {
   async function cascade(storyId: string): Promise<void> {
     for (let i = 0; i < 6; i += 1) {

@@ -582,6 +582,7 @@ describe('validatePwattConfigValue (write-time rejection, all keys)', () => {
           baseRateFloor: 3,
         },
       ],
+      ['trust_weights', { new: 0.5, recent: 0.7, active: 0.9, established: 1 }],
       ['penalty_coefficients', { pM: 1, pH: 1, pT: 1, pR: 0.5 }],
       [
         'ranking_profiles',
@@ -623,6 +624,8 @@ describe('validatePwattConfigValue (write-time rejection, all keys)', () => {
       ],
       ['burst', { minVolume: 0 }, /./],
       ['cascade', { hostileShareThreshold: 2 }, /./],
+      // Non-monotone trust weights (new > recent) are rejected.
+      ['trust_weights', { new: 1, recent: 0.5, active: 0.9, established: 1 }, /monotone/],
       ['penalty_coefficients', { pM: -1, pH: 0, pT: 0, pR: 0 }, /./],
       [
         'ranking_profiles',

@@ -28,6 +28,8 @@ import {
   type CascadeDetectorConfig,
   DEFAULT_BURST_CONFIG,
   DEFAULT_CASCADE_CONFIG,
+  DEFAULT_TRUST_WEIGHTS,
+  type TrustWeights,
 } from './anti-signals.js';
 
 export interface PwattRuntimeConfig {
@@ -36,6 +38,8 @@ export interface PwattRuntimeConfig {
   v1: PwattV1ComponentsConfig;
   burst: BurstDetectorConfig;
   cascade: CascadeDetectorConfig;
+  /** Account-age progressive-trust weights (WS-O.4.5). */
+  trustWeights: TrustWeights;
   penaltyCoefficients: PenaltyCoefficients;
   profiles: readonly RankingProfile[];
   /** Real-time event-count threshold that triggers an early aggregation run. */
@@ -47,6 +51,7 @@ export const DEFAULT_PWATT_RUNTIME_CONFIG: PwattRuntimeConfig = {
   v1: DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
   burst: DEFAULT_BURST_CONFIG,
   cascade: DEFAULT_CASCADE_CONFIG,
+  trustWeights: DEFAULT_TRUST_WEIGHTS,
   penaltyCoefficients: DEFAULT_PENALTY_COEFFICIENTS,
   profiles: DEFAULT_RANKING_PROFILES,
   triggerThreshold: 500,
@@ -70,6 +75,18 @@ const cascadeSchema = z
     baseRateFloor: z.number().positive(),
   })
   .strict();
+
+const trustWeightsSchema = z
+  .object({
+    new: z.number().min(0.1).max(1),
+    recent: z.number().min(0.1).max(1),
+    active: z.number().min(0.1).max(1),
+    established: z.number().min(0.1).max(1),
+  })
+  .strict()
+  .refine((w) => w.new <= w.recent && w.recent <= w.active && w.active <= w.established, {
+    message: 'trust weights must be monotone non-decreasing (new ≤ recent ≤ active ≤ established)',
+  });
 
 const penaltySchema = z
   .object({
@@ -175,6 +192,7 @@ export const PWATT_CONFIG_KEYS = [
   'v1',
   'burst',
   'cascade',
+  'trust_weights',
   'penalty_coefficients',
   'ranking_profiles',
   'trigger_threshold',
@@ -215,6 +233,10 @@ export function validatePwattConfigValue(
         return parsed.success
           ? null
           : (parsed.error.issues[0]?.message ?? 'invalid cascade config');
+      }
+      case 'trust_weights': {
+        const parsed = trustWeightsSchema.safeParse(value);
+        return parsed.success ? null : (parsed.error.issues[0]?.message ?? 'invalid trust weights');
       }
       case 'penalty_coefficients': {
         const parsed = penaltySchema.safeParse(value);
@@ -297,6 +319,13 @@ export async function loadPwattRuntimeConfig(
     const parsed = cascadeSchema.safeParse(cascade);
     if (parsed.success) config.cascade = parsed.data;
     else reject('cascade', parsed.error.issues[0]?.message ?? 'invalid');
+  }
+
+  const trustWeights = await events.configStore.get('trust_weights');
+  if (trustWeights) {
+    const parsed = trustWeightsSchema.safeParse(trustWeights);
+    if (parsed.success) config.trustWeights = parsed.data;
+    else reject('trust_weights', parsed.error.issues[0]?.message ?? 'invalid');
   }
 
   const penalties = await events.configStore.get('penalty_coefficients');

@@ -16,6 +16,39 @@
 // or mixed constructive contributions) never triggers.
 import type { EventContributionType } from '@licio/shared';
 
+// Account-age / progressive-trust weighting (WS-O.4.5). A bounded, monotone
+// trust weight per account-age bucket — NEVER zero, so legitimate new users
+// still participate. A burst dominated by low-trust (disposable, fresh)
+// accounts has its effective volume threshold scaled DOWN by the average trust
+// factor, so it is flagged at lower volume (raising the economic cost of a
+// throwaway-account brigade) while an aged community is unaffected. Account age
+// is a coarse, non-financial signal already used by MFCI's user_group dimension;
+// anonymity is never penalized (the privacy-bucket actor is treated as trusted).
+export interface TrustWeights {
+  /** < 7 days. */ new: number;
+  /** < 90 days. */ recent: number;
+  /** < 365 days. */ active: number;
+  /** ≥ 365 days (the unweighted baseline). */ established: number;
+}
+
+export const DEFAULT_TRUST_WEIGHTS: TrustWeights = {
+  new: 0.5,
+  recent: 0.7,
+  active: 0.9,
+  established: 1,
+};
+
+/** Bounded, monotone account-age trust weight (never zero). Pure and total. */
+export function accountTrustWeight(
+  ageDays: number,
+  weights: TrustWeights = DEFAULT_TRUST_WEIGHTS,
+): number {
+  if (!Number.isFinite(ageDays) || ageDays < 7) return weights.new;
+  if (ageDays < 90) return weights.recent;
+  if (ageDays < 365) return weights.active;
+  return weights.established;
+}
+
 export interface BurstDetectorConfig {
   /** Minimum events in the window before any detection (noise floor). */
   minVolume: number;
@@ -46,14 +79,23 @@ export interface BurstDetection {
  * (trailing windows' event counts). Pure and total.
  */
 export function detectCoordinatedBurst(
-  input: { eventCount: number; distinctActors: number; trailingEventCounts: readonly number[] },
+  input: {
+    eventCount: number;
+    distinctActors: number;
+    trailingEventCounts: readonly number[];
+    /** Average account-age trust factor of the window's actors (WS-O.4.5);
+     *  ∈ (0, 1], defaults to 1 (no effect). A low factor (a fresh-account
+     *  brigade) scales the threshold DOWN so it is flagged at lower volume. */
+    trustFactor?: number;
+  },
   config: BurstDetectorConfig = DEFAULT_BURST_CONFIG,
 ): BurstDetection {
   const trailing = input.trailingEventCounts.filter((n) => Number.isFinite(n) && n >= 0);
   const mean =
     trailing.length === 0 ? 0 : trailing.reduce((sum, n) => sum + n, 0) / trailing.length;
   const expectedVolume = Math.max(config.baseRateFloor, mean);
-  const threshold = config.burstMultiplier * expectedVolume;
+  const trustFactor = clampTrustFactor(input.trustFactor);
+  const threshold = config.burstMultiplier * expectedVolume * trustFactor;
   const detected =
     input.eventCount >= config.minVolume &&
     input.distinctActors >= config.minDistinctActors &&
@@ -89,6 +131,12 @@ export interface CascadeDetection {
   hostileShare: number;
 }
 
+/** Clamp the optional trust factor to (0, 1]; absent/invalid → 1 (no effect). */
+function clampTrustFactor(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 1;
+  return Math.min(1, Math.max(0.1, value));
+}
+
 /** Harassment-cascade detection (WS-E.2.2c). Pure and total. */
 export function detectHarassmentCascade(
   input: {
@@ -96,6 +144,8 @@ export function detectHarassmentCascade(
     distinctActors: number;
     contributionCounts: Partial<Record<EventContributionType, number>>;
     trailingEventCounts: readonly number[];
+    /** Average account-age trust factor (WS-O.4.5); ∈ (0, 1], defaults to 1. */
+    trustFactor?: number;
   },
   config: CascadeDetectorConfig = DEFAULT_CASCADE_CONFIG,
 ): CascadeDetection {
@@ -117,7 +167,7 @@ export function detectHarassmentCascade(
     input.distinctActors >= config.minDistinctActors &&
     total >= config.minContributions &&
     hostileShare >= config.hostileShareThreshold &&
-    input.eventCount > config.volumeMultiplier * expected;
+    input.eventCount > config.volumeMultiplier * expected * clampTrustFactor(input.trustFactor);
   // Confidence grows with how far the hostile share clears the threshold.
   const confidence = detected
     ? Math.min(
