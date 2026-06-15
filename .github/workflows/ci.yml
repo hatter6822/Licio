@@ -164,7 +164,7 @@ jobs:
           name: build-artifacts
           path: apps/web/dist/
       - name: Cache Playwright browsers
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ hashFiles('apps/web/node_modules/@playwright/test/package.json') }}
