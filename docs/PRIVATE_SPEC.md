@@ -1,0 +1,2774 @@
+# Licio Private P2P Rooms — End-to-End Architecture Specification
+
+**Document status:** refined architecture specification v0.2  
+**Prepared:** 2026-06-15  
+**Project:** Licio (`hatter6822/Licio`)  
+**Scope:** real private rooms whose content, threads, comments, media, membership internals, and private search state are end-to-end encrypted and hosted by members' devices rather than the Licio main server.  
+**Primary decision:** private P2P rooms are a separate storage, sync, trust, and authority plane. They must not be implemented as a stronger flag on the existing server-hosted private-room model.
+
+---
+
+## Table of contents
+
+1. Executive summary
+2. Current Licio baseline and required architectural break
+3. Definitions and normative language
+4. Product model: three room classes, not two
+5. Privacy, trust, and threat model
+6. Non-goals and honest user promises
+7. High-level architecture
+8. Data-residency rules and server non-storage contract
+9. IPFS, Helia, and libp2p design
+10. Cryptographic architecture
+11. Identity, devices, and room authority
+12. Membership, invites, removal, and recovery
+13. Private room data model
+14. Operation log, conflict handling, and deterministic reduction
+15. P2P sync protocol
+16. Local storage, pinning, backup, and availability
+17. Media and attachment pipeline
+18. Search, ranking, recommendations, notifications, and analytics
+19. Moderation, reports, trust, and safety
+20. User experience requirements and mandatory copy
+21. Server API specification
+22. Client architecture and package layout
+23. Integration changes for the current Licio codebase
+24. Migration from existing server-private rooms
+25. Efficiency and performance plan
+26. Security, privacy, and correctness test plan
+27. Operational controls and incident response
+28. Workstreams and rollout plan
+29. Launch checklist
+30. Open questions
+31. References
+
+---
+
+## 1. Executive summary
+
+Licio's current private-room behavior is **server-hosted containment**: content is room-owned, private rooms force `room_only`, global surfaces exclude room-only items, and reads are gated by server membership checks. That is useful, but it is not real cryptographic privacy because the server stores the content, has the authority path, and can process private-room metadata through server subsystems.
+
+This specification defines a new architecture for **P2P private rooms**:
+
+- Room content is encrypted locally before storage or sync.
+- IPFS-compatible content addressing is used only for encrypted blocks.
+- The public IPFS DHT, public gateways, delegated routing, public provider advertisements, and public IPNI are not used for private-room content.
+- Members' devices exchange encrypted operation logs and encrypted media blocks directly over room-scoped libp2p protocols.
+- Licio's main server may provide only minimal directory stubs and blind rendezvous/signaling. It must not receive private story IDs, thread IDs, contribution IDs, plaintext, private CIDs, operation heads, member lists, activity state, search terms, or room keys.
+- Room authority comes from cryptographic room keys and signed capability operations, not from platform admins or server ACLs.
+- Platform staff cannot read, alter, recover, moderate, add members to, or delete private-room content because the platform does not possess content, keys, heads, or authoritative membership state.
+
+The implementation should keep Licio's existing public forum and ranking architecture intact. Public rooms remain server-hosted. Existing private/restricted rooms should be renamed in the UI as **restricted server rooms** or **members-only server rooms**. Only the new `private_p2p` model should be described as private in the strong sense.
+
+The highest-trust design also addresses the largest web-app weakness: a PWA is code delivered by a server. If Licio's server can silently ship new JavaScript that exfiltrates room keys, cryptographic storage alone is not enough. This spec therefore requires release transparency, signed/reproducible private-mode bundles, service-worker update pinning, strict CSP/Trusted Types, no remote dynamic code, and an optional hardened local key agent for users who want stronger protection against malicious future web updates.
+
+---
+
+## 2. Current Licio baseline and required architectural break
+
+The existing Licio model is already structured around the hierarchy:
+
+```text
+Room -> Content / Story -> Thread -> Contributions
+```
+
+Current server-hosted content has a `room_id`, `visibility`, story lifecycle state, media upload reference, canonical URL, search vector, and related database indexes. The current submission path validates a server `room_id`, derives server visibility, creates a server story and thread shell, and emits server events. The current thread and contribution paths read/write server stores and use server-side visibility gates.
+
+That design is correct for public and restricted server rooms, but it conflicts with the requested privacy guarantee. For real private rooms:
+
+- `stories` must not contain private-room stories.
+- server threads must not exist for private-room content.
+- server contributions must not exist for private-room comments.
+- upload rows must not own private-room media.
+- search indexes, ranking candidates, signal ledgers, freshness features, embeddings, summaries, review queues, and content events must not contain private-room content or metadata.
+- platform stewards/admins must not be able to satisfy a room read bar because the room content is not server-readable.
+
+The required change is therefore not merely adding E2EE to existing rows. It is a **separate private plane** with its own schemas, sync, reducer, local storage, crypto, and UI.
+
+---
+
+## 3. Definitions and normative language
+
+The terms **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** are used in the RFC 2119 sense.
+
+### 3.1 Terms
+
+| Term | Meaning |
+|---|---|
+| P2P private room | A Licio room whose content and membership internals are encrypted and synced among members' devices, not hosted by Licio's main server. |
+| Restricted server room | A server-hosted room with membership-gated reads. This may be private from ordinary users, but not from server operators or platform processes. |
+| Directory stub | Minimal server-side bootstrap record for a P2P room. It contains no content, private CIDs, operation heads, member list, or activity data. |
+| Room manifest | Encrypted, signed room configuration and root pointers. Stored and synced as encrypted IPFS/IPLD blocks. |
+| Operation log | Signed, encrypted append-only DAG of room changes: story creation, thread updates, contribution creation, edits, tombstones, membership changes, summaries, and attachment manifests. |
+| Epoch | A cryptographic membership/key generation. Every add/remove operation creates a new epoch. |
+| Member | A room participant. A member can have multiple devices. |
+| Device | One browser profile, installed PWA context, local agent, or member-operated node participating in a room. |
+| Room key authority | The set of private keys and signed capability operations that define who can read, post, invite, moderate, or administer a P2P room. |
+| Blind rendezvous | Server-assisted peer discovery where the server sees only opaque time-bucketed identifiers and encrypted signaling data. |
+| Private CID | A CID of encrypted private-room data. Private CIDs MUST NOT be announced to public routing systems or logged server-side. |
+
+### 3.2 Security classes
+
+The P2P private-room system has three explicit security tiers:
+
+| Tier | Name | Key custody | Update-channel protection | Intended users |
+|---|---|---|---|---|
+| Tier 1 | PWA private | Browser IndexedDB/WebCrypto | Signed bundle + service-worker pinning | Most users |
+| Tier 2 | Hardened PWA | Browser plus passkey-bound key wrapping and strict update approval | Code transparency + manual update approval | Privacy-conscious users |
+| Tier 3 | Local key agent | Room keys held outside the web origin by a local agent, extension, or member-run node | Web code cannot directly export keys | Highest-trust users and room stewards |
+
+Licio MUST NOT claim that Tier 1 protects users from a malicious Licio web update. Tier 1 protects against passive server storage compromise and ordinary platform administration because the server does not have content or keys. Tier 2 and Tier 3 reduce update-channel risk.
+
+---
+
+## 4. Product model: three room classes, not two
+
+Licio should expose three room classes:
+
+| Internal class | Suggested UI label | Storage | Authority | Server can read? | Server can rank/search? | Typical use |
+|---|---|---|---|---:|---:|---|
+| `public_server` | Public room | Licio server | Platform + room roles | Yes | Yes | Public social news and discussion |
+| `restricted_server` | Members-only server room | Licio server | Platform + room roles | Yes | Limited to server gates | Existing restricted/private behavior, legacy rooms |
+| `private_p2p` | Private P2P room | Member devices / member-operated encrypted pins | Room keys only | No | No | Real private rooms |
+
+### 4.1 Required schema axes
+
+Add room axes without overloading the current `visibility` enum:
+
+```ts
+export const ROOM_STORAGE_MODES = ['server', 'p2p'] as const;
+export const ROOM_AUTHORITY_MODELS = ['platform', 'room_keys'] as const;
+export const ROOM_DIRECTORY_MODES = ['listed', 'unlisted', 'detached'] as const;
+```
+
+Required coherence:
+
+```text
+storage_mode = 'server' -> authority_model = 'platform'
+storage_mode = 'p2p'    -> authority_model = 'room_keys'
+storage_mode = 'p2p'    -> visibility = 'private'
+storage_mode = 'p2p'    -> join_model = 'invite'
+storage_mode = 'p2p'    -> posting_policy is advisory UI only; actual posting is capability-gated by room ops
+```
+
+### 4.2 Directory modes
+
+| Directory mode | Server knows | Discovery | Default? | Privacy tradeoff |
+|---|---|---|---:|---|
+| `listed` | Public display name, description, stub key commitment | Room directory/search can show the room shell | No | Leaks existence and topic. No content. |
+| `unlisted` | Opaque stub reachable only with invite/bootstrap token | Invite/link required | Yes | Server knows a stub exists but not meaningful metadata. |
+| `detached` | Nothing, unless rendezvous is used later | Manual QR/file/contact exchange | No | Maximum privacy, weakest usability. |
+
+Default for P2P private rooms MUST be `unlisted`. `listed` requires explicit user action and plain-language disclosure.
+
+---
+
+## 5. Privacy, trust, and threat model
+
+### 5.1 Primary privacy goals
+
+P2P private rooms MUST provide:
+
+1. **Content confidentiality:** only current or historically authorized members with retained epoch keys can decrypt content from corresponding epochs.
+2. **Content integrity:** every object is authenticated by AEAD and signed by a valid room device key.
+3. **Room-key authority:** platform admins cannot add members, decrypt content, rotate keys, or rewrite history.
+4. **Server non-knowledge:** the main server does not receive private content, private CIDs, op heads, member lists, thread IDs, or private search/ranking data.
+5. **Metadata minimization:** the server sees only the minimum needed for optional directory and blind rendezvous operation.
+6. **Availability transparency:** the UI honestly shows whether enough member devices/pins hold encrypted copies.
+7. **Update-channel accountability:** private-room code is signed, reproducible, hash-pinned, and visible in a transparency log.
+
+### 5.2 Adversaries
+
+| Adversary | Capability | Expected protection |
+|---|---|---|
+| Ordinary outsider | No keys, may know app exists | Cannot read content or join room. |
+| Network observer | Sees traffic timing, endpoints, sizes | Cannot read payloads; metadata reduced by relay/padding/jitter. |
+| Public IPFS observer | Watches public DHT/gateway/provider metadata | Should see no private-room CIDs by default. |
+| Licio database attacker | Reads DB backups and event stores | Finds no private content or keys. |
+| Licio admin/operator | Has production DB/admin access | Cannot read or mutate private-room content. |
+| Licio rendezvous operator | Sees blind rendezvous records | Cannot map records to content, room name, members, or CIDs in unlisted/detached rooms. |
+| Malicious current member | Has legitimate room access | Can copy content they can read; cannot forge other members' signed operations. |
+| Removed member | Retains old keys/content | Can read old content they already received; cannot decrypt future epochs. |
+| Compromised member device | Local malware/browser compromise | Can expose local plaintext/keys until removed and rekeyed. |
+| Malicious future web update | Licio serves hostile JS | Mitigated by signed/pinned bundles and optional local key agent; not fully solved by PWA-only key custody. |
+
+### 5.3 Trust boundary matrix
+
+| Boundary | Server-hosted rooms | P2P private rooms |
+|---|---|---|
+| Content storage | Server DB/object storage | Member devices only |
+| Content encryption | Transport/database controls | End-to-end before IPFS/blockstore |
+| Authorization | Server session + RBAC | Room cryptographic capabilities |
+| Moderation | Platform + room roles | Room-local only; voluntary disclosure to platform |
+| Search | Server index | Local-only decrypted index |
+| Ranking | Server PWAtt/retrievers | No server ranking; local sorting only |
+| Logs | Server IDs/events | No private IDs/content/CIDs in server logs |
+| Backups | Server backups | Member export/replication only |
+| Recovery | Account/support flows | Room keys/recovery kit/other admins only |
+
+### 5.4 Metadata minimization objectives
+
+The design MUST minimize leakage of:
+
+- room existence;
+- room topic/name;
+- member list;
+- membership changes;
+- message count;
+- online presence;
+- unread counts;
+- thread titles;
+- private CIDs;
+- operation heads;
+- exact activity time;
+- content sizes for small text objects;
+- public-account-to-room membership linkage.
+
+Mitigations include unlisted stubs, detached rooms, blind rendezvous, rotating room-scoped PeerIDs, batched announcements, coarse time buckets, padding for small operations, relay-only transport mode, local-only notifications, and no server analytics.
+
+---
+
+## 6. Non-goals and honest user promises
+
+P2P private rooms MUST be honest about these limits:
+
+1. **No protection from members copying content.** Any member can screenshot, copy, export, quote, or leak what they can read.
+2. **No retroactive erasure.** Removing a member prevents future access but cannot claw back content or keys already delivered.
+3. **No guaranteed availability.** If no authorized device or member-operated encrypted pin has the blocks, the room may be temporarily or permanently unavailable.
+4. **No full anonymity.** Direct P2P connections can reveal IP/network metadata to peers. Relay-only mode reduces but does not eliminate metadata.
+5. **No platform rescue.** Licio cannot recover lost room keys, add a member, or decrypt content for support.
+6. **No proactive platform moderation.** The platform cannot scan content it cannot read. Members may voluntarily disclose report packages.
+7. **No complete protection against malicious client updates in basic PWA mode.** Stronger update pinning and local key agents are required for that threat.
+
+Mandatory creation disclosure:
+
+```text
+This is a Private P2P room. Licio does not host the room's content and cannot read, moderate, recover, or add members to it. The room is available only while enough members' devices or member-operated encrypted pins keep copies. Removed members may keep content they already received. Members can still copy or disclose content. Keep a recovery kit if you cannot afford to lose access.
+```
+
+---
+
+## 7. High-level architecture
+
+```text
+                  ┌────────────────────────────────────────────┐
+                  │              Licio main server             │
+                  │                                            │
+                  │ Public/restricted server rooms:            │
+                  │   BFF, Postgres, Redis, ranking, search,   │
+                  │   uploads, moderation, event pipeline       │
+                  │                                            │
+                  │ P2P private rooms:                         │
+                  │   optional directory stubs + blind          │
+                  │   rendezvous/signaling only                 │
+                  │                                            │
+                  │ Forbidden for P2P rooms: content, CIDs,     │
+                  │ op heads, private search, member lists,     │
+                  │ ranking events, private uploads, keys       │
+                  └────────────────────────────────────────────┘
+                                      │
+                                      │ optional bootstrap only
+                                      │ opaque, no private content
+                                      ▼
+┌────────────────────────────┐     encrypted P2P sync      ┌────────────────────────────┐
+│ Member device A             │◀───────────────────────────▶│ Member device B             │
+│ PWA + Helia/libp2p          │                             │ PWA + Helia/libp2p          │
+│ IndexedDB blockstore        │                             │ IndexedDB blockstore        │
+│ local op DAG + reducer      │                             │ local op DAG + reducer      │
+│ local encrypted keys        │                             │ local encrypted keys        │
+│ local private search        │                             │ local private search        │
+└────────────────────────────┘                             └────────────────────────────┘
+              ▲                                                        ▲
+              │ encrypted CAR/block sync                               │ encrypted block sync
+              ▼                                                        ▼
+┌────────────────────────────┐                             ┌────────────────────────────┐
+│ Member-operated encrypted   │                             │ Member-operated relay or    │
+│ pinning node / local agent  │                             │ rendezvous node             │
+│ no plaintext                │                             │ no content authority        │
+└────────────────────────────┘                             └────────────────────────────┘
+```
+
+### 7.1 Core architectural rules
+
+1. Public and restricted server rooms continue to use existing Licio server architecture.
+2. P2P private rooms use local encrypted operation logs and encrypted IPFS-compatible blocks.
+3. The server may assist with account login, feature discovery, stub creation, and blind rendezvous, but not with private room authority.
+4. P2P private rooms render from local decrypted state, not from `/v1/stories`, `/v1/threads`, or `/v1/contributions`.
+5. Every private-room object is content-addressed after encryption, never before.
+6. Every private-room operation is signed by a device key and authorized by room capability state.
+7. Private-room sync must continue to work between members even if the Licio BFF is unavailable, provided peers can reach one another through configured transport paths.
+
+---
+
+## 8. Data-residency rules and server non-storage contract
+
+### 8.1 Absolute server forbiddance list
+
+For `rooms.storage_mode = 'p2p'`, the main server MUST NOT store or derive:
+
+- plaintext room manifest;
+- encrypted room manifest, unless explicitly allowed by an opt-in member-operated pin outside main server scope;
+- private CIDs;
+- operation heads;
+- story IDs;
+- thread IDs;
+- contribution IDs;
+- thread titles;
+- contribution bodies;
+- media bytes or thumbnails;
+- media manifests;
+- search indexes;
+- embeddings;
+- private topics;
+- private URL/canonical URL data;
+- private content events;
+- ranking candidates;
+- attention aggregates;
+- member lists;
+- per-room member counts;
+- per-room latest activity;
+- unread counts;
+- push notification content;
+- key material;
+- invite secrets;
+- recovery secrets.
+
+### 8.2 Allowed server-side data
+
+For a listed or unlisted P2P room, the server MAY store a minimal stub:
+
+```ts
+type PrivateRoomStub = {
+  stub_id: string;
+  room_server_id: string;
+  directory_mode: 'listed' | 'unlisted';
+
+  // Present only for listed rooms.
+  display_name?: string;
+  display_description?: string;
+  display_avatar_public_cid?: string;
+
+  // Cryptographic commitments, not decrypting material.
+  room_public_key: string;
+  manifest_key_commitment: string;
+  latest_manifest_commitment?: string;
+
+  // Bootstrap/rendezvous policy, not private content.
+  rendezvous_policy: 'licio_blind' | 'member_rendezvous' | 'manual_only';
+  bootstrap_hints: Array<{
+    kind: 'licio_blind' | 'member_relay' | 'manual';
+    value: string;
+  }>;
+
+  signed_stub: unknown;
+  stub_signature: string;
+
+  created_by_account_id?: string;
+  created_at: string;
+  updated_at: string;
+};
+```
+
+For `directory_mode = 'detached'`, no stub is stored. Invites are exchanged outside Licio or through blind rendezvous without a persistent room stub.
+
+### 8.3 Database guard
+
+Every server table or store that can reference a room MUST reject P2P room IDs unless it is explicitly a stub/rendezvous table.
+
+Forbidden FK paths:
+
+```text
+stories.room_id -> p2p room
+threads.room_id -> p2p room
+contributions -> thread in p2p room
+uploads.owner_story_id -> p2p story
+search index -> p2p story/thread/contribution
+ranking candidate -> p2p story/thread
+review queue story_id -> p2p story
+signal ledger -> p2p content
+content events -> p2p room
+```
+
+### 8.4 Server-side event policy
+
+P2P private-room activity MUST NOT emit existing public/restricted content events such as:
+
+- `content.submitted`
+- `content.normalized`
+- `content.visibility.changed`
+- `contribution.created`
+- `evidence.added`
+- ranking lifecycle events
+- attention events
+- freshness events
+
+If operational metrics are required for the rendezvous service, they MUST be aggregate-only and unlinkable to room identity. Example allowed counters:
+
+```text
+private_rendezvous.announcements_total
+private_rendezvous.signals_total
+private_rendezvous.rate_limited_total
+private_room_stubs.created_total
+```
+
+Forbidden metrics:
+
+```text
+private_room.<room_id>.peers
+private_room.<room_id>.messages
+private_room.<room_id>.latest_activity
+private_room.<room_id>.member_count
+private_room.<room_id>.cid_requests
+```
+
+---
+
+## 9. IPFS, Helia, and libp2p design
+
+### 9.1 Design stance
+
+IPFS-compatible content addressing is useful for integrity, deduplication within encrypted datasets, offline transfer, and member-operated pinning. It is not a privacy layer. Therefore:
+
+```text
+private plaintext -> canonical encode -> optional compress -> pad -> encrypt -> chunk -> CID encrypted chunks
+```
+
+The CID MUST identify ciphertext. A plaintext CID MUST never exist for private-room content.
+
+### 9.2 Recommended implementation stack
+
+Use **Helia** as the browser-friendly TypeScript IPFS implementation, with custom libp2p configuration for private-room operation. Helia is a modern TypeScript implementation of IPFS for JavaScript and browser environments and supports modular blockstore/datastore configuration.
+
+Recommended packages/modules:
+
+```text
+helia
+@helia/dag-cbor
+@helia/unixfs only for encrypted binary blobs, not plaintext filenames
+multiformats
+libp2p
+@libp2p/webrtc
+@libp2p/webtransport where supported
+@libp2p/websockets for relay/rendezvous fallback
+idb-backed blockstore/datastore
+```
+
+### 9.3 Private Helia profile
+
+P2P private rooms MUST use a separate Helia/libp2p node or namespace from public content:
+
+```ts
+type LicioPrivateHeliaProfile = {
+  profile: 'licio-private-helia-v1';
+  publicDht: false;
+  publicGateways: false;
+  delegatedRouting: false;
+  ipni: false;
+  reprovide: false;
+  mdns: 'off' | 'local_only_explicit';
+  relayMode: 'direct_allowed' | 'relay_preferred' | 'relay_only';
+  peerIdScope: 'room_epoch';
+  blockBrokers: ['licio-private-peer-block-protocol'];
+};
+```
+
+The private profile MUST disable:
+
+- public DHT routing;
+- public gateway fallback;
+- delegated routing;
+- IPNI advertisement;
+- public Bitswap with unknown peers;
+- public provider records;
+- automatic reproviding of private CIDs;
+- permanent cross-room PeerIDs.
+
+### 9.4 CID profile
+
+Use CIDv1 with deterministic private-room import settings for ciphertext blocks:
+
+```text
+cid_version: 1
+base: base32 for string representation
+hash: sha2-256 initially; multihash agility reserved
+small object codec: dag-cbor envelope over ciphertext metadata
+large chunk codec: raw encrypted bytes
+small chunk size: 256 KiB
+large media chunk size: 1 MiB to 4 MiB, selected by media class
+DAG layout: balanced for media, append-friendly op log manifests
+```
+
+CIDv1 is preferred for new browser-facing work because it includes version/codec information and is safer for browser contexts than CIDv0.
+
+### 9.5 Public IPFS avoidance
+
+Private-room content MUST NOT be fetched via:
+
+- `https://ipfs.io/ipfs/...`
+- any public gateway URL;
+- public DHT provider lookup;
+- delegated public routing;
+- public IPNI lookup;
+- generic public Bitswap sessions.
+
+The client MUST reject any private-room render path that attempts to construct a public gateway URL.
+
+### 9.6 Private block exchange protocols
+
+Define Licio-specific libp2p protocols:
+
+```text
+/licio/private/handshake/1
+/licio/private/heads/1
+/licio/private/block-request/1
+/licio/private/block-response/1
+/licio/private/snapshot/1
+/licio/private/range/1
+/licio/private/health/1
+```
+
+Only peers that prove room membership through current epoch credentials may speak these protocols for a room. Public libp2p peers must not be able to request arbitrary private CIDs.
+
+### 9.7 Native-device interpretation
+
+Because Licio is PWA-first, “native on the device” means:
+
+1. The installed PWA can run Helia/libp2p and store encrypted blocks in browser storage.
+2. Advanced users may run a member-operated local node or key agent on their own device for better uptime/key isolation.
+3. No Licio-controlled backend node is part of the private content storage plane.
+
+A browser PWA cannot be assumed to be an always-on daemon. Availability therefore depends on visible replication health and optional member-operated pins.
+
+---
+
+## 10. Cryptographic architecture
+
+### 10.1 Principles
+
+1. Encrypt before content addressing.
+2. Authenticate every object with AEAD and an author signature.
+3. Use standard group key management; do not invent ad hoc group crypto.
+4. Rotate keys on every membership change.
+5. Use domain-separated key derivation labels.
+6. Use fresh nonces and object keys for every encrypted object.
+7. Avoid deterministic encryption for private content to prevent CID equality leakage.
+8. Keep server code out of room authority.
+9. Prefer audited libraries and external review over hand-written primitives.
+10. Treat WebCrypto as low-level; wrap it behind small, testable, reviewed modules.
+
+### 10.2 Group key agreement
+
+Use **Messaging Layer Security (MLS), RFC 9420** for room group state.
+
+Mapping:
+
+| MLS concept | Licio P2P room mapping |
+|---|---|
+| MLS group | One private room |
+| MLS client | One member device |
+| MLS epoch | Room membership/key epoch |
+| Add | Add device/member |
+| Remove | Remove device/member |
+| Commit | Authoritative key-state transition |
+| Welcome | Encrypted join material for a new device |
+| Exporter secret | Basis for application-level room epoch keys |
+
+Application secrets:
+
+```text
+room_epoch_secret = MLS-Exporter(
+  label = "licio.private-room.v1.epoch",
+  context = room_id || epoch || manifest_commitment,
+  length = 32
+)
+
+content_wrap_key = HKDF(room_epoch_secret, "licio.content-wrap.v1")
+sync_topic_key   = HKDF(room_epoch_secret, "licio.sync-topic.v1")
+rendezvous_key   = HKDF(room_epoch_secret, "licio.rendezvous.v1")
+snapshot_key     = HKDF(room_epoch_secret, "licio.snapshot.v1")
+report_key       = HKDF(room_epoch_secret, "licio.voluntary-report.v1")
+```
+
+### 10.3 Invite encryption
+
+Use **HPKE, RFC 9180** for invites and one-to-one bootstrap messages before the recipient is part of the MLS group.
+
+Invite material:
+
+```ts
+type InviteSecretV1 = {
+  schema: 'licio.private.invite_secret.v1';
+  room_stub_ref?: string;
+  room_public_key: Uint8Array;
+  invite_id: string;
+  invite_secret: Uint8Array;
+  expires_at: string;
+  max_uses: number;
+  granted_role: 'member' | 'moderator' | 'admin';
+  requires_admin_approval: boolean;
+};
+```
+
+Invite URL format:
+
+```text
+https://licio.app/private/join#invite=<base64url-sealed-invite>
+```
+
+The secret MUST be in the fragment, not the path or query string, so ordinary HTTP requests do not transmit it to the server.
+
+### 10.4 Object envelope
+
+Every private object is wrapped in an encrypted envelope:
+
+```ts
+type PrivateEncryptedEnvelopeV1 = {
+  schema: 'licio.private.envelope.v1';
+  envelope_version: 1;
+
+  room_id_hash: string;              // HMAC-derived or hash commitment, not raw room ID when avoidable
+  room_epoch: number;
+  object_type:
+    | 'room_manifest'
+    | 'membership_op'
+    | 'story_op'
+    | 'thread_op'
+    | 'contribution_op'
+    | 'attachment_manifest'
+    | 'media_chunk'
+    | 'snapshot'
+    | 'local_index_shard';
+
+  plaintext_schema: string;
+  cid_profile: 'licio-private-cid-v1';
+  created_at_bucket: string;         // coarse bucket, not exact if not needed
+  author_device_id_blind: string;
+  author_seq: number;
+  parent_op_ids: string[];
+
+  aead: {
+    algorithm: 'AES-256-GCM' | 'XCHACHA20-POLY1305';
+    nonce: string;
+    aad_hash: string;
+  };
+
+  key_wrap: {
+    mode: 'mls_exporter_aead_wrap';
+    wrapping_epoch: number;
+    wrapped_object_key: string;
+  };
+
+  ciphertext: string | { chunk_cids: string[] };
+  padding_policy: 'none' | 'small-op-4k' | 'small-op-16k' | 'custom';
+  signature: string;
+};
+```
+
+### 10.5 AEAD additional authenticated data
+
+AAD MUST include:
+
+```text
+schema version
+room id or room id commitment
+epoch
+object type
+plaintext schema
+parent op ids
+author device id
+author sequence number
+capability root at author sequence
+chunk index / total chunks for chunked data
+```
+
+### 10.6 Nonce and key rules
+
+- A fresh object key MUST be generated for every object.
+- A fresh random nonce MUST be generated for every AEAD encryption under a given object key.
+- Object keys MUST be wrapped by epoch-derived wrapping keys.
+- Nonce reuse under the same key is a fatal error.
+- Clients MUST maintain local nonce/key-use assertions in tests.
+- Deterministic/convergent encryption MUST NOT be used for private-room content.
+- Compression MUST happen before encryption only for object classes without attacker-controlled compression oracle risk. For mixed attacker/secret content, use no compression or fixed dictionaries with padding.
+
+### 10.7 Signatures
+
+Every operation and envelope MUST be signed by an authorized device signing key. Signatures cover the canonical encoded envelope and all public envelope metadata. Device keys are room-scoped or room-epoch-scoped to reduce linkability.
+
+Recommended initial algorithm:
+
+```text
+Ed25519 for operation signatures
+X25519/HPKE suite for one-to-one invite bootstrap, depending on chosen HPKE library support
+MLS cipher suite selected from audited library defaults
+```
+
+Final cipher-suite selection MUST be pinned in the spec before implementation and tested with official vectors where available.
+
+### 10.8 Key storage tiers
+
+| Tier | Storage | Notes |
+|---|---|---|
+| Basic | IndexedDB encrypted by a key derived from passphrase or platform secret | Usable but web-origin compromise is high impact. |
+| WebCrypto non-extractable wrapping key | Object keys wrapped by non-extractable CryptoKey where supported | Helps accidental export, not a full malicious-JS defense. |
+| Passkey-assisted wrapping | WebAuthn/passkey-derived or PRF-assisted wrapping where available | Requires compatibility review. |
+| Local key agent | Keys held outside Licio web origin; web app asks agent to sign/decrypt | Best protection against malicious web updates. |
+
+The default should be secure enough for ordinary users and transparent about its limitations. High-risk rooms SHOULD require local key agent or strict update pinning.
+
+### 10.9 Post-compromise and removal
+
+Member/device removal:
+
+```text
+remove device/member -> MLS Remove commit -> new epoch -> new sync topics -> new rendezvous blind IDs -> new content wrapping keys -> future content unreadable to removed device
+```
+
+Old content already delivered remains readable to the removed member. The UI MUST disclose this.
+
+---
+
+## 11. Identity, devices, and room authority
+
+### 11.1 Identity separation
+
+| Identity | Scope | Storage | Purpose |
+|---|---|---|---|
+| Licio account | Global, optional for P2P room membership | Server | Login, stub creation rate limits, public identity if user chooses |
+| Room member ID | One room | Encrypted membership log | Room-local participant identity |
+| Device ID | One device within one room | Encrypted membership log | Operation signing and MLS client identity |
+| Room PeerID | One room epoch or short rotation window | Local/private rendezvous | libp2p connection identity |
+| Room root key | One room | Manifest and local key store | Authenticates room authority |
+
+Default P2P rooms SHOULD use room-scoped display names and room-scoped IDs. Linking a global Licio handle inside a private room must be explicit.
+
+### 11.2 Device model
+
+A member may have multiple devices. Each device has:
+
+```ts
+type PrivateRoomDevice = {
+  device_id: string;
+  member_id: string;
+  signing_public_key: string;
+  hpke_public_key: string;
+  mls_credential: unknown;
+  created_at: string;
+  last_seen_bucket?: string;
+  verified_by: Array<{ member_id: string; verified_at: string }>;
+  status: 'active' | 'removed' | 'lost';
+};
+```
+
+Devices are first-class because removal, compromise, and recovery often happen at the device level rather than the human-member level.
+
+### 11.3 Capability model
+
+Capabilities are room-local and signed into the operation log:
+
+```ts
+type Capability =
+  | 'read'
+  | 'post'
+  | 'invite'
+  | 'moderate'
+  | 'summarize'
+  | 'admin'
+  | 'rotate_keys'
+  | 'recover';
+```
+
+Suggested roles:
+
+| Role | Capabilities |
+|---|---|
+| `member` | read, post |
+| `moderator` | read, post, moderate, summarize |
+| `admin` | read, post, invite, moderate, summarize, admin, rotate_keys |
+| `recovery_admin` | rotate_keys, recover, invite, admin |
+
+Capabilities, not platform roles, govern private rooms.
+
+### 11.4 Platform role exclusion
+
+No platform role can authorize private-room operations.
+
+Forbidden:
+
+```text
+if user.roles.includes('admin') then privateRoomCanRead = true
+if user.roles.includes('steward') then privateRoomCanModerate = true
+support override key
+emergency access key
+server-side member add
+server-side room unlock
+```
+
+Platform staff may delist a public directory stub or suspend a Licio account's access to Licio-hosted services, but cannot decrypt or mutate P2P room state.
+
+### 11.5 Member verification
+
+The UI SHOULD support safety-number verification:
+
+```text
+room_safety_number = HASH(
+  room_public_key ||
+  mls_epoch_authenticator ||
+  sorted(active_device_public_keys) ||
+  manifest_policy_hash
+)
+```
+
+Members can compare QR codes or short authentication strings out of band. A room header should show whether membership/device state is verified, changed, or unverified.
+
+---
+
+## 12. Membership, invites, removal, and recovery
+
+### 12.1 Room creation
+
+Creation steps:
+
+1. User chooses `Private P2P room`.
+2. UI shows mandatory privacy/recovery disclosure.
+3. Client generates room root key, local device keys, MLS group, initial manifest, and first membership operation.
+4. Client encrypts manifest and first ops locally.
+5. Client stores encrypted blocks in local Helia blockstore.
+6. If directory mode is `listed` or `unlisted`, server creates a minimal stub.
+7. Client starts private rendezvous only if policy allows.
+8. Room opens from local reducer state.
+
+The server never receives the room manifest plaintext, member list, or operation heads.
+
+### 12.2 Invite flow
+
+```text
+admin/member with invite capability
+  -> creates invite capability op locally
+  -> seals invite using HPKE / invite secret
+  -> sends invite link, QR, or file
+  -> recipient opens invite locally
+  -> recipient creates device keys and MLS KeyPackage
+  -> recipient sends blinded join request over rendezvous or direct channel
+  -> authorized admin device validates invite and commits MLS Add
+  -> admin sends MLS Welcome and encrypted room bootstrap heads
+  -> recipient syncs encrypted blocks from peers
+```
+
+Invite capability:
+
+```ts
+type InviteCapabilityOp = {
+  type: 'member.invite.create';
+  invite_id: string;
+  granted_role: 'member' | 'moderator' | 'admin';
+  max_uses: number;
+  expires_at: string;
+  requires_approval: boolean;
+  created_by_member_id: string;
+  note?: string;
+};
+```
+
+### 12.3 Join request
+
+```ts
+type JoinRequestV1 = {
+  schema: 'licio.private.join_request.v1';
+  invite_id_blind: string;
+  recipient_device_key_package: unknown;
+  proposed_display_name: string;
+  proof_of_invite_secret: string;
+  requested_at_bucket: string;
+};
+```
+
+The rendezvous server sees only an encrypted blob and a blind routing key.
+
+### 12.4 Removal flow
+
+```text
+admin/threshold approval
+  -> member.remove or device.remove op
+  -> MLS Remove commit
+  -> new epoch
+  -> new manifest commitment
+  -> new sync topic
+  -> new rendezvous blind ID
+  -> future ops encrypted under new epoch
+```
+
+Removal op:
+
+```ts
+type MemberRemoveOp = {
+  type: 'member.remove';
+  member_id: string;
+  device_ids: string[];
+  reason_code?: 'left' | 'lost_device' | 'compromise' | 'room_policy' | 'other';
+  effective_epoch: number;
+};
+```
+
+### 12.5 Key rotation cadence
+
+Required rotations:
+
+- every member add;
+- every member/device remove;
+- suspected compromise;
+- admin-triggered manual rotation.
+
+Recommended rotations:
+
+- periodic monthly rotation for high-risk rooms;
+- after a recovery kit is used;
+- after code transparency violation or client compromise incident.
+
+### 12.6 Recovery options
+
+| Recovery method | Description | Privacy risk | Availability benefit |
+|---|---|---|---|
+| Existing device adds new device | User scans QR from old device | Low | High |
+| Admin re-adds member | Room admin removes lost device and adds new one | Admin can deny; no server recovery | High |
+| Recovery kit | Encrypted local export containing member recovery capability | User must secure kit | High |
+| Threshold recovery | M-of-N admins authorize new device | More complex | Very high |
+| Platform support | Not available | Would break privacy | None |
+
+Recovery kit contents MUST be encrypted with a strong passphrase or hardware-bound key and should support printed/manual backup codes only if carefully designed and audited.
+
+### 12.7 Lost all keys
+
+If all admin/recovery devices are lost and no recovery kit exists, the room is unrecoverable. Licio support MUST NOT offer a false recovery path.
+
+---
+
+## 13. Private room data model
+
+### 13.1 Plaintext manifest
+
+```ts
+type PrivateRoomManifestPlainV1 = {
+  schema: 'licio.private.room_manifest.v1';
+  room_id: string;
+  created_at: string;
+
+  profile: {
+    name: string;
+    description?: string;
+    room_type:
+      | 'global_topic'
+      | 'local_geographic'
+      | 'professional_domain'
+      | 'event'
+      | 'learning'
+      | 'steward';
+    avatar_attachment_id?: string;
+  };
+
+  policy: {
+    directory_mode: 'listed' | 'unlisted' | 'detached';
+    membership_change: 'admin' | 'threshold';
+    threshold?: { required: number; eligible_role: 'admin' | 'recovery_admin' };
+    posting_policy: 'all_members' | 'role_gated';
+    role_gated_posters?: Array<'moderator' | 'admin'>;
+    allow_member_invites: boolean;
+    default_new_member_role: 'member';
+    transport_mode: 'direct_allowed' | 'relay_preferred' | 'relay_only';
+    replication_target: number;
+    small_op_padding: '4k' | '16k' | 'off';
+    allow_blind_push: boolean;
+  };
+
+  crypto: {
+    room_public_key: string;
+    mls_group_id: string;
+    current_epoch: number;
+    mls_cipher_suite: string;
+    envelope_profile: 'licio-private-envelope-v1';
+    cid_profile: 'licio-private-cid-v1';
+  };
+
+  roots: {
+    membership_log_root: string;
+    capability_log_root: string;
+    operation_log_root: string;
+    latest_snapshot?: string;
+  };
+};
+```
+
+### 13.2 Operation envelope plaintext
+
+```ts
+type PrivateRoomOpPlainV1 = {
+  schema: 'licio.private.op.v1';
+  room_id: string;
+  epoch: number;
+
+  op_id: string;
+  author_member_id: string;
+  author_device_id: string;
+  author_seq: number;
+
+  created_at: string;
+  created_at_bucket: string;
+  lamport: string;
+  parents: string[];
+
+  body:
+    | MemberAddOp
+    | MemberRemoveOp
+    | RoleGrantOp
+    | RoleRevokeOp
+    | StoryCreateOp
+    | StoryEditOp
+    | StoryTombstoneOp
+    | ThreadStateOp
+    | ContributionCreateOp
+    | ContributionEditOp
+    | ContributionTombstoneOp
+    | SummaryCreateOp
+    | AttachmentAddOp
+    | SnapshotCommitOp;
+};
+```
+
+### 13.3 Story/content ops
+
+Private rooms preserve Licio's content taxonomy while keeping it local.
+
+```ts
+type StoryCreateOp = {
+  type: 'story.create';
+  story_id: string;
+  thread_id: string;
+  title: string;
+  submission_type:
+    | 'link'
+    | 'original_brief'
+    | 'question'
+    | 'evidence_card'
+    | 'local_update'
+    | 'live_thread'
+    | 'image_post'
+    | 'video_post';
+  topic_ids: string[];
+  language?: string;
+  sensitivity_labels?: string[];
+  location_scope?: unknown;
+  submission_metadata: unknown;
+  attachment_refs?: string[];
+};
+```
+
+`submission_metadata` MUST validate against a private equivalent of the existing Licio story schema. For private links, canonical URL normalization MUST happen locally and MUST NOT call server URL normalization or server safety services.
+
+### 13.4 Thread state
+
+```ts
+type ThreadStateOp = {
+  type: 'thread.state';
+  thread_id: string;
+  conversation_state: 'active' | 'deepening' | 'tense' | 'under_review' | 'resolved' | 'archived';
+  safety_state: 'normal' | 'elevated' | 'under_review' | 'restricted';
+  reason?: string;
+};
+```
+
+Private rooms may use room-local safety states, but these are not platform moderation decisions.
+
+### 13.5 Contribution ops
+
+```ts
+type ContributionCreateOp = {
+  type: 'contribution.create';
+  contribution_id: string;
+  thread_id: string;
+  contribution_type:
+    | 'question'
+    | 'answer'
+    | 'evidence'
+    | 'correction'
+    | 'synthesis'
+    | 'counterexample'
+    | 'explanation'
+    | 'local_context'
+    | 'direct_experience'
+    | 'moderation_concern'
+    | 'meta_discussion';
+  body_markdown_lite: string;
+  citations: Citation[];
+  metadata: Record<string, unknown>;
+  target_claim_id?: string;
+  parent_contribution_id?: string;
+  lens_id?: string;
+  attachment_refs?: string[];
+  client_draft_id: string;
+};
+```
+
+Private contribution validation SHOULD mirror server-hosted rules: typed body caps, citations for evidence/corrections, answer-to-question parent validation, maximum tree depth, lens belongs to room, and attachment validation.
+
+### 13.6 Attachment manifest
+
+```ts
+type PrivateAttachmentManifestPlainV1 = {
+  schema: 'licio.private.attachment_manifest.v1';
+  attachment_id: string;
+  room_id: string;
+  created_by_member_id: string;
+  created_at: string;
+
+  media_kind: 'image' | 'video' | 'audio' | 'document' | 'caption' | 'other';
+  content_type: string;
+  byte_size_exact_encrypted: number;
+  byte_size_class: 'tiny' | 'small' | 'medium' | 'large' | 'huge';
+
+  encrypted_chunks: Array<{
+    index: number;
+    cid: string;
+    size: number;
+    plaintext_hash_commitment: string;
+    ciphertext_hash: string;
+  }>;
+
+  accessibility: {
+    alt_text?: string;
+    captions_attachment_id?: string;
+  };
+
+  local_safety: {
+    metadata_stripped: boolean;
+    user_confirmed_right_to_share: boolean;
+  };
+};
+```
+
+The exact plaintext size SHOULD be hidden for small objects through padding. Large media can expose approximate size classes unless users choose high-padding mode.
+
+### 13.7 Local-only search index shard
+
+```ts
+type PrivateLocalSearchShardPlainV1 = {
+  schema: 'licio.private.local_search_shard.v1';
+  room_id: string;
+  snapshot_root: string;
+  shard_id: string;
+  index_kind: 'title' | 'body' | 'citation' | 'attachment_alt';
+  terms: unknown; // implementation-specific local encrypted index payload
+};
+```
+
+This object is optional and SHOULD remain local by default. Syncing encrypted search shards between devices owned by the same member MAY be supported, but cross-member search-index sync is not required and can leak metadata if poorly designed.
+
+---
+
+## 14. Operation log, conflict handling, and deterministic reduction
+
+### 14.1 Log structure
+
+The private room operation log is a signed encrypted DAG:
+
+```text
+op_1 ──┐
+       ├── op_3 ── op_5
+op_2 ──┘       └── op_6
+op_4 ─────────────┘
+```
+
+Each op includes parent op IDs. Devices exchange heads, fetch missing ancestors, validate, and reduce.
+
+### 14.2 Validation pipeline
+
+For every fetched op:
+
+1. CID exists in local blockstore.
+2. Envelope decodes under the private CID profile.
+3. Envelope signature verifies.
+4. AEAD opens using an authorized epoch key.
+5. Plaintext schema validates strictly.
+6. `room_id` matches the room.
+7. Epoch is valid for the operation type.
+8. Author device existed and had not been removed at the operation epoch.
+9. Author sequence number is monotonic per device.
+10. Parents exist or are queued as missing dependencies.
+11. Capability check passes for the operation type.
+12. Type-specific semantic validation passes.
+13. Operation is inserted into the accepted DAG or quarantined with reason.
+
+Quarantined operations MUST NOT render.
+
+### 14.3 Deterministic reducer
+
+Reducer input:
+
+```text
+accepted ops + current trust policy + local member settings
+```
+
+Reducer output:
+
+```text
+room state
+story list
+thread projections
+contribution trees
+member/capability state
+local moderation overlays
+replication state
+```
+
+Ordering:
+
+```text
+causal parents first
+then Lamport clock
+then created_at bucket
+then author_device_id
+then op_id
+```
+
+The reducer MUST be deterministic across devices.
+
+### 14.4 Conflict policy
+
+| Conflict | Resolution |
+|---|---|
+| Two story edits by same author | Latest valid author edit wins; edit history retained. |
+| Concurrent edits by different unauthorized users | Unauthorized edits rejected. |
+| Moderator tombstone vs author edit | Valid moderator tombstone hides current display. Edit history remains encrypted in log. |
+| Member removed while posting | Ops after effective removal epoch rejected. |
+| Same `client_draft_id` posted twice | Idempotent dedup per author device. |
+| Parent contribution missing | Queue until parent arrives; do not render. |
+| Parent invalid/tombstoned | Render according to tombstone policy; invalid parent rejects child unless policy allows orphan display. |
+| Unknown future op schema | Store encrypted block, do not render, show “unsupported room update” locally. |
+
+### 14.5 Snapshots
+
+Snapshots prevent unbounded replay cost.
+
+```ts
+type SnapshotCommitOp = {
+  type: 'snapshot.commit';
+  snapshot_id: string;
+  includes_ops_up_to: string[];
+  state_merkle_root: string;
+  snapshot_body_cid: string;
+  created_by_member_id: string;
+};
+```
+
+Rules:
+
+- Snapshots are optimization hints, not absolute authority.
+- A snapshot is trusted only if signed by an authorized role and verified against accepted ops.
+- Clients MAY keep old ops for audit and conflict recovery.
+- Clients MAY prune old decrypted derived state, but encrypted operation history should be retained unless room policy allows compaction and enough members agree.
+
+### 14.6 Local moderation overlays
+
+Members may maintain local-only overlays:
+
+```ts
+type LocalOverlay = {
+  hidden_members: string[];
+  hidden_contributions: string[];
+  muted_threads: string[];
+  blocked_media: string[];
+};
+```
+
+Local overlays are not synced unless the user explicitly exports/imports their preferences.
+
+---
+
+## 15. P2P sync protocol
+
+### 15.1 Sync principles
+
+1. Sync encrypted blocks and signed ops only.
+2. Do not reveal private CIDs to non-members.
+3. Do not announce private CIDs to public routing systems.
+4. Use room-epoch-scoped peer identities where practical.
+5. Batch and jitter network announcements.
+6. Support offline-first operation.
+7. Prefer lazy fetching to reduce bandwidth.
+8. Treat peers as untrusted transport sources; validate everything locally.
+
+### 15.2 Peer discovery modes
+
+| Mode | Description | Use case |
+|---|---|---|
+| Local mDNS explicit | Discover peers on same LAN only after user enables it | Homes/offices with trusted LANs |
+| Licio blind rendezvous | Licio relays opaque peer-discovery/signaling records | Default usability path |
+| Member rendezvous | A member-operated rendezvous server | Higher trust rooms |
+| Manual rendezvous | QR/file copy of peer addresses and encrypted CAR files | Maximum privacy |
+
+### 15.3 Blind rendezvous key derivation
+
+```text
+rendezvous_epoch_key = HKDF(room_epoch_secret, "licio.rendezvous.v1")
+room_blind_id = HMAC(rendezvous_epoch_key, "room" || epoch || time_bucket)
+peer_blind_id = HMAC(rendezvous_epoch_key, "peer" || device_id || epoch || time_bucket)
+```
+
+The rendezvous server stores only:
+
+```ts
+type BlindRendezvousRecord = {
+  room_blind_id: string;
+  peer_blind_id: string;
+  encrypted_announcement: string;
+  expires_at: string;
+};
+```
+
+TTL SHOULD be short, for example 5 to 30 minutes.
+
+### 15.4 WebRTC signaling
+
+Signaling messages MUST be encrypted end-to-end before they reach the server. The server only routes opaque blobs.
+
+```ts
+type EncryptedSignal = {
+  room_blind_id: string;
+  sender_blind_id: string;
+  recipient_blind_id?: string;
+  ciphertext: string;
+  expires_at: string;
+};
+```
+
+ICE candidates can reveal network information. Relay-only mode SHOULD be available for rooms whose members do not want to reveal IP addresses to one another.
+
+### 15.5 Handshake
+
+Private libp2p handshake:
+
+```text
+1. Transport connection established.
+2. Peers exchange protocol version and ephemeral peer keys.
+3. Each peer proves membership by signing a challenge with a room-valid device key.
+4. Peers derive a pairwise session key from current epoch material and ephemeral ECDH.
+5. Peers exchange encrypted head summaries.
+6. Peers request missing blocks.
+```
+
+Handshake transcript MUST be bound to room ID commitment, epoch, protocol version, and peer ephemeral keys to prevent replay or cross-room confusion.
+
+### 15.6 Head announcement
+
+```ts
+type HeadAnnouncementPlainV1 = {
+  schema: 'licio.private.heads.v1';
+  room_id: string;
+  epoch: number;
+  device_id: string;
+  known_heads: string[];
+  latest_snapshot?: string;
+  op_count_bucket: string;
+  want_ranges?: Array<{ from?: string; to?: string }>;
+};
+```
+
+This object is encrypted on the pairwise sync channel. It is not sent to the main server.
+
+### 15.7 Missing block protocol
+
+```ts
+type BlockRequestV1 = {
+  schema: 'licio.private.block_request.v1';
+  cids: string[];
+  priority: 'manifest' | 'ops' | 'thread' | 'media' | 'snapshot';
+  max_bytes: number;
+};
+
+type BlockResponseV1 = {
+  schema: 'licio.private.block_response.v1';
+  blocks: Array<{ cid: string; bytes: Uint8Array }>;
+  missing: string[];
+};
+```
+
+Peers MAY refuse large requests or require backoff. All returned blocks are verified by CID, signature, and encryption before use.
+
+### 15.8 Sync priority
+
+Fetch order:
+
+1. room manifest and current epoch metadata;
+2. membership/capability ops;
+3. operation heads and missing ancestors;
+4. thread/story index ops;
+5. visible text contributions for current viewport;
+6. summaries;
+7. media manifests;
+8. media chunks on demand;
+9. old archives and snapshots.
+
+This improves perceived performance and minimizes bandwidth.
+
+### 15.9 Offline CAR exchange
+
+Every room SHOULD support encrypted CAR export/import:
+
+```text
+Export selected encrypted blocks -> CAR file -> share via USB/AirDrop/manual upload -> import -> verify -> reduce
+```
+
+CAR exports MUST contain ciphertext only. Export UI MUST distinguish:
+
+- encrypted backup for members;
+- decrypted personal archive;
+- voluntary report package.
+
+---
+
+## 16. Local storage, pinning, backup, and availability
+
+### 16.1 Browser storage
+
+Use IndexedDB-backed blockstore/datastore for the PWA.
+
+Stores:
+
+```text
+licio_private_rooms
+licio_private_blocks
+licio_private_ops
+licio_private_heads
+licio_private_keys
+licio_private_snapshots
+licio_private_local_search
+licio_private_outbox
+licio_private_replication
+```
+
+### 16.2 Storage encryption
+
+Private blocks are already encrypted at object level. Key material and derived local indexes require additional local protection.
+
+Local key store:
+
+```ts
+type LocalPrivateKeyRecord = {
+  key_id: string;
+  room_id: string;
+  protection_mode:
+    | 'passphrase_argon2id'
+    | 'webcrypto_non_extractable_wrap'
+    | 'passkey_assisted'
+    | 'local_key_agent';
+  encrypted_key_material: string;
+  created_at: string;
+  last_verified_at?: string;
+};
+```
+
+The implementation SHOULD use Argon2id or a similarly reviewed memory-hard KDF for passphrase-protected exports. If platform/browser support is insufficient, the UI must warn users and encourage multi-device recovery.
+
+### 16.3 Availability model
+
+Because installed PWAs are not reliable always-on background daemons, private-room availability depends on replicas.
+
+Room replication targets:
+
+| Room size | Recommended encrypted replicas |
+|---:|---:|
+| 2 members | 2 devices + 1 optional pin |
+| 3-10 members | 3 devices minimum |
+| 11-50 members | 5 devices or pins |
+| High-value room | threshold-admin devices + encrypted pin policy |
+
+### 16.4 Replication health UI
+
+Room header MUST show:
+
+```text
+Replication: 2/3 recommended copies online recently
+Last full sync: 2026-06-15 13:42 local
+Missing blocks: 0 text, 3 media chunks
+Backup: recovery kit not created
+Transport: relay preferred
+```
+
+The UI SHOULD avoid showing exact peer identities unless the user opens a detailed member panel.
+
+### 16.5 Member-operated encrypted pinning
+
+P2P private rooms MAY support member-operated encrypted pins:
+
+- a local desktop node;
+- a NAS or home server;
+- a VPS controlled by a member;
+- a browser profile on another device.
+
+Pinning nodes receive ciphertext and room authorization sufficient to fetch/store encrypted blocks. Ideally they do not receive plaintext keys unless they are also a member device. A “dumb encrypted pin” can store blocks without decrypting them.
+
+Licio-controlled default pinning is out of scope for maximum privacy. If added later, it must be explicit, separate from the main server, blind to room identity/content, and never enabled by default.
+
+### 16.6 Backups
+
+Backup types:
+
+| Backup | Contents | Who can use it |
+|---|---|---|
+| Encrypted block backup | Ciphertext blocks only | Members with keys |
+| Recovery kit | Member/device recovery secret | Owner or threshold recovery group |
+| Decrypted personal archive | Plaintext export | Exporting user; highly sensitive |
+| Voluntary report package | Selected plaintext + proofs | Licio safety team if submitted |
+
+Backups MUST be clearly labeled. Decrypted exports require a strong warning.
+
+---
+
+## 17. Media and attachment pipeline
+
+### 17.1 Local-only media handling
+
+P2P private media MUST NOT use server upload scan gates or server object storage. The client handles:
+
+1. file selection;
+2. local MIME sniffing and size checks;
+3. local metadata stripping;
+4. optional local thumbnail/poster generation;
+5. required alt text for images;
+6. caption support for video;
+7. chunking;
+8. encryption;
+9. encrypted manifest creation;
+10. P2P block sync.
+
+### 17.2 Metadata stripping
+
+Images and videos SHOULD have metadata stripped locally before encryption. If a file type cannot be safely stripped, the UI must warn:
+
+```text
+This file may contain metadata such as device, location, author, or edit history. Licio cannot inspect private-room files on the server, so metadata removal must happen on your device.
+```
+
+### 17.3 Local safety controls
+
+Because server scanning is impossible without disclosure, members get local controls:
+
+- never auto-download large media;
+- blur unknown media by default;
+- hide media from unverified members;
+- block file types locally;
+- per-member media mute;
+- report/export package for selected media;
+- optional client-side perceptual hash warning for the user's own blocked library, without server lookup.
+
+### 17.4 Streaming
+
+Large media should use encrypted chunk manifests with range-like retrieval:
+
+```text
+media manifest -> chunk index -> fetch encrypted chunks lazily -> decrypt locally -> stream to media element via MediaSource where supported
+```
+
+The client SHOULD prefetch only the next few chunks and SHOULD not fetch full large videos automatically.
+
+### 17.5 Accessibility
+
+Image posts require alt text. Video posts SHOULD support captions through encrypted caption attachments or inline caption text. Accessibility requirements do not weaken privacy: alt text and captions are private-room content and encrypted like everything else.
+
+---
+
+## 18. Search, ranking, recommendations, notifications, and analytics
+
+### 18.1 Search
+
+P2P private search is local-only.
+
+Forbidden:
+
+```text
+server full-text indexing
+server embeddings
+server query suggestions
+server query logs
+server private content snippets
+server typo correction
+server semantic search API
+```
+
+Allowed:
+
+```text
+local decrypted in-memory search
+local encrypted index shards
+per-device search history stored locally only
+manual encrypted index sync between a user's own devices
+```
+
+### 18.2 Ranking and recommendations
+
+P2P private content MUST NOT enter Licio PWAtt ranking, public feeds, topic surfaces, global search, cross-room recommendations, invariant services, or attention pipelines.
+
+Private room UI may use local sorting:
+
+- unread first;
+- recent local activity;
+- pinned by room-local moderators;
+- thread state;
+- user-selected filters;
+- local-only “needs reply” markers.
+
+Local sorting must be explainable and must not create global distribution signals.
+
+### 18.3 Attention and analytics
+
+No private-room attention data leaves the device.
+
+Allowed local-only data:
+
+- local read/unread state;
+- local draft state;
+- local notification preferences;
+- local last-opened timestamp;
+- local media download choices.
+
+Forbidden server data:
+
+- dwell time;
+- scroll depth;
+- thread open counts;
+- private notification opens;
+- contribution impressions;
+- per-room activity analytics;
+- private-room funnel metrics.
+
+### 18.4 Notifications
+
+Notification modes:
+
+| Mode | Payload | Server knowledge | Default |
+|---|---|---|---:|
+| Local-only | Generated while app/device has state | None | Yes |
+| Blind push ping | “Open app to sync” with opaque payload | Timing + push endpoint | Optional |
+| Content push | Thread title/body/sender | Too much | Forbidden |
+
+Blind push payload:
+
+```ts
+type BlindPrivatePushV1 = {
+  schema: 'licio.private.blind_push.v1';
+  opaque_room_hint: string;
+  wake_reason: 'sync_available';
+  nonce: string;
+};
+```
+
+Even blind push can leak timing. High-risk rooms should disable it.
+
+---
+
+## 19. Moderation, reports, trust, and safety
+
+### 19.1 Room-local moderation
+
+Room-local moderators may create signed ops:
+
+- contribution tombstone;
+- thread restriction;
+- member warning;
+- member removal;
+- media hide recommendation;
+- room rule update;
+- summary/steward note.
+
+These are private-room operations. They are not platform moderation decisions.
+
+### 19.2 Member-local controls
+
+Every member can:
+
+- leave room;
+- delete local room data;
+- hide a contribution locally;
+- mute/block a member locally;
+- disable media auto-fetch;
+- export encrypted backup;
+- create a voluntary report package.
+
+### 19.3 Platform moderation boundary
+
+Licio platform staff can moderate only:
+
+- listed directory names/descriptions/avatars;
+- abuse of Licio-controlled rendezvous infrastructure;
+- public spam linking to invites;
+- voluntary report packages submitted by a member.
+
+They cannot proactively inspect private content.
+
+### 19.4 Voluntary report package
+
+```ts
+type VoluntaryPrivateReportPackageV1 = {
+  schema: 'licio.private.report_package.v1';
+  report_id: string;
+  reporter_account_id?: string;
+  room_stub_id?: string;
+  disclosed_items: Array<{
+    kind: 'story' | 'thread' | 'contribution' | 'media' | 'membership_op';
+    plaintext_json?: unknown;
+    plaintext_media_file?: string;
+    envelope_cid?: string;
+    signatures: string[];
+    author_device_keys: string[];
+    context_notes?: string;
+  }>;
+  redaction_notes: string;
+  reporter_attestation: string;
+  created_at: string;
+};
+```
+
+The UI MUST preview exactly what will be disclosed. Submission is an intentional privacy boundary crossing.
+
+### 19.5 Trust indicators
+
+Private room UI should show:
+
+- verified/unverified member devices;
+- recent membership changes;
+- room safety number changed warning;
+- update-channel trust state;
+- replication health;
+- backup health;
+- transport mode;
+- whether blind push is enabled.
+
+---
+
+## 20. User experience requirements and mandatory copy
+
+### 20.1 Naming
+
+Use these labels consistently:
+
+- **Public room**: server-hosted and public.
+- **Members-only server room**: server-hosted and membership-gated; Licio can technically access content.
+- **Private P2P room**: end-to-end encrypted and member-hosted.
+
+Do not call server-hosted restricted rooms “private” without a qualifier.
+
+### 20.2 Creation screen requirements
+
+Creation screen fields:
+
+```text
+Room name
+Directory mode: unlisted default, listed optional, detached advanced
+Transport mode: relay preferred default
+Replication target
+Allow blind push: off by default for high privacy, on optional
+Require admin approval for invites: on by default
+Recovery kit: create now / remind later
+```
+
+Mandatory acknowledgment checkboxes:
+
+- Licio cannot read or recover this room.
+- If keys are lost, access can be lost permanently.
+- Members can copy or disclose content.
+- Removing a member does not delete content they already received.
+- Availability depends on member devices or member-operated pins.
+
+### 20.3 Room header requirements
+
+Display compact status:
+
+```text
+Private P2P · Unlisted · Relay preferred · 3/3 replicas · Backup created · Safety number verified
+```
+
+Clicking expands details.
+
+### 20.4 Invite UX
+
+Invite screen MUST show:
+
+- role granted;
+- expiration;
+- max uses;
+- approval requirement;
+- warning not to paste invite links in public spaces;
+- copy/QR/export options;
+- revoke invite action.
+
+### 20.5 Removal UX
+
+Removal dialog MUST say:
+
+```text
+This stops the member from reading future room updates after keys rotate. It cannot delete or recall content they already downloaded or copied.
+```
+
+### 20.6 Update trust UX
+
+If the current private-mode client bundle is not in the transparency log, not signed by required maintainers, or differs from the pinned hash, private rooms should lock with a clear message:
+
+```text
+Private room locked: this Licio build has not passed private-mode code verification. Your room keys were not unlocked. You can keep using public Licio, review the update, or switch to a verified build.
+```
+
+---
+
+## 21. Server API specification
+
+### 21.1 Create private room stub
+
+```http
+POST /v1/private-rooms
+```
+
+Request:
+
+```ts
+type PrivateRoomCreateStubRequest = {
+  directory_mode: 'listed' | 'unlisted';
+  display_name?: string;
+  display_description?: string;
+  display_avatar_public_cid?: string;
+  room_public_key: string;
+  manifest_key_commitment: string;
+  rendezvous_policy: 'licio_blind' | 'member_rendezvous' | 'manual_only';
+  bootstrap_hints?: unknown[];
+  signed_stub: unknown;
+  stub_signature: string;
+};
+```
+
+Response:
+
+```ts
+type PrivateRoomCreateStubResponse = {
+  room_server_id: string;
+  stub_id: string;
+  bootstrap_endpoints: string[];
+  created_at: string;
+};
+```
+
+Validation:
+
+- Authenticated account required for listed/unlisted stub creation.
+- No private CIDs allowed.
+- No operation heads allowed.
+- No member list allowed.
+- Display fields allowed only for `listed` rooms.
+- Rate limit by non-reversible account reference, not IP in app logic.
+
+### 21.2 Fetch bootstrap stub
+
+```http
+GET /v1/private-rooms/:roomServerId/bootstrap
+```
+
+For listed rooms, returns public stub fields. For unlisted rooms, requires invite-derived blind token.
+
+### 21.3 Update stub
+
+```http
+PATCH /v1/private-rooms/:roomServerId
+```
+
+Allowed updates:
+
+- listed display name/description/avatar;
+- rendezvous policy;
+- bootstrap hints;
+- latest manifest commitment.
+
+Forbidden updates:
+
+- member list;
+- private CIDs;
+- op heads;
+- content metadata;
+- activity timestamps;
+- unread counts.
+
+### 21.4 Delete/delist stub
+
+```http
+DELETE /v1/private-rooms/:roomServerId
+POST /v1/private-rooms/:roomServerId/delist
+```
+
+Deleting a stub does not delete member-held content. UI must say “remove Licio directory/bootstrap record,” not “delete private room for everyone.”
+
+### 21.5 Blind rendezvous endpoints
+
+```http
+POST /v1/private-rendezvous/announce
+POST /v1/private-rendezvous/poll
+POST /v1/private-rendezvous/signal
+```
+
+All payloads are opaque:
+
+```ts
+type RendezvousAnnounceRequest = {
+  room_blind_id: string;
+  peer_blind_id: string;
+  encrypted_announcement: string;
+  ttl_seconds: number;
+};
+```
+
+Limits:
+
+- short TTL;
+- bounded payload size;
+- blind ID rate limiting;
+- aggregate abuse metrics only;
+- no content inspection;
+- no long-term storage.
+
+### 21.6 Guard existing endpoints
+
+Existing endpoints MUST reject P2P rooms:
+
+```text
+POST /v1/stories with p2p room_id -> 409 p2p_room_requires_client_sync
+POST /v1/contributions with p2p thread_id -> 409 p2p_room_requires_client_sync
+GET /v1/rooms/:id/feed for p2p room -> 404 or p2p_room_local_only response
+GET /v1/search -> never returns p2p content
+admin APIs -> cannot expose p2p content
+```
+
+Response example:
+
+```json
+{
+  "error": {
+    "code": "p2p_room_requires_client_sync",
+    "message": "Private P2P rooms are stored and synced on members' devices, not through this server endpoint."
+  }
+}
+```
+
+---
+
+## 22. Client architecture and package layout
+
+### 22.1 New shared package
+
+```text
+packages/private-p2p/
+  src/schemas/
+    manifest.ts
+    envelope.ts
+    operations.ts
+    invites.ts
+    reports.ts
+    local-index.ts
+  src/crypto/
+    aead.ts
+    hpke.ts
+    mls.ts
+    kdf.ts
+    signatures.ts
+    canonical.ts
+  src/ipld/
+    cid-profile.ts
+    block-codecs.ts
+    car.ts
+  src/reducer/
+    validate-op.ts
+    reduce-room.ts
+    conflicts.ts
+    snapshots.ts
+  src/sync/
+    protocol.ts
+    head-exchange.ts
+    reconciliation.ts
+  src/testing/
+    vectors.ts
+    generators.ts
+```
+
+### 22.2 Web integration
+
+```text
+apps/web/src/private-p2p/
+  node/
+    helia-node.ts
+    libp2p-config.ts
+    private-blockstore.ts
+  crypto/
+    key-store.ts
+    key-agent-client.ts
+    recovery-kit.ts
+  sync/
+    sync-engine.ts
+    rendezvous-client.ts
+    peer-session.ts
+    block-exchange.ts
+    offline-car.ts
+  state/
+    room-db.ts
+    reducer-worker.ts
+    local-search.ts
+    replication-health.ts
+  ui/
+    PrivateRoomShell.tsx
+    PrivateRoomCreate.tsx
+    PrivateInvitePanel.tsx
+    PrivateMemberPanel.tsx
+    PrivateThreadView.tsx
+    PrivateComposer.tsx
+    PrivateReplicationHealth.tsx
+    PrivateBackupPanel.tsx
+```
+
+### 22.3 Worker architecture
+
+Use dedicated workers for expensive/private operations:
+
+```text
+main UI thread
+  -> private room worker: reducer, local search, sync orchestration
+  -> crypto worker: encryption/decryption/signing where possible
+  -> media worker: metadata stripping, chunking, thumbnails
+```
+
+Workers reduce UI blocking and isolate private code paths. They do not remove the need for update-channel protection.
+
+### 22.4 Service worker role
+
+The service worker may:
+
+- cache the verified private-mode bundle;
+- enforce update pinning;
+- receive blind push wakeups;
+- trigger a sync attempt when allowed by browser lifecycle;
+- serve local app assets offline.
+
+It must not be treated as an always-on P2P daemon.
+
+### 22.5 Key agent interface
+
+For Tier 3, define local agent calls:
+
+```text
+POST http://127.0.0.1:<random>/licio/private/sign
+POST http://127.0.0.1:<random>/licio/private/decrypt-key
+POST http://127.0.0.1:<random>/licio/private/mls-commit
+POST http://127.0.0.1:<random>/licio/private/export-recovery
+```
+
+The local agent must authenticate the web origin, display user approval for sensitive operations, and never expose raw room keys to web JavaScript.
+
+---
+
+## 23. Integration changes for the current Licio codebase
+
+### 23.1 Shared schemas
+
+Update `packages/shared/src/schemas/room.ts`:
+
+- add `storage_mode`, `authority_model`, `directory_mode`;
+- add coherence checks;
+- add `privateRoomStubSchema`;
+- ensure `can_post` is false or omitted for P2P rooms in server projections because posting happens locally.
+
+Add `packages/private-p2p` schemas rather than mixing private op schemas into server story/contribution schemas.
+
+### 23.2 Database
+
+Add enums/tables:
+
+```sql
+CREATE TYPE room_storage_mode AS ENUM ('server', 'p2p');
+CREATE TYPE room_authority_model AS ENUM ('platform', 'room_keys');
+CREATE TYPE room_directory_mode AS ENUM ('listed', 'unlisted', 'detached');
+
+ALTER TABLE rooms
+  ADD COLUMN storage_mode room_storage_mode NOT NULL DEFAULT 'server',
+  ADD COLUMN authority_model room_authority_model NOT NULL DEFAULT 'platform',
+  ADD COLUMN directory_mode room_directory_mode NULL,
+  ADD COLUMN p2p_stub_id uuid NULL;
+```
+
+Create `private_room_stubs` and `private_rendezvous_records` with strict field allowlists.
+
+### 23.3 Ingestion submission guard
+
+In `apps/api/src/ingestion/submission.ts`, before auto-joining or visibility derivation:
+
+```ts
+if (room.storageMode === 'p2p') {
+  return {
+    ok: false,
+    rejection: {
+      status: 409,
+      code: 'p2p_room_requires_client_sync',
+      message: 'Private P2P rooms are created and synced locally.'
+    }
+  };
+}
+```
+
+This prevents the existing path from creating `stories` and thread shells for P2P rooms.
+
+### 23.4 Forum contribution guard
+
+In server contribution routes/services, reject P2P thread/room IDs. In practice P2P thread IDs should never exist server-side, so this is mostly defense in depth.
+
+### 23.5 Ranking retrievers
+
+Every retriever must include:
+
+```text
+rooms.storage_mode = 'server'
+```
+
+Global, topic, and room surfaces must never retrieve P2P private content.
+
+### 23.6 Search
+
+Server search indexing and query results must include only server-hosted rooms:
+
+```text
+stories.room_id -> rooms.storage_mode = 'server'
+```
+
+### 23.7 Event pipeline
+
+Add a validation gate:
+
+```text
+if event payload references p2p room -> reject + security metric
+```
+
+Because private-room events should never be emitted, this gate catches bugs.
+
+### 23.8 Uploads
+
+Server upload endpoints must not attach uploads to P2P room content. P2P media uses local encrypted attachments. If a user tries to use server upload UI inside a P2P room, the client should hide it and the server should reject it.
+
+### 23.9 API routing
+
+Add:
+
+```text
+apps/api/src/routes/private-rooms.ts
+apps/api/src/routes/private-rendezvous.ts
+```
+
+Mount under `/v1/private-rooms` and `/v1/private-rendezvous`.
+
+### 23.10 CI invariants
+
+Add gates:
+
+```text
+check:no-p2p-server-content
+check:no-private-cid-egress
+check:private-rendezvous-schema
+check:private-bundle-transparency
+check:p2p-endpoint-rejections
+check:p2p-ranking-exclusion
+check:p2p-search-exclusion
+```
+
+---
+
+## 24. Migration from existing server-private rooms
+
+### 24.1 Core rule
+
+Existing server-hosted private/restricted rooms cannot be silently upgraded into real private rooms. Their historical content has already existed on the server. Migration creates a new P2P room and optionally imports history through a member's client.
+
+### 24.2 Migration phases
+
+#### Phase 1 — Rename and disclose
+
+- Rename current “private” rooms in the UI to “Members-only server rooms” or “Restricted server rooms.”
+- Add explanation: visible only to members in the app, but hosted on Licio servers.
+
+#### Phase 2 — Create P2P destination
+
+- Room owner creates a new P2P private room.
+- Client generates keys and manifest locally.
+- Server stores only a stub if unlisted/listed.
+
+#### Phase 3 — Choose import mode
+
+| Import mode | Description | Disclosure |
+|---|---|---|
+| Fresh start | No old content imported | Best privacy going forward |
+| Selected import | User selects threads/posts to re-encrypt locally | Imported items were previously server-hosted |
+| Full import | Client fetches all old room content and re-encrypts into P2P | Highest convenience, not retroactive privacy |
+| Redacted import | Titles/summaries only | Lower leakage of old content |
+
+#### Phase 4 — Re-invite members
+
+Server subscriptions do not grant P2P access. Members must join through P2P invites.
+
+#### Phase 5 — Freeze old room
+
+Old server room becomes read-only with a banner pointing to the P2P replacement.
+
+#### Phase 6 — Purge/minimize server history
+
+Where policy and law permit, purge or minimize old server data:
+
+- stories;
+- threads;
+- contributions;
+- media uploads;
+- search documents;
+- ranking candidates;
+- content events;
+- review queues;
+- derived summaries;
+- caches.
+
+Any retained legal/audit records must be disclosed as server-retained historical artifacts, not private P2P content.
+
+### 24.3 Migration warning copy
+
+```text
+This migration improves privacy from this point forward. Imported history was previously stored on Licio servers, so migration cannot make past server access impossible. You may start fresh instead.
+```
+
+---
+
+## 25. Efficiency and performance plan
+
+### 25.1 Efficiency goals
+
+- Open a private room shell in under 1 second from local cache.
+- Show recent thread list before all media is synced.
+- Sync text ops before media chunks.
+- Avoid repeated full DAG replay through snapshots.
+- Avoid public routing overhead.
+- Keep small-operation overhead bounded despite padding.
+- Support low-bandwidth and intermittent mobile devices.
+
+### 25.2 Lazy sync
+
+Fetch sequence:
+
+```text
+manifest -> membership/capabilities -> heads -> recent text ops -> current thread viewport -> summaries -> media manifests -> media chunks
+```
+
+### 25.3 Batching
+
+Batch:
+
+- head announcements;
+- block requests;
+- small ops into encrypted CAR segments;
+- membership verification updates;
+- local search index rebuilds.
+
+Do not batch unrelated rooms together in a way that links them.
+
+### 25.4 Padding policy
+
+Suggested default:
+
+| Object class | Padding |
+|---|---|
+| membership ops | 4 KiB or 16 KiB |
+| small contribution ops | 4 KiB |
+| story/thread metadata | 4 KiB |
+| search shards | 16 KiB+ |
+| media manifests | 4 KiB |
+| media chunks | no full padding by default; size class disclosed |
+
+High-privacy room mode can pad more aggressively at higher bandwidth cost.
+
+### 25.5 Set reconciliation
+
+v1 can use simple head exchange and ancestor fetch. v2 SHOULD add efficient set reconciliation:
+
+- sorted op ID ranges;
+- compact Bloom/Golomb filters;
+- Merkle segment trees;
+- per-thread sub-DAG summaries.
+
+Avoid exposing op IDs to non-members.
+
+### 25.6 Snapshot cadence
+
+Suggested:
+
+- create snapshot every 1,000 accepted ops or 7 days, whichever comes first;
+- create immediate snapshot after large import;
+- create snapshot after membership churn;
+- allow manual “optimize room storage” action.
+
+### 25.7 Local search indexing
+
+Build search indexes incrementally in a worker. Index only decrypted local content. Encrypt index shards at rest. Rebuild on schema upgrade or snapshot verification failure.
+
+### 25.8 Media optimization
+
+- Generate local encrypted thumbnails/posters.
+- Stream video chunks lazily.
+- Support pause/resume.
+- Deduplicate identical encrypted chunks only within the same object where it does not leak cross-object equality.
+- Do not use convergent encryption for cross-user media deduplication.
+
+### 25.9 Battery/network controls
+
+User settings:
+
+- sync on Wi-Fi only;
+- do not auto-fetch media;
+- low-power mode disables background sync attempts;
+- relay-only mode;
+- manual sync only;
+- export/import via file.
+
+---
+
+## 26. Security, privacy, and correctness test plan
+
+### 26.1 Unit tests
+
+- strict zod schema tests for every private type;
+- canonical encoding stability tests;
+- KDF domain separation tests;
+- nonce uniqueness tests;
+- envelope encrypt/decrypt tests;
+- signature verification tests;
+- capability validation matrix;
+- reducer determinism tests;
+- conflict-resolution tests;
+- snapshot verification tests.
+
+### 26.2 Cryptographic tests
+
+- Use official vectors for HPKE.
+- Use MLS library test vectors where available.
+- Differential-test canonical encodings.
+- Fuzz malformed envelopes and ops.
+- Property-test that unauthorized ops never render.
+- Property-test that removed members cannot decrypt future epoch test objects.
+
+### 26.3 Network/privacy tests
+
+Automated Playwright/browser tests with request capture:
+
+- create room;
+- invite member;
+- post story;
+- comment;
+- attach media;
+- sync;
+- remove member;
+- create future content.
+
+Assert no outbound HTTP/WebSocket request contains:
+
+- private title/body;
+- private URL;
+- private CID;
+- op ID;
+- thread ID;
+- contribution ID;
+- member list;
+- invite fragment;
+- plaintext key;
+- exact room ID for unlisted/detached rooms.
+
+### 26.4 Server database tests
+
+After P2P activity, assert:
+
+```sql
+SELECT count(*) FROM stories WHERE room_id = :p2p_room_id = 0;
+SELECT count(*) FROM threads WHERE room_id = :p2p_room_id = 0;
+SELECT count(*) FROM event_store WHERE payload::text LIKE '%p2p_room%' = 0;
+SELECT count(*) FROM search_index WHERE room_id = :p2p_room_id = 0;
+SELECT count(*) FROM ranking_candidates WHERE room_id = :p2p_room_id = 0;
+```
+
+Exact table names should match implementation.
+
+### 26.5 P2P sync tests
+
+- two peers online;
+- offline edits on both peers;
+- conflict merge;
+- missing parent fetch;
+- media partial fetch;
+- snapshot restore;
+- CAR export/import;
+- relay-only mode;
+- rendezvous unavailable;
+- malicious peer sends invalid op;
+- malicious peer sends wrong block for CID;
+- malicious peer replays old epoch op;
+- removed peer attempts sync.
+
+### 26.6 Update-channel tests
+
+- unsigned private-mode bundle locks room;
+- transparency-log mismatch locks room;
+- service worker cannot silently load dynamic remote private code;
+- CSP blocks inline/eval paths;
+- private keys are not unlocked before bundle verification;
+- local key agent refuses unverified origin/bundle.
+
+### 26.7 Manual security review gates
+
+Before launch:
+
+- external cryptography review;
+- browser storage/key management review;
+- rendezvous metadata review;
+- red-team malicious server update scenario;
+- malicious member scenario;
+- incident drill for leaked invite;
+- incident drill for compromised member device;
+- usability study for recovery warnings.
+
+---
+
+## 27. Operational controls and incident response
+
+### 27.1 Operational logging
+
+Allowed logs:
+
+```text
+private_room_stub_created
+private_rendezvous_rate_limited
+private_rendezvous_payload_too_large
+private_bundle_verification_failed
+```
+
+Forbidden logs:
+
+```text
+private CID
+private op ID
+private room name for unlisted/detached rooms
+invite fragment
+member list
+thread title
+message body
+media filename
+exact per-room activity
+```
+
+### 27.2 Abuse controls for rendezvous
+
+Because the server cannot inspect payloads, use:
+
+- payload size limits;
+- TTL limits;
+- blind-ID rate limits;
+- proof-of-work or account-scoped blind tokens if needed;
+- aggregate anomaly detection without room identity;
+- automatic expiry and deletion.
+
+### 27.3 Incident: leaked invite
+
+User actions:
+
+- revoke invite capability;
+- rotate room epoch if invite may have been used;
+- review pending/accepted members;
+- show membership changes since invite creation.
+
+Server action:
+
+- cannot remove private members;
+- may rate-limit invite spam on Licio public surfaces;
+- may delist public stub if directory abuse.
+
+### 27.4 Incident: compromised device
+
+Room admin actions:
+
+- remove device;
+- rotate epoch;
+- create new recovery kit;
+- mark old device compromised;
+- optionally tombstone suspicious ops after review.
+
+Disclosure:
+
+```text
+Future room content is protected after rotation. Content already present on the compromised device may have been exposed.
+```
+
+### 27.5 Incident: malicious client update
+
+Controls:
+
+- transparency log detects or prevents untrusted bundle;
+- private rooms lock before key unlock;
+- publish signed incident notice;
+- rotate room keys after verified safe client is installed;
+- encourage local key agent for high-risk rooms.
+
+---
+
+## 28. Workstreams and rollout plan
+
+### WS-P2P-0 — Specification and terminology
+
+- Rename current private server rooms in UI/docs.
+- Add room class model to SPEC.
+- Add user-facing privacy promise matrix.
+
+### WS-P2P-1 — Server schema and hard non-storage gates
+
+- Add room storage/authority/directory axes.
+- Add private room stubs.
+- Add rendezvous tables with TTL.
+- Add endpoint rejection guards.
+- Add DB/CI no-storage tests.
+
+### WS-P2P-2 — Private schemas and canonical encoding
+
+- Create `packages/private-p2p`.
+- Add zod schemas.
+- Add canonical CBOR/IPLD encoding.
+- Add envelope profile and tests.
+
+### WS-P2P-3 — Crypto foundation
+
+- Integrate reviewed MLS and HPKE libraries.
+- Implement key derivation and envelope encryption.
+- Implement local key store.
+- Implement recovery kit.
+- Add crypto vectors and fuzzing.
+
+### WS-P2P-4 — Helia/libp2p private profile
+
+- Add separate private Helia node/profile.
+- Disable public DHT/gateways/delegated routing/IPNI/reprovide.
+- Add private block protocol.
+- Add IDB blockstore.
+
+### WS-P2P-5 — Operation log and reducer
+
+- Implement membership/capability ops.
+- Implement story/thread/contribution ops.
+- Implement deterministic reducer.
+- Implement snapshots.
+- Implement local-only search.
+
+### WS-P2P-6 — Sync and rendezvous
+
+- Implement blind rendezvous.
+- Implement encrypted signaling.
+- Implement peer handshake.
+- Implement head exchange and block fetch.
+- Implement relay-only mode.
+
+### WS-P2P-7 — Private room UI
+
+- Creation wizard.
+- Room shell.
+- Composer.
+- Thread view.
+- Invite/member panels.
+- Replication/backup/trust indicators.
+
+### WS-P2P-8 — Media
+
+- Local metadata stripping.
+- Attachment manifests.
+- Media chunking/streaming.
+- Alt text/captions.
+- Local media safety controls.
+
+### WS-P2P-9 — Migration
+
+- Restricted server room disclosure.
+- Migration wizard.
+- Selected import and full import.
+- Archive old room.
+- Purge/minimization tooling.
+
+### WS-P2P-10 — Hardened trust
+
+- Reproducible private-mode bundle.
+- Signed release manifest.
+- Code transparency log.
+- Service worker update pinning.
+- Optional local key agent.
+
+### WS-P2P-11 — Audit and launch
+
+- External crypto review.
+- Privacy red-team.
+- Malicious update drill.
+- UX recovery study.
+- Documentation and support runbooks.
+
+---
+
+## 29. Launch checklist
+
+P2P private rooms are launch-ready only if every item is true:
+
+### Product and UX
+
+- [ ] Current server-private rooms are no longer labeled simply “private.”
+- [ ] P2P private creation includes mandatory disclosures.
+- [ ] Removal disclosure explains no retroactive deletion.
+- [ ] Recovery UX is clear and tested.
+- [ ] Replication health is visible.
+- [ ] Invite risks are clear.
+
+### Server non-storage
+
+- [ ] P2P rooms cannot create server stories.
+- [ ] P2P rooms cannot create server contributions.
+- [ ] P2P rooms never enter ranking/search.
+- [ ] P2P content events cannot be emitted.
+- [ ] Server logs exclude private CIDs/op IDs/invite fragments.
+- [ ] DB tests prove no private content rows after E2E tests.
+
+### Crypto
+
+- [ ] MLS add/remove works across devices.
+- [ ] HPKE invites use reviewed libraries and vectors.
+- [ ] Epoch rotation works.
+- [ ] Removed devices fail to decrypt future content.
+- [ ] Nonce uniqueness tests pass.
+- [ ] External crypto review complete.
+
+### P2P/IPFS
+
+- [ ] Private Helia profile disables public DHT/gateways/delegated routing/IPNI/reprovide.
+- [ ] Private CIDs never go to public gateways.
+- [ ] Block exchange validates CID/signature/AEAD.
+- [ ] Relay-only mode works.
+- [ ] Offline CAR import/export works.
+
+### Trust/update channel
+
+- [ ] Private-mode bundle is reproducible.
+- [ ] Bundle hash is signed and in transparency log.
+- [ ] Service worker pins verified private bundle.
+- [ ] Private rooms lock on unverified bundle.
+- [ ] CSP/Trusted Types/no dynamic code checks pass.
+- [ ] Local key agent prototype or documented Tier 1 limitation exists.
+
+### Safety
+
+- [ ] Local moderation ops work.
+- [ ] Member block/hide works.
+- [ ] Voluntary report package preview works.
+- [ ] Directory abuse tools work for listed stubs.
+- [ ] Support docs do not promise impossible recovery/moderation.
+
+---
+
+## 30. Open questions
+
+1. Which audited MLS implementation will be used in the TypeScript/browser stack, and does it support required test vectors and export secrets cleanly?
+2. Which HPKE suite and library will be pinned for invite bootstrap?
+3. Is Tier 3 local key agent in scope for v1 launch, or will v1 launch with Tier 1/Tier 2 disclosures only?
+4. Should detached rooms be available in the first release or hidden behind an advanced flag?
+5. What is the exact browser support matrix for WebRTC/WebTransport/libp2p transports in the target PWA environments?
+6. What local metadata-stripping library is acceptable for images and videos without server scanning?
+7. What is the default padding policy for mobile users with limited bandwidth?
+8. Should rooms support threshold admin membership changes in v1, or begin with admin-only changes?
+9. How will private-mode reproducible builds be independently verified and displayed to users?
+10. How much old server-private history should migration import by default?
+
+---
+
+## 31. References
+
+These references informed the design and should be linked from the implementation PR/spec update:
+
+1. IPFS Privacy and Encryption Best Practices: https://docs.ipfs.tech/how-to/privacy-best-practices/
+2. IPFS Content Identifiers / CIDv1 guidance: https://docs.ipfs.tech/concepts/content-addressing/
+3. Helia TypeScript IPFS implementation: https://github.com/ipfs/helia
+4. libp2p transport documentation: https://docs.libp2p.io/concepts/transports/overview/
+5. RFC 9420, Messaging Layer Security: https://www.rfc-editor.org/rfc/rfc9420
+6. RFC 9180, Hybrid Public Key Encryption: https://www.rfc-editor.org/rfc/rfc9180
+7. MDN WebRTC signaling overview: https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API/Signaling_and_video_calling
+8. MDN Service Worker API: https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API
+9. MDN Web Crypto API: https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API
+10. RFC 8291, Message Encryption for Web Push: https://www.rfc-editor.org/rfc/rfc8291
+
+---
+
+## Appendix A — Minimal P2P room creation sequence
+
+```text
+1. User clicks “Create Private P2P Room”.
+2. Client shows disclosure and requires acknowledgement.
+3. Client verifies private-mode app bundle signature/hash.
+4. Client generates device signing key and HPKE key.
+5. Client creates MLS group.
+6. Client derives epoch 0 app secrets.
+7. Client creates encrypted room manifest and membership op.
+8. Client stores encrypted blocks in local blockstore.
+9. Client optionally creates server stub with no content/CIDs/heads.
+10. Client starts blind rendezvous if enabled.
+11. UI renders from local reducer state.
+```
+
+## Appendix B — Minimal invite sequence
+
+```text
+1. Admin creates invite op.
+2. Client creates sealed invite URL with fragment secret.
+3. Recipient opens invite.
+4. Recipient client generates device keys and KeyPackage.
+5. Recipient sends encrypted blinded join request.
+6. Admin device validates and commits MLS Add.
+7. Admin sends MLS Welcome and encrypted bootstrap heads.
+8. Recipient syncs encrypted blocks from peers.
+9. Recipient verifies room safety number.
+```
+
+## Appendix C — Minimal removal sequence
+
+```text
+1. Admin selects member/device removal.
+2. UI warns removal is not retroactive deletion.
+3. Admin signs remove op.
+4. MLS Remove commit creates new epoch.
+5. Sync/rendezvous topics rotate.
+6. Future content uses new epoch keys.
+7. Removed device can no longer authenticate or decrypt future ops.
+```
+
+## Appendix D — Server no-content assertion pseudocode
+
+```ts
+async function assertNoP2PServerContent(roomId: string) {
+  expect(await db.stories.count({ roomId })).toBe(0);
+  expect(await db.threads.count({ roomId })).toBe(0);
+  expect(await db.search.count({ roomId })).toBe(0);
+  expect(await db.rankingCandidates.count({ roomId })).toBe(0);
+  expect(await db.events.countPayloadContaining(roomId)).toBe(0);
+  expect(await db.uploads.countOwnedByRoom(roomId)).toBe(0);
+}
+```
+
+## Appendix E — Required user-facing privacy matrix
+
+| Question | Public room | Members-only server room | Private P2P room |
+|---|---|---|---|
+| Can Licio host content? | Yes | Yes | No |
+| Can Licio admins technically access content? | Yes | Yes | No |
+| Can content be globally ranked? | Yes | No, except server-local surfaces | No |
+| Can Licio recover lost access? | Account-dependent | Account-dependent | No |
+| Can members leak content? | Yes | Yes | Yes |
+| Can removed members read old downloaded content? | Yes | Yes | Yes |
+| Does availability depend on member devices? | No | No | Yes |
+| Are public IPFS gateways used? | Maybe for public content if ever added | No need | Forbidden |
