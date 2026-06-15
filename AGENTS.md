@@ -716,7 +716,7 @@ licio/
 │   ├── OFFLINE_SPEC.md          -- LCAP v0.2 delay-tolerant sync (WS-R extension spec)
 │   ├── PRIVATE_SPEC.md          -- E2EE private P2P rooms (WS-S extension spec)
 │   ├── planning/                -- per-workstream planning documents
-│   │   ├── 00-index.md          --   master index (~856 atomic tasks)
+│   │   ├── 00-index.md          --   master index (~858 atomic tasks)
 │   │   ├── 01-repository-foundation.md  -- WS-0
 │   │   ├── 02-doctrine-and-policy.md    -- WS-A
 │   │   ├── 03-design-system.md          -- WS-B
@@ -787,7 +787,7 @@ dependency:
 
 ## Reading large files
 
-`docs/SPEC.md` and `docs/planning/00-index.md` (~646 tasks) are large.
+`docs/SPEC.md` and `docs/planning/00-index.md` (~858 tasks) are large.
 Read in chunks with `Read(file_path, offset=…, limit=500)` rather than
 the whole file.
 
@@ -1134,7 +1134,7 @@ Status:
 
 Read the per-workstream planning document under `docs/planning/`
 before starting new work.  The master index at
-`docs/planning/00-index.md` lists all ~856 atomic tasks.
+`docs/planning/00-index.md` lists all ~858 atomic tasks.
 
 ## Documentation rules
 
