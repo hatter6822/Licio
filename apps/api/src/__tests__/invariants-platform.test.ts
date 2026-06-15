@@ -582,7 +582,9 @@ describe('nightly MFCI calibration rebuild (WS-H.3.1a)', () => {
   it('EXCLUDES windows touching an under-case target (anti-poisoning, WS-O.4.5)', async () => {
     const fixture = freshInvariantServices();
     const { rebuildMfciCalibrations } = await import('../invariants/scheduler.js');
-    const nowMs = Date.now();
+    // Hour-aligned so each window's events stay within ONE hour bucket
+    // (otherwise the wall-clock phase can straddle a boundary nondeterministically).
+    const nowMs = Math.floor(Date.now() / 3_600_000) * 3_600_000;
     const organic = await seedStory(fixture);
     const attacked = await seedStory(fixture);
     // An OPEN case on the attacked target → its windows must be dropped.
@@ -623,7 +625,7 @@ describe('nightly MFCI calibration rebuild (WS-H.3.1a)', () => {
   it('ALERTS and RETAINS the previous calibration on a poisoning q99 jump (WS-O.4.5)', async () => {
     const fixture = freshInvariantServices();
     const { rebuildMfciCalibrations } = await import('../invariants/scheduler.js');
-    const nowMs = Date.now();
+    const nowMs = Math.floor(Date.now() / 3_600_000) * 3_600_000;
     // A SENSITIVE previous calibration (low q99 in the small-volume bucket).
     await fixture.invariants.calibrations.upsert({
       calibrationKey: 'mfci:target_concentration',
