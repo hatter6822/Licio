@@ -115,12 +115,12 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 ### WS-S.1.1 Room axes DB migration + coherence CHECKs
 **ID:** WS-S.1.1 | **Ref:** PRIVATE_SPEC §23.2; WS-P2P-1
 
-**Description:** In `packages/db/src/schema/room.ts` add `room_storage_mode`/`room_authority_model`/`room_directory_mode` enums and the `storage_mode` (NOT NULL DEFAULT `'server'`), `authority_model` (NOT NULL DEFAULT `'platform'`), `directory_mode` (nullable), `p2p_stub_id` (nullable) columns, with the §23.2 CHECK constraints enforcing coherence structurally: storage↔authority coherence, `p2p ⇒ directory_mode NOT NULL`, `p2p ⇒ visibility='private'`, `server ⇒ p2p_stub_id IS NULL`. The migration is additive (defaulted columns) following the WS-Q expand pattern; existing rooms remain `server`/`platform`.
+**Description:** In `packages/db/src/schema/room.ts` add `room_storage_mode`/`room_authority_model`/`room_directory_mode` enums and the `storage_mode` (NOT NULL DEFAULT `'server'`), `authority_model` (NOT NULL DEFAULT `'platform'`), `directory_mode` (nullable), `p2p_stub_id` (nullable) columns, with the §23.2 CHECK constraints enforcing **every** §4.1 coherence rule structurally: storage↔authority coherence, `p2p ⇒ directory_mode NOT NULL`, `p2p ⇒ visibility='private'`, `p2p ⇒ join_model='invite'`, and `server ⇒ p2p_stub_id IS NULL`. The `p2p ⇒ join_model='invite'` CHECK reuses the WS-Q `join_model` column and closes the gap where a direct write / migration / old API path could persist a P2P room with `open` or `request_approval` that the shared schema rejects but the DB would otherwise accept. The migration is additive (defaulted columns) following the WS-Q expand pattern; existing rooms remain `server`/`platform`.
 
 **Acceptance criteria:**
 - Migration is additive + idempotent with a clean down path; no existing row is rewritten.
-- The four CHECKs reject every incoherent row (p2p+platform, p2p+public, server-with-stub, p2p without directory).
-- DB enums mirror the shared enums exactly (storage-layer defense in depth).
+- The five CHECKs reject every incoherent row (p2p+platform, p2p+public, p2p+`open`/`request_approval`, server-with-stub, p2p without directory).
+- DB enums mirror the shared enums exactly; the join-model CHECK matches WS-S.0.1's `superRefine` so the storage layer and the wire schema agree.
 
 **Testing:** Gated integration (Postgres) — apply/rollback; CHECK-violation cases. Unit — DB↔shared enum mirror.
 
@@ -197,14 +197,14 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 ### WS-S.2.1 `packages/private-p2p` scaffold + dependency-budget isolation
 **ID:** WS-S.2.1 | **Ref:** PRIVATE_SPEC §9.8, §22.1
 
-**Description:** Create the `@licio/private-p2p` workspace with the §22.1 source tree (`schemas/`, `crypto/`, `ipld/`, `reducer/`, `sync/`, `testing/`), TS strict, SPDX headers, depends on `@licio/shared` only (never `@licio/db`). All heavy dependencies (Helia, libp2p + transports, the chosen MLS lib, HPKE lib, Argon2/curve fallback) are declared **here**, not in `apps/web` — the workspace is excluded from the `apps/web` < 15 direct-dep count. Document the dedicated `check:deps` allowance and confirm the web consumer is a dynamically-imported chunk (§9.8).
+**Description:** Create the `@licio/private-p2p` workspace with the §22.1 source tree (`schemas/`, `crypto/`, `ipld/`, `reducer/`, `sync/`, `testing/`), TS strict, SPDX headers, depends on `@licio/shared` only (never `@licio/db`). All heavy dependencies (Helia, libp2p + transports, the chosen MLS lib, HPKE lib, Argon2/curve fallback) are declared **here**, not in `apps/web` — the workspace is excluded from the `apps/web` < 15 direct-dep count. Two gate updates are mandatory and part of this card: **(1) register `@licio/private-p2p` in `scripts/check-workspace-deps.ts`** (all four maps; allowed deps `['@licio/shared']`) so the hard-coded boundary gate actually scans it — otherwise a forbidden `@licio/db` import is invisible while the check passes; **(2) update `scripts/check-bundle-size.ts`** — the private chunk is code-split out of the initial-load payload, but that script also enforces a **320 KiB gzipped TOTAL-JS budget across every built asset including lazy chunks**, which the Helia/libp2p/MLS chunk would blow even with first-load unchanged. Give the private-p2p chunk its **own measured budget** and exclude it from the core 320 KiB total (e.g. an `excludePattern`/separate-budget bucket keyed on the private chunk's stable name), so the core total stays meaningful and the private chunk is bounded against its own ceiling. Document the dedicated `check:deps` allowance and confirm the web consumer is a dynamically-imported chunk (§9.8).
 
 **Acceptance criteria:**
-- `pnpm --filter @licio/private-p2p build/test` run standalone; `check:workspace-deps` passes (no `@licio/db` import).
-- `apps/web` direct-dep budget and initial-bundle size gate are unchanged (heavy deps are in the workspace + lazy chunk).
+- `pnpm --filter @licio/private-p2p build/test` run standalone; `check:workspace-deps` includes the workspace and FAILS on a planted `@licio/db` import fixture.
+- `apps/web` direct-dep budget, the **200 KiB initial-load**, and the **320 KiB core-total** gates are all unchanged by the core app; the private chunk is measured against its **own** documented budget, not the core total.
 - Each dependency passes the CLAUDE.md review (maintained, install-script-free, AGPL-compatible); choices tracked in §30.1–§30.2.
 
-**Testing:** CI — workspace-boundary + dep-budget + bundle-size gates green; export smoke test.
+**Testing:** CI — workspace-boundary (with planted-violation fixture) + dep-budget + the split core-total/private-chunk bundle-size gates green; export smoke test.
 
 **Dependencies:** none (new workspace; depends on `@licio/shared`).
 
@@ -1028,15 +1028,15 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 ### WS-S.11.4 Update-channel tests
 **ID:** WS-S.11.4 | **Ref:** PRIVATE_SPEC §26.6
 
-**Description:** Implement the §26.6 update-channel tests: an unsigned private-mode bundle locks the room; a transparency-log mismatch locks the room; the service worker cannot silently load dynamic remote private code; CSP blocks inline/eval paths; private keys are not unlocked before bundle verification; the local key agent refuses an unverified origin/bundle.
+**Description:** Implement the §26.6 update-channel tests. The **mandatory** set (required for every launch path, Tier 1/2/3) is: an unsigned private-mode bundle locks the room; a transparency-log mismatch locks the room; the service worker cannot silently load dynamic remote private code; CSP blocks inline/eval paths; private keys are not unlocked before bundle verification. The **conditional** test — the local key agent refuses an unverified origin/bundle — runs **only when WS-S.10.3 (the Tier-3 agent) is in scope** per the §30.3 decision; when v1 launches Tier 1/2 only, this test is skipped (not failed) and the launch checklist is satisfied without it. This keeps the launch checklist completable when the agent is descoped while never weakening the always-required bundle-lock guarantees.
 
 **Acceptance criteria:**
-- Each scenario produces the correct lock/refusal; keys never unlock before verification.
-- CSP/Trusted-Types/no-dynamic-code enforcement is asserted; the SW pinning is exercised.
+- The five mandatory scenarios pass on every launch path; keys never unlock before verification; CSP/Trusted-Types/no-dynamic-code + SW pinning are asserted.
+- The key-agent refusal test is gated on the §30.3 in-scope flag — it runs and passes when the agent is shipped, and is cleanly skipped (checklist still green) when v1 is Tier 1/2 only.
 
-**Testing:** E2E + unit — lock-on-unsigned/mismatch; CSP-blocks-eval; key-agent-refuses-unverified.
+**Testing:** E2E + unit — the five mandatory cases (lock-on-unsigned/mismatch; CSP-blocks-eval; no-unlock-before-verify); plus the conditional key-agent-refuses-unverified case behind the WS-S.10.3-in-scope flag.
 
-**Dependencies:** WS-S.10.2, WS-S.10.3.
+**Dependencies:** WS-S.10.2 (mandatory); WS-S.10.3 (conditional — only if the Tier-3 agent is in v1 scope, §30.3).
 
 ---
 

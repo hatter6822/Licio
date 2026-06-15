@@ -546,7 +546,7 @@ A browser PWA cannot be assumed to be an always-on daemon. Availability therefor
 The private-room stack — Helia, libp2p and its transports, an MLS implementation, an HPKE implementation, and a memory-hard KDF — is large and would, if added to `apps/web`, violate Licio's hard limits: `apps/web` < 15 direct production dependencies and initial JS < 200 KB gz (CLAUDE.md; SPEC §6.12.12). The architecture MUST therefore isolate it:
 
 1. **All P2P dependencies live in `packages/private-p2p` and the lazily-loaded `apps/web/src/private-p2p/` module**, never in `apps/web`'s top-level `package.json`. Workspace (`workspace:*`) dependencies are excluded from the `apps/web` direct-dependency count, so the core app's budget is unaffected.
-2. **Private-mode code is a separate, dynamically-imported route chunk** loaded only when a user opens or creates a Private P2P room. It is excluded from the initial-load bundle-size gate and measured against its own budget; the public PWA's first-load size does not regress.
+2. **Private-mode code is a separate, dynamically-imported route chunk** loaded only when a user opens or creates a Private P2P room. The build gate `scripts/check-bundle-size.ts` enforces **two** JS ceilings — a 200 KiB gzipped *initial-load* budget (entry + preloads) **and a 320 KiB gzipped *total-JS* budget summed across every built asset, lazy chunks included**. Code-splitting keeps the private chunk out of the *initial-load* figure, but a Helia/libp2p/MLS chunk would still blow the *total* budget. The gate MUST therefore be updated to give the private chunk its **own measured budget**, excluded from the core 320 KiB total (keyed on the chunk's stable name). Then the public PWA's first-load AND core-total figures are unaffected, and the private chunk is bounded against its own documented ceiling — never silently exempt.
 3. **No heavy P2P code ships to users who never open a private room.** Helia/libp2p/MLS instantiation is deferred until first private-room use, behind a dynamic `import()`.
 4. **The reproducible private-mode bundle (Tiers 1–3, WS-P2P-10) is exactly this chunk**, giving update-channel transparency (signing + hash-pinning, §20.6) a well-bounded artifact to attest.
 5. **Dependency review still applies** (CLAUDE.md checklist): each library must be actively maintained, install-script-free, and license-compatible (AGPL-3.0-or-later). The MLS/HPKE/curve-library choices are tracked in open questions §30.1–§30.2 and §10.7.
@@ -2216,12 +2216,15 @@ ALTER TABLE rooms
   ADD CONSTRAINT rooms_p2p_visibility_private CHECK (
     storage_mode = 'server' OR visibility = 'private'
   ),
+  ADD CONSTRAINT rooms_p2p_join_model_invite CHECK (
+    storage_mode = 'server' OR join_model = 'invite'
+  ),
   ADD CONSTRAINT rooms_server_has_no_stub CHECK (
     storage_mode = 'p2p' OR p2p_stub_id IS NULL
   );
 ```
 
-These CHECKs make it impossible to persist a row that violates §4.1 (e.g. a `p2p` room with `platform` authority, a non-private P2P room, or a server room carrying a P2P stub), mirroring the expand→backfill→contract migration discipline already used for the WS-Q content-and-room work.
+These CHECKs make it impossible to persist a row that violates §4.1 (e.g. a `p2p` room with `platform` authority, a non-private P2P room, a P2P room with an `open`/`request_approval` join model, or a server room carrying a P2P stub), mirroring the expand→backfill→contract migration discipline already used for the WS-Q content-and-room work.
 
 Create `private_room_stubs` and `private_rendezvous_records` with strict field allowlists (the §8.1 forbiddance list is the column denylist for these tables; only §8.2 fields may appear).
 

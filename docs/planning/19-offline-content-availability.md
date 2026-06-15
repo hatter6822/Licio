@@ -61,11 +61,11 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 ### WS-R.0.1 `packages/lcap` package scaffold
 **ID:** WS-R.0.1 | **Ref:** OFFLINE_SPEC §31, §31.1
 
-**Description:** Create the `@licio/lcap` workspace at `packages/lcap/` with the §31 source tree (`cbor/`, `cid/`, `cose/`, `schemas/`, `validate/`, `pack/`, `scheduler/`, `sync/`, `test-vectors/`), TypeScript strict config (`types: ["node"]`), a thin `vitest.config.ts` reusing `vitest.shared.ts`, and an SPDX header on every file. The package depends on `@licio/shared` only; it MUST NOT depend on `@licio/db`. Declare zero runtime npm dependencies — SHA-256/ECDSA/AES come from WebCrypto, compression from Compression Streams (§31.1).
+**Description:** Create the `@licio/lcap` workspace at `packages/lcap/` with the §31 source tree (`cbor/`, `cid/`, `cose/`, `schemas/`, `validate/`, `pack/`, `scheduler/`, `sync/`, `test-vectors/`), TypeScript strict config (`types: ["node"]`), a thin `vitest.config.ts` reusing `vitest.shared.ts`, and an SPDX header on every file. The package depends on `@licio/shared` only; it MUST NOT depend on `@licio/db`. Declare zero runtime npm dependencies — SHA-256/ECDSA/AES come from WebCrypto, compression from Compression Streams (§31.1). **Register the new workspace in `scripts/check-workspace-deps.ts`** — add `@licio/lcap` to `ALLOWED_WORKSPACE_DEPS` (value `['@licio/shared']`), `WORKSPACE_PACKAGES`, `PACKAGE_PATHS`, and `SOURCE_DIRS`; the gate hard-codes its package list, so without this a forbidden `@licio/db` import inside `packages/lcap` would be invisible while `check:workspace-deps` still passes.
 
 **Acceptance criteria:**
 - `pnpm --filter @licio/lcap build` and `pnpm --filter @licio/lcap test` run standalone.
-- `pnpm check:workspace-deps` passes; `packages/lcap/package.json` declares no production dependency outside `workspace:*`.
+- `scripts/check-workspace-deps.ts` includes `@licio/lcap` in all four maps; a deliberately-added `@licio/db` import in a `packages/lcap` fixture makes `pnpm check:workspace-deps` FAIL (the gate actually scans the package), and the legitimate `@licio/shared`-only graph passes.
 - `pnpm check:deps` unaffected (web/api budgets unchanged); the package is excluded from the web direct-dep count.
 
 **Testing:** Unit — a trivial export smoke test. CI — workspace-boundary and dep-budget gates green.
@@ -337,12 +337,12 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 ### WS-R.2.1 Contribution event record + WS-G/WS-Q mapping
 **ID:** WS-R.2.1 | **Ref:** OFFLINE_SPEC §12.1; WS-G §15.2; WS-Q §14.5
 
-**Description:** Implement the `contribution_event` record. Its `event_type` set and `licio_contribution_type` map onto the shipped WS-G eleven-type taxonomy; `home_room_id` + `visibility_scope` map onto the WS-Q room/visibility model (`public|in_room|private`). It references `capability_cid`, `policy_epoch_claim`, `revocation_epoch_claim`, optional `parent_record_cids`/`replaces_record_cid`/`thread_root_cid`, optional `body_block_cid`/`attachment_manifest_cid`/`source_snapshot_cids`, a `client_nonce`, a `priority`, and `privacy_flags`. Body text lives in a block, never inline (so normalization never perturbs `record_cid`).
+**Description:** Implement the `contribution_event` record. Its `event_type` set and `licio_contribution_type` map onto the shipped WS-G eleven-type taxonomy. The record's `visibility_scope` is OFFLINE_SPEC's own enum (`public|in_room|private`, §12.1); because the shipped WS-Q model (`docs/planning/18-content-and-room-model.md`) uses **room** visibility `public|private` and **story** visibility `public|room_only`, implement an explicit total translation `mapLcapVisibilityToStory` / `mapStoryVisibilityToLcap` (`public ↔ public`; `in_room ↔ room_only`; `private` is reserved for `private_p2p`/WS-S content that LCAP only carries as **ciphertext**, never as a server story) so an accepted LCAP record round-trips into the WS-Q `stories` schema with no ad-hoc coercion or rejected value. It references `capability_cid`, `policy_epoch_claim`, `revocation_epoch_claim`, optional `parent_record_cids`/`replaces_record_cid`/`thread_root_cid`, optional `body_block_cid`/`attachment_manifest_cid`/`source_snapshot_cids`, a `client_nonce`, a `priority`, and `privacy_flags`. Body text lives in a block, never inline (so normalization never perturbs `record_cid`).
 
 **Acceptance criteria:**
-- The schema accepts every WS-G contribution type and rejects unknown ones; `visibility_scope` aligns with WS-Q values.
-- Body/attachments are block references; the record body itself is identifier-bearing only.
-- `privacy_flags` (`contains_private_room_metadata`/`safe_for_unknown_relay`/`safe_for_manual_export`) are present and consulted by export/replication (WS-R.14).
+- The schema accepts every WS-G contribution type and rejects unknown ones; `mapLcapVisibilityToStory` is total over `public|in_room|private` and round-trips (`in_room↔room_only`) against the WS-Q story schema with no rejected value.
+- An `in_room` record reconciles to a `room_only` story; a `private` record is never reconciled into a server `stories` row (it is WS-S ciphertext only).
+- Body/attachments are block references; the record body itself is identifier-bearing only; `privacy_flags` are present and consulted by export/replication (WS-R.14).
 
 **Testing:** Unit — type/visibility matrix; block-reference enforcement; round-trip CID stability with varying body text.
 
@@ -533,7 +533,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 ### WS-R.5.1 Lane/priority model + byte reservations
 **ID:** WS-R.5.1 | **Ref:** OFFLINE_SPEC §15.1, §15.1.1, §15.3
 
-**Description:** Implement the lane model (`C0|T1|E2|B4` per the §15.1.1 canonical `priority↔lane` table) and the §15.3 byte reservations (C0 first 8 KiB then ≥25%; T1 ≥40% after C0 minimum; E2 ≤25%; M3 ≤10% unless media explicitly requested; B4 0% by default). Implement the small-session ladder (≤8/32/128/512 KiB tiers). Lane is a default; an object MAY ship in a non-default lane when closure requires, but only genuine P0 trust/liveness material may enter C0.
+**Description:** Implement the lane model (`C0|T1|E2|M3|B4` per the §15.1.1 canonical `priority↔lane` table — the full five-lane `LcapLane` union from §4.1, `M3` is the media lane) and the §15.3 byte reservations (C0 first 8 KiB then ≥25%; T1 ≥40% after C0 minimum; E2 ≤25%; M3 ≤10% unless media explicitly requested; B4 0% by default). Implement the small-session ladder (≤8/32/128/512 KiB tiers). Lane is a default; an object MAY ship in a non-default lane when closure requires, but only genuine P0 trust/liveness material may enter C0.
 
 **Acceptance criteria:**
 - The canonical mapping table is the single source; `priority n`, `Pn`, and the lane agree.
@@ -1228,7 +1228,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 **Testing:** Unit — quota/reservation enforcement; no-PoW assertion; no-client-address assertion.
 
-**Dependencies:** WS-R.15.3.
+**Dependencies:** WS-R.0.7. (Relay quotas are a standalone reusable policy; the relay service WS-R.15.3 *consumes* this — the back-edge in the first cut is removed so the two cards schedule.)
 
 ---
 
@@ -1253,14 +1253,14 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 ### WS-R.15.2 QR micro-bundle profile
 **ID:** WS-R.15.2 | **Ref:** OFFLINE_SPEC §22.3
 
-**Description:** Implement the QR micro-bundle for tiny control material (checkpoint/revocation frontier, room invite/contact card, tiny signed emergency notice, small manifest pointer, relay contact card). QR MUST show a human-readable summary before display or import. Multi-QR large content is deferred unless carefully designed/tested. QR encode/decode uses a minimal, audited, install-script-free helper inside the lazily-loaded LCAP chunk (dependency-budget reviewed).
+**Description:** Implement the QR micro-bundle for tiny control material (checkpoint/revocation frontier, room invite/contact card, tiny signed emergency notice, small manifest pointer, relay contact card). **Import decodes a QR from a user-supplied still image (file picker / pasted screenshot / photo), NOT a live camera stream** — the app-wide `Permissions-Policy: camera=()` (asserted in the security-header tests) blocks `getUserMedia`, so v0.2 QR import is image/file-based and needs no camera exception; a live-camera scanner would require a narrowly-scoped permissions-policy change + new tests and is out of scope. QR MUST show a human-readable summary before display or import. Multi-QR large content is deferred unless carefully designed/tested. QR encode/decode uses a minimal, audited, install-script-free helper inside the lazily-loaded LCAP chunk (dependency-budget reviewed).
 
 **Acceptance criteria:**
 - QR carries only C0/tiny control objects; a human-readable summary precedes any import.
-- Imported QR material runs the full validation pipeline (no transport trust).
-- Multi-QR is gated off by default (documented deferral).
+- Import decodes from a still image (no `getUserMedia`/camera); the flow works under the unchanged `camera=()` policy.
+- Imported QR material runs the full validation pipeline (no transport trust); multi-QR is gated off by default (documented deferral).
 
-**Testing:** Unit — QR encode/decode round-trip for frontier/revocation cards; summary-before-import. E2E — scan-to-import flow.
+**Testing:** Unit — QR encode + image-decode round-trip for frontier/revocation cards; summary-before-import. E2E — image-file import flow (no camera permission requested).
 
 **Dependencies:** WS-R.6.1, WS-R.14.2.
 
@@ -1516,15 +1516,15 @@ R.12.1c/R.6.2/R.9.3 ─ R.12.4
 R.10.2 ─ R.10.1 ; R.11.3 ─ R.10.3
 R.11.3 ─ R.11.1 ─ R.11.2 ─ R.11.4 ; R.2.1/R.1.2 ─ R.11.5
 R.8.2c/R.2.4/R.9.4 ─ R.13.1 ─ R.13.2
-R.4.2 ─ R.14.1 ; R.6.3/R.4.4 ─ R.14.2 ; R.0.7 ─ R.14.3 ; R.15.3 ─ R.14.4
-R.4.* ─ R.15.1 ─ R.15.4 ; R.6.1 ─ R.15.2 ; R.12.4 ─ R.15.3 ; (defer) R.15.5
+R.4.2 ─ R.14.1 ; R.6.3/R.4.4 ─ R.14.2 ; R.0.7 ─ R.14.3 ; R.0.7 ─ R.14.4
+R.4.* ─ R.15.1 ─ R.15.4 ; R.6.1 ─ R.15.2 ; R.12.4/R.14.4 ─ R.15.3 ; (defer) R.15.5
 R.2.1/R.11.5 ─ R.16.1  (bridge to WS-S)
 R.8.1/R.10.1 ─ R.17.1 ─ R.17.3 ; R.11.2/R.6.2 ─ R.17.2
 R.0.6b/R.9.3 ─ R.18.1 ; R.5.4/R.8.3/R.10.3 ─ R.18.2 ; R.8.3/R.9.4/R.5.4 ─ R.18.3a ─ R.18.3b
 R.14.1/R.0.8/R.4.2 ─ R.18.4 ; R.18.1/R.15.1 ─ R.18.5 ; (all) ─ R.18.6
 ```
 
-The graph is acyclic. Two cycles present in the first cut were removed: the pack writer (R.4.1) now takes a **caller-provided** object order rather than build-depending on the scheduler (R.5.2c), and the room-log append (R.9.1) is a DB primitive that the ingestion commit stage (R.12.1c) *calls* rather than the reverse; the dependency-closure helper (R.7.2) is scheduler-independent and feeds R.5.2a.
+The graph is acyclic. Three cycles present in earlier cuts were removed: the pack writer (R.4.1) now takes a **caller-provided** object order rather than build-depending on the scheduler (R.5.2c); the room-log append (R.9.1) is a DB primitive that the ingestion commit stage (R.12.1c) *calls* rather than the reverse; and the relay quota policy (R.14.4) is standalone (depends only on the schemas R.0.7) while the relay service (R.15.3) *consumes* it — the first cut had R.14.4↔R.15.3 mutually depending. The dependency-closure helper (R.7.2) is scheduler-independent and feeds R.5.2a.
 
 Cross-stream order: **R.0** (LDC codec → CID → AAD → ECDSA → COSE → schemas → suites) is the gate for everything. Then **R.1** (identity/capabilities/revocations) and **R.2/R.3** (records/blocks) in parallel; **R.5** (closure → scheduler front → DRR → score) and **R.4** (pack) co-develop but are decoupled (the writer consumes the scheduler's emitted order at integration in R.15.1); **R.6/R.7/R.8** (sync/reconciliation/trust) build on records + scheduler; **R.9** (checkpoints) sits on the server **R.12** DB; **R.10/R.11** (liveness/storage) underpin the client; **R.13/R.14** (conflict/privacy-DoS) harden; **R.15/R.16** (transports/private bridge) and **R.17** (UI) ride the validated core; **R.18** (tests/sim/acceptance) runs continuously and gates the close. The phase mapping to OFFLINE_SPEC §35 is: Phase 0 = R.0; Phase 1 = R.1/R.6/R.11/R.12; Phase 2 = R.3/R.4/R.5/R.15.1–2; Phase 3 = R.9/R.10; Phase 4 = R.15.3; Phase 5 = R.15.4; Phase 6 = R.7.3/R.16/witness hardening/PQ reservation.
 
