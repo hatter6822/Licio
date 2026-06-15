@@ -30,12 +30,14 @@ export const RATING_LABEL_KINDS = [
   'bridge-active',
 ] as const;
 export const ratingLabelKindSchema = z.enum(RATING_LABEL_KINDS);
+export type RatingLabelKind = (typeof RATING_LABEL_KINDS)[number];
 
 /** Source provenance — feeds the origin badge, never a ranking input. */
 export const storyOriginSchema = z.enum(['independent', 'wire', 'official', 'aggregator']);
 
 /** Story-level safety posture surfaced to readers (SPEC §22.1 safety_state). */
 export const safetyStateSchema = z.enum(['ok', 'caution', 'under-review', 'restricted']);
+export type StorySafetyState = z.infer<typeof safetyStateSchema>;
 
 /**
  * A descriptive context chip ("3 lenses", "2 primary sources"). `icon` is an

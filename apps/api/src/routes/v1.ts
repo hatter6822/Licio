@@ -20,6 +20,8 @@ import {
   attentionIngestAckSchema,
   createReportRequestSchema,
   DEFAULT_USER_SETTINGS,
+  deriveRatingLabel,
+  deriveStorySafetyState,
   FAIL_CLOSED_FLAGS,
   type FeedResponse,
   featureFlagsResponseSchema,
@@ -57,7 +59,8 @@ import { getIdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { loadContentFlags } from '../ingestion/content-flags.js';
 import { getIngestionServices } from '../ingestion/services.js';
-import type { StoryRecord } from '../ingestion/stores.js';
+import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
+import { tryGetInvariantServices } from '../invariants/services.js';
 import { DEMO_FEED, demoStory } from '../lib/demo-data.js';
 import { makeMediaUrlMinter } from '../lib/media-urls.js';
 import {
@@ -121,24 +124,91 @@ const settingsBySession = new Map<string, z.infer<typeof userSettingsSchema>>();
 
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } } as const;
 
-/** WS-F lifecycle states → the WS-C rating-label vocabulary (read mapping). */
-const LIFECYCLE_TO_RATING_LABEL: Readonly<Record<StoryRecord['lifecycleState'], string>> = {
-  submitted: 'getting-attention',
-  gathering_attention: 'getting-attention',
-  deepening: 'deepening',
-  context_needed: 'needs-context',
-  bridging: 'bridge-active',
-  stable: 'resolved-context',
-  archived: 'resolved-context',
-};
+/** The live conversation-state signals a story-detail read needs to derive its
+ *  SPEC §5.6 rating label + §22.1 safety state IDENTICALLY to the WS-I feed. */
+interface StoryReadSignals {
+  safetyState: ReturnType<typeof deriveStorySafetyState>;
+  interpretationsDiverge: boolean;
+  /** Distinct INDEPENDENT, VERIFIED evidence units (the §5.6 well-sourced gate). */
+  evidenceCount: number;
+  meriExposure: ReturnType<typeof exposureLabelForGain>;
+}
+
+/**
+ * Assemble the live rating signals for ONE story from STORED shadow outputs (a
+ * detail read never triggers invariant computation): the item safety state +
+ * MFCI risk + thread posture, the latest SCOI energy (interpretation
+ * divergence — SCOI energy ≥ the needs-context threshold, matching the
+ * story-page "Where interpretations differ" drawer), the thread's independent
+ * evidence-card count, and the latest MERI exposure. Fed through the SAME shared
+ * `deriveRatingLabel`/`deriveStorySafetyState` the feed uses, so the surfaces
+ * agree on every dimension except the SCOI margin (the feed uses its
+ * profile-aware context card there instead).
+ */
+async function assembleStoryReadSignals(
+  story: StoryRecord,
+  thread: ThreadShellRecord | null,
+): Promise<StoryReadSignals> {
+  const events = getEventPipelineServices();
+  const ingestion = getIngestionServices();
+  // Invariants are a SOFT dependency: when the platform is not wired, MFCI risk
+  // and the SCOI threshold are simply absent (the read still serves).
+  const invariants = tryGetInvariantServices();
+  const [safeties, mfciRisk, scoiLatest, gains] = await Promise.all([
+    events.safetyStore.getMany([story.storyId]),
+    invariants ? invariants.mfciRiskStates.get(story.storyId) : Promise.resolve(null),
+    events.invariantStore.latest('SCOI', story.storyId),
+    latestMeriGains(events),
+  ]);
+  const safetyState = deriveStorySafetyState({
+    frozen: safeties.get(story.storyId)?.safetyState === 'frozen',
+    mfciRiskState: mfciRisk?.state,
+    threadSafetyState: thread?.safetyState,
+  });
+  // SCOI interpretation divergence: the latest energy clears the needs-context
+  // threshold (matching the public /interpretations read), and the run actually
+  // covered the story (not an INSUFFICIENT_COVERAGE placeholder). With the
+  // platform unwired there is no SCOI output anyway, so the default threshold is
+  // never consulted in practice — but it keeps the comparison total.
+  const scoi =
+    scoiLatest && typeof scoiLatest.scoreVector['scoi'] === 'number'
+      ? scoiLatest.scoreVector['scoi']
+      : 0;
+  const scoiThreshold = invariants?.config().scoiNeedsContextThreshold ?? 0.4;
+  const interpretationsDiverge =
+    scoiLatest !== null &&
+    !scoiLatest.reasonCodes.includes('INSUFFICIENT_COVERAGE') &&
+    scoi >= scoiThreshold;
+  // Distinct INDEPENDENT, VERIFIED evidence units (the §5.6 well-sourced gate,
+  // identical to the feed's `evidenceSummaryOf`): verified cards sharing a
+  // non-null MERI independence group (§13.6) count once; an un-grouped verified
+  // card is its own unit; unverified/disputed/retracted cards never count.
+  const verifiedGroups = new Set<string>();
+  let ungroupedVerified = 0;
+  for (const claim of await ingestion.claims.listByStory(story.storyId)) {
+    for (const card of await ingestion.evidence.listByClaim(claim.claimId)) {
+      if (card.verificationState !== 'verified') continue;
+      if (card.independenceGroupId === null) ungroupedVerified += 1;
+      else verifiedGroups.add(card.independenceGroupId);
+    }
+  }
+  return {
+    safetyState,
+    interpretationsDiverge,
+    evidenceCount: verifiedGroups.size + ungroupedVerified,
+    meriExposure: exposureLabelForGain(gains[story.storyId] ?? null),
+  };
+}
 
 /** Map a REAL ingested story onto the established WS-C story-detail wire
  *  shape (the client validates against storyDetailSchema; real submissions
- *  appear through the same contract the demo fixtures established). */
+ *  appear through the same contract the demo fixtures established). The rating
+ *  label + safety state derive from the SAME shared functions the feed uses. */
 function realStoryToDetail(
   story: StoryRecord,
   thread: { threadId: string } | null,
   viewer: { isOwner: boolean; roomVisibility: 'public' | 'private' },
+  signals: StoryReadSignals,
 ) {
   const excerptWords = story.excerpt === null ? 0 : story.excerpt.split(/\s+/).length;
   return {
@@ -152,10 +222,17 @@ function realStoryToDetail(
     // Best-effort estimate from the bounded excerpt (the full body is never
     // stored, WS-F.1.4f) — a floor, not a measurement.
     reading_minutes: Math.max(1, Math.ceil(excerptWords / 200)),
-    rating_label: LIFECYCLE_TO_RATING_LABEL[story.lifecycleState],
+    rating_label: deriveRatingLabel({
+      lifecycleState: story.lifecycleState,
+      safetyState: signals.safetyState,
+      interpretationsDiverge: signals.interpretationsDiverge,
+      evidenceCount: signals.evidenceCount,
+      meriExposure: signals.meriExposure,
+    }),
     distribution_reason: 'Recently submitted to Licio',
     context_chips: [],
-    safety_state: 'ok' as const,
+    safety_state: signals.safetyState,
+    exposure_label: signals.meriExposure,
     body_summary: story.excerpt ?? '',
     thread_id: thread?.threadId ?? null,
     topic_ids: story.topicIds.slice(0, 8),
@@ -322,12 +399,18 @@ export function createV1Routes() {
               return c.json(notFound, 404);
             }
             const thread = await ingestion.stories.getThreadByStoryId(storyId);
+            const signals = await assembleStoryReadSignals(real, thread);
             return c.json(
               storyDetailSchema.parse(
-                realStoryToDetail(real, thread, {
-                  isOwner: userId !== null && userId === real.submittedBy,
-                  roomVisibility: room.visibility,
-                }),
+                realStoryToDetail(
+                  real,
+                  thread,
+                  {
+                    isOwner: userId !== null && userId === real.submittedBy,
+                    roomVisibility: room.visibility,
+                  },
+                  signals,
+                ),
               ),
             );
           }

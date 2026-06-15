@@ -29,8 +29,14 @@ export interface InvariantsRuntimeConfig {
   batchConcurrency: number;
   /** Candidate-set size cap per MERI evaluation. */
   meriCandidateLimit: number;
-  /** Near-duplicate Jaccard threshold for MERI grouping. */
+  /** Near-duplicate Jaccard threshold for MERI grouping (lexical, MinHash). */
   meriNearDuplicateThreshold: number;
+  /** Semantic (embedding cosine) near-duplicate threshold for MERI grouping
+   *  (WS-O.4.5): unions hard paraphrases MinHash misses. Its strength depends
+   *  on the deployed embedding provider — the DEFAULT provider is LEXICAL
+   *  (n-gram-correlated), so the semantic benefit is realized only with a
+   *  semantic EMBEDDING_URL provider. */
+  meriSemanticDuplicateThreshold: number;
   /** MFCI sampler parameters (WS-H.3.3b). */
   mfciSamples: number;
   mfciBurnIn: number;
@@ -58,6 +64,20 @@ export interface InvariantsRuntimeConfig {
   promotionMinShadowDays: number;
   /** "Needs Context" feed threshold (WS-H.4.3a). */
   scoiNeedsContextThreshold: number;
+  /** Threshold-hugging meta-monitor (WS-O.4.5): the sub-threshold "hug band"
+   *  width as a FRACTION of each invariant's public threshold (relative so it
+   *  scales uniformly across the MFCI/SCOI/PHI score scales). */
+  thresholdHuggingBandFraction: number;
+  /** Minimum score population for the meta-monitor to judge (fail-closed). */
+  thresholdHuggingMinPopulation: number;
+  /** Minimum observed/expected band excess to flag hugging. */
+  thresholdHuggingExcess: number;
+  /** MFCI calibration drift guard (WS-O.4.5): retain the previous calibration
+   *  when a new q99 jumps beyond this ratio over the same-volume bucket. */
+  mfciCalibrationDriftMaxRatio: number;
+  /** Exclude hourly windows touching an under-case target from the MFCI
+   *  baseline (anti-poisoning, WS-O.4.5). */
+  mfciExcludeFlaggedWindows: boolean;
 }
 
 export const DEFAULT_INVARIANTS_CONFIG: InvariantsRuntimeConfig = {
@@ -66,6 +86,7 @@ export const DEFAULT_INVARIANTS_CONFIG: InvariantsRuntimeConfig = {
   batchConcurrency: 2,
   meriCandidateLimit: 200,
   meriNearDuplicateThreshold: 0.7,
+  meriSemanticDuplicateThreshold: 0.85,
   mfciSamples: 2_000,
   mfciBurnIn: 2_000,
   mfciThinning: 2,
@@ -81,6 +102,11 @@ export const DEFAULT_INVARIANTS_CONFIG: InvariantsRuntimeConfig = {
   gweiMinCohortSize: 25,
   promotionMinShadowDays: DEFAULT_PROMOTION_POLICY.minShadowDays,
   scoiNeedsContextThreshold: 0.4,
+  thresholdHuggingBandFraction: 0.15,
+  thresholdHuggingMinPopulation: 12,
+  thresholdHuggingExcess: 2.5,
+  mfciCalibrationDriftMaxRatio: 1.5,
+  mfciExcludeFlaggedWindows: true,
 };
 
 const positiveInt = z.number().int().positive();
@@ -93,6 +119,7 @@ const CONFIG_VALIDATORS: Record<string, z.ZodType> = {
   'invariants.batchConcurrency': positiveInt.lte(16),
   'invariants.meriCandidateLimit': positiveInt.lte(2_000),
   'invariants.meriNearDuplicateThreshold': z.number().gt(0).lt(1),
+  'invariants.meriSemanticDuplicateThreshold': z.number().gt(0).lte(1),
   'invariants.mfciSamples': positiveInt.gte(100).lte(100_000),
   'invariants.mfciBurnIn': positiveInt.lte(100_000),
   'invariants.mfciThinning': positiveInt.lte(100),
@@ -131,6 +158,11 @@ const CONFIG_VALIDATORS: Record<string, z.ZodType> = {
   'invariants.gweiMinCohortSize': positiveInt.gte(2),
   'invariants.promotionMinShadowDays': positiveInt.lte(365),
   'invariants.scoiNeedsContextThreshold': z.number().gt(0).lt(1),
+  'invariants.thresholdHuggingBandFraction': z.number().gt(0).lt(1),
+  'invariants.thresholdHuggingMinPopulation': positiveInt.gte(5).lte(10_000),
+  'invariants.thresholdHuggingExcess': positiveNum.gte(1),
+  'invariants.mfciCalibrationDriftMaxRatio': positiveNum.gte(1),
+  'invariants.mfciExcludeFlaggedWindows': z.boolean(),
 };
 
 export const INVARIANTS_CONFIG_KEYS = Object.keys(
@@ -152,6 +184,7 @@ const KEY_TO_FIELD: Record<string, keyof InvariantsRuntimeConfig> = {
   'invariants.batchConcurrency': 'batchConcurrency',
   'invariants.meriCandidateLimit': 'meriCandidateLimit',
   'invariants.meriNearDuplicateThreshold': 'meriNearDuplicateThreshold',
+  'invariants.meriSemanticDuplicateThreshold': 'meriSemanticDuplicateThreshold',
   'invariants.mfciSamples': 'mfciSamples',
   'invariants.mfciBurnIn': 'mfciBurnIn',
   'invariants.mfciThinning': 'mfciThinning',
@@ -167,6 +200,11 @@ const KEY_TO_FIELD: Record<string, keyof InvariantsRuntimeConfig> = {
   'invariants.gweiMinCohortSize': 'gweiMinCohortSize',
   'invariants.promotionMinShadowDays': 'promotionMinShadowDays',
   'invariants.scoiNeedsContextThreshold': 'scoiNeedsContextThreshold',
+  'invariants.thresholdHuggingBandFraction': 'thresholdHuggingBandFraction',
+  'invariants.thresholdHuggingMinPopulation': 'thresholdHuggingMinPopulation',
+  'invariants.thresholdHuggingExcess': 'thresholdHuggingExcess',
+  'invariants.mfciCalibrationDriftMaxRatio': 'mfciCalibrationDriftMaxRatio',
+  'invariants.mfciExcludeFlaggedWindows': 'mfciExcludeFlaggedWindows',
 };
 
 /**

@@ -54,6 +54,8 @@ import {
   topicRelevance,
 } from '@licio/ranking';
 import {
+  deriveRatingLabel,
+  deriveStorySafetyState,
   type FeedContextCard,
   type FeedItem,
   type FeedMode,
@@ -64,7 +66,7 @@ import {
 } from '@licio/shared';
 import type { NewStoredEvent } from '../events/stores.js';
 import { roomContentVisibleToUser } from '../forum/rooms.js';
-import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
+import type { ThreadShellRecord } from '../ingestion/stores.js';
 import { makeMediaUrlMinter } from '../lib/media-urls.js';
 import { feedMediaOf } from '../lib/story-media.js';
 import { exposureLabelForGain, latestMeriGains } from '../routes/invariants-public.js';
@@ -72,17 +74,6 @@ import { killSwitchDecision } from './killswitch.js';
 import { assembleCandidatePool } from './orchestrator.js';
 import { applySafetyFilter } from './safety-filter.js';
 import { type RankingServices, SEEN_HISTORY_WINDOW_MS } from './services.js';
-
-/** WS-F lifecycle states → the WS-C rating-label vocabulary (read mapping). */
-export const LIFECYCLE_TO_RATING_LABEL: Readonly<Record<StoryRecord['lifecycleState'], string>> = {
-  submitted: 'getting-attention',
-  gathering_attention: 'getting-attention',
-  deepening: 'deepening',
-  context_needed: 'needs-context',
-  bridging: 'bridge-active',
-  stable: 'resolved-context',
-  archived: 'resolved-context',
-};
 
 /**
  * The locale explanations are served in. The renderer is catalog-ready
@@ -162,18 +153,19 @@ function poolFreshnessClass(
   return 'evergreen';
 }
 
-/** Story safety posture for the wire (descriptive, never a sanction). */
+/** Story safety posture for the wire (descriptive, never a sanction). Thin
+ *  adapter over the shared `deriveStorySafetyState` so the feed and the
+ *  story-detail read derive the posture identically. */
 function feedSafetyState(
   features: FeatureVector | undefined,
   thread: ThreadShellRecord | undefined,
   frozen: boolean,
 ): FeedItem['safety_state'] {
-  if (frozen) return 'under-review';
-  const risk = features?.mfci_risk_state;
-  if (risk === 'severe' || risk === 'high') return 'under-review';
-  if (thread?.safetyState === 'under_review') return 'under-review';
-  if (risk === 'elevated' || thread?.safetyState === 'elevated') return 'caution';
-  return 'ok';
+  return deriveStorySafetyState({
+    frozen,
+    mfciRiskState: features?.mfci_risk_state,
+    threadSafetyState: thread?.safetyState,
+  });
 }
 
 /** One selected entry on its way to the wire. */
@@ -205,7 +197,7 @@ async function buildFeedItems(
     services.events.safetyStore.getMany(ids),
     latestMeriGains(services.events),
   ]);
-  const evidenceCounts = await Promise.all(ids.map((id) => evidenceCountOf(services, id)));
+  const evidenceSummaries = await Promise.all(ids.map((id) => evidenceSummaryOf(services, id)));
   const lensCountByRoom = new Map<string, number>();
   for (const thread of threads.values()) {
     if (thread.roomId !== null && !lensCountByRoom.has(thread.roomId)) {
@@ -220,13 +212,13 @@ async function buildFeedItems(
     const story = stories.get(entry.itemId);
     if (story === undefined) continue;
     const thread = threads.get(entry.itemId);
-    const evidenceCount = evidenceCounts[index] ?? 0;
+    const evidence = evidenceSummaries[index] ?? { total: 0, independentVerified: 0 };
     const excerptWords = story.excerpt === null ? 0 : story.excerpt.split(/\s+/).length;
     const chips: Array<{ id: string; label: string }> = [];
-    if (evidenceCount > 0) {
+    if (evidence.total > 0) {
       chips.push({
         id: 'evidence',
-        label: `${evidenceCount} ${evidenceCount === 1 ? 'evidence card' : 'evidence cards'}`,
+        label: `${evidence.total} ${evidence.total === 1 ? 'evidence card' : 'evidence cards'}`,
       });
     }
     const roomLenses = thread?.roomId != null ? (lensCountByRoom.get(thread.roomId) ?? 0) : 0;
@@ -240,12 +232,25 @@ async function buildFeedItems(
         label: `+${entry.moreOnThisStory.length} more on this story`,
       });
     }
-    // §10.5: the feed-card label says "Needs Context" when SCOI is elevated
-    // (the live signal outranks the slower lifecycle-state mapping).
-    const ratingLabel =
-      entry.contextCard !== null
-        ? 'needs-context'
-        : LIFECYCLE_TO_RATING_LABEL[story.lifecycleState];
+    const safetyState = feedSafetyState(
+      entry.features,
+      thread,
+      safeties.get(entry.itemId)?.safetyState === 'frozen',
+    );
+    const exposureLabel = exposureLabelForGain(meriGains[entry.itemId] ?? null);
+    // SPEC §5.6 — the SINGLE rating-label derivation (shared with the
+    // story-detail read). Live invariant signals — safety review, SCOI
+    // interpretation divergence, and MERI source independence — outrank the
+    // slow lifecycle state (the §10.5 principle generalised to all seven
+    // labels), so e.g. a thread under coordination review reads "Under Review"
+    // and a fresh thread with independent evidence reads "Well-Sourced".
+    const ratingLabel = deriveRatingLabel({
+      lifecycleState: story.lifecycleState,
+      safetyState,
+      interpretationsDiverge: entry.contextCard !== null,
+      evidenceCount: evidence.independentVerified,
+      meriExposure: exposureLabel,
+    });
     items.push(
       feedItemSchema.parse({
         story_id: story.storyId,
@@ -259,12 +264,8 @@ async function buildFeedItems(
         rating_label: ratingLabel,
         distribution_reason: entry.explanation.distributionReason,
         context_chips: chips,
-        safety_state: feedSafetyState(
-          entry.features,
-          thread,
-          safeties.get(entry.itemId)?.safetyState === 'frozen',
-        ),
-        exposure_label: exposureLabelForGain(meriGains[entry.itemId] ?? null),
+        safety_state: safetyState,
+        exposure_label: exposureLabel,
         more_on_this_story: [...entry.moreOnThisStory].slice(0, 12),
         context_card: entry.contextCard,
       }),
@@ -761,8 +762,8 @@ export async function serveFeed(
     request.userId === null
       ? new Map<string, string>()
       : await collectSeen(services, request.userId);
-  const evidenceCounts = await Promise.all(
-    ranked.selected.map((scored) => evidenceCountOf(services, scored.item_id)),
+  const evidenceSummaries = await Promise.all(
+    ranked.selected.map((scored) => evidenceSummaryOf(services, scored.item_id)),
   );
   const contextCards = await contextCardsFor(services, ranked.selected, featuresById);
   // "More on this story" (WS-I.2.4a): the selected cluster representative
@@ -781,7 +782,10 @@ export async function serveFeed(
   const entries: SelectedEntry[] = [];
   for (const [index, scored] of ranked.selected.entries()) {
     const features = featuresById.get(scored.item_id);
-    const evidenceCount = evidenceCounts[index] ?? 0;
+    // The "{n} independent evidence cards" template — fed the distinct verified
+    // independence count so the wording is literally true (never the raw total).
+    const evidenceCount = (evidenceSummaries[index] ?? { independentVerified: 0 })
+      .independentVerified;
     const explanation = explainItem(
       scored,
       {
@@ -889,12 +893,37 @@ async function collectSeen(
   return seen;
 }
 
-async function evidenceCountOf(services: RankingServices, storyId: string): Promise<number> {
-  let count = 0;
+/** Story-level evidence tallies used by both the §5.6 label and the chip/explanation. */
+interface EvidenceSummary {
+  /** ALL evidence cards on the story — the descriptive "N evidence cards" chip. */
+  total: number;
+  /**
+   * Distinct INDEPENDENT, VERIFIED evidence units — the §5.6 "Well-Sourced" gate
+   * and the "N independent evidence cards" explanation. Verified cards sharing a
+   * non-null independence group (MERI §13.6) count once; an un-grouped (null)
+   * verified card is its own independent unit. Unverified/disputed/retracted
+   * cards never count toward independence, so a thread is "Well-Sourced" only on
+   * genuinely independent, verified evidence — not on repeated or unchecked cards.
+   */
+  independentVerified: number;
+}
+
+async function evidenceSummaryOf(
+  services: RankingServices,
+  storyId: string,
+): Promise<EvidenceSummary> {
+  let total = 0;
+  const verifiedGroups = new Set<string>();
+  let ungroupedVerified = 0;
   for (const claim of await services.ingestion.claims.listByStory(storyId)) {
-    count += (await services.ingestion.evidence.listByClaim(claim.claimId)).length;
+    for (const card of await services.ingestion.evidence.listByClaim(claim.claimId)) {
+      total += 1;
+      if (card.verificationState !== 'verified') continue;
+      if (card.independenceGroupId === null) ungroupedVerified += 1;
+      else verifiedGroups.add(card.independenceGroupId);
+    }
   }
-  return count;
+  return { total, independentVerified: verifiedGroups.size + ungroupedVerified };
 }
 
 interface FallbackArgs {

@@ -332,6 +332,23 @@ Because there are no likes or upvotes, the app uses descriptive labels, none of 
 | Resolved Context | A previously ambiguous issue has a high-quality synthesis. |
 | Bridge Active | Multiple communities are engaging with improving coherence. |
 
+Exactly one label is shown per item, derived as a **priority cascade** in which
+the live invariant signals outrank the slower lifecycle state (Section 14.4):
+safety/coordination review (Under Review) → interpretation divergence (Needs
+Context, from SCOI or the `context_needed` state) → cross-community
+reconciliation (Bridge Active) → a resolved synthesis (Resolved Context) →
+independent evidence (Well-Sourced, requiring ≥2 **distinct independent,
+verified** evidence cards — verified cards sharing a MERI independence group
+count once, and unverified/disputed/retracted cards never count — **and** a
+MERI source-independence signal) → ongoing contribution (Deepening) → the
+default (Getting Attention). Well-Sourced and Under Review are reachable only
+through the live signal — the lifecycle state alone never produces them. This
+derivation is implemented once and shared by every reader-facing surface, so the
+feed card and the story page agree on every dimension; the one input that is
+surface-specific is interpretation divergence (the feed reads its profile-aware
+SCOI context card, the story page reads SCOI energy against the needs-context
+threshold), which can differ only at the SCOI margin.
+
 # 6. Progressive Web App: requirements and client architecture
 
 ## 6.1 PWA-first design philosophy
@@ -1610,6 +1627,28 @@ Because a PWA cannot use native attestation, abuse defense is server-side and be
 | Screenshot context removal | Share cards with origin/context metadata. |
 | Forged attention events | Server-side validation, replay protection, rate limits, integrity tokens; client aggregates treated as hints, never sole truth. |
 | Phishing PWA / look-alike domain | Canonical-domain education, anti-impersonation onboarding, signed provenance (Section 20.2). |
+
+**Adversarial posture (Kerckhoffs's principle).** The invariants are
+open-source: an attacker can read every formula, threshold, and seed. The
+project's chosen posture is **fully public, no secrets** — every operating
+point (threshold, seed, calibration window) is public and deterministic, and
+security does **not** depend on hiding any of it. Defense rests on four
+structural properties, all enforced in code and tests (WS-O.4.5): (1) **ensemble
+correlation** — the invariants measure orthogonal, contradictory facets of an
+attack, so evading one trips another (the named `check:adversarial` gate proves
+the combined system catches each catalogued attack even when its primary target
+is individually fooled — `docs/invariants/ADVERSARIAL-THREATS.md`); (2) a
+**threshold-hugging meta-signal** — clustering just under a known public cliff is
+itself an anomaly that routes the attacker into the exact, calibration-
+independent MFCI fiber test, so knowing the threshold is a liability;
+(3) **calibration anti-poisoning** — the MFCI cheap path cannot be desensitized
+by drip-fed coordination (under-case windows are excluded and a q99 drift retains
+the prior calibration), with the exact fiber test as the authoritative backstop;
+and (4) **economic cost** — semantic (not only lexical) independence grouping and
+account-age/progressive-trust weighting make disposable-account attacks
+expensive. The realistic goal is to make a successful attack expensive,
+multi-front, and human-detectable — not to make any invariant individually
+unbeatable.
 
 ## 25.6 Wallet, smart-contract, and Knomosis security
 

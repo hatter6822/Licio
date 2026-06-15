@@ -28,6 +28,14 @@ The following are in scope:
 - Supply-chain vulnerabilities in direct dependencies
 - Wallet/financial exploit vectors (when Knomosis is enabled)
 - Privacy violations (attention signal leakage, tracking)
+- **Invariant / ranking evasion** — a reproducible strategy that gains
+  disproportionate reach while evading the open-source invariant ensemble
+  (MERI/MFCI/SCOI/PHI/Tropical/Braid/…). The invariants are public by design
+  (Kerckhoffs's principle); we actively invite evasion reports so weaknesses are
+  found before they are weaponized. Please include the attack model and a
+  scenario the ensemble adversarial suite
+  (`apps/api/src/__tests__/invariants-ensemble-adversarial.test.ts`,
+  `docs/invariants/ADVERSARIAL-THREATS.md`) does not already cover.
 
 ### Wallet/Financial Exploits
 

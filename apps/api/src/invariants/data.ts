@@ -49,6 +49,7 @@ export async function assembleMeriCandidates(
   topicId: string | null,
   limit: number,
   nearDuplicateThreshold: number,
+  semanticThreshold: number,
 ): Promise<MeriCandidateInput[]> {
   const recent = await ingestion.stories.listRecent(limit * 2);
   const stories = (topicId ? recent.filter((s) => s.topicIds.includes(topicId)) : recent).slice(
@@ -87,6 +88,30 @@ export async function assembleMeriCandidates(
       if (estimateJaccard(signature.minhash, other.minhash) >= nearDuplicateThreshold) {
         union(story.storyId, candidateId);
       }
+    }
+  }
+  // WS-O.4.5 — SEMANTIC near-duplicate union: a hard paraphrase that beats the
+  // lexical MinHash threshold is still grouped when its embedding cosine clears
+  // `semanticThreshold`, so exposure can't be inflated by paraphrasing harder.
+  // Graceful when embeddings are absent (the store returns no matches →
+  // MinHash-only). NOTE: the STRENGTH of this signal depends on the deployed
+  // embedding provider — the DEFAULT provider is LEXICAL (n-gram-correlated), so
+  // the genuine semantic benefit needs a semantic EMBEDDING_URL provider. The
+  // Drizzle `findSimilar` is HNSW-ANN (approximate), so production grouping may
+  // miss a borderline pair the in-memory exact scan catches — acceptable: the
+  // matroid bound is robust to a single missed near-pair, and the deterministic
+  // MinHash + lineage/claim classes remain the grouping backbone.
+  const modelVersion = ingestion.embeddingProvider.modelVersion;
+  for (const story of stories) {
+    const similar = await ingestion.embeddings.findSimilar(
+      'story',
+      story.storyId,
+      modelVersion,
+      semanticThreshold,
+      limit,
+    );
+    for (const match of similar) {
+      if (inSet.has(match.targetId)) union(story.storyId, match.targetId);
     }
   }
   const nearDupGroupOf = (storyId: string): string | null => {
@@ -185,6 +210,14 @@ export async function assembleMeriCandidates(
 // ---------------------------------------------------------------------------
 // MFCI (WS-H.3): action observations over the five table dimensions
 // ---------------------------------------------------------------------------
+//
+// Account-age note (WS-O.4.5): MFCI ALREADY conditions on account age — the
+// `user_group` dimension IS the account-age bucket (accountAgeBucket below), so
+// the fiber test treats a brigade concentrated in the `new` bucket as a
+// coordination signal by construction. The PWAtt anti-signal trust weighting
+// (pwatt/anti-signals.ts) is the COMPLEMENTARY mechanism (it lowers the
+// burst-detection threshold for fresh-account bursts); no separate MFCI-input
+// reinforcement is needed, and adding one would double-count the same age signal.
 
 export interface MfciActionWindow {
   observations: Array<{ labels: string[] }>;

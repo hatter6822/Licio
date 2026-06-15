@@ -297,6 +297,34 @@ describe('WS-H runtime config (fail closed)', () => {
     const updated = await loadInvariantsConfig(fixture.events.configStore);
     expect(updated.batchConcurrency).toBe(4);
   });
+
+  it('validates and round-trips the threshold-hugging meta-monitor keys (WS-O.4.5)', async () => {
+    const fixture = freshInvariantServices();
+    // Out-of-range values are rejected at write time.
+    expect(
+      validateInvariantsConfigValue('invariants.thresholdHuggingBandFraction', 1.5),
+    ).not.toBeNull();
+    expect(
+      validateInvariantsConfigValue('invariants.thresholdHuggingMinPopulation', 1),
+    ).not.toBeNull();
+    expect(validateInvariantsConfigValue('invariants.thresholdHuggingExcess', 0.5)).not.toBeNull();
+    // Valid values round-trip through the fail-closed loader.
+    await fixture.events.configStore.set('invariants.thresholdHuggingBandFraction', { value: 0.2 });
+    await fixture.events.configStore.set('invariants.thresholdHuggingExcess', { value: 3 });
+    const config = await loadInvariantsConfig(fixture.events.configStore);
+    expect(config.thresholdHuggingBandFraction).toBe(0.2);
+    expect(config.thresholdHuggingExcess).toBe(3);
+    // A poisoned row keeps the reviewed default.
+    await fixture.events.configStore.set('invariants.thresholdHuggingMinPopulation', { value: 0 });
+    const rejected: string[] = [];
+    const reloaded = await loadInvariantsConfig(fixture.events.configStore, (key) =>
+      rejected.push(key),
+    );
+    expect(reloaded.thresholdHuggingMinPopulation).toBe(
+      DEFAULT_INVARIANTS_CONFIG.thresholdHuggingMinPopulation,
+    );
+    expect(rejected).toContain('invariants.thresholdHuggingMinPopulation');
+  });
 });
 
 describe('WS-H.1.2f scheduler tick', () => {
@@ -536,5 +564,94 @@ describe('nightly MFCI calibration rebuild (WS-H.3.1a)', () => {
     await rebuildMfciCalibrations(fixture.invariants, fixture.events, Date.now());
     const kept = await fixture.invariants.calibrations.get('mfci:target_concentration');
     expect(kept?.version).toBe('v-previous');
+  });
+
+  // WS-O.4.5 — a contribution.created event on `storyId` at `atMs`.
+  const calibEvent = (storyId: string, atMs: number) => ({
+    eventId: randomUUID(),
+    eventType: 'contribution.created' as const,
+    topic: 'contribution.created',
+    timestamp: new Date(atMs).toISOString(),
+    privacyClassification: 'public' as const,
+    retentionTier: 'public_contribution' as const,
+    payload: { story_id: storyId },
+    ownerUserId: null,
+    purgeAfter: null,
+  });
+
+  it('EXCLUDES windows touching an under-case target (anti-poisoning, WS-O.4.5)', async () => {
+    const fixture = freshInvariantServices();
+    const { rebuildMfciCalibrations } = await import('../invariants/scheduler.js');
+    // Hour-aligned so each window's events stay within ONE hour bucket
+    // (otherwise the wall-clock phase can straddle a boundary nondeterministically).
+    const nowMs = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+    const organic = await seedStory(fixture);
+    const attacked = await seedStory(fixture);
+    // An OPEN case on the attacked target → its windows must be dropped.
+    await fixture.invariants.mfciCases.insert({
+      caseId: randomUUID(),
+      targetType: 'story',
+      targetId: attacked.storyId,
+      riskState: 'high',
+      statistic: 'target_concentration',
+      mfciScore: 6,
+      pHat: 0.002,
+      sampleCount: 100,
+      fixedMarginsRef: 'cheap:test',
+      summary: '{}',
+      appealSummary: '',
+      status: 'open',
+      openedAt: new Date(nowMs).toISOString(),
+      resolvedAt: null,
+      resolvedBy: null,
+    });
+    const rows = [];
+    for (let h = 1; h <= 8; h += 1) {
+      const windowStart = nowMs - h * 3_600_000;
+      for (let i = 0; i < 6; i += 1)
+        rows.push(calibEvent(organic.storyId, windowStart + i * 90_000));
+    }
+    // One poisoned window: a concentrated burst on the under-case target.
+    const poisonStart = nowMs - 9 * 3_600_000;
+    for (let i = 0; i < 20; i += 1)
+      rows.push(calibEvent(attacked.storyId, poisonStart + i * 60_000));
+    await fixture.events.eventStore.insertMany(rows);
+    await rebuildMfciCalibrations(fixture.invariants, fixture.events, nowMs);
+    // Only the 8 organic windows contributed; the poisoned window was excluded.
+    const row = await fixture.invariants.calibrations.get('mfci:target_concentration');
+    expect(row?.sampleCount).toBe(8);
+  });
+
+  it('ALERTS and RETAINS the previous calibration on a poisoning q99 jump (WS-O.4.5)', async () => {
+    const fixture = freshInvariantServices();
+    const { rebuildMfciCalibrations } = await import('../invariants/scheduler.js');
+    const nowMs = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+    // A SENSITIVE previous calibration (low q99 in the small-volume bucket).
+    await fixture.invariants.calibrations.upsert({
+      calibrationKey: 'mfci:target_concentration',
+      version: 'v-sensitive',
+      data: {
+        statistic: 'target_concentration',
+        version: 'v-sensitive',
+        computedAtMs: nowMs,
+        buckets: [{ minVolume: 0, q50: 0.1, q90: 0.15, q99: 0.2, sampleCount: 50 }],
+      },
+      sampleCount: 50,
+      computedAt: new Date(nowMs).toISOString(),
+    });
+    // A POISONED baseline: every window concentrates on one target →
+    // target_concentration ≈ 1 → the new q99 ≫ 1.5 × 0.2.
+    const story = await seedStory(fixture);
+    const rows = [];
+    for (let h = 1; h <= 8; h += 1) {
+      const windowStart = nowMs - h * 3_600_000;
+      for (let i = 0; i < 6; i += 1) rows.push(calibEvent(story.storyId, windowStart + i * 90_000));
+    }
+    await fixture.events.eventStore.insertMany(rows);
+    await rebuildMfciCalibrations(fixture.invariants, fixture.events, nowMs);
+    // The drift alert fired and the SENSITIVE calibration was retained.
+    expect(fixture.events.metrics.counter('invariants.mfci.calibration_drift')).toBeGreaterThan(0);
+    const kept = await fixture.invariants.calibrations.get('mfci:target_concentration');
+    expect(kept?.version).toBe('v-sensitive');
   });
 });

@@ -171,6 +171,7 @@ export async function toRoomSummary(
   room: RoomRecord,
   threadCount: number,
   requesterUserId: string | null,
+  requesterRoles: readonly Role[] = [],
 ): Promise<RoomSummary> {
   const memberCount = await forum.rooms.countMembers(room.roomId);
   const subscription =
@@ -179,11 +180,13 @@ export async function toRoomSummary(
       : null;
   // can_post: a public room auto-joins on post (so all_members ⇒ postable even
   // unjoined); a private room needs membership; experts_and_stewards needs the
-  // steward/expert bar. Platform roles aren't resolved here, so a platform
-  // steward sees an experts room as postable only via a room-steward row — the
-  // server re-checks authoritatively at submit either way.
+  // steward/expert bar. The requester's PLATFORM roles are passed through so the
+  // composer's can_post matches the authoritative submit-time check (a platform
+  // expert/steward sees an experts room as postable). The server re-checks at
+  // submit either way.
   const canPost =
-    requesterUserId !== null && (await userMayPostTopLevel(forum, room, requesterUserId));
+    requesterUserId !== null &&
+    (await userMayPostTopLevel(forum, room, requesterUserId, requesterRoles));
   return {
     room_id: room.roomId,
     name: room.name,
@@ -253,10 +256,11 @@ export async function roomContentVisibleToUser(
 /**
  * WS-Q.3.1b — the single chokepoint for "may create top-level content here":
  * the user passes the content bar AND (the room admits all members OR the user
- * holds a steward role / is an expert-lens assignee). Consumed by the
- * submission guard (WS-Q.2.1b) and the composer's postable-room filter
- * (WS-Q.5.1a). (Per-user expert-lens assignment is the WS-J seam; today the
- * `experts_and_stewards` bar is satisfied by room or platform stewards.)
+ * is a room/platform steward OR the user holds the platform `expert` role).
+ * Consumed by the submission guard (WS-Q.2.1b) and the composer's postable-room
+ * filter (WS-Q.5.1a). The `experts_and_stewards` bar is satisfied by room or
+ * platform stewards and by platform experts; finer per-user expert-lens
+ * assignment remains the WS-J seam.
  */
 export async function userMayPostTopLevel(
   forum: ForumServices,
@@ -267,7 +271,10 @@ export async function userMayPostTopLevel(
   if (!(await roomContentVisibleToUser(forum, room, userId))) return false;
   if (room.postingPolicy === 'all_members') return true;
   if (userId === null) return false;
-  return isRoomSteward(forum, room.roomId, userId, platformRoles);
+  // experts_and_stewards: room/platform stewards, or a platform expert.
+  return (
+    platformRoles.includes('expert') || isRoomSteward(forum, room.roomId, userId, platformRoles)
+  );
 }
 
 /**

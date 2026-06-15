@@ -68,10 +68,17 @@ pnpm dev                       # web on :5173, API on :3001 — zero setup
 `pnpm dev` works out of the box: with no `DATABASE_URL`/`REDIS_URL` the API
 boots on its in-memory stores and seeds a rich demo corpus through the real
 stores — several authors, public/private/expert-gated rooms, stories of varied
-submission types and visibility tiers, and threads with several nested,
-multi-author comments — so the PWA renders real end-to-end data immediately
-(idempotent; never runs in production). The in-memory stores are ephemeral: a
-restart re-seeds a fresh corpus.
+submission types and visibility tiers, threads with several nested,
+multi-author comments, stories across **every** lifecycle state so the feed
+shows all seven §5.6 rating labels (not a monotone "Getting Attention"),
+invariant signals (MERI exposure labels, SCOI interpretation divergence), and
+pre-populated reading signals — so the PWA renders real end-to-end data
+immediately (idempotent; never runs in production). The in-memory stores are
+ephemeral: a restart re-seeds a fresh corpus.
+
+For local **user testing** — the seeded admin / steward / expert accounts and
+how to sign in (Licio is passwordless; the one-time code is surfaced to the
+`pnpm dev` API log) — see [`DEVELOPMENT.md`](DEVELOPMENT.md).
 
 To run dev against a real Postgres/Redis instead (durable data, closer to
 production), start the stack and set the connection URLs:

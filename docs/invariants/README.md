@@ -82,7 +82,15 @@ greedy **fallback**, flagged `MATROID_FALLBACK` with halved confidence and
 the 1−1/e / 1/2 guarantees documented in the card.
 
 Data assembly: near-duplicate groups union MinHash/LSH signature collisions
-at the configured Jaccard threshold; lineage groups union confirmed
+at the configured Jaccard threshold AND (WS-O.4.5) embedding-cosine matches
+above `meriSemanticDuplicateThreshold` (via the WS-F embedding store's
+`findSimilar`), so a hard paraphrase that beats the LEXICAL MinHash threshold
+is still collapsed into one exposure — exposure can't be inflated by
+paraphrasing harder. The semantic union degrades gracefully when embeddings
+are absent (MinHash-only). NOTE: its strength depends on the deployed
+embedding provider — the DEFAULT provider is lexical (n-gram-correlated), so
+the genuine semantic benefit is realized only with a semantic `EMBEDDING_URL`
+provider; the seam is provider-agnostic. Lineage groups union confirmed
 syndication edges and shared outermost publisher ownership; evidence groups
 come from claim/evidence `independence_group_id`. The WS-E
 `hooks.redundancy` seam is closed from the latest stored marginal gains
@@ -303,6 +311,31 @@ weaken either (factor > 1) is rejected at write time.
   (constructive/casual/narrowing/compulsive/rage) reads event kinds, topic
   ordinals, and timing only.
 
+### Threshold-hugging meta-monitor (WS-O.4.5)
+
+Because every operating point is public (the project's chosen posture), an
+attacker can read each invariant's threshold and tune activity to sit a hair
+below the cliff to stay individually under-flagged. The cross-invariant
+**threshold-hugging meta-monitor** turns that knowledge into a liability. The
+pure primitive `detectThresholdHugging(values, threshold, cfg)`
+(`packages/invariants/src/braid/index.ts`, alongside Braid's TEMPORAL
+boundary-crossing `boundaryCrossingsByEntity`) flags an anomalous mass of scores
+in `[threshold − band, threshold)` against a uniform-over-observed-range null —
+scale/translation invariant and FAIL-CLOSED (a small population, no observed
+spread, or an everything-hugging distribution is never flagged). The scheduler
+step `runThresholdHuggingScan` (`apps/api/src/invariants/scheduler.ts`) applies
+it each tick to the recent `invariant_outputs` score population of each
+threshold-bearing invariant (MFCI `mfci`, SCOI `scoi`, PHI `phi`), with the band
+a configured FRACTION of each invariant's public threshold (so it scales across
+their different score scales). A detection emits the
+`invariants.threshold_hugging.detected` metric and routes the flagged SCOI/PHI
+targets to the EXACT MFCI fiber test (the calibration-independent backstop,
+reusing the Tropical→MFCI intake hook) — never a direct action, since the
+invariants are shadow-only. MFCI's own borderline targets are not re-routed
+(their `mfci` IS the exact statistic). Tunables: `thresholdHuggingBandFraction`
+(0.15), `thresholdHuggingMinPopulation` (12), `thresholdHuggingExcess` (2.5),
+all fail-closed under `invariants.*`.
+
 ## Platform mechanics
 
 - **Fallback wrapper (WS-H.1.2c).** Every computation runs under
@@ -399,13 +432,25 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
 
 ## Testing
 
-- `packages/invariants`: 330+ unit/property tests — matroid
+- `packages/invariants`: 340+ unit/property tests — matroid
   monotonicity/submodularity and greedy-vs-brute-force exactness, fiber
   connectivity by enumeration, sampler margin/nonnegativity invariants,
   Jacobi eigenpair residuals, Sinkhorn marginals + rounding exactness,
   Helmholtz orthogonality, Chen-identity exactness, gauge invariance under
   random conjugation, the regression suite against pinned baselines (an
   intentional drift is flagged with its magnitude).
+- `packages/invariants/__tests__/invariant-purpose.test.ts`: the PURPOSE
+  suite — where the per-module suites prove the mathematics is correct, this
+  proves each invariant fulfils its STATED SPEC purpose (and the adversarial
+  cases a skeptic would use against it): MERI collapses ten near-identical
+  sources to ~one exposure (§7.1); MFCI does not flag an active community
+  proportional to its base rates and leaves a burst's innocent neighbour at
+  the null (§8.4); GWEI calls two cohorts with different items but the same
+  relational geometry equivalent and blocks a degraded protected cohort
+  (§9.2); SCOI rises when a post is detached into a divergent community
+  without being "weaponized" absent a safety signal (§10.1); PHI separates a
+  flat loop from a steered one (§11.4); CID catches a locale-biased ranker as
+  readily as a gender-biased one (§12.5).
 - `apps/api`: platform tests (wrapper, promotion, config, scheduler,
   shadow/ranking boundary), service tests on seeded WS-D/E/F/G data
   (including the real MinHash near-duplicate path and the full SCOI lens
@@ -413,6 +458,19 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
   tests (DATABASE_URL) that run the real migration chain — including a
   live-Postgres proof of the 0009 `time_window` text→jsonb USING
   conversion. CI's service containers run the gated suites.
+- `apps/api/src/__tests__/invariants-ensemble-adversarial.test.ts`: the
+  ENSEMBLE adversarial suite (the named `pnpm check:adversarial` CI gate,
+  WS-O.4.5). Where the purpose suite proves each invariant in ISOLATION, this
+  proves the ensemble property the open-source threat model rests on — evading
+  one invariant trips another, because they measure orthogonal (contradictory)
+  facets of the same attack: a Sybil brigade cannot both concentrate (MFCI
+  catches) and spread-but-synchronize (Tropical catches); a paraphrase flood
+  with distinct URLs stays bounded by MERI's claim/lineage classes; manufactured
+  divergence cannot be weaponized via SCOI without a safety signal yet its
+  coordinated authorship trips MFCI; attribute bias is caught by both CID and
+  GWEI; a low-holonomy session with a compulsive re-entry loop is still flagged;
+  and no single evasion zeroes the ensemble. The attack catalog the scenarios
+  map to is `docs/invariants/ADVERSARIAL-THREATS.md`.
 - `packages/invariants` performance (RUN_PERF-gated, the WS-F precedent):
   batch-tier budgets MEASURED at production-like sizes — MERI 200
   candidates ≈ 5 ms, MFCI 800 observations × 60 targets at the production
@@ -445,11 +503,22 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
 - **Notification dispatch** for bridge invitations awaits a platform
   dispatch path (`notification.sent` has no in-repo producer); bridge
   routing produces records for steward visibility only.
-- **Calibration contamination hardening:** the nightly MFCI null rebuild
-  does not yet exclude windows overlapping coordinated bursts, so a
-  sustained attack could gradually lift the cheap path's q99. The exact
-  fiber test is the calibration-independent backstop; window exclusion
-  keyed on opened cases lands with the WS-J case lifecycle.
+- **Development demo:** the dev seed (`lib/demo-seed.ts`) computes SCOI from
+  real lens contributions and surfaces the divergence on the story-page
+  "Where interpretations differ" drawer, but does NOT seed the feed-card
+  SCOI `context_card` (it rides the WS-I ranking feature chain, which the
+  WS-H batch does not feed directly) nor the bridge-attempt records that
+  drive a *computed* "Bridge Active" (the demo uses the `bridging` lifecycle
+  state for that label). Both are demo-corpus gaps, not production gaps.
+- **Calibration anti-poisoning (WS-O.4.5, SHIPPED):** the nightly MFCI null
+  rebuild (`rebuildMfciCalibrations`) now (1) EXCLUDES any hourly window
+  touching a target under an OPEN MFCI case (`mfciExcludeFlaggedWindows`), so an
+  attacker's own flagged activity can never fold into the "normal" it is judged
+  against, and (2) emits an `invariants.mfci.calibration_drift` alert and
+  RETAINS the previous (more sensitive) calibration when a new per-volume-bucket
+  q99 jumps beyond `mfciCalibrationDriftMaxRatio` — a poisoning signature can no
+  longer desensitize the cheap path. The exact fiber test remains the
+  authoritative, calibration-independent backstop.
 - **WS-P** wires the GWEI release gate and the CID model-release gate into
   the experiment framework, and owns the transparency-report pipeline the
   export feeds.

@@ -49,6 +49,7 @@ import {
 } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
 import type { LensRecord, RoomRecord } from '../forum/stores.js';
+import type { Role } from '../identity/rbac.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { getIngestionServices } from '../ingestion/services.js';
@@ -74,6 +75,23 @@ async function softUserId(
   } catch {
     return null;
   }
+}
+
+/**
+ * Soft session resolution that also resolves the requester's PLATFORM roles, so
+ * the room summary's `can_post` is computed against the SAME authority the
+ * submission guard enforces (a platform expert/steward sees an experts-gated
+ * room as postable). The role lookup only fires for an authenticated requester;
+ * an anonymous/invalid session resolves to no roles without a store read.
+ */
+async function softUserContext(
+  cookieHeader: string | undefined,
+  identity: IdentityServices,
+): Promise<{ userId: string | null; roles: readonly Role[] }> {
+  const userId = await softUserId(cookieHeader, identity);
+  if (userId === null) return { userId: null, roles: [] };
+  const user = await identity.store.getUser(userId);
+  return { userId, roles: user?.roles ?? [] };
 }
 
 function toLensPublic(lens: LensRecord) {
@@ -118,7 +136,7 @@ export function createRoomsRoutes() {
           const forum = getForumServices();
           const ingestion = getIngestionServices();
           const identity = getIdentityServices();
-          const userId = await softUserId(c.req.header('cookie'), identity);
+          const { userId, roles } = await softUserContext(c.req.header('cookie'), identity);
           const config = forum.config();
           const pageSize = Math.min(query.limit ?? config.roomPageSize, config.roomPageSizeMax);
 
@@ -217,7 +235,7 @@ export function createRoomsRoutes() {
           const items = [];
           for (const room of page) {
             const threadCount = await ingestion.stories.countThreadsByRoom(room.roomId);
-            items.push(await toRoomSummary(forum, room, threadCount, userId));
+            items.push(await toRoomSummary(forum, room, threadCount, userId, roles));
           }
           return c.json(roomListResponseSchema.parse({ items, nextCursor }));
         },
@@ -292,7 +310,9 @@ export function createRoomsRoutes() {
           });
           forum.metrics.increment('rooms.created');
           return c.json(
-            roomSummarySchema.parse(await toRoomSummary(forum, created.room, 0, auth.userId)),
+            roomSummarySchema.parse(
+              await toRoomSummary(forum, created.room, 0, auth.userId, auth.roles),
+            ),
             201,
           );
         },
@@ -304,7 +324,7 @@ export function createRoomsRoutes() {
         const forum = getForumServices();
         const ingestion = getIngestionServices();
         const identity = getIdentityServices();
-        const userId = await softUserId(c.req.header('cookie'), identity);
+        const { userId, roles } = await softUserContext(c.req.header('cookie'), identity);
         const room = await forum.rooms.getById(roomId);
         if (!room) return c.json(notFound, 404);
         // WS-Q.3.1a — TIER ONE (existence) is universal: the room's shell
@@ -314,7 +334,7 @@ export function createRoomsRoutes() {
         // a non-member of a private room sees the shell with NO lens content.
         const canReadContent = await roomContentVisibleToUser(forum, room, userId);
         const threadCount = await ingestion.stories.countThreadsByRoom(roomId);
-        const summary = await toRoomSummary(forum, room, threadCount, userId);
+        const summary = await toRoomSummary(forum, room, threadCount, userId, roles);
         const lenses = canReadContent ? await forum.lenses.listByRoom(roomId) : [];
         const stewards = await forum.rooms.listStewards(roomId);
         const resolveHandles = new Map<string, { handle: string; displayName: string | null }>();
@@ -427,7 +447,7 @@ export function createRoomsRoutes() {
           return c.json(
             roomJoinResponseSchema.parse({
               status: outcome.status,
-              room: await toRoomSummary(forum, room, threadCount, auth.userId),
+              room: await toRoomSummary(forum, room, threadCount, auth.userId, auth.roles),
             }),
             200,
           );

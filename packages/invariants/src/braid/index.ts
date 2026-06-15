@@ -191,23 +191,9 @@ export function detectGaming(
   const crossingRate = crossingNumber / transitions;
   const entropy = braidEntropyEstimate(strands, word);
 
-  const crossings = new Map<string, number>();
-  const firstSnapshot = snapshots[0];
-  if (firstSnapshot) {
-    for (const topicId of firstSnapshot.topicIdsByRank) {
-      let previousVisible: boolean | null = null;
-      let count = 0;
-      for (const snapshot of snapshots) {
-        const rank = snapshot.topicIdsByRank.indexOf(topicId);
-        if (rank < 0) continue;
-        const visible = rank < visibilityBoundary;
-        if (previousVisible !== null && visible !== previousVisible) count += 1;
-        previousVisible = visible;
-      }
-      if (count > 0) crossings.set(topicId, count);
-    }
-  }
-  const thresholdGamingTopics = [...crossings.entries()]
+  const thresholdGamingTopics = [
+    ...boundaryCrossingsByEntity(snapshots, visibilityBoundary).entries(),
+  ]
     .filter(([, count]) => count >= config.boundaryCrossThreshold)
     .map(([topicId, boundaryCrossings]) => ({ topicId, boundaryCrossings }))
     .sort((a, b) => b.boundaryCrossings - a.boundaryCrossings);
@@ -218,6 +204,101 @@ export function detectGaming(
     entropy,
     thresholdGamingTopics,
   };
+}
+
+/**
+ * Per-entity count of TEMPORAL crossings of a rank boundary across snapshots —
+ * the number of times each topic flips between visible (rank < boundary) and
+ * hidden. Shared by `detectGaming` (visibility-boundary churn) and any consumer
+ * that needs the raw oscillation counts. Pure and total.
+ */
+export function boundaryCrossingsByEntity(
+  snapshots: readonly RankSnapshot[],
+  boundary: number,
+): Map<string, number> {
+  const crossings = new Map<string, number>();
+  const first = snapshots[0];
+  if (!first) return crossings;
+  for (const topicId of first.topicIdsByRank) {
+    let previousVisible: boolean | null = null;
+    let count = 0;
+    for (const snapshot of snapshots) {
+      const rank = snapshot.topicIdsByRank.indexOf(topicId);
+      if (rank < 0) continue;
+      const visible = rank < boundary;
+      if (previousVisible !== null && visible !== previousVisible) count += 1;
+      previousVisible = visible;
+    }
+    if (count > 0) crossings.set(topicId, count);
+  }
+  return crossings;
+}
+
+export interface ThresholdHuggingConfig {
+  /** Width of the sub-threshold "hug band" [threshold − band, threshold). */
+  band: number;
+  /** Minimum population below which detection is suppressed (fail-closed). */
+  minPopulation: number;
+  /** Minimum observed/expected ratio in the band to flag. */
+  excessThreshold: number;
+}
+
+export interface ThresholdHuggingResult {
+  detected: boolean;
+  /** Values observed in [threshold − band, threshold). */
+  bandCount: number;
+  /** Expected band count under a uniform spread over the observed range. */
+  expectedCount: number;
+  /** Anomaly statistic: bandCount / expectedCount (0 when expected = 0). */
+  excess: number;
+  population: number;
+}
+
+/** A minimum absolute band count, so noise on a tiny band never trips it. */
+const MIN_HUG_BAND_COUNT = 3;
+
+/**
+ * Distributional threshold-hugging (WS-O.4.5): detect a population anomalously
+ * massed JUST UNDER a known public threshold — the signature of an attacker who
+ * reads the open-source threshold and tunes activity to sit a hair below the
+ * cliff. The null is a uniform spread over the OBSERVED value range; an excess
+ * of mass in [threshold − band, threshold) over that null is the anomaly.
+ *
+ * Pure, total, deterministic, and scale/translation invariant when (values,
+ * threshold, band) scale together. FAIL-CLOSED: a population below
+ * `minPopulation`, no observed spread (range ≤ band ⇒ no internal reference for
+ * "diffuse"), or an everything-in-band case yields `detected: false` — knowing
+ * the threshold becomes a liability by routing flagged targets to the EXACT
+ * MFCI fiber test, never a direct action, so a false positive only triggers an
+ * authoritative re-check. Complements Braid's TEMPORAL boundary-crossing (one
+ * entity oscillating over time); this is a STATIC cross-entity signal.
+ */
+export function detectThresholdHugging(
+  values: readonly number[],
+  threshold: number,
+  config: ThresholdHuggingConfig,
+): ThresholdHuggingResult {
+  const population = values.length;
+  const empty = { detected: false, bandCount: 0, expectedCount: 0, excess: 0, population };
+  if (population < config.minPopulation) return empty;
+  let lo = Number.POSITIVE_INFINITY;
+  let hi = Number.NEGATIVE_INFINITY;
+  for (const v of values) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  const range = hi - lo;
+  const bandLo = threshold - config.band;
+  let bandCount = 0;
+  for (const v of values) {
+    if (v >= bandLo && v < threshold) bandCount += 1;
+  }
+  // No spread (range ≤ band) ⇒ no internal reference for "diffuse"; fail closed.
+  const expectedFraction = range > config.band ? config.band / range : 1;
+  const expectedCount = population * expectedFraction;
+  const excess = expectedCount > 0 ? bandCount / expectedCount : 0;
+  const detected = bandCount >= MIN_HUG_BAND_COUNT && excess >= config.excessThreshold;
+  return { detected, bandCount, expectedCount, excess, population };
 }
 
 export const BRAID_VERSION = '1.0.0';

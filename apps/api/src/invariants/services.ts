@@ -442,6 +442,16 @@ export function getInvariantServices(): InvariantPlatformServices {
   throw new Error('Invariant services not configured — call setInvariantServices() at startup');
 }
 
+/**
+ * Non-throwing accessor: the invariant platform is a SOFT dependency for read
+ * surfaces (its outputs are treated as ABSENT when degraded, SPEC §21.4). A
+ * detail read must not 500 because the platform is not wired — it returns null
+ * and the caller degrades to "no invariant signal".
+ */
+export function tryGetInvariantServices(): InvariantPlatformServices | null {
+  return _services ?? null;
+}
+
 export function setInvariantServices(services: InvariantPlatformServices): void {
   _services = services;
 }

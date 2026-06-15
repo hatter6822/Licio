@@ -10,6 +10,7 @@
 
 import {
   buildNullCalibration,
+  detectThresholdHugging,
   type InvariantTarget,
   runRegressionSuite,
   synchronyScore,
@@ -22,6 +23,7 @@ import type { InvariantsRuntimeConfig } from './config.js';
 import { hourWindow, mapBounded, persistComputations, runGuarded } from './runner.js';
 import type { InvariantPlatformServices } from './services.js';
 import { GLOBAL_FEED_TARGET_ID } from './services-impl.js';
+import type { CalibrationRow } from './stores.js';
 
 export const INVARIANTS_JOB_LEASE = 'invariants_hourly';
 export const INVARIANTS_SCHEDULER_INTERVAL_MS = 3_600_000;
@@ -29,6 +31,7 @@ export const INVARIANTS_SCHEDULER_INTERVAL_MS = 3_600_000;
 export type InvariantsSchedulerTask =
   | 'config_reload'
   | 'batch_compute'
+  | 'threshold_hugging_scan'
   | 'session_sweep'
   | 'nightly_regression'
   | 'calibration_rebuild';
@@ -93,6 +96,12 @@ export async function runInvariantsTick(
   }
 
   try {
+    await runThresholdHuggingScan(invariants, events, nowMs);
+  } catch (err) {
+    onError(err, 'threshold_hugging_scan');
+  }
+
+  try {
     await invariants.sessions.sweepExpired(nowMs);
   } catch (err) {
     onError(err, 'session_sweep');
@@ -124,7 +133,122 @@ export async function runInvariantsTick(
   }
 }
 
+/** How far back the meta-monitor reads each invariant's recent outputs. */
+const THRESHOLD_HUGGING_LOOKBACK_MS = 24 * 3_600_000;
+/** Cap on outputs read per invariant type (a bounded, targeted read). */
+const THRESHOLD_HUGGING_READ_LIMIT = 2_000;
+
+/**
+ * Threshold-bearing invariants the meta-monitor scans: the score key in the
+ * `score_vector`, the public threshold from config, and whether a detection
+ * routes the flagged targets to the exact MFCI fiber test. Routing is reserved
+ * for invariants whose targets are STORY/THREAD ids the MFCI coordination intake
+ * can evaluate: SCOI hugging (manufactured near-divergence on a story) is worth a
+ * coordination re-check. MFCI's own borderline targets were already fiber-tested
+ * (their `mfci` is the exact statistic), and PHI targets are SESSION-scoped
+ * (a wellbeing signal, not a story the coordination test can score) — both only
+ * emit the metric, never route.
+ */
+const THRESHOLD_BEARING: ReadonlyArray<{
+  type: string;
+  scoreKey: string;
+  threshold: (c: InvariantsRuntimeConfig) => number;
+  routeToMfci: boolean;
+}> = [
+  {
+    type: 'MFCI',
+    scoreKey: 'mfci',
+    threshold: (c) => c.mfciRiskThresholds.elevated,
+    routeToMfci: false,
+  },
+  {
+    type: 'SCOI',
+    scoreKey: 'scoi',
+    threshold: (c) => c.scoiNeedsContextThreshold,
+    routeToMfci: true,
+  },
+  {
+    // Session-scoped target ids: a wellbeing/near-loop signal, NOT a story the
+    // MFCI coordination test can evaluate — metric only, never routed.
+    type: 'PHI',
+    scoreKey: 'phi',
+    threshold: (c) => c.phiThresholds.baseThreshold,
+    routeToMfci: false,
+  },
+];
+
+/**
+ * WS-O.4.5 — the cross-invariant THRESHOLD-HUGGING meta-monitor. For each
+ * threshold-bearing invariant it reads the recent score population across
+ * targets and flags an anomalous mass JUST UNDER the (public, deterministic)
+ * threshold — the signature of an attacker who read the open-source threshold
+ * and tuned activity to sit a hair below the cliff. Knowing the threshold thus
+ * becomes a LIABILITY: a detection emits a metric and routes the flagged targets
+ * to the EXACT MFCI fiber test (the calibration-independent backstop), never a
+ * direct action (the invariants are shadow-only). Read-only over
+ * `invariant_outputs`, bounded per type, and FAIL-CLOSED (the primitive declines
+ * to flag a small population or a no-spread/all-hugging distribution).
+ */
+export async function runThresholdHuggingScan(
+  invariants: InvariantPlatformServices,
+  events: EventPipelineServices,
+  nowMs: number,
+): Promise<void> {
+  const config = invariants.config();
+  const sinceIso = new Date(nowMs - THRESHOLD_HUGGING_LOOKBACK_MS).toISOString();
+  for (const spec of THRESHOLD_BEARING) {
+    const rows = await events.invariantStore.listByTypeSince(
+      spec.type,
+      sinceIso,
+      THRESHOLD_HUGGING_READ_LIMIT,
+    );
+    // Latest score per target (rows are newest-first) — never count a target twice.
+    const latestByTarget = new Map<string, number>();
+    for (const row of rows) {
+      if (latestByTarget.has(row.targetId)) continue;
+      const raw = row.scoreVector[spec.scoreKey];
+      if (typeof raw === 'number' && Number.isFinite(raw)) latestByTarget.set(row.targetId, raw);
+    }
+    const threshold = spec.threshold(config);
+    const band = config.thresholdHuggingBandFraction * threshold;
+    const result = detectThresholdHugging([...latestByTarget.values()], threshold, {
+      band,
+      minPopulation: config.thresholdHuggingMinPopulation,
+      excessThreshold: config.thresholdHuggingExcess,
+    });
+    if (!result.detected) continue;
+    const flagged = [...latestByTarget.entries()]
+      .filter(([, score]) => score >= threshold - band && score < threshold)
+      .map(([targetId]) => targetId);
+    invariants.log('invariants.threshold_hugging.detected', {
+      invariant: spec.type,
+      excess: result.excess,
+      band_count: result.bandCount,
+      population: result.population,
+      flagged: flagged.length,
+    });
+    events.metrics.increment('invariants.threshold_hugging.detected');
+    // Cross-invariant escalation: route the hugging targets to the exact MFCI
+    // fiber test (fail-toward-caution; never an auto-action). COOLDOWN — a
+    // target already under an OPEN case is not re-routed, so a persistently
+    // hugging population is not re-flagged every hourly tick.
+    if (spec.routeToMfci && flagged.length > 0 && events.hooks.mfci) {
+      const fresh: string[] = [];
+      for (const targetId of flagged) {
+        if (fresh.length >= 10) break;
+        const existing = await invariants.mfciCases.latestForTarget(targetId);
+        if (existing?.status === 'open') continue;
+        fresh.push(targetId);
+      }
+      if (fresh.length > 0) await events.hooks.mfci({ target_ids: fresh } as never);
+    }
+  }
+}
+
 const CALIBRATION_TOPICS = ['contribution.created', 'evidence.added', 'content.submitted'];
+
+/** Generous bound on the open-case scan for calibration window exclusion. */
+const OPEN_CASE_SCAN_LIMIT = 5_000;
 
 /**
  * Rebuild the MFCI null calibrations (WS-H.3.1a "precomputed null
@@ -135,13 +259,16 @@ const CALIBRATION_TOPICS = ['contribution.created', 'evidence.added', 'content.s
  * statistic sees. Too few nonempty windows keeps the previous calibration
  * (never replace a baseline with noise).
  *
- * Contamination note: windows containing coordinated bursts are NOT
- * excluded from the baseline, so sustained attacks could gradually lift
- * the q99 and desensitize the CHEAP path. The exact fiber test is the
- * calibration-independent backstop (margins-conditioned, recomputed per
- * window), and analyst case review covers the residual. Window exclusion
- * keyed on opened cases is a deliberate hardening follow-up (WS-J owns
- * the case-lifecycle signals it would key on).
+ * ANTI-POISONING (WS-O.4.5). A sustained attacker could drip coordinated
+ * activity into the baseline to gradually lift the q99 and desensitize the
+ * CHEAP path. Two defenses keep it sensitive: (1) WINDOW EXCLUSION — any hourly
+ * window containing an action on a target under an OPEN MFCI case is dropped, so
+ * an attacker's own flagged activity can never fold into the "normal" it is
+ * judged against; (2) DRIFT ALERT + fail-closed adopt — if a new calibration's
+ * per-volume-bucket q99 jumps beyond `mfciCalibrationDriftMaxRatio` over the
+ * previous one, the rebuild EMITS a drift alert and RETAINS the previous (more
+ * sensitive) calibration rather than adopting the desensitized one. The exact
+ * fiber test remains the authoritative, calibration-independent backstop.
  */
 export async function rebuildMfciCalibrations(
   invariants: InvariantPlatformServices,
@@ -151,6 +278,17 @@ export async function rebuildMfciCalibrations(
 ): Promise<void> {
   const lookbackHours = options.lookbackHours ?? 7 * 24;
   const minSamples = options.minSamples ?? 6;
+  const config = invariants.config();
+  // WS-O.4.5 — targets under an OPEN case whose windows are excluded. The scan
+  // is bounded (the analyst queue is small by construction); the cap is generous
+  // so the exclusion set is effectively complete, and the EXACT fiber test
+  // remains the calibration-independent backstop for anything beyond it.
+  const flaggedTargets = new Set<string>();
+  if (config.mfciExcludeFlaggedWindows) {
+    for (const openCase of await invariants.mfciCases.listOpen(OPEN_CASE_SCAN_LIMIT)) {
+      flaggedTargets.add(openCase.targetId);
+    }
+  }
   const fromIso = new Date(nowMs - lookbackHours * 3_600_000).toISOString();
   const toIso = new Date(nowMs).toISOString();
   const rows = await events.eventStore.listByTopicsBetween(CALIBRATION_TOPICS, fromIso, toIso);
@@ -181,8 +319,15 @@ export async function rebuildMfciCalibrations(
     target_concentration: [] as Array<{ volume: number; rawValue: number }>,
     synchrony: [] as Array<{ volume: number; rawValue: number }>,
   };
+  let excludedWindows = 0;
   for (const actions of byHour.values()) {
     if (actions.length === 0) continue;
+    // WS-O.4.5 — a window touching a flagged (under-case) target is contaminated;
+    // its inflated statistic must never enter the "normal" baseline.
+    if (flaggedTargets.size > 0 && actions.some((a) => flaggedTargets.has(a.targetId))) {
+      excludedWindows += 1;
+      continue;
+    }
     samples.target_concentration.push({
       volume: actions.length,
       rawValue: targetConcentrationScore(actions, neutral, { nowMs }).rawValue,
@@ -198,6 +343,24 @@ export async function rebuildMfciCalibrations(
     const version = `auto:${new Date(nowMs).toISOString().slice(0, 10)}`;
     const calibration = buildNullCalibration(statistic, version, nowMs, list);
     if (calibration.buckets.length === 0) continue;
+    // WS-O.4.5 — drift guard: a q99 that jumped beyond the configured ratio over
+    // the previous calibration's same-volume bucket is a poisoning signature;
+    // RETAIN the previous (more sensitive) calibration and alert instead of
+    // adopting the desensitized one. Volume buckets control for base rates, so a
+    // same-bucket ratio needs no further volume normalization.
+    const previous = await invariants.calibrations.get(`mfci:${statistic}`);
+    const drift = q99DriftRatio(previous, calibration.buckets);
+    if (drift !== null && drift > config.mfciCalibrationDriftMaxRatio) {
+      invariants.log('invariants.mfci.calibration_drift', {
+        statistic,
+        drift,
+        max_ratio: config.mfciCalibrationDriftMaxRatio,
+        retained: previous?.version ?? null,
+        excluded_windows: excludedWindows,
+      });
+      events.metrics.increment('invariants.mfci.calibration_drift');
+      continue;
+    }
     await invariants.calibrations.upsert({
       calibrationKey: `mfci:${statistic}`,
       version,
@@ -210,8 +373,32 @@ export async function rebuildMfciCalibrations(
       version,
       windows: list.length,
       buckets: calibration.buckets.length,
+      excluded_windows: excludedWindows,
     });
   }
+}
+
+/**
+ * Max per-volume-bucket q99 ratio (new / previous); null when there is no
+ * comparable previous bucket. Buckets match on `minVolume` (they condition on
+ * base rates), so a same-bucket ratio is a clean drift signal.
+ */
+function q99DriftRatio(
+  previous: CalibrationRow | null,
+  newBuckets: ReadonlyArray<{ minVolume: number; q99: number }>,
+): number | null {
+  if (!previous) return null;
+  const prevBuckets = (previous.data as { buckets?: Array<{ minVolume: number; q99: number }> })
+    .buckets;
+  if (!Array.isArray(prevBuckets) || prevBuckets.length === 0) return null;
+  let maxRatio: number | null = null;
+  for (const nb of newBuckets) {
+    const pb = prevBuckets.find((b) => b.minVolume === nb.minVolume);
+    if (!pb || pb.q99 <= 0) continue;
+    const ratio = nb.q99 / pb.q99;
+    if (maxRatio === null || ratio > maxRatio) maxRatio = ratio;
+  }
+  return maxRatio;
 }
 
 /** The batch tier: run every invariant guarded, persist shadow outputs. */

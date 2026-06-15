@@ -77,6 +77,8 @@ export async function seedUserWithSession(
     handle?: string;
     /** Seed a TOTP-cleared steward (the WS-E admin-surface bar, WS-D.1.5b). */
     steward?: boolean;
+    /** Seed a platform `expert` (WS-D RBAC; may post in expert-gated rooms). */
+    expert?: boolean;
     /** The suite's pinned clock (account creation backdates from it). */
     nowMs?: number;
     /** Override the seeded account's age (0 ⇒ created exactly "now"). */
@@ -94,7 +96,7 @@ export async function seedUserWithSession(
       privacySettings: opts.privacySettings ?? defaultPrivacySettings(),
       personalizationSettings: defaultPersonalizationSettings(),
       reputationSummary: emptyReputationSummary(),
-      roles: opts.steward ? ['user', 'steward'] : ['user'],
+      roles: opts.steward ? ['user', 'steward'] : opts.expert ? ['user', 'expert'] : ['user'],
     },
     (opts.nowMs ?? Date.now()) - (opts.accountAgeMs ?? SEEDED_ACCOUNT_AGE_MS),
   );
