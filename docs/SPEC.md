@@ -1628,6 +1628,28 @@ Because a PWA cannot use native attestation, abuse defense is server-side and be
 | Forged attention events | Server-side validation, replay protection, rate limits, integrity tokens; client aggregates treated as hints, never sole truth. |
 | Phishing PWA / look-alike domain | Canonical-domain education, anti-impersonation onboarding, signed provenance (Section 20.2). |
 
+**Adversarial posture (Kerckhoffs's principle).** The invariants are
+open-source: an attacker can read every formula, threshold, and seed. The
+project's chosen posture is **fully public, no secrets** — every operating
+point (threshold, seed, calibration window) is public and deterministic, and
+security does **not** depend on hiding any of it. Defense rests on four
+structural properties, all enforced in code and tests (WS-O.4.5): (1) **ensemble
+correlation** — the invariants measure orthogonal, contradictory facets of an
+attack, so evading one trips another (the named `check:adversarial` gate proves
+the combined system catches each catalogued attack even when its primary target
+is individually fooled — `docs/invariants/ADVERSARIAL-THREATS.md`); (2) a
+**threshold-hugging meta-signal** — clustering just under a known public cliff is
+itself an anomaly that routes the attacker into the exact, calibration-
+independent MFCI fiber test, so knowing the threshold is a liability;
+(3) **calibration anti-poisoning** — the MFCI cheap path cannot be desensitized
+by drip-fed coordination (under-case windows are excluded and a q99 drift retains
+the prior calibration), with the exact fiber test as the authoritative backstop;
+and (4) **economic cost** — semantic (not only lexical) independence grouping and
+account-age/progressive-trust weighting make disposable-account attacks
+expensive. The realistic goal is to make a successful attack expensive,
+multi-front, and human-detectable — not to make any invariant individually
+unbeatable.
+
 ## 25.6 Wallet, smart-contract, and Knomosis security
 
 Use EIP-712 typed-data signing with domain separation, nonces, expirations, and chain IDs; authenticate linkage with EIP-4361 and verify both ECDSA `ecrecover` (EOAs) and EIP-1271 `isValidSignature` (contract wallets/multisigs); maintain production contract allowlists and block unknown contract interactions; run transaction simulation and human-readable previews before signing; never request, store, transmit, or log private keys or seed phrases; pin the Knomosis commit, ABIs, contract addresses, runtime versions, and law-pack hashes per environment; validate Knomosis Lean/Solidity/Rust cross-stack fixtures in CI before deployment; use least-privilege keys for indexers, gateway workers, treasury operators, and deployment scripts; store any platform signing keys in HSM/KMS with separation of duties; use multisig and timelocks for treasury execution above low thresholds; monitor event ingestion, reorgs, deposits, withdrawals, challenge windows, and suspicious calls; provide emergency feature flags for wallet connection, payment-intent creation, action submission, treasury execution, and governance voting; run external audits before mainnet funds and after material law-pack/contract changes; include wallet-drainer phishing simulations in security testing; provide just-in-time warnings for approvals, blind signing, unknown recipients, and irreversible transfers; and maintain an incident-specific communications plan for financial exploits.

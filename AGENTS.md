@@ -1117,7 +1117,7 @@ Status:
 | WS-L | Knomosis and wallets | Planned |
 | WS-M | Treasury and governance | Planned |
 | WS-N | Compliance | Planned |
-| WS-O | Security and reliability | Planned |
+| WS-O | Security and reliability | Planned (WS-O.4.5 adversarial hardening shipped) |
 | WS-P | Experimentation and launch | Planned |
 | WS-Q | Content–room ownership and visibility | Complete |
 
