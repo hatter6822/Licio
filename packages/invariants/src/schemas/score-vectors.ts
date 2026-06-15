@@ -131,10 +131,6 @@ export const braidScoreVectorSchema = z
     strands: nonNegativeInt,
     manufactured_churn: z.boolean(),
     threshold_gaming_count: nonNegativeInt,
-    /** WS-O.4.5 — topics massed at crossing-counts just under the gaming flag
-     *  (a distributional companion to the temporal `threshold_gaming_count`). */
-    threshold_hugging_detected: z.boolean(),
-    threshold_hugging_excess: nonNegative,
   })
   .strict();
 export type BraidScoreVector = z.infer<typeof braidScoreVectorSchema>;

@@ -261,7 +261,10 @@ export async function runPwattWindow(
     // detection threshold down. The quantile (not the mean) resists SALTING — a
     // minority of aged accounts mixed into a fresh brigade can't lift the factor
     // (you need a MAJORITY of aged, expensive accounts to evade) — while a
-    // legitimate aged community with a few new users keeps a high factor.
+    // legitimate aged community with a few new users keeps a high factor. A
+    // genuinely viral item drawing a MAJORITY of new users may also trip the
+    // lowered threshold; that is an accepted trade-off (flags are shadow and the
+    // exact fiber test + human review clear organic virality).
     const trustWeights: number[] = [];
     for (const actorKey of item.actors.keys()) trustWeights.push(await actorTrust(actorKey));
     const trustFactor = lowQuantileTrust(trustWeights);

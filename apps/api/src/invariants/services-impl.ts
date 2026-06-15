@@ -16,7 +16,6 @@ import {
   appealSummary,
   assertGaugeInvariantBoundary,
   assessTension,
-  boundaryCrossingsByEntity,
   braidEntropyEstimate,
   braidWordFromSnapshots,
   buildConversationComplex,
@@ -33,7 +32,6 @@ import {
   detectGaming,
   detectNarrowLoop,
   detectSynchronizedCascade,
-  detectThresholdHugging,
   effectiveRepeatThreshold,
   experienceMetrics,
   fiberTestMulti,
@@ -774,13 +772,6 @@ export class TropicalService extends BaseInvariantService {
   }
 }
 
-/** Braid-local threshold-hugging params over the integer crossing-count
- *  distribution (one count below the gaming flag; a small topic-population
- *  floor; a clear excess over the uniform null). */
-const BRAID_HUG_BAND = 1;
-const BRAID_HUG_MIN_POPULATION = 8;
-const BRAID_HUG_EXCESS = 2;
-
 export class BraidService extends BaseInvariantService {
   readonly invariantType = InvariantType.BraidDynamics;
   readonly tiers: TierDeclaration = { realtime: false, nearRealtime: false, batch: true };
@@ -810,22 +801,6 @@ export class BraidService extends BaseInvariantService {
     const { word, crossingNumber, strands } = braidWordFromSnapshots(snapshots);
     const entropy = braidEntropyEstimate(strands, word);
     const gaming = detectGaming(snapshots, 3, DEFAULT_GAMING_DETECTION);
-    // WS-O.4.5 — Braid-local distributional threshold-hugging: topics massed at
-    // crossing-counts JUST UNDER the gaming flag (oscillating
-    // `boundaryCrossThreshold − 1` times to dodge the temporal flag) are a
-    // distributional tell. Integer counts ⇒ band 1; the population is the
-    // crossing topics, so the floor is Braid-local (the global meta-monitor's
-    // population is much larger).
-    const crossingCounts = [...boundaryCrossingsByEntity(snapshots, 3).values()];
-    const hugging = detectThresholdHugging(
-      crossingCounts,
-      DEFAULT_GAMING_DETECTION.boundaryCrossThreshold,
-      {
-        band: BRAID_HUG_BAND,
-        minPopulation: BRAID_HUG_MIN_POPULATION,
-        excessThreshold: BRAID_HUG_EXCESS,
-      },
-    );
     return [
       this.computation(
         { targetType: 'feed', targetId: GLOBAL_FEED_TARGET_ID },
@@ -837,8 +812,6 @@ export class BraidService extends BaseInvariantService {
           strands,
           manufactured_churn: gaming.manufacturedChurn,
           threshold_gaming_count: gaming.thresholdGamingTopics.length,
-          threshold_hugging_detected: hugging.detected,
-          threshold_hugging_excess: hugging.excess,
         },
         0.7,
         1,

@@ -54,9 +54,9 @@ describe('detectThresholdHugging — flags mass just under the cliff', () => {
     expect(detectThresholdHugging(values, 1, CFG).detected).toBe(false);
   });
 
-  it('flags topics massed just under an INTEGER gaming threshold (the Braid-local use)', () => {
-    // Many topics oscillating exactly 3 times to dodge a gaming flag of 4, over a
-    // diffuse 1..6 background — the Braid-local crossing-count distribution.
+  it('flags a population massed just under an INTEGER threshold (e.g. crossing counts)', () => {
+    // Many entities clustered at exactly 3 to dodge an integer flag of 4, over a
+    // diffuse 1..6 background — the primitive is scale-agnostic (integers too).
     const counts = [1, 1, 2, 2, 5, 6, ...Array.from({ length: 12 }, () => 3)];
     const result = detectThresholdHugging(counts, 4, {
       band: 1,
