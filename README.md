@@ -7,8 +7,6 @@
   </picture>
 </p>
 
-<h1 align="center">Licio</h1>
-
 <p align="center">
   A privacy-first social news and forum PWA where distribution is earned by
   genuine attention and constructive participation — never by applause or payment.
