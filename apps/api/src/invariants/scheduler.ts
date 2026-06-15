@@ -247,6 +247,9 @@ export async function runThresholdHuggingScan(
 
 const CALIBRATION_TOPICS = ['contribution.created', 'evidence.added', 'content.submitted'];
 
+/** Generous bound on the open-case scan for calibration window exclusion. */
+const OPEN_CASE_SCAN_LIMIT = 5_000;
+
 /**
  * Rebuild the MFCI null calibrations (WS-H.3.1a "precomputed null
  * calibrations established from historical baseline data"): hourly windows
@@ -276,10 +279,13 @@ export async function rebuildMfciCalibrations(
   const lookbackHours = options.lookbackHours ?? 7 * 24;
   const minSamples = options.minSamples ?? 6;
   const config = invariants.config();
-  // WS-O.4.5 — targets under an OPEN case whose windows are excluded.
+  // WS-O.4.5 — targets under an OPEN case whose windows are excluded. The scan
+  // is bounded (the analyst queue is small by construction); the cap is generous
+  // so the exclusion set is effectively complete, and the EXACT fiber test
+  // remains the calibration-independent backstop for anything beyond it.
   const flaggedTargets = new Set<string>();
   if (config.mfciExcludeFlaggedWindows) {
-    for (const openCase of await invariants.mfciCases.listOpen(500)) {
+    for (const openCase of await invariants.mfciCases.listOpen(OPEN_CASE_SCAN_LIMIT)) {
       flaggedTargets.add(openCase.targetId);
     }
   }

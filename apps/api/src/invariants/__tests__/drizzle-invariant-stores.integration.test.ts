@@ -10,7 +10,12 @@ import { createDbClient, migrationsFolder } from '@licio/db';
 import { sql } from 'drizzle-orm';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { DrizzleInvariantOutputStore } from '../../events/drizzle-event-stores.js';
+import {
+  DrizzleEventStore,
+  DrizzleInvariantOutputStore,
+} from '../../events/drizzle-event-stores.js';
+import type { EventPipelineServices } from '../../events/services.js';
+import { DEFAULT_INVARIANTS_CONFIG } from '../config.js';
 import {
   DrizzleBridgeAttemptStore,
   DrizzleCalibrationStore,
@@ -21,6 +26,8 @@ import {
   DrizzleRunMetadataStore,
   DrizzleScoiContextActionStore,
 } from '../drizzle-invariant-stores.js';
+import { rebuildMfciCalibrations } from '../scheduler.js';
+import type { InvariantPlatformServices } from '../services.js';
 
 const DB_URL = process.env['DATABASE_URL'];
 
@@ -444,5 +451,110 @@ describe.skipIf(!DB_URL)('WS-H Drizzle adapters (live Postgres)', () => {
       end: '2026-06-10T11:00:00.000Z',
     });
     await db.execute(sql`drop table tw_conversion_check`);
+  });
+
+  // WS-O.4.5 — the calibration anti-poisoning LOGIC against live Postgres
+  // (the in-memory suite proves the same behaviour; this proves the Drizzle
+  // calibration/case/event adapters carry it). A minimal container is enough:
+  // rebuildMfciCalibrations only touches config/calibrations/mfciCases/log and
+  // eventStore/metrics.
+  const calibEvent = (storyId: string, atMs: number) => ({
+    eventId: randomUUID(),
+    eventType: 'contribution.created' as const,
+    topic: 'contribution.created',
+    timestamp: new Date(atMs).toISOString(),
+    privacyClassification: 'public' as const,
+    retentionTier: 'public_contribution' as const,
+    payload: { story_id: storyId },
+    ownerUserId: null,
+    purgeAfter: null,
+  });
+  function antiPoisonContainers(): {
+    invariants: InvariantPlatformServices;
+    events: EventPipelineServices;
+    metrics: string[];
+  } {
+    const metrics: string[] = [];
+    const invariants = {
+      config: () => DEFAULT_INVARIANTS_CONFIG,
+      calibrations: new DrizzleCalibrationStore(db),
+      mfciCases: new DrizzleMfciCaseStore(db),
+      log: () => {},
+    } as unknown as InvariantPlatformServices;
+    const events = {
+      eventStore: new DrizzleEventStore(db),
+      metrics: { increment: (name: string) => metrics.push(name) },
+    } as unknown as EventPipelineServices;
+    return { invariants, events, metrics };
+  }
+
+  it('calibration anti-poisoning: a drift jump RETAINS the sensitive calibration (live PG)', async () => {
+    const { invariants, events, metrics } = antiPoisonContainers();
+    await invariants.calibrations.clear();
+    await invariants.mfciCases.clear();
+    const nowMs = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+    await invariants.calibrations.upsert({
+      calibrationKey: 'mfci:target_concentration',
+      version: 'v-sensitive',
+      data: {
+        statistic: 'target_concentration',
+        version: 'v-sensitive',
+        computedAtMs: nowMs,
+        buckets: [{ minVolume: 0, q50: 0.1, q90: 0.15, q99: 0.2, sampleCount: 50 }],
+      },
+      sampleCount: 50,
+      computedAt: new Date(nowMs).toISOString(),
+    });
+    const story = randomUUID();
+    const rows = [];
+    for (let h = 1; h <= 8; h += 1) {
+      const ws = nowMs - h * 3_600_000;
+      for (let i = 0; i < 6; i += 1) rows.push(calibEvent(story, ws + i * 90_000));
+    }
+    await events.eventStore.insertMany(rows);
+    await rebuildMfciCalibrations(invariants, events, nowMs);
+    expect(metrics).toContain('invariants.mfci.calibration_drift');
+    expect((await invariants.calibrations.get('mfci:target_concentration'))?.version).toBe(
+      'v-sensitive',
+    );
+    await invariants.calibrations.clear();
+  });
+
+  it('calibration anti-poisoning: under-case windows are EXCLUDED (live PG)', async () => {
+    const { invariants, events } = antiPoisonContainers();
+    await invariants.calibrations.clear();
+    await invariants.mfciCases.clear();
+    const nowMs = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+    const organic = randomUUID();
+    const attacked = randomUUID();
+    await invariants.mfciCases.insert({
+      caseId: randomUUID(),
+      targetType: 'story',
+      targetId: attacked,
+      riskState: 'high',
+      statistic: 'target_concentration',
+      mfciScore: 6,
+      pHat: 0.002,
+      sampleCount: 100,
+      fixedMarginsRef: 'cheap:test',
+      summary: '{}',
+      appealSummary: '',
+      status: 'open',
+      openedAt: new Date(nowMs).toISOString(),
+      resolvedAt: null,
+      resolvedBy: null,
+    });
+    const rows = [];
+    for (let h = 1; h <= 8; h += 1) {
+      const ws = nowMs - h * 3_600_000;
+      for (let i = 0; i < 6; i += 1) rows.push(calibEvent(organic, ws + i * 90_000));
+    }
+    const poison = nowMs - 9 * 3_600_000;
+    for (let i = 0; i < 20; i += 1) rows.push(calibEvent(attacked, poison + i * 60_000));
+    await events.eventStore.insertMany(rows);
+    await rebuildMfciCalibrations(invariants, events, nowMs);
+    expect((await invariants.calibrations.get('mfci:target_concentration'))?.sampleCount).toBe(8);
+    await invariants.calibrations.clear();
+    await invariants.mfciCases.clear();
   });
 });
