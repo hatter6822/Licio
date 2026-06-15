@@ -171,6 +171,7 @@ export async function toRoomSummary(
   room: RoomRecord,
   threadCount: number,
   requesterUserId: string | null,
+  requesterRoles: readonly Role[] = [],
 ): Promise<RoomSummary> {
   const memberCount = await forum.rooms.countMembers(room.roomId);
   const subscription =
@@ -179,11 +180,13 @@ export async function toRoomSummary(
       : null;
   // can_post: a public room auto-joins on post (so all_members ⇒ postable even
   // unjoined); a private room needs membership; experts_and_stewards needs the
-  // steward/expert bar. Platform roles aren't resolved here, so a platform
-  // steward sees an experts room as postable only via a room-steward row — the
-  // server re-checks authoritatively at submit either way.
+  // steward/expert bar. The requester's PLATFORM roles are passed through so the
+  // composer's can_post matches the authoritative submit-time check (a platform
+  // expert/steward sees an experts room as postable). The server re-checks at
+  // submit either way.
   const canPost =
-    requesterUserId !== null && (await userMayPostTopLevel(forum, room, requesterUserId));
+    requesterUserId !== null &&
+    (await userMayPostTopLevel(forum, room, requesterUserId, requesterRoles));
   return {
     room_id: room.roomId,
     name: room.name,

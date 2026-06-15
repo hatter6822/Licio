@@ -73,10 +73,17 @@ export interface StorySafetyStateInputs {
  * MFCI-risk ranking feature, the detail reads the durable MFCI risk-state store
  * it caches), so they agree by construction. Descriptive, never a sanction:
  * `under-review` means a coordination/safety/policy signal warrants review, not
- * that the content is false or banned. A frozen item or a high/severe MFCI risk
- * is `under-review`; an elevated signal is `caution`; otherwise `ok`.
+ * that the content is false or banned. The cascade, strongest first: a thread
+ * under an active §18.3 RESTRICTION is `restricted` (access-limited, not merely
+ * flagged); a frozen item or a high/severe MFCI risk is `under-review`; an
+ * elevated MFCI/thread signal is `caution`; otherwise `ok`. The thread
+ * §15.4 safety machine's terminal `restricted` state therefore reaches the wire
+ * `restricted` posture instead of silently collapsing to `ok`.
  */
 export function deriveStorySafetyState(input: StorySafetyStateInputs): StorySafetyState {
+  // An active §18.3 thread restriction is the strongest posture — the content
+  // is access-limited, so it outranks the review/caution signals below.
+  if (input.threadSafetyState === 'restricted') return 'restricted';
   if (input.frozen) return 'under-review';
   if (input.mfciRiskState === 'severe' || input.mfciRiskState === 'high') return 'under-review';
   if (input.threadSafetyState === 'under_review') return 'under-review';
@@ -96,7 +103,13 @@ export interface RatingLabelInputs {
    * across lenses) — the §10.5 live signal that outranks the lifecycle state.
    */
   interpretationsDiverge: boolean;
-  /** Independent evidence-card count on the story's thread (WS-G evidence). */
+  /**
+   * Count of DISTINCT INDEPENDENT, VERIFIED evidence units on the story's thread
+   * (WS-G evidence): verified cards sharing a MERI independence group (§13.6)
+   * count once; unverified/disputed/retracted cards never count. Both the feed
+   * and the detail read supply this same independence-aware count, so repeated
+   * or unchecked cards can never alone earn the "Well-Sourced" label.
+   */
   evidenceCount: number;
   /** Latest MERI exposure label for the story; null until a MERI run covers it. */
   meriExposure: MeriExposureLabelWire | null;
@@ -132,7 +145,9 @@ export function deriveRatingLabel(inputs: RatingLabelInputs): RatingLabelKind {
   }
   // 5. Independent evidence cards and primary sources present (Well-Sourced).
   //    A live evidence signal that UPGRADES the still-active states (deepening /
-  //    gathering / submitted): ≥2 evidence cards AND MERI-verified independence.
+  //    gathering / submitted): ≥2 DISTINCT independent, verified evidence cards
+  //    (thread-level) AND a MERI-independent story-level exposure. Both gates are
+  //    independence-aware, so redundant or unchecked cards never reach here.
   if (
     inputs.evidenceCount >= WELL_SOURCED_MIN_EVIDENCE_CARDS &&
     meriExposureIsIndependent(inputs.meriExposure)

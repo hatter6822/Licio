@@ -289,4 +289,37 @@ describe('deriveStorySafetyState — shared safety posture', () => {
       }),
     ).toBe('under-review');
   });
+
+  it('a §18.3-restricted thread reaches the wire restricted posture (never silently ok)', () => {
+    // The thread §15.4 safety machine's terminal `restricted` state must NOT
+    // collapse to `ok` — it is the strongest posture (access-limited content).
+    expect(
+      deriveStorySafetyState({
+        frozen: false,
+        mfciRiskState: undefined,
+        threadSafetyState: 'restricted',
+      }),
+    ).toBe('restricted');
+  });
+
+  it('restricted outranks frozen / high-MFCI (the strongest wire posture)', () => {
+    expect(
+      deriveStorySafetyState({
+        frozen: true,
+        mfciRiskState: 'severe',
+        threadSafetyState: 'restricted',
+      }),
+    ).toBe('restricted');
+  });
+
+  it('a restricted story still reads under-review as its §5.6 label', () => {
+    // The wire posture is `restricted`, but the reader-facing label collapses to
+    // the descriptive "Under Review" (the cascade treats both as review).
+    const safetyState = deriveStorySafetyState({
+      frozen: false,
+      mfciRiskState: undefined,
+      threadSafetyState: 'restricted',
+    });
+    expect(deriveRatingLabel(base({ safetyState }))).toBe('under-review');
+  });
 });

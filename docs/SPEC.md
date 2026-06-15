@@ -337,8 +337,10 @@ the live invariant signals outrank the slower lifecycle state (Section 14.4):
 safety/coordination review (Under Review) → interpretation divergence (Needs
 Context, from SCOI or the `context_needed` state) → cross-community
 reconciliation (Bridge Active) → a resolved synthesis (Resolved Context) →
-independent evidence (Well-Sourced, requiring independent evidence cards **and**
-a MERI source-independence signal) → ongoing contribution (Deepening) → the
+independent evidence (Well-Sourced, requiring ≥2 **distinct independent,
+verified** evidence cards — verified cards sharing a MERI independence group
+count once, and unverified/disputed/retracted cards never count — **and** a
+MERI source-independence signal) → ongoing contribution (Deepening) → the
 default (Getting Attention). Well-Sourced and Under Review are reachable only
 through the live signal — the lifecycle state alone never produces them. This
 derivation is implemented once and shared by every reader-facing surface, so the

@@ -358,10 +358,23 @@ Two §23.3 wire fields carry the diversification/context outputs:
   priority cascade in which the LIVE invariant signals outrank the slower
   lifecycle-state mapping (the §10.5 principle generalised to all seven
   labels): safety review → SCOI interpretation divergence → bridging →
-  resolved synthesis → MERI-verified **well-sourced** (≥2 independent
-  evidence cards AND an independent MERI exposure) → deepening →
-  getting-attention. `well-sourced` and `under-review` are reachable ONLY
-  through this live path — the lifecycle state alone can never produce them.
+  resolved synthesis → MERI-verified **well-sourced** (≥2 DISTINCT
+  independent, VERIFIED evidence units — cards sharing a MERI independence
+  group count once; unverified/disputed/retracted never count — AND an
+  independent MERI exposure) → deepening → getting-attention. The
+  descriptive "N evidence cards" chip keeps the RAW total, so a reader still
+  sees that cards exist even when they are not yet independent/verified
+  enough to earn the label. `well-sourced` and `under-review` are reachable
+  ONLY through this live path — the lifecycle state alone can never produce them.
+- **`safety_state`** — the §22.1 reader-facing safety posture, derived by the
+  single shared `deriveStorySafetyState` (feed + story-detail), strongest
+  first: a thread under an active §18.3 RESTRICTION is `restricted`
+  (access-limited content, not merely flagged); a frozen item or high/severe
+  MFCI risk is `under-review`; an elevated MFCI/thread signal is `caution`;
+  otherwise `ok`. Descriptive, never a sanction. The thread §15.4 safety
+  machine's terminal `restricted` state reaches the wire `restricted` posture
+  (it never silently collapses to `ok`); the §5.6 label for any review/restricted
+  posture is the descriptive "Under Review".
 
 ## Kill switch and fallback (WS-I.4)
 

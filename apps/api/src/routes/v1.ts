@@ -129,6 +129,7 @@ const notFound = { error: { code: 'not_found', message: 'Resource not found' } }
 interface StoryReadSignals {
   safetyState: ReturnType<typeof deriveStorySafetyState>;
   interpretationsDiverge: boolean;
+  /** Distinct INDEPENDENT, VERIFIED evidence units (the §5.6 well-sourced gate). */
   evidenceCount: number;
   meriExposure: ReturnType<typeof exposureLabelForGain>;
 }
@@ -178,14 +179,23 @@ async function assembleStoryReadSignals(
     scoiLatest !== null &&
     !scoiLatest.reasonCodes.includes('INSUFFICIENT_COVERAGE') &&
     scoi >= scoiThreshold;
-  let evidenceCount = 0;
+  // Distinct INDEPENDENT, VERIFIED evidence units (the §5.6 well-sourced gate,
+  // identical to the feed's `evidenceSummaryOf`): verified cards sharing a
+  // non-null MERI independence group (§13.6) count once; an un-grouped verified
+  // card is its own unit; unverified/disputed/retracted cards never count.
+  const verifiedGroups = new Set<string>();
+  let ungroupedVerified = 0;
   for (const claim of await ingestion.claims.listByStory(story.storyId)) {
-    evidenceCount += (await ingestion.evidence.listByClaim(claim.claimId)).length;
+    for (const card of await ingestion.evidence.listByClaim(claim.claimId)) {
+      if (card.verificationState !== 'verified') continue;
+      if (card.independenceGroupId === null) ungroupedVerified += 1;
+      else verifiedGroups.add(card.independenceGroupId);
+    }
   }
   return {
     safetyState,
     interpretationsDiverge,
-    evidenceCount,
+    evidenceCount: verifiedGroups.size + ungroupedVerified,
     meriExposure: exposureLabelForGain(gains[story.storyId] ?? null),
   };
 }

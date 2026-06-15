@@ -152,6 +152,26 @@ describe('WS-Q.2.1 submission guards', () => {
     );
     expect(res.status).toBe(201);
   });
+
+  it('the room read surfaces can_post consistently with the submit authorization', async () => {
+    // Regression: the room detail route must RESOLVE the requester's platform
+    // roles so the composer's `can_post` matches the submit-time authorization —
+    // an expert sees an experts_and_stewards room as postable, a plain member
+    // does not. (Before the fix the route passed only the user id, so the
+    // expert's `can_post` was always false and the UI hid the composer.)
+    const room = await makeRoom('public', { postingPolicy: 'experts_and_stewards' });
+    const detail = async (cookie: string): Promise<boolean> => {
+      const res = await app().request(
+        new Request(`http://local/v1/rooms/${room}`, { headers: { cookie } }),
+      );
+      expect(res.status).toBe(200);
+      return ((await res.json()) as { can_post: boolean }).can_post;
+    };
+    const expert = await seedUserWithSession(fixture.identity, { handle: 'ex2', expert: true });
+    const plain = await seedUserWithSession(fixture.identity, { handle: 'pl2' });
+    expect(await detail(expert.cookie)).toBe(true);
+    expect(await detail(plain.cookie)).toBe(false);
+  });
 });
 
 describe('WS-Q.2.2 tier-scoped dedup + cross-tier linking', () => {
