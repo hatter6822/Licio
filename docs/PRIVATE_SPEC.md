@@ -62,6 +62,8 @@ The implementation should keep Licio's existing public forum and ranking archite
 
 The highest-trust design also addresses the largest web-app weakness: a PWA is code delivered by a server. If Licio's server can silently ship new JavaScript that exfiltrates room keys, cryptographic storage alone is not enough. This spec therefore requires release transparency, signed/reproducible private-mode bundles, service-worker update pinning, strict CSP/Trusted Types, no remote dynamic code, and an optional hardened local key agent for users who want stronger protection against malicious future web updates.
 
+> **Relationship to `docs/OFFLINE_SPEC.md` (LCAP).** This spec owns the **authority and confidentiality** plane for private rooms (room keys, MLS, server non-storage). LCAP owns a complementary, content-neutral **availability and transport** plane for delay-tolerant sync. They compose: a Private P2P room MAY carry its encrypted blocks over LCAP transports and reuse LCAP's `.licio-bundle` pack as its offline CAR-equivalent, its lane scheduler (so membership/control material outruns media), and its honest liveness/trust labelling — but LCAP only ever handles **ciphertext and opaque room hints** for private rooms, never plaintext, keys, op heads, or real room IDs. The two planes pin **different cryptographic suites on purpose** (Ed25519/MLS here for group-key alignment; ECDSA P-256 in LCAP for zero-dependency WebCrypto ubiquity) and never share keys. Where the two documents overlap for private-room content, this spec is authoritative.
+
 ---
 
 ## 2. Current Licio baseline and required architectural break
@@ -89,7 +91,7 @@ The required change is therefore not merely adding E2EE to existing rows. It is 
 
 ## 3. Definitions and normative language
 
-The terms **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** are used in the RFC 2119 sense.
+The terms **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**, **SHOULD**, **SHOULD NOT**, **RECOMMENDED**, **MAY**, and **OPTIONAL** are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174), and only when shown in all uppercase. Lowercase uses are descriptive. TypeScript and SQL sketches are illustrative; the zod schemas in `packages/private-p2p/src/schemas/`, the canonical-encoding rules, and the official cryptographic test vectors (§26.2) are normative where a sketch and an implementation could diverge.
 
 ### 3.1 Terms
 
@@ -539,6 +541,18 @@ Because Licio is PWA-first, “native on the device” means:
 
 A browser PWA cannot be assumed to be an always-on daemon. Availability therefore depends on visible replication health and optional member-operated pins.
 
+### 9.8 Dependency budget and bundle strategy
+
+The private-room stack — Helia, libp2p and its transports, an MLS implementation, an HPKE implementation, and a memory-hard KDF — is large and would, if added to `apps/web`, violate Licio's hard limits: `apps/web` < 15 direct production dependencies and initial JS < 200 KB gz (CLAUDE.md; SPEC §6.12.12). The architecture MUST therefore isolate it:
+
+1. **All P2P dependencies live in `packages/private-p2p` and the lazily-loaded `apps/web/src/private-p2p/` module**, never in `apps/web`'s top-level `package.json`. Workspace (`workspace:*`) dependencies are excluded from the `apps/web` direct-dependency count, so the core app's budget is unaffected.
+2. **Private-mode code is a separate, dynamically-imported route chunk** loaded only when a user opens or creates a Private P2P room. The build gate `scripts/check-bundle-size.ts` enforces **two** JS ceilings — a 200 KiB gzipped *initial-load* budget (entry + preloads) **and a 320 KiB gzipped *total-JS* budget summed across every built asset, lazy chunks included**. Code-splitting keeps the private chunk out of the *initial-load* figure, but a Helia/libp2p/MLS chunk would still blow the *total* budget. The gate MUST therefore be updated to give the private chunk its **own measured budget**, excluded from the core 320 KiB total (keyed on the chunk's stable name). Then the public PWA's first-load AND core-total figures are unaffected, and the private chunk is bounded against its own documented ceiling — never silently exempt.
+3. **No heavy P2P code ships to users who never open a private room.** Helia/libp2p/MLS instantiation is deferred until first private-room use, behind a dynamic `import()`.
+4. **The reproducible private-mode bundle (Tiers 1–3, WS-P2P-10) is exactly this chunk**, giving update-channel transparency (signing + hash-pinning, §20.6) a well-bounded artifact to attest.
+5. **Dependency review still applies** (CLAUDE.md checklist): each library must be actively maintained, install-script-free, and license-compatible (AGPL-3.0-or-later). The MLS/HPKE/curve-library choices are tracked in open questions §30.1–§30.2 and §10.7.
+
+A dedicated, documented `check:deps` allowance for the private-p2p workspace keeps the heavy stack from silently creeping into the core web bundle.
+
 ---
 
 ## 10. Cryptographic architecture
@@ -555,6 +569,10 @@ A browser PWA cannot be assumed to be an always-on daemon. Availability therefor
 8. Keep server code out of room authority.
 9. Prefer audited libraries and external review over hand-written primitives.
 10. Treat WebCrypto as low-level; wrap it behind small, testable, reviewed modules.
+
+### 10.1.1 Canonical encoding
+
+Every structure that is hashed into a CID, supplied to an AEAD as AAD, covered by a signature, or compared for reducer determinism MUST use one **canonical encoding**: the **DAG-CBOR deterministic profile** (RFC 8949 §4.2.1 core deterministic encoding, which the `dag-cbor` codec already selected in §9.4 mandates). The rules match LCAP's LDC profile (`docs/OFFLINE_SPEC.md` §9.1): shortest-form integers, definite-length items only, map keys sorted in bytewise lexicographic order of their encodings, no duplicate keys, no floating point, optional fields omitted rather than `null`-filled, and UTF-8/NFC text. `packages/private-p2p/src/crypto/canonical.ts` is the single implementation, pinned by the §26.1 canonical-encoding stability tests. All references to `canonical(...)` in this document mean this function.
 
 ### 10.2 Group key agreement
 
@@ -573,21 +591,32 @@ Mapping:
 | Welcome | Encrypted join material for a new device |
 | Exporter secret | Basis for application-level room epoch keys |
 
-Application secrets:
+Application secrets are derived from the **MLS exporter secret of the current epoch** (RFC 9420 §8.5). Because the exporter secret is fresh per epoch and uniformly random, the room epoch secret is bound to the epoch automatically:
 
 ```text
 room_epoch_secret = MLS-Exporter(
-  label = "licio.private-room.v1.epoch",
-  context = room_id || epoch || manifest_commitment,
-  length = 32
-)
-
-content_wrap_key = HKDF(room_epoch_secret, "licio.content-wrap.v1")
-sync_topic_key   = HKDF(room_epoch_secret, "licio.sync-topic.v1")
-rendezvous_key   = HKDF(room_epoch_secret, "licio.rendezvous.v1")
-snapshot_key     = HKDF(room_epoch_secret, "licio.snapshot.v1")
-report_key       = HKDF(room_epoch_secret, "licio.voluntary-report.v1")
+  label   = "licio.private-room.v1.epoch",
+  context = canonical([room_id_commitment, epoch, manifest_commitment]),
+  length  = 32
+)                                  // RFC 9420 §8.5 ExpandWithLabel over the epoch exporter_secret
 ```
+
+Per-purpose keys are derived with **HKDF-Expand-Label**, a labeled HKDF (HKDF SHA-256, RFC 5869) in the style of TLS 1.3 / MLS so each label/length is unambiguously bound:
+
+```text
+HKDF-Expand-Label(secret, label, context, length) =
+  HKDF-Expand(secret, encode(length, "licio-priv1 " || label, context), length)
+       // PRK = secret (already uniformly random ⇒ no separate Extract step)
+       // Hash = SHA-256, output length = 32 bytes unless noted
+
+content_wrap_key = HKDF-Expand-Label(room_epoch_secret, "content-wrap.v1",  room_id_commitment, 32)
+sync_topic_key   = HKDF-Expand-Label(room_epoch_secret, "sync-topic.v1",    room_id_commitment, 32)
+rendezvous_key   = HKDF-Expand-Label(room_epoch_secret, "rendezvous.v1",    room_id_commitment, 32)
+snapshot_key     = HKDF-Expand-Label(room_epoch_secret, "snapshot.v1",      room_id_commitment, 32)
+report_key       = HKDF-Expand-Label(room_epoch_secret, "voluntary-report.v1", room_id_commitment, 32)
+```
+
+The `"licio-priv1 "` prefix and the per-purpose `label` provide domain separation: a key minted for one purpose, room, or protocol version can never collide with another. `context` is the canonical-encoded (§14.3 canonical rules) byte string, never an ad-hoc concatenation, so `room_id || epoch` ambiguity (e.g. `"r1" || "23"` vs `"r12" || "3"`) cannot arise. Deriving every operational key from `room_epoch_secret` means a single MLS Commit (add/remove) rotates **all** of them at once (§10.9).
 
 ### 10.3 Invite encryption
 
@@ -666,20 +695,43 @@ type PrivateEncryptedEnvelopeV1 = {
 
 ### 10.5 AEAD additional authenticated data
 
-AAD MUST include:
+Each private object is encrypted under a **fresh per-object content key**, which is itself wrapped under the epoch `content_wrap_key`. Two AEAD operations are therefore involved, and each binds an AAD that MUST be a **canonical-encoded fixed-shape structure (§10.1.1), never an ad-hoc concatenation** — otherwise field-boundary ambiguity (`"r1"||"23"` vs `"r12"||"3"`) becomes a forgery vector.
+
+**Object-body AEAD** (per-object key over plaintext):
 
 ```text
-schema version
-room id or room id commitment
-epoch
-object type
-plaintext schema
-parent op ids
-author device id
-author sequence number
-capability root at author sequence
-chunk index / total chunks for chunked data
+object_key   = random 32 bytes                       // fresh per object, never reused
+nonce        = random 96 bits (AES-GCM) | 192 bits (XChaCha20-Poly1305)   // fresh per encryption
+body_aad     = canonical([
+  "licio-priv1.body",        // domain tag
+  envelope_version,          // uint
+  room_id_commitment,        // bstr
+  room_epoch,                // uint
+  object_type,               // tstr
+  plaintext_schema,          // tstr
+  parent_op_ids,             // [tstr]  (sorted, canonical)
+  author_device_id_blind,    // tstr
+  author_seq,                // uint
+  capability_root_at_seq,    // bstr — capability state the author cites
+  chunk_index, chunk_total   // uint, uint (0,1 for unchunked)
+])
+ciphertext   = AEAD-Seal(object_key, nonce, plaintext, body_aad)
 ```
+
+**Key-wrap AEAD** (`content_wrap_key` over `object_key`, the `key_wrap` field of §10.4):
+
+```text
+wrap_nonce   = random nonce (fresh)
+wrap_aad     = canonical([
+  "licio-priv1.keywrap",
+  wrapping_epoch,            // uint — the epoch whose content_wrap_key is used
+  room_id_commitment,        // bstr
+  object_type                // tstr
+])
+wrapped_object_key = wrap_nonce || AEAD-Seal(content_wrap_key, wrap_nonce, object_key, wrap_aad)
+```
+
+A verifier reconstructs both AADs from the envelope's authenticated metadata and the local epoch state; any mismatch fails the AEAD open and the object is quarantined (§14.2). Binding `wrapping_epoch` into the wrap AAD prevents replaying an object key from one epoch into an envelope that claims another.
 
 ### 10.6 Nonce and key rules
 
@@ -688,8 +740,11 @@ chunk index / total chunks for chunked data
 - Object keys MUST be wrapped by epoch-derived wrapping keys.
 - Nonce reuse under the same key is a fatal error.
 - Clients MUST maintain local nonce/key-use assertions in tests.
-- Deterministic/convergent encryption MUST NOT be used for private-room content.
-- Compression MUST happen before encryption only for object classes without attacker-controlled compression oracle risk. For mixed attacker/secret content, use no compression or fixed dictionaries with padding.
+- Deterministic/convergent encryption MUST NOT be used for private-room content (it would leak plaintext equality through CID equality).
+- **Compression-before-encryption is restricted to avoid CRIME/BREACH-class oracles.** The rule by object class:
+  - *Forbidden* for any object that mixes one member's secret with another member's attacker-influenceable input in the same compression context — in practice all contribution/op bodies. These are padded to a size bucket (§25.4), not compressed.
+  - *Allowed* only for objects that are single-author and already-incompressible or whose length is not secret: already-compressed media chunks (which gain nothing and so SHOULD NOT be compressed anyway), and a member's own local search-index shards that never mix in other members' adversarial content.
+  - When in doubt, **do not compress; pad instead.** Fixed shared dictionaries MUST NOT be used across the secret/attacker boundary.
 
 ### 10.7 Signatures
 
@@ -704,6 +759,13 @@ MLS cipher suite selected from audited library defaults
 ```
 
 Final cipher-suite selection MUST be pinned in the spec before implementation and tested with official vectors where available.
+
+**Browser-compatibility note.** Ed25519 is the right signature choice here because it matches the MLS cipher suite (`MLS_128_DHKEMX25519_..._Ed25519_...`), keeping one curve family across the group-key, invite-HPKE, and signing layers. However, WebCrypto Ed25519 is recent and not uniform across the older Android browsers in Licio's target matrix (open question §30.5). The implementation MUST therefore:
+
+- use WebCrypto `Ed25519`/`X25519` when `crypto.subtle` advertises support, and
+- otherwise fall back to a small audited library (e.g. the `@noble/*` curves family or a libsodium-WASM build) loaded **inside the lazily code-split private-p2p chunk** (§9.8 dependency-budget note), never in Licio's core bundle.
+
+This Ed25519/X25519 choice is independent of the offline-availability plane (`docs/OFFLINE_SPEC.md`, LCAP), which standardizes on `ECDSA P-256` because that suite is natively present in WebCrypto everywhere and needs no fallback. The two planes deliberately pin different suites for different reasons — MLS-suite alignment here, zero-dependency ubiquity there — and never share keys.
 
 ### 10.8 Key storage tiers
 
@@ -936,6 +998,21 @@ Recommended rotations:
 | Platform support | Not available | Would break privacy | None |
 
 Recovery kit contents MUST be encrypted with a strong passphrase or hardware-bound key and should support printed/manual backup codes only if carefully designed and audited.
+
+#### 12.6.1 Threshold recovery mechanism
+
+Threshold recovery is **capability-based, not secret-sharing-based**, by default. M-of-N recovery does not split the room root key with Shamir; instead, a new device is admitted only when **M distinct holders of the `recover`/`rotate_keys` capability each sign a recovery-authorization op** referencing the same new-device KeyPackage, and the threshold of valid signatures triggers an MLS Add + epoch rotation:
+
+```text
+recovery_request(new_device_key_package)
+  -> collect M signed RecoveryAuthorizeOp from distinct recovery_admins   // each is a normal signed op
+  -> when M reached and validated: MLS Add(new_device) + Commit -> new epoch
+  -> Welcome + bootstrap heads sent to the new device
+```
+
+This keeps recovery inside the same signed-op + MLS authority model (no offline key reconstruction, no single point that holds a reassembled root key), and the threshold is enforced by the deterministic reducer (§14.3) counting valid distinct authorizations. The `threshold` policy in the manifest (§13.1) pins `required` (M) and the eligible role.
+
+Splitting an actual secret (e.g. a Shamir-shared recovery seed across trustees) is an **optional, separately-audited** alternative for rooms that need to recover even when fewer than M admins remain reachable; it is deferred (§30.8) and MUST NOT be the default because reconstructing a real key materially raises the blast radius of trustee compromise.
 
 ### 12.7 Lost all keys
 
@@ -1201,10 +1278,12 @@ Quarantined operations MUST NOT render.
 
 ### 14.3 Deterministic reducer
 
+The reducer is a **pure fold over the accepted operations in one canonical total order**. Two devices holding the same accepted op set MUST produce byte-identical state.
+
 Reducer input:
 
 ```text
-accepted ops + current trust policy + local member settings
+accepted ops (validated per §14.2) + current trust policy + local member settings
 ```
 
 Reducer output:
@@ -1219,17 +1298,32 @@ local moderation overlays
 replication state
 ```
 
-Ordering:
+#### 14.3.1 Lamport clock
+
+Each op carries `lamport`, a non-negative integer Lamport timestamp **serialized as a decimal string** so it stays exact beyond 2^53 (JavaScript `number` cannot represent large integers losslessly). On creation:
 
 ```text
-causal parents first
-then Lamport clock
-then created_at bucket
-then author_device_id
-then op_id
+lamport(op) = 1 + max( { lamport(p) : p ∈ op.parents } ∪ { local_lamport } )
 ```
 
-The reducer MUST be deterministic across devices.
+Validation adds one rule to §14.2: an op's `lamport` MUST be strictly greater than every parent's `lamport`, else the op is rejected. This makes the Lamport order a **linear extension of causality** — a parent always precedes its child.
+
+#### 14.3.2 Canonical total order
+
+Accepted ops are sorted ascending by the tuple:
+
+```text
+( lamport (as big integer), created_at_bucket, author_device_id, op_id )
+```
+
+Because `lamport(child) > lamport(parent)` always holds (§14.3.1), this single sort already respects every causal edge; the remaining three components only break ties between **truly concurrent** ops, and each is fully determined by op content, so every device derives the identical sequence. The reducer folds the ordered ops through the per-type transition functions.
+
+#### 14.3.3 Determinism requirements
+
+- The fold MUST NOT depend on local wall-clock time, network arrival order, map/object iteration order, or floating point.
+- "Latest valid author edit wins" (§14.4) is decided by position in this total order, never by `created_at` timestamps (which are untrusted, §14.4).
+- Canonical encoding (§10.1.1) governs every hashed/compared structure, so equal logical state yields equal bytes.
+- A CI property test (§26.1) asserts byte-identical reducer output across shuffled op-delivery orders over generated DAGs.
 
 ### 14.4 Conflict policy
 
@@ -1307,10 +1401,11 @@ Local overlays are not synced unless the user explicitly exports/imports their p
 
 ### 15.3 Blind rendezvous key derivation
 
+Blind IDs are derived from `rendezvous_key`, the per-epoch key from the §10.2 schedule (`rendezvous_key = HKDF-Expand-Label(room_epoch_secret, "rendezvous.v1", room_id_commitment, 32)`). Inputs are `canonical(...)`-encoded (§10.1.1), never raw `||` concatenation, so field-boundary ambiguity cannot create blind-ID collisions:
+
 ```text
-rendezvous_epoch_key = HKDF(room_epoch_secret, "licio.rendezvous.v1")
-room_blind_id = HMAC(rendezvous_epoch_key, "room" || epoch || time_bucket)
-peer_blind_id = HMAC(rendezvous_epoch_key, "peer" || device_id || epoch || time_bucket)
+room_blind_id = HMAC-SHA256(rendezvous_key, canonical(["room", epoch, time_bucket]))
+peer_blind_id = HMAC-SHA256(rendezvous_key, canonical(["peer", device_id, epoch, time_bucket]))
 ```
 
 The rendezvous server stores only:
@@ -1319,12 +1414,26 @@ The rendezvous server stores only:
 type BlindRendezvousRecord = {
   room_blind_id: string;
   peer_blind_id: string;
-  encrypted_announcement: string;
+  encrypted_announcement: string;   // E2E-encrypted under rendezvous_key; server cannot open
   expires_at: string;
 };
 ```
 
 TTL SHOULD be short, for example 5 to 30 minutes.
+
+#### 15.3.1 Authorization
+
+Knowledge of `rendezvous_key` **is** the rendezvous capability: only current-epoch members can compute a room's `room_blind_id`, so only they can announce under it or poll it. The server performs no ACL check — it cannot, because it does not know which account maps to which `room_blind_id`. A non-member cannot derive the blind ID, and a **removed member loses it at the next epoch** (§10.9) because `rendezvous_key` rotates with `room_epoch_secret`. Polling an unknown `room_blind_id` returns the same bounded, opaque result whether or not records exist, so the endpoint is not a room-existence oracle for outsiders.
+
+#### 15.3.2 Residual metadata and mitigations
+
+Blind rendezvous is honest about what the server still sees (cf. §5.4):
+
+- **Approximate concurrent size.** Within one `time_bucket`, distinct `peer_blind_id`s announcing under the same `room_blind_id` reveal an approximate count of currently-online devices. Mitigate with coarser buckets, per-peer announcement jitter, optional cover/dummy announcements for high-risk rooms, and member-operated rendezvous (§15.2) for rooms that do not want Licio to see even this.
+- **Timing.** Announcement and poll timing leak coarse activity. Mitigate with batching, jitter, and relay-only mode.
+- **Endpoint correlation.** The transport endpoint (IP) reaching the rendezvous service is visible to it; this is decoupled from room identity but not from the announcing device. Relay-only mode and standard network-privacy tooling are the user's levers.
+
+High-risk rooms SHOULD prefer `member_rendezvous` or `manual` discovery (§15.2) and disable Licio blind rendezvous entirely.
 
 ### 15.4 WebRTC signaling
 
@@ -1417,7 +1526,7 @@ Every room SHOULD support encrypted CAR export/import:
 Export selected encrypted blocks -> CAR file -> share via USB/AirDrop/manual upload -> import -> verify -> reduce
 ```
 
-CAR exports MUST contain ciphertext only. Export UI MUST distinguish:
+CAR exports MUST contain ciphertext only. The container MAY be either a standard IPLD CAR or the LCAP `.licio-bundle` pack (`docs/OFFLINE_SPEC.md` §14), which adds streaming parse under resource caps, dependency-first ordering, byte-range resume, and quarantine-before-render — all valuable for hostile-transport import. Either way, the importer re-runs the full §14.2 validation pipeline (CID, signature, AEAD, schema, capability) before any block is rendered; the container format never confers trust. Export UI MUST distinguish:
 
 - encrypted backup for members;
 - decrypted personal archive;
@@ -2094,9 +2203,30 @@ ALTER TABLE rooms
   ADD COLUMN authority_model room_authority_model NOT NULL DEFAULT 'platform',
   ADD COLUMN directory_mode room_directory_mode NULL,
   ADD COLUMN p2p_stub_id uuid NULL;
+
+-- Enforce the §4.1 coherence rules structurally, not by convention.
+ALTER TABLE rooms
+  ADD CONSTRAINT rooms_storage_authority_coherence CHECK (
+    (storage_mode = 'server' AND authority_model = 'platform')
+    OR (storage_mode = 'p2p' AND authority_model = 'room_keys')
+  ),
+  ADD CONSTRAINT rooms_p2p_requires_directory_mode CHECK (
+    storage_mode = 'server' OR directory_mode IS NOT NULL
+  ),
+  ADD CONSTRAINT rooms_p2p_visibility_private CHECK (
+    storage_mode = 'server' OR visibility = 'private'
+  ),
+  ADD CONSTRAINT rooms_p2p_join_model_invite CHECK (
+    storage_mode = 'server' OR join_model = 'invite'
+  ),
+  ADD CONSTRAINT rooms_server_has_no_stub CHECK (
+    storage_mode = 'p2p' OR p2p_stub_id IS NULL
+  );
 ```
 
-Create `private_room_stubs` and `private_rendezvous_records` with strict field allowlists.
+These CHECKs make it impossible to persist a row that violates §4.1 (e.g. a `p2p` room with `platform` authority, a non-private P2P room, a P2P room with an `open`/`request_approval` join model, or a server room carrying a P2P stub), mirroring the expand→backfill→contract migration discipline already used for the WS-Q content-and-room work.
+
+Create `private_room_stubs` and `private_rendezvous_records` with strict field allowlists (the §8.1 forbiddance list is the column denylist for these tables; only §8.2 fields may appear).
 
 ### 23.3 Ingestion submission guard
 
@@ -2679,10 +2809,10 @@ P2P private rooms are launch-ready only if every item is true:
 2. Which HPKE suite and library will be pinned for invite bootstrap?
 3. Is Tier 3 local key agent in scope for v1 launch, or will v1 launch with Tier 1/Tier 2 disclosures only?
 4. Should detached rooms be available in the first release or hidden behind an advanced flag?
-5. What is the exact browser support matrix for WebRTC/WebTransport/libp2p transports in the target PWA environments?
+5. What is the exact browser support matrix for WebRTC/WebTransport/libp2p transports **and for WebCrypto `Ed25519`/`X25519`** in the target PWA environments, and where is the audited curve-library fallback (§10.7) required?
 6. What local metadata-stripping library is acceptable for images and videos without server scanning?
 7. What is the default padding policy for mobile users with limited bandwidth?
-8. Should rooms support threshold admin membership changes in v1, or begin with admin-only changes?
+8. Should rooms support threshold admin membership changes in v1, or begin with admin-only changes — and should the optional **Shamir-secret-sharing recovery variant** (§12.6.1) be in scope at all, or remain deferred behind a separate audit?
 9. How will private-mode reproducible builds be independently verified and displayed to users?
 10. How much old server-private history should migration import by default?
 
@@ -2702,6 +2832,12 @@ These references informed the design and should be linked from the implementatio
 8. MDN Service Worker API: https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API
 9. MDN Web Crypto API: https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API
 10. RFC 8291, Message Encryption for Web Push: https://www.rfc-editor.org/rfc/rfc8291
+11. BCP 14 (RFC 2119 + RFC 8174), normative keyword interpretation: https://www.rfc-editor.org/info/bcp14
+12. RFC 5869, HKDF (HMAC-based key derivation): https://www.rfc-editor.org/rfc/rfc5869
+13. RFC 8439, ChaCha20 and Poly1305 AEAD: https://www.rfc-editor.org/rfc/rfc8439
+14. RFC 9106, Argon2 memory-hard password hashing: https://www.rfc-editor.org/rfc/rfc9106
+15. RFC 8949, CBOR and §4.2.1 core deterministic encoding (DAG-CBOR canonical form): https://www.rfc-editor.org/rfc/rfc8949
+16. IPLD CAR (Content-Addressable aRchives) format: https://ipld.io/specs/transport/car/
 
 ---
 

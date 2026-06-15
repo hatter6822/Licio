@@ -1,12 +1,13 @@
 # Licio Implementation Plan — Master Index
 
-**Version:** v4.1
-**Source specification:** docs/SPEC.md v0.7
-**Date:** June 13, 2026
+**Version:** v4.2
+**Source specification:** docs/SPEC.md v0.7 (core); docs/OFFLINE_SPEC.md (LCAP v0.2, WS-R); docs/PRIVATE_SPEC.md (WS-S)
+**Date:** June 15, 2026
 
-This plan decomposes the Licio specification into 18 workstream documents housed in `docs/planning/`. Each document is independently actionable, dependency-ordered, and composed of **~706 atomic tasks** targeting 0.5-2 engineering days each. Every task carries a unique ID, a spec reference (`Ref:`), a description, measurable acceptance criteria, testing requirements, and explicit dependencies; data-bearing tasks include Drizzle/zod schemas and API request/response shapes. Tasks are independently reviewable, testable, and reversible per Section 30.8. The plan follows the spec's milestone structure (M0-M6), workstream labels (0, A-Q), and the critical-path ordering from Section 30.2.
+This plan decomposes the Licio specification into 20 workstream documents housed in `docs/planning/`. Each document is independently actionable, dependency-ordered, and composed of **~856 atomic tasks** targeting 0.5-2 engineering days each. Every task carries a unique ID, a spec reference (`Ref:`), a description, measurable acceptance criteria, testing requirements, and explicit dependencies; data-bearing tasks include Drizzle/zod schemas and API request/response shapes. Tasks are independently reviewable, testable, and reversible per Section 30.8. The plan follows the spec's milestone structure (M0-M6), workstream labels (0, A-S), and the critical-path ordering from Section 30.2. WS-R and WS-S are **extension workstreams**: they derive from the standalone `docs/OFFLINE_SPEC.md` and `docs/PRIVATE_SPEC.md` specifications (not docs/SPEC.md), are post-M3 resilience/privacy extensions, and are not launch-blocking for the core social product.
 
 **Revision history:**
+- **v4.2** — Added two **extension workstreams** derived from the standalone offline/private specs (150 atomic tasks total, after a correctness pass that broke the complex cryptographic/protocol cards into reviewable sub-cards and removed two circular dependencies). **WS-R (offline content availability)** as `19-offline-content-availability.md` (88 tasks) for `docs/OFFLINE_SPEC.md` (LCAP v0.2): the delay-tolerant, content-addressed, signed sync protocol — deterministic CBOR/CID/COSE foundations, detached-proof trust plane (device certs, capabilities, revocations, checkpoints, witnesses), the anti-starvation lane scheduler, the pulse/exchange sync protocol, trust/liveness projection, server reconciliation, manual `.licio-bundle`/QR/relay transports, and the network-simulation + acceptance suites. **WS-S (private P2P rooms)** as `20-private-p2p-rooms.md` (62 tasks) for `docs/PRIVATE_SPEC.md`: end-to-end-encrypted, member-hosted rooms as a separate storage/sync/trust/authority plane — the server non-storage contract (column denylist + endpoint guards + retriever/search/event exclusion + seven CI gates), MLS/HPKE/Ed25519 crypto with the labeled-HKDF key schedule, the private Helia/libp2p profile, the deterministic Lamport-ordered op-log reducer, blind rendezvous, the reproducible/transparency-logged update channel, and the migration of restricted server rooms. Both reuse and respect the existing doctrine gates (no-applause, no-raw-egress, identity-free rate limiting, dependency budget) and cross-reference each other (LCAP packs MAY carry WS-S ciphertext as the CAR-equivalent).
 - **v4.1** — Added **WS-Q (content–room ownership and visibility)** as `18-content-and-room-model.md` (60 atomic tasks) for the SPEC v0.7 model: rooms own content, content owns conversation, binary public/private room visibility with orthogonal join-model/posting-policy axes, per-item public/in-room visibility with private-room forcing and audited transitions, native image/video posts through the scan-gated media pipeline, tier-scoped duplicate detection, visibility-scoped retrieval/search/distribution, and the behavior-preserving migration of pre-room content into home rooms. Every card is a single deliverable; the storage change is sequenced as eight online-safe expand/contract migrations (`0014`–`0020`). WS-Q remodels shipped WS-F/WS-G/WS-I surfaces and is dependency-ordered after them.
 - **v4.0** — Deep audit + expansion of every workstream (≈2x depth; ~22,900 lines; ~646 atomic tasks). Closed spec-coverage gaps surfaced during the audit, including: emergency feature-flag substrate and kill switches (WS-O.2.2), integrity/abuse defense without device attestation (WS-O.4), backend hardening/secrets and reliability/DR (WS-O.5/O.6), Knomosis event schemas behind the pay-to-rank firewall (WS-E.1.2), event storage + retention jobs (WS-E.3), governance action budgets (WS-M.3.2a) and delegation/anti-capture (WS-M.4.2c-*), on-chain privacy (WS-L.1.2e), Knomosis transparency metrics and phase success-gates (WS-P.1.4a/3.1a), Core Web Vitals enforcement (WS-C.5.1), and source/claim/search definitions referenced cross-workstream (WS-F.1.1/1.2/2/3.1). Standardized per-task dependencies and definitions of done across all documents.
 - **v3.0** — Split the monolithic `WORKSTREAM_PLAN.md` into 17 dependency-ordered documents.
@@ -36,7 +37,9 @@ This plan decomposes the Licio specification into 18 workstream documents housed
 | `16-security-and-reliability.md` | WS-O | M0-M6 | P0 | 2+6 | 46 | Security testing, integrity defense, incident response, reproducible builds, reliability/DR |
 | `17-experimentation-and-launch.md` | WS-P | M3-M6 | P3 | 6 | 32 | Product metrics, anti-metrics, experiments, transparency, i18n |
 | `18-content-and-room-model.md` | WS-Q | M3 | P1 | 9 | 60 | Room-owned content, public/private rooms, public/in-room visibility, image/video posts, visibility-scoped distribution |
-| **Total** | | | | | **~706** | Atomic tasks across 18 workstreams |
+| `19-offline-content-availability.md` | WS-R | M3+ ext | P3 | 10 | 88 | LCAP v0.2 delay-tolerant sync: deterministic CBOR/CID/COSE, detached-proof trust plane, lane scheduler, checkpoints/witnesses, liveness, manual bundle/QR/relay transports |
+| `20-private-p2p-rooms.md` | WS-S | M3+ ext | P3 | 11 | 62 | E2EE member-hosted private rooms: server non-storage contract, MLS/HPKE/Ed25519, private Helia/libp2p, Lamport-ordered op-log reducer, blind rendezvous, update-channel transparency |
+| **Total** | | | | | **~856** | Atomic tasks across 20 workstreams |
 
 ---
 
@@ -67,10 +70,12 @@ WS-0 (Repository foundation) ── 01-repository-foundation.md
  │    │                   └── WS-N (Compliance) ── 15-compliance.md
  │    └── WS-J (Trust/safety) [no dependency on WS-G — reports work before forum] ── 11-trust-and-safety.md
  ├── WS-O (Security — continuous) ── 16-security-and-reliability.md
- └── WS-P (Metrics/experiments — from M3 onward) ── 17-experimentation-and-launch.md
+ ├── WS-P (Metrics/experiments — from M3 onward) ── 17-experimentation-and-launch.md
+ ├── WS-R (Offline availability / LCAP v0.2) [extension of OFFLINE_SPEC; depends on WS-C/D/E/F/G/Q] ── 19-offline-content-availability.md
+ └── WS-S (Private P2P rooms / E2EE) [extension of PRIVATE_SPEC; depends on WS-C/D/G/Q/O; optional LCAP-pack reuse from WS-R] ── 20-private-p2p-rooms.md
 ```
 
-Note: WS-L.1 (due diligence, document-only) starts in Wave 1 alongside WS-A. See `13-knomosis-and-wallets.md`.
+Note: WS-L.1 (due diligence, document-only) starts in Wave 1 alongside WS-A. See `13-knomosis-and-wallets.md`. WS-R and WS-S are post-M3 extension workstreams from the standalone offline/private specifications; they are dependency-ordered after WS-Q and parallelizable with each other (WS-R Wave 10, WS-S Wave 11), with WS-S.1's server non-storage gates landable first.
 
 ---
 
@@ -253,6 +258,26 @@ Note: WS-L.1 (due diligence, document-only) starts in Wave 1 alongside WS-A. See
 
 - WS-Q (room-owned content, binary room visibility + join/posting axes, public/in-room content visibility, image/video posts, tier-scoped dedup, visibility-scoped retrieval/search/distribution, behavior-preserving migration) -- `18-content-and-room-model.md`. Remodels shipped WS-F/WS-G/WS-I surfaces; lands before WS-J takes queue ownership.
 
+### Wave 10 (extension; post-WS-Q): Offline content availability (LCAP)
+
+- WS-R (LCAP v0.2: deterministic CBOR/CID/COSE foundations → identity/capabilities/revocations → event/block/pack model → lane scheduler → sync/reconciliation/trust projection → room logs/checkpoints/witnesses → liveness/storage → server ingestion → conflict/privacy/DoS controls → manual bundle/QR/relay transports → client trust labels → simulation/acceptance) -- `19-offline-content-availability.md`. Net-new `packages/lcap` + `apps/{web,api}/src/lcap` + `lcap_*` DB tables; touches the running app only at the SW/IndexedDB/doctrine-gate seams. Foundation sub-area WS-R.0 gates everything.
+
+### Wave 11 (extension; parallel with Wave 10): Private P2P rooms (E2EE)
+
+- WS-S (private P2P rooms: room-class model + server non-storage gates → private schemas/canonical encoding → MLS/HPKE/Ed25519/HKDF crypto → private Helia/libp2p profile → op-log + deterministic reducer → sync/blind-rendezvous → private-room UI → media → migration → update-channel transparency → audit/launch) -- `20-private-p2p-rooms.md`. New `packages/private-p2p` + lazily code-split `apps/web/src/private-p2p` + `private_room_stubs`/`private_rendezvous_records` tables + defensive guards on existing server surfaces. WS-S.1 (server non-storage gates) is landable first, independent of the crypto/P2P stack.
+
+### Extension workstreams: execution order (WS-R / WS-S)
+
+WS-R and WS-S depend only on completed core workstreams (WS-C/D/E/F/G/Q), are **largely independent** (different crypto suites — ES256 vs Ed25519/MLS — and different canonical encoders — LDC vs DAG-CBOR — so no shared crypto code), and couple only softly: WS-S.6.5 MAY reuse the WS-R `.licio-bundle` pack as its CAR (falling back to IPLD CAR), and WS-R.16.1 is a thin carrier that defers all key authority to WS-S. Recommended sequence:
+
+1. **WS-S.1 first, immediately** — the server non-storage gates + seven CI checks. Cheapest, lowest-risk, independent of the whole crypto/P2P stack; landing it early makes it structurally impossible for any later code to leak private content server-side.
+2. **In parallel from the start:** WS-R.0 (LCAP foundations) **and** the WS-S long-lead due-diligence — select/audit the MLS/HPKE/curve libraries (§30.1–§30.2), confirm the dependency-budget isolation (S.2.1), and kick off the external cryptography review. Also schedule the **WS-O reproducible-build + transparency-log slice** that S.10 depends on.
+3. **WS-R in full** (Wave 10) — the content-addressed availability substrate. Lower risk, WebCrypto-native, no exotic deps, and shortest path to visible value (offline outbox + honest trust labels by Phase 1). Its pack/CAR + lane scheduler + liveness UX then make WS-S cheaper.
+4. **WS-S core** (Wave 11) — the E2EE plane. Can overlap Wave 10 once S.1/S.2 and the library selection are done; with two teams it runs concurrently (WS-S is the long pole, ~18–24 wks), with one team it follows WS-R.
+5. **Converge at the close:** WS-R.16 (private-room carrier) + WS-S.6.5 (LCAP-bundle CAR) co-land once the WS-S envelope (S.3.3a/b) exists, then the external audits + WS-R §36 / WS-S §29 launch gates.
+
+Hard constraints: **WS-R.0 and WS-S.2 gate everything** within their workstreams (start nothing ahead of them); both intra-workstream graphs are **acyclic** (the two first-cut cycles were removed). **WS-S.10 (update channel) ⟶ WS-O** — if the WS-O reproducible-build/transparency slice is not ready, ship WS-S at **Tier 1** with the documented "no defense against a malicious web update" limitation and backfill Tier 2/3. The MLS/HPKE library audit and the external crypto review **gate the close, not the start** — begin them in Wave 10a. Per-card ordering within each workstream is fixed by the dependency graph at the end of each document.
+
 ### Wave 7 (Week 16-22): Knomosis
 **Estimated team:** 3-4 engineers
 
@@ -306,6 +331,11 @@ Tasks exceeding three days must be split into sub-tasks that are independently r
 | In-room content leak | High | WS-Q.3.2 (item read bar, fail-closed), WS-Q.4.2 (always-on distribution-side visibility gate), WS-Q.4.4 (containment CI gate), WS-Q.6.1 (monotonic-visibility migration harness) |
 | Smart contract bug | Critical | WS-L.1.2 (threat model), WS-L.1.3 (external audit), WS-M.2.4 (freeze), WS-L.3.5 (kill switches) |
 | Regulatory noncompliance | High | WS-N.1 (jurisdiction engine), WS-A.2.1 (matrix), WS-N.2 (compliance controls), fail-closed default |
+| Offline false certainty / stale revocation | High | WS-R.8 (explicit trust-state projection), WS-R.1.4 + WS-R.7.1 (P0 revocation propagation), WS-R.17.1 (honest trust/liveness labels, no single "verified" badge) |
+| Malicious bundle / dependency bomb (LCAP) | High | WS-R.4.2 (streaming parse under caps), WS-R.14.1 (resource caps + malicious-graph detection), WS-R.18.4 (fuzz + bomb suite), WS-R.8.3 (no render before trust projection) |
+| Malicious web update exfiltrates room keys | Critical | WS-S.10.1/10.2 (reproducible, signed, transparency-logged private bundle; rooms lock before key unlock), WS-S.10.3 (Tier-3 local key agent), honest Tier-1 limitation copy (WS-S.0.3) |
+| Private content/metadata leak to server | Critical | WS-S.1 (server non-storage contract: column denylist + endpoint guards + retriever/search/event exclusion + 7 CI gates), WS-S.11.2 (request-capture E2E), WS-S.6.1 (blind rendezvous), WS-S.4.4 (no public-gateway egress) |
+| Removed member retains future access | High | WS-S.3.1 + WS-S.5.1 (MLS remove → epoch rotation → new keys/topics/blind-ids), WS-S.3.7 (removed-member-cannot-decrypt-future-epoch property), honest non-retroactive-deletion disclosure (WS-S.0.3) |
 
 ---
 
