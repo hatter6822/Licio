@@ -96,7 +96,11 @@ export async function assembleMeriCandidates(
   // Graceful when embeddings are absent (the store returns no matches →
   // MinHash-only). NOTE: the STRENGTH of this signal depends on the deployed
   // embedding provider — the DEFAULT provider is LEXICAL (n-gram-correlated), so
-  // the genuine semantic benefit needs a semantic EMBEDDING_URL provider.
+  // the genuine semantic benefit needs a semantic EMBEDDING_URL provider. The
+  // Drizzle `findSimilar` is HNSW-ANN (approximate), so production grouping may
+  // miss a borderline pair the in-memory exact scan catches — acceptable: the
+  // matroid bound is robust to a single missed near-pair, and the deterministic
+  // MinHash + lineage/claim classes remain the grouping backbone.
   const modelVersion = ingestion.embeddingProvider.modelVersion;
   for (const story of stories) {
     const similar = await ingestion.embeddings.findSimilar(
