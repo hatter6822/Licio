@@ -10,7 +10,14 @@
 // reference computations over these datasets and flags drift beyond
 // per-invariant tolerance.
 
-import { braidEntropyEstimate, braidWordFromSnapshots, type RankSnapshot } from '../braid/index.js';
+import {
+  braidEntropyEstimate,
+  braidWordFromSnapshots,
+  detectThresholdHugging,
+  type RankSnapshot,
+  type ThresholdHuggingConfig,
+  type ThresholdHuggingResult,
+} from '../braid/index.js';
 import {
   type AttributePermutation,
   type CidResult,
@@ -598,4 +605,71 @@ export function generatePathsigDatasets(): PathsigDataset[] {
 
 export function referencePathsig(dataset: PathsigDataset): SessionHealthResult {
   return classifySessionHealth(dataset.events);
+}
+
+// ---------------------------------------------------------------------------
+// WS-O.4.5 adversarial scenarios — pinned in the regression harness so that a
+// WEAKENING of a defense (a drift that lets an attack through) is flagged
+// nightly, exactly as algorithm drift is for the per-invariant references.
+// ---------------------------------------------------------------------------
+
+/**
+ * A paraphrase flood: 8 distinct-URL reposts sharing ONE claim and ONE source
+ * lineage. MERI must bound exposure well below independence regardless of count
+ * (the lineage/claim classes cap it); the harness asserts `meri ≤ 0.3`.
+ */
+export function generateParaphraseFloodDataset(seed: number): MeriDataset {
+  const tag = Math.floor(mulberry32(seed)() * 1000);
+  return {
+    name: `meri-paraphrase-flood-${tag}`,
+    candidates: Array.from({ length: 8 }, (_, i) =>
+      meriCandidate(`pf${i}`, { sourceLineageGroupId: 'one-owner', claimGroupId: 'one-claim' }),
+    ),
+    expectedMeri: 0, // unused; the harness checks the BOUND, not an exact value
+  };
+}
+
+export interface ThresholdHuggingDataset {
+  name: string;
+  values: number[];
+  threshold: number;
+  config: ThresholdHuggingConfig;
+  expectedDetected: boolean;
+}
+
+/**
+ * Threshold-hugging populations: a diffuse background with a spike massed just
+ * under a public threshold (an attacker tuned to the cliff) MUST be detected; a
+ * diffuse population MUST NOT. Deterministic per seed.
+ */
+export function generateThresholdHuggingDatasets(seed: number): ThresholdHuggingDataset[] {
+  const rng = mulberry32(seed);
+  const config: ThresholdHuggingConfig = { band: 0.06, minPopulation: 12, excessThreshold: 2.5 };
+  const threshold = 0.4;
+  const background = Array.from(
+    { length: 18 },
+    (_, i) => (i / 18) * (threshold - config.band) + rng() * 0.001,
+  );
+  return [
+    {
+      name: 'hugging-attack',
+      values: [...background, ...Array.from({ length: 16 }, () => threshold - config.band * 0.4)],
+      threshold,
+      config,
+      expectedDetected: true,
+    },
+    {
+      name: 'hugging-diffuse',
+      values: Array.from({ length: 34 }, (_, i) => (i / 34) * threshold),
+      threshold,
+      config,
+      expectedDetected: false,
+    },
+  ];
+}
+
+export function referenceThresholdHugging(
+  dataset: ThresholdHuggingDataset,
+): ThresholdHuggingResult {
+  return detectThresholdHugging(dataset.values, dataset.threshold, dataset.config);
 }

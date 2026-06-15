@@ -20,10 +20,12 @@ import {
   generateHodgeDatasets,
   generateMeriDataset,
   generateMfciDataset,
+  generateParaphraseFloodDataset,
   generatePathsigDatasets,
   generatePhiDatasets,
   generateReebDatasets,
   generateScoiDatasets,
+  generateThresholdHuggingDatasets,
   generateTropicalDatasets,
   meriEdgeCases,
   referenceBraid,
@@ -36,6 +38,7 @@ import {
   referencePhi,
   referenceReeb,
   referenceScoi,
+  referenceThresholdHugging,
   referenceTropical,
 } from './synthetic.js';
 
@@ -255,6 +258,26 @@ export function runRegressionSuite(
         'classified_as_expected',
         referencePathsig(dataset).classification === dataset.expectedClass ? 1 : 0,
         1,
+        0,
+      ),
+    );
+  }
+
+  // --- WS-O.4.5 adversarial scenarios (the DEFENSE must not drift open) ------
+  // Paraphrase flood: MERI bounds 8 shared-lineage reposts (baseline 0,
+  // tolerance 0.3 ⇒ asserts meri ≤ 0.3 regardless of count).
+  const flood = generateParaphraseFloodDataset(REGRESSION_SEED);
+  checks.push(check('MERI', flood.name, 'meri_bounded', referenceMeri(flood), 0, 0.3));
+  // Threshold-hugging (the Braid-family distributional primitive): a spike under
+  // the cliff is detected; a diffuse one is not.
+  for (const dataset of generateThresholdHuggingDatasets(REGRESSION_SEED)) {
+    checks.push(
+      check(
+        'braid_dynamics',
+        `threshold-hugging-${dataset.name}`,
+        'detected',
+        referenceThresholdHugging(dataset).detected ? 1 : 0,
+        dataset.expectedDetected ? 1 : 0,
         0,
       ),
     );
