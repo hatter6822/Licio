@@ -58,6 +58,17 @@ import { loadPwattRuntimeConfig, type PwattRuntimeConfig } from './config.js';
 /** How many trailing windows condition the base rate (WS-E.2.2a, SPEC §8). */
 const BASE_RATE_TRAILING_WINDOWS = 6;
 
+/** The salting-resistant low quantile of an item's actor trust weights (the
+ *  25th percentile; absent ⇒ 1, no effect). Sorting ascending and reading near
+ *  the bottom means a minority of high-trust (aged) accounts can't lift the
+ *  factor, so a fresh-account brigade stays flagged unless it is MAJORITY aged. */
+function lowQuantileTrust(weights: readonly number[]): number {
+  if (weights.length === 0) return 1;
+  const sorted = [...weights].sort((a, b) => a - b);
+  const index = Math.floor(0.25 * (sorted.length - 1));
+  return sorted[index] ?? 1;
+}
+
 export interface WindowScoringReport {
   windowStart: string;
   windowSize: AggregationWindowSize;
@@ -246,10 +257,14 @@ export async function runPwattWindow(
     const trailingEventCounts = trailing.map((w) => w.eventCount);
     const distinctActors = item.actors.size;
     // A burst dominated by fresh, disposable accounts is flagged at lower volume
-    // (WS-O.4.5): the average trust factor scales the detection threshold down.
-    let trustSum = 0;
-    for (const actorKey of item.actors.keys()) trustSum += await actorTrust(actorKey);
-    const trustFactor = item.actors.size > 0 ? trustSum / item.actors.size : 1;
+    // (WS-O.4.5): a LOW QUANTILE of the actors' trust weights scales the
+    // detection threshold down. The quantile (not the mean) resists SALTING — a
+    // minority of aged accounts mixed into a fresh brigade can't lift the factor
+    // (you need a MAJORITY of aged, expensive accounts to evade) — while a
+    // legitimate aged community with a few new users keeps a high factor.
+    const trustWeights: number[] = [];
+    for (const actorKey of item.actors.keys()) trustWeights.push(await actorTrust(actorKey));
+    const trustFactor = lowQuantileTrust(trustWeights);
 
     const burst = detectCoordinatedBurst(
       { eventCount: item.eventCount, distinctActors, trailingEventCounts, trustFactor },

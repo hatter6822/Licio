@@ -210,6 +210,14 @@ export async function assembleMeriCandidates(
 // ---------------------------------------------------------------------------
 // MFCI (WS-H.3): action observations over the five table dimensions
 // ---------------------------------------------------------------------------
+//
+// Account-age note (WS-O.4.5): MFCI ALREADY conditions on account age — the
+// `user_group` dimension IS the account-age bucket (accountAgeBucket below), so
+// the fiber test treats a brigade concentrated in the `new` bucket as a
+// coordination signal by construction. The PWAtt anti-signal trust weighting
+// (pwatt/anti-signals.ts) is the COMPLEMENTARY mechanism (it lowers the
+// burst-detection threshold for fresh-account bursts); no separate MFCI-input
+// reinforcement is needed, and adding one would double-count the same age signal.
 
 export interface MfciActionWindow {
   observations: Array<{ labels: string[] }>;

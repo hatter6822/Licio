@@ -399,6 +399,28 @@ describe('account-age trust weighting end-to-end (WS-O.4.5)', () => {
     const report = await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
     expect(report.burstsDetected).toBe(1);
   });
+
+  it('a fresh brigade SALTED with a minority of aged accounts is STILL flagged', async () => {
+    // 9 fresh + 2 aged (11 events). The low-quantile trust factor resists the
+    // salt: a minority of aged accounts cannot lift it back to established.
+    const storyId = randomUUID();
+    for (let i = 0; i < 9; i += 1) {
+      const { userId } = await seedUserWithSession(fixture.identity, {
+        handle: `salt${i}f`,
+        accountAgeMs: 1 * 86_400_000,
+      });
+      await ingestAttention(userId, storyId);
+    }
+    for (let i = 0; i < 2; i += 1) {
+      const { userId } = await seedUserWithSession(fixture.identity, {
+        handle: `salt${i}a`,
+        accountAgeMs: 500 * 86_400_000,
+      });
+      await ingestAttention(userId, storyId);
+    }
+    const report = await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
+    expect(report.burstsDetected).toBe(1);
+  });
 });
 
 describe('harassment-cascade freeze (WS-E.2.2c + WS-E.2.3e)', () => {

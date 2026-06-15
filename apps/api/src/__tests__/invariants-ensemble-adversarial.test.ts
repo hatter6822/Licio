@@ -8,8 +8,10 @@
 // scenario maps to an entry in `docs/invariants/ADVERSARIAL-THREATS.md`.
 //
 // The cross-invariant correlation is a property of the MATHEMATICS, so these
-// scenarios drive the pure `@licio/invariants` functions directly (deterministic,
-// no clock/IO); the platform WIRING that feeds them is covered by
+// scenarios mostly drive the pure `@licio/invariants` functions directly
+// (deterministic, no clock/IO); a few drive the equally-pure api-layer
+// detectors that complete a defense (e.g. the account-age-weighted burst
+// detector). The platform WIRING that feeds them is covered by
 // `invariants-platform`/`invariants-services`/`demo-seed-showcase`. Each later
 // hardening PR adds the scenario its defense makes pass.
 
