@@ -515,6 +515,10 @@ describe('moderation console (role-gated)', () => {
     expect(patch.status).toBe(200);
     expect(((await patch.json()) as { reportsPerHour: number }).reportsPerHour).toBe(25);
 
+    const getCfg = await app().request(get('/v1/moderation/config', admin.cookie));
+    expect(getCfg.status).toBe(200);
+    expect(((await getCfg.json()) as { reportsPerHour: number }).reportsPerHour).toBe(25);
+
     const invalid = await app().request(
       new Request('http://localhost/v1/moderation/config', {
         method: 'PATCH',
@@ -523,5 +527,390 @@ describe('moderation console (role-gated)', () => {
       }),
     );
     expect(invalid.status).toBe(422);
+    // An unknown key is also a 422 with a field-level message.
+    const unknown = await app().request(
+      new Request('http://localhost/v1/moderation/config', {
+        method: 'PATCH',
+        headers: json(admin.cookie),
+        body: JSON.stringify({ nope: 1 }),
+      }),
+    );
+    expect(unknown.status).toBe(422);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Additional route-branch coverage (error paths, edges, console palette).
+// ---------------------------------------------------------------------------
+
+describe('trust-safety route branches', () => {
+  it('mute self-block, unknown user, list (cursor), and owned delete + 404', async () => {
+    const a = await seedUser({ handle: `mu${randomUUID().slice(0, 6)}` });
+    expect(
+      (await app().request(post('/v1/mutes', { muted_user_id: a.userId }, a.cookie))).status,
+    ).toBe(400); // cannot_mute_self
+    expect(
+      (await app().request(post('/v1/mutes', { muted_user_id: randomUUID() }, a.cookie))).status,
+    ).toBe(404); // user_not_found
+    const created = await app().request(post('/v1/mutes', { muted_user_id: AUTHOR }, a.cookie));
+    const muteId = ((await created.json()) as { mute_id: string }).mute_id;
+    const list = await app().request(get('/v1/mutes', a.cookie));
+    expect(((await list.json()) as { mutes: unknown[] }).mutes).toHaveLength(1);
+    expect((await app().request(del(`/v1/mutes/${muteId}`, a.cookie))).status).toBe(200);
+    expect((await app().request(del(`/v1/mutes/${randomUUID()}`, a.cookie))).status).toBe(404);
+    // Block delete 404 + block list.
+    expect((await app().request(del(`/v1/blocks/${randomUUID()}`, a.cookie))).status).toBe(404);
+    expect((await app().request(get('/v1/blocks', a.cookie))).status).toBe(200);
+  });
+
+  it('rate-limits reports once the per-hour cap is reached (429)', async () => {
+    const admin = await seedUser({
+      handle: `adm${randomUUID().slice(0, 6)}`,
+      platformRoles: ['user', 'admin'],
+    });
+    await app().request(
+      new Request('http://localhost/v1/moderation/config', {
+        method: 'PATCH',
+        headers: json(admin.cookie),
+        body: JSON.stringify({ reportsPerHour: 1 }),
+      }),
+    );
+    const reporter = await seedUser({ handle: `rl${randomUUID().slice(0, 6)}` });
+    expect((await app().request(post('/v1/reports', reportBody(), reporter.cookie))).status).toBe(
+      201,
+    );
+    const limited = await app().request(post('/v1/reports', reportBody(), reporter.cookie));
+    expect(limited.status).toBe(429);
+    expect(((await limited.json()) as { error: { retry_after: number } }).error.retry_after).toBe(
+      3600,
+    );
+  });
+
+  it('appeal eligibility GET, duplicate (409), and a non-appealable lawful-basis remove (403)', async () => {
+    const safety = await seedUser({
+      handle: `saf${randomUUID().slice(0, 6)}`,
+      platformRoles: ['user', 'steward'],
+      stewardRoles: ['ROLE_SAFETY'],
+    });
+    // A normal removal of AUTHOR's content (the stub maps content → AUTHOR).
+    const remove = await app().request(
+      post(
+        '/v1/moderation/actions',
+        {
+          target_type: 'content',
+          target_id: randomUUID(),
+          action: 'remove',
+          reason_code: 'MOD_HARASS_001',
+        },
+        safety.cookie,
+      ),
+    );
+    const actionId = ((await remove.json()) as { action_id: string }).action_id;
+    // Eligibility GET (owned by AUTHOR).
+    const elig = await app().request(get(`/v1/appeals/eligibility/${actionId}`, AUTHOR_COOKIE));
+    expect(elig.status).toBe(200);
+    expect(((await elig.json()) as { appealable: boolean }).appealable).toBe(true);
+    // Eligibility for an action NOT owned by the caller → 404 (no oracle).
+    expect(
+      (await app().request(get(`/v1/appeals/eligibility/${actionId}`, safety.cookie))).status,
+    ).toBe(404);
+    // First appeal succeeds; the duplicate is 409.
+    expect(
+      (
+        await app().request(
+          post('/v1/appeals', { action_id: actionId, user_statement: 'x' }, AUTHOR_COOKIE),
+        )
+      ).status,
+    ).toBe(201);
+    const dup = await app().request(
+      post('/v1/appeals', { action_id: actionId, user_statement: 'again' }, AUTHOR_COOKIE),
+    );
+    expect(dup.status).toBe(409);
+    // Appealing a non-existent action → 404.
+    expect(
+      (
+        await app().request(
+          post('/v1/appeals', { action_id: randomUUID(), user_statement: 'x' }, AUTHOR_COOKIE),
+        )
+      ).status,
+    ).toBe(404);
+    // A CSAM removal is non-appealable → 403.
+    const csam = await app().request(
+      post(
+        '/v1/moderation/actions',
+        {
+          target_type: 'content',
+          target_id: randomUUID(),
+          action: 'remove',
+          reason_code: 'MOD_CSE_001',
+        },
+        safety.cookie,
+      ),
+    );
+    const csamActionId = ((await csam.json()) as { action_id: string }).action_id;
+    const csamAppeal = await app().request(
+      post('/v1/appeals', { action_id: csamActionId, user_statement: 'x' }, AUTHOR_COOKIE),
+    );
+    expect(csamAppeal.status).toBe(403);
+  });
+
+  it('marks a notice read (and 404s an unknown notice)', async () => {
+    const safety = await seedUser({
+      handle: `saf${randomUUID().slice(0, 6)}`,
+      platformRoles: ['user', 'steward'],
+      stewardRoles: ['ROLE_SAFETY'],
+    });
+    await app().request(
+      post(
+        '/v1/moderation/actions',
+        {
+          target_type: 'content',
+          target_id: randomUUID(),
+          action: 'warn',
+          reason_code: 'MOD_HARASS_001',
+        },
+        safety.cookie,
+      ),
+    );
+    const inbox = await app().request(get('/v1/moderation/notices', AUTHOR_COOKIE));
+    const noticeId = ((await inbox.json()) as { notices: Array<{ notice_id?: string }> }).notices[0]
+      ?.notice_id;
+    if (noticeId) {
+      expect(
+        (await app().request(post(`/v1/moderation/notices/${noticeId}/read`, {}, AUTHOR_COOKIE)))
+          .status,
+      ).toBe(200);
+    }
+    expect(
+      (await app().request(post(`/v1/moderation/notices/${randomUUID()}/read`, {}, AUTHOR_COOKIE)))
+        .status,
+    ).toBe(404);
+  });
+});
+
+describe('console route branches (assign, bulk, revert, reviewer-status, queue filters)', () => {
+  async function safetyUser() {
+    return seedUser({
+      handle: `saf${randomUUID().slice(0, 6)}`,
+      platformRoles: ['user', 'steward'],
+      stewardRoles: ['ROLE_SAFETY'],
+    });
+  }
+  async function openCase(): Promise<string> {
+    const reporter = await seedUser({ handle: `rep${randomUUID().slice(0, 6)}` });
+    await app().request(post('/v1/reports', reportBody(), reporter.cookie));
+    const mod = getModerationServices();
+    const cases = await mod.cases.list({ limit: 1 });
+    return cases[0]?.caseId ?? '';
+  }
+
+  it('assigns a case (ok / case-404 / reviewer-404 / reviewer-ineligible)', async () => {
+    const safety = await safetyUser();
+    const caseId = await openCase();
+    const otherSafety = await safetyUser();
+    const okRes = await app().request(
+      post(
+        `/v1/moderation/cases/${caseId}/assign`,
+        { reviewer_id: otherSafety.userId },
+        safety.cookie,
+      ),
+    );
+    expect(okRes.status).toBe(200);
+    expect(
+      (
+        await app().request(
+          post(
+            `/v1/moderation/cases/${randomUUID()}/assign`,
+            { reviewer_id: otherSafety.userId },
+            safety.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(404); // case not found
+    expect(
+      (
+        await app().request(
+          post(
+            `/v1/moderation/cases/${caseId}/assign`,
+            { reviewer_id: randomUUID() },
+            safety.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(404); // reviewer not found
+    const evidence = await seedUser({
+      handle: `ev${randomUUID().slice(0, 6)}`,
+      stewardRoles: ['ROLE_EVIDENCE'],
+    });
+    expect(
+      (
+        await app().request(
+          post(
+            `/v1/moderation/cases/${caseId}/assign`,
+            { reviewer_id: evidence.userId },
+            safety.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(400); // reviewer cannot access the report queue
+  });
+
+  it('bulk dismiss + assign + per-item errors + bulk_too_large', async () => {
+    const admin = await seedUser({
+      handle: `adm${randomUUID().slice(0, 6)}`,
+      platformRoles: ['user', 'admin'],
+    });
+    const c1 = await openCase();
+    const c2 = await openCase();
+    const dismiss = await app().request(
+      post(
+        '/v1/moderation/bulk',
+        { case_ids: [c1, c2], action: 'dismiss', reason_code: 'MOD_SPAM_001' },
+        admin.cookie,
+      ),
+    );
+    expect(dismiss.status).toBe(200);
+    expect(
+      ((await dismiss.json()) as { results: Array<{ ok: boolean }> }).results.every((r) => r.ok),
+    ).toBe(true);
+    // assign without reviewer_id → per-item reviewer_required; missing case → not_found.
+    const c3 = await openCase();
+    const mixed = await app().request(
+      post(
+        '/v1/moderation/bulk',
+        { case_ids: [c3, randomUUID()], action: 'assign', reason_code: 'MOD_SPAM_001' },
+        admin.cookie,
+      ),
+    );
+    const results = (
+      (await mixed.json()) as { results: Array<{ ok: boolean; error: string | null }> }
+    ).results;
+    expect(results.some((r) => r.error === 'reviewer_required')).toBe(true);
+    expect(results.some((r) => r.error === 'not_found')).toBe(true);
+    // bulk_too_large.
+    await app().request(
+      new Request('http://localhost/v1/moderation/config', {
+        method: 'PATCH',
+        headers: json(admin.cookie),
+        body: JSON.stringify({ bulkActionMax: 1 }),
+      }),
+    );
+    const tooLarge = await app().request(
+      post(
+        '/v1/moderation/bulk',
+        { case_ids: [c1, c2], action: 'dismiss', reason_code: 'MOD_SPAM_001' },
+        admin.cookie,
+      ),
+    );
+    expect(tooLarge.status).toBe(400);
+  });
+
+  it('reverts a reversible action and 404s/409s the edge cases', async () => {
+    const safety = await safetyUser();
+    const hide = await app().request(
+      post(
+        '/v1/moderation/actions',
+        {
+          target_type: 'content',
+          target_id: randomUUID(),
+          action: 'hide',
+          reason_code: 'MOD_HARASS_001',
+        },
+        safety.cookie,
+      ),
+    );
+    const actionId = ((await hide.json()) as { action_id: string }).action_id;
+    const reverted = await app().request(
+      post(
+        `/v1/moderation/actions/${actionId}/revert`,
+        { reason_code: 'MOD_HARASS_001' },
+        safety.cookie,
+      ),
+    );
+    expect(reverted.status).toBe(200);
+    expect(
+      (
+        await app().request(
+          post(
+            `/v1/moderation/actions/${randomUUID()}/revert`,
+            { reason_code: 'MOD_HARASS_001' },
+            safety.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(404);
+    // A permanent ban is not revertible (409).
+    const admin = await seedUser({
+      handle: `adm${randomUUID().slice(0, 6)}`,
+      platformRoles: ['user', 'admin'],
+    });
+    const ban = await app().request(
+      post(
+        '/v1/moderation/actions',
+        { target_type: 'account', target_id: AUTHOR, action: 'ban', reason_code: 'MOD_HARASS_002' },
+        admin.cookie,
+      ),
+    );
+    const banId = ((await ban.json()) as { action_id: string }).action_id;
+    expect(
+      (
+        await app().request(
+          post(
+            `/v1/moderation/actions/${banId}/revert`,
+            { reason_code: 'MOD_HARASS_002' },
+            admin.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(409);
+  });
+
+  it('sets reviewer availability and applies queue filters', async () => {
+    const safety = await safetyUser();
+    expect(
+      (
+        await app().request(
+          post('/v1/moderation/reviewer-status', { status: 'available' }, safety.cookie),
+        )
+      ).status,
+    ).toBe(200);
+    await openCase();
+    // severity/status are array-valued (combinable filters); the scalar query
+    // params (assignment + limit) exercise the route's filter-mapping branches.
+    const filtered = await app().request(
+      get('/v1/moderation/queue?assignment=unassigned&limit=5', safety.cookie),
+    );
+    expect(filtered.status).toBe(200);
+  });
+
+  it('paginates the audit log with a cursor', async () => {
+    const admin = await seedUser({
+      handle: `adm${randomUUID().slice(0, 6)}`,
+      platformRoles: ['user', 'admin'],
+    });
+    for (let i = 0; i < 2; i += 1) {
+      await app().request(
+        post(
+          '/v1/moderation/actions',
+          {
+            target_type: 'content',
+            target_id: randomUUID(),
+            action: 'hide',
+            reason_code: 'MOD_SPAM_001',
+          },
+          admin.cookie,
+        ),
+      );
+    }
+    const page1 = await app().request(
+      get('/v1/moderation/audit?action=hide&limit=1', admin.cookie),
+    );
+    const body1 = (await page1.json()) as { items: unknown[]; next_cursor: string | null };
+    expect(body1.items.length).toBe(1);
+    expect(body1.next_cursor).not.toBeNull();
+    const page2 = await app().request(
+      get(`/v1/moderation/audit?action=hide&limit=1&cursor=${body1.next_cursor}`, admin.cookie),
+    );
+    expect(((await page2.json()) as { items: unknown[] }).items.length).toBe(1);
   });
 });
