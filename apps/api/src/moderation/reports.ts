@@ -20,9 +20,33 @@ import {
   reasonCodeSlaHours,
   toEventSeverity,
 } from '@licio/shared';
+import { autoAssignCase } from './assignment.js';
+import { writeAudit } from './audit.js';
 import { coordinationScore } from './prechecks.js';
 import type { ModerationServices } from './services.js';
 import type { ModerationCaseRecord, ModerationReportRecord } from './stores.js';
+
+/** WS-J.2.1d: route a new case to the least-loaded available reviewer (best
+ *  effort; no available reviewer ⇒ it stays in the unassigned queue).  The
+ *  system assignment is audited (DoD: every assignment writes an audit record). */
+async function autoAssignNewCase(
+  services: ModerationServices,
+  theCase: ModerationCaseRecord,
+): Promise<void> {
+  const assignee = await autoAssignCase(services);
+  if (assignee === null) return;
+  await services.cases.update(theCase.caseId, { assignedTo: assignee });
+  await writeAudit(services, {
+    actorUserId: null, // system routing
+    actorRole: null,
+    action: 'assign',
+    targetType: theCase.targetType,
+    targetId: theCase.targetId,
+    subjectUserId: assignee,
+    notes: 'auto-assigned to the least-loaded available reviewer',
+  });
+  services.metrics.increment('moderation.auto_assign');
+}
 
 const SEVERITY_RANK: Readonly<Record<ReportSeverity, number>> = {
   minor: 0,
@@ -165,7 +189,8 @@ export async function submitReport(
   services.metrics.increment('reports.created');
   services.metrics.increment(`reports.created.${raisedRouting}`);
 
-  // 7. Emit the moderation.case.created event for a NEW case (the queue intake).
+  // 7. Emit the moderation.case.created event for a NEW case (the queue intake),
+  //    and route it to the least-loaded available reviewer (WS-J.2.1d).
   if (newCase) {
     services.trackBackground(
       services.events.caseCreated({
@@ -180,6 +205,7 @@ export async function submitReport(
         nowIso,
       }),
     );
+    services.trackBackground(autoAssignNewCase(services, theCase));
   }
 
   // 8. Emergency routing pages on-call (minimum context, never reporter identity).

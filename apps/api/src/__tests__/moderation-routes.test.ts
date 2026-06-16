@@ -23,6 +23,7 @@ import type {
 } from '../moderation/ports.js';
 import {
   createInMemoryModerationServices,
+  getModerationServices,
   resetModerationServicesForTests,
   setModerationServices,
 } from '../moderation/services.js';
@@ -388,6 +389,66 @@ describe('moderation console (role-gated)', () => {
       stewardRoles: ['ROLE_APPEALS'],
     });
     expect((await app().request(get('/v1/moderation/appeals', appeals.cookie))).status).toBe(200);
+  });
+
+  it('the integrity queue is ROLE_INTEGRITY-only; resolving an incident lifts the delay', async () => {
+    const safety = await seedUser({
+      handle: `saf${randomUUID().slice(0, 6)}`,
+      platformRoles: ['user', 'steward'],
+      stewardRoles: ['ROLE_SAFETY'],
+    });
+    // A safety-only steward cannot reach the integrity queue.
+    expect((await app().request(get('/v1/moderation/incidents', safety.cookie))).status).toBe(403);
+
+    const integrity = await seedUser({
+      handle: `int${randomUUID().slice(0, 6)}`,
+      platformRoles: ['user', 'steward'],
+      stewardRoles: ['ROLE_INTEGRITY'],
+    });
+    // Seed a delayed case + its open incident directly on the singleton.
+    const mod = getModerationServices();
+    const targetId = randomUUID();
+    const theCase = await mod.cases.insert({
+      caseId: randomUUID(),
+      targetType: 'content',
+      targetId,
+      contentKind: 'contribution',
+      status: 'new',
+      severity: 'severe',
+      routedTo: 'standard',
+      assignedTo: null,
+      reportCount: 9,
+      enforcementDelayed: true,
+      resolvedActionId: null,
+      slaDueAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    const incident = await mod.incidents.insert({
+      caseId: theCase.caseId,
+      targetType: 'content',
+      targetId,
+      reportCount: 9,
+      windowSeconds: 600,
+      coordinationScore: 0.35,
+      severity: 'severe',
+      status: 'open',
+      summary: 'aggregate, base-rate conditioned',
+      reviewedAt: null,
+      reviewedBy: null,
+    });
+    const list = await app().request(get('/v1/moderation/incidents', integrity.cookie));
+    expect(list.status).toBe(200);
+    expect(((await list.json()) as { count: number }).count).toBe(1);
+
+    const resolved = await app().request(
+      post(
+        `/v1/moderation/incidents/${incident.incidentId}/resolve`,
+        { resolution: 'cleared' },
+        integrity.cookie,
+      ),
+    );
+    expect(resolved.status).toBe(200);
+    expect(((await resolved.json()) as { case_status: string }).case_status).toBe('new');
+    expect((await mod.cases.getById(theCase.caseId))?.enforcementDelayed).toBe(false);
   });
 
   it('ROLE_COMMUNITY cannot remove content (capability gate)', async () => {

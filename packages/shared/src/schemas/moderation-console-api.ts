@@ -477,3 +477,56 @@ export const auditExportResponseSchema = z
   })
   .strict();
 export type AuditExportResponse = z.infer<typeof auditExportResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Coordinated-report incidents (WS-J.2.6e / MFCI-2) — the integrity queue.
+// ---------------------------------------------------------------------------
+
+export const coordinatedIncidentStatusSchema = z.enum(['open', 'cleared', 'confirmed']);
+export type CoordinatedIncidentStatus = z.infer<typeof coordinatedIncidentStatusSchema>;
+
+/** An incident view for the integrity queue.  The summary is AGGREGATE and
+ *  base-rate-conditioned — never per-reporter identity (SPEC §19.5). */
+export const coordinatedIncidentViewSchema = z
+  .object({
+    incident_id: uuidSchema,
+    case_id: uuidSchema.nullable(),
+    target_type: reportTargetTypeSchema,
+    target_id: uuidSchema,
+    report_count: z.number().int().min(0),
+    window_seconds: z.number().int().min(0),
+    coordination_score: z.number().min(0).max(1),
+    severity: reportSeveritySchema,
+    status: coordinatedIncidentStatusSchema,
+    summary: z.string(),
+    created_at: isoTimestampSchema,
+    reviewed_at: isoTimestampSchema.nullable(),
+    reviewed_by: uuidSchema.nullable(),
+  })
+  .strict();
+export type CoordinatedIncidentView = z.infer<typeof coordinatedIncidentViewSchema>;
+
+export const incidentQueueResponseSchema = z
+  .object({ incidents: z.array(coordinatedIncidentViewSchema), count: z.number().int().min(0) })
+  .strict();
+export type IncidentQueueResponse = z.infer<typeof incidentQueueResponseSchema>;
+
+/** Resolve an incident: `cleared` (reports legitimate — lift the enforcement
+ *  delay) or `confirmed` (a coordinated false-report attack — dismiss the case,
+ *  protecting the target). */
+export const incidentResolveRequestSchema = z
+  .object({
+    resolution: z.enum(['cleared', 'confirmed']),
+    note: z.string().max(2_000).optional(),
+  })
+  .strict();
+export type IncidentResolveRequest = z.infer<typeof incidentResolveRequestSchema>;
+
+export const incidentResolveResponseSchema = z
+  .object({
+    incident: coordinatedIncidentViewSchema,
+    /** The linked case's status after resolution (null when no linked case). */
+    case_status: reportCaseStatusSchema.nullable(),
+  })
+  .strict();
+export type IncidentResolveResponse = z.infer<typeof incidentResolveResponseSchema>;

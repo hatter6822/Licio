@@ -99,10 +99,16 @@ export function mayseeReporterIdentity(actor: StewardActor): boolean {
   return roles.includes('ROLE_SAFETY') || roles.includes('ROLE_INTEGRITY');
 }
 
+/** Whether the actor holds the integrity-analyst role (ROLE_INTEGRITY) — the
+ *  MFCI/coordination judgment authority (clears incidents, may act on a case
+ *  whose volume-driven enforcement is delayed pending integrity review). */
+export function isIntegrityActor(actor: StewardActor): boolean {
+  return effectiveStewardRoles(actor.platformRoles, actor.stewardRoles).includes('ROLE_INTEGRITY');
+}
+
 /** Whether the actor may see full MFCI coordination detail (ROLE_INTEGRITY). */
 export function maySeeCoordinationDetail(actor: StewardActor): boolean {
-  const roles = effectiveStewardRoles(actor.platformRoles, actor.stewardRoles);
-  return roles.includes('ROLE_INTEGRITY');
+  return isIntegrityActor(actor);
 }
 
 /** The console actions the actor's role may take (for the review payload's

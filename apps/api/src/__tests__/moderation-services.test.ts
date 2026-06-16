@@ -23,6 +23,7 @@ import {
   storeModerationConfigValue,
   validateModerationConfigValue,
 } from '../moderation/config.js';
+import { resolveIncident } from '../moderation/incidents.js';
 import { createActionNotice, listNotices } from '../moderation/notices.js';
 import type {
   ContentSnapshot,
@@ -63,6 +64,15 @@ function appealsActor(userId = '00000000-0000-4000-8000-0000000000c2'): StewardA
     userId,
     platformRoles: ['steward'],
     stewardRoles: ['ROLE_APPEALS'],
+    mfaActive: true,
+    mfaVerified: true,
+  };
+}
+function integrityActor(userId = '00000000-0000-4000-8000-0000000000c3'): StewardActor {
+  return {
+    userId,
+    platformRoles: ['steward'],
+    stewardRoles: ['ROLE_INTEGRITY', 'ROLE_SAFETY'],
     mfaActive: true,
     mfaVerified: true,
   };
@@ -250,6 +260,129 @@ describe('submitReport', () => {
     const incident = await services.incidents.findOpenByTarget('content', TARGET);
     expect(incident).not.toBeNull();
     expect(alerts.some((a) => a.kind === 'coordinated_report')).toBe(true);
+  });
+});
+
+describe('MFCI-2 enforcement delay + incident resolution', () => {
+  async function delayedCase(): Promise<string> {
+    const theCase = await services.cases.insert({
+      caseId: '00000000-0000-4000-9000-0000000000e1',
+      targetType: 'content',
+      targetId: TARGET,
+      contentKind: 'contribution',
+      status: 'new',
+      severity: 'severe',
+      routedTo: 'standard',
+      assignedTo: null,
+      reportCount: 8,
+      enforcementDelayed: true, // a coordinated-report incident holds it
+      resolvedActionId: null,
+      slaDueAt: new Date(services.now() + 3_600_000).toISOString(),
+    });
+    return theCase.caseId;
+  }
+
+  it('blocks volume-driven enforcement while delayed, but an integrity analyst may act', async () => {
+    services = createInMemoryModerationServices({
+      content: recordingContentPort(),
+      users: userPort({ [AUTHOR]: 100 }),
+    });
+    const caseId = await delayedCase();
+    const blocked = await applyAction(services, safetyActor(), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'remove',
+      reason_code: 'MOD_HARASS_001',
+      case_id: caseId,
+    });
+    expect(blocked.ok).toBe(false);
+    expect(!blocked.ok && blocked.code).toBe('enforcement_delayed');
+    // The integrity analyst IS the review — they may act.
+    const allowed = await applyAction(services, integrityActor(), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'remove',
+      reason_code: 'MOD_HARASS_001',
+      case_id: caseId,
+    });
+    expect(allowed.ok).toBe(true);
+  });
+
+  it('clearing an incident lifts the delay so enforcement may proceed', async () => {
+    services = createInMemoryModerationServices({
+      content: recordingContentPort(),
+      users: userPort({ [AUTHOR]: 100 }),
+    });
+    const caseId = await delayedCase();
+    const incident = await services.incidents.insert({
+      caseId,
+      targetType: 'content',
+      targetId: TARGET,
+      reportCount: 8,
+      windowSeconds: 600,
+      coordinationScore: 0.4,
+      severity: 'severe',
+      status: 'open',
+      summary: 'aggregate',
+      reviewedAt: null,
+      reviewedBy: null,
+    });
+    const outcome = await resolveIncident(
+      services,
+      integrityActor(),
+      incident.incidentId,
+      'cleared',
+      undefined,
+    );
+    expect(outcome.ok).toBe(true);
+    expect((await services.cases.getById(caseId))?.enforcementDelayed).toBe(false);
+    // Now an ordinary safety steward may enforce.
+    const after = await applyAction(services, safetyActor(), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'remove',
+      reason_code: 'MOD_HARASS_001',
+      case_id: caseId,
+    });
+    expect(after.ok).toBe(true);
+  });
+
+  it('confirming an incident dismisses the case (protecting the target)', async () => {
+    services = createInMemoryModerationServices();
+    const caseId = await delayedCase();
+    const incident = await services.incidents.insert({
+      caseId,
+      targetType: 'content',
+      targetId: TARGET,
+      reportCount: 20,
+      windowSeconds: 300,
+      coordinationScore: 0.9,
+      severity: 'severe',
+      status: 'open',
+      summary: 'aggregate',
+      reviewedAt: null,
+      reviewedBy: null,
+    });
+    const outcome = await resolveIncident(
+      services,
+      integrityActor(),
+      incident.incidentId,
+      'confirmed',
+      'brigade',
+    );
+    expect(outcome.ok && outcome.caseStatus).toBe('resolved');
+    const theCase = await services.cases.getById(caseId);
+    expect(theCase?.status).toBe('resolved');
+    expect(theCase?.enforcementDelayed).toBe(false);
+    // A second resolution is rejected (already resolved).
+    const again = await resolveIncident(
+      services,
+      integrityActor(),
+      incident.incidentId,
+      'cleared',
+      undefined,
+    );
+    expect(again.ok).toBe(false);
   });
 });
 

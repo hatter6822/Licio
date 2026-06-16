@@ -20,6 +20,9 @@ import {
   bulkActionResponseSchema,
   type ConsoleAction,
   caseReviewResponseSchema,
+  incidentQueueResponseSchema,
+  incidentResolveRequestSchema,
+  incidentResolveResponseSchema,
   type ModerationReasonCode,
   moderationActionRequestSchema,
   moderationActionResponseSchema,
@@ -50,6 +53,7 @@ import {
   storeModerationConfigValue,
   validateModerationConfigValue,
 } from '../moderation/config.js';
+import { buildIncidentQueue, resolveIncident } from '../moderation/incidents.js';
 import {
   buildAppealQueue,
   buildAppealReview,
@@ -188,6 +192,9 @@ export function createModerationConsoleRoutes() {
           if (outcome.code === 'target_not_found') {
             return c.json(deny('target_not_found', outcome.message), 404);
           }
+          if (outcome.code === 'enforcement_delayed') {
+            return c.json(deny('enforcement_delayed', outcome.message), 409);
+          }
           if (outcome.code === 'mfa_required') {
             return c.json(deny('mfa_required', outcome.message), 403);
           }
@@ -281,6 +288,49 @@ export function createModerationConsoleRoutes() {
         await mod.reviewerStatus.set(actor.userId, status, new Date(mod.now()).toISOString());
         return c.json(okResponseSchema.parse({ ok: true }));
       })
+
+      // --- Coordinated-report incidents (WS-J.2.6e / MFCI-2) --------------
+      // The integrity queue: ONLY ROLE_INTEGRITY (integrity-queue access) may
+      // list or resolve incidents.  Resolving an incident reconciles the linked
+      // case's enforcement delay (clear ⇒ lift; confirm ⇒ dismiss the case).
+      .get('/incidents', async (c) => {
+        const actor = mustActor(c);
+        const queueDenial = denyQueue(actor, 'integrity-queue');
+        if (queueDenial) return c.json(deny(queueDenial.code, queueDenial.message), 403);
+        const result = await buildIncidentQueue(getModerationServices(), 100);
+        return c.json(incidentQueueResponseSchema.parse(result));
+      })
+      .post(
+        '/incidents/:incidentId/resolve',
+        zValidator('param', uuidParam('incidentId')),
+        zValidator('json', incidentResolveRequestSchema),
+        async (c) => {
+          const actor = mustActor(c);
+          const queueDenial = denyQueue(actor, 'integrity-queue');
+          if (queueDenial) return c.json(deny(queueDenial.code, queueDenial.message), 403);
+          const { incidentId } = c.req.valid('param');
+          const { resolution, note } = c.req.valid('json');
+          const outcome = await resolveIncident(
+            getModerationServices(),
+            actor,
+            incidentId,
+            resolution,
+            note,
+          );
+          if (!outcome.ok) {
+            return c.json(
+              deny(outcome.code, outcome.message),
+              outcome.code === 'not_found' ? 404 : 409,
+            );
+          }
+          return c.json(
+            incidentResolveResponseSchema.parse({
+              incident: outcome.incident,
+              case_status: outcome.caseStatus,
+            }),
+          );
+        },
+      )
 
       // --- Appeal queue + review + decision (WS-J.1.3c, WS-J.2.4a) --------
       .get(

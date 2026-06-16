@@ -23,7 +23,7 @@ import {
   type StewardCapability,
 } from '@licio/shared';
 import { writeAudit } from './audit.js';
-import { denyCapability, type StewardActor } from './authz.js';
+import { denyCapability, isIntegrityActor, type StewardActor } from './authz.js';
 import { createActionNotice } from './notices.js';
 import type { AccountActionState, ContentVisibilityState } from './ports.js';
 import type { ModerationServices } from './services.js';
@@ -37,7 +37,8 @@ export type ActionOutcome =
       message: string;
       requiredRole?: string;
     }
-  | { ok: false; code: 'target_not_found'; message: string };
+  | { ok: false; code: 'target_not_found'; message: string }
+  | { ok: false; code: 'enforcement_delayed'; message: string };
 
 /** Map a console action to the enforcement action type used by the appeal matrix
  *  (escalate/clear are workflow, not enforcement → null). */
@@ -124,6 +125,25 @@ export async function applyAction(
   const enfType = enforcementType(request.action);
   const reversible = actionReversible(request.action, reasonCode);
   const durationDays = parseDurationDays(request.duration);
+
+  // MFCI-2 (WS-J.2.6e): while a coordinated-report incident holds the case,
+  // volume-driven enforcement is DELAYED pending integrity review — so a
+  // brigade of false reports cannot drive an enforcement action against its
+  // target.  An integrity analyst (ROLE_INTEGRITY) IS the review and may still
+  // act; everyone else is held until the incident is cleared (which lifts the
+  // flag).  Workflow-only actions (escalate/clear) are never blocked.
+  if (enfType !== null && request.case_id) {
+    const theCase = await services.cases.getById(request.case_id);
+    if (theCase?.enforcementDelayed && !isIntegrityActor(actor)) {
+      services.metrics.increment('moderation.action.enforcement_delayed');
+      return {
+        ok: false,
+        code: 'enforcement_delayed',
+        message:
+          'Enforcement is delayed pending integrity review of a coordinated-report incident.',
+      };
+    }
+  }
 
   // 1. Apply the effect (idempotent at the port; an already-removed item is a
   //    no-op there).  Reflected to distribution (the ranking seam).
