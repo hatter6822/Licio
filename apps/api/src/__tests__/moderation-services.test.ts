@@ -386,6 +386,36 @@ describe('MFCI-2 enforcement delay + incident resolution', () => {
   });
 });
 
+describe('reversal integrity (WS-J.2.3b)', () => {
+  it('reverting one of two removals keeps the item suppressed until both are reverted', async () => {
+    const port = recordingContentPort();
+    services = createInMemoryModerationServices({
+      content: port,
+      users: userPort({ [AUTHOR]: 100 }),
+    });
+    const act = (): ReturnType<typeof applyAction> =>
+      applyAction(services, safetyActor(), {
+        target_type: 'content',
+        target_id: TARGET,
+        action: 'remove',
+        reason_code: 'MOD_HARASS_001',
+      });
+    const first = await act();
+    const second = await act();
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    port.contentStates.length = 0; // ignore the two 'removed' writes
+
+    // Reverting the FIRST must NOT restore visibility — the second still holds it.
+    await revertAction(services, safetyActor(), first.response.action_id);
+    expect(port.contentStates.some((s) => s.state === 'visible')).toBe(false);
+
+    // Reverting the SECOND (the last active removal) restores visibility.
+    await revertAction(services, safetyActor(), second.response.action_id);
+    expect(port.contentStates.some((s) => s.state === 'visible')).toBe(true);
+  });
+});
+
 describe('action palette + revert', () => {
   it('rejects an action the role cannot perform', async () => {
     const communityActor: StewardActor = {

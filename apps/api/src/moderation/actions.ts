@@ -322,21 +322,43 @@ export async function performRevert(
   actor: StewardActor,
   original: ModerationActionRecord,
 ): Promise<RevertActionResponse> {
-  // Restore prior state.
+  // Mark the original reverted FIRST, so the reversal-integrity scan below
+  // (which reads the ACTIVE, non-reverted actions on the target) no longer
+  // counts this one.
+  await services.actions.update(original.actionId, { reverted: true });
+
+  // Reversal integrity (WS-J.2.3b): restore prior state ONLY when no OTHER
+  // active enforcement action still holds the item/account down — a revert
+  // never resurrects content that a separate, still-standing removal suppresses.
   if (CONTENT_ACTIONS.has(original.action as ConsoleAction) && original.targetType === 'content') {
-    await services.content.applyContentState(
-      original.targetId,
-      null,
-      'visible',
-      original.caseId,
-      actor.userId,
+    const stillSuppressed = (
+      await services.actions.listActiveByTarget('content', original.targetId)
+    ).some(
+      (a) => a.actionId !== original.actionId && CONTENT_ACTIONS.has(a.action as ConsoleAction),
     );
+    if (!stillSuppressed) {
+      await services.content.applyContentState(
+        original.targetId,
+        null,
+        'visible',
+        original.caseId,
+        actor.userId,
+      );
+    }
   }
   if (ACCOUNT_ACTIONS.has(original.action as ConsoleAction) && original.subjectUserId) {
-    await services.content.applyAccountState(original.subjectUserId, 'active', null);
+    const stillRestricted = (
+      await services.actions.listActiveByTarget(original.targetType, original.targetId)
+    ).some(
+      (a) =>
+        a.actionId !== original.actionId &&
+        a.subjectUserId === original.subjectUserId &&
+        ACCOUNT_ACTIONS.has(a.action as ConsoleAction),
+    );
+    if (!stillRestricted) {
+      await services.content.applyAccountState(original.subjectUserId, 'active', null);
+    }
   }
-
-  await services.actions.update(original.actionId, { reverted: true });
   const revert = await services.actions.insert({
     actorUserId: actor.userId,
     actorRole: actor.stewardRoles[0] ?? null,
