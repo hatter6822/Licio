@@ -1289,12 +1289,18 @@ WS-J is complete when ALL of the following conditions hold:
 
 Conditions 1–8 are implemented end-to-end (backend + client), with the production
 wiring shipped: the gated Drizzle adapters for all ten stores (append-only audit
-trigger; TRUNCATE-only reset), the real WS-D/E/F/G/H ports (content-removal →
-ranking seam, user-history stats, `moderation.case.created` emission, the WS-H
-invariant decision-support reads, the side-by-side snapshot), block/mute +
-contribution-safety enforcement on the forum and ranking surfaces, MFCI-2
-enforcement-delay + the ROLE_INTEGRITY incident queue, new-case auto-assignment,
-reversal integrity, and a WS-J demo seed. Tracked residuals (the BFF E2E for the
+trigger whose only exception is the right-to-erasure NULLing of its
+user-reference columns, so a WS-D account hard-purge of a logged user succeeds
+while the record's substantive content stays immutable), the real WS-D/E/F/G/H
+ports (content-removal → ranking seam, user-history stats,
+`moderation.case.created` emission, the WS-H invariant decision-support reads,
+the side-by-side snapshot), block/mute + contribution-safety enforcement on the
+forum and ranking surfaces, MFCI-2 enforcement-delay + the ROLE_INTEGRITY
+incident queue, new-case auto-assignment, reversal integrity (including a
+successful appeal that actually lifts a ban — the `reversible` flag governs only
+the steward self-revert endpoint, not appeal authority — and a `modify` that
+reflects the new action's full content/account effect), and a WS-J demo seed.
+Tracked residuals (the BFF E2E for the
 safety flows; mounting the report/block affordances on every contribution row +
 profile; and the SPEC enhancements beyond conditions 1–8 — two-person co-approval,
 escalation auto-routing, room-steward-layer-first routing, and the on-call paging

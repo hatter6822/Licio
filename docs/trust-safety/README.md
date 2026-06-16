@@ -29,7 +29,10 @@ wins.
                             mutes, appeals, notices, reviewer status, coordinated
                             incidents; + the steward_roles user column
   drizzle/0023_*.sql        migration; moderation_audit carries a DB-level
-                            append-only (BEFORE UPDATE/DELETE) trigger
+                            append-only (BEFORE UPDATE/DELETE) trigger whose ONLY
+                            exception is the right-to-erasure NULLing of its
+                            user-reference columns (the WS-D account-purge
+                            ON DELETE SET NULL cascade)
 
 apps/api/src/moderation/
   stores.ts        store interfaces + in-memory adapters (Postgres drop-in seam)
@@ -132,7 +135,12 @@ platform `admin` role implicitly holds all five doctrine roles.
   report-resolving; reversible actions revert with reversal integrity (a revert
   restores visibility ONLY when no other active removal still holds the item).
   An appeal overturn/modify reverses the original under ROLE_APPEALS authority
-  (bypassing the steward-capability gate, which the original action required).
+  (bypassing the steward-capability gate, which the original action required) —
+  the lift is NOT gated on the action's `reversible` flag (that flag governs only
+  the steward self-revert endpoint), so an overturned/modified **ban is actually
+  lifted**, and a `modify` reflects the new, less-severe action's full effect to
+  distribution (content hide/remove AND account restrict/suspend), never leaving
+  the target silently fully restored.
 - **Integrity incidents (WS-J.2.6e / MFCI-2).** A coordinated-report incident
   HOLDS the case's volume-driven enforcement (`applyAction` returns
   `enforcement_delayed` for non-ROLE_INTEGRITY actors).  The ROLE_INTEGRITY
@@ -142,7 +150,11 @@ platform `admin` role implicitly holds all five doctrine roles.
   dismisses the case (the target is protected).  Every resolution is audited.
 - **Audit (WS-J.2.5).** Append-only (app path + DB trigger); the viewer is
   role-gated and meta-audited; the transparency export applies small-cell
-  suppression and never exposes reporter identities.
+  suppression and never exposes reporter identities.  The DB trigger blocks all
+  row UPDATE/DELETE EXCEPT the right-to-erasure NULLing of the user-reference
+  columns — so a WS-D account hard-purge (SPEC §19.2) of a user who appears in
+  the log succeeds (the substantive record survives with severed identity links)
+  rather than being rejected by the trigger.
 
 ## WS-J.2.6 Automated pre-checks (the detection math)
 
@@ -173,11 +185,15 @@ All in `prechecks.ts`, as pure, total, bounded, unit-tested functions:
 | `packages/shared/.../moderation-metadata.test.ts` | severity/SLA/appealability/emergency helpers |
 | `apps/api/.../moderation-doctrine-consistency.test.ts` | the code constants EQUAL the ratified policy docs (no drift) |
 | `apps/api/.../moderation-prechecks.test.ts` | the detection math: noisy-OR monotonicity, bounds, the MFCI-1 base-rate guarantee |
-| `apps/api/.../moderation-services.test.ts` | submission/coordination, palette+revert, appeal independence, relations, audit, notices, review, authz, config, MFCI-2 enforcement-delay + incident resolution, reversal integrity |
-| `apps/api/.../moderation-routes.test.ts` | the HTTP surface end-to-end (report→action→notice→appeal→overturn; role separation; integrity-queue gating; audit/export; config) |
+| `apps/api/.../moderation-services.test.ts` | submission/coordination, palette+revert, appeal independence, relations, audit, notices, review, authz, config, MFCI-2 enforcement-delay + incident resolution, reversal integrity, **and the appeal ban-lift / `modify` state-reflection** (an overturned/modified ban is actually lifted) |
+| `apps/api/.../moderation-stores.test.ts` | every in-memory adapter branch: filter dimensions, keyset/offset pagination boundaries, idempotency, bilateral/expiry rules, owner/miss guards |
+| `apps/api/.../moderation-review.test.ts` | queue filters + pagination, SLA-state thresholds, the side-by-side snapshot + thread context, and the appeal queue/review panels |
+| `apps/api/.../moderation-units.test.ts` | the lease-guarded tick (+ per-task error sink), assignment load-balancing + appeal independence, jurisdiction-aware support contact, statement-of-reasons phrasing |
+| `apps/api/.../moderation-routes.test.ts` | the HTTP surface end-to-end (report→action→notice→appeal→overturn; role separation; integrity-queue gating; audit/export; config) + the error/edge branches (mute/block/notice 404s, eligibility/duplicate/non-appealable, rate-limit 429, bulk, assign, revert, reviewer-status, audit pagination) |
 | `apps/api/.../moderation-production-ports.test.ts` | the real ports: content state → ranking seam, case-event persist-before-publish, the invariant decision-support mapping, side-by-side snapshot reconstruction, user-history stats |
-| `apps/api/.../moderation-integration.test.ts` | the gated Postgres adapters over the real 0023 migration chain (keyset queue, idempotent block/mute, numeric round-trip, append-only TRUNCATE-vs-DELETE) |
-| `apps/web/.../safety.test.tsx`, `console.test.tsx` | the two-tap report flow, support contact, and console (with axe) |
+| `apps/api/.../moderation-integration.test.ts` | the gated Postgres adapters over the real 0023 migration chain (keyset queue, idempotent block/mute, numeric round-trip, append-only) + **the right-to-erasure path** (purging a user severs the audit user-links but preserves the record) |
+| `apps/web/.../safety.test.tsx`, `console.test.tsx`, `ModerationConsole.panels.test.tsx` | the two-tap report flow, support contact, and the console (queue→review→palette, appeals, integrity incidents, audit; empty/forbidden states; with axe) |
+| `apps/web/.../lib/safety-api.test.ts` | the typed client assembles every user-facing + console request (with and without each optional argument) |
 
 ## Production wiring (shipped)
 
@@ -187,7 +203,11 @@ boot now swaps in the durable + real wiring:
 - **Durability.** The gated Drizzle adapters (`drizzle-moderation-stores.ts`)
   back all ten stores when `DATABASE_URL` is set; `moderation_audit` stays
   append-only (the BEFORE UPDATE/DELETE trigger; the test-only `clear()` uses
-  TRUNCATE).  The lease-guarded scheduler runs the sweeps.
+  TRUNCATE; the trigger permits ONLY the right-to-erasure NULLing so a WS-D
+  account purge of a logged user succeeds).  The lease-guarded scheduler runs the
+  sweeps.  (`drizzle-moderation-stores.ts` is exercised by the gated integration
+  suite, not unit tests — the same coverage convention as every other
+  workstream's Drizzle adapter.)
 - **Real ports.** A content removal writes the WS-E item-safety state (the
   ranking-exclusion seam) + the WS-G contribution state; account actions write
   the WS-D state; user resolution reads the WS-D directory + the WS-G history
