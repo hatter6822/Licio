@@ -5,7 +5,7 @@
 // every one shows here with its reason and, where appealable, an "Appeal"
 // affordance that opens the appeal form (WS-J.1.3b).
 import type { ModerationNoticeView } from '@licio/shared';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useT } from '../../i18n/I18nProvider.js';
 import { queryKeys } from '../../lib/query-keys.js';
@@ -18,10 +18,15 @@ import { useToast } from '../ui/Toast/index.js';
 export function NoticeInbox(): React.ReactElement {
   const t = useT();
   const queryClient = useQueryClient();
-  const { data, isLoading } = useQuery({
+  // Paginated: the server caps each page (30) and returns next_cursor, so older
+  // notices (and their appeal affordances) must be reachable via "Load more".
+  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
     queryKey: queryKeys.moderationNotices(),
-    queryFn: () => fetchModerationNotices(),
+    queryFn: ({ pageParam }) => fetchModerationNotices(pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
   });
+  const notices = data?.pages.flatMap((p) => p.notices) ?? [];
   const [appealFor, setAppealFor] = useState<ModerationNoticeView | null>(null);
 
   const markRead = useMutation({
@@ -36,11 +41,11 @@ export function NoticeInbox(): React.ReactElement {
         {t('notices.title', 'Notices')}
       </h1>
       {isLoading ? <p className="text-ink-muted">{t('common.loading', 'Loading…')}</p> : null}
-      {data && data.notices.length === 0 ? (
+      {data && notices.length === 0 ? (
         <p className="text-ink-muted">{t('notices.empty', 'You have no moderation notices.')}</p>
       ) : null}
       <ul className="flex flex-col gap-3">
-        {data?.notices.map((notice) => (
+        {notices.map((notice) => (
           <li
             key={notice.notice_id}
             className="rounded-lg border border-line bg-canvas p-4"
@@ -81,6 +86,16 @@ export function NoticeInbox(): React.ReactElement {
           </li>
         ))}
       </ul>
+      {hasNextPage ? (
+        <Button
+          variant="ghost"
+          loading={isFetchingNextPage}
+          onClick={() => void fetchNextPage()}
+          className="self-center"
+        >
+          {t('notices.loadMore', 'Load older notices')}
+        </Button>
+      ) : null}
       {appealFor ? <AppealDialog notice={appealFor} onClose={() => setAppealFor(null)} /> : null}
     </section>
   );

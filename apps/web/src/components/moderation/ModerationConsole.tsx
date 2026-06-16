@@ -235,6 +235,42 @@ function CaseReviewDialog({
             </ul>
           </section>
 
+          {/* The reported content + surrounding thread (WS-J.2.2a) — shown so a
+              reviewer never decides blind, even when the item wasn't edited
+              after the report (side_by_side null). Rendered as escaped text. */}
+          {data.thread_context.length > 0 || data.snapshot_body ? (
+            <section aria-label={t('console.reportedContent', 'Reported content')}>
+              <h3 className="text-xs font-semibold uppercase text-ink-muted">
+                {t('console.reportedContent', 'Reported content')}
+              </h3>
+              {data.thread_context.length > 0 ? (
+                <ul className="mt-1 flex flex-col gap-1">
+                  {data.thread_context.map((item) => {
+                    const isReported = item.contribution_id === data.reported_contribution_id;
+                    return (
+                      <li
+                        key={item.contribution_id}
+                        className={`rounded p-2 text-sm ${isReported ? 'border-l-2 border-warning bg-surface pl-2' : 'bg-surface'}`}
+                      >
+                        <span className="text-xs text-ink-muted">
+                          {item.author_handle ?? t('console.unknown', 'unknown')}
+                          {isReported ? ` · ${t('console.reportedItem', 'reported')}` : ''}
+                        </span>
+                        <p className="whitespace-pre-wrap text-ink">
+                          {item.body || t('console.noBody', '—')}
+                        </p>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : data.snapshot_body ? (
+                <pre className="mt-1 overflow-auto rounded bg-surface p-2 text-xs">
+                  {data.snapshot_body}
+                </pre>
+              ) : null}
+            </section>
+          ) : null}
+
           <section aria-label={t('console.history', 'User history')}>
             <h3 className="text-xs font-semibold uppercase text-ink-muted">
               {t('console.history', 'User history')}

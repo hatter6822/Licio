@@ -96,8 +96,28 @@ const caseReview: CaseReviewResponse = {
       reporter_handle: 'reporter_x',
     },
   ],
-  thread_context: [],
-  reported_contribution_id: null,
+  thread_context: [
+    {
+      contribution_id: '00000000-0000-4000-8000-0000000000d1',
+      thread_id: '00000000-0000-4000-8000-0000000000e1',
+      type: 'answer',
+      body: 'the reported contribution text',
+      citations: [],
+      metadata: {},
+      target_claim_id: null,
+      parent_contribution_id: null,
+      author_handle: 'author_y',
+      author_display_name: 'Author Y',
+      is_author: false,
+      depth: 0,
+      child_count: 0,
+      moderation_state: 'published',
+      edited: false,
+      created_at: NOW,
+      updated_at: NOW,
+    },
+  ],
+  reported_contribution_id: '00000000-0000-4000-8000-0000000000d1',
   snapshot_body: null,
   user_history: {
     user_id: '00000000-0000-4000-8000-0000000000bb',
@@ -252,6 +272,9 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     expect(screen.getByText(/do not determine outcomes/)).toBeInTheDocument();
     expect(screen.getAllByText(/unavailable/).length).toBeGreaterThan(0); // scoi/phi/hodge
     expect(screen.getByText(/the original offending text/)).toBeInTheDocument();
+    // The reported content + thread context are shown so the reviewer is not
+    // deciding blind (WS-J.2.2a).
+    expect(screen.getByText(/the reported contribution text/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Apply action/ }));
     await waitFor(() => expect(api.applyModerationAction).toHaveBeenCalledTimes(1));
   });

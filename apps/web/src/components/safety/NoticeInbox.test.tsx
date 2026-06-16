@@ -79,4 +79,29 @@ describe('NoticeInbox appeal affordance', () => {
       expect(screen.getByRole('button', { name: 'Submit appeal' })).toBeInTheDocument(),
     );
   });
+
+  it('loads older notices via the cursor', async () => {
+    vi.mocked(api.fetchModerationNotices).mockImplementation(async (cursor?: string) =>
+      cursor
+        ? {
+            notices: [
+              notice({ notice_id: '00000000-0000-4000-8000-0000000000n2', title: 'Older notice' }),
+            ],
+            next_cursor: null,
+            unread_count: 2,
+          }
+        : {
+            notices: [
+              notice({ notice_id: '00000000-0000-4000-8000-0000000000n1', title: 'Newer notice' }),
+            ],
+            next_cursor: 'cursor-1',
+            unread_count: 2,
+          },
+    );
+    render(<NoticeInbox />, { wrapper: Providers });
+    expect(await screen.findByText('Newer notice')).toBeInTheDocument();
+    expect(screen.queryByText('Older notice')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /load older/i }));
+    expect(await screen.findByText('Older notice')).toBeInTheDocument();
+  });
 });
