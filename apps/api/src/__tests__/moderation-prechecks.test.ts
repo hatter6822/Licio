@@ -131,10 +131,17 @@ describe('classifyMalware', () => {
     expect(v.disposition).toBe('clear');
   });
 
-  it('LocalBlocklistReputationProvider consults the configured set', async () => {
+  it('LocalBlocklistReputationProvider consults the configured set, including subdomains', async () => {
     const p = new LocalBlocklistReputationProvider(() => new Set(['drainer.test']));
     expect(await p.check('drainer.test')).toBe('malicious');
+    // A bare blocklist entry covers its subdomains (shared link-safety semantics)
+    // — an exact-host lookup would let this through.
+    expect(await p.check('app.drainer.test')).toBe('malicious');
+    expect(await p.check('a.b.drainer.test')).toBe('malicious');
     expect(await p.check('safe.test')).toBe('clear');
+    // A look-alike that merely ends with the string but not on a label boundary
+    // is NOT a subdomain (no false positive).
+    expect(await p.check('notdrainer.test')).toBe('clear');
     expect(urlHostname('https://Foo.test/a')).toBe('foo.test');
     expect(urlHostname('garbage')).toBeNull();
   });
@@ -147,15 +154,31 @@ describe('duplicate-flood', () => {
     const t0 = 1_000_000;
     tracker.record({ userId: 'u1', signature: sig, roomId: 'r1', atMs: t0 });
     tracker.record({ userId: 'u1', signature: sig, roomId: 'r2', atMs: t0 + 1000 });
-    const stats = tracker.floodStats('u1', sig, t0 + 2000, 900_000);
-    // 2 prior + this one = 3 across 3 rooms → flagged at default thresholds.
-    const verdict = classifyDuplicateFlood(stats, cfg());
+    // 2 prior + this one (in a third room r3) = 3 across 3 rooms → flagged.
+    const verdict = classifyDuplicateFlood(
+      tracker.floodStats('u1', sig, t0 + 2000, 900_000, 'r3'),
+      cfg(),
+    );
     expect(verdict.flagged).toBe(true);
     expect(verdict.similarCount).toBe(3);
+    expect(verdict.distinctRooms).toBe(3);
+
+    // The SAME content reposted three times into the SAME room is 3 posts but
+    // only ONE distinct room → NOT cross-room flooding (the bug was counting the
+    // current room as always-new, which would inflate this to 2 and flag it).
+    const same = contentSignature('same room spam');
+    tracker.record({ userId: 'u2', signature: same, roomId: 'rA', atMs: t0 });
+    tracker.record({ userId: 'u2', signature: same, roomId: 'rA', atMs: t0 + 1000 });
+    const sameRoom = classifyDuplicateFlood(
+      tracker.floodStats('u2', same, t0 + 2000, 900_000, 'rA'),
+      cfg(),
+    );
+    expect(sameRoom.distinctRooms).toBe(1);
+    expect(sameRoom.flagged).toBe(false);
 
     // A single cross-post (1 prior in 1 room) is NOT a flood.
     const low = classifyDuplicateFlood(
-      tracker.floodStats('u1', contentSignature('unique'), t0, 900_000),
+      tracker.floodStats('u1', contentSignature('unique'), t0, 900_000, 'rX'),
       cfg(),
     );
     expect(low.flagged).toBe(false);

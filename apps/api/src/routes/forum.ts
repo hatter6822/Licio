@@ -72,6 +72,7 @@ import {
   threadOverview,
   toContributionPublic,
   toSummaryPublic,
+  viewerHideSet,
   visibleRows,
 } from '../forum/threads.js';
 import { applyConversationTransition, applyThreadSafetyTransition } from '../forum/transitions.js';
@@ -266,7 +267,11 @@ export function createForumRoutes() {
           if (!thread || !(await threadReadableToUser(bundle, thread, userId))) {
             return c.json(notFound, 404);
           }
-          const renderable = visibleRows([record], userId);
+          // Apply the viewer's block/mute hide set (WS-J.1.2), like the branch +
+          // subtree reads — otherwise this anchor leaks a blocked/muted author's
+          // contribution and enables navigation to it.
+          const hide = await viewerHideSet(bundle, userId);
+          const renderable = visibleRows([record], userId, hide);
           if (renderable.length === 0 || renderable[0]?.tombstone) return c.json(notFound, 404);
           return c.json(contributionAnchorSchema.parse(contributionAnchor(record)));
         },

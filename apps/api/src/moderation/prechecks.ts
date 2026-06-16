@@ -15,6 +15,7 @@
 // real-time layer).  The classifiers are seams WS-K replaces with governed
 // models — they FLAG; they never remove (except the two auto-block paths).
 import { createHash } from 'node:crypto';
+import { hostMatchesDomain } from '@licio/shared';
 import type { ModerationRuntimeConfig } from './config.js';
 
 /** Clamp to the unit interval. */
@@ -132,7 +133,14 @@ export class LocalBlocklistReputationProvider implements UrlReputationProvider {
     this.#domains = domains;
   }
   async check(domain: string): Promise<UrlReputation> {
-    return this.#domains().has(domain.toLowerCase()) ? 'malicious' : 'clear';
+    // Suffix-boundary match (the shared link-safety semantics): a bare blocklist
+    // entry covers its subdomains, so `app.drainer.example` is caught by a
+    // `drainer.example` entry — an exact-host lookup would let it through.
+    const host = domain.toLowerCase();
+    for (const blocked of this.#domains()) {
+      if (hostMatchesDomain(host, blocked)) return 'malicious';
+    }
+    return 'clear';
   }
 }
 
@@ -219,15 +227,18 @@ export class RecentSubmissionTracker {
     signature: string,
     nowMs: number,
     windowMs: number,
+    currentRoomId?: string,
   ): { similarCount: number; distinctRooms: number } {
     const cutoff = nowMs - windowMs;
     const matches = (this.#byUser.get(userId) ?? []).filter(
       (fp) => fp.atMs >= cutoff && fp.signature === signature,
     );
-    return {
-      similarCount: matches.length,
-      distinctRooms: new Set(matches.map((m) => m.roomId)).size,
-    };
+    const rooms = new Set(matches.map((m) => m.roomId));
+    // Fold in the current submission's room ONLY when it is not already among
+    // the prior matches — so repeated same-room duplicates are not miscounted as
+    // cross-room flooding (the distinctRooms total is then inclusive + correct).
+    if (currentRoomId !== undefined) rooms.add(currentRoomId);
+    return { similarCount: matches.length, distinctRooms: rooms.size };
   }
 
   clear(): void {
@@ -242,15 +253,18 @@ export interface FloodVerdict {
 }
 
 /** Flag (never remove) when an account near-duplicates across enough rooms in
- *  the window.  The new submission is counted, so the threshold is inclusive. */
+ *  the window.  `stats.similarCount` is the PRIOR match count (the current post
+ *  is always a new post, so it is +1'd here); `stats.distinctRooms` must ALREADY
+ *  include the current submission's room — call `floodStats(…, currentRoomId)` —
+ *  so a repeated same-room duplicate is not miscounted as cross-room flooding. */
 export function classifyDuplicateFlood(
   stats: { similarCount: number; distinctRooms: number },
   config: ModerationRuntimeConfig,
 ): FloodVerdict {
   const flagged =
     stats.similarCount + 1 >= config.duplicateFloodCount &&
-    stats.distinctRooms + 1 >= config.duplicateFloodMinRooms;
-  return { flagged, similarCount: stats.similarCount + 1, distinctRooms: stats.distinctRooms + 1 };
+    stats.distinctRooms >= config.duplicateFloodMinRooms;
+  return { flagged, similarCount: stats.similarCount + 1, distinctRooms: stats.distinctRooms };
 }
 
 // ---------------------------------------------------------------------------

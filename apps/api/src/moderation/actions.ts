@@ -376,14 +376,13 @@ export async function performRevert(
   actor: StewardActor,
   original: ModerationActionRecord,
 ): Promise<RevertActionResponse> {
-  // Mark the original reverted FIRST, so the reversal-integrity scan below
-  // (which reads the ACTIVE, non-reverted actions on the target) no longer
-  // counts this one.
-  await services.actions.update(original.actionId, { reverted: true });
-
   // Reversal integrity (WS-J.2.3b): restore prior state ONLY when no OTHER
   // active enforcement action still holds the item/account down — a revert
   // never resurrects content that a separate, still-standing removal suppresses.
+  // The state restore runs BEFORE marking the original reverted, so a transient
+  // store failure leaves `reverted=false` and a retry re-attempts the restore
+  // (rather than taking the idempotent path with the state still sanctioned).
+  // Both scans EXCLUDE this action explicitly (by id) since it is not yet marked.
   if (CONTENT_ACTIONS.has(original.action as ConsoleAction) && original.targetType === 'content') {
     const stillSuppressed = (
       await services.actions.listActiveByTarget('content', original.targetId)
@@ -404,15 +403,20 @@ export async function performRevert(
     // Scan the SUBJECT's other active account sanctions BY SUBJECT, not by the
     // action's target: an account sanction taken from a CONTENT case has the
     // content as its target, so a target scan would miss the user's sanctions
-    // from other reports and prematurely lift them.  (The original was already
-    // marked reverted above, so it is excluded by `!reverted`.)
+    // from other reports and prematurely lift them.  This action is excluded by
+    // id (it is not yet marked reverted).
     const stillRestricted = (await services.actions.listBySubject(original.subjectUserId)).some(
-      (a) => !a.reverted && ACCOUNT_ACTIONS.has(a.action as ConsoleAction),
+      (a) =>
+        a.actionId !== original.actionId &&
+        !a.reverted &&
+        ACCOUNT_ACTIONS.has(a.action as ConsoleAction),
     );
     if (!stillRestricted) {
       await services.content.applyAccountState(original.subjectUserId, 'active', null);
     }
   }
+  // Restore succeeded — NOW mark the original reverted (idempotency point).
+  await services.actions.update(original.actionId, { reverted: true });
   const revert = await services.actions.insert({
     actorUserId: actor.userId,
     actorRole: actor.stewardRoles[0] ?? null,

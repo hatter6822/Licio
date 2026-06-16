@@ -99,6 +99,9 @@ export function createWsJContributionSafety(
         signature,
         nowMs,
         config.duplicateFloodWindowSeconds * 1000,
+        // The current submission's room (= its thread) — folded into the
+        // distinct-room count so a same-room repeat isn't seen as cross-room.
+        request.thread_id,
       );
       const spam = classifySpam(
         {
