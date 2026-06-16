@@ -230,6 +230,23 @@ export async function decideAppeal(
         message: 'A modified action must be strictly less severe than the original',
       };
     }
+    // The modified action must apply to the ORIGINAL target type: a content
+    // action (hide/remove) only on content, an account sanction only on an
+    // account.  Otherwise `applyModifiedAction` would revert the original yet
+    // write no replacement state (e.g. an account sanction "modified" to `hide`
+    // on an account target) — a successful modification with NO enforcement.
+    const contentOnly = CONTENT_ACTIONS.has(modifiedAction);
+    const accountOnly = ACCOUNT_ACTIONS.has(modifiedAction);
+    if (
+      (contentOnly && original.targetType !== 'content') ||
+      (accountOnly && original.targetType !== 'account')
+    ) {
+      return {
+        ok: false,
+        code: 'invalid_modification',
+        message: 'The modified action does not apply to the original target type',
+      };
+    }
   }
 
   const status =

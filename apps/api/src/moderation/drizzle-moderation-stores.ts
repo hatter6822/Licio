@@ -1076,6 +1076,11 @@ export class DrizzleModerationAppealStore implements ModerationAppealStore {
     if (filter.assignedReviewerId !== undefined && filter.assignedReviewerId !== null) {
       c.push(eq(moderationAppeals.assignedReviewerId, filter.assignedReviewerId));
     }
+    if (filter.afterSlaDueAt !== undefined && filter.afterAppealId !== undefined) {
+      c.push(
+        sql`(${moderationAppeals.slaDueAt}, ${moderationAppeals.appealId}) > (${new Date(filter.afterSlaDueAt).toISOString()}::timestamptz, ${filter.afterAppealId}::uuid)`,
+      );
+    }
     const rows = await this.#db
       .select()
       .from(moderationAppeals)

@@ -40,7 +40,12 @@ import {
   muteExpiry,
 } from '../moderation/relations.js';
 import { detectCoordination, submitReport } from '../moderation/reports.js';
-import { buildCaseReview, buildReportQueue, buildUserHistory } from '../moderation/review.js';
+import {
+  buildAppealQueue,
+  buildCaseReview,
+  buildReportQueue,
+  buildUserHistory,
+} from '../moderation/review.js';
 import {
   createInMemoryModerationServices,
   type ModerationServices,
@@ -770,6 +775,63 @@ describe('appeals (independence enforced)', () => {
     });
     expect(dup.ok).toBe(false);
     expect(!dup.ok && dup.code).toBe('appeal_already_exists');
+  });
+
+  it('#1 rejects a modify whose action does not apply to the original target type', async () => {
+    const out = await applyAction(services, safetyActor(), {
+      target_type: 'account',
+      target_id: AUTHOR,
+      action: 'suspend',
+      reason_code: 'MOD_HARASS_001',
+    });
+    if (!out.ok) throw new Error('suspend failed');
+    await submitAppeal(services, AUTHOR, {
+      action_id: out.response.action_id,
+      user_statement: 's',
+    });
+    const appeal = await services.appeals.getByActionId(out.response.action_id);
+    if (!appeal) throw new Error('appeal not created');
+    // `hide` is less severe than `suspend` (passes de-escalation) but is a
+    // content-only action while the original target is an account → it would
+    // leave no replacement enforcement, so it must be rejected.
+    const decision = await decideAppeal(
+      services,
+      appealsActor(),
+      appeal.appealId,
+      'modify',
+      'MOD_HARASS_001',
+      'reduce',
+      'hide',
+    );
+    expect(decision.ok).toBe(false);
+    expect(!decision.ok && decision.code).toBe('invalid_modification');
+  });
+
+  it('#8 paginates the appeal queue via the keyset cursor', async () => {
+    for (let i = 0; i < 3; i += 1) {
+      await services.appeals.insert({
+        actionId: `00000000-0000-4000-8000-0000000008a${i}`,
+        appellantUserId: AUTHOR,
+        statement: 's',
+        newEvidence: [],
+        status: 'pending',
+        assignedReviewerId: null,
+        isBanAppeal: false,
+        slaDueAt: new Date(services.now() + (i + 1) * 3_600_000).toISOString(),
+        decidedAt: null,
+        decidedBy: null,
+        decisionReasonCode: null,
+        decisionExplanation: null,
+      });
+    }
+    const page1 = await buildAppealQueue(services, ['pending'], 2);
+    expect(page1.items).toHaveLength(2);
+    expect(page1.next_cursor).not.toBeNull();
+    const page2 = await buildAppealQueue(services, ['pending'], 2, page1.next_cursor ?? undefined);
+    expect(page2.items).toHaveLength(1);
+    expect(page2.next_cursor).toBeNull();
+    const ids1 = new Set(page1.items.map((a) => a.appeal_id));
+    expect(page2.items.some((a) => ids1.has(a.appeal_id))).toBe(false);
   });
 
   it('forbids the original decision-maker from deciding the appeal', async () => {

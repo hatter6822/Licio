@@ -121,6 +121,7 @@ import {
   createAutoModerationSink,
   createWsJContributionSafety,
 } from './moderation/forum-integration.js';
+import { noticeToView } from './moderation/notices.js';
 import {
   createProductionContentPort,
   createProductionEventPort,
@@ -636,6 +637,22 @@ if (db) {
   moderationServices.incidents = stores.incidents;
   moderationServices.configStore = new DrizzlePwattConfigStore(db);
 }
+// WS-J ↔ WS-D DSAR: the user's moderation notices (statement-of-reasons +
+// appeal outcomes) are durable user data, so they belong in the data export
+// (GDPR Art. 15).  Reporter identity never appears (noticeToView carries the
+// reason code only).  Paged so the export is COMPLETE.
+identityServices.exportModerationNotices = async (userId) => {
+  const out: unknown[] = [];
+  let after: string | null = null;
+  for (;;) {
+    const page = await moderationServices.notices.listByUser(userId, after, 200);
+    for (const n of page) out.push(noticeToView(n));
+    if (page.length < 200) break;
+    after = page[page.length - 1]?.createdAt ?? null;
+    if (after === null) break;
+  }
+  return out;
+};
 // WS-J #18: auto-assignment only chooses reviewers who can open the queue —
 // resolve each reviewer's queues from their WS-D steward roles.
 moderationServices.reviewerQueues = async (id) => {

@@ -408,6 +408,7 @@ export function createModerationConsoleRoutes() {
           z.object({
             status: z.string().optional(),
             limit: z.coerce.number().int().min(1).max(200).optional(),
+            cursor: z.string().min(1).max(512).optional(),
           }),
         ),
         async (c) => {
@@ -416,7 +417,12 @@ export function createModerationConsoleRoutes() {
           if (queueDenial) return c.json(deny(queueDenial.code, queueDenial.message), 403);
           const q = c.req.valid('query');
           const status = q.status === 'pending' ? (['pending'] as const) : undefined;
-          const result = await buildAppealQueue(getModerationServices(), status, q.limit ?? 50);
+          const result = await buildAppealQueue(
+            getModerationServices(),
+            status,
+            q.limit ?? 50,
+            q.cursor,
+          );
           return c.json(appealQueueResponseSchema.parse(result));
         },
       )

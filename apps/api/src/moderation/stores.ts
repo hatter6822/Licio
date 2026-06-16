@@ -342,6 +342,9 @@ export interface AccountMuteStore {
 export interface AppealQueueFilter {
   status?: readonly AppealStatus[];
   assignedReviewerId?: string | null;
+  /** Keyset cursor on the (slaDueAt, appealId) sort order (exclusive). */
+  afterSlaDueAt?: string;
+  afterAppealId?: string;
   limit: number;
 }
 
@@ -920,21 +923,31 @@ export class InMemoryModerationAppealStore implements ModerationAppealStore {
     return { ...updated };
   }
   async list(filter: AppealQueueFilter): Promise<ModerationAppealRecord[]> {
-    return [...this.#rows.values()]
-      .filter((r) => {
-        if (filter.status && !filter.status.includes(r.status)) return false;
-        if (
-          filter.assignedReviewerId !== undefined &&
-          filter.assignedReviewerId !== null &&
-          r.assignedReviewerId !== filter.assignedReviewerId
-        ) {
-          return false;
-        }
-        return true;
-      })
-      .sort((a, b) => a.slaDueAt.localeCompare(b.slaDueAt))
-      .slice(0, filter.limit)
-      .map((r) => ({ ...r }));
+    return (
+      [...this.#rows.values()]
+        .filter((r) => {
+          if (filter.status && !filter.status.includes(r.status)) return false;
+          if (
+            filter.assignedReviewerId !== undefined &&
+            filter.assignedReviewerId !== null &&
+            r.assignedReviewerId !== filter.assignedReviewerId
+          ) {
+            return false;
+          }
+          return true;
+        })
+        // Stable keyset order: SLA breach soonest first, then appeal id.
+        .sort(
+          (a, b) => a.slaDueAt.localeCompare(b.slaDueAt) || a.appealId.localeCompare(b.appealId),
+        )
+        .filter((r) => {
+          if (filter.afterSlaDueAt === undefined || filter.afterAppealId === undefined) return true;
+          if (r.slaDueAt !== filter.afterSlaDueAt) return r.slaDueAt > filter.afterSlaDueAt;
+          return r.appealId > filter.afterAppealId;
+        })
+        .slice(0, filter.limit)
+        .map((r) => ({ ...r }))
+    );
   }
   async countOpenByReviewer(userId: string): Promise<number> {
     return [...this.#rows.values()].filter(

@@ -311,9 +311,12 @@ export async function buildAppealQueue(
   services: ModerationServices,
   status: readonly AppealStatus[] | undefined,
   limit: number,
+  cursor?: string,
 ): Promise<AppealQueueResponse> {
+  const after = decodeCursor(cursor);
   const rows = await services.appeals.list({
     ...(status ? { status } : {}),
+    ...(after ? { afterSlaDueAt: after.sla, afterAppealId: after.id } : {}),
     limit: limit + 1,
   });
   const page = rows.slice(0, limit);
@@ -334,9 +337,16 @@ export async function buildAppealQueue(
       };
     }),
   );
+  const last = page.at(-1);
   return {
     items,
-    next_cursor: rows.length > limit ? (page.at(-1)?.createdAt ?? null) : null,
+    // Keyset cursor on (slaDueAt, appealId) — matches the store's sort, so it is
+    // stable under inserts (unlike the createdAt value previously emitted, which
+    // did not align with the SLA ordering).
+    next_cursor:
+      rows.length > limit && last
+        ? Buffer.from(`${last.slaDueAt}|${last.appealId}`, 'utf-8').toString('base64url')
+        : null,
     filtered_total: items.length,
   };
 }
