@@ -1363,7 +1363,7 @@ file counts at current state:
 
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
-| apps/web | ~131 unit + 7 E2E (6 frontend-only + the BFF-in-the-loop spec; incl. the WS-J report flow, safety controls, and the moderation console panels) | jsdom / Playwright | `pnpm --filter web test` |
+| apps/web | ~132 unit + 7 E2E (6 frontend-only + the BFF-in-the-loop spec; incl. the WS-J report flow, the notice-inbox appeal affordance, safety controls, and the moderation console panels incl. the appeal-review-before-decide gate) | jsdom / Playwright | `pnpm --filter web test` |
 | apps/api | ~113 (incl. WS-D identity + the `expert` RBAC role + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-J trust-safety services/routes/stores/units + the gated WS-J Postgres adapters incl. the right-to-erasure path + the WS-Q E2E test-auth route + the dev-seed showcase integration test + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
 | packages/shared | ~20 (incl. WS-D–WS-H schemas, URL/lifecycle utils, the §5.6 rating-label SSOT, the UGC pipeline + XSS-vector suite) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~4 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |

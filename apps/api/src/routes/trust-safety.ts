@@ -66,7 +66,13 @@ export function createTrustSafetyRoutes() {
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const request = c.req.valid('json');
           const mod = getModerationServices();
-          // Resolve target existence (against a tombstone where applicable).
+          // Resolve target existence (against a tombstone where applicable).  For
+          // content, the resolver also yields the AUTHORITATIVE kind (story/
+          // thread/contribution); we forward it so the case/report/event record
+          // the resolved kind, never a missing or misstated client hint.
+          let resolvedContentKind: Awaited<
+            ReturnType<typeof mod.content.resolveTarget>
+          >['contentKind'] = null;
           if (request.target_type === 'account') {
             const target = await getIdentityServices().store.getUser(request.target_id);
             if (!target) return c.json(deny('target_not_found', 'Target not found'), 404);
@@ -74,13 +80,14 @@ export function createTrustSafetyRoutes() {
             const resolution = await mod.content.resolveTarget('content', request.target_id);
             if (!resolution.exists)
               return c.json(deny('target_not_found', 'Target not found'), 404);
+            resolvedContentKind = resolution.contentKind;
           } else if (request.target_type === 'room') {
             // A room report must reference a real room — otherwise a user could
             // open a moderation case against an arbitrary/nonexistent UUID.
             const room = await getForumServices().rooms.getById(request.target_id);
             if (!room) return c.json(deny('target_not_found', 'Target not found'), 404);
           }
-          const outcome = await submitReport(mod, auth.userId, request);
+          const outcome = await submitReport(mod, auth.userId, request, resolvedContentKind);
           if (!outcome.ok) {
             return c.json(
               {

@@ -492,6 +492,11 @@ describe.skipIf(!DB_URL)('WS-H Drizzle adapters (live Postgres)', () => {
     const { invariants, events, metrics } = antiPoisonContainers();
     await invariants.calibrations.clear();
     await invariants.mfciCases.clear();
+    // rebuildMfciCalibrations scans EVERY calibration-topic event in a 7-day
+    // lookback and counts distinct hour-windows, so leftover events from a prior
+    // run (or the sibling test) land in other buckets and inflate the count.
+    // Start from an empty event store so the window count is deterministic.
+    await events.eventStore.clear();
     const nowMs = Math.floor(Date.now() / 3_600_000) * 3_600_000;
     await invariants.calibrations.upsert({
       calibrationKey: 'mfci:target_concentration',
@@ -518,12 +523,16 @@ describe.skipIf(!DB_URL)('WS-H Drizzle adapters (live Postgres)', () => {
       'v-sensitive',
     );
     await invariants.calibrations.clear();
+    await events.eventStore.clear();
   });
 
   it('calibration anti-poisoning: under-case windows are EXCLUDED (live PG)', async () => {
     const { invariants, events } = antiPoisonContainers();
     await invariants.calibrations.clear();
     await invariants.mfciCases.clear();
+    // Deterministic window count: scan only this test's own events (see the
+    // sibling test — the 7-day lookback otherwise picks up prior-run rows).
+    await events.eventStore.clear();
     const nowMs = Math.floor(Date.now() / 3_600_000) * 3_600_000;
     const organic = randomUUID();
     const attacked = randomUUID();
@@ -556,5 +565,6 @@ describe.skipIf(!DB_URL)('WS-H Drizzle adapters (live Postgres)', () => {
     expect((await invariants.calibrations.get('mfci:target_concentration'))?.sampleCount).toBe(8);
     await invariants.calibrations.clear();
     await invariants.mfciCases.clear();
+    await events.eventStore.clear();
   });
 });

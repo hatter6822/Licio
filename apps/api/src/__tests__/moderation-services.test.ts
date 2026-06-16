@@ -213,6 +213,21 @@ describe('submitReport', () => {
     expect(!fourth.ok && fourth.code).toBe('rate_limited');
   });
 
+  it('#1 records the server-resolved content_kind, ignoring a wrong client hint', async () => {
+    // The client claims 'story' but the route's resolver determined 'contribution'.
+    const r = await submitReport(
+      services,
+      REPORTER,
+      report({ content_kind: 'story' }),
+      'contribution',
+    );
+    expect(r.ok).toBe(true);
+    const theCase = await services.cases.findOpenByTarget('content', TARGET);
+    expect(theCase?.contentKind).toBe('contribution');
+    const reports = await services.reports.listByCase(theCase?.caseId ?? '');
+    expect(reports[0]?.contentKind).toBe('contribution');
+  });
+
   it('detects a new-account brigade and delays enforcement (MFCI-2)', async () => {
     services = createInMemoryModerationServices({
       content: recordingContentPort(),
@@ -260,6 +275,56 @@ describe('submitReport', () => {
     const incident = await services.incidents.findOpenByTarget('content', TARGET);
     expect(incident).not.toBeNull();
     expect(alerts.some((a) => a.kind === 'coordinated_report')).toBe(true);
+  });
+
+  it('#4 opens at most one incident per target under concurrent detection', async () => {
+    services = createInMemoryModerationServices({
+      content: recordingContentPort(),
+      users: userPort({}),
+      alerts: { pageOnCall: (i) => alerts.push(i) },
+      config: {
+        coordinationMinDistinctReporters: 3,
+        coordinationMinReports: 3,
+        coordinationNewAccountDays: 7,
+      },
+    });
+    const theCase = await services.cases.insert({
+      caseId: '00000000-0000-4000-9000-0000000000c4',
+      targetType: 'content',
+      targetId: TARGET,
+      contentKind: 'contribution',
+      status: 'new',
+      severity: 'moderate',
+      routedTo: 'standard',
+      assignedTo: null,
+      reportCount: 0,
+      enforcementDelayed: false,
+      resolvedActionId: null,
+      slaDueAt: new Date(services.now() + 3_600_000).toISOString(),
+    });
+    for (let i = 0; i < 4; i += 1) {
+      await services.reports.insert({
+        caseId: theCase.caseId,
+        reporterUserId: `00000000-0000-4000-8000-00000000020${i}`,
+        targetType: 'content',
+        targetId: TARGET,
+        contentKind: 'contribution',
+        reasonCode: 'MOD_HARASS_001',
+        severity: 'moderate',
+        context: null,
+        evidenceUrls: [],
+        localOperationId: `op-c4-${i}`,
+      });
+    }
+    // Two detection passes race for the same target; the atomic open keeps it to one.
+    await Promise.all([
+      detectCoordination(services, theCase),
+      detectCoordination(services, theCase),
+    ]);
+    const open = await services.incidents.listOpen(10);
+    expect(open.filter((i) => i.targetType === 'content' && i.targetId === TARGET)).toHaveLength(1);
+    // The page + delay fire exactly once (not once per duplicate incident).
+    expect(alerts.filter((a) => a.kind === 'coordinated_report')).toHaveLength(1);
   });
 });
 
@@ -526,6 +591,51 @@ describe('action palette + revert', () => {
     expect(!rev.ok && rev.code).toBe('not_reversible');
   });
 
+  it('#2 workflow-only actions (clear/escalate) are not reversible', async () => {
+    for (const action of ['clear', 'escalate'] as const) {
+      const out = await applyAction(services, safetyActor(), {
+        target_type: 'content',
+        target_id: TARGET,
+        action,
+        reason_code: 'MOD_HARASS_001',
+      });
+      expect(out.ok).toBe(true);
+      if (!out.ok) continue;
+      expect(out.response.reversible).toBe(false);
+      const rev = await revertAction(services, safetyActor(), out.response.action_id);
+      expect(rev.ok).toBe(false);
+      expect(!rev.ok && rev.code).toBe('not_reversible');
+    }
+  });
+
+  it('#3 ignores a case_id whose target does not match the action target', async () => {
+    const otherTarget = '00000000-0000-4000-9000-0000000000a1';
+    const otherCase = await services.cases.insert({
+      caseId: '00000000-0000-4000-9000-0000000000a2',
+      targetType: 'content',
+      targetId: otherTarget,
+      contentKind: 'contribution',
+      status: 'new',
+      severity: 'moderate',
+      routedTo: 'standard',
+      assignedTo: null,
+      reportCount: 1,
+      enforcementDelayed: false,
+      resolvedActionId: null,
+      slaDueAt: new Date(services.now() + 1000).toISOString(),
+    });
+    const out = await applyAction(services, safetyActor(), {
+      target_type: 'content',
+      target_id: TARGET, // ≠ otherCase.targetId
+      action: 'hide',
+      reason_code: 'MOD_HARASS_001',
+      case_id: otherCase.caseId,
+    });
+    expect(out.ok).toBe(true);
+    // The mismatched case is untouched (NOT silently resolved off the queue).
+    expect((await services.cases.getById(otherCase.caseId))?.status).toBe('new');
+  });
+
   it('parseDurationDays handles d/h and rejects garbage', () => {
     expect(parseDurationDays('7d')).toBe(7);
     expect(parseDurationDays('48h')).toBe(2);
@@ -565,6 +675,25 @@ describe('appeals (independence enforced)', () => {
     const appeal = await services.appeals.getByActionId(actionId);
     expect(appeal?.assignedReviewerId).toBe('00000000-0000-4000-8000-0000000000e1');
     expect(appeal?.assignedReviewerId).not.toBe('00000000-0000-4000-8000-0000000000d1');
+  });
+
+  it('#6 marks the action notice pending after an appeal is filed', async () => {
+    const actionId = await applyHide();
+    const before = (await services.notices.listByUser(AUTHOR, null, 10)).find(
+      (n) => n.actionId === actionId && n.kind === 'action',
+    );
+    expect(before?.appealable).toBe(true);
+    expect(before?.appealStatus).toBeNull();
+    const sub = await submitAppeal(services, AUTHOR, {
+      action_id: actionId,
+      user_statement: 'Please reconsider.',
+    });
+    expect(sub.ok).toBe(true);
+    const after = (await services.notices.listByUser(AUTHOR, null, 10)).find(
+      (n) => n.actionId === actionId && n.kind === 'action',
+    );
+    // The inbox now suppresses the Appeal affordance (status is non-null).
+    expect(after?.appealStatus).toBe('pending');
   });
 
   it('rejects a duplicate appeal (409 semantics)', async () => {

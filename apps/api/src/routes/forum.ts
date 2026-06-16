@@ -59,7 +59,7 @@ import {
   editContribution,
   mapCardTypeToEventType,
   removeContribution,
-  threadVisibleToUser,
+  threadReadableToUser,
 } from '../forum/contributions.js';
 import { stripUploadMetadata } from '../forum/exif.js';
 import { getForumServices } from '../forum/services.js';
@@ -176,7 +176,7 @@ export function createForumRoutes() {
           const userId = await softUserId(c.req.header('cookie'), identity);
           const thread = await bundle.ingestion.stories.getThreadById(threadId);
           if (!thread) return c.json(notFound, 404);
-          if (!(await threadVisibleToUser(bundle, thread, userId))) return c.json(notFound, 404);
+          if (!(await threadReadableToUser(bundle, thread, userId))) return c.json(notFound, 404);
           const story = await bundle.ingestion.stories.getById(thread.storyId);
           if (!story) return c.json(notFound, 404);
           const overview = await threadOverview(
@@ -201,7 +201,7 @@ export function createForumRoutes() {
           const userId = await softUserId(c.req.header('cookie'), identity);
           const thread = await bundle.ingestion.stories.getThreadById(threadId);
           if (!thread) return c.json(notFound, 404);
-          if (!(await threadVisibleToUser(bundle, thread, userId))) return c.json(notFound, 404);
+          if (!(await threadReadableToUser(bundle, thread, userId))) return c.json(notFound, 404);
           const content = await branchContent(
             bundle,
             threadId,
@@ -230,7 +230,7 @@ export function createForumRoutes() {
           const userId = await softUserId(c.req.header('cookie'), identity);
           const thread = await bundle.ingestion.stories.getThreadById(threadId);
           if (!thread) return c.json(notFound, 404);
-          if (!(await threadVisibleToUser(bundle, thread, userId))) return c.json(notFound, 404);
+          if (!(await threadReadableToUser(bundle, thread, userId))) return c.json(notFound, 404);
           const subtree = await subtreeContent(
             bundle,
             threadId,
@@ -263,7 +263,7 @@ export function createForumRoutes() {
           const record = await bundle.forum.contributions.getById(contributionId);
           if (!record) return c.json(notFound, 404);
           const thread = await bundle.ingestion.stories.getThreadById(record.threadId);
-          if (!thread || !(await threadVisibleToUser(bundle, thread, userId))) {
+          if (!thread || !(await threadReadableToUser(bundle, thread, userId))) {
             return c.json(notFound, 404);
           }
           const renderable = visibleRows([record], userId);
@@ -514,7 +514,7 @@ export function createForumRoutes() {
           const bundle = bundles();
           const identity = getIdentityServices();
           const thread = await bundle.ingestion.stories.getThreadById(threadId);
-          if (!thread || !(await threadVisibleToUser(bundle, thread, auth.userId))) {
+          if (!thread || !(await threadReadableToUser(bundle, thread, auth.userId))) {
             return c.json(notFound, 404);
           }
           // Steward check: platform steward role OR any WS-A.2.2 room-steward

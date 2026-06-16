@@ -14,6 +14,7 @@ import {
   type CreateReportRequest,
   isEmergencyReasonCode,
   type ModerationReasonCode,
+  type ReportContentKind,
   type ReportCreatedResponse,
   type ReportSeverity,
   reasonCodeSeverity,
@@ -78,18 +79,26 @@ function toResponse(report: ModerationReportRecord, idempotent: boolean): Report
 }
 
 /**
- * Submit a report.  The caller (route) has already zod-validated the request
- * and resolved the reporter.  Existence of the target is the route's concern
- * (404); here we focus on idempotency, rate limits, routing, aggregation, and
- * coordination.
+ * Submit a report.  The caller (route) has already zod-validated the request,
+ * resolved the reporter, and resolved the target's existence (404 is the
+ * route's concern).  `resolvedContentKind` is the kind the route's target
+ * resolver determined (story/thread/contribution) — it is AUTHORITATIVE over the
+ * optional client-supplied `request.content_kind`, so a missing or misstated
+ * client field can never persist or emit the wrong kind (which would misroute
+ * the `moderation.case.created` consumers and the review context).  Here we
+ * focus on idempotency, rate limits, routing, aggregation, and coordination.
  */
 export async function submitReport(
   services: ModerationServices,
   reporterUserId: string,
   request: CreateReportRequest,
+  resolvedContentKind: ReportContentKind | null = null,
 ): Promise<SubmitReportOutcome> {
   const config = services.config();
   const reasonCode = request.reason_code as ModerationReasonCode;
+  // Trust the server-resolved kind first; fall back to the client hint only when
+  // the resolver could not determine one (e.g. an account/room target).
+  const contentKind: ReportContentKind | null = resolvedContentKind ?? request.content_kind ?? null;
   const severity = reasonCodeSeverity(reasonCode);
   const emergency = isEmergencyReasonCode(reasonCode);
   const nowMs = services.now();
@@ -145,7 +154,7 @@ export async function submitReport(
         caseId: randomUUID(),
         targetType: request.target_type,
         targetId: request.target_id,
-        contentKind: request.content_kind ?? null,
+        contentKind,
         status: 'new',
         severity,
         routedTo: emergency ? 'emergency' : 'standard',
@@ -177,7 +186,7 @@ export async function submitReport(
       reporterUserId,
       targetType: request.target_type,
       targetId: request.target_id,
-      contentKind: request.content_kind ?? null,
+      contentKind,
       reasonCode,
       severity,
       context: request.context ?? null,
@@ -237,7 +246,7 @@ export async function submitReport(
       await services.events.caseCreated({
         caseId: theCase.caseId,
         targetType: request.target_type,
-        contentKind: request.content_kind ?? null,
+        contentKind,
         targetId: request.target_id,
         reporterId: reporterUserId,
         reasonCode,
@@ -318,10 +327,11 @@ export async function detectCoordination(
   services.metrics.increment('reports.coordination_checked');
   if (verdict.score < config.coordinationDelayThreshold) return;
 
-  const existing = await services.incidents.findOpenByTarget(theCase.targetType, theCase.targetId);
-  if (existing) return; // one open incident per target
-
-  await services.incidents.insert({
+  // Atomic open-once-per-target: concurrent detection runs for the same target
+  // cannot both open an incident (a DB partial-unique index / synchronous
+  // in-memory check is the authority).  The loser short-circuits, so the
+  // enforcement delay below + the page + the audit fire EXACTLY once.
+  const { inserted } = await services.incidents.insertIfNoneOpenForTarget({
     caseId: theCase.caseId,
     targetType: theCase.targetType,
     targetId: theCase.targetId,
@@ -335,6 +345,8 @@ export async function detectCoordination(
     reviewedAt: null,
     reviewedBy: null,
   });
+  if (!inserted) return; // a concurrent run already opened the incident for this target
+
   // MFCI-2: delay volume-driven enforcement pending integrity review.
   await services.cases.update(theCase.caseId, { enforcementDelayed: true });
   services.metrics.increment('reports.coordination_flagged');

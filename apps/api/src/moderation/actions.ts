@@ -136,7 +136,12 @@ export async function applyAction(
   }
 
   const enfType = enforcementType(request.action);
-  const reversible = actionReversible(request.action, reasonCode);
+  // Workflow-only actions (escalate/clear) change no content/account state, so
+  // the reversal-integrity path has nothing to restore — a `/actions/:id/revert`
+  // on one would falsely report success while the case stays escalated/resolved.
+  // Only enforcement actions are steward-reversible; the case workflow is undone
+  // by re-reviewing the case, not by the action-revert endpoint.
+  const reversible = enfType !== null && actionReversible(request.action, reasonCode);
   const durationDays = parseDurationDays(request.duration);
 
   // MFCI-2 (WS-J.2.6e): while a coordinated-report incident holds the case,
@@ -277,6 +282,14 @@ async function resolveCaseForAction(
   if (!request.case_id) return;
   const theCase = await services.cases.getById(request.case_id);
   if (!theCase) return;
+  // The case_id must reference the SAME target this action enforced.  A stale or
+  // forged case_id for a DIFFERENT target would otherwise resolve/escalate an
+  // unrelated case (silently dropping it from the queue) while the enforcement
+  // landed on request.target_id.  On mismatch the action still stands on its
+  // own target; we simply do not touch the unrelated case.
+  if (theCase.targetType !== request.target_type || theCase.targetId !== request.target_id) {
+    return;
+  }
   if (request.action === 'escalate') {
     await services.cases.update(theCase.caseId, { status: 'escalated' });
     return;

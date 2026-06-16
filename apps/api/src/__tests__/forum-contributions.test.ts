@@ -300,6 +300,19 @@ describe('WS-G.3.1 — dedup, rate limit, thread state', () => {
     expect(restricted.status).toBe(403);
   });
 
+  it('#8 a moderation-restricted thread is gone from the direct reads (404)', async () => {
+    const fresh = await seedThread(fixture);
+    expect((await app().request(`http://local/v1/threads/${fresh.threadId}`)).status).toBe(200);
+    // The WS-J content port locks a hidden/removed thread to `restricted`; the
+    // direct reads then 404 (parity with a hidden story), not just the
+    // distribution/ranking seam.
+    await fixture.ingestion.stories.updateThread(fresh.threadId, { safetyState: 'restricted' });
+    expect((await app().request(`http://local/v1/threads/${fresh.threadId}`)).status).toBe(404);
+    expect(
+      (await app().request(`http://local/v1/threads/${fresh.threadId}/branches/questions`)).status,
+    ).toBe(404);
+  });
+
   it('hidden stories yield 404 (no existence oracle)', async () => {
     const second = await seedThread(fixture);
     await fixture.ingestion.stories.update(second.storyId, { hiddenState: 'takedown' });

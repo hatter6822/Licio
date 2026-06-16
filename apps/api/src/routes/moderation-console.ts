@@ -95,6 +95,38 @@ function auditReadAllowed(actor: StewardActor): boolean {
   );
 }
 
+/** Runtime-config access (read + write) is restricted to the abuse-enforcement
+ *  roles — report-queue (ROLE_COMMUNITY/ROLE_SAFETY) or integrity-queue
+ *  (ROLE_INTEGRITY).  An evidence-only or appeals-only steward must not read or
+ *  tune rate limits, spam thresholds, or the malware-domain denylist. */
+function configAccessAllowed(actor: StewardActor): boolean {
+  return (['report-queue', 'integrity-queue'] as const).some(
+    (queue) => denyQueue(actor, queue) === null,
+  );
+}
+
+/** Compact, identity-free description of an audit query's scope (for the
+ *  meta-audit record on a successful read). */
+function auditQueryScope(q: {
+  actor_id?: string | undefined;
+  target_user?: string | undefined;
+  action?: string | undefined;
+  reason_code?: string | undefined;
+  created_after?: string | undefined;
+  created_before?: string | undefined;
+  limit?: number | undefined;
+}): string {
+  const parts: string[] = [];
+  if (q.actor_id) parts.push(`actor=${q.actor_id}`);
+  if (q.target_user) parts.push(`subject=${q.target_user}`);
+  if (q.action) parts.push(`action=${q.action}`);
+  if (q.reason_code) parts.push(`reason=${q.reason_code}`);
+  if (q.created_after) parts.push(`after=${q.created_after}`);
+  if (q.created_before) parts.push(`before=${q.created_before}`);
+  if (q.limit !== undefined) parts.push(`limit=${q.limit}`);
+  return parts.length > 0 ? parts.join(' ') : 'unfiltered';
+}
+
 export function createModerationConsoleRoutes() {
   // Gate: authenticated + verified MFA + holds ≥1 doctrine steward role.
   const requireConsole: MiddlewareHandler<AuthEnv> = async (c, next) => {
@@ -474,6 +506,16 @@ export function createModerationConsoleRoutes() {
                 'base64url',
               )
             : null;
+        // The audit log is itself an accountability surface — every successful
+        // read is meta-audited with its query scope (parity with /audit/export
+        // below), so steward inspection of the trail is never invisible.
+        await writeAudit(mod, {
+          actorUserId: actor.userId,
+          actorRole: actor.stewardRoles[0] ?? null,
+          action: 'audit_view',
+          targetType: 'audit',
+          notes: auditQueryScope(q),
+        });
         return c.json(auditListResponseSchema.parse({ items, next_cursor: nextCursor }));
       })
       .get(
@@ -516,12 +558,24 @@ export function createModerationConsoleRoutes() {
       )
 
       // --- Runtime config (steward; WS-J.1.1d/2.6 "configurable without deploy") ---
+      // Reads + writes are restricted to the abuse-enforcement roles: the
+      // rate limits, spam thresholds, and malware-domain denylist govern
+      // enforcement, so an evidence-only or appeals-only steward must not see or
+      // change them.  Every write is audited with the keys it touched.
       .get('/config', async (c) => {
+        const actor = mustActor(c);
+        if (!configAccessAllowed(actor)) {
+          return c.json(deny('forbidden', 'Config access requires a moderation role'), 403);
+        }
         const mod = getModerationServices();
         await mod.reloadConfig();
         return c.json(mod.config() as unknown as Record<string, unknown>);
       })
       .patch('/config', zValidator('json', z.record(z.string(), z.unknown())), async (c) => {
+        const actor = mustActor(c);
+        if (!configAccessAllowed(actor)) {
+          return c.json(deny('forbidden', 'Config changes require a moderation role'), 403);
+        }
         const mod = getModerationServices();
         const patch = c.req.valid('json');
         const fields: Array<{ key: string; message: string }> = [];
@@ -539,10 +593,20 @@ export function createModerationConsoleRoutes() {
             422,
           );
         }
+        const changedKeys = Object.keys(patch);
         for (const [key, value] of Object.entries(patch)) {
           await storeModerationConfigValue(mod.configStore, key, value);
         }
         await mod.reloadConfig();
+        // Audit the change (keys only — values may include the malware-domain
+        // denylist; the keys touched are the accountability record).
+        await writeAudit(mod, {
+          actorUserId: actor.userId,
+          actorRole: actor.stewardRoles[0] ?? null,
+          action: 'config_update',
+          targetType: 'config',
+          notes: `keys: ${changedKeys.join(', ')}`,
+        });
         return c.json(mod.config() as unknown as Record<string, unknown>);
       })
   );

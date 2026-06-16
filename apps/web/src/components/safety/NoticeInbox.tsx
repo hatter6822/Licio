@@ -56,10 +56,17 @@ export function NoticeInbox(): React.ReactElement {
             </div>
             <p className="mt-1 text-sm text-ink-muted">{notice.body}</p>
             <div className="mt-2 flex flex-wrap gap-2">
-              {notice.appealable ? (
+              {/* Offer Appeal only while no appeal has been filed yet: once one
+                  exists the notice carries an `appeal_status` (pending/decided),
+                  and showing the button would just open a form that 409s. */}
+              {notice.appealable && notice.appeal_status === null ? (
                 <Button variant="secondary" onClick={() => setAppealFor(notice)}>
                   {t('notices.appeal', 'Appeal')}
                 </Button>
+              ) : notice.appeal_status === 'pending' ? (
+                <span className="rounded-full bg-surface px-2 py-0.5 text-xs text-ink-muted">
+                  {t('notices.appealPending', 'Appeal under review')}
+                </span>
               ) : null}
               {notice.read_at === null ? (
                 <Button

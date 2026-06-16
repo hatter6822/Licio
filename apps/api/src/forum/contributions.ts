@@ -36,6 +36,7 @@ import {
   type EventContributionType,
   evidenceAddedEventSchema,
   MAX_CONTRIBUTION_DEPTH,
+  type ThreadSafetyState,
   TOPIC_REGISTRY,
 } from '@licio/shared';
 import { type SlidingWindowStore, slidingWindowRetryAfterMs } from '../events/ingest-limiter.js';
@@ -217,6 +218,24 @@ export async function threadVisibleToUser(
   if (subscription?.status === 'active') return true;
   const roles = await bundle.forum.rooms.stewardRolesFor(room.roomId, userId);
   return roles.length > 0;
+}
+
+/**
+ * Read-side visibility for a thread (WS-J #8): room/story visibility (above)
+ * AND not moderation-locked.  A `restricted` thread (set by a steward safety
+ * action / the WS-J content port, or an emergency §18.3 jump) is removed from
+ * the DIRECT reads — overview, branches, subtree, summaries — exactly as a
+ * hidden story is, so a thread removal actually leaves the read model.  The
+ * create guard keeps using {@link threadVisibleToUser} so a restricted thread
+ * still returns the specific `thread_restricted` 403 (not a generic 404).
+ */
+export async function threadReadableToUser(
+  bundle: Pick<ServiceBundle, 'forum' | 'ingestion'>,
+  thread: { storyId: string; roomId: string | null; safetyState: ThreadSafetyState },
+  userId: string | null,
+): Promise<boolean> {
+  if (thread.safetyState === 'restricted') return false;
+  return threadVisibleToUser(bundle, thread, userId);
 }
 
 /** The WS-G.3.1 create flow (see module header for the guard chain). */

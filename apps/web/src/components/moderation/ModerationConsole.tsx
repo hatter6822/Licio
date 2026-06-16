@@ -7,6 +7,8 @@
 // server-side; a non-steward simply sees an access notice.  No financial data
 // appears on any surface.
 import type {
+  AppealQueueRow,
+  AppealReviewResponse,
   CaseReviewResponse,
   ConsoleAction,
   ModerationCaseRow,
@@ -20,6 +22,7 @@ import { queryKeys } from '../../lib/query-keys.js';
 import {
   applyModerationAction,
   decideAppeal,
+  fetchAppeal,
   fetchAppealQueue,
   fetchAudit,
   fetchCase,
@@ -32,12 +35,23 @@ import { Button } from '../ui/Button/index.js';
 import { Dialog } from '../ui/Dialog/index.js';
 import { Select } from '../ui/Select/index.js';
 import { Tabs } from '../ui/Tabs/index.js';
+import { TextArea } from '../ui/TextArea/index.js';
 import { useToast } from '../ui/Toast/index.js';
 
 const REASON_OPTIONS = [...REPORT_REASONS_BY_CODE.values()].map((r) => ({
   value: r.code,
   label: `${r.code} — ${r.label}`,
 }));
+
+/** Modify-decision target actions (the server enforces strict de-escalation; a
+ *  non-de-escalating choice is rejected with 400). */
+const MODIFY_ACTION_OPTIONS: ReadonlyArray<{ value: ConsoleAction; label: string }> = [
+  { value: 'warn', label: 'warn' },
+  { value: 'hide', label: 'hide' },
+  { value: 'restrict', label: 'restrict' },
+  { value: 'shadow', label: 'shadow' },
+  { value: 'suspend', label: 'suspend' },
+];
 
 const slaTone: Record<string, string> = {
   ok: 'text-ink-muted',
@@ -284,35 +298,11 @@ function CaseReviewDialog({
 
 function AppealsPanel(): React.ReactElement {
   const t = useT();
-  const { toast } = useToast();
-  const queryClient = useQueryClient();
+  const [reviewFor, setReviewFor] = useState<AppealQueueRow | null>(null);
   const appeals = useQuery({
     queryKey: queryKeys.modAppeals(),
     queryFn: fetchAppealQueue,
     retry: false,
-  });
-  const decide = useMutation({
-    mutationFn: (input: { appealId: string; decision: 'overturn' | 'uphold' | 'modify' }) =>
-      decideAppeal(input.appealId, {
-        decision: input.decision,
-        reason_code: 'MOD_HARASS_001',
-        explanation:
-          input.decision === 'overturn'
-            ? 'Reviewed independently; the original action is reversed.'
-            : 'Reviewed independently; the original action stands.',
-      }),
-    onSuccess: () => {
-      toast({
-        message: t('console.appealDecided', 'Appeal decided and the user was notified.'),
-        tone: 'success',
-      });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.modAppeals() });
-    },
-    onError: () =>
-      toast({
-        message: t('console.appealFailed', 'Could not record that decision.'),
-        tone: 'error',
-      }),
   });
   if (appeals.isError) return <AccessNotice />;
   return (
@@ -335,24 +325,215 @@ function AppealsPanel(): React.ReactElement {
                 SLA: {a.sla_state}
               </span>
             </span>
-            <span className="flex gap-2">
-              <Button
-                variant="secondary"
-                onClick={() => decide.mutate({ appealId: a.appeal_id, decision: 'overturn' })}
-              >
-                {t('console.overturn', 'Overturn')}
-              </Button>
-              <Button
-                variant="ghost"
-                onClick={() => decide.mutate({ appealId: a.appeal_id, decision: 'uphold' })}
-              >
-                {t('console.uphold', 'Uphold')}
-              </Button>
-            </span>
+            {/* No inline decide here: the decision is made from the review dialog,
+                which loads the appellant statement, new evidence, original
+                context, and side-by-side snapshot — a reviewer must not decide
+                blind from the queue row (WS-J.2.4). */}
+            <Button variant="secondary" onClick={() => setReviewFor(a)}>
+              {t('console.reviewAppeal', 'Review')}
+            </Button>
           </li>
         ))}
       </ul>
+      {reviewFor ? (
+        <AppealReviewDialog appeal={reviewFor} onClose={() => setReviewFor(null)} />
+      ) : null}
     </div>
+  );
+}
+
+/** The independence-preserving appeal review (WS-J.2.4): loads the full review
+ *  payload — appellant statement, new evidence, original action + reviewer,
+ *  report-time snapshot, side-by-side edit diff, user history — and only then
+ *  offers a decision, each requiring a written explanation sent to the user. */
+function AppealReviewDialog({
+  appeal,
+  onClose,
+}: {
+  appeal: AppealQueueRow;
+  onClose: () => void;
+}): React.ReactElement {
+  const t = useT();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const review = useQuery({
+    queryKey: queryKeys.modAppeal(appeal.appeal_id),
+    queryFn: () => fetchAppeal(appeal.appeal_id),
+    retry: false,
+  });
+  const [reasonCode, setReasonCode] = useState<ModerationReasonCode>(
+    appeal.original_reason_code ?? 'MOD_HARASS_001',
+  );
+  const [explanation, setExplanation] = useState('');
+  const [modifiedAction, setModifiedAction] = useState<ConsoleAction>('warn');
+  const data: AppealReviewResponse | undefined = review.data;
+
+  const decide = useMutation({
+    mutationFn: (decision: 'overturn' | 'uphold' | 'modify') =>
+      decideAppeal(appeal.appeal_id, {
+        decision,
+        reason_code: reasonCode,
+        explanation: explanation.trim(),
+        ...(decision === 'modify' ? { modified_action: modifiedAction } : {}),
+      }),
+    onSuccess: () => {
+      toast({
+        message: t('console.appealDecided', 'Appeal decided and the user was notified.'),
+        tone: 'success',
+      });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.modAppeals() });
+      onClose();
+    },
+    onError: (e) =>
+      toast({
+        message: isForbidden(e)
+          ? t('console.appealForbidden', 'Your role cannot decide this appeal.')
+          : t('console.appealFailed', 'Could not record that decision.'),
+        tone: 'error',
+      }),
+  });
+  const canDecide = explanation.trim().length > 0 && !decide.isPending;
+
+  return (
+    <Dialog open onClose={onClose} title={t('console.appealReviewTitle', 'Review appeal')}>
+      {review.isLoading ? (
+        <p className="text-ink-muted">{t('common.loading', 'Loading…')}</p>
+      ) : null}
+      {review.isError ? (
+        <p className="text-error">
+          {t('console.appealReviewError', 'Could not load this appeal for review.')}
+        </p>
+      ) : null}
+      {data ? (
+        <div className="flex flex-col gap-4">
+          <section aria-label={t('console.appealOriginal', 'Original action')}>
+            <h3 className="text-xs font-semibold uppercase text-ink-muted">
+              {t('console.appealOriginal', 'Original action')}
+            </h3>
+            <p className="text-sm text-ink">
+              {data.original_action}
+              {data.original_reason_code ? ` · ${data.original_reason_code}` : ''}
+            </p>
+            <p className="text-xs text-ink-muted">
+              {t('console.appealDecidedBy', 'Decided by')}:{' '}
+              {data.original_reviewer_handle ?? t('console.unknown', 'unknown')}
+            </p>
+          </section>
+
+          <section aria-label={t('console.appellantStatement', 'Appellant statement')}>
+            <h3 className="text-xs font-semibold uppercase text-ink-muted">
+              {t('console.appellantStatement', 'Appellant statement')}
+            </h3>
+            <p className="whitespace-pre-wrap text-sm text-ink-muted">
+              {data.appellant_statement || t('console.noStatement', 'No statement provided.')}
+            </p>
+          </section>
+
+          {data.new_evidence.length > 0 ? (
+            <section aria-label={t('console.newEvidence', 'New evidence')}>
+              <h3 className="text-xs font-semibold uppercase text-ink-muted">
+                {t('console.newEvidence', 'New evidence')}
+              </h3>
+              <ul className="mt-1 flex flex-col gap-1 text-xs text-ink-muted">
+                {data.new_evidence.map((e) => (
+                  <li key={e} className="truncate">
+                    {e}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
+          {data.snapshot_body ? (
+            <section aria-label={t('console.reportedContent', 'Reported content')}>
+              <h3 className="text-xs font-semibold uppercase text-ink-muted">
+                {t('console.reportedContent', 'Reported content')}
+              </h3>
+              <pre className="overflow-auto rounded bg-surface p-2 text-xs">
+                {data.snapshot_body}
+              </pre>
+            </section>
+          ) : null}
+
+          {data.side_by_side ? (
+            <section aria-label={t('console.diff', 'Edited since report')} className="text-xs">
+              <h3 className="text-xs font-semibold uppercase text-warning">
+                {t('console.editedAfter', 'Edited after the report')}
+              </h3>
+              <div className="mt-1 grid grid-cols-2 gap-2">
+                <pre className="overflow-auto rounded bg-surface p-2 line-through">
+                  {data.side_by_side.original_body}
+                </pre>
+                <pre className="overflow-auto rounded bg-surface p-2">
+                  {data.side_by_side.current_body}
+                </pre>
+              </div>
+            </section>
+          ) : null}
+
+          <section aria-label={t('console.history', 'User history')}>
+            <p className="text-xs text-ink-muted">
+              {t('console.accountAge', 'Account age (days)')}:{' '}
+              {data.user_history.account_age_days ?? t('console.unknown', 'unknown')} ·{' '}
+              {t('console.priorActions', 'prior actions')}: {data.user_history.past_actions.length}
+            </p>
+          </section>
+
+          <section aria-label={t('console.decision', 'Decision')} className="flex flex-col gap-2">
+            <h3 className="text-xs font-semibold uppercase text-ink-muted">
+              {t('console.decision', 'Decision')}
+            </h3>
+            <Select
+              label={t('console.reason', 'Reason code')}
+              value={reasonCode}
+              onValueChange={(v) => setReasonCode(v as ModerationReasonCode)}
+              options={REASON_OPTIONS}
+            />
+            <Select
+              label={t('console.modifyTo', 'Modified action (for Modify)')}
+              value={modifiedAction}
+              onValueChange={(v) => setModifiedAction(v as ConsoleAction)}
+              options={MODIFY_ACTION_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+            />
+            <TextArea
+              label={t('console.appealExplanation', 'Explanation to the user')}
+              value={explanation}
+              onChange={(e) => setExplanation(e.target.value)}
+              maxLength={2000}
+              rows={4}
+              required
+            />
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button variant="ghost" onClick={onClose}>
+                {t('common.cancel', 'Cancel')}
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={!canDecide}
+                onClick={() => decide.mutate('uphold')}
+              >
+                {t('console.uphold', 'Uphold')}
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={!canDecide}
+                onClick={() => decide.mutate('modify')}
+              >
+                {t('console.modify', 'Modify')}
+              </Button>
+              <Button
+                variant="primary"
+                loading={decide.isPending}
+                disabled={!canDecide}
+                onClick={() => decide.mutate('overturn')}
+              >
+                {t('console.overturn', 'Overturn')}
+              </Button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+    </Dialog>
   );
 }
 

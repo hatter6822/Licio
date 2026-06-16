@@ -479,6 +479,22 @@ const moderationServices = createInMemoryModerationServices({
         await ingestionServices.stories.update(id, { hiddenState: null });
       }
     },
+    // WS-J #8: a thread hide/removal must also leave it inaccessible via the
+    // direct thread reads (/v1/threads/:id and branches), not just feeds — lock
+    // it to `restricted` (the posture the read bar + create guard + ranking
+    // filter honour).  A revert lifts ONLY our moderation lock, leaving any
+    // other steward-set posture (elevated/under_review) intact.
+    setThreadSafetyState: async (threadId, state) => {
+      const thread = await ingestionServices.stories.getThreadById(threadId);
+      if (!thread) return;
+      if (state === 'restricted') {
+        if (thread.safetyState !== 'restricted') {
+          await ingestionServices.stories.updateThread(threadId, { safetyState: 'restricted' });
+        }
+      } else if (thread.safetyState === 'restricted') {
+        await ingestionServices.stories.updateThread(threadId, { safetyState: 'normal' });
+      }
+    },
     setAccountState: (userId, accountState) =>
       identityServices.store.updateUser(userId, { accountState }),
     // WS-J.2.2d side-by-side diff: the reported contribution's body + edits.

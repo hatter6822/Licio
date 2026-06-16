@@ -388,6 +388,38 @@ describe('InMemoryModerationNoticeStore', () => {
     expect(await store.unreadCount(A)).toBe(1);
     expect(await store.markRead('missing', A, new Date(START).toISOString())).toBe(false);
   });
+
+  it('markAppealPending flips only the matching action notice to pending', async () => {
+    const c = clockFrom(START);
+    const store = new InMemoryModerationNoticeStore(c.now);
+    const base = {
+      userId: A,
+      reasonCode: null,
+      appealStatus: null as null,
+      readAt: null,
+    };
+    const action = await store.insert({
+      ...base,
+      kind: 'action',
+      actionId: 'act-1',
+      title: 't',
+      body: 'b',
+      appealable: true,
+    });
+    // A different action's notice and another user's notice are untouched.
+    const other = await store.insert({
+      ...base,
+      kind: 'action',
+      actionId: 'act-2',
+      title: 't',
+      body: 'b',
+      appealable: true,
+    });
+    await store.markAppealPending(A, 'act-1');
+    const rows = await store.listByUser(A, null, 10);
+    expect(rows.find((r) => r.noticeId === action.noticeId)?.appealStatus).toBe('pending');
+    expect(rows.find((r) => r.noticeId === other.noticeId)?.appealStatus).toBeNull();
+  });
 });
 
 describe('InMemoryReviewerStatusStore', () => {
@@ -432,5 +464,33 @@ describe('InMemoryCoordinatedReportIncidentStore', () => {
     expect(resolved?.status).toBe('cleared');
     expect(await store.findOpenByTarget('account', T1)).toBeNull(); // no longer open
     expect(await store.getById('missing')).toBeNull();
+  });
+
+  it('insertIfNoneOpenForTarget opens once per target, then returns the existing open row', async () => {
+    const c = clockFrom(START);
+    const store = new InMemoryCoordinatedReportIncidentStore(c.now);
+    const rec = (caseId: string) => ({
+      caseId,
+      targetType: 'content' as const,
+      targetId: T1,
+      reportCount: 5,
+      windowSeconds: 600,
+      coordinationScore: 0.7,
+      severity: 'moderate' as ReportSeverity,
+      status: 'open' as const,
+      summary: 'agg',
+      reviewedAt: null,
+      reviewedBy: null,
+    });
+    const first = await store.insertIfNoneOpenForTarget(rec('case-x'));
+    expect(first.inserted).toBe(true);
+    const second = await store.insertIfNoneOpenForTarget(rec('case-y'));
+    expect(second.inserted).toBe(false);
+    expect(second.incident.incidentId).toBe(first.incident.incidentId);
+    expect((await store.listOpen(10)).length).toBe(1);
+    // Once the incident is resolved, a fresh open incident may be created again.
+    await store.resolve(first.incident.incidentId, 'cleared', A, new Date(START).toISOString());
+    const third = await store.insertIfNoneOpenForTarget(rec('case-z'));
+    expect(third.inserted).toBe(true);
   });
 });

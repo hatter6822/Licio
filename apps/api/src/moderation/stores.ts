@@ -354,6 +354,10 @@ export interface ModerationNoticeStore {
     limit: number,
   ): Promise<ModerationNoticeRecord[]>;
   markRead(noticeId: string, userId: string, nowIso: string): Promise<boolean>;
+  /** Mark the action notice(s) for (userId, actionId) as having a pending appeal,
+   *  so the inbox stops offering an Appeal affordance once one is filed (the
+   *  persistent `appealable` flag never clears on its own — WS-J.1.3d). */
+  markAppealPending(userId: string, actionId: string): Promise<void>;
   unreadCount(userId: string): Promise<number>;
   clear(): Promise<void>;
 }
@@ -370,6 +374,20 @@ export interface CoordinatedReportIncidentStore {
   insert(
     record: Omit<CoordinatedReportIncidentRecord, 'incidentId' | 'createdAt'>,
   ): Promise<CoordinatedReportIncidentRecord>;
+  /**
+   * Atomically open an incident for a target ONLY when no OPEN incident already
+   * exists for it — returns `{ inserted: false, incident }` with the existing
+   * open row otherwise.  Two concurrent `detectCoordination` runs for the same
+   * high-volume target must not both pass a read-before-insert check and create
+   * duplicate open incidents (clearing one would lift the enforcement delay
+   * while the other still holds it).  In-memory: a single synchronous
+   * check-and-insert (no await between). Postgres: a partial unique index on
+   * `(target_type, target_id) WHERE status = 'open'` is the authority across
+   * connections/processes; the loser re-reads the winner's row.
+   */
+  insertIfNoneOpenForTarget(
+    record: Omit<CoordinatedReportIncidentRecord, 'incidentId' | 'createdAt'>,
+  ): Promise<{ incident: CoordinatedReportIncidentRecord; inserted: boolean }>;
   getById(incidentId: string): Promise<CoordinatedReportIncidentRecord | null>;
   findOpenByTarget(
     targetType: ReportTargetType,
@@ -931,6 +949,13 @@ export class InMemoryModerationNoticeStore implements ModerationNoticeStore {
     if (r.readAt === null) this.#rows.set(noticeId, { ...r, readAt: nowIso });
     return true;
   }
+  async markAppealPending(userId: string, actionId: string): Promise<void> {
+    for (const [id, r] of this.#rows) {
+      if (r.userId === userId && r.actionId === actionId && r.kind === 'action') {
+        this.#rows.set(id, { ...r, appealStatus: 'pending' });
+      }
+    }
+  }
   async unreadCount(userId: string): Promise<number> {
     return [...this.#rows.values()].filter((r) => r.userId === userId && r.readAt === null).length;
   }
@@ -978,6 +1003,27 @@ export class InMemoryCoordinatedReportIncidentStore implements CoordinatedReport
     };
     this.#rows.set(full.incidentId, full);
     return { ...full };
+  }
+  async insertIfNoneOpenForTarget(
+    record: Omit<CoordinatedReportIncidentRecord, 'incidentId' | 'createdAt'>,
+  ): Promise<{ incident: CoordinatedReportIncidentRecord; inserted: boolean }> {
+    // Synchronous check-and-insert: no `await` separates the scan from the
+    // write, so two concurrent callers cannot both observe "no open incident".
+    for (const r of this.#rows.values()) {
+      if (
+        r.targetType === record.targetType &&
+        r.targetId === record.targetId &&
+        r.status === 'open'
+      )
+        return { incident: { ...r }, inserted: false };
+    }
+    const full: CoordinatedReportIncidentRecord = {
+      ...record,
+      incidentId: randomUUID(),
+      createdAt: iso(this.#now),
+    };
+    this.#rows.set(full.incidentId, full);
+    return { incident: { ...full }, inserted: true };
   }
   async getById(incidentId: string): Promise<CoordinatedReportIncidentRecord | null> {
     const r = this.#rows.get(incidentId);

@@ -33,6 +33,10 @@ wins.
                             exception is the right-to-erasure NULLing of its
                             user-reference columns (the WS-D account-purge
                             ON DELETE SET NULL cascade)
+  drizzle/0024_*.sql        partial unique index on coordinated_report_incidents
+                            (target_type, target_id) WHERE status = 'open' — the
+                            cross-connection authority that keeps coordinated-
+                            incident creation atomic (one open incident per target)
 
 apps/api/src/moderation/
   stores.ts        store interfaces + in-memory adapters (Postgres drop-in seam)
@@ -209,15 +213,47 @@ boot now swaps in the durable + real wiring:
   suite, not unit tests — the same coverage convention as every other
   workstream's Drizzle adapter.)
 - **Real ports.** A content removal writes the WS-E item-safety state (the
-  ranking-exclusion seam) + the WS-G contribution state; account actions write
-  the WS-D state; user resolution reads the WS-D directory + the WS-G history
-  stats; opening a case emits `moderation.case.created` (persist-then-publish,
-  restricted); the review panel reads the REAL WS-H invariant outputs.
+  ranking-exclusion seam) + the WS-G contribution state; a STORY removal also sets
+  its canonical `hiddenState` (gone from the direct read), and a THREAD removal
+  locks the thread to `restricted` (gone from the direct thread reads + the create
+  guard + the ranking filter — not just the distribution seam, then lifted on a
+  revert); account actions write the WS-D state; user resolution reads the WS-D
+  directory + the WS-G history stats; opening a case emits `moderation.case.created`
+  (persist-then-publish, restricted); the review panel reads the REAL WS-H
+  invariant outputs.  Reports carry the SERVER-resolved `content_kind`
+  (story/thread/contribution), never an unverified client hint.
 - **Enforcement.** Blocks/mutes are consumed in forum interaction rejection +
   thread/feed viewing filters and the ranking feed filter; the WS-J.2.6
   classifier + auto-block sink run on the WS-G contribution submission path
   (WS-F story submission rejects spam/malware at submission time — a stronger,
   by-design gate, so it is NOT double-processed through WS-J).
+
+## Correctness & accountability invariants (enforced)
+
+These are structural guarantees the code holds (each covered by a test):
+
+- **Action reversibility is truthful.** Only enforcement actions that changed a
+  content/account state are `reversible`; the workflow-only verbs (`escalate`/
+  `clear`) report `reversible: false`, so `/actions/:id/revert` returns
+  `not_reversible` rather than falsely succeeding while the case stays open.
+- **`case_id` must match the action target.** Resolving a case off a stale/forged
+  `case_id` for a DIFFERENT target is refused — the enforcement stands on its own
+  target and the unrelated case is never silently dropped from the queue.
+- **One open incident per target.** Coordinated-incident creation is atomic
+  (synchronous in-memory check-and-insert; the 0024 partial unique index in
+  Postgres), so a high-volume target cannot spawn duplicate incidents that would
+  leave the enforcement delay half-lifted.
+- **The audit log audits its own reads.** Both the transparency export AND the
+  `/audit` viewer write a meta-audit record (the query scope), so steward
+  inspection of the accountability trail is itself accountable.
+- **Config is an enforcement surface.** Reading or writing `moderation.*` runtime
+  config requires report-queue or integrity-queue access (not an evidence-only or
+  appeals-only steward), and every write is audited with the keys it touched.
+- **Appeals are decided from the review surface.** The console offers no inline
+  decide on a queue row; a decision requires opening the review (appellant
+  statement, new evidence, original context, side-by-side snapshot) and a written
+  explanation.  Filing an appeal flips the originating notice to `pending`, so the
+  inbox stops offering an Appeal affordance that would 409.
 
 ## Residuals (tracked)
 

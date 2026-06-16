@@ -1155,6 +1155,19 @@ export class DrizzleModerationNoticeStore implements ModerationNoticeStore {
     return owned.length > 0;
   }
 
+  async markAppealPending(userId: string, actionId: string): Promise<void> {
+    await this.#db
+      .update(moderationNotices)
+      .set({ appealStatus: 'pending' })
+      .where(
+        and(
+          eq(moderationNotices.userId, userId),
+          eq(moderationNotices.actionId, actionId),
+          eq(moderationNotices.kind, 'action'),
+        ),
+      );
+  }
+
   async unreadCount(userId: string): Promise<number> {
     const rows = await this.#db
       .select({ count: sql<number>`count(*)::int` })
@@ -1254,6 +1267,39 @@ export class DrizzleCoordinatedReportIncidentStore implements CoordinatedReportI
     const row = rows[0];
     if (row === undefined) throw new Error('coordinated incident insert returned no row');
     return mapIncident(row);
+  }
+
+  async insertIfNoneOpenForTarget(
+    record: Omit<CoordinatedReportIncidentRecord, 'incidentId' | 'createdAt'>,
+  ): Promise<{ incident: CoordinatedReportIncidentRecord; inserted: boolean }> {
+    // The partial unique index (status = 'open') is the cross-connection
+    // authority: `ON CONFLICT DO NOTHING` makes a concurrent second open a no-op
+    // (empty `returning()`), and we re-read the winner's row.
+    const rows = await this.#db
+      .insert(coordinatedReportIncidents)
+      .values({
+        caseId: record.caseId,
+        targetType: record.targetType,
+        targetId: record.targetId,
+        reportCount: record.reportCount,
+        windowSeconds: record.windowSeconds,
+        coordinationScore: record.coordinationScore.toString(),
+        severity: record.severity,
+        status: record.status,
+        summary: record.summary,
+        reviewedAt: dateOrNull(record.reviewedAt),
+        reviewedBy: record.reviewedBy,
+      })
+      .onConflictDoNothing()
+      .returning();
+    const row = rows[0];
+    if (row !== undefined) return { incident: mapIncident(row), inserted: true };
+    // Conflict: an open incident already exists for this target — return it.
+    const existing = await this.findOpenByTarget(record.targetType, record.targetId);
+    if (existing) return { incident: existing, inserted: false };
+    // Defensive: the conflicting incident was resolved between the insert and
+    // this re-read (so the partial index no longer matches) — open one now.
+    return { incident: await this.insert(record), inserted: true };
   }
 
   async getById(incidentId: string): Promise<CoordinatedReportIncidentRecord | null> {

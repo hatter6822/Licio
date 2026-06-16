@@ -7,6 +7,7 @@
 // toasts.  safety-api is fully mocked so the panels render deterministically.
 import type {
   AppealQueueResponse,
+  AppealReviewResponse,
   AuditListResponse,
   CaseReviewResponse,
   IncidentQueueResponse,
@@ -24,6 +25,7 @@ vi.mock('../../lib/safety-api.js', () => ({
   fetchReportQueue: vi.fn(),
   fetchCase: vi.fn(),
   fetchAppealQueue: vi.fn(),
+  fetchAppeal: vi.fn(),
   fetchAudit: vi.fn(),
   fetchIncidents: vi.fn(),
   applyModerationAction: vi.fn(),
@@ -140,6 +142,31 @@ const appealQueue: AppealQueueResponse = {
   ],
   next_cursor: null,
   filtered_total: 1,
+};
+
+const appealReview: AppealReviewResponse = {
+  appeal_id: appealQueue.items[0]?.appeal_id ?? '',
+  action_id: '00000000-0000-4000-8000-0000000000ac',
+  status: 'pending',
+  original_action: 'remove',
+  original_reason_code: 'MOD_HARASS_001',
+  original_reviewer_handle: 'first_reviewer',
+  original_created_at: NOW,
+  appellant_statement: 'I was quoting the policy, not endorsing it.',
+  new_evidence: ['https://example.com/context'],
+  target_type: 'content',
+  target_id: TARGET_ID,
+  snapshot_body: 'the reported text',
+  user_history: {
+    user_id: '00000000-0000-4000-8000-0000000000bb',
+    account_age_days: 42,
+    reports_by_category: { MOD_HARASS: 1 },
+    past_actions: [],
+    contribution_count: 3,
+    contribution_types: { question: 3 },
+    rooms_active_in: 1,
+  },
+  side_by_side: null,
 };
 
 const incidentView = {
@@ -262,9 +289,10 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
 });
 
 describe('AppealsPanel', () => {
-  it('renders pending appeals and overturns one', async () => {
+  it('requires opening the review before deciding, then overturns with an explanation', async () => {
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
     vi.mocked(api.fetchAppealQueue).mockResolvedValue(appealQueue);
+    vi.mocked(api.fetchAppeal).mockResolvedValue(appealReview);
     vi.mocked(api.decideAppeal).mockResolvedValue({
       appeal_id: appealQueue.items[0]?.appeal_id ?? '',
       status: 'overturned',
@@ -274,8 +302,29 @@ describe('AppealsPanel', () => {
     render(<ModerationConsole />, { wrapper: Providers });
     tab('Appeals');
     expect(await screen.findByText(/ban appeal/i)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Overturn' }));
+    // No decide affordance on the queue row — only a Review entry point.
+    expect(screen.queryByRole('button', { name: 'Overturn' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    // The review payload is fetched and shown (the appellant statement appears).
+    expect(await screen.findByText(/quoting the policy/i)).toBeInTheDocument();
+    expect(api.fetchAppeal).toHaveBeenCalledWith(appealQueue.items[0]?.appeal_id);
+    // Overturn is blocked (aria-disabled; activation is suppressed) until a
+    // written explanation is provided — a click now is a no-op.
+    const overturn = screen.getByRole('button', { name: 'Overturn' });
+    expect(overturn).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(overturn);
+    expect(api.decideAppeal).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText(/explanation to the user/i), {
+      target: { value: 'Quoting policy is not a violation; reversing.' },
+    });
+    expect(overturn).not.toHaveAttribute('aria-disabled');
+    fireEvent.click(overturn);
     await waitFor(() => expect(api.decideAppeal).toHaveBeenCalledTimes(1));
+    expect(api.decideAppeal).toHaveBeenCalledWith(appealQueue.items[0]?.appeal_id, {
+      decision: 'overturn',
+      reason_code: 'MOD_HARASS_001',
+      explanation: 'Quoting policy is not a violation; reversing.',
+    });
   });
 
   it('shows the empty + error states', async () => {

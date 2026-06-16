@@ -152,6 +152,10 @@ export async function submitAppeal(
     }
     throw error;
   }
+  // Reflect the pending appeal onto the originating action notice so the inbox
+  // stops offering an Appeal affordance that would now 409 (WS-J.1.3d).  The
+  // persistent `appealable` flag never clears on its own.
+  await services.notices.markAppealPending(appellantUserId, request.action_id);
   services.metrics.increment('appeals.created');
   return {
     ok: true,

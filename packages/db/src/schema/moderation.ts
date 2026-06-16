@@ -409,6 +409,14 @@ export const coordinatedReportIncidents = pgTable(
     }).onDelete('set null'),
     index('coordinated_report_incidents_status_idx').on(t.status, t.createdAt),
     index('coordinated_report_incidents_target_idx').on(t.targetType, t.targetId),
+    // At most ONE open incident per target — the cross-connection authority that
+    // makes coordinated-incident creation atomic (WS-J.2.6e): two concurrent
+    // detection runs cannot both open an incident (the loser hits this and
+    // re-reads the winner), so clearing the single incident always lifts the
+    // case's enforcement delay.
+    uniqueIndex('coordinated_report_incidents_target_open_uq')
+      .on(t.targetType, t.targetId)
+      .where(sql`${t.status} = 'open'`),
   ],
 );
 export type CoordinatedReportIncidentRowDb = typeof coordinatedReportIncidents.$inferSelect;

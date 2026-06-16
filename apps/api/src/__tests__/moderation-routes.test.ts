@@ -537,6 +537,57 @@ describe('moderation console (role-gated)', () => {
     );
     expect(unknown.status).toBe(422);
   });
+
+  it('#5 meta-audits each audit-log read (parity with export)', async () => {
+    const admin = await seedUser({
+      handle: `aud${randomUUID().slice(0, 6)}`,
+      platformRoles: ['user', 'admin'],
+    });
+    // The first read writes its own `audit_view` record (after building the page).
+    const first = await app().request(get('/v1/moderation/audit?action=hide', admin.cookie));
+    expect(first.status).toBe(200);
+    // A second read, filtered to audit_view, sees the first read's meta-audit entry.
+    const viewLog = await app().request(
+      get('/v1/moderation/audit?action=audit_view', admin.cookie),
+    );
+    expect(viewLog.status).toBe(200);
+    expect(((await viewLog.json()) as { items: unknown[] }).items.length).toBeGreaterThan(0);
+  });
+
+  it('#7 config read + write require an enforcement role; the write is audited', async () => {
+    // An evidence-only steward (no report/integrity queue) is refused both.
+    const evidence = await seedUser({
+      handle: `ev${randomUUID().slice(0, 6)}`,
+      stewardRoles: ['ROLE_EVIDENCE'],
+    });
+    expect((await app().request(get('/v1/moderation/config', evidence.cookie))).status).toBe(403);
+    const evWrite = await app().request(
+      new Request('http://localhost/v1/moderation/config', {
+        method: 'PATCH',
+        headers: json(evidence.cookie),
+        body: JSON.stringify({ reportsPerHour: 9 }),
+      }),
+    );
+    expect(evWrite.status).toBe(403);
+
+    // An admin writes config; the change is audited (config_update with the keys).
+    const admin = await seedUser({
+      handle: `cfg${randomUUID().slice(0, 6)}`,
+      platformRoles: ['user', 'admin'],
+    });
+    const ok = await app().request(
+      new Request('http://localhost/v1/moderation/config', {
+        method: 'PATCH',
+        headers: json(admin.cookie),
+        body: JSON.stringify({ reportsPerHour: 17 }),
+      }),
+    );
+    expect(ok.status).toBe(200);
+    const cfgAudit = await app().request(
+      get('/v1/moderation/audit?action=config_update', admin.cookie),
+    );
+    expect(((await cfgAudit.json()) as { items: unknown[] }).items.length).toBeGreaterThan(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

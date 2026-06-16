@@ -109,6 +109,40 @@ describe('production content port', () => {
     });
   });
 
+  it('#8 a thread hide/removal locks the thread (restricted); a revert restores normal', async () => {
+    const THREAD = '00000000-0000-4000-8000-0000000000dd';
+    const setThreadSafetyState = vi.fn(async () => undefined);
+    const port = createProductionContentPort(
+      contentDeps({
+        getThread: async (id) => (id === THREAD ? { submittedBy: AUTHOR } : null),
+        setThreadSafetyState,
+      }),
+    );
+    await port.applyContentState(THREAD, 'thread', 'removed', 'case-1', 'mod-1');
+    expect(setThreadSafetyState).toHaveBeenCalledWith(THREAD, 'restricted');
+    await port.applyContentState(THREAD, 'thread', 'hidden', 'case-1', 'mod-1');
+    expect(setThreadSafetyState).toHaveBeenCalledWith(THREAD, 'restricted');
+    // The ranking-exclusion row is written too (hidden + removed both exclude).
+    // A revert restores the thread to normal.
+    await port.applyContentState(THREAD, 'thread', 'visible', 'case-1', 'mod-1');
+    expect(setThreadSafetyState).toHaveBeenLastCalledWith(THREAD, 'normal');
+  });
+
+  it('#8 a kind-less revert (null) still restores a thread it resolves', async () => {
+    const THREAD = '00000000-0000-4000-8000-0000000000dd';
+    const setThreadSafetyState = vi.fn(async () => undefined);
+    const port = createProductionContentPort(
+      contentDeps({
+        getStory: async () => null,
+        getContribution: async () => null,
+        getThread: async (id) => (id === THREAD ? { submittedBy: AUTHOR } : null),
+        setThreadSafetyState,
+      }),
+    );
+    await port.applyContentState(THREAD, null, 'visible', null, 'mod-1');
+    expect(setThreadSafetyState).toHaveBeenCalledWith(THREAD, 'normal');
+  });
+
   it('account action writes the coarse WS-D account state', async () => {
     const setAccountState = vi.fn(async () => undefined);
     const port = createProductionContentPort(contentDeps({ setAccountState }));
