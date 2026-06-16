@@ -213,27 +213,37 @@ framing (now also under the route-scanning no-applause gate), and the offline
 cache-version bump.  An authenticated **BFF-in-the-loop E2E harness** (the WS-P
 seed: an in-memory API `e2e-server` + a gated test-only login + a proxied
 preview) drives the WS-Q flows in real browsers with axe.
-WS-J (trust, safety, and abuse operations) ships its core
+WS-J (trust, safety, and abuse operations) is complete
 (`docs/trust-safety/README.md`): user safety controls (taxonomy-bound reports
 with idempotency + per-user/per-target rate limits + emergency routing; bilateral
 blocks; one-directional mutes; appeals with reviewer independence enforced at
 assignment AND decision; the unauthenticated published support contact; the
 statement-of-reasons + appeal-outcome notice inbox), the role-gated steward
-moderation console (priority/SLA report queue with filters/bulk/assignment, the
-full-context review panel with role-gated reporter identity + financial-data-free
-user history + side-by-side edit diff, the capability-gated action palette with
-reversal-integrity revert, the independence-enforcing appeal review, and the
-append-only audit log + small-cell-suppressed transparency export), the WS-J.2.6
-automated pre-check math (noisy-OR spam confidence + malware fail-toward-flagging
-auto-block paths, duplicate-flood + policy-risk flag-only detectors), and
-base-rate-conditioned coordinated-report detection (MFCI-1 conditioning delays
-volume-driven enforcement, MFCI-2).  The five doctrine steward roles are persisted
-per-user (`steward_roles`) with a single-sourced capability/queue policy pinned to
-the ratified `STEWARD_ROLES.md`/`MODERATION_TAXONOMY.md` by a no-drift test.
-WS-J residuals (production port wiring so removals reach the ranking seam,
-forum/ranking block-mute + pre-check submission enforcement, the gated Drizzle
-moderation adapters, and the demo seed) are tracked in
-`docs/planning/11-trust-and-safety.md`.  Workstreams WS-K
+moderation console (priority/SLA report queue with filters/bulk/assignment +
+new-case auto-assignment, the full-context review panel with role-gated reporter
+identity + financial-data-free user history + the REAL WS-H invariant
+decision-support + thread context + side-by-side edit diff, the capability-gated
+action palette with reversal-integrity revert, the independence-enforcing appeal
+review, the ROLE_INTEGRITY coordinated-report incident queue, and the append-only
+audit log + small-cell-suppressed transparency export), the WS-J.2.6 automated
+pre-check math (noisy-OR spam confidence + malware fail-toward-flagging auto-block
+paths, duplicate-flood + policy-risk flag-only detectors) wired onto the WS-G
+contribution submission path, and base-rate-conditioned coordinated-report
+detection that actually DELAYS volume-driven enforcement pending integrity review
+(MFCI-1/2; clearing the incident lifts the delay, confirming it dismisses the
+case).  The five doctrine steward roles are persisted per-user (`steward_roles`)
+with a single-sourced capability/queue policy pinned to the ratified
+`STEWARD_ROLES.md`/`MODERATION_TAXONOMY.md` by a no-drift test.  Production wiring
+is shipped: the gated Drizzle adapters for all ten stores (append-only audit
+trigger), the real WS-D/E/F/G/H ports (content removal → the WS-E item-safety
+state the ranking seam reads + WS-G state, user-history stats,
+`moderation.case.created` emission, the WS-H invariant reads, the side-by-side
+snapshot), block/mute + contribution-safety enforcement across the forum + ranking
+surfaces, and a WS-J demo seed.  WS-J residuals (the BFF E2E for the safety flows;
+mounting the report/block affordances on every contribution row + profile; and the
+SPEC enhancements beyond the §-DoD — two-person co-approval, escalation
+auto-routing, room-steward-layer routing, the on-call paging provider) are tracked
+in `docs/trust-safety/README.md`.  Workstreams WS-K
 through WS-P are planned (planning documents exist under `docs/planning/`;
 implementation not yet started, beyond that E2E-harness seed).  See
 "Implementation roadmap" below for the full status table.
@@ -1154,7 +1164,7 @@ Status:
 | WS-G | Forum and conversation | Complete |
 | WS-H | Invariant services (MERI, MFCI, SCOI, GWEI, PHI) | Complete |
 | WS-I | Ranking and distribution | Complete |
-| WS-J | Trust, safety, and abuse operations | Core complete (integration residuals tracked, `docs/planning/11`) |
+| WS-J | Trust, safety, and abuse operations | Complete (residuals tracked, `docs/trust-safety/README.md`) |
 | WS-K | AI governance | Planned |
 | WS-L | Knomosis and wallets | Planned |
 | WS-M | Treasury and governance | Planned |
