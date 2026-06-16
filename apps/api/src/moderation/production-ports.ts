@@ -10,6 +10,7 @@
 // the full service container.
 import { randomUUID } from 'node:crypto';
 import {
+  type ContributionPublic,
   EVENT_SCHEMA_VERSION,
   type InvariantSignal,
   type InvariantSignalsPanel,
@@ -20,6 +21,7 @@ import {
 import type { ItemSafetyStateStore, NewStoredEvent } from '../events/stores.js';
 import {
   type AccountActionState,
+  type ContentSnapshot,
   type ContentVisibilityState,
   type ModerationContentPort,
   type ModerationEventPort,
@@ -42,6 +44,16 @@ interface AccountSlice {
   createdAt: string;
 }
 
+/** The inputs for the WS-J.2.2d side-by-side diff: the current body + the edit
+ *  history (previous-body snapshots), from which the report-time body is
+ *  reconstructed. */
+export interface ContributionSnapshotInput {
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+  edits: ReadonlyArray<{ previousBody: string; editedAt: string }>;
+}
+
 export interface ContentPortDeps {
   safetyStore: ItemSafetyStateStore;
   getStory(storyId: string): Promise<StorySlice | null>;
@@ -51,7 +63,52 @@ export interface ContentPortDeps {
     state: 'published' | 'hidden' | 'removed',
   ): Promise<unknown>;
   setAccountState(userId: string, accountState: 'active' | 'suspended'): Promise<unknown>;
+  /** WS-J.2.2d: the reported contribution's body + edit history (or null). */
+  getContributionSnapshot?(contributionId: string): Promise<ContributionSnapshotInput | null>;
+  /** WS-J.2.2a: the thread context centered on the reported item, already
+   *  projected to the public shape (the reviewer sees all moderation states). */
+  getThreadContext?(
+    reportedContributionId: string,
+    requesterUserId: string,
+  ): Promise<{ items: ContributionPublic[]; reportedContributionId: string | null }>;
   now: () => number;
+}
+
+/**
+ * Reconstruct the WS-J.2.2d side-by-side view from the current body + the edit
+ * history.  The report-time body is the `previousBody` snapshotted by the FIRST
+ * edit AFTER the report (the content as it stood when reported); with no
+ * post-report edit the content is unchanged (original ≡ current,
+ * `editedAfterReport=false`).  `editedAfterReport=true` is the edit-to-evade
+ * signal the reviewer needs.
+ */
+export function composeSnapshot(
+  snap: ContributionSnapshotInput,
+  reportTimeIso: string,
+): ContentSnapshot {
+  const editsAsc = [...snap.edits].sort((a, b) => a.editedAt.localeCompare(b.editedAt));
+  const after = editsAsc.filter((e) => e.editedAt > reportTimeIso);
+  const firstAfter = after[0];
+  if (firstAfter === undefined) {
+    return {
+      originalBody: snap.body,
+      currentBody: snap.body,
+      originalAt: snap.updatedAt,
+      currentAt: snap.updatedAt,
+      editedAfterReport: false,
+    };
+  }
+  const before = editsAsc.filter((e) => e.editedAt <= reportTimeIso);
+  const lastBefore = before[before.length - 1];
+  return {
+    originalBody: firstAfter.previousBody,
+    currentBody: snap.body,
+    // When the report-time body became current: the last pre-report edit, else
+    // the contribution's creation.
+    originalAt: lastBefore?.editedAt ?? snap.createdAt,
+    currentAt: snap.updatedAt,
+    editedAfterReport: true,
+  };
 }
 
 /** Map a moderation visibility state to the WS-E item-safety state the ranking
@@ -113,14 +170,22 @@ export function createProductionContentPort(deps: ContentPortDeps): ModerationCo
       await deps.setAccountState(userId, accountStateFor(state));
     },
 
-    async contentSnapshot(): Promise<null> {
-      // Report-time snapshot/diff is a tracked residual (WS-G edit-history read).
-      return null;
+    async contentSnapshot(targetId, reportTimeIso): Promise<ContentSnapshot | null> {
+      // The side-by-side diff applies to (editable) contributions.
+      if (deps.getContributionSnapshot === undefined) return null;
+      const snap = await deps.getContributionSnapshot(targetId);
+      return snap === null ? null : composeSnapshot(snap, reportTimeIso);
     },
 
-    async threadContext(): Promise<{ items: never[]; reportedContributionId: null }> {
-      // Thread-context assembly is a tracked residual (WS-G subtree read).
-      return { items: [], reportedContributionId: null };
+    async threadContext(
+      targetId,
+      _contentKind,
+      requesterUserId,
+    ): Promise<{ items: ContributionPublic[]; reportedContributionId: string | null }> {
+      if (deps.getThreadContext === undefined) {
+        return { items: [], reportedContributionId: null };
+      }
+      return deps.getThreadContext(targetId, requesterUserId);
     },
   };
 }
@@ -128,6 +193,11 @@ export function createProductionContentPort(deps: ContentPortDeps): ModerationCo
 export interface UserPortDeps {
   getUser(userId: string): Promise<AccountSlice | null>;
   getUsersByIds(userIds: readonly string[]): Promise<Array<{ userId: string } & AccountSlice>>;
+  /** WS-J.2.2b user-history context: prior-contribution count, per-type tally,
+   *  and distinct rooms active in (bounded read; no financial data). */
+  contributionStats?(
+    userId: string,
+  ): Promise<{ count: number; byType: Record<string, number>; roomsActiveIn: number }>;
   now: () => number;
 }
 
@@ -307,10 +377,9 @@ export function createProductionInvariantPort(deps: InvariantPortDeps): Moderati
 }
 
 export function createProductionUserPort(deps: UserPortDeps): ModerationUserPort {
-  const toResolved = (slice: AccountSlice): ResolvedUser => ({
+  const baseResolved = (slice: AccountSlice): ResolvedUser => ({
     handle: slice.handle,
     accountAgeDays: ageDays(slice.createdAt, deps.now()),
-    // Contribution stats are a tracked residual (WS-E/WS-G internal signals).
     contributionCount: 0,
     contributionTypes: {},
     roomsActiveIn: 0,
@@ -318,13 +387,27 @@ export function createProductionUserPort(deps: UserPortDeps): ModerationUserPort
   return {
     async resolve(userId): Promise<ResolvedUser | null> {
       const user = await deps.getUser(userId);
-      return user ? toResolved(user) : null;
+      if (user === null) return null;
+      const base = baseResolved(user);
+      // The single-subject review path enriches with the WS-J.2.2b history
+      // stats (the per-target panel reads them).
+      if (deps.contributionStats === undefined) return base;
+      const stats = await deps.contributionStats(userId);
+      return {
+        ...base,
+        contributionCount: stats.count,
+        contributionTypes: stats.byType,
+        roomsActiveIn: stats.roomsActiveIn,
+      };
     },
     async resolveMany(userIds): Promise<Map<string, ResolvedUser>> {
+      // Batch metadata path (coordination ages + reporter handles): age/handle
+      // only — the heavy per-subject history stats are intentionally omitted
+      // here (no caller reads them), avoiding an N-query regression.
       const out = new Map<string, ResolvedUser>();
       if (userIds.length === 0) return out;
       for (const user of await deps.getUsersByIds(userIds)) {
-        out.set(user.userId, toResolved(user));
+        out.set(user.userId, baseResolved(user));
       }
       return out;
     },

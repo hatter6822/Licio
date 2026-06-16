@@ -9,6 +9,8 @@ import type { NewStoredEvent } from '../events/stores.js';
 import { InMemoryItemSafetyStateStore } from '../events/stores.js';
 import {
   type ContentPortDeps,
+  type ContributionSnapshotInput,
+  composeSnapshot,
   createProductionContentPort,
   createProductionEventPort,
   createProductionInvariantPort,
@@ -80,6 +82,99 @@ describe('production content port', () => {
     expect(setAccountState).toHaveBeenCalledWith(AUTHOR, 'suspended');
     await port.applyAccountState(AUTHOR, 'active', null);
     expect(setAccountState).toHaveBeenCalledWith(AUTHOR, 'active');
+  });
+});
+
+describe('composeSnapshot (WS-J.2.2d side-by-side diff)', () => {
+  const snap = (
+    body: string,
+    edits: ContributionSnapshotInput['edits'],
+  ): ContributionSnapshotInput => ({
+    body,
+    createdAt: '2026-06-01T00:00:00.000Z',
+    updatedAt: '2026-06-10T00:00:00.000Z',
+    edits,
+  });
+
+  it('no post-report edit ⇒ original ≡ current, editedAfterReport=false', () => {
+    const view = composeSnapshot(snap('current', []), '2026-06-05T00:00:00.000Z');
+    expect(view).toEqual({
+      originalBody: 'current',
+      currentBody: 'current',
+      originalAt: '2026-06-10T00:00:00.000Z',
+      currentAt: '2026-06-10T00:00:00.000Z',
+      editedAfterReport: false,
+    });
+  });
+
+  it('an edit AFTER the report reconstructs the report-time body (edit-to-evade)', () => {
+    // Reported at 06-05; edited at 06-08 (snapshotting the offending body).
+    const view = composeSnapshot(
+      snap('softened text', [
+        { previousBody: 'offending text', editedAt: '2026-06-08T00:00:00.000Z' },
+      ]),
+      '2026-06-05T00:00:00.000Z',
+    );
+    expect(view.originalBody).toBe('offending text');
+    expect(view.currentBody).toBe('softened text');
+    expect(view.editedAfterReport).toBe(true);
+    // originalAt falls back to createdAt (no pre-report edit).
+    expect(view.originalAt).toBe('2026-06-01T00:00:00.000Z');
+  });
+
+  it('a pre-report edit sets originalAt to that edit; only post-report edits flag', () => {
+    const view = composeSnapshot(
+      snap('v3', [
+        { previousBody: 'v1', editedAt: '2026-06-03T00:00:00.000Z' }, // before report
+        { previousBody: 'v2', editedAt: '2026-06-08T00:00:00.000Z' }, // after report
+      ]),
+      '2026-06-05T00:00:00.000Z',
+    );
+    expect(view.originalBody).toBe('v2'); // body at report time = previous of first-after
+    expect(view.originalAt).toBe('2026-06-03T00:00:00.000Z'); // last pre-report edit
+    expect(view.editedAfterReport).toBe(true);
+  });
+});
+
+describe('production content port — snapshot + thread context', () => {
+  it('contentSnapshot composes from the edit-history dep (and is null without it)', async () => {
+    const withDep = createProductionContentPort(
+      contentDeps({
+        getContributionSnapshot: async () => ({
+          body: 'now',
+          createdAt: '2026-06-01T00:00:00.000Z',
+          updatedAt: '2026-06-09T00:00:00.000Z',
+          edits: [{ previousBody: 'then', editedAt: '2026-06-08T00:00:00.000Z' }],
+        }),
+      }),
+    );
+    const view = await withDep.contentSnapshot(CONTRIB, '2026-06-05T00:00:00.000Z');
+    expect(view?.originalBody).toBe('then');
+    expect(view?.editedAfterReport).toBe(true);
+    // Default deps (no snapshot dep) ⇒ null.
+    expect(
+      await createProductionContentPort(contentDeps()).contentSnapshot(CONTRIB, 'x'),
+    ).toBeNull();
+  });
+
+  it('threadContext passes through the projected dep (empty without it)', async () => {
+    const item = { contribution_id: CONTRIB } as never;
+    const withDep = createProductionContentPort(
+      contentDeps({
+        getThreadContext: async () => ({ items: [item], reportedContributionId: CONTRIB }),
+      }),
+    );
+    expect(await withDep.threadContext(CONTRIB, 'contribution', AUTHOR)).toEqual({
+      items: [item],
+      reportedContributionId: CONTRIB,
+    });
+    expect(
+      await createProductionContentPort(contentDeps()).threadContext(
+        CONTRIB,
+        'contribution',
+        AUTHOR,
+      ),
+    ).toEqual({ items: [], reportedContributionId: null });
   });
 });
 
@@ -228,5 +323,28 @@ describe('production user port', () => {
     expect(await port.resolve('00000000-0000-4000-8000-0000000000ff')).toBeNull();
     const many = await port.resolveMany([AUTHOR]);
     expect(many.get(AUTHOR)?.accountAgeDays).toBe(10);
+  });
+
+  it('resolve enriches with WS-J.2.2b stats; resolveMany stays metadata-only', async () => {
+    const nowMs = 1_700_000_000_000;
+    const created = new Date(nowMs - 5 * 86_400_000).toISOString();
+    const port = createProductionUserPort({
+      getUser: async () => ({ handle: 'bob', createdAt: created }),
+      getUsersByIds: async (ids) =>
+        ids.map((id) => ({ userId: id, handle: 'bob', createdAt: created })),
+      contributionStats: async () => ({
+        count: 7,
+        byType: { question: 4, explanation: 3 },
+        roomsActiveIn: 2,
+      }),
+      now: () => nowMs,
+    });
+    const resolved = await port.resolve(AUTHOR);
+    expect(resolved?.contributionCount).toBe(7);
+    expect(resolved?.contributionTypes).toEqual({ question: 4, explanation: 3 });
+    expect(resolved?.roomsActiveIn).toBe(2);
+    // The batch path never pays for the per-subject stats.
+    const many = await port.resolveMany([AUTHOR]);
+    expect(many.get(AUTHOR)?.contributionCount).toBe(0);
   });
 });

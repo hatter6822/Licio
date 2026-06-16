@@ -49,6 +49,7 @@ import {
   registerForumConsumers,
   setForumServices,
 } from './forum/services.js';
+import { toContributionPublic } from './forum/threads.js';
 import {
   DrizzleAuditStore,
   DrizzleIdentityStore,
@@ -454,6 +455,49 @@ const moderationServices = createInMemoryModerationServices({
       forumServices.contributions.setModerationState(id, state),
     setAccountState: (userId, accountState) =>
       identityServices.store.updateUser(userId, { accountState }),
+    // WS-J.2.2d side-by-side diff: the reported contribution's body + edits.
+    getContributionSnapshot: async (id) => {
+      const c = await forumServices.contributions.getById(id);
+      if (!c) return null;
+      const edits = await forumServices.contributions.listEditHistory(id);
+      return {
+        body: c.body,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
+        edits: edits.map((e) => ({ previousBody: e.previousBody, editedAt: e.editedAt })),
+      };
+    },
+    // WS-J.2.2a thread context: the full thread centered on the reported item.
+    // The reviewer sees ALL moderation states (so removed/flagged items are
+    // visible in context) — never the public visibility filter.
+    getThreadContext: async (reportedId, requesterUserId) => {
+      const reported = await forumServices.contributions.getById(reportedId);
+      if (!reported) return { items: [], reportedContributionId: null };
+      const rows = await forumServices.contributions.listByThread(reported.threadId, {
+        states: ['published', 'under_review', 'hidden', 'removed'],
+        limit: 200,
+      });
+      const authorIds = [
+        ...new Set(rows.map((r) => r.userId).filter((x): x is string => x !== null)),
+      ];
+      const authorList = await identityServices.store.getUsersByIds(authorIds);
+      const authors = new Map(
+        authorList.map((u) => [u.userId, { handle: u.handle, displayName: u.displayName }]),
+      );
+      const childCounts = await forumServices.contributions.childCounts(
+        rows.map((r) => r.contributionId),
+      );
+      const items = rows.map((r) =>
+        toContributionPublic(
+          r,
+          r.userId !== null ? (authors.get(r.userId) ?? null) : null,
+          childCounts.get(r.contributionId) ?? 0,
+          requesterUserId,
+          r.userId === null,
+        ),
+      );
+      return { items, reportedContributionId: reportedId };
+    },
     now: () => Date.now(),
   }),
   users: createProductionUserPort({
@@ -467,6 +511,35 @@ const moderationServices = createInMemoryModerationServices({
         handle: u.handle,
         createdAt: u.createdAt,
       })),
+    // WS-J.2.2b user-history context: count + per-type tally + distinct rooms,
+    // over a bounded recent-contribution read (this is the per-subject review
+    // panel, not a hot path).  No financial data appears here by construction.
+    contributionStats: async (userId) => {
+      const CAP = 300;
+      const byType: Record<string, number> = {};
+      const threadIds = new Set<string>();
+      let count = 0;
+      let after: { createdAt: string; id: string } | null = null;
+      while (count < CAP) {
+        const page = await forumServices.contributions.listByUser(userId, after, 100);
+        const last = page[page.length - 1];
+        for (const c of page) {
+          count += 1;
+          byType[c.type] = (byType[c.type] ?? 0) + 1;
+          threadIds.add(c.threadId);
+        }
+        if (page.length < 100 || last === undefined) break;
+        after = { createdAt: last.createdAt, id: last.contributionId };
+      }
+      const roomIds = new Set<string>();
+      for (const threadId of threadIds) {
+        const storyId = await ingestionServices.stories.getStoryIdByThreadId(threadId);
+        if (storyId === null) continue;
+        const story = await ingestionServices.stories.getById(storyId);
+        if (story) roomIds.add(story.roomId);
+      }
+      return { count, byType, roomsActiveIn: roomIds.size };
+    },
     now: () => Date.now(),
   }),
   // WS-J case intake onto the WS-E pipeline: persist `moderation.case.created`
