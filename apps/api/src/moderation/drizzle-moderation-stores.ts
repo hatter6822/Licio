@@ -87,6 +87,7 @@ function mapCase(row: typeof moderationCases.$inferSelect): ModerationCaseRecord
     severity: row.severity,
     routedTo: row.routedTo,
     assignedTo: row.assignedTo,
+    subjectUserId: row.subjectUserId,
     reportCount: row.reportCount,
     enforcementDelayed: row.enforcementDelayed,
     resolvedActionId: row.resolvedActionId,
@@ -244,7 +245,9 @@ export class DrizzleModerationCaseStore implements ModerationCaseStore {
   }
 
   async insert(
-    record: Omit<ModerationCaseRecord, 'createdAt' | 'updatedAt'>,
+    record: Omit<ModerationCaseRecord, 'createdAt' | 'updatedAt' | 'subjectUserId'> & {
+      subjectUserId?: string | null;
+    },
   ): Promise<ModerationCaseRecord> {
     const rows = await this.#db
       .insert(moderationCases)
@@ -257,6 +260,7 @@ export class DrizzleModerationCaseStore implements ModerationCaseStore {
         severity: record.severity,
         routedTo: record.routedTo,
         assignedTo: record.assignedTo,
+        subjectUserId: record.subjectUserId ?? null,
         reportCount: record.reportCount,
         enforcementDelayed: record.enforcementDelayed,
         resolvedActionId: record.resolvedActionId,
@@ -306,6 +310,7 @@ export class DrizzleModerationCaseStore implements ModerationCaseStore {
     if (patch.severity !== undefined) set.severity = patch.severity;
     if (patch.routedTo !== undefined) set.routedTo = patch.routedTo;
     if (patch.assignedTo !== undefined) set.assignedTo = patch.assignedTo;
+    if (patch.subjectUserId !== undefined) set.subjectUserId = patch.subjectUserId;
     if (patch.reportCount !== undefined) set.reportCount = patch.reportCount;
     if (patch.enforcementDelayed !== undefined) set.enforcementDelayed = patch.enforcementDelayed;
     if (patch.resolvedActionId !== undefined) set.resolvedActionId = patch.resolvedActionId;
@@ -332,6 +337,17 @@ export class DrizzleModerationCaseStore implements ModerationCaseStore {
     if (filter.unassigned) c.push(isNull(moderationCases.assignedTo));
     if (filter.assignedTo !== undefined && filter.assignedTo !== null) {
       c.push(eq(moderationCases.assignedTo, filter.assignedTo));
+    }
+    if (filter.subjectUserId !== undefined) {
+      c.push(eq(moderationCases.subjectUserId, filter.subjectUserId));
+    }
+    if (filter.caseIds !== undefined) {
+      // An empty set matches nothing (a reporter with no cases ⇒ empty queue).
+      c.push(
+        filter.caseIds.length > 0
+          ? inArray(moderationCases.caseId, [...filter.caseIds])
+          : sql`false`,
+      );
     }
     if (filter.createdAfter !== undefined) {
       c.push(gte(moderationCases.createdAt, new Date(filter.createdAfter)));
@@ -527,6 +543,14 @@ export class DrizzleModerationReportStore implements ModerationReportStore {
         ),
       );
     return rows[0]?.count ?? 0;
+  }
+
+  async listCaseIdsByReporter(reporterUserId: string): Promise<string[]> {
+    const rows = await this.#db
+      .selectDistinct({ caseId: moderationReports.caseId })
+      .from(moderationReports)
+      .where(eq(moderationReports.reporterUserId, reporterUserId));
+    return rows.map((r) => r.caseId);
   }
 
   async clear(): Promise<void> {

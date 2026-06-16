@@ -78,6 +78,11 @@ export interface QueueFilterInput {
   status?: readonly ('new' | 'in_progress' | 'resolved' | 'escalated')[];
   assignment?: 'unassigned' | 'mine' | 'reviewer';
   assigneeId?: string;
+  /** Restrict to cases ABOUT this user (the `target_user` filter, WS-J.2.1b). */
+  targetUser?: string;
+  /** Restrict to cases this reporter filed (role-gated: the route only passes it
+   *  for actors permitted to see reporter identity). */
+  reporter?: string;
   createdAfter?: string;
   createdBefore?: string;
   cursor?: string;
@@ -104,6 +109,13 @@ export async function buildReportQueue(
 ): Promise<ReportQueueResponse> {
   const cursor = decodeCursor(filter.cursor);
   const baseStatus = filter.status ?? (['new', 'in_progress', 'escalated'] as const);
+  // The `reporter` filter resolves the reporter → their case ids (an empty set
+  // matches nothing, so an unknown reporter yields an empty queue rather than
+  // every case).
+  const reporterCaseIds =
+    filter.reporter !== undefined
+      ? await services.reports.listCaseIdsByReporter(filter.reporter)
+      : undefined;
   const common = {
     status: baseStatus,
     ...(filter.severity ? { severity: filter.severity } : {}),
@@ -112,6 +124,8 @@ export async function buildReportQueue(
     ...(filter.assignment === 'reviewer' && filter.assigneeId
       ? { assignedTo: filter.assigneeId }
       : {}),
+    ...(filter.targetUser ? { subjectUserId: filter.targetUser } : {}),
+    ...(reporterCaseIds !== undefined ? { caseIds: reporterCaseIds } : {}),
     ...(filter.createdAfter ? { createdAfter: filter.createdAfter } : {}),
     ...(filter.createdBefore ? { createdBefore: filter.createdBefore } : {}),
   };

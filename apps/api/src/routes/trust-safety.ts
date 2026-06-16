@@ -73,21 +73,32 @@ export function createTrustSafetyRoutes() {
           let resolvedContentKind: Awaited<
             ReturnType<typeof mod.content.resolveTarget>
           >['contentKind'] = null;
+          // The user the case is about — the account itself, or the content's
+          // author — stored on the case for the `target_user` queue filter.
+          let resolvedSubjectUserId: string | null = null;
           if (request.target_type === 'account') {
             const target = await getIdentityServices().store.getUser(request.target_id);
             if (!target) return c.json(deny('target_not_found', 'Target not found'), 404);
+            resolvedSubjectUserId = request.target_id;
           } else if (request.target_type === 'content') {
             const resolution = await mod.content.resolveTarget('content', request.target_id);
             if (!resolution.exists)
               return c.json(deny('target_not_found', 'Target not found'), 404);
             resolvedContentKind = resolution.contentKind;
+            resolvedSubjectUserId = resolution.subjectUserId;
           } else if (request.target_type === 'room') {
             // A room report must reference a real room — otherwise a user could
             // open a moderation case against an arbitrary/nonexistent UUID.
             const room = await getForumServices().rooms.getById(request.target_id);
             if (!room) return c.json(deny('target_not_found', 'Target not found'), 404);
           }
-          const outcome = await submitReport(mod, auth.userId, request, resolvedContentKind);
+          const outcome = await submitReport(
+            mod,
+            auth.userId,
+            request,
+            resolvedContentKind,
+            resolvedSubjectUserId,
+          );
           if (!outcome.ok) {
             return c.json(
               {

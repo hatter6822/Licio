@@ -176,6 +176,13 @@
 			"when": 1781636355365,
 			"tag": "0024_ws_j_incident_atomic",
 			"breakpoints": true
+		},
+		{
+			"idx": 25,
+			"version": "7",
+			"when": 1781639004775,
+			"tag": "0025_ws_j_case_subject",
+			"breakpoints": true
 		}
 	]
 }

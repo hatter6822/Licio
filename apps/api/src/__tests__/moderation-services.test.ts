@@ -328,6 +328,71 @@ describe('submitReport', () => {
   });
 });
 
+describe('#13 reporter / target_user queue filters', () => {
+  const SUBJECT_A = '00000000-0000-4000-8000-00000000a001';
+  const SUBJECT_B = '00000000-0000-4000-8000-00000000a002';
+  const REPORTER_A = '00000000-0000-4000-8000-00000000b001';
+  const REPORTER_B = '00000000-0000-4000-8000-00000000b002';
+
+  async function openCaseAbout(subjectUserId: string, caseId: string): Promise<string> {
+    const c = await services.cases.insert({
+      caseId,
+      targetType: 'account',
+      targetId: subjectUserId,
+      contentKind: null,
+      subjectUserId,
+      status: 'new',
+      severity: 'moderate',
+      routedTo: 'standard',
+      assignedTo: null,
+      reportCount: 1,
+      enforcementDelayed: false,
+      resolvedActionId: null,
+      slaDueAt: new Date(services.now() + 3_600_000).toISOString(),
+    });
+    return c.caseId;
+  }
+
+  it('honors target_user (subject) and reporter; unknown reporter ⇒ empty', async () => {
+    const caseA = await openCaseAbout(SUBJECT_A, '00000000-0000-4000-9000-0000000013a1');
+    const caseB = await openCaseAbout(SUBJECT_B, '00000000-0000-4000-9000-0000000013a2');
+    await services.reports.insert({
+      caseId: caseA,
+      reporterUserId: REPORTER_A,
+      targetType: 'account',
+      targetId: SUBJECT_A,
+      contentKind: null,
+      reasonCode: 'MOD_HARASS_001',
+      severity: 'moderate',
+      context: null,
+      evidenceUrls: [],
+      localOperationId: 'op-13-a',
+    });
+    await services.reports.insert({
+      caseId: caseB,
+      reporterUserId: REPORTER_B,
+      targetType: 'account',
+      targetId: SUBJECT_B,
+      contentKind: null,
+      reasonCode: 'MOD_HARASS_001',
+      severity: 'moderate',
+      context: null,
+      evidenceUrls: [],
+      localOperationId: 'op-13-b',
+    });
+    const actor = safetyActor();
+    const ids = async (f: Parameters<typeof buildReportQueue>[2]): Promise<string[]> => {
+      const q = await buildReportQueue(services, actor, f);
+      return [...q.emergency, ...q.standard].map((r) => r.case_id).sort();
+    };
+    expect(await ids({ targetUser: SUBJECT_A, limit: 50 })).toEqual([caseA]);
+    expect(await ids({ reporter: REPORTER_B, limit: 50 })).toEqual([caseB]);
+    expect(await ids({ reporter: '00000000-0000-4000-8000-0000000000ff', limit: 50 })).toHaveLength(
+      0,
+    );
+  });
+});
+
 describe('MFCI-2 enforcement delay + incident resolution', () => {
   async function delayedCase(): Promise<string> {
     const theCase = await services.cases.insert({

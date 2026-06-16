@@ -77,6 +77,12 @@ export const moderationCases = pgTable(
     routedTo: reportRoutedToEnum('routed_to').notNull(),
     /** Reviewer currently handling the case (WS-J.2.1d). */
     assignedTo: uuid('assigned_to').references(() => users.userId, { onDelete: 'set null' }),
+    /** The user the case is ABOUT — the account (account target) or the content
+     *  author (content/thread target) — populated at report time so the queue can
+     *  filter by `target_user` (WS-J.2.1b).  NULLed on a right-to-erasure purge. */
+    subjectUserId: uuid('subject_user_id').references(() => users.userId, {
+      onDelete: 'set null',
+    }),
     reportCount: integer('report_count').notNull().default(1),
     /** True while volume-driven enforcement is delayed pending integrity review
      *  (coordinated-report protection, MFCI-2 / WS-J.2.6e). */
@@ -96,6 +102,7 @@ export const moderationCases = pgTable(
     index('moderation_cases_queue_idx').on(t.status, t.routedTo, t.severity, t.slaDueAt),
     index('moderation_cases_assigned_idx').on(t.assignedTo),
     index('moderation_cases_target_idx').on(t.targetType, t.targetId),
+    index('moderation_cases_subject_idx').on(t.subjectUserId),
   ],
 );
 export type ModerationCaseRowDb = typeof moderationCases.$inferSelect;

@@ -46,6 +46,7 @@ import {
   denyQueue,
   effectiveStewardRoles,
   isStewardActor,
+  mayseeReporterIdentity,
   type StewardActor,
 } from '../moderation/authz.js';
 import {
@@ -158,6 +159,11 @@ export function createModerationConsoleRoutes() {
           ...(f.status ? { status: f.status } : {}),
           ...(f.assignment ? { assignment: f.assignment } : {}),
           ...(f.assignee_id ? { assigneeId: f.assignee_id } : {}),
+          ...(f.target_user ? { targetUser: f.target_user } : {}),
+          // The `reporter` filter exposes reporter identity, so it is honored
+          // ONLY for roles permitted to see it (ROLE_SAFETY / ROLE_INTEGRITY);
+          // for anyone else it is silently dropped (not applied).
+          ...(f.reporter && mayseeReporterIdentity(actor) ? { reporter: f.reporter } : {}),
           ...(f.created_after ? { createdAfter: f.created_after } : {}),
           ...(f.created_before ? { createdBefore: f.created_before } : {}),
           ...(f.cursor ? { cursor: f.cursor } : {}),

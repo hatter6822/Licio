@@ -93,12 +93,18 @@ export async function submitReport(
   reporterUserId: string,
   request: CreateReportRequest,
   resolvedContentKind: ReportContentKind | null = null,
+  resolvedSubjectUserId: string | null = null,
 ): Promise<SubmitReportOutcome> {
   const config = services.config();
   const reasonCode = request.reason_code as ModerationReasonCode;
   // Trust the server-resolved kind first; fall back to the client hint only when
   // the resolver could not determine one (e.g. an account/room target).
   const contentKind: ReportContentKind | null = resolvedContentKind ?? request.content_kind ?? null;
+  // The user the case is ABOUT (account → the account; content/thread → its
+  // author) — resolved by the route, stored on the case for the `target_user`
+  // queue filter.
+  const subjectUserId: string | null =
+    resolvedSubjectUserId ?? (request.target_type === 'account' ? request.target_id : null);
   const severity = reasonCodeSeverity(reasonCode);
   const emergency = isEmergencyReasonCode(reasonCode);
   const nowMs = services.now();
@@ -155,6 +161,7 @@ export async function submitReport(
         targetType: request.target_type,
         targetId: request.target_id,
         contentKind,
+        subjectUserId,
         status: 'new',
         severity,
         routedTo: emergency ? 'emergency' : 'standard',
@@ -295,6 +302,11 @@ export async function detectCoordination(
 ): Promise<void> {
   const config = services.config();
   const nowMs = services.now();
+  // Re-read the case so the incident records the RECOMPUTED aggregate severity
+  // (the caller's `theCase` is the pre-aggregation snapshot from before the
+  // submit recomputed it) — a critical coordinated incident must not be paged
+  // to the integrity queue at a stale lower severity.
+  const current = (await services.cases.getById(theCase.caseId)) ?? theCase;
   const sinceIso = new Date(nowMs - config.coordinationWindowSeconds * 1000).toISOString();
   const reports = await services.reports.listAgainstTargetSince(
     theCase.targetType,
@@ -338,7 +350,7 @@ export async function detectCoordination(
     reportCount: reports.length,
     windowSeconds: config.coordinationWindowSeconds,
     coordinationScore: verdict.score,
-    severity: theCase.severity,
+    severity: current.severity,
     status: 'open',
     // Aggregate, base-rate-conditioned — never per-reporter identity (§19.5).
     summary: `${reports.length} reports from ${distinctReporters.size} accounts within ${config.coordinationWindowSeconds}s; new-account fraction ${verdict.newAccountFraction.toFixed(2)}, temporal concentration ${verdict.temporalConcentration.toFixed(2)}.`,
@@ -355,7 +367,7 @@ export async function detectCoordination(
     targetType: theCase.targetType,
     targetId: theCase.targetId,
     reasonCode: null,
-    severity: theCase.severity,
+    severity: current.severity,
   });
   // Automated, system-actor audit entry (WS-J.2.5a: every automated event).
   services.trackBackground(

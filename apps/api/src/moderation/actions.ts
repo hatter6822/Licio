@@ -144,6 +144,17 @@ export async function applyAction(
   const reversible = enfType !== null && actionReversible(request.action, reasonCode);
   const durationDays = parseDurationDays(request.duration);
 
+  // The action/audit report list is the case's aggregated reports: the console
+  // passes `case_id` but not the ids, and the audit view exposes `report_ids`
+  // (not `case_id`), so deriving them here keeps the resolved reports traceable
+  // from the accountability log.
+  const reportIds =
+    request.report_ids && request.report_ids.length > 0
+      ? request.report_ids
+      : request.case_id
+        ? (await services.reports.listByCase(request.case_id)).map((r) => r.reportId)
+        : [];
+
   // MFCI-2 (WS-J.2.6e): while a coordinated-report incident holds the case,
   // volume-driven enforcement is DELAYED pending integrity review — so a
   // brigade of false reports cannot drive an enforcement action against its
@@ -204,7 +215,7 @@ export async function applyAction(
     linkedActionId: null,
     caseId: request.case_id ?? null,
     coApproverUserId: null,
-    reportIds: request.report_ids ?? [],
+    reportIds,
   });
 
   // 3. Resolve the linked case/reports.
@@ -255,7 +266,7 @@ export async function applyAction(
     priorState,
     nextState,
     reversible,
-    reportIds: request.report_ids ?? [],
+    reportIds,
     notes: request.reviewer_note ?? null,
   });
   services.metrics.increment(`moderation.action.${request.action}`);

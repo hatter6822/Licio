@@ -35,6 +35,10 @@ export interface ModerationCaseRecord {
   targetType: ReportTargetType;
   targetId: string;
   contentKind: ReportContentKind | null;
+  /** The user the case is about (account target → the account; content/thread
+   *  target → its author); null when unresolved.  Drives the `target_user`
+   *  queue filter (WS-J.2.1b). */
+  subjectUserId: string | null;
   status: ReportCaseStatus;
   severity: ReportSeverity;
   routedTo: ReportRoutedTo;
@@ -182,6 +186,11 @@ export interface CaseQueueFilter {
   routedTo?: ReportRoutedTo;
   assignedTo?: string | null;
   unassigned?: boolean;
+  /** Restrict to cases ABOUT this user (the `target_user` filter). */
+  subjectUserId?: string;
+  /** Restrict to this set of case ids (the `reporter` filter resolves a
+   *  reporter's reports → their case ids).  An EMPTY set matches nothing. */
+  caseIds?: readonly string[];
   createdAfter?: string;
   createdBefore?: string;
   /** Keyset cursor on the (slaDueAt, caseId) sort order (exclusive). */
@@ -192,7 +201,11 @@ export interface CaseQueueFilter {
 
 export interface ModerationCaseStore {
   insert(
-    record: Omit<ModerationCaseRecord, 'createdAt' | 'updatedAt'>,
+    // `subjectUserId` is optional on insert (defaults to null) so existing
+    // callers/tests need not set it; submitReport supplies the resolved subject.
+    record: Omit<ModerationCaseRecord, 'createdAt' | 'updatedAt' | 'subjectUserId'> & {
+      subjectUserId?: string | null;
+    },
   ): Promise<ModerationCaseRecord>;
   getById(caseId: string): Promise<ModerationCaseRecord | null>;
   findOpenByTarget(
@@ -241,6 +254,9 @@ export interface ModerationReportStore {
     targetId: string,
     sinceIso: string,
   ): Promise<number>;
+  /** Distinct case ids the reporter has filed against (the `reporter` queue
+   *  filter resolves the reporter → their cases). */
+  listCaseIdsByReporter(reporterUserId: string): Promise<string[]>;
   clear(): Promise<void>;
 }
 
@@ -419,10 +435,17 @@ export class InMemoryModerationCaseStore implements ModerationCaseStore {
   }
 
   async insert(
-    record: Omit<ModerationCaseRecord, 'createdAt' | 'updatedAt'>,
+    record: Omit<ModerationCaseRecord, 'createdAt' | 'updatedAt' | 'subjectUserId'> & {
+      subjectUserId?: string | null;
+    },
   ): Promise<ModerationCaseRecord> {
     const at = iso(this.#now);
-    const full: ModerationCaseRecord = { ...record, createdAt: at, updatedAt: at };
+    const full: ModerationCaseRecord = {
+      ...record,
+      subjectUserId: record.subjectUserId ?? null,
+      createdAt: at,
+      updatedAt: at,
+    };
     this.#rows.set(full.caseId, full);
     return { ...full };
   }
@@ -458,6 +481,8 @@ export class InMemoryModerationCaseStore implements ModerationCaseStore {
     if (f.unassigned && r.assignedTo !== null) return false;
     if (f.assignedTo !== undefined && f.assignedTo !== null && r.assignedTo !== f.assignedTo)
       return false;
+    if (f.subjectUserId !== undefined && r.subjectUserId !== f.subjectUserId) return false;
+    if (f.caseIds !== undefined && !f.caseIds.includes(r.caseId)) return false;
     if (f.createdAfter && r.createdAt < f.createdAfter) return false;
     if (f.createdBefore && r.createdAt > f.createdBefore) return false;
     return true;
@@ -584,6 +609,13 @@ export class InMemoryModerationReportStore implements ModerationReportStore {
       }
     }
     return n;
+  }
+  async listCaseIdsByReporter(reporterUserId: string): Promise<string[]> {
+    const ids = new Set<string>();
+    for (const r of this.#rows.values()) {
+      if (r.reporterUserId === reporterUserId) ids.add(r.caseId);
+    }
+    return [...ids];
   }
   async clear(): Promise<void> {
     this.#rows.clear();

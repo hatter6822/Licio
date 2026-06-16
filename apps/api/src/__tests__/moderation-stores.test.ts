@@ -43,6 +43,7 @@ function baseCase(
     targetType: 'content',
     targetId: T1,
     contentKind: 'contribution',
+    subjectUserId: null,
     status: 'new',
     severity: 'moderate',
     routedTo: 'standard',
