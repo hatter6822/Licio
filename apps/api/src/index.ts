@@ -113,6 +113,15 @@ import {
 import { demoStory } from './lib/demo-data.js';
 import { seedForumDemoData, seedOperationalSignals } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
+import {
+  createProductionContentPort,
+  createProductionUserPort,
+} from './moderation/production-ports.js';
+import {
+  MODERATION_SCHEDULER_INTERVAL_MS,
+  startModerationScheduler,
+} from './moderation/scheduler.js';
+import { createInMemoryModerationServices, setModerationServices } from './moderation/services.js';
 import { loadPwattRuntimeConfig } from './pwatt/config.js';
 import {
   EVENT_PIPELINE_SCHEDULER_INTERVAL_MS,
@@ -414,6 +423,57 @@ if (s3Config) {
 }
 setIdentityServices(identityServices);
 
+// --- WS-J trust, safety, and abuse operations -------------------------------
+// Reports/blocks/mutes/appeals + the steward console + the audit log over the
+// in-memory stores (durable Drizzle adapters are a tracked residual).  The
+// PRODUCTION PORTS make actions take effect: a content removal writes the WS-E
+// item-safety state (which the WS-I ranking filter reads — the documented seam)
+// and the WS-G contribution state; an account action writes the WS-D state;
+// user resolution reads the WS-D directory.  Alerts log; on-call paging is a
+// WS-O binding.
+const moderationServices = createInMemoryModerationServices({
+  content: createProductionContentPort({
+    safetyStore: eventServices.safetyStore,
+    getStory: async (id) => {
+      const story = await ingestionServices.stories.getById(id);
+      return story ? { submittedBy: story.submittedBy } : null;
+    },
+    getContribution: async (id) => {
+      const c = await forumServices.contributions.getById(id);
+      return c ? { userId: c.userId } : null;
+    },
+    setContributionModerationState: (id, state) =>
+      forumServices.contributions.setModerationState(id, state),
+    setAccountState: (userId, accountState) =>
+      identityServices.store.updateUser(userId, { accountState }),
+    now: () => Date.now(),
+  }),
+  users: createProductionUserPort({
+    getUser: async (id) => {
+      const user = await identityServices.store.getUser(id);
+      return user ? { handle: user.handle, createdAt: user.createdAt } : null;
+    },
+    getUsersByIds: async (ids) =>
+      (await identityServices.store.getUsersByIds(ids)).map((u) => ({
+        userId: u.userId,
+        handle: u.handle,
+        createdAt: u.createdAt,
+      })),
+    now: () => Date.now(),
+  }),
+  alerts: {
+    pageOnCall: (input) =>
+      logger.warn({ ...input }, 'moderation on-call alert (page the safety team)'),
+  },
+  log: (event, meta) => logger.info(meta, event),
+});
+if (db) {
+  // The fail-closed config store is the durable, deploy-free tuning surface.
+  moderationServices.configStore = new DrizzlePwattConfigStore(db);
+}
+await moderationServices.reloadConfig();
+setModerationServices(moderationServices);
+
 // Development demo seed (NEVER in production): populate rooms, stories, threads,
 // and multi-author comments through the REAL stores so a fresh dev database
 // renders end-to-end data on boot. Idempotent (a no-op once seeded) and
@@ -500,6 +560,15 @@ startRankingScheduler(
   rankingServices,
   (err, task) => logger.error({ err, task }, 'ranking scheduler task failed'),
   RANKING_SCHEDULER_INTERVAL_MS,
+  { lease: makeJobLease() },
+);
+
+// Hourly WS-J maintenance: config reload, expired-mute lift, ephemeral
+// submission-window prune, and queue/SLA gauges — under its own job lease.
+startModerationScheduler(
+  moderationServices,
+  (err, task) => logger.error({ err, task }, 'moderation scheduler task failed'),
+  MODERATION_SCHEDULER_INTERVAL_MS,
   { lease: makeJobLease() },
 );
 
