@@ -512,7 +512,12 @@ export const coordinatedIncidentViewSchema = z
 export type CoordinatedIncidentView = z.infer<typeof coordinatedIncidentViewSchema>;
 
 export const incidentQueueResponseSchema = z
-  .object({ incidents: z.array(coordinatedIncidentViewSchema), count: z.number().int().min(0) })
+  .object({
+    incidents: z.array(coordinatedIncidentViewSchema),
+    /** TRUE open-incident total (independent of the returned page). */
+    count: z.number().int().min(0),
+    next_cursor: z.string().min(1).max(512).nullable(),
+  })
   .strict();
 export type IncidentQueueResponse = z.infer<typeof incidentQueueResponseSchema>;
 

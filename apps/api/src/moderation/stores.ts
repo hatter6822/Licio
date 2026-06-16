@@ -421,7 +421,14 @@ export interface CoordinatedReportIncidentStore {
     targetType: ReportTargetType,
     targetId: string,
   ): Promise<CoordinatedReportIncidentRecord | null>;
-  listOpen(limit: number): Promise<CoordinatedReportIncidentRecord[]>;
+  /** Open incidents, oldest first (FIFO), keyset-paginated by (createdAt,
+   *  incidentId).  `after` resumes strictly past that row. */
+  listOpen(
+    limit: number,
+    after?: { createdAt: string; incidentId: string },
+  ): Promise<CoordinatedReportIncidentRecord[]>;
+  /** Total open incidents (for the queue `count`, independent of the page). */
+  countOpen(): Promise<number>;
   resolve(
     incidentId: string,
     status: 'cleared' | 'confirmed',
@@ -1110,12 +1117,30 @@ export class InMemoryCoordinatedReportIncidentStore implements CoordinatedReport
     }
     return null;
   }
-  async listOpen(limit: number): Promise<CoordinatedReportIncidentRecord[]> {
-    return [...this.#rows.values()]
+  async listOpen(
+    limit: number,
+    after?: { createdAt: string; incidentId: string },
+  ): Promise<CoordinatedReportIncidentRecord[]> {
+    const sorted = [...this.#rows.values()]
       .filter((r) => r.status === 'open')
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-      .slice(0, limit)
-      .map((r) => ({ ...r }));
+      .sort(
+        (a, b) =>
+          a.createdAt.localeCompare(b.createdAt) || a.incidentId.localeCompare(b.incidentId),
+      );
+    const start = after
+      ? sorted.findIndex(
+          (r) =>
+            r.createdAt > after.createdAt ||
+            (r.createdAt === after.createdAt && r.incidentId > after.incidentId),
+        )
+      : 0;
+    const from = start < 0 ? sorted.length : start;
+    return sorted.slice(from, from + Math.max(0, limit)).map((r) => ({ ...r }));
+  }
+  async countOpen(): Promise<number> {
+    let n = 0;
+    for (const r of this.#rows.values()) if (r.status === 'open') n += 1;
+    return n;
   }
   async resolve(
     incidentId: string,

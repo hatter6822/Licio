@@ -467,6 +467,49 @@ describe('InMemoryCoordinatedReportIncidentStore', () => {
     expect(await store.getById('missing')).toBeNull();
   });
 
+  it('listOpen keyset-paginates every open incident; countOpen is the true total', async () => {
+    const c = clockFrom(START);
+    const store = new InMemoryCoordinatedReportIncidentStore(c.now);
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      c.advance(1000); // distinct createdAt per incident
+      const inc = await store.insert({
+        caseId: `case-${i}`,
+        targetType: 'content',
+        targetId: T1,
+        reportCount: 5,
+        windowSeconds: 600,
+        coordinationScore: 0.7,
+        severity: 'moderate' as ReportSeverity,
+        status: 'open',
+        summary: 'agg',
+        reviewedAt: null,
+        reviewedBy: null,
+      });
+      ids.push(inc.incidentId);
+    }
+    expect(await store.countOpen()).toBe(5);
+
+    // Walk pages of 2 via the (createdAt, incidentId) keyset — every open
+    // incident must be reachable with no duplicates/skips (not just the first N).
+    const seen: string[] = [];
+    let after: { createdAt: string; incidentId: string } | undefined;
+    for (let guard = 0; guard < 10; guard += 1) {
+      const page = await store.listOpen(2, after);
+      if (page.length === 0) break;
+      seen.push(...page.map((r) => r.incidentId));
+      const last = page.at(-1);
+      if (!last) break;
+      after = { createdAt: last.createdAt, incidentId: last.incidentId };
+    }
+    expect(seen).toHaveLength(5);
+    expect(new Set(seen).size).toBe(5);
+
+    // countOpen excludes resolved incidents.
+    await store.resolve(ids[0] as string, 'cleared', A, new Date(START).toISOString());
+    expect(await store.countOpen()).toBe(4);
+  });
+
   it('insertIfNoneOpenForTarget opens once per target, then returns the existing open row', async () => {
     const c = clockFrom(START);
     const store = new InMemoryCoordinatedReportIncidentStore(c.now);

@@ -1383,14 +1383,34 @@ export class DrizzleCoordinatedReportIncidentStore implements CoordinatedReportI
     return row === undefined ? null : mapIncident(row);
   }
 
-  async listOpen(limit: number): Promise<CoordinatedReportIncidentRecord[]> {
+  async listOpen(
+    limit: number,
+    after?: { createdAt: string; incidentId: string },
+  ): Promise<CoordinatedReportIncidentRecord[]> {
+    const conditions = [eq(coordinatedReportIncidents.status, 'open')];
+    if (after) {
+      // Keyset on (createdAt, incidentId) ascending — stable under inserts.
+      conditions.push(
+        sql`(${coordinatedReportIncidents.createdAt}, ${coordinatedReportIncidents.incidentId}) > (${new Date(after.createdAt).toISOString()}::timestamptz, ${after.incidentId}::uuid)`,
+      );
+    }
     const rows = await this.#db
       .select()
       .from(coordinatedReportIncidents)
-      .where(eq(coordinatedReportIncidents.status, 'open'))
-      .orderBy(asc(coordinatedReportIncidents.createdAt))
+      .where(and(...conditions))
+      .orderBy(
+        asc(coordinatedReportIncidents.createdAt),
+        asc(coordinatedReportIncidents.incidentId),
+      )
       .limit(Math.max(0, limit));
     return rows.map(mapIncident);
+  }
+  async countOpen(): Promise<number> {
+    const rows = await this.#db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(coordinatedReportIncidents)
+      .where(eq(coordinatedReportIncidents.status, 'open'));
+    return rows[0]?.count ?? 0;
   }
 
   async resolve(

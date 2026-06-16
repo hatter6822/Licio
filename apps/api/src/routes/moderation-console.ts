@@ -369,7 +369,11 @@ export function createModerationConsoleRoutes() {
         const actor = mustActor(c);
         const queueDenial = denyQueue(actor, 'integrity-queue');
         if (queueDenial) return c.json(deny(queueDenial.code, queueDenial.message), 403);
-        const result = await buildIncidentQueue(getModerationServices(), 100);
+        const result = await buildIncidentQueue(
+          getModerationServices(),
+          100,
+          c.req.query('cursor'),
+        );
         return c.json(incidentQueueResponseSchema.parse(result));
       })
       .post(

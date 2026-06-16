@@ -9,7 +9,11 @@
 // Either way the per-reporter identities never surface — the incident summary
 // is aggregate, base-rate-conditioned (SPEC §19.5).  Every resolution is
 // audited (DoD §7).
-import type { CoordinatedIncidentView, ReportCaseStatus } from '@licio/shared';
+import type {
+  CoordinatedIncidentView,
+  IncidentQueueResponse,
+  ReportCaseStatus,
+} from '@licio/shared';
 import { writeAudit } from './audit.js';
 import type { StewardActor } from './authz.js';
 import type { ModerationServices } from './services.js';
@@ -33,13 +37,38 @@ export function incidentToView(record: CoordinatedReportIncidentRecord): Coordin
   };
 }
 
-/** The open integrity queue, newest first. */
+function decodeIncidentCursor(
+  cursor: string | undefined,
+): { createdAt: string; incidentId: string } | null {
+  if (!cursor) return null;
+  try {
+    const [createdAt, incidentId] = Buffer.from(cursor, 'base64url').toString('utf-8').split('|');
+    return createdAt && incidentId ? { createdAt, incidentId } : null;
+  } catch {
+    return null;
+  }
+}
+const encodeIncidentCursor = (createdAt: string, incidentId: string): string =>
+  Buffer.from(`${createdAt}|${incidentId}`, 'utf-8').toString('base64url');
+
+/** The open integrity queue, oldest first (FIFO), keyset-paginated so every open
+ *  incident is reachable during a coordinated-report spike (not just the first
+ *  100).  `count` is the TRUE open total, independent of the page. */
 export async function buildIncidentQueue(
   services: ModerationServices,
   limit: number,
-): Promise<{ incidents: CoordinatedIncidentView[]; count: number }> {
-  const open = await services.incidents.listOpen(limit);
-  return { incidents: open.map(incidentToView), count: open.length };
+  cursor?: string,
+): Promise<IncidentQueueResponse> {
+  const after = decodeIncidentCursor(cursor);
+  const open = await services.incidents.listOpen(limit + 1, after ?? undefined);
+  const page = open.slice(0, limit);
+  const last = page.at(-1);
+  return {
+    incidents: page.map(incidentToView),
+    count: await services.incidents.countOpen(),
+    next_cursor:
+      open.length > limit && last ? encodeIncidentCursor(last.createdAt, last.incidentId) : null,
+  };
 }
 
 export type IncidentResolveOutcome =

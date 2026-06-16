@@ -204,7 +204,11 @@ const incidentView = {
   reviewed_at: null,
   reviewed_by: null,
 };
-const incidents: IncidentQueueResponse = { incidents: [incidentView], count: 1 };
+const incidents: IncidentQueueResponse = {
+  incidents: [incidentView],
+  count: 1,
+  next_cursor: null,
+};
 
 const auditList: AuditListResponse = {
   items: [
@@ -389,7 +393,7 @@ describe('IncidentsPanel', () => {
 
   it('shows the empty + error states', async () => {
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
-    vi.mocked(api.fetchIncidents).mockResolvedValue({ incidents: [], count: 0 });
+    vi.mocked(api.fetchIncidents).mockResolvedValue({ incidents: [], count: 0, next_cursor: null });
     const { unmount } = render(<ModerationConsole />, { wrapper: Providers });
     tab('Integrity');
     expect(await screen.findByText(/no coordinated-report incidents/i)).toBeInTheDocument();
