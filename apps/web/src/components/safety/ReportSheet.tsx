@@ -156,13 +156,17 @@ export function ReportButton({
       <Button variant="ghost" {...(className ? { className } : {})} onClick={() => setOpen(true)}>
         {t('report.action', 'Report')}
       </Button>
-      <ReportSheet
-        open={open}
-        onClose={() => setOpen(false)}
-        targetType={targetType}
-        targetId={targetId}
-        {...(contentKind ? { contentKind } : {})}
-      />
+      {/* Mount the sheet lazily so the closed affordance needs no ToastProvider
+          (the sheet's hooks run only once it is actually opened). */}
+      {open ? (
+        <ReportSheet
+          open
+          onClose={() => setOpen(false)}
+          targetType={targetType}
+          targetId={targetId}
+          {...(contentKind ? { contentKind } : {})}
+        />
+      ) : null}
     </>
   );
 }
