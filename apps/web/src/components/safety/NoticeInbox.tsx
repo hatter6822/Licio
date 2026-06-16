@@ -5,11 +5,17 @@
 // every one shows here with its reason and, where appealable, an "Appeal"
 // affordance that opens the appeal form (WS-J.1.3b).
 import type { ModerationNoticeView } from '@licio/shared';
-import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { useT } from '../../i18n/I18nProvider.js';
+import { formatDate } from '../../i18n/format.js';
+import { useI18n, useT } from '../../i18n/I18nProvider.js';
 import { queryKeys } from '../../lib/query-keys.js';
-import { createAppeal, fetchModerationNotices, markNoticeRead } from '../../lib/safety-api.js';
+import {
+  createAppeal,
+  fetchAppealEligibility,
+  fetchModerationNotices,
+  markNoticeRead,
+} from '../../lib/safety-api.js';
 import { Button } from '../ui/Button/index.js';
 import { Dialog } from '../ui/Dialog/index.js';
 import { TextArea } from '../ui/TextArea/index.js';
@@ -61,18 +67,7 @@ export function NoticeInbox(): React.ReactElement {
             </div>
             <p className="mt-1 text-sm text-ink-muted">{notice.body}</p>
             <div className="mt-2 flex flex-wrap gap-2">
-              {/* Offer Appeal only while no appeal has been filed yet: once one
-                  exists the notice carries an `appeal_status` (pending/decided),
-                  and showing the button would just open a form that 409s. */}
-              {notice.appealable && notice.appeal_status === null ? (
-                <Button variant="secondary" onClick={() => setAppealFor(notice)}>
-                  {t('notices.appeal', 'Appeal')}
-                </Button>
-              ) : notice.appeal_status === 'pending' ? (
-                <span className="rounded-full bg-surface px-2 py-0.5 text-xs text-ink-muted">
-                  {t('notices.appealPending', 'Appeal under review')}
-                </span>
-              ) : null}
+              <NoticeAppealAffordance notice={notice} onAppeal={setAppealFor} />
               {notice.read_at === null ? (
                 <Button
                   variant="ghost"
@@ -99,6 +94,69 @@ export function NoticeInbox(): React.ReactElement {
       {appealFor ? <AppealDialog notice={appealFor} onClose={() => setAppealFor(null)} /> : null}
     </section>
   );
+}
+
+/**
+ * The per-notice appeal affordance.  A ban notice persists `appealable: false`
+ * because appealing is blocked DURING the cooldown — but the affordance must
+ * RE-APPEAR once the cooldown elapses.  So for a not-directly-appealable notice
+ * with no appeal on file, consult the eligibility endpoint (it knows the
+ * cooldown / `available_at`).  That query is GATED to exactly that case, so a
+ * warn/cleared/already-appealable/pending notice never issues it.
+ */
+function NoticeAppealAffordance({
+  notice,
+  onAppeal,
+}: {
+  notice: ModerationNoticeView;
+  onAppeal: (notice: ModerationNoticeView) => void;
+}): React.ReactElement | null {
+  const { t, locale } = useI18n();
+  const cooldownCandidate = !notice.appealable && notice.appeal_status === null;
+  const eligibility = useQuery({
+    queryKey: queryKeys.appealEligibility(notice.action_id),
+    queryFn: () => fetchAppealEligibility(notice.action_id),
+    enabled: cooldownCandidate,
+  });
+
+  // An appeal is already under review → the review pill (no button that would 409).
+  if (notice.appeal_status === 'pending') {
+    return (
+      <span className="rounded-full bg-surface px-2 py-0.5 text-xs text-ink-muted">
+        {t('notices.appealPending', 'Appeal under review')}
+      </span>
+    );
+  }
+  // Directly appealable with none on file → the Appeal button (no eligibility fetch).
+  if (notice.appealable && notice.appeal_status === null) {
+    return (
+      <Button variant="secondary" onClick={() => onAppeal(notice)}>
+        {t('notices.appeal', 'Appeal')}
+      </Button>
+    );
+  }
+  // Ban-cooldown case: surface the affordance once eligibility says it reopened,
+  // otherwise tell the user when it becomes available.
+  if (cooldownCandidate && eligibility.data) {
+    const e = eligibility.data;
+    if (e.appealable && !e.already_appealed) {
+      return (
+        <Button variant="secondary" onClick={() => onAppeal(notice)}>
+          {t('notices.appeal', 'Appeal')}
+        </Button>
+      );
+    }
+    if (!e.appealable && !e.already_appealed && e.available_at !== null) {
+      return (
+        <span className="rounded-full bg-surface px-2 py-0.5 text-xs text-ink-muted">
+          {t('notices.appealAvailableAfter', 'Appeal available after {date}', {
+            date: formatDate(new Date(e.available_at), locale),
+          })}
+        </span>
+      );
+    }
+  }
+  return null;
 }
 
 function AppealDialog({

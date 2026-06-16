@@ -4,11 +4,15 @@
 // appealable AND no appeal has been filed yet; once an appeal is pending the
 // notice carries an `appeal_status` and the inbox shows "under review" instead
 // of a button that would 409 (the duplicate-appeal path).
-import type { ModerationNoticeListResponse, ModerationNoticeView } from '@licio/shared';
+import type {
+  AppealEligibilityView,
+  ModerationNoticeListResponse,
+  ModerationNoticeView,
+} from '@licio/shared';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n/I18nProvider.js';
 import { ToastProvider } from '../ui/Toast/index.js';
 
@@ -16,6 +20,7 @@ vi.mock('../../lib/safety-api.js', () => ({
   fetchModerationNotices: vi.fn(),
   createAppeal: vi.fn(),
   markNoticeRead: vi.fn(),
+  fetchAppealEligibility: vi.fn(),
 }));
 
 const api = await import('../../lib/safety-api.js');
@@ -56,7 +61,22 @@ function withList(notices: ModerationNoticeView[]): void {
   vi.mocked(api.fetchModerationNotices).mockResolvedValue(list);
 }
 
+// A ban notice persists appealable:false (appeals are blocked during cooldown).
+const banNotice = (): ModerationNoticeView =>
+  notice({ appealable: false, appeal_status: null, title: 'Your account was suspended' });
+const eligibility = (over: Partial<AppealEligibilityView> = {}): AppealEligibilityView => ({
+  action_id: '00000000-0000-4000-8000-0000000000ac',
+  action_type: 'ban',
+  appealable: false,
+  ineligible_reason: 'ban_cooldown',
+  available_at: null,
+  already_appealed: false,
+  ...over,
+});
+
 describe('NoticeInbox appeal affordance', () => {
+  beforeEach(() => vi.clearAllMocks());
+
   it('offers Appeal for an un-appealed appealable notice', async () => {
     withList([notice()]);
     render(<NoticeInbox />, { wrapper: Providers });
@@ -103,5 +123,43 @@ describe('NoticeInbox appeal affordance', () => {
     expect(screen.queryByText('Older notice')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /load older/i }));
     expect(await screen.findByText('Older notice')).toBeInTheDocument();
+  });
+
+  it('C1: re-surfaces Appeal for a ban notice once the cooldown elapses', async () => {
+    withList([banNotice()]);
+    vi.mocked(api.fetchAppealEligibility).mockResolvedValue(eligibility({ appealable: true }));
+    render(<NoticeInbox />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: 'Appeal' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Submit appeal' })).toBeInTheDocument(),
+    );
+  });
+
+  it('C1: shows "available after" for a ban still in cooldown (no button)', async () => {
+    withList([banNotice()]);
+    vi.mocked(api.fetchAppealEligibility).mockResolvedValue(
+      eligibility({ appealable: false, available_at: '2026-06-01T00:00:00.000Z' }),
+    );
+    render(<NoticeInbox />, { wrapper: Providers });
+    expect(await screen.findByText(/available after/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Appeal' })).not.toBeInTheDocument();
+  });
+
+  it('C1: shows neither button nor note once an appeal is already on file', async () => {
+    withList([banNotice()]);
+    vi.mocked(api.fetchAppealEligibility).mockResolvedValue(
+      eligibility({ appealable: false, already_appealed: true }),
+    );
+    render(<NoticeInbox />, { wrapper: Providers });
+    await waitFor(() => expect(api.fetchAppealEligibility).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: 'Appeal' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/available after/i)).not.toBeInTheDocument();
+  });
+
+  it('C1: does NOT query eligibility for a directly-appealable notice', async () => {
+    withList([notice()]); // appealable:true → no cooldown eligibility round-trip
+    render(<NoticeInbox />, { wrapper: Providers });
+    expect(await screen.findByRole('button', { name: 'Appeal' })).toBeInTheDocument();
+    expect(api.fetchAppealEligibility).not.toHaveBeenCalled();
   });
 });
