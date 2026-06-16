@@ -144,15 +144,23 @@ export async function applyAction(
   const reversible = enfType !== null && actionReversible(request.action, reasonCode);
   const durationDays = parseDurationDays(request.duration);
 
-  // The action/audit report list is the case's aggregated reports: the console
-  // passes `case_id` but not the ids, and the audit view exposes `report_ids`
-  // (not `case_id`), so deriving them here keeps the resolved reports traceable
-  // from the accountability log.
+  // Resolve the linked case ONCE and trust it only when its target matches this
+  // action's target — a stale/forged `case_id` for a DIFFERENT target must not
+  // leak that case's report ids into this action's accountability record (paired
+  // with the same target-match guard in resolveCaseForAction below).
+  const linkedCase = request.case_id ? await services.cases.getById(request.case_id) : null;
+  const caseMatches =
+    linkedCase !== null &&
+    linkedCase.targetType === request.target_type &&
+    linkedCase.targetId === request.target_id;
+  // The action/audit report list is the matching case's aggregated reports (the
+  // console passes `case_id` but not the ids; the audit view exposes
+  // `report_ids` but not `case_id`), so the resolved reports stay traceable.
   const reportIds =
     request.report_ids && request.report_ids.length > 0
       ? request.report_ids
-      : request.case_id
-        ? (await services.reports.listByCase(request.case_id)).map((r) => r.reportId)
+      : linkedCase && caseMatches
+        ? (await services.reports.listByCase(linkedCase.caseId)).map((r) => r.reportId)
         : [];
 
   // MFCI-2 (WS-J.2.6e): while a coordinated-report incident holds the case,

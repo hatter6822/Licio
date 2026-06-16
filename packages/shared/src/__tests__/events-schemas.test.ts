@@ -16,6 +16,7 @@ import {
   integritySignalDetectedEventSchema,
   isLegalClaimTransition,
   MODERATION_CATEGORY_IDS,
+  MODERATION_REASON_CODES,
   moderationCaseCreatedEventSchema,
   moderationReasonCodeSchema,
   SUBMISSION_TYPES,
@@ -287,9 +288,22 @@ describe('moderation events (WS-E.1.1d)', () => {
     for (const category of MODERATION_CATEGORY_IDS) {
       expect(moderationReasonCodeSchema.safeParse(`${category}_001`).success).toBe(true);
     }
+    // The crypto-abuse plane (MOD_CRYPTO_<MODE>_NNN) is accepted alongside.
+    expect(moderationReasonCodeSchema.safeParse('MOD_CRYPTO_DRAIN_001').success).toBe(true);
     expect(moderationReasonCodeSchema.safeParse('MOD_BOGUS_001').success).toBe(false);
     expect(moderationReasonCodeSchema.safeParse('SPAM_001').success).toBe(false);
-    expect(moderationReasonCodeSchema.safeParse('MOD_HARASS_1').success).toBe(false);
+    expect(moderationReasonCodeSchema.safeParse('MOD_HARASS').success).toBe(false); // no suffix
+    expect(moderationReasonCodeSchema.safeParse('mod_harass_001').success).toBe(false); // lowercase
+  });
+
+  it('every ratified report reason code parses through the case-created event schema', () => {
+    // No-drift: the report request accepts the full WS-A taxonomy, and
+    // submitReport forwards the code into `moderation.case.created`.  A code that
+    // the event schema rejects would save the case/report but silently drop the
+    // durable intake event, so every ratified code MUST parse here.
+    for (const code of MODERATION_REASON_CODES) {
+      expect(moderationReasonCodeSchema.safeParse(code).success).toBe(true);
+    }
   });
 
   it('integrity signal types match the SPEC §5.3 anti-signal set', () => {

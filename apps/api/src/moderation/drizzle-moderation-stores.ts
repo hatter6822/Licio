@@ -727,13 +727,21 @@ export class DrizzleModerationAuditStore implements ModerationAuditStore {
     if (filter.createdBefore !== undefined) {
       c.push(lte(moderationAudit.eventTime, new Date(filter.createdBefore)));
     }
+    const keyset = filter.afterEventTime !== undefined && filter.afterAuditId !== undefined;
+    if (keyset) {
+      c.push(
+        sql`(${moderationAudit.eventTime}, ${moderationAudit.auditId}) < (${new Date(filter.afterEventTime as string).toISOString()}::timestamptz, ${filter.afterAuditId as string}::uuid)`,
+      );
+    }
     const rows = await this.#db
       .select()
       .from(moderationAudit)
       .where(c.length > 0 ? and(...c) : undefined)
-      .orderBy(desc(moderationAudit.eventTime))
+      .orderBy(desc(moderationAudit.eventTime), desc(moderationAudit.auditId))
       .limit(Math.max(0, filter.limit))
-      .offset(Math.max(0, filter.offset ?? 0));
+      // Keyset supersedes offset (stable under concurrent inserts); offset is the
+      // legacy fallback when no cursor is supplied.
+      .offset(keyset ? 0 : Math.max(0, filter.offset ?? 0));
     return rows.map(mapAudit);
   }
 

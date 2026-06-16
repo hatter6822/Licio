@@ -36,7 +36,6 @@ import {
   type EventContributionType,
   evidenceAddedEventSchema,
   MAX_CONTRIBUTION_DEPTH,
-  type ThreadSafetyState,
   TOPIC_REGISTRY,
 } from '@licio/shared';
 import { type SlidingWindowStore, slidingWindowRetryAfterMs } from '../events/ingest-limiter.js';
@@ -222,19 +221,20 @@ export async function threadVisibleToUser(
 
 /**
  * Read-side visibility for a thread (WS-J #8): room/story visibility (above)
- * AND not moderation-locked.  A `restricted` thread (set by a steward safety
- * action / the WS-J content port, or an emergency §18.3 jump) is removed from
- * the DIRECT reads — overview, branches, subtree, summaries — exactly as a
- * hidden story is, so a thread removal actually leaves the read model.  The
- * create guard keeps using {@link threadVisibleToUser} so a restricted thread
- * still returns the specific `thread_restricted` 403 (not a generic 404).
+ * AND not moderation-removed.  A WS-J hide/remove on the thread writes the WS-E
+ * item-safety row (state='removed'); the thread is then gone from the DIRECT
+ * reads — overview, branches, subtree, summaries — exactly as a hidden story
+ * is.  This is DISTINCT from the WS-G steward `restricted` posture (a review
+ * lock that keeps the thread readable): the two states have separate owners, so
+ * a moderation revert never lifts a steward review lock and vice versa.
  */
 export async function threadReadableToUser(
-  bundle: Pick<ServiceBundle, 'forum' | 'ingestion'>,
-  thread: { storyId: string; roomId: string | null; safetyState: ThreadSafetyState },
+  bundle: Pick<ServiceBundle, 'forum' | 'ingestion' | 'events'>,
+  thread: { threadId: string; storyId: string; roomId: string | null },
   userId: string | null,
 ): Promise<boolean> {
-  if (thread.safetyState === 'restricted') return false;
+  const safety = await bundle.events.safetyStore.get(thread.threadId);
+  if (safety?.safetyState === 'removed') return false;
   return threadVisibleToUser(bundle, thread, userId);
 }
 
@@ -269,6 +269,12 @@ export async function createContribution(
   const thread = await ingestion.stories.getThreadById(request.thread_id);
   if (!thread) return reject({ status: 404, code: 'not_found', message: 'Thread not found' });
   if (!(await threadVisibleToUser(bundle, thread, userId))) {
+    return reject({ status: 404, code: 'not_found', message: 'Thread not found' });
+  }
+  // A WS-J moderation removal hides the thread from reads AND writes (item-safety
+  // 'removed'); a create must 404 like the reads (no existence oracle).  This is
+  // separate from the steward `restricted` review lock handled below.
+  if ((await events.safetyStore.get(request.thread_id))?.safetyState === 'removed') {
     return reject({ status: 404, code: 'not_found', message: 'Thread not found' });
   }
   if (thread.conversationState === 'archived') {

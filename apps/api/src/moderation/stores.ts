@@ -285,6 +285,11 @@ export interface AuditQueryFilter {
   reasonCode?: string;
   createdAfter?: string;
   createdBefore?: string;
+  /** Keyset cursor on the (eventTime, auditId) DESC order (exclusive).  Preferred
+   *  over `offset`: stable when new audit rows are inserted between page reads
+   *  (e.g. the `audit_view` meta-record the viewer itself writes). */
+  afterEventTime?: string;
+  afterAuditId?: string;
   limit: number;
   offset?: number;
 }
@@ -715,7 +720,16 @@ export class InMemoryModerationAuditStore implements ModerationAuditStore {
   async list(filter: AuditQueryFilter): Promise<ModerationAuditRecord[]> {
     const matched = this.#rows
       .filter((r) => this.#matches(r, filter))
-      .sort((a, b) => b.eventTime.localeCompare(a.eventTime));
+      // Stable DESC order with an id tiebreaker (rows can share an eventTime).
+      .sort((a, b) => b.eventTime.localeCompare(a.eventTime) || b.auditId.localeCompare(a.auditId));
+    if (filter.afterEventTime !== undefined && filter.afterAuditId !== undefined) {
+      const at = filter.afterEventTime;
+      const ai = filter.afterAuditId;
+      return matched
+        .filter((r) => r.eventTime < at || (r.eventTime === at && r.auditId < ai))
+        .slice(0, filter.limit)
+        .map((r) => ({ ...r }));
+    }
     const offset = filter.offset ?? 0;
     return matched.slice(offset, offset + filter.limit).map((r) => ({ ...r }));
   }

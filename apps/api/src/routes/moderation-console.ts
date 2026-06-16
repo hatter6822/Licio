@@ -486,9 +486,12 @@ export function createModerationConsoleRoutes() {
         }
         const q = c.req.valid('query');
         const mod = getModerationServices();
-        const offset = q.cursor
-          ? Number.parseInt(Buffer.from(q.cursor, 'base64url').toString('utf-8'), 10)
-          : 0;
+        // Keyset cursor on (eventTime, auditId) DESC — stable when the
+        // `audit_view` meta-record below is inserted between page reads (an
+        // offset cursor would shift, duplicating/skipping rows).
+        const [curTime, curId] = q.cursor
+          ? Buffer.from(q.cursor, 'base64url').toString('utf-8').split('|')
+          : [undefined, undefined];
         const limit = q.limit ?? 50;
         const records = await mod.audit.list({
           ...(q.actor_id ? { actorUserId: q.actor_id } : {}),
@@ -497,8 +500,8 @@ export function createModerationConsoleRoutes() {
           ...(q.reason_code ? { reasonCode: q.reason_code } : {}),
           ...(q.created_after ? { createdAfter: q.created_after } : {}),
           ...(q.created_before ? { createdBefore: q.created_before } : {}),
+          ...(curTime && curId ? { afterEventTime: curTime, afterAuditId: curId } : {}),
           limit: limit + 1,
-          offset: Number.isFinite(offset) ? offset : 0,
         });
         const page = records.slice(0, limit);
         const actorIds = [
@@ -512,11 +515,10 @@ export function createModerationConsoleRoutes() {
         const handles = new Map<string, string | null>();
         for (const id of actorIds) handles.set(id, resolved.get(id)?.handle ?? null);
         const items = page.map((r) => auditToView(r, handles, true));
+        const last = page[page.length - 1];
         const nextCursor =
-          records.length > limit
-            ? Buffer.from(String((Number.isFinite(offset) ? offset : 0) + limit), 'utf-8').toString(
-                'base64url',
-              )
+          records.length > limit && last
+            ? Buffer.from(`${last.eventTime}|${last.auditId}`, 'utf-8').toString('base64url')
             : null;
         // The audit log is itself an accountability surface — every successful
         // read is meta-audited with its query scope (parity with /audit/export

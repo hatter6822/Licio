@@ -102,9 +102,11 @@ export const reportQueueFilterSchema = z
     category: z.array(z.string().min(1).max(32)).optional(),
     created_after: isoTimestampSchema.optional(),
     created_before: isoTimestampSchema.optional(),
-    /** Role-gated: only roles permitted to see reporter identity may filter by it. */
-    reporter: z.string().min(1).max(64).optional(),
-    target_user: z.string().min(1).max(64).optional(),
+    /** User ids (the queue predicates compare UUID columns: `subject_user_id` /
+     *  `reporter_user_id`).  Role-gated: only roles permitted to see reporter
+     *  identity may filter by `reporter`. */
+    reporter: uuidSchema.optional(),
+    target_user: uuidSchema.optional(),
     assignment: z.enum(['unassigned', 'mine', 'reviewer']).optional(),
     assignee_id: uuidSchema.optional(),
     cursor: z.string().min(1).max(512).optional(),

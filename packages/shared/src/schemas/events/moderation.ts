@@ -14,6 +14,9 @@ import { eventBaseShape } from './envelope.js';
  * The twelve moderation policy categories (SPEC §18.1), as stable namespaces.
  * Reason codes are `<NAMESPACE>_NNN` per the WS-A taxonomy
  * (docs/policy/MODERATION_TAXONOMY.md, the SSOT validated by `check:policy`).
+ * This is EXACTLY the §18.1 content-category set (pinned by `moderation-policy-
+ * drift`); the crypto-abuse plane (`MOD_CRYPTO_*`, WS-A.1.2d / §18.5) is a
+ * separate namespace accepted by {@link moderationReasonCodeSchema} below.
  */
 export const MODERATION_CATEGORY_IDS = [
   'MOD_ILLEGAL',
@@ -29,28 +32,44 @@ export const MODERATION_CATEGORY_IDS = [
   'MOD_SYNTH',
   'MOD_IP',
 ] as const;
-export type ModerationCategoryId = (typeof MODERATION_CATEGORY_IDS)[number];
-
-const REASON_CODE_PATTERN = /^(MOD_[A-Z]+)_(\d{3})$/;
 
 /**
- * A reason code from the WS-A moderation taxonomy: `MOD_<NAMESPACE>_NNN` where
- * the namespace is one of the twelve §18.1 categories. The code list itself is
+ * The crypto-abuse plane namespace (SPEC §18.5 / WS-A.1.2d).  Ratified crypto
+ * reason codes are `MOD_CRYPTO_<MODE>_NNN`, whose first `MOD_<WORD>` segment is
+ * `MOD_CRYPTO`.  Accepted by the event reason-code validator alongside the
+ * §18.1 categories so a crypto-abuse report's `moderation.case.created` event
+ * parses (the report path enforces exact ratified membership upstream).
+ */
+const MODERATION_CRYPTO_NAMESPACE = 'MOD_CRYPTO';
+export type ModerationCategoryId = (typeof MODERATION_CATEGORY_IDS)[number];
+
+// `MOD_<NAMESPACE>_<SUFFIX>` where the suffix is the rest of the code: a numeric
+// id (`MOD_HARASS_001`) OR a mode mnemonic plus id (the crypto-abuse codes are
+// `MOD_CRYPTO_DRAIN_001` etc.).  The namespace is the FIRST `MOD_<WORD>` segment
+// (`[A-Z]+` stops at the underscore), so crypto codes resolve to `MOD_CRYPTO`.
+// The report path enforces EXACT ratified membership upstream
+// (contributionReasonCodeSchema); this stays shape + namespace only.
+const REASON_CODE_PATTERN = /^(MOD_[A-Z]+)_([A-Z0-9_]+)$/;
+
+/**
+ * A reason code from the WS-A moderation taxonomy: `MOD_<NAMESPACE>_<SUFFIX>`
+ * where the namespace is one of the §18.1 categories. The code list itself is
  * owned by the policy document; this validates shape + category membership so
  * an unknown category can never enter the pipeline.
  */
 export const moderationReasonCodeSchema = z
   .string()
-  .regex(REASON_CODE_PATTERN, { message: 'reason_code must be MOD_<CATEGORY>_NNN' })
+  .regex(REASON_CODE_PATTERN, { message: 'reason_code must be MOD_<CATEGORY>_<SUFFIX>' })
   .refine(
     (code) => {
       const namespace = REASON_CODE_PATTERN.exec(code)?.[1];
       return (
         namespace !== undefined &&
-        (MODERATION_CATEGORY_IDS as readonly string[]).includes(namespace)
+        ((MODERATION_CATEGORY_IDS as readonly string[]).includes(namespace) ||
+          namespace === MODERATION_CRYPTO_NAMESPACE)
       );
     },
-    { message: 'reason_code namespace must be a SPEC §18.1 policy category' },
+    { message: 'reason_code namespace must be a SPEC §18.1 category or the crypto plane' },
   );
 
 export const MODERATION_SEVERITIES = ['low', 'medium', 'high', 'critical'] as const;

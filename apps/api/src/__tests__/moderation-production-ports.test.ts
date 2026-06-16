@@ -109,38 +109,39 @@ describe('production content port', () => {
     });
   });
 
-  it('#8 a thread hide/removal locks the thread (restricted); a revert restores normal', async () => {
+  it('#8 a thread hide/removal writes the item-safety row (removed); a revert restores normal', async () => {
     const THREAD = '00000000-0000-4000-8000-0000000000dd';
-    const setThreadSafetyState = vi.fn(async () => undefined);
+    const safetyStore = new InMemoryItemSafetyStateStore();
     const port = createProductionContentPort(
       contentDeps({
+        safetyStore,
         getThread: async (id) => (id === THREAD ? { submittedBy: AUTHOR } : null),
-        setThreadSafetyState,
       }),
     );
+    // The item-safety row is the SOLE moderation signal for a thread — the
+    // thread's own safety_state (the WS-G review dimension) is never touched.
     await port.applyContentState(THREAD, 'thread', 'removed', 'case-1', 'mod-1');
-    expect(setThreadSafetyState).toHaveBeenCalledWith(THREAD, 'restricted');
+    expect((await safetyStore.get(THREAD))?.safetyState).toBe('removed');
     await port.applyContentState(THREAD, 'thread', 'hidden', 'case-1', 'mod-1');
-    expect(setThreadSafetyState).toHaveBeenCalledWith(THREAD, 'restricted');
-    // The ranking-exclusion row is written too (hidden + removed both exclude).
-    // A revert restores the thread to normal.
+    expect((await safetyStore.get(THREAD))?.safetyState).toBe('removed'); // hidden also excludes
+    // A revert clears it back to normal.
     await port.applyContentState(THREAD, 'thread', 'visible', 'case-1', 'mod-1');
-    expect(setThreadSafetyState).toHaveBeenLastCalledWith(THREAD, 'normal');
+    expect((await safetyStore.get(THREAD))?.safetyState).toBe('normal');
   });
 
-  it('#8 a kind-less revert (null) still restores a thread it resolves', async () => {
+  it('#8 a kind-less revert (null) clears the item-safety row', async () => {
     const THREAD = '00000000-0000-4000-8000-0000000000dd';
-    const setThreadSafetyState = vi.fn(async () => undefined);
+    const safetyStore = new InMemoryItemSafetyStateStore();
     const port = createProductionContentPort(
       contentDeps({
+        safetyStore,
         getStory: async () => null,
         getContribution: async () => null,
         getThread: async (id) => (id === THREAD ? { submittedBy: AUTHOR } : null),
-        setThreadSafetyState,
       }),
     );
     await port.applyContentState(THREAD, null, 'visible', null, 'mod-1');
-    expect(setThreadSafetyState).toHaveBeenCalledWith(THREAD, 'normal');
+    expect((await safetyStore.get(THREAD))?.safetyState).toBe('normal');
   });
 
   it('account action writes the coarse WS-D account state', async () => {

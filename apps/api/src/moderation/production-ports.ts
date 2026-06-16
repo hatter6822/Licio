@@ -16,7 +16,6 @@ import {
   type InvariantSignalsPanel,
   type ModerationCaseCreatedEvent,
   moderationCaseCreatedEventSchema,
-  type ThreadSafetyState,
   toEventTargetType,
 } from '@licio/shared';
 import type { ItemSafetyStateStore, NewStoredEvent } from '../events/stores.js';
@@ -73,12 +72,6 @@ export interface ContentPortDeps {
    *  hides; `null` restores (the boot impl must never clobber a stronger
    *  takedown). */
   setStoryHiddenState?(storyId: string, hiddenState: 'safety' | null): Promise<unknown>;
-  /** WS-J #8: reflect a thread hide/removal into the thread's own safety state so
-   *  the DIRECT thread reads (/v1/threads/:id and its branches) reject it, not
-   *  just the ranking/distribution seam.  `'restricted'` is the locked posture
-   *  the WS-G create guard + WS-I safety filter already honor; `'normal'`
-   *  restores it on a revert. */
-  setThreadSafetyState?(threadId: string, state: ThreadSafetyState): Promise<unknown>;
   setAccountState(userId: string, accountState: 'active' | 'suspended'): Promise<unknown>;
   /** WS-J.2.2d: the reported contribution's body + edit history (or null). */
   getContributionSnapshot?(contributionId: string): Promise<ContributionSnapshotInput | null>;
@@ -139,13 +132,6 @@ function contributionStateFor(state: ContentVisibilityState): 'published' | 'hid
   return state === 'visible' ? 'published' : state === 'hidden' ? 'hidden' : 'removed';
 }
 
-/** Map a moderation visibility state to the thread safety posture (WS-J #8):
- *  hide/remove → `restricted` (the locked state the WS-G create guard, the WS-I
- *  safety filter, and the thread read bar all honor); visible → `normal`. */
-function threadSafetyFor(state: ContentVisibilityState): ThreadSafetyState {
-  return state === 'visible' ? 'normal' : 'restricted';
-}
-
 /** Map an account action to the coarse WS-D account state (the moderation_action
  *  record holds the precise action + duration). */
 function accountStateFor(state: AccountActionState): 'active' | 'suspended' {
@@ -195,22 +181,22 @@ export function createProductionContentPort(deps: ContentPortDeps): ModerationCo
         // feeds); restoring lifts the moderation hide.
         await deps.setStoryHiddenState?.(targetId, state === 'visible' ? null : 'safety');
       } else if (contentKind === 'thread') {
-        // A thread removal/hide locks the thread (restricted) so its DIRECT
-        // reads + writes are refused, not just its distribution; a revert
-        // restores it to normal.
-        await deps.setThreadSafetyState?.(targetId, threadSafetyFor(state));
+        // A thread removal/hide is reflected ONLY through the item-safety row
+        // written above — the forum thread read bar + create guard consult it
+        // (WS-J #8).  We intentionally do NOT mutate the thread's own
+        // safety_state: that dimension is owned by the WS-G steward review flow,
+        // and conflating the two would let a moderation revert lift an unrelated
+        // safety-review restriction (and vice versa).  A revert clears the
+        // item-safety row (state='visible' → 'normal') with no further work.
       } else if (contentKind === null) {
         // Unknown kind (e.g. a revert that did not carry it): best-effort —
-        // contribution, then story, then thread.
+        // contribution, then story (a thread needs no extra write — the
+        // item-safety row above is authoritative for it).
         const contribution = await deps.getContribution(targetId);
         if (contribution) {
           await deps.setContributionModerationState(targetId, contributionStateFor(state));
         } else if (await deps.getStory(targetId)) {
           await deps.setStoryHiddenState?.(targetId, state === 'visible' ? null : 'safety');
-        } else if (deps.getThread && deps.setThreadSafetyState) {
-          if (await deps.getThread(targetId)) {
-            await deps.setThreadSafetyState(targetId, threadSafetyFor(state));
-          }
         }
       }
     },

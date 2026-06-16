@@ -807,6 +807,36 @@ describe('appeals (independence enforced)', () => {
     expect(!decision.ok && decision.code).toBe('invalid_modification');
   });
 
+  it('#1 allows downgrading an account sanction issued from a content case', async () => {
+    // An account sanction taken from a CONTENT target (targetType 'content',
+    // subject = the author) — modifying it to a LESSER account action must be
+    // allowed (the domain matches; only cross-domain modifies are rejected).
+    const out = await applyAction(services, safetyActor(), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'suspend',
+      reason_code: 'MOD_HARASS_001',
+    });
+    if (!out.ok) throw new Error('suspend failed');
+    await submitAppeal(services, AUTHOR, {
+      action_id: out.response.action_id,
+      user_statement: 's',
+    });
+    const appeal = await services.appeals.getByActionId(out.response.action_id);
+    if (!appeal) throw new Error('appeal not created');
+    const decision = await decideAppeal(
+      services,
+      appealsActor(),
+      appeal.appealId,
+      'modify',
+      'MOD_HARASS_001',
+      'reduce to restrict',
+      'restrict',
+    );
+    expect(decision.ok).toBe(true);
+    expect(decision.ok && decision.status).toBe('modified');
+  });
+
   it('#8 paginates the appeal queue via the keyset cursor', async () => {
     for (let i = 0; i < 3; i += 1) {
       await services.appeals.insert({

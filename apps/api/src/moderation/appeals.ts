@@ -230,21 +230,25 @@ export async function decideAppeal(
         message: 'A modified action must be strictly less severe than the original',
       };
     }
-    // The modified action must apply to the ORIGINAL target type: a content
-    // action (hide/remove) only on content, an account sanction only on an
-    // account.  Otherwise `applyModifiedAction` would revert the original yet
-    // write no replacement state (e.g. an account sanction "modified" to `hide`
-    // on an account target) — a successful modification with NO enforcement.
-    const contentOnly = CONTENT_ACTIONS.has(modifiedAction);
-    const accountOnly = ACCOUNT_ACTIONS.has(modifiedAction);
+    // The modified action must stay within the ORIGINAL action's DOMAIN: an
+    // account sanction (ban/suspend/restrict/shadow) downgrades to another
+    // account action (or `warn`); a content action (hide/remove) downgrades to
+    // another content action (or `warn`).  Keyed on the original action KIND,
+    // not targetType — an account sanction issued from a CONTENT case carries
+    // `targetType: 'content'` (subject = the author), so a targetType check
+    // would wrongly reject a legitimate ban→restrict downgrade.  Crossing
+    // domains is rejected: `applyModifiedAction` would otherwise revert the
+    // original yet write no replacement state (a no-enforcement modification).
+    const origAccount = ACCOUNT_ACTIONS.has(original.action as ConsoleAction);
+    const origContent = CONTENT_ACTIONS.has(original.action as ConsoleAction);
     if (
-      (contentOnly && original.targetType !== 'content') ||
-      (accountOnly && original.targetType !== 'account')
+      (origAccount && CONTENT_ACTIONS.has(modifiedAction)) ||
+      (origContent && ACCOUNT_ACTIONS.has(modifiedAction))
     ) {
       return {
         ok: false,
         code: 'invalid_modification',
-        message: 'The modified action does not apply to the original target type',
+        message: "The modified action does not match the original action's domain",
       };
     }
   }
