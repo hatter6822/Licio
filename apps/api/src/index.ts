@@ -121,6 +121,7 @@ import {
 import {
   createProductionContentPort,
   createProductionEventPort,
+  createProductionInvariantPort,
   createProductionUserPort,
 } from './moderation/production-ports.js';
 import { createRelationshipReader } from './moderation/relations.js';
@@ -476,6 +477,26 @@ const moderationServices = createInMemoryModerationServices({
     persist: (event) => eventServices.eventStore.insertMany([event]),
     publish: (event) => eventServices.router.publish(event),
     log: (event, meta) => logger.info(meta, event),
+  }),
+  // WS-J.2.2c invariant decision-support: the review panel reads the REAL WS-H
+  // outputs (MFCI risk state, SCOI context state, PHI holonomy, Hodge tension).
+  // Read-only and never a verdict; a missing output shows "unavailable".
+  invariants: createProductionInvariantPort({
+    mfciRiskState: async (id) => {
+      const risk = await invariantServices.mfciRiskStates.get(id);
+      return risk ? { state: risk.state, score: risk.score, reason: risk.reason } : null;
+    },
+    latestOutput: async (invariantType, id) => {
+      const out = await eventServices.invariantStore.latest(invariantType, id);
+      return out
+        ? {
+            scoreVector: out.scoreVector,
+            explanationSummary: out.explanationSummary,
+            coverage: out.coverage,
+            reasonCodes: out.reasonCodes,
+          }
+        : null;
+    },
   }),
   alerts: {
     pageOnCall: (input) =>

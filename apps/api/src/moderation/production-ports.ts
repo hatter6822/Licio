@@ -11,19 +11,24 @@
 import { randomUUID } from 'node:crypto';
 import {
   EVENT_SCHEMA_VERSION,
+  type InvariantSignal,
+  type InvariantSignalsPanel,
   type ModerationCaseCreatedEvent,
   moderationCaseCreatedEventSchema,
   toEventTargetType,
 } from '@licio/shared';
 import type { ItemSafetyStateStore, NewStoredEvent } from '../events/stores.js';
-import type {
-  AccountActionState,
-  ContentVisibilityState,
-  ModerationContentPort,
-  ModerationEventPort,
-  ModerationUserPort,
-  ResolvedUser,
-  TargetResolution,
+import {
+  type AccountActionState,
+  type ContentVisibilityState,
+  type ModerationContentPort,
+  type ModerationEventPort,
+  type ModerationInvariantPort,
+  type ModerationUserPort,
+  type ResolvedUser,
+  SIGNALS_DISCLAIMER,
+  type TargetResolution,
+  UNAVAILABLE_SIGNAL,
 } from './ports.js';
 
 interface StorySlice {
@@ -182,6 +187,121 @@ export function createProductionEventPort(deps: EventPortDeps): ModerationEventP
       });
       await deps.publish(event);
       deps.log?.('moderation.case_event_emitted', { caseId: input.caseId, source: input.source });
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Invariant decision-support port (WS-J.2.2c) — reads the WS-H outputs.
+// ---------------------------------------------------------------------------
+
+/** A latest invariant output read (the fields the panel needs). */
+export interface InvariantOutputRead {
+  scoreVector: Record<string, unknown>;
+  explanationSummary: string | null;
+  coverage: number;
+  reasonCodes: readonly string[];
+}
+
+export interface InvariantPortDeps {
+  /** The durable MFCI risk state for a target (normal/elevated/high/severe). */
+  mfciRiskState(targetId: string): Promise<{ state: string; score: number; reason: string } | null>;
+  /** The latest invariant output of a type for a target (WS-H output store). */
+  latestOutput(invariantType: string, targetId: string): Promise<InvariantOutputRead | null>;
+}
+
+function clamp(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+/** A read of a string field from a score vector (the field is present + a string). */
+function stringField(vector: Record<string, unknown>, key: string): string | null {
+  const value = vector[key];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * Production invariant decision-support port: maps the WS-H outputs onto the
+ * four review-panel signals.  These INFORM review and never determine outcomes
+ * (the disclaimer is constant); a missing/degraded output is surfaced as an
+ * explicit "unavailable", never a misleading zero.  MFCI coordination DETAIL is
+ * role-gated (`coordinationDetail`): a community steward sees the state label
+ * only; an integrity analyst sees the conditioning reason + score.
+ */
+export function createProductionInvariantPort(deps: InvariantPortDeps): ModerationInvariantPort {
+  return {
+    async signalsFor(
+      targetType,
+      targetId,
+      subjectUserId,
+      coordinationDetail,
+    ): Promise<InvariantSignalsPanel> {
+      // MFCI: the target's risk state, falling back to the subject account's
+      // (an account-level coordination signal) when the target carries none.
+      const mfciSignal = async (): Promise<InvariantSignal> => {
+        const risk =
+          (await deps.mfciRiskState(targetId)) ??
+          (subjectUserId !== null ? await deps.mfciRiskState(subjectUserId) : null);
+        if (risk === null) return { ...UNAVAILABLE_SIGNAL };
+        return {
+          available: true,
+          state: clamp(risk.state, 40),
+          detail: coordinationDetail
+            ? clamp(`${risk.reason} (score ${risk.score.toFixed(3)})`, 500)
+            : null,
+        };
+      };
+
+      // SCOI and Hodge are content-conversation invariants — definitionally
+      // unavailable for an account/room target (no conversation to read).
+      const contentTarget = targetType === 'content';
+
+      // SCOI: the interpretation-context state (neutral/contested/weaponized).
+      const scoiSignal = async (): Promise<InvariantSignal> => {
+        if (!contentTarget) return { ...UNAVAILABLE_SIGNAL };
+        const out = await deps.latestOutput('SCOI', targetId);
+        const state = out === null ? null : stringField(out.scoreVector, 'context_state');
+        if (out === null || state === null) return { ...UNAVAILABLE_SIGNAL };
+        return {
+          available: true,
+          state: clamp(state, 40),
+          detail: out.explanationSummary === null ? null : clamp(out.explanationSummary, 500),
+        };
+      };
+
+      // PHI: the subject's preference-frame holonomy (personalization narrowing).
+      const phiSignal = async (): Promise<InvariantSignal> => {
+        const id = subjectUserId ?? targetId;
+        const out = await deps.latestOutput('PHI', id);
+        const phi = out?.scoreVector['phi'];
+        if (out === null || typeof phi !== 'number') return { ...UNAVAILABLE_SIGNAL };
+        return {
+          available: true,
+          state: phi >= 0.5 ? 'personalization-narrowing' : 'stable',
+          detail: out.explanationSummary === null ? null : clamp(out.explanationSummary, 500),
+        };
+      };
+
+      // Hodge: the conversation's harmful-tension label (structural conflict).
+      const hodgeSignal = async (): Promise<InvariantSignal> => {
+        if (!contentTarget) return { ...UNAVAILABLE_SIGNAL };
+        const out = await deps.latestOutput('hodge_tension', targetId);
+        const label = out === null ? null : stringField(out.scoreVector, 'label');
+        if (out === null || label === null) return { ...UNAVAILABLE_SIGNAL };
+        return {
+          available: true,
+          state: clamp(label, 40),
+          detail: out.explanationSummary === null ? null : clamp(out.explanationSummary, 500),
+        };
+      };
+
+      const [mfci, scoi, phi, hodge] = await Promise.all([
+        mfciSignal(),
+        scoiSignal(),
+        phiSignal(),
+        hodgeSignal(),
+      ]);
+      return { mfci, scoi, phi, hodge, disclaimer: SIGNALS_DISCLAIMER };
     },
   };
 }

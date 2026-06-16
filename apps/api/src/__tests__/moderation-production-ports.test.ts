@@ -11,7 +11,9 @@ import {
   type ContentPortDeps,
   createProductionContentPort,
   createProductionEventPort,
+  createProductionInvariantPort,
   createProductionUserPort,
+  type InvariantOutputRead,
 } from '../moderation/production-ports.js';
 
 const STORY = '00000000-0000-4000-8000-00000000000a';
@@ -144,6 +146,69 @@ describe('production event port', () => {
     expect(published[0]?.target_type).toBe('user');
     expect(published[0]?.reporter_id).toBeNull();
     expect(published[0]?.source).toBe('automated');
+  });
+});
+
+describe('production invariant port (WS-J.2.2c)', () => {
+  const TARGET = '00000000-0000-4000-8000-00000000000a';
+  const SUBJECT = '00000000-0000-4000-8000-00000000000c';
+
+  function output(
+    scoreVector: Record<string, unknown>,
+    summary: string | null,
+  ): InvariantOutputRead {
+    return { scoreVector, explanationSummary: summary, coverage: 1, reasonCodes: [] };
+  }
+
+  it('maps WS-H outputs onto the four signals; MFCI detail is role-gated', async () => {
+    const port = createProductionInvariantPort({
+      mfciRiskState: async (id) =>
+        id === TARGET ? { state: 'elevated', score: 0.91, reason: 'fiber p<0.01' } : null,
+      latestOutput: async (type, id) => {
+        if (type === 'SCOI' && id === TARGET)
+          return output({ context_state: 'weaponized' }, 'Interpretations diverge sharply.');
+        if (type === 'hodge_tension' && id === TARGET)
+          return output(
+            { label: 'structural-conflict', harmful_tension_risk: 0.4 },
+            'Flow conflict.',
+          );
+        if (type === 'PHI' && id === SUBJECT) return output({ phi: 0.7 }, 'Frame rotated.');
+        return null;
+      },
+    });
+    // Community steward: state only, no coordination detail.
+    const steward = await port.signalsFor('content', TARGET, SUBJECT, false);
+    expect(steward.mfci).toEqual({ available: true, state: 'elevated', detail: null });
+    expect(steward.scoi.state).toBe('weaponized');
+    expect(steward.hodge.state).toBe('structural-conflict');
+    expect(steward.phi.state).toBe('personalization-narrowing');
+    expect(steward.disclaimer).toContain('do not determine outcomes');
+    // Integrity analyst: MFCI detail present.
+    const analyst = await port.signalsFor('content', TARGET, SUBJECT, true);
+    expect(analyst.mfci.detail).toContain('fiber p<0.01');
+    expect(analyst.mfci.detail).toContain('0.910');
+  });
+
+  it('surfaces "unavailable" (not zero) when an output is missing or degraded', async () => {
+    const port = createProductionInvariantPort({
+      mfciRiskState: async () => null,
+      latestOutput: async () => null,
+    });
+    const panel = await port.signalsFor('account', SUBJECT, SUBJECT, true);
+    expect(panel.mfci.available).toBe(false);
+    expect(panel.scoi).toEqual({ available: false, state: null, detail: null });
+    expect(panel.phi.available).toBe(false);
+    expect(panel.hodge.available).toBe(false);
+  });
+
+  it('falls back to the subject account for MFCI when the target carries none', async () => {
+    const port = createProductionInvariantPort({
+      mfciRiskState: async (id) =>
+        id === SUBJECT ? { state: 'high', score: 0.97, reason: 'account-level' } : null,
+      latestOutput: async () => null,
+    });
+    const panel = await port.signalsFor('content', TARGET, SUBJECT, false);
+    expect(panel.mfci).toEqual({ available: true, state: 'high', detail: null });
   });
 });
 
