@@ -48,7 +48,7 @@ pay-to-rank — is enforced by the type system, runtime guards, and CI gates.
 | Node.js | `22` (pinned in [`.nvmrc`](.nvmrc)) |
 | pnpm | `9.15.4` via Corepack (pinned in `package.json`) |
 | Language | TypeScript `6.0.3`, strict everywhere (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) |
-| Milestone | WS-0 – WS-I and **WS-Q (content–room ownership/visibility) complete** — rooms own content, binary room visibility + join/posting axes, public/`room_only` content with private-room forcing, native image/video posts, always-on two-tier containment, the full client surface (story composer, media rendering, room shell/feed/create, author visibility control), and a gated migration-validation harness; WS-J (trust and safety) next |
+| Milestone | WS-0 – WS-I and **WS-Q (content–room ownership/visibility) complete** — rooms own content, binary room visibility + join/posting axes, public/`room_only` content with private-room forcing, native image/video posts, always-on two-tier containment, the full client surface (story composer, media rendering, room shell/feed/create, author visibility control), and a gated migration-validation harness; **WS-J (trust, safety, and abuse operations) core complete** — reports/blocks/mutes/appeals, the role-gated steward moderation console (queue, full-context review, action palette, appeals, append-only audit + transparency export), the automated pre-check math, and base-rate-conditioned coordinated-report detection (integration residuals tracked in `docs/planning/11`) |
 | Test gate | 80% cross-workspace coverage (lines, functions, branches, statements) |
 | Bundle budgets | initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz (CI-enforced) |
 
@@ -261,7 +261,7 @@ licenses are checked for AGPL compatibility at SBOM time (`pnpm sbom`).
 - **Specification:** [`docs/SPEC.md`](docs/SPEC.md) — the canonical design spec (v0.7).
 - **Implementation plan:** [`docs/planning/00-index.md`](docs/planning/00-index.md) — 20 workstreams (WS-0 – WS-S; WS-R/WS-S are post-M3 offline/private extensions), ~858 atomic tasks.
 - **Extension specs (post-M3):** [`docs/OFFLINE_SPEC.md`](docs/OFFLINE_SPEC.md) (LCAP v0.2 offline content availability — WS-R) and [`docs/PRIVATE_SPEC.md`](docs/PRIVATE_SPEC.md) (E2EE private P2P rooms — WS-S).
-- **Completed-workstream references:** [`docs/design-system/`](docs/design-system/README.md), [`docs/pwa-client/`](docs/pwa-client/README.md), [`docs/identity/`](docs/identity/README.md), [`docs/events/`](docs/events/README.md), [`docs/ingestion/`](docs/ingestion/README.md), [`docs/forum/`](docs/forum/README.md), [`docs/invariants/`](docs/invariants/README.md), [`docs/ranking/`](docs/ranking/README.md), and the policy corpus under [`docs/policy/`](docs/policy/).
+- **Completed-workstream references:** [`docs/design-system/`](docs/design-system/README.md), [`docs/pwa-client/`](docs/pwa-client/README.md), [`docs/identity/`](docs/identity/README.md), [`docs/events/`](docs/events/README.md), [`docs/ingestion/`](docs/ingestion/README.md), [`docs/forum/`](docs/forum/README.md), [`docs/invariants/`](docs/invariants/README.md), [`docs/ranking/`](docs/ranking/README.md), [`docs/trust-safety/`](docs/trust-safety/README.md), and the policy corpus under [`docs/policy/`](docs/policy/).
 - **Conventions:** [`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md) (kept byte-identical).
 
 ## Security
