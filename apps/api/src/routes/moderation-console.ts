@@ -324,7 +324,10 @@ export function createModerationConsoleRoutes() {
           // dismiss → clear; remove → remove (each individually authorized + audited).
           const verb: ConsoleAction = action === 'dismiss' ? 'clear' : 'remove';
           const outcome = await applyAction(mod, actor, {
-            target_type: theCase.targetType === 'account' ? 'account' : 'content',
+            // Pass the case's real target type (content/account/room) — a room
+            // case bulk-dismisses via `clear`; an enforcement verb on it is
+            // rejected by applyAction (reported as that item's error).
+            target_type: theCase.targetType,
             target_id: theCase.targetId,
             action: verb,
             reason_code,

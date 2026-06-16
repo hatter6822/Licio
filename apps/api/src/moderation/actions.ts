@@ -135,6 +135,18 @@ export async function applyAction(
     };
   }
 
+  // A room case is actionable for WORKFLOW only (escalate/clear).  Room-level
+  // enforcement is not implemented, so an enforcement verb on a room would
+  // record + resolve the case with NO effect — reject it instead (room-steward
+  // enforcement is a tracked WS-J residual).
+  if (request.target_type === 'room' && enforcementType(request.action) !== null) {
+    return {
+      ok: false,
+      code: 'invalid_action_for_target',
+      message: 'Only escalate or clear can be applied to a room case',
+    };
+  }
+
   const enfType = enforcementType(request.action);
   // Workflow-only actions (escalate/clear) change no content/account state, so
   // the reversal-integrity path has nothing to restore — a `/actions/:id/revert`

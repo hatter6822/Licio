@@ -706,6 +706,43 @@ describe('action palette + revert', () => {
     expect((await services.cases.getById(otherCase.caseId))?.status).toBe('new');
   });
 
+  it('a room case is clearable/escalatable but rejects enforcement verbs', async () => {
+    const ROOM = '00000000-0000-4000-9000-0000000000ff';
+    const roomCase = await services.cases.insert({
+      caseId: '00000000-0000-4000-9000-0000000000fe',
+      targetType: 'room',
+      targetId: ROOM,
+      contentKind: null,
+      status: 'new',
+      severity: 'moderate',
+      routedTo: 'standard',
+      assignedTo: null,
+      reportCount: 1,
+      enforcementDelayed: false,
+      resolvedActionId: null,
+      slaDueAt: new Date(services.now() + 1000).toISOString(),
+    });
+    // clear (workflow) resolves the room case.
+    const cleared = await applyAction(services, safetyActor(), {
+      target_type: 'room',
+      target_id: ROOM,
+      action: 'clear',
+      reason_code: 'MOD_HARASS_001',
+      case_id: roomCase.caseId,
+    });
+    expect(cleared.ok).toBe(true);
+    expect((await services.cases.getById(roomCase.caseId))?.status).toBe('resolved');
+    // An account/content enforcement verb on a room is rejected (no effect).
+    const suspend = await applyAction(services, safetyActor(), {
+      target_type: 'room',
+      target_id: ROOM,
+      action: 'suspend',
+      reason_code: 'MOD_HARASS_001',
+    });
+    expect(suspend.ok).toBe(false);
+    expect(!suspend.ok && suspend.code).toBe('invalid_action_for_target');
+  });
+
   it('parseDurationDays handles d/h and rejects garbage', () => {
     expect(parseDurationDays('7d')).toBe(7);
     expect(parseDurationDays('48h')).toBe(2);

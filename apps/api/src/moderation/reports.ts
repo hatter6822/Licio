@@ -187,6 +187,7 @@ export async function submitReport(
   //    rejects the loser — re-read and return the original (offline-replay safe),
   //    never a 500.
   let report: ModerationReportRecord;
+  let idempotent = false;
   try {
     report = await services.reports.insert({
       caseId: theCase.caseId,
@@ -205,11 +206,15 @@ export async function submitReport(
       reporterUserId,
       request.local_operation_id,
     );
-    if (dupOp) {
-      services.metrics.increment('reports.idempotent_op');
-      return { ok: true, response: toResponse(dupOp, true) };
-    }
-    throw error;
+    if (!dupOp) throw error;
+    // The op-id duplicate lost the insert race.  Do NOT return early: if THIS
+    // request created the case (newCase), it is the one responsible for the
+    // durable `moderation.case.created` intake event + auto-assignment below —
+    // returning here would leave the case it opened with no intake signal (the
+    // winning report joined the case with newCase=false and never emits it).
+    services.metrics.increment('reports.idempotent_op');
+    report = dupOp;
+    idempotent = true;
   }
 
   // 6. RECOMPUTE the case aggregate from its committed reports (race-safe): every
@@ -286,7 +291,7 @@ export async function submitReport(
   // 9. Coordinated-report detection (base-rate conditioned; MFCI-1/2).
   services.trackBackground(detectCoordination(services, theCase));
 
-  return { ok: true, response: toResponse(report, false) };
+  return { ok: true, response: toResponse(report, idempotent) };
 }
 
 /**

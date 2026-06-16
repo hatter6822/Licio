@@ -241,7 +241,10 @@ export type CaseReviewResponse = z.infer<typeof caseReviewResponseSchema>;
 
 export const moderationActionRequestSchema = z
   .object({
-    target_type: z.enum(['content', 'account']),
+    // `room` is accepted so a reviewer can clear/escalate a room report case
+    // (POST /v1/reports accepts room targets); enforcement verbs on a room are
+    // rejected server-side until room-level enforcement ships (WS-J residual).
+    target_type: z.enum(['content', 'account', 'room']),
     target_id: uuidSchema,
     action: consoleActionSchema,
     reason_code: contributionReasonCodeSchema,
