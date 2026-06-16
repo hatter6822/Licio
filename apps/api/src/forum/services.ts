@@ -45,6 +45,18 @@ export class ForumMetrics {
   }
 }
 
+/**
+ * The WS-J block/mute enforcement seam (a narrow structural port; the
+ * moderation `RelationshipReader` is assigned here at boot).  Default `null`
+ * means no relationships are enforced — forum stays usable standalone.
+ */
+export interface ViewerRelationshipReader {
+  /** The viewer's hide sets (blocked ∪ muted) for content filtering. */
+  setsFor(userId: string): Promise<{ blocked: Set<string>; muted: Set<string> }>;
+  /** True when actor↔target are blocked (either direction) — interaction reject. */
+  interactionBlocked(actorUserId: string, targetUserId: string): Promise<boolean>;
+}
+
 export interface ForumServices {
   contributions: ContributionStore;
   rooms: RoomStore;
@@ -55,6 +67,8 @@ export interface ForumServices {
   safety: ContributionSafetyClassifier;
   /** WS-J.2.6b seam: the post-local-checks upload scanner. */
   uploadScanner: UploadScanner;
+  /** WS-J.1.2 enforcement seam (assigned at boot; null = not enforced). */
+  relationshipReader: ViewerRelationshipReader | null;
   metrics: ForumMetrics;
   config: () => ForumRuntimeConfig;
   reloadConfig: () => Promise<ForumRuntimeConfig>;
@@ -73,6 +87,7 @@ export interface InMemoryForumOptions {
   config?: Partial<ForumRuntimeConfig>;
   safety?: ContributionSafetyClassifier;
   uploadScanner?: UploadScanner;
+  relationshipReader?: ViewerRelationshipReader;
   limiterStore?: SlidingWindowStore;
   log?: (event: string, meta: Record<string, unknown>) => void;
   now?: () => number;
@@ -113,6 +128,7 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
         ? new HeuristicContributionSafety(ingestion.urlSafety)
         : { classify: async () => ({ flagged: false, reasons: [] }) }),
     uploadScanner: options.uploadScanner ?? new LocalChecksUploadScanner(),
+    relationshipReader: options.relationshipReader ?? null,
     metrics,
     config: () => config,
     reloadConfig: async () => config,

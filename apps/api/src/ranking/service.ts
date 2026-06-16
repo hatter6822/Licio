@@ -591,6 +591,34 @@ export async function serveFeed(
   surfacePool = visibilityGate.filtered;
   const visibilityExcludedCount = visibilityGate.excludedCount;
 
+  // WS-J.1.2 — bilateral block + one-directional mute hide content FROM THE
+  // VIEWER on the distribution side (the per-viewer complement to the global,
+  // item-level safety filter).  Wired via the forum relationship-reader seam;
+  // null reader (forum standalone) is a no-op.
+  if (
+    request.userId !== null &&
+    services.forum.relationshipReader !== null &&
+    surfacePool.length > 0
+  ) {
+    const sets = await services.forum.relationshipReader.setsFor(request.userId);
+    const hide = new Set<string>(sets.blocked);
+    for (const id of sets.muted) hide.add(id);
+    if (hide.size > 0) {
+      const stories = await services.ingestion.stories.getByIds(surfacePool.map((c) => c.item_id));
+      const before = surfacePool.length;
+      surfacePool = surfacePool.filter((c) => {
+        const author = stories.get(c.item_id)?.submittedBy ?? null;
+        return author === null || !hide.has(author);
+      });
+      if (before !== surfacePool.length) {
+        services.log('ranking.relationship_filter.applied', {
+          request_id: requestId,
+          excluded_count: before - surfacePool.length,
+        });
+      }
+    }
+  }
+
   // Seen-aware pagination: items the cursor's page chain already served
   // leave the pool BEFORE profile selection and the safety filter, so the
   // next page is a fresh, fully-pipelined ranking over the remainder.

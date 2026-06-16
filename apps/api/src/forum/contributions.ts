@@ -107,6 +107,7 @@ export const FORUM_TO_EVENT_TYPE: Readonly<Record<ContributionType, EventContrib
 export type ContributionRejection =
   | { status: 404; code: 'not_found'; message: string }
   | { status: 403; code: 'thread_restricted'; message: string }
+  | { status: 403; code: 'interaction_blocked'; message: string }
   | { status: 409; code: 'thread_archived'; message: string }
   | { status: 422; code: string; message: string }
   | { status: 429; code: 'rate_limited'; message: string; retryAfterSec: number };
@@ -285,6 +286,19 @@ export async function createContribution(
     const parent = await forum.contributions.getById(request.parent_contribution_id);
     if (!parent || parent.threadId !== request.thread_id) {
       return invalid('invalid_parent', 'The parent contribution must belong to the same thread.');
+    }
+    // WS-J.1.2a — a blocked user cannot reply to the blocker (bilateral,
+    // server-side authorization; the block relationship is never disclosed).
+    if (
+      parent.userId !== null &&
+      forum.relationshipReader !== null &&
+      (await forum.relationshipReader.interactionBlocked(userId, parent.userId))
+    ) {
+      return reject({
+        status: 403,
+        code: 'interaction_blocked',
+        message: 'You cannot reply to this contribution.',
+      });
     }
     if (parent.path.length + 1 > MAX_CONTRIBUTION_DEPTH) {
       return invalid('max_depth_exceeded', 'Maximum thread depth exceeded.');

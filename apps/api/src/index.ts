@@ -117,6 +117,7 @@ import {
   createProductionContentPort,
   createProductionUserPort,
 } from './moderation/production-ports.js';
+import { createRelationshipReader } from './moderation/relations.js';
 import {
   MODERATION_SCHEDULER_INTERVAL_MS,
   startModerationScheduler,
@@ -473,6 +474,9 @@ if (db) {
 }
 await moderationServices.reloadConfig();
 setModerationServices(moderationServices);
+// WS-J.1.2 enforcement seam: forum interaction-rejection + thread/feed viewing
+// filters read this (ranking reads it via `services.forum`).  One wiring point.
+forumServices.relationshipReader = createRelationshipReader(moderationServices);
 
 // Development demo seed (NEVER in production): populate rooms, stories, threads,
 // and multi-author comments through the REAL stores so a fresh dev database
