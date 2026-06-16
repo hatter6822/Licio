@@ -23,7 +23,9 @@ import {
   fetchAppealQueue,
   fetchAudit,
   fetchCase,
+  fetchIncidents,
   fetchReportQueue,
+  resolveIncident,
 } from '../../lib/safety-api.js';
 import { REPORT_REASONS_BY_CODE } from '../safety/report-reasons.js';
 import { Button } from '../ui/Button/index.js';
@@ -59,6 +61,7 @@ export function ModerationConsole(): React.ReactElement {
         tabs={[
           { id: 'queue', label: t('console.queue', 'Report queue') },
           { id: 'appeals', label: t('console.appeals', 'Appeals') },
+          { id: 'integrity', label: t('console.integrity', 'Integrity') },
           { id: 'audit', label: t('console.audit', 'Audit log') },
         ]}
       >
@@ -66,6 +69,7 @@ export function ModerationConsole(): React.ReactElement {
           <>
             {activeId === 'queue' ? <ReportQueuePanel /> : null}
             {activeId === 'appeals' ? <AppealsPanel /> : null}
+            {activeId === 'integrity' ? <IncidentsPanel /> : null}
             {activeId === 'audit' ? <AuditPanel /> : null}
           </>
         )}
@@ -343,6 +347,89 @@ function AppealsPanel(): React.ReactElement {
                 onClick={() => decide.mutate({ appealId: a.appeal_id, decision: 'uphold' })}
               >
                 {t('console.uphold', 'Uphold')}
+              </Button>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** WS-J.2.6e integrity queue: ROLE_INTEGRITY analysts clear (reports legitimate)
+ *  or confirm (a coordinated false-report attack) a coordinated-report incident.
+ *  Clearing lifts the case's enforcement delay; confirming dismisses the case
+ *  (the target is protected).  Per-reporter identity never appears — the summary
+ *  is aggregate, base-rate-conditioned. */
+function IncidentsPanel(): React.ReactElement {
+  const t = useT();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const incidents = useQuery({
+    queryKey: queryKeys.modIncidents(),
+    queryFn: fetchIncidents,
+    retry: false,
+  });
+  const resolve = useMutation({
+    mutationFn: (input: { incidentId: string; resolution: 'cleared' | 'confirmed' }) =>
+      resolveIncident(input.incidentId, input.resolution),
+    onSuccess: () => {
+      toast({ message: t('console.incidentResolved', 'Incident resolved.'), tone: 'success' });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.modIncidents() });
+    },
+    onError: () =>
+      toast({
+        message: t('console.incidentFailed', 'Could not resolve that incident.'),
+        tone: 'error',
+      }),
+  });
+  if (incidents.isError) return <AccessNotice />;
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-xs text-ink-muted">
+        {t(
+          'console.integrityHelp',
+          'Coordinated-report incidents delay volume-driven enforcement pending review. Clear (reports legitimate) to resume enforcement, or confirm (a coordinated attack) to dismiss the case.',
+        )}
+      </p>
+      {incidents.data && incidents.data.incidents.length === 0 ? (
+        <p className="text-ink-muted">
+          {t('console.incidentsEmpty', 'No coordinated-report incidents are open.')}
+        </p>
+      ) : null}
+      <ul className="flex flex-col gap-2">
+        {incidents.data?.incidents.map((inc) => (
+          <li
+            key={inc.incident_id}
+            className="flex items-start justify-between gap-3 rounded-md border border-line bg-canvas p-3"
+          >
+            <span className="flex flex-col text-sm">
+              <span className="font-medium text-ink">
+                {inc.report_count} {t('console.reportsIn', 'reports in')}{' '}
+                {Math.round(inc.window_seconds / 60)}m · {inc.severity}
+              </span>
+              <span className="text-xs text-ink-muted">{inc.summary}</span>
+              <span className="text-xs text-ink-muted">
+                {t('console.coordinationScore', 'Coordination score')}:{' '}
+                {inc.coordination_score.toFixed(2)}
+              </span>
+            </span>
+            <span className="flex shrink-0 gap-2">
+              <Button
+                variant="secondary"
+                onClick={() =>
+                  resolve.mutate({ incidentId: inc.incident_id, resolution: 'cleared' })
+                }
+              >
+                {t('console.clearIncident', 'Clear')}
+              </Button>
+              <Button
+                variant="primary"
+                onClick={() =>
+                  resolve.mutate({ incidentId: inc.incident_id, resolution: 'confirmed' })
+                }
+              >
+                {t('console.confirmIncident', 'Confirm')}
               </Button>
             </span>
           </li>

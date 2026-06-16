@@ -30,6 +30,10 @@ import {
   type CreateAppealRequest,
   type CreateReportRequest,
   caseReviewResponseSchema,
+  type IncidentQueueResponse,
+  type IncidentResolveResponse,
+  incidentQueueResponseSchema,
+  incidentResolveResponseSchema,
   type ModerationActionResponse,
   type ModerationNoticeListResponse,
   type ModerationReasonCode,
@@ -228,4 +232,23 @@ export async function fetchAudit(query: {
 export async function exportAudit(): Promise<AuditExportResponse> {
   const response = await client.v1.moderation.audit.export.$get({ query: {} });
   return parseResponse(response, auditExportResponseSchema);
+}
+
+// --- Coordinated-report incidents (WS-J.2.6e, ROLE_INTEGRITY) ----------------
+
+export async function fetchIncidents(): Promise<IncidentQueueResponse> {
+  const response = await client.v1.moderation.incidents.$get();
+  return parseResponse(response, incidentQueueResponseSchema);
+}
+
+export async function resolveIncident(
+  incidentId: string,
+  resolution: 'cleared' | 'confirmed',
+  note?: string,
+): Promise<IncidentResolveResponse> {
+  const response = await client.v1.moderation.incidents[':incidentId'].resolve.$post({
+    param: { incidentId },
+    json: { resolution, ...(note ? { note } : {}) },
+  });
+  return parseResponse(response, incidentResolveResponseSchema);
 }

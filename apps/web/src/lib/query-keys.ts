@@ -40,4 +40,5 @@ export const queryKeys = {
   modAppeals: () => ['mod-appeals'] as const,
   modAppeal: (appealId: string) => ['mod-appeal', appealId] as const,
   modAudit: (filterKey: string) => ['mod-audit', filterKey] as const,
+  modIncidents: () => ['mod-incidents'] as const,
 } as const;
