@@ -13,6 +13,7 @@ import {
   type ConsoleAction,
   type CreateAppealRequest,
   type EnforcementActionType,
+  isDeEscalation,
   type ModerationReasonCode,
 } from '@licio/shared';
 import {
@@ -25,7 +26,7 @@ import {
 } from './actions.js';
 import { assignAppealReviewer } from './assignment.js';
 import { writeAudit } from './audit.js';
-import type { StewardActor } from './authz.js';
+import { isSenior, type StewardActor } from './authz.js';
 import { createAppealOutcomeNotice } from './notices.js';
 import type { ModerationServices } from './services.js';
 import type { ModerationActionRecord } from './stores.js';
@@ -161,6 +162,7 @@ export type DecideAppealOutcome =
         | 'already_decided'
         | 'independence_violation'
         | 'insufficient_capability'
+        | 'invalid_modification'
         | 'mfa_required';
       message: string;
     };
@@ -190,6 +192,28 @@ export async function decideAppeal(
   // Independence: the original decision-maker can NEVER act on the appeal.
   if (original.actorUserId !== null && original.actorUserId === actor.userId) {
     return { ok: false, code: 'independence_violation', message: 'Independent reviewer required' };
+  }
+  // A permanent-ban appeal is a senior-only decision (STEWARD_ROLES.md /
+  // WS-A.1.2c: ban appeals are "ROLE_APPEALS (senior)"); the platform admin
+  // carries the senior grant.  A non-senior appeals reviewer cannot decide it.
+  if ((appeal.isBanAppeal || original.action === 'ban') && !isSenior(actor.platformRoles)) {
+    return {
+      ok: false,
+      code: 'insufficient_capability',
+      message: 'A ban appeal requires a senior appeals reviewer',
+    };
+  }
+  // A `modify` may only DE-ESCALATE (WS-J.2.4a): the new action must be strictly
+  // less severe than the original, so an appeal can never become a HARSHER
+  // sanction (e.g. a warn/hide appeal modified into ban/suspend — escalation).
+  if (decision === 'modify') {
+    if (modifiedAction === undefined || !isDeEscalation(original.action, modifiedAction)) {
+      return {
+        ok: false,
+        code: 'invalid_modification',
+        message: 'A modified action must be strictly less severe than the original',
+      };
+    }
   }
 
   const status =

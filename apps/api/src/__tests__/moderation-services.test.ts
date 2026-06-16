@@ -668,9 +668,10 @@ describe('appeals (independence enforced)', () => {
     expect(sub.ok).toBe(true);
     const appeal = await services.appeals.getByActionId(out.response.action_id);
     if (!appeal) throw new Error('appeal not created');
+    // A ban appeal is senior-only (#5) — an independent senior appeals reviewer.
     const decision = await decideAppeal(
       services,
-      appealsActor(),
+      { ...appealsActor(), platformRoles: ['admin' as const] },
       appeal.appealId,
       'overturn',
       'MOD_HARASS_001',
@@ -710,9 +711,10 @@ describe('appeals (independence enforced)', () => {
     expect(sub.ok).toBe(true);
     const appeal = await services.appeals.getByActionId(out.response.action_id);
     if (!appeal) throw new Error('appeal not created');
+    // A ban appeal is senior-only (#5) — an independent senior appeals reviewer.
     const decision = await decideAppeal(
       services,
-      appealsActor(),
+      { ...appealsActor(), platformRoles: ['admin' as const] },
       appeal.appealId,
       'modify',
       'MOD_HARASS_001',
@@ -811,6 +813,150 @@ describe('appeals (independence enforced)', () => {
     expect(elig?.appealable).toBe(false);
     expect(elig?.ineligible_reason).toBe('ban_cooldown');
     expect(elig?.available_at).not.toBeNull();
+  });
+});
+
+describe('Codex review fixes (service level)', () => {
+  async function applyHide(reviewer = '00000000-0000-4000-8000-0000000000d1'): Promise<string> {
+    const out = await applyAction(services, safetyActor(reviewer), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'hide',
+      reason_code: 'MOD_HARASS_001',
+    });
+    if (!out.ok) throw new Error('hide failed');
+    return out.response.action_id;
+  }
+
+  it('#1 a `modify` must DE-ESCALATE — modifying a hide into a ban is rejected', async () => {
+    const actionId = await applyHide();
+    await submitAppeal(services, AUTHOR, { action_id: actionId, user_statement: 's' });
+    const appeal = await services.appeals.getByActionId(actionId);
+    if (!appeal) throw new Error('no appeal');
+    const escalate = await decideAppeal(
+      services,
+      appealsActor(),
+      appeal.appealId,
+      'modify',
+      'MOD_HARASS_001',
+      'trying to escalate',
+      'ban', // MORE severe than hide
+    );
+    expect(escalate.ok).toBe(false);
+    expect(!escalate.ok && escalate.code).toBe('invalid_modification');
+    // The original hide is untouched (no escalation occurred).
+    expect((await services.actions.getById(actionId))?.reverted).toBe(false);
+  });
+
+  it('#5 a ban appeal can only be decided by a SENIOR appeals reviewer', async () => {
+    services = createInMemoryModerationServices({
+      content: recordingContentPort(),
+      users: userPort({ [AUTHOR]: 100 }),
+      config: { banAppealCooldownHours: 0 },
+    });
+    const banner = { ...safetyActor(), platformRoles: ['admin' as const] };
+    const out = await applyAction(services, banner, {
+      target_type: 'account',
+      target_id: AUTHOR,
+      action: 'ban',
+      reason_code: 'MOD_HARASS_002',
+    });
+    if (!out.ok) throw new Error('ban failed');
+    await submitAppeal(services, AUTHOR, {
+      action_id: out.response.action_id,
+      user_statement: 's',
+    });
+    const appeal = await services.appeals.getByActionId(out.response.action_id);
+    if (!appeal) throw new Error('no appeal');
+    // A non-senior ROLE_APPEALS reviewer (platform `steward`, not `admin`).
+    const nonSenior = appealsActor();
+    const denied = await decideAppeal(
+      services,
+      nonSenior,
+      appeal.appealId,
+      'uphold',
+      'MOD_HARASS_001',
+      'x',
+      undefined,
+    );
+    expect(denied.ok).toBe(false);
+    expect(!denied.ok && denied.code).toBe('insufficient_capability');
+    // A senior (platform admin, independent of the banner) may decide it.
+    const senior = {
+      ...appealsActor('00000000-0000-4000-8000-0000000000e9'),
+      platformRoles: ['admin' as const],
+    };
+    const ok = await decideAppeal(
+      services,
+      senior,
+      appeal.appealId,
+      'uphold',
+      'MOD_HARASS_001',
+      'stands',
+      undefined,
+    );
+    expect(ok.ok).toBe(true);
+  });
+
+  it('#4 a fresh ban is NOT appealable yet (cooldown) — the notice must not invite an appeal', async () => {
+    const banner = { ...safetyActor(), platformRoles: ['admin' as const] };
+    const out = await applyAction(services, banner, {
+      target_type: 'account',
+      target_id: AUTHOR,
+      action: 'ban',
+      reason_code: 'MOD_HARASS_002',
+    });
+    expect(out.ok && out.response.appealable).toBe(false); // cooldown not elapsed
+    const notices = await listNotices(services, AUTHOR, null, 5);
+    const banNotice = notices.notices.find((n) => n.kind === 'action');
+    expect(banNotice?.appealable).toBe(false);
+    expect(banNotice?.body).toMatch(/after 24 hours/i); // the deferred-appeal note
+  });
+
+  it('#2 a content action on an account target is rejected (no silent no-op)', async () => {
+    const out = await applyAction(services, safetyActor(), {
+      target_type: 'account',
+      target_id: AUTHOR,
+      action: 'hide',
+      reason_code: 'MOD_HARASS_001',
+    });
+    expect(out.ok).toBe(false);
+    expect(!out.ok && out.code).toBe('invalid_action_for_target');
+  });
+
+  it('#8 a concurrent open-case race joins the winning case instead of throwing', async () => {
+    const winner = await services.cases.insert({
+      caseId: '00000000-0000-4000-9000-00000000ff01',
+      targetType: 'content',
+      targetId: TARGET,
+      contentKind: 'contribution',
+      status: 'new',
+      severity: 'moderate',
+      routedTo: 'standard',
+      assignedTo: null,
+      reportCount: 0,
+      enforcementDelayed: false,
+      resolvedActionId: null,
+      slaDueAt: new Date(services.now() + 3_600_000).toISOString(),
+    });
+    const realFind = services.cases.findOpenByTarget.bind(services.cases);
+    let firstFind = true;
+    services.cases.findOpenByTarget = async (tt, tid) => {
+      if (firstFind) {
+        firstFind = false;
+        return null; // the race window: the winner is not visible yet
+      }
+      return realFind(tt, tid);
+    };
+    services.cases.insert = async () => {
+      throw new Error(
+        'duplicate key value violates unique constraint moderation_cases_open_target_uq',
+      );
+    };
+    const r = await submitReport(services, REPORTER, report());
+    expect(r.ok).toBe(true);
+    // The report joined the winner, not a phantom new case.
+    expect((await services.reports.listByCase(winner.caseId)).length).toBe(1);
   });
 });
 

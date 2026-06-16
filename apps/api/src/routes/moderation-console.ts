@@ -198,6 +198,9 @@ export function createModerationConsoleRoutes() {
           if (outcome.code === 'mfa_required') {
             return c.json(deny('mfa_required', outcome.message), 403);
           }
+          if (outcome.code === 'invalid_action_for_target') {
+            return c.json(deny('invalid_action_for_target', outcome.message), 400);
+          }
           return c.json(
             {
               error: {
@@ -233,11 +236,29 @@ export function createModerationConsoleRoutes() {
       // --- Bulk actions (WS-J.2.1c) — per-item, reversible ----------------
       .post('/bulk', zValidator('json', bulkActionRequestSchema), async (c) => {
         const actor = mustActor(c);
+        // Bulk operates on the report queue — gate it like the single-case routes
+        // (a steward outside the report queue cannot bulk-assign/dismiss/remove).
+        const queueDenial = denyQueue(actor, 'report-queue');
+        if (queueDenial) return c.json(deny(queueDenial.code, queueDenial.message), DENIAL_STATUS);
         const { case_ids, action, reason_code, reviewer_id } = c.req.valid('json');
         const mod = getModerationServices();
         const max = mod.config().bulkActionMax;
         if (case_ids.length > max) {
           return c.json(deny('bulk_too_large', `Maximum ${max} items per bulk action`), 400);
+        }
+        // For an assignment, validate the assignee ONCE (least privilege, like the
+        // single-case route) before touching any case.
+        if (action === 'assign' && reviewer_id) {
+          const assignee = await getIdentityServices().store.getUser(reviewer_id);
+          const assigneeRoles = assignee
+            ? effectiveStewardRoles(assignee.roles, assignee.stewardRoles)
+            : [];
+          if (!assignee || !stewardRolesCanAccessQueue(assigneeRoles, 'report-queue')) {
+            return c.json(
+              deny('reviewer_ineligible', 'Reviewer cannot access the report queue'),
+              400,
+            );
+          }
         }
         const results = [];
         for (const caseId of case_ids) {
@@ -382,7 +403,13 @@ export function createModerationConsoleRoutes() {
           );
           if (!outcome.ok) {
             const status =
-              outcome.code === 'not_found' ? 404 : outcome.code === 'already_decided' ? 409 : 403;
+              outcome.code === 'not_found'
+                ? 404
+                : outcome.code === 'already_decided'
+                  ? 409
+                  : outcome.code === 'invalid_modification'
+                    ? 400
+                    : 403;
             return c.json(deny(outcome.code, outcome.message), status);
           }
           return c.json(

@@ -84,11 +84,21 @@ export function createWsJContributionSafety(
       const signature = contentSignature(request.body);
       const nowMs = services.now();
       const windowMs = config.spamVelocityWindowSeconds * 1000;
+      // Both flood windows are sampled BEFORE recording this submission:
+      // classifySpam / classifyDuplicateFlood each add one for the current item,
+      // so the stats they receive must EXCLUDE it (otherwise it is counted twice
+      // and a legitimate cross-post can trip the threshold a submission early).
       const floodStats = services.submissions.floodStats(
         context.userId,
         signature,
         nowMs,
         windowMs,
+      );
+      const dupWindowStats = services.submissions.floodStats(
+        context.userId,
+        signature,
+        nowMs,
+        config.duplicateFloodWindowSeconds * 1000,
       );
       const spam = classifySpam(
         {
@@ -117,15 +127,9 @@ export function createWsJContributionSafety(
       if (spam.disposition === 'flag') reasons.push(...spam.signals);
 
       // 3. Duplicate flood (FLAG, never remove — legitimate cross-posting exists).
-      const flood = classifyDuplicateFlood(
-        services.submissions.floodStats(
-          context.userId,
-          signature,
-          nowMs,
-          config.duplicateFloodWindowSeconds * 1000,
-        ),
-        config,
-      );
+      //    Uses the pre-record window stats (the current submission is added by
+      //    classifyDuplicateFlood itself — never double-counted).
+      const flood = classifyDuplicateFlood(dupWindowStats, config);
       if (flood.flagged) reasons.push('duplicate_flood');
 
       // 4. Policy-risk (FLAG, never remove — the human-review invariant).

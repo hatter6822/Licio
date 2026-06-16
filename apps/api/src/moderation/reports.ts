@@ -139,22 +139,31 @@ export async function submitReport(
   let theCase = await services.cases.findOpenByTarget(request.target_type, request.target_id);
   let newCase = false;
   if (theCase === null) {
-    newCase = true;
     const slaDueAt = new Date(nowMs + reasonCodeSlaHours(reasonCode) * 3_600_000).toISOString();
-    theCase = await services.cases.insert({
-      caseId: randomUUID(),
-      targetType: request.target_type,
-      targetId: request.target_id,
-      contentKind: request.content_kind ?? null,
-      status: 'new',
-      severity,
-      routedTo: emergency ? 'emergency' : 'standard',
-      assignedTo: null,
-      reportCount: 0,
-      enforcementDelayed: false,
-      resolvedActionId: null,
-      slaDueAt,
-    });
+    try {
+      theCase = await services.cases.insert({
+        caseId: randomUUID(),
+        targetType: request.target_type,
+        targetId: request.target_id,
+        contentKind: request.content_kind ?? null,
+        status: 'new',
+        severity,
+        routedTo: emergency ? 'emergency' : 'standard',
+        assignedTo: null,
+        reportCount: 0,
+        enforcementDelayed: false,
+        resolvedActionId: null,
+        slaDueAt,
+      });
+      newCase = true;
+    } catch (error) {
+      // A concurrent report can open the case between the lookup above and this
+      // insert; the open-case partial-unique index then rejects the loser.
+      // Re-read and JOIN the just-created case instead of surfacing a 500.
+      const raced = await services.cases.findOpenByTarget(request.target_type, request.target_id);
+      if (raced === null) throw error; // not the race — a genuine failure
+      theCase = raced;
+    }
   }
 
   // 5. Insert the report.

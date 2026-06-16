@@ -69,6 +69,62 @@ describe('runModerationTick', () => {
     expect(m['queue.sla_breached']).toBe(1);
   });
 
+  it('#7 auto-lifts an expired temporary restrict and restores the account', async () => {
+    const accountStates: Array<{ userId: string; state: string }> = [];
+    let t = Date.parse('2026-04-01T00:00:00.000Z');
+    const svc = createInMemoryModerationServices({
+      now: () => t,
+      content: {
+        async resolveTarget(tt, tid) {
+          return { exists: true, subjectUserId: tt === 'account' ? tid : null, contentKind: null };
+        },
+        async applyContentState() {},
+        async applyAccountState(userId, state) {
+          accountStates.push({ userId, state });
+        },
+        async contentSnapshot() {
+          return null;
+        },
+        async threadContext() {
+          return { items: [], reportedContributionId: null };
+        },
+      },
+    });
+    // A 1-day restrict on B, applied now.
+    const restrict = await svc.actions.insert({
+      actorUserId: A,
+      actorRole: 'ROLE_SAFETY',
+      action: 'restrict',
+      targetType: 'account',
+      targetId: B,
+      subjectUserId: B,
+      reasonCode: 'MOD_HARASS_001',
+      duration: '1d',
+      reviewerNote: null,
+      priorState: 'active',
+      nextState: 'restricted',
+      reversible: true,
+      reverted: false,
+      linkedActionId: null,
+      caseId: null,
+      coApproverUserId: null,
+      reportIds: [],
+    });
+    // Not yet expired → the tick leaves it active.
+    await runModerationTick(svc);
+    expect((await svc.actions.getById(restrict.actionId))?.reverted).toBe(false);
+    // Advance two days → expired → the tick lifts it.
+    t += 2 * 86_400_000;
+    await runModerationTick(svc);
+    expect((await svc.actions.getById(restrict.actionId))?.reverted).toBe(true);
+    expect(accountStates).toContainEqual({ userId: B, state: 'active' });
+    // The lift is an audited system revert.
+    const audit = await svc.audit.list({ action: 'revert', limit: 5 });
+    expect(
+      audit.some((r) => r.actorUserId === null && r.linkedActionId === restrict.actionId),
+    ).toBe(true);
+  });
+
   it('routes every task failure to the error sink without throwing', async () => {
     const errs: ModerationSchedulerTask[] = [];
     services.reloadConfig = async () => {

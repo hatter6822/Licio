@@ -686,6 +686,18 @@ describe('trust-safety route branches', () => {
         .status,
     ).toBe(404);
   });
+
+  it('#12 rejects a room report for a nonexistent room (404)', async () => {
+    const reporter = await seedUser({ handle: `rr${randomUUID().slice(0, 6)}` });
+    const res = await app().request(
+      post(
+        '/v1/reports',
+        reportBody({ target_type: 'room', target_id: randomUUID(), content_kind: undefined }),
+        reporter.cookie,
+      ),
+    );
+    expect(res.status).toBe(404);
+  });
 });
 
 describe('console route branches (assign, bulk, revert, reviewer-status, queue filters)', () => {
@@ -912,5 +924,39 @@ describe('console route branches (assign, bulk, revert, reviewer-status, queue f
       get(`/v1/moderation/audit?action=hide&limit=1&cursor=${body1.next_cursor}`, admin.cookie),
     );
     expect(((await page2.json()) as { items: unknown[] }).items.length).toBe(1);
+  });
+
+  it('#6 bulk is gated by report-queue access + assignee eligibility', async () => {
+    const safety = await safetyUser();
+    const c1 = await openCase();
+    // An evidence-only steward holds a doctrine role but NOT report-queue access
+    // → the whole bulk request is 403 (matching the single-case routes).
+    const evidence = await seedUser({
+      handle: `ev${randomUUID().slice(0, 6)}`,
+      stewardRoles: ['ROLE_EVIDENCE'],
+    });
+    const denied = await app().request(
+      post(
+        '/v1/moderation/bulk',
+        { case_ids: [c1], action: 'dismiss', reason_code: 'MOD_SPAM_001' },
+        evidence.cookie,
+      ),
+    );
+    expect(denied.status).toBe(403);
+    // A report-queue steward assigning to an INELIGIBLE (evidence-only) reviewer
+    // → 400 (the assignee cannot access the report queue).
+    const ineligible = await app().request(
+      post(
+        '/v1/moderation/bulk',
+        {
+          case_ids: [c1],
+          action: 'assign',
+          reason_code: 'MOD_SPAM_001',
+          reviewer_id: evidence.userId,
+        },
+        safety.cookie,
+      ),
+    );
+    expect(ineligible.status).toBe(400);
   });
 });

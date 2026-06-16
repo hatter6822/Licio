@@ -22,6 +22,7 @@ import {
 
 const A = '00000000-0000-4000-8000-0000000000a1';
 const B = '00000000-0000-4000-8000-0000000000b2';
+const C = '00000000-0000-4000-8000-0000000000c3';
 const resolveAuthor = async (userId: string | null) =>
   userId ? { handle: `u_${userId.slice(0, 4)}`, displayName: 'U' } : null;
 
@@ -69,15 +70,32 @@ describe('WS-J.1.2 block enforcement', () => {
     expect(!reply.ok && reply.rejection.code).toBe('interaction_blocked');
     expect(!reply.ok && reply.rejection.status).toBe(403);
 
-    // Bilateral: A → reply to a B-authored question is ALSO rejected.
-    const bQuestion = await post(B, contributionBody('question', threadId));
+    // Bilateral: A → reply to a B-authored question is ALSO rejected.  B's
+    // question lives in a NEUTRAL thread (owner C) — A does not own it, so B may
+    // post there; A replying to it is the blocked (bilateral) interaction.
+    const neutral = await seedThread(fixture, { submittedBy: C });
+    const bQuestion = await post(B, contributionBody('question', neutral.threadId));
     if (!bQuestion.ok) throw new Error('B question failed');
     const aReply = await post(
       A,
-      contributionBody('answer', threadId, { parentId: bQuestion.contribution.contributionId }),
+      contributionBody('answer', neutral.threadId, {
+        parentId: bQuestion.contribution.contributionId,
+      }),
     );
     expect(aReply.ok).toBe(false);
     expect(!aReply.ok && aReply.rejection.code).toBe('interaction_blocked');
+  });
+
+  it('#11 rejects a TOP-LEVEL post from a user blocked by the story owner', async () => {
+    const { threadId } = await seedThread(fixture, { submittedBy: A });
+    await createBlock(mod, A, B); // A owns the story and blocks B
+    // B posts top-level (no parent) in A's thread → rejected server-side.
+    const top = await post(B, contributionBody('question', threadId));
+    expect(top.ok).toBe(false);
+    expect(!top.ok && top.rejection.code).toBe('interaction_blocked');
+    // The owner is never blocked from their own thread (self).
+    const own = await post(A, contributionBody('question', threadId));
+    expect(own.ok).toBe(true);
   });
 
   it('allows replies once unblocked', async () => {

@@ -27,7 +27,20 @@ import {
   reviewerStatus,
 } from '@licio/db';
 import type { ReportTargetType, ReviewerAvailability } from '@licio/shared';
-import { and, asc, desc, eq, gte, inArray, isNull, lte, or, type SQL, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  lte,
+  or,
+  type SQL,
+  sql,
+} from 'drizzle-orm';
 import type {
   AccountBlockRecord,
   AccountBlockStore,
@@ -615,6 +628,20 @@ export class DrizzleModerationActionStore implements ModerationActionStore {
         ),
       )
       .orderBy(desc(moderationActions.createdAt));
+    return rows.map(mapAction);
+  }
+
+  async listActiveTemporaryAccountActions(): Promise<ModerationActionRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(moderationActions)
+      .where(
+        and(
+          eq(moderationActions.reverted, false),
+          isNotNull(moderationActions.duration),
+          inArray(moderationActions.action, ['restrict', 'suspend']),
+        ),
+      );
     return rows.map(mapAction);
   }
 

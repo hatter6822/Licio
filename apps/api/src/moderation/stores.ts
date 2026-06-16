@@ -256,6 +256,9 @@ export interface ModerationActionStore {
   listBySubject(userId: string): Promise<ModerationActionRecord[]>;
   /** Active (non-reverted) actions against an item, newest first. */
   listActiveByTarget(targetType: string, targetId: string): Promise<ModerationActionRecord[]>;
+  /** Active (non-reverted) TEMPORARY account actions (restrict/suspend carrying a
+   *  duration) — the auto-expiry sweep computes each one's expiry (WS-J.2.3a). */
+  listActiveTemporaryAccountActions(): Promise<ModerationActionRecord[]>;
   clear(): Promise<void>;
 }
 
@@ -613,6 +616,14 @@ export class InMemoryModerationActionStore implements ModerationActionStore {
     return [...this.#rows.values()]
       .filter((r) => r.targetType === targetType && r.targetId === targetId && !r.reverted)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map((r) => ({ ...r }));
+  }
+  async listActiveTemporaryAccountActions(): Promise<ModerationActionRecord[]> {
+    return [...this.#rows.values()]
+      .filter(
+        (r) =>
+          !r.reverted && r.duration !== null && (r.action === 'restrict' || r.action === 'suspend'),
+      )
       .map((r) => ({ ...r }));
   }
   async clear(): Promise<void> {

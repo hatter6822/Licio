@@ -5,15 +5,20 @@
 // submission window, and emits queue-depth / SLA-breach observability gauges
 // (WS-J.2.1a).  One instance runs per window via the distributed lease.
 import { hostname } from 'node:os';
+import type { ConsoleAction } from '@licio/shared';
 import type { JobLeaseStore } from '../identity/job-lease.js';
+import { ACCOUNT_ACTIONS, parseDurationDays } from './actions.js';
 import type { ModerationServices } from './services.js';
 
 export type ModerationSchedulerTask =
   | 'lease'
   | 'config_reload'
   | 'mute_expiry'
+  | 'account_expiry'
   | 'submission_prune'
   | 'queue_metrics';
+
+const DAY_MS = 86_400_000;
 
 export const MODERATION_JOB_LEASE = 'moderation:maintenance';
 export const MODERATION_SCHEDULER_INTERVAL_MS = 60 * 60 * 1000; // hourly
@@ -39,6 +44,57 @@ export async function runModerationTick(
     }
   } catch (err) {
     onError(err, 'mute_expiry');
+  }
+
+  try {
+    // Auto-lift TEMPORARY account actions whose duration has elapsed (WS-J.2.3a:
+    // a "24h"/"7d" restrict/suspend must not become permanent).  Reversal
+    // integrity: restore the account ONLY when no other active sanction still
+    // holds it; the lift is an audited system revert.
+    const temporary = await services.actions.listActiveTemporaryAccountActions();
+    let lifted = 0;
+    for (const action of temporary) {
+      const days = parseDurationDays(action.duration ?? undefined);
+      if (days === null) continue;
+      if (Date.parse(action.createdAt) + days * DAY_MS > nowMs) continue;
+      await services.actions.update(action.actionId, { reverted: true });
+      if (action.subjectUserId !== null) {
+        const stillSanctioned = (
+          await services.actions.listActiveByTarget(action.targetType, action.targetId)
+        ).some(
+          (a) =>
+            a.actionId !== action.actionId &&
+            a.subjectUserId === action.subjectUserId &&
+            ACCOUNT_ACTIONS.has(a.action as ConsoleAction),
+        );
+        if (!stillSanctioned) {
+          await services.content.applyAccountState(action.subjectUserId, 'active', null);
+        }
+      }
+      await services.audit.append({
+        actorUserId: null,
+        actorRole: null,
+        action: 'revert',
+        reasonCode: action.reasonCode,
+        targetType: action.targetType,
+        targetId: action.targetId,
+        subjectUserId: action.subjectUserId,
+        priorState: action.nextState,
+        nextState: action.priorState,
+        reversible: false,
+        linkedActionId: action.actionId,
+        reportIds: [],
+        coApproverUserId: null,
+        notes: 'Temporary account action auto-lifted on expiry (WS-J.2.3a).',
+      });
+      lifted += 1;
+    }
+    if (lifted > 0) {
+      services.metrics.increment('moderation.account_action.auto_lifted', lifted);
+      services.log('moderation.account_actions_expired', { lifted });
+    }
+  } catch (err) {
+    onError(err, 'account_expiry');
   }
 
   try {

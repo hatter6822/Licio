@@ -38,6 +38,7 @@ export type ActionOutcome =
       requiredRole?: string;
     }
   | { ok: false; code: 'target_not_found'; message: string }
+  | { ok: false; code: 'invalid_action_for_target'; message: string }
   | { ok: false; code: 'enforcement_delayed'; message: string };
 
 /** Map a console action to the enforcement action type used by the appeal matrix
@@ -122,6 +123,18 @@ export async function applyAction(
   const subjectUserId =
     request.target_type === 'account' ? request.target_id : resolution.subjectUserId;
 
+  // A content action (hide/remove) only makes sense on content.  On an
+  // account/room target it would otherwise no-op (the content-state write is
+  // skipped) yet still record the action and resolve the case — closing a report
+  // with no enforcement effect.  Reject it instead.
+  if (CONTENT_ACTIONS.has(request.action) && request.target_type !== 'content') {
+    return {
+      ok: false,
+      code: 'invalid_action_for_target',
+      message: `"${request.action}" can only be applied to content`,
+    };
+  }
+
   const enfType = enforcementType(request.action);
   const reversible = actionReversible(request.action, reasonCode);
   const durationDays = parseDurationDays(request.duration);
@@ -198,7 +211,12 @@ export async function applyAction(
       shadowUserNotified: true,
       emergencyReviewComplete: false,
     });
-    appealable = eligibility.appealable;
+    // A ban is not appealable until its cooldown elapses; the notice must not
+    // advertise an Appeal affordance that would be rejected (WS-J.1.3a) — it
+    // carries the "appeal available after N hours" note instead.  `appealable`
+    // reflects current availability, not eventual eligibility.
+    appealable =
+      eligibility.appealable && !(enfType === 'ban' && (eligibility.availableAfterHours ?? 0) > 0);
     if (isSignificantAction(enfType) && subjectUserId) {
       const banNote =
         enfType === 'ban' && eligibility.availableAfterHours

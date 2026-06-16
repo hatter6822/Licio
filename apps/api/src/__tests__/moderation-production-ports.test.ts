@@ -75,6 +75,18 @@ describe('production content port', () => {
     expect((await safetyStore.get(STORY))?.safetyState).toBe('normal');
   });
 
+  it('#9 a story hide/removal also sets the canonical hiddenState (gone from direct reads)', async () => {
+    const setStoryHiddenState = vi.fn(async () => undefined);
+    const port = createProductionContentPort(contentDeps({ setStoryHiddenState }));
+    await port.applyContentState(STORY, 'story', 'removed', 'case-1', 'mod-1');
+    expect(setStoryHiddenState).toHaveBeenCalledWith(STORY, 'safety');
+    await port.applyContentState(STORY, 'story', 'hidden', 'case-1', 'mod-1');
+    expect(setStoryHiddenState).toHaveBeenCalledWith(STORY, 'safety');
+    // Restoring the story lifts the moderation hide.
+    await port.applyContentState(STORY, 'story', 'visible', 'case-1', 'mod-1');
+    expect(setStoryHiddenState).toHaveBeenLastCalledWith(STORY, null);
+  });
+
   it('account action writes the coarse WS-D account state', async () => {
     const setAccountState = vi.fn(async () => undefined);
     const port = createProductionContentPort(contentDeps({ setAccountState }));

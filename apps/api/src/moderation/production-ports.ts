@@ -62,6 +62,11 @@ export interface ContentPortDeps {
     contributionId: string,
     state: 'published' | 'hidden' | 'removed',
   ): Promise<unknown>;
+  /** WS-J #9: reflect a story hide/removal into its canonical hidden state so it
+   *  is gone from DIRECT reads (/v1/stories/:id), not just feeds.  `'safety'`
+   *  hides; `null` restores (the boot impl must never clobber a stronger
+   *  takedown). */
+  setStoryHiddenState?(storyId: string, hiddenState: 'safety' | null): Promise<unknown>;
   setAccountState(userId: string, accountState: 'active' | 'suspended'): Promise<unknown>;
   /** WS-J.2.2d: the reported contribution's body + edit history (or null). */
   getContributionSnapshot?(contributionId: string): Promise<ContributionSnapshotInput | null>;
@@ -157,11 +162,20 @@ export function createProductionContentPort(deps: ContentPortDeps): ModerationCo
       // Contribution-level visibility for the forum thread reads.
       if (contentKind === 'contribution') {
         await deps.setContributionModerationState(targetId, contributionStateFor(state));
+      } else if (contentKind === 'story') {
+        // A story removal/hide also hides it from the DIRECT read (not just
+        // feeds); restoring lifts the moderation hide.
+        await deps.setStoryHiddenState?.(targetId, state === 'visible' ? null : 'safety');
       } else if (contentKind === null) {
-        // Unknown kind (e.g. a revert that did not carry it): best-effort both.
+        // Unknown kind (e.g. a revert that did not carry it): best-effort —
+        // contribution first, else the story hidden state.
         const contribution = await deps.getContribution(targetId);
         if (contribution) {
           await deps.setContributionModerationState(targetId, contributionStateFor(state));
+        } else if (deps.setStoryHiddenState) {
+          const story = await deps.getStory(targetId);
+          if (story)
+            await deps.setStoryHiddenState(targetId, state === 'visible' ? null : 'safety');
         }
       }
     },

@@ -307,10 +307,29 @@ export async function createContribution(
       return invalid('answer_requires_question', 'Answers must respond to a question.');
     }
     parentPath = [...parent.path, parent.contributionId];
-  } else if (request.type === 'answer') {
-    // Unreachable through the schema (parent is required there); kept as a
-    // defense-in-depth guard for direct service callers.
-    return invalid('answer_requires_question', 'Answers must respond to a question.');
+  } else {
+    if (request.type === 'answer') {
+      // Unreachable through the schema (parent is required there); kept as a
+      // defense-in-depth guard for direct service callers.
+      return invalid('answer_requires_question', 'Answers must respond to a question.');
+    }
+    // WS-J.1.2a — a TOP-LEVEL contribution interacts with the thread's story
+    // owner; a blocked user cannot post into the blocker's thread (bilateral,
+    // server-side authorization — the block is not just a viewing filter).  The
+    // reply path above checks the parent author; this is the main-entry analogue.
+    if (forum.relationshipReader !== null) {
+      const story = await ingestion.stories.getById(thread.storyId);
+      if (
+        story?.submittedBy != null &&
+        (await forum.relationshipReader.interactionBlocked(userId, story.submittedBy))
+      ) {
+        return reject({
+          status: 403,
+          code: 'interaction_blocked',
+          message: 'You cannot post in this thread.',
+        });
+      }
+    }
   }
 
   if ('target_claim_id' in request && request.target_claim_id !== undefined) {

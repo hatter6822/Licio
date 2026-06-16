@@ -453,6 +453,21 @@ const moderationServices = createInMemoryModerationServices({
     },
     setContributionModerationState: (id, state) =>
       forumServices.contributions.setModerationState(id, state),
+    // WS-J #9: a story hide/removal must also leave it inaccessible via the
+    // direct read (/v1/stories/:id), not just absent from feeds — reflect it in
+    // the canonical hiddenState (both the detail route and ranking honour it).
+    // Never clobber a stronger takedown, and only lift a moderation 'safety' hide.
+    setStoryHiddenState: async (id, next) => {
+      const story = await ingestionServices.stories.getById(id);
+      if (!story) return;
+      if (next === 'safety') {
+        if (story.hiddenState === null) {
+          await ingestionServices.stories.update(id, { hiddenState: 'safety' });
+        }
+      } else if (story.hiddenState === 'safety') {
+        await ingestionServices.stories.update(id, { hiddenState: null });
+      }
+    },
     setAccountState: (userId, accountState) =>
       identityServices.store.updateUser(userId, { accountState }),
     // WS-J.2.2d side-by-side diff: the reported contribution's body + edits.

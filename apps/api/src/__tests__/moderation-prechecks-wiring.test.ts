@@ -124,4 +124,22 @@ describe('WS-J.2.6 contribution auto-block', () => {
     const res = await post(contributionCreateSchema.parse(contributionBody('question', threadId)));
     expect(res.ok && res.contribution.moderationState).toBe('published');
   });
+
+  it('#3 does not flag a duplicate flood one submission/room early (no double-count)', async () => {
+    const t1 = await seedThread(fixture);
+    const t2 = await seedThread(fixture);
+    const t3 = await seedThread(fixture);
+    const body = 'A perfectly ordinary cross-posted note about the topic at hand.';
+    const mk = (threadId: string) =>
+      contributionCreateSchema.parse({ ...contributionBody('explanation', threadId), body });
+    const r1 = await post(mk(t1.threadId));
+    expect(r1.ok && r1.contribution.moderationState).toBe('published');
+    // The 2nd identical post across a 2nd room must NOT yet be a flood — the
+    // off-by-one bug (counting the just-recorded submission twice) flagged here.
+    const r2 = await post(mk(t2.threadId));
+    expect(r2.ok && r2.contribution.moderationState).toBe('published');
+    // The 3rd (3 similar across 2+ rooms in the window) IS flagged for review.
+    const r3 = await post(mk(t3.threadId));
+    expect(r3.ok && r3.contribution.moderationState).toBe('under_review');
+  });
 });

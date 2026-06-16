@@ -25,6 +25,7 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { getForumServices } from '../forum/services.js';
 import { getIdentityServices } from '../identity/services.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { checkEligibility, submitAppeal } from '../moderation/appeals.js';
@@ -73,6 +74,11 @@ export function createTrustSafetyRoutes() {
             const resolution = await mod.content.resolveTarget('content', request.target_id);
             if (!resolution.exists)
               return c.json(deny('target_not_found', 'Target not found'), 404);
+          } else if (request.target_type === 'room') {
+            // A room report must reference a real room — otherwise a user could
+            // open a moderation case against an arbitrary/nonexistent UUID.
+            const room = await getForumServices().rooms.getById(request.target_id);
+            if (!room) return c.json(deny('target_not_found', 'Target not found'), 404);
           }
           const outcome = await submitReport(mod, auth.userId, request);
           if (!outcome.ok) {

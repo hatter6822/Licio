@@ -340,3 +340,30 @@ export const SIGNIFICANT_ACTION_TYPES: ReadonlySet<string> = new Set([
 export function isSignificantAction(actionType: string): boolean {
   return SIGNIFICANT_ACTION_TYPES.has(actionType);
 }
+
+/**
+ * Relative severity of an enforcement action (higher = more severe).  Used by
+ * the appeal `modify` path: a modification may only REDUCE severity (WS-J.2.4a
+ * "the new, less severe action"), so an appeal can never be turned INTO a harsher
+ * sanction (e.g. a warn appeal modified into a ban — a privilege-escalation).
+ * Workflow actions (escalate/clear) are 0 and are never modify targets.
+ */
+const ENFORCEMENT_SEVERITY: Readonly<Record<string, number>> = {
+  warn: 1,
+  shadow: 2,
+  hide: 2,
+  restrict: 3,
+  remove: 3,
+  suspend: 4,
+  ban: 5,
+};
+
+export function enforcementSeverityRank(action: string): number {
+  return ENFORCEMENT_SEVERITY[action] ?? 0;
+}
+
+/** Whether `modified` is a strict de-escalation of `original` (a valid modify). */
+export function isDeEscalation(original: string, modified: string): boolean {
+  const m = enforcementSeverityRank(modified);
+  return m > 0 && m < enforcementSeverityRank(original);
+}
