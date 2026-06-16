@@ -304,6 +304,15 @@ export function createModerationConsoleRoutes() {
       // --- Reviewer availability (WS-J.2.1d) ------------------------------
       .post('/reviewer-status', zValidator('json', reviewerStatusRequestSchema), async (c) => {
         const actor = mustActor(c);
+        // Only an actual report/appeal reviewer may enter the auto-assignment
+        // pool — an evidence-only (or other non-reviewer) steward marking
+        // `available` must not receive auto-assigned reports/appeals (#18).
+        if (denyQueue(actor, 'report-queue') && denyQueue(actor, 'appeal-queue')) {
+          return c.json(
+            deny('forbidden', 'Only report or appeal reviewers can set availability'),
+            DENIAL_STATUS,
+          );
+        }
         const { status } = c.req.valid('json');
         const mod = getModerationServices();
         await mod.reviewerStatus.set(actor.userId, status, new Date(mod.now()).toISOString());

@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { createDbClient } from '@licio/db';
+import { stewardRolesQueues } from '@licio/shared';
 import { validateServerEnv } from '@licio/shared/env';
 import { createApp } from './app.js';
 import { registerDefaultConsumers } from './events/consumers.js';
@@ -114,6 +115,7 @@ import {
 import { demoStory } from './lib/demo-data.js';
 import { seedForumDemoData, seedModerationDemo, seedOperationalSignals } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
+import { effectiveStewardRoles } from './moderation/authz.js';
 import { createDrizzleModerationStores } from './moderation/drizzle-moderation-stores.js';
 import {
   createAutoModerationSink,
@@ -451,6 +453,15 @@ const moderationServices = createInMemoryModerationServices({
       const c = await forumServices.contributions.getById(id);
       return c ? { userId: c.userId } : null;
     },
+    // WS-J #23: a thread report target → the thread's story owner.
+    getThread: async (threadId) => {
+      const thread = await ingestionServices.stories.getThreadById(threadId);
+      if (!thread) return null;
+      const story = await ingestionServices.stories.getById(thread.storyId);
+      return { submittedBy: story?.submittedBy ?? null };
+    },
+    // WS-J #17: an account action only proceeds against a REAL account.
+    accountExists: async (id) => (await identityServices.store.getUser(id)) !== null,
     setContributionModerationState: (id, state) =>
       forumServices.contributions.setModerationState(id, state),
     // WS-J #9: a story hide/removal must also leave it inaccessible via the
@@ -609,6 +620,12 @@ if (db) {
   moderationServices.incidents = stores.incidents;
   moderationServices.configStore = new DrizzlePwattConfigStore(db);
 }
+// WS-J #18: auto-assignment only chooses reviewers who can open the queue —
+// resolve each reviewer's queues from their WS-D steward roles.
+moderationServices.reviewerQueues = async (id) => {
+  const u = await identityServices.store.getUser(id);
+  return u ? stewardRolesQueues(effectiveStewardRoles(u.roles, u.stewardRoles)) : [];
+};
 await moderationServices.reloadConfig();
 setModerationServices(moderationServices);
 // WS-J.1.2 enforcement seam: forum interaction-rejection + thread/feed viewing

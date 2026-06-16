@@ -516,16 +516,17 @@ export async function createContribution(
     });
     // A high-confidence auto-block is an APPEALABLE system action: record the
     // moderation action + audit + a statement-of-reasons notice (WS-J.2.6a/b +
-    // the false-positive recourse).  No-op when the sink is unwired.
+    // the false-positive recourse).  AWAITED, not background: an auto-removal is
+    // only legitimate WITH its appealable action/audit/notice, so the
+    // accountability write must be durable before the response (never a silent
+    // removal if the process exits).
     if (verdict.disposition === 'block' && forum.autoModerationSink !== null) {
-      forum.trackBackground(
-        forum.autoModerationSink.recordContentAutoBlock({
-          contributionId: contribution.contributionId,
-          authorUserId: userId,
-          reasonCode: verdict.reasonCode ?? 'MOD_SPAM_001',
-          reasons: verdict.reasons,
-        }),
-      );
+      await forum.autoModerationSink.recordContentAutoBlock({
+        contributionId: contribution.contributionId,
+        authorUserId: userId,
+        reasonCode: verdict.reasonCode ?? 'MOD_SPAM_001',
+        reasons: verdict.reasons,
+      });
     }
   }
   if (request.type === 'moderation_concern') {
@@ -549,12 +550,12 @@ export async function createContribution(
   }
 
   // 7. Durable events (ids/types/flags only — never body text).  A
-  // safety-HELD contribution emits NOTHING (fail toward caution): scoring,
-  // lifecycle activity, and freshness must not count content readers
-  // cannot see — a malware-held "evidence" post would otherwise still earn
-  // participation weight while hidden.  Emission on release is the WS-J
-  // approval flow's job (the review-queue seam owns the state change).
-  if (moderationState === 'under_review') {
+  // safety-HELD or AUTO-BLOCKED contribution emits NOTHING (fail toward
+  // caution): scoring, lifecycle activity, and freshness must not count content
+  // readers cannot see — a malware-held/removed "evidence" post would otherwise
+  // still earn participation weight while hidden.  Emission on release is the
+  // WS-J approval flow's job (the review-queue seam owns the state change).
+  if (moderationState === 'under_review' || moderationState === 'removed') {
     // No room-activity bump either: the public recency timestamp must not
     // reflect content readers cannot see.
     forum.metrics.increment('contributions.held_emission_deferred');
@@ -813,14 +814,14 @@ export async function editContribution(
     forum.metrics.increment('contributions.edit_safety_flagged');
     const held = await forum.contributions.setModerationState(contributionId, targetState);
     if (verdict.disposition === 'block' && forum.autoModerationSink !== null) {
-      forum.trackBackground(
-        forum.autoModerationSink.recordContentAutoBlock({
-          contributionId,
-          authorUserId: userId,
-          reasonCode: verdict.reasonCode ?? 'MOD_SPAM_001',
-          reasons: verdict.reasons,
-        }),
-      );
+      // Awaited (not background): the auto-removal's appealable action/audit/
+      // notice must be durable with the removal (no silent auto-removal).
+      await forum.autoModerationSink.recordContentAutoBlock({
+        contributionId,
+        authorUserId: userId,
+        reasonCode: verdict.reasonCode ?? 'MOD_SPAM_001',
+        reasons: verdict.reasons,
+      });
     }
     const storyId = await bundle.ingestion.stories.getStoryIdByThreadId(existing.threadId);
     await bundle.ingestion.reviewQueue.insert({

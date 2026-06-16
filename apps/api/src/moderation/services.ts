@@ -5,6 +5,7 @@
 // boot.  Routes read the module singleton via `getModerationServices()`; the
 // production boot swaps Postgres adapters + real ports in by assignment;
 // tests build an in-memory container and `setModerationServices(...)`.
+import type { ModerationQueue } from '@licio/shared';
 import type { PwattConfigStore } from '../events/stores.js';
 import { InMemoryPwattConfigStore } from '../events/stores.js';
 import {
@@ -89,6 +90,11 @@ export interface ModerationServices {
   urlReputation: UrlReputationProvider;
   policyRisk: PolicyRiskClassifier;
   configStore: PwattConfigStore;
+  /** WS-J #18: the moderation queues a reviewer may access — used to filter
+   *  auto-assignment to ELIGIBLE reviewers.  Absent ⇒ no filter (every available
+   *  reviewer is eligible, the test/default posture); wired at boot to the WS-D
+   *  steward roles. */
+  reviewerQueues?: (userId: string) => Promise<readonly ModerationQueue[]>;
   config: () => ModerationRuntimeConfig;
   reloadConfig: () => Promise<ModerationRuntimeConfig>;
   metrics: ModerationMetrics;

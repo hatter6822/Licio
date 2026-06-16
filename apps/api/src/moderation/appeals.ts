@@ -29,7 +29,7 @@ import { writeAudit } from './audit.js';
 import { isSenior, type StewardActor } from './authz.js';
 import { createAppealOutcomeNotice } from './notices.js';
 import type { ModerationServices } from './services.js';
-import type { ModerationActionRecord } from './stores.js';
+import type { ModerationActionRecord, ModerationAppealRecord } from './stores.js';
 
 /** Map a stored action verb to the appeal-matrix enforcement type. */
 function enforcementTypeOf(action: string): EnforcementActionType | null {
@@ -126,20 +126,32 @@ export async function submitAppeal(
   // Independent reviewer (never the original decision-maker; WS-J.1.3c).
   const assignedReviewerId = await assignAppealReviewer(services, action.actorUserId);
 
-  const appeal = await services.appeals.insert({
-    actionId: request.action_id,
-    appellantUserId,
-    statement: request.user_statement,
-    newEvidence: request.new_evidence ?? [],
-    status: 'pending',
-    assignedReviewerId,
-    isBanAppeal,
-    slaDueAt,
-    decidedAt: null,
-    decidedBy: null,
-    decisionReasonCode: null,
-    decisionExplanation: null,
-  });
+  let appeal: ModerationAppealRecord;
+  try {
+    appeal = await services.appeals.insert({
+      actionId: request.action_id,
+      appellantUserId,
+      statement: request.user_statement,
+      newEvidence: request.new_evidence ?? [],
+      status: 'pending',
+      assignedReviewerId,
+      isBanAppeal,
+      slaDueAt,
+      decidedAt: null,
+      decidedBy: null,
+      decisionReasonCode: null,
+      decisionExplanation: null,
+    });
+  } catch (error) {
+    // Concurrent double-submit (double-click / offline retry): the
+    // `moderation_appeals_action_uq` index rejects the loser — return the
+    // documented duplicate response, not a 500.
+    const existing = await services.appeals.getByActionId(request.action_id);
+    if (existing) {
+      return { ok: false, code: 'appeal_already_exists', appealId: existing.appealId };
+    }
+    throw error;
+  }
   services.metrics.increment('appeals.created');
   return {
     ok: true,

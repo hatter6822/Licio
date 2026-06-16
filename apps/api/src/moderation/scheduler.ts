@@ -59,13 +59,11 @@ export async function runModerationTick(
       if (Date.parse(action.createdAt) + days * DAY_MS > nowMs) continue;
       await services.actions.update(action.actionId, { reverted: true });
       if (action.subjectUserId !== null) {
-        const stillSanctioned = (
-          await services.actions.listActiveByTarget(action.targetType, action.targetId)
-        ).some(
-          (a) =>
-            a.actionId !== action.actionId &&
-            a.subjectUserId === action.subjectUserId &&
-            ACCOUNT_ACTIONS.has(a.action as ConsoleAction),
+        // By SUBJECT, not target: an account sanction from a content case has the
+        // content as its target, so a target scan would prematurely lift the
+        // user's other active sanctions (the just-expired one is now reverted).
+        const stillSanctioned = (await services.actions.listBySubject(action.subjectUserId)).some(
+          (a) => !a.reverted && ACCOUNT_ACTIONS.has(a.action as ConsoleAction),
         );
         if (!stillSanctioned) {
           await services.content.applyAccountState(action.subjectUserId, 'active', null);

@@ -58,6 +58,11 @@ export interface ContentPortDeps {
   safetyStore: ItemSafetyStateStore;
   getStory(storyId: string): Promise<StorySlice | null>;
   getContribution(contributionId: string): Promise<ContributionSlice | null>;
+  /** WS-J #23: resolve a thread report target → its story owner (or null). */
+  getThread?(threadId: string): Promise<{ submittedBy: string | null } | null>;
+  /** WS-J #17: whether the account exists (else an action against a deleted
+   *  account would no-op `setAccountState` and fail the notice FK as a 500). */
+  accountExists?(userId: string): Promise<boolean>;
   setContributionModerationState(
     contributionId: string,
     state: 'published' | 'hidden' | 'removed',
@@ -137,7 +142,10 @@ export function createProductionContentPort(deps: ContentPortDeps): ModerationCo
   return {
     async resolveTarget(targetType, targetId): Promise<TargetResolution> {
       if (targetType === 'account') {
-        return { exists: true, subjectUserId: targetId, contentKind: null };
+        // Validate the account actually exists (#17) — else an action would
+        // no-op the state write and fail the notice FK as a 500 instead of 404.
+        const exists = deps.accountExists ? await deps.accountExists(targetId) : true;
+        return { exists, subjectUserId: exists ? targetId : null, contentKind: null };
       }
       if (targetType === 'room') return { exists: true, subjectUserId: null, contentKind: null };
       const story = await deps.getStory(targetId);
@@ -145,6 +153,12 @@ export function createProductionContentPort(deps: ContentPortDeps): ModerationCo
       const contribution = await deps.getContribution(targetId);
       if (contribution) {
         return { exists: true, subjectUserId: contribution.userId, contentKind: 'contribution' };
+      }
+      // A thread report target (#23) — resolve to the thread's story owner.
+      if (deps.getThread) {
+        const thread = await deps.getThread(targetId);
+        if (thread)
+          return { exists: true, subjectUserId: thread.submittedBy, contentKind: 'thread' };
       }
       return { exists: false, subjectUserId: null, contentKind: null };
     },

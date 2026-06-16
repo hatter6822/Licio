@@ -926,6 +926,30 @@ describe('console route branches (assign, bulk, revert, reviewer-status, queue f
     expect(((await page2.json()) as { items: unknown[] }).items.length).toBe(1);
   });
 
+  it('#18 reviewer availability is gated to report/appeal reviewers', async () => {
+    // An evidence-only steward (no report/appeal queue) cannot enter the pool.
+    const evidence = await seedUser({
+      handle: `ev${randomUUID().slice(0, 6)}`,
+      stewardRoles: ['ROLE_EVIDENCE'],
+    });
+    expect(
+      (
+        await app().request(
+          post('/v1/moderation/reviewer-status', { status: 'available' }, evidence.cookie),
+        )
+      ).status,
+    ).toBe(403);
+    // A report-queue steward can.
+    const safety = await safetyUser();
+    expect(
+      (
+        await app().request(
+          post('/v1/moderation/reviewer-status', { status: 'available' }, safety.cookie),
+        )
+      ).status,
+    ).toBe(200);
+  });
+
   it('#6 bulk is gated by report-queue access + assignee eligibility', async () => {
     const safety = await safetyUser();
     const c1 = await openCase();

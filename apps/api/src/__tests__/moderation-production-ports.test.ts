@@ -87,6 +87,28 @@ describe('production content port', () => {
     expect(setStoryHiddenState).toHaveBeenLastCalledWith(STORY, null);
   });
 
+  it('#17 an account action against a nonexistent account resolves to not-found', async () => {
+    const port = createProductionContentPort(
+      contentDeps({ accountExists: async (id) => id === AUTHOR }),
+    );
+    expect((await port.resolveTarget('account', AUTHOR)).exists).toBe(true);
+    expect(
+      (await port.resolveTarget('account', '00000000-0000-4000-8000-0000000000ff')).exists,
+    ).toBe(false);
+  });
+
+  it('#23 resolves a thread report target to its story owner (contentKind=thread)', async () => {
+    const THREAD = '00000000-0000-4000-8000-0000000000dd';
+    const port = createProductionContentPort(
+      contentDeps({ getThread: async (id) => (id === THREAD ? { submittedBy: AUTHOR } : null) }),
+    );
+    expect(await port.resolveTarget('content', THREAD)).toEqual({
+      exists: true,
+      subjectUserId: AUTHOR,
+      contentKind: 'thread',
+    });
+  });
+
   it('account action writes the coarse WS-D account state', async () => {
     const setAccountState = vi.fn(async () => undefined);
     const port = createProductionContentPort(contentDeps({ setAccountState }));

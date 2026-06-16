@@ -166,43 +166,75 @@ export async function submitReport(
     }
   }
 
-  // 5. Insert the report.
-  const report = await services.reports.insert({
-    caseId: theCase.caseId,
-    reporterUserId,
-    targetType: request.target_type,
-    targetId: request.target_id,
-    contentKind: request.content_kind ?? null,
-    reasonCode,
-    severity,
-    context: request.context ?? null,
-    evidenceUrls: request.evidence_urls ?? [],
-    localOperationId: request.local_operation_id,
-  });
+  // 5. Insert the report.  Idempotent under concurrency: two same-op submissions
+  //    can both pass findByOperationId, but the `moderation_reports_op_uq` index
+  //    rejects the loser — re-read and return the original (offline-replay safe),
+  //    never a 500.
+  let report: ModerationReportRecord;
+  try {
+    report = await services.reports.insert({
+      caseId: theCase.caseId,
+      reporterUserId,
+      targetType: request.target_type,
+      targetId: request.target_id,
+      contentKind: request.content_kind ?? null,
+      reasonCode,
+      severity,
+      context: request.context ?? null,
+      evidenceUrls: request.evidence_urls ?? [],
+      localOperationId: request.local_operation_id,
+    });
+  } catch (error) {
+    const dupOp = await services.reports.findByOperationId(
+      reporterUserId,
+      request.local_operation_id,
+    );
+    if (dupOp) {
+      services.metrics.increment('reports.idempotent_op');
+      return { ok: true, response: toResponse(dupOp, true) };
+    }
+    throw error;
+  }
 
-  // 6. Update case aggregation (raise severity/routing, tighten SLA from the
-  //    first report, bump count, reopen a resolved case if one exists).
-  const raisedSeverity = maxSeverity(theCase.severity, severity);
-  const raisedRouting = theCase.routedTo === 'emergency' || emergency ? 'emergency' : 'standard';
-  const slaDueAt = new Date(
-    Date.parse(theCase.createdAt) + reasonCodeSlaHours(reasonCode) * 3_600_000,
-  ).toISOString();
+  // 6. RECOMPUTE the case aggregate from its committed reports (race-safe): every
+  //    writer derives the same final severity/routing/count/SLA from the actual
+  //    rows, so a concurrent lower-priority report can never drop an increment or
+  //    overwrite a higher-priority escalation (a stale-snapshot lost update).
+  const caseReports = await services.reports.listByCase(theCase.caseId);
+  const aggSeverity = caseReports.reduce<ReportSeverity>(
+    (m, r) => maxSeverity(m, r.severity),
+    'minor',
+  );
+  const anyEmergency = caseReports.some((r) =>
+    isEmergencyReasonCode(r.reasonCode as ModerationReasonCode),
+  );
+  const routedTo = anyEmergency ? 'emergency' : 'standard';
+  const minSlaHours = caseReports.reduce(
+    (m, r) => Math.min(m, reasonCodeSlaHours(r.reasonCode as ModerationReasonCode)),
+    reasonCodeSlaHours(reasonCode),
+  );
+  const slaDueAt = new Date(Date.parse(theCase.createdAt) + minSlaHours * 3_600_000).toISOString();
   await services.cases.update(theCase.caseId, {
-    severity: raisedSeverity,
-    routedTo: raisedRouting,
-    reportCount: theCase.reportCount + 1,
-    slaDueAt: newCase ? theCase.slaDueAt : minIso(theCase.slaDueAt, slaDueAt),
+    severity: aggSeverity,
+    routedTo,
+    reportCount: caseReports.length,
+    slaDueAt,
     status: theCase.status === 'resolved' ? 'new' : theCase.status,
   });
 
   services.metrics.increment('reports.created');
-  services.metrics.increment(`reports.created.${raisedRouting}`);
+  services.metrics.increment(`reports.created.${routedTo}`);
 
   // 7. Emit the moderation.case.created event for a NEW case (the queue intake),
   //    and route it to the least-loaded available reviewer (WS-J.2.1d).
   if (newCase) {
-    services.trackBackground(
-      services.events.caseCreated({
+    // AWAITED (not background): `moderation.case.created` is the durable intake
+    // signal for the safety/integrity consumers; awaiting persist-then-publish
+    // means a process exit after the response cannot lose it.  A failure is
+    // logged + metered (the report is already saved; the hourly batch backstops)
+    // rather than failing the user's report.
+    try {
+      await services.events.caseCreated({
         caseId: theCase.caseId,
         targetType: request.target_type,
         contentKind: request.content_kind ?? null,
@@ -212,8 +244,14 @@ export async function submitReport(
         severity: toEventSeverity(severity),
         source: 'user_report',
         nowIso,
-      }),
-    );
+      });
+    } catch (error) {
+      services.metrics.increment('moderation.case_event_failed');
+      services.log('moderation.case_event_failed', {
+        caseId: theCase.caseId,
+        error: String(error),
+      });
+    }
     services.trackBackground(autoAssignNewCase(services, theCase));
   }
 
@@ -233,10 +271,6 @@ export async function submitReport(
   services.trackBackground(detectCoordination(services, theCase));
 
   return { ok: true, response: toResponse(report, false) };
-}
-
-function minIso(a: string, b: string): string {
-  return a <= b ? a : b;
 }
 
 /**

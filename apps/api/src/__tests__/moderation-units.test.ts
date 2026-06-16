@@ -226,6 +226,19 @@ describe('assignment', () => {
     expect(await autoAssignCase(services)).toBe(B);
   });
 
+  it('#18 auto-assignment only chooses reviewers eligible for the target queue', async () => {
+    const svc = createInMemoryModerationServices({
+      now: () => Date.parse('2026-04-01T00:00:00.000Z'),
+    });
+    const iso = new Date(svc.now()).toISOString();
+    await svc.reviewerStatus.set(A, 'available', iso); // A: appeals-only reviewer
+    await svc.reviewerStatus.set(B, 'available', iso); // B: report-queue reviewer
+    svc.reviewerQueues = async (id) => (id === A ? ['appeal-queue'] : ['report-queue']);
+    // A report case may only go to B; an appeal may only go to A.
+    expect(await autoAssignCase(svc)).toBe(B);
+    expect(await assignAppealReviewer(svc, null)).toBe(A);
+  });
+
   it('assignAppealReviewer enforces independence (never the original)', async () => {
     await services.reviewerStatus.set(A, 'available', new Date(services.now()).toISOString());
     // Only A available, but A is the original decision-maker → null (no oracle).

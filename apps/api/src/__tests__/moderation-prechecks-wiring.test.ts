@@ -82,6 +82,11 @@ describe('WS-J.2.6 contribution auto-block', () => {
     const audit = await spamMod.audit.list({ action: 'auto_block', limit: 5 });
     expect(audit).toHaveLength(1);
     expect(audit[0]?.actorUserId).toBeNull();
+    // #15: a `removed` auto-block took the no-emission suppress path (scoring,
+    // freshness, and room activity must not count content readers cannot see).
+    expect(
+      fixture.forum.metrics.snapshot()['contributions.held_emission_deferred'] ?? 0,
+    ).toBeGreaterThanOrEqual(1);
   });
 
   it('auto-blocks a malware-domain citation (moderation blocklist)', async () => {

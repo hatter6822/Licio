@@ -145,9 +145,13 @@ export async function applyAction(
   // target.  An integrity analyst (ROLE_INTEGRITY) IS the review and may still
   // act; everyone else is held until the incident is cleared (which lifts the
   // flag).  Workflow-only actions (escalate/clear) are never blocked.
-  if (enfType !== null && request.case_id) {
-    const theCase = await services.cases.getById(request.case_id);
-    if (theCase?.enforcementDelayed && !isIntegrityActor(actor)) {
+  if (enfType !== null && !isIntegrityActor(actor)) {
+    // The hold is keyed on the TARGET's open case (authoritative), NOT a
+    // client-supplied case_id — otherwise a steward could omit/forge case_id to
+    // bypass the MFCI-2 protection.  An integrity analyst (ROLE_INTEGRITY) IS the
+    // review and is exempt; everyone else is held until the incident clears.
+    const openCase = await services.cases.findOpenByTarget(request.target_type, request.target_id);
+    if (openCase?.enforcementDelayed) {
       services.metrics.increment('moderation.action.enforcement_delayed');
       return {
         ok: false,
@@ -365,13 +369,13 @@ export async function performRevert(
     }
   }
   if (ACCOUNT_ACTIONS.has(original.action as ConsoleAction) && original.subjectUserId) {
-    const stillRestricted = (
-      await services.actions.listActiveByTarget(original.targetType, original.targetId)
-    ).some(
-      (a) =>
-        a.actionId !== original.actionId &&
-        a.subjectUserId === original.subjectUserId &&
-        ACCOUNT_ACTIONS.has(a.action as ConsoleAction),
+    // Scan the SUBJECT's other active account sanctions BY SUBJECT, not by the
+    // action's target: an account sanction taken from a CONTENT case has the
+    // content as its target, so a target scan would miss the user's sanctions
+    // from other reports and prematurely lift them.  (The original was already
+    // marked reverted above, so it is excluded by `!reverted`.)
+    const stillRestricted = (await services.actions.listBySubject(original.subjectUserId)).some(
+      (a) => !a.reverted && ACCOUNT_ACTIONS.has(a.action as ConsoleAction),
     );
     if (!stillRestricted) {
       await services.content.applyAccountState(original.subjectUserId, 'active', null);

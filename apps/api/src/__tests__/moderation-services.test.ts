@@ -960,6 +960,165 @@ describe('Codex review fixes (service level)', () => {
   });
 });
 
+describe('Codex review fixes — wave 2 (service level)', () => {
+  const OTHER = '00000000-0000-4000-8000-0000000000ee';
+
+  async function delayedCaseOn(target: string): Promise<void> {
+    await services.cases.insert({
+      caseId: `00000000-0000-4000-9000-0000000000${Math.floor(Math.random() * 90 + 10)}`,
+      targetType: 'content',
+      targetId: target,
+      contentKind: 'contribution',
+      status: 'new',
+      severity: 'severe',
+      routedTo: 'standard',
+      assignedTo: null,
+      reportCount: 5,
+      enforcementDelayed: true,
+      resolvedActionId: null,
+      slaDueAt: new Date(services.now() + 3_600_000).toISOString(),
+    });
+  }
+
+  it('#19 the MFCI-2 hold cannot be bypassed by omitting case_id', async () => {
+    await delayedCaseOn(TARGET);
+    // A safety steward acts WITHOUT a case_id — the hold is resolved by TARGET.
+    const blocked = await applyAction(services, safetyActor(), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'remove',
+      reason_code: 'MOD_HARASS_001',
+    });
+    expect(blocked.ok).toBe(false);
+    expect(!blocked.ok && blocked.code).toBe('enforcement_delayed');
+    // An integrity analyst IS the review and may still act.
+    const allowed = await applyAction(services, integrityActor(), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'remove',
+      reason_code: 'MOD_HARASS_001',
+    });
+    expect(allowed.ok).toBe(true);
+  });
+
+  it('#24 reverting one account sanction keeps another (from a different report) in force', async () => {
+    const port = recordingContentPort(); // both content targets resolve to AUTHOR
+    services = createInMemoryModerationServices({
+      content: port,
+      users: userPort({ [AUTHOR]: 100 }),
+    });
+    const r1 = await applyAction(services, safetyActor(), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'restrict',
+      reason_code: 'MOD_HARASS_001',
+    });
+    const r2 = await applyAction(services, safetyActor(), {
+      target_type: 'content',
+      target_id: OTHER,
+      action: 'restrict',
+      reason_code: 'MOD_HARASS_001',
+    });
+    if (!r1.ok || !r2.ok) throw new Error('restricts failed');
+    port.accountStates.length = 0;
+    // Reverting r1 must NOT lift the account — r2 still restricts the same user.
+    await revertAction(services, safetyActor(), r1.response.action_id);
+    expect(port.accountStates.some((s) => s.userId === AUTHOR && s.state === 'active')).toBe(false);
+    // Reverting the last one restores the account.
+    await revertAction(services, safetyActor(), r2.response.action_id);
+    expect(port.accountStates.some((s) => s.userId === AUTHOR && s.state === 'active')).toBe(true);
+  });
+
+  it('#25 case aggregation recomputes the max severity + count from the reports', async () => {
+    // A lower-priority report first, then an emergency one.
+    await submitReport(services, REPORTER, report({ reason_code: 'MOD_HARASS_001' }));
+    await submitReport(
+      services,
+      '00000000-0000-4000-8000-000000000055',
+      report({ reason_code: 'MOD_THREAT_001' }),
+    );
+    const c = await services.cases.findOpenByTarget('content', TARGET);
+    expect(c?.severity).toBe('critical'); // escalated, never downgraded
+    expect(c?.routedTo).toBe('emergency');
+    expect(c?.reportCount).toBe(2);
+  });
+
+  it('#16 a racing duplicate op-id insert returns the original report (no 500)', async () => {
+    const op = 'op-race';
+    // The concurrent "winner" report the catch re-read should surface.
+    const winner = await services.reports.insert({
+      caseId: '00000000-0000-4000-9000-0000000000aa',
+      reporterUserId: REPORTER,
+      targetType: 'content',
+      targetId: TARGET,
+      contentKind: 'contribution',
+      reasonCode: 'MOD_HARASS_001',
+      severity: 'moderate',
+      context: null,
+      evidenceUrls: [],
+      localOperationId: op,
+    });
+    // The race: both idempotency lookups miss (the winner is not visible yet),
+    // the insert hits the unique index, and the catch re-read finds the winner.
+    let opCalls = 0;
+    services.reports.findByOperationId = async () => {
+      opCalls += 1;
+      return opCalls === 1 ? null : winner;
+    };
+    services.reports.findRecentDuplicate = async () => null;
+    services.reports.insert = async () => {
+      throw new Error('duplicate key value violates unique constraint moderation_reports_op_uq');
+    };
+    const dup = await submitReport(services, REPORTER, report({ local_operation_id: op }));
+    expect(dup.ok && dup.response.idempotent).toBe(true);
+    expect(dup.ok && dup.response.report_id).toBe(winner.reportId);
+  });
+
+  it('#22 a racing duplicate appeal insert returns appeal_already_exists (no 500)', async () => {
+    const out = await applyAction(services, safetyActor('00000000-0000-4000-8000-0000000000d1'), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'hide',
+      reason_code: 'MOD_HARASS_001',
+    });
+    if (!out.ok) throw new Error('hide failed');
+    // The concurrent winning appeal the catch re-read should surface.
+    const winner = await services.appeals.insert({
+      actionId: out.response.action_id,
+      appellantUserId: AUTHOR,
+      statement: 'winner',
+      newEvidence: [],
+      status: 'pending',
+      assignedReviewerId: null,
+      isBanAppeal: false,
+      slaDueAt: new Date(services.now() + 3_600_000).toISOString(),
+      decidedAt: null,
+      decidedBy: null,
+      decisionReasonCode: null,
+      decisionExplanation: null,
+    });
+    // The race: the already-appealed pre-check misses (call #1 → null), the
+    // insert hits the unique index, the catch re-read (call #2) finds the winner.
+    let getCalls = 0;
+    services.appeals.getByActionId = async () => {
+      getCalls += 1;
+      return getCalls >= 2 ? winner : null;
+    };
+    services.appeals.insert = async () => {
+      throw new Error(
+        'duplicate key value violates unique constraint moderation_appeals_action_uq',
+      );
+    };
+    const dup = await submitAppeal(services, AUTHOR, {
+      action_id: out.response.action_id,
+      user_statement: 'racing',
+    });
+    expect(dup.ok).toBe(false);
+    expect(!dup.ok && dup.code).toBe('appeal_already_exists');
+    expect(!dup.ok && dup.code === 'appeal_already_exists' && dup.appealId).toBe(winner.appealId);
+  });
+});
+
 describe('relations (block/mute)', () => {
   it('creates and lists blocks, and enforces interaction + viewing', async () => {
     await createBlock(services, REPORTER, AUTHOR);
