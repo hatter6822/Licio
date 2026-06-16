@@ -71,7 +71,7 @@ export const moderationCaseCreatedEventSchema = z
     ...eventBaseShape,
     event_type: z.literal('moderation.case.created'),
     case_id: uuidSchema,
-    target_type: z.enum(['contribution', 'story', 'user', 'room']),
+    target_type: z.enum(['contribution', 'thread', 'story', 'user', 'room']),
     target_id: uuidSchema,
     /** Null for automated detection. NEVER exposed outside restricted access. */
     reporter_id: uuidSchema.nullable(),

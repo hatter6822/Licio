@@ -3,11 +3,14 @@
 // WS-J production ports: removals actually propagate to the WS-E item-safety
 // state (the ranking-exclusion seam) + the WS-G contribution state; account
 // actions write the WS-D state; user resolution reads handle + account age.
+import type { ModerationCaseCreatedEvent } from '@licio/shared';
 import { describe, expect, it, vi } from 'vitest';
+import type { NewStoredEvent } from '../events/stores.js';
 import { InMemoryItemSafetyStateStore } from '../events/stores.js';
 import {
   type ContentPortDeps,
   createProductionContentPort,
+  createProductionEventPort,
   createProductionUserPort,
 } from '../moderation/production-ports.js';
 
@@ -75,6 +78,72 @@ describe('production content port', () => {
     expect(setAccountState).toHaveBeenCalledWith(AUTHOR, 'suspended');
     await port.applyAccountState(AUTHOR, 'active', null);
     expect(setAccountState).toHaveBeenCalledWith(AUTHOR, 'active');
+  });
+});
+
+describe('production event port', () => {
+  const CASE = '00000000-0000-4000-8000-00000000000d';
+  const REPORTER = '00000000-0000-4000-8000-00000000000e';
+
+  it('persists durably THEN publishes a valid moderation.case.created (restricted)', async () => {
+    const persisted: NewStoredEvent[] = [];
+    const published: ModerationCaseCreatedEvent[] = [];
+    const port = createProductionEventPort({
+      persist: async (e) => {
+        // Publish must not have happened before the durable write.
+        expect(published).toHaveLength(0);
+        persisted.push(e);
+      },
+      publish: async (e) => {
+        published.push(e);
+      },
+    });
+    await port.caseCreated({
+      caseId: CASE,
+      targetType: 'content',
+      contentKind: 'contribution',
+      targetId: CONTRIB,
+      reporterId: REPORTER,
+      reasonCode: 'MOD_HARASS_001',
+      severity: 'high',
+      source: 'user_report',
+      nowIso: '2026-06-16T00:00:00.000Z',
+    });
+    expect(persisted).toHaveLength(1);
+    expect(published).toHaveLength(1);
+    const stored = persisted[0];
+    expect(stored?.topic).toBe('moderation.case.created');
+    expect(stored?.privacyClassification).toBe('restricted');
+    expect(stored?.retentionTier).toBe('moderation_legal');
+    expect(stored?.ownerUserId).toBeNull(); // never DSAR-linked
+    const event = published[0];
+    expect(event?.target_type).toBe('contribution');
+    expect(event?.reporter_id).toBe(REPORTER);
+    expect(event?.case_id).toBe(CASE);
+  });
+
+  it('maps target/content-kind onto the event scale (account→user, story→story)', async () => {
+    const published: ModerationCaseCreatedEvent[] = [];
+    const port = createProductionEventPort({
+      persist: async () => undefined,
+      publish: async (e) => {
+        published.push(e);
+      },
+    });
+    await port.caseCreated({
+      caseId: CASE,
+      targetType: 'account',
+      contentKind: null,
+      targetId: AUTHOR,
+      reporterId: null, // automated detection
+      reasonCode: 'MOD_SPAM_001',
+      severity: 'medium',
+      source: 'automated',
+      nowIso: '2026-06-16T00:00:00.000Z',
+    });
+    expect(published[0]?.target_type).toBe('user');
+    expect(published[0]?.reporter_id).toBeNull();
+    expect(published[0]?.source).toBe('automated');
   });
 });
 

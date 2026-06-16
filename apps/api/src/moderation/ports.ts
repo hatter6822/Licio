@@ -7,7 +7,12 @@
 // real services at boot (index.ts / services.ts) and to lightweight stubs in
 // tests.  Defaults are safe no-ops / "unavailable" so the console is fully
 // usable before the invariant services ship (WS-J.2.2c graceful degradation).
-import type { ContributionPublic, InvariantSignalsPanel, ReportContentKind } from '@licio/shared';
+import type {
+  ContributionPublic,
+  InvariantSignalsPanel,
+  ReportContentKind,
+  ReportTargetType,
+} from '@licio/shared';
 
 /** Resolution of a moderation target (subject user, existence, kind). */
 export interface TargetResolution {
@@ -87,7 +92,8 @@ export interface ModerationInvariantPort {
 export interface ModerationEventPort {
   caseCreated(input: {
     caseId: string;
-    targetType: string;
+    targetType: ReportTargetType;
+    contentKind: ReportContentKind | null;
     targetId: string;
     reporterId: string | null;
     reasonCode: string;

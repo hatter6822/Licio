@@ -37,6 +37,28 @@ export type ReportTargetType = z.infer<typeof reportTargetTypeSchema>;
 export const reportContentKindSchema = z.enum(['story', 'thread', 'contribution']);
 export type ReportContentKind = z.infer<typeof reportContentKindSchema>;
 
+/** The WS-E `moderation.case.created` target-type scale. */
+export type ModerationEventTargetType = 'contribution' | 'thread' | 'story' | 'user' | 'room';
+
+/**
+ * Map a report's (target_type, content_kind) onto the WS-E
+ * `moderation.case.created` `target_type` scale, so the event carries the
+ * precise entity (account→user, content→its content_kind) without inventing a
+ * second SSOT.  A content target with an unknown content_kind falls back to
+ * `contribution` (the most common content report).
+ */
+export function toEventTargetType(
+  targetType: ReportTargetType,
+  contentKind: ReportContentKind | null,
+): ModerationEventTargetType {
+  if (targetType === 'account') return 'user';
+  if (targetType === 'room') return 'room';
+  // content:
+  if (contentKind === 'story') return 'story';
+  if (contentKind === 'thread') return 'thread';
+  return 'contribution';
+}
+
 /** Whether a report was routed to the emergency or the standard queue. */
 export const reportRoutedToSchema = z.enum(['emergency', 'standard']);
 export type ReportRoutedTo = z.infer<typeof reportRoutedToSchema>;

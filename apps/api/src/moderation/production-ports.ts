@@ -8,11 +8,19 @@
 // state; user resolution reads the WS-D directory for handle + account age.
 // Deps are narrow structural interfaces so the ports are unit-testable without
 // the full service container.
-import type { ItemSafetyStateStore } from '../events/stores.js';
+import { randomUUID } from 'node:crypto';
+import {
+  EVENT_SCHEMA_VERSION,
+  type ModerationCaseCreatedEvent,
+  moderationCaseCreatedEventSchema,
+  toEventTargetType,
+} from '@licio/shared';
+import type { ItemSafetyStateStore, NewStoredEvent } from '../events/stores.js';
 import type {
   AccountActionState,
   ContentVisibilityState,
   ModerationContentPort,
+  ModerationEventPort,
   ModerationUserPort,
   ResolvedUser,
   TargetResolution,
@@ -122,6 +130,60 @@ const DAY_MS = 86_400_000;
 
 function ageDays(createdAt: string, nowMs: number): number {
   return Math.max(0, Math.floor((nowMs - Date.parse(createdAt)) / DAY_MS));
+}
+
+export interface EventPortDeps {
+  /** Durable WS-E insert (event-id idempotent) — the replay backstop. */
+  persist(event: NewStoredEvent): Promise<unknown>;
+  /** Router delivery to subscribed, authorized consumers (safety queue intake). */
+  publish(event: ModerationCaseCreatedEvent): Promise<unknown>;
+  log?: (event: string, meta: Record<string, unknown>) => void;
+}
+
+/**
+ * Production WS-E event port: opens a moderation case on the pipeline by
+ * persisting `moderation.case.created` durably, THEN publishing it to the
+ * router (the at-least-once intake the safety/integrity consumers subscribe to).
+ * The topic is `restricted` / `moderation_legal` — `reporter_id` is the
+ * highest-sensitivity field (SPEC §19.5); the stored event carries no
+ * `ownerUserId` (it is not user-owned content and is never a DSAR projection).
+ */
+export function createProductionEventPort(deps: EventPortDeps): ModerationEventPort {
+  return {
+    async caseCreated(input): Promise<void> {
+      // Build + validate through the SSOT schema (a malformed event never
+      // reaches the durable log or the router).
+      const event: ModerationCaseCreatedEvent = moderationCaseCreatedEventSchema.parse({
+        event_id: randomUUID(),
+        event_type: 'moderation.case.created',
+        timestamp: input.nowIso,
+        schema_version: EVENT_SCHEMA_VERSION,
+        case_id: input.caseId,
+        target_type: toEventTargetType(input.targetType, input.contentKind),
+        target_id: input.targetId,
+        reporter_id: input.reporterId,
+        reason_code: input.reasonCode,
+        severity: input.severity,
+        source: input.source,
+        privacy_classification: 'restricted',
+        retention_tier: 'moderation_legal',
+      });
+      await deps.persist({
+        eventId: event.event_id,
+        eventType: event.event_type,
+        topic: event.event_type,
+        timestamp: event.timestamp,
+        privacyClassification: event.privacy_classification,
+        retentionTier: event.retention_tier,
+        payload: event as unknown as Record<string, unknown>,
+        // Restricted moderation event — not user-owned; no DSAR linkage.
+        ownerUserId: null,
+        purgeAfter: null,
+      });
+      await deps.publish(event);
+      deps.log?.('moderation.case_event_emitted', { caseId: input.caseId, source: input.source });
+    },
+  };
 }
 
 export function createProductionUserPort(deps: UserPortDeps): ModerationUserPort {

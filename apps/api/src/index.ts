@@ -120,6 +120,7 @@ import {
 } from './moderation/forum-integration.js';
 import {
   createProductionContentPort,
+  createProductionEventPort,
   createProductionUserPort,
 } from './moderation/production-ports.js';
 import { createRelationshipReader } from './moderation/relations.js';
@@ -466,6 +467,15 @@ const moderationServices = createInMemoryModerationServices({
         createdAt: u.createdAt,
       })),
     now: () => Date.now(),
+  }),
+  // WS-J case intake onto the WS-E pipeline: persist `moderation.case.created`
+  // durably (the at-least-once replay backstop), then publish to the router so
+  // the safety/integrity consumers receive it.  Restricted topic; reporter
+  // identity never leaves the role-gated path.
+  events: createProductionEventPort({
+    persist: (event) => eventServices.eventStore.insertMany([event]),
+    publish: (event) => eventServices.router.publish(event),
+    log: (event, meta) => logger.info(meta, event),
   }),
   alerts: {
     pageOnCall: (input) =>

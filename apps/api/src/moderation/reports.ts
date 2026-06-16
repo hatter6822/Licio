@@ -171,6 +171,7 @@ export async function submitReport(
       services.events.caseCreated({
         caseId: theCase.caseId,
         targetType: request.target_type,
+        contentKind: request.content_kind ?? null,
         targetId: request.target_id,
         reporterId: reporterUserId,
         reasonCode,
