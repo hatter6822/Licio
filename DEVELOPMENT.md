@@ -51,7 +51,7 @@ cannot be pre-seeded, so the development accounts below sign in with the
 | Role chip | Display name      | Email                 | What it exercises |
 |-----------|-------------------|-----------------------|-------------------|
 | **admin** | Ada Admin         | `admin@licio.test`    | Full RBAC: every steward **and** admin surface. |
-| **steward** | Sam Steward     | `steward@licio.test`  | Moderation review queue, governance, ranking/audit reads. |
+| **steward** | Sam Steward     | `steward@licio.test`  | The WS-J doctrine steward roles `ROLE_SAFETY` + `ROLE_APPEALS` + `ROLE_INTEGRITY` — the report-queue, appeals, and integrity (coordinated-report incident) console tabs; governance; ranking/audit reads. |
 | **expert** | Dr. Erin Expert  | `expert@licio.test`   | The platform `expert` role (least-privilege): may post top-level in expert-gated rooms (e.g. *Open Science*) where ordinary members cannot — but holds no moderation/admin power. |
 
 There is also a plain demo author, `demo@…`-less `licio_demo`, that owns most
@@ -120,6 +120,10 @@ something to show.
   syntheses, local context, direct experience, …), plus community syntheses.
 - **A non-empty moderation review queue** (pending `moderation_concern` items
   with ratified reason codes) for the steward/admin review surface.
+- **A WS-J report case** (two reporters → one standard case in the moderation
+  console's report queue) so the steward/admin console renders real data — the
+  full-context review panel, the action palette, and the audit log — on first
+  boot.
 
 ### 3.2 The seven rating labels
 

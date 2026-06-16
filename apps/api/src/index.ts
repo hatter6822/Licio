@@ -112,7 +112,7 @@ import {
   setInvariantServices,
 } from './invariants/services.js';
 import { demoStory } from './lib/demo-data.js';
-import { seedForumDemoData, seedOperationalSignals } from './lib/demo-seed.js';
+import { seedForumDemoData, seedModerationDemo, seedOperationalSignals } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
 import { createDrizzleModerationStores } from './moderation/drizzle-moderation-stores.js';
 import {
@@ -622,6 +622,8 @@ if (env.NODE_ENV !== 'production') {
       identityServices,
       ingestionServices,
     );
+    // WS-J: a small report queue so the dev console shows real data on boot.
+    await seedModerationDemo(moderationServices);
     logger.info('demo data seeded (development)');
   } catch (err) {
     logger.warn({ err }, 'demo seed skipped (non-fatal)');
