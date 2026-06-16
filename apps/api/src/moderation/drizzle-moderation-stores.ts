@@ -36,6 +36,7 @@ import {
   inArray,
   isNotNull,
   isNull,
+  like,
   lte,
   or,
   type SQL,
@@ -550,6 +551,20 @@ export class DrizzleModerationReportStore implements ModerationReportStore {
       .selectDistinct({ caseId: moderationReports.caseId })
       .from(moderationReports)
       .where(eq(moderationReports.reporterUserId, reporterUserId));
+    return rows.map((r) => r.caseId);
+  }
+
+  async listCaseIdsByReasonCategories(categories: readonly string[]): Promise<string[]> {
+    if (categories.length === 0) return [];
+    // Namespace prefix match: `MOD_HARASS` matches `MOD_HARASS_001` (escape LIKE
+    // metacharacters in the category just in case).
+    const likes = categories.map((c) =>
+      like(moderationReports.reasonCode, `${c.replace(/[%_\\]/g, '\\$&')}\\_%`),
+    );
+    const rows = await this.#db
+      .selectDistinct({ caseId: moderationReports.caseId })
+      .from(moderationReports)
+      .where(likes.length === 1 ? likes[0] : or(...likes));
     return rows.map((r) => r.caseId);
   }
 

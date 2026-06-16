@@ -83,6 +83,9 @@ export interface QueueFilterInput {
   /** Restrict to cases this reporter filed (role-gated: the route only passes it
    *  for actors permitted to see reporter identity). */
   reporter?: string;
+  /** Restrict to cases with a report in one of these policy-category namespaces
+   *  (e.g. `MOD_HARASS`). */
+  category?: readonly string[];
   createdAfter?: string;
   createdBefore?: string;
   cursor?: string;
@@ -109,13 +112,25 @@ export async function buildReportQueue(
 ): Promise<ReportQueueResponse> {
   const cursor = decodeCursor(filter.cursor);
   const baseStatus = filter.status ?? (['new', 'in_progress', 'escalated'] as const);
-  // The `reporter` filter resolves the reporter → their case ids (an empty set
-  // matches nothing, so an unknown reporter yields an empty queue rather than
-  // every case).
+  // The `reporter` + `category` filters each resolve to a SET of case ids (via
+  // the reports); an empty set matches nothing (so an unknown reporter/category
+  // yields an empty queue, not every case).  When BOTH are present the queue is
+  // their intersection.
   const reporterCaseIds =
     filter.reporter !== undefined
       ? await services.reports.listCaseIdsByReporter(filter.reporter)
       : undefined;
+  const categoryCaseIds =
+    filter.category && filter.category.length > 0
+      ? await services.reports.listCaseIdsByReasonCategories(filter.category)
+      : undefined;
+  let caseIds: string[] | undefined;
+  if (reporterCaseIds !== undefined && categoryCaseIds !== undefined) {
+    const inCategory = new Set(categoryCaseIds);
+    caseIds = reporterCaseIds.filter((id) => inCategory.has(id));
+  } else {
+    caseIds = reporterCaseIds ?? categoryCaseIds;
+  }
   const common = {
     status: baseStatus,
     ...(filter.severity ? { severity: filter.severity } : {}),
@@ -125,7 +140,7 @@ export async function buildReportQueue(
       ? { assignedTo: filter.assigneeId }
       : {}),
     ...(filter.targetUser ? { subjectUserId: filter.targetUser } : {}),
-    ...(reporterCaseIds !== undefined ? { caseIds: reporterCaseIds } : {}),
+    ...(caseIds !== undefined ? { caseIds } : {}),
     ...(filter.createdAfter ? { createdAfter: filter.createdAfter } : {}),
     ...(filter.createdBefore ? { createdBefore: filter.createdBefore } : {}),
   };

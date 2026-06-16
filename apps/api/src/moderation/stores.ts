@@ -257,6 +257,10 @@ export interface ModerationReportStore {
   /** Distinct case ids the reporter has filed against (the `reporter` queue
    *  filter resolves the reporter → their cases). */
   listCaseIdsByReporter(reporterUserId: string): Promise<string[]>;
+  /** Distinct case ids with a report whose reason code is in one of the given
+   *  policy-category namespaces (the `category` queue filter; e.g. `MOD_HARASS`
+   *  matches `MOD_HARASS_001`). */
+  listCaseIdsByReasonCategories(categories: readonly string[]): Promise<string[]>;
   clear(): Promise<void>;
 }
 
@@ -622,6 +626,14 @@ export class InMemoryModerationReportStore implements ModerationReportStore {
     const ids = new Set<string>();
     for (const r of this.#rows.values()) {
       if (r.reporterUserId === reporterUserId) ids.add(r.caseId);
+    }
+    return [...ids];
+  }
+  async listCaseIdsByReasonCategories(categories: readonly string[]): Promise<string[]> {
+    const prefixes = categories.map((c) => `${c}_`);
+    const ids = new Set<string>();
+    for (const r of this.#rows.values()) {
+      if (prefixes.some((p) => r.reasonCode.startsWith(p))) ids.add(r.caseId);
     }
     return [...ids];
   }

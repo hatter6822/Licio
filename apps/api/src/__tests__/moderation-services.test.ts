@@ -395,6 +395,14 @@ describe('#13 reporter / target_user queue filters', () => {
     expect(await ids({ reporter: '00000000-0000-4000-8000-0000000000ff', limit: 50 })).toHaveLength(
       0,
     );
+    // category: both cases have a MOD_HARASS report; MOD_SPAM matches none.
+    expect(await ids({ category: ['MOD_HARASS'], limit: 50 })).toEqual([caseA, caseB].sort());
+    expect(await ids({ category: ['MOD_SPAM'], limit: 50 })).toHaveLength(0);
+    // reporter ∩ category: only reporter B's case, and only if it's MOD_HARASS.
+    expect(await ids({ reporter: REPORTER_B, category: ['MOD_HARASS'], limit: 50 })).toEqual([
+      caseB,
+    ]);
+    expect(await ids({ reporter: REPORTER_B, category: ['MOD_SPAM'], limit: 50 })).toHaveLength(0);
   });
 });
 

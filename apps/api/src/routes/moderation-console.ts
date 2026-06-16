@@ -160,6 +160,7 @@ export function createModerationConsoleRoutes() {
           ...(f.assignment ? { assignment: f.assignment } : {}),
           ...(f.assignee_id ? { assigneeId: f.assignee_id } : {}),
           ...(f.target_user ? { targetUser: f.target_user } : {}),
+          ...(f.category && f.category.length > 0 ? { category: f.category } : {}),
           // The `reporter` filter exposes reporter identity, so it is honored
           // ONLY for roles permitted to see it (ROLE_SAFETY / ROLE_INTEGRITY);
           // for anyone else it is silently dropped (not applied).
