@@ -12,10 +12,12 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as ThreadsRouteImport } from './routes/threads'
+import { Route as SupportRouteImport } from './routes/support'
 import { Route as SubmitRouteImport } from './routes/submit'
 import { Route as StyleguideRouteImport } from './routes/styleguide'
 import { Route as RoomsRouteImport } from './routes/rooms'
 import { Route as ProfileRouteImport } from './routes/profile'
+import { Route as ModerationRouteImport } from './routes/moderation'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ThreadsThreadIdRouteImport } from './routes/threads_.$threadId'
@@ -26,13 +28,20 @@ import { Route as ProfileSignalLedgerRouteImport } from './routes/profile_.signa
 import { Route as ProfileSettingsRouteImport } from './routes/profile_.settings'
 import { Route as ProfileSecurityRouteImport } from './routes/profile_.security'
 import { Route as ProfileSavedRouteImport } from './routes/profile_.saved'
+import { Route as ProfileSafetyRouteImport } from './routes/profile_.safety'
 import { Route as ProfilePrivacyRouteImport } from './routes/profile_.privacy'
+import { Route as ProfileNoticesRouteImport } from './routes/profile_.notices'
 import { Route as RoomsRoomIdGovernanceRouteImport } from './routes/rooms_.$roomId_.governance'
 import { Route as ThreadsThreadIdBranchesBranchIdRouteImport } from './routes/threads_.$threadId_.branches.$branchId'
 
 const ThreadsRoute = ThreadsRouteImport.update({
   id: '/threads',
   path: '/threads',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SupportRoute = SupportRouteImport.update({
+  id: '/support',
+  path: '/support',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SubmitRoute = SubmitRouteImport.update({
@@ -53,6 +62,11 @@ const RoomsRoute = RoomsRouteImport.update({
 const ProfileRoute = ProfileRouteImport.update({
   id: '/profile',
   path: '/profile',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModerationRoute = ModerationRouteImport.update({
+  id: '/moderation',
+  path: '/moderation',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -105,9 +119,19 @@ const ProfileSavedRoute = ProfileSavedRouteImport.update({
   path: '/profile/saved',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProfileSafetyRoute = ProfileSafetyRouteImport.update({
+  id: '/profile_/safety',
+  path: '/profile/safety',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ProfilePrivacyRoute = ProfilePrivacyRouteImport.update({
   id: '/profile_/privacy',
   path: '/profile/privacy',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProfileNoticesRoute = ProfileNoticesRouteImport.update({
+  id: '/profile_/notices',
+  path: '/profile/notices',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RoomsRoomIdGovernanceRoute = RoomsRoomIdGovernanceRouteImport.update({
@@ -125,12 +149,16 @@ const ThreadsThreadIdBranchesBranchIdRoute =
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/moderation': typeof ModerationRoute
   '/profile': typeof ProfileRoute
   '/rooms': typeof RoomsRoute
   '/styleguide': typeof StyleguideRoute
   '/submit': typeof SubmitRoute
+  '/support': typeof SupportRoute
   '/threads': typeof ThreadsRoute
+  '/profile/notices': typeof ProfileNoticesRoute
   '/profile/privacy': typeof ProfilePrivacyRoute
+  '/profile/safety': typeof ProfileSafetyRoute
   '/profile/saved': typeof ProfileSavedRoute
   '/profile/security': typeof ProfileSecurityRoute
   '/profile/settings': typeof ProfileSettingsRoute
@@ -145,12 +173,16 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/moderation': typeof ModerationRoute
   '/profile': typeof ProfileRoute
   '/rooms': typeof RoomsRoute
   '/styleguide': typeof StyleguideRoute
   '/submit': typeof SubmitRoute
+  '/support': typeof SupportRoute
   '/threads': typeof ThreadsRoute
+  '/profile/notices': typeof ProfileNoticesRoute
   '/profile/privacy': typeof ProfilePrivacyRoute
+  '/profile/safety': typeof ProfileSafetyRoute
   '/profile/saved': typeof ProfileSavedRoute
   '/profile/security': typeof ProfileSecurityRoute
   '/profile/settings': typeof ProfileSettingsRoute
@@ -166,12 +198,16 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/moderation': typeof ModerationRoute
   '/profile': typeof ProfileRoute
   '/rooms': typeof RoomsRoute
   '/styleguide': typeof StyleguideRoute
   '/submit': typeof SubmitRoute
+  '/support': typeof SupportRoute
   '/threads': typeof ThreadsRoute
+  '/profile_/notices': typeof ProfileNoticesRoute
   '/profile_/privacy': typeof ProfilePrivacyRoute
+  '/profile_/safety': typeof ProfileSafetyRoute
   '/profile_/saved': typeof ProfileSavedRoute
   '/profile_/security': typeof ProfileSecurityRoute
   '/profile_/settings': typeof ProfileSettingsRoute
@@ -188,12 +224,16 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/login'
+    | '/moderation'
     | '/profile'
     | '/rooms'
     | '/styleguide'
     | '/submit'
+    | '/support'
     | '/threads'
+    | '/profile/notices'
     | '/profile/privacy'
+    | '/profile/safety'
     | '/profile/saved'
     | '/profile/security'
     | '/profile/settings'
@@ -208,12 +248,16 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/login'
+    | '/moderation'
     | '/profile'
     | '/rooms'
     | '/styleguide'
     | '/submit'
+    | '/support'
     | '/threads'
+    | '/profile/notices'
     | '/profile/privacy'
+    | '/profile/safety'
     | '/profile/saved'
     | '/profile/security'
     | '/profile/settings'
@@ -228,12 +272,16 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/login'
+    | '/moderation'
     | '/profile'
     | '/rooms'
     | '/styleguide'
     | '/submit'
+    | '/support'
     | '/threads'
+    | '/profile_/notices'
     | '/profile_/privacy'
+    | '/profile_/safety'
     | '/profile_/saved'
     | '/profile_/security'
     | '/profile_/settings'
@@ -249,12 +297,16 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   LoginRoute: typeof LoginRoute
+  ModerationRoute: typeof ModerationRoute
   ProfileRoute: typeof ProfileRoute
   RoomsRoute: typeof RoomsRoute
   StyleguideRoute: typeof StyleguideRoute
   SubmitRoute: typeof SubmitRoute
+  SupportRoute: typeof SupportRoute
   ThreadsRoute: typeof ThreadsRoute
+  ProfileNoticesRoute: typeof ProfileNoticesRoute
   ProfilePrivacyRoute: typeof ProfilePrivacyRoute
+  ProfileSafetyRoute: typeof ProfileSafetyRoute
   ProfileSavedRoute: typeof ProfileSavedRoute
   ProfileSecurityRoute: typeof ProfileSecurityRoute
   ProfileSettingsRoute: typeof ProfileSettingsRoute
@@ -274,6 +326,13 @@ declare module '@tanstack/react-router' {
       path: '/threads'
       fullPath: '/threads'
       preLoaderRoute: typeof ThreadsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/support': {
+      id: '/support'
+      path: '/support'
+      fullPath: '/support'
+      preLoaderRoute: typeof SupportRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/submit': {
@@ -302,6 +361,13 @@ declare module '@tanstack/react-router' {
       path: '/profile'
       fullPath: '/profile'
       preLoaderRoute: typeof ProfileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/moderation': {
+      id: '/moderation'
+      path: '/moderation'
+      fullPath: '/moderation'
+      preLoaderRoute: typeof ModerationRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -374,11 +440,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProfileSavedRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/profile_/safety': {
+      id: '/profile_/safety'
+      path: '/profile/safety'
+      fullPath: '/profile/safety'
+      preLoaderRoute: typeof ProfileSafetyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/profile_/privacy': {
       id: '/profile_/privacy'
       path: '/profile/privacy'
       fullPath: '/profile/privacy'
       preLoaderRoute: typeof ProfilePrivacyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/profile_/notices': {
+      id: '/profile_/notices'
+      path: '/profile/notices'
+      fullPath: '/profile/notices'
+      preLoaderRoute: typeof ProfileNoticesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/rooms_/$roomId_/governance': {
@@ -401,12 +481,16 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   LoginRoute: LoginRoute,
+  ModerationRoute: ModerationRoute,
   ProfileRoute: ProfileRoute,
   RoomsRoute: RoomsRoute,
   StyleguideRoute: StyleguideRoute,
   SubmitRoute: SubmitRoute,
+  SupportRoute: SupportRoute,
   ThreadsRoute: ThreadsRoute,
+  ProfileNoticesRoute: ProfileNoticesRoute,
   ProfilePrivacyRoute: ProfilePrivacyRoute,
+  ProfileSafetyRoute: ProfileSafetyRoute,
   ProfileSavedRoute: ProfileSavedRoute,
   ProfileSecurityRoute: ProfileSecurityRoute,
   ProfileSettingsRoute: ProfileSettingsRoute,
