@@ -113,6 +113,7 @@ import {
 import { demoStory } from './lib/demo-data.js';
 import { seedForumDemoData, seedOperationalSignals } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
+import { createDrizzleModerationStores } from './moderation/drizzle-moderation-stores.js';
 import {
   createAutoModerationSink,
   createWsJContributionSafety,
@@ -429,13 +430,13 @@ if (s3Config) {
 setIdentityServices(identityServices);
 
 // --- WS-J trust, safety, and abuse operations -------------------------------
-// Reports/blocks/mutes/appeals + the steward console + the audit log over the
-// in-memory stores (durable Drizzle adapters are a tracked residual).  The
-// PRODUCTION PORTS make actions take effect: a content removal writes the WS-E
-// item-safety state (which the WS-I ranking filter reads — the documented seam)
-// and the WS-G contribution state; an account action writes the WS-D state;
-// user resolution reads the WS-D directory.  Alerts log; on-call paging is a
-// WS-O binding.
+// Reports/blocks/mutes/appeals + the steward console + the append-only audit log
+// over the durable Postgres adapters (DATABASE_URL present) or the in-memory
+// stores (dev/test/CI).  The PRODUCTION PORTS make actions take effect: a content
+// removal writes the WS-E item-safety state (which the WS-I ranking filter reads
+// — the documented seam) and the WS-G contribution state; an account action
+// writes the WS-D state; user resolution reads the WS-D directory.  Alerts log;
+// on-call paging is a WS-O binding.
 const moderationServices = createInMemoryModerationServices({
   content: createProductionContentPort({
     safetyStore: eventServices.safetyStore,
@@ -473,7 +474,20 @@ const moderationServices = createInMemoryModerationServices({
   log: (event, meta) => logger.info(meta, event),
 });
 if (db) {
-  // The fail-closed config store is the durable, deploy-free tuning surface.
+  // Durable Postgres adapters (same interfaces as the in-memory stores; the
+  // append-only audit log is the tamper-evident source of truth).  The
+  // fail-closed config store is the deploy-free tuning surface.
+  const stores = createDrizzleModerationStores(db);
+  moderationServices.cases = stores.cases;
+  moderationServices.reports = stores.reports;
+  moderationServices.actions = stores.actions;
+  moderationServices.audit = stores.audit;
+  moderationServices.blocks = stores.blocks;
+  moderationServices.mutes = stores.mutes;
+  moderationServices.appeals = stores.appeals;
+  moderationServices.notices = stores.notices;
+  moderationServices.reviewerStatus = stores.reviewerStatus;
+  moderationServices.incidents = stores.incidents;
   moderationServices.configStore = new DrizzlePwattConfigStore(db);
 }
 await moderationServices.reloadConfig();
