@@ -92,6 +92,40 @@ export interface QueueFilterInput {
   limit: number;
 }
 
+// The report queue pages emergency-first, then standard, so the cursor carries a
+// SECTION tag: 'e' (still paging emergencies) or 's' (paging standard).  Keyset
+// within a section is (sla_due_at, case_id).  Back-compat: a legacy 2-part
+// `sla|id` cursor decodes as a standard-section cursor.  The empty-keyset
+// sentinel `s||` means "start of the standard section" (no `after`) — emitted at
+// the exact page boundary where emergencies filled the page but standard cases
+// still remain.
+type QueueSection = 'e' | 's';
+function decodeQueueCursor(
+  cursor: string | undefined,
+): { section: QueueSection; sla: string; id: string } | null {
+  if (!cursor) return null;
+  try {
+    const parts = Buffer.from(cursor, 'base64url').toString('utf-8').split('|');
+    if (parts.length === 3) {
+      const [section, sla, id] = parts;
+      if (section === 'e' || section === 's') return { section, sla: sla ?? '', id: id ?? '' };
+      return null;
+    }
+    if (parts.length === 2) {
+      const [sla, id] = parts;
+      return sla && id ? { section: 's', sla, id } : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+const encodeQueueCursor = (section: QueueSection, slaDueAt: string, caseId: string): string =>
+  Buffer.from(`${section}|${slaDueAt}|${caseId}`, 'utf-8').toString('base64url');
+const STANDARD_START_CURSOR = Buffer.from('s||', 'utf-8').toString('base64url');
+
+/** Decode the appeal queue's 2-part `sla|appealId` keyset cursor (the appeal
+ *  queue has a single section, so no section tag). */
 function decodeCursor(cursor: string | undefined): { sla: string; id: string } | null {
   if (!cursor) return null;
   try {
@@ -101,8 +135,6 @@ function decodeCursor(cursor: string | undefined): { sla: string; id: string } |
     return null;
   }
 }
-const encodeCursor = (row: ModerationCaseRow): string =>
-  Buffer.from(`${row.sla_due_at}|${row.case_id}`, 'utf-8').toString('base64url');
 
 /** Build the report queue (emergency on top + paginated standard section). */
 export async function buildReportQueue(
@@ -110,7 +142,6 @@ export async function buildReportQueue(
   actor: StewardActor,
   filter: QueueFilterInput,
 ): Promise<ReportQueueResponse> {
-  const cursor = decodeCursor(filter.cursor);
   const baseStatus = filter.status ?? (['new', 'in_progress', 'escalated'] as const);
   // The `reporter` + `category` filters each resolve to a SET of case ids (via
   // the reports); an empty set matches nothing (so an unknown reporter/category
@@ -145,32 +176,70 @@ export async function buildReportQueue(
     ...(filter.createdBefore ? { createdBefore: filter.createdBefore } : {}),
   };
 
-  const emergencyRows = await services.cases.list({ ...common, routedTo: 'emergency', limit: 200 });
-  const standardRows = await services.cases.list({
-    ...common,
-    routedTo: 'standard',
-    ...(cursor ? { afterSlaDueAt: cursor.sla, afterCaseId: cursor.id } : {}),
-    limit: filter.limit + 1,
-  });
+  // Paginate emergency-first within ONE page: an 'e'-section request keyset-pages
+  // the emergency cases (so EVERY emergency case is reachable, not just the first
+  // 200); once they're exhausted the same page backfills with the start of the
+  // standard section and the cursor moves to the 's' section.
+  const cur = decodeQueueCursor(filter.cursor);
+  const section: QueueSection = cur?.section ?? 'e';
+  const limit = filter.limit;
+  let emergencyRecords: ModerationCaseRecord[] = [];
+  let standardRecords: ModerationCaseRecord[] = [];
+  let nextCursor: string | null = null;
 
-  const assigneeIds = [...emergencyRows, ...standardRows]
+  if (section === 'e') {
+    const fetched = await services.cases.list({
+      ...common,
+      routedTo: 'emergency',
+      ...(cur ? { afterSlaDueAt: cur.sla, afterCaseId: cur.id } : {}),
+      limit: limit + 1,
+    });
+    emergencyRecords = fetched.slice(0, limit);
+    if (fetched.length > limit) {
+      // More emergency cases remain — keep paging the emergency section.
+      const last = emergencyRecords[emergencyRecords.length - 1];
+      nextCursor = last ? encodeQueueCursor('e', last.slaDueAt, last.caseId) : null;
+    } else {
+      // Emergency exhausted — backfill the page with the start of the standard
+      // section (no `after`).
+      const remaining = limit - emergencyRecords.length;
+      const standardFetched = await services.cases.list({
+        ...common,
+        routedTo: 'standard',
+        limit: remaining + 1,
+      });
+      standardRecords = standardFetched.slice(0, remaining);
+      if (standardFetched.length > remaining) {
+        const last = standardRecords[standardRecords.length - 1];
+        // remaining === 0 (emergencies filled the page exactly) but standard
+        // cases remain → the sentinel resumes the standard section next page.
+        nextCursor = last
+          ? encodeQueueCursor('s', last.slaDueAt, last.caseId)
+          : STANDARD_START_CURSOR;
+      }
+    }
+  } else {
+    const fetched = await services.cases.list({
+      ...common,
+      routedTo: 'standard',
+      ...(cur?.sla ? { afterSlaDueAt: cur.sla, afterCaseId: cur.id } : {}),
+      limit: limit + 1,
+    });
+    standardRecords = fetched.slice(0, limit);
+    if (fetched.length > limit) {
+      const last = standardRecords[standardRecords.length - 1];
+      nextCursor = last ? encodeQueueCursor('s', last.slaDueAt, last.caseId) : null;
+    }
+  }
+
+  const assigneeIds = [...emergencyRecords, ...standardRecords]
     .map((c) => c.assignedTo)
     .filter((id): id is string => id !== null);
   const handles = await resolveHandles(services, assigneeIds);
-
-  const standardPage = standardRows.slice(0, filter.limit);
-  const emergency = await Promise.all(emergencyRows.map((c) => caseToRow(services, c, handles)));
-  const standard = await Promise.all(standardPage.map((c) => caseToRow(services, c, handles)));
+  const emergency = await Promise.all(emergencyRecords.map((c) => caseToRow(services, c, handles)));
+  const standard = await Promise.all(standardRecords.map((c) => caseToRow(services, c, handles)));
   const filteredTotal = await services.cases.count({ ...common });
-  return {
-    emergency,
-    standard,
-    next_cursor:
-      standardRows.length > filter.limit && standard.length > 0
-        ? encodeCursor(standard[standard.length - 1] as ModerationCaseRow)
-        : null,
-    filtered_total: filteredTotal,
-  };
+  return { emergency, standard, next_cursor: nextCursor, filtered_total: filteredTotal };
 }
 
 async function resolveHandles(

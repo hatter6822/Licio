@@ -151,7 +151,10 @@ describe('buildReportQueue (filters + pagination + emergency section)', () => {
 
     const page1 = await buildReportQueue(services, SAFETY, { limit: 2 });
     expect(page1.emergency.length).toBe(1); // emergency section on top
-    expect(page1.standard.length).toBe(2);
+    // Emergency + standard now SHARE the page budget (emergency-first): one
+    // emergency + one standard fill the limit-2 page, with more standard behind
+    // the cursor.
+    expect(page1.standard.length).toBe(1);
     expect(page1.next_cursor).not.toBeNull();
     expect(page1.filtered_total).toBeGreaterThanOrEqual(4);
 
@@ -190,6 +193,107 @@ describe('buildReportQueue (filters + pagination + emergency section)', () => {
     await insertCase({ caseId: 'dddddddd-0000-4000-9000-000000000001' });
     const res = await buildReportQueue(services, SAFETY, { limit: 10, cursor: 'not-base64!!' });
     expect(res.standard.length).toBe(1);
+  });
+
+  // Walk every page of the queue, collecting the case ids in each section.
+  async function walkQueue(limit: number): Promise<{ emergency: string[]; standard: string[] }> {
+    const emergency: string[] = [];
+    const standard: string[] = [];
+    let cursor: string | undefined;
+    let total: number | null = null;
+    for (let guard = 0; guard < 200; guard += 1) {
+      const page = await buildReportQueue(services, SAFETY, {
+        limit,
+        ...(cursor ? { cursor } : {}),
+      });
+      // filtered_total is the both-section total and must be constant per page.
+      if (total === null) total = page.filtered_total;
+      else expect(page.filtered_total).toBe(total);
+      emergency.push(...page.emergency.map((r) => r.case_id));
+      standard.push(...page.standard.map((r) => r.case_id));
+      if (page.next_cursor === null) break;
+      cursor = page.next_cursor;
+    }
+    return { emergency, standard };
+  }
+
+  it('reaches every emergency case across pages (no 200-row cap) then standard', async () => {
+    for (let i = 1; i <= 5; i += 1) {
+      await insertCase({
+        caseId: `eeeeeeee-0000-4000-9000-00000000000${i}`,
+        targetId: `00000000-0000-4000-8000-0000000000e${i}`,
+        routedTo: 'emergency',
+        severity: 'critical',
+        slaDueAt: new Date(START + i * 60_000).toISOString(),
+      });
+    }
+    for (let i = 1; i <= 3; i += 1) {
+      await insertCase({
+        caseId: `aaaaaaaa-0000-4000-9000-00000000000${i}`,
+        targetId: `00000000-0000-4000-8000-0000000000a${i}`,
+        slaDueAt: new Date(START + i * 60_000).toISOString(),
+      });
+    }
+    const { emergency, standard } = await walkQueue(2);
+    expect(emergency).toHaveLength(5); // all five reachable despite limit 2
+    expect(new Set(emergency).size).toBe(5); // no duplicates / skips
+    expect(standard).toHaveLength(3);
+    expect(new Set([...emergency, ...standard]).size).toBe(8); // sections disjoint
+  });
+
+  it('handles the exact emergency/standard page boundary via the sentinel cursor', async () => {
+    // Two emergencies + two standard, limit 2: page 1 is full of emergencies
+    // (remaining === 0) yet standard cases remain — the sentinel resumes them.
+    for (let i = 1; i <= 2; i += 1) {
+      await insertCase({
+        caseId: `eeeeeeee-0000-4000-9000-00000000000${i}`,
+        targetId: `00000000-0000-4000-8000-0000000000e${i}`,
+        routedTo: 'emergency',
+        severity: 'critical',
+        slaDueAt: new Date(START + i * 60_000).toISOString(),
+      });
+    }
+    for (let i = 1; i <= 2; i += 1) {
+      await insertCase({
+        caseId: `aaaaaaaa-0000-4000-9000-00000000000${i}`,
+        targetId: `00000000-0000-4000-8000-0000000000a${i}`,
+        slaDueAt: new Date(START + i * 60_000).toISOString(),
+      });
+    }
+    const page1 = await buildReportQueue(services, SAFETY, { limit: 2 });
+    expect(page1.emergency).toHaveLength(2);
+    expect(page1.standard).toHaveLength(0); // page filled exactly by emergencies
+    expect(page1.next_cursor).not.toBeNull(); // standard still pending → sentinel
+    const page2 = await buildReportQueue(services, SAFETY, {
+      limit: 2,
+      ...(page1.next_cursor ? { cursor: page1.next_cursor } : {}),
+    });
+    expect(page2.emergency).toHaveLength(0);
+    expect(page2.standard).toHaveLength(2); // the sentinel resumed the standard section
+    expect(page2.next_cursor).toBeNull();
+  });
+
+  it('decodes a legacy 2-part cursor as a standard-section cursor', async () => {
+    for (let i = 1; i <= 3; i += 1) {
+      await insertCase({
+        caseId: `aaaaaaaa-0000-4000-9000-00000000000${i}`,
+        targetId: `00000000-0000-4000-8000-0000000000a${i}`,
+        slaDueAt: new Date(START + i * 60_000).toISOString(),
+      });
+    }
+    // A legacy cursor is `base64url(sla|caseId)` (no section tag) — it must resume
+    // the standard section after the first case, not restart at emergencies.
+    const firstSla = new Date(START + 1 * 60_000).toISOString();
+    const legacy = Buffer.from(
+      `${firstSla}|aaaaaaaa-0000-4000-9000-000000000001`,
+      'utf-8',
+    ).toString('base64url');
+    const res = await buildReportQueue(services, SAFETY, { limit: 10, cursor: legacy });
+    expect(res.emergency).toHaveLength(0);
+    expect(res.standard.map((r) => r.case_id)).not.toContain(
+      'aaaaaaaa-0000-4000-9000-000000000001',
+    );
+    expect(res.standard).toHaveLength(2); // the two cases after the cursor
   });
 });
 
