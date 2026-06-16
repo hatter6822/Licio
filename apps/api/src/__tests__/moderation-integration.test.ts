@@ -106,10 +106,11 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
     await blocks.clear();
     await mutes.clear();
     await reviewerStatus.clear();
-    // Clear the append-only audit (TRUNCATE) BEFORE deleting users: a user row
-    // is referenced by moderation_audit via ON DELETE set null, and that
-    // cascade UPDATE is rejected by the append-only trigger — so the audit rows
-    // must be gone first.
+    // TRUNCATE the append-only audit (the only permitted bulk reset; row
+    // UPDATE/DELETE stay blocked).  Deleting the seeded users below now cascades
+    // cleanly even with audit rows present — the append-only trigger PERMITS the
+    // right-to-erasure NULLing of audit user-references (see the erasure test) —
+    // so ordering no longer matters, but TRUNCATE remains the fast fixture reset.
     await audit.clear();
     const { users } = await import('@licio/db');
     const { inArray } = await import('drizzle-orm');
@@ -274,6 +275,45 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
       new Date(Date.now() + HOUR).toISOString(),
     );
     expect(wide.length).toBe(3);
+  });
+
+  it('audit: right-to-erasure purge severs user links but preserves the record', async () => {
+    // The WS-D account hard-purge (SPEC §19.2) is a plain `DELETE FROM users`
+    // relying on the FK ON DELETE SET NULL cascade.  The append-only trigger
+    // must PERMIT the resulting NULLing of audit user-references (else the purge
+    // throws and erasure is impossible the moment a user appears in the log),
+    // while still preserving the substantive record (tamper-evidence).
+    const actor = await insertUser('erasesubject');
+    const target = randomUUID();
+    await audit.append({
+      actorUserId: actor,
+      actorRole: 'ROLE_SAFETY',
+      action: 'remove',
+      reasonCode: 'MOD_HARASS_001',
+      targetType: 'content',
+      targetId: target,
+      subjectUserId: actor,
+      priorState: 'visible',
+      nextState: 'removed',
+      reversible: true,
+      linkedActionId: null,
+      reportIds: [],
+      coApproverUserId: null,
+      notes: 'pre-purge',
+    });
+    const { users } = await import('@licio/db');
+    const { eq } = await import('drizzle-orm');
+    // The purge must SUCCEED (the SET NULL cascade is permitted).
+    await db.delete(users).where(eq(users.userId, actor));
+    // The record survives with severed (NULL) actor + subject links; the
+    // substantive content (action, reason, target) is intact and immutable.
+    const surviving = (await audit.list({ action: 'remove', limit: 50 })).filter(
+      (r) => r.targetId === target,
+    );
+    expect(surviving.length).toBe(1);
+    expect(surviving[0]?.actorUserId).toBeNull();
+    expect(surviving[0]?.subjectUserId).toBeNull();
+    expect(surviving[0]?.reasonCode).toBe('MOD_HARASS_001');
   });
 
   it('blocks: idempotent insert, bilateral enforcement, owned delete', async () => {

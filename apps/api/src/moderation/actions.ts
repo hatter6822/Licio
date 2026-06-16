@@ -79,21 +79,21 @@ export function actionReversible(action: ConsoleAction, reasonCode: ModerationRe
   return true;
 }
 
-const CONTENT_ACTIONS: ReadonlySet<ConsoleAction> = new Set(['hide', 'remove']);
-const ACCOUNT_ACTIONS: ReadonlySet<ConsoleAction> = new Set([
+export const CONTENT_ACTIONS: ReadonlySet<ConsoleAction> = new Set(['hide', 'remove']);
+export const ACCOUNT_ACTIONS: ReadonlySet<ConsoleAction> = new Set([
   'restrict',
   'shadow',
   'suspend',
   'ban',
 ]);
 
-function contentStateFor(action: ConsoleAction): ContentVisibilityState | null {
+export function contentStateFor(action: ConsoleAction): ContentVisibilityState | null {
   if (action === 'hide') return 'hidden';
   if (action === 'remove') return 'removed';
   return null;
 }
 
-function accountStateFor(action: ConsoleAction): AccountActionState | null {
+export function accountStateFor(action: ConsoleAction): AccountActionState | null {
   if (action === 'restrict') return 'restricted';
   if (action === 'suspend') return 'suspended';
   if (action === 'ban') return 'banned';

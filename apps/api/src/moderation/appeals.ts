@@ -15,7 +15,14 @@ import {
   type EnforcementActionType,
   type ModerationReasonCode,
 } from '@licio/shared';
-import { performRevert } from './actions.js';
+import {
+  ACCOUNT_ACTIONS,
+  accountStateFor,
+  actionReversible,
+  CONTENT_ACTIONS,
+  contentStateFor,
+  performRevert,
+} from './actions.js';
 import { assignAppealReviewer } from './assignment.js';
 import { writeAudit } from './audit.js';
 import type { StewardActor } from './authz.js';
@@ -193,8 +200,12 @@ export async function decideAppeal(
     // Reverse the original (restores prior state, reversal integrity).  The
     // appeals reviewer's authority to overturn IS the authorization, so this
     // bypasses the steward-capability gate (an appeals reviewer need not hold
-    // the original action's capability).
-    if (original.reversible && !original.reverted) {
+    // the original action's capability).  The lift is NOT gated on
+    // `original.reversible`: that flag governs only the STEWARD self-revert
+    // endpoint, not appeal authority — so a ban (recorded reversible:false,
+    // un-toggleable by a steward) IS actually lifted when its appeal succeeds
+    // (otherwise the appellant is told they won while the ban silently stands).
+    if (!original.reverted) {
       await performRevert(services, actor, original);
     }
     if (decision === 'modify' && modifiedAction && original.subjectUserId) {
@@ -237,7 +248,14 @@ export async function decideAppeal(
   return { ok: true, status, noticeSent: true };
 }
 
-/** Apply the new, less-severe action a `modify` outcome selects. */
+/**
+ * Apply the new, less-severe action a `modify` outcome selects.  The prior
+ * `performRevert` already restored the baseline (content visible / account
+ * active), so the modified action is applied fresh and its FULL effect is
+ * reflected to distribution via the same mapping as the action palette — a
+ * downgrade like remove → hide or ban → restrict must actually leave the
+ * content/account in the modified state, never silently fully restored.
+ */
 async function applyModifiedAction(
   services: ModerationServices,
   actor: StewardActor,
@@ -245,6 +263,14 @@ async function applyModifiedAction(
   modifiedAction: ConsoleAction,
   reasonCode: ModerationReasonCode,
 ): Promise<void> {
+  const contentState =
+    original.targetType === 'content' && CONTENT_ACTIONS.has(modifiedAction)
+      ? contentStateFor(modifiedAction)
+      : null;
+  const accountState = ACCOUNT_ACTIONS.has(modifiedAction) ? accountStateFor(modifiedAction) : null;
+  const priorState = contentState ? 'visible' : accountState ? 'active' : null;
+  const nextState = contentState ?? accountState ?? null;
+  const reversible = actionReversible(modifiedAction, reasonCode);
   const newAction = await services.actions.insert({
     actorUserId: actor.userId,
     actorRole: actor.stewardRoles[0] ?? null,
@@ -255,24 +281,26 @@ async function applyModifiedAction(
     reasonCode,
     duration: null,
     reviewerNote: 'Applied via appeal modification',
-    priorState: original.nextState,
-    nextState: modifiedAction,
-    reversible: modifiedAction !== 'ban',
+    priorState,
+    nextState,
+    reversible,
     reverted: false,
     linkedActionId: original.actionId,
     caseId: original.caseId,
     coApproverUserId: null,
     reportIds: [],
   });
-  // Reflect a content modify (e.g. remove → hide) to distribution.
-  if (modifiedAction === 'hide' && original.targetType === 'content') {
+  if (contentState) {
     await services.content.applyContentState(
       original.targetId,
       null,
-      'hidden',
+      contentState,
       original.caseId,
       actor.userId,
     );
+  }
+  if (accountState && original.subjectUserId) {
+    await services.content.applyAccountState(original.subjectUserId, accountState, null);
   }
   await writeAudit(services, {
     actorUserId: actor.userId,
@@ -282,9 +310,9 @@ async function applyModifiedAction(
     targetType: original.targetType,
     targetId: original.targetId,
     subjectUserId: original.subjectUserId,
-    priorState: original.nextState,
-    nextState: modifiedAction,
-    reversible: modifiedAction !== 'ban',
+    priorState,
+    nextState,
+    reversible,
     linkedActionId: newAction.actionId,
   });
 }

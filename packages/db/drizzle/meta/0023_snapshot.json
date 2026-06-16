@@ -3675,8 +3675,8 @@
         }
       },
       "foreignKeys": {
-        "coordinated_report_incidents_case_id_moderation_cases_case_id_fk": {
-          "name": "coordinated_report_incidents_case_id_moderation_cases_case_id_fk",
+        "coordinated_report_incidents_case_fk": {
+          "name": "coordinated_report_incidents_case_fk",
           "tableFrom": "coordinated_report_incidents",
           "tableTo": "moderation_cases",
           "columnsFrom": [

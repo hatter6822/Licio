@@ -11,7 +11,11 @@
 //     (set null) on account deletion.
 //   • `moderation_audit` is APPEND-ONLY: there is no UPDATE/DELETE code path,
 //     and a DB trigger (added by the migration) rejects mutation — the log is
-//     the tamper-evident source of truth for history + transparency.
+//     the tamper-evident source of truth for history + transparency.  The sole
+//     trigger exception is the right-to-erasure (SPEC §19.2 / WS-D account
+//     purge) NULLing of the user-reference columns via the `users` ON DELETE
+//     SET NULL cascade: the substantive record is preserved (immutable) while a
+//     purged user's identity link is severed.
 //   • NO wallet/payment/treasury/donor column exists on any moderation table
 //     (the ranking-neutrality "no financial data in moderation" rule, SPEC
 //     §13.6) — enforced by the ABSENCE of the column, not by hiding it.
@@ -19,6 +23,7 @@ import { sql } from 'drizzle-orm';
 import {
   boolean,
   check,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -378,7 +383,10 @@ export const coordinatedReportIncidents = pgTable(
   'coordinated_report_incidents',
   {
     incidentId: uuid('incident_id').primaryKey().defaultRandom(),
-    caseId: uuid('case_id').references(() => moderationCases.caseId, { onDelete: 'set null' }),
+    // The auto-derived FK name (…_case_id_moderation_cases_case_id_fk) is 64
+    // chars and Postgres truncates it to 63 (a NOTICE on every migration); name
+    // it explicitly (short, ≤63) to keep the identifier intact.
+    caseId: uuid('case_id'),
     targetType: reportTargetTypeEnum('target_type').notNull(),
     targetId: uuid('target_id').notNull(),
     reportCount: integer('report_count').notNull(),
@@ -394,6 +402,11 @@ export const coordinatedReportIncidents = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    foreignKey({
+      columns: [t.caseId],
+      foreignColumns: [moderationCases.caseId],
+      name: 'coordinated_report_incidents_case_fk',
+    }).onDelete('set null'),
     index('coordinated_report_incidents_status_idx').on(t.status, t.createdAt),
     index('coordinated_report_incidents_target_idx').on(t.targetType, t.targetId),
   ],

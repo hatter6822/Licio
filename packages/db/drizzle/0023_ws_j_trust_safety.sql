@@ -178,7 +178,7 @@ ALTER TABLE "moderation_appeals" ADD CONSTRAINT "moderation_appeals_assigned_rev
 ALTER TABLE "moderation_appeals" ADD CONSTRAINT "moderation_appeals_decided_by_users_user_id_fk" FOREIGN KEY ("decided_by") REFERENCES "public"."users"("user_id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "moderation_notices" ADD CONSTRAINT "moderation_notices_user_id_users_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("user_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "reviewer_status" ADD CONSTRAINT "reviewer_status_user_id_users_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("user_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "coordinated_report_incidents" ADD CONSTRAINT "coordinated_report_incidents_case_id_moderation_cases_case_id_fk" FOREIGN KEY ("case_id") REFERENCES "public"."moderation_cases"("case_id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "coordinated_report_incidents" ADD CONSTRAINT "coordinated_report_incidents_case_fk" FOREIGN KEY ("case_id") REFERENCES "public"."moderation_cases"("case_id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "coordinated_report_incidents" ADD CONSTRAINT "coordinated_report_incidents_reviewed_by_users_user_id_fk" FOREIGN KEY ("reviewed_by") REFERENCES "public"."users"("user_id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "moderation_cases_queue_idx" ON "moderation_cases" USING btree ("status","routed_to","severity","sla_due_at");--> statement-breakpoint
 CREATE INDEX "moderation_cases_assigned_idx" ON "moderation_cases" USING btree ("assigned_to");--> statement-breakpoint
@@ -211,13 +211,44 @@ CREATE INDEX "account_mutes_expiry_idx" ON "account_mutes" USING btree ("expires
 CREATE INDEX "coordinated_report_incidents_status_idx" ON "coordinated_report_incidents" USING btree ("status","created_at");--> statement-breakpoint
 CREATE INDEX "coordinated_report_incidents_target_idx" ON "coordinated_report_incidents" USING btree ("target_type","target_id");--> statement-breakpoint
 -- Append-only enforcement for the moderation audit log (WS-J.2.5a, SPEC §25.4):
--- a BEFORE UPDATE/DELETE row trigger rejects any mutation, making the log
--- tamper-evident at the DB level (defense in depth beyond the no-mutate code
--- path).  TRUNCATE (table-owner only) is intentionally NOT blocked so test
--- fixtures can reset; the application role cannot TRUNCATE in production.
+-- a BEFORE UPDATE/DELETE row trigger makes the log tamper-evident at the DB
+-- level (defense in depth beyond the no-mutate code path).  Two cases:
+--   • DELETE is ALWAYS rejected — a record is never erased.
+--   • UPDATE is rejected EXCEPT the right-to-erasure (SPEC §19.2 / WS-D account
+--     hard-purge) NULLing of the user-reference columns via the `users`
+--     ON DELETE SET NULL cascade.  Every substantive field is immutable, and a
+--     user reference may only transition TO NULL (never be repointed to another
+--     user), so the audit record's content stays tamper-evident while a purged
+--     user's identity link is severed (matching the documented purge semantics:
+--     "audit rows survive with a severed NULL actor link").
+-- TRUNCATE (table-owner only) is intentionally NOT blocked so test fixtures can
+-- reset; the application role cannot TRUNCATE in production.
 CREATE OR REPLACE FUNCTION "moderation_audit_no_mutate"() RETURNS trigger AS $$
 BEGIN
-	RAISE EXCEPTION 'moderation_audit is append-only (no UPDATE/DELETE)';
+	IF (TG_OP = 'DELETE') THEN
+		RAISE EXCEPTION 'moderation_audit is append-only (no DELETE)';
+	END IF;
+	IF ( NEW."audit_id"         IS DISTINCT FROM OLD."audit_id"
+	  OR NEW."event_time"       IS DISTINCT FROM OLD."event_time"
+	  OR NEW."actor_role"       IS DISTINCT FROM OLD."actor_role"
+	  OR NEW."action"           IS DISTINCT FROM OLD."action"
+	  OR NEW."reason_code"      IS DISTINCT FROM OLD."reason_code"
+	  OR NEW."target_type"      IS DISTINCT FROM OLD."target_type"
+	  OR NEW."target_id"        IS DISTINCT FROM OLD."target_id"
+	  OR NEW."prior_state"      IS DISTINCT FROM OLD."prior_state"
+	  OR NEW."next_state"       IS DISTINCT FROM OLD."next_state"
+	  OR NEW."reversible"       IS DISTINCT FROM OLD."reversible"
+	  OR NEW."linked_action_id" IS DISTINCT FROM OLD."linked_action_id"
+	  OR NEW."report_ids"       IS DISTINCT FROM OLD."report_ids"
+	  OR NEW."notes"            IS DISTINCT FROM OLD."notes"
+	  OR NEW."created_at"       IS DISTINCT FROM OLD."created_at"
+	  OR (NEW."actor_user_id"       IS DISTINCT FROM OLD."actor_user_id"       AND NEW."actor_user_id"       IS NOT NULL)
+	  OR (NEW."subject_user_id"     IS DISTINCT FROM OLD."subject_user_id"     AND NEW."subject_user_id"     IS NOT NULL)
+	  OR (NEW."co_approver_user_id" IS DISTINCT FROM OLD."co_approver_user_id" AND NEW."co_approver_user_id" IS NOT NULL)
+	) THEN
+		RAISE EXCEPTION 'moderation_audit is append-only (only right-to-erasure NULLing of user references is permitted)';
+	END IF;
+	RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;--> statement-breakpoint
 CREATE TRIGGER "moderation_audit_append_only" BEFORE UPDATE OR DELETE ON "moderation_audit" FOR EACH ROW EXECUTE FUNCTION "moderation_audit_no_mutate"();

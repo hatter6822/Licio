@@ -641,6 +641,163 @@ describe('appeals (independence enforced)', () => {
     expect(notices.notices.some((n) => n.kind === 'appeal_outcome')).toBe(true);
   });
 
+  it('overturning a ban appeal actually lifts the account (reversible flag is steward-only)', async () => {
+    const port = recordingContentPort();
+    services = createInMemoryModerationServices({
+      content: port,
+      users: userPort({ [AUTHOR]: 100 }),
+      config: { banAppealCooldownHours: 0 }, // immediately appealable for the test
+    });
+    const banner = {
+      ...safetyActor('00000000-0000-4000-8000-0000000000d1'),
+      platformRoles: ['admin' as const],
+    };
+    const out = await applyAction(services, banner, {
+      target_type: 'account',
+      target_id: AUTHOR,
+      action: 'ban',
+      reason_code: 'MOD_HARASS_002',
+    });
+    if (!out.ok) throw new Error('ban failed');
+    expect(out.response.reversible).toBe(false); // a steward cannot self-revert a ban
+    port.accountStates.length = 0; // ignore the ban's suspend write
+    const sub = await submitAppeal(services, AUTHOR, {
+      action_id: out.response.action_id,
+      user_statement: 'mistaken identity',
+    });
+    expect(sub.ok).toBe(true);
+    const appeal = await services.appeals.getByActionId(out.response.action_id);
+    if (!appeal) throw new Error('appeal not created');
+    const decision = await decideAppeal(
+      services,
+      appealsActor(),
+      appeal.appealId,
+      'overturn',
+      'MOD_HARASS_001',
+      'Wrong account.',
+      undefined,
+    );
+    expect(decision.ok && decision.status).toBe('overturned');
+    // The ban is ACTUALLY lifted — the account returns to active (the bug was
+    // that the reversible:false flag suppressed the lift on a successful appeal).
+    expect(port.accountStates).toContainEqual({ userId: AUTHOR, state: 'active' });
+    expect((await services.actions.getById(out.response.action_id))?.reverted).toBe(true);
+  });
+
+  it('modifying a ban to a restriction lifts the ban then applies the restriction', async () => {
+    const port = recordingContentPort();
+    services = createInMemoryModerationServices({
+      content: port,
+      users: userPort({ [AUTHOR]: 100 }),
+      config: { banAppealCooldownHours: 0 },
+    });
+    const banner = {
+      ...safetyActor('00000000-0000-4000-8000-0000000000d1'),
+      platformRoles: ['admin' as const],
+    };
+    const out = await applyAction(services, banner, {
+      target_type: 'account',
+      target_id: AUTHOR,
+      action: 'ban',
+      reason_code: 'MOD_HARASS_002',
+    });
+    if (!out.ok) throw new Error('ban failed');
+    port.accountStates.length = 0;
+    const sub = await submitAppeal(services, AUTHOR, {
+      action_id: out.response.action_id,
+      user_statement: 'too harsh',
+    });
+    expect(sub.ok).toBe(true);
+    const appeal = await services.appeals.getByActionId(out.response.action_id);
+    if (!appeal) throw new Error('appeal not created');
+    const decision = await decideAppeal(
+      services,
+      appealsActor(),
+      appeal.appealId,
+      'modify',
+      'MOD_HARASS_001',
+      'Downgraded to a restriction.',
+      'restrict',
+    );
+    expect(decision.ok && decision.status).toBe('modified');
+    // The ban is lifted (active) and the modified restriction is applied
+    // (restricted) — never silently left fully restored or fully banned.
+    expect(port.accountStates).toContainEqual({ userId: AUTHOR, state: 'active' });
+    expect(port.accountStates).toContainEqual({ userId: AUTHOR, state: 'restricted' });
+    const subjectActions = await services.actions.listBySubject(AUTHOR);
+    expect(
+      subjectActions.some(
+        (a) => a.action === 'restrict' && a.linkedActionId === out.response.action_id,
+      ),
+    ).toBe(true);
+  });
+
+  it('modifying a content removal to a hide reflects the hidden state', async () => {
+    const port = recordingContentPort();
+    services = createInMemoryModerationServices({
+      content: port,
+      users: userPort({ [AUTHOR]: 100 }),
+    });
+    const out = await applyAction(services, safetyActor('00000000-0000-4000-8000-0000000000d1'), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'remove',
+      reason_code: 'MOD_HARASS_001',
+    });
+    if (!out.ok) throw new Error('remove failed');
+    port.contentStates.length = 0;
+    await submitAppeal(services, AUTHOR, {
+      action_id: out.response.action_id,
+      user_statement: 'ctx',
+    });
+    const appeal = await services.appeals.getByActionId(out.response.action_id);
+    if (!appeal) throw new Error('appeal not created');
+    const decision = await decideAppeal(
+      services,
+      appealsActor(),
+      appeal.appealId,
+      'modify',
+      'MOD_HARASS_001',
+      'Hidden instead of removed.',
+      'hide',
+    );
+    expect(decision.ok && decision.status).toBe('modified');
+    expect(port.contentStates).toContainEqual({ targetId: TARGET, state: 'visible' }); // revert
+    expect(port.contentStates).toContainEqual({ targetId: TARGET, state: 'hidden' }); // modify
+  });
+
+  it('upholding an appeal leaves the action in place and still notifies the user', async () => {
+    const actionId = await applyHide();
+    await submitAppeal(services, AUTHOR, { action_id: actionId, user_statement: 's' });
+    const appeal = await services.appeals.getByActionId(actionId);
+    if (!appeal) throw new Error('appeal not created');
+    const decision = await decideAppeal(
+      services,
+      appealsActor(),
+      appeal.appealId,
+      'uphold',
+      'MOD_HARASS_001',
+      'The action stands.',
+      undefined,
+    );
+    expect(decision.ok && decision.status).toBe('upheld');
+    expect((await services.actions.getById(actionId))?.reverted).toBe(false);
+    const notices = await listNotices(services, AUTHOR, null, 10);
+    expect(notices.notices.some((n) => n.kind === 'appeal_outcome')).toBe(true);
+    // Deciding again is rejected (already decided).
+    const again = await decideAppeal(
+      services,
+      appealsActor(),
+      appeal.appealId,
+      'overturn',
+      'MOD_HARASS_001',
+      'x',
+      undefined,
+    );
+    expect(again.ok).toBe(false);
+    expect(!again.ok && again.code).toBe('already_decided');
+  });
+
   it('a ban appeal is gated by the cooldown', async () => {
     const banner = { ...safetyActor(), platformRoles: ['admin' as const] };
     const out = await applyAction(services, banner, {
