@@ -37,6 +37,9 @@ wins.
                             (target_type, target_id) WHERE status = 'open' — the
                             cross-connection authority that keeps coordinated-
                             incident creation atomic (one open incident per target)
+  drizzle/0025_*.sql        moderation_cases.subject_user_id (FK users ON DELETE
+                            SET NULL + index) — the user a case is ABOUT, populated
+                            at report time, driving the `target_user` queue filter
 
 apps/api/src/moderation/
   stores.ts        store interfaces + in-memory adapters (Postgres drop-in seam)
@@ -253,7 +256,18 @@ These are structural guarantees the code holds (each covered by a test):
   decide on a queue row; a decision requires opening the review (appellant
   statement, new evidence, original context, side-by-side snapshot) and a written
   explanation.  Filing an appeal flips the originating notice to `pending`, so the
-  inbox stops offering an Appeal affordance that would 409.
+  inbox stops offering an Appeal affordance that would 409.  A `modify` outcome
+  must be both strictly less severe AND applicable to the original target type
+  (no account→content "modification" that leaves no enforcement).
+- **Queue filters are honored.** `target_user` filters on the case's
+  `subject_user_id`; `reporter` resolves the reporter → their case ids and is
+  honored ONLY for roles permitted to see reporter identity.  Both the report
+  queue and the appeal queue are keyset-paginated (stable under inserts), so no
+  case/appeal is stranded beyond the first page.
+- **Accountability completeness.** Console actions persist the case's aggregated
+  `report_ids` (the audit view exposes them); coordinated incidents record the
+  recomputed aggregate severity; and a user's moderation notices are included in
+  their DSAR export (reason codes only, never reporter identity).
 
 ## Residuals (tracked)
 
