@@ -93,6 +93,7 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
     await blocks.clear();
     await mutes.clear();
     await reviewerStatus.clear();
+    await audit.clear();
   });
 
   afterAll(async () => {
@@ -105,6 +106,11 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
     await blocks.clear();
     await mutes.clear();
     await reviewerStatus.clear();
+    // Clear the append-only audit (TRUNCATE) BEFORE deleting users: a user row
+    // is referenced by moderation_audit via ON DELETE set null, and that
+    // cascade UPDATE is rejected by the append-only trigger — so the audit rows
+    // must be gone first.
+    await audit.clear();
     const { users } = await import('@licio/db');
     const { inArray } = await import('drizzle-orm');
     if (userIds.length > 0) await db.delete(users).where(inArray(users.userId, userIds));
@@ -300,10 +306,31 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
 
   it('appeals: by-action lookup, decide update, reviewer load, queue order', async () => {
     const appellant = await insertUser('appellant');
-    const reviewer = await insertUser('appeal-rev');
-    const actionId = randomUUID();
+    const reviewer = await insertUser('appealrev');
+    const subject = await insertUser('appealsubj');
+    // A REAL action to appeal — moderation_appeals.action_id FKs to
+    // moderation_actions, so a bogus id would violate the constraint.
+    const action = await actions.insert({
+      actorUserId: reviewer,
+      actorRole: 'ROLE_SAFETY',
+      action: 'remove',
+      targetType: 'content',
+      targetId: randomUUID(),
+      subjectUserId: subject,
+      reasonCode: 'MOD_HARASS_001',
+      duration: null,
+      reviewerNote: null,
+      priorState: 'visible',
+      nextState: 'removed',
+      reversible: true,
+      reverted: false,
+      linkedActionId: null,
+      caseId: null,
+      coApproverUserId: null,
+      reportIds: [],
+    });
     const ap = await appeals.insert({
-      actionId,
+      actionId: action.actionId,
       appellantUserId: appellant,
       statement: 'Please reconsider.',
       newEvidence: [],
@@ -316,7 +343,7 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
       decisionReasonCode: null,
       decisionExplanation: null,
     });
-    expect((await appeals.getByActionId(actionId))?.appealId).toBe(ap.appealId);
+    expect((await appeals.getByActionId(action.actionId))?.appealId).toBe(ap.appealId);
     expect(await appeals.countOpenByReviewer(reviewer)).toBe(1);
     await appeals.update(ap.appealId, {
       status: 'overturned',
