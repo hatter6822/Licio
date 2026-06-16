@@ -428,7 +428,9 @@ export async function createContribution(
 
   // 5. Safety pre-checks (WS-J.2.6 seam): flag → under_review + queue;
   //    block → removed (high-confidence spam/malware auto-block, appealable).
-  const verdict = await forum.safety.classify(request, { userId });
+  //    The duplicate-flood detector counts distinct ROOMS, so pass the thread's
+  //    real home room (NOT the thread id — same-room reposts are one room).
+  const verdict = await forum.safety.classify(request, { userId, roomId: thread.roomId });
   const moderationState =
     verdict.disposition === 'block'
       ? 'removed'
@@ -746,7 +748,7 @@ export async function editContribution(
   contributionId: string,
   update: ContributionUpdate,
 ): Promise<ContributionEditOutcome> {
-  const { forum } = bundle;
+  const { forum, ingestion } = bundle;
   const existing = await forum.contributions.getById(contributionId);
   if (!existing || existing.userId !== userId) {
     // 404-over-403: never confirm another user's contribution ids.
@@ -823,7 +825,14 @@ export async function editContribution(
       ? { source_url: existing.metadata['source_url'] }
       : {}),
   } as unknown as ContributionCreate;
-  const verdict = await forum.safety.classify(editedShape, { userId });
+  // Re-screen against the thread's real home room (WS-Q), so the flood detector
+  // counts distinct rooms — not thread ids.  The thread exists (the contribution
+  // does); fall back to the thread id only for an unreachable missing-thread case.
+  const editThread = await ingestion.stories.getThreadById(existing.threadId);
+  const verdict = await forum.safety.classify(editedShape, {
+    userId,
+    roomId: editThread?.roomId ?? existing.threadId,
+  });
 
   const edited = await forum.contributions.applyEdit(contributionId, patch, userId, randomUUID());
   if (!edited) {

@@ -131,9 +131,11 @@ describe('WS-J.2.6 contribution auto-block', () => {
   });
 
   it('#3 does not flag a duplicate flood one submission/room early (no double-count)', async () => {
-    const t1 = await seedThread(fixture);
-    const t2 = await seedThread(fixture);
-    const t3 = await seedThread(fixture);
+    // DISTINCT rooms (cross-room flooding needs duplicateFloodMinRooms=2 rooms
+    // AND duplicateFloodCount=3 similar posts): seed each thread in its own room.
+    const t1 = await seedThread(fixture, { roomId: '00000000-0000-4000-8000-00000000ee01' });
+    const t2 = await seedThread(fixture, { roomId: '00000000-0000-4000-8000-00000000ee02' });
+    const t3 = await seedThread(fixture, { roomId: '00000000-0000-4000-8000-00000000ee03' });
     const body = 'A perfectly ordinary cross-posted note about the topic at hand.';
     const mk = (threadId: string) =>
       contributionCreateSchema.parse({ ...contributionBody('explanation', threadId), body });
@@ -146,5 +148,23 @@ describe('WS-J.2.6 contribution auto-block', () => {
     // The 3rd (3 similar across 2+ rooms in the window) IS flagged for review.
     const r3 = await post(mk(t3.threadId));
     expect(r3.ok && r3.contribution.moderationState).toBe('under_review');
+  });
+
+  it('A1: same-room cross-thread reposts are NOT cross-room flooding', async () => {
+    // Three threads in ONE room (the WS-Q default): the flood detector keys off
+    // the real home room, so distinctRooms stays 1 (< duplicateFloodMinRooms) and
+    // even the 3rd identical post is published.  The pre-fix bug keyed off the
+    // thread id, reading three threads as three rooms and flagging the 3rd.
+    const ROOM = '00000000-0000-4000-8000-00000000ee0f';
+    const t1 = await seedThread(fixture, { roomId: ROOM });
+    const t2 = await seedThread(fixture, { roomId: ROOM });
+    const t3 = await seedThread(fixture, { roomId: ROOM });
+    const body = 'A perfectly ordinary same-room note repeated across threads.';
+    const mk = (threadId: string) =>
+      contributionCreateSchema.parse({ ...contributionBody('explanation', threadId), body });
+    for (const t of [t1, t2, t3]) {
+      const r = await post(mk(t.threadId));
+      expect(r.ok && r.contribution.moderationState).toBe('published');
+    }
   });
 });

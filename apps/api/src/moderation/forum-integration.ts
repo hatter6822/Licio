@@ -99,9 +99,10 @@ export function createWsJContributionSafety(
         signature,
         nowMs,
         config.duplicateFloodWindowSeconds * 1000,
-        // The current submission's room (= its thread) — folded into the
-        // distinct-room count so a same-room repeat isn't seen as cross-room.
-        request.thread_id,
+        // The current submission's REAL home room (WS-Q: every thread belongs to
+        // a room) — folded into the distinct-room count so two threads in ONE
+        // room are not miscounted as two rooms (false cross-room flooding).
+        context.roomId,
       );
       const spam = classifySpam(
         {
@@ -112,11 +113,12 @@ export function createWsJContributionSafety(
         },
         config,
       );
-      // Record this submission for future velocity/flood (room = thread).
+      // Record this submission for future velocity/flood, keyed by the real
+      // home room (NOT the thread) so cross-room counting is accurate.
       services.submissions.record({
         userId: context.userId,
         signature,
-        roomId: request.thread_id,
+        roomId: context.roomId,
         atMs: nowMs,
       });
       if (spam.disposition === 'block') {

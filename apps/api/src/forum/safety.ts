@@ -38,6 +38,14 @@ export interface ContributionSafetyVerdict {
 /** Per-request author context the WS-J classifiers need (account age, etc.). */
 export interface ContributionSafetyContext {
   userId: string;
+  /**
+   * The thread's home ROOM (WS-Q: every thread belongs to a room).  The
+   * duplicate-flood detector counts DISTINCT ROOMS, so this must be the real
+   * room id — NOT the thread id.  Two threads in one room are ONE room, so
+   * keying flooding off the thread id would read same-room reposts as
+   * cross-room flooding (a false positive).
+   */
+  roomId: string;
 }
 
 export interface ContributionSafetyClassifier {
