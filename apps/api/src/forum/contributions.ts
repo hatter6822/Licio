@@ -382,9 +382,15 @@ export async function createContribution(
     );
   }
 
-  // 5. Safety pre-checks (WS-J.2.6 seam): flagged → under_review + queue.
-  const verdict = await forum.safety.classify(request);
-  const moderationState = verdict.flagged ? 'under_review' : 'published';
+  // 5. Safety pre-checks (WS-J.2.6 seam): flag → under_review + queue;
+  //    block → removed (high-confidence spam/malware auto-block, appealable).
+  const verdict = await forum.safety.classify(request, { userId });
+  const moderationState =
+    verdict.disposition === 'block'
+      ? 'removed'
+      : verdict.disposition === 'flag'
+        ? 'under_review'
+        : 'published';
 
   // 6. Transactional insert (with the evidence card for evidence types).
   const contributionId = randomUUID();
@@ -468,8 +474,12 @@ export async function createContribution(
 
   // Review-queue intake: safety holds AND user-filed moderation concerns
   // (§18.4 report mechanism; urgent flags carry their urgency in context).
-  if (verdict.flagged) {
-    forum.metrics.increment('contributions.safety_flagged');
+  if (verdict.disposition !== 'clear') {
+    forum.metrics.increment(
+      verdict.disposition === 'block'
+        ? 'contributions.safety_blocked'
+        : 'contributions.safety_flagged',
+    );
     await ingestion.reviewQueue.insert({
       kind: 'contribution_safety_hold',
       storyId: thread.storyId,
@@ -477,6 +487,7 @@ export async function createContribution(
         contribution_id: contribution.contributionId,
         thread_id: contribution.threadId,
         reasons: verdict.reasons,
+        disposition: verdict.disposition,
       },
       status: 'pending',
       resolution: null,
@@ -484,6 +495,19 @@ export async function createContribution(
       resolvedAt: null,
       notBefore: null,
     });
+    // A high-confidence auto-block is an APPEALABLE system action: record the
+    // moderation action + audit + a statement-of-reasons notice (WS-J.2.6a/b +
+    // the false-positive recourse).  No-op when the sink is unwired.
+    if (verdict.disposition === 'block' && forum.autoModerationSink !== null) {
+      forum.trackBackground(
+        forum.autoModerationSink.recordContentAutoBlock({
+          contributionId: contribution.contributionId,
+          authorUserId: userId,
+          reasonCode: verdict.reasonCode ?? 'MOD_SPAM_001',
+          reasons: verdict.reasons,
+        }),
+      );
+    }
   }
   if (request.type === 'moderation_concern') {
     forum.metrics.increment('contributions.moderation_concern');
@@ -754,7 +778,7 @@ export async function editContribution(
       ? { source_url: existing.metadata['source_url'] }
       : {}),
   } as unknown as ContributionCreate;
-  const verdict = await forum.safety.classify(editedShape);
+  const verdict = await forum.safety.classify(editedShape, { userId });
 
   const edited = await forum.contributions.applyEdit(contributionId, patch, userId, randomUUID());
   if (!edited) {
@@ -763,9 +787,22 @@ export async function editContribution(
       rejection: { status: 404, code: 'not_found', message: 'Contribution not found' },
     };
   }
-  if (verdict.flagged && edited.moderationState === 'published') {
+  // Edit-to-introduce-spam/malware is caught here: a `block` disposition removes
+  // the edit (appealable system action); `flag` holds it for review.
+  if (verdict.disposition !== 'clear' && edited.moderationState === 'published') {
+    const targetState = verdict.disposition === 'block' ? 'removed' : 'under_review';
     forum.metrics.increment('contributions.edit_safety_flagged');
-    const held = await forum.contributions.setModerationState(contributionId, 'under_review');
+    const held = await forum.contributions.setModerationState(contributionId, targetState);
+    if (verdict.disposition === 'block' && forum.autoModerationSink !== null) {
+      forum.trackBackground(
+        forum.autoModerationSink.recordContentAutoBlock({
+          contributionId,
+          authorUserId: userId,
+          reasonCode: verdict.reasonCode ?? 'MOD_SPAM_001',
+          reasons: verdict.reasons,
+        }),
+      );
+    }
     const storyId = await bundle.ingestion.stories.getStoryIdByThreadId(existing.threadId);
     await bundle.ingestion.reviewQueue.insert({
       kind: 'contribution_safety_hold',

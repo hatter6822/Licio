@@ -114,6 +114,10 @@ import { demoStory } from './lib/demo-data.js';
 import { seedForumDemoData, seedOperationalSignals } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
 import {
+  createAutoModerationSink,
+  createWsJContributionSafety,
+} from './moderation/forum-integration.js';
+import {
   createProductionContentPort,
   createProductionUserPort,
 } from './moderation/production-ports.js';
@@ -477,6 +481,11 @@ setModerationServices(moderationServices);
 // WS-J.1.2 enforcement seam: forum interaction-rejection + thread/feed viewing
 // filters read this (ranking reads it via `services.forum`).  One wiring point.
 forumServices.relationshipReader = createRelationshipReader(moderationServices);
+// WS-J.2.6 pre-checks on the contribution submission path: spam/malware
+// auto-block (recorded as appealable system actions) + duplicate-flood/policy-
+// risk flag-to-review (the WS-F denylist is consulted as the malware fallback).
+forumServices.safety = createWsJContributionSafety(moderationServices, ingestionServices.urlSafety);
+forumServices.autoModerationSink = createAutoModerationSink(moderationServices);
 
 // Development demo seed (NEVER in production): populate rooms, stories, threads,
 // and multi-author comments through the REAL stores so a fresh dev database

@@ -57,6 +57,22 @@ export interface ViewerRelationshipReader {
   interactionBlocked(actorUserId: string, targetUserId: string): Promise<boolean>;
 }
 
+/**
+ * WS-J.2.6a/b auto-block accountability seam: when a contribution is
+ * auto-blocked (high-confidence spam/malware), this records the system
+ * moderation action + audit + the appealable statement-of-reasons notice.
+ * Assigned at boot (null = no accountability sink; the content is still
+ * persisted `removed`).
+ */
+export interface AutoModerationSink {
+  recordContentAutoBlock(input: {
+    contributionId: string;
+    authorUserId: string;
+    reasonCode: string;
+    reasons: string[];
+  }): Promise<void>;
+}
+
 export interface ForumServices {
   contributions: ContributionStore;
   rooms: RoomStore;
@@ -69,6 +85,8 @@ export interface ForumServices {
   uploadScanner: UploadScanner;
   /** WS-J.1.2 enforcement seam (assigned at boot; null = not enforced). */
   relationshipReader: ViewerRelationshipReader | null;
+  /** WS-J.2.6 auto-block accountability seam (assigned at boot; null = none). */
+  autoModerationSink: AutoModerationSink | null;
   metrics: ForumMetrics;
   config: () => ForumRuntimeConfig;
   reloadConfig: () => Promise<ForumRuntimeConfig>;
@@ -88,6 +106,7 @@ export interface InMemoryForumOptions {
   safety?: ContributionSafetyClassifier;
   uploadScanner?: UploadScanner;
   relationshipReader?: ViewerRelationshipReader;
+  autoModerationSink?: AutoModerationSink;
   limiterStore?: SlidingWindowStore;
   log?: (event: string, meta: Record<string, unknown>) => void;
   now?: () => number;
@@ -126,9 +145,10 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
       options.safety ??
       (ingestion
         ? new HeuristicContributionSafety(ingestion.urlSafety)
-        : { classify: async () => ({ flagged: false, reasons: [] }) }),
+        : { classify: async () => ({ disposition: 'clear' as const, reasons: [] }) }),
     uploadScanner: options.uploadScanner ?? new LocalChecksUploadScanner(),
     relationshipReader: options.relationshipReader ?? null,
+    autoModerationSink: options.autoModerationSink ?? null,
     metrics,
     config: () => config,
     reloadConfig: async () => config,
