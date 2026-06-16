@@ -559,6 +559,38 @@ describe('reversal integrity (WS-J.2.3b)', () => {
   });
 });
 
+describe('action durability — record before enforcement (A2)', () => {
+  it('persists the action row even when the enforcement port throws', async () => {
+    // The content store is down: applyContentState rejects.  With the action
+    // recorded FIRST, the failure surfaces but the row survives as a revert
+    // handle (pre-fix order enforced before recording, so a throw left the
+    // content hidden with no action id / notice / revert handle).
+    const throwingPort: ModerationContentPort = {
+      ...recordingContentPort(),
+      async applyContentState(): Promise<void> {
+        throw new Error('content store unavailable');
+      },
+    };
+    services = createInMemoryModerationServices({
+      content: throwingPort,
+      users: userPort({ [AUTHOR]: 100 }),
+    });
+    await expect(
+      applyAction(services, safetyActor(), {
+        target_type: 'content',
+        target_id: TARGET,
+        action: 'remove',
+        reason_code: 'MOD_HARASS_001',
+      }),
+    ).rejects.toThrow(/content store unavailable/);
+    // The durable action row exists (non-reverted) despite the enforcement throw.
+    const active = await services.actions.listActiveByTarget('content', TARGET);
+    expect(active).toHaveLength(1);
+    expect(active[0]?.action).toBe('remove');
+    expect(active[0]?.reverted).toBe(false);
+  });
+});
+
 describe('action palette + revert', () => {
   it('rejects an action the role cannot perform', async () => {
     const communityActor: StewardActor = {

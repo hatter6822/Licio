@@ -198,24 +198,14 @@ export async function applyAction(
     }
   }
 
-  // 1. Apply the effect (idempotent at the port; an already-removed item is a
-  //    no-op there).  Reflected to distribution (the ranking seam).
+  // 1. Record the action FIRST — a durable record before any enforcement side
+  //    effect.  The ports span separate stores with no shared transaction, so
+  //    insert-first is the outbox ordering: a failure AFTER the insert leaves
+  //    "recorded, not enforced" (the distribution seam reads the item-safety /
+  //    account state, NOT this row, so content stays visible and the row is a
+  //    revert handle), never the unrecoverable "enforced, not recorded".
   const contentState = CONTENT_ACTIONS.has(request.action) ? contentStateFor(request.action) : null;
-  if (contentState && request.target_type === 'content') {
-    await services.content.applyContentState(
-      request.target_id,
-      resolution.contentKind,
-      contentState,
-      request.case_id ?? null,
-      actor.userId,
-    );
-  }
   const accountState = ACCOUNT_ACTIONS.has(request.action) ? accountStateFor(request.action) : null;
-  if (accountState && subjectUserId) {
-    await services.content.applyAccountState(subjectUserId, accountState, durationDays);
-  }
-
-  // 2. Record the action.
   const priorState = contentState ? 'visible' : accountState ? 'active' : null;
   const nextState = contentState ?? accountState ?? null;
   const action = await services.actions.insert({
@@ -237,6 +227,21 @@ export async function applyAction(
     coApproverUserId: null,
     reportIds,
   });
+
+  // 2. Apply the effect (idempotent at the port; an already-removed item is a
+  //    no-op there).  Reflected to distribution (the ranking seam).
+  if (contentState && request.target_type === 'content') {
+    await services.content.applyContentState(
+      request.target_id,
+      resolution.contentKind,
+      contentState,
+      request.case_id ?? null,
+      actor.userId,
+    );
+  }
+  if (accountState && subjectUserId) {
+    await services.content.applyAccountState(subjectUserId, accountState, durationDays);
+  }
 
   // 3. Resolve the linked case/reports.
   await resolveCaseForAction(services, request, action.actionId);
