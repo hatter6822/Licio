@@ -401,11 +401,21 @@ export function createV1Routes() {
             }
             const thread = await ingestion.stories.getThreadByStoryId(storyId);
             const signals = await assembleStoryReadSignals(real, thread);
+            // WS-G.3.3 — a WS-J moderation removal makes the thread routes 404
+            // (threadReadableToUser) and drops it from the directory; suppress
+            // the id here too so the story page renders no conversation link to a
+            // guaranteed-404 thread.
+            const events = getEventPipelineServices();
+            const linkThread =
+              thread !== null &&
+              (await events.safetyStore.get(thread.threadId))?.safetyState === 'removed'
+                ? null
+                : thread;
             return c.json(
               storyDetailSchema.parse(
                 realStoryToDetail(
                   real,
-                  thread,
+                  linkThread,
                   {
                     isOwner: userId !== null && userId === real.submittedBy,
                     roomVisibility: room.visibility,

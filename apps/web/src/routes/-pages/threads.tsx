@@ -4,8 +4,8 @@
 // the detail route reads a thread through the six WS-B.2.12 semantic branches,
 // with the active branch in a shareable `?branch=` search param. Visiting a
 // branch records nonredundant traversal (WS-C.4.3).
-import type { BranchId, ContributionPublic } from '@licio/shared';
-import { useNavigate, useParams, useSearch } from '@tanstack/react-router';
+import type { BranchId, ContributionPublic, ThreadSummary } from '@licio/shared';
+import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { ThreadBranchNav } from '../../components/thread/ThreadBranchNav/index.js';
 import { UgcBody } from '../../components/ugc/UgcBody.js';
@@ -13,10 +13,13 @@ import { Badge } from '../../components/ui/Badge/index.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { EmptyState } from '../../components/ui/EmptyState/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
+import { Icon } from '../../components/ui/Icon/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { Skeleton } from '../../components/ui/Skeleton/index.js';
 import { useT } from '../../i18n/index.js';
-import { useThreadBranchQuery, useThreadQuery } from '../../lib/queries.js';
+import { cn } from '../../lib/cn.js';
+import { useThreadBranchQuery, useThreadQuery, useThreadsQuery } from '../../lib/queries.js';
+import { raisedInteractive, raisedSurface } from '../../lib/surfaces.js';
 import { readThreadSnapshot } from '../../offline/read-through.js';
 import type { ThreadSnapshotRecord } from '../../offline/schemas.js';
 import { markInteractionStart, measureInteraction } from '../../perf/marks.js';
@@ -64,23 +67,88 @@ function OfflineThreadSummary({ record }: { record: ThreadSnapshotRecord }): Rea
   );
 }
 
+/** One conversation in the directory: a link into the thread, with the story
+ *  title, the contribution count, and a state chip when the conversation is no
+ *  longer simply `active` (resolved/archived/under_review). */
+function ThreadListItem({ thread }: { thread: ThreadSummary }): React.ReactElement {
+  const t = useT();
+  const count = thread.contribution_count;
+  return (
+    <li>
+      <Link
+        to="/threads/$threadId"
+        params={{ threadId: thread.thread_id }}
+        search={{ branch: 'overview' }}
+        className={cn(
+          'flex items-center justify-between gap-3 p-4',
+          raisedSurface,
+          raisedInteractive,
+        )}
+      >
+        <span className="flex min-w-0 flex-col gap-1">
+          <span className="truncate font-medium text-ink">{thread.title}</span>
+          <span className="flex flex-wrap items-center gap-2 text-ink-muted text-sm">
+            {/* Locale-aware pluralization via the ICU resolver (Intl.PluralRules);
+                `#` renders the formatted count. */}
+            <span>
+              {t(
+                'threads.list.contributions',
+                '{count, plural, one {# contribution} other {# contributions}}',
+                { count },
+              )}
+            </span>
+            {thread.conversation_state !== 'active' ? (
+              <Badge>
+                {t(
+                  `thread.state.${thread.conversation_state}`,
+                  thread.conversation_state.replaceAll('_', ' '),
+                )}
+              </Badge>
+            ) : null}
+          </span>
+        </span>
+        <Icon name="chevron-right" className="size-5 shrink-0 text-ink-muted" />
+      </Link>
+    </li>
+  );
+}
+
 export function ThreadsPage(): React.ReactElement {
   const t = useT();
   usePageFocus(t('nav.threads', 'Threads'));
+  const threads = useThreadsQuery();
   return (
-    <>
-      <PageHeader title={t('nav.threads', 'Threads')} />
-      <div className="mx-auto w-full max-w-2xl p-4">
-        <EmptyState
-          icon="threads"
-          title={t('threads.empty.title', 'No active conversations yet')}
-          description={t(
-            'threads.empty.description',
-            'Conversations you join, your replies, and saved drafts will appear here.',
-          )}
-        />
-      </div>
-    </>
+    <PageScaffold
+      title={t('nav.threads', 'Threads')}
+      query={threads}
+      isEmpty={(data) => data.items.length === 0}
+      emptyTitle={t('threads.empty.title', 'No conversations yet')}
+      emptyDescription={t(
+        'threads.empty.description',
+        'Open a story and start its conversation — active discussions appear here.',
+      )}
+    >
+      {(data) => (
+        <div className="flex flex-col gap-4">
+          <ul className="flex flex-col gap-4">
+            {data.items.map((thread) => (
+              <ThreadListItem key={thread.thread_id} thread={thread} />
+            ))}
+          </ul>
+          {threads.hasMore ? (
+            <div className="flex justify-center">
+              <Button
+                variant="secondary"
+                onClick={() => threads.loadMore()}
+                disabled={threads.isFetchingMore}
+              >
+                {t('threads.list.more', 'Show more conversations')}
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      )}
+    </PageScaffold>
   );
 }
 

@@ -574,4 +574,44 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
       true,
     );
   });
+
+  it('listThreads: global keyset (most-recent-first), hidden stories excluded', async () => {
+    // Two visible conversations and one whose story is taken down.
+    const older = await stories.createWithThread(storyInput({ title: 'LT older' }), randomUUID());
+    const newer = await stories.createWithThread(storyInput({ title: 'LT newer' }), randomUUID());
+    const hidden = await stories.createWithThread(
+      storyInput({ title: 'LT hidden', hiddenState: 'takedown' }),
+      randomUUID(),
+    );
+    if (!older.ok || !newer.ok || !hidden.ok) throw new Error('setup failed');
+    const mine = new Set([older.thread.threadId, newer.thread.threadId, hidden.thread.threadId]);
+
+    // Walk the whole directory by keyset, collecting just our three threads in
+    // wire order — exercises the `(created_at, thread_id)` cast cursor on real
+    // Postgres (the in-memory store can't catch a SQL serialization bug).
+    const seen: string[] = [];
+    let before: { createdAt: string; threadId: string } | null = null;
+    for (let i = 0; i < 50; i += 1) {
+      const batch = await stories.listThreads(before, 100);
+      for (const tRow of batch) if (mine.has(tRow.threadId)) seen.push(tRow.threadId);
+      const lastRow = batch[batch.length - 1];
+      if (!lastRow || batch.length < 100) break;
+      before = { createdAt: lastRow.createdAt, threadId: lastRow.threadId };
+    }
+    expect(seen).not.toContain(hidden.thread.threadId); // takedown drops out
+    expect(seen).toContain(older.thread.threadId);
+    expect(seen).toContain(newer.thread.threadId);
+    // Most-recent-first: the later insert precedes the earlier one.
+    expect(seen.indexOf(newer.thread.threadId)).toBeLessThan(seen.indexOf(older.thread.threadId));
+
+    // Direct strictly-before cursor: paging past `newer` excludes it but still
+    // yields the older conversation (deterministic keyset-cast assertion).
+    const afterNewer = await stories.listThreads(
+      { createdAt: newer.thread.createdAt, threadId: newer.thread.threadId },
+      100,
+    );
+    const afterIds = afterNewer.map((tRow) => tRow.threadId);
+    expect(afterIds).not.toContain(newer.thread.threadId);
+    expect(afterIds).toContain(older.thread.threadId);
+  });
 });

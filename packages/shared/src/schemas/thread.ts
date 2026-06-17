@@ -14,7 +14,7 @@
 // ends in restriction therefore transitions `safety_state → restricted`
 // while the conversation dimension returns to `active`/`resolved`/`archived`.
 import { z } from 'zod';
-import { isoTimestampSchema, uuidSchema } from './common.js';
+import { isoTimestampSchema, paginatedSchema, uuidSchema } from './common.js';
 import { contributionPublicSchema } from './contribution.js';
 import { summaryLayerSchema, summaryPublicSchema } from './summary.js';
 
@@ -125,6 +125,18 @@ export const threadSummarySchema = z
   })
   .strict();
 export type ThreadSummary = z.infer<typeof threadSummarySchema>;
+
+/**
+ * Thread directory (WS-G.3.3 `GET /v1/threads`): a keyset page of the PUBLIC
+ * conversation summaries, most recent first — the listing behind the primary
+ * `/threads` tab and the read-side counterpart to the per-id overview.  The set
+ * is the same two-condition global containment the front-page feed uses (a
+ * PUBLIC item from a PUBLIC room; hidden stories, `room_only` items, private-room
+ * threads, and moderation-removed threads are excluded), enforced server-side
+ * and USER-INDEPENDENT — room-scoped conversations are reached through their room.
+ */
+export const threadListResponseSchema = paginatedSchema(threadSummarySchema);
+export type ThreadListResponse = z.infer<typeof threadListResponseSchema>;
 
 /** Current-summary status shown in the overview (§15.4 three layers). */
 export const threadSummaryStatusSchema = z.enum([

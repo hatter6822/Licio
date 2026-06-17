@@ -10,6 +10,7 @@ export const queryKeys = {
   story: (storyId: string) => ['story', storyId] as const,
   storyInterpretations: (storyId: string) => ['story', storyId, 'interpretations'] as const,
   independentSources: (storyId: string) => ['story', storyId, 'independent-sources'] as const,
+  threads: () => ['threads'] as const,
   thread: (threadId: string) => ['thread', threadId] as const,
   threadBranch: (threadId: string, branch: BranchId) =>
     ['thread', threadId, 'branch', branch] as const,

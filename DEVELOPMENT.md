@@ -118,8 +118,11 @@ something to show.
 - **A populated thread on every story** — nested, multi-author contributions
   spanning the contribution taxonomy (questions, answers, evidence, corrections,
   counterexamples, syntheses, local context, direct experience, …), plus
-  community syntheses. Open any story from the feed and its conversation is
-  already there.
+  community syntheses. Two ways to reach a conversation: the **Threads** tab
+  (`/threads`) lists the public conversations across Licio (a public, signed-out
+  surface — the same PUBLIC-item/PUBLIC-room containment as the front-page feed,
+  so `room_only` items and private-room threads stay on their room), and every
+  story page carries a **View the conversation** link to its own thread.
 - **A non-empty moderation review queue** (pending `moderation_concern` items
   with ratified reason codes) for the steward/admin review surface.
 - **A WS-J report case** (two reporters → one standard case in the moderation

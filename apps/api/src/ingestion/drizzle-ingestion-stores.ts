@@ -225,6 +225,31 @@ export class DrizzleStoryStore implements StoryStore {
     return rows[0]?.value ?? 0;
   }
 
+  async listThreads(
+    before: { createdAt: string; threadId: string } | null,
+    limit: number,
+  ): Promise<ThreadShellRecord[]> {
+    // The `/threads` directory: most-recent-first keyset over ALL threads, with
+    // the visible-only join (hidden stories excluded) so a takedown drops out
+    // of the listing exactly as it drops out of countThreadsByRoom.
+    const conditions = [isNull(storiesTable.hiddenState)];
+    if (before !== null) {
+      conditions.push(
+        // ISO string + explicit cast — a raw Date in a sql`` fragment is not
+        // serializable by the postgres-js driver (gated-test-proven).
+        sql`(${threadsTable.createdAt}, ${threadsTable.threadId}) < (${before.createdAt}::timestamptz, ${before.threadId}::uuid)`,
+      );
+    }
+    const rows = await this.#db
+      .select()
+      .from(threadsTable)
+      .innerJoin(storiesTable, eq(threadsTable.storyId, storiesTable.storyId))
+      .where(and(...conditions))
+      .orderBy(desc(threadsTable.createdAt), desc(threadsTable.threadId))
+      .limit(limit);
+    return rows.map((row) => this.#toThread(row.threads));
+  }
+
   async createWithThread(
     story: Omit<StoryRecord, 'createdAt' | 'updatedAt' | 'lastMaterialUpdateAt'>,
     threadId: string,

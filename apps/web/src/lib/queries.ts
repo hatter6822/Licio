@@ -119,6 +119,36 @@ export function useThreadBranchQuery(threadId: string, branch: BranchId) {
   };
 }
 
+/** The `/threads` directory: most-recent-first public conversations (WS-G.3.3),
+ *  keyset-paginated — the hook flattens the pages and exposes `loadMore`/`hasMore`
+ *  so the tab can surface every conversation, not just the first page. */
+export function useThreadsQuery() {
+  const query = useInfiniteQuery({
+    queryKey: queryKeys.threads(),
+    queryFn: ({ pageParam }) => api.fetchThreads(pageParam ?? undefined),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor,
+    ...cachePolicy.thread,
+  });
+  const pages = query.data?.pages ?? [];
+  const data =
+    pages.length > 0
+      ? {
+          items: pages.flatMap((page) => page.items),
+          nextCursor: pages[pages.length - 1]?.nextCursor ?? null,
+        }
+      : undefined;
+  return {
+    data,
+    isLoading: query.isLoading,
+    isError: query.isError,
+    refetch: () => query.refetch(),
+    loadMore: () => query.fetchNextPage(),
+    hasMore: query.hasNextPage,
+    isFetchingMore: query.isFetchingNextPage,
+  };
+}
+
 export function useRoomsQuery() {
   return useQuery({
     queryKey: queryKeys.rooms(),

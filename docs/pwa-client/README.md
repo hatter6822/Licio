@@ -85,6 +85,18 @@ the SW-update / eviction toasts, and emits a navigation breadcrumb (route PATTER
   `/profile/signal-ledger`, `/profile/settings`, `/profile/privacy`,
   `/profile/wallet`), and flag-gated routes (`/rooms/$roomId/governance`). Flat
   URLs for nested detail routes use the `_`-suffixed (non-nesting) route-id form.
+- **Discovery surfaces (WS-G.3.3):** the `/threads` tab lists conversations from
+  `GET /v1/threads` (title + contribution count + state, each a link into the
+  thread; keyset-paginated with a **Show more** control so older conversations
+  are reachable, not just the first page), and a story page links to its own
+  conversation via the served `thread_id` — the feed → story → discussion path
+  (the link is suppressed when the thread has been moderation-removed, so it never
+  points at a 404). The tab is a PUBLIC read surface (no `requireAuth`, like
+  `/rooms` and the front page) showing the same two-condition global containment
+  the front-page feed uses: PUBLIC items from PUBLIC rooms only. It is
+  USER-INDEPENDENT — `room_only` items and private-room conversations never appear
+  on the global tab; they are reached through their room (which marks `room_only`
+  items with the in-room chip).
 - **Code splitting (WS-C.1.1c):** `autoCodeSplitting` makes every route's
   component its own on-demand chunk behind a Skeleton fallback. The initial JS
   payload stays within the Section 6.10 budget (CI gate:

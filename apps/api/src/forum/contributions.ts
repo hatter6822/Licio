@@ -238,6 +238,38 @@ export async function threadReadableToUser(
   return threadVisibleToUser(bundle, thread, userId);
 }
 
+/**
+ * Whether a thread belongs on the GLOBAL conversation directory (the `/threads`
+ * tab) — the read-side analogue of the ranking pipeline's two-condition global
+ * containment (`filterByVisibility`, SPEC §18.4 / WS-Q): a PUBLIC item from a
+ * PUBLIC room, not hidden and not moderation-removed.  Like the front-page feed
+ * this is USER-INDEPENDENT: `room_only` items and private-room threads are kept
+ * OFF every global surface (they are reached through the room itself), so the
+ * directory shows the same public set to everyone and never leaks a room-scoped
+ * conversation onto a global tab.  Item visibility never WIDENS the bar — a
+ * public item mislabeled into a private room still fails closed because the room
+ * is private.
+ */
+export async function threadOnGlobalDirectory(
+  bundle: Pick<ServiceBundle, 'forum' | 'ingestion' | 'events'>,
+  thread: { threadId: string; storyId: string; roomId: string | null },
+): Promise<boolean> {
+  const safety = await bundle.events.safetyStore.get(thread.threadId);
+  if (safety?.safetyState === 'removed') return false;
+  const story = await bundle.ingestion.stories.getById(thread.storyId);
+  if (!story || story.hiddenState !== null) return false;
+  // Condition 1: a PUBLIC item (room_only stays off global surfaces, WS-Q).
+  if (story.visibility !== 'public') return false;
+  // Condition 2: from a confirmed PUBLIC room.  FAIL CLOSED on an unresolved
+  // room (a null link or migration-drift orphan) exactly like the feed/search
+  // global gate (filterByVisibility) — a global public surface never lists a
+  // conversation whose room cannot be confirmed public.  (Every story has a
+  // home room, WS-Q.1.5, so this only excludes genuine drift.)
+  if (thread.roomId === null) return false;
+  const room = await bundle.forum.rooms.getById(thread.roomId);
+  return room !== null && room.visibility === 'public';
+}
+
 /** The WS-G.3.1 create flow (see module header for the guard chain). */
 export async function createContribution(
   bundle: ServiceBundle,
