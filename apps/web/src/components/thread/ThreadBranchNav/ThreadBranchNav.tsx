@@ -113,9 +113,10 @@ export function ThreadBranchNav({
   };
 
   return (
-    // `relative` anchors nothing visual here; the Contribute button is fixed to
-    // the viewport thumb-zone, intentionally outside the scrollable panel.
-    <div className={cn('relative flex flex-col', className)}>
+    // The Contribute button is fixed to the viewport thumb-zone (outside the
+    // scrollable panel), so this wrapper needs no positioning context — just the
+    // column layout for the tab bar and its panel.
+    <div className={cn('flex flex-col', className)}>
       <Tabs
         tabs={tabs}
         label={t('thread.branches.label', 'Thread branches')}
@@ -133,9 +134,12 @@ export function ThreadBranchNav({
           size="lg"
           onClick={onContribute}
           aria-label={t('thread.contribute', 'Contribute to this thread')}
-          // Thumb-zone: pinned to the bottom-end (logical) corner, above sticky
-          // chrome. `me-`/`bottom-` keep it RTL-correct (end flips with dir).
-          className="fixed bottom-4 end-4 z-sticky shadow-lg"
+          // Thumb-zone CTA: horizontally CENTERED via the absolute-centering idiom
+          // (`inset-x-0` + `w-fit` + `mx-auto`) and lifted clear of the fixed
+          // bottom nav (~4.5rem + safe-area), which `bottom-4` previously overlapped.
+          // At lg the nav is a side rail, so a small bottom inset suffices.
+          // Centering is symmetric, so it stays correct under RTL with no end flip.
+          className="fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+5rem)] z-sticky mx-auto w-fit shadow-lg lg:bottom-6"
         >
           <Icon name="pencil" className="size-5" />
           {t('thread.contribute.short', 'Contribute')}

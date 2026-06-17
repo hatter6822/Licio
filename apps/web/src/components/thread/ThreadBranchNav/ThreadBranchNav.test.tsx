@@ -107,6 +107,19 @@ describe('ThreadBranchNav (WS-B.2.12)', () => {
     expect(screen.queryByRole('button', { name: /contribute/i })).toBeNull();
   });
 
+  it('floats the Contribute button horizontally centered and clear of the bottom nav', () => {
+    renderNav({ onContribute: () => undefined });
+    const contribute = screen.getByRole('button', { name: 'Contribute to this thread' });
+    const classes = contribute.className.split(/\s+/);
+    // Centered via the absolute-centering idiom (inset-x-0 + w-fit + mx-auto),
+    // no longer pinned to the bottom-end corner.
+    expect(classes).toEqual(expect.arrayContaining(['fixed', 'inset-x-0', 'w-fit', 'mx-auto']));
+    expect(classes).not.toContain('end-4');
+    // Lifted above the fixed bottom nav instead of overlapping it at bottom-4.
+    expect(classes).not.toContain('bottom-4');
+    expect(contribute.className).toContain('bottom-[calc(env(safe-area-inset-bottom)+5rem)]');
+  });
+
   it('has no axe violations', async () => {
     const { container } = renderNav({ onContribute: () => undefined });
     expect(await checkA11y(container)).toHaveNoViolations();
