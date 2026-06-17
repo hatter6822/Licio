@@ -399,6 +399,73 @@ describe('appeal queue + review', () => {
     expect(await buildAppealReview(services, 'missing')).toBeNull();
   });
 
+  it('#9 resolves the target content kind so a story appeal gets a snapshot', async () => {
+    const STORY = '00000000-0000-4000-8000-0000000000s9';
+    services = createInMemoryModerationServices({
+      now: () => START,
+      content: {
+        async resolveTarget(targetType, targetId): Promise<TargetResolution> {
+          return targetType === 'account'
+            ? { exists: true, subjectUserId: targetId, contentKind: null }
+            : { exists: true, subjectUserId: AUTHOR, contentKind: 'story' };
+        },
+        async applyContentState(): Promise<void> {},
+        async applyAccountState(): Promise<void> {},
+        // Builds a story snapshot ONLY when the resolved kind is threaded through
+        // (a `null` kind would yield the best-effort contribution path → null).
+        async contentSnapshot(_t, _r, contentKind): Promise<ContentSnapshot | null> {
+          return contentKind === 'story'
+            ? {
+                originalBody: 'Story Title\n\nexcerpt',
+                currentBody: 'Story Title\n\nexcerpt',
+                originalAt: new Date(START).toISOString(),
+                currentAt: new Date(START).toISOString(),
+                editedAfterReport: false,
+              }
+            : null;
+        },
+        async threadContext(): Promise<{ items: never[]; reportedContributionId: null }> {
+          return { items: [], reportedContributionId: null };
+        },
+      },
+    });
+    const action = await services.actions.insert({
+      actorUserId: REVIEWER,
+      actorRole: 'ROLE_SAFETY',
+      action: 'remove',
+      targetType: 'content',
+      targetId: STORY,
+      subjectUserId: AUTHOR,
+      reasonCode: 'MOD_HARASS_001',
+      duration: null,
+      reviewerNote: null,
+      priorState: 'visible',
+      nextState: 'removed',
+      reversible: true,
+      reverted: false,
+      linkedActionId: null,
+      caseId: null,
+      coApproverUserId: null,
+      reportIds: [],
+    });
+    const appeal = await services.appeals.insert({
+      actionId: action.actionId,
+      appellantUserId: AUTHOR,
+      statement: 's',
+      newEvidence: [],
+      status: 'pending',
+      assignedReviewerId: REVIEWER,
+      isBanAppeal: false,
+      slaDueAt: new Date(START + 3_600_000).toISOString(),
+      decidedAt: null,
+      decidedBy: null,
+      decisionReasonCode: null,
+      decisionExplanation: null,
+    });
+    const review = await buildAppealReview(services, appeal.appealId);
+    expect(review?.snapshot_body).toBe('Story Title\n\nexcerpt');
+  });
+
   it('shows original_action "unknown" when the action row is gone, and null review for a dangling action', async () => {
     const appealId = await seedAppeal(false); // appeal points at a non-existent action
     const queue = await buildAppealQueue(services, undefined, 10);

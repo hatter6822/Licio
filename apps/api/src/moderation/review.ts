@@ -468,11 +468,19 @@ export async function buildAppealReview(
   const action = await services.actions.getById(appeal.actionId);
   if (!action) return null;
   const subjectUserId = action.subjectUserId;
+  // Resolve the target's content kind (the action row stores only the coarse
+  // `content`/`account` type) so the snapshot can build the right view — a STORY
+  // hide/removal needs its title/excerpt, not a best-effort contribution lookup
+  // that yields `snapshot_body: null` and leaves the reviewer deciding blind.
+  const contentKind =
+    action.targetType === 'content'
+      ? (await services.content.resolveTarget('content', action.targetId)).contentKind
+      : null;
   const [history, originalReviewer, snapshot] = await Promise.all([
     buildUserHistory(services, subjectUserId),
     action.actorUserId ? services.users.resolve(action.actorUserId) : Promise.resolve(null),
     action.targetType === 'content'
-      ? services.content.contentSnapshot(action.targetId, action.createdAt, null)
+      ? services.content.contentSnapshot(action.targetId, action.createdAt, contentKind)
       : Promise.resolve(null),
   ]);
   return {
