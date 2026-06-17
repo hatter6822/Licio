@@ -94,12 +94,22 @@ export const reportQueueResponseSchema = z
   .strict();
 export type ReportQueueResponse = z.infer<typeof reportQueueResponseSchema>;
 
+/** A repeatable query filter arrives as a SCALAR for a single value
+ *  (`?severity=moderate`) or an ARRAY for repeats
+ *  (`?severity=moderate&severity=severe`).  Normalize a lone scalar into a
+ *  one-element array so both URL forms satisfy the array filter — otherwise a
+ *  single-value filter (the common case) fails validation. */
+const arrayQueryParam = <T extends z.ZodTypeAny>(item: T) =>
+  z
+    .preprocess((v) => (v === undefined ? undefined : Array.isArray(v) ? v : [v]), z.array(item))
+    .optional();
+
 /** Report-queue filter query (WS-J.2.1b; combinable AND filters). */
 export const reportQueueFilterSchema = z
   .object({
-    severity: z.array(reportSeveritySchema).optional(),
-    status: z.array(reportCaseStatusSchema).optional(),
-    category: z.array(z.string().min(1).max(32)).optional(),
+    severity: arrayQueryParam(reportSeveritySchema),
+    status: arrayQueryParam(reportCaseStatusSchema),
+    category: arrayQueryParam(z.string().min(1).max(32)),
     created_after: isoTimestampSchema.optional(),
     created_before: isoTimestampSchema.optional(),
     /** User ids (the queue predicates compare UUID columns: `subject_user_id` /

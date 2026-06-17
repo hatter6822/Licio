@@ -16,6 +16,7 @@ import {
   SEVERITY_SLA_HOURS,
   toEventSeverity,
 } from '../constants/moderation.js';
+import { reportQueueFilterSchema } from '../schemas/moderation-console-api.js';
 import {
   appealEligibility,
   isSignificantAction,
@@ -25,6 +26,29 @@ import {
   stewardRolesCanAccessQueue,
   stewardRolesQueues,
 } from '../schemas/steward-roles.js';
+
+describe('reportQueueFilterSchema query coercion (WS-J.2.1b)', () => {
+  it('accepts a lone scalar filter value (single-value query param)', () => {
+    const parsed = reportQueueFilterSchema.parse({
+      severity: 'moderate',
+      status: 'new',
+      category: 'MOD_HARASS',
+    });
+    expect(parsed.severity).toEqual(['moderate']);
+    expect(parsed.status).toEqual(['new']);
+    expect(parsed.category).toEqual(['MOD_HARASS']);
+  });
+
+  it('accepts repeated (array) filter values and leaves them as arrays', () => {
+    const parsed = reportQueueFilterSchema.parse({ severity: ['moderate', 'severe'] });
+    expect(parsed.severity).toEqual(['moderate', 'severe']);
+  });
+
+  it('omits absent filters and still rejects an invalid value', () => {
+    expect(reportQueueFilterSchema.parse({}).severity).toBeUndefined();
+    expect(() => reportQueueFilterSchema.parse({ severity: 'not-a-severity' })).toThrow();
+  });
+});
 
 describe('reason-code severity / SLA / appealability', () => {
   it('every ratified code has metadata and a derived SLA', () => {
