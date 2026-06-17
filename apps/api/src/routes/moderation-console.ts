@@ -265,7 +265,14 @@ export function createModerationConsoleRoutes() {
         async (c) => {
           const actor = mustActor(c);
           const { actionId } = c.req.valid('param');
-          const outcome = await revertAction(getModerationServices(), actor, actionId);
+          // Carry the steward's revert reason/note (validated above) into the
+          // revert action + audit — the trail must record WHY this was reverted,
+          // not inherit the original violation's reason.
+          const { reason_code, reviewer_note } = c.req.valid('json');
+          const outcome = await revertAction(getModerationServices(), actor, actionId, {
+            reasonCode: reason_code,
+            reviewerNote: reviewer_note ?? null,
+          });
           if (!outcome.ok) {
             const status =
               outcome.code === 'not_found' ? 404 : outcome.code === 'not_reversible' ? 409 : 403;

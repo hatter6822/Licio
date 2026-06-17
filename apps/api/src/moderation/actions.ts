@@ -406,10 +406,19 @@ export type RevertOutcome =
  * visibility — it never resurrects separately-removed content (the port acts
  * per-item) and the audit chain records the linkage.
  */
+/** The steward's accountability for THIS revert — distinct from the original
+ *  action's reason.  Recorded on the revert action + audit so the trail reflects
+ *  WHY the action was reverted (e.g. "issued in error"), not the old violation. */
+export interface RevertContext {
+  reasonCode?: ModerationReasonCode;
+  reviewerNote?: string | null;
+}
+
 export async function revertAction(
   services: ModerationServices,
   actor: StewardActor,
   actionId: string,
+  context: RevertContext = {},
 ): Promise<RevertOutcome> {
   const original = await services.actions.getById(actionId);
   if (!original) return { ok: false, code: 'not_found', message: 'Action not found' };
@@ -433,7 +442,7 @@ export async function revertAction(
       },
     };
   }
-  return { ok: true, response: await performRevert(services, actor, original) };
+  return { ok: true, response: await performRevert(services, actor, original, context) };
 }
 
 /**
@@ -446,7 +455,13 @@ export async function performRevert(
   services: ModerationServices,
   actor: StewardActor,
   original: ModerationActionRecord,
+  context: RevertContext = {},
 ): Promise<RevertActionResponse> {
+  // The revert's OWN accountability: the steward's submitted reason/note when
+  // present (a direct `/revert` carries `reason_code`), else the original
+  // action's reason (an appeal-driven revert inherits its context).
+  const revertReason = context.reasonCode ?? original.reasonCode;
+  const revertNote = context.reviewerNote ?? null;
   // Reversal integrity (WS-J.2.3b): restore prior state ONLY when no OTHER
   // active enforcement action still holds the item/account down — a revert
   // never resurrects content that a separate, still-standing removal suppresses.
@@ -507,9 +522,9 @@ export async function performRevert(
     targetType: original.targetType,
     targetId: original.targetId,
     subjectUserId: original.subjectUserId,
-    reasonCode: original.reasonCode,
+    reasonCode: revertReason,
     duration: null,
-    reviewerNote: null,
+    reviewerNote: revertNote,
     priorState: original.nextState,
     nextState: original.priorState,
     reversible: false,
@@ -541,7 +556,7 @@ export async function performRevert(
     actorUserId: actor.userId,
     actorRole: revert.actorRole,
     action: 'revert',
-    reasonCode: original.reasonCode,
+    reasonCode: revertReason,
     targetType: original.targetType,
     targetId: original.targetId,
     subjectUserId: original.subjectUserId,
@@ -549,6 +564,7 @@ export async function performRevert(
     nextState: original.priorState,
     reversible: false,
     linkedActionId: original.actionId,
+    notes: revertNote,
   });
   services.metrics.increment('moderation.revert');
 

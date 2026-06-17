@@ -819,6 +819,31 @@ describe('action palette + revert', () => {
     expect(original?.reverted).toBe(true);
   });
 
+  it('#3 records the steward revert reason + note on the revert action', async () => {
+    const port = recordingContentPort();
+    services = createInMemoryModerationServices({
+      content: port,
+      users: userPort({ [AUTHOR]: 100 }),
+    });
+    const applied = await applyAction(services, safetyActor(), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'hide',
+      reason_code: 'MOD_HARASS_001',
+    });
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    const rev = await revertAction(services, safetyActor(), applied.response.action_id, {
+      reasonCode: 'MOD_SPAM_001', // distinct from the original violation reason
+      reviewerNote: 'Issued in error',
+    });
+    expect(rev.ok).toBe(true);
+    if (!rev.ok) return;
+    const revertRow = await services.actions.getById(rev.response.revert_action_id);
+    expect(revertRow?.reasonCode).toBe('MOD_SPAM_001');
+    expect(revertRow?.reviewerNote).toBe('Issued in error');
+  });
+
   it('cannot revert a permanent ban', async () => {
     const applied = await applyAction(
       services,
