@@ -1,0 +1,1 @@
+ALTER TYPE "public"."account_state" ADD VALUE IF NOT EXISTS 'restricted' BEFORE 'deactivated';

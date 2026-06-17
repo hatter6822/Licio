@@ -22,14 +22,22 @@ import { stewardRoleIdSchema } from './steward-roles.js';
 // ---------------------------------------------------------------------------
 
 /**
- * Account lifecycle (§22.1 account_state).  Distinct from the WS-C client-facing
- * `accountStateSchema` in `profile.ts`: this is the canonical DB domain, which
- * includes `deleted` (a tombstone state) and omits the client's `restricted`.
- * The enum deliberately has no `pending`/`unverified` value — verification lives
- * in a separate column (WS-D.1.4a), so an unverified account is still `active`
- * with reduced capabilities (WS-D.1.1a Security/Privacy note).
+ * Account lifecycle (§22.1 account_state).  The canonical DB domain.  It is a
+ * superset of the WS-C client-facing `accountStateSchema` in `profile.ts`: it
+ * adds `deleted` (a tombstone the client never renders), and shares `restricted`
+ * — the WS-J moderation sanction under which a user may read + self-serve
+ * (profile, data-rights, appeals, block/mute) but not publicly contribute.  The
+ * enum deliberately has no `pending`/`unverified` value — verification lives in a
+ * separate column (WS-D.1.4a), so an unverified account is still `active` with
+ * reduced capabilities (WS-D.1.1a Security/Privacy note).
  */
-export const USER_ACCOUNT_STATES = ['active', 'suspended', 'deactivated', 'deleted'] as const;
+export const USER_ACCOUNT_STATES = [
+  'active',
+  'suspended',
+  'restricted',
+  'deactivated',
+  'deleted',
+] as const;
 export type UserAccountState = (typeof USER_ACCOUNT_STATES)[number];
 export const userAccountStateSchema = z.enum(USER_ACCOUNT_STATES);
 

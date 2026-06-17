@@ -1,6 +1,6 @@
 {
-  "id": "026c3d45-d7f1-4c65-a229-136c9749f256",
-  "prevId": "a80c6ff1-38d0-4021-9bce-78ecf5dd8cce",
+  "id": "a22aa549-b369-41c1-bee9-cfe90efc4ab5",
+  "prevId": "026c3d45-d7f1-4c65-a229-136c9749f256",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -9415,6 +9415,7 @@
       "values": [
         "active",
         "suspended",
+        "restricted",
         "deactivated",
         "deleted"
       ]

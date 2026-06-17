@@ -32,6 +32,9 @@ import {
 export const accountStateEnum = pgEnum('account_state', [
   'active',
   'suspended',
+  // A WS-J `restrict` sanction: read + self-service allowed, public contribution
+  // denied (between active and the harder suspended/lifecycle states).
+  'restricted',
   'deactivated',
   'deleted',
 ]);
