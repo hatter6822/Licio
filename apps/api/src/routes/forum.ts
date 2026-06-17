@@ -87,6 +87,7 @@ import {
   authMiddleware,
   getAuth,
   requireSteward,
+  requireUnrestricted,
   requireVerifiedAccount,
 } from '../middleware/auth.js';
 
@@ -282,6 +283,7 @@ export function createForumRoutes() {
         '/contributions',
         authMiddleware(),
         requireVerifiedAccount(),
+        requireUnrestricted(),
         zValidator('json', contributionCreateSchema),
         async (c) => {
           const auth = getAuth(c);
@@ -405,6 +407,7 @@ export function createForumRoutes() {
         '/evidence',
         authMiddleware(),
         requireVerifiedAccount(),
+        requireUnrestricted(),
         zValidator('json', evidenceCreateRequestSchema),
         async (c) => {
           const auth = getAuth(c);
@@ -506,6 +509,7 @@ export function createForumRoutes() {
         '/threads/:threadId/summaries',
         authMiddleware(),
         requireVerifiedAccount(),
+        requireUnrestricted(),
         zValidator('param', z.object({ threadId: uuidSchema })),
         zValidator('json', summaryCreateRequestSchema),
         async (c) => {

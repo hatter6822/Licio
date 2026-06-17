@@ -152,10 +152,16 @@ describe('production content port', () => {
     expect((await safetyStore.get(THREAD))?.safetyState).toBe('normal');
   });
 
-  it('account action writes the coarse WS-D account state', async () => {
+  it('account action writes the coarse WS-D account state (restrict is its own state)', async () => {
     const setAccountState = vi.fn(async () => undefined);
     const port = createProductionContentPort(contentDeps({ setAccountState }));
+    // A `restrict` is NOT collapsed to a suspension — it maps to `restricted`.
+    await port.applyAccountState(AUTHOR, 'restricted', null);
+    expect(setAccountState).toHaveBeenCalledWith(AUTHOR, 'restricted');
+    // A ban's permanence lives in the action record; the coarse state is suspended.
     await port.applyAccountState(AUTHOR, 'banned', null);
+    expect(setAccountState).toHaveBeenCalledWith(AUTHOR, 'suspended');
+    await port.applyAccountState(AUTHOR, 'suspended', null);
     expect(setAccountState).toHaveBeenCalledWith(AUTHOR, 'suspended');
     await port.applyAccountState(AUTHOR, 'active', null);
     expect(setAccountState).toHaveBeenCalledWith(AUTHOR, 'active');

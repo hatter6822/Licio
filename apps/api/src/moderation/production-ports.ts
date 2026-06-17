@@ -18,6 +18,7 @@ import {
   moderationCaseCreatedEventSchema,
   type ReportContentKind,
   toEventTargetType,
+  type UserAccountState,
 } from '@licio/shared';
 import type { ItemSafetyStateStore, NewStoredEvent } from '../events/stores.js';
 import {
@@ -78,7 +79,7 @@ export interface ContentPortDeps {
    *  hides; `null` restores (the boot impl must never clobber a stronger
    *  takedown). */
   setStoryHiddenState?(storyId: string, hiddenState: 'safety' | null): Promise<unknown>;
-  setAccountState(userId: string, accountState: 'active' | 'suspended'): Promise<unknown>;
+  setAccountState(userId: string, accountState: UserAccountState): Promise<unknown>;
   /** WS-J.2.2d: the reported contribution's body + edit history (or null). */
   getContributionSnapshot?(contributionId: string): Promise<ContributionSnapshotInput | null>;
   /** WS-J.2.2a: the thread context for the reported target, projected to the
@@ -142,9 +143,20 @@ function contributionStateFor(state: ContentVisibilityState): 'published' | 'hid
 }
 
 /** Map an account action to the coarse WS-D account state (the moderation_action
- *  record holds the precise action + duration). */
-function accountStateFor(state: AccountActionState): 'active' | 'suspended' {
-  return state === 'active' ? 'active' : 'suspended';
+ *  record holds the precise action + duration).  A `restrict` is its OWN state
+ *  (read + self-service allowed, public contribution denied) — NOT collapsed to
+ *  a full suspension; a `ban`'s permanence lives in the action record, so its
+ *  coarse account state is `suspended`. */
+function accountStateFor(state: AccountActionState): UserAccountState {
+  switch (state) {
+    case 'active':
+      return 'active';
+    case 'restricted':
+      return 'restricted';
+    case 'suspended':
+    case 'banned':
+      return 'suspended';
+  }
 }
 
 export function createProductionContentPort(deps: ContentPortDeps): ModerationContentPort {
