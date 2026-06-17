@@ -34,10 +34,13 @@ import {
   summaryCreateRequestSchema,
   summaryPublicSchema,
   type ThreadSafetyState,
+  type ThreadSummary,
   TOPIC_REGISTRY,
   threadConversationStateSchema,
   threadDetailSchema,
+  threadListResponseSchema,
   threadSafetyStateSchema,
+  threadSummarySchema,
   UPLOAD_CAPTION_TYPES,
   UPLOAD_DOCUMENT_TYPES,
   UPLOAD_IMAGE_TYPES,
@@ -81,6 +84,7 @@ import { accountRef } from '../identity/crypto.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { getIngestionServices } from '../ingestion/services.js';
+import type { ThreadShellRecord } from '../ingestion/stores.js';
 import { verifyMediaToken } from '../lib/media-urls.js';
 import {
   type AuthEnv,
@@ -167,6 +171,83 @@ function bundles() {
 export function createForumRoutes() {
   return (
     new Hono<AuthEnv>()
+      // --- Thread directory (WS-G.3.3) ---------------------------------------
+      // The listing behind the primary `/threads` tab: a keyset page of the
+      // conversations the requester may read, most recent first.  Mirrors the
+      // rooms-directory scan (rooms.ts): walk the store-level
+      // `(created_at, thread_id)` keyset in bounded batches until a full
+      // VISIBLE page accumulates — `threadReadableToUser` removes hidden
+      // stories, private/restricted-room threads, and moderation-removed
+      // threads — so no fixed fetch prefix can strand a readable conversation
+      // and a filtered-out thread never stalls the walk.
+      .get(
+        '/threads',
+        zValidator('query', z.object({ cursor: z.string().min(1).max(512).optional() })),
+        async (c) => {
+          const { cursor } = c.req.valid('query');
+          const bundle = bundles();
+          const identity = getIdentityServices();
+          const userId = await softUserId(c.req.header('cookie'), identity);
+          const pageSize = bundle.forum.config().roomPageSize;
+
+          // Recover the keyset position from the opaque cursor (the last thread
+          // id of the previous page); an unknown cursor restarts from the top
+          // (defensive, never an error — the branch/subtree cursor semantics).
+          let before: { createdAt: string; threadId: string } | null = null;
+          if (cursor !== undefined) {
+            const last = await bundle.ingestion.stories.getThreadById(cursor);
+            if (last) before = { createdAt: last.createdAt, threadId: last.threadId };
+          }
+
+          const visible: ThreadShellRecord[] = [];
+          let exhausted = false;
+          const BATCH = 200;
+          const MAX_BATCHES = 25;
+          for (let scan = 0; scan < MAX_BATCHES && visible.length <= pageSize; scan += 1) {
+            const batch = await bundle.ingestion.stories.listThreads(before, BATCH);
+            for (const thread of batch) {
+              if (visible.length > pageSize) break;
+              if (await threadReadableToUser(bundle, thread, userId)) visible.push(thread);
+            }
+            const lastScanned = batch[batch.length - 1];
+            if (!lastScanned || batch.length < BATCH) {
+              exhausted = true;
+              break;
+            }
+            before = { createdAt: lastScanned.createdAt, threadId: lastScanned.threadId };
+          }
+          const page = visible.slice(0, pageSize);
+          const last = page[page.length - 1];
+          const nextCursor =
+            (visible.length > pageSize || !exhausted) && last ? last.threadId : null;
+
+          const items: ThreadSummary[] = [];
+          for (const thread of page) {
+            const story = await bundle.ingestion.stories.getById(thread.storyId);
+            if (!story) continue; // a thread can never outlive its story; defensive.
+            const counts = await bundle.forum.contributions.countByType(thread.threadId, [
+              'published',
+            ]);
+            const contributionCount = Object.values(counts).reduce((sum, n) => sum + (n ?? 0), 0);
+            items.push(
+              threadSummarySchema.parse({
+                thread_id: thread.threadId,
+                story_id: thread.storyId,
+                room_id: thread.roomId,
+                branch_index: thread.branchIndex,
+                title: story.title,
+                conversation_state: thread.conversationState,
+                safety_state: thread.safetyState,
+                contribution_count: contributionCount,
+                created_at: thread.createdAt,
+                updated_at: thread.updatedAt,
+              }),
+            );
+          }
+          return c.json(threadListResponseSchema.parse({ items, nextCursor }));
+        },
+      )
+
       // --- Thread reading (WS-G.3.3) -----------------------------------------
       .get(
         '/threads/:threadId',

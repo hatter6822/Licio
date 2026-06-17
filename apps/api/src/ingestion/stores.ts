@@ -308,6 +308,16 @@ export interface StoryStore {
     before: { createdAt: string; threadId: string } | null,
     limit: number,
   ): Promise<ThreadShellRecord[]>;
+  /** Keyset page of ALL threads (the `/threads` directory, WS-G.3.3),
+   *  `(created_at, thread_id)` DESCENDING (most recent first).  Threads whose
+   *  story is hidden (takedown or safety) are EXCLUDED — the same visible-only
+   *  invariant as `countThreadsByRoom` — so a directory scan never spends its
+   *  page budget on, or leaks the existence of, taken-down content.  Room
+   *  visibility and moderation-removal are layered on by the handler. */
+  listThreads(
+    before: { createdAt: string; threadId: string } | null,
+    limit: number,
+  ): Promise<ThreadShellRecord[]>;
   /** VISIBLE thread count: threads whose story is hidden (takedown or
    *  safety) are excluded — a count exceeding the listable threads would be
    *  a hidden-story oracle. */
@@ -802,6 +812,31 @@ export class InMemoryStoryStore implements StoryStore {
       if (story && story.hiddenState === null) count += 1;
     }
     return count;
+  }
+
+  async listThreads(
+    before: { createdAt: string; threadId: string } | null,
+    limit: number,
+  ): Promise<ThreadShellRecord[]> {
+    return [...this.#threads.values()]
+      .filter((t) => {
+        // Visible-only invariant: a hidden story's thread never enters the
+        // directory (mirrors countThreadsByRoom — no hidden-story oracle).
+        const story = this.#stories.get(t.storyId);
+        return story !== undefined && story.hiddenState === null;
+      })
+      .filter(
+        (t) =>
+          before === null ||
+          t.createdAt < before.createdAt ||
+          (t.createdAt === before.createdAt && t.threadId < before.threadId),
+      )
+      .sort((a, b) =>
+        a.createdAt === b.createdAt
+          ? b.threadId.localeCompare(a.threadId)
+          : b.createdAt.localeCompare(a.createdAt),
+      )
+      .slice(0, limit);
   }
 
   async update(

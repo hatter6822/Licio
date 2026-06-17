@@ -10,7 +10,9 @@ import {
   branchContentSchema,
   contributionAnchorSchema,
   contributionSubtreeSchema,
+  type ThreadListResponse,
   threadDetailSchema,
+  threadListResponseSchema,
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -372,6 +374,120 @@ describe('WS-G.3.3 — semantic anchors and visibility', () => {
       `http://local/v1/contributions/${created.contribution_id}/anchor`,
     );
     expect(anchor.status).toBe(404);
+  });
+});
+
+describe('WS-G.3.3 — thread directory (GET /v1/threads)', () => {
+  async function directory(asCookie?: string): Promise<ThreadListResponse> {
+    const res = await app().request(
+      new Request('http://local/v1/threads', asCookie ? { headers: { cookie: asCookie } } : {}),
+    );
+    expect(res.status).toBe(200);
+    return threadListResponseSchema.parse(await res.json());
+  }
+
+  it('lists readable conversations most-recent-first with title + contribution count', async () => {
+    // `beforeEach` already seeded `threadId` (the oldest conversation).
+    const second = await seedThread(fixture, { title: 'Second conversation' });
+    const third = await seedThread(fixture, { title: 'Third conversation' });
+    await createOk({ ...contributionBody('question', third.threadId), client_draft_id: 'dir-1' });
+    await createOk({
+      ...contributionBody('explanation', third.threadId),
+      client_draft_id: 'dir-2',
+    });
+
+    const page = await directory();
+    expect(page.items.map((t) => t.thread_id)).toEqual([third.threadId, second.threadId, threadId]);
+    expect(page.items[0]?.title).toBe('Third conversation');
+    expect(page.items[0]?.contribution_count).toBe(2);
+    expect(page.items[1]?.contribution_count).toBe(0);
+    expect(page.items[0]?.conversation_state).toBe('active');
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it('excludes a thread whose story is hidden (takedown — no oracle)', async () => {
+    const hidden = await seedThread(fixture, { title: 'Hidden conversation' });
+    await fixture.ingestion.stories.update(hidden.storyId, { hiddenState: 'takedown' });
+    const ids = (await directory()).items.map((t) => t.thread_id);
+    expect(ids).toContain(threadId);
+    expect(ids).not.toContain(hidden.threadId);
+  });
+
+  it('hides a private-room conversation from non-members; shows it to a steward', async () => {
+    const roomRes = await app().request(
+      jsonRequest(
+        '/v1/rooms',
+        'POST',
+        {
+          room_type: 'global_topic',
+          name: 'Private R',
+          description: 'Members only.',
+          initial_topics: ['health'],
+          visibility: 'private',
+        },
+        cookie,
+      ),
+    );
+    expect(roomRes.status).toBe(201);
+    const { room_id } = (await roomRes.json()) as { room_id: string };
+    const priv = await seedThread(fixture, {
+      title: 'Members-only conversation',
+      roomId: room_id,
+      visibility: 'room_only',
+    });
+
+    // Anonymous reader: the private-room conversation is absent.
+    expect((await directory()).items.map((t) => t.thread_id)).not.toContain(priv.threadId);
+    // The creator is a room steward (auto-assigned on create) → it is present.
+    expect((await directory(cookie)).items.map((t) => t.thread_id)).toContain(priv.threadId);
+  });
+
+  it('keyset-paginates the directory (page size honoured, no gaps or dupes)', async () => {
+    // A fresh bundle (replaces the singletons) with a small page size and four
+    // conversations, so a single page cannot hold them all.
+    let ms = Date.parse('2026-06-12T00:00:00.000Z');
+    const local = freshForumServices({
+      now: () => {
+        ms += 100;
+        return ms;
+      },
+      forumConfig: { roomPageSize: 2 },
+    });
+    const seeded: string[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      const { threadId: id } = await seedThread(local, { title: `Convo ${i}` });
+      seeded.push(id);
+    }
+
+    const first = threadListResponseSchema.parse(
+      await (await app().request('http://local/v1/threads')).json(),
+    );
+    expect(first.items).toHaveLength(2);
+    expect(first.nextCursor).not.toBeNull();
+
+    const second = threadListResponseSchema.parse(
+      await (await app().request(`http://local/v1/threads?cursor=${first.nextCursor}`)).json(),
+    );
+    expect(second.items).toHaveLength(2);
+    expect(second.nextCursor).toBeNull();
+
+    const ids = new Set([
+      ...first.items.map((t) => t.thread_id),
+      ...second.items.map((t) => t.thread_id),
+    ]);
+    expect(ids.size).toBe(4); // no duplicates across pages
+    expect(ids).toEqual(new Set(seeded)); // no gaps
+  });
+
+  it('is empty (items: [], nextCursor: null) when no readable conversation exists', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    expect(thread).not.toBeNull();
+    if (thread) {
+      await fixture.ingestion.stories.update(thread.storyId, { hiddenState: 'takedown' });
+    }
+    const page = await directory();
+    expect(page.items).toEqual([]);
+    expect(page.nextCursor).toBeNull();
   });
 });
 

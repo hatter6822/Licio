@@ -60,7 +60,9 @@ import {
   storyDuplicateResponseSchema,
   storyInterpretationsResponseSchema,
   type ThreadDetail,
+  type ThreadListResponse,
   threadDetailSchema,
+  threadListResponseSchema,
   type UploadPublic,
   type UserSettings,
   uploadPublicSchema,
@@ -239,6 +241,11 @@ export async function fetchIndependentSources(
     param: { storyId },
   });
   return parseResponse(response, independentSourcesResponseSchema);
+}
+
+export async function fetchThreads(cursor?: string): Promise<ThreadListResponse> {
+  const response = await client.v1.threads.$get({ query: cursor ? { cursor } : {} });
+  return parseResponse(response, threadListResponseSchema);
 }
 
 export async function fetchThread(threadId: string): Promise<ThreadDetail> {

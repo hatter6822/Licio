@@ -52,6 +52,7 @@ vi.mock('../../lib/api.js', async (importOriginal) => {
 });
 
 const { StoryDetailPage } = await import('./stories.js');
+const { fetchStory } = await import('../../lib/api.js');
 
 function renderStoryPage() {
   const rootRoute = createRootRoute({ component: Outlet });
@@ -91,5 +92,57 @@ describe('StoryDetailPage explanation surface (WS-I.2.6b / §13.5)', () => {
     await userEvent.click(link);
     await waitFor(() => expect(router.state.location.pathname).toBe('/profile/signal-ledger'));
     expect(await screen.findByRole('heading', { name: 'Signal Ledger' })).toBeInTheDocument();
+  });
+});
+
+describe('StoryDetailPage conversation link (WS-G.3.3)', () => {
+  const THREAD_ID = '44444444-4444-4444-8444-444444444444';
+
+  function renderWithThreadRoute() {
+    const rootRoute = createRootRoute({ component: Outlet });
+    const storyRoute = createRoute({
+      getParentRoute: () => rootRoute,
+      path: '/stories/$storyId',
+      component: StoryDetailPage,
+    });
+    const ledgerRoute = createRoute({
+      getParentRoute: () => rootRoute,
+      path: '/profile/signal-ledger',
+      component: () => <h1>Signal Ledger</h1>,
+    });
+    const threadRoute = createRoute({
+      getParentRoute: () => rootRoute,
+      path: '/threads/$threadId',
+      component: () => <h1>Thread</h1>,
+    });
+    const router = createRouter({
+      routeTree: rootRoute.addChildren([storyRoute, ledgerRoute, threadRoute]),
+      history: createMemoryHistory({ initialEntries: [`/stories/${STORY.story_id}`] }),
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <RouterProvider router={router as never} />
+      </QueryClientProvider>,
+    );
+    return router;
+  }
+
+  it('shows "View the conversation" and navigates to the thread when thread_id is present', async () => {
+    vi.mocked(fetchStory).mockResolvedValueOnce({ ...STORY, thread_id: THREAD_ID });
+    const router = renderWithThreadRoute();
+    const link = await screen.findByRole('link', { name: 'View the conversation' });
+    await userEvent.click(link);
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/threads/${THREAD_ID}`));
+    expect(await screen.findByRole('heading', { name: 'Thread' })).toBeInTheDocument();
+  });
+
+  it('omits the conversation link when the story has no thread', async () => {
+    vi.mocked(fetchStory).mockResolvedValueOnce({ ...STORY, thread_id: null });
+    renderWithThreadRoute();
+    // The story content has loaded…
+    expect(await screen.findByText(STORY.distribution_reason)).toBeInTheDocument();
+    // …but there is no conversation affordance.
+    expect(screen.queryByRole('link', { name: 'View the conversation' })).not.toBeInTheDocument();
   });
 });

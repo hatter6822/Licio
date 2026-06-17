@@ -119,6 +119,17 @@ export function useThreadBranchQuery(threadId: string, branch: BranchId) {
   };
 }
 
+/** The `/threads` directory: most-recent-first conversations the reader may
+ *  see (WS-G.3.3). One page is enough for the tab — like the rooms directory,
+ *  deeper paging is a follow-up, not a correctness gap. */
+export function useThreadsQuery() {
+  return useQuery({
+    queryKey: queryKeys.threads(),
+    queryFn: () => api.fetchThreads(),
+    ...cachePolicy.thread,
+  });
+}
+
 export function useRoomsQuery() {
   return useQuery({
     queryKey: queryKeys.rooms(),
