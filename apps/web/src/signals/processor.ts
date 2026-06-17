@@ -87,9 +87,11 @@ export class SignalProcessor {
   }
 
   /**
-   * Set the collection policy. Turning collection off discards in-flight dwell
-   * AND the locally-persisted return history, so opting out leaves no on-device
-   * signal state behind (WS-C.4.1d privacy gate).
+   * Set the collection policy. Turning collection off discards in-flight dwell,
+   * the locally-persisted return history, AND any aggregate already buffered but
+   * not yet uploaded — so opting out leaves no on-device signal state behind and
+   * the interval/page-hide path can never upload a pre-opt-out capture after the
+   * user opted out (WS-C.4.1d privacy gate).
    */
   setCollectionPolicy(policy: CollectionPolicy): void {
     this.policy = policy;
@@ -98,6 +100,7 @@ export class SignalProcessor {
       this.dwell.reset();
       this.lastDwellMs = 0;
       this.returns.resetSession();
+      this.uploader.clear();
     }
   }
 

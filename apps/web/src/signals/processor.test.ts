@@ -47,6 +47,7 @@ function setup(options: { capMs?: number; flushIntervalMs?: number; tickMs?: num
     processor,
     upload,
     enqueue,
+    uploader,
     returnTracker,
     accrue,
     setVisible: (v: boolean) => {
@@ -68,6 +69,27 @@ describe('SignalProcessor collection gating', () => {
     s.processor.setActiveStory(STORY);
     s.accrue(45_000);
     s.processor.captureAggregate(STORY);
+    await s.processor.flush();
+    expect(s.upload).not.toHaveBeenCalled();
+  });
+
+  it('discards a buffered-but-unflushed aggregate when collection is turned off', async () => {
+    const s = setup();
+    s.processor.setCollectionPolicy(ENABLED);
+    s.processor.setActiveStory(STORY);
+    s.accrue(45_000);
+    // Leaving the item buffers its aggregate but does NOT upload it (uploads are
+    // interval/page-hide driven). The buffer now holds one pending aggregate.
+    s.processor.setActiveStory(null);
+    expect(s.uploader.size).toBe(1);
+    // The reader opts out before the next interval/page-hide flush. Opt-out must
+    // drop the on-device buffer so the captured aggregate is never uploaded.
+    s.processor.setCollectionPolicy({
+      collect: false,
+      privacyLevel: 'standard',
+      identifier: 'privacy-bucket',
+    });
+    expect(s.uploader.size).toBe(0);
     await s.processor.flush();
     expect(s.upload).not.toHaveBeenCalled();
   });

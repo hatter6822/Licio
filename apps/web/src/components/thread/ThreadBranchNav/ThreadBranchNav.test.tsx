@@ -107,17 +107,23 @@ describe('ThreadBranchNav (WS-B.2.12)', () => {
     expect(screen.queryByRole('button', { name: /contribute/i })).toBeNull();
   });
 
-  it('floats the Contribute button horizontally centered and clear of the bottom nav', () => {
+  it('floats the Contribute CTA centered and clear of the bottom nav via a fixed wrapper', () => {
     renderNav({ onContribute: () => undefined });
     const contribute = screen.getByRole('button', { name: 'Contribute to this thread' });
-    const classes = contribute.className.split(/\s+/);
-    // Centered via the absolute-centering idiom (inset-x-0 + w-fit + mx-auto),
-    // no longer pinned to the bottom-end corner.
-    expect(classes).toEqual(expect.arrayContaining(['fixed', 'inset-x-0', 'w-fit', 'mx-auto']));
-    expect(classes).not.toContain('end-4');
-    // Lifted above the fixed bottom nav instead of overlapping it at bottom-4.
-    expect(classes).not.toContain('bottom-4');
-    expect(contribute.className).toContain('bottom-[calc(env(safe-area-inset-bottom)+5rem)]');
+    // Positioning lives on the WRAPPER, not the Button: the Button base hardcodes
+    // `relative`, which (with no tailwind-merge in `cn`) would win a `position`
+    // conflict and leave the CTA in flow. The wrapper is a plain, fixed div.
+    const wrapper = contribute.parentElement;
+    const wrapperClasses = wrapper?.className.split(/\s+/) ?? [];
+    expect(wrapperClasses).toEqual(
+      expect.arrayContaining(['fixed', 'inset-x-0', 'w-fit', 'mx-auto']),
+    );
+    expect(wrapper?.className).toContain('bottom-[calc(env(safe-area-inset-bottom)+5rem)]');
+    // The Button must carry NO competing position utility (no conflict to lose).
+    const buttonClasses = contribute.className.split(/\s+/);
+    expect(buttonClasses).not.toContain('fixed');
+    expect(buttonClasses).not.toContain('end-4');
+    expect(buttonClasses).not.toContain('bottom-4');
   });
 
   it('has no axe violations', async () => {

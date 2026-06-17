@@ -117,4 +117,14 @@ export class AggregateUploader {
     const batch = this.pending.splice(0, this.pending.length);
     await this.enqueue(batch);
   }
+
+  /**
+   * Discard the buffered batch WITHOUT uploading or enqueuing it. Used by the
+   * privacy opt-out (WS-C.4.1d): a captured-but-unflushed aggregate is on-device
+   * signal state, so turning collection off must drop it rather than let the
+   * interval/page-hide path upload it after the user opted out.
+   */
+  clear(): void {
+    this.pending.length = 0;
+  }
 }

@@ -129,21 +129,26 @@ export function ThreadBranchNav({
       </Tabs>
 
       {onContribute ? (
-        <Button
-          variant="primary"
-          size="lg"
-          onClick={onContribute}
-          aria-label={t('thread.contribute', 'Contribute to this thread')}
-          // Thumb-zone CTA: horizontally CENTERED via the absolute-centering idiom
-          // (`inset-x-0` + `w-fit` + `mx-auto`) and lifted clear of the fixed
-          // bottom nav (~4.5rem + safe-area), which `bottom-4` previously overlapped.
-          // At lg the nav is a side rail, so a small bottom inset suffices.
-          // Centering is symmetric, so it stays correct under RTL with no end flip.
-          className="fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+5rem)] z-sticky mx-auto w-fit shadow-lg lg:bottom-6"
-        >
-          <Icon name="pencil" className="size-5" />
-          {t('thread.contribute.short', 'Contribute')}
-        </Button>
+        // Fixed positioning lives on this wrapper, NOT the Button: the shared
+        // Button base hardcodes `position: relative`, and `cn` does not resolve
+        // Tailwind conflicts, so `fixed` on the Button loses to that `relative`
+        // (the CTA would stay in flow and shift over branch content). A plain div
+        // has no competing position, so `fixed` applies. Thumb-zone CTA, lifted
+        // clear of the fixed bottom nav (~4.5rem + safe-area) and horizontally
+        // CENTERED (inset-x-0 + w-fit + mx-auto); at lg the nav is a side rail, so
+        // a small inset suffices. Centering is symmetric — RTL-safe, no end flip.
+        <div className="fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+5rem)] z-sticky mx-auto w-fit lg:bottom-6">
+          <Button
+            variant="primary"
+            size="lg"
+            onClick={onContribute}
+            aria-label={t('thread.contribute', 'Contribute to this thread')}
+            className="shadow-lg"
+          >
+            <Icon name="pencil" className="size-5" />
+            {t('thread.contribute.short', 'Contribute')}
+          </Button>
+        </div>
       ) : null}
     </div>
   );
