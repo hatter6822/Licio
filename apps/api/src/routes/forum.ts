@@ -346,6 +346,10 @@ export function createForumRoutes() {
         '/contributions/:contributionId',
         authMiddleware(),
         requireVerifiedAccount(),
+        // Editing existing public content IS a public contribution — a restricted
+        // account is denied (it may still DELETE/retract, which only reduces
+        // exposure; that route stays open).
+        requireUnrestricted(),
         zValidator('param', z.object({ contributionId: uuidSchema })),
         zValidator('json', contributionUpdateSchema),
         async (c) => {
