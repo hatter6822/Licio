@@ -113,9 +113,10 @@ export function ThreadBranchNav({
   };
 
   return (
-    // `relative` anchors nothing visual here; the Contribute button is fixed to
-    // the viewport thumb-zone, intentionally outside the scrollable panel.
-    <div className={cn('relative flex flex-col', className)}>
+    // The Contribute button is fixed to the viewport thumb-zone (outside the
+    // scrollable panel), so this wrapper needs no positioning context — just the
+    // column layout for the tab bar and its panel.
+    <div className={cn('flex flex-col', className)}>
       <Tabs
         tabs={tabs}
         label={t('thread.branches.label', 'Thread branches')}
@@ -128,18 +129,26 @@ export function ThreadBranchNav({
       </Tabs>
 
       {onContribute ? (
-        <Button
-          variant="primary"
-          size="lg"
-          onClick={onContribute}
-          aria-label={t('thread.contribute', 'Contribute to this thread')}
-          // Thumb-zone: pinned to the bottom-end (logical) corner, above sticky
-          // chrome. `me-`/`bottom-` keep it RTL-correct (end flips with dir).
-          className="fixed bottom-4 end-4 z-sticky shadow-lg"
-        >
-          <Icon name="pencil" className="size-5" />
-          {t('thread.contribute.short', 'Contribute')}
-        </Button>
+        // Fixed positioning lives on this wrapper, NOT the Button: the shared
+        // Button base hardcodes `position: relative`, and `cn` does not resolve
+        // Tailwind conflicts, so `fixed` on the Button loses to that `relative`
+        // (the CTA would stay in flow and shift over branch content). A plain div
+        // has no competing position, so `fixed` applies. Thumb-zone CTA, lifted
+        // clear of the fixed bottom nav (~4.5rem + safe-area) and horizontally
+        // CENTERED (inset-x-0 + w-fit + mx-auto); at lg the nav is a side rail, so
+        // a small inset suffices. Centering is symmetric — RTL-safe, no end flip.
+        <div className="fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+5rem)] z-sticky mx-auto w-fit lg:bottom-6">
+          <Button
+            variant="primary"
+            size="lg"
+            onClick={onContribute}
+            aria-label={t('thread.contribute', 'Contribute to this thread')}
+            className="shadow-lg"
+          >
+            <Icon name="pencil" className="size-5" />
+            {t('thread.contribute.short', 'Contribute')}
+          </Button>
+        </div>
       ) : null}
     </div>
   );
