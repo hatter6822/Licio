@@ -1139,6 +1139,49 @@ describe('appeals (independence enforced)', () => {
     expect(decision.ok && decision.status).toBe('modified');
   });
 
+  it('#2/#4 a modified account sanction carries the prior state + remaining duration', async () => {
+    const port = recordingContentPort();
+    services = createInMemoryModerationServices({
+      content: port,
+      // The author was ALREADY restricted before the temporary suspend stacked.
+      users: userPort({ [AUTHOR]: 100 }, { [AUTHOR]: 'restricted' }),
+    });
+    const out = await applyAction(services, safetyActor(), {
+      target_type: 'account',
+      target_id: AUTHOR,
+      action: 'suspend',
+      reason_code: 'MOD_HARASS_001',
+      duration: '7d', // a TEMPORARY suspension
+    });
+    if (!out.ok) throw new Error('suspend failed');
+    expect((await services.actions.getById(out.response.action_id))?.priorState).toBe('restricted');
+    await submitAppeal(services, AUTHOR, {
+      action_id: out.response.action_id,
+      user_statement: 's',
+    });
+    const appeal = await services.appeals.getByActionId(out.response.action_id);
+    if (!appeal) throw new Error('appeal not created');
+    const decision = await decideAppeal(
+      services,
+      appealsActor(),
+      appeal.appealId,
+      'modify',
+      'MOD_HARASS_001',
+      'reduce to restrict',
+      'restrict',
+    );
+    expect(decision.ok).toBe(true);
+    const replacement = (await services.actions.listBySubject(AUTHOR)).find(
+      (a) => a.action === 'restrict' && !a.reverted,
+    );
+    // #4: prior state is the original baseline (`restricted`), never `active` —
+    // so a later revert/expiry restores the right state, not a tombstone clear.
+    expect(replacement?.priorState).toBe('restricted');
+    // #2: a remaining duration is carried (≈7d), never null → the scheduler
+    // still auto-lifts it rather than leaving an indefinite restriction.
+    expect(replacement?.duration).toBe('7d');
+  });
+
   it('#5 modify does not re-apply a sanction when the original was already reverted', async () => {
     const port = recordingContentPort();
     services = createInMemoryModerationServices({

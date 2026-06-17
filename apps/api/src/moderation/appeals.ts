@@ -22,6 +22,7 @@ import {
   actionReversible,
   CONTENT_ACTIONS,
   contentStateFor,
+  parseDurationDays,
   performRevert,
 } from './actions.js';
 import { assignAppealReviewer } from './assignment.js';
@@ -321,13 +322,28 @@ export async function decideAppeal(
   return { ok: true, status, noticeSent: true };
 }
 
+const DAY_MS = 86_400_000;
+
+/** The original sanction's REMAINING bound (whole days, floored at 1 while time
+ *  is left), or `null` for a permanent original.  A modified replacement carries
+ *  this so it expires no later than the original would have — never indefinite,
+ *  never harsher in wall-clock. */
+function remainingDuration(original: ModerationActionRecord, nowMs: number): string | null {
+  const days = parseDurationDays(original.duration ?? undefined);
+  if (days === null) return null; // permanent original → permanent replacement
+  const expiresAtMs = Date.parse(original.createdAt) + days * DAY_MS;
+  return `${Math.max(1, Math.ceil((expiresAtMs - nowMs) / DAY_MS))}d`;
+}
+
 /**
  * Apply the new, less-severe action a `modify` outcome selects.  The prior
- * `performRevert` already restored the baseline (content visible / account
- * active), so the modified action is applied fresh and its FULL effect is
- * reflected to distribution via the same mapping as the action palette — a
- * downgrade like remove → hide or ban → restrict must actually leave the
- * content/account in the modified state, never silently fully restored.
+ * `performRevert` already restored the baseline (content visible / account to
+ * its true prior state), so the modified action is applied fresh and its FULL
+ * effect is reflected to distribution via the same mapping as the action
+ * palette — a downgrade like remove → hide or ban → restrict must actually
+ * leave the content/account in the modified state, never silently fully
+ * restored.  It carries the original's prior state + remaining duration so a
+ * later revert/expiry restores the right baseline on the original's schedule.
  */
 async function applyModifiedAction(
   services: ModerationServices,
@@ -341,9 +357,24 @@ async function applyModifiedAction(
       ? contentStateFor(modifiedAction)
       : null;
   const accountState = ACCOUNT_ACTIONS.has(modifiedAction) ? accountStateFor(modifiedAction) : null;
-  const priorState = contentState ? 'visible' : accountState ? 'active' : null;
+  // The replacement stacks on the baseline `performRevert` just restored — the
+  // ORIGINAL action's prior account state (e.g. `restricted`/`suspended`), NOT
+  // an unconditional `active`.  The domain guard above guarantees an account
+  // replacement only follows an account original, so `original.priorState` is a
+  // real account state.  Without this, reverting/expiring the replacement would
+  // reactivate a user who was already sanctioned before the original action.
+  const priorState = contentState
+    ? 'visible'
+    : accountState
+      ? (original.priorState ?? 'active')
+      : null;
   const nextState = contentState ?? accountState ?? null;
   const reversible = actionReversible(modifiedAction, reasonCode);
+  // Carry the original's REMAINING duration onto an account replacement so the
+  // scheduler still auto-lifts it (a `null` duration would make a downgraded
+  // temporary sanction PERMANENT — harsher than the original).  Content
+  // modifications carry no duration (auto-lift is account-only).
+  const duration = accountState ? remainingDuration(original, services.now()) : null;
   const newAction = await services.actions.insert({
     actorUserId: actor.userId,
     actorRole: actor.stewardRoles[0] ?? null,
@@ -352,7 +383,7 @@ async function applyModifiedAction(
     targetId: original.targetId,
     subjectUserId: original.subjectUserId,
     reasonCode,
-    duration: null,
+    duration,
     reviewerNote: 'Applied via appeal modification',
     priorState,
     nextState,
