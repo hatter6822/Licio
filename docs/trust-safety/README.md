@@ -40,6 +40,14 @@ wins.
   drizzle/0025_*.sql        moderation_cases.subject_user_id (FK users ON DELETE
                             SET NULL + index) — the user a case is ABOUT, populated
                             at report time, driving the `target_user` queue filter
+  drizzle/0026_*.sql,       right-to-erasure: a `users` BEFORE DELETE trigger NULLs
+  drizzle/0028_*.sql        an `account` target's polymorphic `target_id` (NOT an
+                            FK, so the SET NULL cascade can't reach it) — 0026 on
+                            the immutable audit log, 0028 extends it to
+                            cases/reports/actions/incidents (target_id made
+                            nullable; NULLs stay distinct in the open-target
+                            partial unique indexes), so a hard purge leaves no
+                            stable account id in ANY moderation table
 
 apps/api/src/moderation/
   stores.ts        store interfaces + in-memory adapters (Postgres drop-in seam)
@@ -219,8 +227,10 @@ boot now swaps in the durable + real wiring:
   back all ten stores when `DATABASE_URL` is set; `moderation_audit` stays
   append-only (the BEFORE UPDATE/DELETE trigger; the test-only `clear()` uses
   TRUNCATE; the trigger permits ONLY the right-to-erasure NULLing so a WS-D
-  account purge of a logged user succeeds).  The lease-guarded scheduler runs the
-  sweeps.  (`drizzle-moderation-stores.ts` is exercised by the gated integration
+  account purge of a logged user succeeds).  That same hard purge also scrubs the
+  polymorphic `account` `target_id` to NULL across EVERY moderation table (audit +
+  cases/reports/actions/incidents), so no stable erased-account id survives
+  anywhere.  The lease-guarded scheduler runs the sweeps.  (`drizzle-moderation-stores.ts` is exercised by the gated integration
   suite, not unit tests — the same coverage convention as every other
   workstream's Drizzle adapter.)
 - **Real ports.** A content removal writes the WS-E item-safety state (the
@@ -291,19 +301,6 @@ These are honest, tracked gaps — see `docs/planning/11-trust-and-safety.md`:
   senior queue (today `escalate` sets the case status and seniors pull it);
   room-report room-steward-layer-first routing; and the on-call paging PROVIDER
   (a WS-O binding — alerts log today).
-- **Right-to-erasure scrub of the polymorphic `target_id` on the OPERATIONAL
-  tables** (`moderation_cases`/`moderation_reports`/`moderation_actions`/
-  `coordinated_report_incidents`).  Migration `0026` scrubs the **immutable audit
-  log** (`moderation_audit.target_id`, already nullable) for `target_type =
-  'account'` rows on hard purge — the long-term retention surface, and the line
-  the review flagged.  The operational tables hold the same polymorphic account
-  id; scrubbing them needs `target_id` made nullable there (their app record type
-  is `string`, so a small mapper/type change) plus the same `users`-DELETE scrub
-  arm — deferred because it is a 4-table nullability migration that must be
-  validated against the gated Postgres (the partial unique index
-  `moderation_cases_open_target_uq` relies on NULLs being distinct, which the NULL
-  scrub satisfies but a sentinel would not).  Closure target: a follow-up WS-J
-  migration extending the `0026` `moderation_audit_scrub_account_target` trigger.
 
 ## Room-class scope (honest boundary)
 

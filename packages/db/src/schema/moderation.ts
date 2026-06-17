@@ -70,7 +70,12 @@ export const moderationCases = pgTable(
   {
     caseId: uuid('case_id').primaryKey().defaultRandom(),
     targetType: reportTargetTypeEnum('target_type').notNull(),
-    targetId: uuid('target_id').notNull(),
+    // Nullable for the right-to-erasure scrub (WS-D §19.2): an `account`-target
+    // case holds the user's UUID here (not an FK — polymorphic), so the
+    // `users` BEFORE DELETE trigger NULLs it on a hard purge.  NULLs are
+    // distinct in `moderation_cases_open_target_uq`, so several erased-account
+    // cases never collide (a sentinel would).
+    targetId: uuid('target_id'),
     contentKind: reportContentKindEnum('content_kind'),
     status: moderationCaseStatusEnum('status').notNull().default('new'),
     severity: reportSeverityEnum('severity').notNull(),
@@ -120,7 +125,8 @@ export const moderationReports = pgTable(
       onDelete: 'set null',
     }),
     targetType: reportTargetTypeEnum('target_type').notNull(),
-    targetId: uuid('target_id').notNull(),
+    // Nullable for the right-to-erasure scrub (see moderation_cases.target_id).
+    targetId: uuid('target_id'),
     contentKind: reportContentKindEnum('content_kind'),
     reasonCode: text('reason_code').notNull(),
     severity: reportSeverityEnum('severity').notNull(),
@@ -160,7 +166,8 @@ export const moderationActions = pgTable(
     actorRole: text('actor_role'),
     action: text('action').notNull(),
     targetType: text('target_type').notNull(),
-    targetId: uuid('target_id').notNull(),
+    // Nullable for the right-to-erasure scrub (see moderation_cases.target_id).
+    targetId: uuid('target_id'),
     /** The user the action acts against (notice recipient / appeal owner / history). */
     subjectUserId: uuid('subject_user_id').references(() => users.userId, { onDelete: 'set null' }),
     reasonCode: text('reason_code'),
@@ -395,7 +402,9 @@ export const coordinatedReportIncidents = pgTable(
     // it explicitly (short, ≤63) to keep the identifier intact.
     caseId: uuid('case_id'),
     targetType: reportTargetTypeEnum('target_type').notNull(),
-    targetId: uuid('target_id').notNull(),
+    // Nullable for the right-to-erasure scrub (see moderation_cases.target_id);
+    // NULLs are distinct in `coordinated_report_incidents_target_open_uq`.
+    targetId: uuid('target_id'),
     reportCount: integer('report_count').notNull(),
     windowSeconds: integer('window_seconds').notNull(),
     /** Coordination score in [0,1]; cheap statistics until MFCI confirms. */

@@ -59,7 +59,8 @@ export const moderationCaseRowSchema = z
   .object({
     case_id: uuidSchema,
     target_type: reportTargetTypeSchema,
-    target_id: uuidSchema,
+    // Nullable: a right-to-erasure purge scrubs an `account` target's UUID.
+    target_id: uuidSchema.nullable(),
     content_kind: reportContentKindSchema.nullable(),
     /** Distinct reason codes across the aggregated reports. */
     reason_codes: z.array(contributionReasonCodeSchema).min(1),
@@ -222,7 +223,8 @@ export const caseReviewResponseSchema = z
   .object({
     case_id: uuidSchema,
     target_type: reportTargetTypeSchema,
-    target_id: uuidSchema,
+    // Nullable: a right-to-erasure purge scrubs an `account` target's UUID.
+    target_id: uuidSchema.nullable(),
     content_kind: reportContentKindSchema.nullable(),
     status: reportCaseStatusSchema,
     severity: reportSeveritySchema,
@@ -389,7 +391,8 @@ export const appealReviewResponseSchema = z
     appellant_statement: z.string().max(2000),
     new_evidence: z.array(z.string().max(2048)),
     target_type: reportTargetTypeSchema,
-    target_id: uuidSchema,
+    // Nullable: a right-to-erasure purge scrubs an `account` target's UUID.
+    target_id: uuidSchema.nullable(),
     snapshot_body: z.string().max(5000).nullable(),
     user_history: userHistorySchema,
     side_by_side: sideBySideViewSchema.nullable(),
@@ -507,7 +510,8 @@ export const coordinatedIncidentViewSchema = z
     incident_id: uuidSchema,
     case_id: uuidSchema.nullable(),
     target_type: reportTargetTypeSchema,
-    target_id: uuidSchema,
+    // Nullable: a right-to-erasure purge scrubs an `account` target's UUID.
+    target_id: uuidSchema.nullable(),
     report_count: z.number().int().min(0),
     window_seconds: z.number().int().min(0),
     coordination_score: z.number().min(0).max(1),

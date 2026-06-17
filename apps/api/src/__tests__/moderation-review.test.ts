@@ -337,6 +337,24 @@ describe('buildCaseReview (snapshot + thread + side-by-side)', () => {
     const enforcementVerbs = ['hide', 'remove', 'warn', 'restrict', 'shadow', 'suspend', 'ban'];
     expect(room?.available_actions.some((a) => enforcementVerbs.includes(a))).toBe(false);
   });
+
+  it('renders an account case whose target was erased (NULL target_id, no crash)', async () => {
+    // A right-to-erasure purge scrubbed the account `target_id` to NULL; the
+    // review must still render — the live-target resolution (existence /
+    // invariant signals / snapshot) is skipped, the reports/audit still show.
+    const caseId = await insertCase({
+      caseId: 'aaaaaaaa-0000-4000-9000-0000000000a4',
+      targetType: 'account',
+      targetId: null,
+      contentKind: null,
+    });
+    const review = await buildCaseReview(services, SAFETY, caseId);
+    expect(review).not.toBeNull();
+    expect(review?.target_id).toBeNull();
+    expect(review?.user_history.user_id).toBeNull(); // no subject to resolve
+    expect(review?.invariant_signals.mfci.available).toBe(false); // erased → unavailable
+    expect(review?.snapshot_body).toBeNull();
+  });
 });
 
 describe('appeal queue + review', () => {

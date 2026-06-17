@@ -33,7 +33,9 @@ const iso = (now: Clock): string => new Date(now()).toISOString();
 export interface ModerationCaseRecord {
   caseId: string;
   targetType: ReportTargetType;
-  targetId: string;
+  /** The polymorphic target id; NULL after a right-to-erasure purge of an
+   *  `account` target (the scrub mirrors `subjectUserId`'s ON DELETE SET NULL). */
+  targetId: string | null;
   contentKind: ReportContentKind | null;
   /** The user the case is about (account target → the account; content/thread
    *  target → its author); null when unresolved.  Drives the `target_user`
@@ -56,7 +58,8 @@ export interface ModerationReportRecord {
   caseId: string;
   reporterUserId: string | null;
   targetType: ReportTargetType;
-  targetId: string;
+  /** NULL after a right-to-erasure purge of an `account` target (see case). */
+  targetId: string | null;
   contentKind: ReportContentKind | null;
   reasonCode: string;
   severity: ReportSeverity;
@@ -72,7 +75,8 @@ export interface ModerationActionRecord {
   actorRole: StewardRoleId | null;
   action: string;
   targetType: string;
-  targetId: string;
+  /** NULL after a right-to-erasure purge of an `account` target (see case). */
+  targetId: string | null;
   subjectUserId: string | null;
   reasonCode: string | null;
   duration: string | null;
@@ -164,7 +168,8 @@ export interface CoordinatedReportIncidentRecord {
   incidentId: string;
   caseId: string | null;
   targetType: ReportTargetType;
-  targetId: string;
+  /** NULL after a right-to-erasure purge of an `account` target (see case). */
+  targetId: string | null;
   reportCount: number;
   windowSeconds: number;
   coordinationScore: number;

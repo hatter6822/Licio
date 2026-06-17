@@ -1393,8 +1393,14 @@ export class DrizzleCoordinatedReportIncidentStore implements CoordinatedReportI
       .returning();
     const row = rows[0];
     if (row !== undefined) return { incident: mapIncident(row), inserted: true };
-    // Conflict: an open incident already exists for this target — return it.
-    const existing = await this.findOpenByTarget(record.targetType, record.targetId);
+    // Conflict: an open incident already exists for this target — return it.  An
+    // incident is always opened with a real target (the erasure scrub only NULLs
+    // an EXISTING row), so the re-read key is non-null in practice; guard the
+    // type defensively.
+    const existing =
+      record.targetId === null
+        ? null
+        : await this.findOpenByTarget(record.targetType, record.targetId);
     if (existing) return { incident: existing, inserted: false };
     // Defensive: the conflicting incident was resolved between the insert and
     // this re-read (so the partial index no longer matches) — open one now.

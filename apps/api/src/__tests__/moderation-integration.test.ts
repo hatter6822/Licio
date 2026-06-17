@@ -399,6 +399,86 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
     expect(surviving[0]?.reasonCode).toBe('MOD_HARASS_001');
   });
 
+  it('right-to-erasure also scrubs the account target_id on the OPERATIONAL tables', async () => {
+    // Cases/reports/actions/incidents carry the same polymorphic `target_id`
+    // (an account target = the user UUID, NOT an FK).  The extended BEFORE DELETE
+    // scrub NULLs it on every operational table so a hard purge leaves no stable
+    // account id anywhere — while the substantive rows survive.
+    const subject = await insertUser('opscrub');
+    const reporter = await insertUser('opreporter');
+    const now = Date.now();
+    const theCase = await cases.insert({
+      caseId: randomUUID(),
+      targetType: 'account',
+      targetId: subject,
+      contentKind: null,
+      subjectUserId: subject,
+      status: 'new',
+      severity: 'moderate',
+      routedTo: 'standard',
+      assignedTo: null,
+      reportCount: 1,
+      enforcementDelayed: false,
+      resolvedActionId: null,
+      slaDueAt: new Date(now + HOUR).toISOString(),
+    });
+    const report = await reports.insert({
+      caseId: theCase.caseId,
+      reporterUserId: reporter,
+      targetType: 'account',
+      targetId: subject,
+      contentKind: null,
+      reasonCode: 'MOD_HARASS_001',
+      severity: 'moderate',
+      context: null,
+      evidenceUrls: [],
+      localOperationId: randomUUID(),
+    });
+    const action = await actions.insert({
+      actorUserId: null,
+      actorRole: 'ROLE_SAFETY',
+      action: 'suspend',
+      targetType: 'account',
+      targetId: subject,
+      subjectUserId: subject,
+      reasonCode: 'MOD_HARASS_001',
+      duration: null,
+      reviewerNote: null,
+      priorState: 'active',
+      nextState: 'suspended',
+      reversible: true,
+      reverted: false,
+      linkedActionId: null,
+      caseId: theCase.caseId,
+      coApproverUserId: null,
+      reportIds: [],
+    });
+    const incident = await incidents.insert({
+      caseId: theCase.caseId,
+      targetType: 'account',
+      targetId: subject,
+      reportCount: 3,
+      windowSeconds: 600,
+      coordinationScore: 0.5,
+      severity: 'moderate',
+      status: 'open',
+      summary: 'aggregate',
+      reviewedAt: null,
+      reviewedBy: null,
+    });
+    const { users } = await import('@licio/db');
+    const { eq } = await import('drizzle-orm');
+    await db.delete(users).where(eq(users.userId, subject));
+    // Every operational table's account target_id is scrubbed to NULL...
+    expect((await cases.getById(theCase.caseId))?.targetId).toBeNull();
+    expect((await reports.getById(report.reportId))?.targetId).toBeNull();
+    expect((await actions.getById(action.actionId))?.targetId).toBeNull();
+    expect((await incidents.getById(incident.incidentId))?.targetId).toBeNull();
+    // ...while the substantive rows survive (not deleted).
+    expect(await cases.getById(theCase.caseId)).not.toBeNull();
+    expect((await actions.getById(action.actionId))?.reasonCode).toBe('MOD_HARASS_001');
+  });
+
   it('blocks: idempotent insert, bilateral enforcement, owned delete', async () => {
     const a = await insertUser('blocker');
     const b = await insertUser('blocked');

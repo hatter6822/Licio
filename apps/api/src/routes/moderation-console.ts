@@ -332,6 +332,12 @@ export function createModerationConsoleRoutes() {
             results.push({ case_id: caseId, ok: true, error: null });
             continue;
           }
+          // An `account`-target case whose user was erased (right-to-erasure
+          // NULLed the id) has no live target to act on — skip it.
+          if (theCase.targetId === null) {
+            results.push({ case_id: caseId, ok: false, error: 'target_erased' });
+            continue;
+          }
           // dismiss → clear; remove → remove (each individually authorized + audited).
           const verb: ConsoleAction = action === 'dismiss' ? 'clear' : 'remove';
           const outcome = await applyAction(mod, actor, {

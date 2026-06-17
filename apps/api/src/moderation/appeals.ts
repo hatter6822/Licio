@@ -407,7 +407,9 @@ async function applyModifiedAction(
     coApproverUserId: null,
     reportIds: [],
   });
-  if (contentState) {
+  // `contentState` is set only for a content target, whose id is never scrubbed
+  // (the null guard also narrows the type for the port call).
+  if (contentState && original.targetId !== null) {
     await services.content.applyContentState(
       original.targetId,
       null,

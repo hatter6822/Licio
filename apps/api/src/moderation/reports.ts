@@ -321,6 +321,11 @@ export async function detectCoordination(
 ): Promise<void> {
   const config = services.config();
   const nowMs = services.now();
+  // An erased `account` target (a right-to-erasure purge NULLed `target_id`) has
+  // no coordination to assess — the account is gone.  The guard also narrows the
+  // polymorphic id to a string for the queries below.
+  if (theCase.targetId === null) return;
+  const targetId = theCase.targetId;
   // Re-read the case so the incident records the RECOMPUTED aggregate severity
   // (the caller's `theCase` is the pre-aggregation snapshot from before the
   // submit recomputed it) — a critical coordinated incident must not be paged
@@ -329,7 +334,7 @@ export async function detectCoordination(
   const sinceIso = new Date(nowMs - config.coordinationWindowSeconds * 1000).toISOString();
   const reports = await services.reports.listAgainstTargetSince(
     theCase.targetType,
-    theCase.targetId,
+    targetId,
     sinceIso,
   );
   const distinctReporters = new Set(
@@ -400,7 +405,7 @@ export async function detectCoordination(
   services.alerts.pageOnCall({
     kind: 'coordinated_report',
     targetType: theCase.targetType,
-    targetId: theCase.targetId,
+    targetId,
     reasonCode: null,
     severity: current.severity,
   });

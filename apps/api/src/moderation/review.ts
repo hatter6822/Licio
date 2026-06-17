@@ -29,6 +29,7 @@ import {
   mayseeReporterIdentity,
   type StewardActor,
 } from './authz.js';
+import { defaultInvariantPort, type TargetResolution } from './ports.js';
 import type { ModerationServices } from './services.js';
 import type { ModerationCaseRecord, ModerationReportRecord } from './stores.js';
 
@@ -339,9 +340,16 @@ export async function buildCaseReview(
   const theCase = await services.cases.getById(caseId);
   if (!theCase) return null;
   const reports = await services.reports.listByCase(caseId);
-  const resolution = await services.content.resolveTarget(theCase.targetType, theCase.targetId);
-  const subjectUserId =
-    theCase.targetType === 'account' ? theCase.targetId : resolution.subjectUserId;
+  // An `account`-target case whose user was hard-purged (right-to-erasure) has a
+  // NULL target id: the live-target resolution (existence / invariant signals /
+  // content snapshot+thread) is skipped — the panel still renders the reports,
+  // the (now empty) user history, and the audit trail.
+  const targetId = theCase.targetId;
+  const resolution: TargetResolution =
+    targetId === null
+      ? { exists: false, subjectUserId: null, contentKind: null }
+      : await services.content.resolveTarget(theCase.targetType, targetId);
+  const subjectUserId = theCase.targetType === 'account' ? targetId : resolution.subjectUserId;
 
   // Reporter identity only for authorized roles (WS-J.2.2a / §19.5).
   const showReporter = mayseeReporterIdentity(actor);
@@ -358,24 +366,26 @@ export async function buildCaseReview(
 
   const [history, signals, snapshot, thread] = await Promise.all([
     buildUserHistory(services, subjectUserId),
-    services.invariants.signalsFor(
-      theCase.targetType,
-      theCase.targetId,
-      subjectUserId,
-      maySeeCoordinationDetail(actor),
-    ),
-    theCase.targetType === 'content'
-      ? services.content.contentSnapshot(theCase.targetId, theCase.createdAt, theCase.contentKind)
+    targetId === null
+      ? defaultInvariantPort.signalsFor(theCase.targetType, '', subjectUserId, false)
+      : services.invariants.signalsFor(
+          theCase.targetType,
+          targetId,
+          subjectUserId,
+          maySeeCoordinationDetail(actor),
+        ),
+    theCase.targetType === 'content' && targetId !== null
+      ? services.content.contentSnapshot(targetId, theCase.createdAt, theCase.contentKind)
       : Promise.resolve(null),
-    theCase.targetType === 'content'
-      ? services.content.threadContext(theCase.targetId, theCase.contentKind, actor.userId)
+    theCase.targetType === 'content' && targetId !== null
+      ? services.content.threadContext(targetId, theCase.contentKind, actor.userId)
       : Promise.resolve({ items: [], reportedContributionId: null }),
   ]);
 
   return {
     case_id: theCase.caseId,
     target_type: theCase.targetType,
-    target_id: theCase.targetId,
+    target_id: targetId,
     content_kind: theCase.contentKind,
     status: theCase.status,
     severity: theCase.severity,
@@ -472,14 +482,16 @@ export async function buildAppealReview(
   // `content`/`account` type) so the snapshot can build the right view — a STORY
   // hide/removal needs its title/excerpt, not a best-effort contribution lookup
   // that yields `snapshot_body: null` and leaves the reviewer deciding blind.
+  // A content target's id is never scrubbed (only an `account` target's is, on a
+  // right-to-erasure purge); the null guard also narrows the type for the ports.
   const contentKind =
-    action.targetType === 'content'
+    action.targetType === 'content' && action.targetId !== null
       ? (await services.content.resolveTarget('content', action.targetId)).contentKind
       : null;
   const [history, originalReviewer, snapshot] = await Promise.all([
     buildUserHistory(services, subjectUserId),
     action.actorUserId ? services.users.resolve(action.actorUserId) : Promise.resolve(null),
-    action.targetType === 'content'
+    action.targetType === 'content' && action.targetId !== null
       ? services.content.contentSnapshot(action.targetId, action.createdAt, contentKind)
       : Promise.resolve(null),
   ]);

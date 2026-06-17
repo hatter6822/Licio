@@ -469,7 +469,13 @@ export async function performRevert(
   // store failure leaves `reverted=false` and a retry re-attempts the restore
   // (rather than taking the idempotent path with the state still sanctioned).
   // Both scans EXCLUDE this action explicitly (by id) since it is not yet marked.
-  if (CONTENT_ACTIONS.has(original.action as ConsoleAction) && original.targetType === 'content') {
+  // `targetId` is null only for an erased `account` target; a content action's
+  // target is never scrubbed, so the guard also narrows the type.
+  if (
+    CONTENT_ACTIONS.has(original.action as ConsoleAction) &&
+    original.targetType === 'content' &&
+    original.targetId !== null
+  ) {
     const stillSuppressed = (
       await services.actions.listActiveByTarget('content', original.targetId)
     ).some(
