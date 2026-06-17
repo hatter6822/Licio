@@ -76,12 +76,14 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
   const updateDurable = useUpdateDurablePrivacyMutation();
 
   // Mark this story the active item for dwell/return tracking while it is open.
+  // Leaving captures its §22.1 aggregate on the "done attending" boundary; the
+  // buffered batch is uploaded on the processor's interval, never eagerly per
+  // navigation (WS-C.4.4: batched at intervals, not per interaction).
   useEffect(() => {
     const processor = getSignalProcessor();
     processor.setActiveStory(storyId);
     return () => {
       processor.setActiveStory(null);
-      void processor.flush();
     };
   }, [storyId]);
 

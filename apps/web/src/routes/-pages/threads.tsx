@@ -243,19 +243,31 @@ function ThreadDetailContent({ threadId }: { threadId: string }): React.ReactEle
   // When the live thread fetch fails (offline), fall back to a cached summary.
   const offlineSnapshot = useThreadSnapshot(threadId, thread.isError);
 
+  // The attended item is the THREAD, so the active-item lifecycle is keyed on
+  // `threadId` alone. Switching branches is intra-item navigation: it records a
+  // distinct-branch visit (below) but must NOT churn the active item — doing so
+  // would reset dwell, re-snapshot the aggregate, and (keyed on `branch`) fire an
+  // upload on every tab tap, flooding the ingestion endpoint into 429s. The
+  // aggregate is captured on the "done attending" boundary here; uploads are
+  // batched on the processor's interval, never per navigation (WS-C.4.4).
   useEffect(() => {
     const processor = getSignalProcessor();
     processor.setActiveStory(threadId);
-    processor.recordBranchVisit(threadId, branch);
     return () => {
       processor.setActiveStory(null);
-      void processor.flush();
     };
+  }, [threadId]);
+
+  // Record each DISTINCT branch visited — including the initial one and any
+  // arrived at by deep link — for the §22.1 branch-depth bucket (WS-C.4.3).
+  useEffect(() => {
+    getSignalProcessor().recordBranchVisit(threadId, branch);
   }, [threadId, branch]);
 
   const onBranchChange = (next: BranchId): void => {
     markInteractionStart('branch-open');
-    getSignalProcessor().recordBranchVisit(threadId, next);
+    // The branch-visit effect above records `next` once navigation lands it in
+    // the `?branch=` param — a single source of truth, no per-tap double count.
     void navigate({ to: '/threads/$threadId', params: { threadId }, search: { branch: next } });
   };
 
