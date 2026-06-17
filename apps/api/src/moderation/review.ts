@@ -284,13 +284,28 @@ export async function buildUserHistory(
       rooms_active_in: 0,
     };
   }
-  const [user, actions, accountReports] = await Promise.all([
+  const [user, actions, accountReports, subjectCases] = await Promise.all([
     services.users.resolve(subjectUserId),
     services.actions.listBySubject(subjectUserId),
     services.reports.listAgainstTargetSince('account', subjectUserId, new Date(0).toISOString()),
+    // Reports on the user's CONTENT (contribution/story/thread) target the
+    // content id, not the account — but they aggregate into cases ABOUT this user
+    // (subjectUserId).  Without these the history panel under-reports a user whose
+    // pattern is repeated content reports.  Bounded for the summary panel.
+    services.cases.list({
+      subjectUserId,
+      status: ['new', 'in_progress', 'resolved', 'escalated'],
+      limit: 500,
+    }),
   ]);
+  const contentReportLists = await Promise.all(
+    subjectCases.map((c) => services.reports.listByCase(c.caseId)),
+  );
   const reportsByCategory: Record<string, number> = {};
-  for (const r of accountReports) {
+  const seenReportIds = new Set<string>();
+  for (const r of [...accountReports, ...contentReportLists.flat()]) {
+    if (seenReportIds.has(r.reportId)) continue; // account reports appear in both
+    seenReportIds.add(r.reportId);
     const cat = reasonCodeCategory(r.reasonCode);
     reportsByCategory[cat] = (reportsByCategory[cat] ?? 0) + 1;
   }

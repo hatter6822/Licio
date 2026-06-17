@@ -1696,6 +1696,20 @@ describe('review projections', () => {
     expect(Object.keys(history)).not.toContain('wallet');
     expect(Object.keys(history)).not.toContain('treasury');
   });
+
+  it("#1 counts reports on the user's CONTENT (subject cases), not just account reports", async () => {
+    // A content report whose case is ABOUT this user (subjectUserId = the author)
+    // — pre-fix the history counted only account-target reports, so this was 0.
+    await submitReport(
+      services,
+      REPORTER,
+      report({ target_type: 'content', target_id: TARGET, reason_code: 'MOD_HARASS_001' }),
+      'contribution',
+      AUTHOR,
+    );
+    const history = await buildUserHistory(services, AUTHOR);
+    expect(history.reports_by_category['MOD_HARASS']).toBe(1);
+  });
 });
 
 describe('authz', () => {
