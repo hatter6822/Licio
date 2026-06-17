@@ -65,6 +65,29 @@ describe('production content port', () => {
     ).toBe(false);
   });
 
+  it('#7 canUserReadContent delegates to the visibility gate (default readable)', async () => {
+    // No gate dep ⇒ readable (the in-memory seam enforces no private rooms).
+    const open = createProductionContentPort(contentDeps());
+    expect(await open.canUserReadContent?.(STORY, 'story', AUTHOR)).toBe(true);
+    // A denying gate ⇒ not readable (the report intake then 404s).
+    const denied = createProductionContentPort(
+      contentDeps({ isContentReadable: async () => false }),
+    );
+    expect(await denied.canUserReadContent?.(STORY, 'story', AUTHOR)).toBe(false);
+    // An allowing gate ⇒ readable, with the target/kind/requester forwarded.
+    const calls: Array<[string, string | null, string]> = [];
+    const allowed = createProductionContentPort(
+      contentDeps({
+        isContentReadable: async (id, kind, uid) => {
+          calls.push([id, kind, uid]);
+          return true;
+        },
+      }),
+    );
+    expect(await allowed.canUserReadContent?.(CONTRIB, 'contribution', AUTHOR)).toBe(true);
+    expect(calls).toEqual([[CONTRIB, 'contribution', AUTHOR]]);
+  });
+
   it('removal writes the WS-E item-safety state to removed (the ranking seam)', async () => {
     const safetyStore = new InMemoryItemSafetyStateStore();
     const setState = vi.fn(async () => undefined);

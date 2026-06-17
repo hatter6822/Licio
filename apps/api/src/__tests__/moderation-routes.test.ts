@@ -222,6 +222,27 @@ describe('POST /v1/reports', () => {
     expect(res.status).toBe(404);
   });
 
+  it('#7 404s a content report the reporter cannot read (read bar, no existence leak)', async () => {
+    const { cookie } = await seedUser({ handle: `r${randomUUID().slice(0, 6)}` });
+    // A content port whose WS-Q visibility gate denies this reporter — the
+    // target EXISTS but is unreadable, so the report 404s like a missing one.
+    setModerationServices(
+      createInMemoryModerationServices({
+        content: {
+          ...stubContentPort(),
+          async canUserReadContent(): Promise<boolean> {
+            return false;
+          },
+        },
+        users: userPortOverIdentity(),
+        alerts: { pageOnCall: (i) => alerts.push(i) },
+      }),
+    );
+    const res = await app().request(post('/v1/reports', reportBody(), cookie));
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('target_not_found');
+  });
+
   it('emergency reason codes page on-call', async () => {
     const { cookie } = await seedUser({ handle: `r${randomUUID().slice(0, 6)}` });
     await app().request(post('/v1/reports', reportBody({ reason_code: 'MOD_THREAT_001' }), cookie));

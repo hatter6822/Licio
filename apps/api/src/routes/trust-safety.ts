@@ -84,6 +84,20 @@ export function createTrustSafetyRoutes() {
             const resolution = await mod.content.resolveTarget('content', request.target_id);
             if (!resolution.exists)
               return c.json(deny('target_not_found', 'Target not found'), 404);
+            // 404-over-403 read bar (WS-Q.3.2): a reporter who cannot READ the
+            // content cannot file against it — else existence of private /
+            // `room_only` content leaks through the report endpoint.  Resolved
+            // through the SAME visibility gate as a direct content read; an
+            // unreadable target is 404, identical to a nonexistent one.  A port
+            // without the gate (in-memory/e2e) treats content as readable.
+            if (mod.content.canUserReadContent) {
+              const readable = await mod.content.canUserReadContent(
+                request.target_id,
+                resolution.contentKind,
+                auth.userId,
+              );
+              if (!readable) return c.json(deny('target_not_found', 'Target not found'), 404);
+            }
             resolvedContentKind = resolution.contentKind;
             resolvedSubjectUserId = resolution.subjectUserId;
           } else if (request.target_type === 'room') {

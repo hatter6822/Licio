@@ -36,7 +36,7 @@ import {
   createInMemoryEventPipelineServices,
   setEventPipelineServices,
 } from './events/services.js';
-import { ContributionRateLimiter } from './forum/contributions.js';
+import { ContributionRateLimiter, threadReadableToUser } from './forum/contributions.js';
 import { anonymizeUserContent, exportUserContent } from './forum/data-rights.js';
 import {
   DrizzleContributionStore,
@@ -45,6 +45,7 @@ import {
   DrizzleSummaryStore,
   DrizzleUploadStore,
 } from './forum/drizzle-forum-stores.js';
+import { storyReadableByUser } from './forum/rooms.js';
 import {
   createInMemoryForumServices,
   registerForumConsumers,
@@ -558,6 +559,35 @@ const moderationServices = createInMemoryModerationServices({
         ),
       );
       return { items, reportedContributionId };
+    },
+    // WS-J #7: the report intake's read bar — resolve the target through the
+    // SAME WS-Q visibility gate as a direct content read (story read bar /
+    // thread read bar), so a reporter cannot probe existence of private /
+    // room_only content they cannot see.  Fail-closed on an unreachable shell.
+    isContentReadable: async (targetId, contentKind, requesterUserId) => {
+      if (contentKind === 'story') {
+        const story = await ingestionServices.stories.getById(targetId);
+        if (!story) return false;
+        const room = await forumServices.rooms.getById(story.roomId);
+        if (!room) return false;
+        return storyReadableByUser(forumServices, story, room, requesterUserId);
+      }
+      const bundle = {
+        forum: forumServices,
+        ingestion: ingestionServices,
+        events: eventServices,
+      };
+      if (contentKind === 'thread') {
+        const thread = await ingestionServices.stories.getThreadById(targetId);
+        return thread ? threadReadableToUser(bundle, thread, requesterUserId) : false;
+      }
+      if (contentKind === 'contribution') {
+        const contribution = await forumServices.contributions.getById(targetId);
+        if (!contribution) return false;
+        const thread = await ingestionServices.stories.getThreadById(contribution.threadId);
+        return thread ? threadReadableToUser(bundle, thread, requesterUserId) : false;
+      }
+      return true;
     },
     now: () => Date.now(),
   }),

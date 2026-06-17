@@ -68,6 +68,17 @@ export interface ModerationContentPort {
     contentKind: ReportContentKind | null,
     requesterUserId: string,
   ): Promise<{ items: ContributionPublic[]; reportedContributionId: string | null }>;
+  /** WS-J #7 — whether `requesterUserId` may READ the target content through the
+   *  SAME visibility gate as a direct content read (WS-Q.3.2 story/thread read
+   *  bars).  The report intake calls this so a reporter cannot probe existence
+   *  of private / `room_only` content they cannot see (404-over-403).  OPTIONAL:
+   *  a port without it (the in-memory seam) treats content as readable — the
+   *  production port implements the real room-visibility walk. */
+  canUserReadContent?(
+    targetId: string,
+    contentKind: ReportContentKind | null,
+    requesterUserId: string,
+  ): Promise<boolean>;
 }
 
 export interface ResolvedUser {

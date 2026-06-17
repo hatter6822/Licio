@@ -93,6 +93,14 @@ export interface ContentPortDeps {
     contentKind: ReportContentKind | null,
     requesterUserId: string,
   ): Promise<{ items: ContributionPublic[]; reportedContributionId: string | null }>;
+  /** WS-J #7: resolve the target through the WS-Q room-visibility gate for a
+   *  reporter (the story/thread read bar).  Absent ⇒ readable (the gate is a
+   *  boot wiring; the in-memory seam has no private rooms to enforce). */
+  isContentReadable?(
+    targetId: string,
+    contentKind: ReportContentKind | null,
+    requesterUserId: string,
+  ): Promise<boolean>;
   now: () => number;
 }
 
@@ -260,6 +268,13 @@ export function createProductionContentPort(deps: ContentPortDeps): ModerationCo
         return { items: [], reportedContributionId: null };
       }
       return deps.getThreadContext(targetId, contentKind, requesterUserId);
+    },
+
+    async canUserReadContent(targetId, contentKind, requesterUserId): Promise<boolean> {
+      // Delegate to the boot-wired WS-Q gate; absent ⇒ readable (no enforcement
+      // seam in the in-memory path).
+      if (deps.isContentReadable === undefined) return true;
+      return deps.isContentReadable(targetId, contentKind, requesterUserId);
     },
   };
 }
