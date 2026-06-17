@@ -224,6 +224,61 @@ describe('demo seed — the story-detail read agrees with the feed', () => {
   });
 });
 
+describe('demo seed — every story has a readable, populated thread', () => {
+  const app = new Hono().route('/v1', createV1Routes());
+
+  /** The thread id a story-detail read resolves (the link the UI follows). */
+  async function threadIdOf(storyId: string): Promise<string | null> {
+    const res = await app.request(new Request(`http://localhost/v1/stories/${storyId}`));
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { thread_id: string | null }).thread_id;
+  }
+
+  /** Read a thread overview through the real GET /v1/threads/:id route. */
+  async function readThread(
+    threadId: string,
+  ): Promise<{ status: number; contributionCount: number; uncertainty: unknown }> {
+    const res = await app.request(new Request(`http://localhost/v1/threads/${threadId}`));
+    if (res.status !== 200) return { status: res.status, contributionCount: 0, uncertainty: null };
+    const body = (await res.json()) as {
+      contribution_count: number;
+      current_summary: { unresolved_uncertainty: string | null } | null;
+    };
+    return {
+      status: 200,
+      contributionCount: body.contribution_count,
+      uncertainty: body.current_summary?.unresolved_uncertainty ?? null,
+    };
+  }
+
+  it('reads the community-synthesis threads (T11, T20) without a 500 (§24.3 regression)', async () => {
+    // Both carried a current summary; a null unresolved-uncertainty note made
+    // the thread-overview read schema throw → HTTP 500 on the whole thread.
+    for (const n of [11, 20]) {
+      const threadId = await threadIdOf(S(n));
+      expect(threadId).not.toBeNull();
+      const thread = await readThread(threadId as string);
+      expect(thread.status).toBe(200);
+      expect(thread.uncertainty).toBeTruthy(); // §24.3 note present
+    }
+  });
+
+  it('gives every public story the feed surfaces a thread with at least one contribution', async () => {
+    const items = await fullFrontPage();
+    expect(items.length).toBeGreaterThan(0);
+    for (const item of items) {
+      const threadId = await threadIdOf(item.story_id);
+      expect(threadId, `story ${item.story_id} resolves a thread`).not.toBeNull();
+      const thread = await readThread(threadId as string);
+      expect(thread.status, `thread read for ${item.story_id}`).toBe(200);
+      expect(
+        thread.contributionCount,
+        `discussion seeded for ${item.story_id} (${item.title})`,
+      ).toBeGreaterThan(0);
+    }
+  });
+});
+
 describe('demo seed — media + moderation surfaces', () => {
   it('seeds a native image post the media-rendering surface can serve', async () => {
     const media = (await fullFrontPage()).find((i) => i.media?.kind === 'image');

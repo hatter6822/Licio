@@ -62,6 +62,7 @@ import type {
   UploadRecord,
   UploadStore,
 } from './stores.js';
+import { assertSummaryUncertainty } from './stores.js';
 
 type Db = ReturnType<typeof createDbClient>;
 
@@ -863,6 +864,7 @@ export class DrizzleSummaryStore implements SummaryStore {
   }
 
   async insert(record: Omit<SummaryRecord, 'createdAt' | 'updatedAt'>): Promise<SummaryRecord> {
+    assertSummaryUncertainty(record);
     const rows = await this.#db
       .insert(summariesTable)
       .values({

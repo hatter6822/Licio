@@ -115,15 +115,26 @@ something to show.
   local update, and a **native image post** with a real served PNG) across the
   **public** and **`room_only`** visibility tiers. (Video posts are best tested
   live via the composer — sign in and upload one.)
-- **Threads with nested, multi-author contributions** spanning the contribution
-  taxonomy (questions, answers, evidence, corrections, counterexamples,
-  syntheses, local context, direct experience, …), plus community syntheses.
+- **A populated thread on every story** — nested, multi-author contributions
+  spanning the contribution taxonomy (questions, answers, evidence, corrections,
+  counterexamples, syntheses, local context, direct experience, …), plus
+  community syntheses. Open any story from the feed and its conversation is
+  already there.
 - **A non-empty moderation review queue** (pending `moderation_concern` items
   with ratified reason codes) for the steward/admin review surface.
 - **A WS-J report case** (two reporters → one standard case in the moderation
   console's report queue) so the steward/admin console renders real data — the
   full-context review panel, the action palette, and the audit log — on first
   boot.
+
+> If you previously saw **stories without threads** (or two threads returning a
+> 500), that was the symptom of a now-fixed issue: two seeded community
+> syntheses omitted the §24.3 unresolved-uncertainty note, which made the
+> thread-overview read schema reject them — and, on a Postgres-backed
+> deployment, aborted the whole seed at that insert (so the invariant signals
+> and moderation queue never loaded). The seed now populates a readable thread
+> on every story, and the store rejects an uncertainty-less community/steward
+> summary at write time.
 
 ### 3.2 The seven rating labels
 
