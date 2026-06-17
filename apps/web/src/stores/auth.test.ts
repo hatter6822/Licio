@@ -109,6 +109,25 @@ describe('auth selectors', () => {
     expect(selectIsAuthenticated(useAuthStore.getState())).toBe(false);
     expect(selectIsRestricted(useAuthStore.getState())).toBe(true);
   });
+
+  it('selectCollectionUserId returns the id only for a live authenticated session', async () => {
+    const { useAuthStore, selectCollectionUserId } = await freshAuth();
+    // Anonymous: no id.
+    expect(selectCollectionUserId(useAuthStore.getState())).toBeNull();
+    // Live session: the user id.
+    useAuthStore.getState().setAuthenticated(ACTIVE_USER);
+    expect(selectCollectionUserId(useAuthStore.getState())).toBe(ACTIVE_USER.id);
+    // Expired session retains `user` for the UI but must NOT enable collection.
+    useAuthStore.getState().expireSession();
+    expect(useAuthStore.getState().user).toEqual(ACTIVE_USER);
+    expect(selectCollectionUserId(useAuthStore.getState())).toBeNull();
+  });
+
+  it('selectCollectionUserId is null for a suspended (non-active) account', async () => {
+    const { useAuthStore, selectCollectionUserId } = await freshAuth();
+    useAuthStore.getState().setAuthenticated(SUSPENDED_USER);
+    expect(selectCollectionUserId(useAuthStore.getState())).toBeNull();
+  });
 });
 
 describe('auth cross-tab sync', () => {
