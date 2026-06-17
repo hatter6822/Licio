@@ -1091,6 +1091,30 @@ export class DrizzleModerationAppealStore implements ModerationAppealStore {
     return row === undefined ? null : mapAppeal(row);
   }
 
+  async claimDecision(
+    appealId: string,
+    patch: Partial<ModerationAppealRecord>,
+  ): Promise<ModerationAppealRecord | null> {
+    const set: Partial<typeof moderationAppeals.$inferInsert> = {};
+    if (patch.status !== undefined) set.status = patch.status;
+    if (patch.decidedAt !== undefined) set.decidedAt = dateOrNull(patch.decidedAt);
+    if (patch.decidedBy !== undefined) set.decidedBy = patch.decidedBy;
+    if (patch.decisionReasonCode !== undefined) set.decisionReasonCode = patch.decisionReasonCode;
+    if (patch.decisionExplanation !== undefined) {
+      set.decisionExplanation = patch.decisionExplanation;
+    }
+    // Compare-and-set on status='pending': the decision is claimed atomically, so
+    // two concurrent reviewers cannot both pass the service-layer pending check
+    // and both run revert/modify side effects.  The loser matches no row → null.
+    const rows = await this.#db
+      .update(moderationAppeals)
+      .set(set)
+      .where(and(eq(moderationAppeals.appealId, appealId), eq(moderationAppeals.status, 'pending')))
+      .returning();
+    const row = rows[0];
+    return row === undefined ? null : mapAppeal(row);
+  }
+
   async list(filter: AppealQueueFilter): Promise<ModerationAppealRecord[]> {
     const c: SQL[] = [];
     if (filter.status && filter.status.length > 0) {
@@ -1423,10 +1447,19 @@ export class DrizzleCoordinatedReportIncidentStore implements CoordinatedReportI
     reviewedBy: string | null,
     nowIso: string,
   ): Promise<CoordinatedReportIncidentRecord | null> {
+    // Compare-and-set on status='open': two integrity reviewers resolving the
+    // same incident concurrently must not both succeed (both reconciling/auditing
+    // the case).  Only the row still `open` transitions; the loser matches no row
+    // and `resolveIncident` reports `already_resolved`.
     const rows = await this.#db
       .update(coordinatedReportIncidents)
       .set({ status, reviewedBy, reviewedAt: new Date(nowIso) })
-      .where(eq(coordinatedReportIncidents.incidentId, incidentId))
+      .where(
+        and(
+          eq(coordinatedReportIncidents.incidentId, incidentId),
+          eq(coordinatedReportIncidents.status, 'open'),
+        ),
+      )
       .returning();
     const row = rows[0];
     return row === undefined ? null : mapIncident(row);

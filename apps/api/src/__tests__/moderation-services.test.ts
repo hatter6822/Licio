@@ -626,6 +626,36 @@ describe('MFCI-2 enforcement delay + incident resolution', () => {
     expect((await services.incidents.getById(incident.incidentId))?.status).toBe('open');
   });
 
+  it('#KEyPO a lost resolve race reports already_resolved (CAS miss)', async () => {
+    services = createInMemoryModerationServices();
+    const caseId = await delayedCase();
+    const incident = await services.incidents.insert({
+      caseId,
+      targetType: 'content',
+      targetId: TARGET,
+      reportCount: 5,
+      windowSeconds: 600,
+      coordinationScore: 0.5,
+      severity: 'severe',
+      status: 'open',
+      summary: 'aggregate',
+      reviewedAt: null,
+      reviewedBy: null,
+    });
+    // A concurrent reviewer already resolved it: the open-status CAS matches no
+    // row → null, so this resolution reports already_resolved (not a 2nd audit).
+    services.incidents.resolve = async () => null;
+    const out = await resolveIncident(
+      services,
+      integrityActor(),
+      incident.incidentId,
+      'cleared',
+      undefined,
+    );
+    expect(out.ok).toBe(false);
+    expect(!out.ok && out.code).toBe('already_resolved');
+  });
+
   it('#4 commits the enforcement delay synchronously (no background flush)', async () => {
     services = createInMemoryModerationServices({
       content: recordingContentPort(),
@@ -1243,6 +1273,43 @@ describe('appeals (independence enforced)', () => {
     // #2: a remaining duration is carried (≈7d), never null → the scheduler
     // still auto-lifts it rather than leaving an indefinite restriction.
     expect(replacement?.duration).toBe('7d');
+  });
+
+  it('#KEyPM a lost decision-claim race returns already_decided without re-applying', async () => {
+    const port = recordingContentPort();
+    services = createInMemoryModerationServices({
+      content: port,
+      users: userPort({ [AUTHOR]: 100 }),
+    });
+    const out = await applyAction(services, safetyActor(), {
+      target_type: 'account',
+      target_id: AUTHOR,
+      action: 'suspend',
+      reason_code: 'MOD_HARASS_001',
+    });
+    if (!out.ok) throw new Error('suspend failed');
+    await submitAppeal(services, AUTHOR, {
+      action_id: out.response.action_id,
+      user_statement: 's',
+    });
+    const appeal = await services.appeals.getByActionId(out.response.action_id);
+    if (!appeal) throw new Error('appeal not created');
+    port.accountStates.length = 0;
+    // A concurrent reviewer already claimed it: the pending CAS matches no row →
+    // null, so this decision loses the race and never reaches the revert.
+    services.appeals.claimDecision = async () => null;
+    const decision = await decideAppeal(
+      services,
+      appealsActor(),
+      appeal.appealId,
+      'overturn',
+      'MOD_HARASS_001',
+      'x',
+      undefined,
+    );
+    expect(decision.ok).toBe(false);
+    expect(!decision.ok && decision.code).toBe('already_decided');
+    expect(port.accountStates).toHaveLength(0); // the revert side effect never ran
   });
 
   it('#5 modify does not re-apply a sanction when the original was already reverted', async () => {

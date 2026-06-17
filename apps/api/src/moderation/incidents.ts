@@ -115,8 +115,15 @@ export async function resolveIncident(
     }
   }
 
+  // Compare-and-set: `resolve` transitions ONLY a still-`open` incident.  After
+  // the open read above, a null means a concurrent reviewer already resolved it
+  // (the CAS lost the race) — report `already_resolved`, not `not_found`, and do
+  // NOT audit a second time (the winner already did; the case reconcile above is
+  // idempotent, so the loser's redundant reconcile is harmless).
   const resolved = await services.incidents.resolve(incidentId, resolution, actor.userId, nowIso);
-  if (resolved === null) return { ok: false, code: 'not_found', message: 'Incident not found' };
+  if (resolved === null) {
+    return { ok: false, code: 'already_resolved', message: 'Incident already resolved' };
+  }
 
   await writeAudit(services, {
     actorUserId: actor.userId,

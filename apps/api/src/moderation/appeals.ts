@@ -258,6 +258,25 @@ export async function decideAppeal(
     decision === 'overturn' ? 'overturned' : decision === 'modify' ? 'modified' : 'upheld';
   const nowIso = new Date(services.now()).toISOString();
 
+  // Atomically CLAIM the pending appeal BEFORE any irreversible side effect
+  // (revert/modify/notice).  The `status !== 'pending'` read above is only a
+  // fast-path: two independent reviewers can pass it concurrently, so this
+  // compare-and-set on `status='pending'` is the real gate — the loser gets
+  // `already_decided` and never double-reverts/re-notifies.  Trade-off: a crash
+  // AFTER the claim but BEFORE the revert leaves the appeal decided with the
+  // sanction still standing (recoverable by a steward revert); race-safety here
+  // outranks that rare retry case.
+  const claimed = await services.appeals.claimDecision(appealId, {
+    status,
+    decidedAt: nowIso,
+    decidedBy: actor.userId,
+    decisionReasonCode: reasonCode,
+    decisionExplanation: explanation,
+  });
+  if (!claimed) {
+    return { ok: false, code: 'already_decided', message: 'Appeal already decided' };
+  }
+
   if (decision === 'overturn' || decision === 'modify') {
     // Reverse the original (restores prior state, reversal integrity).  The
     // appeals reviewer's authority to overturn IS the authorization, so this
@@ -281,13 +300,7 @@ export async function decideAppeal(
     }
   }
 
-  await services.appeals.update(appealId, {
-    status,
-    decidedAt: nowIso,
-    decidedBy: actor.userId,
-    decisionReasonCode: reasonCode,
-    decisionExplanation: explanation,
-  });
+  // (The decision fields were persisted by the atomic claim above.)
 
   // Clear the ORIGINAL action notice's pending-appeal flag → its final status, so
   // the inbox stops rendering "Appeal under review" after the decision (the

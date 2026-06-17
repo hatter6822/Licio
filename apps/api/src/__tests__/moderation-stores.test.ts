@@ -357,6 +357,12 @@ describe('InMemoryModerationAppealStore', () => {
     expect(await store.countOpenByReviewer(C)).toBe(0); // upheld, not pending
     expect(await store.update('missing', { status: 'upheld' })).toBeNull();
     expect(await store.getById('missing')).toBeNull();
+    // claimDecision is a compare-and-set on status='pending'.
+    const claim = await store.claimDecision(ap.appealId, { status: 'overturned', decidedBy: C });
+    expect(claim?.status).toBe('overturned');
+    // A second claim misses (no longer pending) → null: the race loser.
+    expect(await store.claimDecision(ap.appealId, { status: 'upheld' })).toBeNull();
+    expect(await store.claimDecision('missing', { status: 'upheld' })).toBeNull();
   });
 });
 
@@ -464,6 +470,11 @@ describe('InMemoryCoordinatedReportIncidentStore', () => {
     );
     expect(resolved?.status).toBe('cleared');
     expect(await store.findOpenByTarget('account', T1)).toBeNull(); // no longer open
+    // CAS: resolving the SAME incident again misses (no longer 'open') → null,
+    // so a concurrent second resolution reports already_resolved.
+    expect(
+      await store.resolve(inc.incidentId, 'confirmed', A, new Date(START).toISOString()),
+    ).toBeNull();
     expect(await store.getById('missing')).toBeNull();
   });
 

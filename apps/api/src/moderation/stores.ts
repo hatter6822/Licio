@@ -367,6 +367,15 @@ export interface ModerationAppealStore {
     appealId: string,
     patch: Partial<ModerationAppealRecord>,
   ): Promise<ModerationAppealRecord | null>;
+  /** Atomically transition a PENDING appeal to its decided status (compare-and-set
+   *  on `status='pending'`): returns the updated row, or null when it was no
+   *  longer pending (a concurrent reviewer already decided it).  Used to CLAIM
+   *  the appeal BEFORE any irreversible side effect (revert/modify/notice), so two
+   *  independent reviewers can never both act on one appeal. */
+  claimDecision(
+    appealId: string,
+    patch: Partial<ModerationAppealRecord>,
+  ): Promise<ModerationAppealRecord | null>;
   list(filter: AppealQueueFilter): Promise<ModerationAppealRecord[]>;
   countOpenByReviewer(userId: string): Promise<number>;
   clear(): Promise<void>;
@@ -959,6 +968,17 @@ export class InMemoryModerationAppealStore implements ModerationAppealStore {
     this.#rows.set(appealId, updated);
     return { ...updated };
   }
+  async claimDecision(
+    appealId: string,
+    patch: Partial<ModerationAppealRecord>,
+  ): Promise<ModerationAppealRecord | null> {
+    const r = this.#rows.get(appealId);
+    if (r === undefined) return null;
+    if (r.status !== 'pending') return null; // CAS: only a pending appeal is claimable
+    const updated = { ...r, ...patch };
+    this.#rows.set(appealId, updated);
+    return { ...updated };
+  }
   async list(filter: AppealQueueFilter): Promise<ModerationAppealRecord[]> {
     return (
       [...this.#rows.values()]
@@ -1157,6 +1177,7 @@ export class InMemoryCoordinatedReportIncidentStore implements CoordinatedReport
   ): Promise<CoordinatedReportIncidentRecord | null> {
     const r = this.#rows.get(incidentId);
     if (!r) return null;
+    if (r.status !== 'open') return null; // CAS: only an OPEN incident resolves (race loser → null)
     const updated: CoordinatedReportIncidentRecord = {
       ...r,
       status,
