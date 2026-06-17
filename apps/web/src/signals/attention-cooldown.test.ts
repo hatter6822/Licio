@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  attentionCooldownRemainingMs,
   attentionUploadsCoolingDown,
   noteAttentionRateLimited,
   noteAttentionUploadOk,
@@ -44,5 +45,13 @@ describe('attention-cooldown (WS-C.4.4 backoff gate)', () => {
     expect(attentionUploadsCoolingDown(2_000)).toBe(true);
     noteAttentionUploadOk();
     expect(attentionUploadsCoolingDown(2_000)).toBe(false);
+  });
+
+  it('reports the remaining window (0 when not cooling down)', () => {
+    expect(attentionCooldownRemainingMs(1_000)).toBe(0);
+    noteAttentionRateLimited(30, 1_000); // until 31_000
+    expect(attentionCooldownRemainingMs(1_000)).toBe(30_000);
+    expect(attentionCooldownRemainingMs(20_000)).toBe(11_000);
+    expect(attentionCooldownRemainingMs(40_000)).toBe(0); // never negative
   });
 });

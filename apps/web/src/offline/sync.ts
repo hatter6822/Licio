@@ -10,11 +10,11 @@
 // `online`/app-open path too (WS-C.2.3 edge case).
 import {
   type AttentionAggregate,
-  attentionAggregateBatchSchema,
+  attentionAggregateSchema,
   contributionCreateSchema,
   createReportRequestSchema,
 } from '@licio/shared';
-import { ZodError } from 'zod';
+import { ZodError, z } from 'zod';
 import {
   ApiClientError,
   createContribution,
@@ -22,9 +22,22 @@ import {
   uploadAttentionAggregates,
 } from '../lib/api.js';
 import { track } from '../lib/telemetry.js';
-import { attentionUploadsCoolingDown } from '../signals/attention-cooldown.js';
+import {
+  attentionCooldownRemainingMs,
+  attentionUploadsCoolingDown,
+} from '../signals/attention-cooldown.js';
 import * as queue from './queue.js';
 import type { PendingOperationRecord } from './schemas.js';
+
+/**
+ * Lenient attention-replay payload schema: each aggregate is validated, but the
+ * 200-per-batch wire cap is NOT applied here. A large coalesced backlog is split
+ * into ≤200 requests by `uploadAttentionAggregates`, so an over-cap queued set is
+ * a transport concern, never a corruption signal.
+ */
+const attentionReplaySchema = z.object({
+  aggregates: z.array(attentionAggregateSchema).min(1),
+});
 
 /** Max send attempts before an operation is parked as `failed` (WS-C.2.3). */
 export const MAX_QUEUE_ATTEMPTS = 5;
@@ -131,29 +144,40 @@ async function resolveFailure(
 }
 
 /**
- * Send all queued attention batches as ONE coalesced upload (WS-C.4.4: attention
- * is batched, not per-event — the replay path matches the live flush). Replaying
- * each queued batch as its own request would burst the per-account rate limit
- * (the very thing that fills this queue) and feed back into more 429s, so the
- * backlog is merged into a single POST. While the endpoint's Retry-After window
- * is open the batches are left pending and untouched — no network, no attempt
- * burn — to retry on a later trigger once it clears. Corrupt payloads are parked
- * as terminal; the coalesced batch shares one success/failure verdict.
+ * Drain the queued attention batches COALESCED (WS-C.4.4: attention is batched,
+ * not per-event — the replay path matches the live flush). Replaying each queued
+ * batch as its own request would burst the per-account rate limit (the very thing
+ * that fills this queue) and feed back into more 429s, so the backlog is merged
+ * and handed to `uploadAttentionAggregates`, which splits it into ≤200-aggregate
+ * requests. Failure handling:
+ *   - cooling down → leave everything pending (no network, no attempt burn) and
+ *     schedule a retry at the Retry-After deadline;
+ *   - corrupt payload → parked terminal (isolated per op);
+ *   - a TERMINAL rejection of the coalesced set → retried per op, so one poisoned
+ *     batch (e.g. a cross-user 403) never fails unrelated valid hints;
+ *   - a transient failure → the whole set retries (it re-coalesces next pass).
  */
 async function drainAttentionQueue(
   ops: PendingOperationRecord[],
   options: SyncOptions,
   result: SyncResult,
 ): Promise<void> {
-  if (ops.length === 0 || attentionUploadsCoolingDown()) return;
+  if (ops.length === 0) return;
+  if (attentionUploadsCoolingDown()) {
+    // On an already-online/visible client nothing else fires at the Retry-After
+    // deadline (foreground sync only reacts to online/visibility/SW events), so
+    // schedule a retry — otherwise the backlog could sit until an unrelated
+    // lifecycle event happens to drain it.
+    scheduleAttentionRetry();
+    return;
+  }
 
-  const valid: PendingOperationRecord[] = [];
-  const merged: AttentionAggregate[] = [];
+  // Park genuinely corrupt payloads; collect the valid (op, aggregates) pairs.
+  const valid: { op: PendingOperationRecord; aggregates: AttentionAggregate[] }[] = [];
   for (const op of ops) {
-    const parsed = attentionAggregateBatchSchema.safeParse(op.payload);
+    const parsed = attentionReplaySchema.safeParse(op.payload);
     if (parsed.success) {
-      valid.push(op);
-      merged.push(...parsed.data.aggregates);
+      valid.push({ op, aggregates: parsed.data.aggregates });
     } else {
       await queue.markFailed(op.operationId, 'corrupt attention payload');
       options.onTerminalFailure?.(op, 'corrupt attention payload');
@@ -162,13 +186,63 @@ async function drainAttentionQueue(
   }
   if (valid.length === 0) return;
 
-  for (const op of valid) await queue.markInFlight(op.operationId);
+  for (const { op } of valid) await queue.markInFlight(op.operationId);
   try {
-    await uploadAttentionAggregates(merged);
-    for (const op of valid) await queue.remove(op.operationId);
+    await uploadAttentionAggregates(valid.flatMap((entry) => entry.aggregates));
+    for (const { op } of valid) await queue.remove(op.operationId);
     result.sent += valid.length;
   } catch (error) {
-    for (const op of valid) await resolveFailure(op, error, options, result);
+    // A TERMINAL rejection of the coalesced batch (e.g. one cross-user 403 left
+    // in the queue after a logout) must not fail unrelated valid hints — isolate
+    // by retrying each operation alone so only the offender is parked. Transient
+    // failures retry the whole set (it re-coalesces on the next pass).
+    if (valid.length > 1 && isTerminal(error)) {
+      for (const { op, aggregates } of valid) {
+        await uploadAttentionOperation(op, aggregates, options, result);
+      }
+    } else {
+      for (const { op } of valid) await resolveFailure(op, error, options, result);
+    }
+  }
+}
+
+/** Upload one attention operation in isolation (the poisoned-batch fallback). */
+async function uploadAttentionOperation(
+  op: PendingOperationRecord,
+  aggregates: AttentionAggregate[],
+  options: SyncOptions,
+  result: SyncResult,
+): Promise<void> {
+  try {
+    await uploadAttentionAggregates(aggregates);
+    await queue.remove(op.operationId);
+    result.sent += 1;
+  } catch (error) {
+    await resolveFailure(op, error, options, result);
+  }
+}
+
+let attentionRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Re-drain the queue once the attention Retry-After window expires. One pending
+ * timer at a time; unref'd so it never keeps the process alive (tests/Node).
+ */
+function scheduleAttentionRetry(): void {
+  if (attentionRetryTimer !== null) return;
+  const delay = attentionCooldownRemainingMs() + 250;
+  attentionRetryTimer = setTimeout(() => {
+    attentionRetryTimer = null;
+    void processPendingQueue();
+  }, delay);
+  (attentionRetryTimer as unknown as { unref?: () => void }).unref?.();
+}
+
+/** Cancel any pending attention-retry timer (tests). */
+export function resetAttentionRetry(): void {
+  if (attentionRetryTimer !== null) {
+    clearTimeout(attentionRetryTimer);
+    attentionRetryTimer = null;
   }
 }
 

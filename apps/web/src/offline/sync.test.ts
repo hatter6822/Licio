@@ -18,9 +18,13 @@ vi.mock('../lib/api.js', async (importOriginal) => {
 });
 
 const api = await import('../lib/api.js');
-const { MAX_QUEUE_ATTEMPTS, processPendingQueue, requestBackgroundSync, SYNC_TAG } = await import(
-  './sync.js'
-);
+const {
+  MAX_QUEUE_ATTEMPTS,
+  processPendingQueue,
+  requestBackgroundSync,
+  resetAttentionRetry,
+  SYNC_TAG,
+} = await import('./sync.js');
 
 const CONTRIBUTION_PAYLOAD = {
   thread_id: '11111111-1111-4111-8111-111111111111',
@@ -66,6 +70,7 @@ beforeEach(async () => {
   await deleteDatabase(DB_NAME);
   vi.clearAllMocks();
   resetAttentionCooldown();
+  resetAttentionRetry();
 });
 
 afterEach(() => {
@@ -247,6 +252,43 @@ describe('processPendingQueue', () => {
       expect((await queue.get('a-6'))?.status).toBe('failed');
       expect(await queue.get('a-7')).toBeUndefined(); // sent + removed
       expect(vi.mocked(api.uploadAttentionAggregates).mock.calls[0]?.[0]).toHaveLength(1);
+    });
+
+    it('isolates a terminal batch rejection so a poisoned op never fails valid ones', async () => {
+      // One queued op belongs to a prior user (server 403s any batch containing
+      // it); coalescing must not drop the other user's valid hints with it.
+      vi.mocked(api.uploadAttentionAggregates).mockImplementation(async (aggs) => {
+        if (aggs.some((a) => a.story_id === STORY_B)) {
+          throw new ApiClientError('forbidden', 'owner mismatch', 403);
+        }
+        return { accepted: aggs.length };
+      });
+      await queue.enqueue('attention-aggregate', attentionPayload(STORY_A), 'a-good');
+      await queue.enqueue('attention-aggregate', attentionPayload(STORY_B), 'a-bad');
+
+      const result = await processPendingQueue();
+
+      // Coalesced attempt 403s → falls back to per-op: the good one sends, the
+      // poisoned one parks. (1 coalesced + 2 isolated calls.)
+      expect(result.sent).toBe(1);
+      expect(result.failed).toBe(1);
+      expect(await queue.get('a-good')).toBeUndefined();
+      expect((await queue.get('a-bad'))?.status).toBe('failed');
+    });
+
+    it('schedules a retry at the Retry-After deadline when it defers under cooldown', async () => {
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+      noteAttentionRateLimited(50, Date.now()); // ~50 s window
+      await queue.enqueue('attention-aggregate', attentionPayload(STORY_A), 'a-defer');
+
+      await processPendingQueue();
+
+      expect(api.uploadAttentionAggregates).not.toHaveBeenCalled();
+      // A retry is scheduled for roughly the remaining window (no other lifecycle
+      // event would otherwise drain the backlog on an online/visible client).
+      expect(setTimeoutSpy.mock.calls.some(([, delay]) => (delay ?? 0) >= 40_000)).toBe(true);
+      resetAttentionRetry();
+      setTimeoutSpy.mockRestore();
     });
   });
 });

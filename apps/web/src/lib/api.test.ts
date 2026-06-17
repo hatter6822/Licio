@@ -274,4 +274,46 @@ describe('uploadAttentionAggregates rate-limit backoff (WS-C.4.4)', () => {
     await uploadAttentionAggregates([AGGREGATE]);
     expect(attentionUploadsCoolingDown()).toBe(false);
   });
+
+  it('splits an over-cap coalesced set into ≤200-aggregate batches', async () => {
+    const sizes: number[] = [];
+    let posts = 0;
+    mockFetch(async (url, init) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      posts += 1;
+      const body = JSON.parse(String(init?.body)) as { aggregates: unknown[] };
+      sizes.push(body.aggregates.length);
+      return jsonResponse({ accepted: body.aggregates.length }, 202);
+    });
+    const many = Array.from({ length: 250 }, () => AGGREGATE);
+
+    const ack = await uploadAttentionAggregates(many);
+
+    expect(posts).toBe(2);
+    expect(sizes).toEqual([200, 50]); // never exceeds the schema's batch cap
+    expect(ack.accepted).toBe(250);
+  });
+
+  it('serializes uploads so a concurrent second backs off once the first 429s', async () => {
+    let posts = 0;
+    mockFetch(async (url) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      posts += 1;
+      return new Response(JSON.stringify({ error: { code: 'rate_limited', message: 'wait' } }), {
+        status: 429,
+        headers: { 'content-type': 'application/json', 'Retry-After': '30' },
+      });
+    });
+
+    const [first, second] = await Promise.allSettled([
+      uploadAttentionAggregates([AGGREGATE]),
+      uploadAttentionAggregates([AGGREGATE]),
+    ]);
+
+    expect(first.status).toBe('rejected');
+    expect(second.status).toBe('rejected');
+    // The second saw the armed cooldown inside the serialized turn and never
+    // reached the network — only ONE request hit the rate-limited endpoint.
+    expect(posts).toBe(1);
+  });
 });

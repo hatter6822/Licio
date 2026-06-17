@@ -26,6 +26,11 @@ export function attentionUploadsCoolingDown(now: number = Date.now()): boolean {
   return now < suppressedUntilMs;
 }
 
+/** Milliseconds remaining in the current cooldown window (0 when not cooling down). */
+export function attentionCooldownRemainingMs(now: number = Date.now()): number {
+  return Math.max(0, suppressedUntilMs - now);
+}
+
 /**
  * Record a 429: suppress attention uploads for `retryAfterSec` seconds from
  * `now` (a 1 s floor guards a missing/garbage header). Monotonic — a longer
