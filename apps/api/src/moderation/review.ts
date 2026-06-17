@@ -364,7 +364,7 @@ export async function buildCaseReview(
       maySeeCoordinationDetail(actor),
     ),
     theCase.targetType === 'content'
-      ? services.content.contentSnapshot(theCase.targetId, theCase.createdAt)
+      ? services.content.contentSnapshot(theCase.targetId, theCase.createdAt, theCase.contentKind)
       : Promise.resolve(null),
     theCase.targetType === 'content'
       ? services.content.threadContext(theCase.targetId, theCase.contentKind, actor.userId)
@@ -465,7 +465,7 @@ export async function buildAppealReview(
     buildUserHistory(services, subjectUserId),
     action.actorUserId ? services.users.resolve(action.actorUserId) : Promise.resolve(null),
     action.targetType === 'content'
-      ? services.content.contentSnapshot(action.targetId, action.createdAt)
+      ? services.content.contentSnapshot(action.targetId, action.createdAt, null)
       : Promise.resolve(null),
   ]);
   return {

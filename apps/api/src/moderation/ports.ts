@@ -54,8 +54,13 @@ export interface ModerationContentPort {
     state: AccountActionState,
     durationDays: number | null,
   ): Promise<void>;
-  /** Report-time vs current snapshot for the side-by-side diff (WS-J.2.2d). */
-  contentSnapshot(targetId: string, reportTimeIso: string): Promise<ContentSnapshot | null>;
+  /** Report-time vs current snapshot for the side-by-side diff (WS-J.2.2d); a
+   *  story shows its title + excerpt (no editable body diff). */
+  contentSnapshot(
+    targetId: string,
+    reportTimeIso: string,
+    contentKind: ReportContentKind | null,
+  ): Promise<ContentSnapshot | null>;
   /** Thread context centered on the reported item (WS-J.2.2a). */
   threadContext(
     targetId: string,

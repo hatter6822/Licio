@@ -16,6 +16,7 @@ import {
   type InvariantSignalsPanel,
   type ModerationCaseCreatedEvent,
   moderationCaseCreatedEventSchema,
+  type ReportContentKind,
   toEventTargetType,
 } from '@licio/shared';
 import type { ItemSafetyStateStore, NewStoredEvent } from '../events/stores.js';
@@ -35,6 +36,11 @@ import {
 
 interface StorySlice {
   submittedBy: string | null;
+  /** For the story review snapshot (WS-J.2.2d) — a story has no editable body
+   *  diff, so the reviewer sees its title + excerpt. */
+  title: string;
+  excerpt: string | null;
+  createdAt: string;
 }
 interface ContributionSlice {
   userId: string | null;
@@ -75,10 +81,13 @@ export interface ContentPortDeps {
   setAccountState(userId: string, accountState: 'active' | 'suspended'): Promise<unknown>;
   /** WS-J.2.2d: the reported contribution's body + edit history (or null). */
   getContributionSnapshot?(contributionId: string): Promise<ContributionSnapshotInput | null>;
-  /** WS-J.2.2a: the thread context centered on the reported item, already
-   *  projected to the public shape (the reviewer sees all moderation states). */
+  /** WS-J.2.2a: the thread context for the reported target, projected to the
+   *  public shape (the reviewer sees all moderation states).  `contentKind`
+   *  selects the resolution: a contribution centers the thread on the reported
+   *  item; a story/thread target projects that story's/thread's contributions. */
   getThreadContext?(
-    reportedContributionId: string,
+    targetId: string,
+    contentKind: ReportContentKind | null,
     requesterUserId: string,
   ): Promise<{ items: ContributionPublic[]; reportedContributionId: string | null }>;
   now: () => number;
@@ -205,7 +214,23 @@ export function createProductionContentPort(deps: ContentPortDeps): ModerationCo
       await deps.setAccountState(userId, accountStateFor(state));
     },
 
-    async contentSnapshot(targetId, reportTimeIso): Promise<ContentSnapshot | null> {
+    async contentSnapshot(targetId, reportTimeIso, contentKind): Promise<ContentSnapshot | null> {
+      // A STORY has no editable body diff — show its title + excerpt so the
+      // reviewer sees the reported item (the side-by-side diff is contribution-
+      // only; a thread is reviewed through its thread_context).
+      if (contentKind === 'story') {
+        const story = await deps.getStory(targetId);
+        if (story === null) return null;
+        const body = story.excerpt ? `${story.title}\n\n${story.excerpt}` : story.title;
+        return {
+          originalBody: body,
+          currentBody: body,
+          originalAt: story.createdAt,
+          currentAt: story.createdAt,
+          editedAfterReport: false,
+        };
+      }
+      if (contentKind === 'thread') return null;
       // The side-by-side diff applies to (editable) contributions.
       if (deps.getContributionSnapshot === undefined) return null;
       const snap = await deps.getContributionSnapshot(targetId);
@@ -214,13 +239,13 @@ export function createProductionContentPort(deps: ContentPortDeps): ModerationCo
 
     async threadContext(
       targetId,
-      _contentKind,
+      contentKind,
       requesterUserId,
     ): Promise<{ items: ContributionPublic[]; reportedContributionId: string | null }> {
       if (deps.getThreadContext === undefined) {
         return { items: [], reportedContributionId: null };
       }
-      return deps.getThreadContext(targetId, requesterUserId);
+      return deps.getThreadContext(targetId, contentKind, requesterUserId);
     },
   };
 }

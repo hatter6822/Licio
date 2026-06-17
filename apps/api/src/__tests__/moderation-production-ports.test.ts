@@ -25,7 +25,15 @@ const AUTHOR = '00000000-0000-4000-8000-00000000000c';
 function contentDeps(over: Partial<ContentPortDeps> = {}): ContentPortDeps {
   return {
     safetyStore: new InMemoryItemSafetyStateStore(),
-    getStory: async (id) => (id === STORY ? { submittedBy: AUTHOR } : null),
+    getStory: async (id) =>
+      id === STORY
+        ? {
+            submittedBy: AUTHOR,
+            title: 'Reported story title',
+            excerpt: 'Reported story excerpt.',
+            createdAt: '2026-06-01T00:00:00.000Z',
+          }
+        : null,
     getContribution: async (id) => (id === CONTRIB ? { userId: AUTHOR } : null),
     setContributionModerationState: vi.fn(async () => undefined),
     setAccountState: vi.fn(async () => undefined),
@@ -217,13 +225,21 @@ describe('production content port — snapshot + thread context', () => {
         }),
       }),
     );
-    const view = await withDep.contentSnapshot(CONTRIB, '2026-06-05T00:00:00.000Z');
+    const view = await withDep.contentSnapshot(CONTRIB, '2026-06-05T00:00:00.000Z', 'contribution');
     expect(view?.originalBody).toBe('then');
     expect(view?.editedAfterReport).toBe(true);
     // Default deps (no snapshot dep) ⇒ null.
     expect(
-      await createProductionContentPort(contentDeps()).contentSnapshot(CONTRIB, 'x'),
+      await createProductionContentPort(contentDeps()).contentSnapshot(
+        CONTRIB,
+        'x',
+        'contribution',
+      ),
     ).toBeNull();
+    // A STORY target shows its title + excerpt (no editable body diff).
+    const storyView = await withDep.contentSnapshot(STORY, '2026-06-05T00:00:00.000Z', 'story');
+    expect(storyView?.currentBody).toContain('Reported story title');
+    expect(storyView?.editedAfterReport).toBe(false);
   });
 
   it('threadContext passes through the projected dep (empty without it)', async () => {
@@ -244,6 +260,20 @@ describe('production content port — snapshot + thread context', () => {
         AUTHOR,
       ),
     ).toEqual({ items: [], reportedContributionId: null });
+
+    // The contentKind is FORWARDED to the dep (story/thread reports resolve their
+    // own thread there) — not ignored as before.
+    let seenKind: string | null = 'unset';
+    const capturing = createProductionContentPort(
+      contentDeps({
+        getThreadContext: async (_id, kind) => {
+          seenKind = kind;
+          return { items: [], reportedContributionId: null };
+        },
+      }),
+    );
+    await capturing.threadContext(STORY, 'story', AUTHOR);
+    expect(seenKind).toBe('story');
   });
 });
 

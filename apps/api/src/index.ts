@@ -448,7 +448,14 @@ const moderationServices = createInMemoryModerationServices({
     safetyStore: eventServices.safetyStore,
     getStory: async (id) => {
       const story = await ingestionServices.stories.getById(id);
-      return story ? { submittedBy: story.submittedBy } : null;
+      return story
+        ? {
+            submittedBy: story.submittedBy,
+            title: story.title,
+            excerpt: story.excerpt,
+            createdAt: story.createdAt,
+          }
+        : null;
     },
     getContribution: async (id) => {
       const c = await forumServices.contributions.getById(id);
@@ -497,13 +504,40 @@ const moderationServices = createInMemoryModerationServices({
     // WS-J.2.2a thread context: the full thread centered on the reported item.
     // The reviewer sees ALL moderation states (so removed/flagged items are
     // visible in context) — never the public visibility filter.
-    getThreadContext: async (reportedId, requesterUserId) => {
-      const reported = await forumServices.contributions.getById(reportedId);
-      if (!reported) return { items: [], reportedContributionId: null };
-      const rows = await forumServices.contributions.listByThread(reported.threadId, {
+    getThreadContext: async (targetId, contentKind, requesterUserId) => {
+      // Resolve which thread to project, and (for a contribution target) which
+      // row the review centers on.  A story/thread report has no contribution id,
+      // so it projects the story's/thread's own thread — without this branch the
+      // console showed an EMPTY context for story/thread reports (WS-J.2.2a).
+      let threadId: string | null = null;
+      let reportedContributionId: string | null = null;
+      if (contentKind === 'story') {
+        const thread = await ingestionServices.stories.getThreadByStoryId(targetId);
+        threadId = thread?.threadId ?? null;
+      } else if (contentKind === 'thread') {
+        threadId = targetId;
+      } else {
+        const reported = await forumServices.contributions.getById(targetId);
+        if (reported) {
+          threadId = reported.threadId;
+          reportedContributionId = targetId;
+        }
+      }
+      if (threadId === null) return { items: [], reportedContributionId: null };
+      const rows = await forumServices.contributions.listByThread(threadId, {
         states: ['published', 'under_review', 'hidden', 'removed'],
         limit: 200,
       });
+      // The reviewed contribution must ALWAYS appear in its context — a row late
+      // in a long thread can fall outside the first window, so include it
+      // explicitly if the window missed it (WS-J.2.2a).
+      if (
+        reportedContributionId !== null &&
+        !rows.some((r) => r.contributionId === reportedContributionId)
+      ) {
+        const reported = await forumServices.contributions.getById(reportedContributionId);
+        if (reported) rows.push(reported);
+      }
       const authorIds = [
         ...new Set(rows.map((r) => r.userId).filter((x): x is string => x !== null)),
       ];
@@ -523,7 +557,7 @@ const moderationServices = createInMemoryModerationServices({
           r.userId === null,
         ),
       );
-      return { items, reportedContributionId: reportedId };
+      return { items, reportedContributionId };
     },
     now: () => Date.now(),
   }),
