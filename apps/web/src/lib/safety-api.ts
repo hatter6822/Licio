@@ -158,7 +158,7 @@ export async function assignCase(caseId: string, reviewerId: string): Promise<Ok
 }
 
 export interface ApplyActionInput {
-  targetType: 'content' | 'account';
+  targetType: 'content' | 'account' | 'room';
   targetId: string;
   action: ConsoleAction;
   reasonCode: ModerationReasonCode;

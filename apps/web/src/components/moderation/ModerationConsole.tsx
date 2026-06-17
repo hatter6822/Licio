@@ -181,7 +181,10 @@ function CaseReviewDialog({
   const apply = useMutation({
     mutationFn: () =>
       applyModerationAction({
-        targetType: data?.target_type === 'account' ? 'account' : 'content',
+        // Pass the case's REAL target type (content/account/room) — collapsing
+        // room→content made a room case resolve the wrong target (or 400).  The
+        // server allows only clear/escalate on a room target.
+        targetType: data?.target_type ?? 'content',
         targetId: data?.target_id ?? '',
         action,
         reasonCode,
@@ -222,6 +225,27 @@ function CaseReviewDialog({
                   {r.context ? <span className="text-ink-muted"> — {r.context}</span> : null}
                   {r.reporter_handle ? (
                     <span className="ml-1 text-xs text-ink-muted">({r.reporter_handle})</span>
+                  ) : null}
+                  {r.evidence_urls.length > 0 ? (
+                    <ul className="mt-1 flex flex-col gap-0.5">
+                      {r.evidence_urls.map((url) => (
+                        <li key={url} className="truncate text-xs">
+                          <span className="text-ink-muted">
+                            {t('console.evidence', 'Evidence')}:{' '}
+                          </span>
+                          {/* Reporter-supplied links; the steward opens them in a
+                              new context with no referrer/opener leakage. */}
+                          <a
+                            href={url}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            className="text-primary underline"
+                          >
+                            {url}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
                   ) : null}
                 </li>
               ))}

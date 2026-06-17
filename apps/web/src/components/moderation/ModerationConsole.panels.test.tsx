@@ -313,6 +313,38 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Apply action/ }));
     expect(await screen.findByText(/cannot take that action/i)).toBeInTheDocument();
   });
+
+  it('C4: shows report evidence URLs and actions a ROOM case with its real target type', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      target_type: 'room',
+      content_kind: null,
+      reports: caseReview.reports.map((r) => ({
+        ...r,
+        evidence_urls: ['https://example.com/evidence-1'],
+      })),
+      available_actions: ['clear', 'escalate'],
+    });
+    vi.mocked(api.applyModerationAction).mockResolvedValue({
+      action_id: '00000000-0000-4000-8000-0000000000ac',
+      action: 'clear',
+      reversible: false,
+      notice_sent: false,
+      appealable: false,
+      created_at: NOW,
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    // The reporter's evidence link is surfaced before the action palette.
+    expect(await screen.findByRole('link', { name: /evidence-1/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Apply action/ }));
+    await waitFor(() =>
+      expect(api.applyModerationAction).toHaveBeenCalledWith(
+        expect.objectContaining({ targetType: 'room' }),
+      ),
+    );
+  });
 });
 
 describe('AppealsPanel', () => {
