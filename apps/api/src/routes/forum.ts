@@ -62,6 +62,7 @@ import {
   editContribution,
   mapCardTypeToEventType,
   removeContribution,
+  threadOnGlobalDirectory,
   threadReadableToUser,
 } from '../forum/contributions.js';
 import { stripUploadMetadata } from '../forum/exif.js';
@@ -173,21 +174,22 @@ export function createForumRoutes() {
     new Hono<AuthEnv>()
       // --- Thread directory (WS-G.3.3) ---------------------------------------
       // The listing behind the primary `/threads` tab: a keyset page of the
-      // conversations the requester may read, most recent first.  Mirrors the
-      // rooms-directory scan (rooms.ts): walk the store-level
-      // `(created_at, thread_id)` keyset in bounded batches until a full
-      // VISIBLE page accumulates — `threadReadableToUser` removes hidden
-      // stories, private/restricted-room threads, and moderation-removed
-      // threads — so no fixed fetch prefix can strand a readable conversation
-      // and a filtered-out thread never stalls the walk.
+      // PUBLIC conversations, most recent first.  Mirrors the rooms-directory
+      // scan (rooms.ts) AND the feed's two-condition global containment
+      // (filterByVisibility): walk the store-level `(created_at, thread_id)`
+      // keyset in bounded batches until a full VISIBLE page accumulates —
+      // `threadOnGlobalDirectory` keeps it to PUBLIC items from PUBLIC rooms,
+      // dropping hidden stories, room_only items, private-room threads, and
+      // moderation-removed threads — so no fixed fetch prefix can strand a
+      // listable conversation and a filtered-out thread never stalls the walk.
+      // The set is USER-INDEPENDENT (room-scoped conversations are reached
+      // through their room), exactly like the front-page feed.
       .get(
         '/threads',
         zValidator('query', z.object({ cursor: z.string().min(1).max(512).optional() })),
         async (c) => {
           const { cursor } = c.req.valid('query');
           const bundle = bundles();
-          const identity = getIdentityServices();
-          const userId = await softUserId(c.req.header('cookie'), identity);
           const pageSize = bundle.forum.config().roomPageSize;
 
           // Recover the keyset position from the opaque cursor (the last thread
@@ -207,7 +209,7 @@ export function createForumRoutes() {
             const batch = await bundle.ingestion.stories.listThreads(before, BATCH);
             for (const thread of batch) {
               if (visible.length > pageSize) break;
-              if (await threadReadableToUser(bundle, thread, userId)) visible.push(thread);
+              if (await threadOnGlobalDirectory(bundle, thread)) visible.push(thread);
             }
             const lastScanned = batch[batch.length - 1];
             if (!lastScanned || batch.length < BATCH) {

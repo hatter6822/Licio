@@ -7,7 +7,12 @@
 // the owner-scoped Signal Ledger is non-empty for each test account. This is
 // the regression guard for "every story said Getting Attention" / "reading
 // signals were empty".
-import { handleSchema, type RatingLabelKind } from '@licio/shared';
+import {
+  handleSchema,
+  type RatingLabelKind,
+  type ThreadListResponse,
+  threadListResponseSchema,
+} from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { userMayPostTopLevel } from '../forum/rooms.js';
@@ -275,6 +280,47 @@ describe('demo seed — every story has a readable, populated thread', () => {
         thread.contributionCount,
         `discussion seeded for ${item.story_id} (${item.title})`,
       ).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('demo seed — the /threads directory surfaces the public conversations', () => {
+  const app = new Hono().route('/v1', createV1Routes());
+
+  /** Read the public thread directory through the real GET /v1/threads route. */
+  async function directory(): Promise<ThreadListResponse> {
+    const res = await app.request(new Request('http://localhost/v1/threads'));
+    expect(res.status).toBe(200);
+    return threadListResponseSchema.parse(await res.json());
+  }
+
+  it('lists public conversations whose threads each open (threads are visible to users)', async () => {
+    const page = await directory();
+    // The tab is NOT the old hardcoded empty state — the seeded corpus surfaces.
+    expect(page.items.length).toBeGreaterThan(0);
+    for (const t of page.items) {
+      expect(t.title.length, 'a real story title').toBeGreaterThan(0);
+      expect(t.contribution_count).toBeGreaterThanOrEqual(0);
+      // Each listed conversation actually opens via the per-id overview.
+      const res = await app.request(new Request(`http://localhost/v1/threads/${t.thread_id}`));
+      expect(res.status, `thread ${t.thread_id} (${t.title}) opens`).toBe(200);
+    }
+  });
+
+  it('lists ONLY public/public conversations on the real seed (two-condition containment)', async () => {
+    const page = await directory();
+    expect(page.items.length).toBeGreaterThan(0);
+    // The seed includes room_only items and private-room conversations; the
+    // global directory excludes them — every listed item is a PUBLIC story in a
+    // PUBLIC room, verified directly against the stores (not via the feed).
+    for (const t of page.items) {
+      const story = await fx.ingestion.stories.getById(t.story_id);
+      expect(story?.visibility, `${t.title} is a public item`).toBe('public');
+      expect(story?.hiddenState, `${t.title} not hidden`).toBeNull();
+      const room = t.room_id === null ? null : await fx.forum.rooms.getById(t.room_id);
+      expect(room === null || room.visibility === 'public', `${t.title} in a public room`).toBe(
+        true,
+      );
     }
   });
 });

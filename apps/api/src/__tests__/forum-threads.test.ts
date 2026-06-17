@@ -386,7 +386,7 @@ describe('WS-G.3.3 — thread directory (GET /v1/threads)', () => {
     return threadListResponseSchema.parse(await res.json());
   }
 
-  it('lists readable conversations most-recent-first with title + contribution count', async () => {
+  it('lists public conversations most-recent-first with title + contribution count', async () => {
     // `beforeEach` already seeded `threadId` (the oldest conversation).
     const second = await seedThread(fixture, { title: 'Second conversation' });
     const third = await seedThread(fixture, { title: 'Third conversation' });
@@ -413,33 +413,77 @@ describe('WS-G.3.3 — thread directory (GET /v1/threads)', () => {
     expect(ids).not.toContain(hidden.threadId);
   });
 
-  it('hides a private-room conversation from non-members; shows it to a steward', async () => {
-    const roomRes = await app().request(
-      jsonRequest(
-        '/v1/rooms',
-        'POST',
-        {
-          room_type: 'global_topic',
-          name: 'Private R',
-          description: 'Members only.',
-          initial_topics: ['health'],
-          visibility: 'private',
-        },
-        cookie,
-      ),
-    );
-    expect(roomRes.status).toBe(201);
-    const { room_id } = (await roomRes.json()) as { room_id: string };
+  it('excludes a moderation-removed conversation (item-safety state)', async () => {
+    const removed = await seedThread(fixture, { title: 'Removed conversation' });
+    // A WS-J hide/remove writes the WS-E item-safety row (state 'removed'); the
+    // directory drops it exactly as the direct reads 404 it.
+    await fixture.events.safetyStore.set({
+      itemId: removed.threadId,
+      safetyState: 'removed',
+      frozenScore: null,
+      caseId: null,
+      updatedBy: 'mod-1',
+      updatedAt: new Date().toISOString(),
+    });
+    const ids = (await directory()).items.map((t) => t.thread_id);
+    expect(ids).toContain(threadId);
+    expect(ids).not.toContain(removed.threadId);
+  });
+
+  it('keeps room-scoped conversations off the global directory (two-condition containment)', async () => {
+    async function createRoom(name: string, visibility: 'public' | 'private'): Promise<string> {
+      const res = await app().request(
+        jsonRequest(
+          '/v1/rooms',
+          'POST',
+          {
+            room_type: 'global_topic',
+            name,
+            description: 'd',
+            initial_topics: ['health'],
+            visibility,
+          },
+          cookie,
+        ),
+      );
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { room_id: string }).room_id;
+    }
+
+    // (a) A PRIVATE room: the room is not public, so its conversations never
+    //     list — not even for the creator/steward (they are reached via the room).
+    const privateRoomId = await createRoom('Private R', 'private');
     const priv = await seedThread(fixture, {
-      title: 'Members-only conversation',
-      roomId: room_id,
+      title: 'Private-room conversation',
+      roomId: privateRoomId,
       visibility: 'room_only',
     });
 
-    // Anonymous reader: the private-room conversation is absent.
-    expect((await directory()).items.map((t) => t.thread_id)).not.toContain(priv.threadId);
-    // The creator is a room steward (auto-assigned on create) → it is present.
-    expect((await directory(cookie)).items.map((t) => t.thread_id)).toContain(priv.threadId);
+    // (b) In a PUBLIC room: a `room_only` item is a distribution control kept off
+    //     global surfaces (WS-Q), while a `public` item lists normally.
+    const publicRoomId = await createRoom('Open R', 'public');
+    const roomOnly = await seedThread(fixture, {
+      title: 'Room-only item',
+      roomId: publicRoomId,
+      visibility: 'room_only',
+    });
+    const publicItem = await seedThread(fixture, {
+      title: 'Public item in open room',
+      roomId: publicRoomId,
+      visibility: 'public',
+    });
+
+    const ids = (await directory()).items.map((t) => t.thread_id);
+    expect(ids).not.toContain(priv.threadId); // private room → off global
+    expect(ids).not.toContain(roomOnly.threadId); // room_only item → off global
+    expect(ids).toContain(publicItem.threadId); // public item, public room → listed
+
+    // The set is USER-INDEPENDENT: the creator/steward sees the SAME global
+    // directory (room-scoped conversations are reached through their room).
+    const memberIds = (await directory(cookie)).items.map((t) => t.thread_id);
+    expect(memberIds).not.toContain(priv.threadId);
+    expect(memberIds).not.toContain(roomOnly.threadId);
+    expect(memberIds).toContain(publicItem.threadId);
   });
 
   it('keyset-paginates the directory (page size honoured, no gaps or dupes)', async () => {
@@ -479,7 +523,7 @@ describe('WS-G.3.3 — thread directory (GET /v1/threads)', () => {
     expect(ids).toEqual(new Set(seeded)); // no gaps
   });
 
-  it('is empty (items: [], nextCursor: null) when no readable conversation exists', async () => {
+  it('is empty (items: [], nextCursor: null) when no public conversation exists', async () => {
     const thread = await fixture.ingestion.stories.getThreadById(threadId);
     expect(thread).not.toBeNull();
     if (thread) {

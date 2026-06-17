@@ -88,16 +88,20 @@ function ThreadListItem({ thread }: { thread: ThreadSummary }): React.ReactEleme
         <span className="flex min-w-0 flex-col gap-1">
           <span className="truncate font-medium text-ink">{thread.title}</span>
           <span className="flex flex-wrap items-center gap-2 text-ink-muted text-sm">
+            {/* Locale-aware pluralization via the ICU resolver (Intl.PluralRules);
+                `#` renders the formatted count. */}
             <span>
-              {count === 1
-                ? t('threads.list.oneContribution', '1 contribution')
-                : t('threads.list.contributions', '{count} contributions', { count })}
+              {t(
+                'threads.list.contributions',
+                '{count, plural, one {# contribution} other {# contributions}}',
+                { count },
+              )}
             </span>
             {thread.conversation_state !== 'active' ? (
               <Badge>
                 {t(
                   `thread.state.${thread.conversation_state}`,
-                  thread.conversation_state.replace('_', ' '),
+                  thread.conversation_state.replaceAll('_', ' '),
                 )}
               </Badge>
             ) : null}

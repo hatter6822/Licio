@@ -127,11 +127,13 @@ export const threadSummarySchema = z
 export type ThreadSummary = z.infer<typeof threadSummarySchema>;
 
 /**
- * Thread directory (WS-G.3.3 `GET /v1/threads`): a keyset page of conversation
- * summaries the requester may read, most recent first.  This is the listing
- * behind the primary `/threads` tab — the read-side counterpart to the per-id
- * overview.  Visibility (hidden story, private/restricted room, moderation
- * removal) is enforced server-side before a thread enters a page.
+ * Thread directory (WS-G.3.3 `GET /v1/threads`): a keyset page of the PUBLIC
+ * conversation summaries, most recent first — the listing behind the primary
+ * `/threads` tab and the read-side counterpart to the per-id overview.  The set
+ * is the same two-condition global containment the front-page feed uses (a
+ * PUBLIC item from a PUBLIC room; hidden stories, `room_only` items, private-room
+ * threads, and moderation-removed threads are excluded), enforced server-side
+ * and USER-INDEPENDENT — room-scoped conversations are reached through their room.
  */
 export const threadListResponseSchema = paginatedSchema(threadSummarySchema);
 export type ThreadListResponse = z.infer<typeof threadListResponseSchema>;
