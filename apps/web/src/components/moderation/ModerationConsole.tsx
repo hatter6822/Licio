@@ -14,7 +14,7 @@ import type {
   ModerationCaseRow,
   ModerationReasonCode,
 } from '@licio/shared';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useT } from '../../i18n/I18nProvider.js';
 import { ApiClientError } from '../../lib/api.js';
@@ -104,16 +104,16 @@ function AccessNotice(): React.ReactElement {
 function ReportQueuePanel(): React.ReactElement {
   const t = useT();
   const [openCase, setOpenCase] = useState<string | null>(null);
-  const queue = useQuery({
+  const queue = useInfiniteQuery({
     queryKey: queryKeys.modQueue('default'),
-    queryFn: () => fetchReportQueue(),
+    queryFn: ({ pageParam }) => fetchReportQueue(pageParam ? { cursor: pageParam } : {}),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
     retry: false,
   });
-  if (queue.isError) return isForbidden(queue.error) ? <AccessNotice /> : <AccessNotice />;
-  const rows: ModerationCaseRow[] = [
-    ...(queue.data?.emergency ?? []),
-    ...(queue.data?.standard ?? []),
-  ];
+  if (queue.isError) return <AccessNotice />;
+  const rows: ModerationCaseRow[] =
+    queue.data?.pages.flatMap((p) => [...p.emergency, ...p.standard]) ?? [];
   return (
     <div className="flex flex-col gap-2">
       {queue.data && rows.length === 0 ? (
@@ -144,6 +144,16 @@ function ReportQueuePanel(): React.ReactElement {
           </li>
         ))}
       </ul>
+      {queue.hasNextPage ? (
+        <Button
+          variant="ghost"
+          loading={queue.isFetchingNextPage}
+          onClick={() => void queue.fetchNextPage()}
+          className="self-center"
+        >
+          {t('console.loadMore', 'Load more')}
+        </Button>
+      ) : null}
       {openCase ? <CaseReviewDialog caseId={openCase} onClose={() => setOpenCase(null)} /> : null}
     </div>
   );
@@ -335,19 +345,22 @@ function CaseReviewDialog({
 function AppealsPanel(): React.ReactElement {
   const t = useT();
   const [reviewFor, setReviewFor] = useState<AppealQueueRow | null>(null);
-  const appeals = useQuery({
+  const appeals = useInfiniteQuery({
     queryKey: queryKeys.modAppeals(),
-    queryFn: fetchAppealQueue,
+    queryFn: ({ pageParam }) => fetchAppealQueue(pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
     retry: false,
   });
   if (appeals.isError) return <AccessNotice />;
+  const items = appeals.data?.pages.flatMap((p) => p.items) ?? [];
   return (
     <div className="flex flex-col gap-2">
-      {appeals.data && appeals.data.items.length === 0 ? (
+      {appeals.data && items.length === 0 ? (
         <p className="text-ink-muted">{t('console.appealsEmpty', 'No appeals are pending.')}</p>
       ) : null}
       <ul className="flex flex-col gap-2">
-        {appeals.data?.items.map((a) => (
+        {items.map((a) => (
           <li
             key={a.appeal_id}
             className="flex items-center justify-between rounded-md border border-line bg-canvas p-3"
@@ -371,6 +384,16 @@ function AppealsPanel(): React.ReactElement {
           </li>
         ))}
       </ul>
+      {appeals.hasNextPage ? (
+        <Button
+          variant="ghost"
+          loading={appeals.isFetchingNextPage}
+          onClick={() => void appeals.fetchNextPage()}
+          className="self-center"
+        >
+          {t('console.loadMore', 'Load more')}
+        </Button>
+      ) : null}
       {reviewFor ? (
         <AppealReviewDialog appeal={reviewFor} onClose={() => setReviewFor(null)} />
       ) : null}
@@ -582,9 +605,11 @@ function IncidentsPanel(): React.ReactElement {
   const t = useT();
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const incidents = useQuery({
+  const incidents = useInfiniteQuery({
     queryKey: queryKeys.modIncidents(),
-    queryFn: fetchIncidents,
+    queryFn: ({ pageParam }) => fetchIncidents(pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
     retry: false,
   });
   const resolve = useMutation({
@@ -601,6 +626,7 @@ function IncidentsPanel(): React.ReactElement {
       }),
   });
   if (incidents.isError) return <AccessNotice />;
+  const items = incidents.data?.pages.flatMap((p) => p.incidents) ?? [];
   return (
     <div className="flex flex-col gap-2">
       <p className="text-xs text-ink-muted">
@@ -609,13 +635,13 @@ function IncidentsPanel(): React.ReactElement {
           'Coordinated-report incidents delay volume-driven enforcement pending review. Clear (reports legitimate) to resume enforcement, or confirm (a coordinated attack) to dismiss the case.',
         )}
       </p>
-      {incidents.data && incidents.data.incidents.length === 0 ? (
+      {incidents.data && items.length === 0 ? (
         <p className="text-ink-muted">
           {t('console.incidentsEmpty', 'No coordinated-report incidents are open.')}
         </p>
       ) : null}
       <ul className="flex flex-col gap-2">
-        {incidents.data?.incidents.map((inc) => (
+        {items.map((inc) => (
           <li
             key={inc.incident_id}
             className="flex items-start justify-between gap-3 rounded-md border border-line bg-canvas p-3"
@@ -652,21 +678,34 @@ function IncidentsPanel(): React.ReactElement {
           </li>
         ))}
       </ul>
+      {incidents.hasNextPage ? (
+        <Button
+          variant="ghost"
+          loading={incidents.isFetchingNextPage}
+          onClick={() => void incidents.fetchNextPage()}
+          className="self-center"
+        >
+          {t('console.loadMore', 'Load more')}
+        </Button>
+      ) : null}
     </div>
   );
 }
 
 function AuditPanel(): React.ReactElement {
   const t = useT();
-  const audit = useQuery({
+  const audit = useInfiniteQuery({
     queryKey: queryKeys.modAudit('default'),
-    queryFn: () => fetchAudit({}),
+    queryFn: ({ pageParam }) => fetchAudit(pageParam ? { cursor: pageParam } : {}),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
     retry: false,
   });
   if (audit.isError) return <AccessNotice />;
+  const items = audit.data?.pages.flatMap((p) => p.items) ?? [];
   return (
     <ul className="flex flex-col gap-1 text-sm">
-      {audit.data?.items.map((entry) => (
+      {items.map((entry) => (
         <li key={entry.audit_id} className="rounded bg-surface p-2">
           <span className="font-medium text-ink">{entry.action}</span>
           {entry.reason_code ? (
@@ -679,8 +718,19 @@ function AuditPanel(): React.ReactElement {
           </span>
         </li>
       ))}
-      {audit.data && audit.data.items.length === 0 ? (
+      {audit.data && items.length === 0 ? (
         <li className="text-ink-muted">{t('console.auditEmpty', 'No audit records yet.')}</li>
+      ) : null}
+      {audit.hasNextPage ? (
+        <li className="self-center">
+          <Button
+            variant="ghost"
+            loading={audit.isFetchingNextPage}
+            onClick={() => void audit.fetchNextPage()}
+          >
+            {t('console.loadMore', 'Load more')}
+          </Button>
+        </li>
       ) : null}
     </ul>
   );

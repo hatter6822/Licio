@@ -200,8 +200,10 @@ export async function setReviewerStatus(status: ReviewerAvailability): Promise<O
   return parseResponse(response, okResponseSchema);
 }
 
-export async function fetchAppealQueue(): Promise<AppealQueueResponse> {
-  const response = await client.v1.moderation.appeals.$get({ query: { status: 'pending' } });
+export async function fetchAppealQueue(cursor?: string): Promise<AppealQueueResponse> {
+  const response = await client.v1.moderation.appeals.$get({
+    query: { status: 'pending', ...(cursor ? { cursor } : {}) },
+  });
   return parseResponse(response, appealQueueResponseSchema);
 }
 
@@ -236,8 +238,8 @@ export async function exportAudit(): Promise<AuditExportResponse> {
 
 // --- Coordinated-report incidents (WS-J.2.6e, ROLE_INTEGRITY) ----------------
 
-export async function fetchIncidents(): Promise<IncidentQueueResponse> {
-  const response = await client.v1.moderation.incidents.$get();
+export async function fetchIncidents(cursor?: string): Promise<IncidentQueueResponse> {
+  const response = await client.v1.moderation.incidents.$get({ query: cursor ? { cursor } : {} });
   return parseResponse(response, incidentQueueResponseSchema);
 }
 

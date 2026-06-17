@@ -423,3 +423,91 @@ describe('AuditPanel', () => {
     expect(await screen.findByText(/no audit records yet/i)).toBeInTheDocument();
   });
 });
+
+describe('console pagination (Load more)', () => {
+  it('B3: pages the report queue beyond the first page', async () => {
+    vi.mocked(api.fetchReportQueue).mockImplementation(async (q) =>
+      q?.cursor
+        ? {
+            emergency: [],
+            standard: queueWithCase.standard.map((c) => ({
+              ...c,
+              case_id: '00000000-0000-4000-8000-0000000000p2',
+            })),
+            next_cursor: null,
+            filtered_total: 2,
+          }
+        : { ...queueWithCase, next_cursor: 'cursor-1' },
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    expect(await screen.findByRole('button', { name: /MOD_HARASS_001/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: /MOD_HARASS_001/ }).length).toBe(2),
+    );
+  });
+
+  it('B3: pages the appeal queue beyond the first page', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchAppealQueue).mockImplementation(async (cursor) =>
+      cursor
+        ? {
+            items: appealQueue.items.map((a) => ({
+              ...a,
+              appeal_id: '00000000-0000-4000-8000-0000000000p2',
+            })),
+            next_cursor: null,
+            filtered_total: 2,
+          }
+        : { ...appealQueue, next_cursor: 'cursor-1' },
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Appeals');
+    expect(await screen.findByRole('button', { name: 'Review' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Review' }).length).toBe(2));
+  });
+
+  it('B4: pages the integrity queue beyond the first page', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchIncidents).mockImplementation(async (cursor) =>
+      cursor
+        ? {
+            incidents: incidents.incidents.map((i) => ({
+              ...i,
+              incident_id: '00000000-0000-4000-8000-0000000000p2',
+              summary: 'Second batch of coordinated reports',
+            })),
+            count: 2,
+            next_cursor: null,
+          }
+        : { ...incidents, next_cursor: 'cursor-1' },
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Integrity');
+    expect(await screen.findByText(/Volume spike/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+    expect(await screen.findByText(/Second batch of coordinated reports/)).toBeInTheDocument();
+  });
+
+  it('B4: pages the audit log beyond the first page', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchAudit).mockImplementation(async (q) =>
+      q?.cursor
+        ? {
+            items: auditList.items.slice(0, 1).map((e) => ({
+              ...e,
+              audit_id: '00000000-0000-4000-8000-0000000000d3',
+              action: 'restrict',
+            })),
+            next_cursor: null,
+          }
+        : { ...auditList, next_cursor: 'cursor-1' },
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Audit log');
+    expect(await screen.findByText('remove')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+    expect(await screen.findByText('restrict')).toBeInTheDocument();
+  });
+});

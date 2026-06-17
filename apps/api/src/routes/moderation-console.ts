@@ -365,17 +365,21 @@ export function createModerationConsoleRoutes() {
       // The integrity queue: ONLY ROLE_INTEGRITY (integrity-queue access) may
       // list or resolve incidents.  Resolving an incident reconciles the linked
       // case's enforcement delay (clear ⇒ lift; confirm ⇒ dismiss the case).
-      .get('/incidents', async (c) => {
-        const actor = mustActor(c);
-        const queueDenial = denyQueue(actor, 'integrity-queue');
-        if (queueDenial) return c.json(deny(queueDenial.code, queueDenial.message), 403);
-        const result = await buildIncidentQueue(
-          getModerationServices(),
-          100,
-          c.req.query('cursor'),
-        );
-        return c.json(incidentQueueResponseSchema.parse(result));
-      })
+      .get(
+        '/incidents',
+        zValidator('query', z.object({ cursor: z.string().min(1).max(512).optional() })),
+        async (c) => {
+          const actor = mustActor(c);
+          const queueDenial = denyQueue(actor, 'integrity-queue');
+          if (queueDenial) return c.json(deny(queueDenial.code, queueDenial.message), 403);
+          const result = await buildIncidentQueue(
+            getModerationServices(),
+            100,
+            c.req.valid('query').cursor,
+          );
+          return c.json(incidentQueueResponseSchema.parse(result));
+        },
+      )
       .post(
         '/incidents/:incidentId/resolve',
         zValidator('param', uuidParam('incidentId')),
