@@ -14,6 +14,7 @@ import {
   type AuthStatusResponse,
   apiErrorSchema,
   attentionAggregateBatchSchema,
+  attentionAggregateSchema,
   attentionIngestAckSchema,
   authStatusResponseSchema,
   type BranchContent,
@@ -72,6 +73,11 @@ import {
 import type { AppType } from 'api';
 import { hc } from 'hono/client';
 import { z } from 'zod';
+import {
+  attentionUploadsCoolingDown,
+  noteAttentionRateLimited,
+  noteAttentionUploadOk,
+} from '../signals/attention-cooldown.js';
 import { useAuthStore } from '../stores/auth.js';
 
 const API_BASE: string =
@@ -115,9 +121,10 @@ async function fetchCsrfToken(): Promise<string | null> {
   }
 }
 
-/** Reset client request state (the mutation serialization chain). Test helper. */
+/** Reset client request state (the mutation + attention serialization chains). Test helper. */
 export function resetApiClientState(): void {
   mutationQueue = Promise.resolve();
+  attentionUploadChain = Promise.resolve();
 }
 
 /** Send one request, attaching credentials (+ a CSRF token for mutations). */
@@ -335,12 +342,68 @@ export async function createReport(request: CreateReportRequest): Promise<Report
   return parseResponse(response, reportCreatedResponseSchema);
 }
 
+/** Parse a `Retry-After` header (delta-seconds form) with a 1 s floor. */
+function retryAfterSeconds(response: Response): number {
+  const raw = response.headers.get('Retry-After');
+  const parsed = raw !== null ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+/** The wire cap on one attention batch (`attentionAggregateBatchSchema.max`). */
+const MAX_ATTENTION_BATCH = 200;
+
+// Attention uploads are SERIALIZED through this chain so a 429's Retry-After —
+// armed by the prior upload — is observed by the next BEFORE it leaves: apiFetch's
+// generic mutation queue advances when the Response returns, which is too early to
+// close the gate, so the cooldown check and the POST must be atomic per batch.
+let attentionUploadChain: Promise<unknown> = Promise.resolve();
+
+/** Send ONE ≤200 batch, serialized, re-checking + arming the cooldown gate. */
+async function postAttentionBatch(batch: AttentionAggregate[]): Promise<AttentionIngestAck> {
+  const run = attentionUploadChain.then(async () => {
+    // Re-checked INSIDE the serialized turn (not just by the caller): the prior
+    // upload may have armed the window while this one waited its turn.
+    if (attentionUploadsCoolingDown()) {
+      throw new ApiClientError('rate_limited', 'Attention uploads are cooling down', 429);
+    }
+    const response = await client.v1.attention.aggregates.$post({
+      json: attentionAggregateBatchSchema.parse({ aggregates: batch }),
+    });
+    if (response.status === 429) {
+      noteAttentionRateLimited(retryAfterSeconds(response));
+    } else if (response.ok) {
+      noteAttentionUploadOk();
+    }
+    return parseResponse(response, attentionIngestAckSchema);
+  });
+  // Keep the chain alive regardless of this batch's outcome.
+  attentionUploadChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/**
+ * The single network egress for attention aggregates. Idempotent, durable HINTS
+ * (§25.5), so the client honours backpressure rather than hammering: a 429 arms a
+ * shared Retry-After window (`signals/attention-cooldown.ts`) that BOTH upload
+ * paths consult, and uploads are serialized so the window closes before the next
+ * leaves. A coalesced replay can exceed the per-batch wire cap, so the set is
+ * split into ≤200 batches sent in order; a failed batch throws and the caller
+ * keeps the idempotent remainder queued (the server dedupes any re-send by
+ * `aggregate_id`, so a partial send is safe to retry whole).
+ */
 export async function uploadAttentionAggregates(
   aggregates: AttentionAggregate[],
 ): Promise<AttentionIngestAck> {
-  const body = attentionAggregateBatchSchema.parse({ aggregates });
-  const response = await client.v1.attention.aggregates.$post({ json: body });
-  return parseResponse(response, attentionIngestAckSchema);
+  const valid = z.array(attentionAggregateSchema).min(1).parse(aggregates);
+  let accepted = 0;
+  for (let i = 0; i < valid.length; i += MAX_ATTENTION_BATCH) {
+    const ack = await postAttentionBatch(valid.slice(i, i + MAX_ATTENTION_BATCH));
+    accepted += ack.accepted;
+  }
+  return attentionIngestAckSchema.parse({ accepted });
 }
 
 export async function fetchVapidPublicKey(): Promise<string> {

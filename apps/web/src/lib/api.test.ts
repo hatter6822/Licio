@@ -2,6 +2,10 @@
 import type { UserContext } from '@licio/shared';
 import { feedResponseSchema } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  attentionUploadsCoolingDown,
+  resetAttentionCooldown,
+} from '../signals/attention-cooldown.js';
 import { useAuthStore } from '../stores/auth.js';
 import {
   ApiClientError,
@@ -9,6 +13,7 @@ import {
   fetchFeed,
   parseResponse,
   resetApiClientState,
+  uploadAttentionAggregates,
 } from './api.js';
 
 const realFetch = globalThis.fetch;
@@ -210,5 +215,105 @@ describe('request interceptor', () => {
     );
     await expect(fetchFeed()).rejects.toBeInstanceOf(ApiClientError);
     expect(useAuthStore.getState().status).toBe('authenticated');
+  });
+});
+
+describe('uploadAttentionAggregates rate-limit backoff (WS-C.4.4)', () => {
+  // A schema-valid §22.1 aggregate (buckets only — no raw traces).
+  const AGGREGATE = {
+    aggregate_id: '44444444-4444-4444-8444-444444444444',
+    user_id_or_privacy_bucket: 'user-1',
+    story_id: '11111111-1111-4111-8111-111111111111',
+    session_bucket: '2026-06-09T13:00:00.000Z',
+    active_dwell_bucket: 'medium' as const,
+    source_opened: true,
+    context_opened: false,
+    branch_depth_bucket: 'moderate' as const,
+    return_visit_count_bucket: 'few' as const,
+    privacy_level: 'standard' as const,
+    created_at: '2026-06-09T13:30:00.000Z',
+  };
+
+  beforeEach(() => resetAttentionCooldown());
+  afterEach(() => resetAttentionCooldown());
+
+  it('arms the cooldown from Retry-After on a 429', async () => {
+    mockFetch(async (url) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      return new Response(JSON.stringify({ error: { code: 'rate_limited', message: 'wait' } }), {
+        status: 429,
+        headers: { 'content-type': 'application/json', 'Retry-After': '42' },
+      });
+    });
+    await expect(uploadAttentionAggregates([AGGREGATE])).rejects.toMatchObject({ status: 429 });
+    expect(attentionUploadsCoolingDown()).toBe(true);
+  });
+
+  it('short-circuits WITHOUT touching the network while cooling down', async () => {
+    mockFetch(async (url) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      return new Response(JSON.stringify({ error: { code: 'rate_limited', message: 'wait' } }), {
+        status: 429,
+        headers: { 'content-type': 'application/json', 'Retry-After': '42' },
+      });
+    });
+    await expect(uploadAttentionAggregates([AGGREGATE])).rejects.toMatchObject({ status: 429 });
+
+    const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchSpy.mockClear();
+    // A second upload during the window never reaches fetch (no POST, no CSRF GET).
+    await expect(uploadAttentionAggregates([AGGREGATE])).rejects.toMatchObject({ status: 429 });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('clears the cooldown after a successful upload', async () => {
+    mockFetch(async (url) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      return jsonResponse({ accepted: 1 }, 202);
+    });
+    await uploadAttentionAggregates([AGGREGATE]);
+    expect(attentionUploadsCoolingDown()).toBe(false);
+  });
+
+  it('splits an over-cap coalesced set into ≤200-aggregate batches', async () => {
+    const sizes: number[] = [];
+    let posts = 0;
+    mockFetch(async (url, init) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      posts += 1;
+      const body = JSON.parse(String(init?.body)) as { aggregates: unknown[] };
+      sizes.push(body.aggregates.length);
+      return jsonResponse({ accepted: body.aggregates.length }, 202);
+    });
+    const many = Array.from({ length: 250 }, () => AGGREGATE);
+
+    const ack = await uploadAttentionAggregates(many);
+
+    expect(posts).toBe(2);
+    expect(sizes).toEqual([200, 50]); // never exceeds the schema's batch cap
+    expect(ack.accepted).toBe(250);
+  });
+
+  it('serializes uploads so a concurrent second backs off once the first 429s', async () => {
+    let posts = 0;
+    mockFetch(async (url) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      posts += 1;
+      return new Response(JSON.stringify({ error: { code: 'rate_limited', message: 'wait' } }), {
+        status: 429,
+        headers: { 'content-type': 'application/json', 'Retry-After': '30' },
+      });
+    });
+
+    const [first, second] = await Promise.allSettled([
+      uploadAttentionAggregates([AGGREGATE]),
+      uploadAttentionAggregates([AGGREGATE]),
+    ]);
+
+    expect(first.status).toBe('rejected');
+    expect(second.status).toBe('rejected');
+    // The second saw the armed cooldown inside the serialized turn and never
+    // reached the network — only ONE request hit the rate-limited endpoint.
+    expect(posts).toBe(1);
   });
 });

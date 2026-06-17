@@ -299,7 +299,14 @@ uploaded (to `attention.aggregate`).
   per-item attention is buffered as the reader navigates. The buffer is uploaded in
   **batches on a configurable interval** (not per-event); a failed or page-hide
   flush durably enqueues to the pending queue. The dwell tick AND the flush interval
-  both pause while the page is hidden.
+  both pause while the page is hidden. Attention aggregates are idempotent, durable
+  **hints** (§25.5), so the client honours the ingestion endpoint's backpressure: a
+  `429` arms a shared **Retry-After cooldown** (`signals/attention-cooldown.ts`)
+  consulted by BOTH upload paths, so the interval flush keeps coalescing in its
+  buffer and the offline replay defers — never hammering a limit that is asking it
+  to wait. The replay path **coalesces every queued batch into ONE upload** (the
+  same "batched, not per-event" rule as the live flush), so a backlog drains in a
+  single request instead of a burst that would re-trip the per-account limit.
 - **Privacy (4.1d):** personalization-off stops collection (and the return tracker)
   entirely; minimum privacy replaces the user id with a coarse bucket.
   `assertNoRawEgress` is the **runtime** half of the no-raw-egress guarantee — every

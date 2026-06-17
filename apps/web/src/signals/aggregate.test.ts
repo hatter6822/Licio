@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { attentionAggregateSchema } from '@licio/shared';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type AggregateInput, AggregateUploader, buildAggregate } from './aggregate.js';
+import { noteAttentionRateLimited, resetAttentionCooldown } from './attention-cooldown.js';
 
 const INPUT: AggregateInput = {
   storyId: '11111111-1111-4111-8111-111111111111',
@@ -84,5 +85,30 @@ describe('AggregateUploader', () => {
     expect(() => uploader.add({ ...buildAggregate(INPUT), scrollY: 10 } as never)).toThrow(
       /forbidden key/,
     );
+  });
+
+  describe('rate-limit backoff (WS-C.4.4)', () => {
+    afterEach(() => resetAttentionCooldown());
+
+    it('keeps the buffer (no upload, no enqueue) while the Retry-After window is open', async () => {
+      const upload = vi.fn().mockResolvedValue(undefined);
+      const enqueue = vi.fn().mockResolvedValue(undefined);
+      let now = 1_000;
+      const uploader = new AggregateUploader({ upload, enqueue, now: () => now });
+      noteAttentionRateLimited(30, now); // cool down for 30 s from now
+      uploader.add(buildAggregate(INPUT));
+
+      await uploader.flush();
+      // Backed off: nothing hits the network and the batch is NOT fragmented to
+      // the durable queue — it stays buffered to coalesce and send after the window.
+      expect(upload).not.toHaveBeenCalled();
+      expect(enqueue).not.toHaveBeenCalled();
+      expect(uploader.size).toBe(1);
+
+      now += 30_000; // window elapsed
+      await uploader.flush();
+      expect(upload).toHaveBeenCalledOnce();
+      expect(uploader.size).toBe(0);
+    });
   });
 });

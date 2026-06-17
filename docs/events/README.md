@@ -100,10 +100,15 @@ never per retention tier, and a replayed event's §22.1 aggregate rows are
 dropped with it, never re-inserted).
 
 **Rate limiting** (SPEC §19.1-compliant: no addresses, no raw user ids) uses
-true sliding windows (timestamped ZSET entries; default 10/min + 120/h via
+true sliding windows (timestamped ZSET entries; default 30/min + 600/h via
 `EVENTS_RATE_PER_MINUTE`/`EVENTS_RATE_PER_HOUR`) with exact Retry-After math,
 and FAILS CLOSED: a Redis outage degrades to an in-memory fallback at 50% of
-the configured limits — never an open gate.
+the configured limits — never an open gate. The budget sits ABOVE the client's
+30 s batched upload cadence (2/min, 120/h in steady state, WS-C.4.4) with
+headroom for the page-hide replay, the post-submit drain, and concurrent
+tabs/devices — the limit is per-ACCOUNT, so a budget set at exactly the cadence
+spuriously 429'd legitimate readers. The client coalesces each batch and honours
+`Retry-After`, so it never bursts against the gate.
 
 **Privacy enforcement** (WS-E.1.3d) reads the user's durable WS-D settings on
 every request (a mid-session change applies to the next event):

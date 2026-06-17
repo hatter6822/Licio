@@ -102,9 +102,16 @@ export const serverEnvSchema = z.object({
   SES_FROM_ADDRESS: z.string().min(3).optional(),
   SES_ENDPOINT: z.string().url({ message: 'SES_ENDPOINT must be a valid URL' }).optional(),
   // Attention-ingestion per-user rate limits (WS-E.1.3c): env-driven so the
-  // budgets are changeable without a redeploy. Defaults per the WS-E plan.
-  EVENTS_RATE_PER_MINUTE: z.coerce.number().int().positive().default(10),
-  EVENTS_RATE_PER_HOUR: z.coerce.number().int().positive().default(120),
+  // budgets are changeable without a redeploy. The client uploads on a 30 s
+  // batched cadence (WS-C.4.4) = 2 req/min, 120 req/hr in steady state — so the
+  // budget MUST sit ABOVE that, with headroom for the page-hide durable flush
+  // replayed on next open, the post-submit queue drain, and a few concurrent
+  // tabs/devices (the limit is per-ACCOUNT, not per-tab/IP — §19.1). A budget at
+  // exactly the cadence (the former 120/hr) left zero slack and spuriously 429'd
+  // legitimate readers. 30/min + 600/hr keeps a firm per-account gate (each
+  // request is one coalesced, idempotent, deduped batch) with ~5x headroom.
+  EVENTS_RATE_PER_MINUTE: z.coerce.number().int().positive().default(30),
+  EVENTS_RATE_PER_HOUR: z.coerce.number().int().positive().default(600),
   // Self-hosted embedding service (WS-F.3.2a, SPEC §19.1: no mandatory
   // EXTERNAL embedding API — content text must not leak to a third party).
   // ALL-OR-NONE (refined below): when the group is unset, the deterministic
