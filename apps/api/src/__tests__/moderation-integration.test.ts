@@ -245,6 +245,53 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
     expect((await actions.listBySubject(subject))[0]?.actionId).toBe(a.actionId);
   });
 
+  it('actions: listActiveShadowedSubjects (active shadow vs reverted vs non-shadow)', async () => {
+    const steward = await insertUser('shdwstew');
+    const shadowed = await insertUser('shadowsub');
+    const cleared = await insertUser('shadowrev');
+    const suspended = await insertUser('shadownon');
+    const base = {
+      actorUserId: steward,
+      actorRole: 'ROLE_SAFETY' as const,
+      targetType: 'account',
+      reasonCode: 'MOD_HARASS_001',
+      duration: null,
+      reviewerNote: null,
+      priorState: 'active',
+      nextState: null,
+      reversible: true,
+      reverted: false,
+      linkedActionId: null,
+      caseId: null,
+      coApproverUserId: null,
+      reportIds: [],
+    };
+    await actions.insert({
+      ...base,
+      action: 'shadow',
+      targetId: shadowed,
+      subjectUserId: shadowed,
+    });
+    const rev = await actions.insert({
+      ...base,
+      action: 'shadow',
+      targetId: cleared,
+      subjectUserId: cleared,
+    });
+    await actions.update(rev.actionId, { reverted: true });
+    await actions.insert({
+      ...base,
+      action: 'suspend',
+      targetId: suspended,
+      subjectUserId: suspended,
+    });
+    const set = await actions.listActiveShadowedSubjects([shadowed, cleared, suspended]);
+    expect(set.has(shadowed)).toBe(true); // active shadow
+    expect(set.has(cleared)).toBe(false); // reverted shadow
+    expect(set.has(suspended)).toBe(false); // non-shadow sanction
+    expect((await actions.listActiveShadowedSubjects([])).size).toBe(0);
+  });
+
   it('audit: append-only, filtered list with offset, period window', async () => {
     const steward = await insertUser('auditor');
     const subject = await insertUser('audited');

@@ -225,6 +225,45 @@ describe('InMemoryModerationActionStore', () => {
     expect(await store.update('missing', { reverted: true })).toBeNull();
     expect(await store.getById('missing')).toBeNull();
   });
+
+  it('lists active shadowed subjects (active shadow vs reverted vs non-shadow)', async () => {
+    const c = clockFrom(START);
+    const store = new InMemoryModerationActionStore(c.now);
+    const base = {
+      actorUserId: A,
+      actorRole: 'ROLE_SAFETY' as const,
+      targetType: 'account',
+      reasonCode: 'MOD_HARASS_001',
+      duration: null,
+      reviewerNote: null,
+      priorState: 'active',
+      nextState: null,
+      reversible: true,
+      reverted: false,
+      linkedActionId: null,
+      caseId: null,
+      coApproverUserId: null,
+      reportIds: [],
+    };
+    // B: an active shadow. C: a shadow that was reverted. A: a non-shadow sanction.
+    await store.insert({ ...base, action: 'shadow', targetId: B, subjectUserId: B });
+    const reverted = await store.insert({
+      ...base,
+      action: 'shadow',
+      targetId: C,
+      subjectUserId: C,
+    });
+    await store.update(reverted.actionId, { reverted: true });
+    await store.insert({ ...base, action: 'suspend', targetId: A, subjectUserId: A });
+
+    const shadowed = await store.listActiveShadowedSubjects([A, B, C]);
+    expect(shadowed.has(B)).toBe(true); // active shadow
+    expect(shadowed.has(C)).toBe(false); // reverted shadow
+    expect(shadowed.has(A)).toBe(false); // non-shadow sanction
+    expect(shadowed.size).toBe(1);
+    // Empty input short-circuits to an empty set.
+    expect((await store.listActiveShadowedSubjects([])).size).toBe(0);
+  });
 });
 
 describe('InMemoryModerationAuditStore', () => {

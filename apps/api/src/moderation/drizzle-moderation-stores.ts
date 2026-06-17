@@ -684,6 +684,25 @@ export class DrizzleModerationActionStore implements ModerationActionStore {
     return rows.map(mapAction);
   }
 
+  async listActiveShadowedSubjects(userIds: readonly string[]): Promise<Set<string>> {
+    if (userIds.length === 0) return new Set();
+    const rows = await this.#db
+      .selectDistinct({ subjectUserId: moderationActions.subjectUserId })
+      .from(moderationActions)
+      .where(
+        and(
+          eq(moderationActions.action, 'shadow'),
+          eq(moderationActions.reverted, false),
+          inArray(moderationActions.subjectUserId, [...userIds]),
+        ),
+      );
+    const out = new Set<string>();
+    for (const r of rows) {
+      if (r.subjectUserId !== null) out.add(r.subjectUserId);
+    }
+    return out;
+  }
+
   async clear(): Promise<void> {
     await this.#db.delete(moderationActions);
   }

@@ -279,6 +279,12 @@ export interface ModerationActionStore {
   /** Active (non-reverted) TEMPORARY account actions (restrict/suspend carrying a
    *  duration) — the auto-expiry sweep computes each one's expiry (WS-J.2.3a). */
   listActiveTemporaryAccountActions(): Promise<ModerationActionRecord[]>;
+  /** WS-J.2.3 shadow enforcement: the subset of `userIds` under a STANDING
+   *  shadow (`action='shadow'`, `reverted=false`).  The ranking safety filter
+   *  consults this to drop a shadowed author's content from ORGANIC feeds while
+   *  it stays directly readable (a reach reduction to zero, distinct from a
+   *  removal).  Empty `userIds` ⇒ empty set (no scan). */
+  listActiveShadowedSubjects(userIds: readonly string[]): Promise<Set<string>>;
   clear(): Promise<void>;
 }
 
@@ -715,6 +721,22 @@ export class InMemoryModerationActionStore implements ModerationActionStore {
           !r.reverted && r.duration !== null && (r.action === 'restrict' || r.action === 'suspend'),
       )
       .map((r) => ({ ...r }));
+  }
+  async listActiveShadowedSubjects(userIds: readonly string[]): Promise<Set<string>> {
+    if (userIds.length === 0) return new Set();
+    const wanted = new Set(userIds);
+    const out = new Set<string>();
+    for (const r of this.#rows.values()) {
+      if (
+        r.action === 'shadow' &&
+        !r.reverted &&
+        r.subjectUserId !== null &&
+        wanted.has(r.subjectUserId)
+      ) {
+        out.add(r.subjectUserId);
+      }
+    }
+    return out;
   }
   async clear(): Promise<void> {
     this.#rows.clear();
