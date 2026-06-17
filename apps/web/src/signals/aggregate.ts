@@ -17,6 +17,7 @@ import {
 } from '@licio/shared';
 import { uploadAttentionAggregates } from '../lib/api.js';
 import * as queue from '../offline/queue.js';
+import { attentionUploadsCoolingDown } from './attention-cooldown.js';
 import { assertNoRawEgress } from './privacy.js';
 
 function newId(): string {
@@ -66,6 +67,8 @@ export interface UploaderOptions {
   upload?: (aggregates: AttentionAggregate[]) => Promise<unknown>;
   /** Override the durable enqueue (tests). */
   enqueue?: (aggregates: AttentionAggregate[]) => Promise<unknown>;
+  /** Wall clock for the rate-limit backoff window (epoch ms; tests). */
+  now?: () => number;
 }
 
 async function defaultEnqueue(aggregates: AttentionAggregate[]): Promise<void> {
@@ -76,10 +79,12 @@ export class AggregateUploader {
   private readonly pending: AttentionAggregate[] = [];
   private readonly upload: (aggregates: AttentionAggregate[]) => Promise<unknown>;
   private readonly enqueue: (aggregates: AttentionAggregate[]) => Promise<unknown>;
+  private readonly now: () => number;
 
   constructor(options: UploaderOptions = {}) {
     this.upload = options.upload ?? uploadAttentionAggregates;
     this.enqueue = options.enqueue ?? defaultEnqueue;
+    this.now = options.now ?? (() => Date.now());
   }
 
   /** Buffer an aggregate for the next batch. Rejects any raw-trace payload. */
@@ -99,6 +104,11 @@ export class AggregateUploader {
    */
   async flush(): Promise<void> {
     if (this.pending.length === 0) return;
+    // Honour the endpoint's backoff (WS-C.4.4): while the rate limit's
+    // Retry-After window is open, keep the batch in the in-memory buffer (it
+    // coalesces with later captures) instead of POSTing into a 429 or churning
+    // it through the durable queue. The page-hide path still flushes it durably.
+    if (attentionUploadsCoolingDown(this.now())) return;
     const batch = this.pending.splice(0, this.pending.length);
     try {
       await this.upload(batch);

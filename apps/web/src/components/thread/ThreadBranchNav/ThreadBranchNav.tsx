@@ -135,9 +135,15 @@ export function ThreadBranchNav({
         // (the CTA would stay in flow and shift over branch content). A plain div
         // has no competing position, so `fixed` applies. Thumb-zone CTA, lifted
         // clear of the fixed bottom nav (~4.5rem + safe-area) and horizontally
-        // CENTERED (inset-x-0 + w-fit + mx-auto); at lg the nav is a side rail, so
-        // a small inset suffices. Centering is symmetric — RTL-safe, no end flip.
-        <div className="fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+5rem)] z-sticky mx-auto w-fit lg:bottom-6">
+        // CENTERED on the reading column (w-fit + mx-auto inside the inset band).
+        // The band must match the CONTENT, not the viewport: on mobile the nav is
+        // the bottom bar so content is full width (`start-0 end-0`); at lg the nav
+        // becomes a `w-56` side rail at the inline-START and the content sits in
+        // the column past it, so the band starts at the rail's edge (`lg:start-56`,
+        // mirroring `BottomNav`'s `lg:w-56`) — otherwise viewport-centering pulls
+        // the CTA ~7rem off the column's centre. Logical insets (start/end, not
+        // left/right) keep the rail-side offset correct under RTL too.
+        <div className="fixed start-0 end-0 bottom-[calc(env(safe-area-inset-bottom)+5rem)] z-sticky mx-auto w-fit lg:bottom-6 lg:start-56">
           <Button
             variant="primary"
             size="lg"

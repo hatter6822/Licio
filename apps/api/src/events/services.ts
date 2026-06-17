@@ -137,7 +137,11 @@ export function createInMemoryEventPipelineServices(
     replay: new InMemoryReplayNonceStore(),
     ingestLimiter: new IngestRateLimiter(
       new InMemorySlidingWindowStore(),
-      options.limits ?? { perMinute: 10, perHour: 120 },
+      // Headroom above the client's 30 s batched cadence (2/min, 120/hr) for the
+      // page-hide replay, the post-submit drain, and concurrent tabs/devices —
+      // the limit is per-ACCOUNT, not per-tab. Mirrors the EVENTS_RATE_* env
+      // defaults (packages/shared/src/env/server.ts).
+      options.limits ?? { perMinute: 30, perHour: 600 },
     ),
     realtime: new InMemoryRealtimeAggregator(now),
     router: new EventRouter({

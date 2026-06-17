@@ -107,7 +107,7 @@ describe('ThreadBranchNav (WS-B.2.12)', () => {
     expect(screen.queryByRole('button', { name: /contribute/i })).toBeNull();
   });
 
-  it('floats the Contribute CTA centered and clear of the bottom nav via a fixed wrapper', () => {
+  it('floats the Contribute CTA centered on the reading column and clear of the bottom nav', () => {
     renderNav({ onContribute: () => undefined });
     const contribute = screen.getByRole('button', { name: 'Contribute to this thread' });
     // Positioning lives on the WRAPPER, not the Button: the Button base hardcodes
@@ -115,10 +115,17 @@ describe('ThreadBranchNav (WS-B.2.12)', () => {
     // conflict and leave the CTA in flow. The wrapper is a plain, fixed div.
     const wrapper = contribute.parentElement;
     const wrapperClasses = wrapper?.className.split(/\s+/) ?? [];
+    // Logical insets (start/end, not left/right) so the band stays RTL-correct.
     expect(wrapperClasses).toEqual(
-      expect.arrayContaining(['fixed', 'inset-x-0', 'w-fit', 'mx-auto']),
+      expect.arrayContaining(['fixed', 'start-0', 'end-0', 'w-fit', 'mx-auto']),
     );
     expect(wrapper?.className).toContain('bottom-[calc(env(safe-area-inset-bottom)+5rem)]');
+    // At lg the bottom bar becomes a `w-56` side rail at the inline-start, so the
+    // centering band must start at the rail's edge (`lg:start-56`) to center on
+    // the CONTENT column, not the whole viewport — otherwise the CTA is pulled
+    // ~7rem off-centre on desktop. (Matches BottomNav's `lg:w-56`.)
+    expect(wrapperClasses).toContain('lg:start-56');
+    expect(wrapperClasses).toContain('lg:bottom-6');
     // The Button must carry NO competing position utility (no conflict to lose).
     const buttonClasses = contribute.className.split(/\s+/);
     expect(buttonClasses).not.toContain('fixed');

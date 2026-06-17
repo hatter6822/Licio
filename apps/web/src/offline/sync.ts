@@ -9,6 +9,7 @@
 // separately. iOS lacks the Background Sync API, so this runs on the foreground
 // `online`/app-open path too (WS-C.2.3 edge case).
 import {
+  type AttentionAggregate,
   attentionAggregateBatchSchema,
   contributionCreateSchema,
   createReportRequestSchema,
@@ -21,6 +22,7 @@ import {
   uploadAttentionAggregates,
 } from '../lib/api.js';
 import { track } from '../lib/telemetry.js';
+import { attentionUploadsCoolingDown } from '../signals/attention-cooldown.js';
 import * as queue from './queue.js';
 import type { PendingOperationRecord } from './schemas.js';
 
@@ -64,7 +66,12 @@ export interface SyncOptions {
   onTerminalFailure?: (operation: PendingOperationRecord, reason: string) => void;
 }
 
-/** Dispatch one operation to its typed endpoint, validating the payload first. */
+/**
+ * Dispatch one PER-OPERATION write to its typed endpoint, validating the payload
+ * first. Attention aggregates are NOT sent here — they are coalesced into a
+ * single batched upload by {@link drainAttentionQueue} (WS-C.4.4: attention is
+ * batched, not per-event, on the replay path exactly as on the live flush).
+ */
 async function sendOperation(operation: PendingOperationRecord): Promise<void> {
   switch (operation.operationType) {
     case 'contribution':
@@ -73,14 +80,10 @@ async function sendOperation(operation: PendingOperationRecord): Promise<void> {
     case 'report':
       await createReport(createReportRequestSchema.parse(operation.payload));
       return;
-    case 'attention-aggregate': {
-      const { aggregates } = attentionAggregateBatchSchema.parse(operation.payload);
-      await uploadAttentionAggregates(aggregates);
-      return;
-    }
-    case 'draft-sync':
-      // Opt-in cross-device draft sync (client-wins). Left pending until the
-      // draft-sync endpoint is wired; not processed here so it never loops.
+    default:
+      // attention-aggregate is coalesced in drainAttentionQueue; draft-sync is
+      // left pending until its endpoint is wired. The caller filters both out,
+      // so reaching here is a no-op guard rather than a silent drop.
       return;
   }
 }
@@ -100,6 +103,75 @@ function isTerminal(error: unknown): boolean {
   return false;
 }
 
+/**
+ * Apply the conflict policy to one failed operation: park terminal rejections
+ * (and retry-exhausted transients) as `failed` for manual retry; otherwise
+ * return it to `pending` with the attempt recorded. Shared by the per-operation
+ * loop and the coalesced attention drain so both decide failures identically.
+ */
+async function resolveFailure(
+  operation: PendingOperationRecord,
+  error: unknown,
+  options: SyncOptions,
+  result: SyncResult,
+): Promise<void> {
+  const reason = error instanceof Error ? error.message : 'unknown error';
+  if (isTerminal(error)) {
+    await queue.markFailed(operation.operationId, reason);
+    options.onTerminalFailure?.(operation, reason);
+    result.failed += 1;
+  } else if (operation.attempts + 1 >= MAX_QUEUE_ATTEMPTS) {
+    await queue.markFailed(operation.operationId, `exhausted retries: ${reason}`);
+    options.onTerminalFailure?.(operation, reason);
+    result.failed += 1;
+  } else {
+    await queue.markForRetry(operation.operationId, reason);
+    result.retried += 1;
+  }
+}
+
+/**
+ * Send all queued attention batches as ONE coalesced upload (WS-C.4.4: attention
+ * is batched, not per-event — the replay path matches the live flush). Replaying
+ * each queued batch as its own request would burst the per-account rate limit
+ * (the very thing that fills this queue) and feed back into more 429s, so the
+ * backlog is merged into a single POST. While the endpoint's Retry-After window
+ * is open the batches are left pending and untouched — no network, no attempt
+ * burn — to retry on a later trigger once it clears. Corrupt payloads are parked
+ * as terminal; the coalesced batch shares one success/failure verdict.
+ */
+async function drainAttentionQueue(
+  ops: PendingOperationRecord[],
+  options: SyncOptions,
+  result: SyncResult,
+): Promise<void> {
+  if (ops.length === 0 || attentionUploadsCoolingDown()) return;
+
+  const valid: PendingOperationRecord[] = [];
+  const merged: AttentionAggregate[] = [];
+  for (const op of ops) {
+    const parsed = attentionAggregateBatchSchema.safeParse(op.payload);
+    if (parsed.success) {
+      valid.push(op);
+      merged.push(...parsed.data.aggregates);
+    } else {
+      await queue.markFailed(op.operationId, 'corrupt attention payload');
+      options.onTerminalFailure?.(op, 'corrupt attention payload');
+      result.failed += 1;
+    }
+  }
+  if (valid.length === 0) return;
+
+  for (const op of valid) await queue.markInFlight(op.operationId);
+  try {
+    await uploadAttentionAggregates(merged);
+    for (const op of valid) await queue.remove(op.operationId);
+    result.sent += valid.length;
+  } catch (error) {
+    for (const op of valid) await resolveFailure(op, error, options, result);
+  }
+}
+
 let processing = false;
 
 /**
@@ -114,28 +186,29 @@ export async function processPendingQueue(options: SyncOptions = {}): Promise<Sy
   try {
     const pending = await queue.listPending();
     for (const operation of pending) {
-      if (operation.operationType === 'draft-sync') continue;
+      // Attention aggregates are coalesced into one upload below; draft-sync is
+      // left pending until its endpoint is wired. Everything else (contributions,
+      // reports) sends one operation at a time.
+      if (
+        operation.operationType === 'attention-aggregate' ||
+        operation.operationType === 'draft-sync'
+      ) {
+        continue;
+      }
       await queue.markInFlight(operation.operationId);
       try {
         await sendOperation(operation);
         await queue.remove(operation.operationId);
         result.sent += 1;
       } catch (error) {
-        const reason = error instanceof Error ? error.message : 'unknown error';
-        if (isTerminal(error)) {
-          await queue.markFailed(operation.operationId, reason);
-          options.onTerminalFailure?.(operation, reason);
-          result.failed += 1;
-        } else if (operation.attempts + 1 >= MAX_QUEUE_ATTEMPTS) {
-          await queue.markFailed(operation.operationId, `exhausted retries: ${reason}`);
-          options.onTerminalFailure?.(operation, reason);
-          result.failed += 1;
-        } else {
-          await queue.markForRetry(operation.operationId, reason);
-          result.retried += 1;
-        }
+        await resolveFailure(operation, error, options, result);
       }
     }
+    await drainAttentionQueue(
+      pending.filter((op) => op.operationType === 'attention-aggregate'),
+      options,
+      result,
+    );
   } finally {
     processing = false;
   }

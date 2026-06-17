@@ -72,6 +72,11 @@ import {
 import type { AppType } from 'api';
 import { hc } from 'hono/client';
 import { z } from 'zod';
+import {
+  attentionUploadsCoolingDown,
+  noteAttentionRateLimited,
+  noteAttentionUploadOk,
+} from '../signals/attention-cooldown.js';
 import { useAuthStore } from '../stores/auth.js';
 
 const API_BASE: string =
@@ -335,11 +340,35 @@ export async function createReport(request: CreateReportRequest): Promise<Report
   return parseResponse(response, reportCreatedResponseSchema);
 }
 
+/** Parse a `Retry-After` header (delta-seconds form) with a 1 s floor. */
+function retryAfterSeconds(response: Response): number {
+  const raw = response.headers.get('Retry-After');
+  const parsed = raw !== null ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+/**
+ * The single network egress for attention aggregates. Honours the endpoint's
+ * per-account rate limit (WS-C.4.4, SPEC §25.5): while a prior 429's `Retry-After`
+ * window is open it short-circuits WITHOUT touching the network (a transient
+ * throw, so the caller keeps the idempotent batch buffered/queued for later),
+ * and a fresh 429 arms that window. Enforcing this here means every caller — the
+ * processor's interval flush AND the offline-sync replay — backs off by
+ * construction rather than hammering a limit that is asking it to wait.
+ */
 export async function uploadAttentionAggregates(
   aggregates: AttentionAggregate[],
 ): Promise<AttentionIngestAck> {
   const body = attentionAggregateBatchSchema.parse({ aggregates });
+  if (attentionUploadsCoolingDown()) {
+    throw new ApiClientError('rate_limited', 'Attention uploads are cooling down', 429);
+  }
   const response = await client.v1.attention.aggregates.$post({ json: body });
+  if (response.status === 429) {
+    noteAttentionRateLimited(retryAfterSeconds(response));
+  } else if (response.ok) {
+    noteAttentionUploadOk();
+  }
   return parseResponse(response, attentionIngestAckSchema);
 }
 
