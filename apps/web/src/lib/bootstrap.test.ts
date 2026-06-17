@@ -116,6 +116,30 @@ describe('applySignalPolicy', () => {
     await applySignalPolicy();
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ collect: false }));
   });
+
+  it('does NOT collect when the session is expired but a user is retained', async () => {
+    // expireSession() keeps `user` for the UI but there is no valid session
+    // cookie, so an upload would 401 at the WS-E ingestion boundary. Collection
+    // must be gated on the live session status, not the retained user object
+    // (regression: the 401-on-every-story-interaction bug).
+    const processor = new SignalProcessor();
+    const spy = vi.spyOn(processor, 'setCollectionPolicy');
+    setSignalProcessor(processor);
+    useAuthStore.getState().setAuthenticated(USER);
+    useAuthStore.getState().expireSession();
+    vi.mocked(api.fetchSettings).mockResolvedValue({
+      feed_mode: 'balanced',
+      personalization_enabled: true,
+      privacy_level: 'standard',
+      theme: 'system',
+      reduced_motion: 'system',
+    });
+    await applySignalPolicy();
+    // The user context is still present (UI needs it) ...
+    expect(useAuthStore.getState().user).not.toBeNull();
+    // ... but collection is off because the session is not live.
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ collect: false }));
+  });
 });
 
 describe('startRuntime', () => {

@@ -21,8 +21,11 @@ device.
 > authenticated server surfaces (`docs/events/README.md`): uploads pass
 > ownership, replay, rate-limit, and privacy guards, and the ledger returns
 > only the session user's entries. Correspondingly, the client collection
-> policy requires an authenticated session (anonymous readers generate no
-> attention data), and the policy re-applies live on login/logout.
+> policy requires a *live* authenticated session — gated on the genuine auth
+> status, not a retained/optimistically-rehydrated `user` object — so anonymous
+> AND session-expired readers generate no attention data (their uploads would
+> only 401 at the ingestion boundary). The policy re-applies live whenever the
+> effective session identity changes: login, logout, and session expiry.
 
 ## Layers
 
