@@ -316,6 +316,42 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
     expect(surviving[0]?.reasonCode).toBe('MOD_HARASS_001');
   });
 
+  it('audit: right-to-erasure also scrubs an ACCOUNT-target id (no stable account id survives)', async () => {
+    // When the audited TARGET is the account being erased, `target_id` holds the
+    // account UUID — but it is polymorphic (not an FK), so the SET NULL cascade
+    // cannot reach it.  The BEFORE DELETE scrub trigger NULLs it on hard purge,
+    // so no stable account id survives in the immutable log.
+    const subject = await insertUser('accounterasesubject');
+    await audit.append({
+      actorUserId: null,
+      actorRole: 'ROLE_SAFETY',
+      action: 'suspend',
+      reasonCode: 'MOD_HARASS_001',
+      targetType: 'account',
+      targetId: subject,
+      subjectUserId: subject,
+      priorState: 'active',
+      nextState: 'suspended',
+      reversible: true,
+      linkedActionId: null,
+      reportIds: [],
+      coApproverUserId: null,
+      notes: 'pre-purge account action',
+    });
+    const { users } = await import('@licio/db');
+    const { eq } = await import('drizzle-orm');
+    await db.delete(users).where(eq(users.userId, subject));
+    const surviving = (await audit.list({ action: 'suspend', limit: 50 })).filter(
+      (r) => r.notes === 'pre-purge account action',
+    );
+    expect(surviving.length).toBe(1);
+    // The substantive record is preserved, but the account id is gone from BOTH
+    // the user-reference columns AND the polymorphic target_id.
+    expect(surviving[0]?.targetId).toBeNull();
+    expect(surviving[0]?.subjectUserId).toBeNull();
+    expect(surviving[0]?.reasonCode).toBe('MOD_HARASS_001');
+  });
+
   it('blocks: idempotent insert, bilateral enforcement, owned delete', async () => {
     const a = await insertUser('blocker');
     const b = await insertUser('blocked');

@@ -283,6 +283,19 @@ These are honest, tracked gaps — see `docs/planning/11-trust-and-safety.md`:
   senior queue (today `escalate` sets the case status and seniors pull it);
   room-report room-steward-layer-first routing; and the on-call paging PROVIDER
   (a WS-O binding — alerts log today).
+- **Right-to-erasure scrub of the polymorphic `target_id` on the OPERATIONAL
+  tables** (`moderation_cases`/`moderation_reports`/`moderation_actions`/
+  `coordinated_report_incidents`).  Migration `0026` scrubs the **immutable audit
+  log** (`moderation_audit.target_id`, already nullable) for `target_type =
+  'account'` rows on hard purge — the long-term retention surface, and the line
+  the review flagged.  The operational tables hold the same polymorphic account
+  id; scrubbing them needs `target_id` made nullable there (their app record type
+  is `string`, so a small mapper/type change) plus the same `users`-DELETE scrub
+  arm — deferred because it is a 4-table nullability migration that must be
+  validated against the gated Postgres (the partial unique index
+  `moderation_cases_open_target_uq` relies on NULLs being distinct, which the NULL
+  scrub satisfies but a sentinel would not).  Closure target: a follow-up WS-J
+  migration extending the `0026` `moderation_audit_scrub_account_target` trigger.
 
 ## Room-class scope (honest boundary)
 
