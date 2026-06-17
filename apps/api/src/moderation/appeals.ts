@@ -288,6 +288,12 @@ export async function decideAppeal(
     decisionExplanation: explanation,
   });
 
+  // Clear the ORIGINAL action notice's pending-appeal flag → its final status, so
+  // the inbox stops rendering "Appeal under review" after the decision (the
+  // outcome notice below is a SEPARATE record; the original would otherwise stay
+  // stale forever — WS-J.1.3d).
+  await services.notices.markAppealDecided(appeal.appellantUserId, appeal.actionId, status);
+
   // Notify the appellant (WS-J.1.3d).
   await createAppealOutcomeNotice(services, {
     userId: appeal.appellantUserId,

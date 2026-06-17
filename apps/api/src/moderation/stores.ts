@@ -386,6 +386,10 @@ export interface ModerationNoticeStore {
    *  so the inbox stops offering an Appeal affordance once one is filed (the
    *  persistent `appealable` flag never clears on its own — WS-J.1.3d). */
   markAppealPending(userId: string, actionId: string): Promise<void>;
+  /** Update the action notice(s) for (userId, actionId) to the appeal's FINAL
+   *  status once decided, so the inbox no longer shows "Appeal under review"
+   *  after an overturn/uphold/modify (WS-J.1.3d). */
+  markAppealDecided(userId: string, actionId: string, status: AppealStatus): Promise<void>;
   unreadCount(userId: string): Promise<number>;
   clear(): Promise<void>;
 }
@@ -1028,9 +1032,12 @@ export class InMemoryModerationNoticeStore implements ModerationNoticeStore {
     return true;
   }
   async markAppealPending(userId: string, actionId: string): Promise<void> {
+    await this.markAppealDecided(userId, actionId, 'pending');
+  }
+  async markAppealDecided(userId: string, actionId: string, status: AppealStatus): Promise<void> {
     for (const [id, r] of this.#rows) {
       if (r.userId === userId && r.actionId === actionId && r.kind === 'action') {
-        this.#rows.set(id, { ...r, appealStatus: 'pending' });
+        this.#rows.set(id, { ...r, appealStatus: status });
       }
     }
   }

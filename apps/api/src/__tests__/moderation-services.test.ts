@@ -983,6 +983,27 @@ describe('appeals (independence enforced)', () => {
     expect(after?.appealStatus).toBe('pending');
   });
 
+  it('#5 updates the action notice to the final status once the appeal is decided', async () => {
+    const actionId = await applyHide();
+    await submitAppeal(services, AUTHOR, { action_id: actionId, user_statement: 'reconsider' });
+    const appeal = await services.appeals.getByActionId(actionId);
+    if (!appeal) throw new Error('appeal missing');
+    await decideAppeal(
+      services,
+      appealsActor(),
+      appeal.appealId,
+      'uphold',
+      'MOD_HARASS_001',
+      'Reviewed; the action stands.',
+      undefined,
+    );
+    const after = (await services.notices.listByUser(AUTHOR, null, 10)).find(
+      (n) => n.actionId === actionId && n.kind === 'action',
+    );
+    // No longer 'pending' → the inbox stops rendering "Appeal under review".
+    expect(after?.appealStatus).toBe('upheld');
+  });
+
   it('rejects a duplicate appeal (409 semantics)', async () => {
     const actionId = await applyHide();
     await submitAppeal(services, AUTHOR, { action_id: actionId, user_statement: 'first' });

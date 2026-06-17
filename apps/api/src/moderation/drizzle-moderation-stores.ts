@@ -26,7 +26,7 @@ import {
   moderationReports,
   reviewerStatus,
 } from '@licio/db';
-import type { ReportTargetType, ReviewerAvailability } from '@licio/shared';
+import type { AppealStatus, ReportTargetType, ReviewerAvailability } from '@licio/shared';
 import {
   and,
   asc,
@@ -1208,9 +1208,13 @@ export class DrizzleModerationNoticeStore implements ModerationNoticeStore {
   }
 
   async markAppealPending(userId: string, actionId: string): Promise<void> {
+    await this.markAppealDecided(userId, actionId, 'pending');
+  }
+
+  async markAppealDecided(userId: string, actionId: string, status: AppealStatus): Promise<void> {
     await this.#db
       .update(moderationNotices)
-      .set({ appealStatus: 'pending' })
+      .set({ appealStatus: status })
       .where(
         and(
           eq(moderationNotices.userId, userId),
