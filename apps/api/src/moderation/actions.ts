@@ -195,12 +195,22 @@ export async function applyAction(
   // The action/audit report list is the matching case's aggregated reports (the
   // console passes `case_id` but not the ids; the audit view exposes
   // `report_ids` but not `case_id`), so the resolved reports stay traceable.
+  const caseReportIds =
+    linkedCase && caseMatches
+      ? (await services.reports.listByCase(linkedCase.caseId)).map((r) => r.reportId)
+      : [];
+  // Client-supplied `report_ids` are accountability claims — trust them ONLY
+  // when they belong to the matched case.  A forged/stale id, or one from a
+  // DIFFERENT case/target, must never enter this action's record: it would
+  // claim to resolve reports the action never addressed while
+  // `resolveCaseForAction` only touches the matched case.  With no matched case
+  // there is nothing to validate against, so supplied ids are dropped and the
+  // action's report list is empty (it still stands on its own target).
+  const caseReportIdSet = new Set(caseReportIds);
   const reportIds =
     request.report_ids && request.report_ids.length > 0
-      ? request.report_ids
-      : linkedCase && caseMatches
-        ? (await services.reports.listByCase(linkedCase.caseId)).map((r) => r.reportId)
-        : [];
+      ? request.report_ids.filter((id) => caseReportIdSet.has(id))
+      : caseReportIds;
 
   // MFCI-2 (WS-J.2.6e): while a coordinated-report incident holds the case,
   // volume-driven enforcement is DELAYED pending integrity review — so a

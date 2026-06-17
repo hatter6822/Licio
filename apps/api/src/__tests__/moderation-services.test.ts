@@ -886,6 +886,45 @@ describe('action palette + revert', () => {
     expect((await services.cases.getById(otherCase.caseId))?.status).toBe('new');
   });
 
+  it('#8 records only client report_ids that belong to the matched case', async () => {
+    // A real report aggregates into an open case for TARGET.
+    const submitted = await submitReport(services, REPORTER, report());
+    expect(submitted.ok).toBe(true);
+    if (!submitted.ok) return;
+    const theCase = await services.cases.findOpenByTarget('content', TARGET);
+    if (!theCase) throw new Error('case not opened');
+    const realReportId = submitted.response.report_id;
+    const forgedReportId = '00000000-0000-4000-9000-0000000000d1';
+    const out = await applyAction(services, safetyActor(), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'hide',
+      reason_code: 'MOD_HARASS_001',
+      case_id: theCase.caseId,
+      report_ids: [realReportId, forgedReportId], // one real, one forged
+    });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const recorded = await services.actions.getById(out.response.action_id);
+    // The forged id (not in the matched case) is dropped from the record.
+    expect(recorded?.reportIds).toEqual([realReportId]);
+  });
+
+  it('#8 drops supplied report_ids when no matched case validates them', async () => {
+    const out = await applyAction(services, safetyActor(), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'hide',
+      reason_code: 'MOD_HARASS_001',
+      // No case_id → nothing to validate against → supplied ids are dropped.
+      report_ids: ['00000000-0000-4000-9000-0000000000d2'],
+    });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const recorded = await services.actions.getById(out.response.action_id);
+    expect(recorded?.reportIds).toEqual([]);
+  });
+
   it('a room case is clearable/escalatable but rejects enforcement verbs', async () => {
     const ROOM = '00000000-0000-4000-9000-0000000000ff';
     const roomCase = await services.cases.insert({
