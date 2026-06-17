@@ -345,6 +345,23 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
       ),
     );
   });
+
+  it('#6 shows the story snapshot AND the thread context for a story-level report', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      content_kind: 'story',
+      reported_contribution_id: null, // story-level: the story is NOT in thread_context
+      snapshot_body: 'Reported Story Title\n\nThe story excerpt under review.',
+      side_by_side: null,
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    // BOTH the story snapshot (title/excerpt) AND the surrounding thread render —
+    // the steward never decides on a hide/remove without seeing the story.
+    expect(await screen.findByText(/Reported Story Title/)).toBeInTheDocument();
+    expect(screen.getByText(/the reported contribution text/)).toBeInTheDocument();
+  });
 });
 
 describe('AppealsPanel', () => {

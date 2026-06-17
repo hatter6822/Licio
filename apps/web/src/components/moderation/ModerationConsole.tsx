@@ -285,6 +285,15 @@ function CaseReviewDialog({
               <h3 className="text-xs font-semibold uppercase text-ink-muted">
                 {t('console.reportedContent', 'Reported content')}
               </h3>
+              {/* The reported item's own body (a story's title/excerpt, or a
+                  contribution's report-time body) shown ALONGSIDE the thread —
+                  a story-level report (reported_contribution_id null) is not in
+                  thread_context, so without this the steward never sees it. */}
+              {data.snapshot_body ? (
+                <pre className="mt-1 overflow-auto rounded bg-surface p-2 text-xs">
+                  {data.snapshot_body}
+                </pre>
+              ) : null}
               {data.thread_context.length > 0 ? (
                 <ul className="mt-1 flex flex-col gap-1">
                   {data.thread_context.map((item) => {
@@ -305,10 +314,6 @@ function CaseReviewDialog({
                     );
                   })}
                 </ul>
-              ) : data.snapshot_body ? (
-                <pre className="mt-1 overflow-auto rounded bg-surface p-2 text-xs">
-                  {data.snapshot_body}
-                </pre>
               ) : null}
             </section>
           ) : null}
