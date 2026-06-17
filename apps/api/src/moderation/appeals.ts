@@ -269,7 +269,13 @@ export async function decideAppeal(
     if (!original.reverted) {
       await performRevert(services, actor, original);
     }
-    if (decision === 'modify' && modifiedAction && original.subjectUserId) {
+    // Apply the replacement ONLY when the original was actually active and we
+    // just reverted it.  If the original had ALREADY been reverted while the
+    // appeal was pending (another steward, auto-expiry), `performRevert` was
+    // skipped above — applying a fresh sanction here would re-hide/re-restrict a
+    // user/content that was already cleared.  Decide the appeal (status,
+    // notice, audit) without re-sanctioning.
+    if (decision === 'modify' && modifiedAction && original.subjectUserId && !original.reverted) {
       await applyModifiedAction(services, actor, original, modifiedAction, reasonCode);
     }
   }

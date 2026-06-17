@@ -94,9 +94,14 @@ export async function resolveIncident(
     return { ok: false, code: 'already_resolved', message: 'Incident already resolved' };
   }
   const nowIso = new Date(services.now()).toISOString();
-  const resolved = await services.incidents.resolve(incidentId, resolution, actor.userId, nowIso);
-  if (resolved === null) return { ok: false, code: 'not_found', message: 'Incident not found' };
 
+  // Reconcile the linked case FIRST (lift the enforcement delay / dismiss), THEN
+  // mark the incident resolved.  The stores share no transaction, so if the
+  // incident write failed AFTER the incident was closed, the incident would
+  // vanish from the open queue (retries 409 `already_resolved`) while the case
+  // stayed enforcement-delayed and non-integrity reviewers stayed blocked.
+  // Reconcile-first inverts that: a failure leaves the case correctly reconciled
+  // and the incident still open for a retry (the retry's reconcile is idempotent).
   let caseStatus: ReportCaseStatus | null = null;
   if (incident.caseId !== null) {
     const theCase = await services.cases.getById(incident.caseId);
@@ -109,6 +114,9 @@ export async function resolveIncident(
       caseStatus = updated?.status ?? theCase.status;
     }
   }
+
+  const resolved = await services.incidents.resolve(incidentId, resolution, actor.userId, nowIso);
+  if (resolved === null) return { ok: false, code: 'not_found', message: 'Incident not found' };
 
   await writeAudit(services, {
     actorUserId: actor.userId,

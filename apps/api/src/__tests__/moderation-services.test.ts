@@ -527,6 +527,61 @@ describe('MFCI-2 enforcement delay + incident resolution', () => {
     );
     expect(again.ok).toBe(false);
   });
+
+  it('#6 reconciles the case before resolving the incident (partial-failure safe)', async () => {
+    services = createInMemoryModerationServices();
+    const caseId = await delayedCase();
+    const incident = await services.incidents.insert({
+      caseId,
+      targetType: 'content',
+      targetId: TARGET,
+      reportCount: 8,
+      windowSeconds: 600,
+      coordinationScore: 0.4,
+      severity: 'severe',
+      status: 'open',
+      summary: 'aggregate',
+      reviewedAt: null,
+      reviewedBy: null,
+    });
+    // The incident write fails AFTER the case is reconciled: the delay must
+    // already be lifted (reviewers unblocked) and the incident left OPEN to retry
+    // (not vanished from the queue while the case stays delayed).
+    services.incidents.resolve = async () => {
+      throw new Error('incident store unavailable');
+    };
+    await expect(
+      resolveIncident(services, integrityActor(), incident.incidentId, 'cleared', undefined),
+    ).rejects.toThrow(/incident store unavailable/);
+    expect((await services.cases.getById(caseId))?.enforcementDelayed).toBe(false);
+    expect((await services.incidents.getById(incident.incidentId))?.status).toBe('open');
+  });
+
+  it('#4 commits the enforcement delay synchronously (no background flush)', async () => {
+    services = createInMemoryModerationServices({
+      content: recordingContentPort(),
+      users: userPort({}), // reporters resolve as new accounts (null age)
+      config: {
+        coordinationMinReports: 2,
+        coordinationMinDistinctReporters: 2,
+        coordinationDelayThreshold: 0.1,
+      },
+    });
+    const reporters = [
+      '00000000-0000-4000-8000-0000000004r1',
+      '00000000-0000-4000-8000-0000000004r2',
+    ];
+    let last: Awaited<ReturnType<typeof submitReport>> | undefined;
+    for (const r of reporters) {
+      last = await submitReport(services, r, report({ local_operation_id: `op-${r}` }));
+    }
+    expect(last?.ok).toBe(true);
+    // detectCoordination is AWAITED inside submitReport, so the MFCI-2 delay is
+    // already committed when the last report returns — no settle()/background flush
+    // (the pre-fix code backgrounded it, leaving an enforce-before-delay window).
+    const c = await services.cases.findOpenByTarget('content', TARGET);
+    expect(c?.enforcementDelayed).toBe(true);
+  });
 });
 
 describe('reversal integrity (WS-J.2.3b)', () => {
@@ -912,6 +967,46 @@ describe('appeals (independence enforced)', () => {
     );
     expect(decision.ok).toBe(true);
     expect(decision.ok && decision.status).toBe('modified');
+  });
+
+  it('#5 modify does not re-apply a sanction when the original was already reverted', async () => {
+    const port = recordingContentPort();
+    services = createInMemoryModerationServices({
+      content: port,
+      users: userPort({ [AUTHOR]: 100 }),
+    });
+    const out = await applyAction(services, safetyActor(), {
+      target_type: 'account',
+      target_id: AUTHOR,
+      action: 'suspend',
+      reason_code: 'MOD_HARASS_001',
+    });
+    if (!out.ok) throw new Error('suspend failed');
+    await submitAppeal(services, AUTHOR, {
+      action_id: out.response.action_id,
+      user_statement: 's',
+    });
+    const appeal = await services.appeals.getByActionId(out.response.action_id);
+    if (!appeal) throw new Error('appeal not created');
+    // The original sanction is reverted (another steward / auto-expiry) WHILE the
+    // appeal is pending → the account is already 'active'.
+    await revertAction(services, safetyActor(), out.response.action_id);
+    expect(port.accountStates.at(-1)?.state).toBe('active');
+    port.accountStates.length = 0;
+
+    // Deciding the appeal as 'modify' must NOT re-impose a (lesser) sanction on
+    // the already-cleared account.
+    const decision = await decideAppeal(
+      services,
+      appealsActor(),
+      appeal.appealId,
+      'modify',
+      'MOD_HARASS_001',
+      'reduce to restrict',
+      'restrict',
+    );
+    expect(decision.ok).toBe(true);
+    expect(port.accountStates).toHaveLength(0); // no re-application
   });
 
   it('#8 paginates the appeal queue via the keyset cursor', async () => {

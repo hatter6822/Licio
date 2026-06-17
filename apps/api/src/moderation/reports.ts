@@ -288,8 +288,22 @@ export async function submitReport(
     });
   }
 
-  // 9. Coordinated-report detection (base-rate conditioned; MFCI-1/2).
-  services.trackBackground(detectCoordination(services, theCase));
+  // 9. Coordinated-report detection (base-rate conditioned; MFCI-1/2).  AWAITED
+  //    (not backgrounded) so the enforcement delay is committed BEFORE the report
+  //    is acknowledged — otherwise submitReport could return with
+  //    enforcementDelayed=false (and a crash could drop the background task),
+  //    leaving a window in which a non-integrity reviewer enforces because
+  //    applyAction only checks the stored flag.  A detection failure is logged +
+  //    metered, never fails the already-saved report (the hourly batch backstops).
+  try {
+    await detectCoordination(services, theCase);
+  } catch (error) {
+    services.metrics.increment('moderation.coordination_detect_failed');
+    services.log('moderation.coordination_detect_failed', {
+      caseId: theCase.caseId,
+      error: String(error),
+    });
+  }
 
   return { ok: true, response: toResponse(report, idempotent) };
 }
