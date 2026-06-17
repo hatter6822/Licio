@@ -1043,19 +1043,27 @@ export async function seedForumDemoData(
       'base64',
     ),
   );
-  await forum.uploads.put(
-    {
-      uploadId: imageUploadId,
-      ownerUserId: lena,
-      contentType: 'image/png',
-      byteSize: pngBytes.byteLength,
-      altText: 'A chart of harbor water-clarity readings rising over the quarter.',
-      storageRef: `demo/${imageUploadId}.png`,
-      metadataStripped: true,
-      scanState: 'clear',
-    },
-    pngBytes,
-  );
+  // The upload row + bytes live on the LONG-LIVED uploads store, NOT the seed
+  // transaction: the bytes must survive commit (the dev fallback holds them in
+  // memory per store instance), and the row must be visible to the in-transaction
+  // image story that FK-references it (uploads commit before the story insert; the
+  // soft `ownerStoryId` back-link has no FK). The existence guard keeps a retry —
+  // after a rolled-back content transaction — from re-inserting the same upload.
+  if ((await forum.uploads.getRecord(imageUploadId)) === null) {
+    await forum.uploads.put(
+      {
+        uploadId: imageUploadId,
+        ownerUserId: lena,
+        contentType: 'image/png',
+        byteSize: pngBytes.byteLength,
+        altText: 'A chart of harbor water-clarity readings rising over the quarter.',
+        storageRef: `demo/${imageUploadId}.png`,
+        metadataStripped: true,
+        scanState: 'clear',
+      },
+      pngBytes,
+    );
+  }
   const imageStory = await ingestion.stories.createWithThread(
     {
       storyId: S(26),
@@ -1583,6 +1591,129 @@ export async function seedForumDemoData(
     },
   ]);
 
+  // Discussion on the remaining stories so EVERY story has a populated thread
+  // (delivering the "every story has discussion" intent above): a clarifying
+  // exchange on the room_only questions (S3, S6), civic Q&A (S14, S21, S26), the
+  // archived recall write-up's method trail (S20), the expert methodology
+  // exchange (S23), and a note folding the verbatim repost to the original (S25).
+  // Transit timetable caveat (PRIVATE Transit room, room_only): the demo member
+  // (the room's only member) pins the missing caveat behind the "Needs Context".
+  await tree(T(3), 300, [
+    {
+      type: 'question',
+      author: demo,
+      body: 'Which caveat is missing — that the higher frequency is peak-hours only?',
+    },
+    {
+      type: 'explanation',
+      author: demo,
+      parent: 0,
+      body: 'Yes: the headline frequency holds 7–9am and 4–6pm; midday service is unchanged. The timetable should say so.',
+      metadata: { assumptions: 'Reading the published timetable at face value.' },
+    },
+  ]);
+  // Lead-testing footnotes (room_only question in a public room).
+  await tree(T(6), 310, [
+    {
+      type: 'explanation',
+      author: maya,
+      body: 'The footnotes switch the denominator from sampled homes to all service connections, so the headline rate reads lower than the per-home figure.',
+      metadata: { assumptions: 'Comparing the two denominators named in the footnotes.' },
+    },
+    {
+      type: 'answer',
+      author: demo,
+      parent: 0,
+      body: 'That matches my read. We should lead with the per-home rate and footnote the connection-level one, not the reverse.',
+    },
+  ]);
+  // Harbor cleanup schedule (public local).
+  await tree(T(14), 320, [
+    {
+      type: 'question',
+      author: theo,
+      body: 'Is the pier rotation the same as last quarter, or did any piers swap weeks?',
+    },
+    {
+      type: 'answer',
+      author: lena,
+      parent: 0,
+      body: 'Two piers swapped weeks; the rest is unchanged. The bulletin has the updated calendar.',
+    },
+  ]);
+  // Recall-petition write-up (public, archived ⇒ Resolved Context): the method
+  // trail behind the certified total.
+  await tree(T(20), 330, [
+    {
+      type: 'question',
+      author: raj,
+      body: 'How were duplicate signatures detected — by name, or by registered-voter id?',
+    },
+    {
+      type: 'answer',
+      author: admin,
+      parent: 0,
+      body: 'By registered-voter id against the voter file, so two distinct voters who share a name were never merged.',
+    },
+    {
+      type: 'evidence',
+      author: samd,
+      parent: 1,
+      body: 'The published rejection log lists each excluded signature with its reason code.',
+      citations: [{ url: 'https://example.org/elections/recall-rejection-log' }],
+      metadata: { evidence_type: 'primary_source' },
+    },
+  ]);
+  // Winter-rate filing (public, just submitted ⇒ Getting Attention): one opening
+  // question, kept light because no interpretation has formed yet.
+  await tree(T(21), 340, [
+    {
+      type: 'question',
+      author: samd,
+      body: 'Does the filing ask for a flat winter surcharge, or a tiered rate by usage?',
+    },
+  ]);
+  // Expert methodology question (public): a falsifiable-indicator exchange.
+  await tree(T(23), 350, [
+    {
+      type: 'answer',
+      author: samd,
+      body: 'A pre-registered threshold on weather-normalized demand would separate noise from a real shift.',
+    },
+    {
+      type: 'counterexample',
+      author: theo,
+      parent: 0,
+      body: 'Only if the normalization baseline is fixed in advance — otherwise the threshold moves with the data.',
+      metadata: {
+        relevance_explanation: 'Shows the indicator depends on a pre-committed baseline.',
+      },
+    },
+  ]);
+  // Verbatim repost of the winter-rate filing (public): a note folding it back to
+  // the original so the discussion stays in one place (the dedup demonstration).
+  await tree(T(25), 360, [
+    {
+      type: 'meta_discussion',
+      author: maya,
+      body: 'This is the same filing already posted; keeping the discussion on the original rather than splitting it here.',
+    },
+  ]);
+  // Harbor water-clarity image post (public): seasonal trend or real improvement?
+  await tree(T(26), 370, [
+    {
+      type: 'question',
+      author: theo,
+      body: 'Is the clarity trend seasonal, or a real improvement after the cleanup?',
+    },
+    {
+      type: 'answer',
+      author: lena,
+      parent: 0,
+      body: 'Partly seasonal, but the post-cleanup readings are above the same months last year.',
+    },
+  ]);
+
   // A couple of community syntheses on the richer new threads.
   const briefSummary = await forum.summaries.insert({
     summaryId: SUM(2),
@@ -1605,7 +1736,8 @@ export async function seedForumDemoData(
     body: 'Turnout is reported as a share of registered voters; a spot-check against certified totals matched.',
     citedBranchIds: [C(181)],
     citedEvidenceIds: [],
-    unresolvedUncertainty: null,
+    unresolvedUncertainty:
+      'Whether the registered-voter denominator is comparable across precincts with recent roll updates.',
     minorityViewsNote: null,
     authoredBy: raj,
     approvedBy: null,
@@ -1621,7 +1753,8 @@ export async function seedForumDemoData(
     body: 'Signatures were verified against the voter file; duplicates and out-of-district entries were rejected with reasons; the certified total cleared the threshold.',
     citedBranchIds: [],
     citedEvidenceIds: [],
-    unresolvedUncertainty: null,
+    unresolvedUncertainty:
+      'Whether the same rejection criteria were applied consistently across every signature batch.',
     minorityViewsNote: null,
     authoredBy: admin,
     approvedBy: null,

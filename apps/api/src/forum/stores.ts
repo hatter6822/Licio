@@ -124,6 +124,27 @@ export interface SummaryRecord {
   updatedAt: string;
 }
 
+/**
+ * §24.3 invariant, enforced at EVERY summary-insert path (defense in depth
+ * below the wire schema's `.refine` and the Postgres `summaries_uncertainty`
+ * CHECK): a community/steward summary MUST carry a non-empty unresolved-
+ * uncertainty note.  Without this, a direct store writer (e.g. the dev seed)
+ * could persist a summary the in-memory store accepts but the thread-overview
+ * read schema later rejects — turning a bad write into an HTTP 500 on every
+ * read of that thread.  Asserting here makes the write fail loudly at its
+ * source instead, symmetric with the validated `createSummary` service path.
+ */
+export function assertSummaryUncertainty(
+  record: Pick<SummaryRecord, 'layer' | 'unresolvedUncertainty'>,
+): void {
+  if (
+    record.layer !== 'automated_draft' &&
+    (record.unresolvedUncertainty === null || record.unresolvedUncertainty.trim().length === 0)
+  ) {
+    throw new Error('Community and steward summaries must state unresolved uncertainty (§24.3)');
+  }
+}
+
 export interface UploadRecord {
   uploadId: string;
   ownerUserId: string | null;
@@ -842,6 +863,7 @@ export class InMemorySummaryStore implements SummaryStore {
   }
 
   async insert(record: Omit<SummaryRecord, 'createdAt' | 'updatedAt'>): Promise<SummaryRecord> {
+    assertSummaryUncertainty(record);
     const at = iso(this.#now);
     const full: SummaryRecord = {
       ...record,
