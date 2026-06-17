@@ -321,7 +321,7 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
     // account UUID — but it is polymorphic (not an FK), so the SET NULL cascade
     // cannot reach it.  The BEFORE DELETE scrub trigger NULLs it on hard purge,
     // so no stable account id survives in the immutable log.
-    const subject = await insertUser('accounterasesubject');
+    const subject = await insertUser('acctscrub');
     await audit.append({
       actorUserId: null,
       actorRole: 'ROLE_SAFETY',
