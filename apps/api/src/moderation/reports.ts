@@ -376,7 +376,23 @@ export async function detectCoordination(
     reviewedAt: null,
     reviewedBy: null,
   });
-  if (!inserted) return; // a concurrent run already opened the incident for this target
+  if (!inserted) {
+    // An incident is already open for this target (a concurrent or prior
+    // detection run opened it).  The case's `enforcementDelayed` flag may be
+    // UNSET — a prior run could have opened the incident then crashed before the
+    // update below, or this detection is examining a newer case for the same
+    // target.  Without repair, `applyAction`'s `enforcementDelayed` check would
+    // let a non-integrity reviewer enforce despite the standing coordinated-
+    // report incident.  Reconcile the flag (idempotent; re-read fresh to avoid a
+    // redundant write under a brigade) WITHOUT re-paging/re-auditing — those
+    // fire exactly once, on the run that actually opened the incident.
+    const existing = await services.cases.getById(theCase.caseId);
+    if (existing && !existing.enforcementDelayed) {
+      await services.cases.update(theCase.caseId, { enforcementDelayed: true });
+      services.metrics.increment('reports.coordination_reconciled');
+    }
+    return;
+  }
 
   // MFCI-2: delay volume-driven enforcement pending integrity review.
   await services.cases.update(theCase.caseId, { enforcementDelayed: true });

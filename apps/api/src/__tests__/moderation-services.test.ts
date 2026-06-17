@@ -337,6 +337,69 @@ describe('submitReport', () => {
     // The page + delay fire exactly once (not once per duplicate incident).
     expect(alerts.filter((a) => a.kind === 'coordinated_report')).toHaveLength(1);
   });
+
+  it('#5 reconciles the case delay when an incident is already open but the case is not delayed', async () => {
+    services = createInMemoryModerationServices({
+      content: recordingContentPort(),
+      users: userPort({}),
+      alerts: { pageOnCall: (i) => alerts.push(i) },
+      config: {
+        coordinationMinDistinctReporters: 3,
+        coordinationMinReports: 3,
+        coordinationNewAccountDays: 7,
+      },
+    });
+    const theCase = await services.cases.insert({
+      caseId: '00000000-0000-4000-9000-0000000000c5',
+      targetType: 'content',
+      targetId: TARGET,
+      contentKind: 'contribution',
+      status: 'new',
+      severity: 'moderate',
+      routedTo: 'standard',
+      assignedTo: null,
+      reportCount: 0,
+      enforcementDelayed: false,
+      resolvedActionId: null,
+      slaDueAt: new Date(services.now() + 3_600_000).toISOString(),
+    });
+    // Simulate the crash gap: an incident is already open for the target, but the
+    // case was NOT delayed (the prior run died before `cases.update`).
+    const opened = await services.incidents.insertIfNoneOpenForTarget({
+      caseId: theCase.caseId,
+      targetType: 'content',
+      targetId: TARGET,
+      reportCount: 4,
+      windowSeconds: 3600,
+      coordinationScore: 1,
+      severity: 'moderate',
+      status: 'open',
+      summary: 'pre-existing incident',
+      reviewedAt: null,
+      reviewedBy: null,
+    });
+    expect(opened.inserted).toBe(true);
+    expect((await services.cases.getById(theCase.caseId))?.enforcementDelayed).toBe(false);
+    for (let i = 0; i < 4; i += 1) {
+      await services.reports.insert({
+        caseId: theCase.caseId,
+        reporterUserId: `00000000-0000-4000-8000-00000000030${i}`,
+        targetType: 'content',
+        targetId: TARGET,
+        contentKind: 'contribution',
+        reasonCode: 'MOD_HARASS_001',
+        severity: 'moderate',
+        context: null,
+        evidenceUrls: [],
+        localOperationId: `op-c5-${i}`,
+      });
+    }
+    // A fresh detection run hits the existing-incident path → reconciles the flag.
+    await detectCoordination(services, theCase);
+    expect((await services.cases.getById(theCase.caseId))?.enforcementDelayed).toBe(true);
+    // No second page — the incident already existed (alert fires once, at open).
+    expect(alerts.filter((a) => a.kind === 'coordinated_report')).toHaveLength(0);
+  });
 });
 
 describe('#13 reporter / target_user queue filters', () => {
