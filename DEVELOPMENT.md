@@ -135,6 +135,13 @@ something to show.
 > and moderation queue never loaded). The seed now populates a readable thread
 > on every story, and the store rejects an uncertainty-less community/steward
 > summary at write time.
+>
+> On Postgres the forum/content seed now runs inside **one transaction**
+> (all-or-nothing), so a mid-seed failure can never leave a partial corpus that
+> traps the `ROOM_1` idempotency guard. In-memory dev re-seeds fresh on every
+> boot. A database **already** poisoned by the pre-fix build won't self-heal
+> (its committed `ROOM_1` makes the guard skip) — drop and re-migrate it
+> (`docker compose down -v` for the local stack) to pick up the full corpus.
 
 ### 3.2 The seven rating labels
 

@@ -48,6 +48,7 @@ import {
 import { storyReadableByUser } from './forum/rooms.js';
 import {
   createInMemoryForumServices,
+  type ForumServices,
   registerForumConsumers,
   setForumServices,
 } from './forum/services.js';
@@ -91,6 +92,7 @@ import { SubmissionRateLimiter } from './ingestion/prechecks.js';
 import { INGESTION_SCHEDULER_INTERVAL_MS, startIngestionScheduler } from './ingestion/scheduler.js';
 import {
   createInMemoryIngestionServices,
+  type IngestionServices,
   registerIngestionConsumers,
   setIngestionServices,
 } from './ingestion/services.js';
@@ -740,11 +742,46 @@ rankingServices.moderation = createDefaultModerationStateProvider({
 // best-effort (a seed failure never blocks serving).
 if (env.NODE_ENV !== 'production') {
   try {
-    await seedForumDemoData(forumServices, ingestionServices, identityServices.store);
+    if (db) {
+      // Postgres: the forum/content seed (rooms → stories → threads →
+      // contributions → summaries → claims/evidence/signatures/review queue)
+      // commits ALL-OR-NOTHING inside one transaction, so a mid-seed failure can
+      // never leave a partial corpus that traps the idempotency guard (which keys
+      // on ROOM_1, written early). Every content store is bound to the transaction
+      // handle; uploads and identity stay on the long-lived stores — the upload
+      // bytes must outlive the transaction (and its FK-referenced row commits
+      // before the in-transaction image story under READ COMMITTED), and both are
+      // independently idempotent (existence-guarded), so a retry never
+      // double-inserts. In-memory dev needs no transaction: it re-seeds fresh on
+      // every boot, so a partial seed can never persist across a restart.
+      await db.transaction(async (tx) => {
+        const txForum: ForumServices = {
+          ...forumServices,
+          rooms: new DrizzleRoomStore(tx),
+          lenses: new DrizzleLensStore(tx),
+          contributions: new DrizzleContributionStore(tx),
+          summaries: new DrizzleSummaryStore(tx),
+        };
+        const txIngestion: IngestionServices = {
+          ...ingestionServices,
+          stories: new DrizzleStoryStore(tx),
+          claims: new DrizzleClaimStore(tx),
+          evidence: new DrizzleEvidenceCardStore(tx),
+          signatures: new DrizzleSignatureStore(tx),
+          reviewQueue: new DrizzleReviewQueueStore(tx),
+        };
+        await seedForumDemoData(txForum, txIngestion, identityServices.store);
+      });
+    } else {
+      await seedForumDemoData(forumServices, ingestionServices, identityServices.store);
+    }
     // COMPUTE the demo's invariant outputs + reading signals by running the real
-    // WS-H batch and the WS-E PWAtt scorer over the shaped content, so the
-    // invariant surfaces and the Signal Ledger render on first boot through the
-    // production read paths (the hourly schedulers recompute the same way).
+    // WS-H batch and the WS-E PWAtt scorer over the shaped content (now committed),
+    // so the invariant surfaces and the Signal Ledger render on first boot through
+    // the production read paths (the hourly schedulers recompute the same way).
+    // This runs against the long-lived stores AFTER the content transaction
+    // commits, and is itself idempotent + hourly-recomputed, so it stays outside
+    // the seed transaction.
     await seedOperationalSignals(
       eventServices,
       invariantServices,

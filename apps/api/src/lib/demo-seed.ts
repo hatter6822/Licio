@@ -1043,19 +1043,27 @@ export async function seedForumDemoData(
       'base64',
     ),
   );
-  await forum.uploads.put(
-    {
-      uploadId: imageUploadId,
-      ownerUserId: lena,
-      contentType: 'image/png',
-      byteSize: pngBytes.byteLength,
-      altText: 'A chart of harbor water-clarity readings rising over the quarter.',
-      storageRef: `demo/${imageUploadId}.png`,
-      metadataStripped: true,
-      scanState: 'clear',
-    },
-    pngBytes,
-  );
+  // The upload row + bytes live on the LONG-LIVED uploads store, NOT the seed
+  // transaction: the bytes must survive commit (the dev fallback holds them in
+  // memory per store instance), and the row must be visible to the in-transaction
+  // image story that FK-references it (uploads commit before the story insert; the
+  // soft `ownerStoryId` back-link has no FK). The existence guard keeps a retry —
+  // after a rolled-back content transaction — from re-inserting the same upload.
+  if ((await forum.uploads.getRecord(imageUploadId)) === null) {
+    await forum.uploads.put(
+      {
+        uploadId: imageUploadId,
+        ownerUserId: lena,
+        contentType: 'image/png',
+        byteSize: pngBytes.byteLength,
+        altText: 'A chart of harbor water-clarity readings rising over the quarter.',
+        storageRef: `demo/${imageUploadId}.png`,
+        metadataStripped: true,
+        scanState: 'clear',
+      },
+      pngBytes,
+    );
+  }
   const imageStory = await ingestion.stories.createWithThread(
     {
       storyId: S(26),

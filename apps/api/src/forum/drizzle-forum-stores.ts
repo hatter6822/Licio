@@ -20,7 +20,7 @@
 // in-memory and production logs a loud warning (the same posture as the
 // WS-D DSAR archives): records survive, bytes do not survive a restart.
 
-import type { createDbClient } from '@licio/db';
+import type { DbExecutor } from '@licio/db';
 import {
   contributionEditHistory,
   contributions as contributionsTable,
@@ -64,7 +64,9 @@ import type {
 } from './stores.js';
 import { assertSummaryUncertainty } from './stores.js';
 
-type Db = ReturnType<typeof createDbClient>;
+// The base client OR an open transaction, so a store can be bound to one
+// `db.transaction(...)` (the atomic development seed) as well as run standalone.
+type Db = DbExecutor;
 
 function iso(value: Date): string {
   return value.toISOString();

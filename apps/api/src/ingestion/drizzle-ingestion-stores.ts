@@ -19,7 +19,7 @@
 // real migration chain.
 import {
   claims as claimsTable,
-  type createDbClient,
+  type DbExecutor,
   embeddings as embeddingsTable,
   evidenceCards as evidenceTable,
   ingestionReviewItems,
@@ -93,7 +93,9 @@ import type {
   ThreadShellRecord,
 } from './stores.js';
 
-type Db = ReturnType<typeof createDbClient>;
+// The base client OR an open transaction, so a store can be bound to one
+// `db.transaction(...)` (the atomic development seed) as well as run standalone.
+type Db = DbExecutor;
 
 const iso = (d: Date): string => d.toISOString();
 const isoOrNull = (d: Date | null): string | null => (d ? d.toISOString() : null);
