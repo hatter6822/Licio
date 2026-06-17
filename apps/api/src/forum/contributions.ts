@@ -520,60 +520,75 @@ export async function createContribution(
 
   // Review-queue intake: safety holds AND user-filed moderation concerns
   // (§18.4 report mechanism; urgent flags carry their urgency in context).
-  if (verdict.disposition !== 'clear') {
-    forum.metrics.increment(
-      verdict.disposition === 'block'
-        ? 'contributions.safety_blocked'
-        : 'contributions.safety_flagged',
-    );
-    await ingestion.reviewQueue.insert({
-      kind: 'contribution_safety_hold',
-      storyId: thread.storyId,
-      context: {
-        contribution_id: contribution.contributionId,
-        thread_id: contribution.threadId,
-        reasons: verdict.reasons,
-        disposition: verdict.disposition,
-      },
-      status: 'pending',
-      resolution: null,
-      resolvedBy: null,
-      resolvedAt: null,
-      notBefore: null,
-    });
-    // A high-confidence auto-block is an APPEALABLE system action: record the
-    // moderation action + audit + a statement-of-reasons notice (WS-J.2.6a/b +
-    // the false-positive recourse).  AWAITED, not background: an auto-removal is
-    // only legitimate WITH its appealable action/audit/notice, so the
-    // accountability write must be durable before the response (never a silent
-    // removal if the process exits).
-    if (verdict.disposition === 'block' && forum.autoModerationSink !== null) {
-      await forum.autoModerationSink.recordContentAutoBlock({
-        contributionId: contribution.contributionId,
-        authorUserId: userId,
-        reasonCode: verdict.reasonCode ?? 'MOD_SPAM_001',
-        reasons: verdict.reasons,
+  // The intake spans the ingestion review queue + (for an auto-block) the
+  // moderation action/audit/notice stores — none sharing a transaction with the
+  // contribution insert above.  A partial failure here would leave content
+  // hidden (under_review/removed) with NO queue item or appeal notice, and the
+  // client's retry (same client_draft_id) would dedup and skip the missing
+  // intake — orphaning the suppression.  So on ANY intake failure we COMPENSATE
+  // by purging the just-created contribution (fail toward flagging, never toward
+  // a silent un-recourse-able removal): the retry then recreates BOTH the row
+  // and its intake.
+  try {
+    if (verdict.disposition !== 'clear') {
+      forum.metrics.increment(
+        verdict.disposition === 'block'
+          ? 'contributions.safety_blocked'
+          : 'contributions.safety_flagged',
+      );
+      await ingestion.reviewQueue.insert({
+        kind: 'contribution_safety_hold',
+        storyId: thread.storyId,
+        context: {
+          contribution_id: contribution.contributionId,
+          thread_id: contribution.threadId,
+          reasons: verdict.reasons,
+          disposition: verdict.disposition,
+        },
+        status: 'pending',
+        resolution: null,
+        resolvedBy: null,
+        resolvedAt: null,
+        notBefore: null,
+      });
+      // A high-confidence auto-block is an APPEALABLE system action: record the
+      // moderation action + audit + a statement-of-reasons notice (WS-J.2.6a/b +
+      // the false-positive recourse).  AWAITED, not background: an auto-removal is
+      // only legitimate WITH its appealable action/audit/notice, so the
+      // accountability write must be durable before the response (never a silent
+      // removal if the process exits).
+      if (verdict.disposition === 'block' && forum.autoModerationSink !== null) {
+        await forum.autoModerationSink.recordContentAutoBlock({
+          contributionId: contribution.contributionId,
+          authorUserId: userId,
+          reasonCode: verdict.reasonCode ?? 'MOD_SPAM_001',
+          reasons: verdict.reasons,
+        });
+      }
+    }
+    if (request.type === 'moderation_concern') {
+      forum.metrics.increment('contributions.moderation_concern');
+      await ingestion.reviewQueue.insert({
+        kind: 'moderation_concern',
+        storyId: thread.storyId,
+        context: {
+          contribution_id: contribution.contributionId,
+          thread_id: contribution.threadId,
+          target_contribution_id: request.target_contribution_id,
+          reason_code: request.reason_code,
+          urgency: request.urgency ?? 'normal',
+        },
+        status: 'pending',
+        resolution: null,
+        resolvedBy: null,
+        resolvedAt: null,
+        notBefore: null,
       });
     }
-  }
-  if (request.type === 'moderation_concern') {
-    forum.metrics.increment('contributions.moderation_concern');
-    await ingestion.reviewQueue.insert({
-      kind: 'moderation_concern',
-      storyId: thread.storyId,
-      context: {
-        contribution_id: contribution.contributionId,
-        thread_id: contribution.threadId,
-        target_contribution_id: request.target_contribution_id,
-        reason_code: request.reason_code,
-        urgency: request.urgency ?? 'normal',
-      },
-      status: 'pending',
-      resolution: null,
-      resolvedBy: null,
-      resolvedAt: null,
-      notBefore: null,
-    });
+  } catch (error) {
+    forum.metrics.increment('contributions.safety_intake_rollback');
+    await forum.contributions.purgeForRollback(contribution.contributionId);
+    throw error;
   }
 
   // 7. Durable events (ids/types/flags only — never body text).  A

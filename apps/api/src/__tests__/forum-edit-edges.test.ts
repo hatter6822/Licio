@@ -203,3 +203,46 @@ describe('create-guard edges', () => {
     if (!outcome.ok) expect(outcome.rejection.status).toBe(404);
   });
 });
+
+describe('WS-J.2.6 safety-intake durability (KEC1S)', () => {
+  it('purges a held contribution when the intake write fails, so a retry recreates it', async () => {
+    const draftId = 'draft-kec1s';
+    const body = {
+      ...contributionBody('question', threadId),
+      client_draft_id: draftId,
+    } as unknown as ContributionCreate;
+    // Force a BLOCK disposition (the content would be inserted `removed`).
+    fixture.forum.safety.classify = async () => ({
+      disposition: 'block',
+      reasons: ['spam'],
+      reasonCode: 'MOD_SPAM_001',
+    });
+    // The review-queue intake fails AFTER the contribution insert.
+    const realInsert = fixture.ingestion.reviewQueue.insert.bind(fixture.ingestion.reviewQueue);
+    fixture.ingestion.reviewQueue.insert = async () => {
+      throw new Error('review queue unavailable');
+    };
+    await expect(createContribution(bundle(), userId, `ref-${userId}`, body)).rejects.toThrow(
+      /review queue unavailable/,
+    );
+    // Compensated: the hidden row was purged (no orphan), and the client_draft_id
+    // dedup mapping is gone — a retry is NOT trapped.
+    expect(await fixture.forum.contributions.getByDraft(userId, draftId)).toBeNull();
+
+    // Retry with the intake restored: BOTH the row and its safety-hold queue
+    // item are recreated.
+    fixture.ingestion.reviewQueue.insert = realInsert;
+    const retry = await createContribution(bundle(), userId, `ref-${userId}`, body);
+    expect(retry.ok).toBe(true);
+    if (!retry.ok) return;
+    expect(retry.contribution.moderationState).toBe('removed');
+    const queue = await fixture.ingestion.reviewQueue.list(
+      { kind: 'contribution_safety_hold' },
+      10,
+    );
+    expect(queue).toHaveLength(1);
+    expect((queue[0]?.context as { contribution_id?: string }).contribution_id).toBe(
+      retry.contribution.contributionId,
+    );
+  });
+});

@@ -366,6 +366,19 @@ export class DrizzleContributionStore implements ContributionStore {
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }
 
+  async purgeForRollback(contributionId: string): Promise<void> {
+    // Reverse the insert transaction: drop the co-created evidence card (no FK
+    // cascade — it references the contribution by id only) and the contribution
+    // row (its edit-history rows cascade).  Deleting the row also clears the
+    // `client_draft_id` dedup key, so the client's retry recreates row + intake.
+    await this.#db.transaction(async (tx) => {
+      await tx.delete(evidenceTable).where(eq(evidenceTable.contributionId, contributionId));
+      await tx
+        .delete(contributionsTable)
+        .where(eq(contributionsTable.contributionId, contributionId));
+    });
+  }
+
   async listByUser(
     userId: string,
     after: CreatedAtCursor | null,
