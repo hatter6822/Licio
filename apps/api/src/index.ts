@@ -142,6 +142,7 @@ import {
 } from './pwatt/scheduler.js';
 import { runPwattWindow } from './pwatt/scoring.js';
 import { DrizzleDecisionLogStore, DrizzleFeatureStore } from './ranking/drizzle-ranking-stores.js';
+import { createDefaultModerationStateProvider } from './ranking/safety-filter.js';
 import { RANKING_SCHEDULER_INTERVAL_MS, startRankingScheduler } from './ranking/scheduler.js';
 import {
   createInMemoryRankingServices,
@@ -720,6 +721,18 @@ forumServices.relationshipReader = createRelationshipReader(moderationServices);
 // risk flag-to-review (the WS-F denylist is consulted as the malware fallback).
 forumServices.safety = createWsJContributionSafety(moderationServices, ingestionServices.urlSafety);
 forumServices.autoModerationSink = createAutoModerationSink(moderationServices);
+
+// WS-J.2.3 shadow enforcement: late-bind the ranking safety filter's
+// `shadowedSubjects` to the (now finalized, Drizzle-swapped) moderation action
+// store.  Wired HERE — outside the `ranking/` closure — so the neutrality gate's
+// ranking import-closure stays free of `../moderation`; the closure reads
+// `moderationServices.actions` lazily at call time.  A shadowed author's content
+// then gets zero organic reach while staying directly readable.
+rankingServices.moderation = createDefaultModerationStateProvider({
+  events: eventServices,
+  stories: ingestionServices.stories,
+  shadowedSubjects: (ids) => moderationServices.actions.listActiveShadowedSubjects(ids),
+});
 
 // Development demo seed (NEVER in production): populate rooms, stories, threads,
 // and multi-author comments through the REAL stores so a fresh dev database

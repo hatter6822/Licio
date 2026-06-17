@@ -147,7 +147,15 @@ platform `admin` role implicitly holds all five doctrine roles.
   the steward self-revert endpoint), so an overturned/modified **ban is actually
   lifted**, and a `modify` reflects the new, less-severe action's full effect to
   distribution (content hide/remove AND account restrict/suspend), never leaving
-  the target silently fully restored.
+  the target silently fully restored.  A **`shadow`** action is a DISTRIBUTION
+  reduction, not a WS-D account-state change (`accountStateFor('shadow')` stays
+  null, so it never appears in `account_state` or client context): it drops the
+  author's content to ZERO organic reach at the WS-I ranking safety filter
+  (`author_shadow`) — via `listActiveShadowedSubjects`, injected as a function
+  dependency so the ranking import closure stays moderation-free — while the
+  content stays directly readable and in-room.  Reverting the shadow restores
+  reach (the auto-expiry sweep covers only restrict/suspend, so a shadow is
+  permanent until manually reverted).
 - **Integrity incidents (WS-J.2.6e / MFCI-2).** A coordinated-report incident
   HOLDS the case's volume-driven enforcement (`applyAction` returns
   `enforcement_delayed` for non-ROLE_INTEGRITY actors).  The ROLE_INTEGRITY
