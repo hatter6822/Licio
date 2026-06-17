@@ -1,6 +1,6 @@
 # WS-T: Conversation as Comments — Inline Comment Sections
 
-**Milestone:** M3 (remodel of shipped M1/M3 surfaces) | **Priority:** P1 | **Dependencies:** WS-G (forum/threads/contributions/composer/UGC), WS-Q (room/content/visibility/native media + `media-urls.ts`), WS-E (events/PWAtt/attention signals), WS-J (report/block/mute affordances + `RelationshipReader`), WS-C (PWA: push, notification budget, offline drafts, routing/signals) — all complete; WS-H/WS-I consume contributions and MUST keep their inputs | **Wave:** 12 (post-WS-Q remodel; does not block WS-R/WS-S, parallelizable with them) | **Estimated duration:** 6-8 weeks | **Task count:** 63 atomic cards
+**Milestone:** M3 (remodel of shipped M1/M3 surfaces) | **Priority:** P1 | **Dependencies:** WS-G (forum/threads/contributions/composer/UGC), WS-Q (room/content/visibility/native media + `media-urls.ts`), WS-E (events/PWAtt/attention signals), WS-J (report/block/mute affordances + `RelationshipReader`), WS-C (PWA: push, notification budget, offline drafts, routing/signals) — all complete; WS-H/WS-I consume contributions and MUST keep their inputs | **Wave:** 12 (post-WS-Q remodel; does not block WS-R/WS-S, parallelizable with them) | **Estimated duration:** 6-8 weeks | **Task count:** 64 atomic cards
 
 ---
 
@@ -67,6 +67,7 @@ Schema change is minimal because the tree already models nested comments and the
 | `0030` | WS-T.2.2 | relax `contributions` body CHECK `1..5000` → `0..5000` | `DROP`/`ADD … CHECK NOT VALID` then `VALIDATE` (no full-table lock); "body OR media" enforced at the zod + service boundary |
 | `0031` | WS-T.2.3 | uploads content-type CHECK: add `image/gif` | `NOT VALID` + `VALIDATE`, the `0020` video precedent; the existing `byte_size` CHECK already covers `MAX_GIF_BYTES` (8 MB < 200 MB ceiling) |
 | `0032` | WS-T.2.4 | summaries: add `cited_contribution_ids`, backfill from `cited_branch_ids`, keep old column as a read alias | expand→backfill→(deferred contract); cosmetic clarity, never read-breaking |
+| `0033` | WS-T.2.5 | `attention_aggregates`: add `reply_depth_bucket` (col + enum), backfill from `branch_depth_bucket`, dual-accept ingest until clients upgrade | expand→dual-write/read→(deferred contract); the durable side of the WS-T.1.7 wire rename, deploy-ordered before the client cutover (WS-T.8.4) |
 
 ### Conventions for this workstream
 
@@ -130,10 +131,11 @@ Schema change is minimal because the tree already models nested comments and the
 ### WS-T.1.2a Add the `comment` type + body-or-media rule
 **ID:** WS-T.1.2a | **Ref:** Sections 15.1, 15.5, 25.2
 
-**Description:** In `packages/shared/src/schemas/contribution.ts` append `comment` to `CONTRIBUTION_TYPES` and add `comment: 5_000` to `CONTRIBUTION_BODY_LIMITS`. Add `commentCreateSchema` over the existing `createBaseShape` (`thread_id`, `client_draft_id`, optional `parent_contribution_id`, optional `lens_id`, optional `attachment_ids` ≤ 4) with `type: z.literal('comment')` and an **optional** `body` (trimmed, ≤ 5000). Add a top-level `.superRefine` enforcing **body-or-media**: a non-empty trimmed `body` OR ≥ 1 `attachment_ids`, else a specific issue on `body`. Export `commentCreateSchema` and its inferred type.
+**Description:** In `packages/shared/src/schemas/contribution.ts` append `comment` to `CONTRIBUTION_TYPES` and add `comment: 5_000` to `CONTRIBUTION_BODY_LIMITS`. Add `commentCreateSchema` over the existing `createBaseShape` (`thread_id`, `client_draft_id`, optional `parent_contribution_id`, optional `lens_id`, optional `attachment_ids` ≤ 4) with `type: z.literal('comment')` and an **optional** `body` (trimmed, ≤ 5000). Add a top-level `.superRefine` enforcing **body-or-media**: a non-empty trimmed `body` OR ≥ 1 `attachment_ids`, else a specific issue on `body`. **Normalize the body**: a `.transform` coerces a missing/whitespace-only `comment` body to `''` (the create service reads `request.body.length`, runs the safety classifiers over it, and inserts into the NOT-NULL `body` column — a media-only comment must enter the unchanged service chain as `''`, never `undefined`/whitespace). Export `commentCreateSchema` and its inferred type.
 
 **Acceptance criteria:**
 - `comment` parses with body-only, media-only, and body+media; rejects empty-and-medialess with a clear message.
+- A media-only (or whitespace-body) comment normalizes `body` to `''` (never `undefined`); the unchanged create service + NOT-NULL `body` column accept it.
 - `attachment_ids` cap (4) and `lens_id`/`parent_contribution_id` optionality match `createBaseShape`.
 - No applause/financial field appears on the shape (denylist/no-applause schema tests stay green).
 
@@ -178,12 +180,12 @@ Schema change is minimal because the tree already models nested comments and the
 ### WS-T.1.4 Resolved comment media on the read projection
 **ID:** WS-T.1.4 | **Ref:** Sections 15.5, 22.1, 23.3
 
-**Description:** Add an OPTIONAL `media` array to `contributionPublicSchema`: `{ upload_id, url, kind: z.enum(['image']), content_type, alt_text, animatable: boolean }` — the server-resolved, visibility-gated, same-origin read URL for each cleared attachment (the `kind` enum is left extensible for a future `video`). Retain raw `metadata.attachment_ids` (DSAR/back-compat); `media` is the render-ready projection, capped at 4, ordered to match `attachment_ids`.
+**Description:** Two additions in `packages/shared/src/schemas`. (1) Add an OPTIONAL **defined** `media` array to `contributionPublicSchema`: `{ upload_id, url, kind: z.enum(['image']), content_type, alt_text, animatable: boolean }` — a *defined* optional field, so the `.strict()` schema still accepts it; capped at 4, ordered to match `attachment_ids`; raw `metadata.attachment_ids` retained (DSAR/back-compat). (2) Add a DEDICATED `commentItemSchema` for the nested read = the contribution projection PLUS `replies: commentItemSchema[]` (the bounded preview), `reply_count: z.number().int().min(0)`, and `has_more_replies: z.boolean()` — a SEPARATE schema, NOT extra fields on strict `contributionPublicSchema` (which has only `child_count`, and would reject the nesting fields on egress). The `kind` enum is left extensible for a future `video`.
 
 **Acceptance criteria:**
+- `media` is a defined optional on `contributionPublicSchema` (strict-schema egress still passes); `commentItemSchema` carries `replies`/`reply_count`/`has_more_replies`; `animatable` is `true` exactly for `image/gif`.
 - `media` present and order-aligned for a comment with cleared attachments; absent/empty otherwise.
-- `animatable` is `true` exactly for `image/gif`.
-- A schema-level test fixes the shape; server resolution is WS-T.3.4.
+- A schema-level test fixes both shapes; server resolution is WS-T.3.4.
 
 **Testing:** Unit — projection over {none, image, gif, mixed}; `animatable` correctness; `expectTypeOf`.
 
@@ -224,10 +226,11 @@ Schema change is minimal because the tree already models nested comments and the
 ### WS-T.1.7 Rename the attention traversal signal to reply-depth
 **ID:** WS-T.1.7 | **Ref:** Sections 22.1, 19.1
 
-**Description:** In `packages/shared/src/schemas/attention.ts` rename `branch_depth_bucket` → `reply_depth_bucket`, `BRANCH_DEPTH_BUCKETS` → `REPLY_DEPTH_BUCKETS` (same `none|shallow|moderate|deep`), and `branchDepthBucket` → `replyDepthBucket` (input = distinct reply-depth levels read, 0..10; keep `n<=0→none`, `n===1→shallow`, `n<=3→moderate`, else `deep`). The aggregate stays "exactly eleven fields"; `reply_depth_bucket` is a bucket, not a raw value, and is NOT added to `FORBIDDEN_KEYS` (it is allowed). Web sourcing is WS-T.8.4; the offline aggregate cache version bump rides WS-T.7.3d's `RECORD_SCHEMA_VERSION` bump.
+**Description:** In `packages/shared/src/schemas/attention.ts` rename `branch_depth_bucket` → `reply_depth_bucket`, `BRANCH_DEPTH_BUCKETS` → `REPLY_DEPTH_BUCKETS` (same `none|shallow|moderate|deep`), and `branchDepthBucket` → `replyDepthBucket` (input = distinct reply-depth levels read, 0..10; keep `n<=0→none`, `n===1→shallow`, `n<=3→moderate`, else `deep`). The aggregate stays "exactly eleven fields"; `reply_depth_bucket` is a bucket, not a raw value, and is NOT added to `FORBIDDEN_KEYS` (it is allowed). This is a wire rename, so the **durable WS-E path must move with it** — the `attention_aggregates` table persists a `branch_depth_bucket` column (+ enum) and the ingest/PWAtt readers read it; WS-T.2.5 carries the DB migration AND a server ingest **dual-accept window** (reads/writes both `branch_depth_bucket` and `reply_depth_bucket` until clients have upgraded), and WS-T.8.4 sequences the client cutover after that deploy. Web sourcing is WS-T.8.4; the offline aggregate cache version bump rides WS-T.7.3d's `RECORD_SCHEMA_VERSION` bump.
 
 **Acceptance criteria:**
-- `reply_depth_bucket` is the only traversal field; `branch_depth_bucket` is gone.
+- `reply_depth_bucket` is the only traversal field on the wire shape; `branch_depth_bucket` is gone from `@licio/shared`.
+- The shared rename is paired with the durable migration + dual-accept ingest (WS-T.2.5); no aggregate upload fails validation and PWAtt keeps its input across the rollout.
 - `assertNoRawEgress`/`check:no-raw-egress` still pass (no forbidden key introduced).
 - `replyDepthBucket` keeps the total/monotone/deterministic properties (the attention property suite extends to it).
 
@@ -301,17 +304,31 @@ Schema change is minimal because the tree already models nested comments and the
 
 ---
 
-## WS-T.3 Forum backend: comment reads, writes, and branch retirement
+### WS-T.2.5 Migration 0033 — durable attention `reply_depth_bucket` + dual-accept ingest
+**ID:** WS-T.2.5 | **Ref:** Sections 22.1, 19.1, 30.6
+
+**Description:** The §22.1 aggregate is persisted: `packages/db/src/schema/events.ts` (or the WS-E aggregate schema) has an `attention_aggregates.branch_depth_bucket` column with a `branch_depth_bucket` enum, and the WS-E ingest + PWAtt readers read it. The WS-T.1.7 wire rename therefore needs a durable, online-safe migration, NOT a pure type rename. Migration `0033_ws_t_reply_depth_bucket.sql` (expand): add the `reply_depth_bucket` column + enum (the four buckets), backfill `reply_depth_bucket = branch_depth_bucket` for existing rows, and keep `branch_depth_bucket` as a retained column (no contract drop this workstream). The **ingest boundary dual-accepts**: the attention-ingest validator accepts an aggregate carrying EITHER `branch_depth_bucket` or `reply_depth_bucket` (coalescing to the new field) for a deploy window, and writes both columns; PWAtt readers read `reply_depth_bucket` coalesced to the old column. WS-T.8.4 (the client cutover to emit `reply_depth_bucket`) is gated to deploy AFTER this dual-accept is live everywhere, so an upgraded client is never rejected by an old ingest.
+
+**Acceptance criteria:**
+- Post-`0033` every row's `reply_depth_bucket` equals its prior `branch_depth_bucket`; the ingest accepts BOTH field names and writes both columns during the window; PWAtt keeps reading the value.
+- A pre-cutover client (old field) and a post-cutover client (new field) both ingest successfully; no upload is rejected and no PWAtt input is lost.
+- Idempotent down path; `check:no-raw-egress` still green (both fields are buckets).
+
+**Testing:** Gated integration — apply `0033`; ingest aggregates with each field name; assert dual-write + PWAtt read; backfill equality.
+
+**Dependencies:** WS-T.1.7.
+
+---
 
 ### WS-T.3.1a Comment-read service (nested assembly + reply previews)
 **ID:** WS-T.3.1a | **Ref:** Sections 6.4, 15.3, 16.2
 
-**Description:** Add `apps/api/src/forum/comments.ts` with a pure-ish `commentPage(bundle, threadId, requesterUserId, resolveAuthor, opts)` that returns a **lightly-nested** page: top-level comments (`parent_contribution_id IS NULL`) via `listByThread(threadId, { states: ['published','under_review'], after, limit })`, keyset-ordered by `(created_at, id)` (default newest-first; `opts.order` flips it), each enriched with up to `REPLY_PREVIEW = 3` newest descendants (`listDescendants` bounded) plus `reply_count` (`childCounts`) and `has_more_replies`. Reuse `visibleRows(rows, requesterUserId, hideAuthorIds)` for the published/under-review/tombstone + block-mute filtering (`hideAuthorIds` from the `ViewerRelationshipReader.setsFor`). Return the existing `ContributionPublic` shape (now with `media`, WS-T.3.4). This is the read counterpart of the retired `branchContent`, minus the section filter.
+**Description:** Add `apps/api/src/forum/comments.ts` with a pure-ish `commentPage(bundle, threadId, requesterUserId, resolveAuthor, opts)` returning a **lightly-nested** page. The current store contracts do NOT support this as-is — `listByThread` has no roots predicate (it returns all depths) and `listDescendants` returns ALL depths ascending — so reusing them would page nested replies as top-level and preview grandchildren while omitting their direct parent. **Add two store methods** (in-memory + Drizzle): `listRoots(threadId, { states, after, limit })` (`parent_contribution_id IS NULL`, keyset `(created_at,id)`, `opts.order` flips it) for the top-level page, and `listChildren(parentId, { limit })` (DIRECT children only — depth = parent depth + 1 — newest-first) for the `REPLY_PREVIEW = 3` previews; `reply_count` from `childCounts`, `has_more_replies = reply_count > REPLY_PREVIEW`. Fetch with the `states: ['published','under_review']` set AND the rows `visibleRows` needs for honest tombstones (a removed/hidden parent with visible children must still tombstone), then run `visibleRows(rows, requesterUserId, hideAuthorIds)` (`hideAuthorIds` from `ViewerRelationshipReader.setsFor`) for the published/under-review/tombstone + block-mute filtering. Return the `commentItemSchema` shape (WS-T.1.4, with resolved `media` from WS-T.3.4). This is the read counterpart of the retired `branchContent`, minus the section filter.
 
 **Acceptance criteria:**
-- Top-level comments paginate by a replayable `(created_at,id)` keyset; bounded reply previews + accurate `reply_count`/`has_more_replies`.
-- Published/under-review (own)/tombstone/block-mute behavior is byte-for-byte the same as `branchContent` on a shared fixture.
-- Newest/oldest order both correct and stable under inserts.
+- New `listRoots`/`listChildren` predicates back the roots/direct-children reads: no nested reply is paged as a top-level comment, and no grandchild is previewed without its direct parent; the preview is newest-first with a defined descending cursor.
+- Top-level comments paginate by a replayable `(created_at,id)` keyset; bounded reply previews + accurate `reply_count`/`has_more_replies`; tombstone rows are included where a removed parent has visible children.
+- Published/under-review (own)/tombstone/block-mute behavior matches `branchContent('chronology')` on a shared fixture; newest/oldest order both correct and stable under inserts.
 
 **Testing:** Unit — nesting + preview bounds; keyset determinism; a golden-output parity test vs. `branchContent('chronology')` on a seeded thread.
 
@@ -322,7 +339,7 @@ Schema change is minimal because the tree already models nested comments and the
 ### WS-T.3.1b `GET /v1/stories/:storyId/comments` route
 **ID:** WS-T.3.1b | **Ref:** Sections 16.2, 23.2, 23.3
 
-**Description:** Add the route in `apps/api/src/routes/forum.ts` (soft session): resolve story → thread (one shell per story), enforce the WS-Q room read bar (404 to outsiders / `room_only` non-members), call `commentPage` (WS-T.3.1a), and return `{ comments, next_cursor, overview: { comment_count, sources_count, corrections_count }, summary }` (the §24.3 current summary for the Overview slot). Add the response zod schema to `@licio/shared` (`storyCommentsResponseSchema`). Accept `?cursor=`, `?order=newest|oldest`.
+**Description:** Add the route in `apps/api/src/routes/forum.ts` (soft session): resolve story → thread (one shell per story), enforce the WS-Q room read bar (404 to outsiders / `room_only` non-members), call `commentPage` (WS-T.3.1a), and return `{ comments: commentItemSchema[], next_cursor, overview: { comment_count, sources_count, corrections_count }, summary }` (the §24.3 current summary for the Overview slot). Add the response zod schema to `@licio/shared` (`storyCommentsResponseSchema`, over `commentItemSchema` — WS-T.1.4 — not the flat contribution shape). Accept `?cursor=`, `?order=newest|oldest`.
 
 **Acceptance criteria:**
 - Returns the nested page + counts + current summary; cursor round-trips; private/`room_only` content never served to non-members (extends the WS-Q containment leg).
@@ -367,10 +384,11 @@ Schema change is minimal because the tree already models nested comments and the
 ### WS-T.3.2a Create accepts `comment`
 **ID:** WS-T.3.2a | **Ref:** Sections 15.1, 15.5
 
-**Description:** Route `POST /v1/contributions` through `contributionWriteCreateSchema` (WS-T.1.2b) so it accepts `comment|evidence|correction`. Enforce body-or-media server-side (defense in depth over zod): reject a `comment` with empty body and no cleared attachments. `metadataFromRequest` carries `attachment_ids`/`lens_id` for `comment` exactly as today; a `comment` never co-creates an evidence card. Everything else in the guard chain — per-account rate limit, visibility, dedup (`client_draft_id`), parent depth ≤ 10, block check, attachment ownership + `scan_state==='clear'`, safety pre-check → insert → intake → event emission (published only) — is unchanged.
+**Description:** Route `POST /v1/contributions` through `contributionWriteCreateSchema` (WS-T.1.2b) so it accepts `comment|evidence|correction`. Enforce body-or-media server-side (defense in depth over zod): reject a `comment` with empty body and no cleared attachments. `metadataFromRequest` carries `attachment_ids`/`lens_id` for `comment` exactly as today; a `comment` never co-creates an evidence card. **Two added guards for comment media** (the existing attachment guard only checks ownership + scan state): (1) **image-only allowlist** — reject a `comment` whose `attachment_ids` resolve to any non-image upload, since `/v1/uploads` also admits PDF/video/caption and the read projection renders attachments as `kind:'image'`; a comment may attach only `image/*` (GIF capped), enforced server-side, not just in the composer; (2) **claim each attachment for the parent story** — set the upload's `ownerStoryId` to the comment's story on insert, so the existing story-scoped `/v1/uploads/:id` serving gate covers `room_only` comment media (today contribution attachments are stored with `ownerStoryId: null` and served unrestricted, which would let a private-room GIF be fetched via the bare URL even though WS-T.3.4 signs it). Everything else in the guard chain — per-account rate limit, visibility, dedup (`client_draft_id`), parent depth ≤ 10, block check, attachment ownership + `scan_state==='clear'`, safety pre-check → insert → intake → event emission (published only) — is unchanged.
 
 **Acceptance criteria:**
 - A `comment` (body, media, or both) creates, dedups on `client_draft_id`, and respects depth/visibility/block guards; `evidence`/`correction` still require citations/claims and co-create cards.
+- A `comment` attaching a non-image upload (PDF/video/caption) is rejected server-side; each attached upload is claimed for the comment's story (`ownerStoryId`) so `room_only` comment media cannot be fetched via the bare `/v1/uploads/:id` URL.
 - A GIF-only comment passes the attachment scan-clear gate before publish.
 
 **Testing:** Unit — create matrix over comment/evidence/correction × {body, media, both}; dedup; the WS-J safety-hold path for a comment.
@@ -426,10 +444,11 @@ Schema change is minimal because the tree already models nested comments and the
 ### WS-T.3.4 Resolve comment media for reads
 **ID:** WS-T.3.4 | **Ref:** Sections 15.5, 22.1
 
-**Description:** Implement WS-T.1.4's `media` resolution in the read path. Add `commentMediaOf(uploadRecord, mint: MediaUrlMinter, restricted: boolean)` (mirroring `feedMediaOf` in `lib/story-media.ts`): map each cleared `attachment_ids` upload to `{ upload_id, url, content_type, alt_text, animatable }`, using `signedMediaUrlPath` (signed, `MEDIA_URL_TTL_MS`) when the parent story is `room_only` and the bare immutable `/v1/uploads/:id` when public. Skip `pending`/`flagged` uploads. Batch the upload lookups (one `getMany` per page; no N+1).
+**Description:** Implement WS-T.1.4's `media` resolution in the read path. Add `commentMediaOf(uploadRecord, mint: MediaUrlMinter, restricted: boolean)` (mirroring `feedMediaOf` in `lib/story-media.ts`): map each cleared `attachment_ids` upload to `{ upload_id, url, content_type, alt_text, animatable }`, using `signedMediaUrlPath` (signed, `MEDIA_URL_TTL_MS`) when the parent story is `room_only` and the bare immutable `/v1/uploads/:id` when public. Skip `pending`/`flagged` uploads. Batch the upload lookups (one `getMany` per page; no N+1). The signed URL is only sound because WS-T.3.2a claims each attachment for the parent story (`ownerStoryId`), so the serving route's story-scoped gate rejects a bare-URL fetch of `room_only` comment media — this card depends on that ownership link.
 
 **Acceptance criteria:**
 - Public-parent media → bare URL; `room_only`-parent media → signed URL; flagged/pending omitted; `animatable` true only for `image/gif`.
+- `room_only` comment media is NOT fetchable via the bare `/v1/uploads/:id` URL (the WS-T.3.2a ownership claim + the existing story-scoped serving gate enforce it).
 - Order matches `attachment_ids`; one batched upload read per page.
 
 **Testing:** Unit — resolution over visibility × scan-state × type; batch-read (no N+1) assertion.
@@ -441,10 +460,11 @@ Schema change is minimal because the tree already models nested comments and the
 ### WS-T.3.5 Update the deepening trigger's evidence-bearing set
 **ID:** WS-T.3.5 | **Ref:** Section 15.4
 
-**Description:** In `apps/api/src/forum/transitions.ts` `maybeDeepenConversation`, set the evidence-bearing types to `{evidence, correction}` (counterexample is retired for new writes; legacy counterexamples still count on historical threads). The structural `active → deepening` thresholds (reply depth, published count, evidence-bearing count) are otherwise unchanged; the audited `thread.state.changed` event/reason shape is unchanged.
+**Description:** In `apps/api/src/forum/transitions.ts` `maybeDeepenConversation`, **keep** the evidence-bearing count set as `{evidence, correction, counterexample}` — counterexample is retired only as a NEW WRITE option (the composer no longer offers it), but it must still COUNT toward deepening exactly as today's `EVIDENCE_BEARING_TYPES` does, or historical threads' deepening behavior changes silently. Since new writes are `comment|evidence|correction`, no new counterexamples accrue, but existing rows keep counting. The structural `active → deepening` thresholds (reply depth, published count, evidence-bearing count) and the audited `thread.state.changed` event/reason shape are otherwise unchanged. (`comment` is NOT evidence-bearing — it doesn't deepen by itself.)
 
 **Acceptance criteria:**
-- Deepening fires on evidence+correction accumulation; reason string shape unchanged; legacy counterexample rows still count for historical threads.
+- The evidence-bearing count set still includes `counterexample`; historical threads' deepening is unchanged; deepening fires on evidence/correction/counterexample accumulation; a plain `comment` does not count as evidence-bearing.
+- Reason-string shape unchanged.
 
 **Testing:** Unit — deepening fires/doesn't across {evidence, correction, comment-only}; reason-string snapshot.
 
@@ -586,10 +606,11 @@ Return a typed list of `{kind, label?, appId?, start, end}` spans (or a typed fa
 ### WS-T.5.2c Connection budget + per-frame block/mute filter
 **ID:** WS-T.5.2c | **Ref:** Sections 19.1, 25.5
 
-**Description:** Apply a global per-endpoint connection budget (identity-free, the §19.1 fixed-window pattern — never the client address) so the stream cannot be used to exhaust connections. Filter each outgoing frame for the connecting user via the `ViewerRelationshipReader.setsFor` hide set (blocked/muted authors' comments are not delivered). Resolve the reader's hide set once at connect; refresh opportunistically.
+**Description:** Apply a global per-endpoint connection budget (identity-free, the §19.1 fixed-window pattern — never the client address) so the stream cannot be used to exhaust connections. **Revalidate access before every frame, not just at connect** (P1 privacy): re-check the WS-Q room read bar per frame (or on a short interval) against the reader's CURRENT membership AND the story's CURRENT visibility, and **force-close** the connection the moment the reader loses access — a reader removed from a private room, or a story narrowed to `room_only`, must stop receiving frames on an already-open stream (a `room.visibility.changed`/membership-change signal, or the cheap per-frame bar check, drives the revocation). Also filter each frame for the connecting user via the `ViewerRelationshipReader.setsFor` hide set (blocked/muted authors' comments are not delivered); resolve the hide set at connect and refresh opportunistically.
 
 **Acceptance criteria:**
 - Over-budget connections get 429 + Retry-After; the budget keys on no client address (the `no-client-address` test stays green).
+- Losing room access mid-stream (membership removal OR the story narrowed to `room_only`) stops further frames and closes the connection; no private comment is delivered after revocation.
 - A blocked/muted author's live comment is not delivered to the connecting user.
 
 **Testing:** Integration — budget rejection; block/mute frame suppression; no-client-address static test.
@@ -648,10 +669,11 @@ Return a typed list of `{kind, label?, appId?, start, end}` spans (or a typed fa
 ### WS-T.6.1b Reply trigger in the create flow
 **ID:** WS-T.6.1b | **Ref:** Sections 18.4, 19.1, 21.3
 
-**Description:** In the create flow (WS-T.3.2a), when a **published** comment has a `parent_contribution_id`, resolve the parent's author and enqueue exactly one `reply` notification for that author when: parent author ≠ new author, the pair is not block/mute-related (`RelationshipReader.interactionBlocked`), and the comment was not held. Enqueue is detached/best-effort (never blocks the create response) and idempotent on `comment_id` (an edit does not re-notify). Add a `NotificationStore` port (in-memory + gated Drizzle later) with `enqueue`/`listForUser`/`markRead`.
+**Description:** In the create flow (WS-T.3.2a), when a **published** comment has a `parent_contribution_id`, resolve the parent's author and enqueue exactly one `reply` notification for that author when ALL hold: parent author ≠ new author; the pair is not block/mute-related (`RelationshipReader.interactionBlocked`); the comment was not held; **and the recipient still passes the WS-Q room read bar for the story** (a user who authored an old parent but later left/was removed from a private room — or whose story was narrowed to `room_only` — must NOT receive the actor/story/comment ids or a deep link to content they can no longer read). Enqueue is detached/best-effort (never blocks the create response) and idempotent on `comment_id` (an edit does not re-notify). Add a `NotificationStore` port (in-memory + gated Drizzle later) with `enqueue`/`listForUser`/`markRead`.
 
 **Acceptance criteria:**
 - A published reply to A's comment enqueues one item for A; top-level/self-reply/blocked/muted/held → none; payload carries no body/scores.
+- A recipient who no longer passes the story read bar gets no enqueue and no deep link, even for a reply to their own old comment.
 - Editing the reply does not re-notify.
 
 **Testing:** Unit — trigger matrix (reply/self/top-level/blocked/muted/held); idempotency; payload shape.
@@ -663,11 +685,11 @@ Return a typed list of `{kind, label?, appId?, start, end}` spans (or a typed fa
 ### WS-T.6.2a User-scoped push send path
 **ID:** WS-T.6.2a | **Ref:** Sections 19.4, 25.3
 
-**Description:** `apps/api/src/lib/push-service.ts` is **session-scoped** today (`registerSubscription(sub, sessionId)`, `getSubscriptions()` returns all, `suppressionReason(prefs, …)`) with no "send to a user" path (verified). Add the missing user-scoping: track `userId` alongside `sessionId` on `StoredSubscription` and add `subscriptionsForUser(userId): StoredSubscription[]` + `sendWebPush(subscription, payload)` (VAPID, reusing `lib/vapid.ts`). This is the prerequisite the reply-notification delivery needs and a general capability the push layer was missing.
+**Description:** `apps/api/src/lib/push-service.ts` is **session-scoped** today (`registerSubscription(sub, sessionId)`, `getSubscriptions()` returns all, `suppressionReason`) with no "send to a user" path, and `/v1/push/subscriptions` stores only a `sessionId` with no stable user id (verified). Add the missing user-scoping: (1) **bind subscriptions to the authenticated user** — record `userId` on `StoredSubscription` at registration (from the auth session) and CLEAR it on logout/session end, so existing/ new subscriptions map to a stable user (otherwise reply delivery finds no devices or sends through a stale session); (2) add `subscriptionsForUser(userId): StoredSubscription[]`; (3) keep the existing **bodyless VAPID wake-up** as the send primitive — `sendWebPush(subscription)` posts a `Content-Length: 0` wake (reusing `lib/vapid.ts`); Licio does NOT add RFC 8291 encrypted payloads (no new crypto/dependency), so the deep link + actor metadata are NOT in the push body but fetched by the service worker on wake (WS-T.6.2b).
 
 **Acceptance criteria:**
-- A user's subscriptions are retrievable by `userId`; `sendWebPush` delivers a VAPID payload to one subscription; no client address read.
-- Existing session-scoped register/remove behavior is preserved.
+- Subscriptions are bound to the authenticated `userId` at registration and cleared on logout; retrievable by `userId`.
+- The bodyless VAPID wake delivers to a user's subscriptions (no encrypted payload, no new dependency); no client address read; existing session-scoped register/remove behavior preserved.
 
 **Testing:** Unit — user lookup; send (mocked web-push); session-scope regression.
 
@@ -678,13 +700,13 @@ Return a typed list of `{kind, label?, appId?, start, end}` spans (or a typed fa
 ### WS-T.6.2b Deliver reply notifications via push + budget
 **ID:** WS-T.6.2b | **Ref:** Sections 6.7, 11.6, 19.4
 
-**Description:** On `enqueue` (WS-T.6.1b), deliver to the author's devices via `subscriptionsForUser` + `sendWebPush` (WS-T.6.2a), gated by: the `reply_notifications` preference (WS-T.6.1a), `suppressionReason(prefs, {topic, minuteOfDay})` (quiet hours / muted topic), the WS-H.6.1c quiet-topic policy (`isTopicQuiet`/silent), and the client per-day budget (`notification-meter`). The push deep-links to `/stories/:storyId#comment-:commentId`. Suppressed/out-of-budget still records the in-app item (WS-T.6.3).
+**Description:** Delivery is split between what the SERVER can decide and what only the CLIENT/service worker knows (the `notification-meter` budget + quiet-topic state live in browser/SW IndexedDB and are incremented only after display, so the API enqueue path cannot consult them). **Server (on `enqueue`):** send a bodyless VAPID wake via `subscriptionsForUser` + `sendWebPush` (WS-T.6.2a) ONLY when the recipient has `reply_notifications` enabled (WS-T.6.1a) AND still passes the story read bar (re-checked here — access can change between enqueue and send). **Service worker (on wake):** fetch the unread items from `GET /v1/notifications` (WS-T.6.3), then apply the client-only gates — the per-day `notification-meter` budget, quiet hours (`isWithinQuietHours`), and the WS-H.6.1c quiet-topic policy (`isTopicQuiet`) — and either show a notification deep-linking to `/stories/:storyId#comment-:commentId` (incrementing the meter) or stay silent. The in-app item (WS-T.6.3) is recorded regardless, so a budget/quiet suppression never loses the reply.
 
 **Acceptance criteria:**
-- Subscribed + opted-in + in-budget → push; quiet-hours/muted/opted-out → no push (but in-app item persists); deep-link targets the comment.
-- Keying reads no client address.
+- The server wake fires only for opted-in recipients who still pass the read bar; the SW applies budget/quiet-hours/quiet-topic before display and deep-links to the comment.
+- A budget/quiet-suppressed push still leaves the in-app item; no client address is read; no encrypted push payload is sent.
 
-**Testing:** Unit — delivery decision matrix over {subscribed, reply_notifications, quiet-hours, budget}; deep-link correctness.
+**Testing:** Unit — server send-decision (reply_notifications + read bar) and SW gate matrix (budget/quiet-hours/quiet-topic) with the in-app item always recorded; deep-link correctness.
 
 **Dependencies:** WS-T.6.1b, WS-T.6.2a.
 
@@ -993,15 +1015,16 @@ Return a typed list of `{kind, label?, appId?, start, end}` spans (or a typed fa
 ### WS-T.8.4 Signals: drop branch visits, source the reply-depth bucket
 **ID:** WS-T.8.4 | **Ref:** Sections 22.1, 19.1
 
-**Description:** Remove `recordBranchVisit` (the retired thread page was its only caller) and repoint `TraversalTracker` to record **distinct reply-depth levels read** in the comment section, feeding `replyDepthBucket` (WS-T.1.7). Rename the tracker method/field; have `CommentList`/`CommentItem` report the deepest reply level the reader expands (coarse, in-browser only). `buildAggregate` consumes the renamed input. The story-as-active-item dwell behavior is unchanged.
+**Description:** Remove `recordBranchVisit` (the retired thread page was its only caller) and repoint `TraversalTracker` to record **distinct reply-depth levels read** in the comment section, feeding `replyDepthBucket` (WS-T.1.7). Rename the tracker method/field; have `CommentList`/`CommentItem` report the deepest reply level the reader expands (coarse, in-browser only). `buildAggregate` consumes the renamed input. The story-as-active-item dwell behavior is unchanged. **Sequence the client cutover AFTER the WS-T.2.5 server dual-accept is deployed**, so an upgraded client emitting `reply_depth_bucket` is never rejected by an old ingest (the migration table's deploy ordering).
 
 **Acceptance criteria:**
 - No `recordBranchVisit`/branch traversal remains; the aggregate carries `reply_depth_bucket` from comment expansion; `check:no-raw-egress`/`assertNoRawEgress` pass.
+- The client emits `reply_depth_bucket` only once the server accepts both field names (WS-T.2.5); no aggregate upload is rejected during rollout.
 - Dwell/return tracking for the story unchanged.
 
 **Testing:** Unit — tracker records reply depth → bucket; no-raw-egress; aggregate build with the renamed field.
 
-**Dependencies:** WS-T.1.7, WS-T.7.2c.
+**Dependencies:** WS-T.1.7, WS-T.2.5, WS-T.7.2c.
 
 ---
 
@@ -1074,7 +1097,7 @@ WS-T.1.1a / WS-T.1.1b (SPEC amendments)
  │                             └── WS-T.4.1a (gif parser) ── WS-T.4.1b (stripGif) ── WS-T.4.2 (uploads accept GIF)
  ├── WS-T.1.4 (read media projection) ── WS-T.3.4 (resolve media)
  ├── WS-T.1.5 (summary rename) ── WS-T.2.4 (summary col 0032)
- ├── WS-T.1.7 (reply-depth rename) ── WS-T.8.4 (web signal source)
+ ├── WS-T.1.7 (reply-depth rename) ── WS-T.2.5 (durable aggregate 0033 + dual-accept) ── WS-T.8.4 (web signal source)
  └── WS-T.2.1 (enum 0029) ── WS-T.2.2 (body CHECK 0030)
 
 WS-T.3.1a (comment read service) ── WS-T.3.1b (route) ─┬── WS-T.3.1c (continue-thread) 
@@ -1102,7 +1125,7 @@ WS-T.9.1/9.2/9.3/9.4 (gates, E2E, docs, migration harness) depend on the relevan
 **Suggested execution order (waves within WS-T):**
 
 1. **Doctrine + schemas:** T.1.1a/b → T.1.2a/b, T.1.3, T.1.4, T.1.5, T.1.6, T.1.7.
-2. **Storage:** T.2.1 → T.2.2; T.2.3; T.2.4 (parallel).
+2. **Storage:** T.2.1 → T.2.2; T.2.3; T.2.4 (parallel); T.2.5 (after T.1.7; deploy its dual-accept ingest before the T.8.4 client cutover).
 3. **GIF pipeline:** T.4.1a → T.4.1b → T.4.2 (parallel with storage).
 4. **Backend reads/writes:** T.3.2a → T.3.2b/c, T.3.5; T.3.1a → T.3.1b → T.3.1c/d → T.3.3 → T.3.6; T.3.4.
 5. **Live + notifications:** T.5.1a → T.5.1b; T.5.2a → T.5.2b/c; T.6.1a → T.6.1b → T.6.2a → T.6.2b, T.6.3.
