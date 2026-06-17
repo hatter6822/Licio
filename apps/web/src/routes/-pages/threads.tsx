@@ -129,11 +129,24 @@ export function ThreadsPage(): React.ReactElement {
       )}
     >
       {(data) => (
-        <ul className="flex flex-col gap-4">
-          {data.items.map((thread) => (
-            <ThreadListItem key={thread.thread_id} thread={thread} />
-          ))}
-        </ul>
+        <div className="flex flex-col gap-4">
+          <ul className="flex flex-col gap-4">
+            {data.items.map((thread) => (
+              <ThreadListItem key={thread.thread_id} thread={thread} />
+            ))}
+          </ul>
+          {threads.hasMore ? (
+            <div className="flex justify-center">
+              <Button
+                variant="secondary"
+                onClick={() => threads.loadMore()}
+                disabled={threads.isFetchingMore}
+              >
+                {t('threads.list.more', 'Show more conversations')}
+              </Button>
+            </div>
+          ) : null}
+        </div>
       )}
     </PageScaffold>
   );

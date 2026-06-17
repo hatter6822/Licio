@@ -260,11 +260,14 @@ export async function threadOnGlobalDirectory(
   if (!story || story.hiddenState !== null) return false;
   // Condition 1: a PUBLIC item (room_only stays off global surfaces, WS-Q).
   if (story.visibility !== 'public') return false;
-  // Condition 2: from a PUBLIC room.  A null/orphan room link is treated as
-  // public (mirrors threadVisibleToUser); otherwise the room must be public.
-  if (thread.roomId === null) return true;
+  // Condition 2: from a confirmed PUBLIC room.  FAIL CLOSED on an unresolved
+  // room (a null link or migration-drift orphan) exactly like the feed/search
+  // global gate (filterByVisibility) — a global public surface never lists a
+  // conversation whose room cannot be confirmed public.  (Every story has a
+  // home room, WS-Q.1.5, so this only excludes genuine drift.)
+  if (thread.roomId === null) return false;
   const room = await bundle.forum.rooms.getById(thread.roomId);
-  return room === null || room.visibility === 'public';
+  return room !== null && room.visibility === 'public';
 }
 
 /** The WS-G.3.1 create flow (see module header for the guard chain). */

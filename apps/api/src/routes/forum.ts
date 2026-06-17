@@ -186,15 +186,18 @@ export function createForumRoutes() {
       // through their room), exactly like the front-page feed.
       .get(
         '/threads',
-        zValidator('query', z.object({ cursor: z.string().min(1).max(512).optional() })),
+        // The cursor is an opaque thread id we minted; a non-UUID value (a
+        // malformed/forged request) coerces to undefined → restart from the top,
+        // never a Postgres uuid-cast 500 (defensive cursor semantics).
+        zValidator('query', z.object({ cursor: uuidSchema.optional().catch(undefined) })),
         async (c) => {
           const { cursor } = c.req.valid('query');
           const bundle = bundles();
-          const pageSize = bundle.forum.config().roomPageSize;
+          const config = bundle.forum.config();
+          const pageSize = config.roomPageSize;
 
-          // Recover the keyset position from the opaque cursor (the last thread
-          // id of the previous page); an unknown cursor restarts from the top
-          // (defensive, never an error — the branch/subtree cursor semantics).
+          // Recover the keyset position from the cursor (the deepest scanned
+          // thread id of the previous page); an unknown id restarts from the top.
           let before: { createdAt: string; threadId: string } | null = null;
           if (cursor !== undefined) {
             const last = await bundle.ingestion.stories.getThreadById(cursor);
@@ -203,8 +206,9 @@ export function createForumRoutes() {
 
           const visible: ThreadShellRecord[] = [];
           let exhausted = false;
-          const BATCH = 200;
-          const MAX_BATCHES = 25;
+          let scannedCursor: string | null = null; // deepest keyset position reached
+          const BATCH = config.threadDirectoryScanBatch;
+          const MAX_BATCHES = config.threadDirectoryMaxScanBatches;
           for (let scan = 0; scan < MAX_BATCHES && visible.length <= pageSize; scan += 1) {
             const batch = await bundle.ingestion.stories.listThreads(before, BATCH);
             for (const thread of batch) {
@@ -217,11 +221,20 @@ export function createForumRoutes() {
               break;
             }
             before = { createdAt: lastScanned.createdAt, threadId: lastScanned.threadId };
+            scannedCursor = lastScanned.threadId;
           }
           const page = visible.slice(0, pageSize);
-          const last = page[page.length - 1];
+          // Continuation: a full page resumes after the last SERVED row; a
+          // budget-truncated partial page resumes from the deepest SCANNED row
+          // (never the last visible row) so a long run of filtered
+          // (private/room_only/removed) threads can never strand the older public
+          // conversations behind it; a genuinely exhausted store has no next page.
           const nextCursor =
-            (visible.length > pageSize || !exhausted) && last ? last.threadId : null;
+            visible.length > pageSize
+              ? (page[page.length - 1]?.threadId ?? null)
+              : exhausted
+                ? null
+                : scannedCursor;
 
           const items: ThreadSummary[] = [];
           for (const thread of page) {

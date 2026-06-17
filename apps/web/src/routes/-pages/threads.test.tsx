@@ -6,7 +6,7 @@
 // list, the contribution-count framing, the genuine empty state, and a11y.
 import type { ThreadListResponse, ThreadSummary } from '@licio/shared';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { checkA11y } from '../../test/axe.js';
@@ -54,7 +54,16 @@ function thread(over: Partial<ThreadSummary>): ThreadSummary {
 }
 
 function queryResult(over: Record<string, unknown>) {
-  return { data: undefined, isLoading: false, isError: false, refetch: () => {}, ...over };
+  return {
+    data: undefined,
+    isLoading: false,
+    isError: false,
+    refetch: () => {},
+    loadMore: () => {},
+    hasMore: false,
+    isFetchingMore: false,
+    ...over,
+  };
 }
 
 function renderPage() {
@@ -109,6 +118,34 @@ describe('ThreadsPage (WS-G.3.3 directory)', () => {
     renderPage();
     expect(screen.getByText('No conversations yet')).toBeInTheDocument();
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
+  });
+
+  it('shows a load-more control that fetches the next page when there are more', () => {
+    const loadMore = vi.fn();
+    useThreadsQuery.mockReturnValue(
+      queryResult({
+        data: { items: [thread({ title: 'First page convo' })], nextCursor: 'cursor-2' },
+        hasMore: true,
+        loadMore,
+      }),
+    );
+    renderPage();
+    const more = screen.getByRole('button', { name: 'Show more conversations' });
+    fireEvent.click(more);
+    expect(loadMore).toHaveBeenCalledTimes(1);
+  });
+
+  it('omits the load-more control on the last page', () => {
+    useThreadsQuery.mockReturnValue(
+      queryResult({
+        data: { items: [thread({ title: 'Only convo' })], nextCursor: null },
+        hasMore: false,
+      }),
+    );
+    renderPage();
+    expect(
+      screen.queryByRole('button', { name: 'Show more conversations' }),
+    ).not.toBeInTheDocument();
   });
 
   it('has no accessibility violations', async () => {

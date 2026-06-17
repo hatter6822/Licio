@@ -16,6 +16,7 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { ensureCommonsRoom } from '../forum/rooms.js';
 import type { ContributionRecord } from '../forum/stores.js';
 import { orderDepthFirst, sectionOfType } from '../forum/tree.js';
 import { createV1Routes } from '../routes/v1.js';
@@ -48,6 +49,9 @@ beforeEach(async () => {
     },
     forumConfig: { contributionsPerMinute: 120, contributionsPerHour: 5_000 },
   });
+  // Seed the Commons room (production seeds it on boot) so its public threads
+  // resolve a public room — the global directory FAILS CLOSED on unresolved rooms.
+  await ensureCommonsRoom(fixture.forum);
   const session = await seedUserWithSession(fixture.identity);
   cookie = session.cookie;
   ({ threadId } = await seedThread(fixture));
@@ -497,6 +501,7 @@ describe('WS-G.3.3 — thread directory (GET /v1/threads)', () => {
       },
       forumConfig: { roomPageSize: 2 },
     });
+    await ensureCommonsRoom(local.forum);
     const seeded: string[] = [];
     for (let i = 0; i < 4; i += 1) {
       const { threadId: id } = await seedThread(local, { title: `Convo ${i}` });
@@ -532,6 +537,91 @@ describe('WS-G.3.3 — thread directory (GET /v1/threads)', () => {
     const page = await directory();
     expect(page.items).toEqual([]);
     expect(page.nextCursor).toBeNull();
+  });
+
+  it('fails closed on a thread whose room does not resolve (orphan/migration drift)', async () => {
+    // A public story whose home room is missing from the rooms store: the feed
+    // gate fails closed on unresolved rooms, so the directory must too — never
+    // expose an unconfirmable conversation on a global public surface.
+    const orphan = await seedThread(fixture, {
+      title: 'Orphaned-room conversation',
+      roomId: randomUUID(), // a room id that was never created
+    });
+    const ids = (await directory()).items.map((t) => t.thread_id);
+    expect(ids).toContain(threadId); // the Commons thread still lists
+    expect(ids).not.toContain(orphan.threadId);
+  });
+
+  it('coerces a malformed cursor to a top-of-directory read (no 500)', async () => {
+    // The cursor is an opaque thread UUID; a non-UUID query must restart from the
+    // top, never reach getThreadById (which would cast-error on Postgres).
+    const res = await app().request('http://local/v1/threads?cursor=not-a-uuid');
+    expect(res.status).toBe(200);
+    const page = threadListResponseSchema.parse(await res.json());
+    const top = await directory();
+    expect(page.items.map((t) => t.thread_id)).toEqual(top.items.map((t) => t.thread_id));
+  });
+
+  it('keeps older public conversations reachable past a long filtered run (#cursor)', async () => {
+    // A tiny scan budget (1 batch of 2) with the two NEWEST conversations
+    // non-global (room_only) and an older PUBLIC one behind them: page 1 collects
+    // nothing yet must NOT report the directory empty — it returns a continuation
+    // from the deepest SCANNED row so page 2 reaches the public conversation.
+    let ms = Date.parse('2026-06-13T00:00:00.000Z');
+    const local = freshForumServices({
+      now: () => {
+        ms += 100;
+        return ms;
+      },
+      forumConfig: { threadDirectoryScanBatch: 2, threadDirectoryMaxScanBatches: 1 },
+    });
+    await ensureCommonsRoom(local.forum);
+    // Oldest → newest: a public conversation, then two room_only ones ahead of it.
+    const publicOld = await seedThread(local, { title: 'Older public convo' });
+    await seedThread(local, { title: 'Newer room_only A', visibility: 'room_only' });
+    await seedThread(local, { title: 'Newer room_only B', visibility: 'room_only' });
+
+    const page1 = threadListResponseSchema.parse(
+      await (await app().request('http://local/v1/threads')).json(),
+    );
+    // Page 1 scanned only the two room_only rows (budget = 1×2): empty page, but a
+    // NON-null continuation (the bug was returning null here and dropping publicOld).
+    expect(page1.items).toEqual([]);
+    expect(page1.nextCursor).not.toBeNull();
+
+    const page2 = threadListResponseSchema.parse(
+      await (await app().request(`http://local/v1/threads?cursor=${page1.nextCursor}`)).json(),
+    );
+    expect(page2.items.map((t) => t.thread_id)).toContain(publicOld.threadId);
+  });
+});
+
+describe('WS-G.3.3 — story-detail conversation link', () => {
+  const app = () => new Hono().route('/v1', createV1Routes());
+
+  async function storyThreadId(storyId: string): Promise<string | null> {
+    const res = await app().request(`http://local/v1/stories/${storyId}`);
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { thread_id: string | null }).thread_id;
+  }
+
+  it('suppresses the thread_id once the thread is moderation-removed (no link to a 404)', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    expect(thread).not.toBeNull();
+    const storyId = thread?.storyId as string;
+    // While the thread is live the story page links to it.
+    expect(await storyThreadId(storyId)).toBe(threadId);
+    // WS-J removes the thread (item-safety 'removed') but the story stays up: the
+    // thread routes 404, so the story detail must stop advertising the link.
+    await fixture.events.safetyStore.set({
+      itemId: threadId,
+      safetyState: 'removed',
+      frozenScore: null,
+      caseId: null,
+      updatedBy: 'mod-1',
+      updatedAt: new Date().toISOString(),
+    });
+    expect(await storyThreadId(storyId)).toBeNull();
   });
 });
 

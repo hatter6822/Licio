@@ -29,6 +29,13 @@ export interface ForumRuntimeConfig {
   /** Room listing page size bounds (WS-G.2.3a: default 20, max 50). */
   roomPageSize: number;
   roomPageSizeMax: number;
+  /** The `/threads` global directory scan (WS-G.3.3): rows per keyset batch and
+   *  the max batches scanned per request.  Bounds the work when many non-global
+   *  (private/room_only/moderation-removed) threads precede public ones; the
+   *  continuation cursor still advances past them, so older public conversations
+   *  stay reachable across pages. */
+  threadDirectoryScanBatch: number;
+  threadDirectoryMaxScanBatches: number;
   /** Structural `active → deepening` thresholds (§15.4 "sustained,
    *  multi-level conversation with evidence accumulating"): evaluated at
    *  contribution creation; ALL three must hold. */
@@ -46,6 +53,8 @@ export const DEFAULT_FORUM_CONFIG: ForumRuntimeConfig = {
   drainerBlocklist: [],
   roomPageSize: 20,
   roomPageSizeMax: 50,
+  threadDirectoryScanBatch: 200,
+  threadDirectoryMaxScanBatches: 25,
   deepeningMinContributions: 12,
   deepeningMinDepth: 2,
   deepeningMinEvidence: 2,
@@ -67,6 +76,8 @@ const VALIDATORS: Readonly<Record<keyof ForumRuntimeConfig, z.ZodType>> = {
     }),
   roomPageSize: z.number().int().min(5).max(50),
   roomPageSizeMax: z.number().int().min(5).max(50),
+  threadDirectoryScanBatch: z.number().int().min(1).max(1_000),
+  threadDirectoryMaxScanBatches: z.number().int().min(1).max(100),
   deepeningMinContributions: z.number().int().min(3).max(500),
   deepeningMinDepth: z.number().int().min(1).max(10),
   deepeningMinEvidence: z.number().int().min(0).max(100),
