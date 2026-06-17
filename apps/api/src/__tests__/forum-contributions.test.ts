@@ -300,6 +300,27 @@ describe('WS-G.3.1 — dedup, rate limit, thread state', () => {
     expect(restricted.status).toBe(403);
   });
 
+  it('#8 a moderation-removed thread (item-safety) is gone from the direct reads (404)', async () => {
+    const fresh = await seedThread(fixture);
+    expect((await app().request(`http://local/v1/threads/${fresh.threadId}`)).status).toBe(200);
+    // A WS-J hide/remove on the thread writes the item-safety row (state
+    // 'removed'); the direct reads then 404 (parity with a hidden story), not
+    // just the distribution/ranking seam.  (This is distinct from the WS-G
+    // steward `restricted` review lock, which keeps the thread readable.)
+    await fixture.events.safetyStore.set({
+      itemId: fresh.threadId,
+      safetyState: 'removed',
+      frozenScore: null,
+      caseId: null,
+      updatedBy: 'mod-1',
+      updatedAt: new Date().toISOString(),
+    });
+    expect((await app().request(`http://local/v1/threads/${fresh.threadId}`)).status).toBe(404);
+    expect(
+      (await app().request(`http://local/v1/threads/${fresh.threadId}/branches/questions`)).status,
+    ).toBe(404);
+  });
+
   it('hidden stories yield 404 (no existence oracle)', async () => {
     const second = await seedThread(fixture);
     await fixture.ingestion.stories.update(second.storyId, { hiddenState: 'takedown' });

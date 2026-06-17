@@ -42,6 +42,7 @@ function userInput(
     personalizationSettings: defaultPersonalizationSettings(),
     reputationSummary: emptyReputationSummary(),
     roles: over.roles ?? ['user'],
+    stewardRoles: [],
   };
 }
 

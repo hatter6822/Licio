@@ -220,6 +220,12 @@ export interface ContributionStore {
     contributionId: string,
     state: ContributionModerationState,
   ): Promise<ContributionRecord | null>;
+  /** WS-J.2.6 compensation: HARD-delete a just-created contribution (and its
+   *  co-created evidence card) when the safety intake that should hide it fails.
+   *  Reverses the insert — including the `client_draft_id` dedup mapping — so the
+   *  client's retry recreates BOTH the row and its intake, never leaving content
+   *  hidden with no queue item / appeal notice.  A no-op for an unknown id. */
+  purgeForRollback(contributionId: string): Promise<void>;
   /** DSAR export page (WS-D §19.3): `(created_at, id)` ascending. */
   listByUser(
     userId: string,
@@ -525,6 +531,21 @@ export class InMemoryContributionStore implements ContributionStore {
     row.moderationState = state;
     row.updatedAt = iso(this.#now);
     return row;
+  }
+
+  async purgeForRollback(contributionId: string): Promise<void> {
+    const row = this.#rows.get(contributionId);
+    if (!row) return;
+    this.#rows.delete(contributionId);
+    this.#edits.delete(contributionId);
+    if (row.userId !== null) {
+      this.#byDraft.delete(this.#draftKey(row.userId, row.clientDraftId));
+    }
+    // Reverse the co-created evidence card too (insert is both-or-neither).
+    const evidenceId = row.metadata.evidence_id;
+    if (typeof evidenceId === 'string' && this.#evidenceSink) {
+      await this.#evidenceSink.removeForumCard(evidenceId);
+    }
   }
 
   async listByUser(

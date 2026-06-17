@@ -59,7 +59,7 @@ import {
   editContribution,
   mapCardTypeToEventType,
   removeContribution,
-  threadVisibleToUser,
+  threadReadableToUser,
 } from '../forum/contributions.js';
 import { stripUploadMetadata } from '../forum/exif.js';
 import { getForumServices } from '../forum/services.js';
@@ -72,6 +72,7 @@ import {
   threadOverview,
   toContributionPublic,
   toSummaryPublic,
+  viewerHideSet,
   visibleRows,
 } from '../forum/threads.js';
 import { applyConversationTransition, applyThreadSafetyTransition } from '../forum/transitions.js';
@@ -86,6 +87,7 @@ import {
   authMiddleware,
   getAuth,
   requireSteward,
+  requireUnrestricted,
   requireVerifiedAccount,
 } from '../middleware/auth.js';
 
@@ -176,7 +178,7 @@ export function createForumRoutes() {
           const userId = await softUserId(c.req.header('cookie'), identity);
           const thread = await bundle.ingestion.stories.getThreadById(threadId);
           if (!thread) return c.json(notFound, 404);
-          if (!(await threadVisibleToUser(bundle, thread, userId))) return c.json(notFound, 404);
+          if (!(await threadReadableToUser(bundle, thread, userId))) return c.json(notFound, 404);
           const story = await bundle.ingestion.stories.getById(thread.storyId);
           if (!story) return c.json(notFound, 404);
           const overview = await threadOverview(
@@ -201,7 +203,7 @@ export function createForumRoutes() {
           const userId = await softUserId(c.req.header('cookie'), identity);
           const thread = await bundle.ingestion.stories.getThreadById(threadId);
           if (!thread) return c.json(notFound, 404);
-          if (!(await threadVisibleToUser(bundle, thread, userId))) return c.json(notFound, 404);
+          if (!(await threadReadableToUser(bundle, thread, userId))) return c.json(notFound, 404);
           const content = await branchContent(
             bundle,
             threadId,
@@ -230,7 +232,7 @@ export function createForumRoutes() {
           const userId = await softUserId(c.req.header('cookie'), identity);
           const thread = await bundle.ingestion.stories.getThreadById(threadId);
           if (!thread) return c.json(notFound, 404);
-          if (!(await threadVisibleToUser(bundle, thread, userId))) return c.json(notFound, 404);
+          if (!(await threadReadableToUser(bundle, thread, userId))) return c.json(notFound, 404);
           const subtree = await subtreeContent(
             bundle,
             threadId,
@@ -263,10 +265,14 @@ export function createForumRoutes() {
           const record = await bundle.forum.contributions.getById(contributionId);
           if (!record) return c.json(notFound, 404);
           const thread = await bundle.ingestion.stories.getThreadById(record.threadId);
-          if (!thread || !(await threadVisibleToUser(bundle, thread, userId))) {
+          if (!thread || !(await threadReadableToUser(bundle, thread, userId))) {
             return c.json(notFound, 404);
           }
-          const renderable = visibleRows([record], userId);
+          // Apply the viewer's block/mute hide set (WS-J.1.2), like the branch +
+          // subtree reads — otherwise this anchor leaks a blocked/muted author's
+          // contribution and enables navigation to it.
+          const hide = await viewerHideSet(bundle, userId);
+          const renderable = visibleRows([record], userId, hide);
           if (renderable.length === 0 || renderable[0]?.tombstone) return c.json(notFound, 404);
           return c.json(contributionAnchorSchema.parse(contributionAnchor(record)));
         },
@@ -277,6 +283,7 @@ export function createForumRoutes() {
         '/contributions',
         authMiddleware(),
         requireVerifiedAccount(),
+        requireUnrestricted(),
         zValidator('json', contributionCreateSchema),
         async (c) => {
           const auth = getAuth(c);
@@ -339,6 +346,10 @@ export function createForumRoutes() {
         '/contributions/:contributionId',
         authMiddleware(),
         requireVerifiedAccount(),
+        // Editing existing public content IS a public contribution — a restricted
+        // account is denied (it may still DELETE/retract, which only reduces
+        // exposure; that route stays open).
+        requireUnrestricted(),
         zValidator('param', z.object({ contributionId: uuidSchema })),
         zValidator('json', contributionUpdateSchema),
         async (c) => {
@@ -400,6 +411,7 @@ export function createForumRoutes() {
         '/evidence',
         authMiddleware(),
         requireVerifiedAccount(),
+        requireUnrestricted(),
         zValidator('json', evidenceCreateRequestSchema),
         async (c) => {
           const auth = getAuth(c);
@@ -501,6 +513,7 @@ export function createForumRoutes() {
         '/threads/:threadId/summaries',
         authMiddleware(),
         requireVerifiedAccount(),
+        requireUnrestricted(),
         zValidator('param', z.object({ threadId: uuidSchema })),
         zValidator('json', summaryCreateRequestSchema),
         async (c) => {
@@ -514,7 +527,7 @@ export function createForumRoutes() {
           const bundle = bundles();
           const identity = getIdentityServices();
           const thread = await bundle.ingestion.stories.getThreadById(threadId);
-          if (!thread || !(await threadVisibleToUser(bundle, thread, auth.userId))) {
+          if (!thread || !(await threadReadableToUser(bundle, thread, auth.userId))) {
             return c.json(notFound, 404);
           }
           // Steward check: platform steward role OR any WS-A.2.2 room-steward

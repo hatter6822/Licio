@@ -29,4 +29,16 @@ export const queryKeys = {
   exportStatus: (jobId: string) => ['export-status', jobId] as const,
   deletionStatus: () => ['deletion-status'] as const,
   durablePrivacySettings: () => ['durable-privacy-settings'] as const,
+  // WS-J trust & safety.
+  blocks: () => ['blocks'] as const,
+  mutes: () => ['mutes'] as const,
+  moderationNotices: () => ['moderation-notices'] as const,
+  appealEligibility: (actionId: string) => ['appeal-eligibility', actionId] as const,
+  supportContact: () => ['support-contact'] as const,
+  modQueue: (filterKey: string) => ['mod-queue', filterKey] as const,
+  modCase: (caseId: string) => ['mod-case', caseId] as const,
+  modAppeals: () => ['mod-appeals'] as const,
+  modAppeal: (appealId: string) => ['mod-appeal', appealId] as const,
+  modAudit: (filterKey: string) => ['mod-audit', filterKey] as const,
+  modIncidents: () => ['mod-incidents'] as const,
 } as const;

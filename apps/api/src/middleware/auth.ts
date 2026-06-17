@@ -5,7 +5,13 @@
 // FAILS CLOSED: any error loading/validating the session denies rather than
 // allows.  Routes never re-parse cookies — AuthContext is the single identity
 // source.
-import type { AgeBand, AuthAssurance, AuthMethod, UserAccountState } from '@licio/shared';
+import type {
+  AgeBand,
+  AuthAssurance,
+  AuthMethod,
+  StewardRoleId,
+  UserAccountState,
+} from '@licio/shared';
 import type { MiddlewareHandler } from 'hono';
 import { hasVerifiedCredential } from '../identity/auth-methods.js';
 import { isSteward, type Role } from '../identity/rbac.js';
@@ -25,6 +31,8 @@ export interface AuthContext {
   userId: string;
   accountState: UserAccountState;
   roles: Role[];
+  /** Doctrine steward-role grants (WS-J console authorization). */
+  stewardRoles: StewardRoleId[];
   authMethod: AuthMethod;
   authAssurance: AuthAssurance;
   emailVerified: boolean;
@@ -68,7 +76,12 @@ export function authMiddleware(
 
     const user = await services.store.getUser(validated.record.user_id);
     if (!user) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-    if (user.accountState !== 'active') {
+    // A `restricted` account (WS-J `restrict` sanction) may authenticate and
+    // READ + self-serve (profile, data-rights, appeals, block/mute, notices);
+    // its public-contribution attempts are denied at the write routes (403
+    // `account_restricted`), not here.  `suspended`/`deleted`/non-grace
+    // `deactivated` are denied outright.
+    if (user.accountState !== 'active' && user.accountState !== 'restricted') {
       // A deactivated account in its deletion grace period may reach ONLY the
       // deletion cancel/status routes (so a no-email account can still cancel).
       const inGrace =
@@ -86,6 +99,7 @@ export function authMiddleware(
       userId: user.userId,
       accountState: user.accountState,
       roles: user.roles,
+      stewardRoles: user.stewardRoles,
       authMethod: validated.record.auth_method,
       authAssurance: validated.record.auth_assurance,
       emailVerified: auth?.emailVerified ?? false,
@@ -116,6 +130,23 @@ export function requireVerifiedAccount(): MiddlewareHandler<AuthEnv> {
     if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
     if (!auth.accountVerified) {
       return c.json(deny('verification_required', 'Verify your account to continue'), 403);
+    }
+    await next();
+    return;
+  };
+}
+
+/** Deny a `restricted` account from creating PUBLIC content (the WS-J `restrict`
+ *  sanction): a restricted user may authenticate, read, and self-serve (profile,
+ *  data-rights, appeals, block/mute, notices), but not publicly contribute.
+ *  Apply to every public-content-creating route (contributions, stories,
+ *  summaries, evidence).  Non-restricted accounts pass through. */
+export function requireUnrestricted(): MiddlewareHandler<AuthEnv> {
+  return async (c, next) => {
+    const auth = c.get('auth');
+    if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+    if (auth.accountState === 'restricted') {
+      return c.json(deny('account_restricted', 'Your account is restricted from posting'), 403);
     }
     await next();
     return;

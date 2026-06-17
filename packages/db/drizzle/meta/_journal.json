@@ -162,6 +162,48 @@
       "when": 1781240001000,
       "tag": "0022_ws_q_upload_owner_story",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1781563415954,
+      "tag": "0023_ws_j_trust_safety",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1781636355365,
+      "tag": "0024_ws_j_incident_atomic",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1781639004775,
+      "tag": "0025_ws_j_case_subject",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1781660000000,
+      "tag": "0026_ws_j_erasure_audit_scrub",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1781660001000,
+      "tag": "0027_ws_j_account_restricted",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1781671300173,
+      "tag": "0028_ws_j_erasure_operational_scrub",
+      "breakpoints": true
     }
   ]
 }

@@ -212,7 +212,40 @@ form, the author visibility control, the participation-weighted front-page
 framing (now also under the route-scanning no-applause gate), and the offline
 cache-version bump.  An authenticated **BFF-in-the-loop E2E harness** (the WS-P
 seed: an in-memory API `e2e-server` + a gated test-only login + a proxied
-preview) drives the WS-Q flows in real browsers with axe.  Workstreams WS-J
+preview) drives the WS-Q flows in real browsers with axe.
+WS-J (trust, safety, and abuse operations) is complete
+(`docs/trust-safety/README.md`): user safety controls (taxonomy-bound reports
+with idempotency + per-user/per-target rate limits + emergency routing; bilateral
+blocks; one-directional mutes; appeals with reviewer independence enforced at
+assignment AND decision; the unauthenticated published support contact; the
+statement-of-reasons + appeal-outcome notice inbox), the role-gated steward
+moderation console (priority/SLA report queue with filters/bulk/assignment +
+new-case auto-assignment, the full-context review panel with role-gated reporter
+identity + financial-data-free user history + the REAL WS-H invariant
+decision-support + thread context + side-by-side edit diff, the capability-gated
+action palette with reversal-integrity revert, the independence-enforcing appeal
+review, the ROLE_INTEGRITY coordinated-report incident queue, and the append-only
+audit log + small-cell-suppressed transparency export), the WS-J.2.6 automated
+pre-check math (noisy-OR spam confidence + malware fail-toward-flagging auto-block
+paths, duplicate-flood + policy-risk flag-only detectors) wired onto the WS-G
+contribution submission path, and base-rate-conditioned coordinated-report
+detection that actually DELAYS volume-driven enforcement pending integrity review
+(MFCI-1/2; clearing the incident lifts the delay, confirming it dismisses the
+case).  The five doctrine steward roles are persisted per-user (`steward_roles`)
+with a single-sourced capability/queue policy pinned to the ratified
+`STEWARD_ROLES.md`/`MODERATION_TAXONOMY.md` by a no-drift test.  Production wiring
+is shipped: the gated Drizzle adapters for all ten stores (append-only audit
+trigger that permits only the right-to-erasure NULLing of user references, so a
+WS-D account hard-purge of a logged user succeeds while the record stays
+immutable), the real WS-D/E/F/G/H ports (content removal → the WS-E item-safety
+state the ranking seam reads + WS-G state, user-history stats,
+`moderation.case.created` emission, the WS-H invariant reads, the side-by-side
+snapshot), block/mute + contribution-safety enforcement across the forum + ranking
+surfaces, and a WS-J demo seed.  WS-J residuals (the BFF E2E for the safety flows;
+mounting the report/block affordances on every contribution row + profile; and the
+SPEC enhancements beyond the §-DoD — two-person co-approval, escalation
+auto-routing, room-steward-layer routing, the on-call paging provider) are tracked
+in `docs/trust-safety/README.md`.  Workstreams WS-K
 through WS-P are planned (planning documents exist under `docs/planning/`;
 implementation not yet started, beyond that E2E-harness seed).  See
 "Implementation roadmap" below for the full status table.
@@ -356,6 +389,10 @@ licio/
 │   │       │   │                           WhereInterpretationsDiffer (WS-H), StoryMedia +
 │   │       │   │                           AuthorVisibilityControl + feed-card (WS-Q.5)
 │   │       │   ├── thread/              -- ThreadBranchNav
+│   │       │   ├── safety/              -- ReportButton/ReportSheet (two-tap report),
+│   │       │   │                           block/mute controls, notice inbox + appeal (WS-J.1)
+│   │       │   ├── moderation/          -- ModerationConsole (queue/review/palette/appeals/
+│   │       │   │                           integrity/audit; server-side authorized) (WS-J.2)
 │   │       │   ├── ugc/                 -- UgcBody (THE sanctioned UGC sink, WS-G.4.2b)
 │   │       │   │                           + LinkInterstitial (WS-G.4.2c)
 │   │       │   ├── reader/              -- SourceReader + readability worker
@@ -460,6 +497,10 @@ licio/
 │           │   ├── forum.ts             --   /v1/contributions, threads, summaries,
 │           │   │                             uploads, flags (WS-G §23.2)
 │           │   ├── rooms.ts             --   /v1/rooms/* + lenses + governance (WS-G)
+│           │   ├── trust-safety.ts      --   reports, blocks, mutes, appeals, support,
+│           │   │                             notice inbox (WS-J.1)
+│           │   ├── moderation-console.ts --  role-gated console: queue, review, action
+│           │   │                             palette, appeals, incidents, audit (WS-J.2)
 │           │   ├── health.ts            --   /health endpoint
 │           │   └── csp-report.ts        --   CSP violation ingest
 │           ├── middleware/
@@ -579,6 +620,29 @@ licio/
 │           │   ├── exif.ts              --   byte-level image metadata stripping (WS-G.4.4)
 │           │   ├── config.ts            --   fail-closed runtime config (forum.* keys)
 │           │   └── drizzle-forum-stores.ts -- production Postgres adapters (gated)
+│           ├── moderation/               -- WS-J trust, safety, and abuse operations
+│           │   ├── stores.ts            --   ten store interfaces + in-memory adapters
+│           │   ├── drizzle-moderation-stores.ts -- production Postgres adapters (gated)
+│           │   ├── reports.ts           --   submission + idempotency + rate limits +
+│           │   │                             routing + coordinated-report detection (WS-J.1.1/2.6e)
+│           │   ├── relations.ts         --   block/mute CRUD + the RelationshipReader seam
+│           │   ├── appeals.ts           --   eligibility + independent assignment + decision
+│           │   ├── actions.ts           --   action palette + reversal-integrity revert + MFCI-2 gate
+│           │   ├── incidents.ts         --   ROLE_INTEGRITY coordinated-report incident review
+│           │   ├── audit.ts             --   append-only writer + suppressed transparency export
+│           │   ├── notices.ts           --   statement-of-reasons + appeal-outcome inbox
+│           │   ├── review.ts            --   queue + full-context review + appeal projections
+│           │   ├── prechecks.ts         --   WS-J.2.6 detection math (spam/malware/flood/policy-risk)
+│           │   ├── forum-integration.ts --   the WS-J.2.6 contribution-safety classifier + sink
+│           │   ├── malware-fetch.ts     --   WS-J.2.6b redirect-chain malware verdict (SSRF-safe)
+│           │   ├── assignment.ts        --   load-balanced assignment (reports + appeals)
+│           │   ├── authz.ts             --   doctrine-role authorization (MFA + senior + integrity)
+│           │   ├── ports.ts             --   content/user/invariant/event/alert seams (safe defaults)
+│           │   ├── production-ports.ts  --   the REAL ports over WS-D/E/F/G/H
+│           │   ├── support.ts           --   the unauthenticated published support contact
+│           │   ├── config.ts            --   fail-closed runtime config (moderation.* keys)
+│           │   ├── scheduler.ts         --   lease-guarded sweeps (mute expiry, queue gauges)
+│           │   └── services.ts          --   injectable container + singleton + boot wiring
 │           ├── lib/
 │           │   ├── rate-limit.ts        --   global fixed-window budget (no client keying)
 │           │   ├── push-service.ts      --   VAPID push (session-scoped delete)
@@ -612,6 +676,10 @@ licio/
 │   │       │   │                             citations + depth cap (WS-G §15.2)
 │   │       │   ├── summary.ts           --   §24.3 layered summaries + uncertainty (WS-G)
 │   │       │   ├── forum-api.ts         --   forum endpoint wire contracts (WS-G)
+│   │       │   ├── steward-roles.ts     --   the five doctrine roles + capability/queue
+│   │       │   │                             policy + appeal-eligibility matrix (WS-J)
+│   │       │   ├── moderation-api.ts    --   user-facing trust & safety contracts (WS-J)
+│   │       │   ├── moderation-console-api.ts -- steward console contracts (WS-J)
 │   │       │   ├── signal-ledger.ts     --   SignalLedgerEntry
 │   │       │   ├── notifications.ts     --   Notification schemas
 │   │       │   ├── telemetry.ts         --   telemetryBatchSchema
@@ -635,7 +703,7 @@ licio/
 │   │       │                                 WS-A moderation reason codes)
 │   │       └── env/                     --   environment variable validation
 │   ├── db/                      -- Drizzle ORM schema + migrations
-│   │   ├── drizzle/                     --   generated SQL migrations (WS-D – WS-H)
+│   │   ├── drizzle/                     --   generated SQL migrations (WS-D – WS-J)
 │   │   └── src/
 │   │       ├── schema/                  --   PostgreSQL table definitions
 │   │       │   ├── user.ts              --     users + JSONB + indexes/CHECK (WS-D.1.1)
@@ -666,6 +734,9 @@ licio/
 │   │       │   ├── upload.ts            --     WS-G uploads (EXIF-stripped, scan-gated)
 │   │       │   ├── ranking.ts           --     WS-I feature-vector revisions + decision
 │   │       │   │                               logs (privacy-bucket CHECK, §22.4 retention)
+│   │       │   ├── moderation.ts        --     WS-J cases, reports, actions, append-only
+│   │       │   │                               audit (right-to-erasure-safe trigger), blocks,
+│   │       │   │                               mutes, appeals, notices, incidents (+steward_roles)
 │   │       │   └── wallet/wallet-account.ts -- isolated financial WalletAccount
 │   │       ├── isolation.ts             --   wallet↔ranking BFS isolation (WS-D.3.2)
 │   │       ├── client.ts                --   database client initialization
@@ -733,6 +804,7 @@ licio/
 │   ├── forum/                   -- WS-G implementation reference
 │   ├── invariants/              -- WS-H implementation reference
 │   ├── ranking/                 -- WS-I implementation reference
+│   ├── trust-safety/            -- WS-J implementation reference
 │   └── policy/                  -- 9 policy documents (moderation, signals,
 │                                   privacy, crypto, jurisdiction, transparency)
 └── .github/
@@ -1132,7 +1204,7 @@ Status:
 | WS-G | Forum and conversation | Complete |
 | WS-H | Invariant services (MERI, MFCI, SCOI, GWEI, PHI) | Complete |
 | WS-I | Ranking and distribution | Complete |
-| WS-J | Trust and safety | Planned |
+| WS-J | Trust, safety, and abuse operations | Complete (residuals tracked, `docs/trust-safety/README.md`) |
 | WS-K | AI governance | Planned |
 | WS-L | Knomosis and wallets | Planned |
 | WS-M | Treasury and governance | Planned |
@@ -1291,8 +1363,8 @@ file counts at current state:
 
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
-| apps/web | ~116 unit + 7 E2E (6 frontend-only + the BFF-in-the-loop spec) | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~88 (incl. WS-D identity + the `expert` RBAC role + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-Q E2E test-auth route + the dev-seed showcase integration test + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
+| apps/web | ~132 unit + 7 E2E (6 frontend-only + the BFF-in-the-loop spec; incl. the WS-J report flow, the notice-inbox appeal affordance, safety controls, and the moderation console panels incl. the appeal-review-before-decide gate) | jsdom / Playwright | `pnpm --filter web test` |
+| apps/api | ~113 (incl. WS-D identity + the `expert` RBAC role + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-J trust-safety services/routes/stores/units + the gated WS-J Postgres adapters incl. the right-to-erasure path + the WS-Q E2E test-auth route + the dev-seed showcase integration test + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
 | packages/shared | ~20 (incl. WS-D–WS-H schemas, URL/lifecycle utils, the §5.6 rating-label SSOT, the UGC pipeline + XSS-vector suite) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~4 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |
 | packages/invariants | ~19 (PWAtt/MinHash/freshness + the WS-H invariant mathematics: matroid/fiber/GW/sheaf/holonomy/supporting property suites + the regression harness + the SPEC-purpose oracle suite) | node | `pnpm --filter @licio/invariants test` |

@@ -1284,3 +1284,24 @@ WS-J is complete when ALL of the following conditions hold:
 7. **Auditability and observability.** Every steward action, automated block, assignment, appeal decision, and revert writes a complete, append-only audit record (WS-J.2.5a); safety SLAs, queue depths, false-positive rates, and appeal-overturn rate are continuously monitored and feed the transparency dictionary (WS-A.1.3a / WS-P.2). No financial data appears on any moderation surface, and no reporter identity, private moderation data, or minors' data is ever placed on-chain.
 
 8. **Room-class scope (honest boundary).** WS-J's queue, console, action palette, and automated pre-checks govern **server-hosted** content only (`public_server` / `restricted_server`). `private_p2p` ("Private P2P room", WS-S) content is structurally out of reach — the platform never holds it (PRIVATE_SPEC §8/§11.4) — so it is never enqueued, scanned, or actioned in-room; the platform's only private-room levers are directory-stub delisting and account suspension, and in-room moderation is room-local. WS-R / LCAP-reconciled content is moderated through the same server-side pipeline once it reconciles to canonical state. This boundary is documented as by-design, not a coverage gap.
+
+## Implementation status
+
+Conditions 1–8 are implemented end-to-end (backend + client), with the production
+wiring shipped: the gated Drizzle adapters for all ten stores (append-only audit
+trigger whose only exception is the right-to-erasure NULLing of its
+user-reference columns, so a WS-D account hard-purge of a logged user succeeds
+while the record's substantive content stays immutable), the real WS-D/E/F/G/H
+ports (content-removal → ranking seam, user-history stats,
+`moderation.case.created` emission, the WS-H invariant decision-support reads,
+the side-by-side snapshot), block/mute + contribution-safety enforcement on the
+forum and ranking surfaces, MFCI-2 enforcement-delay + the ROLE_INTEGRITY
+incident queue, new-case auto-assignment, reversal integrity (including a
+successful appeal that actually lifts a ban — the `reversible` flag governs only
+the steward self-revert endpoint, not appeal authority — and a `modify` that
+reflects the new action's full content/account effect), and a WS-J demo seed.
+Tracked residuals (the BFF E2E for the
+safety flows; mounting the report/block affordances on every contribution row +
+profile; and the SPEC enhancements beyond conditions 1–8 — two-person co-approval,
+escalation auto-routing, room-steward-layer-first routing, and the on-call paging
+PROVIDER) live in `docs/trust-safety/README.md`.

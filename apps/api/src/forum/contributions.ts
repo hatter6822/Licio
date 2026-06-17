@@ -107,6 +107,7 @@ export const FORUM_TO_EVENT_TYPE: Readonly<Record<ContributionType, EventContrib
 export type ContributionRejection =
   | { status: 404; code: 'not_found'; message: string }
   | { status: 403; code: 'thread_restricted'; message: string }
+  | { status: 403; code: 'interaction_blocked'; message: string }
   | { status: 409; code: 'thread_archived'; message: string }
   | { status: 422; code: string; message: string }
   | { status: 429; code: 'rate_limited'; message: string; retryAfterSec: number };
@@ -218,6 +219,25 @@ export async function threadVisibleToUser(
   return roles.length > 0;
 }
 
+/**
+ * Read-side visibility for a thread (WS-J #8): room/story visibility (above)
+ * AND not moderation-removed.  A WS-J hide/remove on the thread writes the WS-E
+ * item-safety row (state='removed'); the thread is then gone from the DIRECT
+ * reads — overview, branches, subtree, summaries — exactly as a hidden story
+ * is.  This is DISTINCT from the WS-G steward `restricted` posture (a review
+ * lock that keeps the thread readable): the two states have separate owners, so
+ * a moderation revert never lifts a steward review lock and vice versa.
+ */
+export async function threadReadableToUser(
+  bundle: Pick<ServiceBundle, 'forum' | 'ingestion' | 'events'>,
+  thread: { threadId: string; storyId: string; roomId: string | null },
+  userId: string | null,
+): Promise<boolean> {
+  const safety = await bundle.events.safetyStore.get(thread.threadId);
+  if (safety?.safetyState === 'removed') return false;
+  return threadVisibleToUser(bundle, thread, userId);
+}
+
 /** The WS-G.3.1 create flow (see module header for the guard chain). */
 export async function createContribution(
   bundle: ServiceBundle,
@@ -249,6 +269,12 @@ export async function createContribution(
   const thread = await ingestion.stories.getThreadById(request.thread_id);
   if (!thread) return reject({ status: 404, code: 'not_found', message: 'Thread not found' });
   if (!(await threadVisibleToUser(bundle, thread, userId))) {
+    return reject({ status: 404, code: 'not_found', message: 'Thread not found' });
+  }
+  // A WS-J moderation removal hides the thread from reads AND writes (item-safety
+  // 'removed'); a create must 404 like the reads (no existence oracle).  This is
+  // separate from the steward `restricted` review lock handled below.
+  if ((await events.safetyStore.get(request.thread_id))?.safetyState === 'removed') {
     return reject({ status: 404, code: 'not_found', message: 'Thread not found' });
   }
   if (thread.conversationState === 'archived') {
@@ -286,6 +312,19 @@ export async function createContribution(
     if (!parent || parent.threadId !== request.thread_id) {
       return invalid('invalid_parent', 'The parent contribution must belong to the same thread.');
     }
+    // WS-J.1.2a — a blocked user cannot reply to the blocker (bilateral,
+    // server-side authorization; the block relationship is never disclosed).
+    if (
+      parent.userId !== null &&
+      forum.relationshipReader !== null &&
+      (await forum.relationshipReader.interactionBlocked(userId, parent.userId))
+    ) {
+      return reject({
+        status: 403,
+        code: 'interaction_blocked',
+        message: 'You cannot reply to this contribution.',
+      });
+    }
     if (parent.path.length + 1 > MAX_CONTRIBUTION_DEPTH) {
       return invalid('max_depth_exceeded', 'Maximum thread depth exceeded.');
     }
@@ -293,10 +332,29 @@ export async function createContribution(
       return invalid('answer_requires_question', 'Answers must respond to a question.');
     }
     parentPath = [...parent.path, parent.contributionId];
-  } else if (request.type === 'answer') {
-    // Unreachable through the schema (parent is required there); kept as a
-    // defense-in-depth guard for direct service callers.
-    return invalid('answer_requires_question', 'Answers must respond to a question.');
+  } else {
+    if (request.type === 'answer') {
+      // Unreachable through the schema (parent is required there); kept as a
+      // defense-in-depth guard for direct service callers.
+      return invalid('answer_requires_question', 'Answers must respond to a question.');
+    }
+    // WS-J.1.2a — a TOP-LEVEL contribution interacts with the thread's story
+    // owner; a blocked user cannot post into the blocker's thread (bilateral,
+    // server-side authorization — the block is not just a viewing filter).  The
+    // reply path above checks the parent author; this is the main-entry analogue.
+    if (forum.relationshipReader !== null) {
+      const story = await ingestion.stories.getById(thread.storyId);
+      if (
+        story?.submittedBy != null &&
+        (await forum.relationshipReader.interactionBlocked(userId, story.submittedBy))
+      ) {
+        return reject({
+          status: 403,
+          code: 'interaction_blocked',
+          message: 'You cannot post in this thread.',
+        });
+      }
+    }
   }
 
   if ('target_claim_id' in request && request.target_claim_id !== undefined) {
@@ -368,9 +426,17 @@ export async function createContribution(
     );
   }
 
-  // 5. Safety pre-checks (WS-J.2.6 seam): flagged → under_review + queue.
-  const verdict = await forum.safety.classify(request);
-  const moderationState = verdict.flagged ? 'under_review' : 'published';
+  // 5. Safety pre-checks (WS-J.2.6 seam): flag → under_review + queue;
+  //    block → removed (high-confidence spam/malware auto-block, appealable).
+  //    The duplicate-flood detector counts distinct ROOMS, so pass the thread's
+  //    real home room (NOT the thread id — same-room reposts are one room).
+  const verdict = await forum.safety.classify(request, { userId, roomId: thread.roomId });
+  const moderationState =
+    verdict.disposition === 'block'
+      ? 'removed'
+      : verdict.disposition === 'flag'
+        ? 'under_review'
+        : 'published';
 
   // 6. Transactional insert (with the evidence card for evidence types).
   const contributionId = randomUUID();
@@ -454,50 +520,84 @@ export async function createContribution(
 
   // Review-queue intake: safety holds AND user-filed moderation concerns
   // (§18.4 report mechanism; urgent flags carry their urgency in context).
-  if (verdict.flagged) {
-    forum.metrics.increment('contributions.safety_flagged');
-    await ingestion.reviewQueue.insert({
-      kind: 'contribution_safety_hold',
-      storyId: thread.storyId,
-      context: {
-        contribution_id: contribution.contributionId,
-        thread_id: contribution.threadId,
-        reasons: verdict.reasons,
-      },
-      status: 'pending',
-      resolution: null,
-      resolvedBy: null,
-      resolvedAt: null,
-      notBefore: null,
-    });
-  }
-  if (request.type === 'moderation_concern') {
-    forum.metrics.increment('contributions.moderation_concern');
-    await ingestion.reviewQueue.insert({
-      kind: 'moderation_concern',
-      storyId: thread.storyId,
-      context: {
-        contribution_id: contribution.contributionId,
-        thread_id: contribution.threadId,
-        target_contribution_id: request.target_contribution_id,
-        reason_code: request.reason_code,
-        urgency: request.urgency ?? 'normal',
-      },
-      status: 'pending',
-      resolution: null,
-      resolvedBy: null,
-      resolvedAt: null,
-      notBefore: null,
-    });
+  // The intake spans the ingestion review queue + (for an auto-block) the
+  // moderation action/audit/notice stores — none sharing a transaction with the
+  // contribution insert above.  A partial failure here would leave content
+  // hidden (under_review/removed) with NO queue item or appeal notice, and the
+  // client's retry (same client_draft_id) would dedup and skip the missing
+  // intake — orphaning the suppression.  So on ANY intake failure we COMPENSATE
+  // by purging the just-created contribution (fail toward flagging, never toward
+  // a silent un-recourse-able removal): the retry then recreates BOTH the row
+  // and its intake.
+  try {
+    if (verdict.disposition !== 'clear') {
+      forum.metrics.increment(
+        verdict.disposition === 'block'
+          ? 'contributions.safety_blocked'
+          : 'contributions.safety_flagged',
+      );
+      await ingestion.reviewQueue.insert({
+        kind: 'contribution_safety_hold',
+        storyId: thread.storyId,
+        context: {
+          contribution_id: contribution.contributionId,
+          thread_id: contribution.threadId,
+          reasons: verdict.reasons,
+          disposition: verdict.disposition,
+        },
+        status: 'pending',
+        resolution: null,
+        resolvedBy: null,
+        resolvedAt: null,
+        notBefore: null,
+      });
+      // A high-confidence auto-block is an APPEALABLE system action: record the
+      // moderation action + audit + a statement-of-reasons notice (WS-J.2.6a/b +
+      // the false-positive recourse).  AWAITED, not background: an auto-removal is
+      // only legitimate WITH its appealable action/audit/notice, so the
+      // accountability write must be durable before the response (never a silent
+      // removal if the process exits).
+      if (verdict.disposition === 'block' && forum.autoModerationSink !== null) {
+        await forum.autoModerationSink.recordContentAutoBlock({
+          contributionId: contribution.contributionId,
+          authorUserId: userId,
+          reasonCode: verdict.reasonCode ?? 'MOD_SPAM_001',
+          reasons: verdict.reasons,
+        });
+      }
+    }
+    if (request.type === 'moderation_concern') {
+      forum.metrics.increment('contributions.moderation_concern');
+      await ingestion.reviewQueue.insert({
+        kind: 'moderation_concern',
+        storyId: thread.storyId,
+        context: {
+          contribution_id: contribution.contributionId,
+          thread_id: contribution.threadId,
+          target_contribution_id: request.target_contribution_id,
+          reason_code: request.reason_code,
+          urgency: request.urgency ?? 'normal',
+        },
+        status: 'pending',
+        resolution: null,
+        resolvedBy: null,
+        resolvedAt: null,
+        notBefore: null,
+      });
+    }
+  } catch (error) {
+    forum.metrics.increment('contributions.safety_intake_rollback');
+    await forum.contributions.purgeForRollback(contribution.contributionId);
+    throw error;
   }
 
   // 7. Durable events (ids/types/flags only — never body text).  A
-  // safety-HELD contribution emits NOTHING (fail toward caution): scoring,
-  // lifecycle activity, and freshness must not count content readers
-  // cannot see — a malware-held "evidence" post would otherwise still earn
-  // participation weight while hidden.  Emission on release is the WS-J
-  // approval flow's job (the review-queue seam owns the state change).
-  if (moderationState === 'under_review') {
+  // safety-HELD or AUTO-BLOCKED contribution emits NOTHING (fail toward
+  // caution): scoring, lifecycle activity, and freshness must not count content
+  // readers cannot see — a malware-held/removed "evidence" post would otherwise
+  // still earn participation weight while hidden.  Emission on release is the
+  // WS-J approval flow's job (the review-queue seam owns the state change).
+  if (moderationState === 'under_review' || moderationState === 'removed') {
     // No room-activity bump either: the public recency timestamp must not
     // reflect content readers cannot see.
     forum.metrics.increment('contributions.held_emission_deferred');
@@ -663,7 +763,7 @@ export async function editContribution(
   contributionId: string,
   update: ContributionUpdate,
 ): Promise<ContributionEditOutcome> {
-  const { forum } = bundle;
+  const { forum, ingestion } = bundle;
   const existing = await forum.contributions.getById(contributionId);
   if (!existing || existing.userId !== userId) {
     // 404-over-403: never confirm another user's contribution ids.
@@ -740,7 +840,14 @@ export async function editContribution(
       ? { source_url: existing.metadata['source_url'] }
       : {}),
   } as unknown as ContributionCreate;
-  const verdict = await forum.safety.classify(editedShape);
+  // Re-screen against the thread's real home room (WS-Q), so the flood detector
+  // counts distinct rooms — not thread ids.  The thread exists (the contribution
+  // does); fall back to the thread id only for an unreachable missing-thread case.
+  const editThread = await ingestion.stories.getThreadById(existing.threadId);
+  const verdict = await forum.safety.classify(editedShape, {
+    userId,
+    roomId: editThread?.roomId ?? existing.threadId,
+  });
 
   const edited = await forum.contributions.applyEdit(contributionId, patch, userId, randomUUID());
   if (!edited) {
@@ -749,9 +856,22 @@ export async function editContribution(
       rejection: { status: 404, code: 'not_found', message: 'Contribution not found' },
     };
   }
-  if (verdict.flagged && edited.moderationState === 'published') {
+  // Edit-to-introduce-spam/malware is caught here: a `block` disposition removes
+  // the edit (appealable system action); `flag` holds it for review.
+  if (verdict.disposition !== 'clear' && edited.moderationState === 'published') {
+    const targetState = verdict.disposition === 'block' ? 'removed' : 'under_review';
     forum.metrics.increment('contributions.edit_safety_flagged');
-    const held = await forum.contributions.setModerationState(contributionId, 'under_review');
+    const held = await forum.contributions.setModerationState(contributionId, targetState);
+    if (verdict.disposition === 'block' && forum.autoModerationSink !== null) {
+      // Awaited (not background): the auto-removal's appealable action/audit/
+      // notice must be durable with the removal (no silent auto-removal).
+      await forum.autoModerationSink.recordContentAutoBlock({
+        contributionId,
+        authorUserId: userId,
+        reasonCode: verdict.reasonCode ?? 'MOD_SPAM_001',
+        reasons: verdict.reasons,
+      });
+    }
     const storyId = await bundle.ingestion.stories.getStoryIdByThreadId(existing.threadId);
     await bundle.ingestion.reviewQueue.insert({
       kind: 'contribution_safety_hold',

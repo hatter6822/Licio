@@ -10,6 +10,7 @@
 // in WS-D.1.1c).  Email is optional throughout.
 
 import { randomUUID } from 'node:crypto';
+import type { StewardRoleId } from '@licio/shared';
 import {
   type AgeBand,
   defaultPersonalizationSettings,
@@ -36,6 +37,8 @@ export interface StoredUser {
   personalizationSettings: PersonalizationSettings;
   reputationSummary: ReputationSummaryPrivate;
   roles: Role[];
+  /** Doctrine steward-role grants (WS-J / STEWARD_ROLES.md); [] for non-stewards. */
+  stewardRoles: StewardRoleId[];
   createdAt: string;
   updatedAt: string;
 }
@@ -112,7 +115,10 @@ export interface StoredDeletionRequest {
 export interface IdentityStore {
   // --- Users ---
   createUser(
-    input: Omit<StoredUser, 'userId' | 'createdAt' | 'updatedAt'> & { userId?: string },
+    input: Omit<StoredUser, 'userId' | 'createdAt' | 'updatedAt' | 'stewardRoles'> & {
+      userId?: string;
+      stewardRoles?: StewardRoleId[];
+    },
     now?: number,
   ): Promise<StoredUser>;
   getUser(userId: string): Promise<StoredUser | null>;
@@ -167,12 +173,21 @@ export class InMemoryIdentityStore implements IdentityStore {
 
   // --- Users ---------------------------------------------------------------
   async createUser(
-    input: Omit<StoredUser, 'userId' | 'createdAt' | 'updatedAt'> & { userId?: string },
+    input: Omit<StoredUser, 'userId' | 'createdAt' | 'updatedAt' | 'stewardRoles'> & {
+      userId?: string;
+      stewardRoles?: StewardRoleId[];
+    },
     now: number = Date.now(),
   ): Promise<StoredUser> {
     const userId = input.userId ?? randomUUID();
     const iso = new Date(now).toISOString();
-    const user: StoredUser = { ...input, userId, createdAt: iso, updatedAt: iso };
+    const user: StoredUser = {
+      stewardRoles: [],
+      ...input,
+      userId,
+      createdAt: iso,
+      updatedAt: iso,
+    };
     this.#users.set(userId, user);
     this.#auth.set(userId, {
       userId,

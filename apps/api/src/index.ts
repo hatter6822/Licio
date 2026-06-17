@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { createDbClient } from '@licio/db';
+import { stewardRolesQueues } from '@licio/shared';
 import { validateServerEnv } from '@licio/shared/env';
 import { createApp } from './app.js';
 import { registerDefaultConsumers } from './events/consumers.js';
@@ -35,7 +36,7 @@ import {
   createInMemoryEventPipelineServices,
   setEventPipelineServices,
 } from './events/services.js';
-import { ContributionRateLimiter } from './forum/contributions.js';
+import { ContributionRateLimiter, threadReadableToUser } from './forum/contributions.js';
 import { anonymizeUserContent, exportUserContent } from './forum/data-rights.js';
 import {
   DrizzleContributionStore,
@@ -44,11 +45,13 @@ import {
   DrizzleSummaryStore,
   DrizzleUploadStore,
 } from './forum/drizzle-forum-stores.js';
+import { storyReadableByUser } from './forum/rooms.js';
 import {
   createInMemoryForumServices,
   registerForumConsumers,
   setForumServices,
 } from './forum/services.js';
+import { toContributionPublic } from './forum/threads.js';
 import {
   DrizzleAuditStore,
   DrizzleIdentityStore,
@@ -111,8 +114,27 @@ import {
   setInvariantServices,
 } from './invariants/services.js';
 import { demoStory } from './lib/demo-data.js';
-import { seedForumDemoData, seedOperationalSignals } from './lib/demo-seed.js';
+import { seedForumDemoData, seedModerationDemo, seedOperationalSignals } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
+import { effectiveStewardRoles } from './moderation/authz.js';
+import { createDrizzleModerationStores } from './moderation/drizzle-moderation-stores.js';
+import {
+  createAutoModerationSink,
+  createWsJContributionSafety,
+} from './moderation/forum-integration.js';
+import { noticeToView } from './moderation/notices.js';
+import {
+  createProductionContentPort,
+  createProductionEventPort,
+  createProductionInvariantPort,
+  createProductionUserPort,
+} from './moderation/production-ports.js';
+import { createRelationshipReader } from './moderation/relations.js';
+import {
+  MODERATION_SCHEDULER_INTERVAL_MS,
+  startModerationScheduler,
+} from './moderation/scheduler.js';
+import { createInMemoryModerationServices, setModerationServices } from './moderation/services.js';
 import { loadPwattRuntimeConfig } from './pwatt/config.js';
 import {
   EVENT_PIPELINE_SCHEDULER_INTERVAL_MS,
@@ -120,6 +142,7 @@ import {
 } from './pwatt/scheduler.js';
 import { runPwattWindow } from './pwatt/scoring.js';
 import { DrizzleDecisionLogStore, DrizzleFeatureStore } from './ranking/drizzle-ranking-stores.js';
+import { createDefaultModerationStateProvider } from './ranking/safety-filter.js';
 import { RANKING_SCHEDULER_INTERVAL_MS, startRankingScheduler } from './ranking/scheduler.js';
 import {
   createInMemoryRankingServices,
@@ -414,6 +437,303 @@ if (s3Config) {
 }
 setIdentityServices(identityServices);
 
+// --- WS-J trust, safety, and abuse operations -------------------------------
+// Reports/blocks/mutes/appeals + the steward console + the append-only audit log
+// over the durable Postgres adapters (DATABASE_URL present) or the in-memory
+// stores (dev/test/CI).  The PRODUCTION PORTS make actions take effect: a content
+// removal writes the WS-E item-safety state (which the WS-I ranking filter reads
+// — the documented seam) and the WS-G contribution state; an account action
+// writes the WS-D state; user resolution reads the WS-D directory.  Alerts log;
+// on-call paging is a WS-O binding.
+const moderationServices = createInMemoryModerationServices({
+  content: createProductionContentPort({
+    safetyStore: eventServices.safetyStore,
+    getStory: async (id) => {
+      const story = await ingestionServices.stories.getById(id);
+      return story
+        ? {
+            submittedBy: story.submittedBy,
+            title: story.title,
+            excerpt: story.excerpt,
+            createdAt: story.createdAt,
+          }
+        : null;
+    },
+    getContribution: async (id) => {
+      const c = await forumServices.contributions.getById(id);
+      return c ? { userId: c.userId } : null;
+    },
+    // WS-J #23: a thread report target → the thread's story owner.
+    getThread: async (threadId) => {
+      const thread = await ingestionServices.stories.getThreadById(threadId);
+      if (!thread) return null;
+      const story = await ingestionServices.stories.getById(thread.storyId);
+      return { submittedBy: story?.submittedBy ?? null };
+    },
+    // WS-J #17: an account action only proceeds against a REAL account.
+    accountExists: async (id) => (await identityServices.store.getUser(id)) !== null,
+    setContributionModerationState: (id, state) =>
+      forumServices.contributions.setModerationState(id, state),
+    // WS-J #9: a story hide/removal must also leave it inaccessible via the
+    // direct read (/v1/stories/:id), not just absent from feeds — reflect it in
+    // the canonical hiddenState (both the detail route and ranking honour it).
+    // Never clobber a stronger takedown, and only lift a moderation 'safety' hide.
+    setStoryHiddenState: async (id, next) => {
+      const story = await ingestionServices.stories.getById(id);
+      if (!story) return;
+      if (next === 'safety') {
+        if (story.hiddenState === null) {
+          await ingestionServices.stories.update(id, { hiddenState: 'safety' });
+        }
+      } else if (story.hiddenState === 'safety') {
+        await ingestionServices.stories.update(id, { hiddenState: null });
+      }
+    },
+    setAccountState: (userId, accountState) =>
+      identityServices.store.updateUser(userId, { accountState }),
+    // WS-J.2.2d side-by-side diff: the reported contribution's body + edits.
+    getContributionSnapshot: async (id) => {
+      const c = await forumServices.contributions.getById(id);
+      if (!c) return null;
+      const edits = await forumServices.contributions.listEditHistory(id);
+      return {
+        body: c.body,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
+        edits: edits.map((e) => ({ previousBody: e.previousBody, editedAt: e.editedAt })),
+      };
+    },
+    // WS-J.2.2a thread context: the full thread centered on the reported item.
+    // The reviewer sees ALL moderation states (so removed/flagged items are
+    // visible in context) — never the public visibility filter.
+    getThreadContext: async (targetId, contentKind, requesterUserId) => {
+      // Resolve which thread to project, and (for a contribution target) which
+      // row the review centers on.  A story/thread report has no contribution id,
+      // so it projects the story's/thread's own thread — without this branch the
+      // console showed an EMPTY context for story/thread reports (WS-J.2.2a).
+      let threadId: string | null = null;
+      let reportedContributionId: string | null = null;
+      if (contentKind === 'story') {
+        const thread = await ingestionServices.stories.getThreadByStoryId(targetId);
+        threadId = thread?.threadId ?? null;
+      } else if (contentKind === 'thread') {
+        threadId = targetId;
+      } else {
+        const reported = await forumServices.contributions.getById(targetId);
+        if (reported) {
+          threadId = reported.threadId;
+          reportedContributionId = targetId;
+        }
+      }
+      if (threadId === null) return { items: [], reportedContributionId: null };
+      const rows = await forumServices.contributions.listByThread(threadId, {
+        states: ['published', 'under_review', 'hidden', 'removed'],
+        limit: 200,
+      });
+      // The reviewed contribution must ALWAYS appear in its context — a row late
+      // in a long thread can fall outside the first window, so include it
+      // explicitly if the window missed it (WS-J.2.2a).
+      if (
+        reportedContributionId !== null &&
+        !rows.some((r) => r.contributionId === reportedContributionId)
+      ) {
+        const reported = await forumServices.contributions.getById(reportedContributionId);
+        if (reported) rows.push(reported);
+      }
+      const authorIds = [
+        ...new Set(rows.map((r) => r.userId).filter((x): x is string => x !== null)),
+      ];
+      const authorList = await identityServices.store.getUsersByIds(authorIds);
+      const authors = new Map(
+        authorList.map((u) => [u.userId, { handle: u.handle, displayName: u.displayName }]),
+      );
+      const childCounts = await forumServices.contributions.childCounts(
+        rows.map((r) => r.contributionId),
+      );
+      const items = rows.map((r) =>
+        toContributionPublic(
+          r,
+          r.userId !== null ? (authors.get(r.userId) ?? null) : null,
+          childCounts.get(r.contributionId) ?? 0,
+          requesterUserId,
+          r.userId === null,
+        ),
+      );
+      return { items, reportedContributionId };
+    },
+    // WS-J #7: the report intake's read bar — resolve the target through the
+    // SAME WS-Q visibility gate as a direct content read (story read bar /
+    // thread read bar), so a reporter cannot probe existence of private /
+    // room_only content they cannot see.  Fail-closed on an unreachable shell.
+    isContentReadable: async (targetId, contentKind, requesterUserId) => {
+      if (contentKind === 'story') {
+        const story = await ingestionServices.stories.getById(targetId);
+        if (!story) return false;
+        const room = await forumServices.rooms.getById(story.roomId);
+        if (!room) return false;
+        return storyReadableByUser(forumServices, story, room, requesterUserId);
+      }
+      const bundle = {
+        forum: forumServices,
+        ingestion: ingestionServices,
+        events: eventServices,
+      };
+      if (contentKind === 'thread') {
+        const thread = await ingestionServices.stories.getThreadById(targetId);
+        return thread ? threadReadableToUser(bundle, thread, requesterUserId) : false;
+      }
+      if (contentKind === 'contribution') {
+        const contribution = await forumServices.contributions.getById(targetId);
+        if (!contribution) return false;
+        const thread = await ingestionServices.stories.getThreadById(contribution.threadId);
+        return thread ? threadReadableToUser(bundle, thread, requesterUserId) : false;
+      }
+      return true;
+    },
+    now: () => Date.now(),
+  }),
+  users: createProductionUserPort({
+    getUser: async (id) => {
+      const user = await identityServices.store.getUser(id);
+      return user
+        ? { handle: user.handle, createdAt: user.createdAt, accountState: user.accountState }
+        : null;
+    },
+    getUsersByIds: async (ids) =>
+      (await identityServices.store.getUsersByIds(ids)).map((u) => ({
+        userId: u.userId,
+        handle: u.handle,
+        createdAt: u.createdAt,
+        accountState: u.accountState,
+      })),
+    // WS-J.2.2b user-history context: count + per-type tally + distinct rooms,
+    // over a bounded recent-contribution read (this is the per-subject review
+    // panel, not a hot path).  No financial data appears here by construction.
+    contributionStats: async (userId) => {
+      const CAP = 300;
+      const byType: Record<string, number> = {};
+      const threadIds = new Set<string>();
+      let count = 0;
+      let after: { createdAt: string; id: string } | null = null;
+      while (count < CAP) {
+        const page = await forumServices.contributions.listByUser(userId, after, 100);
+        const last = page[page.length - 1];
+        for (const c of page) {
+          count += 1;
+          byType[c.type] = (byType[c.type] ?? 0) + 1;
+          threadIds.add(c.threadId);
+        }
+        if (page.length < 100 || last === undefined) break;
+        after = { createdAt: last.createdAt, id: last.contributionId };
+      }
+      const roomIds = new Set<string>();
+      for (const threadId of threadIds) {
+        const storyId = await ingestionServices.stories.getStoryIdByThreadId(threadId);
+        if (storyId === null) continue;
+        const story = await ingestionServices.stories.getById(storyId);
+        if (story) roomIds.add(story.roomId);
+      }
+      return { count, byType, roomsActiveIn: roomIds.size };
+    },
+    now: () => Date.now(),
+  }),
+  // WS-J case intake onto the WS-E pipeline: persist `moderation.case.created`
+  // durably (the at-least-once replay backstop), then publish to the router so
+  // the safety/integrity consumers receive it.  Restricted topic; reporter
+  // identity never leaves the role-gated path.
+  events: createProductionEventPort({
+    persist: (event) => eventServices.eventStore.insertMany([event]),
+    publish: (event) => eventServices.router.publish(event),
+    log: (event, meta) => logger.info(meta, event),
+  }),
+  // WS-J.2.2c invariant decision-support: the review panel reads the REAL WS-H
+  // outputs (MFCI risk state, SCOI context state, PHI holonomy, Hodge tension).
+  // Read-only and never a verdict; a missing output shows "unavailable".
+  invariants: createProductionInvariantPort({
+    mfciRiskState: async (id) => {
+      const risk = await invariantServices.mfciRiskStates.get(id);
+      return risk ? { state: risk.state, score: risk.score, reason: risk.reason } : null;
+    },
+    latestOutput: async (invariantType, id) => {
+      const out = await eventServices.invariantStore.latest(invariantType, id);
+      return out
+        ? {
+            scoreVector: out.scoreVector,
+            explanationSummary: out.explanationSummary,
+            coverage: out.coverage,
+            reasonCodes: out.reasonCodes,
+          }
+        : null;
+    },
+  }),
+  alerts: {
+    pageOnCall: (input) =>
+      logger.warn({ ...input }, 'moderation on-call alert (page the safety team)'),
+  },
+  log: (event, meta) => logger.info(meta, event),
+});
+if (db) {
+  // Durable Postgres adapters (same interfaces as the in-memory stores; the
+  // append-only audit log is the tamper-evident source of truth).  The
+  // fail-closed config store is the deploy-free tuning surface.
+  const stores = createDrizzleModerationStores(db);
+  moderationServices.cases = stores.cases;
+  moderationServices.reports = stores.reports;
+  moderationServices.actions = stores.actions;
+  moderationServices.audit = stores.audit;
+  moderationServices.blocks = stores.blocks;
+  moderationServices.mutes = stores.mutes;
+  moderationServices.appeals = stores.appeals;
+  moderationServices.notices = stores.notices;
+  moderationServices.reviewerStatus = stores.reviewerStatus;
+  moderationServices.incidents = stores.incidents;
+  moderationServices.configStore = new DrizzlePwattConfigStore(db);
+}
+// WS-J ↔ WS-D DSAR: the user's moderation notices (statement-of-reasons +
+// appeal outcomes) are durable user data, so they belong in the data export
+// (GDPR Art. 15).  Reporter identity never appears (noticeToView carries the
+// reason code only).  Paged so the export is COMPLETE.
+identityServices.exportModerationNotices = async (userId) => {
+  const out: unknown[] = [];
+  let after: string | null = null;
+  for (;;) {
+    const page = await moderationServices.notices.listByUser(userId, after, 200);
+    for (const n of page) out.push(noticeToView(n));
+    if (page.length < 200) break;
+    after = page[page.length - 1]?.createdAt ?? null;
+    if (after === null) break;
+  }
+  return out;
+};
+// WS-J #18: auto-assignment only chooses reviewers who can open the queue —
+// resolve each reviewer's queues from their WS-D steward roles.
+moderationServices.reviewerQueues = async (id) => {
+  const u = await identityServices.store.getUser(id);
+  return u ? stewardRolesQueues(effectiveStewardRoles(u.roles, u.stewardRoles)) : [];
+};
+await moderationServices.reloadConfig();
+setModerationServices(moderationServices);
+// WS-J.1.2 enforcement seam: forum interaction-rejection + thread/feed viewing
+// filters read this (ranking reads it via `services.forum`).  One wiring point.
+forumServices.relationshipReader = createRelationshipReader(moderationServices);
+// WS-J.2.6 pre-checks on the contribution submission path: spam/malware
+// auto-block (recorded as appealable system actions) + duplicate-flood/policy-
+// risk flag-to-review (the WS-F denylist is consulted as the malware fallback).
+forumServices.safety = createWsJContributionSafety(moderationServices, ingestionServices.urlSafety);
+forumServices.autoModerationSink = createAutoModerationSink(moderationServices);
+
+// WS-J.2.3 shadow enforcement: late-bind the ranking safety filter's
+// `shadowedSubjects` to the (now finalized, Drizzle-swapped) moderation action
+// store.  Wired HERE — outside the `ranking/` closure — so the neutrality gate's
+// ranking import-closure stays free of `../moderation`; the closure reads
+// `moderationServices.actions` lazily at call time.  A shadowed author's content
+// then gets zero organic reach while staying directly readable.
+rankingServices.moderation = createDefaultModerationStateProvider({
+  events: eventServices,
+  stories: ingestionServices.stories,
+  shadowedSubjects: (ids) => moderationServices.actions.listActiveShadowedSubjects(ids),
+});
+
 // Development demo seed (NEVER in production): populate rooms, stories, threads,
 // and multi-author comments through the REAL stores so a fresh dev database
 // renders end-to-end data on boot. Idempotent (a no-op once seeded) and
@@ -431,6 +751,8 @@ if (env.NODE_ENV !== 'production') {
       identityServices,
       ingestionServices,
     );
+    // WS-J: a small report queue so the dev console shows real data on boot.
+    await seedModerationDemo(moderationServices);
     logger.info('demo data seeded (development)');
   } catch (err) {
     logger.warn({ err }, 'demo seed skipped (non-fatal)');
@@ -500,6 +822,15 @@ startRankingScheduler(
   rankingServices,
   (err, task) => logger.error({ err, task }, 'ranking scheduler task failed'),
   RANKING_SCHEDULER_INTERVAL_MS,
+  { lease: makeJobLease() },
+);
+
+// Hourly WS-J maintenance: config reload, expired-mute lift, ephemeral
+// submission-window prune, and queue/SLA gauges — under its own job lease.
+startModerationScheduler(
+  moderationServices,
+  (err, task) => logger.error({ err, task }, 'moderation scheduler task failed'),
+  MODERATION_SCHEDULER_INTERVAL_MS,
   { lease: makeJobLease() },
 );
 

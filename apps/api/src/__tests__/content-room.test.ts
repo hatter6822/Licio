@@ -333,6 +333,35 @@ describe('WS-Q.2.4 author visibility transitions', () => {
     );
     expect(widen.status).toBe(422);
   });
+
+  it('#1 a restricted author may NARROW but not WIDEN to public', async () => {
+    const author = await seedUserWithSession(fixture.identity, { handle: 'rstr' });
+    const created = await app().request(post('/v1/stories', briefSubmission(), author.cookie));
+    const { story_id } = (await created.json()) as { story_id: string };
+    // The WS-J `restrict` sanction lands after the story was posted.
+    await fixture.identity.store.updateUser(author.userId, { accountState: 'restricted' });
+    // NARROW (public → room_only) only reduces reach → still allowed.
+    const narrow = await app().request(
+      new Request(`http://local/v1/stories/${story_id}/visibility`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie: author.cookie },
+        body: JSON.stringify({ visibility: 'room_only' }),
+      }),
+    );
+    expect(narrow.status).toBe(200);
+    // WIDEN (→ public) is a public-contribution attempt → 403 account_restricted.
+    const widen = await app().request(
+      new Request(`http://local/v1/stories/${story_id}/visibility`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie: author.cookie },
+        body: JSON.stringify({ visibility: 'public' }),
+      }),
+    );
+    expect(widen.status).toBe(403);
+    expect(((await widen.json()) as { error: { code: string } }).error.code).toBe(
+      'account_restricted',
+    );
+  });
 });
 
 describe('WS-Q.1.7c content-event classification firewall', () => {

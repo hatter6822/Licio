@@ -11,6 +11,8 @@ import {
   HANDLE_PATTERN,
   handleSchema,
   isMinorBand,
+  USER_ACCOUNT_STATES,
+  userAccountStateSchema,
   userCreateSchema,
   userPublicSchema,
   userRecordSchema,
@@ -189,6 +191,21 @@ describe('userUpdateSchema', () => {
 
   it('rejects unknown keys', () => {
     expect(() => userUpdateSchema.parse({ account_state: 'deleted' })).toThrow();
+  });
+});
+
+describe('account_state domain (WS-J restricted)', () => {
+  it('includes the restricted sanction and parses it', () => {
+    expect(USER_ACCOUNT_STATES).toContain('restricted');
+    expect(userAccountStateSchema.parse('restricted')).toBe('restricted');
+    // The full DB domain (superset of the client schema, which omits `deleted`).
+    expect([...USER_ACCOUNT_STATES]).toEqual([
+      'active',
+      'suspended',
+      'restricted',
+      'deactivated',
+      'deleted',
+    ]);
   });
 });
 

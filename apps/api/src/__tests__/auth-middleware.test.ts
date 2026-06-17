@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import type { AgeBand } from '@licio/shared';
+import type { AgeBand, UserAccountState } from '@licio/shared';
 import {
   defaultPersonalizationSettings,
   defaultPrivacySettings,
@@ -22,6 +22,7 @@ import {
   requireAdult,
   requireStepUp,
   requireSteward,
+  requireUnrestricted,
   requireVerifiedAccount,
 } from '../middleware/auth.js';
 
@@ -45,6 +46,7 @@ interface SeedOpts {
   mfaVerified?: boolean;
   verified?: boolean;
   sessionAge?: number; // ms ago the session was created (for step-up staleness)
+  accountState?: UserAccountState;
 }
 
 async function seedSessionCookie(opts: SeedOpts = {}): Promise<string> {
@@ -52,7 +54,7 @@ async function seedSessionCookie(opts: SeedOpts = {}): Promise<string> {
     handle: 'guarduser',
     displayName: 'Guard',
     email: opts.verified === false ? 'g@example.com' : null,
-    accountState: 'active',
+    accountState: opts.accountState ?? 'active',
     locale: null,
     ageBand: opts.ageBand === undefined ? 'adult' : opts.ageBand,
     privacySettings: defaultPrivacySettings(),
@@ -99,7 +101,11 @@ function guardedApp() {
     )
     .get('/adult', authMiddleware(resolve), requireAdult(), (c) => c.json({ ok: true }))
     .get('/steward', authMiddleware(resolve), requireSteward(), (c) => c.json({ ok: true }))
-    .get('/stepup', authMiddleware(resolve), requireStepUp(), (c) => c.json({ ok: true }));
+    .get('/stepup', authMiddleware(resolve), requireStepUp(), (c) => c.json({ ok: true }))
+    .get('/open', authMiddleware(resolve), (c) => c.json({ ok: true }))
+    .get('/unrestricted', authMiddleware(resolve), requireUnrestricted(), (c) =>
+      c.json({ ok: true }),
+    );
 }
 
 describe('assuranceStale', () => {
@@ -229,6 +235,39 @@ describe('requireVerifiedAccount', () => {
         })
       ).status,
     ).toBe(403);
+  });
+});
+
+describe('restricted account state (WS-J restrict sanction)', () => {
+  it('authMiddleware ALLOWS a restricted account to authenticate + read', async () => {
+    const res = await guardedApp().request('/open', {
+      headers: { cookie: await seedSessionCookie({ accountState: 'restricted' }) },
+    });
+    expect(res.status).toBe(200); // read + self-service permitted
+  });
+
+  it('authMiddleware still DENIES a suspended account', async () => {
+    const res = await guardedApp().request('/open', {
+      headers: { cookie: await seedSessionCookie({ accountState: 'suspended' }) },
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+      'account_suspended',
+    );
+  });
+
+  it('requireUnrestricted blocks a restricted account from posting, allows an active one', async () => {
+    const restricted = await guardedApp().request('/unrestricted', {
+      headers: { cookie: await seedSessionCookie({ accountState: 'restricted' }) },
+    });
+    expect(restricted.status).toBe(403);
+    expect(((await restricted.json()) as { error: { code: string } }).error.code).toBe(
+      'account_restricted',
+    );
+    const active = await guardedApp().request('/unrestricted', {
+      headers: { cookie: await seedSessionCookie() },
+    });
+    expect(active.status).toBe(200);
   });
 });
 

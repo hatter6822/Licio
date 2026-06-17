@@ -70,12 +70,17 @@ export function toContributionPublic(
 export function visibleRows(
   rows: readonly ContributionRecord[],
   requesterUserId: string | null,
+  hideAuthorIds?: ReadonlySet<string>,
 ): Array<{ row: ContributionRecord; tombstone: boolean }> {
+  // WS-J.1.2 — content authored by a blocked/muted user is hidden FROM THE
+  // VIEWER (a row with visible descendants still tombstones for tree integrity;
+  // a leaf simply disappears).  The viewer's own rows are never in their set.
   const visible = (row: ContributionRecord): boolean =>
-    row.moderationState === 'published' ||
-    (row.moderationState === 'under_review' &&
-      requesterUserId !== null &&
-      row.userId === requesterUserId);
+    (row.moderationState === 'published' ||
+      (row.moderationState === 'under_review' &&
+        requesterUserId !== null &&
+        row.userId === requesterUserId)) &&
+    (hideAuthorIds === undefined || row.userId === null || !hideAuthorIds.has(row.userId));
   const visibleIds = new Set(rows.filter(visible).map((row) => row.contributionId));
   // A non-visible row renders as a tombstone exactly when a visible row
   // descends from it (tree integrity).
@@ -89,6 +94,22 @@ export function visibleRows(
   return rows
     .filter((row) => visibleIds.has(row.contributionId) || tombstoneIds.has(row.contributionId))
     .map((row) => ({ row, tombstone: !visibleIds.has(row.contributionId) }));
+}
+
+/**
+ * The viewer's blocked∪muted author-id hide set (WS-J.1.2), or undefined when
+ * there is no viewer or no relationship reader is wired (forum standalone).
+ */
+export async function viewerHideSet(
+  bundle: Bundle,
+  requesterUserId: string | null,
+): Promise<Set<string> | undefined> {
+  const reader = bundle.forum.relationshipReader;
+  if (requesterUserId === null || reader === null) return undefined;
+  const sets = await reader.setsFor(requesterUserId);
+  const hide = new Set<string>(sets.blocked);
+  for (const id of sets.muted) hide.add(id);
+  return hide.size > 0 ? hide : undefined;
 }
 
 function summaryStatus(summaries: readonly SummaryRecord[]): ThreadSummaryStatus {
@@ -213,7 +234,8 @@ export async function branchContent(
   const page = fetched.slice(0, pageSize);
   const lastFetched = page[page.length - 1];
 
-  const renderable = visibleRows(page, requesterUserId);
+  const hide = await viewerHideSet(bundle, requesterUserId);
+  const renderable = visibleRows(page, requesterUserId, hide);
   const ordered =
     branch === 'chronology'
       ? renderable // already (created_at, id) ascending
@@ -271,9 +293,10 @@ export async function subtreeContent(
   const empty = { rows: [], rootFound: false, nextCursor: null };
   const root = await bundle.forum.contributions.getById(rootId);
   if (!root || root.threadId !== threadId) return empty;
-  // An invisible root gates EVERY page (a removed contribution must not
-  // anchor enumeration of the conversation beneath it).
-  if (visibleRows([root], requesterUserId).length === 0) return empty;
+  const hide = await viewerHideSet(bundle, requesterUserId);
+  // An invisible root gates EVERY page (a removed — or blocked-author —
+  // contribution must not anchor enumeration of the conversation beneath it).
+  if (visibleRows([root], requesterUserId, hide).length === 0) return empty;
   const config = bundle.forum.config();
 
   // Recover the keyset position from the opaque cursor; an unknown or
@@ -298,7 +321,7 @@ export async function subtreeContent(
 
   // The root row itself heads the first page only.
   const candidates = after === null ? [root, ...page] : page;
-  const renderable = visibleRows(candidates, requesterUserId);
+  const renderable = visibleRows(candidates, requesterUserId, hide);
   const byId = new Map(renderable.map((entry) => [entry.row.contributionId, entry]));
   const ordered = orderDepthFirst(renderable.map((entry) => entry.row));
   const childCounts = await bundle.forum.contributions.childCounts(

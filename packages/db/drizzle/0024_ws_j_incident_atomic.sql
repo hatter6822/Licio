@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "coordinated_report_incidents_target_open_uq" ON "coordinated_report_incidents" USING btree ("target_type","target_id") WHERE "coordinated_report_incidents"."status" = 'open';

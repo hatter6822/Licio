@@ -32,6 +32,9 @@ import {
 export const accountStateEnum = pgEnum('account_state', [
   'active',
   'suspended',
+  // A WS-J `restrict` sanction: read + self-service allowed, public contribution
+  // denied (between active and the harder suspended/lifecycle states).
+  'restricted',
   'deactivated',
   'deleted',
 ]);
@@ -51,6 +54,10 @@ export const users = pgTable(
     // RBAC roles (WS-D.1.6a/b).  Values are drawn from the closed application
     // policy table (user/moderator/steward/admin); the app validates membership.
     roles: text('roles').array().notNull().default(sql`'{user}'::text[]`),
+    // Doctrine steward-role grants (WS-J / STEWARD_ROLES.md): the five ROLE_*
+    // ids, orthogonal to `roles`.  Empty for a non-steward; the app validates
+    // membership against the closed STEWARD_ROLE_IDS set.
+    stewardRoles: text('steward_roles').array().notNull().default(sql`'{}'::text[]`),
     privacySettings: jsonb('privacy_settings').$type<PrivacySettings>().notNull(),
     personalizationSettings: jsonb('personalization_settings')
       .$type<PersonalizationSettings>()

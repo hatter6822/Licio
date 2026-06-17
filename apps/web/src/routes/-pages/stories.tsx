@@ -8,6 +8,7 @@ import type { StoryDetail } from '@licio/shared';
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
+import { ReportButton } from '../../components/safety/ReportSheet.js';
 import { AuthorVisibilityControl } from '../../components/story/AuthorVisibilityControl/index.js';
 import { IndependentSourcesDrawer } from '../../components/story/IndependentSourcesDrawer/index.js';
 import { ShareStoryButton } from '../../components/story/ShareStoryButton/index.js';
@@ -171,6 +172,8 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 needsContext={interpretations.data?.needs_context ?? false}
                 contextStatusPending={interpretations.isPending}
               />
+              {/* WS-J.1.1 — report this story (the two-tap sheet). */}
+              <ReportButton targetType="content" targetId={data.story_id} contentKind="story" />
             </div>
             {/* WS-Q.5.4a — the author's visibility control (owner only). */}
             {data.is_owner ? (

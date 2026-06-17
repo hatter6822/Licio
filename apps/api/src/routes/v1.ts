@@ -18,7 +18,6 @@ import {
   type AttentionIngestAck,
   attentionAggregateBatchSchema,
   attentionIngestAckSchema,
-  createReportRequestSchema,
   DEFAULT_USER_SETTINGS,
   deriveRatingLabel,
   deriveStorySafetyState,
@@ -85,10 +84,12 @@ import {
   exposureLabelForGain,
   latestMeriGains,
 } from './invariants-public.js';
+import { createModerationConsoleRoutes } from './moderation-console.js';
 import { createPrivacyRoutes } from './privacy.js';
 import { createRankingAdminRoutes } from './ranking-admin.js';
 import { createRoomsRoutes } from './rooms.js';
 import { createStoriesRoutes } from './stories.js';
+import { createTrustSafetyRoutes } from './trust-safety.js';
 
 /** Read the session id from the `__Host-session` cookie (or undefined). */
 function sessionIdOf(cookieHeader: string | undefined): string | undefined {
@@ -472,6 +473,14 @@ export function createV1Routes() {
       .route('/', createForumRoutes())
       .route('/', createRoomsRoutes())
 
+      // --- Trust & safety (WS-J) ----------------------------------------------
+      // User-facing: reports, blocks, mutes, appeals, the unauthenticated
+      // support contact, and the moderation-notice inbox.  Console: the
+      // role-gated report/appeal queues, review panels, action palette, audit
+      // viewer, and transparency export.
+      .route('/', createTrustSafetyRoutes())
+      .route('/moderation', createModerationConsoleRoutes())
+
       // --- Settings sync (SPEC §23.2 /feed/preferences) ---------------------
       .get('/settings', (c) => {
         const key = stateKey(c.req.header('cookie'));
@@ -509,15 +518,6 @@ export function createV1Routes() {
               video_max_seconds: cfg.videoMaxSeconds,
             },
           }),
-        );
-      })
-
-      // --- Reports (§18.4 report mechanism; queued offline, WS-C.2.3) -------
-      .post('/reports', zValidator('json', createReportRequestSchema), (c) => {
-        const request = c.req.valid('json');
-        return c.json(
-          { status: 'received' as const, local_operation_id: request.local_operation_id },
-          202,
         );
       })
 

@@ -82,9 +82,13 @@ serveFeed(services, { userId, surface, surfaceRoomId, surfaceTopicId, mode })
                             scoring): the BATCHED ModerationStateProvider
                             (three bulk reads per request, fail-closed on
                             unknown items) covers removals, integrity
-                            removals, thread restriction, age gating, the
-                            jurisdiction seam; scoring has no re-admission
-                            path (asserted)
+                            removals, thread restriction, author shadow
+                            (WS-J.2.3 `author_shadow` — zero organic reach
+                            while the item stays directly readable; injected
+                            as a function dep so the ranking import closure
+                            stays moderation-free, neutrality-gated), age
+                            gating, the jurisdiction seam; scoring has no
+                            re-admission path (asserted)
   4. constrained scoring    rankFeasibleSet: baseline + §5.4 positive
                             combination − promotion-gated penalties;
                             per-item constraints (MFCI/SCOI) evaluated once

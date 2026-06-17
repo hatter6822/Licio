@@ -228,6 +228,7 @@ describe('safety filter (WS-I.2.2a, non-overridable)', () => {
     const provider = createDefaultModerationStateProvider({
       events: fixture.events,
       stories: fixture.ingestion.stories,
+      shadowedSubjects: async () => new Set(),
     });
     const candidates = [
       visible.storyId,
@@ -262,11 +263,52 @@ describe('safety filter (WS-I.2.2a, non-overridable)', () => {
     ).toBe('case-1');
   });
 
+  it('excludes a shadowed author from organic feeds (author_shadow); a takedown still wins', async () => {
+    const shadowedAuthor = '00000000-0000-4000-8000-00000000a5ad';
+    const plain = await seedStory(fixture.ingestion, { submittedBy: shadowedAuthor });
+    const takenDown = await seedStory(fixture.ingestion, {
+      submittedBy: shadowedAuthor,
+      hiddenState: 'takedown',
+    });
+    const other = await seedStory(fixture.ingestion); // a different (non-shadowed) author
+    const provider = createDefaultModerationStateProvider({
+      events: fixture.events,
+      stories: fixture.ingestion.stories,
+      // Only `shadowedAuthor` is under a standing shadow.
+      shadowedSubjects: async (ids) => new Set(ids.filter((id) => id === shadowedAuthor)),
+    });
+    const candidates = [plain.storyId, takenDown.storyId, other.storyId].map((id) => ({
+      item_id: id,
+      item_type: 'story' as const,
+      source_type: 'global' as const,
+      room_id: null,
+      visibility: 'public' as const,
+      topic_ids: [],
+      source_id: null,
+      freshness_timestamp: new Date().toISOString(),
+      retrieval_score: 0.5,
+      retrieval_origins: ['global_pwatt_v1'],
+      bridge_context: null,
+    }));
+    const result = await applySafetyFilter(candidates, provider, {
+      ageBand: 'adult',
+      jurisdiction: null,
+    });
+    const reasons = new Map(result.exclusions.map((e) => [e.item_id, e.policy_reason]));
+    // The shadowed author's plain story → excluded as author_shadow.
+    expect(reasons.get(plain.storyId)).toBe('author_shadow');
+    // Their taken-down story → the more-specific takedown reason wins.
+    expect(reasons.get(takenDown.storyId)).toBe('takedown_removal');
+    // A non-shadowed author's story keeps its organic reach.
+    expect(result.feasible.map((c) => c.item_id)).toEqual([other.storyId]);
+  });
+
   it('age-gates graphic/crisis content for teens AND unknown-age requests', async () => {
     const graphic = await seedStory(fixture.ingestion, { sensitivityLabels: ['graphic'] });
     const provider = createDefaultModerationStateProvider({
       events: fixture.events,
       stories: fixture.ingestion.stories,
+      shadowedSubjects: async () => new Set(),
     });
     const candidate = {
       item_id: graphic.storyId,

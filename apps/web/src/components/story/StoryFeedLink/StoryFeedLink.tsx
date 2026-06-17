@@ -15,14 +15,21 @@
 //      StoryCard, whose title was itself an <a>: "<a> cannot be a descendant of
 //      <a>", a React hydration error.) This is the standard "stretched link"
 //      pattern (cf. Bootstrap .stretched-link).
+//
+// The Report affordance (WS-J.1.1) sits ABOVE the overlay link (z-10) so it is
+// independently clickable; it opens the shared ReportSheet for this story.
 import type { FeedItem } from '@licio/shared';
 import { Link } from '@tanstack/react-router';
+import { useState } from 'react';
 import { useT } from '../../../i18n/index.js';
+import { ReportSheet } from '../../safety/ReportSheet.js';
+import { Icon } from '../../ui/Icon/index.js';
 import { feedItemToCard } from '../feed-card.js';
 import { StoryCard } from '../StoryCard/index.js';
 
 export function StoryFeedLink({ item }: { item: FeedItem }): React.ReactElement {
   const t = useT();
+  const [reportOpen, setReportOpen] = useState(false);
   return (
     <li className="relative">
       {/* The stretched overlay covers the whole card and opens the discussion;
@@ -36,7 +43,25 @@ export function StoryFeedLink({ item }: { item: FeedItem }): React.ReactElement 
         })}
         className="absolute inset-0 rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
       />
+      {/* Stacked above the overlay (z-10) so it is independently operable. */}
+      <button
+        type="button"
+        onClick={() => setReportOpen(true)}
+        aria-label={t('feed.reportStory', 'Report this story')}
+        className="absolute end-2 top-2 z-10 inline-flex h-12 w-12 items-center justify-center rounded-full text-ink-muted hover:bg-surface hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+      >
+        <Icon name="flag" />
+      </button>
       <StoryCard {...feedItemToCard(item)} />
+      {reportOpen ? (
+        <ReportSheet
+          open
+          onClose={() => setReportOpen(false)}
+          targetType="content"
+          targetId={item.story_id}
+          contentKind="story"
+        />
+      ) : null}
     </li>
   );
 }

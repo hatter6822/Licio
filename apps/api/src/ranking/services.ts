@@ -261,7 +261,13 @@ export function createInMemoryRankingServices(
     decisionLogs: new InMemoryDecisionLogStore(),
     retrievers: createDefaultRetrievers(ports),
     classification: createClassificationPorts(events, ingestion, now),
-    moderation: createDefaultModerationStateProvider({ events, stories: ingestion.stories }),
+    moderation: createDefaultModerationStateProvider({
+      events,
+      stories: ingestion.stories,
+      // No-op by default (no moderation store wired) → ranking stays closure-
+      // clean for the neutrality gate.  Boot late-binds the real WS-J query.
+      shadowedSubjects: async () => new Set(),
+    }),
     config: () => runtimeConfig,
     reloadConfig: async () => {
       runtimeConfig = await loadRankingRuntimeConfig(events);

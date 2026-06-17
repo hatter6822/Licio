@@ -166,17 +166,19 @@ describe('v1 writes', () => {
     expect(res.status).toBe(401);
   });
 
-  it('acknowledges a safety report', async () => {
+  it('rejects an unauthenticated safety report (WS-J.1.1a requires a session)', async () => {
+    // WS-J replaced the WS-C stub: /v1/reports is now taxonomy-bound and
+    // authenticated (reporter identity is recorded, never anonymous).
     const res = await app().request(
       jsonRequest('/v1/reports', 'POST', {
-        target_type: 'contribution',
+        target_type: 'content',
         target_id: VALID_UUID,
-        reason: 'Off-topic harassment',
+        content_kind: 'contribution',
+        reason_code: 'MOD_HARASS_001',
         local_operation_id: 'op-1',
       }),
     );
-    expect(res.status).toBe(202);
-    expect(await res.json()).toEqual({ status: 'received', local_operation_id: 'op-1' });
+    expect(res.status).toBe(401);
   });
 
   it('rejects an unauthenticated attention upload (WS-E.1.3a)', async () => {

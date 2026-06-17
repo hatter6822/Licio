@@ -141,6 +141,13 @@ export interface DefaultProviderDeps {
     getByIds(storyIds: readonly string[]): Promise<Map<string, StoryRecord>>;
     getThreadsByStoryIds(storyIds: readonly string[]): Promise<Map<string, ThreadShellRecord>>;
   };
+  /** WS-J.2.3 shadow enforcement (SPEC §24.4): the subset of the given author
+   *  ids under a STANDING shadow.  A FUNCTION dependency — NOT a `../moderation`
+   *  import — so the ranking import closure stays free of moderation/financial
+   *  code (the `check:neutrality` gate).  Boot injects the real moderation-store
+   *  query; the default is a no-op (empty set), so a ranking built without
+   *  moderation stays closure-clean. */
+  shadowedSubjects(authorUserIds: readonly string[]): Promise<Set<string>>;
 }
 
 /**
@@ -160,6 +167,16 @@ export function createDefaultModerationStateProvider(
         deps.events.safetyStore.getMany(itemIds),
         deps.stories.getThreadsByStoryIds(itemIds),
       ]);
+      // WS-J.2.3 shadow: which of the candidate authors are under a standing
+      // shadow.  Resolved AFTER stories (their authors are the query input) in
+      // ONE batched call — a shadowed author's content gets zero ORGANIC reach
+      // while staying directly readable (a reach reduction, NOT a removal).
+      const authorIds = [
+        ...new Set(
+          [...stories.values()].map((s) => s.submittedBy).filter((id): id is string => id !== null),
+        ),
+      ];
+      const shadowed = await deps.shadowedSubjects(authorIds);
       for (const itemId of itemIds) {
         const story = stories.get(itemId);
         if (story === undefined) {
@@ -196,6 +213,20 @@ export function createDefaultModerationStateProvider(
           out.set(itemId, {
             removed: true,
             removalReason: 'thread_restricted',
+            moderationCaseRef: null,
+            sensitivityLabels: story.sensitivityLabels,
+            legallyRestrictedIn: [],
+            stewardHold: false,
+          });
+          continue;
+        }
+        // Author shadow (WS-J.2.3): exclude from organic distribution.  Checked
+        // LAST so a more-specific takedown/integrity/thread reason logs instead
+        // when present; the item stays directly readable (zero organic reach).
+        if (story.submittedBy !== null && shadowed.has(story.submittedBy)) {
+          out.set(itemId, {
+            removed: true,
+            removalReason: 'author_shadow',
             moderationCaseRef: null,
             sensitivityLabels: story.sensitivityLabels,
             legallyRestrictedIn: [],

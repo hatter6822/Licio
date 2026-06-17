@@ -15,20 +15,29 @@
 import { z } from 'zod';
 import { isoTimestampSchema, uuidSchema } from './common.js';
 import { personalizationSettingsSchema, privacySettingsSchema } from './privacy-settings.js';
+import { stewardRoleIdSchema } from './steward-roles.js';
 
 // ---------------------------------------------------------------------------
 // Enumerations (the §22.1 column domains).
 // ---------------------------------------------------------------------------
 
 /**
- * Account lifecycle (§22.1 account_state).  Distinct from the WS-C client-facing
- * `accountStateSchema` in `profile.ts`: this is the canonical DB domain, which
- * includes `deleted` (a tombstone state) and omits the client's `restricted`.
- * The enum deliberately has no `pending`/`unverified` value — verification lives
- * in a separate column (WS-D.1.4a), so an unverified account is still `active`
- * with reduced capabilities (WS-D.1.1a Security/Privacy note).
+ * Account lifecycle (§22.1 account_state).  The canonical DB domain.  It is a
+ * superset of the WS-C client-facing `accountStateSchema` in `profile.ts`: it
+ * adds `deleted` (a tombstone the client never renders), and shares `restricted`
+ * — the WS-J moderation sanction under which a user may read + self-serve
+ * (profile, data-rights, appeals, block/mute) but not publicly contribute.  The
+ * enum deliberately has no `pending`/`unverified` value — verification lives in a
+ * separate column (WS-D.1.4a), so an unverified account is still `active` with
+ * reduced capabilities (WS-D.1.1a Security/Privacy note).
  */
-export const USER_ACCOUNT_STATES = ['active', 'suspended', 'deactivated', 'deleted'] as const;
+export const USER_ACCOUNT_STATES = [
+  'active',
+  'suspended',
+  'restricted',
+  'deactivated',
+  'deleted',
+] as const;
 export type UserAccountState = (typeof USER_ACCOUNT_STATES)[number];
 export const userAccountStateSchema = z.enum(USER_ACCOUNT_STATES);
 
@@ -214,6 +223,9 @@ export const userRecordSchema = z
     privacy_settings: privacySettingsSchema,
     personalization_settings: personalizationSettingsSchema,
     reputation_summary_private: reputationSummaryPrivateSchema,
+    /** Doctrine steward-role grants (WS-J / STEWARD_ROLES.md); empty for a
+     *  non-steward.  Private — excluded from `userPublicSchema` by allowlist. */
+    steward_roles: z.array(stewardRoleIdSchema).default([]),
     created_at: isoTimestampSchema,
     updated_at: isoTimestampSchema,
   })

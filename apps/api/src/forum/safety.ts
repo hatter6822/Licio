@@ -17,15 +17,42 @@
 import type { ContributionCreate } from '@licio/shared';
 import type { UrlSafetyProvider } from '../ingestion/prechecks.js';
 
+/**
+ * The disposition a safety classifier returns (WS-J.2.6):
+ *   • `clear` → publish normally
+ *   • `flag`  → persist `under_review` (default-hidden) + enqueue for review
+ *   • `block` → persist `removed` (high-confidence spam/malware auto-block, an
+ *               appealable system action — the only auto-removal paths besides
+ *               malware are spam, WS-J.2.6a/b)
+ */
+export type ContributionSafetyDisposition = 'clear' | 'flag' | 'block';
+
 export interface ContributionSafetyVerdict {
-  /** True → persist as under_review + enqueue for steward review. */
-  flagged: boolean;
+  disposition: ContributionSafetyDisposition;
   /** Machine-readable reasons (counted in metrics; no body text). */
   reasons: string[];
+  /** The taxonomy reason code for an auto-block action (spam/malware). */
+  reasonCode?: string;
+}
+
+/** Per-request author context the WS-J classifiers need (account age, etc.). */
+export interface ContributionSafetyContext {
+  userId: string;
+  /**
+   * The thread's home ROOM (WS-Q: every thread belongs to a room).  The
+   * duplicate-flood detector counts DISTINCT ROOMS, so this must be the real
+   * room id — NOT the thread id.  Two threads in one room are ONE room, so
+   * keying flooding off the thread id would read same-room reposts as
+   * cross-room flooding (a false positive).
+   */
+  roomId: string;
 }
 
 export interface ContributionSafetyClassifier {
-  classify(request: ContributionCreate): Promise<ContributionSafetyVerdict>;
+  classify(
+    request: ContributionCreate,
+    context: ContributionSafetyContext,
+  ): Promise<ContributionSafetyVerdict>;
 }
 
 const BARE_URL = /https?:\/\/[^\s<>"'`)]{1,2048}/gi;
@@ -73,7 +100,7 @@ export class HeuristicContributionSafety implements ContributionSafetyClassifier
         break;
       }
     }
-    return { flagged: reasons.length > 0, reasons };
+    return { disposition: reasons.length > 0 ? 'flag' : 'clear', reasons };
   }
 }
 

@@ -24,6 +24,7 @@ import {
   type EvidenceCardType,
   emptyReputationSummary,
   type LocationScope,
+  type StewardRoleId,
   type StoryLifecycleState,
   type SubmissionMetadata,
 } from '@licio/shared';
@@ -37,6 +38,8 @@ import type { IngestionServices } from '../ingestion/services.js';
 import { runBatchTier } from '../invariants/scheduler.js';
 import type { InvariantPlatformServices } from '../invariants/services.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
+import { submitReport } from '../moderation/reports.js';
+import type { ModerationServices } from '../moderation/services.js';
 import { windowStartMs } from '../pwatt/aggregation.js';
 import { runPwattWindow } from '../pwatt/scoring.js';
 import { DEMO_IDS } from './demo-data.js';
@@ -86,6 +89,8 @@ export const DEV_ACCOUNTS: ReadonlyArray<{
   displayName: string;
   email: string;
   roles: readonly Role[];
+  /** WS-J doctrine steward roles (the console queues each unlocks). */
+  stewardRoles?: readonly StewardRoleId[];
   purpose: string;
 }> = [
   {
@@ -102,7 +107,10 @@ export const DEV_ACCOUNTS: ReadonlyArray<{
     displayName: 'Sam Steward',
     email: 'steward@licio.test',
     roles: ['user', 'steward'],
-    purpose: 'Platform steward — moderation queues, governance, ranking/audit reads.',
+    // The three WS-J doctrine roles needed to exercise every console tab in dev:
+    // report queue (safety), appeals, and the integrity incident queue.
+    stewardRoles: ['ROLE_SAFETY', 'ROLE_APPEALS', 'ROLE_INTEGRITY'],
+    purpose: 'Platform steward — moderation queues, appeals, integrity, audit reads.',
   },
   {
     userId: U(22),
@@ -166,6 +174,7 @@ export async function seedForumDemoData(
         personalizationSettings: defaultPersonalizationSettings(),
         reputationSummary: emptyReputationSummary(),
         roles: [...account.roles],
+        ...(account.stewardRoles ? { stewardRoles: [...account.stewardRoles] } : {}),
       },
       backdated,
     );
@@ -1858,4 +1867,25 @@ export async function seedOperationalSignals(
   });
   await events.eventStore.insertMany(rows);
   await runPwattWindow(events, identity, hourStart, '1h');
+}
+
+/**
+ * Seed a small WS-J moderation demo: two distinct reporters file a report
+ * against one demo story, so a fresh dev console shows a non-empty report queue
+ * (one standard case, report_count 2) that an authorized steward can review and
+ * action.  Idempotent — the fixed operation ids make a re-run a no-op.  Runs on
+ * non-prod boot AFTER the moderation services are wired.
+ */
+export async function seedModerationDemo(moderation: ModerationServices): Promise<void> {
+  const target = DEMO_IDS.STORY_2;
+  const reporters = [U(20), U(22)]; // the dev admin + expert accounts
+  for (const [i, reporter] of reporters.entries()) {
+    await submitReport(moderation, reporter, {
+      target_type: 'content',
+      target_id: target,
+      content_kind: 'story',
+      reason_code: 'MOD_SPAM_001',
+      local_operation_id: `demo-report-${i}`,
+    });
+  }
 }

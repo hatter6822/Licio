@@ -9,7 +9,7 @@
 // limiting is per-account (a non-reversible ref of the account under attack)
 // plus a global identity-free backstop; a static test enforces that no source
 // file reads the forwarded-address header.
-import type { AuthMethod } from '@licio/shared';
+import type { AuthMethod, UserAccountState } from '@licio/shared';
 import { accountRef, sessionRef as deriveSessionRef } from '../identity/crypto.js';
 import { assessLogin, deviceProfile, sendSecurityAlert } from '../identity/security-alerts.js';
 import type { IdentityServices } from '../identity/services.js';
@@ -204,7 +204,7 @@ export interface PublicUserInput {
   userId: string;
   handle: string;
   displayName: string;
-  accountState: 'active' | 'suspended' | 'deactivated' | 'deleted';
+  accountState: UserAccountState;
   locale: string | null;
   createdAt: string;
 }

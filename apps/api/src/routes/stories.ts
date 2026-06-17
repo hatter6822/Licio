@@ -45,7 +45,7 @@ import type {
 import { submitStory } from '../ingestion/submission.js';
 import { changeStoryVisibility } from '../ingestion/visibility.js';
 import { rateLimit } from '../lib/rate-limit.js';
-import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
+import { type AuthEnv, authMiddleware, getAuth, requireUnrestricted } from '../middleware/auth.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
 
@@ -167,6 +167,7 @@ export function createStoriesRoutes() {
       .post(
         '/stories',
         authMiddleware(),
+        requireUnrestricted(),
         zValidator('json', storyCreateRequestSchema),
         async (c) => {
           const auth = getAuth(c);
@@ -220,6 +221,16 @@ export function createStoriesRoutes() {
         async (c) => {
           const auth = getAuth(c);
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          // A `restricted` account may NARROW (retract) its own content but not
+          // WIDEN it to the public tier — widening increases public reach and is
+          // a public-contribution attempt (WS-J `restrict`).  Narrowing only
+          // reduces exposure, so it stays available.
+          if (auth.accountState === 'restricted' && c.req.valid('json').visibility === 'public') {
+            return c.json(
+              deny('account_restricted', 'Your account is restricted from posting'),
+              403,
+            );
+          }
           const outcome = await changeStoryVisibility(
             getIngestionServices(),
             getEventPipelineServices(),
