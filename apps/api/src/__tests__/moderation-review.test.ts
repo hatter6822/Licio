@@ -311,6 +311,32 @@ describe('buildCaseReview (snapshot + thread + side-by-side)', () => {
     expect(review?.available_actions).toContain('remove');
     expect(await buildCaseReview(services, SAFETY, 'missing')).toBeNull();
   });
+
+  it('#1 scopes the action palette to the case target type', async () => {
+    // An ACCOUNT case must not offer content actions (hide/remove).
+    const acctCase = await insertCase({
+      caseId: 'aaaaaaaa-0000-4000-9000-0000000000a1',
+      targetType: 'account',
+      targetId: '00000000-0000-4000-8000-0000000000bb',
+      contentKind: null,
+    });
+    const acct = await buildCaseReview(services, SAFETY, acctCase);
+    expect(acct?.available_actions).not.toContain('hide');
+    expect(acct?.available_actions).not.toContain('remove');
+    expect(acct?.available_actions).toContain('suspend'); // account actions OK
+
+    // A ROOM case offers only workflow (escalate/clear), no enforcement verbs.
+    const roomCase = await insertCase({
+      caseId: 'aaaaaaaa-0000-4000-9000-0000000000a2',
+      targetType: 'room',
+      targetId: '00000000-0000-4000-8000-0000000000f1',
+      contentKind: null,
+    });
+    const room = await buildCaseReview(services, SAFETY, roomCase);
+    expect(room?.available_actions).toEqual(expect.arrayContaining(['escalate', 'clear']));
+    const enforcementVerbs = ['hide', 'remove', 'warn', 'restrict', 'shadow', 'suspend', 'ban'];
+    expect(room?.available_actions.some((a) => enforcementVerbs.includes(a))).toBe(false);
+  });
 });
 
 describe('appeal queue + review', () => {

@@ -22,6 +22,7 @@ import {
   type UserHistory,
   type UserHistoryAction,
 } from '@licio/shared';
+import { actionValidForTarget } from './actions.js';
 import {
   availableConsoleActions,
   maySeeCoordinationDetail,
@@ -395,8 +396,14 @@ export async function buildCaseReview(
           edited_after_report: true,
         }
       : null,
-    available_actions: availableConsoleActions(actor).filter((a): a is ConsoleAction =>
-      (CONSOLE_ACTIONS as readonly string[]).includes(a),
+    // Scope the palette to actions VALID for this case's target type (mirrors the
+    // applyAction guards) AND the actor's role — a reviewer is never shown an
+    // action that can only fail (e.g. hide/remove on an account, an enforcement
+    // verb on a room).
+    available_actions: availableConsoleActions(actor).filter(
+      (a): a is ConsoleAction =>
+        (CONSOLE_ACTIONS as readonly string[]).includes(a) &&
+        actionValidForTarget(a as ConsoleAction, theCase.targetType),
     ),
   };
 }

@@ -177,6 +177,14 @@ function CaseReviewDialog({
   const [action, setAction] = useState<ConsoleAction>('hide');
   const [reasonCode, setReasonCode] = useState<ModerationReasonCode>('MOD_HARASS_001');
   const data: CaseReviewResponse | undefined = review.data;
+  // The palette only offers actions VALID for this case's target (server-scoped).
+  // The initial `hide` may not be among them (a room case → clear/escalate, or a
+  // role without hide), so default to the first available action until the
+  // reviewer picks one — Apply then never submits an action that can only fail.
+  const effectiveAction: ConsoleAction =
+    data && !data.available_actions.includes(action)
+      ? (data.available_actions[0] ?? action)
+      : action;
 
   const apply = useMutation({
     mutationFn: () =>
@@ -186,7 +194,7 @@ function CaseReviewDialog({
         // server allows only clear/escalate on a room target.
         targetType: data?.target_type ?? 'content',
         targetId: data?.target_id ?? '',
-        action,
+        action: effectiveAction,
         reasonCode,
         caseId,
       }),
@@ -341,7 +349,7 @@ function CaseReviewDialog({
             </h3>
             <Select
               label={t('console.action', 'Action')}
-              value={action}
+              value={effectiveAction}
               onValueChange={(v) => setAction(v as ConsoleAction)}
               options={data.available_actions.map((a) => ({ value: a, label: a }))}
             />

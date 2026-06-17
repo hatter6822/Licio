@@ -113,6 +113,21 @@ export function restoreStateFrom(priorState: string | null): AccountActionState 
   return 'active';
 }
 
+/** Whether a console action is valid for a case's target type — mirrors the
+ *  `applyAction` guards: a content action (hide/remove) needs a content target;
+ *  a room target accepts only workflow (escalate/clear, no enforcement verb); an
+ *  account target accepts everything except content actions.  Used to scope the
+ *  review palette so a reviewer is never offered an action that can only 400/409
+ *  for the case in front of them. */
+export function actionValidForTarget(
+  action: ConsoleAction,
+  targetType: 'content' | 'account' | 'room',
+): boolean {
+  if (targetType === 'room') return enforcementType(action) === null;
+  if (targetType === 'account') return !CONTENT_ACTIONS.has(action);
+  return true;
+}
+
 /**
  * Apply a moderation action.  `actor` is the authenticated steward (authorization
  * is resolved here, server-side); the route has zod-validated the request.
