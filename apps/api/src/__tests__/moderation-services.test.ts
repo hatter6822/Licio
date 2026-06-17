@@ -4,7 +4,7 @@
 // palette + revert, appeals (independence), block/mute enforcement, audit +
 // transparency, notices, review projections, authz, and fail-closed config —
 // exercised against in-memory stores + recording stub ports.
-import type { CreateReportRequest } from '@licio/shared';
+import type { CreateReportRequest, UserAccountState } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { InMemoryPwattConfigStore } from '../events/stores.js';
 import { applyAction, parseDurationDays, revertAction } from '../moderation/actions.js';
@@ -118,7 +118,10 @@ function recordingContentPort(subjectFor: Record<string, string> = {}): Recordin
   };
 }
 
-function userPort(ages: Record<string, number | null>): ModerationUserPort {
+function userPort(
+  ages: Record<string, number | null>,
+  accountStates: Record<string, UserAccountState> = {},
+): ModerationUserPort {
   const make = (id: string): ResolvedUser => ({
     handle: `user_${id.slice(0, 4)}`,
     accountAgeDays: ages[id] ?? null,
@@ -132,6 +135,9 @@ function userPort(ages: Record<string, number | null>): ModerationUserPort {
     },
     async resolveMany(ids) {
       return new Map(ids.map((id) => [id, make(id)]));
+    },
+    async currentAccountState(id) {
+      return accountStates[id] ?? null;
     },
   };
 }
@@ -611,6 +617,85 @@ describe('reversal integrity (WS-J.2.3b)', () => {
     // Reverting the SECOND (the last active removal) restores visibility.
     await revertAction(services, safetyActor(), second.response.action_id);
     expect(port.contentStates.some((s) => s.state === 'visible')).toBe(true);
+  });
+});
+
+describe('account-state prior-state preservation (D3)', () => {
+  it('revert restores the TRUE prior account state (restricted), not always active', async () => {
+    const port = recordingContentPort();
+    services = createInMemoryModerationServices({
+      content: port,
+      users: userPort({ [AUTHOR]: 100 }, { [AUTHOR]: 'restricted' }), // already restricted
+    });
+    const out = await applyAction(services, safetyActor(), {
+      target_type: 'account',
+      target_id: AUTHOR,
+      action: 'suspend',
+      reason_code: 'MOD_HARASS_001',
+    });
+    if (!out.ok) throw new Error('suspend failed');
+    expect(port.accountStates.at(-1)?.state).toBe('suspended');
+    await revertAction(services, safetyActor(), out.response.action_id);
+    expect(port.accountStates.at(-1)?.state).toBe('restricted'); // not 'active'
+  });
+
+  it('refuses an account action on a deactivated/deleted account (no resurrection)', async () => {
+    const port = recordingContentPort();
+    services = createInMemoryModerationServices({
+      content: port,
+      users: userPort({ [AUTHOR]: 100 }, { [AUTHOR]: 'deactivated' }),
+    });
+    const out = await applyAction(services, safetyActor(), {
+      target_type: 'account',
+      target_id: AUTHOR,
+      action: 'suspend',
+      reason_code: 'MOD_HARASS_001',
+    });
+    expect(out.ok).toBe(false);
+    expect(!out.ok && out.code).toBe('invalid_account_state');
+    expect(await services.actions.listActiveByTarget('account', AUTHOR)).toHaveLength(0);
+    expect(port.accountStates).toHaveLength(0); // no state write
+  });
+
+  it('#2 a standing shadow does not block restoring a reverted account sanction', async () => {
+    const port = recordingContentPort();
+    services = createInMemoryModerationServices({
+      content: port,
+      users: userPort({ [AUTHOR]: 100 }),
+    });
+    const shadow = await applyAction(services, safetyActor(), {
+      target_type: 'account',
+      target_id: AUTHOR,
+      action: 'shadow',
+      reason_code: 'MOD_HARASS_001',
+    });
+    const suspend = await applyAction(services, safetyActor(), {
+      target_type: 'account',
+      target_id: AUTHOR,
+      action: 'suspend',
+      reason_code: 'MOD_HARASS_001',
+    });
+    if (!shadow.ok || !suspend.ok) throw new Error('setup failed');
+    // shadow writes NO account state (it is null-gated out of the read/write).
+    expect(port.accountStates.map((s) => s.state)).toEqual(['suspended']);
+    port.accountStates.length = 0;
+    // Reverting the suspend restores the account even though a shadow still stands.
+    await revertAction(services, safetyActor(), suspend.response.action_id);
+    expect(port.accountStates.at(-1)?.state).toBe('active');
+  });
+
+  it('#2 shadow is not refused on a deactivated account (null-gated, no account read)', async () => {
+    services = createInMemoryModerationServices({
+      content: recordingContentPort(),
+      users: userPort({ [AUTHOR]: 100 }, { [AUTHOR]: 'deactivated' }),
+    });
+    const out = await applyAction(services, safetyActor(), {
+      target_type: 'account',
+      target_id: AUTHOR,
+      action: 'shadow',
+      reason_code: 'MOD_HARASS_001',
+    });
+    expect(out.ok).toBe(true); // shadow does not touch account state → not refused
   });
 });
 

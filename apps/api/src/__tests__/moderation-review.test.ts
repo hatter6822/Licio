@@ -88,6 +88,9 @@ beforeEach(() => {
           ]),
         );
       },
+      async currentAccountState() {
+        return null;
+      },
     },
     now: () => START,
   });

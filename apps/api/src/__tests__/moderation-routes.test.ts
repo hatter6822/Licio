@@ -61,6 +61,9 @@ function userPortOverIdentity(): ModerationUserPort {
       }
       return out;
     },
+    async currentAccountState() {
+      return null;
+    },
   };
 }
 

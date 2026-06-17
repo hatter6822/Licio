@@ -240,6 +240,9 @@ export function createModerationConsoleRoutes() {
           if (outcome.code === 'invalid_action_for_target') {
             return c.json(deny('invalid_action_for_target', outcome.message), 400);
           }
+          if (outcome.code === 'invalid_account_state') {
+            return c.json(deny('invalid_account_state', outcome.message), 409);
+          }
           return c.json(
             {
               error: {

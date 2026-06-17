@@ -12,6 +12,7 @@ import type {
   InvariantSignalsPanel,
   ReportContentKind,
   ReportTargetType,
+  UserAccountState,
 } from '@licio/shared';
 
 /** Resolution of a moderation target (subject user, existence, kind). */
@@ -81,6 +82,12 @@ export interface ResolvedUser {
 export interface ModerationUserPort {
   resolve(userId: string): Promise<ResolvedUser | null>;
   resolveMany(userIds: readonly string[]): Promise<Map<string, ResolvedUser>>;
+  /** The subject's CURRENT account state (WS-J.2.3b): an account sanction stores
+   *  it as the action's prior-state so a revert/auto-lift restores the true
+   *  state (e.g. `restricted`), not an unconditional `active`; and a sanction on
+   *  a `deactivated`/`deleted` tombstone is refused (no resurrection).  `null`
+   *  when unknown (the default port). */
+  currentAccountState(userId: string): Promise<UserAccountState | null>;
 }
 
 /** The invariant decision-support port (WS-H), read-only and never a verdict. */
@@ -168,6 +175,9 @@ export const defaultUserPort: ModerationUserPort = {
   },
   async resolveMany(): Promise<Map<string, ResolvedUser>> {
     return new Map();
+  },
+  async currentAccountState(): Promise<UserAccountState | null> {
+    return null;
   },
 };
 

@@ -49,6 +49,8 @@ interface ContributionSlice {
 interface AccountSlice {
   handle: string;
   createdAt: string;
+  /** The subject's current WS-D account state (for the revert prior-state read). */
+  accountState: UserAccountState;
 }
 
 /** The inputs for the WS-J.2.2d side-by-side diff: the current body + the edit
@@ -482,6 +484,9 @@ export function createProductionUserPort(deps: UserPortDeps): ModerationUserPort
         out.set(user.userId, baseResolved(user));
       }
       return out;
+    },
+    async currentAccountState(userId): Promise<UserAccountState | null> {
+      return (await deps.getUser(userId))?.accountState ?? null;
     },
   };
 }

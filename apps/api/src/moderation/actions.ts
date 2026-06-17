@@ -39,6 +39,7 @@ export type ActionOutcome =
     }
   | { ok: false; code: 'target_not_found'; message: string }
   | { ok: false; code: 'invalid_action_for_target'; message: string }
+  | { ok: false; code: 'invalid_account_state'; message: string }
   | { ok: false; code: 'enforcement_delayed'; message: string };
 
 /** Map a console action to the enforcement action type used by the appeal matrix
@@ -99,6 +100,17 @@ export function accountStateFor(action: ConsoleAction): AccountActionState | nul
   if (action === 'suspend') return 'suspended';
   if (action === 'ban') return 'banned';
   return null; // shadow leaves account active (distribution reduced elsewhere)
+}
+
+/** Map a stored account `prior_state` (the account's state BEFORE the sanction)
+ *  to the account action that restores it on revert/auto-lift.  `restricted`
+ *  restores to restricted (not active — the user was already restricted before
+ *  this sanction stacked on top); anything else (incl. a legacy `active`)
+ *  restores to active. */
+export function restoreStateFrom(priorState: string | null): AccountActionState {
+  if (priorState === 'restricted') return 'restricted';
+  if (priorState === 'suspended') return 'suspended';
+  return 'active';
 }
 
 /**
@@ -206,7 +218,24 @@ export async function applyAction(
   //    revert handle), never the unrecoverable "enforced, not recorded".
   const contentState = CONTENT_ACTIONS.has(request.action) ? contentStateFor(request.action) : null;
   const accountState = ACCOUNT_ACTIONS.has(request.action) ? accountStateFor(request.action) : null;
-  const priorState = contentState ? 'visible' : accountState ? 'active' : null;
+  // An account sanction (NOT shadow — its mapping is null) records the account's
+  // CURRENT state as the action's prior-state, so a revert/auto-lift restores the
+  // TRUE prior (e.g. `restricted`), not an unconditional `active`.  A sanction on
+  // a self-deactivated/purged account is refused — a later revert must never
+  // resurrect a tombstone.
+  let priorAccount = 'active';
+  if (accountState !== null && subjectUserId) {
+    const current = await services.users.currentAccountState(subjectUserId);
+    if (current === 'deactivated' || current === 'deleted') {
+      return {
+        ok: false,
+        code: 'invalid_account_state',
+        message: 'Cannot apply an account action to a deactivated or deleted account',
+      };
+    }
+    priorAccount = current ?? 'active';
+  }
+  const priorState = contentState ? 'visible' : accountState ? priorAccount : null;
   const nextState = contentState ?? accountState ?? null;
   const action = await services.actions.insert({
     actorUserId: actor.userId,
@@ -416,20 +445,32 @@ export async function performRevert(
       );
     }
   }
-  if (ACCOUNT_ACTIONS.has(original.action as ConsoleAction) && original.subjectUserId) {
+  // Only actions that actually WRITE an account state gate the restore.  `shadow`
+  // is an account action but maps to no WS-D state (accountStateFor → null), so a
+  // standing shadow must NOT block restoring an expiring/reverted suspend/restrict
+  // (its reach reduction is lifted by reverting the shadow itself, not here).
+  if (accountStateFor(original.action as ConsoleAction) !== null && original.subjectUserId) {
     // Scan the SUBJECT's other active account sanctions BY SUBJECT, not by the
     // action's target: an account sanction taken from a CONTENT case has the
     // content as its target, so a target scan would miss the user's sanctions
     // from other reports and prematurely lift them.  This action is excluded by
-    // id (it is not yet marked reverted).
+    // id (it is not yet marked reverted), and `shadow` is excluded (no WS-D state).
     const stillRestricted = (await services.actions.listBySubject(original.subjectUserId)).some(
       (a) =>
         a.actionId !== original.actionId &&
         !a.reverted &&
-        ACCOUNT_ACTIONS.has(a.action as ConsoleAction),
+        accountStateFor(a.action as ConsoleAction) !== null,
     );
     if (!stillRestricted) {
-      await services.content.applyAccountState(original.subjectUserId, 'active', null);
+      // Restore the TRUE prior account state (e.g. `restricted` if the user was
+      // already restricted before this sanction stacked), not an unconditional
+      // `active` — and never a `deactivated`/`deleted` tombstone (applyAction
+      // refuses to sanction those, so `priorState` is never one).
+      await services.content.applyAccountState(
+        original.subjectUserId,
+        restoreStateFrom(original.priorState),
+        null,
+      );
     }
   }
   // Restore succeeded — NOW mark the original reverted (idempotency point).

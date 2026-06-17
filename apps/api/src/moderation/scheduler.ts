@@ -7,7 +7,7 @@
 import { hostname } from 'node:os';
 import type { ConsoleAction } from '@licio/shared';
 import type { JobLeaseStore } from '../identity/job-lease.js';
-import { ACCOUNT_ACTIONS, parseDurationDays } from './actions.js';
+import { accountStateFor, parseDurationDays, restoreStateFrom } from './actions.js';
 import type { ModerationServices } from './services.js';
 
 export type ModerationSchedulerTask =
@@ -57,18 +57,31 @@ export async function runModerationTick(
       const days = parseDurationDays(action.duration ?? undefined);
       if (days === null) continue;
       if (Date.parse(action.createdAt) + days * DAY_MS > nowMs) continue;
-      await services.actions.update(action.actionId, { reverted: true });
       if (action.subjectUserId !== null) {
-        // By SUBJECT, not target: an account sanction from a content case has the
-        // content as its target, so a target scan would prematurely lift the
-        // user's other active sanctions (the just-expired one is now reverted).
+        // Restore the account BEFORE marking the action reverted: a transient
+        // restore failure then leaves the action active for a later tick to
+        // retry, rather than skipping it forever with the account still
+        // sanctioned.  By SUBJECT, not target (an account sanction from a content
+        // case has the content as its target); EXCLUDE this action by id since it
+        // is not yet marked reverted.
         const stillSanctioned = (await services.actions.listBySubject(action.subjectUserId)).some(
-          (a) => !a.reverted && ACCOUNT_ACTIONS.has(a.action as ConsoleAction),
+          (a) =>
+            a.actionId !== action.actionId &&
+            !a.reverted &&
+            // Only WS-D-state-writing sanctions block the restore — `shadow` maps
+            // to no account state, so it must not keep the account sanctioned.
+            accountStateFor(a.action as ConsoleAction) !== null,
         );
         if (!stillSanctioned) {
-          await services.content.applyAccountState(action.subjectUserId, 'active', null);
+          // Restore the TRUE prior state (e.g. `restricted`), not always `active`.
+          await services.content.applyAccountState(
+            action.subjectUserId,
+            restoreStateFrom(action.priorState),
+            null,
+          );
         }
       }
+      await services.actions.update(action.actionId, { reverted: true });
       await services.audit.append({
         actorUserId: null,
         actorRole: null,

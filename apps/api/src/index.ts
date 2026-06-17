@@ -564,13 +564,16 @@ const moderationServices = createInMemoryModerationServices({
   users: createProductionUserPort({
     getUser: async (id) => {
       const user = await identityServices.store.getUser(id);
-      return user ? { handle: user.handle, createdAt: user.createdAt } : null;
+      return user
+        ? { handle: user.handle, createdAt: user.createdAt, accountState: user.accountState }
+        : null;
     },
     getUsersByIds: async (ids) =>
       (await identityServices.store.getUsersByIds(ids)).map((u) => ({
         userId: u.userId,
         handle: u.handle,
         createdAt: u.createdAt,
+        accountState: u.accountState,
       })),
     // WS-J.2.2b user-history context: count + per-type tally + distinct rooms,
     // over a bounded recent-contribution read (this is the per-subject review

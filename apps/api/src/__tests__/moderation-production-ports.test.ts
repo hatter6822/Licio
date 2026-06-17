@@ -417,9 +417,12 @@ describe('production user port', () => {
     const nowMs = 1_700_000_000_000;
     const created = new Date(nowMs - 10 * 86_400_000).toISOString();
     const port = createProductionUserPort({
-      getUser: async (id) => (id === AUTHOR ? { handle: 'alice', createdAt: created } : null),
+      getUser: async (id) =>
+        id === AUTHOR ? { handle: 'alice', createdAt: created, accountState: 'active' } : null,
       getUsersByIds: async (ids) =>
-        ids.includes(AUTHOR) ? [{ userId: AUTHOR, handle: 'alice', createdAt: created }] : [],
+        ids.includes(AUTHOR)
+          ? [{ userId: AUTHOR, handle: 'alice', createdAt: created, accountState: 'active' }]
+          : [],
       now: () => nowMs,
     });
     const resolved = await port.resolve(AUTHOR);
@@ -434,9 +437,14 @@ describe('production user port', () => {
     const nowMs = 1_700_000_000_000;
     const created = new Date(nowMs - 5 * 86_400_000).toISOString();
     const port = createProductionUserPort({
-      getUser: async () => ({ handle: 'bob', createdAt: created }),
+      getUser: async () => ({ handle: 'bob', createdAt: created, accountState: 'active' }),
       getUsersByIds: async (ids) =>
-        ids.map((id) => ({ userId: id, handle: 'bob', createdAt: created })),
+        ids.map((id) => ({
+          userId: id,
+          handle: 'bob',
+          createdAt: created,
+          accountState: 'active',
+        })),
       contributionStats: async () => ({
         count: 7,
         byType: { question: 4, explanation: 3 },
