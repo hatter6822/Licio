@@ -110,6 +110,21 @@ export function selectIsAuthenticated(state: AuthState): boolean {
   return state.status === 'authenticated' && state.user?.account_state === 'active';
 }
 
+/**
+ * The user id the attention pipeline may attribute uploads to: the session user
+ * iff the session is genuinely authenticated (`selectIsAuthenticated`), otherwise
+ * `null`. The store retains `user` across `session-expired` (so the UI can show
+ * whose session lapsed) and optimistically rehydrates it from localStorage at
+ * boot, so the mere presence of `user` does NOT imply a live session. Every
+ * attention upload is authenticated at the WS-E ingestion boundary, so EVERY
+ * collection-policy writer (the boot policy + the live Privacy-page sync) must
+ * gate on this, never on the raw `user?.id` — otherwise an expired session keeps
+ * uploading straight into 401s.
+ */
+export function selectCollectionUserId(state: AuthState): string | null {
+  return selectIsAuthenticated(state) ? (state.user?.id ?? null) : null;
+}
+
 /** True when the rehydrated/loaded account is restricted or suspended. */
 export function selectIsRestricted(state: AuthState): boolean {
   return (

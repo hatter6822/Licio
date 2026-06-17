@@ -17,12 +17,7 @@ import { initWebVitals } from '../perf/vitals.js';
 import { ensurePushSubscription } from '../push/subscription.js';
 import { resolveCollectionPolicy } from '../signals/privacy.js';
 import { getSignalProcessor } from '../signals/runtime.js';
-import {
-  type AuthState,
-  initAuthSync,
-  selectIsAuthenticated,
-  useAuthStore,
-} from '../stores/auth.js';
+import { initAuthSync, selectCollectionUserId, useAuthStore } from '../stores/auth.js';
 import { useFeatureFlagStore } from '../stores/feature-flags.js';
 import { initUIStore, useUIStore } from '../stores/ui.js';
 import { fetchAuthStatus, fetchFeatureFlags, fetchSettings } from './api.js';
@@ -82,32 +77,26 @@ async function seedDurableFeedMode(): Promise<void> {
 }
 
 /**
- * The user id the signal pipeline may attribute attention to: the session user
- * iff the session is genuinely authenticated (`selectIsAuthenticated` — an active
- * account with a non-expired status), otherwise `null`. The auth store retains the
- * `user` context across `session-expired` (so the UI can show whose session
- * lapsed) and optimistically rehydrates it from localStorage at boot, so the mere
- * presence of `user` does NOT imply a live session — keying collection on it would
- * upload attention straight into a 401 at the WS-E ingestion boundary.
- */
-function effectiveCollectionUserId(state: AuthState): string | null {
-  return selectIsAuthenticated(state) ? (state.user?.id ?? null) : null;
-}
-
-/**
  * Apply the signal-collection policy from the user's privacy settings. Collection
- * is gated on a live authenticated session (see {@link effectiveCollectionUserId}),
- * honoring the `signals/privacy.ts` invariant: signed-out or session-expired
- * readers generate no attention data at all.
+ * is gated on a live authenticated session via `selectCollectionUserId`, honoring
+ * the `signals/privacy.ts` invariant: signed-out or session-expired readers
+ * generate no attention data at all.
+ *
+ * The effective user id is read AFTER the settings await, not before: a logout or
+ * 401-driven session expiry can land while the request is in flight, and a
+ * pre-await snapshot would let this (now-stale) invocation re-enable collection
+ * for a dead session — racing, and overwriting, the auth subscription's disable.
+ * Reading the live auth state immediately before the write keeps the last writer
+ * correct regardless of interleaving.
  */
 export async function applySignalPolicy(): Promise<void> {
-  const userId = effectiveCollectionUserId(useAuthStore.getState());
   let settings = DEFAULT_USER_SETTINGS;
   try {
     settings = await fetchSettings();
   } catch {
     // Use the safe defaults (personalization on, standard privacy) when offline.
   }
+  const userId = selectCollectionUserId(useAuthStore.getState());
   getSignalProcessor().setCollectionPolicy(resolveCollectionPolicy(settings, userId));
 }
 
@@ -170,12 +159,12 @@ export function startRuntime(): () => void {
   // (login, logout, AND session expiry): collection requires a live authenticated
   // session (the WS-E ingestion boundary authenticates every upload), so the policy
   // must track auth state live — not only at startup. We key on the gated identity
-  // (effectiveCollectionUserId), not the raw `user?.id`, because expireSession()
+  // (selectCollectionUserId), not the raw `user?.id`, because expireSession()
   // retains the user object and only flips the status; keying on the id would miss
   // the expiry and keep collecting straight into 401s.
-  let lastPolicyUserId = effectiveCollectionUserId(useAuthStore.getState());
+  let lastPolicyUserId = selectCollectionUserId(useAuthStore.getState());
   const teardownPolicySync = useAuthStore.subscribe((state) => {
-    const userId = effectiveCollectionUserId(state);
+    const userId = selectCollectionUserId(state);
     if (userId === lastPolicyUserId) return;
     lastPolicyUserId = userId;
     void applySignalPolicy();

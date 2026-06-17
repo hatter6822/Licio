@@ -49,6 +49,7 @@ import { resolveCollectionPolicy } from '../../signals/privacy.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
 import { getTopicLoopTracker } from '../../signals/topic-loops.js';
 import {
+  selectCollectionUserId,
   selectCryptoEnabled,
   useAuthStore,
   useFeatureFlagStore,
@@ -365,7 +366,12 @@ export function PrivacyPage(): React.ReactElement {
   const settings = useSettingsQuery();
   const updateSettings = useUpdateSettingsMutation();
   const updateDurablePrivacy = useUpdateDurablePrivacyMutation();
-  const userId = useAuthStore((state) => state.user?.id ?? null);
+  // Gate on the live auth status (selectCollectionUserId), not the retained
+  // `user`: a session can expire while this page stays mounted with cached
+  // settings, and toggling personalization/privacy must not re-enable attention
+  // collection for a dead session (whose uploads would only 401). The selector is
+  // reactive, so an expiry re-renders this with `null` before the next toggle.
+  const userId = useAuthStore(selectCollectionUserId);
 
   // Push the resolved collection policy to the signal processor immediately so a
   // change takes effect this session (WS-C.4.1d), not just on next boot.

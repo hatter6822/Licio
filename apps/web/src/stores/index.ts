@@ -7,6 +7,7 @@ export {
   type AuthState,
   type AuthStatus,
   initAuthSync,
+  selectCollectionUserId,
   selectIsAuthenticated,
   selectIsRestricted,
   useAuthStore,

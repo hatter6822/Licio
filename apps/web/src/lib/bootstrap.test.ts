@@ -140,6 +140,40 @@ describe('applySignalPolicy', () => {
     // ... but collection is off because the session is not live.
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ collect: false }));
   });
+
+  it('re-reads auth AFTER settings load: mid-flight expiry disables collection', async () => {
+    // The session expires while fetchSettings() is in flight. A pre-await snapshot
+    // of the user id would re-enable collection for a now-dead session; reading the
+    // effective id after the await keeps this stale invocation correct (collect:false).
+    type Settings = Awaited<ReturnType<typeof api.fetchSettings>>;
+    const settings: Settings = {
+      feed_mode: 'balanced',
+      personalization_enabled: true,
+      privacy_level: 'standard',
+      theme: 'system',
+      reduced_motion: 'system',
+    };
+    const processor = new SignalProcessor();
+    const spy = vi.spyOn(processor, 'setCollectionPolicy');
+    setSignalProcessor(processor);
+    useAuthStore.getState().setAuthenticated(USER);
+
+    let resolveSettings: (value: Settings) => void = () => undefined;
+    vi.mocked(api.fetchSettings).mockReturnValue(
+      new Promise<Settings>((resolve) => {
+        resolveSettings = resolve;
+      }),
+    );
+
+    const pending = applySignalPolicy();
+    // Expiry lands while the settings request is still in flight.
+    useAuthStore.getState().expireSession();
+    resolveSettings(settings);
+    await pending;
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ collect: false }));
+  });
 });
 
 describe('startRuntime', () => {
