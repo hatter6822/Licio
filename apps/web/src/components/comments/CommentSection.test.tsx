@@ -193,6 +193,53 @@ describe('CommentSection', () => {
     expect(loadMore).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps deep reply chains readable by capping visual nesting at two reply layers', () => {
+    const thirdLayerReply = comment({
+      contribution_id: '88888888-8888-4888-8888-888888888888',
+      parent_contribution_id: '99999999-9999-4999-8999-999999999999',
+      author_display_name: 'Deep reader',
+      body: 'This reply should remain readable without another indentation layer.',
+      depth: 3,
+      reply_count: 0,
+    });
+    const secondLayerReply = comment({
+      contribution_id: '99999999-9999-4999-8999-999999999999',
+      parent_contribution_id: '55555555-5555-4555-8555-555555555555',
+      author_display_name: 'Threaded reader',
+      body: 'Second reply layer.',
+      depth: 2,
+      replies: [thirdLayerReply],
+      reply_count: 1,
+    });
+    const firstLayerReply = comment({
+      contribution_id: '55555555-5555-4555-8555-555555555555',
+      parent_contribution_id: '33333333-3333-4333-8333-333333333333',
+      author_display_name: 'Reply reader',
+      body: 'First reply layer.',
+      depth: 1,
+      replies: [secondLayerReply],
+      reply_count: 1,
+    });
+    queryState = {
+      data: {
+        comments: [comment({ replies: [firstLayerReply], reply_count: 1 })],
+        next_cursor: null,
+        overview: { comment_count: 4, sources_count: 0, corrections_count: 0 },
+        summary: null,
+      },
+    };
+
+    renderSection();
+
+    expect(
+      screen.getByText('This reply should remain readable without another indentation layer.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Further replies continue at this width to keep the reading area open.'),
+    ).toBeInTheDocument();
+    expect(recordReplyDepth).toHaveBeenCalledWith(storyId, 3);
+  });
+
   it('submits top-level comments and replies with the comment write contract', async () => {
     const parent = comment();
     queryState = {
