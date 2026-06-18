@@ -22,8 +22,6 @@ export interface CommentSectionProps {
 
 type CommentFilter = 'all' | 'sources' | 'corrections';
 
-const MAX_VISUAL_REPLY_NESTING = 2;
-
 function authorName(comment: CommentItemType): string {
   return comment.author_display_name ?? comment.author_handle ?? 'Deleted account';
 }
@@ -169,7 +167,6 @@ function CommentItem({
   );
   const visibleReplies =
     expanded && loadedReplies.length > comment.replies.length ? loadedReplies : comment.replies;
-  const repliesContinueAtCurrentWidth = depth >= MAX_VISUAL_REPLY_NESTING;
   useEffect(() => {
     getSignalProcessor().recordReplyDepth(storyId, depth);
   }, [storyId, depth]);
@@ -204,19 +201,7 @@ function CommentItem({
         />
       ) : null}
       {visibleReplies.length > 0 ? (
-        <div
-          className={cn(
-            'flex flex-col gap-3',
-            repliesContinueAtCurrentWidth
-              ? 'rounded-md border border-line bg-surface/60 p-3'
-              : 'ml-4 border-l border-line pl-4',
-          )}
-        >
-          {repliesContinueAtCurrentWidth ? (
-            <p className="text-xs font-medium uppercase tracking-wide text-ink-muted">
-              Further replies continue at this width to keep the reading area open.
-            </p>
-          ) : null}
+        <div className="ml-4 flex flex-col gap-3 border-l border-line pl-4">
           {visibleReplies.map((reply) => (
             <CommentItem
               key={reply.contribution_id}
