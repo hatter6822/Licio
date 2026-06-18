@@ -353,7 +353,6 @@ licio/
 ├── .nvmrc                       -- Node 22 pin
 ├── CLAUDE.md                    -- this file
 ├── README.md                    -- project entry point
-├── DEVELOPMENT.md               -- local dev + user-testing (dev accounts, sign-in)
 ├── SECURITY.md                  -- vulnerability disclosure policy
 ├── CONTRIBUTING.md              -- contribution guidelines
 ├── CODE_OF_CONDUCT.md           -- community standards
@@ -1227,7 +1226,7 @@ same PR:
    change.
 4. `CLAUDE.md` (and `AGENTS.md` — keep them byte-identical) — if
    conventions, build commands, or current-status summary change.
-5. `DEVELOPMENT.md` — if the change affects the local dev environment,
+5. `docs/DEVELOPMENT.md` — if the change affects the local dev environment,
    the seeded demo data, or the dev test accounts / sign-in flow.
 
 Canonical ownership: `docs/SPEC.md` owns the design; this file owns

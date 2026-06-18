@@ -78,7 +78,7 @@ ephemeral: a restart re-seeds a fresh corpus.
 
 For local **user testing** — the seeded admin / steward / expert accounts and
 how to sign in (Licio is passwordless; the one-time code is surfaced to the
-`pnpm dev` API log) — see [`DEVELOPMENT.md`](DEVELOPMENT.md).
+`pnpm dev` API log) — see [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
 To run dev against a real Postgres/Redis instead (durable data, closer to
 production), start the stack and set the connection URLs:
