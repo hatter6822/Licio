@@ -346,10 +346,13 @@ export interface NeumorphicInk {
  * Theme-aware source colours for the neumorphic highlight/shadow pair. The
  * depth is a WARM taupe (oklch ≈ 0.48 0.03 65) rather than a cool blue, so the
  * extrusion reads as cloth catching light — coherent with the warm linen canvas.
+ * The dark-mode highlight is deliberately desaturated and lower-alpha so raised
+ * controls do not glow around text, while the light-mode shadow is soft enough
+ * to avoid muddying adjacent content.
  */
 export const neumorphicInk = {
-  light: { highlight: 'rgb(255 255 255 / 0.55)', shadow: 'rgb(106 90 76 / 0.20)' },
-  dark: { highlight: 'rgb(141 133 121 / 0.38)', shadow: 'rgb(0 0 0 / 0.55)' },
+  light: { highlight: 'rgb(255 255 255 / 0.64)', shadow: 'rgb(104 88 72 / 0.18)' },
+  dark: { highlight: 'rgb(174 162 143 / 0.24)', shadow: 'rgb(0 0 0 / 0.48)' },
 } as const satisfies Record<'light' | 'dark', NeumorphicInk>;
 
 /**
@@ -373,20 +376,24 @@ export const NEU_OUTER_REACH_BUDGET_PX = 16;
  * Geometry is deliberately TIGHT (a close bevel, not a wide halo): the outer
  * layers stay within {@link NEU_OUTER_REACH_BUDGET_PX}, and the inset layers
  * hug the edge so they fall inside a control's padding rather than washing over
- * its label. Combined with the lowered highlight alpha (see {@link neumorphicInk}),
- * this keeps the soft-UI lift readable without bleeding into content.
+ * its label. Combined with the lowered blur radius and calibrated source
+ * alphas (see {@link neumorphicInk}), this keeps the soft-UI lift readable
+ * without bleeding into content or forcing large paint invalidation regions.
  */
 export const neumorphicShadows = {
-  // reach = 5 + 11 = 16 (== budget): the largest extruded surface (cards, sheets).
-  raised: '-5px -5px 11px var(--licio-neu-highlight), 5px 5px 11px var(--licio-neu-shadow)',
-  // reach = 3 + 7 = 10: buttons, the Switch knob, chips — safe even at gap-3 (12px).
-  'raised-sm': '-3px -3px 7px var(--licio-neu-highlight), 3px 3px 7px var(--licio-neu-shadow)',
+  // reach = 4 + 10 = 14 (< budget): the largest extruded surface (cards, sheets).
+  // The inset rim sharpens the bevel without increasing paint bleed.
+  raised:
+    '-4px -4px 10px var(--licio-neu-highlight), 4px 4px 10px var(--licio-neu-shadow), inset 1px 1px 0 var(--licio-neu-highlight), inset -1px -1px 0 var(--licio-neu-shadow)',
+  // reach = 2 + 6 = 8: buttons, the Switch knob, chips — safe even at gap-3 (12px).
+  'raised-sm':
+    '-2px -2px 6px var(--licio-neu-highlight), 2px 2px 6px var(--licio-neu-shadow), inset 1px 1px 0 var(--licio-neu-highlight), inset -1px -1px 0 var(--licio-neu-shadow)',
   pressed:
-    'inset 4px 4px 9px var(--licio-neu-shadow), inset -4px -4px 9px var(--licio-neu-highlight)',
+    'inset 4px 4px 8px var(--licio-neu-shadow), inset -4px -4px 8px var(--licio-neu-highlight)',
   'pressed-sm':
-    'inset 2px 2px 5px var(--licio-neu-shadow), inset -2px -2px 5px var(--licio-neu-highlight)',
+    'inset 2px 2px 4px var(--licio-neu-shadow), inset -2px -2px 4px var(--licio-neu-highlight)',
   inset:
-    'inset 3px 3px 7px var(--licio-neu-shadow), inset -3px -3px 7px var(--licio-neu-highlight)',
+    'inset 3px 3px 6px var(--licio-neu-shadow), inset -3px -3px 6px var(--licio-neu-highlight)',
 } as const;
 
 export const zIndexScale = {
