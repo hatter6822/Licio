@@ -16,9 +16,9 @@
   }
 
   /* Canvas background. The page sits on a theme-aware, warm neutral base so
-   * neumorphic highlights remain visible. The ambient gradients below are
-   * decorative and token-derived; the solid background-color is the fallback,
-   * and high-contrast / forced-colors users receive that flat fallback. */
+   * neumorphic highlights remain visible. Keep the canvas flat: directional
+   * page-level gradients read as stray light sources on wide desktop viewports,
+   * while the neumorphic components already carry the intentional lighting. */
   body {
     margin: 0;
     min-height: 100dvh;
@@ -29,28 +29,7 @@
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizelegibility;
     background-color: var(--licio-bg-default);
-    background-image:
-      radial-gradient(
-        circle at 14% 8%,
-        color-mix(in srgb, var(--licio-bg-subtle) 82%, transparent) 0 18rem,
-        transparent 30rem
-      ),
-      radial-gradient(
-        circle at 86% 0%,
-        color-mix(in srgb, var(--licio-primary-soft) 36%, transparent) 0 14rem,
-        transparent 26rem
-      ),
-      linear-gradient(
-        135deg,
-        color-mix(in srgb, var(--licio-bg-default) 94%, var(--licio-bg-subtle)) 0%,
-        var(--licio-bg-default) 52%,
-        color-mix(in srgb, var(--licio-bg-default) 94%, var(--licio-bg-sunken)) 100%
-      );
-    background-repeat: no-repeat;
-    background-size:
-      72rem 52rem,
-      64rem 44rem,
-      100% 100%;
+    background-image: none;
   }
 
   /* Focus appearance — WCAG 2.4.13 (new in 2.2): a 2px ring offset from the
@@ -211,11 +190,5 @@
     --licio-shadow-pressed: none;
     --licio-shadow-pressed-sm: none;
     --licio-shadow-inset: none;
-  }
-
-  body {
-    background-image: none;
-    background-repeat: initial;
-    background-size: initial;
   }
 }
