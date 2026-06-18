@@ -863,6 +863,22 @@ is clean with it).  `ws` is viem's RPC WebSocket transport; Licio uses
 server, so exploitability is low regardless.  Remove this override once
 `viem` ships a release pinning `ws >= 8.21.0`.
 
+**Pinned transitive override (`undici`).**  `pnpm.overrides` pins `undici`
+to `^7.28.0`.  `undici` reaches the tree only through `jsdom@29.1.1` (the
+Vitest jsdom test environment), which declares `undici@^7.25.0` and would
+otherwise resolve it to 7.27.2.  7.27.2 carries GHSA-vmh5-mc38-953g (high; a
+TLS certificate-validation bypass via dropped `requestTls` in the SOCKS5
+`ProxyAgent`) and GHSA-pr7r-676h-xcf6 (moderate; cross-user information
+disclosure), both patched in 7.28.0.  `jsdom@29.1.1` does not yet ship a
+release pinning a patched `undici`, so the override is the remediation
+(7.27.2 → 7.28.0 is the latest 7.x and within jsdom's `^7.25.0` range, so
+it is API-compatible; `pnpm audit --audit-level=high` is clean with it).
+`undici` is a test-only transitive dependency (jsdom's `fetch`
+implementation); it never reaches the production bundle, so exploitability
+is low regardless, but the `pnpm audit --audit-level=high` CI gate flags it
+tree-wide.  Remove this override once `jsdom` ships a release pinning
+`undici >= 7.28.0`.
+
 ## Reading large files
 
 `docs/SPEC.md` and `docs/planning/00-index.md` (~858 tasks) are large.
