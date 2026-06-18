@@ -81,8 +81,8 @@ function comment(overrides: Partial<CommentItem> = {}): CommentItem {
   };
 }
 
-function renderSection() {
-  return render(<CommentSection storyId={storyId} threadId={threadId} />);
+function renderSection(props: Partial<React.ComponentProps<typeof CommentSection>> = {}) {
+  return render(<CommentSection storyId={storyId} threadId={threadId} {...props} />);
 }
 
 beforeEach(() => {
@@ -137,7 +137,8 @@ describe('CommentSection', () => {
       author_handle: null,
       body: '',
       depth: 1,
-      reply_count: 0,
+      reply_count: 1,
+      has_more_replies: true,
     });
     queryState = {
       hasMore: true,
@@ -182,6 +183,14 @@ describe('CommentSection', () => {
     expect(screen.getByText(/Animated GIF hidden/)).toBeInTheDocument();
     expect(screen.getByText('Deleted account')).toBeInTheDocument();
     expect(screen.getByText('Load all 3 replies')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Show more comments' })).toHaveAttribute(
+      'href',
+      `/stories/${storyId}/comments`,
+    );
+    expect(screen.getByRole('link', { name: 'Show more replies' })).toHaveAttribute(
+      'href',
+      `/stories/${storyId}/comments?root=${reply.contribution_id}`,
+    );
     expect(recordReplyDepth).toHaveBeenCalledWith(storyId, 0);
     expect(recordReplyDepth).toHaveBeenCalledWith(storyId, 1);
 
@@ -191,6 +200,50 @@ describe('CommentSection', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Load more comments' }));
     expect(loadMore).toHaveBeenCalledTimes(1);
+  });
+
+  it('resets visual nesting on the focused branch page so deep roots can keep expanding', () => {
+    const deepReply = comment({
+      contribution_id: '88888888-8888-4888-8888-888888888888',
+      parent_contribution_id: '99999999-9999-4999-8999-999999999999',
+      body: 'A reply below a deep branch root.',
+      depth: 4,
+    });
+    const deepRoot = comment({
+      contribution_id: '99999999-9999-4999-8999-999999999999',
+      parent_contribution_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      body: 'A deep branch root.',
+      depth: 3,
+      replies: [deepReply],
+      reply_count: 1,
+    });
+    queryState = {
+      data: {
+        comments: [deepRoot],
+        next_cursor: null,
+        overview: { comment_count: 2, sources_count: 0, corrections_count: 0 },
+        summary: null,
+      },
+    };
+
+    renderSection({
+      focused: true,
+      visualReplyDepth: 2,
+      rootContributionId: deepRoot.contribution_id,
+    });
+
+    expect(screen.getByText('A deep branch root.')).toBeInTheDocument();
+    expect(screen.getByText('A reply below a deep branch root.')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Back to story comments' })).toHaveAttribute(
+      'href',
+      `/stories/${storyId}#comments`,
+    );
+    expect(screen.getByRole('link', { name: 'Return to top-level conversation' })).toHaveAttribute(
+      'href',
+      `/stories/${storyId}/comments`,
+    );
+    expect(recordReplyDepth).toHaveBeenCalledWith(storyId, 3);
+    expect(recordReplyDepth).toHaveBeenCalledWith(storyId, 4);
   });
 
   it('submits top-level comments and replies with the comment write contract', async () => {

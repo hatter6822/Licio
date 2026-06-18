@@ -18,6 +18,14 @@ import { Icon } from '../ui/Icon/index.js';
 export interface CommentSectionProps {
   storyId: string;
   threadId: string;
+  /**
+   * Number of nested reply layers rendered inside this surface. The story page
+   * stays intentionally shallow so the reading column does not collapse; the
+   * dedicated conversation page allows one additional visual layer.
+   */
+  visualReplyDepth?: 1 | 2;
+  rootContributionId?: string;
+  focused?: boolean;
 }
 
 type CommentFilter = 'all' | 'sources' | 'corrections';
@@ -153,11 +161,15 @@ function CommentComposer({
 function CommentItem({
   storyId,
   comment,
-  depth = comment.depth,
+  signalDepth = comment.depth,
+  visualDepth = 0,
+  visualReplyDepth,
 }: {
   storyId: string;
   comment: CommentItemType;
-  depth?: number;
+  signalDepth?: number;
+  visualDepth?: number;
+  visualReplyDepth: 1 | 2;
 }): React.ReactElement {
   const [replying, setReplying] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -167,9 +179,13 @@ function CommentItem({
   );
   const visibleReplies =
     expanded && loadedReplies.length > comment.replies.length ? loadedReplies : comment.replies;
+  const canShowRepliesHere = visualDepth < visualReplyDepth;
+  const hasRepliesBeyondThisSurface =
+    !canShowRepliesHere &&
+    (comment.replies.length > 0 || comment.has_more_replies || comment.reply_count > 0);
   useEffect(() => {
-    getSignalProcessor().recordReplyDepth(storyId, depth);
-  }, [storyId, depth]);
+    getSignalProcessor().recordReplyDepth(storyId, signalDepth);
+  }, [storyId, signalDepth]);
   return (
     <article className={cn('flex flex-col gap-3 p-4', raisedSurface)}>
       <header className="flex items-start justify-between gap-3">
@@ -200,19 +216,29 @@ function CommentItem({
           onCancel={() => setReplying(false)}
         />
       ) : null}
-      {visibleReplies.length > 0 ? (
+      {canShowRepliesHere && visibleReplies.length > 0 ? (
         <div className="ml-4 flex flex-col gap-3 border-l border-line pl-4">
           {visibleReplies.map((reply) => (
             <CommentItem
               key={reply.contribution_id}
               storyId={storyId}
               comment={reply}
-              depth={depth + 1}
+              signalDepth={reply.depth}
+              visualDepth={visualDepth + 1}
+              visualReplyDepth={visualReplyDepth}
             />
           ))}
         </div>
       ) : null}
-      {comment.has_more_replies ? (
+      {hasRepliesBeyondThisSurface ? (
+        <a
+          href={`/stories/${storyId}/comments?root=${encodeURIComponent(comment.contribution_id)}`}
+          className="inline-flex min-h-touch items-center justify-center rounded-md border border-line-strong bg-surface px-4 py-2 font-medium text-ink neu-raised-sm hover:bg-surface-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+        >
+          Show more replies
+        </a>
+      ) : null}
+      {canShowRepliesHere && comment.has_more_replies ? (
         <Button
           type="button"
           variant="secondary"
@@ -229,9 +255,19 @@ function CommentItem({
   );
 }
 
-export function CommentSection({ storyId, threadId }: CommentSectionProps): React.ReactElement {
+export function CommentSection({
+  storyId,
+  threadId,
+  visualReplyDepth = 1,
+  rootContributionId,
+  focused = false,
+}: CommentSectionProps): React.ReactElement {
   const [filter, setFilter] = useState<CommentFilter>('all');
-  const comments = useStoryCommentsQuery(storyId, filter === 'all' ? {} : { filter });
+  const commentOptions = {
+    ...(filter === 'all' ? {} : { filter }),
+    ...(rootContributionId ? { root: rootContributionId } : {}),
+  };
+  const comments = useStoryCommentsQuery(storyId, commentOptions);
   const stream = useCommentStream(storyId);
   const options = useMemo(
     () => [
@@ -249,7 +285,9 @@ export function CommentSection({ storyId, threadId }: CommentSectionProps): Reac
           Conversation
         </h2>
         <p className="text-sm text-ink-muted">
-          Comments are weighted by context, evidence, and reply depth — never by applause.
+          {focused
+            ? 'A wider reading lane for following branches. Each view shows two reply layers; continue a branch to go deeper without losing the top-level path back.'
+            : 'Comments are weighted by context, evidence, and reply depth — never by applause. The story view shows one reply layer to preserve reading width.'}
         </p>
       </div>
       {comments.data?.summary ? (
@@ -257,6 +295,24 @@ export function CommentSection({ storyId, threadId }: CommentSectionProps): Reac
           <h3 className="font-semibold text-ink">Overview</h3>
           <UgcBody markdown={comments.data.summary.body} compact />
         </aside>
+      ) : null}
+      {focused ? (
+        <div className="flex flex-wrap gap-2">
+          <a
+            href={`/stories/${storyId}#comments`}
+            className="inline-flex min-h-touch items-center justify-center rounded-md border border-line-strong bg-surface px-4 py-2 font-medium text-ink neu-raised-sm hover:bg-surface-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+          >
+            Back to story comments
+          </a>
+          {rootContributionId ? (
+            <a
+              href={`/stories/${storyId}/comments`}
+              className="inline-flex min-h-touch items-center justify-center rounded-md border border-line-strong bg-transparent px-4 py-2 font-medium text-ink hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+            >
+              Return to top-level conversation
+            </a>
+          ) : null}
+        </div>
       ) : null}
       <CommentComposer storyId={storyId} threadId={threadId} />
       <div className="flex flex-wrap gap-2" role="group" aria-label="Comment filters">
@@ -303,10 +359,23 @@ export function CommentSection({ storyId, threadId }: CommentSectionProps): Reac
       ) : (
         <div className="flex flex-col gap-3">
           {comments.data?.comments.map((comment) => (
-            <CommentItem key={comment.contribution_id} storyId={storyId} comment={comment} />
+            <CommentItem
+              key={comment.contribution_id}
+              storyId={storyId}
+              comment={comment}
+              visualReplyDepth={visualReplyDepth}
+            />
           ))}
         </div>
       )}
+      {!focused ? (
+        <a
+          href={`/stories/${storyId}/comments`}
+          className="inline-flex min-h-touch items-center justify-center rounded-md border border-line-strong bg-surface px-4 py-2 font-medium text-ink neu-raised-sm hover:bg-surface-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+        >
+          Show more comments
+        </a>
+      ) : null}
       {comments.hasMore ? (
         <Button
           type="button"
