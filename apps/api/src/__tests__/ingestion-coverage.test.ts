@@ -63,7 +63,7 @@ describe('scheduler edges', () => {
       now: () => nowMs,
     });
     const app = new Hono().route('/v1', createV1Routes());
-    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    const { userId, cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     const res = await app.request(
       post(
         '/v1/stories',
