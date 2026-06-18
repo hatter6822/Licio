@@ -1,98 +1,91 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Interaction-budget release gate (WS-C.5.1, SPEC §6.10). The app emits User
-// Timing measures (`licio:<interaction>`) for the budgeted interactions; this
-// asserts the measured duration is within budget in a real browser. The thread
-// branch-open budget is ≤500ms (cached). Composer-open (≤300ms) and draft-save
-// (≤100ms) live behind the auth guard and are covered by the perf unit tests.
-//
-// The preview server serves only static assets (no BFF), so the thread + branch
-// reads are stubbed at the network layer; the service worker is blocked so the
-// stub is the deterministic source (no NetworkFirst cache interplay).
+// Interaction-budget release gate (WS-C.5.1, SPEC §6.10). WS-T retired the
+// branch reader, so the browser budget now exercises the inline comment-section
+// filter interaction on a story page. The preview server serves static assets
+// only; API reads are stubbed at the network layer and the service worker is
+// blocked so the stub is deterministic.
 import { expect, test } from '@playwright/test';
 
-const THREAD = '5f5e2000-0000-4000-8000-000000000001';
 const STORY = '5f5e1000-0000-4000-8000-000000000001';
-const BRANCH_OPEN_BUDGET_MS = 500;
+const THREAD = '5f5e2000-0000-4000-8000-000000000001';
+const COMMENT_FILTER_BUDGET_MS = 500;
 
 test.use({ serviceWorkers: 'block' });
 
 test.describe('interaction budgets (WS-C.5.1)', () => {
-  test('opening a thread branch stays within the 500ms budget', async ({ page }) => {
-    // Fixtures match the WS-G wire schemas exactly — the page zod-validates
-    // every response before it enters the cache (the WS-C.1.2 boundary).
-    await page.route(/\/v1\/threads\//, async (route) => {
-      const branch = new URL(route.request().url()).pathname.match(/\/branches\/([^/?]+)/)?.[1];
-      if (branch) {
-        await route.fulfill({
-          json: {
-            thread_id: THREAD,
-            branch,
-            contributions: [
-              {
-                contribution_id: '5f5e4000-0000-4000-8000-000000000001',
-                thread_id: THREAD,
-                type: 'evidence',
-                body: 'A primary source worth weighing.',
-                citations: [{ url: 'https://example.org/source' }],
-                metadata: {},
-                target_claim_id: null,
-                parent_contribution_id: null,
-                author_handle: 'ada',
-                author_display_name: 'Ada',
-                is_author: false,
-                depth: 0,
-                child_count: 0,
-                moderation_state: 'published',
-                edited: false,
-                created_at: '2026-06-09T12:30:00.000Z',
-                updated_at: '2026-06-09T12:30:00.000Z',
-              },
-            ],
-            next_cursor: null,
-          },
-        });
-        return;
-      }
+  test('switching comment filters stays within the 500ms budget', async ({ page }) => {
+    await page.route('**/v1/feature-flags', async (route) => {
+      await route.fulfill({ json: { flags: {} } });
+    });
+    await page.route('**/v1/security/link-blocklist', async (route) => {
+      await route.fulfill({ json: { blocked: [] } });
+    });
+    await page.route('**/v1/auth/status', async (route) => {
+      await route.fulfill({ json: { authenticated: false, user: null } });
+    });
+    await page.route('**/v1/settings', async (route) => {
+      await route.fulfill({ json: {} });
+    });
+    await page.route('**/v1/telemetry', async (route) => {
+      await route.fulfill({ status: 204 });
+    });
+    await page.route(`**/v1/stories/${STORY}`, async (route) => {
       await route.fulfill({
         json: {
-          thread_id: THREAD,
           story_id: STORY,
-          room_id: null,
-          branch_index: 0,
-          title: 'A deliberative thread',
-          conversation_state: 'active',
-          safety_state: 'normal',
-          contribution_count: 1,
-          created_at: '2026-06-09T12:00:00.000Z',
-          updated_at: '2026-06-09T12:30:00.000Z',
-          sections: {
-            overview: 0,
-            questions: 0,
-            evidence: 1,
-            challenges: 0,
-            lenses: 0,
-            chronology: 1,
-          },
-          summary_status: 'none',
-          current_summary: null,
-          summary_layers: [],
+          title: 'Regional water board publishes the full testing dataset',
+          source: 'Public Records Office',
+          origin: 'official',
+          url: 'https://example.org/water-testing-dataset',
+          reading_minutes: 6,
+          rating_label: 'well-sourced',
+          exposure_label: null,
+          more_on_this_story: [],
+          context_card: null,
+          distribution_reason: 'Readers opened the source and added context.',
+          context_chips: [],
+          safety_state: 'ok',
+          body_summary: 'The board released raw and processed results alongside the methodology.',
+          thread_id: THREAD,
+          topic_ids: ['water-quality'],
+        },
+      });
+    });
+    await page.route(`**/v1/stories/${STORY}/interpretations`, async (route) => {
+      await route.fulfill({ json: { interpretations: [] } });
+    });
+    await page.route(`**/v1/stories/${STORY}/independent-sources`, async (route) => {
+      await route.fulfill({ json: { sources: [] } });
+    });
+    await page.route(`**/v1/stories/${STORY}/comments**`, async (route) => {
+      await route.fulfill({
+        json: {
+          comments: [],
+          next_cursor: null,
+          overview: { comment_count: 0, sources_count: 0, corrections_count: 0 },
+          summary: null,
         },
       });
     });
 
-    await page.goto(`/threads/${THREAD}`);
+    await page.goto(`/stories/${STORY}`);
+    await expect(page.getByRole('heading', { name: 'Conversation' })).toBeVisible();
 
-    // The branch bar is a tablist; switching branches times a branch-open.
-    await page.getByRole('tab', { name: 'Evidence' }).click();
-
-    // The measure is recorded when the branch content resolves.
-    const handle = await page.waitForFunction(() => {
-      const entries = performance.getEntriesByName('licio:branch-open', 'measure');
-      return entries.length > 0 ? (entries[entries.length - 1]?.duration ?? null) : null;
+    const duration = await page.getByRole('button', { name: 'Sources' }).evaluate((button) => {
+      const started = performance.now();
+      (button as HTMLButtonElement).click();
+      return new Promise<number>((resolve) => {
+        requestAnimationFrame(() => {
+          resolve(performance.now() - started);
+        });
+      });
     });
-    const duration = (await handle.jsonValue()) as number;
+    await expect(page.getByRole('button', { name: 'Sources' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
     expect(duration).toBeGreaterThanOrEqual(0);
-    expect(duration).toBeLessThanOrEqual(BRANCH_OPEN_BUDGET_MS);
+    expect(duration).toBeLessThanOrEqual(COMMENT_FILTER_BUDGET_MS);
   });
 });
