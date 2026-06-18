@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Canonical thread contracts + state machines (WS-G.1.1/WS-G.3.3, SPEC
-// §22.1/§6.4/§15.4).  A thread is the conversation shell of a story branch,
-// read through six fixed STRUCTURED SECTIONS (§6.4) — never a flat list —
+// §22.1/§6.4/§15.4).  A thread is the conversation shell of a story comment section
 // and carries two ORTHOGONAL state dimensions:
 //
 //   conversation_state — the discourse lifecycle (WS-G.1.1 graph below);
@@ -17,21 +16,6 @@ import { z } from 'zod';
 import { isoTimestampSchema, paginatedSchema, uuidSchema } from './common.js';
 import { contributionPublicSchema } from './contribution.js';
 import { summaryLayerSchema, summaryPublicSchema } from './summary.js';
-
-// ---------------------------------------------------------------------------
-// Structured reading sections (§6.4; the tab order is fixed).
-// ---------------------------------------------------------------------------
-
-export const BRANCH_IDS = [
-  'overview',
-  'questions',
-  'evidence',
-  'challenges',
-  'lenses',
-  'chronology',
-] as const;
-export type BranchId = (typeof BRANCH_IDS)[number];
-export const branchIdSchema = z.enum(BRANCH_IDS);
 
 // ---------------------------------------------------------------------------
 // Conversation state (WS-G.1.1).
@@ -171,20 +155,6 @@ export const threadDetailSchema = threadSummarySchema
   })
   .strict();
 export type ThreadDetail = z.infer<typeof threadDetailSchema>;
-
-/**
- * One structured section's content (WS-G.3.3 branch endpoint): contributions
- * in tree order with depth indicators, lazily loaded (cursor after 50).
- */
-export const branchContentSchema = z
-  .object({
-    thread_id: uuidSchema,
-    branch: branchIdSchema,
-    contributions: z.array(contributionPublicSchema).max(50),
-    next_cursor: z.string().min(1).max(512).nullable(),
-  })
-  .strict();
-export type BranchContent = z.infer<typeof branchContentSchema>;
 
 /** Subtree read (WS-G.1.2d-2 `?root=` view): a root and its descendants. */
 export const contributionSubtreeSchema = z

@@ -184,10 +184,10 @@ Licio is a **loom** for public knowledge. Sources, posts, claims, comments, summ
 
 1. **Front Page:** a personalized but constrained feed that organizes and displays the **public** content earning the most meaningful attention and constructive participation platform-wide; in-room content never appears here.
 2. **Topic Rooms:** persistent spaces around topics such as climate, local politics, science, technology, health, or city-level news. Every content item on the platform is posted in exactly one room (Section 3.4); rooms are public or private (Section 16.1).
-3. **Threads:** structured discussion spaces owned by content — every story (link, image, video, or written post) anchors its own thread.
+3. **Comment threads:** lightly nested discussion spaces embedded in content pages — every story (link, image, video, or written post) anchors its own comment thread.
 4. **Context Cards:** compact overlays explaining source history, community interpretations, claim status, timeline, and missing context.
 5. **Evidence Drawer:** a swipe-up panel of cited sources, primary documents, fact checks, data references, and counterevidence.
-6. **Participation Composer:** a structured composer that asks what kind of contribution the user is making.
+6. **Comment Composer:** an inline composer for text and/or image/GIF comments, with optional source-citation, correction, and lens controls.
 7. **Signal Ledger:** a private, user-facing explanation of what attention and participation signals were counted — never a public score.
 8. **Civic Map:** a visual overview of topic basins, narrative branches, and cross-community bridges.
 9. **Steward Console:** moderator and community-steward tooling for queue review, context repair, appeals, and safety decisions.
@@ -202,8 +202,8 @@ Licio is a **loom** for public knowledge. Sources, posts, claims, comments, summ
 | Source | The external publisher, author, dataset, document, or media origin. |
 | Claim | A discrete proposition extracted from a story or comment. |
 | Evidence Card | A citation, data point, document, image, transcript, or expert reference supporting or challenging a claim. |
-| Thread | The structured conversation space owned by its anchoring story; branches organize questions, evidence, challenges, and lenses (Section 15.3). |
-| Contribution | A value-adding user action: question, evidence, correction, synthesis, summary, counterexample, moderation flag, etc. |
+| Thread | The comment section owned by its anchoring story; it is lightly nested and may be filtered for sources or corrections (Section 15.3). |
+| Contribution | A value-adding comment or typed enrichment: comment, evidence citation, correction, or a legacy contribution retained for back-compatible reads. |
 | Lens | A community-specific interpretation frame: local resident, domain expert, affected group, skeptic, beginner. |
 | Context Patch | A reusable piece of explanation that reduces context obstruction. |
 | Attention Receipt | A private, aggregated record of meaningful attention counted for the user. |
@@ -213,10 +213,10 @@ Licio is a **loom** for public knowledge. Sources, posts, claims, comments, summ
 
 The platform has one containment chain, enforced at the schema level and on every read path:
 
-    Room  ⊃  Content (story)  ⊃  Thread  ⊃  Contributions
+    Room  ⊃  Content (story)  ⊃  Thread (comment section)  ⊃  Comments
 
 1. **Rooms own content.** Every content item — link story, image post, video post, or user-written post (the Section 14.1 submission types) — is posted in exactly one **home room**, chosen at submission. There is no room-less content.
-2. **Content owns conversation.** Every content item anchors its own thread (with structured branches, Section 15.3). Threads never exist apart from the content that owns them; claim- and evidence-level discussion happens inside the owning item's thread.
+2. **Content owns conversation.** Every content item anchors its own comment thread — a lightly-nested comment section (Section 15.3). Threads never exist apart from the content that owns them; claim- and evidence-level discussion happens inside the owning item's thread.
 3. **Visibility is two-tier.** A room is **public** or **private** (Section 16.1). A content item is **public** — eligible for every distribution surface: front page, topic surfaces, global search, cross-room recommendation — or **in-room**, visible only on its home room's surfaces to users who can read that room. A private room forces every item in it in-room with no override; a public room lets the author choose at submission, defaulting to public (Section 14.5).
 4. **The front page is the public tier's showcase.** It organizes and displays the public content receiving the broadest meaningful attention and constructive participation, ranked by PWAtt under Section 13's constraints — on Licio, "popular" always means participation-weighted attention, never applause counts.
 
@@ -384,11 +384,11 @@ The Submit tab is centered and persistent; it is a contribution entry point, not
 
 ## 6.3 Front Page layout
 
-Each feed card contains: story title; source and origin badge; home-room chip (where the conversation lives); rating label (e.g. "Deepening," "Needs Context"); one-line reason ("Rising from independent source opens and evidence additions"); context chips ("3 lenses," "2 primary sources," "low coordination risk"); reading estimate; thread-branch preview; and swipe actions (left to save, right to open context card, long-press to signal problem / mute source / adjust topic). The front page serves public content only (Section 3.4). No card contains a like count, vote count, heart icon, public score, or reaction bar.
+Each feed card contains: story title; source and origin badge; home-room chip (where the conversation lives); rating label (e.g. "Deepening," "Needs Context"); one-line reason ("Rising from independent source opens and evidence additions"); context chips ("3 lenses," "2 primary sources," "low coordination risk"); reading estimate; comment-thread preview; and swipe actions (left to save, right to open context card, long-press to signal problem / mute source / adjust topic). The front page serves public content only (Section 3.4). No card contains a like count, vote count, heart icon, public score, or reaction bar.
 
 ## 6.4 Thread layout
 
-Threads use **structured branches**: Overview (best current synthesis, unresolved questions, evidence status); Questions; Evidence; Challenges (counterarguments and disputes); Local/Expert Lenses; and Chronology (time-ordered view for users who prefer it). A floating "Contribute" button opens the Participation Composer, which first asks: "What are you adding?"
+The comment section is embedded directly in the content page. Comments are lightly nested: top-level comments, one collapsible reply preview level, and a "continue thread" link for deeper subthreads. The default read is chronological, with newest/oldest ordering and optional, de-emphasized filters for **Sources** and **Corrections** derived from contribution type. The **Overview** is the Section 24.3 summary shown above the comments. Inline controls open the comment composer in place rather than sending the reader to a separate contribution page.
 
 ## 6.5 Context cards
 
@@ -396,20 +396,9 @@ Compact, swipeable overlays: What happened? Why it matters; Where interpretation
 
 ## 6.6 Participation composer
 
-The composer reduces low-information replies and encourages substance. Structured modes:
+The inline comment composer reduces low-information replies while keeping participation simple. A comment contains text and/or an uploaded image or GIF. Two progressive enrichments preserve the invariant-critical structure: **Cite a source** stores an evidence contribution with its evidence card, and **Mark a correction** stores a correction with supporting citation and target context. An optional lens control remains available for interpretation context. GIFs use the same same-origin media pipeline as other uploads and must include alt text.
 
-| Mode | Prompt | Required fields |
-|---|---|---|
-| Ask | "What would clarify this?" | Question text, optional claim reference. |
-| Evidence | "What source should readers inspect?" | Link/file/citation, relevance note, claim reference. |
-| Correction | "What is incorrect or missing?" | Correction text, supporting evidence, target text. |
-| Synthesis | "What can be fairly summarized?" | Summary, included branches, uncertainty note. |
-| Counterexample | "What case complicates this?" | Example, why relevant, source if factual. |
-| Experience | "What direct context do you have?" | Experience scope, location/time if relevant, privacy warning. |
-| Explain | "Can you make this easier to understand?" | Explanation, assumptions, caveats. |
-| Flag | "What policy or safety issue exists?" | Reason, target, urgency. |
-
-It supports voice dictation (Web Speech where available), citation capture from the browser share target, image/document attachment with privacy warnings, and local draft autosave. Story submission through the composer always shows the destination room and the content-visibility choice before posting — and shows the visibility as locked to in-room when the destination room is private (Section 14.5).
+The question/answer flag and the direct-experience acknowledgment are deliberately retired from new writes as part of the comment-section simplification; those concerns become ordinary comment text plus the general attachment/privacy warning. Moderation concerns move to the Section 18.4 report flow mounted on comments. The composer still supports voice dictation where available, citation capture from the browser share target, attachment privacy warnings, and local draft autosave. Story submission remains a separate story-submission flow that shows the destination room and visibility choice before posting — locked to in-room when the destination room is private (Section 14.5).
 
 ## 6.7 Stopping cues and wellbeing
 
@@ -1054,9 +1043,9 @@ Rules:
 
 Conversation is owned by content: every thread belongs to the story that anchors it (Section 3.4), lives in that story's home room, and inherits its visibility — the room read bar of Section 16.2 gates every thread and contribution read.
 
-## 15.1 Structured contribution taxonomy
+## 15.1 Comment contribution taxonomy
 
-Contributions are classified because classification improves ranking, moderation, and readability; the app makes classification easy, not burdensome. Types: question; answer; evidence; correction; synthesis; counterexample; explanation; local context; direct experience; moderation concern; meta-discussion about thread structure.
+A comment is the base unit of participation. New writes are ordinary comments plus two optional typed enrichments: `evidence` for cited source material and `correction` for supported corrections. The interpretation lens remains an optional metadata field because SCOI depends on it. Legacy rows with the older types remain readable, but those types are retired for new writes: question/answer become comments and replies; counterexample, explanation, local context, direct experience, and meta-discussion become comments; moderation concern becomes the Section 18.4 report flow; synthesis becomes the community-synthesis summary layer. The question/answer flag and direct-experience acknowledgment are intentionally removed from the new composer scope and recorded here as doctrine changes, not accidental omissions.
 
 ## 15.2 Conversation quality model
 
@@ -1064,9 +1053,9 @@ A conversation is high quality when it has clear claims; independent evidence; v
 
 ## 15.3 Thread structure and branch scoring
 
-Threads are read through six fixed **structured sections** (Section 6.4): Overview, Questions, Evidence, Challenges, Local/Expert Lenses, and Chronology — never a flat list. Contributions form a depth-bounded tree beneath the sections; every read is branch-aware, keyset-paginated, and visibility-filtered (removed or hidden contributions collapse honestly rather than disappearing silently, and the room read bar gates every page).
+Threads are read as lightly nested comment trees embedded in their owning content page. Top-level comments are keyset-paginated chronologically, direct replies appear as a bounded collapsible preview, and deeper discussion opens through a "continue thread" subtree link. Every read is visibility-filtered (removed or hidden comments collapse honestly rather than disappearing silently, and the room read bar gates every page). Optional Sources and Corrections filters are derived from contribution type rather than stored sections.
 
-Branches receive internal scores from nonredundant evidence added, questions answered, context obstruction reduced (SCOI), harmonic tension reduced without suppressing disagreement (Hodge), corrections incorporated, low coordination risk (MFCI), and reader utility from active attention and return visits. No branch receives score from likes.
+Comments receive internal signals from nonredundant evidence added (MERI), lens divergence or context obstruction reduced (SCOI), harmonic tension reduced without suppressing disagreement (Hodge), corrections incorporated, low coordination risk (MFCI), and reader utility from active attention and return visits. No comment receives score from likes.
 
 ## 15.4 Thread states and summaries
 
@@ -1075,11 +1064,11 @@ A thread carries two orthogonal, audited state dimensions, evolved only through 
 - **Conversation state** — the discourse lifecycle: `active → {deepening, tense, under_review, resolved}`; `tense ⇄ under_review`; `under_review → {active, resolved}`; any non-archived state → `archived` (terminal). `deepening` is entered structurally on sustained, multi-level participation with evidence (volume, evidence, and live-depth thresholds). A review that ends in restriction moves the safety dimension, not the conversation dimension.
 - **Safety state** — the trust-and-safety posture: `normal`, `elevated`, `under_review`, `restricted`. Escalation may move one step or jump straight to `restricted` for imminent harm (Section 18.3); de-escalation always passes through review (`restricted → under_review` is the appeal path). Every change is audit-logged and emits `thread.state.changed` (Section 21.3).
 
-Summaries come in three layers: an **automated draft summary** (generated, labeled machine-generated, never final); a **community synthesis** (user-written, citing branches and evidence); and a **steward summary** (moderator-approved, for high-impact threads). A human layer always supersedes the automated draft, and summaries include unresolved uncertainty and relevant minority views (Section 24.3).
+Summaries come in three layers: an **automated draft summary** (generated, labeled machine-generated, never final); a **community synthesis** (user-written, citing comments and evidence); and a **steward summary** (moderator-approved, for high-impact threads). A human layer always supersedes the automated draft, and summaries include unresolved uncertainty and relevant minority views (Section 24.3).
 
 ## 15.5 Comments and replies
 
-Comments support Markdown-lite formatting (rendered through a strict sanitizer and Trusted Types, Section 25); source-citation cards; claim references; quote snippets with attribution; edit history for material changes; deletion with a tombstone when needed for thread integrity; abuse reporting; translation with original text accessible; and accessibility labels for attachments. Image and document attachments pass the shared media pipeline before storage: a content-type allowlist, byte-level EXIF/GPS/XMP metadata stripping for images, a scan gate that holds flagged files, and required alt text for images — the same pipeline that admits Section 14.1 image and video posts.
+Comments support Markdown-lite formatting (rendered through a strict sanitizer and Trusted Types, Section 25); source-citation cards; claim references; quote snippets with attribution; edit history for material changes; deletion with a tombstone when needed for thread integrity; abuse reporting; translation with original text accessible; and accessibility labels for attachments. Image and GIF attachments pass the shared media pipeline before storage: a content-type allowlist including `image/gif`, byte-level metadata stripping, a scan gate that holds flagged files, and required alt text — the same pipeline that admits Section 14.1 image and video posts. Animated GIFs preserve rendering and loop metadata but respect reduced-motion settings through a static first-frame poster and explicit play control.
 
 ## 15.6 Reputation without applause
 
@@ -1392,7 +1381,7 @@ Knomosis is an isolated bounded context: ranking services read only sanitized, a
 
     AttentionAggregate { aggregate_id, user_id_or_privacy_bucket, story_id,
                          session_bucket, active_dwell_bucket, source_opened,
-                         context_opened, branch_depth_bucket,
+                         context_opened, reply_depth_bucket,
                          return_visit_count_bucket, privacy_level, created_at }
 
     InvariantOutput { invariant_output_id, invariant_type, target_type, target_id,
@@ -1575,7 +1564,7 @@ Maintain model cards for ranking, safety, summarization, and invariant models; m
 
 ## 24.3 Summarization constraints
 
-Summaries must cite source branches and evidence cards; distinguish facts, claims, and interpretations; preserve uncertainty; identify unresolved questions; avoid synthesizing harassment or slurs unnecessarily; avoid presenting the majority view as truth merely because it is common; and support correction workflows.
+Summaries must cite source comments and evidence cards; distinguish facts, claims, and interpretations; preserve uncertainty; identify unresolved questions; avoid synthesizing harassment or slurs unnecessarily; avoid presenting the majority view as truth merely because it is common; and support correction workflows.
 
 ## 24.4 Ranking-ML constraints
 

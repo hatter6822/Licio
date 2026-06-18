@@ -151,7 +151,7 @@ describe('AttentionAggregate field-name mapping (WS-E.1.1g / SPEC §22.1)', () =
         'active_dwell_bucket',
         'source_opened',
         'context_opened',
-        'branch_depth_bucket',
+        'reply_depth_bucket',
         'return_visit_count_bucket',
       ].sort(),
     );

@@ -9,12 +9,6 @@ import { RouteAnnouncer } from '../components/a11y/index.js';
 import { DefinedTerm } from '../components/cognitive/DefinedTerm/index.js';
 import { ExplainLikeNewLens } from '../components/cognitive/ExplainLikeNewLens/index.js';
 import { ProgressiveDisclosure } from '../components/cognitive/ProgressiveDisclosure/index.js';
-import {
-  type ComposerErrors,
-  type ComposerMode,
-  ParticipationComposer,
-} from '../components/composer/ParticipationComposer/index.js';
-import { buildContributionPayload } from '../components/composer/ParticipationComposer/payload.js';
 import { TranslationDisclosure } from '../components/i18n/TranslationDisclosure/index.js';
 import { RatingLabel, ratingLabelKinds } from '../components/story/RatingLabel/index.js';
 import { StoryCard } from '../components/story/StoryCard/index.js';
@@ -93,30 +87,12 @@ const UGC_ATTACK_SAMPLE = [
   '[claim airdrop](https://site.example/approve?spender=0xabc123)',
 ].join('\n');
 
-/** The composer wired to the REAL shared-schema validation (no server). */
 function ComposerDemo(): React.ReactElement {
-  const { toast } = useToast();
-  const [mode, setMode] = useState<ComposerMode | undefined>(undefined);
-  const [errors, setErrors] = useState<ComposerErrors>({});
   return (
-    <ParticipationComposer
-      {...(mode !== undefined ? { mode } : {})}
-      onModeChange={setMode}
-      onDraftChange={() => {}}
-      onSubmit={(submittedMode, values) => {
-        const built = buildContributionPayload(submittedMode, values, {
-          threadId: '00000000-0000-4000-8000-000000000000',
-          clientDraftId: 'styleguide-demo',
-        });
-        if (!built.ok) {
-          setErrors(built.fieldErrors);
-          return;
-        }
-        setErrors({});
-        toast({ tone: 'success', message: 'Validated against the shared schema' });
-      }}
-      errors={errors}
-    />
+    <p className="rounded-lg border border-line bg-surface p-4 text-ink">
+      The legacy participation composer has been retired. Comments now live inline on story pages;
+      this styleguide keeps the story composer and shared affordances covered separately.
+    </p>
   );
 }
 

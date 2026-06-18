@@ -5,7 +5,7 @@
 // rollback pattern for mutations. Every queryFn returns zod-validated data
 // (validated inside the RPC client), so nothing unvalidated reaches the cache.
 import type {
-  BranchId,
+  ContributionWriteCreate,
   FeedMode,
   NotificationPreferences,
   RoomCreateRequest,
@@ -19,6 +19,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import { readNotificationsUsedToday } from '../offline/notification-meter.js';
 import {
   cacheSignalLedger,
+  cacheStoryCommentsSnapshot,
   cacheThreadSnapshot,
   listSavedStories,
   readCachedSignalLedger,
@@ -89,60 +90,40 @@ export function useThreadQuery(threadId: string, enabled = true) {
   });
 }
 
-export function useThreadBranchQuery(threadId: string, branch: BranchId) {
-  // Lazy loading (WS-G.3.3): pages of 50 with a continuation cursor; the
-  // hook exposes the FLATTENED contributions plus `loadMore`.
-  const query = useInfiniteQuery({
-    queryKey: queryKeys.threadBranch(threadId, branch),
-    queryFn: ({ pageParam }) => api.fetchThreadBranch(threadId, branch, pageParam ?? undefined),
-    initialPageParam: null as string | null,
-    getNextPageParam: (lastPage) => lastPage.next_cursor,
-    ...cachePolicy.thread,
-  });
-  const pages = query.data?.pages ?? [];
-  const flattened =
-    pages.length > 0
-      ? {
-          thread_id: threadId,
-          branch,
-          contributions: pages.flatMap((page) => page.contributions),
-          next_cursor: pages[pages.length - 1]?.next_cursor ?? null,
-        }
-      : undefined;
-  return {
-    data: flattened,
-    isLoading: query.isLoading,
-    isError: query.isError,
-    isSuccess: query.isSuccess,
-    refetch: () => query.refetch(),
-    loadMore: () => query.fetchNextPage(),
-  };
+export interface StoryCommentsOptions {
+  order?: 'newest' | 'oldest';
+  filter?: 'sources' | 'corrections';
+  root?: string;
 }
 
-/** The `/threads` directory: most-recent-first public conversations (WS-G.3.3),
- *  keyset-paginated — the hook flattens the pages and exposes `loadMore`/`hasMore`
- *  so the tab can surface every conversation, not just the first page. */
-export function useThreadsQuery() {
+export function useStoryCommentsQuery(storyId: string, options: StoryCommentsOptions = {}) {
   const query = useInfiniteQuery({
-    queryKey: queryKeys.threads(),
-    queryFn: ({ pageParam }) => api.fetchThreads(pageParam ?? undefined),
+    queryKey: queryKeys.storyComments(storyId, options),
+    queryFn: async ({ pageParam }) => {
+      const page = await api.fetchStoryComments(storyId, {
+        ...options,
+        ...(pageParam ? { cursor: pageParam } : {}),
+      });
+      if (pageParam === null) await cacheStoryCommentsSnapshot(storyId, options, page);
+      return page;
+    },
     initialPageParam: null as string | null,
-    getNextPageParam: (lastPage) => lastPage.nextCursor,
+    getNextPageParam: (lastPage) => lastPage.next_cursor,
+    enabled: storyId.length > 0,
     ...cachePolicy.thread,
   });
   const pages = query.data?.pages ?? [];
-  const data =
-    pages.length > 0
-      ? {
-          items: pages.flatMap((page) => page.items),
-          nextCursor: pages[pages.length - 1]?.nextCursor ?? null,
-        }
-      : undefined;
   return {
-    data,
-    isLoading: query.isLoading,
-    isError: query.isError,
-    refetch: () => query.refetch(),
+    ...query,
+    data:
+      pages.length > 0
+        ? {
+            comments: pages.flatMap((page) => page.comments),
+            next_cursor: pages[pages.length - 1]?.next_cursor ?? null,
+            overview: pages[0]?.overview,
+            summary: pages[0]?.summary ?? null,
+          }
+        : undefined,
     loadMore: () => query.fetchNextPage(),
     hasMore: query.hasNextPage,
     isFetchingMore: query.isFetchingNextPage,
@@ -292,6 +273,17 @@ export function useNotificationBudgetQuery() {
     queryKey: queryKeys.notificationBudget(),
     queryFn: () => readNotificationsUsedToday(),
     ...cachePolicy.profile,
+  });
+}
+
+export function useCreateCommentMutation(storyId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (request: ContributionWriteCreate) => api.createComment(request),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.storyComments(storyId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.story(storyId) });
+    },
   });
 }
 

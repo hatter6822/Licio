@@ -24,8 +24,10 @@ import {
   draftStoryRecordSchema,
   type SavedStoryRecord,
   type SignalLedgerRecord,
+  type StoryCommentsSnapshotRecord,
   savedStoryRecordSchema,
   signalLedgerRecordSchema,
+  storyCommentsSnapshotRecordSchema,
   type ThreadSnapshotRecord,
   threadSnapshotRecordSchema,
 } from './schemas.js';
@@ -104,6 +106,10 @@ export const draftStories: IntegrityStore<DraftStoryRecord> = createStore(
 export const threadSnapshots: IntegrityStore<ThreadSnapshotRecord> = createStore(
   STORE.threadSnapshots,
   threadSnapshotRecordSchema,
+);
+export const storyComments: IntegrityStore<StoryCommentsSnapshotRecord> = createStore(
+  STORE.storyComments,
+  storyCommentsSnapshotRecordSchema,
 );
 export const signalLedger: IntegrityStore<SignalLedgerRecord> = createStore(
   STORE.signalLedger,

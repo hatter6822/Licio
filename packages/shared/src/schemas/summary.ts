@@ -2,7 +2,7 @@
 //
 // Summary contracts (WS-G.1.4, SPEC §15.4/§24.3).  Three layers: an
 // automated draft (always labeled machine-generated, never final), a
-// community synthesis (user-written, citing branches and evidence), and a
+// community synthesis (user-written, citing comments and evidence), and a
 // steward summary (moderator-approved).  Community and steward layers MUST
 // carry a non-empty unresolved-uncertainty note (§24.3: summaries preserve
 // uncertainty and identify unresolved questions).
@@ -24,7 +24,7 @@ export const summaryPublicSchema = z
     layer: summaryLayerSchema,
     /** Markdown-lite (rendered through renderUGC, WS-G.4.2b). */
     body: z.string().min(1).max(10_000),
-    cited_branch_ids: z.array(uuidSchema).max(50),
+    cited_contribution_ids: z.array(uuidSchema).max(50),
     cited_evidence_ids: z.array(uuidSchema).max(50),
     /** Required (non-null, non-empty) for community/steward layers (§24.3). */
     unresolved_uncertainty: z.string().min(1).max(2_000).nullable(),
@@ -54,12 +54,12 @@ export type SummaryPublic = z.infer<typeof summaryPublicSchema>;
  * the author holds a steward role).  Automated drafts are system-created
  * (WS-K seam) and have no user-facing creation contract.
  */
-export const summaryCreateRequestSchema = z
+const summaryCreateRequestBaseSchema = z
   .object({
     thread_id: uuidSchema,
     layer: z.enum(['community_synthesis', 'steward_summary']),
     body: z.string().trim().min(1).max(10_000),
-    cited_branch_ids: z.array(uuidSchema).max(50).default([]),
+    cited_contribution_ids: z.array(uuidSchema).max(50).default([]),
     cited_evidence_ids: z.array(uuidSchema).max(50).default([]),
     unresolved_uncertainty: z
       .string()
@@ -69,4 +69,12 @@ export const summaryCreateRequestSchema = z
     minority_views_note: z.string().trim().min(1).max(2_000).optional(),
   })
   .strict();
+
+export const summaryCreateRequestSchema = z.preprocess((input) => {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return input;
+  const value = input as Record<string, unknown>;
+  if ('cited_contribution_ids' in value || !('cited_branch_ids' in value)) return value;
+  const { cited_branch_ids, ...rest } = value;
+  return { ...rest, cited_contribution_ids: cited_branch_ids };
+}, summaryCreateRequestBaseSchema);
 export type SummaryCreateRequest = z.infer<typeof summaryCreateRequestSchema>;

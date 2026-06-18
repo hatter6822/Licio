@@ -7,6 +7,7 @@
 import type { StoryDetail } from '@licio/shared';
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
+import { CommentSection } from '../../components/comments/index.js';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
 import { ReportButton } from '../../components/safety/ReportSheet.js';
 import { AuthorVisibilityControl } from '../../components/story/AuthorVisibilityControl/index.js';
@@ -17,11 +18,9 @@ import { TopicRepeatsPreference } from '../../components/story/TopicRepeatsPrefe
 import { WhereInterpretationsDiffer } from '../../components/story/WhereInterpretationsDiffer/index.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
-import { Icon } from '../../components/ui/Icon/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { NarrowLoopPrompt } from '../../components/wellbeing/NarrowLoopPrompt/index.js';
 import { useT } from '../../i18n/index.js';
-import { cn } from '../../lib/cn.js';
 import {
   useIndependentSourcesQuery,
   useSavedStoriesQuery,
@@ -30,7 +29,6 @@ import {
   useToggleSavedStoryMutation,
   useUpdateDurablePrivacyMutation,
 } from '../../lib/queries.js';
-import { raisedInteractive, raisedSurface } from '../../lib/surfaces.js';
 import { markTopicQuiet } from '../../offline/notification-meter.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
@@ -180,27 +178,11 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
               {/* WS-J.1.1 — report this story (the two-tap sheet). */}
               <ReportButton targetType="content" targetId={data.story_id} contentKind="story" />
             </div>
-            {/* WS-G.3.3 — the conversation lives on the story's thread; this is
-                the reader's entry into it (the feed → story → discussion path).
-                A story always has a thread shell, so the link opens even before
-                anyone has contributed. */}
+            {/* WS-T.7 — the conversation now lives inline on the story page as a
+                lightly nested comment section; /threads deep links remain only
+                as backwards-compatible redirects/read shells. */}
             {data.thread_id ? (
-              <Link
-                to="/threads/$threadId"
-                params={{ threadId: data.thread_id }}
-                search={{ branch: 'overview' }}
-                className={cn(
-                  'flex items-center justify-between gap-3 p-4',
-                  raisedSurface,
-                  raisedInteractive,
-                )}
-              >
-                <span className="flex items-center gap-2 font-medium text-ink">
-                  <Icon name="threads" className="size-5 text-ink-muted" />
-                  {t('story.discussion.open', 'View the conversation')}
-                </span>
-                <Icon name="chevron-right" className="size-5 shrink-0 text-ink-muted" />
-              </Link>
+              <CommentSection storyId={data.story_id} threadId={data.thread_id} />
             ) : null}
             {/* WS-Q.5.4a — the author's visibility control (owner only). */}
             {data.is_owner ? (

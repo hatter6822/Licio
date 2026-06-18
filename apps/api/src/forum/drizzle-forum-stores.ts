@@ -38,7 +38,7 @@ import type {
   ContributionModerationState,
   ContributionType,
 } from '@licio/shared';
-import { and, asc, count, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { sha256Hex } from '../identity/crypto.js';
 import type { S3ObjectStoreConfig } from '../identity/object-store-s3.js';
 import { type SigV4Credentials, signRequest, uriEncode } from '../identity/sigv4.js';
@@ -260,6 +260,55 @@ export class DrizzleContributionStore implements ContributionStore {
       .from(contributionsTable)
       .where(and(...conditions))
       .orderBy(asc(contributionsTable.createdAt), asc(contributionsTable.contributionId))
+      .limit(opts.limit);
+    return rows.map((row) => this.#toRecord(row));
+  }
+
+  async listRoots(
+    threadId: string,
+    opts: {
+      types?: readonly ContributionType[];
+      states?: readonly ContributionModerationState[];
+      after?: CreatedAtCursor | null;
+      limit: number;
+      order?: 'newest' | 'oldest';
+    },
+  ): Promise<ContributionRecord[]> {
+    const conditions = [
+      eq(contributionsTable.threadId, threadId),
+      isNull(contributionsTable.parentContributionId),
+    ];
+    if (opts.types) conditions.push(inArray(contributionsTable.type, [...opts.types]));
+    if (opts.states) conditions.push(inArray(contributionsTable.moderationState, [...opts.states]));
+    if (opts.after) {
+      conditions.push(
+        sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`,
+      );
+    }
+    const order =
+      opts.order === 'newest'
+        ? [desc(contributionsTable.createdAt), desc(contributionsTable.contributionId)]
+        : [asc(contributionsTable.createdAt), asc(contributionsTable.contributionId)];
+    const rows = await this.#db
+      .select()
+      .from(contributionsTable)
+      .where(and(...conditions))
+      .orderBy(...order)
+      .limit(opts.limit);
+    return rows.map((row) => this.#toRecord(row));
+  }
+
+  async listChildren(
+    parentContributionId: string,
+    opts: { states?: readonly ContributionModerationState[]; limit: number },
+  ): Promise<ContributionRecord[]> {
+    const conditions = [eq(contributionsTable.parentContributionId, parentContributionId)];
+    if (opts.states) conditions.push(inArray(contributionsTable.moderationState, [...opts.states]));
+    const rows = await this.#db
+      .select()
+      .from(contributionsTable)
+      .where(and(...conditions))
+      .orderBy(desc(contributionsTable.createdAt), desc(contributionsTable.contributionId))
       .limit(opts.limit);
     return rows.map((row) => this.#toRecord(row));
   }
@@ -855,6 +904,8 @@ export class DrizzleSummaryStore implements SummaryStore {
       layer: row.layer,
       body: row.body,
       citedBranchIds: row.citedBranchIds,
+      citedContributionIds:
+        row.citedContributionIds.length > 0 ? row.citedContributionIds : row.citedBranchIds,
       citedEvidenceIds: row.citedEvidenceIds,
       unresolvedUncertainty: row.unresolvedUncertainty,
       minorityViewsNote: row.minorityViewsNote,
@@ -875,6 +926,7 @@ export class DrizzleSummaryStore implements SummaryStore {
         layer: record.layer,
         body: record.body,
         citedBranchIds: record.citedBranchIds,
+        citedContributionIds: record.citedContributionIds ?? record.citedBranchIds,
         citedEvidenceIds: record.citedEvidenceIds,
         unresolvedUncertainty: record.unresolvedUncertainty,
         minorityViewsNote: record.minorityViewsNote,

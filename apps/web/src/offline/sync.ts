@@ -11,7 +11,7 @@
 import {
   type AttentionAggregate,
   attentionAggregateSchema,
-  contributionCreateSchema,
+  contributionWriteCreateSchema,
   createReportRequestSchema,
 } from '@licio/shared';
 import { ZodError, z } from 'zod';
@@ -88,7 +88,7 @@ export interface SyncOptions {
 async function sendOperation(operation: PendingOperationRecord): Promise<void> {
   switch (operation.operationType) {
     case 'contribution':
-      await createContribution(contributionCreateSchema.parse(operation.payload));
+      await createContribution(contributionWriteCreateSchema.parse(operation.payload));
       return;
     case 'report':
       await createReport(createReportRequestSchema.parse(operation.payload));

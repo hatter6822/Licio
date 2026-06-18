@@ -561,6 +561,7 @@ const KIND_BY_TYPE: Record<string, Interaction['kind']> = {
   counterexample: 'disagreement',
   moderation_concern: 'disagreement',
   meta_discussion: 'attention',
+  comment: 'attention',
 };
 
 export async function assembleConversationInteractions(

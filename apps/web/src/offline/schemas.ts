@@ -5,17 +5,18 @@
 // data can never enter application state — the same zod-on-the-boundary defense
 // as zod-on-response (SPEC §6.12.7), applied at the storage trust boundary.
 import {
-  branchDepthBucketSchema,
-  branchIdSchema,
+  commentItemSchema,
   contributionTypeSchema,
   dwellBucketSchema,
+  replyDepthBucketSchema,
   returnVisitBucketSchema,
+  storyCommentsResponseSchema,
   storyVisibilitySchema,
 } from '@licio/shared';
 import { z } from 'zod';
 
 /** Current per-store record schema version (bump with a db.ts migration). */
-export const RECORD_SCHEMA_VERSION = 1;
+export const RECORD_SCHEMA_VERSION = 2;
 const schemaVersion = z.literal(RECORD_SCHEMA_VERSION);
 
 /** A story saved for offline reading (key: storyId). Timestamps are epoch ms. */
@@ -50,7 +51,6 @@ export const draftContributionRecordSchema = z
     draftId: z.string().min(1),
     storyId: z.string().uuid().nullable(),
     threadId: z.string().uuid().nullable(),
-    branch: branchIdSchema.nullable(),
     contributionType: contributionTypeSchema,
     values: z.record(z.string(), z.string()),
     updatedAt: z.number().int().nonnegative(),
@@ -115,6 +115,20 @@ export const threadSnapshotRecordSchema = z.object({
 });
 export type ThreadSnapshotRecord = z.infer<typeof threadSnapshotRecordSchema>;
 
+/** A cached first page of the story comment section (key: cacheKey). */
+export const storyCommentsSnapshotRecordSchema = z.object({
+  schemaVersion,
+  cacheKey: z.string().min(1),
+  storyId: z.string().uuid(),
+  optionsKey: z.string().min(1),
+  comments: z.array(commentItemSchema).max(100),
+  nextCursor: z.string().min(1).max(512).nullable(),
+  overview: storyCommentsResponseSchema.shape.overview,
+  summary: storyCommentsResponseSchema.shape.summary,
+  cachedAt: z.number().int().nonnegative(),
+});
+export type StoryCommentsSnapshotRecord = z.infer<typeof storyCommentsSnapshotRecordSchema>;
+
 /** A private Signal-Ledger snapshot row (key: itemId). */
 export const signalLedgerRecordSchema = z.object({
   schemaVersion,
@@ -124,7 +138,7 @@ export const signalLedgerRecordSchema = z.object({
   activeDwellBucket: dwellBucketSchema,
   sourceOpened: z.boolean(),
   contextOpened: z.boolean(),
-  branchDepthBucket: branchDepthBucketSchema,
+  replyDepthBucket: replyDepthBucketSchema,
   returnVisitCountBucket: returnVisitBucketSchema,
   // Optional since WS-E: cap status is client-known only; server-generated
   // ledger entries omit it (loosening only — older cached rows still parse).

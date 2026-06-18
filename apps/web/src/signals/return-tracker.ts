@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Return-visit + thread-traversal tracker (WS-C.4.3, SPEC §5.3/§6.7). A return
+// Return-visit + reply-depth traversal tracker (WS-C.4.3, SPEC §5.3/§6.7). A return
 // visit is a revisit after a time-away threshold (sustained interest). A
 // RAGE-LOOP — too many returns inside a short window — PERMANENTLY forfeits the
 // returns counted during the burst, so a hostile/compulsive loop never increases
 // positive attention even after the window ages out (SIG-ANTI-RAGELOOP, §6.7).
 // (A windowed-only suppression would let the burst's returns resurrect into the
-// count later — the exact gaming vector this rule closes.) Thread traversal counts
-// DISTINCT branches visited, so nonredundant exploration is weighted above
-// re-reading the same branch.
+// count later — the exact gaming vector this rule closes.) Reply traversal counts DISTINCT comment depths viewed, so expanding deeper
+// replies is represented as a coarse bucket without emitting raw scroll traces.
 //
 // Return state is persisted LOCALLY (never uploaded) through an injectable store
 // so that a genuine return after the app was closed — and a rage-loop spanning a
@@ -166,23 +165,24 @@ export class ReturnTracker {
   }
 }
 
-/** Distinct-branch traversal per thread (nonredundant exploration). */
+/** Distinct reply-depth traversal per story (nonredundant comment exploration). */
 export class TraversalTracker {
-  private readonly branchesByThread = new Map<string, Set<string>>();
+  private readonly depthsByStory = new Map<string, Set<number>>();
 
-  /** Record a branch visit. Revisiting the same branch does not raise the count. */
-  visitBranch(threadId: string, branchId: string): void {
-    const set = this.branchesByThread.get(threadId) ?? new Set<string>();
-    set.add(branchId);
-    this.branchesByThread.set(threadId, set);
+  /** Record a bounded reply depth. Revisiting the same depth does not raise the count. */
+  visitReplyDepth(storyId: string, depth: number): void {
+    const bounded = Math.max(0, Math.min(10, Math.trunc(depth)));
+    const set = this.depthsByStory.get(storyId) ?? new Set<number>();
+    set.add(bounded);
+    this.depthsByStory.set(storyId, set);
   }
 
-  /** Number of DISTINCT branches visited in a thread. */
-  distinctBranches(threadId: string): number {
-    return this.branchesByThread.get(threadId)?.size ?? 0;
+  /** Number of DISTINCT reply-depth levels viewed in a story. */
+  distinctReplyDepthLevels(storyId: string): number {
+    return this.depthsByStory.get(storyId)?.size ?? 0;
   }
 
   resetSession(): void {
-    this.branchesByThread.clear();
+    this.depthsByStory.clear();
   }
 }

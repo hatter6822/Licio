@@ -114,7 +114,9 @@ export interface SummaryRecord {
   threadId: string;
   layer: SummaryLayer;
   body: string;
+  /** Retained read alias for pre-WS-T rows. */
   citedBranchIds: string[];
+  citedContributionIds?: string[];
   citedEvidenceIds: string[];
   unresolvedUncertainty: string | null;
   minorityViewsNote: string | null;
@@ -213,6 +215,22 @@ export interface ContributionStore {
       after?: CreatedAtCursor | null;
       limit: number;
     },
+  ): Promise<ContributionRecord[]>;
+  /** Top-level comment roots only, keyset-paginated. */
+  listRoots(
+    threadId: string,
+    opts: {
+      types?: readonly ContributionType[];
+      states?: readonly ContributionModerationState[];
+      after?: CreatedAtCursor | null;
+      limit: number;
+      order?: 'newest' | 'oldest';
+    },
+  ): Promise<ContributionRecord[]>;
+  /** Direct children only; newest first for reply previews. */
+  listChildren(
+    parentContributionId: string,
+    opts: { states?: readonly ContributionModerationState[]; limit: number },
   ): Promise<ContributionRecord[]>;
   /** Rows whose path contains `rootId` (the subtree, excluding the root),
    *  `(created_at, id)` ascending with keyset continuation — the WS-G.3.3
@@ -479,6 +497,47 @@ export class InMemoryContributionStore implements ContributionStore {
           (!opts.after || afterCursor(row, row.contributionId, opts.after)),
       )
       .sort((a, b) => byCreatedAtThenId(a, b, a.contributionId, b.contributionId))
+      .slice(0, opts.limit);
+  }
+
+  async listRoots(
+    threadId: string,
+    opts: {
+      types?: readonly ContributionType[];
+      states?: readonly ContributionModerationState[];
+      after?: CreatedAtCursor | null;
+      limit: number;
+      order?: 'newest' | 'oldest';
+    },
+  ): Promise<ContributionRecord[]> {
+    const types = opts.types ? new Set(opts.types) : null;
+    const states = opts.states ? new Set(opts.states) : null;
+    const rows = [...this.#rows.values()]
+      .filter(
+        (row) =>
+          row.threadId === threadId &&
+          row.parentContributionId === null &&
+          (types === null || types.has(row.type)) &&
+          (states === null || states.has(row.moderationState)) &&
+          (!opts.after || afterCursor(row, row.contributionId, opts.after)),
+      )
+      .sort((a, b) => byCreatedAtThenId(a, b, a.contributionId, b.contributionId));
+    if (opts.order === 'newest') rows.reverse();
+    return rows.slice(0, opts.limit);
+  }
+
+  async listChildren(
+    parentContributionId: string,
+    opts: { states?: readonly ContributionModerationState[]; limit: number },
+  ): Promise<ContributionRecord[]> {
+    const states = opts.states ? new Set(opts.states) : null;
+    return [...this.#rows.values()]
+      .filter(
+        (row) =>
+          row.parentContributionId === parentContributionId &&
+          (states === null || states.has(row.moderationState)),
+      )
+      .sort((a, b) => -byCreatedAtThenId(a, b, a.contributionId, b.contributionId))
       .slice(0, opts.limit);
   }
 

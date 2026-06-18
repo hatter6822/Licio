@@ -857,3 +857,13 @@ describe('Test 13 — every global retrieval path routes through the visibility 
     expect(retrieversSrc).toMatch(/globallyRetrievable\(/);
   });
 });
+
+describe('Test 14 — WS-T comment remodel stays outside ranking inputs', () => {
+  it('ranking imports no comment read model, live stream, or notification surfaces', () => {
+    const closure = rankingTransitiveClosure();
+    expect(closure.specifiers).not.toContain('../forum/comments.js');
+    expect(closure.specifiers).not.toContain('../forum/comment-broadcaster.js');
+    expect(closure.specifiers).not.toContain('../lib/reply-notifications.js');
+    expect(closure.files.some((file) => file.includes('forum/comments'))).toBe(false);
+  });
+});

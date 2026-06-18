@@ -17,11 +17,8 @@ import {
   attentionAggregateSchema,
   attentionIngestAckSchema,
   authStatusResponseSchema,
-  type BranchContent,
-  type BranchId,
-  branchContentSchema,
-  type ContributionCreate,
   type ContributionCreateResponse,
+  type ContributionWriteCreate,
   type CreateReportRequest,
   contributionCreateResponseSchema,
   type FeatureFlags,
@@ -51,19 +48,19 @@ import {
   roomListResponseSchema,
   roomSummarySchema,
   type SignalLedgerResponse,
+  type StoryCommentsResponse,
   type StoryCreateRequest,
   type StoryCreateResponse,
   type StoryDetail,
   type StoryInterpretationsResponse,
   signalLedgerResponseSchema,
+  storyCommentsResponseSchema,
   storyCreateResponseSchema,
   storyDetailSchema,
   storyDuplicateResponseSchema,
   storyInterpretationsResponseSchema,
   type ThreadDetail,
-  type ThreadListResponse,
   threadDetailSchema,
-  threadListResponseSchema,
   type UploadPublic,
   type UserSettings,
   uploadPublicSchema,
@@ -250,26 +247,32 @@ export async function fetchIndependentSources(
   return parseResponse(response, independentSourcesResponseSchema);
 }
 
-export async function fetchThreads(cursor?: string): Promise<ThreadListResponse> {
-  const response = await client.v1.threads.$get({ query: cursor ? { cursor } : {} });
-  return parseResponse(response, threadListResponseSchema);
-}
-
 export async function fetchThread(threadId: string): Promise<ThreadDetail> {
   const response = await client.v1.threads[':threadId'].$get({ param: { threadId } });
   return parseResponse(response, threadDetailSchema);
 }
 
-export async function fetchThreadBranch(
-  threadId: string,
-  branch: BranchId,
-  cursor?: string,
-): Promise<BranchContent> {
-  const response = await client.v1.threads[':threadId'].branches[':branch'].$get({
-    param: { threadId, branch },
-    query: cursor ? { cursor } : {},
-  });
-  return parseResponse(response, branchContentSchema);
+export interface StoryCommentsQuery {
+  cursor?: string;
+  order?: 'newest' | 'oldest';
+  filter?: 'sources' | 'corrections';
+  root?: string;
+}
+
+export async function fetchStoryComments(
+  storyId: string,
+  query: StoryCommentsQuery = {},
+): Promise<StoryCommentsResponse> {
+  const params = new URLSearchParams();
+  if (query.cursor) params.set('cursor', query.cursor);
+  if (query.order) params.set('order', query.order);
+  if (query.filter) params.set('filter', query.filter);
+  if (query.root) params.set('root', query.root);
+  const suffix = params.toString();
+  const response = await apiFetch(
+    `${API_BASE}/v1/stories/${encodeURIComponent(storyId)}/comments${suffix ? `?${suffix}` : ''}`,
+  );
+  return parseResponse(response, storyCommentsResponseSchema);
 }
 
 export async function fetchRooms(cursor?: string): Promise<RoomListResponse> {
@@ -331,11 +334,13 @@ export async function fetchFeatureFlags(): Promise<FeatureFlags> {
 }
 
 export async function createContribution(
-  request: ContributionCreate,
+  request: ContributionWriteCreate,
 ): Promise<ContributionCreateResponse> {
   const response = await client.v1.contributions.$post({ json: request });
   return parseResponse(response, contributionCreateResponseSchema);
 }
+
+export const createComment = createContribution;
 
 export async function createReport(request: CreateReportRequest): Promise<ReportCreatedResponse> {
   const response = await client.v1.reports.$post({ json: request });

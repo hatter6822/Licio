@@ -8,11 +8,11 @@ describe('queryKeys', () => {
     expect(queryKeys.feed('chronological')).toEqual(['feed', 'chronological']);
     expect(queryKeys.story('s1')).toEqual(['story', 's1']);
     expect(queryKeys.thread('t1')).toEqual(['thread', 't1']);
-    expect(queryKeys.threadBranch('t1', 'evidence')).toEqual([
-      'thread',
-      't1',
-      'branch',
-      'evidence',
+    expect(queryKeys.storyComments('s1', { filter: 'sources' })).toEqual([
+      'story',
+      's1',
+      'comments',
+      { filter: 'sources' },
     ]);
     expect(queryKeys.rooms()).toEqual(['rooms']);
     expect(queryKeys.room('r1')).toEqual(['room', 'r1']);

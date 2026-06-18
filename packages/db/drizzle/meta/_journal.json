@@ -204,6 +204,41 @@
       "when": 1781671300173,
       "tag": "0028_ws_j_erasure_operational_scrub",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1781671301000,
+      "tag": "0029_ws_t_comment_type",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1781671302000,
+      "tag": "0030_ws_t_body_optional",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1781671303000,
+      "tag": "0031_ws_t_gif_upload",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1781671304000,
+      "tag": "0032_ws_t_summary_citations",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1781671305000,
+      "tag": "0033_ws_t_reply_depth_bucket",
+      "breakpoints": true
     }
   ]
 }

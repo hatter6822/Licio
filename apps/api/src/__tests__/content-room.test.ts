@@ -666,7 +666,7 @@ describe('WS-Q.5.2c restricted media serving gate', () => {
       post(
         '/v1/contributions',
         {
-          type: 'question',
+          type: 'comment',
           thread_id: thread?.threadId,
           client_draft_id: randomUUID(),
           body: 'What does the attached chart show?',
@@ -698,7 +698,7 @@ describe('WS-Q.5.2c restricted media serving gate', () => {
       post(
         '/v1/contributions',
         {
-          type: 'question',
+          type: 'comment',
           thread_id: pubThread?.threadId,
           client_draft_id: randomUUID(),
           body: 'What does the attached chart show?',

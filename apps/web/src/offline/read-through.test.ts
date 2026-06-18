@@ -40,7 +40,7 @@ const LEDGER_ENTRY: SignalLedgerEntry = {
   active_dwell_bucket: 'medium',
   source_opened: true,
   context_opened: false,
-  branch_depth_bucket: 'moderate',
+  reply_depth_bucket: 'moderate',
   return_visit_count_bucket: 'few',
   cap_reached: false,
 };
@@ -63,7 +63,7 @@ const THREAD: ThreadDetail = {
     thread_id: '33333333-3333-4333-8333-333333333333',
     layer: 'community_synthesis',
     body: 'Where the conversation stands.',
-    cited_branch_ids: [],
+    cited_contribution_ids: [],
     cited_evidence_ids: [],
     unresolved_uncertainty: 'Open question.',
     minority_views_note: null,

@@ -85,7 +85,7 @@ export const EVENT_FIXTURES: Readonly<Record<EventTopic, Record<string, unknown>
         active_dwell_bucket: 'medium',
         source_opened: true,
         context_opened: false,
-        branch_depth_bucket: 'shallow',
+        reply_depth_bucket: 'shallow',
         return_visit_count_bucket: 'none',
       },
     ],

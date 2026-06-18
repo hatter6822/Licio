@@ -16,6 +16,9 @@
 //          instead the upload is REJECTED when an Exif/XMP item is declared
 //          (fail closed: the privacy promise is never silently broken — the
 //          user re-exports without metadata).  Metadata-free AVIF passes.
+//   GIF  — drop Comment extensions and XMP Application extensions while
+//          preserving rendering/animation blocks (GCE, NETSCAPE loop control,
+//          image descriptors/tables/data) byte-for-byte.
 //   PDF  — documents are stored verbatim (the §15.5 warning covers IMAGE
 //          metadata; PDF sanitization is a WS-J.2.6b concern).
 //
@@ -44,6 +47,8 @@ export function matchesMagic(contentType: string, bytes: Uint8Array): boolean {
       );
     case 'image/webp':
       return ascii(0, 'RIFF') && ascii(8, 'WEBP');
+    case 'image/gif':
+      return ascii(0, 'GIF8') && (ascii(4, '7a') || ascii(4, '9a'));
     case 'image/avif':
       return bytes.length > 12 && ascii(4, 'ftyp');
     case 'application/pdf':
@@ -58,6 +63,10 @@ export function matchesMagic(contentType: string, bytes: Uint8Array): boolean {
 
 function readU16BE(bytes: Uint8Array, at: number): number {
   return ((bytes[at] ?? 0) << 8) | (bytes[at + 1] ?? 0);
+}
+
+function readU16LE(bytes: Uint8Array, at: number): number {
+  return (bytes[at] ?? 0) | ((bytes[at + 1] ?? 0) << 8);
 }
 
 function readU32BE(bytes: Uint8Array, at: number): number {
@@ -192,6 +201,124 @@ export function checkAvif(bytes: Uint8Array): StripOutcome {
   return { ok: true, bytes, stripped: true }; // verified metadata-free
 }
 
+export type GifBlock =
+  | { kind: 'header'; start: number; end: number }
+  | { kind: 'global_color_table'; start: number; end: number }
+  | { kind: 'image'; start: number; end: number }
+  | { kind: 'extension'; label: number; appId?: string; start: number; end: number }
+  | { kind: 'trailer'; start: number; end: number };
+
+export type GifParseOutcome = { ok: true; blocks: GifBlock[] } | { ok: false; reason: 'malformed' };
+
+function gifColorTableSize(packed: number): number {
+  return 3 * 2 ** ((packed & 0b0000_0111) + 1);
+}
+
+function readGifSubBlocks(bytes: Uint8Array, at: number): number | null {
+  while (at < bytes.length) {
+    const size = bytes[at] ?? 0;
+    at += 1;
+    if (size === 0) return at;
+    if (at + size > bytes.length) return null;
+    at += size;
+  }
+  return null;
+}
+
+/**
+ * Parse GIF block spans without decoding pixels. The returned spans tile the
+ * container from the header through the trailer when parsing succeeds.
+ */
+export function parseGifBlocks(bytes: Uint8Array): GifParseOutcome {
+  if (!matchesMagic('image/gif', bytes) || bytes.length < 13)
+    return { ok: false, reason: 'malformed' };
+  const blocks: GifBlock[] = [{ kind: 'header', start: 0, end: 13 }];
+  let at = 13;
+  const lsdPacked = bytes[10] ?? 0;
+  if ((lsdPacked & 0b1000_0000) !== 0) {
+    const end = at + gifColorTableSize(lsdPacked);
+    if (end > bytes.length) return { ok: false, reason: 'malformed' };
+    blocks.push({ kind: 'global_color_table', start: at, end });
+    at = end;
+  }
+
+  while (at < bytes.length) {
+    const introducer = bytes[at] ?? 0;
+    if (introducer === 0x3b) {
+      if (at + 1 !== bytes.length) return { ok: false, reason: 'malformed' };
+      blocks.push({ kind: 'trailer', start: at, end: at + 1 });
+      return { ok: true, blocks };
+    }
+
+    if (introducer === 0x2c) {
+      const start = at;
+      if (at + 10 > bytes.length) return { ok: false, reason: 'malformed' };
+      readU16LE(bytes, at + 5); // Width/height are u16-LE; parsing them proves offset handling.
+      readU16LE(bytes, at + 7);
+      const imagePacked = bytes[at + 9] ?? 0;
+      at += 10;
+      if ((imagePacked & 0b1000_0000) !== 0) {
+        at += gifColorTableSize(imagePacked);
+        if (at > bytes.length) return { ok: false, reason: 'malformed' };
+      }
+      if (at >= bytes.length) return { ok: false, reason: 'malformed' };
+      at += 1; // LZW minimum code size.
+      const end = readGifSubBlocks(bytes, at);
+      if (end === null) return { ok: false, reason: 'malformed' };
+      at = end;
+      blocks.push({ kind: 'image', start, end: at });
+      continue;
+    }
+
+    if (introducer === 0x21) {
+      const start = at;
+      if (at + 2 > bytes.length) return { ok: false, reason: 'malformed' };
+      const label = bytes[at + 1] ?? 0;
+      at += 2;
+      let appId: string | undefined;
+      if (label === 0xff) {
+        if (at >= bytes.length) return { ok: false, reason: 'malformed' };
+        const firstSize = bytes[at] ?? 0;
+        if (at + 1 + firstSize > bytes.length) return { ok: false, reason: 'malformed' };
+        appId = Array.from(bytes.subarray(at + 1, at + 1 + firstSize), (b) =>
+          String.fromCharCode(b),
+        ).join('');
+      }
+      const end = readGifSubBlocks(bytes, at);
+      if (end === null) return { ok: false, reason: 'malformed' };
+      at = end;
+      blocks.push(
+        appId === undefined
+          ? { kind: 'extension', label, start, end: at }
+          : { kind: 'extension', label, appId, start, end: at },
+      );
+      continue;
+    }
+
+    return { ok: false, reason: 'malformed' };
+  }
+  return { ok: false, reason: 'malformed' };
+}
+
+/** GIF: drop comment and XMP application extensions without re-encoding. */
+export function stripGif(bytes: Uint8Array): StripOutcome {
+  const parsed = parseGifBlocks(bytes);
+  if (!parsed.ok) return { ok: false, reason: 'malformed' };
+  const kept: Uint8Array[] = [];
+  let stripped = false;
+  for (const block of parsed.blocks) {
+    const isComment = block.kind === 'extension' && block.label === 0xfe;
+    const isXmp =
+      block.kind === 'extension' && block.label === 0xff && block.appId === 'XMP DataXMP';
+    if (isComment || isXmp) {
+      stripped = true;
+      continue;
+    }
+    kept.push(bytes.subarray(block.start, block.end));
+  }
+  return { ok: true, bytes: concat(kept), stripped };
+}
+
 function concat(parts: readonly Uint8Array[]): Uint8Array {
   const total = parts.reduce((sum, part) => sum + part.length, 0);
   const out = new Uint8Array(total);
@@ -213,6 +340,8 @@ export function stripUploadMetadata(contentType: string, bytes: Uint8Array): Str
       return stripPng(bytes);
     case 'image/webp':
       return stripWebp(bytes);
+    case 'image/gif':
+      return stripGif(bytes);
     case 'image/avif':
       return checkAvif(bytes);
     case 'application/pdf':

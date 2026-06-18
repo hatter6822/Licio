@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import {
   attentionAggregateSchema,
-  branchContentSchema,
   DEFAULT_USER_SETTINGS,
   feedResponseSchema,
   notificationPreferencesSchema,
   roomListResponseSchema,
   signalLedgerResponseSchema,
+  storyCommentsResponseSchema,
   storyDetailSchema,
   threadDetailSchema,
   userSettingsSchema,
@@ -14,6 +14,7 @@ import {
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resetPushState } from '../lib/push-service.js';
+import { replyNotifications } from '../lib/reply-notifications.js';
 import { createV1Routes, resetSettingsState } from '../routes/v1.js';
 import { freshEventServices, legacyAggregate, seedUserWithSession } from './event-test-helpers.js';
 import { freshForumServices, seedThread } from './forum-test-helpers.js';
@@ -37,11 +38,13 @@ const VALID_UUID = '11111111-1111-4111-8111-111111111111';
 beforeEach(() => {
   resetPushState();
   resetSettingsState();
+  replyNotifications.reset();
 });
 
 afterEach(() => {
   resetPushState();
   resetSettingsState();
+  replyNotifications.reset();
 });
 
 describe('v1 read models', () => {
@@ -65,15 +68,15 @@ describe('v1 read models', () => {
     expect(body.story_id).toBe('5f5e1000-0000-4000-8000-000000000001');
   });
 
-  it('serves schema-valid thread / branch / room bodies from the REAL stores', async () => {
+  it('serves schema-valid thread / comments / room bodies from the REAL stores', async () => {
     const fixture = freshForumServices();
     const a = app();
-    const { threadId } = await seedThread(fixture);
+    const { threadId, storyId } = await seedThread(fixture);
     // Each body must satisfy its shared schema (the server re-validates on
     // egress; this guards the contract end to end).
     threadDetailSchema.parse(await (await a.request(`/v1/threads/${threadId}`)).json());
-    branchContentSchema.parse(
-      await (await a.request(`/v1/threads/${threadId}/branches/overview`)).json(),
+    storyCommentsResponseSchema.parse(
+      await (await a.request(`/v1/stories/${storyId}/comments`)).json(),
     );
     roomListResponseSchema.parse(await (await a.request('/v1/rooms')).json());
   });
@@ -99,9 +102,9 @@ describe('v1 read models', () => {
     expect(res.status).toBe(404);
   });
 
-  it('rejects an unknown thread branch with 400', async () => {
+  it('returns 404 for the retired thread branch route', async () => {
     const res = await app().request(`/v1/threads/${VALID_UUID}/branches/bogus`);
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(404);
   });
 });
 
@@ -190,7 +193,7 @@ describe('v1 writes', () => {
       active_dwell_bucket: 'short',
       source_opened: true,
       context_opened: false,
-      branch_depth_bucket: 'shallow',
+      reply_depth_bucket: 'shallow',
       return_visit_count_bucket: 'none',
       privacy_level: 'minimum',
       created_at: '2026-06-09T13:30:00.000Z',
@@ -284,5 +287,42 @@ describe('v1 push + notifications', () => {
     const body = notificationPreferencesSchema.parse(await patched.json());
     expect(body.daily_digest).toBe(true);
     expect(body.grouping).toBe(true);
+  });
+
+  it('serves and marks bodyless reply notifications for the authenticated user', async () => {
+    const { identity } = freshEventServices();
+    const { userId, cookie } = await seedUserWithSession(identity);
+    const item = replyNotifications.enqueue({
+      recipientUserId: userId,
+      storyId: VALID_UUID,
+      threadId: '22222222-2222-4222-8222-222222222222',
+      commentId: '33333333-3333-4333-8333-333333333333',
+      parentCommentId: '44444444-4444-4444-8444-444444444444',
+      actorHandle: 'alice',
+    });
+    const inbox = await app().request(
+      new Request('http://local/v1/notifications', { headers: { cookie } }),
+    );
+    expect(inbox.status).toBe(200);
+    const body = (await inbox.json()) as {
+      notifications: Array<{ notification_id: string; body?: string; score?: number }>;
+      unread_count: number;
+    };
+    expect(body.unread_count).toBe(1);
+    expect(body.notifications[0]?.notification_id).toBe(item.notification_id);
+    expect(body.notifications[0]?.body).toBeUndefined();
+    expect(body.notifications[0]?.score).toBeUndefined();
+
+    const read = await app().request(
+      new Request(`http://local/v1/notifications/${item.notification_id}/read`, {
+        method: 'POST',
+        headers: { cookie },
+      }),
+    );
+    expect(read.status).toBe(200);
+    const afterRead = await app().request(
+      new Request('http://local/v1/notifications', { headers: { cookie } }),
+    );
+    expect(((await afterRead.json()) as { unread_count: number }).unread_count).toBe(0);
   });
 });

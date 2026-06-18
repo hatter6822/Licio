@@ -208,6 +208,13 @@ export function contributionBody(
       };
     case 'meta_discussion':
       return { ...base, type, body: 'Should these two branches be merged?' };
+    case 'comment':
+      return {
+        ...base,
+        type,
+        body: 'This is a comment in the thread.',
+        ...(extra.parentId ? { parent_contribution_id: extra.parentId } : {}),
+      };
   }
 }
 

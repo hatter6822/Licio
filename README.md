@@ -32,7 +32,7 @@ pay-to-rank — is enforced by the type system, runtime guards, and CI gates.
 - **No applause mechanics** — no likes, upvotes, karma, reaction bars, or follower counts anywhere; the absence is type-level, runtime-guarded, and CI-gated (`check:no-applause`).
 - **In-browser attention processing** — raw engagement (scrolls, touches, dwell) is bucketed in the browser and discarded; only coarse `AttentionAggregate`s ever reach the network (SPEC §19.2; runtime egress guard + the `check:no-raw-egress` gate).
 - **PWAtt shadow scoring** — Participation-Weighted Attention (v0 + guardrailed v1) rewards source-opening, evidence, corrections, synthesis, and bridge-building; anti-signals only ever subtract; scores carry zero ranking power until the SPEC §30.5 review lifts shadow by an explicit code change.
-- **Structured conversation, not comments** — eleven typed contributions (question, answer, evidence, correction, synthesis, counterexample, …) with type-specific requirements enforced by one shared schema on both client and server; branch-aware threads with materialized-path subtrees; rooms, lenses, and steward roles; every piece of user content reaches the DOM through a single sanctioned Markdown-lite → DOMPurify → Trusted Types sink with an external-link safety interstitial.
+- **Inline comment-first conversation** — each story embeds a lightly nested comment section; comments can carry text and media, with evidence/correction as typed enrichments and legacy contribution types retained for backward-compatible reads. The old `/threads` directory/branch routes are retired behind story redirects; every piece of user content still reaches the DOM through a single sanctioned Markdown-lite → DOMPurify → Trusted Types sink with an external-link safety interstitial.
 - **A hardened event pipeline** — a strict topic registry of zod envelopes, authenticated replay-protected ingestion, a retention-tier-partitioned event store with sweeps, a real-time HyperLogLog layer, boot recovery + dead-letter redrive, and a pay-to-rank firewall at the consumer router.
 - **Passwordless identity** — WebAuthn-first with email-OTP and SIWE; there is no password column anywhere; RBAC with object-level authorization, an append-only audit log, steward TOTP MFA.
 - **Privacy by construction** — the client address and location are never read (statically tested); rate limiting is identity-free; DSAR export ships an encrypted signed-URL archive; account deletion has a 30-day grace then hard purge.
@@ -236,7 +236,7 @@ packages/shared/      zod schemas, types, enums, constants (the wire SSOT; leaf)
 packages/db/          Drizzle ORM schema + hand-tuned SQL migrations (PostgreSQL)
 packages/invariants/  pure invariant + scoring mathematics (PWAtt v0/v1, guardrails)
 scripts/              build validation + the CI security/doctrine gates
-docs/                 SPEC.md, planning/ (~858 tasks), policy/ (9 documents), per-WS references
+docs/                 SPEC.md, planning/ (~922 tasks), policy/ (9 documents), per-WS references
 .github/workflows/    CI (8 jobs), CodeQL, Dependabot auto-merge
 ```
 
@@ -259,7 +259,7 @@ licenses are checked for AGPL compatibility at SBOM time (`pnpm sbom`).
 ## Planning & design
 
 - **Specification:** [`docs/SPEC.md`](docs/SPEC.md) — the canonical design spec (v0.7).
-- **Implementation plan:** [`docs/planning/00-index.md`](docs/planning/00-index.md) — 20 workstreams (WS-0 – WS-S; WS-R/WS-S are post-M3 offline/private extensions), ~858 atomic tasks.
+- **Implementation plan:** [`docs/planning/00-index.md`](docs/planning/00-index.md) — 21 workstreams (WS-0 – WS-T; WS-R/WS-S are post-M3 offline/private extensions and WS-T remodels conversation as comments), ~922 atomic tasks.
 - **Extension specs (post-M3):** [`docs/OFFLINE_SPEC.md`](docs/OFFLINE_SPEC.md) (LCAP v0.2 offline content availability — WS-R) and [`docs/PRIVATE_SPEC.md`](docs/PRIVATE_SPEC.md) (E2EE private P2P rooms — WS-S).
 - **Completed-workstream references:** [`docs/design-system/`](docs/design-system/README.md), [`docs/pwa-client/`](docs/pwa-client/README.md), [`docs/identity/`](docs/identity/README.md), [`docs/events/`](docs/events/README.md), [`docs/ingestion/`](docs/ingestion/README.md), [`docs/forum/`](docs/forum/README.md), [`docs/invariants/`](docs/invariants/README.md), [`docs/ranking/`](docs/ranking/README.md), [`docs/trust-safety/`](docs/trust-safety/README.md), and the policy corpus under [`docs/policy/`](docs/policy/).
 - **Conventions:** [`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md) (kept byte-identical).

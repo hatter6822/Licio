@@ -16,7 +16,6 @@ export interface DraftInput {
   draftId: string;
   storyId: string | null;
   threadId: string | null;
-  branch: DraftContributionRecord['branch'];
   contributionType: DraftContributionRecord['contributionType'];
   values: Record<string, string>;
 }
@@ -29,7 +28,6 @@ export async function saveDraft(input: DraftInput): Promise<void> {
     draftId: input.draftId,
     storyId: input.storyId,
     threadId: input.threadId,
-    branch: input.branch,
     contributionType: input.contributionType,
     updatedAt: Date.now(),
   } as const;

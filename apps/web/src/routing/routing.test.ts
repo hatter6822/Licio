@@ -6,7 +6,7 @@ import {
   resolveRouteAccess,
   sanitizeRedirect,
 } from './guards.js';
-import { parseFeedSearch, parseThreadSearch } from './search.js';
+import { parseFeedSearch } from './search.js';
 
 describe('search param parsing', () => {
   it('keeps a valid feed mode and coerces an invalid/absent one to undefined', () => {
@@ -14,11 +14,6 @@ describe('search param parsing', () => {
     expect(parseFeedSearch({ mode: 'chronological' }).mode).toBe('chronological');
     expect(parseFeedSearch({ mode: 'bogus' }).mode).toBeUndefined();
     expect(parseFeedSearch({}).mode).toBeUndefined();
-  });
-
-  it('keeps a valid branch and coerces an invalid one to overview', () => {
-    expect(parseThreadSearch({ branch: 'evidence' }).branch).toBe('evidence');
-    expect(parseThreadSearch({ branch: 'nonsense' }).branch).toBe('overview');
   });
 });
 

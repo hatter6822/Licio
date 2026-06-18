@@ -9,12 +9,13 @@
 | **Plan** | `docs/planning/08-forum-and-conversation.md` (38 atomic tasks) |
 | **Primary consumers** | WS-H (SCOI/MERI inputs), WS-I (ranking reads), WS-J (review queue, moderation states), WS-K (classifier seams) |
 
-The forum is where participation happens: threads read through six structured
-sections (never a flat list), contributions are **typed** (eleven types, no
-generic comments), rooms scope topics and communities, lenses are
-interpretation contexts for SCOI, and reputation exists **without applause**.
-All UGC renders through one defense-in-depth pipeline; the server stores raw
-Markdown-lite only.
+The forum is where participation happens: each story now hosts an inline,
+lightly nested comment section.  New writes use the comment-first WS-T contract
+(`comment` plus typed `evidence`/`correction` enrichments), while historical
+contribution types remain readable for backward compatibility.  Rooms scope
+topics and communities, lenses are interpretation contexts for SCOI, and
+reputation exists **without applause**.  All UGC renders through one
+defense-in-depth pipeline; the server stores raw Markdown-lite only.
 
 ## Architecture
 
@@ -27,9 +28,9 @@ Markdown-lite only.
 | `packages/shared/src/ugc/` | The WS-G.4 pipeline: Markdown-lite parser → serializer → DOMPurify (`licio-ugc`) → `renderUGC`; drainer-link detection |
 | `packages/db/src/schema/` | `contribution.ts`, `room.ts`, `summary.ts`, `upload.ts`, the WS-G-owned `thread.ts`, the dual-dimension `claim.ts` evidence cards |
 | `packages/db/drizzle/0008_ws_g_forum.sql` | The WS-G migration (validated against live Postgres 16) |
-| `apps/api/src/forum/` | Stores (in-memory + interfaces), services container, contribution guard chain, thread reads, rooms, summaries, transitions, safety seam, EXIF stripping, config, Drizzle adapters |
+| `apps/api/src/forum/` | Stores (in-memory + interfaces), services container, contribution guard chain, story comment reads, live broadcaster, compatibility thread reads, rooms, summaries, transitions, safety seam, GIF/EXIF stripping, config, Drizzle adapters |
 | `apps/api/src/routes/forum.ts`, `routes/rooms.ts` | The §23.2 endpoint surface |
-| `apps/web/src/components/composer/` | 11-mode composer (5 groups), payload builder, voice dictation |
+| `apps/web/src/components/comments/`, `components/composer/` | Inline comment section/composer plus reusable composer affordances (attachments, citations, privacy warning, voice dictation) |
 | `apps/web/src/components/ugc/` | `UgcBody` (THE sanctioned render sink) + the drainer interstitial |
 | `apps/web/src/lib/link-safety.ts` | Runtime blocklist cache + shared detection |
 | `packages/invariants/src/pwatt/low-info-reply.ts` | Conservative low-info classifier (closes the WS-E residual) |
@@ -155,23 +156,23 @@ thread's room).  `GET /v1/stories/:id/lenses` groups lens-tagged
 contributions per lens — never framed as factions or scoreboards — and the
 SCOI divergence summary is absent gracefully until WS-H.4 produces it.
 
-## WS-G.3 API surface and composer
+## WS-G/WS-T API surface and comment composer
 
 | Endpoint | Notes |
 |---|---|
 | `POST /v1/contributions` | The guard chain: per-account sliding-window rate limit (10/min default, 429 + exact Retry-After, keyed by non-reversible account ref — never an IP) → thread existence/visibility (hidden story → 404; restricted-room thread → 404 to non-members; archived → 409; safety-restricted → 403) → `client_draft_id` dedup (existing row returns, 200) → per-type cross-record validation (422 with specific messages) → safety pre-checks (flag → `under_review` + review queue) → transactional insert (atomic with the evidence card) → durable `contribution.created` (+`evidence.added`) emission — EXCEPT for safety-held rows, which emit nothing and bump no room activity (scoring/lifecycle/freshness must not count invisible content; emission on release is the WS-J approval seam) |
-| `GET /v1/threads` | Thread directory (the public `/threads` tab): a keyset page of conversation summaries (title + contribution count + state), most recent first. Walks the store keyset in bounded batches (`threadDirectoryScanBatch` × `threadDirectoryMaxScanBatches`) until a full VISIBLE page accumulates — `threadOnGlobalDirectory` applies the SAME two-condition global containment as the feed (`filterByVisibility`): a PUBLIC item from a confirmed PUBLIC room, dropping hidden stories, `room_only` items, private-room threads, moderation-removed threads, AND conversations whose room cannot be confirmed public (fail-closed, like the feed). The continuation cursor advances over the deepest SCANNED row, so a long run of filtered conversations can never strand the older public ones behind it; a non-UUID cursor coerces to a top read (no Postgres cast 500). USER-INDEPENDENT (room-scoped conversations are reached through their room); page size is `roomPageSize` |
-| `GET /v1/threads/:id` | Overview: six section counts + layered summary status |
-| `GET /v1/threads/:id/branches/:branch` | Section content with depth indicators, keyset-paginated at the store level (complete over arbitrarily large threads; chronology pages are exact `(created_at, id)` order, tree sections are depth-first WITHIN each page — a cross-page parent renders as a local root with absolute depth) |
-| `GET /v1/threads/:id/contributions?root=` | Materialized-path subtree, keyset-paginated like branches (pages of `branchPageSize`; the cursor is the last contribution id; complete over arbitrarily large subtrees; an invisible root gates every page) |
-| `GET /v1/contributions/:id/anchor` | Semantic deep-link anchor (section + subtree root) |
+| `GET /v1/stories/:id/comments` | Story-owned comment section: keyset-paginated roots with bounded reply previews, optional `sources`/`corrections` filters, and subtree reads via `root`. This is the primary read surface embedded on `/stories/$storyId`; the old global `/threads` directory is retired on the client. |
+| `GET /v1/threads/:id` | Back-compat overview/resolution surface. The web client uses it only to redirect old `/threads/$threadId` deep links to the owning story comment section. |
+| `GET /v1/stories/:id/comments/stream` | Same-origin SSE stream for new visible comments; frames carry only the public contribution projection, are revalidated by the read bar, and are covered by score/raw/financial-field introspection tests. |
+| `GET /v1/contributions/:id/anchor` | Semantic deep-link anchor (`thread_id` + subtree root) for legacy/shared contribution links. |
 | `PATCH/DELETE /v1/contributions/:id` | Author-only edit (history snapshot; citation floors survive edits; the safety classifier RE-RUNS on the edited content and a flag holds it for review) and tombstone removal; 404-over-403 |
 | `POST /v1/evidence` | Standalone cards with explicit material + relationship types; emits the same durable `evidence.added` as the co-create path (resolved through the claim's story thread) so embeddings/lifecycle see every card |
-| `POST /v1/threads/:id/summaries` | Community/steward layers (§24.3 uncertainty required); cited branches AND cited evidence are validated as real, thread-scoped records — provenance can never point at arbitrary ids |
+| `POST /v1/threads/:id/summaries` | Community/steward layers (§24.3 uncertainty required); cited contributions AND cited evidence are validated as real, thread-scoped records — provenance can never point at arbitrary ids |
 | `GET/PATCH /v1/feed/preferences` | The §23.2 canonical veneer over the WS-D settings stores (single source of truth; clamped/audited); the five §13 modes |
 | `POST /v1/uploads`, `GET /v1/uploads/:id` | See uploads below |
 | `GET /v1/security/link-blocklist` | Drainer blocklist, steward-tunable, content-hash version for cache busting |
 | `GET/POST… /v1/rooms*` | Listing/creation/detail/threads/join/notifications/join-requests/lenses; the directory walks the store keyset until a full visible page (no fetch-prefix cap), `joined` enumerates the requester's own memberships, and `thread_count` counts VISIBLE threads only (hidden stories excluded — no oracle) |
+| `GET /v1/notifications`, `PATCH /v1/notifications/:id/read` | Bodyless reply-notification inbox; push wakes are user-scoped and honor `reply_notifications`, quiet hours, budgets, and block/mute relationships. |
 | `PATCH /v1/threads/:id/state` | Steward transitions (audited, reasoned) |
 | `/v1/forum/admin/*` | Steward+TOTP: validated config writes (422 on bad values), metrics |
 
@@ -351,18 +352,14 @@ microsecond drift), and the S3 byte path end-to-end against a fake bucket
 `pgvector/pgvector:pg16` + `redis:7` service containers, so the gated
 suites are no longer skip-only.
 
-**Real-browser E2E** (`apps/web/e2e/ugc-safety.spec.ts`, `composer.spec.ts`;
+**Real-browser E2E** (`apps/web/e2e/ugc-safety.spec.ts`, `composer.spec.ts`, `comments.bff.spec.ts`;
 Chromium + Firefox + WebKit against the preview's enforcing CSP): the
 `licio-ugc` Trusted Types policy creates TrustedHTML under
 `require-trusted-types-for 'script'` in real engines, the attack fixtures
 come out inert (no script/handlers/javascript: remnants, execution flag
 never set), the interstitial intercepts a heuristic-suspicious link and
 Back closes without navigating, a safe link opens a popup under intact
-user activation, the 11-mode chooser renders with shared-schema validation
-errors and the acknowledgment-gates-submit rule, and axe passes on every
-state.  What still needs the WS-P BFF-in-the-loop harness: authenticated
-thread-page flows (server-rendered branch reads, draft RECOVERY across
-reload, submit→sync round-trips).
+user activation, story submission renders with shared-schema validation, and the BFF-in-the-loop comment spec opens the inline comment section, verifies the legacy thread redirect, and runs axe on the story conversation surface.
 
 ## Residuals (tracked elsewhere)
 

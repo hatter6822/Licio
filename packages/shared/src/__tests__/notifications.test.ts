@@ -6,6 +6,7 @@ import {
   notificationPreferencesSchema,
   pushSubscriptionSchema,
   type QuietHours,
+  replyNotificationSchema,
 } from '../schemas/notifications.js';
 
 const enabled = (start: number, end: number): QuietHours => ({
@@ -54,6 +55,7 @@ describe('notification + push schemas', () => {
     expect(() =>
       notificationPreferencesSchema.parse(DEFAULT_NOTIFICATION_PREFERENCES),
     ).not.toThrow();
+    expect(DEFAULT_NOTIFICATION_PREFERENCES.reply_notifications).toBe(true);
   });
 
   it('rejects a quiet-hours minute past the end of day', () => {
@@ -77,5 +79,30 @@ describe('notification + push schemas', () => {
         keys: { p256dh: 'BPk...', auth: 'a1b2' },
       }),
     ).not.toThrow();
+  });
+
+  it('accepts bodyless reply notifications and rejects score/body/raw/financial fields', () => {
+    const item = {
+      notification_id: '00000000-0000-4000-8000-000000000001',
+      kind: 'reply',
+      story_id: '00000000-0000-4000-8000-000000000002',
+      thread_id: '00000000-0000-4000-8000-000000000003',
+      comment_id: '00000000-0000-4000-8000-000000000004',
+      parent_comment_id: '00000000-0000-4000-8000-000000000005',
+      actor_handle: 'alice',
+      created_at: '2026-06-18T00:00:00.000Z',
+      read_at: null,
+    };
+    expect(replyNotificationSchema.parse(item)).toEqual(item);
+    expect(() => replyNotificationSchema.parse({ ...item, body: 'No body text here.' })).toThrow();
+    for (const forbidden of [
+      { score: 1 },
+      { raw_dwell_ms: 1200 },
+      { scrollY: 20 },
+      { wallet_address: '0xabc' },
+      { payment_amount: '1.00' },
+    ]) {
+      expect(() => replyNotificationSchema.parse({ ...item, ...forbidden })).toThrow();
+    }
   });
 });

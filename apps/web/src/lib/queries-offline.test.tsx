@@ -27,7 +27,7 @@ const ENTRY: SignalLedgerEntry = {
   active_dwell_bucket: 'short',
   source_opened: false,
   context_opened: false,
-  branch_depth_bucket: 'shallow',
+  reply_depth_bucket: 'shallow',
   return_visit_count_bucket: 'none',
   cap_reached: false,
 };

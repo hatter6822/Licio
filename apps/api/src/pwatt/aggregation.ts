@@ -15,13 +15,13 @@
 import type { ActorItemSummary } from '@licio/invariants';
 import {
   type AttentionAggregateEvent,
-  BRANCH_DEPTH_BUCKETS,
-  type BranchDepthBucket,
   DWELL_BUCKETS,
   type DwellBucket,
   type EventContributionType,
   type IntegritySignalDetectedEvent,
+  REPLY_DEPTH_BUCKETS,
   RETURN_VISIT_BUCKETS,
+  type ReplyDepthBucket,
   type ReturnVisitBucket,
   type SourceOpenedAggregateEvent,
 } from '@licio/shared';
@@ -64,7 +64,7 @@ function maxBucket<T extends string>(order: readonly T[], a: T, b: T): T {
 /** Mutable per-(actor, item) fold state. */
 interface ActorFold {
   dwellBucket: DwellBucket;
-  branchDepthBucket: BranchDepthBucket;
+  branchDepthBucket: ReplyDepthBucket;
   returnVisitBucket: ReturnVisitBucket;
   sawMeaningfulSourceOpen: boolean;
   /** Bounce-adjacent evidence only: bounce=true, or a `brief` source dwell. */
@@ -149,9 +149,9 @@ export async function computeAggregationWindow(
         const actor = actorOf(item, actorKey);
         actor.dwellBucket = maxBucket(DWELL_BUCKETS, actor.dwellBucket, entry.active_dwell_bucket);
         actor.branchDepthBucket = maxBucket(
-          BRANCH_DEPTH_BUCKETS,
+          REPLY_DEPTH_BUCKETS,
           actor.branchDepthBucket,
-          entry.branch_depth_bucket,
+          entry.reply_depth_bucket,
         );
         actor.returnVisitBucket = maxBucket(
           RETURN_VISIT_BUCKETS,

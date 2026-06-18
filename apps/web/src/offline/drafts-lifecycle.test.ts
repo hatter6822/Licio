@@ -37,7 +37,6 @@ describe('WS-G.3.7c draft lifecycle', () => {
       draftId: 'draft-a1',
       storyId: null,
       threadId: THREAD_A,
-      branch: null,
       contributionType: 'question',
       values: { body: 'older' },
     });
@@ -45,7 +44,6 @@ describe('WS-G.3.7c draft lifecycle', () => {
       draftId: 'draft-a2',
       storyId: null,
       threadId: THREAD_A,
-      branch: null,
       contributionType: 'explanation',
       values: { body: 'newer' },
     });
@@ -53,7 +51,6 @@ describe('WS-G.3.7c draft lifecycle', () => {
       draftId: 'draft-b1',
       storyId: null,
       threadId: THREAD_B,
-      branch: null,
       contributionType: 'question',
       values: { body: 'other thread' },
     });
@@ -70,7 +67,6 @@ describe('WS-G.3.7c draft lifecycle', () => {
       draftId: 'draft-x',
       storyId: null,
       threadId: THREAD_A,
-      branch: null,
       contributionType: 'question',
       values: { body: 'x' },
     });
@@ -83,7 +79,6 @@ describe('WS-G.3.7c draft lifecycle', () => {
       draftId: 'draft-fresh',
       storyId: null,
       threadId: THREAD_A,
-      branch: null,
       contributionType: 'question',
       values: { body: 'fresh' },
     });
@@ -91,7 +86,6 @@ describe('WS-G.3.7c draft lifecycle', () => {
       draftId: 'draft-stale',
       storyId: null,
       threadId: THREAD_A,
-      branch: null,
       contributionType: 'question',
       values: { body: 'stale' },
     });
@@ -103,7 +97,6 @@ describe('WS-G.3.7c draft lifecycle', () => {
       draftId: 'draft-now',
       storyId: null,
       threadId: THREAD_A,
-      branch: null,
       contributionType: 'question',
       values: { body: 'now' },
     });

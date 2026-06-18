@@ -100,7 +100,7 @@ export function BottomNav({
   );
 }
 
-/** The five standard primary-nav tabs (WS-C supplies real hrefs/active state). */
+/** The four standard primary-nav tabs (WS-C supplies real hrefs/active state). */
 export function defaultNavItems(t: ReturnType<typeof useT>): NavItem[] {
   return [
     { id: 'front-page', label: t('nav.frontPage', 'Front Page'), icon: 'home', href: '/' },
@@ -112,7 +112,6 @@ export function defaultNavItems(t: ReturnType<typeof useT>): NavItem[] {
       href: '/submit',
       prominent: true,
     },
-    { id: 'threads', label: t('nav.threads', 'Threads'), icon: 'threads', href: '/threads' },
     { id: 'profile', label: t('nav.profile', 'Profile'), icon: 'user', href: '/profile' },
   ];
 }

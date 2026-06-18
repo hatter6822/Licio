@@ -12,6 +12,7 @@ import { InMemorySlidingWindowStore, type SlidingWindowStore } from '../events/i
 import type { EventPipelineServices } from '../events/services.js';
 import { getIdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
+import { type CommentBroadcaster, InMemoryCommentBroadcaster } from './comment-broadcaster.js';
 import { DEFAULT_FORUM_CONFIG, type ForumRuntimeConfig, loadForumConfig } from './config.js';
 import { ContributionRateLimiter } from './contributions.js';
 import {
@@ -83,6 +84,8 @@ export interface ForumServices {
   safety: ContributionSafetyClassifier;
   /** WS-J.2.6b seam: the post-local-checks upload scanner. */
   uploadScanner: UploadScanner;
+  /** WS-T.5 same-origin live comment stream fan-out. */
+  commentBroadcaster: CommentBroadcaster;
   /** WS-J.1.2 enforcement seam (assigned at boot; null = not enforced). */
   relationshipReader: ViewerRelationshipReader | null;
   /** WS-J.2.6 auto-block accountability seam (assigned at boot; null = none). */
@@ -105,6 +108,7 @@ export interface InMemoryForumOptions {
   config?: Partial<ForumRuntimeConfig>;
   safety?: ContributionSafetyClassifier;
   uploadScanner?: UploadScanner;
+  commentBroadcaster?: CommentBroadcaster;
   relationshipReader?: ViewerRelationshipReader;
   autoModerationSink?: AutoModerationSink;
   limiterStore?: SlidingWindowStore;
@@ -147,6 +151,7 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
         ? new HeuristicContributionSafety(ingestion.urlSafety)
         : { classify: async () => ({ disposition: 'clear' as const, reasons: [] }) }),
     uploadScanner: options.uploadScanner ?? new LocalChecksUploadScanner(),
+    commentBroadcaster: options.commentBroadcaster ?? new InMemoryCommentBroadcaster(),
     relationshipReader: options.relationshipReader ?? null,
     autoModerationSink: options.autoModerationSink ?? null,
     metrics,

@@ -133,6 +133,16 @@ export function attentionEvent(
   overrides: Partial<AttentionAggregateEvent> & { storyId?: string } = {},
 ): AttentionAggregateEvent {
   const { storyId, ...rest } = overrides;
+  if (Array.isArray(rest.items)) {
+    rest.items = rest.items.map((item) => {
+      const legacy = item as Record<string, unknown>;
+      if ('branch_depth_bucket' in legacy && !('reply_depth_bucket' in legacy)) {
+        const { branch_depth_bucket, ...withoutLegacy } = legacy;
+        return { ...withoutLegacy, reply_depth_bucket: branch_depth_bucket };
+      }
+      return item;
+    }) as typeof rest.items;
+  }
   return attentionAggregateEventSchema.parse({
     event_id: randomUUID(),
     event_type: 'attention.aggregate',
@@ -148,7 +158,7 @@ export function attentionEvent(
         active_dwell_bucket: 'medium',
         source_opened: true,
         context_opened: false,
-        branch_depth_bucket: 'shallow',
+        reply_depth_bucket: 'shallow',
         return_visit_count_bucket: 'none',
       },
     ],
@@ -194,7 +204,7 @@ export function legacyAggregate(
     active_dwell_bucket: 'short',
     source_opened: true,
     context_opened: false,
-    branch_depth_bucket: 'shallow',
+    reply_depth_bucket: 'shallow',
     return_visit_count_bucket: 'none',
     privacy_level: 'standard',
     created_at: new Date().toISOString(),

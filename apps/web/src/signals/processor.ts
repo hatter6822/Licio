@@ -2,7 +2,7 @@
 //
 // Signal processor (WS-C.4 orchestration). Ties the in-browser trackers together:
 // engagement (visibility+focus) AND reading cadence gate active dwell, which is
-// capped per item per session; source/context opens, return visits, and branch
+// capped per item per session; source/context opens, return visits, and reply-depth
 // traversal are recorded; and the bucketed §22.1 aggregate is assembled and
 // buffered for upload. Collection only runs when personalization is enabled
 // (privacy gate); raw events are processed here and never leave the browser.
@@ -133,8 +133,8 @@ export class SignalProcessor {
   recordContextClose(openId: string): void {
     this.opens.close(openId, this.wallClock());
   }
-  recordBranchVisit(storyId: string, branchId: string): void {
-    if (this.policy.collect) this.traversal.visitBranch(storyId, branchId);
+  recordReplyDepth(storyId: string, depth: number): void {
+    if (this.policy.collect) this.traversal.visitReplyDepth(storyId, depth);
   }
   markProgrammaticScroll(): void {
     this.cadence.markProgrammaticScroll();
@@ -154,7 +154,7 @@ export class SignalProcessor {
       this.cap.get(itemId) > 0 ||
       this.opens.wasSourceOpened(itemId) ||
       this.opens.wasContextOpened(itemId) ||
-      this.traversal.distinctBranches(itemId) > 0 ||
+      this.traversal.distinctReplyDepthLevels(itemId) > 0 ||
       this.returns.returnCount(itemId) > 0
     );
   }
@@ -216,7 +216,7 @@ export class SignalProcessor {
       cappedDwellMs: this.cap.get(storyId),
       sourceOpened: this.opens.wasSourceOpened(storyId),
       contextOpened: this.opens.wasContextOpened(storyId),
-      distinctBranches: this.traversal.distinctBranches(storyId),
+      distinctReplyDepthLevels: this.traversal.distinctReplyDepthLevels(storyId),
       returnCount: this.returns.returnCount(storyId),
       now: this.wallClock(),
     };

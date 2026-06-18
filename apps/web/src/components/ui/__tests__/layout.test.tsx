@@ -16,16 +16,16 @@ function Nav({ activeId }: { activeId?: string }) {
 }
 
 describe('BottomNav (WS-B.1.5)', () => {
-  it('renders five labelled tabs with icons and text (never icon-only)', () => {
+  it('renders four labelled tabs with icons and text (never icon-only)', () => {
     render(<Nav activeId="front-page" />);
     const nav = screen.getByRole('navigation', { name: 'Primary navigation' });
     const links = screen.getAllByRole('link');
-    expect(links).toHaveLength(5);
-    for (const label of ['Front Page', 'Rooms', 'Submit', 'Threads', 'Profile']) {
+    expect(links).toHaveLength(4);
+    for (const label of ['Front Page', 'Rooms', 'Submit', 'Profile']) {
       expect(screen.getByRole('link', { name: new RegExp(label) })).toBeInTheDocument();
     }
     // Each link contains both an icon (svg) and a visible text label.
-    expect(nav.querySelectorAll('svg')).toHaveLength(5);
+    expect(nav.querySelectorAll('svg')).toHaveLength(4);
   });
 
   it('marks the active tab with aria-current="page"', () => {
