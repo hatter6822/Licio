@@ -87,13 +87,13 @@
   --licio-shadow-lg: 0 18px 34px -8px rgb(40 48 80 / 0.18), 0 6px 12px -6px rgb(40 48 80 / 0.10);
   /* Neumorphic soft-UI shadows (WS-B fabric theme) */
   color-scheme: light;
-  --licio-neu-highlight: rgb(255 255 255 / 0.55);
-  --licio-neu-shadow: rgb(106 90 76 / 0.20);
-  --licio-shadow-raised: -5px -5px 11px var(--licio-neu-highlight), 5px 5px 11px var(--licio-neu-shadow);
-  --licio-shadow-raised-sm: -3px -3px 7px var(--licio-neu-highlight), 3px 3px 7px var(--licio-neu-shadow);
-  --licio-shadow-pressed: inset 4px 4px 9px var(--licio-neu-shadow), inset -4px -4px 9px var(--licio-neu-highlight);
-  --licio-shadow-pressed-sm: inset 2px 2px 5px var(--licio-neu-shadow), inset -2px -2px 5px var(--licio-neu-highlight);
-  --licio-shadow-inset: inset 3px 3px 7px var(--licio-neu-shadow), inset -3px -3px 7px var(--licio-neu-highlight);
+  --licio-neu-highlight: rgb(255 255 255 / 0.64);
+  --licio-neu-shadow: rgb(104 88 72 / 0.18);
+  --licio-shadow-raised: -4px -4px 10px var(--licio-neu-highlight), 4px 4px 10px var(--licio-neu-shadow), inset 1px 1px 0 var(--licio-neu-highlight), inset -1px -1px 0 var(--licio-neu-shadow);
+  --licio-shadow-raised-sm: -2px -2px 6px var(--licio-neu-highlight), 2px 2px 6px var(--licio-neu-shadow), inset 1px 1px 0 var(--licio-neu-highlight), inset -1px -1px 0 var(--licio-neu-shadow);
+  --licio-shadow-pressed: inset 4px 4px 8px var(--licio-neu-shadow), inset -4px -4px 8px var(--licio-neu-highlight);
+  --licio-shadow-pressed-sm: inset 2px 2px 4px var(--licio-neu-shadow), inset -2px -2px 4px var(--licio-neu-highlight);
+  --licio-shadow-inset: inset 3px 3px 6px var(--licio-neu-shadow), inset -3px -3px 6px var(--licio-neu-highlight);
   --licio-z-base: 0;
   --licio-z-dropdown: 100;
   --licio-z-sticky: 200;
@@ -142,8 +142,8 @@
     --licio-info-soft: #16243E;
     --licio-info-on-soft: #AEC6F2;
     color-scheme: dark;
-    --licio-neu-highlight: rgb(141 133 121 / 0.38);
-    --licio-neu-shadow: rgb(0 0 0 / 0.55);
+    --licio-neu-highlight: rgb(174 162 143 / 0.24);
+    --licio-neu-shadow: rgb(0 0 0 / 0.48);
   }
 }
 
@@ -173,8 +173,8 @@
   --licio-info-soft: #16243E;
   --licio-info-on-soft: #AEC6F2;
   color-scheme: dark;
-  --licio-neu-highlight: rgb(141 133 121 / 0.38);
-  --licio-neu-shadow: rgb(0 0 0 / 0.55);
+  --licio-neu-highlight: rgb(174 162 143 / 0.24);
+  --licio-neu-shadow: rgb(0 0 0 / 0.48);
 }
 
 @media (prefers-color-scheme: light) and (prefers-contrast: more) {
