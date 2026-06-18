@@ -59,15 +59,15 @@ export interface SeededUser {
 }
 
 /**
- * Seeded accounts are created 7 days OLD so the WS-F account-age precheck
+ * Seeded accounts are created 8 days OLD so the WS-F account-age precheck
  * passes regardless of which clock a suite runs on.  Suites pin `now` to a
  * wall-date (e.g. noon today) while the identity store stamps `created_at`
  * with the REAL clock — without the backdate, a user created after the
  * pinned instant has NEGATIVE age and every submission 403s the moment the
  * wall clock passes the pin (a time bomb, not a flake).  Suites pinning a
- * clock further than 7 days in the past must pass `nowMs` explicitly.
+ * clock further than 8 days in the past must pass `nowMs` explicitly.
  */
-const SEEDED_ACCOUNT_AGE_MS = 7 * 24 * 3_600_000;
+const SEEDED_ACCOUNT_AGE_MS = 8 * 24 * 3_600_000;
 
 /** Seed an active, verified user and return a live session cookie. */
 export async function seedUserWithSession(

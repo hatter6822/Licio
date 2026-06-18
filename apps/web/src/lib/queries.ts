@@ -94,22 +94,24 @@ export interface StoryCommentsOptions {
   order?: 'newest' | 'oldest';
   filter?: 'sources' | 'corrections';
   root?: string;
+  enabled?: boolean;
 }
 
 export function useStoryCommentsQuery(storyId: string, options: StoryCommentsOptions = {}) {
+  const { enabled = true, ...requestOptions } = options;
   const query = useInfiniteQuery({
-    queryKey: queryKeys.storyComments(storyId, options),
+    queryKey: queryKeys.storyComments(storyId, requestOptions),
     queryFn: async ({ pageParam }) => {
       const page = await api.fetchStoryComments(storyId, {
-        ...options,
+        ...requestOptions,
         ...(pageParam ? { cursor: pageParam } : {}),
       });
-      if (pageParam === null) await cacheStoryCommentsSnapshot(storyId, options, page);
+      if (pageParam === null) await cacheStoryCommentsSnapshot(storyId, requestOptions, page);
       return page;
     },
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.next_cursor,
-    enabled: storyId.length > 0,
+    enabled: enabled && storyId.length > 0,
     ...cachePolicy.thread,
   });
   const pages = query.data?.pages ?? [];

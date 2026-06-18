@@ -193,6 +193,50 @@ describe('CommentSection', () => {
     expect(loadMore).toHaveBeenCalledTimes(1);
   });
 
+  it('limits story comments to one visual reply layer and focused comments to two', () => {
+    const grandchild = comment({
+      contribution_id: '88888888-8888-4888-8888-888888888888',
+      parent_contribution_id: '55555555-5555-4555-8555-555555555555',
+      body: 'A deeper reply.',
+      depth: 2,
+    });
+    const child = comment({
+      contribution_id: '55555555-5555-4555-8555-555555555555',
+      parent_contribution_id: '33333333-3333-4333-8333-333333333333',
+      body: 'A first-layer reply.',
+      depth: 1,
+      replies: [grandchild],
+      reply_count: 1,
+    });
+    queryState = {
+      data: {
+        comments: [comment({ replies: [child], reply_count: 1 })],
+        next_cursor: null,
+        overview: { comment_count: 3, sources_count: 0, corrections_count: 0 },
+        summary: null,
+      },
+    };
+
+    const { rerender } = renderSection();
+    expect(screen.getByText('A first-layer reply.')).toBeInTheDocument();
+    expect(screen.queryByText('A deeper reply.')).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Show More' })).toHaveAttribute(
+      'href',
+      `/stories/${storyId}/comments`,
+    );
+    expect(screen.getByRole('link', { name: 'Continue this thread (1 reply)' })).toHaveAttribute(
+      'href',
+      `/stories/${storyId}/comments?root=${child.contribution_id}`,
+    );
+
+    rerender(<CommentSection storyId={storyId} threadId={threadId} surface="conversation" />);
+    expect(screen.getByText('A deeper reply.')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Back to story comments' })).toHaveAttribute(
+      'href',
+      `/stories/${storyId}#comments`,
+    );
+  });
+
   it('submits top-level comments and replies with the comment write contract', async () => {
     const parent = comment();
     queryState = {

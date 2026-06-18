@@ -18,6 +18,8 @@ import { Icon } from '../ui/Icon/index.js';
 export interface CommentSectionProps {
   storyId: string;
   threadId: string;
+  surface?: 'story' | 'conversation';
+  rootContributionId?: string | undefined;
 }
 
 type CommentFilter = 'all' | 'sources' | 'corrections';
@@ -154,19 +156,27 @@ function CommentItem({
   storyId,
   comment,
   depth = comment.depth,
+  maxNestedDepth,
 }: {
   storyId: string;
   comment: CommentItemType;
   depth?: number;
+  maxNestedDepth: number;
 }): React.ReactElement {
   const [replying, setReplying] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  const expandedReplies = useStoryCommentsQuery(storyId, { root: comment.contribution_id });
+  const expandedReplies = useStoryCommentsQuery(storyId, {
+    root: comment.contribution_id,
+    enabled: expanded,
+  });
   const loadedReplies = (expandedReplies.data?.comments ?? []).filter(
     (reply) => reply.contribution_id !== comment.contribution_id,
   );
   const visibleReplies =
     expanded && loadedReplies.length > comment.replies.length ? loadedReplies : comment.replies;
+  const canRenderRepliesInline = depth < maxNestedDepth;
+  const hasInlineHiddenReplies =
+    !canRenderRepliesInline && (comment.replies.length > 0 || comment.reply_count > 0);
   useEffect(() => {
     getSignalProcessor().recordReplyDepth(storyId, depth);
   }, [storyId, depth]);
@@ -200,7 +210,7 @@ function CommentItem({
           onCancel={() => setReplying(false)}
         />
       ) : null}
-      {visibleReplies.length > 0 ? (
+      {canRenderRepliesInline && visibleReplies.length > 0 ? (
         <div className="ml-4 flex flex-col gap-3 border-l border-line pl-4">
           {visibleReplies.map((reply) => (
             <CommentItem
@@ -208,11 +218,22 @@ function CommentItem({
               storyId={storyId}
               comment={reply}
               depth={depth + 1}
+              maxNestedDepth={maxNestedDepth}
             />
           ))}
         </div>
       ) : null}
-      {comment.has_more_replies ? (
+      {hasInlineHiddenReplies ? (
+        <Button
+          href={`/stories/${storyId}/comments?root=${encodeURIComponent(comment.contribution_id)}`}
+          variant="secondary"
+          className="w-fit"
+        >
+          Continue this thread ({comment.reply_count}{' '}
+          {comment.reply_count === 1 ? 'reply' : 'replies'})
+        </Button>
+      ) : null}
+      {canRenderRepliesInline && comment.has_more_replies ? (
         <Button
           type="button"
           variant="secondary"
@@ -229,9 +250,18 @@ function CommentItem({
   );
 }
 
-export function CommentSection({ storyId, threadId }: CommentSectionProps): React.ReactElement {
+export function CommentSection({
+  storyId,
+  threadId,
+  surface = 'story',
+  rootContributionId,
+}: CommentSectionProps): React.ReactElement {
   const [filter, setFilter] = useState<CommentFilter>('all');
-  const comments = useStoryCommentsQuery(storyId, filter === 'all' ? {} : { filter });
+  const comments = useStoryCommentsQuery(storyId, {
+    ...(filter === 'all' ? {} : { filter }),
+    ...(rootContributionId ? { root: rootContributionId } : {}),
+  });
+  const maxNestedDepth = surface === 'story' ? 1 : 2;
   const stream = useCommentStream(storyId);
   const options = useMemo(
     () => [
@@ -249,8 +279,26 @@ export function CommentSection({ storyId, threadId }: CommentSectionProps): Reac
           Conversation
         </h2>
         <p className="text-sm text-ink-muted">
-          Comments are weighted by context, evidence, and reply depth — never by applause.
+          {surface === 'story'
+            ? 'Showing one reply layer here to preserve the story reading area. Open the focused discussion view for deeper branches.'
+            : 'Focused comment reading with two visible reply layers at a time and quick returns to the story or top-level comments.'}
         </p>
+        {surface === 'story' ? (
+          <Button href={`/stories/${storyId}/comments`} variant="primary" className="w-fit">
+            Show More
+          </Button>
+        ) : (
+          <div className="flex flex-wrap gap-2 text-sm">
+            <Button href={`/stories/${storyId}#comments`} variant="secondary">
+              Back to story comments
+            </Button>
+            {rootContributionId ? (
+              <Button href={`/stories/${storyId}/comments`} variant="secondary">
+                Return to top-level comments
+              </Button>
+            ) : null}
+          </div>
+        )}
       </div>
       {comments.data?.summary ? (
         <aside className={cn('p-4', raisedSurface)} aria-label="Conversation overview">
@@ -303,7 +351,13 @@ export function CommentSection({ storyId, threadId }: CommentSectionProps): Reac
       ) : (
         <div className="flex flex-col gap-3">
           {comments.data?.comments.map((comment) => (
-            <CommentItem key={comment.contribution_id} storyId={storyId} comment={comment} />
+            <CommentItem
+              key={comment.contribution_id}
+              storyId={storyId}
+              comment={comment}
+              depth={0}
+              maxNestedDepth={maxNestedDepth}
+            />
           ))}
         </div>
       )}

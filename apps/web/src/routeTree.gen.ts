@@ -30,6 +30,7 @@ import { Route as ProfileSavedRouteImport } from './routes/profile_.saved'
 import { Route as ProfileSafetyRouteImport } from './routes/profile_.safety'
 import { Route as ProfilePrivacyRouteImport } from './routes/profile_.privacy'
 import { Route as ProfileNoticesRouteImport } from './routes/profile_.notices'
+import { Route as StoriesStoryIdCommentsRouteImport } from './routes/stories_.$storyId_.comments'
 import { Route as RoomsRoomIdGovernanceRouteImport } from './routes/rooms_.$roomId_.governance'
 
 const SupportRoute = SupportRouteImport.update({
@@ -127,6 +128,11 @@ const ProfileNoticesRoute = ProfileNoticesRouteImport.update({
   path: '/profile/notices',
   getParentRoute: () => rootRouteImport,
 } as any)
+const StoriesStoryIdCommentsRoute = StoriesStoryIdCommentsRouteImport.update({
+  id: '/stories_/$storyId_/comments',
+  path: '/stories/$storyId/comments',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const RoomsRoomIdGovernanceRoute = RoomsRoomIdGovernanceRouteImport.update({
   id: '/rooms_/$roomId_/governance',
   path: '/rooms/$roomId/governance',
@@ -154,6 +160,7 @@ export interface FileRoutesByFullPath {
   '/stories/$storyId': typeof StoriesStoryIdRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/rooms/$roomId/governance': typeof RoomsRoomIdGovernanceRoute
+  '/stories/$storyId/comments': typeof StoriesStoryIdCommentsRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -176,6 +183,7 @@ export interface FileRoutesByTo {
   '/stories/$storyId': typeof StoriesStoryIdRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/rooms/$roomId/governance': typeof RoomsRoomIdGovernanceRoute
+  '/stories/$storyId/comments': typeof StoriesStoryIdCommentsRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -199,6 +207,7 @@ export interface FileRoutesById {
   '/stories/$storyId': typeof StoriesStoryIdRoute
   '/threads_/$threadId': typeof ThreadsThreadIdRoute
   '/rooms_/$roomId_/governance': typeof RoomsRoomIdGovernanceRoute
+  '/stories_/$storyId_/comments': typeof StoriesStoryIdCommentsRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -223,6 +232,7 @@ export interface FileRouteTypes {
     | '/stories/$storyId'
     | '/threads/$threadId'
     | '/rooms/$roomId/governance'
+    | '/stories/$storyId/comments'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -245,6 +255,7 @@ export interface FileRouteTypes {
     | '/stories/$storyId'
     | '/threads/$threadId'
     | '/rooms/$roomId/governance'
+    | '/stories/$storyId/comments'
   id:
     | '__root__'
     | '/'
@@ -267,6 +278,7 @@ export interface FileRouteTypes {
     | '/stories/$storyId'
     | '/threads_/$threadId'
     | '/rooms_/$roomId_/governance'
+    | '/stories_/$storyId_/comments'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -290,6 +302,7 @@ export interface RootRouteChildren {
   StoriesStoryIdRoute: typeof StoriesStoryIdRoute
   ThreadsThreadIdRoute: typeof ThreadsThreadIdRoute
   RoomsRoomIdGovernanceRoute: typeof RoomsRoomIdGovernanceRoute
+  StoriesStoryIdCommentsRoute: typeof StoriesStoryIdCommentsRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -427,6 +440,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProfileNoticesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/stories_/$storyId_/comments': {
+      id: '/stories_/$storyId_/comments'
+      path: '/stories/$storyId/comments'
+      fullPath: '/stories/$storyId/comments'
+      preLoaderRoute: typeof StoriesStoryIdCommentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/rooms_/$roomId_/governance': {
       id: '/rooms_/$roomId_/governance'
       path: '/rooms/$roomId/governance'
@@ -458,6 +478,7 @@ const rootRouteChildren: RootRouteChildren = {
   StoriesStoryIdRoute: StoriesStoryIdRoute,
   ThreadsThreadIdRoute: ThreadsThreadIdRoute,
   RoomsRoomIdGovernanceRoute: RoomsRoomIdGovernanceRoute,
+  StoriesStoryIdCommentsRoute: StoriesStoryIdCommentsRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
