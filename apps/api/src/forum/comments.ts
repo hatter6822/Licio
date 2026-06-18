@@ -118,13 +118,22 @@ async function toCommentItem(
   hide: ReadonlySet<string> | undefined,
   mediaById: ReadonlyMap<string, NonNullable<ContributionPublic['media']>>,
 ): Promise<CommentItem | null> {
-  const rootVisible = visibleRows([root], requesterUserId, hide);
-  if (rootVisible.length === 0) return null;
   const children = await bundle.forum.contributions.listChildren(root.contributionId, {
     states: ['published', 'under_review', 'hidden', 'removed'],
     limit: REPLY_PREVIEW + 1,
   });
-  const visibleChildren = visibleRows(children.slice(0, REPLY_PREVIEW), requesterUserId, hide);
+  const visibleWithPreview = visibleRows(
+    [root, ...children.slice(0, REPLY_PREVIEW)],
+    requesterUserId,
+    hide,
+  );
+  const rootVisible = visibleWithPreview.filter(
+    (entry) => entry.row.contributionId === root.contributionId,
+  );
+  if (rootVisible.length === 0) return null;
+  const visibleChildren = visibleWithPreview.filter(
+    (entry) => entry.row.contributionId !== root.contributionId,
+  );
   const projected = await projectRows(
     bundle,
     [...rootVisible, ...visibleChildren],

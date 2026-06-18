@@ -53,8 +53,16 @@ function CommentMedia({ comment }: { comment: CommentItemType }): React.ReactEle
           />
           {item.animatable ? (
             <figcaption className="hidden p-2 text-sm text-ink-muted motion-reduce:block">
-              Animated GIF hidden because reduced motion is enabled. Open the media from the comment
-              controls to play it deliberately.
+              Animated GIF hidden because reduced motion is enabled.{' '}
+              <a
+                href={mediaUrl(item.url)}
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium text-primary underline"
+              >
+                Open the GIF deliberately
+              </a>
+              .
             </figcaption>
           ) : null}
         </figure>
@@ -152,6 +160,13 @@ function CommentItem({
   depth?: number;
 }): React.ReactElement {
   const [replying, setReplying] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const expandedReplies = useStoryCommentsQuery(storyId, { root: comment.contribution_id });
+  const loadedReplies = (expandedReplies.data?.comments ?? []).filter(
+    (reply) => reply.contribution_id !== comment.contribution_id,
+  );
+  const visibleReplies =
+    expanded && loadedReplies.length > comment.replies.length ? loadedReplies : comment.replies;
   useEffect(() => {
     getSignalProcessor().recordReplyDepth(storyId, depth);
   }, [storyId, depth]);
@@ -185,9 +200,9 @@ function CommentItem({
           onCancel={() => setReplying(false)}
         />
       ) : null}
-      {comment.replies.length > 0 ? (
+      {visibleReplies.length > 0 ? (
         <div className="ml-4 flex flex-col gap-3 border-l border-line pl-4">
-          {comment.replies.map((reply) => (
+          {visibleReplies.map((reply) => (
             <CommentItem
               key={reply.contribution_id}
               storyId={storyId}
@@ -198,9 +213,17 @@ function CommentItem({
         </div>
       ) : null}
       {comment.has_more_replies ? (
-        <p className="text-sm text-ink-muted">
-          {comment.reply_count} replies — open this thread to continue reading.
-        </p>
+        <Button
+          type="button"
+          variant="secondary"
+          loading={expandedReplies.isLoading || expandedReplies.isFetching}
+          onClick={() => {
+            setExpanded(true);
+            void expandedReplies.refetch();
+          }}
+        >
+          Load all {comment.reply_count} replies
+        </Button>
       ) : null}
     </article>
   );

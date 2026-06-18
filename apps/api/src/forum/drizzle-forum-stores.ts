@@ -282,7 +282,9 @@ export class DrizzleContributionStore implements ContributionStore {
     if (opts.states) conditions.push(inArray(contributionsTable.moderationState, [...opts.states]));
     if (opts.after) {
       conditions.push(
-        sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`,
+        opts.order === 'newest'
+          ? sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) < (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`
+          : sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`,
       );
     }
     const order =

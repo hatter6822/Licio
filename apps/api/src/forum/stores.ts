@@ -393,6 +393,10 @@ function afterCursor(record: { createdAt: string }, id: string, after: CreatedAt
   return record.createdAt > after.createdAt;
 }
 
+function beforeCursor(row: { createdAt: string }, id: string, cursor: CreatedAtCursor): boolean {
+  return row.createdAt < cursor.createdAt || (row.createdAt === cursor.createdAt && id < cursor.id);
+}
+
 /** The forum's view of the evidence-card store (implemented by ingestion). */
 export interface EvidenceCardSink {
   insertForumCard(card: ForumEvidenceCardInput, createdAt: string): Promise<void>;
@@ -519,7 +523,10 @@ export class InMemoryContributionStore implements ContributionStore {
           row.parentContributionId === null &&
           (types === null || types.has(row.type)) &&
           (states === null || states.has(row.moderationState)) &&
-          (!opts.after || afterCursor(row, row.contributionId, opts.after)),
+          (!opts.after ||
+            (opts.order === 'newest'
+              ? beforeCursor(row, row.contributionId, opts.after)
+              : afterCursor(row, row.contributionId, opts.after))),
       )
       .sort((a, b) => byCreatedAtThenId(a, b, a.contributionId, b.contributionId));
     if (opts.order === 'newest') rows.reverse();

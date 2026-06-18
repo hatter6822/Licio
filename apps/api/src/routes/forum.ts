@@ -25,6 +25,7 @@ import {
   linkBlocklistResponseSchema,
   MAX_CAPTION_BYTES,
   MAX_DOCUMENT_BYTES,
+  MAX_GIF_BYTES,
   MAX_IMAGE_BYTES,
   MAX_VIDEO_BYTES,
   personalizationSettingsSchema,
@@ -88,7 +89,12 @@ import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { getIngestionServices } from '../ingestion/services.js';
 import type { ThreadShellRecord } from '../ingestion/stores.js';
 import { makeMediaUrlMinter, verifyMediaToken } from '../lib/media-urls.js';
-import { getPreferences, getVapidConfig, sendBodylessWakeToUser } from '../lib/push-service.js';
+import {
+  getPreferences,
+  getVapidConfig,
+  sendBodylessWakeToUser,
+  suppressionReason,
+} from '../lib/push-service.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import { replyNotifications } from '../lib/reply-notifications.js';
 import {
@@ -205,6 +211,26 @@ async function liveContributionProjection(
     if (item) media.push(item);
   }
   return media.length > 0 ? { ...projected, media } : projected;
+}
+
+async function attachCommentMedia(
+  bundle: ReturnType<typeof bundles>,
+  rows: readonly ContributionPublic[],
+  restrictedMedia: boolean,
+): Promise<ContributionPublic[]> {
+  const mint = makeMediaUrlMinter();
+  return Promise.all(
+    rows.map(async (row) => {
+      const media: NonNullable<ContributionPublic['media']> = [];
+      for (const uploadId of row.metadata.attachment_ids ?? []) {
+        const upload = await bundle.forum.uploads.getRecord(uploadId);
+        if (!upload) continue;
+        const item = commentMediaOf(upload, mint, restrictedMedia);
+        if (item) media.push(item);
+      }
+      return media.length > 0 ? { ...row, media } : row;
+    }),
+  );
 }
 
 async function replayFramesAfter(
@@ -469,9 +495,14 @@ export function createForumRoutes() {
               cursor ?? null,
             );
             if (!subtree.rootFound) return c.json(notFound, 404);
+            const rowsWithMedia = await attachCommentMedia(
+              bundle,
+              subtree.rows,
+              story.visibility === 'room_only',
+            );
             return c.json(
               storyCommentsResponseSchema.parse({
-                comments: subtree.rows.map((row) => ({
+                comments: rowsWithMedia.map((row) => ({
                   ...row,
                   replies: [],
                   reply_count: row.child_count,
@@ -640,10 +671,17 @@ export function createForumRoutes() {
             resolveAuthor,
             story?.visibility === 'room_only',
           );
+          const broadcastContribution = await liveContributionProjection(
+            bundle,
+            outcome.contribution,
+            null,
+            resolveAuthor,
+            story?.visibility === 'room_only',
+          );
           if (!outcome.deduplicated && outcome.contribution.moderationState === 'published') {
             bundle.forum.commentBroadcaster.publish(outcome.contribution.threadId, {
               eventId: outcome.contribution.contributionId,
-              contribution,
+              contribution: broadcastContribution,
             });
             if (
               outcome.contribution.parentContributionId !== null &&
@@ -661,6 +699,7 @@ export function createForumRoutes() {
                   auth.userId,
                   recipientUserId,
                 )) &&
+                !(await viewerHideSet(bundle, recipientUserId))?.has(auth.userId) &&
                 (await threadReadableToUser(bundle, thread, recipientUserId))
               ) {
                 bundle.forum.trackBackground(
@@ -675,7 +714,16 @@ export function createForumRoutes() {
                     });
                     const prefs = getPreferences(recipientUserId);
                     const vapid = getVapidConfig();
-                    if (notification && prefs.reply_notifications && vapid) {
+                    const minuteOfDay = new Date().getUTCHours() * 60 + new Date().getUTCMinutes();
+                    if (
+                      notification &&
+                      prefs.reply_notifications &&
+                      suppressionReason(prefs, {
+                        topic: story.roomId ?? undefined,
+                        minuteOfDay,
+                      }) === null &&
+                      vapid
+                    ) {
                       await sendBodylessWakeToUser(recipientUserId, vapid);
                     }
                   })(),
@@ -1042,7 +1090,9 @@ export function createForumRoutes() {
           const videoCfg = getIngestionServices().config();
           const maxVideoBytes = Math.min(videoCfg.videoMaxBytes, MAX_VIDEO_BYTES);
           const maxBytes = isImage
-            ? MAX_IMAGE_BYTES
+            ? contentType === 'image/gif'
+              ? MAX_GIF_BYTES
+              : MAX_IMAGE_BYTES
             : isVideo
               ? maxVideoBytes
               : isCaption

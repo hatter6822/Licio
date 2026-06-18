@@ -130,7 +130,7 @@ function toCount(value: number): number {
 // The aggregate itself — exactly the eleven §22.1 fields, no more. Validated by
 // zod before upload (WS-C.4.4 acceptance criteria) and again server-side.
 // ---------------------------------------------------------------------------
-export const attentionAggregateSchema = z.object({
+const attentionAggregateWireSchema = z.object({
   /** Client-generated unique id for idempotent ingestion / dedup. */
   aggregate_id: uuidSchema,
   /** User id (standard/reduced) or a coarse privacy bucket (minimum). */
@@ -154,6 +154,14 @@ export const attentionAggregateSchema = z.object({
   /** Upload time (ISO-8601). */
   created_at: isoTimestampSchema,
 });
+
+export const attentionAggregateSchema = z.preprocess((value) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+  const aggregate = value as Record<string, unknown>;
+  if ('reply_depth_bucket' in aggregate || !('branch_depth_bucket' in aggregate)) return value;
+  const { branch_depth_bucket: branchDepthBucket, ...rest } = aggregate;
+  return { ...rest, reply_depth_bucket: branchDepthBucket };
+}, attentionAggregateWireSchema);
 
 export type AttentionAggregate = z.infer<typeof attentionAggregateSchema>;
 

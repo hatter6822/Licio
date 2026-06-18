@@ -79,6 +79,7 @@ export function useCommentStream(storyId: string | null | undefined): CommentStr
         setStatus('open');
       });
       source.addEventListener('comment', (event) => {
+        if (event.lastEventId) lastEventIdRef.current = event.lastEventId;
         const parsed = contributionPublicSchema.safeParse(parseEventData(event.data));
         if (!parsed.success) return;
         lastEventIdRef.current = event.lastEventId || parsed.data.contribution_id;

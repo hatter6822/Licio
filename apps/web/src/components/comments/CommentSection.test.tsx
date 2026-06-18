@@ -181,9 +181,7 @@ describe('CommentSection', () => {
     expect(screen.getByAltText('Chart from source')).toBeInTheDocument();
     expect(screen.getByText(/Animated GIF hidden/)).toBeInTheDocument();
     expect(screen.getByText('Deleted account')).toBeInTheDocument();
-    expect(
-      screen.getByText('3 replies — open this thread to continue reading.'),
-    ).toBeInTheDocument();
+    expect(screen.getByText('Load all 3 replies')).toBeInTheDocument();
     expect(recordReplyDepth).toHaveBeenCalledWith(storyId, 0);
     expect(recordReplyDepth).toHaveBeenCalledWith(storyId, 1);
 
