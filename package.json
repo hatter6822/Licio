@@ -1,6 +1,6 @@
 {
   "name": "licio",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "packageManager": "pnpm@9.15.4",
@@ -44,6 +44,7 @@
   "pnpm": {
     "overrides": {
       "esbuild": "^0.28.1",
+      "undici": "^7.28.0",
       "ws": "^8.21.0"
     }
   }
