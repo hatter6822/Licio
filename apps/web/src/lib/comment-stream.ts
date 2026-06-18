@@ -22,6 +22,12 @@ function streamUrl(storyId: string): string {
   return `${API_BASE}/v1/stories/${encodeURIComponent(storyId)}/comments/stream`;
 }
 
+function streamResumeUrl(storyId: string, lastEventId: string | null): string {
+  const url = streamUrl(storyId);
+  if (!lastEventId) return url;
+  return `${url}?since=${encodeURIComponent(lastEventId)}`;
+}
+
 function parseEventData(data: string): unknown {
   try {
     return JSON.parse(data) as unknown;
@@ -34,6 +40,7 @@ export function useCommentStream(storyId: string | null | undefined): CommentStr
   const [status, setStatus] = useState<CommentStreamStatus>('idle');
   const [newComments, setNewComments] = useState<ContributionPublic[]>([]);
   const bufferRef = useRef<ContributionPublic[]>([]);
+  const lastEventIdRef = useRef<string | null>(null);
   const retryRef = useRef(1_000);
   const retryTimerRef = useRef<number | null>(null);
 
@@ -64,7 +71,9 @@ export function useCommentStream(storyId: string | null | undefined): CommentStr
       if (closed) return;
       clearRetry();
       setStatus('connecting');
-      source = new EventSource(streamUrl(storyId), { withCredentials: true });
+      source = new EventSource(streamResumeUrl(storyId, lastEventIdRef.current), {
+        withCredentials: true,
+      });
       source.addEventListener('open', () => {
         retryRef.current = 1_000;
         setStatus('open');
@@ -72,6 +81,7 @@ export function useCommentStream(storyId: string | null | undefined): CommentStr
       source.addEventListener('comment', (event) => {
         const parsed = contributionPublicSchema.safeParse(parseEventData(event.data));
         if (!parsed.success) return;
+        lastEventIdRef.current = event.lastEventId || parsed.data.contribution_id;
         bufferRef.current = [...bufferRef.current, parsed.data];
         setNewComments(bufferRef.current);
       });
