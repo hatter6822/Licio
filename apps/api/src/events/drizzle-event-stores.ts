@@ -336,6 +336,7 @@ export class DrizzleAttentionAggregateStore implements AttentionAggregateStore {
       source_opened: row.sourceOpened,
       context_opened: row.contextOpened,
       branch_depth_bucket: row.branchDepthBucket,
+      reply_depth_bucket: row.replyDepthBucket ?? row.branchDepthBucket,
       return_visit_count_bucket: row.returnVisitCountBucket,
       privacy_level: row.privacyLevel,
       created_at: iso(row.createdAt),
@@ -347,19 +348,23 @@ export class DrizzleAttentionAggregateStore implements AttentionAggregateStore {
     const inserted = await this.#db
       .insert(attentionAggregates)
       .values(
-        rows.map((row) => ({
-          aggregateId: row.aggregate_id,
-          userIdOrPrivacyBucket: row.user_id_or_privacy_bucket,
-          storyId: row.story_id,
-          sessionBucket: row.session_bucket,
-          activeDwellBucket: row.active_dwell_bucket as never,
-          sourceOpened: row.source_opened,
-          contextOpened: row.context_opened,
-          branchDepthBucket: row.branch_depth_bucket as never,
-          returnVisitCountBucket: row.return_visit_count_bucket as never,
-          privacyLevel: row.privacy_level as never,
-          createdAt: new Date(row.created_at),
-        })),
+        rows.map((row) => {
+          const replyDepthBucket = row.reply_depth_bucket ?? row.branch_depth_bucket ?? 'none';
+          return {
+            aggregateId: row.aggregate_id,
+            userIdOrPrivacyBucket: row.user_id_or_privacy_bucket,
+            storyId: row.story_id,
+            sessionBucket: row.session_bucket,
+            activeDwellBucket: row.active_dwell_bucket as never,
+            sourceOpened: row.source_opened,
+            contextOpened: row.context_opened,
+            branchDepthBucket: (row.branch_depth_bucket ?? replyDepthBucket) as never,
+            replyDepthBucket: replyDepthBucket as never,
+            returnVisitCountBucket: row.return_visit_count_bucket as never,
+            privacyLevel: row.privacy_level as never,
+            createdAt: new Date(row.created_at),
+          };
+        }),
       )
       .onConflictDoNothing()
       .returning({ aggregateId: attentionAggregates.aggregateId });

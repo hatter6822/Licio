@@ -15,7 +15,7 @@ function deleteDatabase(name: string): Promise<void> {
 }
 
 const RECORD: SavedStoryRecord = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   storyId: '11111111-1111-4111-8111-111111111111',
   title: 'Saved',
   source: 'Wire',
@@ -49,7 +49,7 @@ describe('integrity store reads (quarantine on invalid)', () => {
     await savedStories.put(RECORD);
     // Insert a corrupt record directly, bypassing write validation.
     await rawPut(STORE.savedStories, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       storyId: '22222222-2222-4222-8222-222222222222',
       title: 'Corrupt',
       // missing `source`, `savedAt`, etc.

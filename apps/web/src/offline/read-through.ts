@@ -7,10 +7,20 @@
 // caching can only ever HELP — the network result is returned regardless. The
 // orchestration that prefers network then falls back to cache lives in the query
 // layer (lib/queries.ts); this module is the pure cache mapping.
-import type { SignalLedgerEntry, StoryDetail, ThreadDetail } from '@licio/shared';
-import type { SavedStoryRecord, SignalLedgerRecord, ThreadSnapshotRecord } from './schemas.js';
+import type {
+  SignalLedgerEntry,
+  StoryCommentsResponse,
+  StoryDetail,
+  ThreadDetail,
+} from '@licio/shared';
+import type {
+  SavedStoryRecord,
+  SignalLedgerRecord,
+  StoryCommentsSnapshotRecord,
+  ThreadSnapshotRecord,
+} from './schemas.js';
 import { RECORD_SCHEMA_VERSION } from './schemas.js';
-import { savedStories, signalLedger, threadSnapshots } from './store.js';
+import { savedStories, signalLedger, storyComments, threadSnapshots } from './store.js';
 
 /** Run a storage side-effect, swallowing any error (offline storage is best-effort). */
 async function bestEffort(op: () => Promise<unknown>): Promise<void> {
@@ -35,7 +45,7 @@ function entryToLedgerRecord(entry: SignalLedgerEntry): SignalLedgerRecord {
     activeDwellBucket: entry.active_dwell_bucket,
     sourceOpened: entry.source_opened,
     contextOpened: entry.context_opened,
-    branchDepthBucket: entry.branch_depth_bucket,
+    replyDepthBucket: entry.reply_depth_bucket,
     returnVisitCountBucket: entry.return_visit_count_bucket,
     ...(entry.cap_reached !== undefined ? { capReached: entry.cap_reached } : {}),
   };
@@ -49,7 +59,7 @@ function ledgerRecordToEntry(record: SignalLedgerRecord): SignalLedgerEntry {
     active_dwell_bucket: record.activeDwellBucket,
     source_opened: record.sourceOpened,
     context_opened: record.contextOpened,
-    branch_depth_bucket: record.branchDepthBucket,
+    reply_depth_bucket: record.replyDepthBucket,
     return_visit_count_bucket: record.returnVisitCountBucket,
     ...(record.capReached !== undefined ? { cap_reached: record.capReached } : {}),
   };
@@ -72,6 +82,55 @@ export async function readCachedSignalLedger(): Promise<SignalLedgerEntry[]> {
     return records.sort((a, b) => b.recordedAt - a.recordedAt).map(ledgerRecordToEntry);
   } catch {
     return [];
+  }
+}
+
+// --- Story comment snapshots (first page, lossy offline fallback) ----------
+
+function stableOptionsKey(options: { order?: string; filter?: string; root?: string }): string {
+  return JSON.stringify({
+    order: options.order ?? 'oldest',
+    filter: options.filter ?? 'all',
+    root: options.root ?? null,
+  });
+}
+
+function commentCacheKey(
+  storyId: string,
+  options: { order?: string; filter?: string; root?: string },
+): string {
+  return `${storyId}:${stableOptionsKey(options)}`;
+}
+
+export async function cacheStoryCommentsSnapshot(
+  storyId: string,
+  options: { order?: string; filter?: string; root?: string },
+  response: StoryCommentsResponse,
+): Promise<void> {
+  const optionsKey = stableOptionsKey(options);
+  await bestEffort(() =>
+    storyComments.put({
+      schemaVersion: RECORD_SCHEMA_VERSION,
+      cacheKey: commentCacheKey(storyId, options),
+      storyId,
+      optionsKey,
+      comments: response.comments,
+      nextCursor: response.next_cursor,
+      overview: response.overview,
+      summary: response.summary,
+      cachedAt: Date.now(),
+    }),
+  );
+}
+
+export async function readStoryCommentsSnapshot(
+  storyId: string,
+  options: { order?: string; filter?: string; root?: string } = {},
+): Promise<StoryCommentsSnapshotRecord | undefined> {
+  try {
+    return await storyComments.get(commentCacheKey(storyId, options));
+  } catch {
+    return undefined;
   }
 }
 

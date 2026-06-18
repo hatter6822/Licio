@@ -102,6 +102,7 @@ export const FORUM_TO_EVENT_TYPE: Readonly<Record<ContributionType, EventContrib
   direct_experience: 'experience',
   moderation_concern: 'flag',
   meta_discussion: 'low_info_reply',
+  comment: 'explanation',
 };
 
 export type ContributionRejection =
@@ -447,7 +448,17 @@ export async function createContribution(
       if (upload.contentType.startsWith('image/') && upload.altText === null) {
         return invalid('attachment_alt_required', 'Images require alt text.');
       }
+      if (request.type === 'comment' && !upload.contentType.startsWith('image/')) {
+        return invalid('invalid_comment_media', 'Comment attachments must be images or GIFs.');
+      }
     }
+  }
+  if (
+    request.type === 'comment' &&
+    request.body.trim().length === 0 &&
+    (request.attachment_ids?.length ?? 0) === 0
+  ) {
+    return invalid('comment_body_or_media_required', 'Comment text or media is required.');
   }
 
   // Belt-and-suspenders body cap (the schema already enforces it).
@@ -651,7 +662,7 @@ export async function createContribution(
   const hasCitation = citations.length > 0;
   const baseType = FORUM_TO_EVENT_TYPE[request.type];
   const eventType: EventContributionType =
-    (request.type === 'answer' || request.type === 'explanation') &&
+    (request.type === 'answer' || request.type === 'explanation' || request.type === 'comment') &&
     classifyLowInfoReplyV0(request.body, hasCitation)
       ? 'low_info_reply'
       : baseType;

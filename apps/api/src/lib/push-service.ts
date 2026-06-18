@@ -12,7 +12,7 @@ import {
   type NotificationPreferences,
   type PushSubscriptionJson,
 } from '@licio/shared';
-import type { VapidConfig } from './vapid.js';
+import { sendWebPush, type VapidConfig } from './vapid.js';
 
 /** Resolve VAPID config from env, or `null` when push is not configured. */
 export function getVapidConfig(env: NodeJS.ProcessEnv = process.env): VapidConfig | null {
@@ -26,6 +26,7 @@ export function getVapidConfig(env: NodeJS.ProcessEnv = process.env): VapidConfi
 export interface StoredSubscription {
   subscription: PushSubscriptionJson;
   sessionId: string;
+  userId: string | null;
   createdAt: number;
 }
 
@@ -33,8 +34,17 @@ const subscriptions = new Map<string, StoredSubscription>();
 const preferences = new Map<string, NotificationPreferences>();
 
 /** Register (or refresh) a push subscription, keyed by its endpoint. */
-export function registerSubscription(subscription: PushSubscriptionJson, sessionId: string): void {
-  subscriptions.set(subscription.endpoint, { subscription, sessionId, createdAt: Date.now() });
+export function registerSubscription(
+  subscription: PushSubscriptionJson,
+  sessionId: string,
+  userId: string | null = null,
+): void {
+  subscriptions.set(subscription.endpoint, {
+    subscription,
+    sessionId,
+    userId,
+    createdAt: Date.now(),
+  });
 }
 
 /**
@@ -50,6 +60,27 @@ export function removeSubscription(endpoint: string, sessionId: string): boolean
 
 export function getSubscriptions(): StoredSubscription[] {
   return [...subscriptions.values()];
+}
+
+export function subscriptionsForUser(userId: string): StoredSubscription[] {
+  return [...subscriptions.values()].filter((stored) => stored.userId === userId);
+}
+
+export async function sendBodylessWakeToUser(
+  userId: string,
+  config: VapidConfig,
+  fetchImpl?: typeof fetch,
+): Promise<number> {
+  const deliveries = await Promise.all(
+    subscriptionsForUser(userId).map(async (stored) => {
+      const result = await sendWebPush(stored.subscription, config, {
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
+      if (result.gone) subscriptions.delete(stored.subscription.endpoint);
+      return result.ok ? 1 : 0;
+    }),
+  );
+  return deliveries.reduce<number>((sum, value) => sum + value, 0);
 }
 
 /** Read a session's notification preferences, or the privacy-safe defaults. */

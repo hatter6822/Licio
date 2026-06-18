@@ -408,9 +408,8 @@ describe('WS-G.2.2 / WS-G.2.4 — lenses', () => {
         {
           thread_id: threadId,
           client_draft_id: 'lens-tagged',
-          type: 'local_context',
+          type: 'comment',
           body: 'The intersection floods every spring.',
-          scope: 'Riverside resident',
           lens_id: lens.lens_id,
         },
         cookie,

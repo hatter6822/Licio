@@ -4,8 +4,10 @@
 // events), summary layer rules, the EXIF/metadata strippers on real binary
 // fixtures, the forum runtime config (fail-closed), the scoring-taxonomy
 // mappings (pinned), and the steward thread-state route.
+import type { ContributionPublic } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { InMemoryCommentBroadcaster } from '../forum/comment-broadcaster.js';
 import {
   DEFAULT_FORUM_CONFIG,
   loadForumConfig,
@@ -15,6 +17,8 @@ import {
 import { FORUM_TO_EVENT_TYPE, mapCardTypeToEventType } from '../forum/contributions.js';
 import {
   matchesMagic,
+  parseGifBlocks,
+  stripGif,
   stripJpeg,
   stripPng,
   stripUploadMetadata,
@@ -22,6 +26,7 @@ import {
 } from '../forum/exif.js';
 import { supersedesCurrent } from '../forum/summaries.js';
 import { applyConversationTransition, applyThreadSafetyTransition } from '../forum/transitions.js';
+import { sseCommentFrame } from '../routes/forum.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
   type ForumServicesFixture,
@@ -52,6 +57,26 @@ function transitionDeps() {
     now: fixture.forum.now,
   };
 }
+
+const publicContribution: ContributionPublic = {
+  contribution_id: '00000000-0000-4000-8000-0000000000c1',
+  thread_id: '00000000-0000-4000-8000-0000000000a1',
+  type: 'comment',
+  body: 'A live comment.',
+  citations: [],
+  metadata: {},
+  target_claim_id: null,
+  parent_contribution_id: null,
+  author_handle: 'alice',
+  author_display_name: 'Alice',
+  is_author: false,
+  created_at: '2026-06-18T00:00:00.000Z',
+  updated_at: '2026-06-18T00:00:00.000Z',
+  edited: false,
+  depth: 0,
+  child_count: 0,
+  moderation_state: 'published',
+};
 
 describe('WS-G.1.1 — transition service (audit + events)', () => {
   it('applies a legal conversation transition, emits the event, audits with reason', async () => {
@@ -214,6 +239,71 @@ describe('WS-G.1.4 — summary layer ladder', () => {
   });
 });
 
+describe('WS-T.5.1 — live comment broadcaster', () => {
+  it('fans out public comment frames by thread and fully unsubscribes', () => {
+    const broadcaster = new InMemoryCommentBroadcaster();
+    const received: string[] = [];
+    const unsubscribe = broadcaster.subscribe(publicContribution.thread_id, (frame) => {
+      received.push(frame.eventId);
+    });
+    broadcaster.publish(publicContribution.thread_id, {
+      eventId: publicContribution.contribution_id,
+      contribution: publicContribution,
+    });
+    broadcaster.publish('00000000-0000-4000-8000-0000000000b2', {
+      eventId: publicContribution.contribution_id,
+      contribution: { ...publicContribution, thread_id: '00000000-0000-4000-8000-0000000000b2' },
+    });
+    unsubscribe();
+    broadcaster.publish(publicContribution.thread_id, {
+      eventId: '00000000-0000-4000-8000-0000000000c2',
+      contribution: {
+        ...publicContribution,
+        contribution_id: '00000000-0000-4000-8000-0000000000c2',
+      },
+    });
+    expect(received).toEqual([publicContribution.contribution_id]);
+  });
+
+  it('serializes SSE frames without score, raw-attention, or financial fields', () => {
+    const frame = sseCommentFrame({
+      eventId: publicContribution.contribution_id,
+      contribution: publicContribution,
+    });
+    expect(frame).toContain('event: comment');
+    const dataLine = frame
+      .split('\n')
+      .find((line) => line.startsWith('data: '))
+      ?.slice('data: '.length);
+    expect(dataLine).toBeDefined();
+    const payload = JSON.parse(dataLine as string) as Record<string, unknown>;
+    for (const forbidden of [
+      'score',
+      'pwatt_score',
+      'raw_score',
+      'scrollY',
+      'clientX',
+      'dwell_ms',
+      'branch_depth_bucket',
+      'wallet_address',
+      'payment_amount',
+    ]) {
+      expect(payload).not.toHaveProperty(forbidden);
+      expect(frame).not.toContain(forbidden);
+    }
+  });
+
+  it('validates frames against the public contribution projection boundary', () => {
+    const broadcaster = new InMemoryCommentBroadcaster();
+    expect(() =>
+      broadcaster.publish(publicContribution.thread_id, {
+        eventId: publicContribution.contribution_id,
+        contribution: { ...publicContribution, score: 99 } as never,
+      }),
+    ).toThrow();
+  });
+});
+
 describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
   /** Minimal JPEG: SOI + APP0(JFIF) + APP1(EXIF w/ GPS marker) + COM + SOS + EOI. */
   function jpegWithExif(): Uint8Array {
@@ -352,6 +442,109 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
     expect(riffSize).toBe(result.bytes.length - 8);
   });
 
+  function gifExtension(label: number, payloads: readonly number[][]): number[] {
+    return [0x21, label, ...payloads.flatMap((payload) => [payload.length, ...payload]), 0x00];
+  }
+
+  function gifImage(payload: readonly number[]): number[] {
+    return [
+      0x2c,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x01,
+      0x00,
+      0x01,
+      0x00,
+      0x00,
+      0x02,
+      payload.length,
+      ...payload,
+      0x00,
+    ];
+  }
+
+  /** Minimal animated GIF with GCE/NETSCAPE loop, Comment, XMP, and two frames. */
+  function gifWithMetadata(): Uint8Array {
+    const ascii = (text: string): number[] => [...text].map((ch) => ch.charCodeAt(0));
+    return new Uint8Array([
+      ...ascii('GIF89a'),
+      0x01,
+      0x00,
+      0x01,
+      0x00,
+      0x80,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0xff,
+      0xff,
+      0xff,
+      ...gifExtension(0xff, [ascii('NETSCAPE2.0'), [0x01, 0x00, 0x00]]),
+      ...gifExtension(0xfe, [ascii('GPSLatitude 51.5')]),
+      ...gifExtension(0xff, [ascii('XMP DataXMP'), ascii('<xmp>camera</xmp>')]),
+      ...gifExtension(0xf9, [[0x04, 0x0a, 0x00, 0x00]]),
+      ...gifImage([0x4c, 0x01]),
+      ...gifExtension(0xf9, [[0x04, 0x14, 0x00, 0x00]]),
+      ...gifImage([0x4c, 0x01]),
+      0x3b,
+    ]);
+  }
+
+  it('parses GIF block spans exactly and rejects truncations cleanly', () => {
+    const gif = gifWithMetadata();
+    const parsed = parseGifBlocks(gif);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.blocks[0]).toMatchObject({ kind: 'header', start: 0, end: 13 });
+    expect(parsed.blocks.at(-1)).toMatchObject({ kind: 'trailer', end: gif.length });
+    expect(parsed.blocks.map((block) => block.end - block.start).reduce((a, b) => a + b, 0)).toBe(
+      gif.length,
+    );
+    expect(parsed.blocks.filter((block) => block.kind === 'image')).toHaveLength(2);
+    expect(parseGifBlocks(gif.subarray(0, gif.length - 2))).toEqual({
+      ok: false,
+      reason: 'malformed',
+    });
+  });
+
+  it('strips GIF comment/XMP metadata while preserving animation controls and frames', () => {
+    const result = stripGif(gifWithMetadata());
+    expect(result.ok && result.stripped).toBe(true);
+    if (!result.ok) return;
+    const text = Array.from(result.bytes, (b) => String.fromCharCode(b)).join('');
+    expect(text).toContain('NETSCAPE2.0');
+    expect(text).not.toContain('GPSLatitude');
+    expect(text).not.toContain('XMP DataXMP');
+    const parsed = parseGifBlocks(result.bytes);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.blocks.filter((block) => block.kind === 'image')).toHaveLength(2);
+    expect(
+      parsed.blocks.filter((block) => block.kind === 'extension' && block.label === 0xf9),
+    ).toHaveLength(2);
+  });
+
+  it('dispatches GIF metadata stripping only after GIF magic validation', () => {
+    const clean = new Uint8Array([
+      ...gifWithMetadata().subarray(0, 19),
+      ...gifImage([0x4c, 0x01]),
+      0x3b,
+    ]);
+    const stripped = stripUploadMetadata('image/gif', gifWithMetadata());
+    expect(stripped.ok && stripped.stripped).toBe(true);
+    const passed = stripUploadMetadata('image/gif', clean);
+    expect(passed.ok && passed.stripped).toBe(false);
+    expect(matchesMagic('image/gif', clean)).toBe(true);
+    expect(stripUploadMetadata('image/gif', pngWithText())).toEqual({
+      ok: false,
+      reason: 'type_mismatch',
+    });
+  });
+
   it('rejects AVIF carrying Exif (fail closed) and passes metadata-free AVIF', () => {
     const fourCc = (text: string): number[] => [...text].map((ch) => ch.charCodeAt(0));
     const avifClean = new Uint8Array([0, 0, 0, 16, ...fourCc('ftypavif'), 0, 0, 0, 0]);
@@ -464,7 +657,7 @@ describe('WS-G forum runtime config (fail-closed)', () => {
 });
 
 describe('WS-G → WS-E scoring-taxonomy mappings (pinned)', () => {
-  it('maps all 11 forum types onto the WS-E enum with zero-weight safety types', () => {
+  it('maps all 12 forum types onto the WS-E enum with zero-weight safety types', () => {
     expect(FORUM_TO_EVENT_TYPE).toEqual({
       question: 'question',
       answer: 'explanation',
@@ -477,6 +670,7 @@ describe('WS-G → WS-E scoring-taxonomy mappings (pinned)', () => {
       direct_experience: 'experience',
       moderation_concern: 'flag', // weight 0: a safety action, not participation
       meta_discussion: 'low_info_reply', // weight 0: volume, never negative
+      comment: 'explanation',
     });
   });
 

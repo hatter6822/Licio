@@ -168,21 +168,21 @@ describe('ReturnTracker', () => {
 });
 
 describe('TraversalTracker', () => {
-  it('counts distinct branches and ignores repeats', () => {
+  it('counts distinct reply-depth levels and ignores repeats', () => {
     const tracker = new TraversalTracker();
-    tracker.visitBranch('t1', 'overview');
-    tracker.visitBranch('t1', 'evidence');
-    tracker.visitBranch('t1', 'evidence'); // repeat — no increase
-    tracker.visitBranch('t1', 'challenges');
-    expect(tracker.distinctBranches('t1')).toBe(3);
+    tracker.visitReplyDepth('s1', 0);
+    tracker.visitReplyDepth('s1', 1);
+    tracker.visitReplyDepth('s1', 1); // repeat — no increase
+    tracker.visitReplyDepth('s1', 3);
+    expect(tracker.distinctReplyDepthLevels('s1')).toBe(3);
   });
 
-  it('tracks threads independently and resets between sessions', () => {
+  it('tracks stories independently and resets between sessions', () => {
     const tracker = new TraversalTracker();
-    tracker.visitBranch('t1', 'overview');
-    tracker.visitBranch('t2', 'overview');
-    expect(tracker.distinctBranches('t1')).toBe(1);
+    tracker.visitReplyDepth('s1', 0);
+    tracker.visitReplyDepth('s2', 0);
+    expect(tracker.distinctReplyDepthLevels('s1')).toBe(1);
     tracker.resetSession();
-    expect(tracker.distinctBranches('t1')).toBe(0);
+    expect(tracker.distinctReplyDepthLevels('s1')).toBe(0);
   });
 });

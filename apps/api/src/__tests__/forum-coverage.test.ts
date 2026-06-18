@@ -352,12 +352,7 @@ describe('WS-G.3.2 — standalone evidence endpoint', () => {
     const claimId = await seedClaim(fixture);
     const other = await seedUserWithSession(fixture.identity, { handle: 'other-evidence' });
     const theirs = await app().request(
-      jsonRequest(
-        '/v1/contributions',
-        'POST',
-        contributionBody('question', threadId),
-        other.cookie,
-      ),
+      jsonRequest('/v1/contributions', 'POST', contributionBody('comment', threadId), other.cookie),
     );
     const theirId = ((await theirs.json()) as { contribution: { contribution_id: string } })
       .contribution.contribution_id;

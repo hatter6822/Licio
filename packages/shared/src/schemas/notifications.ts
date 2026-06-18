@@ -6,6 +6,7 @@
 // quiet-hours math here is shared so both sides agree, including the
 // crosses-midnight case (WS-C.2.4c edge case).
 import { z } from 'zod';
+import { isoTimestampSchema, uuidSchema } from './common.js';
 
 /** A browser PushSubscription serialised to JSON for server registration. */
 export const pushSubscriptionSchema = z.object({
@@ -36,6 +37,8 @@ export const quietHoursSchema = z.object({
 export type QuietHours = z.infer<typeof quietHoursSchema>;
 
 export const notificationPreferencesSchema = z.object({
+  /** Reply-to-your-comment alerts (in-app always records; push wake honors this). */
+  reply_notifications: z.boolean(),
   /** Collapse same-thread notifications (default on, SPEC §6.7). */
   grouping: z.boolean(),
   /** Coalesce into a single daily summary instead of real-time. */
@@ -50,12 +53,36 @@ export type NotificationPreferences = z.infer<typeof notificationPreferencesSche
 
 /** Privacy-safe defaults: grouped, quiet hours off, a modest daily budget. */
 export const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
+  reply_notifications: true,
   grouping: true,
   daily_digest: false,
   quiet_hours: { enabled: false, start_minute: 22 * 60, end_minute: 7 * 60 },
   muted_topics: [],
   budget_limit: 20,
 };
+
+export const replyNotificationSchema = z
+  .object({
+    notification_id: uuidSchema,
+    kind: z.literal('reply'),
+    story_id: uuidSchema,
+    thread_id: uuidSchema,
+    comment_id: uuidSchema,
+    parent_comment_id: uuidSchema,
+    actor_handle: z.string().min(1),
+    created_at: isoTimestampSchema,
+    read_at: isoTimestampSchema.nullable(),
+  })
+  .strict();
+export type ReplyNotification = z.infer<typeof replyNotificationSchema>;
+
+export const notificationsResponseSchema = z
+  .object({
+    notifications: z.array(replyNotificationSchema).max(100),
+    unread_count: z.number().int().min(0),
+  })
+  .strict();
+export type NotificationsResponse = z.infer<typeof notificationsResponseSchema>;
 
 /**
  * Whether `minuteOfDay` falls inside the quiet-hours window. Handles the

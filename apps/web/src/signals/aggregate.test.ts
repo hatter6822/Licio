@@ -12,7 +12,7 @@ const INPUT: AggregateInput = {
   cappedDwellMs: 45_000,
   sourceOpened: true,
   contextOpened: false,
-  distinctBranches: 2,
+  distinctReplyDepthLevels: 2,
   returnCount: 1,
   now: Date.UTC(2026, 5, 9, 13, 30),
 };
@@ -22,7 +22,7 @@ describe('buildAggregate', () => {
     const aggregate = buildAggregate(INPUT);
     expect(() => attentionAggregateSchema.parse(aggregate)).not.toThrow();
     expect(aggregate.active_dwell_bucket).toBe('medium'); // 45s → medium
-    expect(aggregate.branch_depth_bucket).toBe('moderate'); // 2 → moderate
+    expect(aggregate.reply_depth_bucket).toBe('moderate'); // 2 → moderate
     expect(aggregate.return_visit_count_bucket).toBe('few'); // 1 → few
     expect(aggregate.source_opened).toBe(true);
     expect(Object.keys(aggregate)).toHaveLength(11);

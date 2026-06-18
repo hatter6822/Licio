@@ -11,7 +11,6 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as ThreadsRouteImport } from './routes/threads'
 import { Route as SupportRouteImport } from './routes/support'
 import { Route as SubmitRouteImport } from './routes/submit'
 import { Route as StyleguideRouteImport } from './routes/styleguide'
@@ -32,13 +31,7 @@ import { Route as ProfileSafetyRouteImport } from './routes/profile_.safety'
 import { Route as ProfilePrivacyRouteImport } from './routes/profile_.privacy'
 import { Route as ProfileNoticesRouteImport } from './routes/profile_.notices'
 import { Route as RoomsRoomIdGovernanceRouteImport } from './routes/rooms_.$roomId_.governance'
-import { Route as ThreadsThreadIdBranchesBranchIdRouteImport } from './routes/threads_.$threadId_.branches.$branchId'
 
-const ThreadsRoute = ThreadsRouteImport.update({
-  id: '/threads',
-  path: '/threads',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const SupportRoute = SupportRouteImport.update({
   id: '/support',
   path: '/support',
@@ -139,12 +132,6 @@ const RoomsRoomIdGovernanceRoute = RoomsRoomIdGovernanceRouteImport.update({
   path: '/rooms/$roomId/governance',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ThreadsThreadIdBranchesBranchIdRoute =
-  ThreadsThreadIdBranchesBranchIdRouteImport.update({
-    id: '/threads_/$threadId_/branches/$branchId',
-    path: '/threads/$threadId/branches/$branchId',
-    getParentRoute: () => rootRouteImport,
-  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -155,7 +142,6 @@ export interface FileRoutesByFullPath {
   '/styleguide': typeof StyleguideRoute
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
-  '/threads': typeof ThreadsRoute
   '/profile/notices': typeof ProfileNoticesRoute
   '/profile/privacy': typeof ProfilePrivacyRoute
   '/profile/safety': typeof ProfileSafetyRoute
@@ -168,7 +154,6 @@ export interface FileRoutesByFullPath {
   '/stories/$storyId': typeof StoriesStoryIdRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/rooms/$roomId/governance': typeof RoomsRoomIdGovernanceRoute
-  '/threads/$threadId/branches/$branchId': typeof ThreadsThreadIdBranchesBranchIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -179,7 +164,6 @@ export interface FileRoutesByTo {
   '/styleguide': typeof StyleguideRoute
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
-  '/threads': typeof ThreadsRoute
   '/profile/notices': typeof ProfileNoticesRoute
   '/profile/privacy': typeof ProfilePrivacyRoute
   '/profile/safety': typeof ProfileSafetyRoute
@@ -192,7 +176,6 @@ export interface FileRoutesByTo {
   '/stories/$storyId': typeof StoriesStoryIdRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/rooms/$roomId/governance': typeof RoomsRoomIdGovernanceRoute
-  '/threads/$threadId/branches/$branchId': typeof ThreadsThreadIdBranchesBranchIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -204,7 +187,6 @@ export interface FileRoutesById {
   '/styleguide': typeof StyleguideRoute
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
-  '/threads': typeof ThreadsRoute
   '/profile_/notices': typeof ProfileNoticesRoute
   '/profile_/privacy': typeof ProfilePrivacyRoute
   '/profile_/safety': typeof ProfileSafetyRoute
@@ -217,7 +199,6 @@ export interface FileRoutesById {
   '/stories/$storyId': typeof StoriesStoryIdRoute
   '/threads_/$threadId': typeof ThreadsThreadIdRoute
   '/rooms_/$roomId_/governance': typeof RoomsRoomIdGovernanceRoute
-  '/threads_/$threadId_/branches/$branchId': typeof ThreadsThreadIdBranchesBranchIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -230,7 +211,6 @@ export interface FileRouteTypes {
     | '/styleguide'
     | '/submit'
     | '/support'
-    | '/threads'
     | '/profile/notices'
     | '/profile/privacy'
     | '/profile/safety'
@@ -243,7 +223,6 @@ export interface FileRouteTypes {
     | '/stories/$storyId'
     | '/threads/$threadId'
     | '/rooms/$roomId/governance'
-    | '/threads/$threadId/branches/$branchId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -254,7 +233,6 @@ export interface FileRouteTypes {
     | '/styleguide'
     | '/submit'
     | '/support'
-    | '/threads'
     | '/profile/notices'
     | '/profile/privacy'
     | '/profile/safety'
@@ -267,7 +245,6 @@ export interface FileRouteTypes {
     | '/stories/$storyId'
     | '/threads/$threadId'
     | '/rooms/$roomId/governance'
-    | '/threads/$threadId/branches/$branchId'
   id:
     | '__root__'
     | '/'
@@ -278,7 +255,6 @@ export interface FileRouteTypes {
     | '/styleguide'
     | '/submit'
     | '/support'
-    | '/threads'
     | '/profile_/notices'
     | '/profile_/privacy'
     | '/profile_/safety'
@@ -291,7 +267,6 @@ export interface FileRouteTypes {
     | '/stories/$storyId'
     | '/threads_/$threadId'
     | '/rooms_/$roomId_/governance'
-    | '/threads_/$threadId_/branches/$branchId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -303,7 +278,6 @@ export interface RootRouteChildren {
   StyleguideRoute: typeof StyleguideRoute
   SubmitRoute: typeof SubmitRoute
   SupportRoute: typeof SupportRoute
-  ThreadsRoute: typeof ThreadsRoute
   ProfileNoticesRoute: typeof ProfileNoticesRoute
   ProfilePrivacyRoute: typeof ProfilePrivacyRoute
   ProfileSafetyRoute: typeof ProfileSafetyRoute
@@ -316,18 +290,10 @@ export interface RootRouteChildren {
   StoriesStoryIdRoute: typeof StoriesStoryIdRoute
   ThreadsThreadIdRoute: typeof ThreadsThreadIdRoute
   RoomsRoomIdGovernanceRoute: typeof RoomsRoomIdGovernanceRoute
-  ThreadsThreadIdBranchesBranchIdRoute: typeof ThreadsThreadIdBranchesBranchIdRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/threads': {
-      id: '/threads'
-      path: '/threads'
-      fullPath: '/threads'
-      preLoaderRoute: typeof ThreadsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/support': {
       id: '/support'
       path: '/support'
@@ -468,13 +434,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RoomsRoomIdGovernanceRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/threads_/$threadId_/branches/$branchId': {
-      id: '/threads_/$threadId_/branches/$branchId'
-      path: '/threads/$threadId/branches/$branchId'
-      fullPath: '/threads/$threadId/branches/$branchId'
-      preLoaderRoute: typeof ThreadsThreadIdBranchesBranchIdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
   }
 }
 
@@ -487,7 +446,6 @@ const rootRouteChildren: RootRouteChildren = {
   StyleguideRoute: StyleguideRoute,
   SubmitRoute: SubmitRoute,
   SupportRoute: SupportRoute,
-  ThreadsRoute: ThreadsRoute,
   ProfileNoticesRoute: ProfileNoticesRoute,
   ProfilePrivacyRoute: ProfilePrivacyRoute,
   ProfileSafetyRoute: ProfileSafetyRoute,
@@ -500,7 +458,6 @@ const rootRouteChildren: RootRouteChildren = {
   StoriesStoryIdRoute: StoriesStoryIdRoute,
   ThreadsThreadIdRoute: ThreadsThreadIdRoute,
   RoomsRoomIdGovernanceRoute: RoomsRoomIdGovernanceRoute,
-  ThreadsThreadIdBranchesBranchIdRoute: ThreadsThreadIdBranchesBranchIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

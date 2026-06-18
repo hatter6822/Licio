@@ -27,7 +27,6 @@ describe('saveDraft / loadDraft', () => {
       draftId: 'd1',
       storyId: null,
       threadId: null,
-      branch: null,
       contributionType: 'evidence',
       values: { headline: 'secret draft text' },
     });
@@ -45,11 +44,10 @@ describe('saveDraft / loadDraft', () => {
 
   it('loads a plaintext (unencrypted fallback) draft unchanged', async () => {
     await draftContributions.put({
-      schemaVersion: 1,
+      schemaVersion: 2,
       draftId: 'd2',
       storyId: null,
       threadId: null,
-      branch: null,
       contributionType: 'evidence',
       values: { headline: 'plain' },
       updatedAt: Date.now(),

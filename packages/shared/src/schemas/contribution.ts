@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Canonical contribution contracts (WS-G.1.2b/c, SPEC §15.1/§22.1/§23.3).
-// The ELEVEN typed contributions — there is no "react/like/vote" type
+// The comment-first contribution taxonomy — there is no "react/like/vote" type
 // anywhere (no-applause doctrine, SIGNAL_MATRIX).  One discriminated union
 // drives BOTH the Hono BFF validation and the client composer, so the
 // per-type required-field rules cannot drift (WS-G definition of done #2).
@@ -14,7 +14,7 @@ import { isModerationReasonCode } from '../constants/moderation.js';
 import { httpUrlSchema, isoTimestampSchema, uuidSchema } from './common.js';
 
 // ---------------------------------------------------------------------------
-// The fixed 11-member taxonomy (SPEC §15.1; order is the registry order).
+// The fixed contribution taxonomy (SPEC §15.1; order is the registry order).
 // ---------------------------------------------------------------------------
 
 export const CONTRIBUTION_TYPES = [
@@ -29,6 +29,7 @@ export const CONTRIBUTION_TYPES = [
   'direct_experience',
   'moderation_concern',
   'meta_discussion',
+  'comment',
 ] as const;
 export type ContributionType = (typeof CONTRIBUTION_TYPES)[number];
 export const contributionTypeSchema = z.enum(CONTRIBUTION_TYPES);
@@ -46,6 +47,7 @@ export const CONTRIBUTION_BODY_LIMITS: Readonly<Record<ContributionType, number>
   direct_experience: 2_000,
   moderation_concern: 2_000,
   meta_discussion: 2_000,
+  comment: 5_000,
 };
 
 /** Moderation lifecycle of a contribution (WS-G.1.2a; auditable, WS-J). */
@@ -134,6 +136,28 @@ const createBaseShape = {
   attachment_ids: z.array(uuidSchema).max(4).optional(),
 } as const;
 
+export const commentCreateSchema = z
+  .object({
+    ...createBaseShape,
+    type: z.literal('comment'),
+    body: z.string().trim().max(CONTRIBUTION_BODY_LIMITS.comment).optional().default(''),
+  })
+  .strict()
+  .transform((value) => ({ ...value, body: value.body.trim() }))
+  .superRefine((value, ctx) => {
+    const hasBody = value.body.length > 0;
+    const hasMedia = (value.attachment_ids?.length ?? 0) > 0;
+    if (!hasBody && !hasMedia) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['body'],
+        message: 'Comment text or at least one attachment is required.',
+      });
+    }
+  });
+export type CommentCreate = z.infer<typeof commentCreateSchema>;
+
+/** @deprecated WS-T: use commentCreateSchema for new writes. */
 export const questionCreateSchema = z
   .object({
     ...createBaseShape,
@@ -143,6 +167,7 @@ export const questionCreateSchema = z
   })
   .strict();
 
+/** @deprecated WS-T: legacy reads only; not part of contributionWriteCreateSchema. */
 export const answerCreateSchema = z
   .object({
     ...createBaseShape,
@@ -194,6 +219,7 @@ export const correctionCreateSchema = z
   })
   .strict();
 
+/** @deprecated WS-T: legacy reads only; not part of contributionWriteCreateSchema. */
 export const synthesisCreateSchema = z
   .object({
     ...createBaseShape,
@@ -210,6 +236,7 @@ export const synthesisCreateSchema = z
   })
   .strict();
 
+/** @deprecated WS-T: legacy reads only; not part of contributionWriteCreateSchema. */
 export const counterexampleCreateSchema = z
   .object({
     ...createBaseShape,
@@ -225,6 +252,7 @@ export const counterexampleCreateSchema = z
   })
   .strict();
 
+/** @deprecated WS-T: legacy reads only; not part of contributionWriteCreateSchema. */
 export const explanationCreateSchema = z
   .object({
     ...createBaseShape,
@@ -235,6 +263,7 @@ export const explanationCreateSchema = z
   })
   .strict();
 
+/** @deprecated WS-T: legacy reads only; not part of contributionWriteCreateSchema. */
 export const localContextCreateSchema = z
   .object({
     ...createBaseShape,
@@ -246,6 +275,7 @@ export const localContextCreateSchema = z
   })
   .strict();
 
+/** @deprecated WS-T: legacy reads only; not part of contributionWriteCreateSchema. */
 export const directExperienceCreateSchema = z
   .object({
     ...createBaseShape,
@@ -261,6 +291,7 @@ export const directExperienceCreateSchema = z
   })
   .strict();
 
+/** @deprecated WS-T: legacy reads only; not part of contributionWriteCreateSchema. */
 export const moderationConcernCreateSchema = z
   .object({
     ...createBaseShape,
@@ -272,6 +303,7 @@ export const moderationConcernCreateSchema = z
   })
   .strict();
 
+/** @deprecated WS-T: legacy reads only; not part of contributionWriteCreateSchema. */
 export const metaDiscussionCreateSchema = z
   .object({
     ...createBaseShape,
@@ -281,7 +313,19 @@ export const metaDiscussionCreateSchema = z
   })
   .strict();
 
-/** WS-G.1.2c: the single create contract (11 branches, shared client+server). */
+/** WS-T.1.2b: live create contract; legacy create schemas stay exported for one release. */
+export const contributionWriteCreateSchema = z.discriminatedUnion('type', [
+  commentCreateSchema,
+  evidenceCreateSchema,
+  correctionCreateSchema,
+]);
+export type ContributionWriteCreate = z.infer<typeof contributionWriteCreateSchema>;
+
+/**
+ * Back-compat full create contract retained for legacy clients/tests until the
+ * WS-T.3.2a route cutover moves the endpoint to contributionWriteCreateSchema.
+ * New code MUST use contributionWriteCreateSchema.
+ */
 export const contributionCreateSchema = z.discriminatedUnion('type', [
   questionCreateSchema,
   answerCreateSchema,
@@ -294,6 +338,7 @@ export const contributionCreateSchema = z.discriminatedUnion('type', [
   directExperienceCreateSchema,
   moderationConcernCreateSchema,
   metaDiscussionCreateSchema,
+  commentCreateSchema,
 ]);
 export type ContributionCreate = z.infer<typeof contributionCreateSchema>;
 
@@ -346,6 +391,18 @@ export type ContributionMetadata = z.infer<typeof contributionMetadataSchema>;
 /** Wire bound for a body (the largest per-type cap). */
 export const MAX_CONTRIBUTION_BODY_WIRE_LENGTH = 5_000;
 
+export const contributionMediaSchema = z
+  .object({
+    upload_id: uuidSchema,
+    url: z.string().min(1).max(512),
+    kind: z.enum(['image']),
+    content_type: z.string().min(1).max(128),
+    alt_text: z.string().min(1).max(500),
+    animatable: z.boolean(),
+  })
+  .strict();
+export type ContributionMedia = z.infer<typeof contributionMediaSchema>;
+
 export const contributionPublicSchema = z
   .object({
     contribution_id: uuidSchema,
@@ -369,6 +426,7 @@ export const contributionPublicSchema = z
     edited: z.boolean(),
     created_at: isoTimestampSchema,
     updated_at: isoTimestampSchema,
+    media: z.array(contributionMediaSchema).max(4).optional(),
   })
   .strict();
 export type ContributionPublic = z.infer<typeof contributionPublicSchema>;
@@ -378,13 +436,22 @@ export const contributionAnchorSchema = z
   .object({
     contribution_id: uuidSchema,
     thread_id: uuidSchema,
-    /** The structured section this contribution renders under. */
-    branch: z.enum(['overview', 'questions', 'evidence', 'challenges', 'lenses', 'chronology']),
     /** The subtree root whose page contains the contribution. */
     root_contribution_id: uuidSchema,
   })
   .strict();
 export type ContributionAnchor = z.infer<typeof contributionAnchorSchema>;
+
+export type CommentItem = ContributionPublic & {
+  replies: CommentItem[];
+  reply_count: number;
+  has_more_replies: boolean;
+};
+export const commentItemSchema: z.ZodType<CommentItem> = contributionPublicSchema.extend({
+  replies: z.lazy(() => z.array(commentItemSchema)),
+  reply_count: z.number().int().min(0),
+  has_more_replies: z.boolean(),
+});
 
 // ---------------------------------------------------------------------------
 // Reports (SPEC §23.2 /reports — §18.4 report mechanism).

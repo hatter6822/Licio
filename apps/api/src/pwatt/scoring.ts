@@ -532,7 +532,7 @@ export async function runPwattWindow(
           source_opened: summaryInput.sourceOpened,
           source_bounce_only: summaryInput.sourceBounceOnly,
           context_opened: summaryInput.contextOpened,
-          branch_depth_bucket: fold.branchDepthBucket,
+          reply_depth_bucket: fold.branchDepthBucket,
           return_visit_count_bucket: summaryInput.returnVisitBucket,
           contributions: summaryInput.contributions,
           // Cap status is knowable only on the client (the §22.1 wire carries

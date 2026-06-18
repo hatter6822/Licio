@@ -34,7 +34,7 @@ afterEach(() => {
 });
 
 describe('schema creation', () => {
-  it('creates all six object stores', async () => {
+  it('creates all seven object stores', async () => {
     const db = await getDb();
     expect([...db.objectStoreNames].sort()).toEqual(
       [
@@ -43,6 +43,7 @@ describe('schema creation', () => {
         STORE.pendingQueue,
         STORE.savedStories,
         STORE.signalLedger,
+        STORE.storyComments,
         STORE.threadSnapshots,
       ].sort(),
     );

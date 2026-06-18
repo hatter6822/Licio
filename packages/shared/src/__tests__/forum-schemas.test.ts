@@ -14,8 +14,10 @@ import {
 import type { ContributionUpdate } from '../schemas/contribution.js';
 import {
   citationSchema,
-  contributionCreateSchema,
+  commentItemSchema,
+  contributionPublicSchema,
   contributionUpdateSchema,
+  contributionWriteCreateSchema,
 } from '../schemas/contribution.js';
 import { mapLegacyRoomVisibility, roomCreateRequestSchema } from '../schemas/room.js';
 import { summaryCreateRequestSchema, summaryPublicSchema } from '../schemas/summary.js';
@@ -29,202 +31,147 @@ import {
 const uuidOf = (n: number): string => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const THREAD = uuidOf(1);
 const CLAIM = uuidOf(2);
-const PARENT = uuidOf(3);
-const TARGET = uuidOf(4);
 
 const base = { thread_id: THREAD, client_draft_id: 'draft-1' } as const;
 const citation = { url: 'https://example.org/source' } as const;
 
-describe('WS-G.1.2c contribution create union — valid payloads (11 types)', () => {
-  const valid: Array<Record<string, unknown>> = [
-    { ...base, type: 'question', body: 'What evidence supports the employment claim?' },
-    { ...base, type: 'answer', body: 'The labor report, table 3.', parent_contribution_id: PARENT },
-    {
-      ...base,
-      type: 'evidence',
-      body: 'Primary dataset.',
-      citations: [citation],
-      target_claim_id: CLAIM,
-      evidence_type: 'dataset',
-    },
-    {
-      ...base,
-      type: 'correction',
-      body: 'The date is wrong.',
-      target_claim_id: CLAIM,
-      citations: [citation],
-      target_text_excerpt: 'on June 3',
-    },
-    {
-      ...base,
-      type: 'synthesis',
-      body: 'Both branches agree on X.',
-      included_branch_ids: [uuidOf(5), uuidOf(6)],
-      uncertainty_note: 'Y is unresolved.',
-    },
-    {
-      ...base,
-      type: 'counterexample',
-      body: 'County B saw the opposite.',
-      target_claim_id: CLAIM,
-      relevance_explanation: 'Same policy, different outcome.',
-    },
-    {
-      ...base,
-      type: 'explanation',
-      body: 'The statute defines this term narrowly.',
-      assumptions: 'Current case law.',
-      caveats: 'Pending appeal.',
-    },
-    {
-      ...base,
-      type: 'local_context',
-      body: 'The intersection floods every spring.',
-      scope: 'Riverside resident',
-    },
-    {
-      ...base,
-      type: 'direct_experience',
-      body: 'I attended the hearing.',
-      scope: 'Hearing attendee',
-      privacy_acknowledged: true,
-    },
-    {
-      ...base,
-      type: 'moderation_concern',
-      body: 'This is targeted harassment.',
-      target_contribution_id: TARGET,
-      reason_code: 'MOD_HARASS_001',
-      urgency: 'normal',
-    },
-    {
-      ...base,
-      type: 'meta_discussion',
-      body: 'Should these two branches be merged?',
-      target_contribution_id: TARGET,
-    },
-  ];
+describe('WS-T.1.2 contribution create union — comment-first writes', () => {
+  const validComment = { ...base, type: 'comment', body: 'A plain comment.' } as const;
+  const validEvidence = {
+    ...base,
+    type: 'evidence',
+    body: 'Primary dataset.',
+    citations: [citation],
+    target_claim_id: CLAIM,
+    evidence_type: 'dataset',
+  } as const;
+  const validCorrection = {
+    ...base,
+    type: 'correction',
+    body: 'The date is wrong.',
+    target_claim_id: CLAIM,
+    citations: [citation],
+    target_text_excerpt: 'on June 3',
+  } as const;
 
-  it.each(
-    valid.map((v) => [v['type'] as string, v] as const),
-  )('accepts a valid %s', (_t, payload) => {
-    expect(contributionCreateSchema.safeParse(payload).success).toBe(true);
+  it('accepts exactly comment, evidence, and correction for new writes', () => {
+    for (const payload of [validComment, validEvidence, validCorrection]) {
+      expect(contributionWriteCreateSchema.safeParse(payload).success).toBe(true);
+    }
+    for (const type of [
+      'question',
+      'answer',
+      'synthesis',
+      'counterexample',
+      'explanation',
+      'local_context',
+      'direct_experience',
+      'moderation_concern',
+      'meta_discussion',
+    ]) {
+      expect(
+        contributionWriteCreateSchema.safeParse({ ...base, type, body: 'legacy' }).success,
+      ).toBe(false);
+    }
   });
 
-  it('covers all 11 types exactly once', () => {
-    expect(new Set(valid.map((v) => v['type'])).size).toBe(11);
-  });
-});
-
-describe('WS-G.1.2b per-type required-field enforcement', () => {
-  it.each([
-    ['question without body', { ...base, type: 'question', body: '' }],
-    ['answer without parent', { ...base, type: 'answer', body: 'x' }],
-    [
-      'evidence without citations',
-      { ...base, type: 'evidence', body: 'x', citations: [], target_claim_id: CLAIM },
-    ],
-    [
-      'evidence without target claim',
-      { ...base, type: 'evidence', body: 'x', citations: [citation] },
-    ],
-    [
-      'correction without citations',
-      { ...base, type: 'correction', body: 'x', target_claim_id: CLAIM, citations: [] },
-    ],
-    [
-      'correction without target claim',
-      { ...base, type: 'correction', body: 'x', citations: [citation] },
-    ],
-    [
-      'correction with six citations',
-      {
-        ...base,
-        type: 'correction',
-        body: 'x',
-        target_claim_id: CLAIM,
-        citations: Array.from({ length: 6 }, () => citation),
-      },
-    ],
-    [
-      'synthesis with one branch',
-      { ...base, type: 'synthesis', body: 'x', included_branch_ids: [uuidOf(5)] },
-    ],
-    [
-      'synthesis with duplicate branches',
-      { ...base, type: 'synthesis', body: 'x', included_branch_ids: [uuidOf(5), uuidOf(5)] },
-    ],
-    [
-      'counterexample without relevance',
-      { ...base, type: 'counterexample', body: 'x', target_claim_id: CLAIM },
-    ],
-    ['local_context without scope', { ...base, type: 'local_context', body: 'x' }],
-    [
-      'direct_experience without acknowledgment',
-      { ...base, type: 'direct_experience', body: 'x', scope: 's' },
-    ],
-    [
-      'direct_experience with false acknowledgment',
-      { ...base, type: 'direct_experience', body: 'x', scope: 's', privacy_acknowledged: false },
-    ],
-    [
-      'moderation_concern without target',
-      { ...base, type: 'moderation_concern', body: 'x', reason_code: 'MOD_SPAM_001' },
-    ],
-    [
-      'moderation_concern with unknown reason code',
-      {
-        ...base,
-        type: 'moderation_concern',
-        body: 'x',
-        target_contribution_id: TARGET,
-        reason_code: 'MOD_FAKE_001',
-      },
-    ],
-    ['unknown type', { ...base, type: 'like', body: 'x' }],
-    ['unknown extra key (strict)', { ...base, type: 'question', body: 'x', upvotes: 3 }],
-  ])('rejects %s', (_name, payload) => {
-    expect(contributionCreateSchema.safeParse(payload).success).toBe(false);
-  });
-
-  it('enforces the per-type body caps', () => {
+  it('normalizes comment bodies and enforces body-or-media', () => {
+    expect(contributionWriteCreateSchema.parse(validComment).body).toBe('A plain comment.');
     expect(
-      contributionCreateSchema.safeParse({ ...base, type: 'question', body: 'q'.repeat(2_001) })
-        .success,
-    ).toBe(false);
-    expect(
-      contributionCreateSchema.safeParse({
+      contributionWriteCreateSchema.parse({
         ...base,
-        type: 'evidence',
-        body: 'r'.repeat(501),
-        citations: [citation],
-        target_claim_id: CLAIM,
-      }).success,
-    ).toBe(false);
+        type: 'comment',
+        body: '   ',
+        attachment_ids: [uuidOf(8)],
+      }).body,
+    ).toBe('');
     expect(
-      contributionCreateSchema.safeParse({
+      contributionWriteCreateSchema.safeParse({
         ...base,
-        type: 'synthesis',
-        body: 's'.repeat(5_000),
-        included_branch_ids: [uuidOf(5), uuidOf(6)],
+        type: 'comment',
+        attachment_ids: [uuidOf(8)],
       }).success,
     ).toBe(true);
+    const rejected = contributionWriteCreateSchema.safeParse({
+      ...base,
+      type: 'comment',
+      body: '   ',
+    });
+    expect(rejected.success).toBe(false);
+    if (!rejected.success) expect(rejected.error.issues[0]?.path).toEqual(['body']);
   });
 
-  it('produces specific per-field messages, never a generic "invalid input"', () => {
-    const result = contributionCreateSchema.safeParse({
-      ...base,
-      type: 'evidence',
-      body: 'x',
+  it('keeps evidence and correction citation requirements unchanged', () => {
+    expect(
+      contributionWriteCreateSchema.safeParse({ ...validEvidence, citations: [] }).success,
+    ).toBe(false);
+    expect(
+      contributionWriteCreateSchema.safeParse({ ...validCorrection, citations: [] }).success,
+    ).toBe(false);
+  });
+
+  it('keeps legacy contribution types readable on the public projection', () => {
+    const publicRow = {
+      contribution_id: uuidOf(9),
+      thread_id: THREAD,
+      type: 'question',
+      body: 'A legacy question remains readable.',
       citations: [],
-      target_claim_id: CLAIM,
-    });
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues.some((i) => i.message.includes('at least one citation'))).toBe(
-        true,
-      );
-    }
+      metadata: {},
+      target_claim_id: null,
+      parent_contribution_id: null,
+      author_handle: 'mara',
+      author_display_name: 'Mara',
+      is_author: false,
+      depth: 0,
+      child_count: 0,
+      moderation_state: 'published',
+      edited: false,
+      created_at: '2026-06-11T00:00:00.000Z',
+      updated_at: '2026-06-11T00:00:00.000Z',
+    };
+    expect(contributionPublicSchema.safeParse(publicRow).success).toBe(true);
+  });
+
+  it('models resolved media and nested comment items separately from the flat projection', () => {
+    const publicRow = {
+      contribution_id: uuidOf(10),
+      thread_id: THREAD,
+      type: 'comment',
+      body: '',
+      citations: [],
+      metadata: { attachment_ids: [uuidOf(11)] },
+      target_claim_id: null,
+      parent_contribution_id: null,
+      author_handle: 'mara',
+      author_display_name: 'Mara',
+      is_author: true,
+      depth: 0,
+      child_count: 1,
+      moderation_state: 'published',
+      edited: false,
+      created_at: '2026-06-11T00:00:00.000Z',
+      updated_at: '2026-06-11T00:00:00.000Z',
+      media: [
+        {
+          upload_id: uuidOf(11),
+          url: '/v1/uploads/11',
+          kind: 'image',
+          content_type: 'image/gif',
+          alt_text: 'Animated diagram',
+          animatable: true,
+        },
+      ],
+    };
+    expect(contributionPublicSchema.safeParse(publicRow).success).toBe(true);
+    expect(
+      commentItemSchema.safeParse({
+        ...publicRow,
+        replies: [],
+        reply_count: 1,
+        has_more_replies: false,
+      }).success,
+    ).toBe(true);
   });
 });
 
@@ -479,8 +426,8 @@ describe('WS-G.1.4 summary schemas', () => {
     summary_id: uuidOf(7),
     thread_id: THREAD,
     layer: 'community_synthesis',
-    body: 'Branches A and B agree on the dataset provenance.',
-    cited_branch_ids: [uuidOf(5)],
+    body: 'Comments A and B agree on the dataset provenance.',
+    cited_contribution_ids: [uuidOf(5)],
     cited_evidence_ids: [],
     unresolved_uncertainty: 'Whether the sampling window was representative.',
     minority_views_note: null,
@@ -516,6 +463,22 @@ describe('WS-G.1.4 summary schemas', () => {
         layer: 'automated_draft',
         machine_generated: false,
       }).success,
+    ).toBe(false);
+  });
+
+  it('accepts deprecated cited_branch_ids on create and emits cited_contribution_ids publicly', () => {
+    const created = summaryCreateRequestSchema.parse({
+      thread_id: THREAD,
+      layer: 'community_synthesis',
+      body: 'x',
+      cited_branch_ids: [uuidOf(5)],
+      unresolved_uncertainty: 'y',
+    });
+    expect(created.cited_contribution_ids).toEqual([uuidOf(5)]);
+    expect('cited_branch_ids' in created).toBe(false);
+    expect(summaryPublicSchema.safeParse(summary).success).toBe(true);
+    expect(
+      summaryPublicSchema.safeParse({ ...summary, cited_branch_ids: [uuidOf(5)] }).success,
     ).toBe(false);
   });
 

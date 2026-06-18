@@ -11,8 +11,8 @@ import {
   type AttentionAggregate,
   activeDwellBucket,
   attentionAggregateSchema,
-  branchDepthBucket,
   type PrivacyLevel,
+  replyDepthBucket,
   returnVisitCountBucket,
 } from '@licio/shared';
 import { uploadAttentionAggregates } from '../lib/api.js';
@@ -37,8 +37,8 @@ export interface AggregateInput {
   cappedDwellMs: number;
   sourceOpened: boolean;
   contextOpened: boolean;
-  /** Distinct branches visited (WS-C.4.3). */
-  distinctBranches: number;
+  /** Distinct reply-depth levels viewed (WS-T.8.4). */
+  distinctReplyDepthLevels: number;
   /** Genuine return count (already rage-loop-zeroed, WS-C.4.3). */
   returnCount: number;
   /** Upload timestamp (epoch ms). */
@@ -55,7 +55,7 @@ export function buildAggregate(input: AggregateInput): AttentionAggregate {
     active_dwell_bucket: activeDwellBucket(input.cappedDwellMs),
     source_opened: input.sourceOpened,
     context_opened: input.contextOpened,
-    branch_depth_bucket: branchDepthBucket(input.distinctBranches),
+    reply_depth_bucket: replyDepthBucket(input.distinctReplyDepthLevels),
     return_visit_count_bucket: returnVisitCountBucket(input.returnCount),
     privacy_level: input.privacyLevel,
     created_at: new Date(input.now).toISOString(),

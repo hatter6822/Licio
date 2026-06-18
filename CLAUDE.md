@@ -85,30 +85,24 @@ migration) behind self-hosted/deterministic providers; the versioned
 freshness baseline for WS-I; the public takedown intake; the WS-F.2.5b
 financial-denylist CI assertion; and `content.submitted`/
 `content.normalized` emission (closing that WS-E residual).
-WS-G ships forum and conversation (`docs/forum/README.md`): the
-eleven-type §15.2 contribution taxonomy behind ONE shared
-discriminated-union schema (client and server validate identically,
-type-specific requirements like evidence citations and the
-direct-experience privacy acknowledgment included), branch-aware
-threads on a materialized-path tree (depth-capped, GIN-containment
-subtree reads) with the §15.4 conversation/safety state machines
-(table-driven legal-transition functions, audited transitions emitting
-`thread.state.changed`), the WS-G.4 UGC pipeline (strict Markdown-lite
-AST with no raw-HTML node → constrained serializer → DOMPurify
-`licio-ugc` Trusted Types policy → THE single sanctioned
-`dangerouslySetInnerHTML` sink) with the external-link safety
-interstitial (drainer blocklist + dApp-mimicry heuristics) and
-EXIF-stripped image uploads, dual-dimension evidence cards
-(material type × claim relationship) shared with WS-F claims, §24.3
-provenance-bearing summaries with uncertainty disclosure, rooms with
-§16.2 join models, lenses, steward roles, audited governance settings
-+ recommendation-input transparency, moderation-concern intake with
-ratified WS-A reason codes routed to the review queue (WS-J seam),
-conversation-health metrics, encrypted offline drafts with autosave/
-recovery + PWA share-target intake, and the 11-mode structured
-composer; it closes the WS-D contribution hooks
-(`anonymizeContributions`, forum-composed `exportContributions`) and
-the WS-E `low_info_reply` classifier + evidence-correlation residuals.
+WS-G plus WS-T ship forum and conversation (`docs/forum/README.md`): a
+comment-first contribution model where `comment` is the base live-write type
+and `evidence`/`correction` remain typed enrichments, while the historical
+contribution taxonomy remains readable for backward compatibility.  Each story
+owns an inline, lightly nested comment section backed by the materialized-path
+`contributions` tree (depth-capped, GIN-containment subtree reads), with the
+§15.4 conversation/safety state machines preserved (table-driven legal
+transitions, audited transitions emitting `thread.state.changed`).  The WS-G.4
+UGC pipeline remains the only DOM egress path (strict Markdown-lite AST with no
+raw-HTML node → constrained serializer → DOMPurify `licio-ugc` Trusted Types
+policy → THE single sanctioned `dangerouslySetInnerHTML` sink) with the
+external-link safety interstitial and metadata-stripped same-origin image/GIF
+uploads.  Evidence cards, §24.3 summaries (`cited_contribution_ids`), rooms,
+lenses, steward roles, audited governance settings, report/block/mute seams,
+conversation-health metrics, encrypted offline drafts, live same-origin comment
+SSE, reply notifications, and reply-depth attention buckets are shipped; the
+old `/threads` directory/branch reader and eleven-mode participation composer
+are retired behind story-page comments and a `/threads/$threadId` redirect.
 WS-H ships the eleven invariant services in shadow
 (`docs/invariants/README.md`): the computation platform (the WS-H.1.1c
 envelope on every `invariant_outputs` row, per-type score-vector zod
@@ -379,16 +373,15 @@ licio/
 │   │       │   ├── ui/                  -- 33 reusable UI primitives (incl. BrandLogo)
 │   │       │   ├── a11y/                -- RouteAnnouncer, SkipToContent, useSpaFocus
 │   │       │   ├── cognitive/           -- DefinedTerm, ProgressiveDisclosure, jargon
-│   │       │   ├── composer/            -- 11-mode ParticipationComposer + shared-schema
-│   │       │   │                           payload builder, VoiceDictation (WS-G.3),
-│   │       │   │                           StoryComposer (WS-Q.5.1/5.2 story submission)
+│   │       │   ├── composer/            -- StoryComposer + shared affordances (Attachment,
+│   │       │   │                           CitationCapture, PrivacyWarning, VoiceDictation)
+│   │       │   ├── comments/            -- Inline CommentSection + comment composer/media (WS-T)
 │   │       │   ├── feed/                -- FeedModeSwitcher, DiminishingReturnsPrompt
 │   │       │   ├── rooms/               -- RoomCreateForm + RoomSettingsForm (WS-Q.5.3c)
 │   │       │   ├── story/               -- StoryCard, ContextCard, RatingLabel,
 │   │       │   │                           ExposureLabel, IndependentSourcesDrawer,
 │   │       │   │                           WhereInterpretationsDiffer (WS-H), StoryMedia +
 │   │       │   │                           AuthorVisibilityControl + feed-card (WS-Q.5)
-│   │       │   ├── thread/              -- ThreadBranchNav
 │   │       │   ├── safety/              -- ReportButton/ReportSheet (two-tap report),
 │   │       │   │                           block/mute controls, notice inbox + appeal (WS-J.1)
 │   │       │   ├── moderation/          -- ModerationConsole (queue/review/palette/appeals/
@@ -454,7 +447,7 @@ licio/
 │   │       │   ├── __root.tsx           --   root layout, AppShell, BottomNav
 │   │       │   ├── index.tsx            --   front page
 │   │       │   ├── stories.$storyId.tsx --   story detail
-│   │       │   ├── threads*.tsx         --   thread views + branches
+│   │       │   ├── threads_.$threadId.tsx -- legacy thread→story#comments redirect
 │   │       │   ├── rooms*.tsx           --   room views + governance
 │   │       │   ├── profile*.tsx         --   profile, settings, privacy, security, saved
 │   │       │   ├── submit.tsx           --   content submission (auth-guarded)
@@ -494,8 +487,8 @@ licio/
 │           │   ├── invariants-admin.ts  --   /v1/invariants/admin/* analyst surface (WS-H)
 │           │   ├── invariants-public.ts --   public SCOI/MERI story reads (WS-H)
 │           │   ├── ranking-admin.ts     --   /v1/ranking/admin/* steward surface (WS-I)
-│           │   ├── forum.ts             --   /v1/contributions, threads, summaries,
-│           │   │                             uploads, flags (WS-G §23.2)
+│           │   ├── forum.ts             --   /v1/contributions, story comments/SSE,
+│           │   │                             thread redirect reads, summaries, uploads, flags
 │           │   ├── rooms.ts             --   /v1/rooms/* + lenses + governance (WS-G)
 │           │   ├── trust-safety.ts      --   reports, blocks, mutes, appeals, support,
 │           │   │                             notice inbox (WS-J.1)
@@ -603,11 +596,13 @@ licio/
 │           │   ├── config.ts            --   fail-closed runtime config (ingestion.* keys)
 │           │   ├── scheduler.ts         --   lease-guarded hourly maintenance tick
 │           │   └── drizzle-ingestion-stores.ts -- production Postgres adapters + FTS (gated)
-│           ├── forum/                   -- WS-G forum, rooms, lenses, summaries
+│           ├── forum/                   -- WS-G/WS-T forum, comments, rooms, lenses, summaries
 │           │   ├── stores.ts            --   store interfaces + in-memory adapters
 │           │   ├── services.ts          --   injectable container + metrics + boot wiring
-│           │   ├── contributions.ts     --   create/edit/remove guard chain + event emission
-│           │   ├── threads.ts           --   thread/branch/subtree reads (visibility-aware)
+│           │   ├── contributions.ts     --   create/edit/remove guard chain + live fan-out
+│           │   ├── comments.ts          --   story comment pages, reply previews, media projection
+│           │   ├── comment-broadcaster.ts -- same-origin live comment broadcaster port
+│           │   ├── threads.ts           --   overview/anchor/subtree compatibility reads
 │           │   ├── tree.ts              --   materialized-path math + depth-first ordering
 │           │   ├── rooms.ts             --   rooms/lenses/stewards/joins + the binary
 │           │   │                             read bar / userMayPostTopLevel / Commons (WS-Q)
@@ -1363,7 +1358,7 @@ file counts at current state:
 
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
-| apps/web | ~133 unit + 8 E2E (6 frontend-only + 2 BFF-in-the-loop specs; incl. the WS-J report flow, the notice-inbox appeal affordance, safety controls, the moderation console panels incl. the appeal-review-before-decide gate, and the WS-G.3.3 thread-discovery flow — the public /threads directory + the story→conversation link, run logged-out) | jsdom / Playwright | `pnpm --filter web test` |
+| apps/web | ~133 unit + 8 E2E (6 frontend-only + 2 BFF-in-the-loop specs; incl. the WS-J report flow, the notice-inbox appeal affordance, safety controls, the moderation console panels incl. the appeal-review-before-decide gate, and the WS-T comment-flow BFF spec — inline story comments + legacy thread redirect) | jsdom / Playwright | `pnpm --filter web test` |
 | apps/api | ~113 (incl. WS-D identity + the `expert` RBAC role + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-J trust-safety services/routes/stores/units + the gated WS-J Postgres adapters incl. the right-to-erasure path + the WS-Q E2E test-auth route + the dev-seed showcase integration test + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
 | packages/shared | ~20 (incl. WS-D–WS-H schemas, URL/lifecycle utils, the §5.6 rating-label SSOT, the UGC pipeline + XSS-vector suite) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~4 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // App-level signal-processor singleton. The route pages drive it (setActiveStory,
-// recordSourceOpen, recordBranchVisit…) and the app bootstrap starts it and
+// recordSourceOpen, recordReplyDepth…) and the app bootstrap starts it and
 // applies the collection policy from the user's privacy settings. Kept as a lazy
 // singleton so importing a page never constructs DOM listeners on its own. The
 // production processor is wired with localStorage-backed return persistence so

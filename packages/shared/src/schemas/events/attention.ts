@@ -15,9 +15,9 @@
 // private one (see envelope.ts for the canonical field-name mapping).
 import { z } from 'zod';
 import {
-  branchDepthBucketSchema,
   dwellBucketSchema,
   privacyLevelSchema,
+  replyDepthBucketSchema,
   returnVisitBucketSchema,
 } from '../attention.js';
 import { uuidSchema } from '../common.js';
@@ -52,7 +52,7 @@ export const attentionAggregateItemSchema = z
     active_dwell_bucket: dwellBucketSchema,
     source_opened: z.boolean(),
     context_opened: z.boolean(),
-    branch_depth_bucket: branchDepthBucketSchema,
+    reply_depth_bucket: replyDepthBucketSchema,
     return_visit_count_bucket: returnVisitBucketSchema,
   })
   .strict();

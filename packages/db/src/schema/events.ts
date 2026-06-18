@@ -69,6 +69,13 @@ export const branchDepthBucketEnum = pgEnum('branch_depth_bucket', [
   'deep',
 ]);
 
+export const replyDepthBucketEnum = pgEnum('reply_depth_bucket', [
+  'none',
+  'shallow',
+  'moderate',
+  'deep',
+]);
+
 export const returnVisitBucketEnum = pgEnum('return_visit_bucket', [
   'none',
   'few',
@@ -147,7 +154,9 @@ export const attentionAggregates = pgTable(
     activeDwellBucket: dwellBucketEnum('active_dwell_bucket').notNull(),
     sourceOpened: boolean('source_opened').notNull(),
     contextOpened: boolean('context_opened').notNull(),
+    /** Retained during the WS-T deploy window for pre-cutover clients/readers. */
     branchDepthBucket: branchDepthBucketEnum('branch_depth_bucket').notNull(),
+    replyDepthBucket: replyDepthBucketEnum('reply_depth_bucket').notNull(),
     returnVisitCountBucket: returnVisitBucketEnum('return_visit_count_bucket').notNull(),
     privacyLevel: collectionPrivacyLevelEnum('privacy_level').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull(),

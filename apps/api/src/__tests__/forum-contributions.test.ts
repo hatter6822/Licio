@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-G.3.1/3.2 contribution-creation route tests: all 11 types, the
-// per-type 422 rejections, rate limiting (429 + Retry-After), client-draft
+// WS-T comment-first contribution route tests: live writes accept comments plus
+// evidence/correction enrichments, reject retired legacy write types, and keep rate limiting (429 + Retry-After), client-draft
 // dedup, depth/same-thread guards, safety holds, evidence co-creation
 // atomicity, event emission (ids only — never body text), and the
 // stored-XSS persistence half (bodies stored VERBATIM; render-time
 // sanitization is proven in @licio/shared's XSS suite against the same
 // stored value).
-import {
-  CONTRIBUTION_TYPES,
-  type ContributionPublic,
-  contributionPublicSchema,
-} from '@licio/shared';
+import { type ContributionPublic, contributionPublicSchema } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createV1Routes } from '../routes/v1.js';
@@ -60,39 +56,32 @@ async function createOk(body: Record<string, unknown>): Promise<ContributionPubl
   return contributionPublicSchema.parse(json.contribution);
 }
 
-describe('WS-G.3.1 — all 11 types create', () => {
-  it('creates every type with valid fields and projects the public shape', async () => {
-    const question = await createOk(contributionBody('question', threadId));
-    const second = await createOk(contributionBody('question', threadId));
-    for (const type of CONTRIBUTION_TYPES) {
-      if (type === 'question') continue;
-      const body = contributionBody(type, threadId, {
-        claimId,
-        parentId: question.contribution_id,
-        targetId: second.contribution_id,
-      });
-      const created = await createOk(body);
-      expect(created.type).toBe(type);
+describe('WS-T.3.2 — comment-first write surface', () => {
+  it('creates comment, evidence, and correction writes and projects the public shape', async () => {
+    const comment = await createOk(contributionBody('comment', threadId));
+    const evidence = await createOk(contributionBody('evidence', threadId, { claimId }));
+    const correction = await createOk(contributionBody('correction', threadId, { claimId }));
+    for (const created of [comment, evidence, correction]) {
+      expect(['comment', 'evidence', 'correction']).toContain(created.type);
       expect(created.is_author).toBe(true);
       expect(created.moderation_state).toBe('published');
     }
     await fixture.settleAll();
-    // One contribution.created event per row, ids only.
     const events = await fixture.events.eventStore.listByOwner(userId);
-    const created = events.filter((e) => e.eventType === 'contribution.created');
-    expect(created).toHaveLength(CONTRIBUTION_TYPES.length + 1);
-    for (const event of created) {
-      expect(JSON.stringify(event.payload)).not.toContain('What evidence supports');
+    const createdEvents = events.filter((e) => e.eventType === 'contribution.created');
+    expect(createdEvents).toHaveLength(3);
+    for (const event of createdEvents) {
+      expect(JSON.stringify(event.payload)).not.toContain('This is a comment in the thread.');
     }
   });
 
-  it('answer nests under its question (path + depth)', async () => {
-    const question = await createOk(contributionBody('question', threadId));
-    const answer = await createOk(
-      contributionBody('answer', threadId, { parentId: question.contribution_id }),
+  it('comment replies nest under comments (path + depth)', async () => {
+    const parent = await createOk(contributionBody('comment', threadId));
+    const reply = await createOk(
+      contributionBody('comment', threadId, { parentId: parent.contribution_id }),
     );
-    expect(answer.parent_contribution_id).toBe(question.contribution_id);
-    expect(answer.depth).toBe(1);
+    expect(reply.parent_contribution_id).toBe(parent.contribution_id);
+    expect(reply.depth).toBe(1);
   });
 
   it('evidence co-creates its card atomically with shared linkage', async () => {
@@ -116,7 +105,7 @@ describe('WS-G.3.1 — all 11 types create', () => {
   it('stores bodies VERBATIM (raw markdown; sanitization is render-time)', async () => {
     const hostile = '<script>alert(1)</script> **bold**';
     const created = await createOk({
-      ...contributionBody('question', threadId),
+      ...contributionBody('comment', threadId),
       body: hostile,
     });
     const stored = await fixture.forum.contributions.getById(created.contribution_id);
@@ -150,7 +139,7 @@ describe('WS-G.1.2b — per-type 422 rejections through the route', () => {
       },
     ],
   ])('rejects %s with 400/422 and a specific error', async (_name, spec) => {
-    const question = await createOk(contributionBody('question', threadId));
+    const question = await createOk(contributionBody('comment', threadId));
     const body: Record<string, unknown> = {
       thread_id: threadId,
       client_draft_id: `draft-${_name}`,
@@ -167,31 +156,21 @@ describe('WS-G.1.2b — per-type 422 rejections through the route', () => {
     expect([400, 422]).toContain(res.status);
   });
 
-  it('rejects an answer whose parent is not a question (422)', async () => {
-    const explanation = await createOk(contributionBody('explanation', threadId));
-    const res = await create(
-      contributionBody('answer', threadId, { parentId: explanation.contribution_id }),
-    );
-    expect(res.status).toBe(422);
-    const body = (await res.json()) as { error: { code: string } };
-    expect(body.error.code).toBe('answer_requires_question');
-  });
-
   it('rejects a cross-thread parent (422)', async () => {
-    const question = await createOk(contributionBody('question', threadId));
+    const question = await createOk(contributionBody('comment', threadId));
     const other = await seedThread(fixture);
     const res = await create(
-      contributionBody('answer', other.threadId, { parentId: question.contribution_id }),
+      contributionBody('comment', other.threadId, { parentId: question.contribution_id }),
     );
     expect(res.status).toBe(422);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe('invalid_parent');
   });
 
-  it('rejects synthesis branches that are not same-thread roots (422)', async () => {
-    const question = await createOk(contributionBody('question', threadId));
+  it('rejects retired synthesis writes before branch validation', async () => {
+    const question = await createOk(contributionBody('comment', threadId));
     const answer = await createOk(
-      contributionBody('answer', threadId, { parentId: question.contribution_id }),
+      contributionBody('comment', threadId, { parentId: question.contribution_id }),
     );
     const res = await create({
       thread_id: threadId,
@@ -200,7 +179,7 @@ describe('WS-G.1.2b — per-type 422 rejections through the route', () => {
       body: 'x',
       included_branch_ids: [question.contribution_id, answer.contribution_id],
     });
-    expect(res.status).toBe(422);
+    expect(res.status).toBe(400);
   });
 
   it('rejects an unknown target claim (422 unknown_claim)', async () => {
@@ -215,13 +194,13 @@ describe('WS-G.1.2b — per-type 422 rejections through the route', () => {
 
 describe('WS-G.1.2d-1 — depth limit at the route', () => {
   it('accepts a chain to depth 10 and rejects depth 11 with the exact message', async () => {
-    let parent = await createOk(contributionBody('question', threadId));
+    let parent = await createOk(contributionBody('comment', threadId));
     // Root is depth 0; build children to depth 10 (10 hops).
     for (let depth = 1; depth <= 10; depth += 1) {
       parent = await createOk({
         thread_id: threadId,
         client_draft_id: `chain-${depth}`,
-        type: 'meta_discussion',
+        type: 'comment',
         body: `level ${depth}`,
         parent_contribution_id: parent.contribution_id,
       });
@@ -230,7 +209,7 @@ describe('WS-G.1.2d-1 — depth limit at the route', () => {
     const res = await create({
       thread_id: threadId,
       client_draft_id: 'chain-11',
-      type: 'meta_discussion',
+      type: 'comment',
       body: 'level 11',
       parent_contribution_id: parent.contribution_id,
     });
@@ -242,7 +221,7 @@ describe('WS-G.1.2d-1 — depth limit at the route', () => {
 
 describe('WS-G.3.1 — dedup, rate limit, thread state', () => {
   it('client_draft_id resubmission returns the EXISTING row (idempotent)', async () => {
-    const body = contributionBody('question', threadId);
+    const body = contributionBody('comment', threadId);
     const first = await create(body);
     expect(first.status).toBe(201);
     const firstJson = (await first.json()) as { contribution: { contribution_id: string } };
@@ -269,7 +248,7 @@ describe('WS-G.3.1 — dedup, rate limit, thread state', () => {
           '/v1/contributions',
           'POST',
           {
-            ...contributionBody('meta_discussion', seeded.threadId),
+            ...contributionBody('comment', seeded.threadId),
             client_draft_id: `burst-${index}`,
           },
           session.cookie,
@@ -281,7 +260,7 @@ describe('WS-G.3.1 — dedup, rate limit, thread state', () => {
       jsonRequest(
         '/v1/contributions',
         'POST',
-        { ...contributionBody('meta_discussion', seeded.threadId), client_draft_id: 'burst-11' },
+        { ...contributionBody('comment', seeded.threadId), client_draft_id: 'burst-11' },
         session.cookie,
       ),
     );
@@ -291,12 +270,12 @@ describe('WS-G.3.1 — dedup, rate limit, thread state', () => {
 
   it('rejects writes to an archived thread (409) and a restricted thread (403)', async () => {
     await fixture.ingestion.stories.updateThread(threadId, { conversationState: 'archived' });
-    const archived = await create(contributionBody('question', threadId));
+    const archived = await create(contributionBody('comment', threadId));
     expect(archived.status).toBe(409);
 
     const second = await seedThread(fixture);
     await fixture.ingestion.stories.updateThread(second.threadId, { safetyState: 'restricted' });
-    const restricted = await create(contributionBody('question', second.threadId));
+    const restricted = await create(contributionBody('comment', second.threadId));
     expect(restricted.status).toBe(403);
   });
 
@@ -324,7 +303,7 @@ describe('WS-G.3.1 — dedup, rate limit, thread state', () => {
   it('hidden stories yield 404 (no existence oracle)', async () => {
     const second = await seedThread(fixture);
     await fixture.ingestion.stories.update(second.storyId, { hiddenState: 'takedown' });
-    const res = await create(contributionBody('question', second.threadId));
+    const res = await create(contributionBody('comment', second.threadId));
     expect(res.status).toBe(404);
   });
 });
@@ -363,8 +342,8 @@ describe('WS-G.3.1 — safety holds + report intake (§18.4)', () => {
     expect(queue).toHaveLength(1);
   });
 
-  it('moderation_concern lands in the review queue with reason + urgency', async () => {
-    const target = await createOk(contributionBody('question', threadId));
+  it('retired moderation_concern writes are rejected; reports own the intake path', async () => {
+    const target = await createOk(contributionBody('comment', threadId));
     const res = await create({
       thread_id: threadId,
       client_draft_id: 'draft-concern',
@@ -374,17 +353,15 @@ describe('WS-G.3.1 — safety holds + report intake (§18.4)', () => {
       reason_code: 'MOD_HARASS_002',
       urgency: 'urgent',
     });
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(400);
     const queue = await fixture.ingestion.reviewQueue.list({ kind: 'moderation_concern' }, 10);
-    expect(queue).toHaveLength(1);
-    expect(queue[0]?.context['reason_code']).toBe('MOD_HARASS_002');
-    expect(queue[0]?.context['urgency']).toBe('urgent');
+    expect(queue).toHaveLength(0);
   });
 });
 
 describe('WS-G §15.5 — edits and tombstone removal', () => {
   it('author edits body, history snapshots the previous value, edited=true', async () => {
-    const created = await createOk(contributionBody('question', threadId));
+    const created = await createOk(contributionBody('comment', threadId));
     const res = await app().request(
       jsonRequest(
         `/v1/contributions/${created.contribution_id}`,
@@ -399,11 +376,11 @@ describe('WS-G §15.5 — edits and tombstone removal', () => {
     expect(updated.edited).toBe(true);
     const history = await fixture.forum.contributions.listEditHistory(created.contribution_id);
     expect(history).toHaveLength(1);
-    expect(history[0]?.previousBody).toContain('What evidence supports the employment claim?');
+    expect(history[0]?.previousBody).toContain('This is a comment in the thread.');
   });
 
   it("PATCHing someone else's contribution yields 404 (never 403)", async () => {
-    const created = await createOk(contributionBody('question', threadId));
+    const created = await createOk(contributionBody('comment', threadId));
     const other = await seedUserWithSession(fixture.identity, { handle: 'other' });
     const res = await app().request(
       jsonRequest(
@@ -431,9 +408,9 @@ describe('WS-G §15.5 — edits and tombstone removal', () => {
   });
 
   it('DELETE tombstones (state=removed, body retained at rest, hidden on the wire)', async () => {
-    const question = await createOk(contributionBody('question', threadId));
+    const question = await createOk(contributionBody('comment', threadId));
     const answer = await createOk(
-      contributionBody('answer', threadId, { parentId: question.contribution_id }),
+      contributionBody('comment', threadId, { parentId: question.contribution_id }),
     );
     const res = await app().request(
       new Request(`http://local/v1/contributions/${question.contribution_id}`, {
@@ -445,16 +422,9 @@ describe('WS-G §15.5 — edits and tombstone removal', () => {
     const stored = await fixture.forum.contributions.getById(question.contribution_id);
     expect(stored?.moderationState).toBe('removed');
     expect(stored?.body.length).toBeGreaterThan(0); // §15.5 tombstone keeps the row
-    // The tree read renders the tombstone (empty body) so the answer survives.
-    const branch = await app().request(`http://local/v1/threads/${threadId}/branches/questions`);
-    const content = (await branch.json()) as { contributions: ContributionPublic[] };
-    const tombstone = content.contributions.find(
-      (c) => c.contribution_id === question.contribution_id,
-    );
-    expect(tombstone?.body).toBe('');
-    expect(tombstone?.author_handle).toBeNull();
-    expect(content.contributions.some((c) => c.contribution_id === answer.contribution_id)).toBe(
-      true,
-    );
+    // The row stays in storage as a moderation tombstone, and the child row is
+    // retained so back-compat subtree/comment reads can continue from visible descendants.
+    const child = await fixture.forum.contributions.getById(answer.contribution_id);
+    expect(child?.parentContributionId).toBe(question.contribution_id);
   });
 });

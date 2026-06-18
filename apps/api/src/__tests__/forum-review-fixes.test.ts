@@ -141,7 +141,7 @@ describe('edits re-run the safety classifier (WS-G.3.1 parity)', () => {
       jsonRequest(
         '/v1/contributions',
         'POST',
-        contributionBody('question', seeded.threadId),
+        contributionBody('comment', seeded.threadId),
         session.cookie,
       ),
     );
@@ -178,7 +178,7 @@ describe('edits re-run the safety classifier (WS-G.3.1 parity)', () => {
       jsonRequest(
         '/v1/contributions',
         'POST',
-        contributionBody('question', seeded.threadId),
+        contributionBody('comment', seeded.threadId),
         cookie,
       ),
     );
@@ -340,7 +340,7 @@ describe('branch pagination walks arbitrarily large sections', () => {
         jsonRequest(
           '/v1/contributions',
           'POST',
-          contributionBody('question', seeded.threadId),
+          contributionBody('comment', seeded.threadId),
           session.cookie,
         ),
       );
@@ -351,15 +351,15 @@ describe('branch pagination walks arbitrarily large sections', () => {
     let cursor: string | null = null;
     let pages = 0;
     for (;;) {
-      const url = `http://local/v1/threads/${seeded.threadId}/branches/questions${
+      const url = `http://local/v1/stories/${seeded.storyId}/comments${
         cursor !== null ? `?cursor=${cursor}` : ''
       }`;
       const res = await app().request(new Request(url, { headers: { cookie: session.cookie } }));
       const body = (await res.json()) as {
-        contributions: Array<{ contribution_id: string }>;
+        comments: Array<{ contribution_id: string }>;
         next_cursor: string | null;
       };
-      walked.push(...body.contributions.map((row) => row.contribution_id));
+      walked.push(...body.comments.map((row) => row.contribution_id));
       pages += 1;
       if (body.next_cursor === null) break;
       cursor = body.next_cursor;

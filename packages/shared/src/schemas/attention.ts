@@ -50,18 +50,18 @@ export function activeDwellBucket(ms: number): DwellBucket {
 }
 
 // ---------------------------------------------------------------------------
-// Branch-depth bucket (SIG-ATT-TRAVERSE). Input is the number of DISTINCT
-// branches a reader visited within a thread (0..6 — there are six branches).
-// Nonredundant traversal is what counts; revisiting the same branch does not
+// Reply-depth bucket (SIG-ATT-TRAVERSE). Input is the number of DISTINCT
+// reply-depth levels a reader visited within a comment thread (0..10).
+// Nonredundant traversal is what counts; revisiting the same depth does not
 // raise the input (enforced upstream in WS-C.4.3).
 // ---------------------------------------------------------------------------
-export const BRANCH_DEPTH_BUCKETS = ['none', 'shallow', 'moderate', 'deep'] as const;
-export type BranchDepthBucket = (typeof BRANCH_DEPTH_BUCKETS)[number];
-export const branchDepthBucketSchema = z.enum(BRANCH_DEPTH_BUCKETS);
+export const REPLY_DEPTH_BUCKETS = ['none', 'shallow', 'moderate', 'deep'] as const;
+export type ReplyDepthBucket = (typeof REPLY_DEPTH_BUCKETS)[number];
+export const replyDepthBucketSchema = z.enum(REPLY_DEPTH_BUCKETS);
 
 /** Map a count of distinct branches visited to a coarse depth bucket. */
-export function branchDepthBucket(distinctBranches: number): BranchDepthBucket {
-  const n = toCount(distinctBranches);
+export function replyDepthBucket(distinctReplyDepths: number): ReplyDepthBucket {
+  const n = toCount(distinctReplyDepths);
   if (n <= 0) return 'none';
   if (n === 1) return 'shallow';
   if (n <= 3) return 'moderate';
@@ -130,7 +130,7 @@ function toCount(value: number): number {
 // The aggregate itself — exactly the eleven §22.1 fields, no more. Validated by
 // zod before upload (WS-C.4.4 acceptance criteria) and again server-side.
 // ---------------------------------------------------------------------------
-export const attentionAggregateSchema = z.object({
+const attentionAggregateWireSchema = z.object({
   /** Client-generated unique id for idempotent ingestion / dedup. */
   aggregate_id: uuidSchema,
   /** User id (standard/reduced) or a coarse privacy bucket (minimum). */
@@ -145,8 +145,8 @@ export const attentionAggregateSchema = z.object({
   source_opened: z.boolean(),
   /** Whether a context card was opened in a meaningful session (deduped). */
   context_opened: z.boolean(),
-  /** Bucketed count of distinct branches traversed. */
-  branch_depth_bucket: branchDepthBucketSchema,
+  /** Bucketed count of distinct reply-depth levels traversed. */
+  reply_depth_bucket: replyDepthBucketSchema,
   /** Bucketed count of genuine return visits (rage-loops excluded). */
   return_visit_count_bucket: returnVisitBucketSchema,
   /** Privacy level governing identifier granularity and collection. */
@@ -154,6 +154,14 @@ export const attentionAggregateSchema = z.object({
   /** Upload time (ISO-8601). */
   created_at: isoTimestampSchema,
 });
+
+export const attentionAggregateSchema = z.preprocess((value) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+  const aggregate = value as Record<string, unknown>;
+  if ('reply_depth_bucket' in aggregate || !('branch_depth_bucket' in aggregate)) return value;
+  const { branch_depth_bucket: branchDepthBucket, ...rest } = aggregate;
+  return { ...rest, reply_depth_bucket: branchDepthBucket };
+}, attentionAggregateWireSchema);
 
 export type AttentionAggregate = z.infer<typeof attentionAggregateSchema>;
 

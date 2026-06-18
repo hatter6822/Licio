@@ -65,7 +65,7 @@ export async function createSummary(
   // Cited branches must be contributions of THIS thread (WS-G.1.4: a
   // summary in another thread can never become current here; citations are
   // validated at write time for the same reason).
-  for (const branchId of request.cited_branch_ids) {
+  for (const branchId of request.cited_contribution_ids) {
     const branch = await deps.forum.contributions.getById(branchId);
     if (!branch || branch.threadId !== request.thread_id) {
       return {
@@ -102,7 +102,8 @@ export async function createSummary(
     threadId: request.thread_id,
     layer: request.layer,
     body: request.body,
-    citedBranchIds: request.cited_branch_ids,
+    citedBranchIds: request.cited_contribution_ids,
+    citedContributionIds: request.cited_contribution_ids,
     citedEvidenceIds: request.cited_evidence_ids,
     unresolvedUncertainty: request.unresolved_uncertainty,
     minorityViewsNote: request.minority_views_note ?? null,

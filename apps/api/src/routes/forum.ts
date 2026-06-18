@@ -10,14 +10,13 @@
 import { randomUUID } from 'node:crypto';
 import { zValidator } from '@hono/zod-validator';
 import {
-  branchContentSchema,
-  branchIdSchema,
+  type ContributionPublic,
   contributionAnchorSchema,
   contributionCreateResponseSchema,
-  contributionCreateSchema,
   contributionPublicSchema,
   contributionSubtreeSchema,
   contributionUpdateSchema,
+  contributionWriteCreateSchema,
   evidenceAddedEventSchema,
   evidenceCreateRequestSchema,
   evidenceCreateResponseSchema,
@@ -26,11 +25,13 @@ import {
   linkBlocklistResponseSchema,
   MAX_CAPTION_BYTES,
   MAX_DOCUMENT_BYTES,
+  MAX_GIF_BYTES,
   MAX_IMAGE_BYTES,
   MAX_VIDEO_BYTES,
   personalizationSettingsSchema,
   privacyNotificationPreferencesSchema,
   privacySettingsSchema,
+  storyCommentsResponseSchema,
   summaryCreateRequestSchema,
   summaryPublicSchema,
   type ThreadSafetyState,
@@ -52,6 +53,8 @@ import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import { getEventPipelineServices } from '../events/services.js';
+import type { CommentFrame } from '../forum/comment-broadcaster.js';
+import { commentMediaOf, commentPage } from '../forum/comments.js';
 import {
   FORUM_CONFIG_KEYS,
   storeForumConfigValue,
@@ -70,7 +73,6 @@ import { getForumServices } from '../forum/services.js';
 import type { ContributionRecord, UploadRecord } from '../forum/stores.js';
 import { createSummary } from '../forum/summaries.js';
 import {
-  branchContent,
   contributionAnchor,
   subtreeContent,
   threadOverview,
@@ -86,7 +88,15 @@ import { getIdentityServices, type IdentityServices } from '../identity/services
 import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { getIngestionServices } from '../ingestion/services.js';
 import type { ThreadShellRecord } from '../ingestion/stores.js';
-import { verifyMediaToken } from '../lib/media-urls.js';
+import { makeMediaUrlMinter, verifyMediaToken } from '../lib/media-urls.js';
+import {
+  getPreferences,
+  getVapidConfig,
+  sendBodylessWakeToUser,
+  suppressionReason,
+} from '../lib/push-service.js';
+import { rateLimit } from '../lib/rate-limit.js';
+import { replyNotifications } from '../lib/reply-notifications.js';
 import {
   type AuthEnv,
   authMiddleware,
@@ -167,6 +177,92 @@ function bundles() {
     ingestion: getIngestionServices(),
     events: getEventPipelineServices(),
   };
+}
+
+const SSE_HEARTBEAT_MS = 25_000;
+const STREAM_REPLAY_LIMIT = 200;
+
+export function sseCommentFrame(frame: CommentFrame): string {
+  return `id: ${frame.eventId}\nevent: comment\ndata: ${JSON.stringify(frame.contribution)}\n\n`;
+}
+
+async function liveContributionProjection(
+  bundle: ReturnType<typeof bundles>,
+  contribution: ContributionRecord,
+  requesterUserId: string | null,
+  resolveAuthor: ReturnType<typeof makeAuthorResolver>,
+  restrictedMedia: boolean,
+): Promise<ContributionPublic> {
+  const childCounts = await bundle.forum.contributions.childCounts([contribution.contributionId]);
+  const author = await resolveAuthor(contribution.userId);
+  const projected = toContributionPublic(
+    contribution,
+    author,
+    childCounts.get(contribution.contributionId) ?? 0,
+    requesterUserId,
+    false,
+  );
+  const media: NonNullable<ContributionPublic['media']> = [];
+  const mint = makeMediaUrlMinter();
+  for (const uploadId of contribution.metadata.attachment_ids ?? []) {
+    const upload = await bundle.forum.uploads.getRecord(uploadId);
+    if (!upload) continue;
+    const item = commentMediaOf(upload, mint, restrictedMedia);
+    if (item) media.push(item);
+  }
+  return media.length > 0 ? { ...projected, media } : projected;
+}
+
+async function attachCommentMedia(
+  bundle: ReturnType<typeof bundles>,
+  rows: readonly ContributionPublic[],
+  restrictedMedia: boolean,
+): Promise<ContributionPublic[]> {
+  const mint = makeMediaUrlMinter();
+  return Promise.all(
+    rows.map(async (row) => {
+      const media: NonNullable<ContributionPublic['media']> = [];
+      for (const uploadId of row.metadata.attachment_ids ?? []) {
+        const upload = await bundle.forum.uploads.getRecord(uploadId);
+        if (!upload) continue;
+        const item = commentMediaOf(upload, mint, restrictedMedia);
+        if (item) media.push(item);
+      }
+      return media.length > 0 ? { ...row, media } : row;
+    }),
+  );
+}
+
+async function replayFramesAfter(
+  bundle: ReturnType<typeof bundles>,
+  threadId: string,
+  lastEventId: string | null,
+  requesterUserId: string | null,
+  resolveAuthor: ReturnType<typeof makeAuthorResolver>,
+  restrictedMedia: boolean,
+): Promise<CommentFrame[]> {
+  if (lastEventId === null) return [];
+  const resume = await bundle.forum.contributions.getById(lastEventId);
+  if (!resume || resume.threadId !== threadId) return [];
+  const rows = await bundle.forum.contributions.listByThread(threadId, {
+    states: ['published'],
+    after: { createdAt: resume.createdAt, id: resume.contributionId },
+    limit: STREAM_REPLAY_LIMIT,
+  });
+  const hide = await viewerHideSet(bundle, requesterUserId);
+  const visible = visibleRows(rows, requesterUserId, hide).filter((entry) => !entry.tombstone);
+  const frames: CommentFrame[] = [];
+  for (const entry of visible) {
+    const contribution = await liveContributionProjection(
+      bundle,
+      entry.row,
+      requesterUserId,
+      resolveAuthor,
+      restrictedMedia,
+    );
+    frames.push({ eventId: contribution.contribution_id, contribution });
+  }
+  return frames;
 }
 
 export function createForumRoutes() {
@@ -263,6 +359,190 @@ export function createForumRoutes() {
         },
       )
 
+      // --- Live story comments (WS-T.5) --------------------------------------
+      .get(
+        '/stories/:storyId/comments/stream',
+        rateLimit({ limit: 250, windowMs: 60_000 }),
+        zValidator('param', z.object({ storyId: uuidSchema })),
+        zValidator('query', z.object({ since: uuidSchema.optional() })),
+        async (c) => {
+          const { storyId } = c.req.valid('param');
+          const { since } = c.req.valid('query');
+          const bundle = bundles();
+          const identity = getIdentityServices();
+          const userId = await softUserId(c.req.header('cookie'), identity);
+          const [story, thread] = await Promise.all([
+            bundle.ingestion.stories.getById(storyId),
+            bundle.ingestion.stories.getThreadByStoryId(storyId),
+          ]);
+          if (!story || !thread) return c.json(notFound, 404);
+          if (!(await threadReadableToUser(bundle, thread, userId))) return c.json(notFound, 404);
+
+          const resolveAuthor = makeAuthorResolver(identity);
+          const lastEventId = c.req.header('last-event-id') ?? since ?? null;
+          const restrictedMedia = story.visibility === 'room_only';
+          const replay = await replayFramesAfter(
+            bundle,
+            thread.threadId,
+            lastEventId,
+            userId,
+            resolveAuthor,
+            restrictedMedia,
+          );
+          const encoder = new TextEncoder();
+          let cleanup = () => {};
+          const readable = new ReadableStream<Uint8Array>({
+            start(controller) {
+              const sent = new Set(replay.map((frame) => frame.eventId));
+              let unsubscribe = () => {};
+              let heartbeat: ReturnType<typeof setInterval> | null = null;
+              const write = (chunk: string) => {
+                try {
+                  controller.enqueue(encoder.encode(chunk));
+                } catch {
+                  unsubscribe();
+                  if (heartbeat) clearInterval(heartbeat);
+                }
+              };
+              const close = () => {
+                unsubscribe();
+                if (heartbeat) clearInterval(heartbeat);
+                try {
+                  controller.close();
+                } catch {
+                  // Already closed by the client; cleanup above is the important part.
+                }
+              };
+              unsubscribe = bundle.forum.commentBroadcaster.subscribe(
+                thread.threadId,
+                async (frame) => {
+                  if (sent.has(frame.eventId)) return;
+                  if (!(await threadReadableToUser(bundle, thread, userId))) {
+                    close();
+                    return;
+                  }
+                  const row = await bundle.forum.contributions.getById(frame.eventId);
+                  if (!row) return;
+                  const hide = await viewerHideSet(bundle, userId);
+                  if (visibleRows([row], userId, hide).length === 0) return;
+                  sent.add(frame.eventId);
+                  write(sseCommentFrame(frame));
+                },
+              );
+              heartbeat = setInterval(() => write(': heartbeat\n\n'), SSE_HEARTBEAT_MS);
+              cleanup = close;
+              c.req.raw.signal.addEventListener('abort', close, { once: true });
+              write(': heartbeat\n\n');
+              for (const frame of replay) write(sseCommentFrame(frame));
+            },
+            cancel() {
+              cleanup();
+            },
+          });
+          return new Response(readable, {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/event-stream; charset=utf-8',
+              'Cache-Control': 'no-store, no-transform',
+              Connection: 'keep-alive',
+              'X-Accel-Buffering': 'no',
+            },
+          });
+        },
+      )
+
+      // --- Story comments (WS-T.3.1) -----------------------------------------
+      .get(
+        '/stories/:storyId/comments',
+        zValidator('param', z.object({ storyId: uuidSchema })),
+        zValidator(
+          'query',
+          z.object({
+            cursor: z.string().min(1).max(512).optional(),
+            order: z.enum(['newest', 'oldest']).optional().default('oldest'),
+            root: uuidSchema.optional(),
+            filter: z.enum(['sources', 'corrections']).optional(),
+          }),
+        ),
+        async (c) => {
+          const { storyId } = c.req.valid('param');
+          const { cursor, order, root, filter } = c.req.valid('query');
+          const bundle = bundles();
+          const identity = getIdentityServices();
+          const userId = await softUserId(c.req.header('cookie'), identity);
+          const [story, thread] = await Promise.all([
+            bundle.ingestion.stories.getById(storyId),
+            bundle.ingestion.stories.getThreadByStoryId(storyId),
+          ]);
+          if (!story || !thread) return c.json(notFound, 404);
+          if (!(await threadReadableToUser(bundle, thread, userId))) return c.json(notFound, 404);
+          const resolveAuthor = makeAuthorResolver(identity);
+          const counts = await bundle.forum.contributions.countByType(thread.threadId, [
+            'published',
+          ]);
+          const summaries = await bundle.forum.summaries.listByThread(thread.threadId);
+          const current =
+            thread.currentSummaryId !== null
+              ? (summaries.find((s) => s.summaryId === thread.currentSummaryId) ?? null)
+              : null;
+          if (root !== undefined) {
+            const subtree = await subtreeContent(
+              bundle,
+              thread.threadId,
+              root,
+              userId,
+              resolveAuthor,
+              cursor ?? null,
+            );
+            if (!subtree.rootFound) return c.json(notFound, 404);
+            const rowsWithMedia = await attachCommentMedia(
+              bundle,
+              subtree.rows,
+              story.visibility === 'room_only',
+            );
+            return c.json(
+              storyCommentsResponseSchema.parse({
+                comments: rowsWithMedia.map((row) => ({
+                  ...row,
+                  replies: [],
+                  reply_count: row.child_count,
+                  has_more_replies: row.child_count > 0,
+                })),
+                next_cursor: subtree.nextCursor,
+                overview: {
+                  comment_count: Object.values(counts).reduce(
+                    (sum, value) => sum + (value ?? 0),
+                    0,
+                  ),
+                  sources_count: counts.evidence ?? 0,
+                  corrections_count: counts.correction ?? 0,
+                },
+                summary: current ? await toSummaryPublic(current, resolveAuthor) : null,
+              }),
+            );
+          }
+          const page = await commentPage(bundle, thread.threadId, userId, resolveAuthor, {
+            cursor: cursor ?? null,
+            order,
+            ...(filter !== undefined ? { filter } : {}),
+            restrictedMedia: story.visibility === 'room_only',
+            mintMediaUrl: makeMediaUrlMinter(),
+          });
+          return c.json(
+            storyCommentsResponseSchema.parse({
+              comments: page.comments,
+              next_cursor: page.nextCursor,
+              overview: {
+                comment_count: Object.values(counts).reduce((sum, value) => sum + (value ?? 0), 0),
+                sources_count: counts.evidence ?? 0,
+                corrections_count: counts.correction ?? 0,
+              },
+              summary: current ? await toSummaryPublic(current, resolveAuthor) : null,
+            }),
+          );
+        },
+      )
+
       // --- Thread reading (WS-G.3.3) -----------------------------------------
       .get(
         '/threads/:threadId',
@@ -284,31 +564,6 @@ export function createForumRoutes() {
             makeAuthorResolver(identity),
           );
           return c.json(threadDetailSchema.parse(overview));
-        },
-      )
-
-      .get(
-        '/threads/:threadId/branches/:branch',
-        zValidator('param', z.object({ threadId: uuidSchema, branch: branchIdSchema })),
-        zValidator('query', z.object({ cursor: z.string().min(1).max(512).optional() })),
-        async (c) => {
-          const { threadId, branch } = c.req.valid('param');
-          const { cursor } = c.req.valid('query');
-          const bundle = bundles();
-          const identity = getIdentityServices();
-          const userId = await softUserId(c.req.header('cookie'), identity);
-          const thread = await bundle.ingestion.stories.getThreadById(threadId);
-          if (!thread) return c.json(notFound, 404);
-          if (!(await threadReadableToUser(bundle, thread, userId))) return c.json(notFound, 404);
-          const content = await branchContent(
-            bundle,
-            threadId,
-            branch,
-            userId,
-            makeAuthorResolver(identity),
-            cursor ?? null,
-          );
-          return c.json(branchContentSchema.parse(content));
         },
       )
 
@@ -380,7 +635,7 @@ export function createForumRoutes() {
         authMiddleware(),
         requireVerifiedAccount(),
         requireUnrestricted(),
-        zValidator('json', contributionCreateSchema),
+        zValidator('json', contributionWriteCreateSchema),
         async (c) => {
           const auth = getAuth(c);
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
@@ -401,20 +656,84 @@ export function createForumRoutes() {
             return c.json(deny(rejection.code, rejection.message), rejection.status);
           }
           const resolveAuthor = makeAuthorResolver(identity);
-          const author = await resolveAuthor(auth.userId);
           const card =
             outcome.evidenceCardId !== null
               ? await bundle.ingestion.evidence.getById(outcome.evidenceCardId)
               : null;
+          const thread = await bundle.ingestion.stories.getThreadById(
+            outcome.contribution.threadId,
+          );
+          const story = thread ? await bundle.ingestion.stories.getById(thread.storyId) : null;
+          const contribution = await liveContributionProjection(
+            bundle,
+            outcome.contribution,
+            auth.userId,
+            resolveAuthor,
+            story?.visibility === 'room_only',
+          );
+          const broadcastContribution = await liveContributionProjection(
+            bundle,
+            outcome.contribution,
+            null,
+            resolveAuthor,
+            story?.visibility === 'room_only',
+          );
+          if (!outcome.deduplicated && outcome.contribution.moderationState === 'published') {
+            bundle.forum.commentBroadcaster.publish(outcome.contribution.threadId, {
+              eventId: outcome.contribution.contributionId,
+              contribution: broadcastContribution,
+            });
+            if (
+              outcome.contribution.parentContributionId !== null &&
+              thread !== null &&
+              story !== null
+            ) {
+              const parent = await bundle.forum.contributions.getById(
+                outcome.contribution.parentContributionId,
+              );
+              const recipientUserId = parent?.userId ?? null;
+              if (
+                recipientUserId !== null &&
+                recipientUserId !== auth.userId &&
+                !(await bundle.forum.relationshipReader?.interactionBlocked(
+                  auth.userId,
+                  recipientUserId,
+                )) &&
+                !(await viewerHideSet(bundle, recipientUserId))?.has(auth.userId) &&
+                (await threadReadableToUser(bundle, thread, recipientUserId))
+              ) {
+                bundle.forum.trackBackground(
+                  (async () => {
+                    const notification = replyNotifications.enqueue({
+                      recipientUserId,
+                      storyId: story.storyId,
+                      threadId: thread.threadId,
+                      commentId: outcome.contribution.contributionId,
+                      parentCommentId: outcome.contribution.parentContributionId as string,
+                      actorHandle: contribution.author_handle ?? 'deleted-user',
+                    });
+                    const prefs = getPreferences(recipientUserId);
+                    const vapid = getVapidConfig();
+                    const minuteOfDay = new Date().getUTCHours() * 60 + new Date().getUTCMinutes();
+                    if (
+                      notification &&
+                      prefs.reply_notifications &&
+                      suppressionReason(prefs, {
+                        topic: story.roomId ?? undefined,
+                        minuteOfDay,
+                      }) === null &&
+                      vapid
+                    ) {
+                      await sendBodylessWakeToUser(recipientUserId, vapid);
+                    }
+                  })(),
+                );
+              }
+            }
+          }
           return c.json(
             contributionCreateResponseSchema.parse({
-              contribution: toContributionPublic(
-                outcome.contribution,
-                author,
-                0,
-                auth.userId,
-                false,
-              ),
+              contribution,
               evidence_card: card
                 ? {
                     evidence_id: card.evidenceId,
@@ -771,7 +1090,9 @@ export function createForumRoutes() {
           const videoCfg = getIngestionServices().config();
           const maxVideoBytes = Math.min(videoCfg.videoMaxBytes, MAX_VIDEO_BYTES);
           const maxBytes = isImage
-            ? MAX_IMAGE_BYTES
+            ? contentType === 'image/gif'
+              ? MAX_GIF_BYTES
+              : MAX_IMAGE_BYTES
             : isVideo
               ? maxVideoBytes
               : isCaption

@@ -305,7 +305,9 @@ export interface AttentionAggregateRecord {
   active_dwell_bucket: string;
   source_opened: boolean;
   context_opened: boolean;
-  branch_depth_bucket: string;
+  /** Retained for pre-WS-T clients during the dual-accept window. */
+  branch_depth_bucket?: string;
+  reply_depth_bucket?: string;
   return_visit_count_bucket: string;
   privacy_level: string;
   created_at: string;
@@ -349,7 +351,12 @@ export class InMemoryAttentionAggregateStore implements AttentionAggregateStore 
     let inserted = 0;
     for (const row of rows) {
       if (this.#rows.has(row.aggregate_id)) continue;
-      this.#rows.set(row.aggregate_id, { ...row });
+      const replyDepth = row.reply_depth_bucket ?? row.branch_depth_bucket ?? 'none';
+      this.#rows.set(row.aggregate_id, {
+        ...row,
+        reply_depth_bucket: replyDepth,
+        branch_depth_bucket: row.branch_depth_bucket ?? replyDepth,
+      });
       inserted += 1;
     }
     return inserted;

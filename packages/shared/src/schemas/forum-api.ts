@@ -6,13 +6,14 @@
 import { z } from 'zod';
 import { evidenceCardPublicSchema, evidenceCardTypeSchema } from './claim.js';
 import { isoTimestampSchema, uuidSchema } from './common.js';
-import { citationUrlSchema, contributionPublicSchema } from './contribution.js';
+import { citationUrlSchema, commentItemSchema, contributionPublicSchema } from './contribution.js';
 import { feedModeSchema } from './feed.js';
 import {
   attentionRetentionPreferenceSchema,
   MAX_TOPIC_PREFERENCES,
   privacyNotificationPreferencesSchema,
 } from './privacy-settings.js';
+import { summaryPublicSchema } from './summary.js';
 
 // ---------------------------------------------------------------------------
 // POST /v1/contributions (WS-G.3.1) — response.
@@ -55,6 +56,26 @@ export const evidenceCreateResponseSchema = z
 export type EvidenceCreateResponse = z.infer<typeof evidenceCreateResponseSchema>;
 
 // ---------------------------------------------------------------------------
+// GET /v1/stories/:storyId/comments (WS-T.3.1b).
+// ---------------------------------------------------------------------------
+
+export const storyCommentsResponseSchema = z
+  .object({
+    comments: z.array(commentItemSchema).max(100),
+    next_cursor: z.string().min(1).max(512).nullable(),
+    overview: z
+      .object({
+        comment_count: z.number().int().min(0),
+        sources_count: z.number().int().min(0),
+        corrections_count: z.number().int().min(0),
+      })
+      .strict(),
+    summary: summaryPublicSchema.nullable(),
+  })
+  .strict();
+export type StoryCommentsResponse = z.infer<typeof storyCommentsResponseSchema>;
+
+// ---------------------------------------------------------------------------
 // GET/PATCH /v1/feed/preferences (WS-G.3.8, SPEC §13/§23.2).  A canonical
 // veneer over the WS-D settings stores (single source of truth: the identity
 // store's privacy/personalization blobs) — feed modes are the five §13 modes
@@ -86,13 +107,20 @@ export type FeedPreferencesPatch = z.infer<typeof feedPreferencesPatchSchema>;
 // POST /v1/uploads (WS-G.3.7b).
 // ---------------------------------------------------------------------------
 
-export const UPLOAD_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/avif'] as const;
+export const UPLOAD_IMAGE_TYPES = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/avif',
+  'image/gif',
+] as const;
 export const UPLOAD_DOCUMENT_TYPES = ['application/pdf'] as const;
 /** WS-Q.2.3c native video containers (mp4/webm only; the DB CHECK mirrors this). */
 export const UPLOAD_VIDEO_TYPES = ['video/mp4', 'video/webm'] as const;
 /** WS-Q.5.2c WebVTT caption tracks for video posts (text; no metadata to strip). */
 export const UPLOAD_CAPTION_TYPES = ['text/vtt'] as const;
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+export const MAX_GIF_BYTES = 8 * 1024 * 1024;
 export const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
 export const MAX_CAPTION_BYTES = 1 * 1024 * 1024;
 /** WS-Q.2.3c hard ceiling (mirrors the DB `uploads_byte_size_range` CHECK);
@@ -120,8 +148,18 @@ export const uploadPublicSchema = z
     scan_state: z.enum(['clear', 'pending']),
     created_at: isoTimestampSchema,
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      !UPLOAD_IMAGE_TYPES.includes(value.content_type as (typeof UPLOAD_IMAGE_TYPES)[number]) ||
+      value.alt_text !== null,
+    { message: 'alt_text is required for image uploads.', path: ['alt_text'] },
+  );
 export type UploadPublic = z.infer<typeof uploadPublicSchema>;
+
+export function isAnimatableImage(contentType: string): boolean {
+  return contentType === 'image/gif';
+}
 
 // ---------------------------------------------------------------------------
 // GET /v1/security/link-blocklist (WS-G.4.2c) — updatable without deploys.

@@ -228,7 +228,7 @@ describe('uploadAttentionAggregates rate-limit backoff (WS-C.4.4)', () => {
     active_dwell_bucket: 'medium' as const,
     source_opened: true,
     context_opened: false,
-    branch_depth_bucket: 'moderate' as const,
+    reply_depth_bucket: 'moderate' as const,
     return_visit_count_bucket: 'few' as const,
     privacy_level: 'standard' as const,
     created_at: '2026-06-09T13:30:00.000Z',

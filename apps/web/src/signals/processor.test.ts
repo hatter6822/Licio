@@ -127,21 +127,21 @@ describe('SignalProcessor dwell accrual', () => {
 });
 
 describe('SignalProcessor signal assembly', () => {
-  it('reflects source/context opens and branch traversal in the aggregate', async () => {
+  it('reflects source/context opens and reply-depth traversal in the aggregate', async () => {
     const s = setup();
     s.processor.setCollectionPolicy(ENABLED);
     s.processor.setActiveStory(STORY);
     s.processor.recordSourceOpen('o1', STORY);
     s.advanceWall(4_000);
     s.processor.recordSourceClose('o1');
-    s.processor.recordBranchVisit(STORY, 'overview');
-    s.processor.recordBranchVisit(STORY, 'evidence');
+    s.processor.recordReplyDepth(STORY, 0);
+    s.processor.recordReplyDepth(STORY, 1);
     s.processor.captureAggregate(STORY);
     await s.processor.flush();
     const aggregate = s.lastBatch()[0];
     expect(aggregate?.source_opened).toBe(true);
     expect(aggregate?.context_opened).toBe(false);
-    expect(aggregate?.branch_depth_bucket).toBe('moderate'); // 2 distinct branches
+    expect(aggregate?.reply_depth_bucket).toBe('moderate'); // 2 distinct reply depths
   });
 });
 

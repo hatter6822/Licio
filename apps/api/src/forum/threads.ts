@@ -10,8 +10,6 @@
 // (labeled); hidden/removed/under_review rows with published descendants
 // render as empty TOMBSTONES so subtrees never orphan.
 import type {
-  BranchContent,
-  BranchId,
   ContributionAnchor,
   ContributionPublic,
   SummaryPublic,
@@ -22,7 +20,7 @@ import type { IngestionServices } from '../ingestion/services.js';
 import type { ThreadShellRecord } from '../ingestion/stores.js';
 import type { ForumServices } from './services.js';
 import type { ContributionRecord, SummaryRecord } from './stores.js';
-import { orderDepthFirst, SECTION_TYPES, sectionOfType, subtreeRootId } from './tree.js';
+import { orderDepthFirst, subtreeRootId } from './tree.js';
 
 interface Bundle {
   forum: ForumServices;
@@ -130,7 +128,10 @@ export async function toSummaryPublic(
     thread_id: summary.threadId,
     layer: summary.layer,
     body: summary.body,
-    cited_branch_ids: summary.citedBranchIds,
+    cited_contribution_ids:
+      (summary.citedContributionIds?.length ?? 0) > 0
+        ? (summary.citedContributionIds ?? [])
+        : summary.citedBranchIds,
     cited_evidence_ids: summary.citedEvidenceIds,
     unresolved_uncertainty: summary.unresolvedUncertainty,
     minority_views_note: summary.minorityViewsNote,
@@ -172,102 +173,16 @@ export async function threadOverview(
     created_at: thread.createdAt,
     updated_at: thread.updatedAt,
     sections: {
-      overview: section(SECTION_TYPES.overview),
-      questions: section(SECTION_TYPES.questions),
-      evidence: section(SECTION_TYPES.evidence),
-      challenges: section(SECTION_TYPES.challenges),
-      lenses: section(SECTION_TYPES.lenses),
+      overview: section(['synthesis']),
+      questions: section(['question', 'answer']),
+      evidence: section(['evidence', 'counterexample']),
+      challenges: section(['correction']),
+      lenses: section(['local_context', 'direct_experience']),
       chronology: total,
     },
     summary_status: summaryStatus(summaries),
     current_summary: current ? await toSummaryPublic(current, resolveAuthor) : null,
     summary_layers: [...new Set(summaries.map((s) => s.layer))],
-  };
-}
-
-/**
- * One structured section's content (WS-G.3.3 branch endpoint).  Pagination
- * is COMPLETE over arbitrarily large threads: pages walk the store-level
- * `(created_at, id)` keyset (the cursor is the last FETCHED contribution
- * id, recovered to its keyset position via one read), so no fixed fetch
- * prefix can strand older contributions.  Chronology pages are exactly the
- * keyset order; tree sections are depth-first ordered WITHIN each page — a
- * row whose parent landed on an earlier page renders as a local root with
- * its absolute depth indicator preserved (the same documented degradation
- * as subtree pages).  The cursor advances over rows the requester cannot
- * see, so hidden rows can never stall the walk.
- */
-export async function branchContent(
-  bundle: Bundle,
-  threadId: string,
-  branch: BranchId,
-  requesterUserId: string | null,
-  resolveAuthor: AuthorResolver,
-  cursor: string | null,
-): Promise<BranchContent> {
-  const config = bundle.forum.config();
-  const pageSize = config.branchPageSize;
-
-  // Recover the keyset position; an unknown or foreign-thread cursor
-  // restarts from the beginning (defensive, never an error).
-  let after: { createdAt: string; id: string } | null = null;
-  if (cursor !== null) {
-    const last = await bundle.forum.contributions.getById(cursor);
-    if (last && last.threadId === threadId) {
-      after = { createdAt: last.createdAt, id: last.contributionId };
-    }
-  }
-
-  const fetchOpts = {
-    states: ['published', 'under_review', 'hidden', 'removed'] as const,
-    after,
-    limit: pageSize + 1,
-  };
-  const fetched =
-    branch === 'chronology'
-      ? await bundle.forum.contributions.listByThread(threadId, { ...fetchOpts })
-      : await bundle.forum.contributions.listByThread(threadId, {
-          ...fetchOpts,
-          types: SECTION_TYPES[branch],
-        });
-  const hasMore = fetched.length > pageSize;
-  const page = fetched.slice(0, pageSize);
-  const lastFetched = page[page.length - 1];
-
-  const hide = await viewerHideSet(bundle, requesterUserId);
-  const renderable = visibleRows(page, requesterUserId, hide);
-  const ordered =
-    branch === 'chronology'
-      ? renderable // already (created_at, id) ascending
-      : (() => {
-          const byId = new Map(renderable.map((entry) => [entry.row.contributionId, entry]));
-          return orderDepthFirst(renderable.map((entry) => entry.row)).map((row) => {
-            const entry = byId.get(row.contributionId);
-            return entry ?? { row, tombstone: true };
-          });
-        })();
-
-  const childCounts = await bundle.forum.contributions.childCounts(
-    ordered.map((entry) => entry.row.contributionId),
-  );
-  const contributions: ContributionPublic[] = [];
-  for (const entry of ordered) {
-    const author = entry.tombstone ? null : await resolveAuthor(entry.row.userId);
-    contributions.push(
-      toContributionPublic(
-        entry.row,
-        author,
-        childCounts.get(entry.row.contributionId) ?? 0,
-        requesterUserId,
-        entry.tombstone,
-      ),
-    );
-  }
-  return {
-    thread_id: threadId,
-    branch,
-    contributions,
-    next_cursor: hasMore && lastFetched ? lastFetched.contributionId : null,
   };
 }
 
@@ -354,7 +269,6 @@ export function contributionAnchor(record: ContributionRecord): ContributionAnch
   return {
     contribution_id: record.contributionId,
     thread_id: record.threadId,
-    branch: sectionOfType(record.type),
     root_contribution_id: subtreeRootId(record),
   };
 }

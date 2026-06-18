@@ -3,17 +3,22 @@
 // Query-key factory (WS-C.1.2). One place that mints consistent, serializable
 // tuple keys used for both reads and targeted invalidation, so a typo can never
 // silently split a cache entry in two.
-import type { BranchId, FeedMode } from '@licio/shared';
+import type { FeedMode } from '@licio/shared';
 
 export const queryKeys = {
   feed: (mode: FeedMode = 'balanced') => ['feed', mode] as const,
   story: (storyId: string) => ['story', storyId] as const,
   storyInterpretations: (storyId: string) => ['story', storyId, 'interpretations'] as const,
   independentSources: (storyId: string) => ['story', storyId, 'independent-sources'] as const,
-  threads: () => ['threads'] as const,
+  storyComments: (
+    storyId: string,
+    options: {
+      order?: 'newest' | 'oldest';
+      filter?: 'sources' | 'corrections';
+      root?: string;
+    } = {},
+  ) => ['story', storyId, 'comments', options] as const,
   thread: (threadId: string) => ['thread', threadId] as const,
-  threadBranch: (threadId: string, branch: BranchId) =>
-    ['thread', threadId, 'branch', branch] as const,
   rooms: () => ['rooms'] as const,
   room: (roomId: string) => ['room', roomId] as const,
   roomFeed: (roomId: string) => ['room', roomId, 'feed'] as const,

@@ -9,7 +9,7 @@
 // (never half-migrated, WS-C.2.2c).
 
 export const DB_NAME = 'licio';
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
 
 /** Object-store names (WS-C.2.2a object-store table). */
 export const STORE = {
@@ -17,6 +17,7 @@ export const STORE = {
   draftContributions: 'draft-contributions',
   draftStories: 'draft-stories',
   threadSnapshots: 'thread-snapshots',
+  storyComments: 'story-comments',
   signalLedger: 'signal-ledger',
   pendingQueue: 'pending-queue',
 } as const;
@@ -35,6 +36,18 @@ export type MigrationMap = Record<number, Migration>;
  * step between the existing and the current version. Adding an index or
  * transforming records belongs here under a new version key.
  */
+
+function stampSchemaVersion(store: IDBObjectStore, version: number): void {
+  const request = store.openCursor();
+  request.onsuccess = () => {
+    const cursor = request.result;
+    if (!cursor) return;
+    const value = cursor.value as Record<string, unknown>;
+    cursor.update({ ...value, schemaVersion: version });
+    cursor.continue();
+  };
+}
+
 export const MIGRATIONS: MigrationMap = {
   1: (db) => {
     const saved = db.createObjectStore(STORE.savedStories, { keyPath: 'storyId' });
@@ -74,6 +87,23 @@ export const MIGRATIONS: MigrationMap = {
   3: (db) => {
     const stories = db.createObjectStore(STORE.draftStories, { keyPath: 'draftId' });
     stories.createIndex('updatedAt', 'updatedAt');
+  },
+  // WS-T.7.3d — branch-shaped contribution drafts and signal-ledger buckets were
+  // renamed for the comment model. Evict lossy read caches and add a story-level
+  // comments snapshot store; encrypted draft values stay intact and revalidate
+  // against the branch-free record schema.
+  4: (db, tx) => {
+    tx.objectStore(STORE.threadSnapshots).clear();
+    tx.objectStore(STORE.signalLedger).clear();
+    stampSchemaVersion(tx.objectStore(STORE.savedStories), 2);
+    stampSchemaVersion(tx.objectStore(STORE.draftContributions), 2);
+    stampSchemaVersion(tx.objectStore(STORE.pendingQueue), 2);
+    if (db.objectStoreNames.contains(STORE.draftStories)) {
+      stampSchemaVersion(tx.objectStore(STORE.draftStories), 2);
+    }
+    const comments = db.createObjectStore(STORE.storyComments, { keyPath: 'cacheKey' });
+    comments.createIndex('storyId', 'storyId');
+    comments.createIndex('cachedAt', 'cachedAt');
   },
 };
 

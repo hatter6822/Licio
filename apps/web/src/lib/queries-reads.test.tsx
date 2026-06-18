@@ -12,11 +12,14 @@ vi.mock('./api.js', async (importOriginal) => {
     fetchFeed: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     fetchStory: vi.fn().mockResolvedValue({ story_id: 's' }),
     fetchThread: vi.fn().mockResolvedValue({ thread_id: 't' }),
-    fetchThreadBranch: vi
-      .fn()
-      .mockResolvedValue({ thread_id: 't', branch: 'overview', contributions: [] }),
     fetchRooms: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     fetchRoom: vi.fn().mockResolvedValue({ room_id: 'r' }),
+    fetchStoryComments: vi.fn().mockResolvedValue({
+      comments: [],
+      next_cursor: null,
+      overview: { comment_count: 0, sources_count: 0, corrections_count: 0 },
+      summary: null,
+    }),
     fetchSettings: vi.fn().mockResolvedValue(DEFAULT_USER_SETTINGS),
     fetchSignalLedger: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     fetchNotificationPreferences: vi.fn().mockResolvedValue(DEFAULT_NOTIFICATION_PREFERENCES),
@@ -45,7 +48,7 @@ describe('read hooks', () => {
     const hooks: Array<() => { isSuccess: boolean }> = [
       () => queries.useStoryQuery('s'),
       () => queries.useThreadQuery('t'),
-      () => queries.useThreadBranchQuery('t', 'overview'),
+      () => queries.useStoryCommentsQuery('11111111-1111-4111-8111-111111111111'),
       () => queries.useRoomsQuery(),
       () => queries.useRoomQuery('r'),
       () => queries.useSettingsQuery(),

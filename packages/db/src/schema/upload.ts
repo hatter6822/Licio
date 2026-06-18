@@ -56,7 +56,7 @@ export const uploads = pgTable(
     // shared allowlist (forum/safety.ts) mirrors this exactly (parity-tested).
     check(
       'uploads_content_type_allowed',
-      sql`${t.contentType} in ('image/jpeg','image/png','image/webp','image/avif','application/pdf','video/mp4','video/webm','text/vtt')`,
+      sql`${t.contentType} in ('image/jpeg','image/png','image/webp','image/avif','image/gif','application/pdf','video/mp4','video/webm','text/vtt')`,
     ),
     // Video posts are larger than images; the per-type byte cap (image 10 MB,
     // video 200 MB) is enforced at the API layer (ingestion.video_max_bytes).

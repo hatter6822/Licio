@@ -80,7 +80,6 @@ function activeTabId(pathname: string): string {
   if (pathname === '/' || pathname.startsWith('/stories')) return 'front-page';
   if (pathname.startsWith('/rooms')) return 'rooms';
   if (pathname.startsWith('/submit')) return 'submit';
-  if (pathname.startsWith('/threads')) return 'threads';
   if (pathname.startsWith('/profile')) return 'profile';
   return '';
 }

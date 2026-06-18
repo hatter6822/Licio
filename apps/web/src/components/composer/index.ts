@@ -15,16 +15,3 @@ export {
   VoiceDictation,
   type VoiceDictationProps,
 } from './ComposerAffordances/index.js';
-export {
-  type ComposerErrors,
-  type ComposerMode,
-  type ComposerValues,
-  composerModes,
-  type FieldKind,
-  type FieldOption,
-  getModeDefinition,
-  type ModeDefinition,
-  type ModeField,
-  ParticipationComposer,
-  type ParticipationComposerProps,
-} from './ParticipationComposer/index.js';

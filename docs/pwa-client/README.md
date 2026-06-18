@@ -79,32 +79,28 @@ full-page reload), highlights the active tab with `aria-current="page"`, surface
 the SW-update / eviction toasts, and emits a navigation breadcrumb (route PATTERN
 + render ms — never the concrete path).
 
-- **Five primary tabs:** `/` Front Page, `/rooms`, `/submit`, `/threads`,
-  `/profile`. Plus type-safe detail routes (`/stories/$storyId`,
-  `/threads/$threadId`, `/rooms/$roomId`), profile sub-routes (`/profile/saved`,
+- **Four primary tabs:** `/` Front Page, `/rooms`, `/submit`, `/profile`.
+  Plus type-safe detail routes (`/stories/$storyId`, `/rooms/$roomId`),
+  a back-compat `/threads/$threadId` redirect to the owning story comment section, profile sub-routes (`/profile/saved`,
   `/profile/signal-ledger`, `/profile/settings`, `/profile/privacy`,
   `/profile/wallet`), and flag-gated routes (`/rooms/$roomId/governance`). Flat
   URLs for nested detail routes use the `_`-suffixed (non-nesting) route-id form.
-- **Discovery surfaces (WS-G.3.3):** the `/threads` tab lists conversations from
-  `GET /v1/threads` (title + contribution count + state, each a link into the
-  thread; keyset-paginated with a **Show more** control so older conversations
-  are reachable, not just the first page), and a story page links to its own
-  conversation via the served `thread_id` — the feed → story → discussion path
-  (the link is suppressed when the thread has been moderation-removed, so it never
-  points at a 404). The tab is a PUBLIC read surface (no `requireAuth`, like
-  `/rooms` and the front page) showing the same two-condition global containment
-  the front-page feed uses: PUBLIC items from PUBLIC rooms only. It is
-  USER-INDEPENDENT — `room_only` items and private-room conversations never appear
-  on the global tab; they are reached through their room (which marks `room_only`
-  items with the in-room chip).
+- **Conversation surface (WS-T.7/8):** story pages embed their own lightly nested
+  comment section using the served `thread_id`, so the feed → story → discussion
+  path stays inline. The former `/threads` directory and branch routes are
+  retired; old `/threads/$threadId` deep links resolve the thread overview and
+  redirect to `/stories/$storyId#comments` when readable. `room_only` items and
+  private-room conversations remain reachable only through their room/content
+  surfaces, never through a global conversation tab.
 - **Code splitting (WS-C.1.1c):** `autoCodeSplitting` makes every route's
   component its own on-demand chunk behind a Skeleton fallback. The initial JS
   payload stays within the Section 6.10 budget (CI gate:
   `scripts/check-bundle-size.ts`).
 - **Search params (WS-C.1.1b):** zod schemas in `routing/search.ts`. Invalid
   values coerce to the route default (`.catch`) — never silently accepted. `?mode`
-  drives the feed switcher; `?branch` drives the thread tab; a shareable
-  `/threads/$id/branches/$branch` path canonicalises to `?branch`.
+  drives the feed switcher; `/submit` accepts only share-target `share_url` /
+  `share_title` params for the story composer. Thread branch search params are
+  retired with the old branch reader.
 - **Guards (WS-C.1.1d):** `routing/route-guard.ts` exposes `requireAuth` (a route
   `beforeLoad`) that redirects unauthenticated or non-active accounts to `/login`
   preserving an **allowlisted** destination (`routing/guards.ts` `isSafeRedirect`
@@ -326,7 +322,7 @@ throw), **monotone** (a larger input never maps to an earlier bucket), and
 | Field | Mapping |
 |---|---|
 | `active_dwell_bucket` | none / glance (<10s) / short (<30s) / medium (<2m) / long (<5m) / extended |
-| `branch_depth_bucket` | none (0) / shallow (1) / moderate (2–3) / deep (4+) distinct branches |
+| `reply_depth_bucket` | none (0) / shallow (1) / moderate (2–3) / deep (4+) distinct reply-depth levels viewed |
 | `return_visit_count_bucket` | none / few (1–2) / several (3–5) / many (6+), rage-loops forfeited |
 | `session_bucket` | coarse UTC window label (default 1h) |
 | `privacy_level` | standard / reduced / minimum |
@@ -338,17 +334,17 @@ throw), **monotone** (a larger input never maps to an earlier bucket), and
   (continuous events never inflate it); beacons are privacy-safe (metric
   name/value/rating only, never a URL or identifier).
 - **Interaction marks (`perf/marks.ts`):** User Timing measures for the budgets —
-  thread branch open ≤500ms, composer open ≤300ms, offline draft save ≤100ms —
+  comment section open/live-refresh ≤500ms, composer open ≤300ms, offline draft save ≤100ms —
   emitted from the route components for Playwright traces and RUM.
 - **Release gates:** the initial-JS bundle gate (`scripts/check-bundle-size.ts`),
-  the `e2e/performance.spec.ts` branch-open-budget assertion, and the
+  the `e2e/performance.spec.ts` story/comment-budget assertion, and the
   `e2e/offline.spec.ts` offline-app-shell check fail CI on regression.
 
 ## Observability (privacy-safe telemetry)
 
 `lib/telemetry.ts` buffers PII-free events whose **event names are a closed enum**
 and whose `metric`/`bucket` labels are coarse, **length-bounded** (≤64-char) strings
-(route PATTERNS, error codes, Web-Vital ratings, queue depth, push lifecycle, SW
+(route PATTERNS, error codes, Web-Vital ratings, queue depth, comment-stream lifecycle, reply-notification push lifecycle, SW
 health, feature-flag resolution — never URLs, concrete paths, ids, or free text;
 the navigation breadcrumb falls back to a constant, never the live path). The batch
 is re-validated against the shared zod schema before egress and delivered via
@@ -395,13 +391,13 @@ acknowledges the accepted count.
   coverage gate.
 - **E2E (Playwright + axe):** `e2e/routing.spec.ts` (client-side tab navigation +
   `aria-current`, auth-guard redirect, fail-closed `RestrictedState`, in-shell
-  not-found, WCAG 2.2 AA), `e2e/performance.spec.ts` (branch-open budget,
-  WS-G-schema-exact fixtures), `e2e/offline.spec.ts` (offline app shell from
+  not-found, WCAG 2.2 AA), `e2e/performance.spec.ts` (story/comment budget,
+  WS-G/WS-T-schema-exact fixtures), `e2e/offline.spec.ts` (offline app shell from
   the SW precache), `e2e/design-system.spec.ts` (workbench axe/zoom/contrast
   modes), and the WS-G real-browser pair `e2e/ugc-safety.spec.ts` +
   `e2e/composer.spec.ts` (the `licio-ugc` Trusted Types policy under the
   preview's enforcing CSP, inert attack fixtures, the drainer interstitial,
-  and the 11-mode composer with shared-schema validation —
+  and story/comment composer surfaces with shared-schema validation —
   `docs/forum/README.md`).
 - **Static gates:** `check-sw-security`, `check-bundle-size`, `lint:security`,
   `check:no-applause`, **`check:no-raw-egress`**, `check:workspace-deps`, strict

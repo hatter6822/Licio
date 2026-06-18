@@ -5,11 +5,7 @@
 // never a public per-user score (no-applause doctrine). It mirrors the bucketed
 // AttentionAggregate so the user sees exactly what the cap (WS-C.4.1c) did.
 import { z } from 'zod';
-import {
-  branchDepthBucketSchema,
-  dwellBucketSchema,
-  returnVisitBucketSchema,
-} from './attention.js';
+import { dwellBucketSchema, replyDepthBucketSchema, returnVisitBucketSchema } from './attention.js';
 import { isoTimestampSchema, paginatedSchema, uuidSchema } from './common.js';
 
 /**
@@ -35,7 +31,7 @@ export const signalLedgerEntrySchema = z.object({
   active_dwell_bucket: dwellBucketSchema,
   source_opened: z.boolean(),
   context_opened: z.boolean(),
-  branch_depth_bucket: branchDepthBucketSchema,
+  reply_depth_bucket: replyDepthBucketSchema,
   return_visit_count_bucket: returnVisitBucketSchema,
   /**
    * True when the per-item cap was reached and counting stopped (WS-C.4.1c).

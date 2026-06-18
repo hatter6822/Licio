@@ -29,8 +29,8 @@ apps/web/src/
     wellbeing/       FocusModeToggle, QuietHoursSetting, NotificationBudget  (WS-B.2.8c)
     profile/         SignalLedger                                           (WS-B.2.6)
     reader/          SourceReader (sandboxed iframe)                        (WS-B.2.7)
-    composer/        ParticipationComposer + input affordances              (WS-B.2.10–11)
-    thread/          ThreadBranchNav                                        (WS-B.2.12)
+    comments/        Inline CommentSection + comment composer/media         (WS-T)
+    composer/        StoryComposer + reusable input affordances           (WS-B.2.10–11)
     cognitive/       ProgressiveDisclosure, DefinedTerm, ExplainLikeNewLens (WS-B.2.13)
 ```
 
@@ -242,8 +242,8 @@ and in the e2e suite, which is the stronger guarantee.
 | 2.7 | `SourceReader` + `readability.ts`/`.worker.ts` | `sandbox=""` iframe restricted to http(s) `src`; DOMPurify-sanitized, worker-extracted readable text (input-capped); framing remote sources needs a deployment `frame-src` (WS-C) |
 | 2.8a–c | `SectionEndpoint`, `DiminishingReturnsPrompt`, wellbeing controls | |
 | 2.9 | `FeedModeSwitcher` | |
-| 2.10–11 | `ParticipationComposer`, composer affordances | 8 modes, voice/citation/attachment |
-| 2.12 | `ThreadBranchNav` | Overview-first, lazy + Skeleton |
+| 2.10–11 | `StoryComposer`, composer/comment affordances | story submission plus reusable voice/citation/attachment controls |
+| WS-T | `CommentSection` | inline story comments, reply previews, media/GIF rendering, filters |
 | 2.13 | `ProgressiveDisclosure`, `DefinedTerm`, `ExplainLikeNewLens`, `jargon.ts` | progressive disclosure, defined terms, plain-language lens + jargon audit |
 | 2.14 | `i18n/` (`t()` ICU plural/select + apostrophe escaping, pseudo-locale `en-XA`, lazy `loadCatalog`), `TranslationDisclosure` | localization, RTL, Intl formatting, view-original |
 | workbench | `styleguide/` (`/styleguide` route) | mounts the whole system; the Playwright e2e target |

@@ -27,6 +27,7 @@ import {
   feedQuerySchema,
   feedResponseSchema,
   notificationPreferencesSchema,
+  notificationsResponseSchema,
   okAckSchema,
   pushRegisterRequestSchema,
   type SignalLedgerEntry,
@@ -70,6 +71,7 @@ import {
   setPreferences,
 } from '../lib/push-service.js';
 import { rateLimit } from '../lib/rate-limit.js';
+import { replyNotifications } from '../lib/reply-notifications.js';
 import { feedMediaOf } from '../lib/story-media.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { serveFeed } from '../ranking/service.js';
@@ -259,7 +261,7 @@ function toLedgerEntry(row: SignalLedgerRecord): SignalLedgerEntry {
     active_dwell_bucket?: string;
     source_opened?: boolean;
     context_opened?: boolean;
-    branch_depth_bucket?: string;
+    reply_depth_bucket?: string;
     return_visit_count_bucket?: string;
     cap_reached?: boolean;
   };
@@ -278,8 +280,8 @@ function toLedgerEntry(row: SignalLedgerRecord): SignalLedgerEntry {
       'none') as SignalLedgerEntry['active_dwell_bucket'],
     source_opened: signals.source_opened ?? false,
     context_opened: signals.context_opened ?? false,
-    branch_depth_bucket: (signals.branch_depth_bucket ??
-      'none') as SignalLedgerEntry['branch_depth_bucket'],
+    reply_depth_bucket: (signals.reply_depth_bucket ??
+      'none') as SignalLedgerEntry['reply_depth_bucket'],
     return_visit_count_bucket: (signals.return_visit_count_bucket ??
       'none') as SignalLedgerEntry['return_visit_count_bucket'],
     cap_reached: signals.cap_reached ?? false,
@@ -631,9 +633,13 @@ export function createV1Routes() {
         }
         return c.json(vapidPublicKeyResponseSchema.parse({ publicKey: config.publicKey }));
       })
-      .post('/push/subscriptions', zValidator('json', pushRegisterRequestSchema), (c) => {
+      .post('/push/subscriptions', zValidator('json', pushRegisterRequestSchema), async (c) => {
         const { subscription } = c.req.valid('json');
-        registerSubscription(subscription, stateKey(c.req.header('cookie')));
+        registerSubscription(
+          subscription,
+          stateKey(c.req.header('cookie')),
+          await resolveOptionalUserId(c.req.header('cookie')),
+        );
         return c.json(okAckSchema.parse({ ok: true }), 201);
       })
       .delete(
@@ -648,20 +654,46 @@ export function createV1Routes() {
       )
 
       // --- Notification preferences (WS-C.2.4c) -----------------------------
-      .get('/notifications/preferences', (c) =>
-        c.json(getPreferences(stateKey(c.req.header('cookie')))),
-      )
+      .get('/notifications/preferences', async (c) => {
+        const userId = await resolveOptionalUserId(c.req.header('cookie'));
+        return c.json(getPreferences(userId ?? stateKey(c.req.header('cookie'))));
+      })
       .patch(
         '/notifications/preferences',
         zValidator('json', notificationPreferencesSchema.partial()),
-        (c) => {
-          const key = stateKey(c.req.header('cookie'));
+        async (c) => {
+          const userId = await resolveOptionalUserId(c.req.header('cookie'));
+          const key = userId ?? stateKey(c.req.header('cookie'));
           const merged = notificationPreferencesSchema.parse({
             ...getPreferences(key),
             ...c.req.valid('json'),
           });
           setPreferences(key, merged);
           return c.json(merged);
+        },
+      )
+      .get('/notifications', authMiddleware(), async (c) => {
+        const auth = getAuth(c);
+        if (!auth) return c.json(notFound, 404);
+        const notifications = replyNotifications.listForUser(auth.userId);
+        return c.json(
+          notificationsResponseSchema.parse({
+            notifications,
+            unread_count: replyNotifications.unreadCount(auth.userId),
+          }),
+        );
+      })
+      .post(
+        '/notifications/:notificationId/read',
+        authMiddleware(),
+        zValidator('param', z.object({ notificationId: uuidSchema })),
+        (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(notFound, 404);
+          const { notificationId } = c.req.valid('param');
+          if (!replyNotifications.markRead(notificationId, auth.userId))
+            return c.json(notFound, 404);
+          return c.json(okAckSchema.parse({ ok: true }));
         },
       )
   );

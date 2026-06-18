@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   activeDwellBucket,
   attentionAggregateSchema,
-  branchDepthBucket,
   DWELL_BUCKETS,
+  replyDepthBucket,
   returnVisitCountBucket,
   sessionBucket,
 } from '../schemas/attention.js';
@@ -44,25 +44,25 @@ describe('activeDwellBucket', () => {
   });
 });
 
-describe('branchDepthBucket', () => {
-  it('maps distinct-branch counts to depth buckets', () => {
-    expect(branchDepthBucket(0)).toBe('none');
-    expect(branchDepthBucket(1)).toBe('shallow');
-    expect(branchDepthBucket(2)).toBe('moderate');
-    expect(branchDepthBucket(3)).toBe('moderate');
-    expect(branchDepthBucket(4)).toBe('deep');
-    expect(branchDepthBucket(6)).toBe('deep');
+describe('replyDepthBucket', () => {
+  it('maps reply-depth counts to depth buckets', () => {
+    expect(replyDepthBucket(0)).toBe('none');
+    expect(replyDepthBucket(1)).toBe('shallow');
+    expect(replyDepthBucket(2)).toBe('moderate');
+    expect(replyDepthBucket(3)).toBe('moderate');
+    expect(replyDepthBucket(4)).toBe('deep');
+    expect(replyDepthBucket(6)).toBe('deep');
   });
 
   it('floors fractional input and clamps junk to none', () => {
-    expect(branchDepthBucket(1.9)).toBe('shallow');
-    expect(branchDepthBucket(-3)).toBe('none');
-    expect(branchDepthBucket(Number.NaN)).toBe('none');
+    expect(replyDepthBucket(1.9)).toBe('shallow');
+    expect(replyDepthBucket(-3)).toBe('none');
+    expect(replyDepthBucket(Number.NaN)).toBe('none');
   });
 
   it('maps +Infinity to the TOP bucket (monotone), -Infinity to none', () => {
-    expect(branchDepthBucket(Number.POSITIVE_INFINITY)).toBe('deep');
-    expect(branchDepthBucket(Number.NEGATIVE_INFINITY)).toBe('none');
+    expect(replyDepthBucket(Number.POSITIVE_INFINITY)).toBe('deep');
+    expect(replyDepthBucket(Number.NEGATIVE_INFINITY)).toBe('none');
   });
 });
 
@@ -116,7 +116,7 @@ describe('attentionAggregateSchema', () => {
     active_dwell_bucket: 'medium',
     source_opened: true,
     context_opened: false,
-    branch_depth_bucket: 'moderate',
+    reply_depth_bucket: 'moderate',
     return_visit_count_bucket: 'few',
     privacy_level: 'standard',
     created_at: '2026-06-09T13:45:00.000Z',

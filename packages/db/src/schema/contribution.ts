@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Contribution entities (WS-G.1.2a/1.2d, SPEC §15.1/§15.5/§22.1).  The 11
-// typed contributions form a TREE within a thread (`parent_contribution_id`)
+// Contribution entities (WS-G.1.2a/1.2d, SPEC §15.1/§15.5/§22.1).
+// Comment-first typed contributions form a TREE within a thread (`parent_contribution_id`)
 // with a materialized ancestor path:
 //
 //   `path`  — JSONB array of ancestor contribution ids, root-first (the
@@ -34,7 +34,7 @@ import { claims } from './claim.js';
 import { threads } from './thread.js';
 import { users } from './user.js';
 
-/** The fixed 11-member taxonomy (SPEC §15.1) — order is the registry order. */
+/** The fixed contribution taxonomy (SPEC §15.1) — order mirrors @licio/shared. */
 export const contributionTypeEnum = pgEnum('contribution_type', [
   'question',
   'answer',
@@ -47,6 +47,7 @@ export const contributionTypeEnum = pgEnum('contribution_type', [
   'direct_experience',
   'moderation_concern',
   'meta_discussion',
+  'comment',
 ]);
 
 export const contributionModerationStateEnum = pgEnum('contribution_moderation_state', [
@@ -108,7 +109,7 @@ export const contributions = pgTable(
     uniqueIndex('contributions_user_draft_uq')
       .on(t.userId, t.clientDraftId)
       .where(sql`${t.userId} is not null`),
-    check('contributions_body_len', sql`char_length(${t.body}) between 1 and 5000`),
+    check('contributions_body_len', sql`char_length(${t.body}) between 0 and 5000`),
     check('contributions_citations_array', sql`jsonb_typeof(${t.citations}) = 'array'`),
     check('contributions_metadata_object', sql`jsonb_typeof(${t.metadata}) = 'object'`),
     check('contributions_path_array', sql`jsonb_typeof(${t.path}) = 'array'`),

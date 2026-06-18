@@ -1979,7 +1979,7 @@ export async function seedOperationalSignals(
           active_dwell_bucket: a.dwell,
           source_opened: a.source,
           context_opened: a.context,
-          branch_depth_bucket: a.branch,
+          reply_depth_bucket: a.branch,
           return_visit_count_bucket: a.returns,
         },
       ],

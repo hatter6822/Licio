@@ -4,7 +4,7 @@
 // coerced to the route default via `.catch(...)` — never silently accepted as
 // arbitrary input. These drive the feed-mode switcher and the thread branch tab
 // from shareable URLs.
-import { branchIdSchema, feedModeSchema, uuidSchema } from '@licio/shared';
+import { feedModeSchema } from '@licio/shared';
 import { z } from 'zod';
 
 /**
@@ -17,12 +17,6 @@ export const feedSearchSchema = z.object({
 });
 export type FeedSearch = z.infer<typeof feedSearchSchema>;
 
-/** Thread search: `?branch=` ∈ branch ids (invalid ⇒ overview). */
-export const threadSearchSchema = z.object({
-  branch: branchIdSchema.catch('overview'),
-});
-export type ThreadSearch = z.infer<typeof threadSearchSchema>;
-
 /** Post-login redirect target, preserved across the login flow.  The optional
  *  `cancel_token` carries the emailed single-use deletion-cancellation token
  *  (WS-D.2.4a) — the email's link lands on /login?cancel_token=… . */
@@ -32,14 +26,8 @@ export const loginSearchSchema = z.object({
 });
 export type LoginSearch = z.infer<typeof loginSearchSchema>;
 
-/** Submit composer: optional thread to contribute to, and its branch. */
+/** Submit composer: story submission only; share-target params seed the story composer. */
 export const submitSearchSchema = z.object({
-  threadId: uuidSchema.optional().catch(undefined),
-  branch: branchIdSchema.optional().catch(undefined),
-  /** Reply context: the question being answered (WS-G.3.6d). */
-  parentId: uuidSchema.optional().catch(undefined),
-  /** Flag context: the contribution being reported (WS-G.3.4c). */
-  targetId: uuidSchema.optional().catch(undefined),
   /** Share-target intake (WS-G.3.7a): citation pre-population. */
   share_url: z.string().url().max(2048).optional().catch(undefined),
   share_title: z.string().max(300).optional().catch(undefined),
@@ -49,9 +37,4 @@ export type SubmitSearch = z.infer<typeof submitSearchSchema>;
 /** Validate (and coerce) the feed search params. Never throws. */
 export function parseFeedSearch(search: Record<string, unknown>): FeedSearch {
   return feedSearchSchema.parse(search);
-}
-
-/** Validate (and coerce) the thread search params. Never throws. */
-export function parseThreadSearch(search: Record<string, unknown>): ThreadSearch {
-  return threadSearchSchema.parse(search);
 }

@@ -28,7 +28,9 @@ export const summaries = pgTable(
     layer: summaryLayerEnum('layer').notNull(),
     /** Markdown-lite (rendered through renderUGC, WS-G.4.2b). */
     body: text('body').notNull(),
+    /** Retained read alias for pre-WS-T rows; new writes use citedContributionIds. */
     citedBranchIds: jsonb('cited_branch_ids').$type<string[]>().notNull().default([]),
+    citedContributionIds: jsonb('cited_contribution_ids').$type<string[]>().notNull().default([]),
     citedEvidenceIds: jsonb('cited_evidence_ids').$type<string[]>().notNull().default([]),
     unresolvedUncertainty: text('unresolved_uncertainty'),
     minorityViewsNote: text('minority_views_note'),
@@ -49,6 +51,10 @@ export const summaries = pgTable(
       sql`${t.layer} = 'automated_draft' or (${t.unresolvedUncertainty} is not null and char_length(${t.unresolvedUncertainty}) >= 1)`,
     ),
     check('summaries_branch_ids_array', sql`jsonb_typeof(${t.citedBranchIds}) = 'array'`),
+    check(
+      'summaries_contribution_ids_array',
+      sql`jsonb_typeof(${t.citedContributionIds}) = 'array'`,
+    ),
     check('summaries_evidence_ids_array', sql`jsonb_typeof(${t.citedEvidenceIds}) = 'array'`),
   ],
 );

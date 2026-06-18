@@ -48,6 +48,12 @@ vi.mock('../../lib/api.js', async (importOriginal) => {
     fetchStory: vi.fn().mockResolvedValue(STORY),
     fetchStoryInterpretations: vi.fn().mockRejectedValue(new Error('not computed')),
     fetchIndependentSources: vi.fn().mockRejectedValue(new Error('not computed')),
+    fetchStoryComments: vi.fn().mockResolvedValue({
+      comments: [],
+      next_cursor: null,
+      overview: { comment_count: 0, sources_count: 0, corrections_count: 0 },
+      summary: null,
+    }),
   };
 });
 
@@ -128,21 +134,19 @@ describe('StoryDetailPage conversation link (WS-G.3.3)', () => {
     return router;
   }
 
-  it('shows "View the conversation" and navigates to the thread when thread_id is present', async () => {
+  it('embeds the comment section when thread_id is present', async () => {
     vi.mocked(fetchStory).mockResolvedValueOnce({ ...STORY, thread_id: THREAD_ID });
-    const router = renderWithThreadRoute();
-    const link = await screen.findByRole('link', { name: 'View the conversation' });
-    await userEvent.click(link);
-    await waitFor(() => expect(router.state.location.pathname).toBe(`/threads/${THREAD_ID}`));
-    expect(await screen.findByRole('heading', { name: 'Thread' })).toBeInTheDocument();
+    renderWithThreadRoute();
+    expect(await screen.findByRole('heading', { name: 'Conversation' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Write a comment' })).toBeInTheDocument();
   });
 
-  it('omits the conversation link when the story has no thread', async () => {
+  it('omits the comment section when the story has no thread', async () => {
     vi.mocked(fetchStory).mockResolvedValueOnce({ ...STORY, thread_id: null });
     renderWithThreadRoute();
     // The story content has loaded…
     expect(await screen.findByText(STORY.distribution_reason)).toBeInTheDocument();
-    // …but there is no conversation affordance.
-    expect(screen.queryByRole('link', { name: 'View the conversation' })).not.toBeInTheDocument();
+    // …but there is no embedded conversation affordance.
+    expect(screen.queryByRole('heading', { name: 'Conversation' })).not.toBeInTheDocument();
   });
 });

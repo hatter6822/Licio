@@ -49,7 +49,7 @@ function attentionPayload(storyId: string): { aggregates: unknown[] } {
     cappedDwellMs: 45_000,
     sourceOpened: true,
     contextOpened: false,
-    distinctBranches: 1,
+    distinctReplyDepthLevels: 1,
     returnCount: 0,
     now: Date.UTC(2026, 5, 9, 13, 30),
   };
