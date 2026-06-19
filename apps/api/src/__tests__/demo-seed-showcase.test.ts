@@ -16,11 +16,15 @@ import {
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { userMayPostTopLevel } from '../forum/rooms.js';
+import { createGovernanceService } from '../governance/services.js';
+import { createInMemoryGovernanceStores } from '../governance/stores.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
 import {
   DEV_ACCOUNTS,
+  GOVERNANCE_DEMO_ROOM_ID,
   SEED_USER,
   seedForumDemoData,
+  seedGovernanceDemo,
   seedOperationalSignals,
 } from '../lib/demo-seed.js';
 import { serveFeed } from '../ranking/service.js';
@@ -339,5 +343,22 @@ describe('demo seed — media + moderation surfaces', () => {
     const pending = await fx.ingestion.reviewQueue.list({ status: 'pending' }, 50);
     expect(pending.length).toBeGreaterThanOrEqual(2);
     expect(pending.every((r) => r.kind === 'moderation_concern')).toBe(true);
+  });
+});
+
+describe('demo seed — the WS-U governed-room showcase', () => {
+  it('makes one room governed with an active agent + a logged action (no queue hold)', async () => {
+    const governance = createGovernanceService({ stores: createInMemoryGovernanceStores() });
+    await seedGovernanceDemo(governance);
+    const stewardId = DEV_ACCOUNTS.find((a) => a.email === 'steward@licio.test')?.userId;
+    // The elected steward holds the seat and an active community agent governs it.
+    const seat = await governance.getSeat(GOVERNANCE_DEMO_ROOM_ID);
+    expect(seat?.holderUserId).toBe(stewardId);
+    const binding = await governance.getBinding(GOVERNANCE_DEMO_ROOM_ID);
+    expect(binding?.active).toBe(true);
+    expect(binding?.capabilityDescriptor.granted).toContain('moderate.flag');
+    // A sample agent action surfaces in the "governed by" panel.
+    const actions = await governance.recentAgentActions(GOVERNANCE_DEMO_ROOM_ID, 10);
+    expect(actions[0]?.actionType).toBe('moderate.flag_for_review');
   });
 });

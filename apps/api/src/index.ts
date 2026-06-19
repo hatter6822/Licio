@@ -138,7 +138,12 @@ import {
   setInvariantServices,
 } from './invariants/services.js';
 import { demoStory } from './lib/demo-data.js';
-import { seedForumDemoData, seedModerationDemo, seedOperationalSignals } from './lib/demo-seed.js';
+import {
+  seedForumDemoData,
+  seedGovernanceDemo,
+  seedModerationDemo,
+  seedOperationalSignals,
+} from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
 import { effectiveStewardRoles } from './moderation/authz.js';
 import { createDrizzleModerationStores } from './moderation/drizzle-moderation-stores.js';
@@ -848,6 +853,10 @@ if (env.NODE_ENV !== 'production') {
     // the risk assessments / lineage / AI inventory so the governance surfaces
     // render on first boot. Idempotent (register is a no-op once present).
     await seedAiGovernance(aiGovernanceServices);
+    // WS-U: make one demo room actually governed so the in-room "governed by"
+    // panel + the steward manager render real data on first boot (uses the
+    // bound GovernanceService; logs a sample agent action without a queue hold).
+    await seedGovernanceDemo(getGovernanceService());
     logger.info('demo data seeded (development)');
   } catch (err) {
     logger.warn({ err }, 'demo seed skipped (non-fatal)');

@@ -607,9 +607,9 @@ with `docker compose stop` when you're done for the day.
 
 `pnpm dev` is also the fastest way to click through the whole product. The
 API boots with in-memory stores by default and seeds role accounts, rooms,
-stories, comments, moderation data, invariant outputs, and reading signals.
-Use this section when you want to evaluate the product experience rather than
-just verify the toolchain.
+stories, comments, moderation data, a community-governed room (WS-U),
+invariant outputs, and reading signals. Use this section when you want to
+evaluate the product experience rather than just verify the toolchain.
 
 ### Quick walkthrough
 
@@ -619,6 +619,21 @@ just verify the toolchain.
    **Profile → Signal Ledger**, and any steward/admin surface your role allows.
 4. For durable Postgres/Redis testing, remember that the seed is idempotent.
    Reset the database volume only when you intentionally want a fresh corpus.
+
+### The community-governed room (WS-U)
+
+The *Elections & Governance* room ships **governed** by a community-approved AI
+agent so the AI-governed-rooms surfaces render real data:
+
+- Any visitor sees the **"How this room is governed"** panel — the active model,
+  the powers the community granted it (here, *Flag for human review*), a recent
+  agent action, and a one-click download of the content-addressed model artifact.
+- Sign in as **`steward@licio.test`** (the room's elected steward) to see the
+  **steward model manager**: the proposal registry and the *Propose a model* form
+  (the steward's two powers). An eligible proposal can be adopted for the
+  community there.
+- A platform steward (`admin@licio.test`) can pause the room's agent via the
+  floor-freeze control; the panel then shows the floor-paused state.
 
 ### Seeded role accounts
 

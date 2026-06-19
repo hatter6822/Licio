@@ -129,6 +129,9 @@ hypothetical `knomosis → public.rooms` FK is caught.
   `GovernedByPanel` transparency states, and the `StewardModelManager` steward
   surface (steward-gating, propose with client-side JSON validation, confirm-gated
   ratify, per-proposal download, loading/error branches, axe a11y).
+- `apps/api` — the election-lifecycle scheduler (`governance-scheduler.test.ts`)
+  and the dev **governed-room showcase** (`demo-seed-showcase.test.ts`: the
+  *Elections & Governance* room ships with an active agent + a logged action).
 - `apps/api` (gated) — `governance-integration.test.ts`: the nine Drizzle
   adapters against the real migration chain (seat upsert, election patch/settle,
   the vote-PK idempotency, the model digest-uniqueness collision, prompt/law-pack/

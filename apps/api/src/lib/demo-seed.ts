@@ -32,6 +32,7 @@ import { attentionPurgeAfterIso } from '../events/privacy-gate.js';
 import type { EventPipelineServices } from '../events/services.js';
 import type { NewStoredEvent } from '../events/stores.js';
 import type { ForumServices } from '../forum/services.js';
+import type { GovernanceService } from '../governance/service.js';
 import type { Role } from '../identity/rbac.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
@@ -2021,4 +2022,72 @@ export async function seedModerationDemo(moderation: ModerationServices): Promis
       local_operation_id: `demo-report-${i}`,
     });
   }
+}
+
+/** The demo room that ships GOVERNED (WS-U) — "Elections & Governance" (public). */
+export const GOVERNANCE_DEMO_ROOM_ID = R(5);
+
+/**
+ * DEVELOPMENT showcase for WS-U (NEVER in production): make one room actually
+ * governed so the "governed by" panel + the steward model-manager render real
+ * data on `pnpm dev`. The elected steward (steward@licio.test, U(21)) proposes a
+ * community model that flags link-spam; it clears the platform admission gate; a
+ * member ratification activates the in-room agent; and one sample agent action is
+ * logged via a DIRECT moderate() call — which writes only the agent action log,
+ * NOT the human review queue, so the dev moderation queue stays the curated WS-J
+ * set. Idempotent (bootstrap/propose are existence/duplicate-guarded) and
+ * best-effort; runs AFTER the forum seed (the room must exist) + the governance
+ * service is bound.
+ */
+export async function seedGovernanceDemo(governance: GovernanceService): Promise<void> {
+  const steward = U(21); // steward@licio.test
+  await governance.bootstrapSeat(GOVERNANCE_DEMO_ROOM_ID, steward);
+  const bundle = {
+    bundleId: 'demo-civility',
+    version: '1',
+    name: 'Community civility policy',
+    moderationRules: [
+      {
+        id: 'link-spam',
+        when: { kind: 'link_count_gte', value: 3 },
+        action: 'flag_for_review',
+        reason: 'Posts with several links are sent for human review.',
+      },
+    ],
+    promptTemplates: { summary: 'Summarize the discussion neutrally and briefly.' },
+    config: { summaryStyle: 'neutral_brief', explanationVerbosity: 'standard' },
+    requestedCapabilities: ['moderate.flag'],
+  };
+  const proposed = await governance.proposeModel(
+    GOVERNANCE_DEMO_ROOM_ID,
+    steward,
+    bundle,
+    'Be neutral and concise; cite the community rule when you act, and never exceed your granted powers.',
+  );
+  if (!proposed.ok) return;
+  await governance.evaluateModel(proposed.value.modelId);
+  const approved = await governance.approveModel(
+    GOVERNANCE_DEMO_ROOM_ID,
+    proposed.value.modelId,
+    null,
+    null,
+  );
+  if (!approved.ok) return;
+  // A sample agent action so the "governed by" panel shows activity. A direct
+  // moderate() logs to the agent action log only (no review-queue hold).
+  await governance.moderate(
+    GOVERNANCE_DEMO_ROOM_ID,
+    {
+      contentText: 'check these out https://a.example https://b.example https://c.example',
+      contentKind: 'comment',
+      contentLength: 64,
+      linkCount: 3,
+      mentionCount: 0,
+      hasMediaUpload: false,
+      authorAccountAgeDays: 3,
+      authorNewToRoom: true,
+      priorRemovalsInRoom: 0,
+    },
+    `${GOVERNANCE_DEMO_ROOM_ID}:demo-action`,
+  );
 }
