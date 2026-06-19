@@ -32,10 +32,32 @@ Every document upholds these non-negotiable invariants (SPEC references in each 
 3. **Notice and appeal for significant actions** (`MODERATION_TAXONOMY.md` WS-A.1.2c).
 4. **Published support contact** reachable without authentication
    (`MODERATION_TAXONOMY.md` WS-A.1.2c notice-and-appeal requirements).
-5. **Human review, not auto-removal, for policy-risk** (`MODERATION_TAXONOMY.md` WS-A.1.2b).
+5. **Human review at the platform legal floor** — platform-policy-risk (illegal content,
+   legal/compliance duties, cross-room abuse) gets human review, not auto-removal; in-room AI
+   moderation (SPEC §24.6) is bounded, logged, explainable, and **appealable to this human
+   floor** (`MODERATION_TAXONOMY.md` WS-A.1.2b; SPEC §16.6, §24.6).
 6. **MFCI base-rate conditioning** (`SIGNAL_MATRIX.md` anti-signals; MFCI-1/MFCI-2).
 7. **Privacy by design** (`PRIVACY_REGULATION_MAP.md`; on-chain minimization).
 8. **Fail-closed crypto** (`CRYPTO_FEATURE_MATRIX.md`; `JURISDICTION_MATRIX.md`).
+
+## AI-governed rooms: the three-layer authority model
+
+The platform supports **bounded in-room AI governance** (SPEC §16.6, §24.6;
+`docs/planning/22-ai-governed-rooms.md`). Authority is partitioned into three precedence-ordered
+layers, and these doctrine documents pin the floor:
+
+1. **Room sovereignty** — an **elected room steward** (the creator at first, then a yearly
+   Knomosis election) may propose a community-approved, member-downloadable AI model and its
+   prompt; the room's members ratify both by a Knomosis governance vote. `STEWARD_ROLES.md`
+   defines this seat as distinct from the five platform `ROLE_*` stewards.
+2. **Knomosis-bounded AI agent** — the approved agent may moderate, manage the room treasury,
+   and facilitate lawmaking, but only within community-voted, **kernel-enforced** bounds, holding
+   no keys, fully transparent and appealable.
+3. **Platform legal floor** — the five `ROLE_*` platform stewards (`STEWARD_ROLES.md`) operate a
+   **non-overridable** human floor over illegal content, legal/compliance duties, and cross-room
+   abuse. No room, steward, model, prompt, or vote can countermand it (invariant 5; SPEC §17.1
+   boundary 5). The pay-to-rank firewall (invariant 2) and fail-closed crypto (invariant 8) are
+   preserved in full: nothing the agent does touches organic ranking.
 
 ## Validation
 

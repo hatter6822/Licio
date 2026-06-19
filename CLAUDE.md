@@ -1287,11 +1287,24 @@ No Lean or Rust toolchains.  This is a pure TypeScript monorepo.
 ## Implementation roadmap
 
 The core specification defines 18 workstreams (WS-0 through WS-Q).
-Two **extension workstreams** — WS-R and WS-S — derive from the
-standalone `docs/OFFLINE_SPEC.md` (LCAP v0.2) and `docs/PRIVATE_SPEC.md`
+WS-T (conversation as comments) and the cross-cutting **WS-U**
+(AI-governed-rooms redesign) extend the core spec.  Two **extension
+workstreams** — WS-R and WS-S — derive from the standalone
+`docs/OFFLINE_SPEC.md` (LCAP v0.2) and `docs/PRIVATE_SPEC.md`
 specifications rather than `docs/SPEC.md`; both are post-M3
 resilience/privacy extensions and are not launch-blocking for the core
-social product.
+social product.  **WS-U** is the maintainer's binding redesign of AI's
+role (`docs/planning/22-ai-governed-rooms.md`; SPEC §16.6/§24.6): every
+room has an **elected steward** whose only two powers are to propose a
+community-approved, member-downloadable AI **model** and its **prompt**
+(both ratified by a Knomosis member vote), and the approved **in-room AI
+agent** may then moderate, manage the room treasury, and facilitate
+lawmaking **within community-voted, kernel-enforced bounds, holding no
+keys, subordinate to a non-overridable platform legal floor**.  It is
+**doctrine-first** (Stage 0: SPEC + policy + plan landed; no runtime code
+yet), re-scopes WS-K into the platform evaluation/transparency substrate,
+amends WS-J/L/M, and preserves the pay-to-rank firewall and fail-closed
+crypto in full.
 Status:
 
 | Workstream | Title | Status |
@@ -1307,7 +1320,7 @@ Status:
 | WS-H | Invariant services (MERI, MFCI, SCOI, GWEI, PHI) | Complete |
 | WS-I | Ranking and distribution | Complete |
 | WS-J | Trust, safety, and abuse operations | Complete (residuals tracked, `docs/trust-safety/README.md`) |
-| WS-K | AI and model governance | Complete (residuals tracked, `docs/ai-governance/README.md`) |
+| WS-K | AI and model governance | Complete (residuals tracked, `docs/ai-governance/README.md`); **re-scoped by WS-U** into the platform eval/transparency substrate for community room models |
 | WS-L | Knomosis and wallets | Planned |
 | WS-M | Treasury and governance | Planned |
 | WS-N | Compliance | Planned |
@@ -1316,10 +1329,12 @@ Status:
 | WS-Q | Content–room ownership and visibility | Complete |
 | WS-R | Offline content availability (LCAP v0.2) | Planned (extension; `docs/OFFLINE_SPEC.md`) |
 | WS-S | Private P2P rooms (E2EE) | Planned (extension; `docs/PRIVATE_SPEC.md`) |
+| WS-T | Conversation as comments | Complete |
+| WS-U | AI-governed rooms (redesign) | Doctrine ratified (Stage 0: SPEC/policy/plan); staged runtime impl (`docs/planning/22-ai-governed-rooms.md`) |
 
 Read the per-workstream planning document under `docs/planning/`
 before starting new work.  The master index at
-`docs/planning/00-index.md` lists all ~858 atomic tasks.
+`docs/planning/00-index.md` lists all ~922 atomic tasks.
 
 ## Documentation rules
 

@@ -10,11 +10,11 @@
 |---|---|
 | **Document ID** | `MODERATION_TAXONOMY` |
 | **Produced by** | WS-A.1.2a (categories), WS-A.1.2b (layers), WS-A.1.2c (appeals), WS-A.1.2d (crypto abuse) |
-| **Version** | 1.0.0 |
+| **Version** | 1.1.0 |
 | **Owner** | Licio Maintainers — Doctrine & Policy Working Group |
-| **Effective date** | 2026-06-08 |
-| **Status** | Ratified by maintainer (hatter6822) — 2026-06-08 (M0 doctrine gate) |
-| **SPEC references** | §16.3, §16.4, §17.10, §18.1–§18.5, §25.6, §29.3 |
+| **Effective date** | 2026-06-19 |
+| **Status** | Ratified by maintainer (hatter6822) — 2026-06-08 (M0 doctrine gate); amended 2026-06-19 (AI-governed-rooms redesign) |
+| **SPEC references** | §16.3, §16.4, §16.6, §17.10, §18.1–§18.5, §24.6, §25.6, §29.3 |
 | **Primary consumers** | WS-J (T&S), WS-G.4 (UGC safety), WS-P (transparency), WS-N (compliance) |
 
 **Reason-code convention.** Machine-readable reason codes use the form
@@ -100,6 +100,18 @@ severity drawn from this table and inherits that severity's SLA.
 - External escalation actions are frequently **irreversible** and therefore require
   additional approval (pairs with WS-A.2.2 irreversible-action co-approval and the
   emergency/treasury rules in WS-A.1.2c).
+- **In-room AI moderation (SPEC §24.6, §16.6).** A Knomosis-enabled room may adopt a
+  community-approved, member-downloadable AI agent that moderates **in-room** content within
+  the room's voted law-pack. The agent operates *within* the layers above (an automated,
+  room-scoped mechanism that sits **beneath** the platform legal floor), and every action it
+  takes is logged, explainable, and **appealable to the human platform floor** (`ROLE_APPEALS`);
+  `ROLE_SAFETY` removes illegal content over any room model and `ROLE_INTEGRITY` can
+  `room-governance-freeze` the agent at any time. The agent **cannot** countermand a platform
+  safety action, reinstate floor-removed content, or act on the floor-reserved categories
+  (illegal content, legal/compliance duties, cross-room abuse). The platform automated
+  pre-check rule that **platform**-policy-risk content is never auto-removed (invariant 5) is
+  unchanged: it governs the platform floor, while bounded in-room auto-moderation is a
+  per-room, member-ratified delegation beneath that floor.
 
 ---
 
@@ -319,3 +331,4 @@ Representative reason codes (one per mode shown; namespaces extend as needed):
 | Version | Date | Author | Change | Sign-off |
 |---|---|---|---|---|
 | 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified taxonomy: 12 policy categories with description/examples/severity/SLA/evidence/escalation/reason codes (WS-A.1.2a), 6 moderation layers and SPEC §29.3-aligned escalation path (WS-A.1.2b), 10-row appeal-eligibility matrix (WS-A.1.2c), 15 crypto abuse modes with the DAO-reveal privacy override (WS-A.1.2d). Machine-readable enumeration with 51 reason codes plus layers; categories, layers, and crypto modes cross-validated against SPEC §18.1/§18.2/§18.5. | Reviewed and ratified by hatter6822 (maintainer), 2026-06-08 |
+| 1.1.0 | 2026-06-19 | Doctrine & Policy WG | AI-governed-rooms redesign (SPEC §16.6, §24.6): documented **in-room AI moderation** as a per-room, member-ratified, law-pack-bounded delegation that operates *within* the existing 6 layers and *beneath* the platform legal floor — logged, explainable, and appealable to `ROLE_APPEALS`, overridable by `ROLE_SAFETY`/`ROLE_INTEGRITY`, and barred from the floor-reserved categories. The 12 categories, 6 layers, 15 crypto modes, and 51 reason codes are unchanged (gate set-equality with SPEC §18.2 preserved); the platform "never auto-remove policy-risk" rule (invariant 5) is unchanged for the floor. | Pending maintainer ratification (redesign Stage 0) |

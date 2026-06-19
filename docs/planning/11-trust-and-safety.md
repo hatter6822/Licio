@@ -8,11 +8,25 @@ Safety controls work before the forum is complete. Reports, blocks, mutes, and a
 
 This workstream depends on WS-D.1 (accounts, sessions, role grants, MFA for stewards) and on the WS-A doctrine documents that define *what* is enforced: the moderation taxonomy and reason codes (WS-A.1.2), the appeal-eligibility matrix (WS-A.1.2c), the steward roles and console authorization (WS-A.2.2), and the anti-signal catalog (WS-A.1.1c). It has no dependency on WS-G — reports work before the forum is complete (index dependency graph). MFCI integration points (WS-H.3) degrade gracefully before invariants ship: until MFCI is live, coordinated-report checks run on cheap statistics (temporal clustering, account-correlation heuristics) and tighten when the MFCI service is available, consistent with the cold-start fallback principle.
 
+> **AI-governed-rooms redesign (2026-06-19) — WS-J becomes the platform legal floor (Layer 3).**
+> See `docs/planning/22-ai-governed-rooms.md` (WS-U) and SPEC §16.6/§24.6. Under the redesign,
+> Knomosis-enabled rooms may delegate *ordinary in-room* moderation to a community-approved AI
+> agent. WS-J's five `ROLE_*` stewards + console are reframed as the **non-overridable platform
+> legal floor**: illegal content (CSAM, terrorism, sanctioned actors), legal/compliance duties
+> (mandatory reporting, sanctions, age/jurisdiction gating), **cross-room** abuse, and **appeals
+> of last resort**. The floor sits *above* every room agent — `ROLE_SAFETY` removes illegal
+> content over any room model, `ROLE_INTEGRITY` can `room-governance-freeze` an agent, and every
+> agent moderation action is appealable to `ROLE_APPEALS`. The M6 moderation-override gate ("the
+> platform can moderate harmful content regardless of local governance votes") **is** this floor.
+> New WS-J work in WS-U: route agent moderation actions into the same statement-of-reasons +
+> appeal inbox (model as actor of record); expose the agent-freeze control on the console. No
+> existing WS-J authority is reduced.
+
 ### Cross-cutting requirements (apply to every task in WS-J)
 
 - **Reason codes are taxonomy-bound.** Every enforcement action and report carries a reason code from `docs/policy/MODERATION_TAXONOMY.md` (WS-A.1.2). Invalid codes are rejected.
 - **Notice and appeal for significant actions.** Significant actions emit a readable statement of reasons and, where appealable (WS-A.1.2c), an appeal path. Shadow/reduced-distribution actions are never silent.
-- **Human review, not auto-removal, for policy-risk.** Automated layers flag and prioritize; only high-confidence spam (WS-J.2.6a) and malware (WS-J.2.6b) are auto-blocked. Everything else routes to a human.
+- **Human review, not auto-removal, for platform-policy-risk.** At the platform floor, automated layers flag and prioritize; only high-confidence spam (WS-J.2.6a) and malware (WS-J.2.6b) are auto-blocked, and everything else routes to a human. Bounded *in-room* AI auto-moderation (SPEC §24.6) is a separate, per-room, member-ratified delegation beneath this floor — it is logged, explainable, and appealable to the human floor, and it can never act on the floor-reserved categories.
 - **Reporter-identity protection.** A reporter's identity is never exposed to the reported user through any surface or API. Reporter identities are never published in transparency reports and never placed on-chain (SPEC 19.5).
 - **MFCI base-rate conditioning.** Coordination/brigading detection conditions on normal activity so large authentic communities are not penalized for volume (MFCI-1); coordinated reporting has delayed enforcement until reviewed (MFCI-2).
 - **Authorization.** Every console capability is gated by steward role (WS-A.2.2) with object-/action-level authorization (SPEC 25.4). Financial data (wallet, payment, treasury, donor) is excluded from moderation surfaces (ranking-neutrality principle; SPEC 13.6).

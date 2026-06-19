@@ -14,6 +14,24 @@
 > client render-path integration, WS-M proposal-data wiring, a real model
 > backend, the WS-P experiment-log consumer) is `docs/ai-governance/README.md`.
 
+> **RE-SCOPED by the AI-governed-rooms redesign (2026-06-19) — see
+> `docs/planning/22-ai-governed-rooms.md` (WS-U) and SPEC §16.6/§24.1/§24.5/§24.6.** The
+> maintainer's binding redesign inverts the AI posture for *in-room* governance: every room has
+> an **elected steward** (creator first, then a yearly Knomosis election) whose only two powers
+> are to **propose a community-approved, member-downloadable AI model** and **its prompt**, both
+> ratified by a Knomosis member vote; the approved **in-room AI agent** may then moderate, manage
+> the room treasury, and facilitate lawmaking **within community-voted, kernel-enforced bounds,
+> holding no keys, subordinate to a non-overridable platform legal floor**. This WS-K platform is
+> **re-scoped, not discarded**: its registry, evaluation harness (bias/hallucination/safety/
+> red-team), prohibited-use guard, data-lineage, output-records, and label surface become the
+> **platform-side admission gate and transparency substrate** for community-uploaded room models
+> (WS-U §U.4) — a community model is ineligible for adoption until it clears this gate, and its
+> exact bytes are hash-pinned and member-downloadable. The §24.1-rooted "AI never autonomously
+> spends/approves/sanctions" framing in the *Overview* below is **superseded for in-room
+> governance** by the bounded-autonomy doctrine (it still holds at the **platform** layer); read
+> it together with WS-U. No shipped WS-K capability is removed; the new per-room adopt path
+> (elected steward + member vote + the bounded-agent runtime) lands in the WS-U staged PRs.
+
 ## Overview
 
 Every AI model used in Licio has a model card, undergoes bias/safety evaluation, and has documented prohibited uses. AI outputs are labeled as machine-generated and are user/steward-editable. No autonomous treasury execution, no investment advice, no manipulative voting recommendations.

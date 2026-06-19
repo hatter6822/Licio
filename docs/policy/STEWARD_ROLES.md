@@ -9,11 +9,11 @@
 |---|---|
 | **Document ID** | `STEWARD_ROLES` |
 | **Produced by** | WS-A.2.2 |
-| **Version** | 1.0.0 |
+| **Version** | 1.1.0 |
 | **Owner** | Licio Maintainers — Doctrine & Policy Working Group |
-| **Effective date** | 2026-06-08 |
-| **Status** | Ratified by maintainer (hatter6822) — 2026-06-08 (M0 doctrine gate) |
-| **SPEC references** | §16.3, §16.4, §25.3, §25.4 |
+| **Effective date** | 2026-06-19 |
+| **Status** | Ratified by maintainer (hatter6822) — 2026-06-08 (M0 doctrine gate); amended 2026-06-19 (AI-governed-rooms redesign) |
+| **SPEC references** | §16.3, §16.4, §16.6, §24.6, §25.3, §25.4 |
 | **Primary consumers** | WS-J.2 (console authz), WS-D.1 (role grants, MFA), WS-O (audit) |
 
 **Role-ID convention.** `ROLE_*`. The canonical machine-readable enumeration at the end
@@ -31,6 +31,43 @@ appeal-eligibility reviewers) must resolve to a role defined here.
 | Safety moderator | `ROLE_SAFETY` | Enforce policy, handle reports, protect targets, issue warnings, remove content, restrict accounts (temporary), apply safety labels | Cross-room content and account actions within policy scope | All actions logged with reason codes; subject to appeal; **required training** |
 | Appeals reviewer | `ROLE_APPEALS` | Review disputed moderation/account actions, overturn/uphold/modify, document reasoning | Read access to moderation history and evidence; decision authority on appeals | Decisions logged with full reasoning; **independent from the original moderator**; periodic quality review |
 | Integrity analyst | `ROLE_INTEGRITY` | Investigate coordination, spam, manipulation, raids, bot networks, financial-abuse patterns; place room-governance/treasury freezes | Cross-room analytics, MFCI data, account patterns, financial-transaction patterns | Investigations logged; actions require documentation; **sensitive-data access time-limited and audited** |
+
+---
+
+## The platform legal floor and the elected room steward (SPEC §16.6, §24.6)
+
+The **AI-governed-rooms redesign** (SPEC §16.6, §24.6; `docs/planning/22-ai-governed-rooms.md`)
+partitions room authority into three precedence-ordered layers. These five `ROLE_*` roles are
+the **platform legal floor** — the cross-room, **non-overridable** human layer — and a new
+per-room governance seat sits at the room-sovereignty layer below them.
+
+**The five `ROLE_*` roles are the platform legal floor (Layer 3).** They operate **above every
+room** and no room, elected room steward, AI model, prompt, or governance vote can countermand
+them. The floor's reserved duties are **illegal content** (CSAM, terrorism, sanctioned actors),
+**legal/compliance duties** (mandatory reporting, sanctions, age/jurisdiction gating), and
+**cross-room abuse** (raids, ban evasion, platform-wide manipulation), plus **appeals of last
+resort**. Every in-room AI moderation action (Layer 2) is appealable to `ROLE_APPEALS`;
+`ROLE_SAFETY` removes illegal content over any room model; `ROLE_INTEGRITY` owns the cross-room
+surface and can `room-governance-freeze`/`treasury-freeze` any room's agent. This is the
+existing SPEC §17.1 boundary 5 ("No DAO supremacy over safety"), made load-bearing.
+
+**The elected room steward (`ELECTED_ROOM_STEWARD`) — a per-room seat, not a platform role.**
+Distinct from the five platform `ROLE_*` roles, every room has exactly one elected steward seat
+(identified as `ELECTED_ROOM_STEWARD`; deliberately **outside** the platform `ROLE_*` namespace
+because it is not a platform role and holds no platform capabilities). It is bootstrapped to the
+room's first member at creation and re-elected yearly by a **Knomosis governance vote** of the
+room's members. It holds **exactly two powers**, and **neither takes effect without a member
+vote**:
+
+| Seat | Identifier | The two powers (both member-ratified by Knomosis vote) | What it explicitly is **not** | Accountability |
+|---|---|---|---|---|
+| Elected room steward | `ELECTED_ROOM_STEWARD` | (1) propose a community-approved, hash-pinned, member-downloadable governance/moderation AI model; (2) propose the in-room prompt for it | **No** direct moderation, treasury, account, or lawmaking authority; **no** platform `ROLE_*` capability; **cannot** countermand the platform legal floor | Yearly Knomosis election; both powers require a member ratifying vote; the approved model + prompt are member-downloadable and reproducible; removable by the platform floor |
+
+Because the steward only *proposes* (members ratify, the kernel enforces, the floor overrides),
+capturing the seat confers agenda-setting only — not rule. The **approved AI agent** (SPEC §24.6),
+not the steward, exercises in-room moderation/treasury/lawmaking, and only within community-voted,
+kernel-enforced bounds while holding no keys. Until a room approves a model + prompt, it runs on
+the platform moderation baseline (`MODERATION_TAXONOMY.md` layers) plus this floor.
 
 ---
 
@@ -156,3 +193,4 @@ escalation is handled by the safety lead + counsel.
 | Version | Date | Author | Change | Sign-off |
 |---|---|---|---|---|
 | 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified roles: 5 steward roles with role IDs, capabilities, access levels, accountability, audit fields, and a capability→action/queue mapping consistent with the WS-J console and WS-A.1.2c appeal eligibility. MFA, least-privilege, training, and irreversible-action co-approval mandated; role set cross-validated against SPEC §16.3. | Reviewed and ratified by hatter6822 (maintainer), 2026-06-08 |
+| 1.1.0 | 2026-06-19 | Doctrine & Policy WG | AI-governed-rooms redesign (SPEC §16.6, §24.6): reframed the five `ROLE_*` roles as the **platform legal floor** (cross-room, non-overridable) and added the per-room **elected room steward** (`ELECTED_ROOM_STEWARD`) — a seat with exactly two member-ratified powers (propose an AI model; propose its prompt), holding no platform capability and unable to countermand the floor. The canonical 5-role enumeration is unchanged (gate set-equality with SPEC §16.3 preserved); the new seat is documented as a distinct room-sovereignty-layer role. | Pending maintainer ratification (redesign Stage 0) |
