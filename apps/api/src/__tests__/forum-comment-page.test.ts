@@ -27,6 +27,7 @@ let fixture: ForumServicesFixture;
 let cookie: string;
 let threadId: string;
 let storyId: string;
+let userId: string;
 let nowMs: number;
 
 beforeEach(async () => {
@@ -41,8 +42,35 @@ beforeEach(async () => {
   await ensureCommonsRoom(fixture.forum);
   const session = await seedUserWithSession(fixture.identity);
   cookie = session.cookie;
+  userId = session.userId;
   ({ threadId, storyId } = await seedThread(fixture));
 });
+
+/** Insert a contribution directly so a non-`published` state (which the POST
+ *  guard chain would never accept) can be staged for visibility tests. */
+async function insertContribution(opts: {
+  id: string;
+  parent: { id: string; path: string[] } | null;
+  state: 'published' | 'under_review' | 'hidden' | 'removed';
+  body: string;
+}): Promise<{ id: string; path: string[] }> {
+  const path = opts.parent ? [...opts.parent.path, opts.parent.id] : [];
+  await fixture.forum.contributions.insert({
+    contributionId: opts.id,
+    threadId,
+    userId,
+    type: 'comment',
+    body: opts.body,
+    citations: [],
+    metadata: {},
+    targetClaimId: null,
+    parentContributionId: opts.parent?.id ?? null,
+    clientDraftId: `seed-${opts.id}`,
+    path,
+    moderationState: opts.state,
+  });
+  return { id: opts.id, path };
+}
 
 async function createOk(body: Record<string, unknown>): Promise<string> {
   const res = await app().request(jsonRequest('/v1/contributions', 'POST', body, cookie));
@@ -120,5 +148,62 @@ describe('WS-T.7.2 — story comment depth', () => {
     await seedDepth4();
     const res = await getComments('?root=00000000-0000-4000-8000-0000000000ff&depth=1');
     expect(res.status).toBe(404);
+  });
+
+  it('keeps tree integrity across two layers: a removed mid-comment tombstones', async () => {
+    // root (published) → mid (REMOVED) → leaf (published). The removed mid must
+    // render as an empty tombstone (no body/author leak) so the visible leaf is
+    // never orphaned — proven through the holistic depth-2 visibility pass.
+    const root = await insertContribution({
+      id: '0a000000-0000-4000-8000-000000000001',
+      parent: null,
+      state: 'published',
+      body: 'Root comment.',
+    });
+    const mid = await insertContribution({
+      id: '0a000000-0000-4000-8000-000000000002',
+      parent: root,
+      state: 'removed',
+      body: 'This text was removed and must not leak.',
+    });
+    await insertContribution({
+      id: '0a000000-0000-4000-8000-000000000003',
+      parent: mid,
+      state: 'published',
+      body: 'A visible reply beneath the removed comment.',
+    });
+
+    const res = await getComments('?depth=2');
+    expect(res.status).toBe(200);
+    const body = storyCommentsResponseSchema.parse(await res.json());
+    const top = body.comments.find((c) => c.contribution_id === root.id);
+    const tomb = top?.replies[0];
+    // The removed mid is a tombstone: present (tree intact) but content-free.
+    expect(tomb?.contribution_id).toBe(mid.id);
+    expect(tomb?.body).toBe('');
+    expect(tomb?.author_handle).toBeNull();
+    expect(tomb?.moderation_state).toBe('removed');
+    // …and the visible grandchild still renders beneath it.
+    expect(tomb?.replies[0]?.body).toBe('A visible reply beneath the removed comment.');
+  });
+
+  it('does not render a fully-removed subtree at all', async () => {
+    // root (REMOVED) with only a REMOVED child ⇒ no visible content ⇒ omitted.
+    const root = await insertContribution({
+      id: '0b000000-0000-4000-8000-000000000001',
+      parent: null,
+      state: 'removed',
+      body: 'Removed root.',
+    });
+    await insertContribution({
+      id: '0b000000-0000-4000-8000-000000000002',
+      parent: root,
+      state: 'removed',
+      body: 'Removed child.',
+    });
+    const res = await getComments('?depth=2');
+    expect(res.status).toBe(200);
+    const body = storyCommentsResponseSchema.parse(await res.json());
+    expect(body.comments.some((c) => c.contribution_id === root.id)).toBe(false);
   });
 });

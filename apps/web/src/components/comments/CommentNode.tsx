@@ -105,11 +105,14 @@ export function CommentNode({
         </div>
       ) : null}
 
-      {/* Past the depth budget OR more direct replies than previewed → defer to
-          the dedicated comment-centric page (re-rooted here) so the reading area
-          never collapses under runaway indentation. */}
+      {/* Past the depth budget OR more (published) replies than are shown here →
+          defer to the dedicated comment-centric page (re-rooted here) so the
+          reading area never collapses under runaway indentation.  Gating on the
+          REPLY COUNT vs. what is shown (rather than the server's coarser
+          `has_more_replies`) keeps the label honest — never "Show all 0 replies"
+          when a node's extra children are all removed/hidden. */}
       {canNestDeeper ? (
-        comment.has_more_replies ? (
+        replyCount > comment.replies.length ? (
           <ContinueThreadLink
             storyId={storyId}
             rootId={comment.contribution_id}

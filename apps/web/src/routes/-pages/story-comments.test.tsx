@@ -180,6 +180,21 @@ describe('StoryCommentsPage (dedicated comment page)', () => {
     );
   });
 
+  it('hides the redundant "Up one level" when the anchor is a top-level comment', () => {
+    const anchor = node('77777777-7777-4777-8777-777777777777', {
+      depth: 0,
+      body: 'A top-level focused comment.',
+      parent_contribution_id: null,
+    });
+    search = { root: anchor.contribution_id };
+    commentsState = { data: { comments: [], anchor, next_cursor: null } };
+    render(<StoryCommentsPage />);
+    // "All comments" IS the parent level for a top-level anchor…
+    expect(screen.getByRole('link', { name: 'All comments' })).toBeInTheDocument();
+    // …so there is no duplicate "Up one level" pointing to the same place.
+    expect(screen.queryByRole('link', { name: /up one level/i })).not.toBeInTheDocument();
+  });
+
   it('shows an error state when the focused thread cannot be read', () => {
     search = { root: '99999999-9999-4999-8999-999999999999' };
     commentsState = { isError: true };

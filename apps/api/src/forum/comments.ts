@@ -172,18 +172,19 @@ async function buildProjectCtx(
   const visibleArr = visibleRows(unique, requesterUserId, hide);
   const visible = new Map<string, boolean>();
   for (const entry of visibleArr) visible.set(entry.row.contributionId, entry.tombstone);
-  const childCounts = await bundle.forum.contributions.childCounts(
-    unique.map((record) => record.contributionId),
-  );
   const rendered = visibleArr.filter((entry) => !entry.tombstone).map((entry) => entry.row);
-  const authorIds = new Set<string>();
-  for (const record of rendered) {
-    if (record.userId !== null) authorIds.add(record.userId);
-  }
-  const authors = new Map<string, { handle: string; displayName: string } | null>();
-  for (const userId of authorIds) authors.set(userId, await resolveAuthor(userId));
-  const media = await resolveMedia(bundle, rendered, opts.mintMediaUrl, opts.restrictedMedia);
-  return { requesterUserId, visible, childCounts, authors, media };
+  // Authors are resolved for each UNIQUE author once (the resolver memoizes; the
+  // distinct ids make concurrent calls race-free).  Child counts, author
+  // resolution, and media all read independent stores, so run them concurrently.
+  const authorIds = [
+    ...new Set(rendered.map((record) => record.userId).filter((id): id is string => id !== null)),
+  ];
+  const [childCounts, authorEntries, media] = await Promise.all([
+    bundle.forum.contributions.childCounts(unique.map((record) => record.contributionId)),
+    Promise.all(authorIds.map(async (id) => [id, await resolveAuthor(id)] as const)),
+    resolveMedia(bundle, rendered, opts.mintMediaUrl, opts.restrictedMedia),
+  ]);
+  return { requesterUserId, visible, childCounts, authors: new Map(authorEntries), media };
 }
 
 function projectNode(node: RawNode, ctx: ProjectCtx): CommentItem | null {

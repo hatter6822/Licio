@@ -100,18 +100,24 @@ function Breadcrumbs({
           >
             All comments
           </Link>
-          <span className="text-ink-muted" aria-hidden>
-            ·
-          </span>
-          <Link
-            to="/stories/$storyId/comments"
-            params={{ storyId }}
-            search={anchor.parent_contribution_id ? { root: anchor.parent_contribution_id } : {}}
-            className={linkClass}
-          >
-            <Icon name="chevron-up" className="size-4" aria-hidden />
-            Up one level
-          </Link>
+          {/* Only a reply has somewhere to go "up" to; for a top-level anchor,
+              "All comments" above already IS the parent level. */}
+          {anchor.parent_contribution_id ? (
+            <>
+              <span className="text-ink-muted" aria-hidden>
+                ·
+              </span>
+              <Link
+                to="/stories/$storyId/comments"
+                params={{ storyId }}
+                search={{ root: anchor.parent_contribution_id }}
+                className={linkClass}
+              >
+                <Icon name="chevron-up" className="size-4" aria-hidden />
+                Up one level
+              </Link>
+            </>
+          ) : null}
         </>
       ) : null}
     </nav>

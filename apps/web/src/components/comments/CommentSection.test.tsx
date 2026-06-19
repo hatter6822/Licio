@@ -229,6 +229,52 @@ describe('CommentSection', () => {
     );
   });
 
+  it('omits "Show more comments" when every reply is already shown inline', () => {
+    // A top-level comment whose single reply is a leaf with no further replies:
+    // the whole thread fits in one inline layer, so there is nothing "more".
+    const shownReply = comment({
+      contribution_id: '55555555-5555-4555-8555-555555555555',
+      parent_contribution_id: '33333333-3333-4333-8333-333333333333',
+      body: 'A fully-shown reply.',
+      depth: 1,
+      reply_count: 0,
+      has_more_replies: false,
+    });
+    queryState = {
+      hasMore: false,
+      data: {
+        comments: [comment({ replies: [shownReply], reply_count: 1, has_more_replies: false })],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 2, sources_count: 0, corrections_count: 0 },
+        summary: null,
+      },
+    };
+    renderSection();
+    expect(screen.getByText('A fully-shown reply.')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /show more comments/i })).not.toBeInTheDocument();
+    // …and a fully-shown leaf reply offers no dead "continue" link either.
+    expect(screen.queryByRole('link', { name: /continue this thread/i })).not.toBeInTheDocument();
+  });
+
+  it('shows "Show more comments" when more top-level comments remain unfetched', () => {
+    queryState = {
+      hasMore: true,
+      data: {
+        comments: [comment({ reply_count: 0, has_more_replies: false })],
+        next_cursor: 'next',
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
+        summary: null,
+      },
+    };
+    renderSection();
+    expect(screen.getByRole('link', { name: /show more comments/i })).toHaveAttribute(
+      'href',
+      `/stories/${storyId}/comments`,
+    );
+  });
+
   it('drains the live-comment buffer and refetches on the new-comments prompt', async () => {
     queryState = {
       data: {

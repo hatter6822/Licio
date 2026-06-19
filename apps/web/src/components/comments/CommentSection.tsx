@@ -43,10 +43,16 @@ export function CommentSection({ storyId, threadId }: CommentSectionProps): Reac
   );
 
   const visible = comments.data?.comments ?? [];
-  // There is "more to see" when more top-level comments remain unfetched OR any
-  // shown thread continues past the single inline layer.
+  // There is "more to see" only when something genuinely lies past the single
+  // inline layer — exactly the condition under which a `CommentNode` renders a
+  // "Show all"/"Continue" link: a top-level comment has more direct replies than
+  // are shown (`reply_count > replies.length`), or a SHOWN depth-1 reply itself
+  // has replies (`reply_count > 0`).  A top-level comment whose only reply is
+  // already shown adds nothing, so it must NOT trigger the entry.
   const hasDeeperThreads = visible.some(
-    (comment) => comment.has_more_replies || comment.reply_count > 0,
+    (comment) =>
+      comment.reply_count > comment.replies.length ||
+      comment.replies.some((reply) => reply.reply_count > 0),
   );
   const showFullConversation = comments.hasMore || hasDeeperThreads;
 
