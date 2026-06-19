@@ -72,6 +72,18 @@ export interface AutoModerationSink {
     reasonCode: string;
     reasons: string[];
   }): Promise<void>;
+  /**
+   * WS-U: the in-room community agent held/removed a contribution. Emits the
+   * author's statement-of-reasons notice (no silent sanction) — a COMMUNITY
+   * action carrying no platform reason code, with the human-floor review as its
+   * recourse. The agent's provenance triple is already in the knomosis audit log.
+   */
+  recordAgentHold(input: {
+    contributionId: string;
+    authorUserId: string;
+    removed: boolean;
+    reason: string | null;
+  }): Promise<void>;
 }
 
 /**
@@ -94,7 +106,11 @@ export interface RoomAgentModerator {
     body: string;
     citationCount: number;
     attachmentCount: number;
-  }): Promise<{ state: 'published' | 'under_review' | 'removed' } | null>;
+  }): Promise<{
+    state: 'published' | 'under_review' | 'removed';
+    /** The community-policy statement of reasons (for the author notice). */
+    reason?: string;
+  } | null>;
 }
 
 export interface ForumServices {

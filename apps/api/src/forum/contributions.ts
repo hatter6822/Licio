@@ -503,6 +503,7 @@ export async function createContribution(
   //     (with its provenance triple) is logged inside the GovernanceService.
   let moderationState: ModState = floorState;
   let agentEscalated = false;
+  let agentReason: string | null = null;
   if (thread.roomId !== null && forum.agentModerator !== null) {
     const agent = await forum.agentModerator.moderateContribution({
       roomId: thread.roomId,
@@ -516,6 +517,7 @@ export async function createContribution(
     if (agent !== null && MOD_STATE_RANK[agent.state] > MOD_STATE_RANK[moderationState]) {
       moderationState = agent.state;
       agentEscalated = true;
+      agentReason = agent.reason ?? null;
       forum.metrics.increment('contributions.agent_moderated');
     }
   }
@@ -671,6 +673,17 @@ export async function createContribution(
         resolvedAt: null,
         notBefore: null,
       });
+      // No silent sanction: the author gets the agent's statement of reasons.
+      // AWAITED inside the compensating try (a hold is only legitimate WITH its
+      // author notice, mirroring the auto-block path).
+      if (forum.autoModerationSink !== null) {
+        await forum.autoModerationSink.recordAgentHold({
+          contributionId: contribution.contributionId,
+          authorUserId: userId,
+          removed: moderationState === 'removed',
+          reason: agentReason,
+        });
+      }
     }
     if (request.type === 'moderation_concern') {
       forum.metrics.increment('contributions.moderation_concern');
@@ -974,6 +987,7 @@ export async function editContribution(
         : 'published';
   let target: ModState = floorState;
   let agentEscalated = false;
+  let agentReason: string | null = null;
   if (editThread?.roomId != null && forum.agentModerator !== null) {
     const agent = await forum.agentModerator.moderateContribution({
       roomId: editThread.roomId,
@@ -988,6 +1002,7 @@ export async function editContribution(
     });
     if (agent !== null && MOD_STATE_RANK[agent.state] > MOD_STATE_RANK[target]) {
       target = agent.state;
+      agentReason = agent.reason ?? null;
       agentEscalated = true;
     }
   }
@@ -1028,6 +1043,16 @@ export async function editContribution(
       resolvedAt: null,
       notBefore: null,
     });
+    // The in-room agent held an edit the floor cleared: notify the author with
+    // the agent's statement of reasons (no silent sanction).
+    if (agentEscalated && verdict.disposition === 'clear' && forum.autoModerationSink !== null) {
+      await forum.autoModerationSink.recordAgentHold({
+        contributionId,
+        authorUserId: userId,
+        removed: target === 'removed',
+        reason: agentReason,
+      });
+    }
     forum.metrics.increment('contributions.edited');
     return { ok: true, contribution: held ?? edited };
   }

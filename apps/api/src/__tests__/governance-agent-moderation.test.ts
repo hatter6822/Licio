@@ -202,7 +202,8 @@ describe('WS-U createRoomAgentModerator (governance adapter)', () => {
       citationCount: 0,
       attachmentCount: 0,
     });
-    expect(decision).toEqual({ state: 'under_review' });
+    expect(decision?.state).toBe('under_review');
+    expect(decision?.reason).toBeTruthy(); // carries the community statement of reasons
   });
 
   it('maps an allow decision (few links) to published', async () => {
@@ -235,7 +236,7 @@ describe('WS-U createRoomAgentModerator (governance adapter)', () => {
       citationCount: 1,
       attachmentCount: 0,
     });
-    expect(decision).toEqual({ state: 'under_review' });
+    expect(decision?.state).toBe('under_review');
   });
 
   it('does not miscount an email address as a mention', async () => {
@@ -285,15 +286,17 @@ describe('WS-U createRoomAgentModerator (governance adapter)', () => {
       }),
     ).toEqual({ state: 'published' });
     expect(
-      await port.moderateContribution({
-        roomId: ROOM,
-        contributionId: 'c6',
-        authorUserId: 'u1',
-        type: 'comment',
-        body: 'hey @alice look here',
-        citationCount: 0,
-        attachmentCount: 0,
-      }),
-    ).toEqual({ state: 'under_review' });
+      (
+        await port.moderateContribution({
+          roomId: ROOM,
+          contributionId: 'c6',
+          authorUserId: 'u1',
+          type: 'comment',
+          body: 'hey @alice look here',
+          citationCount: 0,
+          attachmentCount: 0,
+        })
+      )?.state,
+    ).toBe('under_review');
   });
 });

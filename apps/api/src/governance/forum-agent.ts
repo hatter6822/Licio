@@ -204,7 +204,10 @@ export function createRoomAgentModerator(
       };
       const result = await svc.moderate(roomId, context, contributionId);
       if (!result.ok || result.value === null) return null;
-      return { state: ACTION_TO_STATE[result.value.action] };
+      const state = ACTION_TO_STATE[result.value.action];
+      // The reason is only consumed for the author's hold/removal notice; a
+      // published decision carries none (keeps the published return shape clean).
+      return state === 'published' ? { state } : { state, reason: result.value.reason };
     },
   };
 }

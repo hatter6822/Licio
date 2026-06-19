@@ -130,6 +130,46 @@ describe('WS-J.2.6 contribution auto-block', () => {
     expect(res.ok && res.contribution.moderationState).toBe('published');
   });
 
+  it('#8 notifies the author when the in-room agent holds OR removes content', async () => {
+    const { threadId } = await seedThread(fixture);
+
+    // (a) The floor clears, but the in-room community agent holds for review.
+    fixture.forum.agentModerator = {
+      moderateContribution: async () => ({
+        state: 'under_review',
+        reason: 'Off-topic for this room.',
+      }),
+    };
+    const held = await post(contributionCreateSchema.parse(contributionBody('question', threadId)));
+    expect(held.ok && held.contribution.moderationState).toBe('under_review');
+
+    // (b) The in-room agent removes a different contribution.
+    fixture.forum.agentModerator = {
+      moderateContribution: async () => ({ state: 'removed', reason: 'Prohibited content.' }),
+    };
+    const removed = await post(
+      contributionCreateSchema.parse(contributionBody('explanation', threadId)),
+    );
+    expect(removed.ok && removed.contribution.moderationState).toBe('removed');
+
+    await fixture.forum.settle();
+    await mod.settle();
+
+    // Each is a COMMUNITY-layer statement-of-reasons notice: no platform reason
+    // code, not a WS-J in-app appeal (recourse is the queued human review), and it
+    // carries the agent's reason text (no silent sanction).
+    const notices = await mod.notices.listByUser(AUTHOR, null, 5);
+    expect(notices).toHaveLength(2);
+    const bodies = notices.map((n) => n.body).join('\n');
+    expect(bodies).toContain('removed your contribution (Prohibited content.)');
+    expect(bodies).toContain('held for review your contribution (Off-topic for this room.)');
+    for (const n of notices) {
+      expect(n.reasonCode).toBeNull();
+      expect(n.appealable).toBe(false);
+    }
+    expect(fixture.forum.metrics.snapshot()['contributions.agent_moderated'] ?? 0).toBe(2);
+  });
+
   it('#3 does not flag a duplicate flood one submission/room early (no double-count)', async () => {
     // DISTINCT rooms (cross-room flooding needs duplicateFloodMinRooms=2 rooms
     // AND duplicateFloodCount=3 similar posts): seed each thread in its own room.
