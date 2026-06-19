@@ -230,6 +230,44 @@ export class GovernanceService {
     return ok({ settled: result.settled, winnerUserId: result.winnerUserId });
   }
 
+  /**
+   * Drive the time-based election lifecycle (the scheduler's per-tick work,
+   * ADR-7): open an election for every seat whose term has elapsed, and settle
+   * every open election whose voting window has closed (kernel-tallied,
+   * fail-safe — a failed election keeps the incumbent). The eligible-voter count
+   * is INJECTED (a soft cross-context read of room membership) so the service
+   * stays bound to its own `knomosis` stores and never imports the forum/ranking
+   * context (the pay-to-rank isolation boundary).
+   */
+  async runElectionLifecycle(
+    eligibleVoterCount: (roomId: string) => Promise<number>,
+    nowMs: number = this.deps.now().getTime(),
+  ): Promise<{ scheduled: number; settled: number }> {
+    const seats = await this.deps.stores.seats.list();
+    let scheduled = 0;
+    let settled = 0;
+    for (const seat of seats) {
+      if (seat.currentElectionId === null) {
+        if (nowMs >= Date.parse(seat.termEnd)) {
+          const result = await this.scheduleElection(seat.roomId);
+          if (result.ok) scheduled += 1;
+        }
+        continue;
+      }
+      const election = await this.deps.stores.elections.get(seat.currentElectionId);
+      if (
+        election !== null &&
+        election.status === 'open' &&
+        nowMs >= Date.parse(election.closesAt)
+      ) {
+        const count = await eligibleVoterCount(seat.roomId);
+        const result = await this.settleElection(election.electionId, count);
+        if (result.ok) settled += 1;
+      }
+    }
+    return { scheduled, settled };
+  }
+
   // --- Stage 2: model/prompt registry + admission gate ---------------------
 
   /** Propose a model + prompt (seat holder only). Validates and content-addresses. */

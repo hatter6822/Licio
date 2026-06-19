@@ -66,7 +66,15 @@ import { toContributionPublic } from './forum/threads.js';
 import { resolveGovernanceConfig } from './governance/config.js';
 import { createDrizzleGovernanceStores } from './governance/drizzle-governance-stores.js';
 import { createRoomAgentModerator } from './governance/forum-agent.js';
-import { createGovernanceService, setGovernanceService } from './governance/services.js';
+import {
+  GOVERNANCE_SCHEDULER_INTERVAL_MS,
+  startGovernanceScheduler,
+} from './governance/scheduler.js';
+import {
+  createGovernanceService,
+  getGovernanceService,
+  setGovernanceService,
+} from './governance/services.js';
 import {
   DrizzleAuditStore,
   DrizzleIdentityStore,
@@ -928,6 +936,22 @@ startAiGovernanceScheduler(
   aiGovernanceServices,
   (err, task) => logger.error({ err, task }, 'ai-governance scheduler task failed'),
   AI_GOVERNANCE_SCHEDULER_INTERVAL_MS,
+  { lease: makeJobLease() },
+);
+
+// Hourly WS-U maintenance: the steward-election lifecycle (open elections for
+// elapsed terms; settle closed elections, kernel-tallied + fail-safe) — under its
+// own job lease. The eligible-voter count is a soft cross-context read of room
+// membership (no FK; the pay-to-rank isolation boundary holds).
+startGovernanceScheduler(
+  {
+    service: getGovernanceService(),
+    eligibleVoterCount: (roomId) => forumServices.rooms.countMembers(roomId),
+    log: (event, meta) => logger.info(meta, event),
+    now: () => Date.now(),
+  },
+  (err, task) => logger.error({ err, task }, 'governance scheduler task failed'),
+  GOVERNANCE_SCHEDULER_INTERVAL_MS,
   { lease: makeJobLease() },
 );
 

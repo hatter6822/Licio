@@ -44,7 +44,12 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
 `GovernanceService` composes the domain over injectable stores:
 
 - **Stage 1** — seat bootstrap (creator), simulated Knomosis election lifecycle
-  (schedule on term-elapse, idempotent ballots, kernel-tallied settle, fail-safe).
+  (schedule on term-elapse, idempotent ballots, kernel-tallied settle, fail-safe),
+  DRIVEN at runtime by the lease-guarded hourly governance scheduler
+  (`scheduler.ts` → `runElectionLifecycle`): it opens an election for every seat
+  whose term has elapsed and settles every closed election (the eligible-voter
+  count is a soft cross-context read of room membership), so a creator-bootstrapped
+  seat actually rotates yearly rather than staying fixed.
 - **Stage 2** — community model/prompt registry, content-addressing, and the
   **platform admission gate**: the model's deterministic decisions must fall within
   the platform `[min,max]` severity band on every fixture (catching under- and
