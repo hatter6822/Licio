@@ -181,6 +181,7 @@ describe('WS-U createRoomAgentModerator (governance adapter)', () => {
       await port.moderateContribution({
         roomId: ROOM,
         contributionId: 'c1',
+        authorUserId: 'u1',
         type: 'comment',
         body: 'hello',
         citationCount: 0,
@@ -195,6 +196,7 @@ describe('WS-U createRoomAgentModerator (governance adapter)', () => {
     const decision = await port.moderateContribution({
       roomId: ROOM,
       contributionId: 'c2',
+      authorUserId: 'u1',
       type: 'comment',
       body: 'see https://a.test https://b.test https://c.test',
       citationCount: 0,
@@ -209,11 +211,89 @@ describe('WS-U createRoomAgentModerator (governance adapter)', () => {
     const decision = await port.moderateContribution({
       roomId: ROOM,
       contributionId: 'c3',
+      authorUserId: 'u1',
       type: 'comment',
       body: 'a civil and helpful comment',
       citationCount: 0,
       attachmentCount: 0,
     });
     expect(decision).toEqual({ state: 'published' });
+  });
+
+  it('counts inline links canonically (one per URL token, plus citations)', async () => {
+    await seedActiveBinding(); // flags at link_count_gte 3
+    const port = createRoomAgentModerator();
+    // Two inline URL tokens + one citation = 3 ⇒ flagged. (The old substring
+    // scan would also have hit 3, but it double-counts a citation URL repeated
+    // inline; this counts one token per URL.)
+    const decision = await port.moderateContribution({
+      roomId: ROOM,
+      contributionId: 'c4',
+      authorUserId: 'u1',
+      type: 'comment',
+      body: 'refs https://a.test and https://b.test',
+      citationCount: 1,
+      attachmentCount: 0,
+    });
+    expect(decision).toEqual({ state: 'under_review' });
+  });
+
+  it('does not miscount an email address as a mention', async () => {
+    // A model that flags on >=1 mention; an email must NOT trigger it.
+    const svc = createGovernanceService({ stores: createInMemoryGovernanceStores() });
+    setGovernanceService(svc);
+    await svc.bootstrapSeat(ROOM, STEWARD);
+    const mentionBundle = {
+      bundleId: 'flag-mentions',
+      version: '1',
+      name: 'Flag mentions',
+      moderationRules: [
+        {
+          id: 'mentions',
+          when: { kind: 'mention_count_gte', value: 1 },
+          action: 'flag_for_review',
+          reason: 'Mentions pending review.',
+        },
+        // A link rule too, so the bundle clears the admission gate (which checks
+        // a link-spam fixture is not waved through).
+        {
+          id: 'links',
+          when: { kind: 'link_count_gte', value: 3 },
+          action: 'flag_for_review',
+          reason: 'Many links pending review.',
+        },
+      ],
+      promptTemplates: {},
+      config: { summaryStyle: 'neutral_brief', explanationVerbosity: 'standard' },
+      requestedCapabilities: ['moderate.flag'],
+    };
+    const proposed = await svc.proposeModel(ROOM, STEWARD, mentionBundle, 'Be neutral.');
+    if (!proposed.ok) throw new Error('propose failed');
+    await svc.evaluateModel(proposed.value.modelId);
+    await svc.approveModel(ROOM, proposed.value.modelId, null, null);
+    const port = createRoomAgentModerator();
+    // An email (user@host) is not a mention; a real @handle is.
+    expect(
+      await port.moderateContribution({
+        roomId: ROOM,
+        contributionId: 'c5',
+        authorUserId: 'u1',
+        type: 'comment',
+        body: 'contact me at someone@example.com',
+        citationCount: 0,
+        attachmentCount: 0,
+      }),
+    ).toEqual({ state: 'published' });
+    expect(
+      await port.moderateContribution({
+        roomId: ROOM,
+        contributionId: 'c6',
+        authorUserId: 'u1',
+        type: 'comment',
+        body: 'hey @alice look here',
+        citationCount: 0,
+        attachmentCount: 0,
+      }),
+    ).toEqual({ state: 'under_review' });
   });
 });

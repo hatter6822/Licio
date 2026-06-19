@@ -31,7 +31,7 @@ import {
   registerForumConsumers,
   setForumServices,
 } from './forum/services.js';
-import { createRoomAgentModerator } from './governance/forum-agent.js';
+import { buildAuthorHistoryReader, createRoomAgentModerator } from './governance/forum-agent.js';
 import { buildIdentityServicesFromEnv, setIdentityServices } from './identity/services.js';
 import {
   createInMemoryIngestionServices,
@@ -96,8 +96,19 @@ const forumServices = createInMemoryForumServices({
 });
 await forumServices.reloadConfig();
 // WS-U: the contribution path consults the in-room agent (uses the lazy
-// in-memory GovernanceService singleton in the harness).
-forumServices.agentModerator = createRoomAgentModerator();
+// in-memory GovernanceService singleton in the harness), with real author-history
+// signals over the harness's in-memory stores.
+forumServices.agentModerator = createRoomAgentModerator({
+  readAuthorHistory: buildAuthorHistoryReader({
+    getUser: (id) => identityServices.store.getUser(id),
+    getSubscription: (roomId, id) => forumServices.rooms.getSubscription(roomId, id),
+    stewardRolesFor: (roomId, id) => forumServices.rooms.stewardRolesFor(roomId, id),
+    listUserContributions: (id, limit) => forumServices.contributions.listByUser(id, null, limit),
+    getThreadRoomId: async (threadId) =>
+      (await ingestionServices.stories.getThreadById(threadId))?.roomId ?? null,
+    now: () => Date.now(),
+  }),
+});
 setForumServices(forumServices);
 registerForumConsumers(eventServices, ingestionServices, forumServices);
 

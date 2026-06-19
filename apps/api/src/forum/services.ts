@@ -88,6 +88,8 @@ export interface RoomAgentModerator {
   moderateContribution(input: {
     roomId: string;
     contributionId: string;
+    /** The contribution author (for the SPEC §24.6 author-history signals). */
+    authorUserId: string;
     type: ContributionType;
     body: string;
     citationCount: number;

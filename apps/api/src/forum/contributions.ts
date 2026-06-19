@@ -507,6 +507,7 @@ export async function createContribution(
     const agent = await forum.agentModerator.moderateContribution({
       roomId: thread.roomId,
       contributionId,
+      authorUserId: userId,
       type: request.type,
       body: request.body,
       citationCount: 'citations' in request && request.citations ? request.citations.length : 0,
@@ -977,6 +978,7 @@ export async function editContribution(
     const agent = await forum.agentModerator.moderateContribution({
       roomId: editThread.roomId,
       contributionId,
+      authorUserId: userId,
       type: existing.type,
       body: patch.body ?? existing.body,
       citationCount: (patch.citations ?? existing.citations).length,

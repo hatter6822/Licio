@@ -65,7 +65,7 @@ import {
 import { toContributionPublic } from './forum/threads.js';
 import { resolveGovernanceConfig } from './governance/config.js';
 import { createDrizzleGovernanceStores } from './governance/drizzle-governance-stores.js';
-import { createRoomAgentModerator } from './governance/forum-agent.js';
+import { buildAuthorHistoryReader, createRoomAgentModerator } from './governance/forum-agent.js';
 import {
   GOVERNANCE_SCHEDULER_INTERVAL_MS,
   startGovernanceScheduler,
@@ -792,8 +792,20 @@ setGovernanceService(
   }),
 );
 // The forum contribution path consults the in-room agent (subordinate to the
-// platform floor) for any room with an active community-approved binding.
-forumServices.agentModerator = createRoomAgentModerator();
+// platform floor) for any room with an active community-approved binding. The
+// agent's author-history signals are read from the real identity + forum +
+// ingestion stores (only for governed rooms, on this path).
+forumServices.agentModerator = createRoomAgentModerator({
+  readAuthorHistory: buildAuthorHistoryReader({
+    getUser: (id) => identityServices.store.getUser(id),
+    getSubscription: (roomId, id) => forumServices.rooms.getSubscription(roomId, id),
+    stewardRolesFor: (roomId, id) => forumServices.rooms.stewardRolesFor(roomId, id),
+    listUserContributions: (id, limit) => forumServices.contributions.listByUser(id, null, limit),
+    getThreadRoomId: async (threadId) =>
+      (await ingestionServices.stories.getThreadById(threadId))?.roomId ?? null,
+    now: () => Date.now(),
+  }),
+});
 
 // Development demo seed (NEVER in production): populate rooms, stories, threads,
 // and multi-author comments through the REAL stores so a fresh dev database
