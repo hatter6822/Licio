@@ -16,8 +16,10 @@ import {
   jsonb,
   numeric,
   pgSchema,
+  primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 import { users } from './user.js';
@@ -81,7 +83,12 @@ export const stewardElections = knomosisSchema.table(
 );
 export type StewardElectionRow = typeof stewardElections.$inferSelect;
 
-/** One member's simulated-mode ballot (WS-U.1.1c). PK enforces one per voter. */
+/**
+ * One member's simulated-mode ballot (WS-U.1.1c). The composite primary key
+ * `(election_id, voter_user_id)` STRUCTURALLY enforces one ballot per voter per
+ * election (the idempotent-ballot invariant the service relies on), so a
+ * concurrent double-vote collides on the PK rather than racing a read-then-write.
+ */
 export const stewardGovernanceVotes = knomosisSchema.table(
   'steward_governance_vote',
   {
@@ -97,7 +104,7 @@ export const stewardGovernanceVotes = knomosisSchema.table(
     weight: numeric('weight').notNull(),
     castAt: tz('cast_at').notNull().defaultNow(),
   },
-  (t) => [index('steward_vote_pk').on(t.electionId, t.voterUserId)],
+  (t) => [primaryKey({ columns: [t.electionId, t.voterUserId] })],
 );
 export type StewardGovernanceVoteRow = typeof stewardGovernanceVotes.$inferSelect;
 
@@ -117,7 +124,13 @@ export const roomGovernanceModels = knomosisSchema.table(
     evaluationRef: uuid('evaluation_ref'), // soft ref to the WS-K evaluation decision
     createdAt: tz('created_at').notNull().defaultNow(),
   },
-  (t) => [index('room_governance_model_room_idx').on(t.roomId)],
+  (t) => [
+    index('room_governance_model_room_idx').on(t.roomId),
+    // A content-addressed bundle is unique PER ROOM (the in-room "this exact
+    // model is already proposed" guarantee): a duplicate insert collides here
+    // rather than relying on a read-then-write check.
+    uniqueIndex('room_governance_model_room_digest_uq').on(t.roomId, t.artifactDigest),
+  ],
 );
 export type RoomGovernanceModelRow = typeof roomGovernanceModels.$inferSelect;
 

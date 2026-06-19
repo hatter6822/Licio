@@ -253,6 +253,13 @@
       "when": 1781890674971,
       "tag": "0035_ws_u_ai_governed_rooms",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1781896109097,
+      "tag": "0036_ws_u_governance_uniqueness",
+      "breakpoints": true
     }
   ]
 }

@@ -11,8 +11,9 @@
 > bounded moderation agent, kernel-backed treasury), the **`/v1/rooms/*`** routes + seat
 > bootstrap on room create, and the **web surface** (`apps/web/src/components/governance/`):
 > the in-room "governed by" transparency panel and the elected-steward propose/ratify
-> manager with the member-downloadable proposal registry, both on the room page. Residuals
-> (Stages 4/6, the steward-election voting UI, gated Drizzle adapters, doctrine-matrix
+> manager with the member-downloadable proposal registry, both on the room page. The nine
+> stores have gated Drizzle adapters bound at boot (migration `0036` adds the vote PK + model
+> digest uniqueness). Residuals (Stages 4/6, the steward-election voting UI, doctrine-matrix
 > propagation) are tracked in `docs/governance/README.md`. The shipped WS-K
 > platform (`@licio/ai-governance` + `apps/api/src/ai-governance` + the `0034` schema + the
 > `/v1/ai/*` routes) is **not discarded** — it is re-scoped into the *platform-side*

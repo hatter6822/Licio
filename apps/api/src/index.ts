@@ -63,6 +63,9 @@ import {
   setForumServices,
 } from './forum/services.js';
 import { toContributionPublic } from './forum/threads.js';
+import { resolveGovernanceConfig } from './governance/config.js';
+import { createDrizzleGovernanceStores } from './governance/drizzle-governance-stores.js';
+import { createGovernanceService, setGovernanceService } from './governance/services.js';
 import {
   DrizzleAuditStore,
   DrizzleIdentityStore,
@@ -761,6 +764,19 @@ aiGovernanceServices.forum = forumServices;
 await aiGovernanceServices.reloadConfig();
 setAiGovernanceServices(aiGovernanceServices);
 registerAiGovernanceConsumers(eventServices, aiGovernanceServices);
+
+// WS-U AI-governed rooms: bind the GovernanceService process singleton to the
+// production Drizzle stores (the isolated `knomosis` context) when a database is
+// configured, else the in-memory stores. Done BEFORE serving, so the routes and
+// the room-create seat bootstrap resolve the bound service. The crypto flag stays
+// fail-closed by default (no treasury powers); in-room moderation + simulated
+// elections need no crypto.
+setGovernanceService(
+  createGovernanceService({
+    config: resolveGovernanceConfig(),
+    ...(db ? { stores: createDrizzleGovernanceStores(db) } : {}),
+  }),
+);
 
 // Development demo seed (NEVER in production): populate rooms, stories, threads,
 // and multi-author comments through the REAL stores so a fresh dev database

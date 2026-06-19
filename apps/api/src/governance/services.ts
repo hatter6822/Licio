@@ -38,6 +38,15 @@ export function getGovernanceService(): GovernanceService {
   return singleton;
 }
 
+/**
+ * Bind the process singleton (the boot wiring point). Production calls this with
+ * a service over the Drizzle stores BEFORE any route/seat-bootstrap touches
+ * `getGovernanceService()`, so every later read/write hits the same bound store.
+ */
+export function setGovernanceService(service: GovernanceService): void {
+  singleton = service;
+}
+
 /** Test hook: drop the singleton so a fresh in-memory service is built. */
 export function resetGovernanceService(): void {
   singleton = null;

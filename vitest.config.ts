@@ -47,6 +47,7 @@ export default defineConfig({
         'apps/api/src/invariants/drizzle-invariant-stores.ts',
         'apps/api/src/ranking/drizzle-ranking-stores.ts',
         'apps/api/src/moderation/drizzle-moderation-stores.ts',
+        'apps/api/src/governance/drizzle-governance-stores.ts',
         'packages/db/src/similarity.ts',
         // Dev/test-only entrypoint + fixtures (never production): the in-memory
         // E2E server is run by Playwright, not vitest, and the demo seed/data are

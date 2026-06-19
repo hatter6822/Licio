@@ -3,7 +3,12 @@
 // WS-U GovernanceService residual branch coverage (edge guards).
 import { describe, expect, it } from 'vitest';
 import { resolveGovernanceConfig } from '../governance/config.js';
-import { createGovernanceService } from '../governance/services.js';
+import {
+  createGovernanceService,
+  getGovernanceService,
+  resetGovernanceService,
+  setGovernanceService,
+} from '../governance/services.js';
 import { createInMemoryGovernanceStores } from '../governance/stores.js';
 
 function make(cryptoEnabled = false) {
@@ -141,5 +146,18 @@ describe('GovernanceService residual branches', () => {
       proposedAt: '2026-06-19T00:00:00.000Z',
     });
     expect(bad.ok).toBe(false); // invalid_action
+  });
+});
+
+describe('GovernanceService singleton binding', () => {
+  it('setGovernanceService binds the process singleton (the boot wiring point)', () => {
+    resetGovernanceService();
+    const svc = createGovernanceService({ stores: createInMemoryGovernanceStores() });
+    setGovernanceService(svc);
+    expect(getGovernanceService()).toBe(svc);
+    // After reset, the next get lazily builds a fresh (different) instance.
+    resetGovernanceService();
+    expect(getGovernanceService()).not.toBe(svc);
+    resetGovernanceService();
   });
 });

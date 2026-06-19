@@ -12,7 +12,8 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
 | Layer | Where | Status |
 |---|---|---|
 | Pure domain (kernel, DSL, capabilities, elections) | `packages/governance` (`@licio/governance`) | **Shipped** |
-| Isolated persistence | `packages/db/src/schema/governance.ts` (`knomosis` pgSchema) + migration `0035` | **Shipped** |
+| Isolated persistence | `packages/db/src/schema/governance.ts` (`knomosis` pgSchema) + migrations `0035`/`0036` | **Shipped** |
+| Production store binding | `apps/api/src/governance/drizzle-governance-stores.ts` (gated; bound at boot when `DATABASE_URL` is set) | **Shipped** |
 | Runtime service | `apps/api/src/governance/` | **Shipped (Stages 1-3, 5-core)** |
 | HTTP surface | `apps/api/src/routes/governance.ts` (mounted in `v1.ts`); seat bootstrap on room create | **Shipped** |
 | Web surface | `apps/web/src/components/governance/` (mounted on the room page) | **Shipped** |
@@ -78,6 +79,19 @@ Both surfaces are mounted on the room page behind the WS-Q content read bar:
   ratify affordances are gated to the seat holder (`stewardSeat.holder_user_id ===
   the signed-in user`). No applause primitives, and no vote tallies are rendered.
 
+### Production store binding (`drizzle-governance-stores.ts`)
+
+The nine store interfaces have gated Postgres adapters over the `knomosis` tables,
+bound at boot (`apps/api/src/index.ts`) when `DATABASE_URL` is set (the in-memory
+adapters remain the dev/test path). Two invariants the in-memory adapters held by
+convention are now enforced by the schema (migration `0036`), so the production
+path can rely on them instead of a read-then-write race:
+
+- the **steward vote** carries a composite primary key `(election_id,
+  voter_user_id)`, so a double ballot collides (idempotent `cast`); and
+- the **governance model** carries a unique index on `(room_id, artifact_digest)`,
+  so a duplicate proposal collides (`insert` returns null).
+
 ### Pay-to-rank isolation
 
 The `knomosis` tables reference ranking/content (`public.rooms`, contributions, the
@@ -97,6 +111,10 @@ hypothetical `knomosis → public.rooms` FK is caught.
   `GovernedByPanel` transparency states, and the `StewardModelManager` steward
   surface (steward-gating, propose with client-side JSON validation, confirm-gated
   ratify, per-proposal download, loading/error branches, axe a11y).
+- `apps/api` (gated) — `governance-integration.test.ts`: the nine Drizzle
+  adapters against the real migration chain (seat upsert, election patch/settle,
+  the vote-PK idempotency, the model digest-uniqueness collision, prompt/law-pack/
+  binding round-trips, newest-first agent actions, accepted-treasury filtering).
 - `packages/db` — the extended isolation walk over the governance context.
 
 ## Residuals (tracked)
@@ -109,8 +127,10 @@ hypothetical `knomosis → public.rooms` FK is caught.
   (`apps/web/src/components/governance/`). The remaining web residual is the
   **steward-election voting UI** (the seat-election ballot surface; the seat +
   election lifecycle and the read view are shipped) and a richer model-card render.
-- **Gated Drizzle adapters** — the production binding of the store interfaces
-  (the in-memory adapters are the dev/test path; the schema + migration are shipped).
+- **Gated Drizzle adapters** — **shipped**
+  (`apps/api/src/governance/drizzle-governance-stores.ts`, bound at boot when
+  `DATABASE_URL` is set; the migration-chain integration test runs in CI). The
+  in-memory adapters remain the dev/test path.
 - **Doctrine-matrix propagation** — `CRYPTO_FEATURE_MATRIX` now carries the WS-U note
   (no new crypto tier; v1.1.0). `JURISDICTION_MATRIX` / `TRANSPARENCY_DICTIONARY` /
   `SIGNAL_MATRIX` need no new entries — the agent reuses the existing treasury/
