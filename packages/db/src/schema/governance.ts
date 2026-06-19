@@ -13,6 +13,7 @@
 import {
   boolean,
   index,
+  integer,
   jsonb,
   numeric,
   pgSchema,
@@ -149,6 +150,72 @@ export const roomGovernancePrompts = knomosisSchema.table('room_governance_promp
   createdAt: tz('created_at').notNull().defaultNow(),
 });
 export type RoomGovernancePromptRow = typeof roomGovernancePrompts.$inferSelect;
+
+export const modelRatificationStatusEnum = knomosisSchema.enum('model_ratification_status', [
+  'open',
+  'settled',
+  'cancelled',
+]);
+export const modelRatificationOutcomeEnum = knomosisSchema.enum('model_ratification_outcome', [
+  'approved',
+  'rejected',
+]);
+export const modelRatificationChoiceEnum = knomosisSchema.enum('model_ratification_choice', [
+  'approve',
+  'reject',
+]);
+
+/**
+ * A member ratification vote that ADOPTS a steward-proposed, platform-eligible
+ * model (SPEC §16.6/§24.6). The model activates only on a quorum-meeting
+ * approving majority at settle (fail-safe otherwise). The bounds being ratified
+ * are the `law_pack_id` snapshot; the settled `tally` survives voter erasure.
+ */
+export const modelRatifications = knomosisSchema.table(
+  'model_ratification',
+  {
+    voteId: uuid('vote_id').primaryKey().defaultRandom(),
+    roomId: uuid('room_id').notNull(), // soft ref
+    modelId: uuid('model_id')
+      .notNull()
+      .references(() => roomGovernanceModels.modelId, { onDelete: 'cascade' }),
+    lawPackId: uuid('law_pack_id'), // soft intra-context ref (the bounds being ratified)
+    status: modelRatificationStatusEnum('status').notNull().default('open'),
+    opensAt: tz('opens_at').notNull(),
+    closesAt: tz('closes_at').notNull(),
+    minQuorum: integer('min_quorum').notNull(),
+    openedByUserId: uuid('opened_by_user_id').references(() => users.userId, {
+      onDelete: 'set null',
+    }),
+    tally: jsonb('tally'), // settled RatificationResult snapshot
+    outcome: modelRatificationOutcomeEnum('outcome'),
+    createdAt: tz('created_at').notNull().defaultNow(),
+    settledAt: tz('settled_at'),
+  },
+  (t) => [
+    index('model_ratification_room_idx').on(t.roomId),
+    index('model_ratification_model_idx').on(t.modelId),
+  ],
+);
+export type ModelRatificationRow = typeof modelRatifications.$inferSelect;
+
+/** One member's ratification ballot (WS-U.2.3). The composite PK enforces one
+ *  ballot per voter per vote (idempotent cast, no read-then-write race). */
+export const modelRatificationBallots = knomosisSchema.table(
+  'model_ratification_ballot',
+  {
+    voteId: uuid('vote_id')
+      .notNull()
+      .references(() => modelRatifications.voteId, { onDelete: 'cascade' }),
+    voterUserId: uuid('voter_user_id')
+      .notNull()
+      .references(() => users.userId, { onDelete: 'cascade' }),
+    choice: modelRatificationChoiceEnum('choice').notNull(),
+    castAt: tz('cast_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.voteId, t.voterUserId] })],
+);
+export type ModelRatificationBallotRow = typeof modelRatificationBallots.$inferSelect;
 
 /** The room's machine-readable, community-voted law-pack (WS-U.4.1a; SPEC §17.3.4). */
 export const roomLawPacks = knomosisSchema.table(

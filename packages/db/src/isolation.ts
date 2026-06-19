@@ -66,6 +66,8 @@ export const WALLET_CONTEXT_TABLES: ReadonlySet<Relation> = new Set([
   'knomosis.steward_governance_vote',
   'knomosis.room_governance_model',
   'knomosis.room_governance_prompt',
+  'knomosis.model_ratification',
+  'knomosis.model_ratification_ballot',
   'knomosis.room_law_pack',
   'knomosis.room_agent_binding',
   'knomosis.agent_action_log',

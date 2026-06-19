@@ -6,11 +6,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetApiClientState } from './api.js';
 import {
-  approveGovernanceModel,
+  castRatificationBallot,
   downloadGovernanceModel,
   fetchGovernanceModels,
   fetchGovernedBy,
+  fetchRatification,
   fetchStewardSeat,
+  openRatification,
   proposeGovernanceModel,
 } from './governance-api.js';
 
@@ -109,16 +111,30 @@ describe('governance client flows', () => {
     expect((await downloadGovernanceModel('r1', 'm1')).bundle['name']).toBe('Civility');
   });
 
-  it('proposes and approves a model', async () => {
+  it('proposes a model, opens a ratification vote, casts a ballot, and reads the tally', async () => {
     mockRoutes({
       'POST /v1/rooms/r1/governance/models': () =>
         jsonResponse({ modelId: 'm1', promptId: 'p1', artifactDigest: 'a'.repeat(64) }, 201),
-      'POST /v1/rooms/r1/governance/models/m1/approve': () =>
-        jsonResponse({ active: true, granted: ['moderate.remove'] }),
+      'POST /v1/rooms/r1/governance/models/m1/ratification': () =>
+        jsonResponse({ vote_id: 'vote-1' }, 201),
+      'POST /v1/rooms/r1/governance/ratifications/vote-1/ballot': () => jsonResponse({ ok: true }),
+      'GET /v1/rooms/r1/governance/ratification': () =>
+        jsonResponse({
+          vote: {
+            vote_id: 'vote-1',
+            model_id: 'm1',
+            opens_at: '2026-06-19T00:00:00.000Z',
+            closes_at: '2026-06-26T00:00:00.000Z',
+            min_quorum: 1,
+            in_favor: 1,
+            opposed: 0,
+          },
+        }),
     });
     const proposed = await proposeGovernanceModel('r1', { bundle: {}, prompt_text: 'x' });
     expect(proposed.modelId).toBe('m1');
-    const approved = await approveGovernanceModel('r1', 'm1');
-    expect(approved.active).toBe(true);
+    expect((await openRatification('r1', 'm1')).vote_id).toBe('vote-1');
+    expect((await castRatificationBallot('r1', 'vote-1', 'approve')).ok).toBe(true);
+    expect((await fetchRatification('r1')).vote?.in_favor).toBe(1);
   });
 });

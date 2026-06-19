@@ -14,6 +14,8 @@ import {
   agentActionLogs,
   agentTreasuryActions,
   type createDbClient,
+  modelRatificationBallots,
+  modelRatifications,
   roomAgentBindings,
   roomGovernanceModels,
   roomGovernancePrompts,
@@ -27,6 +29,7 @@ import type {
   CapabilityDescriptor,
   GovernancePolicyBundle,
   LawPack,
+  RatificationResult,
   Verdict,
 } from '@licio/governance';
 import { and, asc, desc, eq } from 'drizzle-orm';
@@ -45,6 +48,10 @@ import type {
   ModelStore,
   PromptRecord,
   PromptStore,
+  RatificationBallotRecord,
+  RatificationBallotStore,
+  RatificationVoteRecord,
+  RatificationVoteStore,
   SeatStore,
   StewardSeatRecord,
   TreasuryActionRecord,
@@ -128,6 +135,35 @@ function toLawPack(row: typeof roomLawPacks.$inferSelect): LawPackRecord {
     version: row.version,
     lawPack: row.document as LawPack,
     createdAt: row.createdAt.toISOString(),
+  };
+}
+
+function toRatification(row: typeof modelRatifications.$inferSelect): RatificationVoteRecord {
+  return {
+    voteId: row.voteId,
+    roomId: row.roomId,
+    modelId: row.modelId,
+    lawPackId: row.lawPackId,
+    status: row.status,
+    opensAt: row.opensAt.toISOString(),
+    closesAt: row.closesAt.toISOString(),
+    minQuorum: row.minQuorum,
+    openedByUserId: row.openedByUserId,
+    tally: (row.tally as RatificationResult | null) ?? null,
+    outcome: row.outcome,
+    createdAt: row.createdAt.toISOString(),
+    settledAt: row.settledAt ? row.settledAt.toISOString() : null,
+  };
+}
+
+function toRatificationBallot(
+  row: typeof modelRatificationBallots.$inferSelect,
+): RatificationBallotRecord {
+  return {
+    voteId: row.voteId,
+    voterUserId: row.voterUserId,
+    choice: row.choice,
+    castAt: row.castAt.toISOString(),
   };
 }
 
@@ -576,6 +612,120 @@ export class DrizzleTreasuryActionStore implements TreasuryActionStore {
   }
 }
 
+export class DrizzleRatificationVoteStore implements RatificationVoteStore {
+  readonly #db: Db;
+  constructor(db: Db) {
+    this.#db = db;
+  }
+
+  async insert(vote: RatificationVoteRecord): Promise<RatificationVoteRecord> {
+    await this.#db.insert(modelRatifications).values({
+      voteId: vote.voteId,
+      roomId: vote.roomId,
+      modelId: vote.modelId,
+      lawPackId: vote.lawPackId,
+      status: vote.status,
+      opensAt: new Date(vote.opensAt),
+      closesAt: new Date(vote.closesAt),
+      minQuorum: vote.minQuorum,
+      openedByUserId: vote.openedByUserId,
+      tally: vote.tally,
+      outcome: vote.outcome,
+      createdAt: new Date(vote.createdAt),
+      settledAt: vote.settledAt ? new Date(vote.settledAt) : null,
+    });
+    return vote;
+  }
+
+  async get(voteId: string): Promise<RatificationVoteRecord | null> {
+    const rows = await this.#db
+      .select()
+      .from(modelRatifications)
+      .where(eq(modelRatifications.voteId, voteId))
+      .limit(1);
+    return rows[0] ? toRatification(rows[0]) : null;
+  }
+
+  async getOpenForRoom(roomId: string): Promise<RatificationVoteRecord | null> {
+    const rows = await this.#db
+      .select()
+      .from(modelRatifications)
+      .where(and(eq(modelRatifications.roomId, roomId), eq(modelRatifications.status, 'open')))
+      .orderBy(desc(modelRatifications.createdAt))
+      .limit(1);
+    return rows[0] ? toRatification(rows[0]) : null;
+  }
+
+  async listOpen(): Promise<RatificationVoteRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(modelRatifications)
+      .where(eq(modelRatifications.status, 'open'));
+    return rows.map(toRatification);
+  }
+
+  async patch(
+    voteId: string,
+    fields: Partial<RatificationVoteRecord>,
+  ): Promise<RatificationVoteRecord | null> {
+    const set: Partial<typeof modelRatifications.$inferInsert> = {};
+    if (fields.status !== undefined) set.status = fields.status;
+    if (fields.outcome !== undefined) set.outcome = fields.outcome;
+    if (fields.tally !== undefined) set.tally = fields.tally;
+    if (fields.lawPackId !== undefined) set.lawPackId = fields.lawPackId;
+    if (fields.settledAt !== undefined) {
+      set.settledAt = fields.settledAt === null ? null : new Date(fields.settledAt);
+    }
+    if (Object.keys(set).length === 0) return this.get(voteId);
+    const rows = await this.#db
+      .update(modelRatifications)
+      .set(set)
+      .where(eq(modelRatifications.voteId, voteId))
+      .returning();
+    return rows[0] ? toRatification(rows[0]) : null;
+  }
+
+  async clear(): Promise<void> {
+    await this.#db.delete(modelRatifications);
+  }
+}
+
+export class DrizzleRatificationBallotStore implements RatificationBallotStore {
+  readonly #db: Db;
+  constructor(db: Db) {
+    this.#db = db;
+  }
+
+  async cast(ballot: RatificationBallotRecord): Promise<RatificationBallotRecord | null> {
+    // The composite PK makes a second ballot from the same voter a no-op (idempotent).
+    const rows = await this.#db
+      .insert(modelRatificationBallots)
+      .values({
+        voteId: ballot.voteId,
+        voterUserId: ballot.voterUserId,
+        choice: ballot.choice,
+        castAt: new Date(ballot.castAt),
+      })
+      .onConflictDoNothing({
+        target: [modelRatificationBallots.voteId, modelRatificationBallots.voterUserId],
+      })
+      .returning();
+    return rows[0] ? toRatificationBallot(rows[0]) : null;
+  }
+
+  async listByVote(voteId: string): Promise<RatificationBallotRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(modelRatificationBallots)
+      .where(eq(modelRatificationBallots.voteId, voteId));
+    return rows.map(toRatificationBallot);
+  }
+
+  async clear(): Promise<void> {
+    await this.#db.delete(modelRatificationBallots);
+  }
+}
+
 export function createDrizzleGovernanceStores(db: Db): GovernanceStores {
   return {
     seats: new DrizzleSeatStore(db),
@@ -583,6 +733,8 @@ export function createDrizzleGovernanceStores(db: Db): GovernanceStores {
     votes: new DrizzleVoteStore(db),
     models: new DrizzleModelStore(db),
     prompts: new DrizzlePromptStore(db),
+    ratifications: new DrizzleRatificationVoteStore(db),
+    ratificationBallots: new DrizzleRatificationBallotStore(db),
     lawPacks: new DrizzleLawPackStore(db),
     bindings: new DrizzleBindingStore(db),
     agentActions: new DrizzleAgentActionStore(db),

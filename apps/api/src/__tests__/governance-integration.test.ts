@@ -14,6 +14,7 @@ import {
   agentTreasuryActions,
   createDbClient,
   migrationsFolder,
+  modelRatifications,
   roomAgentBindings,
   roomGovernanceModels,
   roomGovernancePrompts,
@@ -38,6 +39,8 @@ import {
   DrizzleLawPackStore,
   DrizzleModelStore,
   DrizzlePromptStore,
+  DrizzleRatificationBallotStore,
+  DrizzleRatificationVoteStore,
   DrizzleSeatStore,
   DrizzleTreasuryActionStore,
   DrizzleVoteStore,
@@ -98,6 +101,8 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
   let bindings: DrizzleBindingStore;
   let agentActions: DrizzleAgentActionStore;
   let treasury: DrizzleTreasuryActionStore;
+  let ratifications: DrizzleRatificationVoteStore;
+  let ratificationBallots: DrizzleRatificationBallotStore;
 
   beforeAll(async () => {
     db = createDbClient(DB_URL as string);
@@ -111,16 +116,20 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
     bindings = new DrizzleBindingStore(db);
     agentActions = new DrizzleAgentActionStore(db);
     treasury = new DrizzleTreasuryActionStore(db);
+    ratifications = new DrizzleRatificationVoteStore(db);
+    ratificationBallots = new DrizzleRatificationBallotStore(db);
     voterId = await makeUser(db, 'wsu_voter');
     candidateId = await makeUser(db, 'wsu_cand');
     stewardId = await makeUser(db, 'wsu_stew');
   });
 
   afterAll(async () => {
-    // FK-safe order: bindings (restrict→model) before models; elections cascade votes.
+    // FK-safe order: bindings (restrict→model) before models; elections cascade votes;
+    // ratification ballots cascade from the vote, votes before models.
     await db.delete(agentTreasuryActions).where(eq(agentTreasuryActions.roomId, roomId));
     await db.delete(agentActionLogs).where(eq(agentActionLogs.roomId, roomId));
     await db.delete(roomAgentBindings).where(eq(roomAgentBindings.roomId, roomId));
+    await db.delete(modelRatifications).where(eq(modelRatifications.roomId, roomId));
     await db.delete(roomGovernancePrompts).where(eq(roomGovernancePrompts.roomId, roomId));
     await db.delete(roomGovernanceModels).where(eq(roomGovernanceModels.roomId, roomId));
     await db.delete(stewardElections).where(eq(stewardElections.roomId, roomId));
@@ -390,5 +399,65 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
     const acceptedRows = await treasury.acceptedByRoom(roomId);
     expect(acceptedRows).toHaveLength(1);
     expect(acceptedRows[0]?.amount).toBe(10);
+  });
+
+  it('opens a ratification vote, enforces one ballot per voter, and patches the settle', async () => {
+    const t = new Date().toISOString();
+    const modelId = randomUUID();
+    await models.insert({
+      modelId,
+      roomId,
+      artifactDigest: 'f'.repeat(64),
+      bundle: bundleOf(),
+      cardRef: null,
+      proposedByUserId: stewardId,
+      status: 'eligible',
+      evaluationRef: null,
+      createdAt: t,
+    });
+    const voteId = randomUUID();
+    await ratifications.insert({
+      voteId,
+      roomId,
+      modelId,
+      lawPackId: null,
+      status: 'open',
+      opensAt: t,
+      closesAt: t,
+      minQuorum: 1,
+      openedByUserId: stewardId,
+      tally: null,
+      outcome: null,
+      createdAt: t,
+      settledAt: null,
+    });
+    expect((await ratifications.getOpenForRoom(roomId))?.voteId).toBe(voteId);
+
+    const first = await ratificationBallots.cast({
+      voteId,
+      voterUserId: voterId,
+      choice: 'approve',
+      castAt: t,
+    });
+    expect(first).not.toBeNull();
+    // A second ballot from the same voter collides on the composite PK → null.
+    const second = await ratificationBallots.cast({
+      voteId,
+      voterUserId: voterId,
+      choice: 'reject',
+      castAt: t,
+    });
+    expect(second).toBeNull();
+    expect(await ratificationBallots.listByVote(voteId)).toHaveLength(1);
+
+    const settled = await ratifications.patch(voteId, {
+      status: 'settled',
+      outcome: 'approved',
+      settledAt: t,
+    });
+    expect(settled?.status).toBe('settled');
+    expect(settled?.outcome).toBe('approved');
+    // No longer open ⇒ off the open-room read.
+    expect(await ratifications.getOpenForRoom(roomId)).toBeNull();
   });
 });

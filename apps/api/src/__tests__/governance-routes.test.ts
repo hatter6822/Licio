@@ -49,7 +49,7 @@ describe('WS-U governance routes', () => {
     expect(res.status).toBe(401);
   });
 
-  it('drives the full steward → model → approve → agent flow', async () => {
+  it('drives the full steward → model → ratify → agent flow', async () => {
     const user = await seedUserWithSession(forum.identity);
     await getGovernanceService().bootstrapSeat('r1', user.userId);
 
@@ -88,17 +88,25 @@ describe('WS-U governance routes', () => {
     );
     expect((await json<{ bundle: { name: string } }>(dl)).bundle.name).toBe('Civility');
 
-    // Approve ⇒ active binding with the derived capabilities.
-    const approve = await app.request(
-      jsonReq(
-        `/v1/rooms/r1/governance/models/${modelId}/approve`,
-        'POST',
-        { election_id: null },
-        user.cookie,
-      ),
+    // The steward opens a MEMBER ratification vote (the only path to activation).
+    const open = await app.request(
+      jsonReq(`/v1/rooms/r1/governance/models/${modelId}/ratification`, 'POST', {}, user.cookie),
     );
-    expect(approve.status).toBe(200);
-    expect((await json<{ granted: string[] }>(approve)).granted).toContain('moderate.remove');
+    expect(open.status).toBe(201);
+    const { vote_id } = await json<{ vote_id: string }>(open);
+
+    // The open vote surfaces with its live tally.
+    const view = await app.request(
+      jsonReq('/v1/rooms/r1/governance/ratification', 'GET', undefined, user.cookie),
+    );
+    expect((await json<{ vote: { model_id: string } | null }>(view)).vote?.model_id).toBe(modelId);
+
+    // A quorum-meeting approving vote settles to an ACTIVE agent. Casting +
+    // settling go through the service (settle is scheduler-driven; no route).
+    const svc = getGovernanceService();
+    await svc.castRatificationBallot(vote_id, user.userId, 'approve', true);
+    const settled = await svc.settleRatification(vote_id, 1);
+    expect(settled.ok && settled.value.activated).toBe(true);
 
     // "Governed by" view shows the active agent.
     const agent = await app.request(
@@ -107,6 +115,62 @@ describe('WS-U governance routes', () => {
     const agentBody = await json<{ active: boolean; model_id: string }>(agent);
     expect(agentBody.active).toBe(true);
     expect(agentBody.model_id).toBe(modelId);
+  });
+
+  it('opens a ratification vote (steward only) and gates ballots to room members', async () => {
+    const steward = await seedUserWithSession(forum.identity);
+    const other = await seedUserWithSession(forum.identity);
+    await getGovernanceService().bootstrapSeat('rv', steward.userId);
+    const propose = await app.request(
+      jsonReq(
+        '/v1/rooms/rv/governance/models',
+        'POST',
+        { bundle, prompt_text: 'x' },
+        steward.cookie,
+      ),
+    );
+    const { modelId } = await json<{ modelId: string }>(propose);
+
+    // A non-steward cannot open the vote.
+    const forbiddenOpen = await app.request(
+      jsonReq(`/v1/rooms/rv/governance/models/${modelId}/ratification`, 'POST', {}, other.cookie),
+    );
+    expect(forbiddenOpen.status).toBe(403);
+
+    // The steward opens it.
+    const open = await app.request(
+      jsonReq(`/v1/rooms/rv/governance/models/${modelId}/ratification`, 'POST', {}, steward.cookie),
+    );
+    expect(open.status).toBe(201);
+    const { vote_id } = await json<{ vote_id: string }>(open);
+
+    // A non-member's ballot is rejected (membership-gated).
+    const nonMember = await app.request(
+      jsonReq(
+        `/v1/rooms/rv/governance/ratifications/${vote_id}/ballot`,
+        'POST',
+        { choice: 'approve' },
+        other.cookie,
+      ),
+    );
+    expect(nonMember.status).toBe(403);
+
+    // A room member (here, a community steward of the room) may vote.
+    await forum.forum.rooms.addSteward({
+      roomId: 'rv',
+      userId: other.userId,
+      role: 'community_steward',
+      assignedAt: new Date().toISOString(),
+    });
+    const ok = await app.request(
+      jsonReq(
+        `/v1/rooms/rv/governance/ratifications/${vote_id}/ballot`,
+        'POST',
+        { choice: 'approve' },
+        other.cookie,
+      ),
+    );
+    expect(ok.status).toBe(200);
   });
 
   it('forbids a non-steward from proposing', async () => {
@@ -124,7 +188,8 @@ describe('WS-U governance routes', () => {
     const admin = await seedUserWithSession(forum.identity, { admin: true });
     const plain = await seedUserWithSession(forum.identity);
     await getGovernanceService().bootstrapSeat('rf', steward.userId);
-    // The room steward proposes + (eager eval to eligible) + approves ⇒ active binding.
+    // Propose + (eager-eval) eligible via the routes; activate via the service's
+    // internal primitive (the production path is a member vote, exercised above).
     const propose = await app.request(
       jsonReq(
         '/v1/rooms/rf/governance/models',
@@ -134,14 +199,7 @@ describe('WS-U governance routes', () => {
       ),
     );
     const { modelId } = await json<{ modelId: string }>(propose);
-    await app.request(
-      jsonReq(
-        `/v1/rooms/rf/governance/models/${modelId}/approve`,
-        'POST',
-        { election_id: null },
-        steward.cookie,
-      ),
-    );
+    await getGovernanceService().approveModel('rf', modelId, null, null);
 
     // A non-steward (no MFA / no role) cannot freeze the floor control.
     const forbidden = await app.request(
@@ -218,8 +276,9 @@ describe('WS-U governance routes', () => {
     expect(lp.status).toBe(201);
     const { lawPackId } = await json<{ lawPackId: string }>(lp);
 
-    // ...then approves a model bound to it — granted capabilities are intersected
-    // with the law-pack, so the model's requested moderate.remove is dropped.
+    // ...then a model bound to it has its capabilities intersected with the
+    // law-pack (activation primitive; the routed path is a member vote). The
+    // model requests remove + flag; the law-pack permits only flag.
     const propose = await app.request(
       jsonReq(
         '/v1/rooms/rl/governance/models',
@@ -229,17 +288,10 @@ describe('WS-U governance routes', () => {
       ),
     );
     const { modelId } = await json<{ modelId: string }>(propose);
-    const approve = await app.request(
-      jsonReq(
-        `/v1/rooms/rl/governance/models/${modelId}/approve`,
-        'POST',
-        { election_id: null, law_pack_id: lawPackId },
-        steward.cookie,
-      ),
-    );
-    const granted = (await json<{ granted: string[] }>(approve)).granted;
-    expect(granted).toContain('moderate.flag');
-    expect(granted).not.toContain('moderate.remove');
+    const activated = await getGovernanceService().approveModel('rl', modelId, null, lawPackId);
+    if (!activated.ok) throw new Error('activation failed');
+    expect(activated.value.descriptor.granted).toContain('moderate.flag');
+    expect(activated.value.descriptor.granted).not.toContain('moderate.remove');
   });
 
   it('returns a 404 for a download from the wrong room', async () => {

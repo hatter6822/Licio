@@ -2,14 +2,17 @@
 //
 // WS-U AI-governed-rooms HTTP surface (SPEC §16.6, §24.6). Authenticated reads
 // and writes over the GovernanceService: the steward seat + elections, the
-// community model/prompt registry (propose / list / download / approve), and the
-// "governed by" agent view (active binding + recent agent actions). Steward-only
-// actions are enforced by the service (seat-holder check); financial/treasury
-// surfaces stay behind the fail-closed crypto flag in the service.
+// community model/prompt registry (propose / list / download), the MEMBER
+// ratification vote that adopts a model (open / ballot / read), and the "governed
+// by" agent view. There is NO direct-activate route — a model becomes the active
+// agent ONLY by passing a member ratification vote (the doctrine: members ratify).
+// Steward-only writes are service-enforced; the platform-floor freeze is gated by
+// the WS-J `restrict` capability; treasury stays behind the fail-closed crypto flag.
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { getForumServices } from '../forum/services.js';
 import { getGovernanceService } from '../governance/services.js';
 import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
 import { denyCapability, type StewardActor } from '../moderation/authz.js';
@@ -27,6 +30,14 @@ function stewardActorOf(auth: NonNullable<AuthEnv['Variables']['auth']>): Stewar
   };
 }
 
+/** Ratification voting eligibility: an ACTIVE room member or a room steward. */
+async function isRoomMember(roomId: string, userId: string): Promise<boolean> {
+  const rooms = getForumServices().rooms;
+  const subscription = await rooms.getSubscription(roomId, userId);
+  if (subscription?.status === 'active') return true;
+  return (await rooms.stewardRolesFor(roomId, userId)).length > 0;
+}
+
 const proposeBodySchema = z
   .object({
     bundle: z.unknown(),
@@ -35,13 +46,13 @@ const proposeBodySchema = z
   .strict();
 
 const voteBodySchema = z.object({ candidate_user_id: z.string().min(1).max(128) }).strict();
-const approveBodySchema = z
+const ratificationOpenBodySchema = z
   .object({
-    election_id: z.string().min(1).max(128).nullable().default(null),
     /** Bind a community-proposed law-pack (the agent's bounds); null ⇒ default. */
     law_pack_id: z.string().min(1).max(128).nullable().default(null),
   })
   .strict();
+const ballotBodySchema = z.object({ choice: z.enum(['approve', 'reject']) }).strict();
 const lawPackBodySchema = z.object({ law_pack: z.unknown() }).strict();
 
 export function createGovernanceRoutes() {
@@ -134,22 +145,82 @@ export function createGovernanceRoutes() {
           bundle: model.bundle,
         });
       })
+      // --- Member ratification vote (the ONLY path to an active agent) ---------
+      // The steward opens a vote on an eligible model (optionally binding a
+      // law-pack); members cast yes/no ballots; the scheduler settles it at the
+      // window close and activates the model ONLY on a quorum-meeting approving
+      // majority (fail-safe otherwise). No member can unilaterally activate.
       .post(
-        '/rooms/:roomId/governance/models/:modelId/approve',
+        '/rooms/:roomId/governance/models/:modelId/ratification',
         authMiddleware(),
-        zValidator('json', approveBodySchema),
+        zValidator('json', ratificationOpenBodySchema),
         async (c) => {
-          const { election_id, law_pack_id } = c.req.valid('json');
-          const result = await getGovernanceService().approveModel(
+          const auth = c.get('auth');
+          if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
+          const { law_pack_id } = c.req.valid('json');
+          const result = await getGovernanceService().openRatification(
             c.req.param('roomId'),
+            auth.userId,
             c.req.param('modelId'),
-            election_id,
             law_pack_id,
           );
-          if (!result.ok) return c.json(deny(result.code, result.message), 409);
-          return c.json({ active: result.value.active, granted: result.value.descriptor.granted });
+          if (!result.ok) {
+            return c.json(
+              deny(result.code, result.message),
+              result.code === 'not_steward' ? 403 : result.code === 'not_found' ? 404 : 409,
+            );
+          }
+          return c.json({ vote_id: result.value.voteId }, 201);
         },
       )
+      .post(
+        '/rooms/:roomId/governance/ratifications/:voteId/ballot',
+        authMiddleware(),
+        zValidator('json', ballotBodySchema),
+        async (c) => {
+          const auth = c.get('auth');
+          if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
+          const eligible = await isRoomMember(c.req.param('roomId'), auth.userId);
+          const result = await getGovernanceService().castRatificationBallot(
+            c.req.param('voteId'),
+            auth.userId,
+            c.req.valid('json').choice,
+            eligible,
+          );
+          if (!result.ok) {
+            return c.json(
+              deny(result.code, result.message),
+              result.code === 'not_member' ? 403 : 409,
+            );
+          }
+          return c.json({ ok: true });
+        },
+      )
+      .get('/rooms/:roomId/governance/ratification', authMiddleware(), async (c) => {
+        const roomId = c.req.param('roomId');
+        const svc = getGovernanceService();
+        const vote = await svc.getOpenRatification(roomId);
+        if (!vote) return c.json({ vote: null }, 200);
+        // Live tally (governance data, not applause): in-favor / opposed counts.
+        const ballots = await svc.ratificationBallots(vote.voteId);
+        let inFavor = 0;
+        let opposed = 0;
+        for (const b of ballots) {
+          if (b.choice === 'approve') inFavor += 1;
+          else opposed += 1;
+        }
+        return c.json({
+          vote: {
+            vote_id: vote.voteId,
+            model_id: vote.modelId,
+            opens_at: vote.opensAt,
+            closes_at: vote.closesAt,
+            min_quorum: vote.minQuorum,
+            in_favor: inFavor,
+            opposed,
+          },
+        });
+      })
       // --- Community-voted bounds (the law-pack the agent runs within) ---------
       .post(
         '/rooms/:roomId/governance/law-packs',

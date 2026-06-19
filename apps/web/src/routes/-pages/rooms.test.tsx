@@ -50,8 +50,10 @@ vi.mock('../../lib/queries.js', () => ({
     isError: false,
     data: { steward_user_id: null, models: [] },
   }),
+  useRatificationQuery: () => ({ isLoading: false, isError: false, data: { vote: null } }),
   useProposeModelMutation: () => ({ mutate: () => {}, isPending: false }),
-  useApproveModelMutation: () => ({ mutate: () => {}, isPending: false }),
+  useOpenRatificationMutation: () => ({ mutate: () => {}, isPending: false }),
+  useCastBallotMutation: () => ({ mutate: () => {}, isPending: false }),
 }));
 
 function baseRoom(over: Partial<RoomDetail>): RoomDetail {

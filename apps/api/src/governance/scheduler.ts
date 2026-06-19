@@ -16,11 +16,11 @@ import type { GovernanceService } from './service.js';
 export const GOVERNANCE_JOB_LEASE = 'governance_hourly';
 export const GOVERNANCE_SCHEDULER_INTERVAL_MS = 60 * 60 * 1000;
 
-export type GovernanceSchedulerTask = 'election_lifecycle';
+export type GovernanceSchedulerTask = 'election_lifecycle' | 'ratification_lifecycle';
 
 export interface GovernanceSchedulerDeps {
   service: GovernanceService;
-  /** Eligible voters for a room's election quorum (soft cross-context read). */
+  /** Eligible voters for a room's election/ratification quorum (soft cross-context read). */
   eligibleVoterCount: (roomId: string) => Promise<number>;
   log: (event: string, meta: Record<string, unknown>) => void;
   now: () => number;
@@ -42,6 +42,17 @@ export async function runGovernanceTick(
     }
   } catch (err) {
     onError(err, 'election_lifecycle');
+  }
+  try {
+    const { settled, activated } = await deps.service.runRatificationLifecycle(
+      deps.eligibleVoterCount,
+      nowMs,
+    );
+    if (settled > 0) {
+      deps.log('governance.ratification_lifecycle', { settled, activated });
+    }
+  } catch (err) {
+    onError(err, 'ratification_lifecycle');
   }
 }
 

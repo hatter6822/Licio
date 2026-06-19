@@ -2090,4 +2090,16 @@ export async function seedGovernanceDemo(governance: GovernanceService): Promise
     },
     `${GOVERNANCE_DEMO_ROOM_ID}:demo-action`,
   );
+  // A SECOND eligible model put to an OPEN member ratification vote, so the dev
+  // sees the member voting surface alongside the already-active agent (a steward
+  // proposing an upgrade the community is currently ratifying).
+  const upgrade = await governance.proposeModel(
+    GOVERNANCE_DEMO_ROOM_ID,
+    steward,
+    { ...bundle, bundleId: 'demo-civility-v2', name: 'Community civility policy v2' },
+    'Prefer a warning before a removal; otherwise as before.',
+  );
+  if (!upgrade.ok) return;
+  await governance.evaluateModel(upgrade.value.modelId);
+  await governance.openRatification(GOVERNANCE_DEMO_ROOM_ID, steward, upgrade.value.modelId, null);
 }

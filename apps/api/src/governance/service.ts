@@ -24,13 +24,20 @@ import {
   type ModerationAction,
   type ModerationContext,
   type ModerationDecision,
+  type RatificationChoice,
   type TreasuryHistoryEntry,
   tallyElection,
+  tallyRatification,
   treasuryActionSchema,
   type Verdict,
 } from '@licio/governance';
 import type { GovernanceConfig } from './config.js';
-import type { GovernanceStores, ModelRecord, TreasuryActionRecord } from './stores.js';
+import type {
+  GovernanceStores,
+  ModelRecord,
+  RatificationOutcome,
+  TreasuryActionRecord,
+} from './stores.js';
 
 export interface GovernanceServiceDeps {
   stores: GovernanceStores;
@@ -325,7 +332,14 @@ export class GovernanceService {
     return ok({ status });
   }
 
-  /** Approve an eligible model by member vote → create the active binding (Stage 2/3). */
+  /**
+   * Activate an eligible model as the room's agent (the INTERNAL primitive). In
+   * production this is reached only via a passed member ratification
+   * (`settleRatification`); it is NOT a public HTTP route. The previously-approved
+   * model is demoted to `superseded`, so the registry holds exactly one approved
+   * model. `approvedByElectionId` records the ratifying vote (null for a direct
+   * dev-seed activation).
+   */
   async approveModel(
     roomId: string,
     modelId: string,
@@ -341,6 +355,19 @@ export class GovernanceService {
     if (!prompts) return err('no_prompt', 'No prompt is bound to this model.');
     const lawPack = await this.resolveLawPack(roomId, lawPackId);
     const descriptor = deriveCapabilityDescriptor(model.bundle.requestedCapabilities, lawPack);
+    // Supersede the previously-approved model (the binding's prior model), so the
+    // registry never shows two approved models for one room.
+    const prior = await this.deps.stores.bindings.get(roomId);
+    if (prior && prior.modelId !== modelId) {
+      const priorModel = await this.deps.stores.models.get(prior.modelId);
+      if (priorModel && priorModel.status === 'approved') {
+        await this.deps.stores.models.patchStatus(
+          prior.modelId,
+          'superseded',
+          priorModel.evaluationRef,
+        );
+      }
+    }
     await this.deps.stores.bindings.put({
       roomId,
       modelId,
@@ -353,6 +380,135 @@ export class GovernanceService {
     });
     await this.deps.stores.models.patchStatus(modelId, 'approved', model.evaluationRef);
     return ok({ active: true, descriptor });
+  }
+
+  // --- Stage 2: member ratification vote (adopts an eligible model) ---------
+
+  /** Open a member ratification vote on an eligible model (seat holder only). */
+  async openRatification(
+    roomId: string,
+    userId: string,
+    modelId: string,
+    lawPackId: string | null,
+  ): Promise<GovernanceResult<{ voteId: string }>> {
+    const seat = await this.deps.stores.seats.get(roomId);
+    if (!seat || seat.holderUserId !== userId) {
+      return err('not_steward', 'Only the elected room steward may open a ratification vote.');
+    }
+    const model = await this.deps.stores.models.get(modelId);
+    if (!model || model.roomId !== roomId) return err('not_found', 'Model not found for room.');
+    if (model.status !== 'eligible') {
+      return err('not_eligible', 'Only an eligible model may be put to a ratification vote.');
+    }
+    if (await this.deps.stores.ratifications.getOpenForRoom(roomId)) {
+      return err('vote_open', 'A ratification vote is already open for this room.');
+    }
+    const lawPack = await this.resolveLawPack(roomId, lawPackId);
+    const opensAt = this.deps.now();
+    const closesAt = new Date(opensAt.getTime() + this.deps.config.electionWindowSeconds * 1000);
+    const voteId = this.deps.uuid();
+    await this.deps.stores.ratifications.insert({
+      voteId,
+      roomId,
+      modelId,
+      lawPackId,
+      status: 'open',
+      opensAt: opensAt.toISOString(),
+      closesAt: closesAt.toISOString(),
+      minQuorum: Math.max(1, lawPack.election.minQuorum),
+      openedByUserId: userId,
+      tally: null,
+      outcome: null,
+      createdAt: opensAt.toISOString(),
+      settledAt: null,
+    });
+    return ok({ voteId });
+  }
+
+  /** Cast a member ratification ballot (caller-verified room member; one per voter). */
+  async castRatificationBallot(
+    voteId: string,
+    voterUserId: string,
+    choice: RatificationChoice,
+    eligible: boolean,
+  ): Promise<GovernanceResult<void>> {
+    if (!eligible) return err('not_member', 'Only room members may vote on ratification.');
+    const vote = await this.deps.stores.ratifications.get(voteId);
+    if (vote === null || vote.status !== 'open') {
+      return err('not_open', 'Ratification vote is not open.');
+    }
+    const cast = await this.deps.stores.ratificationBallots.cast({
+      voteId,
+      voterUserId,
+      choice,
+      castAt: this.iso(),
+    });
+    if (!cast) return err('already_voted', 'This voter has already cast a ballot.');
+    return ok(undefined);
+  }
+
+  /**
+   * Settle a ratification vote (kernel-tallied, fail-safe). On a quorum-meeting
+   * approving majority the model is ACTIVATED (the only production path to an
+   * active binding); otherwise the model stays eligible (re-votable) and nothing
+   * changes. The settled tally snapshot survives voter erasure.
+   */
+  async settleRatification(
+    voteId: string,
+    eligibleCount: number,
+  ): Promise<GovernanceResult<{ outcome: RatificationOutcome; activated: boolean }>> {
+    const vote = await this.deps.stores.ratifications.get(voteId);
+    if (!vote) return err('not_found', 'Ratification vote not found.');
+    if (vote.status !== 'open') return err('not_open', 'Ratification vote is not open.');
+    const lawPack = await this.resolveLawPack(vote.roomId, vote.lawPackId);
+    const ballots = await this.deps.stores.ratificationBallots.listByVote(voteId);
+    const result = tallyRatification(
+      ballots.map((b) => ({ voterUserId: b.voterUserId, choice: b.choice })),
+      { minQuorum: vote.minQuorum, minTurnout: lawPack.election.minTurnout },
+      { eligibleCount },
+    );
+    await this.deps.stores.ratifications.patch(voteId, {
+      status: 'settled',
+      outcome: result.outcome,
+      tally: result,
+      settledAt: this.iso(),
+    });
+    let activated = false;
+    if (result.outcome === 'approved') {
+      const activate = await this.approveModel(vote.roomId, vote.modelId, voteId, vote.lawPackId);
+      activated = activate.ok;
+    }
+    return ok({ outcome: result.outcome, activated });
+  }
+
+  /** The room's single open ratification vote (for the in-room voting surface). */
+  async getOpenRatification(roomId: string) {
+    return this.deps.stores.ratifications.getOpenForRoom(roomId);
+  }
+
+  /** Ballots cast on a vote (for the live tally on the voting surface). */
+  async ratificationBallots(voteId: string) {
+    return this.deps.stores.ratificationBallots.listByVote(voteId);
+  }
+
+  /** Scheduler tick: settle every ratification vote whose window has closed. */
+  async runRatificationLifecycle(
+    eligibleVoterCount: (roomId: string) => Promise<number>,
+    nowMs: number = this.deps.now().getTime(),
+  ): Promise<{ settled: number; activated: number }> {
+    const open = await this.deps.stores.ratifications.listOpen();
+    let settled = 0;
+    let activated = 0;
+    for (const vote of open) {
+      if (nowMs < Date.parse(vote.closesAt)) continue;
+      const count = await eligibleVoterCount(vote.roomId);
+      const result = await this.settleRatification(vote.voteId, count);
+      if (result.ok) {
+        settled += 1;
+        if (result.value.activated) activated += 1;
+      }
+    }
+    return { settled, activated };
   }
 
   // --- Stage 3: bounded moderation agent -----------------------------------

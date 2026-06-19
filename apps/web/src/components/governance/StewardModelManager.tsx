@@ -2,22 +2,25 @@
 //
 // WS-U steward write surface (SPEC §16.6, §24.6). The elected room steward's two
 // powers, and only those two: propose a community AI **model** (a declarative,
-// member-downloadable GovernancePolicyBundle) and its **prompt**. Members ratify
-// by vote; this surface lets the steward submit a proposal and — once it clears
-// the platform admission gate — record the community's ratified decision, which
-// activates the in-room agent within community-voted, kernel-enforced bounds. The
-// registry (proposal pipeline + admission status) is shown to every member for
-// transparency. No applause primitives; no vote tallies are rendered here.
+// member-downloadable GovernancePolicyBundle) and its **prompt**. The MEMBERS
+// ratify by vote: once a proposal clears the platform admission gate the steward
+// opens a ratification vote, and every member casts a yes/no ballot; the model
+// activates only if the vote passes (settled by the scheduler at the window
+// close). The registry (proposal pipeline + admission status) is shown to every
+// member for transparency. No applause primitives; the vote shows governance
+// counts (in favour / opposed), never a popularity signal.
 
-import type { GovernanceModelSummary } from '@licio/shared';
+import type { GovernanceModelSummary, RatificationViewResponse } from '@licio/shared';
 import { useState } from 'react';
 import { ApiClientError } from '../../lib/api.js';
 import { downloadGovernanceModel } from '../../lib/governance-api.js';
 import { downloadModelBundle } from '../../lib/governance-download.js';
 import {
-  useApproveModelMutation,
+  useCastBallotMutation,
   useGovernanceModelsQuery,
+  useOpenRatificationMutation,
   useProposeModelMutation,
+  useRatificationQuery,
   useStewardSeatQuery,
 } from '../../lib/queries.js';
 import { useAuthStore } from '../../stores/index.js';
@@ -27,6 +30,8 @@ import { Card } from '../ui/Card/index.js';
 import { ErrorState } from '../ui/ErrorState/index.js';
 import { LoadingState } from '../ui/LoadingState/index.js';
 import { TextArea } from '../ui/TextArea/index.js';
+
+type OpenVote = NonNullable<RatificationViewResponse['vote']>;
 
 /**
  * A valid starter policy bundle that passes the platform admission gate (it
@@ -77,25 +82,29 @@ export function StewardModelManager({
 }: StewardModelManagerProps): React.ReactElement | null {
   const seat = useStewardSeatQuery(roomId, enabled);
   const models = useGovernanceModelsQuery(roomId, enabled);
+  const ratification = useRatificationQuery(roomId, enabled);
   const currentUserId = useAuthStore((s) => s.user?.id ?? null);
 
   const holder = seat.data?.seat?.holder_user_id ?? null;
   const isSteward = holder !== null && holder === currentUserId;
   const items = models.data?.models ?? [];
+  const openVote = ratification.data?.vote ?? null;
 
-  // Nothing to show a non-steward until at least one model exists.
-  if (!isSteward && items.length === 0) return null;
+  // Nothing to show until there's a proposal, an open vote, or a steward viewer.
+  if (!isSteward && items.length === 0 && openVote === null) return null;
 
   return (
     <Card as="section">
       <h2 className="text-base font-semibold">Community governance models</h2>
       <p className="mt-1 text-sm text-ink-muted">
-        The elected steward proposes an AI model and prompt; the community ratifies it by vote. A
-        model governs the room only within community-voted, kernel-enforced limits, and never below
-        Licio's non-overridable platform floor.
+        The elected steward proposes an AI model and prompt; the community ratifies it by member
+        vote. A model governs the room only within community-voted, kernel-enforced limits, and
+        never below Licio's non-overridable platform floor.
       </p>
 
       {isSteward ? <ProposeForm roomId={roomId} /> : null}
+
+      {openVote ? <RatificationVotePanel roomId={roomId} vote={openVote} /> : null}
 
       <div className="mt-4">
         <h3 className="text-sm font-medium">Proposals</h3>
@@ -112,7 +121,12 @@ export function StewardModelManager({
           <ul className="mt-2 flex flex-col gap-2">
             {items.map((model) => (
               <li key={model.model_id}>
-                <ModelRow roomId={roomId} model={model} isSteward={isSteward} />
+                <ModelRow
+                  roomId={roomId}
+                  model={model}
+                  isSteward={isSteward}
+                  voteOpen={openVote !== null}
+                />
               </li>
             ))}
           </ul>
@@ -122,27 +136,81 @@ export function StewardModelManager({
   );
 }
 
-/** One row of the proposal registry: status, digest, and the steward ratify action. */
+/** The open member ratification vote: every member casts one yes/no ballot. */
+function RatificationVotePanel({
+  roomId,
+  vote,
+}: {
+  roomId: string;
+  vote: OpenVote;
+}): React.ReactElement {
+  const cast = useCastBallotMutation(roomId);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+
+  function vote_(choice: 'approve' | 'reject'): void {
+    setError(null);
+    cast.mutate(
+      { voteId: vote.vote_id, choice },
+      {
+        onSuccess: () => setDone(true),
+        onError: (e) =>
+          setError(e instanceof ApiClientError ? e.message : 'Could not record your ballot.'),
+      },
+    );
+  }
+
+  return (
+    <div className="neu-inset mt-3 flex flex-col gap-2 rounded-lg p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone="info">Ratification vote open</Badge>
+        <span className="text-ink-muted text-xs">
+          In favour: {vote.in_favor} · Opposed: {vote.opposed} · Quorum: {vote.min_quorum}
+        </span>
+      </div>
+      <p className="text-ink-muted text-sm">
+        Members are voting on whether to adopt this model. It activates only if the vote reaches
+        quorum with an approving majority by {new Date(vote.closes_at).toLocaleString()}.
+      </p>
+      {done ? (
+        <p className="text-sm text-ink">Your ballot is recorded. Thank you.</p>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          <Button variant="primary" disabled={cast.isPending} onClick={() => vote_('approve')}>
+            Approve
+          </Button>
+          <Button variant="secondary" disabled={cast.isPending} onClick={() => vote_('reject')}>
+            Reject
+          </Button>
+        </div>
+      )}
+      {error ? <p className="text-error-on-soft text-xs">{error}</p> : null}
+    </div>
+  );
+}
+
+/** One row of the proposal registry: status, digest, download, and (for the
+ *  steward, on an eligible model with no vote already open) "Open ratification". */
 function ModelRow({
   roomId,
   model,
   isSteward,
+  voteOpen,
 }: {
   roomId: string;
   model: GovernanceModelSummary;
   isSteward: boolean;
+  voteOpen: boolean;
 }): React.ReactElement {
-  const approve = useApproveModelMutation(roomId);
-  const [confirming, setConfirming] = useState(false);
+  const openVote = useOpenRatificationMutation(roomId);
   const [error, setError] = useState<string | null>(null);
   const meta = STATUS_META[model.status];
 
-  function ratify(): void {
+  function startVote(): void {
     setError(null);
-    approve.mutate(model.model_id, {
-      onSuccess: () => setConfirming(false),
+    openVote.mutate(model.model_id, {
       onError: (e) =>
-        setError(e instanceof ApiClientError ? e.message : 'Could not record the ratification.'),
+        setError(e instanceof ApiClientError ? e.message : 'Could not open the ratification vote.'),
     });
   }
 
@@ -168,29 +236,13 @@ function ModelRow({
         </Button>
       </div>
 
-      {/* The steward records the community's ratified decision on an eligible model. */}
-      {isSteward && model.status === 'eligible' ? (
-        confirming ? (
-          <div className="flex flex-col gap-2">
-            <p className="text-ink-muted text-xs">
-              This records the community's vote to adopt this model and activates the in-room agent.
-            </p>
-            <div className="flex flex-wrap gap-2">
-              <Button variant="primary" disabled={approve.isPending} onClick={ratify}>
-                Confirm ratification
-              </Button>
-              <Button variant="ghost" onClick={() => setConfirming(false)}>
-                Cancel
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <div>
-            <Button variant="secondary" onClick={() => setConfirming(true)}>
-              Adopt for the community
-            </Button>
-          </div>
-        )
+      {/* The steward puts an eligible model to a member vote (one open at a time). */}
+      {isSteward && model.status === 'eligible' && !voteOpen ? (
+        <div>
+          <Button variant="secondary" disabled={openVote.isPending} onClick={startVote}>
+            Open ratification vote
+          </Button>
+        </div>
       ) : null}
 
       {error ? <p className="text-error-on-soft text-xs">{error}</p> : null}

@@ -360,5 +360,8 @@ describe('demo seed — the WS-U governed-room showcase', () => {
     // A sample agent action surfaces in the "governed by" panel.
     const actions = await governance.recentAgentActions(GOVERNANCE_DEMO_ROOM_ID, 10);
     expect(actions[0]?.actionType).toBe('moderate.flag_for_review');
+    // An open ratification vote surfaces the member voting UI (an upgrade model).
+    const openVote = await governance.getOpenRatification(GOVERNANCE_DEMO_ROOM_ID);
+    expect(openVote).not.toBeNull();
   });
 });

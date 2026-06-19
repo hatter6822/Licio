@@ -10,10 +10,14 @@ import type {
   CapabilityDescriptor,
   GovernancePolicyBundle,
   LawPack,
+  RatificationChoice,
+  RatificationResult,
   Verdict,
 } from '@licio/governance';
 
 export type ElectionStatus = 'scheduled' | 'open' | 'tallying' | 'settled' | 'cancelled';
+export type RatificationStatus = 'open' | 'settled' | 'cancelled';
+export type RatificationOutcome = 'approved' | 'rejected';
 export type ElectionMode = 'simulated' | 'testnet' | 'onchain';
 export type ModelStatus =
   | 'proposed'
@@ -71,6 +75,27 @@ export interface PromptRecord {
   promptText: string;
   proposedByUserId: string | null;
   createdAt: string;
+}
+export interface RatificationVoteRecord {
+  voteId: string;
+  roomId: string;
+  modelId: string;
+  lawPackId: string | null;
+  status: RatificationStatus;
+  opensAt: string;
+  closesAt: string;
+  minQuorum: number;
+  openedByUserId: string | null;
+  tally: RatificationResult | null;
+  outcome: RatificationOutcome | null;
+  createdAt: string;
+  settledAt: string | null;
+}
+export interface RatificationBallotRecord {
+  voteId: string;
+  voterUserId: string;
+  choice: RatificationChoice;
+  castAt: string;
 }
 export interface LawPackRecord {
   lawPackId: string;
@@ -150,6 +175,23 @@ export interface PromptStore {
 export interface LawPackStore {
   insert(lawPack: LawPackRecord): Promise<LawPackRecord>;
   get(lawPackId: string): Promise<LawPackRecord | null>;
+  clear(): Promise<void>;
+}
+export interface RatificationVoteStore {
+  insert(vote: RatificationVoteRecord): Promise<RatificationVoteRecord>;
+  get(voteId: string): Promise<RatificationVoteRecord | null>;
+  /** The single OPEN vote for a room (at most one at a time), or null. */
+  getOpenForRoom(roomId: string): Promise<RatificationVoteRecord | null>;
+  listOpen(): Promise<RatificationVoteRecord[]>;
+  patch(
+    voteId: string,
+    fields: Partial<RatificationVoteRecord>,
+  ): Promise<RatificationVoteRecord | null>;
+  clear(): Promise<void>;
+}
+export interface RatificationBallotStore {
+  cast(ballot: RatificationBallotRecord): Promise<RatificationBallotRecord | null>; // null ⇒ already voted
+  listByVote(voteId: string): Promise<RatificationBallotRecord[]>;
   clear(): Promise<void>;
 }
 export interface BindingStore {
@@ -293,6 +335,55 @@ export class InMemoryLawPackStore implements LawPackStore {
   }
 }
 
+export class InMemoryRatificationVoteStore implements RatificationVoteStore {
+  private readonly votes = new Map<string, RatificationVoteRecord>();
+  async insert(vote: RatificationVoteRecord) {
+    this.votes.set(vote.voteId, vote);
+    return vote;
+  }
+  async get(voteId: string) {
+    return this.votes.get(voteId) ?? null;
+  }
+  async getOpenForRoom(roomId: string) {
+    for (const v of this.votes.values()) {
+      if (v.roomId === roomId && v.status === 'open') return v;
+    }
+    return null;
+  }
+  async listOpen() {
+    return [...this.votes.values()].filter((v) => v.status === 'open');
+  }
+  async patch(voteId: string, fields: Partial<RatificationVoteRecord>) {
+    const cur = this.votes.get(voteId);
+    if (!cur) return null;
+    const next = { ...cur, ...fields };
+    this.votes.set(voteId, next);
+    return next;
+  }
+  async clear() {
+    this.votes.clear();
+  }
+}
+
+export class InMemoryRatificationBallotStore implements RatificationBallotStore {
+  private readonly ballots = new Map<string, RatificationBallotRecord>();
+  private key(voteId: string, voterUserId: string) {
+    return `${voteId}:${voterUserId}`;
+  }
+  async cast(ballot: RatificationBallotRecord) {
+    const key = this.key(ballot.voteId, ballot.voterUserId);
+    if (this.ballots.has(key)) return null;
+    this.ballots.set(key, ballot);
+    return ballot;
+  }
+  async listByVote(voteId: string) {
+    return [...this.ballots.values()].filter((b) => b.voteId === voteId);
+  }
+  async clear() {
+    this.ballots.clear();
+  }
+}
+
 export class InMemoryBindingStore implements BindingStore {
   private readonly bindings = new Map<string, BindingRecord>();
   async get(roomId: string) {
@@ -351,6 +442,8 @@ export interface GovernanceStores {
   votes: VoteStore;
   models: ModelStore;
   prompts: PromptStore;
+  ratifications: RatificationVoteStore;
+  ratificationBallots: RatificationBallotStore;
   lawPacks: LawPackStore;
   bindings: BindingStore;
   agentActions: AgentActionStore;
@@ -364,6 +457,8 @@ export function createInMemoryGovernanceStores(): GovernanceStores {
     votes: new InMemoryVoteStore(),
     models: new InMemoryModelStore(),
     prompts: new InMemoryPromptStore(),
+    ratifications: new InMemoryRatificationVoteStore(),
+    ratificationBallots: new InMemoryRatificationBallotStore(),
     lawPacks: new InMemoryLawPackStore(),
     bindings: new InMemoryBindingStore(),
     agentActions: new InMemoryAgentActionStore(),

@@ -6,16 +6,21 @@
 // governs the room, the active model, recent agent actions); the steward writes
 // (propose / approve) are the elected-steward's two powers.
 import {
-  type GovernanceApproveResponse,
   type GovernanceModelDownloadResponse,
   type GovernanceModelListResponse,
   type GovernanceProposeResponse,
   type GovernedByResponse,
-  governanceApproveResponseSchema,
   governanceModelDownloadResponseSchema,
   governanceModelListResponseSchema,
   governanceProposeResponseSchema,
   governedByResponseSchema,
+  type RatificationBallotResponse,
+  type RatificationChoiceWire,
+  type RatificationOpenResponse,
+  type RatificationViewResponse,
+  ratificationBallotResponseSchema,
+  ratificationOpenResponseSchema,
+  ratificationViewResponseSchema,
   type StewardSeatResponse,
   stewardSeatResponseSchema,
 } from '@licio/shared';
@@ -57,13 +62,30 @@ export async function proposeGovernanceModel(
   return parseResponse(res, governanceProposeResponseSchema);
 }
 
-export async function approveGovernanceModel(
+export async function openRatification(
   roomId: string,
   modelId: string,
-): Promise<GovernanceApproveResponse> {
-  const res = await client.v1.rooms[':roomId'].governance.models[':modelId'].approve.$post({
+): Promise<RatificationOpenResponse> {
+  const res = await client.v1.rooms[':roomId'].governance.models[':modelId'].ratification.$post({
     param: { roomId, modelId },
-    json: { election_id: null },
+    json: { law_pack_id: null },
   });
-  return parseResponse(res, governanceApproveResponseSchema);
+  return parseResponse(res, ratificationOpenResponseSchema);
+}
+
+export async function castRatificationBallot(
+  roomId: string,
+  voteId: string,
+  choice: RatificationChoiceWire,
+): Promise<RatificationBallotResponse> {
+  const res = await client.v1.rooms[':roomId'].governance.ratifications[':voteId'].ballot.$post({
+    param: { roomId, voteId },
+    json: { choice },
+  });
+  return parseResponse(res, ratificationBallotResponseSchema);
+}
+
+export async function fetchRatification(roomId: string): Promise<RatificationViewResponse> {
+  const res = await client.v1.rooms[':roomId'].governance.ratification.$get({ param: { roomId } });
+  return parseResponse(res, ratificationViewResponseSchema);
 }

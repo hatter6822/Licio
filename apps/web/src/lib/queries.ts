@@ -196,16 +196,38 @@ export function useProposeModelMutation(roomId: string) {
   });
 }
 
-/** WS-U §16.6 — record the community's ratification of an eligible model (the
- *  member-vote step). Activates the in-room agent, so it refreshes BOTH the
- *  registry and the "governed by" agent view. */
-export function useApproveModelMutation(roomId: string) {
+/** WS-U §16.6 — the room's open member ratification vote (the in-room voting
+ *  surface), or null. `enabled` defers the fetch behind the read bar. */
+export function useRatificationQuery(roomId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.ratification(roomId),
+    queryFn: () => governanceApi.fetchRatification(roomId),
+    enabled,
+  });
+}
+
+/** WS-U §16.6 — the steward opens a member ratification vote on an eligible
+ *  model. Refreshes the registry and the open-vote surface. */
+export function useOpenRatificationMutation(roomId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (modelId: string) => governanceApi.approveGovernanceModel(roomId, modelId),
+    mutationFn: (modelId: string) => governanceApi.openRatification(roomId, modelId),
     onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.ratification(roomId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.governanceModels(roomId) });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.governedBy(roomId) });
+    },
+  });
+}
+
+/** WS-U §16.6 — a member casts an approve/reject ratification ballot. Refreshes
+ *  the open-vote surface (the live tally). */
+export function useCastBallotMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { voteId: string; choice: 'approve' | 'reject' }) =>
+      governanceApi.castRatificationBallot(roomId, input.voteId, input.choice),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.ratification(roomId) });
     },
   });
 }

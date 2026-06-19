@@ -12,7 +12,7 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
 | Layer | Where | Status |
 |---|---|---|
 | Pure domain (kernel, DSL, capabilities, elections) | `packages/governance` (`@licio/governance`) | **Shipped** |
-| Isolated persistence | `packages/db/src/schema/governance.ts` (`knomosis` pgSchema) + migrations `0035`/`0036` | **Shipped** |
+| Isolated persistence | `packages/db/src/schema/governance.ts` (`knomosis` pgSchema) + migrations `0035`–`0037` | **Shipped** |
 | Production store binding | `apps/api/src/governance/drizzle-governance-stores.ts` (gated; bound at boot when `DATABASE_URL` is set) | **Shipped** |
 | Runtime service | `apps/api/src/governance/` | **Shipped (Stages 1-3, 5-core)** |
 | HTTP surface | `apps/api/src/routes/governance.ts` (mounted in `v1.ts`); seat bootstrap on room create | **Shipped** |
@@ -53,7 +53,14 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
 - **Stage 2** — community model/prompt registry, content-addressing, and the
   **platform admission gate**: the model's deterministic decisions must fall within
   the platform `[min,max]` severity band on every fixture (catching under- and
-  over-moderation), beneath — never replacing — the platform legal floor.
+  over-moderation), beneath — never replacing — the platform legal floor. A model
+  becomes the active agent ONLY by passing a **member ratification vote** (`@licio/
+  governance` `tallyRatification`): the seat-holder opens a vote on an eligible
+  model (optionally binding a law-pack), members cast one yes/no ballot each
+  (membership-gated, composite-PK idempotent), and the lease-guarded scheduler
+  settles it at the window close — adopting the model only on a quorum-meeting
+  approving majority (FAIL-SAFE otherwise). There is NO direct-activate route;
+  adopting a new model **supersedes** the prior one.
 - **Stage 3** — the bounded moderation agent: capability-gated decisioning (an
   un-granted action is **downgraded to a human-floor referral**, never escalated),
   the provenance-triple audit log, and the floor's room-governance-freeze — now a
@@ -87,19 +94,20 @@ Both surfaces are mounted on the room page behind the WS-Q content read bar:
   the platform's human floor), a one-click **download** of the active,
   content-addressed model artifact, and a distinct **floor-paused** state when the
   platform floor has frozen a community-approved agent (vs a room that never had one).
-- **`StewardModelManager`** — the elected steward's two powers, and only those: a
-  **propose** form (a declarative `GovernancePolicyBundle` editor seeded with a
-  valid starter policy + an agent prompt, JSON-validated client-side before the
-  POST) and, on a model that has cleared the platform admission gate, a confirm-
-  gated action to **record the community's ratified decision** (which activates the
-  agent). The proposal **registry** — status pipeline + per-proposal digest +
-  member **download** — is shown to every member for transparency; the propose and
-  ratify affordances are gated to the seat holder (`stewardSeat.holder_user_id ===
-  the signed-in user`). No applause primitives, and no vote tallies are rendered.
+- **`StewardModelManager`** — the elected steward's two powers + the member vote: a
+  steward-only **propose** form (a declarative `GovernancePolicyBundle` editor
+  seeded with a valid starter policy + an agent prompt, JSON-validated client-side
+  before the POST); on a model that cleared the admission gate, a steward
+  **"Open ratification vote"** action; and, while a vote is open, a member voting
+  panel (**Approve / Reject** with the live in-favour/opposed tally and the close
+  time) shown to every member. The proposal **registry** — status pipeline +
+  per-proposal digest + member **download** — is shown to every member for
+  transparency. No applause primitives; the tally is governance data (in-favour /
+  opposed counts), never a popularity signal.
 
 ### Production store binding (`drizzle-governance-stores.ts`)
 
-The nine store interfaces have gated Postgres adapters over the `knomosis` tables,
+The eleven store interfaces have gated Postgres adapters over the `knomosis` tables,
 bound at boot (`apps/api/src/index.ts`) when `DATABASE_URL` is set (the in-memory
 adapters remain the dev/test path). Two invariants the in-memory adapters held by
 convention are now enforced by the schema (migration `0036`), so the production
@@ -115,7 +123,7 @@ path can rely on them instead of a read-then-write race:
 The `knomosis` tables reference ranking/content (`public.rooms`, contributions, the
 WS-K registry) only by **soft ref** (no FK); the only hard outward edge is to
 `public.users` (the articulation node). The WS-D.3.2 schema-isolation walk seeds
-from all nine governance tables and proves no join path reaches ranking; a
+from all eleven governance tables and proves no join path reaches ranking; a
 hypothetical `knomosis → public.rooms` FK is caught.
 
 ## Tests
@@ -129,13 +137,17 @@ hypothetical `knomosis → public.rooms` FK is caught.
   `GovernedByPanel` transparency states, and the `StewardModelManager` steward
   surface (steward-gating, propose with client-side JSON validation, confirm-gated
   ratify, per-proposal download, loading/error branches, axe a11y).
-- `apps/api` — the election-lifecycle scheduler (`governance-scheduler.test.ts`)
-  and the dev **governed-room showcase** (`demo-seed-showcase.test.ts`: the
-  *Elections & Governance* room ships with an active agent + a logged action).
-- `apps/api` (gated) — `governance-integration.test.ts`: the nine Drizzle
+- `apps/api` — the member-ratification vote (`governance-ratification.test.ts`:
+  open/ballot membership-gating + idempotency, approving-majority activation,
+  fail-safe non-activation, supersede, scheduler settle), the election-lifecycle
+  scheduler (`governance-scheduler.test.ts`), and the dev **governed-room
+  showcase** (`demo-seed-showcase.test.ts`: the *Elections & Governance* room
+  ships with an active agent, a logged action, and an open ratification vote).
+- `apps/api` (gated) — `governance-integration.test.ts`: the eleven Drizzle
   adapters against the real migration chain (seat upsert, election patch/settle,
-  the vote-PK idempotency, the model digest-uniqueness collision, prompt/law-pack/
-  binding round-trips, newest-first agent actions, accepted-treasury filtering).
+  the vote-PK idempotency, the model digest-uniqueness collision, the ratification
+  ballot-PK idempotency + settle patch, prompt/law-pack/binding round-trips,
+  newest-first agent actions, accepted-treasury filtering).
 - `packages/db` — the extended isolation walk over the governance context.
 
 ## Residuals (tracked)
@@ -151,11 +163,13 @@ hypothetical `knomosis → public.rooms` FK is caught.
 - **Treasury execution** (`executeTreasuryAction`) — implemented and fail-closed
   behind the crypto flag (off by default); its caller is the WS-L/WS-M wallet +
   proposal flow, so it stays a tracked residual until that lands.
-- **Web surfaces** — the in-room "governed by" panel, the steward propose/ratify
-  surface, and the member-downloadable proposal registry are **shipped**
+- **Web surfaces** — the in-room "governed by" panel, the steward propose surface,
+  the member-downloadable proposal registry, AND the **member ratification voting
+  panel** (open vote → Approve/Reject + live tally) are **shipped**
   (`apps/web/src/components/governance/`). The remaining web residual is the
-  **steward-election voting UI** (the seat-election ballot surface; the seat +
-  election lifecycle and the read view are shipped) and a richer model-card render.
+  **steward-election ballot UI** (the *seat*-election candidate vote — distinct
+  from model ratification; the seat election lifecycle and read view are shipped)
+  and a richer model-card render.
 - **Gated Drizzle adapters** — **shipped**
   (`apps/api/src/governance/drizzle-governance-stores.ts`, bound at boot when
   `DATABASE_URL` is set; the migration-chain integration test runs in CI). The

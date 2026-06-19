@@ -87,8 +87,30 @@ export const governanceProposeResponseSchema = z.object({
 });
 export type GovernanceProposeResponse = z.infer<typeof governanceProposeResponseSchema>;
 
-export const governanceApproveResponseSchema = z.object({
-  active: z.boolean(),
-  granted: z.array(z.string()),
+// --- Member ratification vote (the path that adopts a model) ---------------
+
+export const ratificationOpenResponseSchema = z.object({ vote_id: z.string() });
+export type RatificationOpenResponse = z.infer<typeof ratificationOpenResponseSchema>;
+
+export const ratificationChoiceSchema = z.enum(['approve', 'reject']);
+export type RatificationChoiceWire = z.infer<typeof ratificationChoiceSchema>;
+
+export const ratificationBallotResponseSchema = z.object({ ok: z.boolean() });
+export type RatificationBallotResponse = z.infer<typeof ratificationBallotResponseSchema>;
+
+/** The in-room ratification surface: the open vote with its live tally (governance
+ *  data — in-favor / opposed counts — never an applause/popularity signal). */
+export const ratificationViewResponseSchema = z.object({
+  vote: z
+    .object({
+      vote_id: z.string(),
+      model_id: z.string(),
+      opens_at: z.string(),
+      closes_at: z.string(),
+      min_quorum: z.number(),
+      in_favor: z.number(),
+      opposed: z.number(),
+    })
+    .nullable(),
 });
-export type GovernanceApproveResponse = z.infer<typeof governanceApproveResponseSchema>;
+export type RatificationViewResponse = z.infer<typeof ratificationViewResponseSchema>;
