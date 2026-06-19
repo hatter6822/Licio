@@ -236,7 +236,7 @@ packages/shared/      zod schemas, types, enums, constants (the wire SSOT; leaf)
 packages/db/          Drizzle ORM schema + hand-tuned SQL migrations (PostgreSQL)
 packages/invariants/  pure invariant + scoring mathematics (PWAtt v0/v1, guardrails)
 scripts/              build validation + the CI security/doctrine gates
-docs/                 SPEC.md, planning/ (~922 tasks), policy/ (9 documents), per-WS references
+docs/                 SPEC.md, planning/ (~971 tasks), policy/ (9 documents), per-WS references
 .github/workflows/    CI (8 jobs), CodeQL, Dependabot auto-merge
 ```
 
@@ -259,7 +259,7 @@ licenses are checked for AGPL compatibility at SBOM time (`pnpm sbom`).
 ## Planning & design
 
 - **Specification:** [`docs/SPEC.md`](docs/SPEC.md) — the canonical design spec (v0.7).
-- **Implementation plan:** [`docs/planning/00-index.md`](docs/planning/00-index.md) — 22 workstream documents (WS-0 – WS-T; WS-R/WS-S are post-M3 offline/private extensions, WS-T remodels conversation as comments, and the cross-cutting [WS-U AI-governed-rooms redesign](docs/planning/22-ai-governed-rooms.md) re-scopes WS-K and amends WS-J/L/M), ~922 atomic tasks.
+- **Implementation plan:** [`docs/planning/00-index.md`](docs/planning/00-index.md) — 22 workstream documents (WS-0 – WS-T; WS-R/WS-S are post-M3 offline/private extensions, WS-T remodels conversation as comments, and the cross-cutting [WS-U AI-governed-rooms redesign](docs/planning/22-ai-governed-rooms.md) re-scopes WS-K and amends WS-J/L/M with 49 decomposed cards), ~971 atomic tasks.
 - **Extension specs (post-M3):** [`docs/OFFLINE_SPEC.md`](docs/OFFLINE_SPEC.md) (LCAP v0.2 offline content availability — WS-R) and [`docs/PRIVATE_SPEC.md`](docs/PRIVATE_SPEC.md) (E2EE private P2P rooms — WS-S).
 - **Completed-workstream references:** [`docs/design-system/`](docs/design-system/README.md), [`docs/pwa-client/`](docs/pwa-client/README.md), [`docs/identity/`](docs/identity/README.md), [`docs/events/`](docs/events/README.md), [`docs/ingestion/`](docs/ingestion/README.md), [`docs/forum/`](docs/forum/README.md), [`docs/invariants/`](docs/invariants/README.md), [`docs/ranking/`](docs/ranking/README.md), [`docs/trust-safety/`](docs/trust-safety/README.md), [`docs/ai-governance/`](docs/ai-governance/README.md), and the policy corpus under [`docs/policy/`](docs/policy/).
 - **Conventions:** [`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md) (kept byte-identical).

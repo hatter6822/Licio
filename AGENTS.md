@@ -1334,7 +1334,7 @@ Status:
 
 Read the per-workstream planning document under `docs/planning/`
 before starting new work.  The master index at
-`docs/planning/00-index.md` lists all ~922 atomic tasks.
+`docs/planning/00-index.md` lists all ~971 atomic tasks.
 
 ## Documentation rules
 
