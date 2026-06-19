@@ -14,7 +14,7 @@ import type {
 } from '@licio/shared';
 import type { MiddlewareHandler } from 'hono';
 import { hasVerifiedCredential } from '../identity/auth-methods.js';
-import { isSteward, type Role } from '../identity/rbac.js';
+import { isAiTeam, isSteward, type Role } from '../identity/rbac.js';
 import {
   authMethodInventory,
   getIdentityServices,
@@ -190,6 +190,28 @@ export function requireSteward(): MiddlewareHandler<AuthEnv> {
     // (mfaVerified), not merely have MFA enrolled on the account (WS-D.1.5b).
     if (!auth.mfaActive || !auth.mfaVerified) {
       return c.json(deny('mfa_required', 'Verify MFA to perform steward actions'), 403);
+    }
+    await next();
+    return;
+  };
+}
+
+/**
+ * Require AI-team membership (the `ai.model.manage` capability) AND active MFA
+ * (WS-K.1.1b). The deployment-gated registry writes — register/version/
+ * deprecate — are restricted to the AI team; model-card LOOKUP stays open to
+ * any authenticated user and uses `authMiddleware()` alone.
+ */
+export function requireAiTeam(): MiddlewareHandler<AuthEnv> {
+  return async (c, next) => {
+    const auth = c.get('auth');
+    if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+    if (!isAiTeam(auth.roles)) {
+      await denyAudit(auth.userId);
+      return c.json(deny('forbidden', 'AI-team role required'), 403);
+    }
+    if (!auth.mfaActive || !auth.mfaVerified) {
+      return c.json(deny('mfa_required', 'Verify MFA to manage AI models'), 403);
     }
     await next();
     return;
