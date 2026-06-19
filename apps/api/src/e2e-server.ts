@@ -14,6 +14,12 @@
 import { serve } from '@hono/node-server';
 import { validateServerEnv } from '@licio/shared/env';
 import { Hono } from 'hono';
+import { seedAiGovernance } from './ai-governance/seed.js';
+import {
+  createInMemoryAiGovernanceServices,
+  setAiGovernanceServices,
+} from './ai-governance/services.js';
+import { registerAiGovernanceConsumers } from './ai-governance/wiring.js';
 import { createApp } from './app.js';
 import { registerDefaultConsumers } from './events/consumers.js';
 import {
@@ -125,7 +131,20 @@ setRankingServices(rankingServices);
 }
 setIdentityServices(identityServices);
 
+// WS-K AI & model governance: register + deploy the governed models through the
+// real gate and seed the inventory/lineage, so the governance surfaces work in
+// the BFF harness.
+const aiGovernanceServices = createInMemoryAiGovernanceServices(eventServices, {
+  log: (event, meta) => logger.info(meta, event),
+});
+aiGovernanceServices.ingestion = ingestionServices;
+aiGovernanceServices.forum = forumServices;
+await aiGovernanceServices.reloadConfig();
+setAiGovernanceServices(aiGovernanceServices);
+registerAiGovernanceConsumers(eventServices, aiGovernanceServices);
+
 await seedForumDemoData(forumServices, ingestionServices, identityServices.store);
+await seedAiGovernance(aiGovernanceServices);
 
 // --- App: the test-auth route first (no CSRF — it bootstraps the session),
 // then the full production app for everything else. --------------------------

@@ -76,6 +76,8 @@ import { feedMediaOf } from '../lib/story-media.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { serveFeed } from '../ranking/service.js';
 import { getRankingServices } from '../ranking/services.js';
+import { createAiGovernanceAdminRoutes } from './ai-governance-admin.js';
+import { createAiGovernancePublicRoutes } from './ai-governance-public.js';
 import { createAuthRoutes } from './auth.js';
 import { createEventsRoutes } from './events.js';
 import { createForumRoutes } from './forum.js';
@@ -492,6 +494,14 @@ export function createV1Routes() {
       // viewer, and transparency export.
       .route('/', createTrustSafetyRoutes())
       .route('/moderation', createModerationConsoleRoutes())
+
+      // --- AI and model governance (WS-K) -------------------------------------
+      // Public: model-card lookup (transparency), translation, and summary/
+      // translation reports.  Admin: AI-team model lifecycle (register/version/
+      // evaluate/deploy/deprecate) + the deploy gate, runtime config, the
+      // inventory/blocked/runtime read surfaces, and the steward review queue.
+      .route('/', createAiGovernancePublicRoutes())
+      .route('/ai/admin', createAiGovernanceAdminRoutes())
 
       // --- Settings sync (SPEC §23.2 /feed/preferences) ---------------------
       .get('/settings', (c) => {

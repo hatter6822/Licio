@@ -7,6 +7,16 @@ import { serve } from '@hono/node-server';
 import { createDbClient } from '@licio/db';
 import { stewardRolesQueues } from '@licio/shared';
 import { validateServerEnv } from '@licio/shared/env';
+import {
+  AI_GOVERNANCE_SCHEDULER_INTERVAL_MS,
+  startAiGovernanceScheduler,
+} from './ai-governance/scheduler.js';
+import { seedAiGovernance } from './ai-governance/seed.js';
+import {
+  createInMemoryAiGovernanceServices,
+  setAiGovernanceServices,
+} from './ai-governance/services.js';
+import { registerAiGovernanceConsumers } from './ai-governance/wiring.js';
 import { createApp } from './app.js';
 import { registerDefaultConsumers } from './events/consumers.js';
 import {
@@ -736,6 +746,22 @@ rankingServices.moderation = createDefaultModerationStateProvider({
   shadowedSubjects: (ids) => moderationServices.actions.listActiveShadowedSubjects(ids),
 });
 
+// WS-K AI & model governance: the registry/deployment gate, prohibited-use
+// guard, evaluation harness, data lineage, audit-sensitive output records, the
+// content/summary/translation/governance pipelines, and runtime monitoring. The
+// ingestion + forum seams are injected so the durable WS-E consumer can classify/
+// extract during ingestion and the summary pipeline can read threads. (Gated
+// Drizzle adapters for the WS-K stores are a tracked residual; the in-memory
+// stores serve every environment until they land.)
+const aiGovernanceServices = createInMemoryAiGovernanceServices(eventServices, {
+  log: (event, meta) => logger.info(meta, event),
+});
+aiGovernanceServices.ingestion = ingestionServices;
+aiGovernanceServices.forum = forumServices;
+await aiGovernanceServices.reloadConfig();
+setAiGovernanceServices(aiGovernanceServices);
+registerAiGovernanceConsumers(eventServices, aiGovernanceServices);
+
 // Development demo seed (NEVER in production): populate rooms, stories, threads,
 // and multi-author comments through the REAL stores so a fresh dev database
 // renders end-to-end data on boot. Idempotent (a no-op once seeded) and
@@ -790,6 +816,10 @@ if (env.NODE_ENV !== 'production') {
     );
     // WS-J: a small report queue so the dev console shows real data on boot.
     await seedModerationDemo(moderationServices);
+    // WS-K: register + DEPLOY the governed models through the real gate, and seed
+    // the risk assessments / lineage / AI inventory so the governance surfaces
+    // render on first boot. Idempotent (register is a no-op once present).
+    await seedAiGovernance(aiGovernanceServices);
     logger.info('demo data seeded (development)');
   } catch (err) {
     logger.warn({ err }, 'demo seed skipped (non-fatal)');
@@ -868,6 +898,16 @@ startModerationScheduler(
   moderationServices,
   (err, task) => logger.error({ err, task }, 'moderation scheduler task failed'),
   MODERATION_SCHEDULER_INTERVAL_MS,
+  { lease: makeJobLease() },
+);
+
+// Hourly WS-K maintenance: config reload, runtime monitoring (drift/report-rate
+// alerts + human-approved rollback recommendations), and accuracy recompute from
+// steward corrections — under its own job lease.
+startAiGovernanceScheduler(
+  aiGovernanceServices,
+  (err, task) => logger.error({ err, task }, 'ai-governance scheduler task failed'),
+  AI_GOVERNANCE_SCHEDULER_INTERVAL_MS,
   { lease: makeJobLease() },
 );
 

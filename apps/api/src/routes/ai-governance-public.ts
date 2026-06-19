@@ -1,0 +1,139 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-K AI-governance public surface (SPEC §24.2). Open to any authenticated user:
+//   • model-card LOOKUP (transparency — every model's card is queryable);
+//   • request a translation (WS-K.2.1a — original stays canonical);
+//   • report a bad summary or translation (WS-K.1.4c / WS-K.2.1a — routes to the
+//     steward review queue + the model-improvement loop; reporter identity is
+//     never exposed).
+
+import { zValidator } from '@hono/zod-validator';
+import {
+  SUMMARY_REPORT_REASONS,
+  TRANSLATION_REPORT_REASONS,
+  TRANSLATION_SOURCE_KINDS,
+} from '@licio/ai-governance';
+import { Hono } from 'hono';
+import { z } from 'zod';
+import { lookupModels } from '../ai-governance/registry.js';
+import { getAiGovernanceServices } from '../ai-governance/services.js';
+import { reportSummary } from '../ai-governance/summaries.js';
+import { reportTranslation, translateContent } from '../ai-governance/translation.js';
+import {
+  buildRegistryDeps,
+  buildSummaryDeps,
+  buildTranslationDeps,
+} from '../ai-governance/wiring.js';
+import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
+
+const deny = (code: string, message: string) => ({ error: { code, message } }) as const;
+
+const translateBodySchema = z
+  .object({
+    source_kind: z.enum(TRANSLATION_SOURCE_KINDS),
+    source_ref: z.string().min(1).max(256),
+    source_text: z.string().min(1).max(20_000),
+    source_lang: z.string().min(2).max(16),
+    target_lang: z.string().min(2).max(16),
+  })
+  .strict();
+
+const summaryReportBodySchema = z
+  .object({
+    reason: z.enum(SUMMARY_REPORT_REASONS),
+    correction_text: z.string().max(8_000).nullable().optional(),
+  })
+  .strict();
+
+const translationReportBodySchema = z
+  .object({ reason: z.enum(TRANSLATION_REPORT_REASONS) })
+  .strict();
+
+export function createAiGovernancePublicRoutes() {
+  // Mounted at '/', so auth is applied PER-ROUTE (a `.use('*')` here would leak
+  // the wildcard to the whole '/v1' scope and gate unrelated public routes).
+  return (
+    new Hono<AuthEnv>()
+
+      // Model-card transparency: lookup is open to all authenticated users.
+      .get('/ai/models', authMiddleware(), async (c) => {
+        const ai = getAiGovernanceServices();
+        const name = c.req.query('name');
+        const status = c.req.query('status');
+        const filter: Parameters<typeof lookupModels>[1] = {
+          ...(name ? { name } : {}),
+          ...(status === 'registered' || status === 'deployed' || status === 'deprecated'
+            ? { status }
+            : {}),
+        };
+        const models = await lookupModels(buildRegistryDeps(ai), filter);
+        // Cards only (no internal lifecycle leakage beyond status/version).
+        return c.json({
+          models: models.map((m) => ({
+            name: m.name,
+            version: m.version,
+            status: m.status,
+            card: m.card,
+            deprecation: m.deprecation,
+          })),
+        });
+      })
+      .get('/ai/models/:name/:version', authMiddleware(), async (c) => {
+        const ai = getAiGovernanceServices();
+        const model = await ai.registry.getVersion(c.req.param('name'), c.req.param('version'));
+        if (model === null) return c.json(deny('not_found', 'model not found'), 404);
+        return c.json({ model });
+      })
+
+      // Translation (WS-K.2.1a) — the original (source_ref) stays canonical.
+      .post(
+        '/ai/translations',
+        authMiddleware(),
+        zValidator('json', translateBodySchema),
+        async (c) => {
+          const ai = getAiGovernanceServices();
+          const body = c.req.valid('json');
+          const translation = await translateContent(buildTranslationDeps(ai), {
+            sourceKind: body.source_kind,
+            sourceRef: body.source_ref,
+            sourceText: body.source_text,
+            sourceLang: body.source_lang,
+            targetLang: body.target_lang,
+          });
+          return c.json({ translation }, 201);
+        },
+      )
+      .post(
+        '/ai/translations/:id/report',
+        authMiddleware(),
+        zValidator('json', translationReportBodySchema),
+        async (c) => {
+          const ai = getAiGovernanceServices();
+          const report = await reportTranslation(
+            buildTranslationDeps(ai),
+            c.req.param('id'),
+            c.req.valid('json').reason,
+          );
+          return c.json({ report }, 201);
+        },
+      )
+
+      // Summary reports (WS-K.1.4c) — reporter identity is never stored/exposed.
+      .post(
+        '/ai/summaries/:id/report',
+        authMiddleware(),
+        zValidator('json', summaryReportBodySchema),
+        async (c) => {
+          const ai = getAiGovernanceServices();
+          const body = c.req.valid('json');
+          const report = await reportSummary(
+            buildSummaryDeps(ai),
+            c.req.param('id'),
+            body.reason,
+            body.correction_text ?? null,
+          );
+          return c.json({ report }, 201);
+        },
+      )
+  );
+}
