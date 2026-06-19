@@ -81,11 +81,29 @@ export function createGovernanceRoutes() {
         async (c) => {
           const auth = c.get('auth');
           if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
+          const roomId = c.req.param('roomId');
           const { candidate_user_id } = c.req.valid('json');
+          // Membership-gate the voter (the soft cross-context read), then require
+          // the candidate to be a room member too — a steward is elected from
+          // among the room's own members, never an outsider.
+          const eligible = await isRoomMember(roomId, auth.userId);
+          if (!eligible) {
+            return c.json(
+              deny('not_member', 'Only room members may vote in a steward election.'),
+              403,
+            );
+          }
+          if (!(await isRoomMember(roomId, candidate_user_id))) {
+            return c.json(
+              deny('invalid_candidate', 'The candidate is not a member of this room.'),
+              422,
+            );
+          }
           const result = await getGovernanceService().castVote(
             c.req.param('electionId'),
             auth.userId,
             candidate_user_id,
+            eligible,
           );
           if (!result.ok) return c.json(deny(result.code, result.message), 409);
           return c.json({ ok: true });

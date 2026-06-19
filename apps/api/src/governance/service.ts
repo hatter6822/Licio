@@ -14,6 +14,7 @@ import {
   type Capability,
   type CapabilityDescriptor,
   deriveCapabilityDescriptor,
+  type ElectionRules,
   evaluatePolicy,
   evaluateTreasuryAction,
   type GovernancePolicyBundle,
@@ -174,12 +175,20 @@ export class GovernanceService {
     return ok(electionId);
   }
 
-  /** Cast a simulated ballot (open election only; one per voter). */
+  /**
+   * Cast a simulated ballot (open election only; caller-verified room member; one
+   * per voter). `eligible` is the route's soft cross-context membership read —
+   * gating it HERE (symmetric with `castRatificationBallot`) keeps the
+   * not-a-member rule on the service, so a route bug can never let a non-member
+   * vote (defense-in-depth, the WS-D.3.2 isolation boundary).
+   */
   async castVote(
     electionId: string,
     voterUserId: string,
     candidateUserId: string,
+    eligible: boolean,
   ): Promise<GovernanceResult<void>> {
+    if (!eligible) return err('not_member', 'Only room members may vote in a steward election.');
     const election = await this.deps.stores.elections.get(electionId);
     if (election === null || election.status !== 'open') {
       return err('not_open', 'Election is not open.');
@@ -203,16 +212,14 @@ export class GovernanceService {
     const election = await this.deps.stores.elections.get(electionId);
     if (!election) return err('not_found', 'Election not found.');
     const seat = await this.deps.stores.seats.get(election.roomId);
+    // The tally + next term length come from the room's community-voted bounds
+    // (the active binding's law-pack `election` rules), defaulting to the platform
+    // baseline when the room has bound no law-pack — never a hardcoded constant.
+    const rules = await this.resolveElectionRules(election.roomId);
     const ballots = await this.deps.stores.votes.listByElection(electionId);
     const result = tallyElection(
       ballots.map((b) => ({ voterUserId: b.voterUserId, candidateUserId: b.candidateUserId })),
-      {
-        weightModel: 'one_civic_account_one_vote',
-        perAccountCap: 1,
-        minQuorum: 1,
-        minTurnout: 0,
-        termSeconds: this.deps.config.electionTermSeconds,
-      },
+      rules,
       { eligibleCount, incumbentUserId: seat?.holderUserId ?? null },
     );
     await this.deps.stores.elections.patch(electionId, {
@@ -223,7 +230,7 @@ export class GovernanceService {
     });
     if (seat) {
       const start = this.deps.now();
-      const end = new Date(start.getTime() + this.deps.config.electionTermSeconds * 1000);
+      const end = new Date(start.getTime() + rules.termSeconds * 1000);
       await this.deps.stores.seats.put({
         ...seat,
         holderUserId: result.winnerUserId ?? seat.holderUserId,
@@ -698,6 +705,20 @@ export class GovernanceService {
       if (stored) return stored.lawPack;
     }
     return defaultModerationLawPack(roomId);
+  }
+
+  /**
+   * The room's effective steward-election rules: the community-voted bounds the
+   * room's agent binding carries (its law-pack `election`), or the platform
+   * baseline when the room has bound no law-pack. Reading the binding here keeps
+   * the service within its own `knomosis` stores (no cross-context import). The
+   * binding's law-pack applies even while the agent is frozen — a freeze pauses
+   * the agent, not the steward seat.
+   */
+  private async resolveElectionRules(roomId: string): Promise<ElectionRules> {
+    const binding = await this.deps.stores.bindings.get(roomId);
+    const lawPack = await this.resolveLawPack(roomId, binding?.lawPackId ?? null);
+    return lawPack.election;
   }
 }
 

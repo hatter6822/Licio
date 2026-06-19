@@ -3,11 +3,40 @@
 // WS-U HTTP surface: the steward seat, the community model registry (propose /
 // list / member-downloadable artifact / approve), and the "governed by" agent
 // view. Authentication is required; steward-only writes are service-enforced.
+import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { getGovernanceService, resetGovernanceService } from '../governance/services.js';
+import { resolveGovernanceConfig } from '../governance/config.js';
+import {
+  createGovernanceService,
+  getGovernanceService,
+  resetGovernanceService,
+  setGovernanceService,
+} from '../governance/services.js';
 import { createGovernanceRoutes } from '../routes/governance.js';
 import { freshForumServices, seedUserWithSession } from './forum-test-helpers.js';
+
+/** Seed an active room membership (the ratification/election eligibility seam). */
+async function joinRoom(
+  forum: ReturnType<typeof freshForumServices>,
+  roomId: string,
+  userId: string,
+): Promise<void> {
+  await forum.forum.rooms.upsertSubscription({
+    roomId,
+    userId,
+    status: 'active',
+    requestId: randomUUID(),
+    notificationPreferences: {
+      threads: 'mentions',
+      new_evidence: false,
+      bridge_requests: false,
+      steward_announcements: true,
+    },
+    requestedAt: new Date().toISOString(),
+    joinedAt: new Date().toISOString(),
+  });
+}
 
 function jsonReq(path: string, method: string, body?: unknown, cookie?: string): Request {
   const init: RequestInit = {
@@ -171,6 +200,52 @@ describe('WS-U governance routes', () => {
       ),
     );
     expect(ok.status).toBe(200);
+  });
+
+  it('steward-election vote: gates to members and validates the candidate is a member', async () => {
+    const steward = await seedUserWithSession(forum.identity);
+    const member = await seedUserWithSession(forum.identity);
+    const candidate = await seedUserWithSession(forum.identity);
+    const outsider = await seedUserWithSession(forum.identity);
+
+    // A controllable clock so a real election can be scheduled (term-elapsed).
+    let t = Date.parse('2026-06-19T00:00:00.000Z');
+    resetGovernanceService();
+    setGovernanceService(
+      createGovernanceService({
+        config: resolveGovernanceConfig({ electionTermSeconds: 100, electionWindowSeconds: 50 }),
+        now: () => new Date(t),
+      }),
+    );
+    const svc = getGovernanceService();
+    await svc.bootstrapSeat('re', steward.userId);
+    t += 101_000; // the term has elapsed ⇒ an election can open
+    const sched = await svc.scheduleElection('re');
+    const electionId = sched.ok ? sched.value : '';
+    expect(electionId).not.toBe('');
+
+    // `member` and `candidate` are active room members; `outsider` is not.
+    await joinRoom(forum, 're', member.userId);
+    await joinRoom(forum, 're', candidate.userId);
+
+    const vote = (cookie: string, candidateUserId: string) =>
+      app.request(
+        jsonReq(
+          `/v1/rooms/re/elections/${electionId}/vote`,
+          'POST',
+          { candidate_user_id: candidateUserId },
+          cookie,
+        ),
+      );
+
+    // A non-member voter is rejected (403 not_member).
+    expect((await vote(outsider.cookie, candidate.userId)).status).toBe(403);
+    // A member voting for a NON-member candidate is rejected (422 invalid_candidate).
+    expect((await vote(member.cookie, outsider.userId)).status).toBe(422);
+    // A member voting for a member candidate succeeds.
+    expect((await vote(member.cookie, candidate.userId)).status).toBe(200);
+    // The same voter cannot vote twice (service idempotency surfaces as 409).
+    expect((await vote(member.cookie, candidate.userId)).status).toBe(409);
   });
 
   it('forbids a non-steward from proposing', async () => {

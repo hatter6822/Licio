@@ -95,9 +95,9 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
     const sched = await h.svc.scheduleElection('r1');
     expect(sched.ok).toBe(true);
     const eid = sched.ok ? sched.value : '';
-    expect((await h.svc.castVote(eid, 'v1', 'cand')).ok).toBe(true);
-    expect((await h.svc.castVote(eid, 'v1', 'cand')).ok).toBe(false); // idempotent
-    await h.svc.castVote(eid, 'v2', 'cand');
+    expect((await h.svc.castVote(eid, 'v1', 'cand', true)).ok).toBe(true);
+    expect((await h.svc.castVote(eid, 'v1', 'cand', true)).ok).toBe(false); // idempotent
+    await h.svc.castVote(eid, 'v2', 'cand', true);
     const settled = await h.svc.settleElection(eid, 3);
     expect(settled.ok && settled.value.winnerUserId).toBe('cand');
     expect((await h.svc.getSeat('r1'))?.holderUserId).toBe('cand');
@@ -105,7 +105,67 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
   });
 
   it('rejects a vote on a non-open election', async () => {
-    expect((await h.svc.castVote('missing', 'v', 'c')).ok).toBe(false);
+    expect((await h.svc.castVote('missing', 'v', 'c', true)).ok).toBe(false);
+  });
+
+  it('rejects a ballot from a non-member (membership-gated at the service)', async () => {
+    await h.svc.bootstrapSeat('r1', 'creator');
+    h.advance(YEAR_MS);
+    const sched = await h.svc.scheduleElection('r1');
+    const eid = sched.ok ? sched.value : '';
+    const denied = await h.svc.castVote(eid, 'outsider', 'cand', false);
+    expect(denied.ok).toBe(false);
+    expect(!denied.ok && denied.code).toBe('not_member');
+  });
+
+  it('settle reads the room law-pack election rules (quorum + term), not a constant', async () => {
+    await h.svc.bootstrapSeat('r1', 'creator');
+    // A bound law-pack whose election demands a quorum of 2 and a short 10s term.
+    const lp = await h.svc.proposeLawPack('r1', 'creator', {
+      lawPackId: 'x',
+      version: '1',
+      allowedProposalTypes: ['steward_election'],
+      permittedCapabilities: ['moderate.flag'],
+      treasury: {
+        caps: [],
+        minIntervalSeconds: 0,
+        timelockSeconds: 0,
+        materialThreshold: 0,
+        requireCoiFor: [],
+        investment: null,
+      },
+      election: {
+        weightModel: 'one_civic_account_one_vote',
+        perAccountCap: 1,
+        minQuorum: 2,
+        minTurnout: 0,
+        termSeconds: 10,
+      },
+    });
+    if (!lp.ok) throw new Error('law-pack proposal failed');
+    const proposed = await h.svc.proposeModel('r1', 'creator', goodBundle(), 'prompt');
+    if (!proposed.ok) throw new Error('model proposal failed');
+    await h.svc.evaluateModel(proposed.value.modelId);
+    // Approve (bind the law-pack) so settle resolves rules from the binding.
+    expect(
+      (await h.svc.approveModel('r1', proposed.value.modelId, null, lp.value.lawPackId)).ok,
+    ).toBe(true);
+
+    // Open an election and cast a SINGLE ballot.
+    h.advance(YEAR_MS);
+    const sched = await h.svc.scheduleElection('r1');
+    const eid = sched.ok ? sched.value : '';
+    await h.svc.castVote(eid, 'v1', 'challenger', true);
+
+    // The bound law-pack requires a quorum of 2; one ballot fails it ⇒ fail-safe
+    // (the default law-pack's quorum of 1 would have settled to 'challenger').
+    const settled = await h.svc.settleElection(eid, 10);
+    expect(settled.ok && settled.value.settled).toBe(false);
+    const seat = await h.svc.getSeat('r1');
+    expect(seat?.holderUserId).toBe('creator');
+    // The next term honours the law-pack's short termSeconds (10s) — proof the
+    // term length is law-pack-driven, never a hardcoded config constant.
+    expect(Date.parse(seat?.termEnd ?? '') - Date.parse(seat?.termStart ?? '')).toBe(10_000);
   });
 });
 

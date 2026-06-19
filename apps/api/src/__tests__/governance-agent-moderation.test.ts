@@ -114,6 +114,7 @@ describe('WS-U agent on the contribution path (combination + intake)', () => {
 
     fixture.forum.agentModerator = fixedAgent('under_review');
     const edited = await editContribution(bundle(), AUTHOR, created.contribution.contributionId, {
+      contribution_id: created.contribution.contributionId,
       body: 'An edited body that the in-room agent flags for review.',
     });
     expect(edited.ok && edited.contribution.moderationState).toBe('under_review');
