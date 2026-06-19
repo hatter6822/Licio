@@ -96,7 +96,11 @@ export interface StoryCommentsOptions {
   root?: string;
 }
 
-export function useStoryCommentsQuery(storyId: string, options: StoryCommentsOptions = {}) {
+export function useStoryCommentsQuery(
+  storyId: string,
+  options: StoryCommentsOptions = {},
+  enabled = true,
+) {
   const query = useInfiniteQuery({
     queryKey: queryKeys.storyComments(storyId, options),
     queryFn: async ({ pageParam }) => {
@@ -109,7 +113,7 @@ export function useStoryCommentsQuery(storyId: string, options: StoryCommentsOpt
     },
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.next_cursor,
-    enabled: storyId.length > 0,
+    enabled: enabled && storyId.length > 0,
     ...cachePolicy.thread,
   });
   const pages = query.data?.pages ?? [];

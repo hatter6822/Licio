@@ -10,6 +10,7 @@ import { ErrorState } from '../../components/ui/ErrorState/index.js';
 import { LoadingState } from '../../components/ui/LoadingState/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { useT } from '../../i18n/index.js';
+import { cn } from '../../lib/cn.js';
 
 interface QueryLike<T> {
   data: T | undefined;
@@ -28,6 +29,7 @@ export interface PageScaffoldProps<T> {
   emptyTitle?: string;
   emptyDescription?: string;
   children: (data: T) => ReactNode;
+  contentClassName?: string;
 }
 
 export function PageScaffold<T>({
@@ -39,12 +41,13 @@ export function PageScaffold<T>({
   emptyTitle,
   emptyDescription,
   children,
+  contentClassName,
 }: PageScaffoldProps<T>): React.ReactElement {
   const t = useT();
   return (
     <>
       <PageHeader title={title} {...(onBack ? { onBack } : {})} {...(actions ? { actions } : {})} />
-      <div className="mx-auto w-full max-w-2xl p-4">
+      <div className={cn('mx-auto w-full p-4', contentClassName ?? 'max-w-2xl')}>
         {query.isLoading ? (
           <LoadingState />
         ) : query.isError || query.data === undefined ? (
