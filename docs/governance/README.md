@@ -69,9 +69,9 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
   safety steward, never the room's elected steward, can pause or restore a room's
   community-approved agent at any time, and the "governed by" view reports the
   paused (`frozen`) state. The agent is **wired into the live contribution path**:
-  `createContribution`
-  consults the `RoomAgentModerator` seam (`governance/forum-agent.ts`) for any
-  room with an active binding and combines its recommendation **floor-dominantly**
+  BOTH `createContribution` AND `editContribution` (an edit-to-violate is caught
+  too) consult the `RoomAgentModerator` seam (`governance/forum-agent.ts`) for any
+  room with an active binding and combine its recommendation **floor-dominantly**
   — the agent can raise a contribution's moderation state (flag → `under_review`,
   remove → `removed`) but can never lower or reverse a platform-floor decision.
   Agent-held content is routed to the human review queue (the appeal path) and is

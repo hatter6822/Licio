@@ -292,7 +292,19 @@ export function createRoomsRoutes() {
           });
           // WS-U §16.6: bootstrap the elected-room-steward seat to the creator
           // (the first member); a Knomosis election re-seats it after the term.
-          await getGovernanceService().bootstrapSeat(created.room.roomId, auth.userId);
+          // BEST-EFFORT + isolated: the seat lives in the separate `knomosis`
+          // context (no shared transaction), so a governance-store hiccup must
+          // never fail or roll back the room creation. `bootstrapSeat` is
+          // idempotent, so a later interaction (or a manual re-bootstrap) heals a
+          // missed seat.
+          try {
+            await getGovernanceService().bootstrapSeat(created.room.roomId, auth.userId);
+          } catch (error) {
+            forum.log('governance.seat_bootstrap_failed', {
+              room_id: created.room.roomId,
+              error: String(error),
+            });
+          }
           const identity = getIdentityServices();
           await identity.audit.append({
             actorUserId: auth.userId,

@@ -10,7 +10,7 @@
 //      null when no agent governs the room.
 import { type ContributionCreate, contributionCreateSchema } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createContribution } from '../forum/contributions.js';
+import { createContribution, editContribution } from '../forum/contributions.js';
 import { type RoomAgentModerator, resetForumServicesForTests } from '../forum/services.js';
 import { createRoomAgentModerator } from '../governance/forum-agent.js';
 import {
@@ -101,6 +101,23 @@ describe('WS-U agent on the contribution path (combination + intake)', () => {
       10,
     );
     expect(queued).toHaveLength(0);
+  });
+
+  it('RE-MODERATES on edit: an agent that flags the edited content holds it', async () => {
+    // Created with no agent ⇒ published; an agent then governs and flags on edit.
+    const { threadId } = await seedThread(fixture);
+    const created = await post(
+      contributionCreateSchema.parse(contributionBody('explanation', threadId)),
+    );
+    if (!created.ok) throw new Error('create failed');
+    expect(created.contribution.moderationState).toBe('published');
+
+    fixture.forum.agentModerator = fixedAgent('under_review');
+    const edited = await editContribution(bundle(), AUTHOR, created.contribution.contributionId, {
+      body: 'An edited body that the in-room agent flags for review.',
+    });
+    expect(edited.ok && edited.contribution.moderationState).toBe('under_review');
+    expect(metric('contributions.edit_agent_flagged')).toBeGreaterThanOrEqual(1);
   });
 
   it('is FLOOR-DOMINANT: the agent cannot lower a platform-floor removal', async () => {

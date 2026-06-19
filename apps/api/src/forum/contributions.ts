@@ -961,12 +961,44 @@ export async function editContribution(
       rejection: { status: 404, code: 'not_found', message: 'Contribution not found' },
     };
   }
-  // Edit-to-introduce-spam/malware is caught here: a `block` disposition removes
-  // the edit (appealable system action); `flag` holds it for review.
-  if (verdict.disposition !== 'clear' && edited.moderationState === 'published') {
-    const targetState = verdict.disposition === 'block' ? 'removed' : 'under_review';
-    forum.metrics.increment('contributions.edit_safety_flagged');
-    const held = await forum.contributions.setModerationState(contributionId, targetState);
+  // The WS-U in-room agent RE-MODERATES the edited content (parity with the
+  // create path, WS-U §24.6): an edit-to-violate-the-community-policy is caught
+  // here too. Combined FLOOR-DOMINANTLY with the platform verdict (the agent can
+  // only add caution, never lower a floor decision).
+  const floorState: ModState =
+    verdict.disposition === 'block'
+      ? 'removed'
+      : verdict.disposition === 'flag'
+        ? 'under_review'
+        : 'published';
+  let target: ModState = floorState;
+  let agentEscalated = false;
+  if (editThread?.roomId != null && forum.agentModerator !== null) {
+    const agent = await forum.agentModerator.moderateContribution({
+      roomId: editThread.roomId,
+      contributionId,
+      type: existing.type,
+      body: patch.body ?? existing.body,
+      citationCount: (patch.citations ?? existing.citations).length,
+      attachmentCount: Array.isArray(existing.metadata['attachment_ids'])
+        ? existing.metadata['attachment_ids'].length
+        : 0,
+    });
+    if (agent !== null && MOD_STATE_RANK[agent.state] > MOD_STATE_RANK[target]) {
+      target = agent.state;
+      agentEscalated = true;
+    }
+  }
+  // Edit-to-introduce-spam/malware (floor) or to-violate-community-policy (agent)
+  // is caught here: `removed` removes the edit (appealable system action);
+  // `under_review` holds it for review.
+  if (target !== 'published' && edited.moderationState === 'published') {
+    forum.metrics.increment(
+      agentEscalated && verdict.disposition === 'clear'
+        ? 'contributions.edit_agent_flagged'
+        : 'contributions.edit_safety_flagged',
+    );
+    const held = await forum.contributions.setModerationState(contributionId, target);
     if (verdict.disposition === 'block' && forum.autoModerationSink !== null) {
       // Awaited (not background): the auto-removal's appealable action/audit/
       // notice must be durable with the removal (no silent auto-removal).
@@ -984,8 +1016,9 @@ export async function editContribution(
       context: {
         contribution_id: contributionId,
         thread_id: existing.threadId,
-        reasons: verdict.reasons,
+        reasons: verdict.disposition !== 'clear' ? verdict.reasons : ['in_room_agent'],
         trigger: 'edit',
+        ...(agentEscalated ? { source: 'in_room_agent' } : {}),
       },
       status: 'pending',
       resolution: null,
