@@ -49,7 +49,7 @@ async function submitLink(url: string, cookie: string): Promise<string> {
 
 describe('robots.txt compliance (WS-F.1.4f)', () => {
   it('never fetches a disallowed path and produces a link-only story', async () => {
-    const { cookie } = await seedUserWithSession(fixture.identity);
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     fixture.robots.set('https://blocked.example', 'User-agent: *\nDisallow: /private/');
     const url = 'https://blocked.example/private/report';
     fixture.pages.set(url, { status: 200, body: articleHtml() });
@@ -68,7 +68,7 @@ describe('robots.txt compliance (WS-F.1.4f)', () => {
   });
 
   it('honors LicioBot-specific groups and allows other paths', async () => {
-    const { cookie } = await seedUserWithSession(fixture.identity);
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     fixture.robots.set(
       'https://picky.example',
       'User-agent: liciobot\nDisallow: /no-bots/\n\nUser-agent: *\nDisallow: /',
@@ -94,7 +94,7 @@ describe('robots.txt compliance (WS-F.1.4f)', () => {
       async () => ({ error: 'network down' }),
       () => nowMs,
     );
-    const { cookie: cookie2 } = await seedUserWithSession(fx.identity);
+    const { cookie: cookie2 } = await seedUserWithSession(fx.identity, { nowMs });
     const url = 'https://down.example/article';
     fx.pages.set(url, { status: 200, body: articleHtml() });
     const res = await app().request(post('/v1/stories', linkSubmission(url), cookie2));
@@ -113,7 +113,7 @@ describe('robots.txt compliance (WS-F.1.4f)', () => {
   });
 
   it('link-only (robots-disallowed) stories classify + extract claims from local text', async () => {
-    const { cookie } = await seedUserWithSession(fixture.identity);
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     fixture.robots.set('https://blocked.example', 'User-agent: *\nDisallow: /private/');
     const url = 'https://blocked.example/private/report';
     fixture.pages.set(url, { status: 200, body: articleHtml() });
@@ -145,7 +145,7 @@ describe('robots.txt compliance (WS-F.1.4f)', () => {
   });
 
   it('re-checks robots on the FINAL url and degrades a redirect-to-disallowed to link-only', async () => {
-    const { cookie } = await seedUserWithSession(fixture.identity);
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     fixture.robots.set('https://redir.example', 'User-agent: *\nDisallow: /private/');
     const start = 'https://redir.example/start'; // ALLOWED by robots…
     const finalUrl = 'https://redir.example/private/secret'; // …redirects to DISALLOWED.
@@ -162,7 +162,7 @@ describe('robots.txt compliance (WS-F.1.4f)', () => {
 
 describe('extraction failure + retry (WS-F.1.4e non-blocking)', () => {
   it('keeps the story readable, schedules a backoff retry, and succeeds later', async () => {
-    const { cookie } = await seedUserWithSession(fixture.identity);
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     const url = 'https://flaky.example/article';
     // No page registered ⇒ the stub returns 404 ⇒ extraction failure.
     const storyId = await submitLink(url, cookie);
@@ -185,7 +185,7 @@ describe('extraction failure + retry (WS-F.1.4e non-blocking)', () => {
   });
 
   it('redelivered content.submitted is a no-op once processed (idempotency)', async () => {
-    const { cookie } = await seedUserWithSession(fixture.identity);
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     const url = 'https://once.example/article';
     fixture.pages.set(url, { status: 200, body: articleHtml() });
     const storyId = await submitLink(url, cookie);
@@ -228,7 +228,7 @@ describe('syndicated copy detection (WS-F.1.3d)', () => {
   }
 
   it('auto-links a KNOWN confirmed partner and flags an UNKNOWN publisher', async () => {
-    const { cookie } = await seedUserWithSession(fixture.identity);
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     const originalId = await submitFrom('wire.example', cookie);
     const original = await fixture.ingestion.stories.getById(originalId);
     const wireSource = await fixture.ingestion.sources.getByDomain('wire.example');
@@ -274,7 +274,7 @@ describe('syndicated copy detection (WS-F.1.3d)', () => {
 
 describe('lifecycle + freshness consumers (WS-F.1.1c / WS-F.1.4g)', () => {
   it('first attention moves submitted → gathering_attention with an audit record', async () => {
-    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    const { userId, cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     const res = await app().request(
       post(
         '/v1/stories',
@@ -308,7 +308,7 @@ describe('lifecycle + freshness consumers (WS-F.1.1c / WS-F.1.4g)', () => {
   });
 
   it('archives idle stories via the sweep; reactivation routes to deepening', async () => {
-    const { cookie } = await seedUserWithSession(fixture.identity);
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     const res = await app().request(
       post(
         '/v1/stories',

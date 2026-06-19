@@ -73,7 +73,7 @@ function evidenceAdded(userId: string, threadId: string, evidenceId: string) {
 
 describe('ingestion-signals consumer (WS-F.1.1c via WS-E events)', () => {
   it('evidence.added marks a material update, refreshes freshness, embeds the card', async () => {
-    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    const { userId, cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     const storyId = await submitBrief(cookie);
     const thread = await fixture.ingestion.stories.getThreadByStoryId(storyId);
     const before = await fixture.ingestion.stories.getById(storyId);
@@ -110,7 +110,7 @@ describe('ingestion-signals consumer (WS-F.1.1c via WS-E events)', () => {
       config: { minAccountAgeMinutes: 0, lifecycleSustainedContributions: 2 },
       now: () => nowMs,
     });
-    const { userId, cookie } = await seedUserWithSession(fixture.identity);
+    const { userId, cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     const storyId = await submitBrief(cookie);
     const thread = await fixture.ingestion.stories.getThreadByStoryId(storyId);
     const threadId = thread?.threadId as string;
@@ -179,7 +179,7 @@ describe('ingestion scheduler (lease + task isolation)', () => {
   });
 
   it('the backfill step resolves text per target type through the live stores', async () => {
-    const { cookie } = await seedUserWithSession(fixture.identity);
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     const storyId = await submitBrief(cookie, {
       body: 'The reservoir level fell by 12 percent in May according to the report.',
     });
@@ -251,7 +251,7 @@ describe('HttpEmbeddingProvider wire handling (WS-F.3.2a production binding)', (
 
 describe('store contract surfaces not exercised elsewhere', () => {
   it('clear() empties every store; freshness sweep listing works', async () => {
-    const { cookie } = await seedUserWithSession(fixture.identity);
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     const storyId = await submitBrief(cookie);
     const ingestion = fixture.ingestion;
     expect(
@@ -283,7 +283,7 @@ describe('store contract surfaces not exercised elsewhere', () => {
     // A story whose canonical URL the WHATWG parser rejects cannot exist via
     // the route (normalizeUrl gate); the pipeline's defensive path is the
     // robots/fetch failure route, covered above — assert the route gate here.
-    const { cookie } = await seedUserWithSession(fixture.identity);
+    const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     const res = await app().request(
       post('/v1/stories', linkSubmission('https://example.com/ok'), cookie),
     );

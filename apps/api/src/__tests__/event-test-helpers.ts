@@ -62,11 +62,18 @@ export interface SeededUser {
  * Seeded accounts are created 30 days OLD so the WS-F account-age precheck
  * passes regardless of which clock a suite runs on.  Suites pin `now` to a
  * wall-date (e.g. noon today) while the identity store stamps `created_at`
- * with the REAL clock — without a generous backdate, a user created after the
- * pinned instant has NEGATIVE age and every submission 403s as soon as the
- * real clock drifts past the fixture wall-date (a time bomb, not a flake).
- * Suites pinning a clock further than 30 days in the past must pass `nowMs`
- * explicitly.
+ * with the REAL clock — without the backdate, a user created after the
+ * pinned instant has NEGATIVE age and every submission 403s the moment the
+ * wall clock passes the pin (a time bomb, not a flake).
+ *
+ * The 7-day backdate is only a grace window, NOT a fix: it masks the gap
+ * until the REAL clock reaches `pin + 7 days`, after which a real-clock-seeded
+ * account is again newer than the pinned instant and every story submission
+ * 403s `account_too_new` forever.  So ANY suite that both pins `now` to a fixed
+ * wall-clock instant AND submits through the account-age gate (`POST
+ * /v1/stories`) MUST pass that same `nowMs` here, so the account backdates from
+ * the pinned clock instead of the real one.  (Suites that pin a clock but never
+ * cross the age gate — most forum/ranking/invariants suites — are unaffected.)
  */
 const SEEDED_ACCOUNT_AGE_MS = 30 * 24 * 3_600_000;
 
