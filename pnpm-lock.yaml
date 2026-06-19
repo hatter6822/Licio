@@ -218,6 +218,15 @@ importers:
         specifier: ^0.31.0
         version: 0.31.10
 
+  packages/governance:
+    dependencies:
+      '@licio/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+
   packages/invariants:
     dependencies:
       '@licio/shared':

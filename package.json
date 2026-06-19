@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "pnpm --parallel --filter web --filter api dev",
-    "build": "pnpm --filter @licio/shared build && pnpm --filter @licio/db --filter @licio/invariants build && pnpm --filter @licio/ranking build && pnpm --filter web --filter api build",
+    "build": "pnpm --filter @licio/shared build && pnpm --filter @licio/db --filter @licio/invariants build && pnpm --filter @licio/ranking --filter @licio/governance build && pnpm --filter web --filter api build",
     "test": "vitest run",
     "test:e2e": "pnpm --filter web test:e2e",
     "lint": "biome check .",

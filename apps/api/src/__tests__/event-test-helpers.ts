@@ -137,7 +137,7 @@ export async function seedUserWithSession(
     credentialRef: `cred-${user.userId}`,
     deviceLabel: 'test',
     rememberMe: false,
-    mfaVerified: opts.steward || opts.admin ? true : false,
+    mfaVerified: opts.steward === true || opts.admin === true,
   });
   const cookie = buildSessionCookie(created.token, created.maxAgeSec).split(';')[0] as string;
   return { userId: user.userId, cookie };
