@@ -16,9 +16,13 @@ function StoryCommentsContent({ storyId, root }: { storyId: string; root?: strin
   const story = useStoryQuery(storyId);
   const t = useT();
   return (
-    <PageScaffold title={t('story.comments.title', 'Conversation')} query={story}>
+    <PageScaffold
+      title={t('story.comments.title', 'Conversation')}
+      query={story}
+      contentClassName="max-w-3xl"
+    >
       {(data) => (
-        <main className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-4">
+        <main className="flex w-full flex-col gap-4">
           <nav aria-label="Conversation navigation" className="text-sm">
             <Link
               to="/stories/$storyId"
