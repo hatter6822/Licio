@@ -498,6 +498,43 @@ join to ranking/attention tables.
 **Card count.** WS-U decomposes into **49 atomic cards** across the six stages (U.1: 11, U.2: 9,
 U.3: 11, U.4: 6, U.5: 8, U.6: 4).
 
+**Migrations.** The seven new entities are added by Drizzle migrations starting at **`0035`**
+(the latest shipped is `0034_ws_k_ai_governance`), each online-safe (expand → backfill → contract
+where a column is added to a populated table), all in the `knomosis` pgSchema, and each followed by
+the WS-D.3.2 isolation-walk extension in the same PR.
+
+### Cross-cutting requirements (every WS-U card inherits these)
+
+Reviewers must reject any card that weakens one of these. They are the runtime form of the §U.6
+safety envelope and are inherited from WS-J/L/M.
+
+1. **Bounded autonomy, never unbounded.** Every agent power runs within the kernel-enforced
+   law-pack; no treasury or governance action executes without machine-checkable proof it satisfies
+   the law-pack preconditions (SPEC §17.6, §24.6).
+2. **Platform-legal-floor supremacy.** No agent, steward, model, prompt, or vote can countermand a
+   platform safety action; the agent has *no capability* for any floor-reserved act (SPEC §17.1
+   boundary 5; WS-U.3.6a).
+3. **No key custody.** The agent never holds, requests, stores, logs, or recovers private keys or
+   seed phrases; it submits signed actions only (SPEC §17.3.1; WS-L; WS-U.5.1a).
+4. **No pay-to-rank.** The agent is firewalled from ranking exactly as the treasury is — crypto flag,
+   consumer-router Knomosis refusal, financial denylist, wallet↔ranking isolation, governance-only
+   standing read (SPEC §17.1 boundary 1, §17.9, §30.6; WS-U.5.4a).
+5. **Fail-closed crypto + jurisdiction.** All treasury behavior is gated; flag off / unknown
+   jurisdiction ⇒ the surface and the agent's treasury powers do not exist (SPEC §17.10, §17.11;
+   WS-U.5.6a). In-room *moderation* needs no crypto flag.
+6. **Schema isolation.** Every new `knomosis`-context entity is proven to have no FK/view join path
+   to any ranking/attention table by the extended WS-D.3.2 walk (WS-U.1.5a and per-table thereafter).
+7. **Transparency + reproducibility.** The model and prompt are hash-pinned and member-downloadable;
+   moderation explanations and lawmaking summaries are deterministic and reproducible from the
+   downloadable artifacts (SPEC §16.6, §24.6).
+8. **Appealability + human floor.** Every agent action is appealable to the human platform floor and
+   reversible through the §15.4 machine; the floor can freeze any agent instantly (WS-U.3.3a/3.3b).
+9. **Auditability.** Every agent action emits an append-only `agent_action_log` row with the
+   provenance triple (`model`/`version`/`prompt_hash`), the law-pack rule, and a statement of reasons
+   (WS-U.3.2b).
+10. **Accessibility + no applause.** All surfaces meet WCAG 2.2 AA and pass `check:no-applause`
+    (governance votes are governance controls, never reactions/karma).
+
 ---
 
 ## WS-U.1 Room steward seat and election lifecycle (Stage 1; simulated)
@@ -1170,6 +1207,39 @@ admission condition for an AI-governed room to enter `capped/mature` treasury mo
 the gate is auditable.
 **Testing.** Checklist-completeness gate test.
 
+---
+
+## Definition of done (WS-U)
+
+WS-U is complete when:
+
+- **Steward + elections.** Every room has a steward seat (creator-bootstrapped); the one-year term
+  triggers a Knomosis election; the simulated lifecycle (open → tally → settle) moves the seat to the
+  winner with a full audit trail (WS-U.1).
+- **Transparent, evaluated models.** A steward can propose a model + prompt; a model is votable only
+  after passing the platform bias/hallucination/safety/red-team gate on room + floor-safety fixtures;
+  any member can download the hash-pinned model and read the prompt; adoption is a recorded member
+  vote (WS-U.2).
+- **Bounded moderation agent.** The sandboxed agent moderates within the law-pack through the §15.4
+  machine — parity with the human console — logged with the provenance triple, appealable to the
+  floor, freezable by the floor, with **no capability** for any floor-reserved act (the
+  floor-capability-absence test is a green CI gate) (WS-U.3).
+- **Unbiased lawmaking.** The agent facilitates lawmaking while the kernel computes the vote; the
+  structural-neutrality gate proves the facilitation path cannot reach vote/tally/weight (WS-U.4).
+- **Bounded treasury.** Treasury powers execute only through signed gateway actions within
+  kernel-enforced caps/intervals/categories/timelocks/COI, the agent holding no keys, behind the
+  fail-closed crypto + jurisdiction gates and the §17.11 production checklist; reconciliation is
+  zero-or-explained (WS-U.5).
+- **Maturity.** Mature rooms run on-chain elections + approvals with the full §17.5 anti-capture
+  suite and fork/exit (WS-U.6).
+- **Gates.** `check:policy`, the extended `check:neutrality` (incl. the agent's financial-event leg),
+  the structural-neutrality gate, the floor-capability-absence test, `check:no-applause`,
+  `check:no-raw-egress`, `check:workspace-deps`, and `check:deps` are all green in CI; SPEC §16.6/§24.6
+  and the `docs/policy/` register stay in sync.
+- **Doctrine fidelity.** The pay-to-rank firewall and fail-closed crypto are intact; managing the
+  *room treasury* within voted bounds is permitted while personalized financial advice to, or wealth
+  profiling of, *individual users* stays prohibited (SPEC §24.5).
+
 
 
 ---
@@ -1180,6 +1250,7 @@ the gate is auditable.
 |---|---|---|---|
 | 0.1.0 (DESIGN) | 2026-06-19 | AI-Governed Rooms redesign | Initial cross-cutting charter ratifying the maintainer's four binding decisions: the three-layer authority model (room sovereignty → Knomosis-bounded AI agent → non-overridable platform legal floor), the elected room steward with exactly two powers, the bounded in-room AI agent (moderation, treasury, unbiased lawmaking facilitation), the re-scoped WS-K transparency/evaluation substrate, the preserved pay-to-rank firewall, the adversarial-community threat model, and the six staged implementation PRs. Doctrine-only (Stage 0); no runtime code. |
 | 0.2.0 (DESIGN) | 2026-06-19 | AI-Governed Rooms redesign | Added Part II — the **atomic task decomposition** (49 cards across WS-U.1–U.6) in the house format (ID/Ref/description/acceptance/testing/dependencies), with authoritative Drizzle/zod shapes for the seven new `knomosis`-bounded-context entities (`room_steward_seat`, `steward_election`, `steward_governance_vote`, `room_governance_model`, `room_governance_prompt`, `room_agent_binding`, `agent_action_log`), the WS-D.3.2 isolation-walk extension, the WS-K registry/harness/guard/monitor reuse points, the §15.4 moderation-port parity, the structural-neutrality gate, the signed-action (no-key) submitter, and the fail-closed crypto/jurisdiction gating. Still doctrine-only; implementation-ready. |
+| 0.3.0 (DESIGN) | 2026-06-19 | AI-Governed Rooms redesign | Hardened the plan to house-complete: a ten-point **cross-cutting requirements** block (bounded autonomy, floor supremacy, no-key-custody, no-pay-to-rank, fail-closed crypto/jurisdiction, schema isolation, transparency/reproducibility, appealability, auditability, accessibility/no-applause), a **migration-sequencing** note (`0035`+ in the `knomosis` pgSchema, online-safe, isolation-walk-extended), and a **Definition of done** spanning steward/elections, transparent-evaluated models, the bounded moderation agent, unbiased lawmaking, bounded treasury, maturity, the green-CI gate set, and doctrine fidelity. Verified all cited cross-references (WS-K/D/I/L/M/J/C task IDs) resolve. |
 
 
 
