@@ -87,24 +87,30 @@ export async function readCachedSignalLedger(): Promise<SignalLedgerEntry[]> {
 
 // --- Story comment snapshots (first page, lossy offline fallback) ----------
 
-function stableOptionsKey(options: { order?: string; filter?: string; root?: string }): string {
+function stableOptionsKey(options: {
+  order?: string;
+  filter?: string;
+  root?: string;
+  depth?: number;
+}): string {
   return JSON.stringify({
     order: options.order ?? 'oldest',
     filter: options.filter ?? 'all',
     root: options.root ?? null,
+    depth: options.depth ?? 1,
   });
 }
 
 function commentCacheKey(
   storyId: string,
-  options: { order?: string; filter?: string; root?: string },
+  options: { order?: string; filter?: string; root?: string; depth?: number },
 ): string {
   return `${storyId}:${stableOptionsKey(options)}`;
 }
 
 export async function cacheStoryCommentsSnapshot(
   storyId: string,
-  options: { order?: string; filter?: string; root?: string },
+  options: { order?: string; filter?: string; root?: string; depth?: number },
   response: StoryCommentsResponse,
 ): Promise<void> {
   const optionsKey = stableOptionsKey(options);
@@ -125,7 +131,7 @@ export async function cacheStoryCommentsSnapshot(
 
 export async function readStoryCommentsSnapshot(
   storyId: string,
-  options: { order?: string; filter?: string; root?: string } = {},
+  options: { order?: string; filter?: string; root?: string; depth?: number } = {},
 ): Promise<StoryCommentsSnapshotRecord | undefined> {
   try {
     return await storyComments.get(commentCacheKey(storyId, options));

@@ -16,6 +16,7 @@ export const queryKeys = {
       order?: 'newest' | 'oldest';
       filter?: 'sources' | 'corrections';
       root?: string;
+      depth?: 1 | 2;
     } = {},
   ) => ['story', storyId, 'comments', options] as const,
   thread: (threadId: string) => ['thread', threadId] as const,

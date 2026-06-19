@@ -93,7 +93,10 @@ export function useThreadQuery(threadId: string, enabled = true) {
 export interface StoryCommentsOptions {
   order?: 'newest' | 'oldest';
   filter?: 'sources' | 'corrections';
+  /** Focus the read on one comment's replies (the dedicated page's drill-down). */
   root?: string;
+  /** Nested reply layers to materialize: 1 (inline section) or 2 (dedicated page). */
+  depth?: 1 | 2;
 }
 
 export function useStoryCommentsQuery(storyId: string, options: StoryCommentsOptions = {}) {
@@ -120,6 +123,8 @@ export function useStoryCommentsQuery(storyId: string, options: StoryCommentsOpt
         ? {
             comments: pages.flatMap((page) => page.comments),
             next_cursor: pages[pages.length - 1]?.next_cursor ?? null,
+            // The focused anchor (dedicated page) is stable across reply pages.
+            anchor: pages[0]?.anchor ?? null,
             overview: pages[0]?.overview,
             summary: pages[0]?.summary ?? null,
           }

@@ -29,4 +29,23 @@ test.describe('WS-T comment flow (BFF-in-the-loop)', () => {
     await expect(page).toHaveURL(new RegExp(`/stories/${PUBLIC_STORY_ID}#comments$`));
     await expect(page.getByRole('heading', { name: 'Conversation', level: 2 })).toBeVisible();
   });
+
+  test('the dedicated comment page opens as a comments-only reading view and returns to the story', async ({
+    page,
+  }) => {
+    await page.goto(`/stories/${PUBLIC_STORY_ID}/comments`);
+    // The comments-only page: its own <h1>, no story body — just the conversation.
+    await expect(page.getByRole('heading', { name: 'Comments', level: 1 })).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).withTags(A11Y_TAGS).analyze();
+    expect(results.violations).toEqual([]);
+
+    // The always-present return control lands back on the story's comment section.
+    await page
+      .getByRole('link', { name: /back to the story/i })
+      .first()
+      .click();
+    await expect(page).toHaveURL(new RegExp(`/stories/${PUBLIC_STORY_ID}#comments$`));
+    await expect(page.getByRole('heading', { name: 'Conversation', level: 2 })).toBeVisible();
+  });
 });

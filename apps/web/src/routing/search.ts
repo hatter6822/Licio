@@ -4,7 +4,7 @@
 // coerced to the route default via `.catch(...)` — never silently accepted as
 // arbitrary input. These drive the feed-mode switcher and the thread branch tab
 // from shareable URLs.
-import { feedModeSchema } from '@licio/shared';
+import { feedModeSchema, uuidSchema } from '@licio/shared';
 import { z } from 'zod';
 
 /**
@@ -38,3 +38,13 @@ export type SubmitSearch = z.infer<typeof submitSearchSchema>;
 export function parseFeedSearch(search: Record<string, unknown>): FeedSearch {
   return feedSearchSchema.parse(search);
 }
+
+/**
+ * Dedicated comment-centric page (WS-T.7.2): `?root=` focuses the view on one
+ * comment's replies (the drill-down anchor).  An invalid/absent value coerces to
+ * undefined — the unrooted "all comments" view — never silently accepted.
+ */
+export const storyCommentsSearchSchema = z.object({
+  root: uuidSchema.optional().catch(undefined),
+});
+export type StoryCommentsSearch = z.infer<typeof storyCommentsSearchSchema>;

@@ -302,15 +302,31 @@ export class DrizzleContributionStore implements ContributionStore {
 
   async listChildren(
     parentContributionId: string,
-    opts: { states?: readonly ContributionModerationState[]; limit: number },
+    opts: {
+      states?: readonly ContributionModerationState[];
+      after?: CreatedAtCursor | null;
+      limit: number;
+      order?: 'newest' | 'oldest';
+    },
   ): Promise<ContributionRecord[]> {
     const conditions = [eq(contributionsTable.parentContributionId, parentContributionId)];
     if (opts.states) conditions.push(inArray(contributionsTable.moderationState, [...opts.states]));
+    if (opts.after) {
+      conditions.push(
+        opts.order === 'oldest'
+          ? sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`
+          : sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) < (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`,
+      );
+    }
+    const order =
+      opts.order === 'oldest'
+        ? [asc(contributionsTable.createdAt), asc(contributionsTable.contributionId)]
+        : [desc(contributionsTable.createdAt), desc(contributionsTable.contributionId)];
     const rows = await this.#db
       .select()
       .from(contributionsTable)
       .where(and(...conditions))
-      .orderBy(desc(contributionsTable.createdAt), desc(contributionsTable.contributionId))
+      .orderBy(...order)
       .limit(opts.limit);
     return rows.map((row) => this.#toRecord(row));
   }

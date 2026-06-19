@@ -80,14 +80,21 @@ the SW-update / eviction toasts, and emits a navigation breadcrumb (route PATTER
 + render ms — never the concrete path).
 
 - **Four primary tabs:** `/` Front Page, `/rooms`, `/submit`, `/profile`.
-  Plus type-safe detail routes (`/stories/$storyId`, `/rooms/$roomId`),
+  Plus type-safe detail routes (`/stories/$storyId`, `/stories/$storyId/comments`,
+  `/rooms/$roomId`),
   a back-compat `/threads/$threadId` redirect to the owning story comment section, profile sub-routes (`/profile/saved`,
   `/profile/signal-ledger`, `/profile/settings`, `/profile/privacy`,
   `/profile/wallet`), and flag-gated routes (`/rooms/$roomId/governance`). Flat
   URLs for nested detail routes use the `_`-suffixed (non-nesting) route-id form.
-- **Conversation surface (WS-T.7/8):** story pages embed their own lightly nested
-  comment section using the served `thread_id`, so the feed → story → discussion
-  path stays inline. The former `/threads` directory and branch routes are
+- **Conversation surface (WS-T.7/8):** story pages embed their own comment
+  section using the served `thread_id`, so the feed → story → discussion path
+  stays inline. That inline section shows exactly **one nested reply layer** to
+  protect the reading area; a "Show more comments" entry and per-thread
+  "continue" links open the dedicated comment-centric page
+  (`/stories/$storyId/comments`) — a comments-only reading view rendering **two**
+  nested layers and re-rootable at any comment (`?root=`) for unbounded
+  drill-down, with a persistent "Back to the story" return to the inline section.
+  The former `/threads` directory and branch routes are
   retired; old `/threads/$threadId` deep links resolve the thread overview and
   redirect to `/stories/$storyId#comments` when readable. `room_only` items and
   private-room conversations remain reachable only through their room/content
@@ -99,8 +106,9 @@ the SW-update / eviction toasts, and emits a navigation breadcrumb (route PATTER
 - **Search params (WS-C.1.1b):** zod schemas in `routing/search.ts`. Invalid
   values coerce to the route default (`.catch`) — never silently accepted. `?mode`
   drives the feed switcher; `/submit` accepts only share-target `share_url` /
-  `share_title` params for the story composer. Thread branch search params are
-  retired with the old branch reader.
+  `share_title` params for the story composer; the dedicated comment page accepts
+  a single `?root=` uuid (the drill-down anchor, invalid ⇒ the unrooted view).
+  Thread branch search params are retired with the old branch reader.
 - **Guards (WS-C.1.1d):** `routing/route-guard.ts` exposes `requireAuth` (a route
   `beforeLoad`) that redirects unauthenticated or non-active accounts to `/login`
   preserving an **allowlisted** destination (`routing/guards.ts` `isSafeRedirect`

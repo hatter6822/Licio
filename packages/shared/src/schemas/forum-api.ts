@@ -63,6 +63,14 @@ export const storyCommentsResponseSchema = z
   .object({
     comments: z.array(commentItemSchema).max(100),
     next_cursor: z.string().min(1).max(512).nullable(),
+    /**
+     * WS-T.7.2 focused (rooted) reads only: the comment the page is anchored to,
+     * rendered as a read-only context header above its paginated replies (which
+     * are `comments`).  Null for the unrooted thread view (story-page section and
+     * the dedicated "all comments" page).  `parent_contribution_id` drives the
+     * dedicated page's one-level-up breadcrumb.
+     */
+    anchor: commentItemSchema.nullable().default(null),
     overview: z
       .object({
         comment_count: z.number().int().min(0),

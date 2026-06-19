@@ -227,10 +227,17 @@ export interface ContributionStore {
       order?: 'newest' | 'oldest';
     },
   ): Promise<ContributionRecord[]>;
-  /** Direct children only; newest first for reply previews. */
+  /** Direct children only.  Defaults to newest-first (the inline reply
+   *  preview); the focused-thread page passes `order: 'oldest'` + `after`
+   *  for chronological keyset pagination of a comment's direct replies. */
   listChildren(
     parentContributionId: string,
-    opts: { states?: readonly ContributionModerationState[]; limit: number },
+    opts: {
+      states?: readonly ContributionModerationState[];
+      after?: CreatedAtCursor | null;
+      limit: number;
+      order?: 'newest' | 'oldest';
+    },
   ): Promise<ContributionRecord[]>;
   /** Rows whose path contains `rootId` (the subtree, excluding the root),
    *  `(created_at, id)` ascending with keyset continuation — the WS-G.3.3
@@ -535,17 +542,29 @@ export class InMemoryContributionStore implements ContributionStore {
 
   async listChildren(
     parentContributionId: string,
-    opts: { states?: readonly ContributionModerationState[]; limit: number },
+    opts: {
+      states?: readonly ContributionModerationState[];
+      after?: CreatedAtCursor | null;
+      limit: number;
+      order?: 'newest' | 'oldest';
+    },
   ): Promise<ContributionRecord[]> {
     const states = opts.states ? new Set(opts.states) : null;
-    return [...this.#rows.values()]
+    const oldestFirst = opts.order === 'oldest';
+    const rows = [...this.#rows.values()]
       .filter(
         (row) =>
           row.parentContributionId === parentContributionId &&
-          (states === null || states.has(row.moderationState)),
+          (states === null || states.has(row.moderationState)) &&
+          (!opts.after ||
+            (oldestFirst
+              ? afterCursor(row, row.contributionId, opts.after)
+              : beforeCursor(row, row.contributionId, opts.after))),
       )
-      .sort((a, b) => -byCreatedAtThenId(a, b, a.contributionId, b.contributionId))
-      .slice(0, opts.limit);
+      .sort((a, b) => byCreatedAtThenId(a, b, a.contributionId, b.contributionId));
+    // Ascending sort above; reverse for the default newest-first preview.
+    if (!oldestFirst) rows.reverse();
+    return rows.slice(0, opts.limit);
   }
 
   async countByType(
