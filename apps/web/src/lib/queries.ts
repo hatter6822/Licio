@@ -28,6 +28,7 @@ import {
 } from '../offline/read-through.js';
 import * as api from './api.js';
 import { fetchCredentials, fetchSecurityActivity, fetchSessions } from './auth-api.js';
+import * as governanceApi from './governance-api.js';
 import {
   fetchDeletionStatus,
   fetchExportStatus,
@@ -148,6 +149,25 @@ export function useRoomQuery(roomId: string) {
     queryKey: queryKeys.room(roomId),
     queryFn: () => api.fetchRoom(roomId),
     ...cachePolicy.room,
+  });
+}
+
+/** WS-U §24.6 — the in-room "governed by" transparency view (active agent +
+ *  recent agent actions). `enabled` defers the fetch behind the read bar. */
+export function useGovernedByQuery(roomId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.governedBy(roomId),
+    queryFn: () => governanceApi.fetchGovernedBy(roomId),
+    enabled,
+  });
+}
+
+/** WS-U §16.6 — the elected-room-steward seat (holder + term). */
+export function useStewardSeatQuery(roomId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.stewardSeat(roomId),
+    queryFn: () => governanceApi.fetchStewardSeat(roomId),
+    enabled,
   });
 }
 

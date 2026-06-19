@@ -7,6 +7,7 @@
 import type { RoomDetail } from '@licio/shared';
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
+import { GovernedByPanel } from '../../components/governance/GovernedByPanel.js';
 import { RoomCreateForm } from '../../components/rooms/RoomCreateForm/index.js';
 import { RoomSettingsForm } from '../../components/rooms/RoomSettingsForm/index.js';
 import { StoryFeedLink } from '../../components/story/StoryFeedLink/index.js';
@@ -213,6 +214,10 @@ export function RoomDetailBody({
       {room.is_steward && binaryVisibilityUi ? (
         <RoomSettingsForm roomId={roomId} room={room} />
       ) : null}
+
+      {/* WS-U §24.6 — the in-room "governed by" transparency view (active agent,
+          granted powers, recent actions, member-downloadable model). */}
+      {contentVisible ? <GovernedByPanel roomId={roomId} /> : null}
 
       {/* Tier two: the room feed (in-room chip on every room_only item). */}
       {contentVisible ? (

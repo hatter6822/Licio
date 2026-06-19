@@ -36,6 +36,12 @@ const joinRoom = vi.hoisted(() => vi.fn());
 vi.mock('../../lib/queries.js', () => ({
   useRoomFeedQuery: (_roomId: string, enabled: boolean) => roomFeed(enabled),
   useJoinRoomMutation: () => ({ mutate: joinRoom, isPending: false }),
+  // WS-U: the room page now renders the "governed by" panel (its own query).
+  useGovernedByQuery: () => ({
+    isLoading: false,
+    isError: false,
+    data: { active: false, model_id: null, granted: [], recent_actions: [] },
+  }),
 }));
 
 function baseRoom(over: Partial<RoomDetail>): RoomDetail {
