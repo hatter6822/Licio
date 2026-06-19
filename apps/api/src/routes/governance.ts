@@ -14,6 +14,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { getForumServices } from '../forum/services.js';
 import { getGovernanceService } from '../governance/services.js';
+import { rateLimit } from '../lib/rate-limit.js';
 import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
 import { denyCapability, type StewardActor } from '../moderation/authz.js';
 
@@ -56,6 +57,13 @@ const ballotBodySchema = z.object({ choice: z.enum(['approve', 'reject']) }).str
 const lawPackBodySchema = z.object({ law_pack: z.unknown() }).strict();
 
 export function createGovernanceRoutes() {
+  // Identity-free per-endpoint cost ceilings (SPEC §19.1): governance writes are
+  // low-frequency by construction, so a global fixed-window budget sheds load
+  // before auth/validation cost. Per-account fairness comes from the steward-only
+  // gates (propose/open/law-pack) and the composite-PK ballot idempotency.
+  // Member ballots get a roomier budget than steward proposals (more voters).
+  const stewardWriteLimit = rateLimit({ limit: 120, windowMs: 60_000 });
+  const voteLimit = rateLimit({ limit: 600, windowMs: 60_000 });
   return (
     new Hono<AuthEnv>()
       // --- Steward seat + elections ---------------------------------------
@@ -76,6 +84,7 @@ export function createGovernanceRoutes() {
       })
       .post(
         '/rooms/:roomId/elections/:electionId/vote',
+        voteLimit,
         authMiddleware(),
         zValidator('json', voteBodySchema),
         async (c) => {
@@ -112,6 +121,7 @@ export function createGovernanceRoutes() {
       // --- Community model / prompt registry ------------------------------
       .post(
         '/rooms/:roomId/governance/models',
+        stewardWriteLimit,
         authMiddleware(),
         zValidator('json', proposeBodySchema),
         async (c) => {
@@ -170,6 +180,7 @@ export function createGovernanceRoutes() {
       // majority (fail-safe otherwise). No member can unilaterally activate.
       .post(
         '/rooms/:roomId/governance/models/:modelId/ratification',
+        stewardWriteLimit,
         authMiddleware(),
         zValidator('json', ratificationOpenBodySchema),
         async (c) => {
@@ -193,6 +204,7 @@ export function createGovernanceRoutes() {
       )
       .post(
         '/rooms/:roomId/governance/ratifications/:voteId/ballot',
+        voteLimit,
         authMiddleware(),
         zValidator('json', ballotBodySchema),
         async (c) => {
@@ -242,6 +254,7 @@ export function createGovernanceRoutes() {
       // --- Community-voted bounds (the law-pack the agent runs within) ---------
       .post(
         '/rooms/:roomId/governance/law-packs',
+        stewardWriteLimit,
         authMiddleware(),
         zValidator('json', lawPackBodySchema),
         async (c) => {

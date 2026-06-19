@@ -248,6 +248,24 @@ describe('WS-U governance routes', () => {
     expect((await vote(member.cookie, candidate.userId)).status).toBe(409);
   });
 
+  it('rate-limits governance writes with an identity-free cost ceiling', async () => {
+    // The steward-write limiter is 120/min (shared across propose/open/law-pack)
+    // and runs BEFORE auth, so an unauthenticated flood is shed with 429 once the
+    // per-endpoint budget is exhausted (SPEC §19.1 load-shedding, not fairness).
+    let sawRateLimited = false;
+    for (let i = 0; i < 130; i += 1) {
+      const res = await app.request(
+        jsonReq('/v1/rooms/rlim/governance/law-packs', 'POST', { law_pack: {} }),
+      );
+      if (res.status === 429) {
+        sawRateLimited = true;
+        break;
+      }
+      expect(res.status).toBe(401); // pre-budget: unauth requests pass the limiter
+    }
+    expect(sawRateLimited).toBe(true);
+  });
+
   it('forbids a non-steward from proposing', async () => {
     const steward = await seedUserWithSession(forum.identity);
     const other = await seedUserWithSession(forum.identity);
