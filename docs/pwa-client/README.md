@@ -94,6 +94,10 @@ the SW-update / eviction toasts, and emits a navigation breadcrumb (route PATTER
   (`/stories/$storyId/comments`) — a comments-only reading view rendering **two**
   nested layers and re-rootable at any comment (`?root=`) for unbounded
   drill-down, with a persistent "Back to the story" return to the inline section.
+  Comments render compactly — a single-line meta header with a compact relative
+  timestamp, top-level comments as small raised tiles, nested replies as flat
+  left-rail threads (no card-in-card), and inline text-link actions — so more of
+  the conversation is visible at a glance.
   The former `/threads` directory and branch routes are
   retired; old `/threads/$threadId` deep links resolve the thread overview and
   redirect to `/stories/$storyId#comments` when readable. `room_only` items and

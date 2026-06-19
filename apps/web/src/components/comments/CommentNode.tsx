@@ -1,22 +1,27 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-T.7.2 recursive comment renderer shared by the inline story-page section
-// (`maxDepthInView: 1` — one nested layer, to protect the reading area) and the
-// dedicated comment-centric page (`maxDepthInView: 2`).  When a thread continues
-// past the view's depth budget, the node renders a "continue this thread" /
-// "show all replies" link into the dedicated page re-rooted at that comment,
-// instead of nesting further — so depth is unbounded by navigation, never by
-// ever-shrinking indentation.
+// WS-T.7.3 recursive comment renderer shared by the inline story-page section
+// (`maxDepthInView: 1`) and the dedicated comment page (`maxDepthInView: 2`).
+//
+// Density: a top-level comment is a COMPACT raised tile (`neu-raised-sm`, an 8px
+// halo that is safe at gap-3); its replies render as FLAT left-rail threads — no
+// card-in-card chrome — so nesting costs only a hairline rail + a little indent.
+// Meta is a single line, and actions are inline text links rather than chunky
+// buttons.  When a thread continues past the view's depth budget the node links
+// into the dedicated page re-rooted at that comment instead of nesting further.
 import type { CommentItem as CommentItemType } from '@licio/shared';
 import { Link } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { cn } from '../../lib/cn.js';
-import { raisedInteractive, raisedSurface } from '../../lib/surfaces.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
 import { UgcBody } from '../ugc/UgcBody.js';
-import { Button } from '../ui/Button/index.js';
 import { Icon } from '../ui/Icon/index.js';
-import { CommentComposer, CommentHeader, CommentMedia } from './CommentParts.js';
+import {
+  CommentComposer,
+  CommentHeader,
+  CommentMedia,
+  commentActionClass,
+} from './CommentParts.js';
 
 export interface CommentNodeProps {
   storyId: string;
@@ -26,6 +31,10 @@ export interface CommentNodeProps {
   /** Nested layers this view renders before deferring to the dedicated page. */
   maxDepthInView: number;
 }
+
+/** A top-level comment tile vs. a nested reply's flat thread rail. */
+const ROOT_TILE = 'rounded-lg border border-line bg-canvas neu-raised-sm p-3';
+const NESTED_RAIL = 'border-l-2 border-line pl-3';
 
 /** "Continue this thread" / "Show all replies" → the dedicated page, re-rooted
  *  at `rootId` (where the reader can read its two further nested layers). */
@@ -43,14 +52,10 @@ function ContinueThreadLink({
       to="/stories/$storyId/comments"
       params={{ storyId }}
       search={{ root: rootId }}
-      className={cn(
-        'inline-flex items-center gap-1 self-start px-3 py-2 text-sm font-medium text-primary-on-soft',
-        raisedSurface,
-        raisedInteractive,
-      )}
+      className={commentActionClass}
     >
       {label}
-      <Icon name="chevron-right" className="size-4" aria-hidden />
+      <Icon name="chevron-right" className="size-3.5" aria-hidden />
     </Link>
   );
 }
@@ -73,15 +78,32 @@ export function CommentNode({
   const replyWord = replyCount === 1 ? 'reply' : 'replies';
 
   return (
-    <article className={cn('flex flex-col gap-3 p-4', raisedSurface)}>
+    <article className={cn('flex flex-col gap-2', depthInView === 0 ? ROOT_TILE : NESTED_RAIL)}>
       <CommentHeader comment={comment} />
       {comment.body.length > 0 ? <UgcBody markdown={comment.body} compact /> : null}
       <CommentMedia comment={comment} />
-      <div className="flex flex-wrap gap-2">
-        <Button type="button" variant="ghost" onClick={() => setReplying((value) => !value)}>
+
+      {/* Compact action row. A leaf (past the view's depth budget) carries its
+          "continue" inline here; a materialized node's "show all" sits after the
+          replies it already shows (below), reading as "there is more under this". */}
+      <div className="-ml-1.5 flex flex-wrap items-center gap-x-1 gap-y-0.5">
+        <button
+          type="button"
+          className={commentActionClass}
+          aria-expanded={replying}
+          onClick={() => setReplying((value) => !value)}
+        >
           Reply
-        </Button>
+        </button>
+        {!canNestDeeper && replyCount > 0 ? (
+          <ContinueThreadLink
+            storyId={storyId}
+            rootId={comment.contribution_id}
+            label={`Continue this thread (${replyCount} ${replyWord})`}
+          />
+        ) : null}
       </div>
+
       {replying ? (
         <CommentComposer
           storyId={storyId}
@@ -92,7 +114,7 @@ export function CommentNode({
       ) : null}
 
       {canNestDeeper && comment.replies.length > 0 ? (
-        <div className="ml-3 flex flex-col gap-3 border-l-2 border-line pl-3 sm:ml-4 sm:pl-4">
+        <div className="mt-0.5 flex flex-col gap-2">
           {comment.replies.map((reply) => (
             <CommentNode
               key={reply.contribution_id}
@@ -105,26 +127,16 @@ export function CommentNode({
         </div>
       ) : null}
 
-      {/* Past the depth budget OR more (published) replies than are shown here →
-          defer to the dedicated comment-centric page (re-rooted here) so the
-          reading area never collapses under runaway indentation.  Gating on the
-          REPLY COUNT vs. what is shown (rather than the server's coarser
-          `has_more_replies`) keeps the label honest — never "Show all 0 replies"
-          when a node's extra children are all removed/hidden. */}
-      {canNestDeeper ? (
-        replyCount > comment.replies.length ? (
+      {/* More direct replies than are shown here → the dedicated page (re-rooted),
+          gated on the visible count so it never reads "Show all 0 replies". */}
+      {canNestDeeper && replyCount > comment.replies.length ? (
+        <div className="-ml-1.5">
           <ContinueThreadLink
             storyId={storyId}
             rootId={comment.contribution_id}
             label={`Show all ${replyCount} ${replyWord}`}
           />
-        ) : null
-      ) : replyCount > 0 ? (
-        <ContinueThreadLink
-          storyId={storyId}
-          rootId={comment.contribution_id}
-          label={`Continue this thread (${replyCount} ${replyWord})`}
-        />
+        </div>
       ) : null}
     </article>
   );

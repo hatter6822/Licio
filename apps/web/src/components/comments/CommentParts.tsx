@@ -9,27 +9,46 @@ import type { CommentItem as CommentItemType, ContributionWriteCreate } from '@l
 import { useState } from 'react';
 import { cn } from '../../lib/cn.js';
 import { useCreateCommentMutation } from '../../lib/queries.js';
+import { relativeTimeShort } from '../../lib/time.js';
 import { Button } from '../ui/Button/index.js';
 
 export function authorName(comment: CommentItemType): string {
   return comment.author_display_name ?? comment.author_handle ?? 'Deleted account';
 }
 
+/**
+ * The shared compact comment-action affordance (Reply, Continue, Show all): a
+ * lightweight inline control that still meets the WCAG 2.2 AA 24px target-size
+ * minimum (28px tall via the padding) without the chunky touch-height of a full
+ * Button.
+ */
+export const commentActionClass =
+  'inline-flex min-h-[1.75rem] items-center gap-1 rounded px-1.5 py-1 text-sm font-medium text-primary-on-soft transition-colors hover:bg-surface hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
+
+/** A single-line meta row: `Author · 3h` with an optional typed-card tag. The
+ *  full localized timestamp is on the `<time>` element's `title`/`dateTime`. */
 export function CommentHeader({ comment }: { comment: CommentItemType }): React.ReactElement {
+  const tag =
+    comment.type === 'evidence' ? 'Source' : comment.type === 'correction' ? 'Correction' : null;
   return (
-    <header className="flex items-start justify-between gap-3">
-      <div>
-        <p className="font-medium text-ink">{authorName(comment)}</p>
-        <time dateTime={comment.created_at} className="text-sm text-ink-muted">
-          {new Date(comment.created_at).toLocaleString()}
-        </time>
-      </div>
-      {comment.type === 'evidence' || comment.type === 'correction' ? (
-        <span className="rounded-full border border-line px-2 py-1 text-xs font-medium uppercase tracking-wide text-ink-muted">
-          {comment.type === 'evidence' ? 'Source' : 'Correction'}
+    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm leading-tight">
+      <span className="font-medium text-ink">{authorName(comment)}</span>
+      <span className="text-ink-muted" aria-hidden>
+        ·
+      </span>
+      <time
+        dateTime={comment.created_at}
+        title={new Date(comment.created_at).toLocaleString()}
+        className="text-ink-muted"
+      >
+        {relativeTimeShort(comment.created_at)}
+      </time>
+      {tag ? (
+        <span className="rounded border border-line px-1.5 py-px text-xs font-medium uppercase tracking-wide text-ink-muted">
+          {tag}
         </span>
       ) : null}
-    </header>
+    </div>
   );
 }
 
@@ -49,7 +68,7 @@ export function CommentMedia({ comment }: { comment: CommentItemType }): React.R
             loading="lazy"
             decoding="async"
             className={cn(
-              'max-h-96 w-full object-contain',
+              'max-h-72 w-full object-contain',
               item.animatable && 'motion-reduce:hidden',
             )}
           />
@@ -121,7 +140,12 @@ export function CommentComposer({
         maxLength={5000}
         onChange={(event) => setBody(event.currentTarget.value)}
         placeholder={parentContributionId ? 'Reply with context…' : 'Add a comment with context…'}
-        className="min-h-28 rounded-md border border-line bg-surface p-3 text-base text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+        className={cn(
+          'rounded-md border border-line bg-surface p-3 text-base text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
+          // Replies open inline inside a thread, so they start shorter; a
+          // top-level comment gets more room to draft.
+          parentContributionId ? 'min-h-20' : 'min-h-28',
+        )}
       />
       <div className="flex items-center justify-between gap-3">
         <p className="text-sm text-ink-muted">{trimmed.length}/5000 characters</p>

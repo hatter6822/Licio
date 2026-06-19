@@ -15,6 +15,7 @@ import {
   CommentHeader,
   CommentMedia,
   CommentNode,
+  commentActionClass,
 } from '../../components/comments/index.js';
 import { UgcBody } from '../../components/ugc/UgcBody.js';
 import { Button } from '../../components/ui/Button/index.js';
@@ -46,17 +47,24 @@ function AnchorComment({
   const [replying, setReplying] = useState(false);
   return (
     <article
-      className={cn('flex flex-col gap-3 border-primary/40 p-4', raisedSurface)}
+      // A surface-tinted raised tile (vs. the canvas-filled reply tiles) plus the
+      // "Replying within" label sets the focused anchor apart from its replies.
+      className={cn(raisedSurface, 'flex flex-col gap-2 bg-surface p-3')}
       aria-label="Focused comment"
     >
       <p className="text-xs font-medium uppercase tracking-wide text-ink-muted">Replying within</p>
       <CommentHeader comment={anchor} />
       {anchor.body.length > 0 ? <UgcBody markdown={anchor.body} compact /> : null}
       <CommentMedia comment={anchor} />
-      <div className="flex flex-wrap gap-2">
-        <Button type="button" variant="ghost" onClick={() => setReplying((value) => !value)}>
+      <div className="-ml-1.5">
+        <button
+          type="button"
+          className={commentActionClass}
+          aria-expanded={replying}
+          onClick={() => setReplying((value) => !value)}
+        >
           Reply
-        </Button>
+        </button>
       </div>
       {replying ? (
         <CommentComposer
