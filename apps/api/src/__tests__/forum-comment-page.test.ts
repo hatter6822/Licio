@@ -206,4 +206,49 @@ describe('WS-T.7.2 — story comment depth', () => {
     const body = storyCommentsResponseSchema.parse(await res.json());
     expect(body.comments.some((c) => c.contribution_id === root.id)).toBe(false);
   });
+
+  it('focuses a moderated (tombstone) parent that still has a visible reply', async () => {
+    // A visible reply X is preserved under a REMOVED parent P.  Focusing P — the
+    // dedicated page's "up one level" target — must serve P as a content-free
+    // tombstone with X beneath it, never a 404, so the breadcrumb never dead-ends.
+    const parent = await insertContribution({
+      id: '0c000000-0000-4000-8000-000000000001',
+      parent: null,
+      state: 'removed',
+      body: 'Removed parent text must not leak.',
+    });
+    await insertContribution({
+      id: '0c000000-0000-4000-8000-000000000002',
+      parent,
+      state: 'published',
+      body: 'A visible reply under the removed parent.',
+    });
+    const res = await getComments(`?root=${parent.id}&depth=1`);
+    expect(res.status).toBe(200);
+    const body = storyCommentsResponseSchema.parse(await res.json());
+    // The anchor is the moderated parent, rendered content-free (no body/author leak)…
+    expect(body.anchor?.contribution_id).toBe(parent.id);
+    expect(body.anchor?.body).toBe('');
+    expect(body.anchor?.author_handle).toBeNull();
+    expect(body.anchor?.moderation_state).toBe('removed');
+    // …with its still-visible reply listed beneath it.
+    expect(body.comments.map((c) => c.body)).toEqual(['A visible reply under the removed parent.']);
+  });
+
+  it('still 404s a focused read of a comment with no visible content at all', async () => {
+    const parent = await insertContribution({
+      id: '0d000000-0000-4000-8000-000000000001',
+      parent: null,
+      state: 'removed',
+      body: 'gone',
+    });
+    await insertContribution({
+      id: '0d000000-0000-4000-8000-000000000002',
+      parent,
+      state: 'removed',
+      body: 'also gone',
+    });
+    const res = await getComments(`?root=${parent.id}&depth=1`);
+    expect(res.status).toBe(404);
+  });
 });

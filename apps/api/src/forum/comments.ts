@@ -244,14 +244,16 @@ export async function commentPage(
       after = { createdAt: last.createdAt, id: last.contributionId };
   }
 
-  // Focused mode: the anchor must exist, belong to the thread, and be visible to
-  // the viewer (a removed — or blocked-author — comment cannot anchor a page).
+  // Focused mode: the anchor must exist and belong to the thread.  A removed or
+  // blocked-author anchor that STILL has a visible reply remains anchorable — it
+  // renders as a content-free tombstone (tree integrity, exactly as it appears
+  // inline), so navigating "up one level" onto a moderated parent never dead-ends
+  // on the error state.  It is rejected (404) only when NOTHING beneath it is
+  // renderable — checked after projection, below.
   let anchorRecord: ContributionRecord | null = null;
   if (opts.parentId !== undefined) {
     const record = await bundle.forum.contributions.getById(opts.parentId);
     if (!record || record.threadId !== threadId) return empty(false);
-    if (visibleRows([record], requesterUserId, hide).every((entry) => entry.tombstone))
-      return empty(false);
     anchorRecord = record;
   }
 
@@ -286,9 +288,16 @@ export async function commentPage(
     .map((node) => projectNode(node, ctx))
     .filter((node): node is CommentItem => node !== null);
 
+  // `projectAnchor` returns null only when the anchor is neither visible nor a
+  // tombstone with a visible descendant — i.e. nothing under it is renderable, so
+  // a focused read of it is a 404.  A tombstone anchor with visible replies (the
+  // moderated-parent case) projects as a content-free placeholder and is served.
+  const anchor = anchorRecord ? projectAnchor(anchorRecord, ctx) : null;
+  if (anchorRecord !== null && anchor === null) return empty(false);
+
   return {
     comments,
-    anchor: anchorRecord ? projectAnchor(anchorRecord, ctx) : null,
+    anchor,
     nextCursor: hasMore && lastFetched ? lastFetched.contributionId : null,
     rootFound: true,
   };
