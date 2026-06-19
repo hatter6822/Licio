@@ -81,6 +81,7 @@ import { createAiGovernancePublicRoutes } from './ai-governance-public.js';
 import { createAuthRoutes } from './auth.js';
 import { createEventsRoutes } from './events.js';
 import { createForumRoutes } from './forum.js';
+import { createGovernanceRoutes } from './governance.js';
 import { createIngestionAdminRoutes } from './ingestion-admin.js';
 import { createInvariantsAdminRoutes } from './invariants-admin.js';
 import {
@@ -502,6 +503,13 @@ export function createV1Routes() {
       // inventory/blocked/runtime read surfaces, and the steward review queue.
       .route('/', createAiGovernancePublicRoutes())
       .route('/ai/admin', createAiGovernanceAdminRoutes())
+
+      // --- AI-governed rooms (WS-U) -------------------------------------------
+      // The elected-steward seat + elections, the community model/prompt registry
+      // (propose / list / member-downloadable artifact / approve), and the
+      // "governed by" agent view.  Steward-only writes are enforced by the
+      // service; treasury powers stay behind the fail-closed crypto flag.
+      .route('/', createGovernanceRoutes())
 
       // --- Settings sync (SPEC §23.2 /feed/preferences) ---------------------
       .get('/settings', (c) => {

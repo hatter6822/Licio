@@ -49,6 +49,7 @@ import {
 } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
 import type { LensRecord, RoomRecord } from '../forum/stores.js';
+import { getGovernanceService } from '../governance/services.js';
 import type { Role } from '../identity/rbac.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
@@ -289,6 +290,9 @@ export function createRoomsRoutes() {
             role: 'community_steward',
             assignedAt: new Date(forum.now()).toISOString(),
           });
+          // WS-U §16.6: bootstrap the elected-room-steward seat to the creator
+          // (the first member); a Knomosis election re-seats it after the term.
+          await getGovernanceService().bootstrapSeat(created.room.roomId, auth.userId);
           const identity = getIdentityServices();
           await identity.audit.append({
             actorUserId: auth.userId,

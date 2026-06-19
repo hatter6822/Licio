@@ -361,6 +361,21 @@ export class GovernanceService {
     return ok(undefined);
   }
 
+  // --- read surface (in-room transparency) ---------------------------------
+
+  async listModels(roomId: string) {
+    return this.deps.stores.models.listByRoom(roomId);
+  }
+  async getModel(modelId: string) {
+    return this.deps.stores.models.get(modelId);
+  }
+  async getBinding(roomId: string) {
+    return this.deps.stores.bindings.get(roomId);
+  }
+  async recentAgentActions(roomId: string, limit: number) {
+    return this.deps.stores.agentActions.listByRoom(roomId, limit);
+  }
+
   // --- Stage 4/5: law-pack + kernel-backed treasury (behind the crypto flag) ---
 
   /** Register a community-voted law-pack for the room (WS-U.4.1a). */
