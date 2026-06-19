@@ -47,7 +47,7 @@ AI inventory + risk assessment (NIST/ISO)
           → human-in-the-loop correction + data lineage + version logging
 ```
 
-Per Section 24.1, AI is never the sole authority for high-impact moderation (except a narrowly defined emergency class) and AI never autonomously spends funds, approves proposals, or issues final sanctions. Per Section 24.2, the platform maintains model cards (ranking, safety, summarization, invariant models), data lineage for training/evaluation, bias/subgroup audits, human review for appeals and ambiguous cases, AI-generated labeling, preserved source citations, user reporting of bad outputs, no unsupported factual claims, logged model version and prompt/configuration for audit-sensitive outputs, and red-team testing before launch.
+Per Section 24.1 (as amended by the redesign — see the re-scope note above), **at the platform layer** AI is never the sole authority for high-impact moderation (except a narrowly defined emergency class) and platform AI never autonomously spends funds, approves proposals, or issues final sanctions; in-room *bounded* autonomy (a community-approved agent moderating/managing-treasury/facilitating-lawmaking within kernel-enforced limits) is governed by SPEC §24.6 / WS-U. Per Section 24.2, the platform maintains model cards (ranking, safety, summarization, invariant models), data lineage for training/evaluation, bias/subgroup audits, human review for appeals and ambiguous cases, AI-generated labeling, preserved source citations, user reporting of bad outputs, no unsupported factual claims, logged model version and prompt/configuration for audit-sensitive outputs, and red-team testing before launch.
 
 ### Shared conventions
 
@@ -820,7 +820,7 @@ Implement the Section 24.5 permitted/prohibited matrix for AI around Knomosis go
 
 **Observability:** Emit `governance.ai.summary.generated` (with cited-field count and uncertainty-flag presence) and `governance.ai.capability.blocked` (prohibited attempts); a governance dashboard tracks advisory output volume and any blocked-capability attempts.
 
-**Security/privacy:** This task is the AI-side counterpart to the ranking pay-to-rank controls: it bars wealth profiling and wealth-based feed personalization, and bars rewriting proposals to hide risk/recipient identity from compliance — using the same pre-execution guard that cannot be bypassed. All governance AI output is advisory and contestable, never autonomous (Section 24.1, 24.5).
+**Security/privacy:** This task is the AI-side counterpart to the ranking pay-to-rank controls: it bars wealth profiling and wealth-based feed personalization, and bars rewriting proposals to hide risk/recipient identity from compliance — using the same pre-execution guard that cannot be bypassed. This platform-layer governance AI output is advisory and contestable, never autonomous (Section 24.1, 24.5); the wealth-profiling, wealth-based-personalization, and risk-hiding-rewrite bars remain absolute at every layer, including the in-room bounded agent (SPEC §24.6 / WS-U).
 
 ---
 

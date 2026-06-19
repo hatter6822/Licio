@@ -10,9 +10,22 @@ WS-K operationalises responsible-AI governance aligned to the **NIST AI
 RMF** and **ISO/IEC 42001**: every AI model used in Licio has a model
 card, undergoes bias/safety/red-team evaluation before deployment, has
 documented prohibited uses enforced *before* execution, and produces
-labelled, audit-logged, human-correctable output.  AI is never the sole
-authority for high-impact moderation and never autonomously spends
-funds, approves proposals, or recommends votes (Section 24.1/24.5).
+labelled, audit-logged, human-correctable output.  **At the platform
+layer**, AI is never the sole authority for high-impact moderation and
+never autonomously spends funds, approves proposals, or recommends votes
+(Section 24.1/24.5).
+
+> **Re-scoped by the AI-governed-rooms redesign (SPEC §24.6;
+> `docs/planning/22-ai-governed-rooms.md`, WS-U).**  The platform-layer
+> non-autonomy above is now **one layer** of a three-layer model.  WS-K
+> becomes the platform-side **evaluation / transparency / prohibited-use
+> substrate** that every *community-uploaded* room model must clear before
+> a room may adopt it by member vote; the approved **in-room** agent is then
+> *bounded*-autonomous (it may moderate, manage the room treasury, and
+> facilitate lawmaking) **within community-voted, kernel-enforced limits,
+> holding no keys, beneath the non-overridable platform legal floor.**  No
+> shipped WS-K capability is removed; see WS-U for the runtime that consumes
+> this substrate.
 
 ## Governance-over-models philosophy
 
