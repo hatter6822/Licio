@@ -332,6 +332,7 @@ pnpm --filter @licio/db build       # build database package
 pnpm --filter @licio/invariants build  # build invariants package
 pnpm --filter @licio/ranking build  # build ranking package
 pnpm --filter @licio/ai-governance build  # build AI-governance package
+pnpm --filter @licio/governance build  # build AI-governed-rooms domain package
 ```
 
 `package.json` (root and per-workspace) is the source of truth for
@@ -913,13 +914,17 @@ duplicated here.
 @licio/ai-governance       (depends on @licio/shared only; browser-safe,
                             NEVER @licio/db — the WS-K governance domain has
                             no database access by construction)
+@licio/governance          (depends on @licio/shared only; browser-safe,
+                            NEVER @licio/db — the WS-U AI-governed-rooms domain
+                            (policy DSL, kernel, capabilities, elections) has
+                            no database access by construction)
 
 apps/web                   (depends on @licio/shared, @licio/invariants,
                             @licio/ai-governance; NEVER @licio/db — enforced
                             by check:workspace-deps)
 apps/api                   (depends on @licio/shared, @licio/db,
                             @licio/invariants, @licio/ranking,
-                            @licio/ai-governance)
+                            @licio/ai-governance, @licio/governance)
 ```
 
 `pnpm check:workspace-deps` enforces these boundaries by scanning both
@@ -1330,7 +1335,7 @@ Status:
 | WS-R | Offline content availability (LCAP v0.2) | Planned (extension; `docs/OFFLINE_SPEC.md`) |
 | WS-S | Private P2P rooms (E2EE) | Planned (extension; `docs/PRIVATE_SPEC.md`) |
 | WS-T | Conversation as comments | Complete |
-| WS-U | AI-governed rooms (redesign) | Doctrine ratified (Stage 0: SPEC/policy/plan); staged runtime impl (`docs/planning/22-ai-governed-rooms.md`) |
+| WS-U | AI-governed rooms (redesign) | Doctrine ratified (Stage 0) + runtime Stages 1-3 & 5-core shipped: the `@licio/governance` pure domain (policy DSL, proof-carrying kernel, capabilities, elections), the `knomosis` schema + migration `0035` (isolation-proven), the `GovernanceService` (seat/elections, model admission, bounded moderation agent, kernel-backed treasury), and the `/v1/rooms/*` governance routes; residuals (Stages 4/6, web surfaces, gated Drizzle adapters) tracked in `docs/governance/README.md` |
 
 Read the per-workstream planning document under `docs/planning/`
 before starting new work.  The master index at
@@ -1487,6 +1492,7 @@ file counts at current state:
 | packages/invariants | ~19 (PWAtt/MinHash/freshness + the WS-H invariant mathematics: matroid/fiber/GW/sheaf/holonomy/supporting property suites + the regression harness + the SPEC-purpose oracle suite) | node | `pnpm --filter @licio/invariants test` |
 | packages/ranking | ~7 (denylist + versioned-artifact pinning, strict schemas, §5.5 profile fuzzing + baseline weights, §5.4 arithmetic, penalties/constraints incl. tie enforcement, dedup/balancing, templates + x-pseudo localization, pipeline determinism, replay diff) | node | `pnpm --filter @licio/ranking test` |
 | packages/ai-governance | ~13 (the prohibited-use guard + §24.5 matrix, the upgrade-only label ladder, the canonical inventory + risk assessments, the bias-audit math (two-proportion z-test + small-cohort), hallucination/safety/red-team, the harness selection/decision/reproducibility, the §24.3 summary-quality constraints + renderer, accuracy, canonical JSON, and the schema refinements) | node | `pnpm --filter @licio/ai-governance test` |
+| packages/governance | ~5 (WS-U AI-governed-rooms domain: the moderation policy DSL + interpreter, the proof-carrying treasury kernel + investment bands, the capability model + derivation (floor-reserved structural disjointness), the quorum-gated fail-safe election tally, and the canonical-JSON content addressing) | node | `pnpm --filter @licio/governance test` |
 | scripts | ~4 | node | via root `pnpm test` (policy project) |
 
 WS-D, WS-E, WS-F, WS-G, WS-H, and WS-I add **gated** integration tests

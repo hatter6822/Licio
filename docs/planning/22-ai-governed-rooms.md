@@ -2,10 +2,15 @@
 
 **Milestone:** M3 (governance substrate) → M4-M5 (treasury powers) | **Priority:** 3-5 | **Dependencies:** WS-K (model-governance substrate — re-scoped, see below), WS-G/WS-Q (rooms, content visibility, conversation/safety state machine), WS-J (platform trust & safety — becomes the legal floor), WS-L (Knomosis gateway, wallets, Lex bounds), WS-M (treasury, law-packs, proposals), WS-H (invariants — unbiased-facilitation audits), WS-N (jurisdiction/compliance) | **Wave:** 5 (substrate) → 8 (treasury) | **Estimated duration:** staged (see §U.7)
 
-> **Status: DESIGN — ratified by the maintainer's four binding decisions (2026-06-19);
-> implementation staged as reviewable PRs (§U.7). This round is doctrine-only: it amends
-> `docs/SPEC.md` (§16.6, §17, §24.1, §24.5, §24.6), the `docs/policy/` register, and the
-> WS-K/J/L/M plans. No runtime code lands until the design is reviewed.** The shipped WS-K
+> **Status: DOCTRINE RATIFIED + RUNTIME STAGES 1-3 & 5-core SHIPPED (2026-06-19).** Stage 0
+> amended `docs/SPEC.md` (§16.6, §17, §24.1, §24.5, §24.6), the `docs/policy/` register, and the
+> WS-K/J/L/M plans. The runtime then landed (rather than reusing WS-K alone, a dedicated
+> deterministic domain package was built): the **`@licio/governance`** pure domain (policy DSL,
+> proof-carrying kernel, capabilities, election tally), the **`knomosis`** schema + migration
+> `0035` (isolation-proven), the **`GovernanceService`** (seat/elections, model admission gate,
+> bounded moderation agent, kernel-backed treasury), and the **`/v1/rooms/*`** routes + seat
+> bootstrap on room create. Residuals (Stages 4/6, web surfaces, gated Drizzle adapters,
+> doctrine-matrix propagation) are tracked in `docs/governance/README.md`. The shipped WS-K
 > platform (`@licio/ai-governance` + `apps/api/src/ai-governance` + the `0034` schema + the
 > `/v1/ai/*` routes) is **not discarded** — it is re-scoped into the *platform-side*
 > evaluation, transparency, lineage, and prohibited-use substrate that every community
