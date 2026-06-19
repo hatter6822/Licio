@@ -31,6 +31,7 @@ import {
   registerForumConsumers,
   setForumServices,
 } from './forum/services.js';
+import { createRoomAgentModerator } from './governance/forum-agent.js';
 import { buildIdentityServicesFromEnv, setIdentityServices } from './identity/services.js';
 import {
   createInMemoryIngestionServices,
@@ -94,6 +95,9 @@ const forumServices = createInMemoryForumServices({
   log: (event, meta) => logger.info(meta, event),
 });
 await forumServices.reloadConfig();
+// WS-U: the contribution path consults the in-room agent (uses the lazy
+// in-memory GovernanceService singleton in the harness).
+forumServices.agentModerator = createRoomAgentModerator();
 setForumServices(forumServices);
 registerForumConsumers(eventServices, ingestionServices, forumServices);
 

@@ -65,6 +65,7 @@ import {
 import { toContributionPublic } from './forum/threads.js';
 import { resolveGovernanceConfig } from './governance/config.js';
 import { createDrizzleGovernanceStores } from './governance/drizzle-governance-stores.js';
+import { createRoomAgentModerator } from './governance/forum-agent.js';
 import { createGovernanceService, setGovernanceService } from './governance/services.js';
 import {
   DrizzleAuditStore,
@@ -777,6 +778,9 @@ setGovernanceService(
     ...(db ? { stores: createDrizzleGovernanceStores(db) } : {}),
   }),
 );
+// The forum contribution path consults the in-room agent (subordinate to the
+// platform floor) for any room with an active community-approved binding.
+forumServices.agentModerator = createRoomAgentModerator();
 
 // Development demo seed (NEVER in production): populate rooms, stories, threads,
 // and multi-author comments through the REAL stores so a fresh dev database

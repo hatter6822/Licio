@@ -105,6 +105,16 @@ export const FORUM_TO_EVENT_TYPE: Readonly<Record<ContributionType, EventContrib
   comment: 'explanation',
 };
 
+/** Contribution moderation states ordered by restrictiveness (higher wins when
+ *  combining the platform floor with the WS-U in-room agent — the agent can only
+ *  raise the state, never lower a floor decision). */
+type ModState = 'published' | 'under_review' | 'removed';
+const MOD_STATE_RANK: Readonly<Record<ModState, number>> = {
+  published: 0,
+  under_review: 1,
+  removed: 2,
+};
+
 export type ContributionRejection =
   | { status: 404; code: 'not_found'; message: string }
   | { status: 403; code: 'thread_restricted'; message: string }
@@ -469,20 +479,47 @@ export async function createContribution(
     );
   }
 
-  // 5. Safety pre-checks (WS-J.2.6 seam): flag → under_review + queue;
+  // The contribution id is minted here (before the safety/agent passes) so the
+  // WS-U agent action log can reference it as the moderated subject.
+  const contributionId = randomUUID();
+
+  // 5. Safety pre-checks (WS-J.2.6 floor seam): flag → under_review + queue;
   //    block → removed (high-confidence spam/malware auto-block, appealable).
   //    The duplicate-flood detector counts distinct ROOMS, so pass the thread's
   //    real home room (NOT the thread id — same-room reposts are one room).
   const verdict = await forum.safety.classify(request, { userId, roomId: thread.roomId });
-  const moderationState =
+  const floorState: ModState =
     verdict.disposition === 'block'
       ? 'removed'
       : verdict.disposition === 'flag'
         ? 'under_review'
         : 'published';
 
+  // 5b. WS-U bounded in-room agent (SPEC §24.6): when the room has an active
+  //     community-approved binding, the agent may add caution within its
+  //     community-granted capabilities. Combined FLOOR-DOMINANTLY (max
+  //     restriction) — the agent can never reduce a floor decision or reinstate a
+  //     floor removal (it holds no floor-reserved capability). The agent action
+  //     (with its provenance triple) is logged inside the GovernanceService.
+  let moderationState: ModState = floorState;
+  let agentEscalated = false;
+  if (thread.roomId !== null && forum.agentModerator !== null) {
+    const agent = await forum.agentModerator.moderateContribution({
+      roomId: thread.roomId,
+      contributionId,
+      type: request.type,
+      body: request.body,
+      citationCount: 'citations' in request && request.citations ? request.citations.length : 0,
+      attachmentCount: request.attachment_ids?.length ?? 0,
+    });
+    if (agent !== null && MOD_STATE_RANK[agent.state] > MOD_STATE_RANK[moderationState]) {
+      moderationState = agent.state;
+      agentEscalated = true;
+      forum.metrics.increment('contributions.agent_moderated');
+    }
+  }
+
   // 6. Transactional insert (with the evidence card for evidence types).
-  const contributionId = randomUUID();
   let evidenceCard: ForumEvidenceCardInput | undefined;
   if (request.type === 'evidence') {
     const claim = await ingestion.claims.getById(request.target_claim_id);
@@ -608,6 +645,31 @@ export async function createContribution(
           reasons: verdict.reasons,
         });
       }
+    } else if (agentEscalated) {
+      // The WS-U in-room agent held/removed content the floor cleared: route it
+      // to human review (the appealable-to-floor path). The agent action itself
+      // is already in the knomosis agent_action_log with its provenance triple.
+      forum.metrics.increment(
+        moderationState === 'removed'
+          ? 'contributions.agent_blocked'
+          : 'contributions.agent_flagged',
+      );
+      await ingestion.reviewQueue.insert({
+        kind: 'contribution_safety_hold',
+        storyId: thread.storyId,
+        context: {
+          contribution_id: contribution.contributionId,
+          thread_id: contribution.threadId,
+          reasons: ['in_room_agent'],
+          disposition: moderationState === 'removed' ? 'block' : 'flag',
+          source: 'in_room_agent',
+        },
+        status: 'pending',
+        resolution: null,
+        resolvedBy: null,
+        resolvedAt: null,
+        notBefore: null,
+      });
     }
     if (request.type === 'moderation_concern') {
       forum.metrics.increment('contributions.moderation_concern');

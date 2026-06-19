@@ -51,7 +51,14 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
   over-moderation), beneath — never replacing — the platform legal floor.
 - **Stage 3** — the bounded moderation agent: capability-gated decisioning (an
   un-granted action is **downgraded to a human-floor referral**, never escalated),
-  the provenance-triple audit log, and the floor's room-governance-freeze.
+  the provenance-triple audit log, and the floor's room-governance-freeze. The
+  agent is **wired into the live contribution path**: `createContribution`
+  consults the `RoomAgentModerator` seam (`governance/forum-agent.ts`) for any
+  room with an active binding and combines its recommendation **floor-dominantly**
+  — the agent can raise a contribution's moderation state (flag → `under_review`,
+  remove → `removed`) but can never lower or reverse a platform-floor decision.
+  Agent-held content is routed to the human review queue (the appeal path) and is
+  suppressed from scoring emission exactly like a WS-J hold.
 - **Stage 5 (core)** — the kernel-backed treasury executor: fail-closed when crypto
   is off, capability- and kernel-gated when on, the agent holding no keys; the
   verdict is logged.
