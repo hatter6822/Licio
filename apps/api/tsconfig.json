@@ -13,7 +13,9 @@
       "@licio/invariants": ["../../packages/invariants/src"],
       "@licio/invariants/*": ["../../packages/invariants/src/*"],
       "@licio/ranking": ["../../packages/ranking/src"],
-      "@licio/ranking/*": ["../../packages/ranking/src/*"]
+      "@licio/ranking/*": ["../../packages/ranking/src/*"],
+      "@licio/ai-governance": ["../../packages/ai-governance/src"],
+      "@licio/ai-governance/*": ["../../packages/ai-governance/src/*"]
     }
   },
   "include": ["src/**/*"],
@@ -21,6 +23,7 @@
     { "path": "../../packages/shared" },
     { "path": "../../packages/db" },
     { "path": "../../packages/invariants" },
-    { "path": "../../packages/ranking" }
+    { "path": "../../packages/ranking" },
+    { "path": "../../packages/ai-governance" }
   ]
 }

@@ -5,6 +5,7 @@
     { "path": "packages/db" },
     { "path": "packages/invariants" },
     { "path": "packages/ranking" },
+    { "path": "packages/ai-governance" },
     { "path": "apps/web" },
     { "path": "apps/api" }
   ]
