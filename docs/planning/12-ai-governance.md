@@ -2,6 +2,18 @@
 
 **Milestone:** M3 | **Priority:** 3 | **Dependencies:** WS-G (forum/threads/evidence for summarization + claim graph), WS-H (invariant platform conventions for model/invariant cards), WS-F (ingestion for topic classification + claim extraction), WS-J.2 (steward review queue) | **Wave:** 5 | **Estimated duration:** 3 weeks
 
+> **Status: COMPLETE.**  Implemented as the browser-safe `@licio/ai-governance`
+> domain package (schemas + deterministic governance math) + the
+> `apps/api/src/ai-governance` services, the `packages/db` schema + migration
+> `0034`, the `/v1/ai/*` routes, and the `apps/web` `AiLabel` provenance badge.
+> All twelve definition-of-done conditions hold; the governed models are
+> deterministic providers (the value is the GOVERNANCE, not ML inference) so a
+> real backend swaps in behind the unchanged registry/evaluation/guard surface.
+> The implementation reference (architecture, per-section status, testing,
+> production wiring, and the tracked residuals — gated Drizzle adapters, deeper
+> client render-path integration, WS-M proposal-data wiring, a real model
+> backend, the WS-P experiment-log consumer) is `docs/ai-governance/README.md`.
+
 ## Overview
 
 Every AI model used in Licio has a model card, undergoes bias/safety evaluation, and has documented prohibited uses. AI outputs are labeled as machine-generated and are user/steward-editable. No autonomous treasury execution, no investment advice, no manipulative voting recommendations.

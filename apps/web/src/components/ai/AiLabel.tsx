@@ -84,8 +84,8 @@ export function AiLabel({ label, iconOnly = false, className }: AiLabelProps): R
       {...(className ? { className } : {})}
     >
       {/* Visible text + a hover title; the full provenance explanation is read
-          by assistive tech via the visually-hidden description (never colour- or
-          text-only). */}
+          by assistive tech via the visually-hidden description, so meaning never
+          rests on colour alone. */}
       <span title={presentation.description}>
         {presentation.text}
         <span className="sr-only">. {presentation.description}</span>

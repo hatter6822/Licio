@@ -245,9 +245,40 @@ surfaces, and a WS-J demo seed.  WS-J residuals (the BFF E2E for the safety flow
 mounting the report/block affordances on every contribution row + profile; and the
 SPEC enhancements beyond the §-DoD — two-person co-approval, escalation
 auto-routing, room-steward-layer routing, the on-call paging provider) are tracked
-in `docs/trust-safety/README.md`.  Workstreams WS-K
+in `docs/trust-safety/README.md`.
+WS-K ships AI and model governance (`docs/ai-governance/README.md`): the new
+browser-safe `@licio/ai-governance` domain package (schemas + deterministic
+governance math, the WS-K counterpart of `@licio/ranking`) and the
+`apps/api/src/ai-governance` services.  The value is the GOVERNANCE, not ML
+inference — the governed models are deterministic providers (the WS-F heuristic
+seam) carrying full governance identity, so a real backend swaps in behind the
+unchanged surface.  It delivers the model registry whose deployment GATE is the
+single chokepoint (no model deploys without a complete card + a passing harness
+decision + a resolved risk assessment; old versions preserved; append-only
+update_history), the NIST AI RMF / ISO 42001 risk assessments + the eight-use-case
+AI inventory (governance marked never-autonomous), the pre-execution
+prohibited-use guard (the five platform prohibitions + the §24.5 governance
+matrix, by capability AND structural defense-in-depth, every block audited),
+immutable data lineage (the §24.2 privacy-review precondition as a schema refine
++ DB CHECK), audit-sensitive `AIOutputRecord` logging (server-side SHA-256 config
+hashing), the evaluation harness (bias two-proportion z-test, source-grounded
+hallucination detection, the safety/privacy suite, the red-team gate) feeding the
+deploy decision, runtime monitoring (drift/report-rate alerts + a human-approved
+rollback recommendation, never autonomous), the content pipelines (topic
+classification, claim extraction, the structured §24.3-quality/grounding-gated
+summary published as the WS-G automated draft, translation with a number-invariant
+consistency check), human-in-the-loop correction + accuracy metrics, the §24.5
+governance summaries/advisories, the persistent provenance labels (the
+upgrade-only ladder; the `AiLabel` web badge), the `ai.model.manage` RBAC
+capability (the AI team), and the full boot wiring (the governed models registered
++ deployed through the real gate on boot, the durable `content.normalized`
+classification consumer, the lease-guarded hourly scheduler).  WS-K residuals (the
+gated Drizzle adapters for the WS-K stores; deeper client render-path integration;
+WS-M proposal-data wiring; a real model backend; the WS-P experiment-log consumer)
+are tracked in `docs/ai-governance/README.md`.  Workstreams WS-L
 through WS-P are planned (planning documents exist under `docs/planning/`;
-implementation not yet started, beyond that E2E-harness seed).  See
+implementation not yet started, beyond the WS-O.4.5 adversarial suite and that
+E2E-harness seed).  See
 "Implementation roadmap" below for the full status table.
 
 ## Build and run
@@ -300,6 +331,7 @@ pnpm --filter @licio/shared build   # build shared package
 pnpm --filter @licio/db build       # build database package
 pnpm --filter @licio/invariants build  # build invariants package
 pnpm --filter @licio/ranking build  # build ranking package
+pnpm --filter @licio/ai-governance build  # build AI-governance package
 ```
 
 `package.json` (root and per-workspace) is the source of truth for
@@ -376,6 +408,8 @@ licio/
 │   │       ├── routeTree.gen.ts         -- auto-generated route tree
 │   │       ├── components/
 │   │       │   ├── ui/                  -- 33 reusable UI primitives (incl. BrandLogo)
+│   │       │   ├── ai/                  -- AiLabel provenance badge (WS-K, machine-generated/
+│   │       │   │                           AI-classified/AI-draft/AI-translated + revisions)
 │   │       │   ├── a11y/                -- RouteAnnouncer, SkipToContent, useSpaFocus
 │   │       │   ├── cognitive/           -- DefinedTerm, ProgressiveDisclosure, jargon
 │   │       │   ├── composer/            -- StoryComposer + shared affordances (Attachment,
@@ -499,6 +533,10 @@ licio/
 │           │   │                             notice inbox (WS-J.1)
 │           │   ├── moderation-console.ts --  role-gated console: queue, review, action
 │           │   │                             palette, appeals, incidents, audit (WS-J.2)
+│           │   ├── ai-governance-admin.ts --  /v1/ai/admin/* AI-team model lifecycle +
+│           │   │                             deploy gate + steward review (WS-K)
+│           │   ├── ai-governance-public.ts -- model-card lookup, translation,
+│           │   │                             summary/translation reports (WS-K)
 │           │   ├── health.ts            --   /health endpoint
 │           │   └── csp-report.ts        --   CSP violation ingest
 │           ├── middleware/
@@ -643,6 +681,27 @@ licio/
 │           │   ├── config.ts            --   fail-closed runtime config (moderation.* keys)
 │           │   ├── scheduler.ts         --   lease-guarded sweeps (mute expiry, queue gauges)
 │           │   └── services.ts          --   injectable container + singleton + boot wiring
+│           ├── ai-governance/            -- WS-K AI and model governance
+│           │   ├── stores.ts            --   store interfaces + in-memory adapters (registry,
+│           │   │                             lineage, output records, review queue, …)
+│           │   ├── registry.ts          --   model registry + the deployment GATE (WS-K.1.1b)
+│           │   ├── guard.ts             --   the pre-execution ProhibitedUseGuard + audit (WS-K.1.1d)
+│           │   ├── harness.ts           --   evaluation-harness orchestrator + decision (WS-K.1.2e)
+│           │   ├── output-records.ts    --   immutable AIOutputRecord writer + config hash (WS-K.1.1f)
+│           │   ├── lineage.ts           --   data lineage + privacy-review precondition (WS-K.1.1e)
+│           │   ├── models.ts            --   governed deterministic models + classifier + translator
+│           │   ├── seed.ts              --   register + DEPLOY models through the gate; inventory
+│           │   ├── pipelines.ts         --   topic classification + claim extraction (WS-K.1.3a/b)
+│           │   ├── summaries.ts         --   AI summary + §24.3 quality/grounding gate (WS-K.1.4)
+│           │   ├── translation.ts       --   translation + consistency check (WS-K.2.1a)
+│           │   ├── correction.ts        --   human-in-the-loop correction + accuracy (WS-K.1.3c)
+│           │   ├── governance-ai.ts     --   §24.5 proposal summaries + advisories (WS-K.2.2a)
+│           │   ├── runtime-monitor.ts   --   drift/report-rate alerts + rollback rec (WS-K.1.2f)
+│           │   ├── config.ts            --   fail-closed runtime config (ai.* keys)
+│           │   ├── metrics.ts           --   observability counters/gauges
+│           │   ├── scheduler.ts         --   lease-guarded hourly tick
+│           │   ├── wiring.ts            --   deps-builders + the durable classification consumer
+│           │   └── services.ts          --   injectable container + singleton
 │           ├── lib/
 │           │   ├── rate-limit.ts        --   global fixed-window budget (no client keying)
 │           │   ├── push-service.ts      --   VAPID push (session-scoped delete)
@@ -703,9 +762,13 @@ licio/
 │   │       │                                 WS-A moderation reason codes)
 │   │       └── env/                     --   environment variable validation
 │   ├── db/                      -- Drizzle ORM schema + migrations
-│   │   ├── drizzle/                     --   generated SQL migrations (WS-D – WS-J)
+│   │   ├── drizzle/                     --   generated SQL migrations (WS-D – WS-K)
 │   │   └── src/
 │   │       ├── schema/                  --   PostgreSQL table definitions
+│   │       │   ├── ai-governance.ts     --     WS-K: model cards/registry, risk assessments,
+│   │       │   │                               inventory, lineage, output records, evaluations,
+│   │       │   │                               corrections, blocked-invocation audit, summaries/
+│   │       │   │                               translations + reports, runtime metrics/alerts
 │   │       │   ├── user.ts              --     users + JSONB + indexes/CHECK (WS-D.1.1)
 │   │       │   ├── session.ts           --     sessions, user_auth (no password), recovery codes
 │   │       │   ├── webauthn-credential.ts --   WebAuthn credentials
@@ -767,6 +830,24 @@ licio/
 │           ├── pipeline.ts              --   the deterministic constrained-optimization
 │           │                                 core (serving AND replay execute this)
 │           └── __tests__/               --   124 deterministic unit/property tests
+│   └── ai-governance/           -- WS-K pure AI-governance domain (no I/O; browser-safe)
+│       └── src/
+│           ├── schemas/                 --   model card, registry, NIST/ISO risk assessment,
+│           │                                 inventory, prohibited-use, data lineage, output
+│           │                                 record, evaluation results, pipelines, summary +
+│           │                                 quality, translation, correction, governance,
+│           │                                 provenance labels (all zod + co-located types)
+│           ├── prohibited-use.ts        --   the guard core + the §24.5 capability matrix
+│           ├── bias-audit.ts            --   two-proportion z-test + disparity gating
+│           ├── hallucination.ts         --   source grounding + consistency + attribution
+│           ├── safety-suite.ts          --   PII/harmful/minimization/disclaimer checks
+│           ├── red-team.ts              --   coverage + critical-finding gate
+│           ├── harness.ts               --   eval-set selection + aggregation + decision
+│           ├── summary-quality.ts       --   the five §24.3 quality constraints
+│           ├── inventory.ts             --   the canonical 8 use cases + risk assessments
+│           ├── labels.ts                --   the upgrade-only provenance label ladder
+│           ├── canonical-json.ts        --   deterministic config-hash serialization
+│           └── __tests__/               --   ~13 deterministic unit/property suites
 ├── scripts/                     -- build validation and security gates
 │   ├── validate-build.ts        --   post-build orchestrator
 │   ├── check-bundle-size.ts     --   initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz
@@ -829,11 +910,16 @@ duplicated here.
 @licio/ranking             (depends on @licio/shared, @licio/invariants;
                             NEVER @licio/db — the ranking math has no
                             database access by construction)
+@licio/ai-governance       (depends on @licio/shared only; browser-safe,
+                            NEVER @licio/db — the WS-K governance domain has
+                            no database access by construction)
 
-apps/web                   (depends on @licio/shared, @licio/invariants;
-                            NEVER @licio/db — enforced by check:workspace-deps)
+apps/web                   (depends on @licio/shared, @licio/invariants,
+                            @licio/ai-governance; NEVER @licio/db — enforced
+                            by check:workspace-deps)
 apps/api                   (depends on @licio/shared, @licio/db,
-                            @licio/invariants, @licio/ranking)
+                            @licio/invariants, @licio/ranking,
+                            @licio/ai-governance)
 ```
 
 `pnpm check:workspace-deps` enforces these boundaries by scanning both
@@ -1221,7 +1307,7 @@ Status:
 | WS-H | Invariant services (MERI, MFCI, SCOI, GWEI, PHI) | Complete |
 | WS-I | Ranking and distribution | Complete |
 | WS-J | Trust, safety, and abuse operations | Complete (residuals tracked, `docs/trust-safety/README.md`) |
-| WS-K | AI governance | Planned |
+| WS-K | AI and model governance | Complete (residuals tracked, `docs/ai-governance/README.md`) |
 | WS-L | Knomosis and wallets | Planned |
 | WS-M | Treasury and governance | Planned |
 | WS-N | Compliance | Planned |
@@ -1379,12 +1465,13 @@ file counts at current state:
 
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
-| apps/web | ~133 unit + 8 E2E (6 frontend-only + 2 BFF-in-the-loop specs; incl. the WS-J report flow, the notice-inbox appeal affordance, safety controls, the moderation console panels incl. the appeal-review-before-decide gate, and the WS-T comment-flow BFF spec — inline story comments + legacy thread redirect) | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~113 (incl. WS-D identity + the `expert` RBAC role + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-J trust-safety services/routes/stores/units + the gated WS-J Postgres adapters incl. the right-to-erasure path + the WS-Q E2E test-auth route + the dev-seed showcase integration test + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
+| apps/web | ~134 unit + 8 E2E (6 frontend-only + 2 BFF-in-the-loop specs; incl. the WS-J report flow, the notice-inbox appeal affordance, safety controls, the moderation console panels incl. the appeal-review-before-decide gate, the WS-T comment-flow BFF spec — inline story comments + legacy thread redirect, and the WS-K AI provenance-label component) | jsdom / Playwright | `pnpm --filter web test` |
+| apps/api | ~118 (incl. WS-D identity + the `expert`/`admin` RBAC roles + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-J trust-safety services/routes/stores/units + the gated WS-J Postgres adapters incl. the right-to-erasure path + the WS-K governance backbone/pipelines/routes/stores/coverage + the WS-Q E2E test-auth route + the dev-seed showcase integration test + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
 | packages/shared | ~20 (incl. WS-D–WS-H schemas, URL/lifecycle utils, the §5.6 rating-label SSOT, the UGC pipeline + XSS-vector suite) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~4 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |
 | packages/invariants | ~19 (PWAtt/MinHash/freshness + the WS-H invariant mathematics: matroid/fiber/GW/sheaf/holonomy/supporting property suites + the regression harness + the SPEC-purpose oracle suite) | node | `pnpm --filter @licio/invariants test` |
 | packages/ranking | ~7 (denylist + versioned-artifact pinning, strict schemas, §5.5 profile fuzzing + baseline weights, §5.4 arithmetic, penalties/constraints incl. tie enforcement, dedup/balancing, templates + x-pseudo localization, pipeline determinism, replay diff) | node | `pnpm --filter @licio/ranking test` |
+| packages/ai-governance | ~13 (the prohibited-use guard + §24.5 matrix, the upgrade-only label ladder, the canonical inventory + risk assessments, the bias-audit math (two-proportion z-test + small-cohort), hallucination/safety/red-team, the harness selection/decision/reproducibility, the §24.3 summary-quality constraints + renderer, accuracy, canonical JSON, and the schema refinements) | node | `pnpm --filter @licio/ai-governance test` |
 | scripts | ~4 | node | via root `pnpm test` (policy project) |
 
 WS-D, WS-E, WS-F, WS-G, WS-H, and WS-I add **gated** integration tests
