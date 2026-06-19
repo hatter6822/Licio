@@ -9,10 +9,10 @@
 |---|---|
 | **Document ID** | `CRYPTO_FEATURE_MATRIX` |
 | **Produced by** | WS-A.2.4 |
-| **Version** | 1.0.0 |
+| **Version** | 1.1.0 |
 | **Owner** | Licio Maintainers — Doctrine & Policy Working Group |
-| **Effective date** | 2026-06-08 |
-| **Status** | Ratified by maintainer (hatter6822) — 2026-06-08 (M0 doctrine gate) |
+| **Effective date** | 2026-06-19 |
+| **Status** | Ratified by maintainer (hatter6822) — 2026-06-08 (M0 doctrine gate); amended 2026-06-19 (WS-U note) |
 | **SPEC references** | §17.10, §17.11, §25.6, §30.3-N |
 | **Primary consumers** | WS-L/WS-M (Knomosis), WS-N (jurisdiction engine), WS-C.1.3 (default-off flags) |
 
@@ -85,6 +85,17 @@ Tier 4 additionally requires an **operational track record** and **expanded lega
 
 ---
 
+## AI-executed treasury (WS-U) reuses these tiers — no new tier
+
+The WS-U AI-governed-rooms redesign (SPEC §16.6, §24.6) introduces **no new crypto tier**. An
+in-room AI agent that *executes* treasury actions is the **existing** room-treasury feature
+operated by a bounded, kernel-enforced executor that holds no keys (SPEC §17.6, §24.6) — so it is
+gated by the **same** `CRYPTO_T0`–`CRYPTO_T4` tiers and the same SPEC §17.11 production-gate
+checklist as any treasury action. With the crypto flag off (the fail-closed default), the agent
+has **no** treasury powers at all; in-room AI *moderation* (no treasury) runs in simulated
+governance independently of these tiers. The kill switch disables the agent's financial surface
+exactly as it disables any crypto feature, preserving core-social independence.
+
 ## Fail-closed behavior
 
 - Jurisdiction status **unknown or pending** → crypto features `disabled`.
@@ -142,3 +153,4 @@ all of them.
 | Version | Date | Author | Change | Sign-off |
 |---|---|---|---|---|
 | 1.0.0 | 2026-06-08 | Doctrine & Policy WG | Initial ratified matrix: 5 tiers (`CRYPTO_T0`–`T4`) with fail-closed defaults, 10 per-tier requirements, SPEC §17.11 production-gate checklist blocking unmet promotions, and fail-closed behavior including kill-switch engagement with core-social independence. Default states drawn from the `JURISDICTION_MATRIX.md` cell vocabulary; tiers anchored to SPEC §17.11. | Reviewed and ratified by hatter6822 (maintainer), 2026-06-08 |
+| 1.1.0 | 2026-06-19 | Doctrine & Policy WG | WS-U AI-governed-rooms note (SPEC §16.6/§24.6): the AI-executed treasury introduces **no new crypto tier** — it is the existing room-treasury feature operated by a bounded, no-key, kernel-enforced executor, gated by the same `CRYPTO_T0`–`CRYPTO_T4` tiers, the same §17.11 checklist, and the same fail-closed kill switch. The 5 tiers + 10 per-tier requirements are unchanged (gate counts preserved). | Pending maintainer ratification (WS-U) |

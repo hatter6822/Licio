@@ -84,8 +84,11 @@ hypothetical `knomosis → public.rooms` FK is caught.
   in-room "governed by" panel (the API is ready; the React surface is pending).
 - **Gated Drizzle adapters** — the production binding of the store interfaces
   (the in-memory adapters are the dev/test path; the schema + migration are shipped).
-- **Doctrine-matrix propagation** — `CRYPTO_FEATURE_MATRIX`/`JURISDICTION_MATRIX`/
-  `TRANSPARENCY_DICTIONARY` clarifying notes (the agent introduces no new crypto
-  tier/jurisdiction feature/metric — it reuses the existing treasury surface).
+- **Doctrine-matrix propagation** — `CRYPTO_FEATURE_MATRIX` now carries the WS-U note
+  (no new crypto tier; v1.1.0). `JURISDICTION_MATRIX` / `TRANSPARENCY_DICTIONARY` /
+  `SIGNAL_MATRIX` need no new entries — the agent reuses the existing treasury/
+  moderation/Knomosis surfaces (covered by their existing feature cells, safety +
+  Knomosis metrics, and coordination anti-signals); confirming clarifying notes are
+  the only residual.
 - **Pluggable LLM provider seam** (ADR-3) — the deterministic default ships;
   the governed provider port for real-LLM summaries is the upgrade path.
