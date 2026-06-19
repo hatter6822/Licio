@@ -180,6 +180,68 @@ describe('WS-U governance routes', () => {
     expect(res.status).toBe(404);
   });
 
+  it('lets the steward propose a law-pack and bind it at approve; non-stewards forbidden', async () => {
+    const steward = await seedUserWithSession(forum.identity);
+    const other = await seedUserWithSession(forum.identity);
+    await getGovernanceService().bootstrapSeat('rl', steward.userId);
+    const lawPack = {
+      lawPackId: 'x',
+      version: '1',
+      allowedProposalTypes: ['model_prompt_approval'],
+      permittedCapabilities: ['moderate.flag'], // bounds the agent below the model request
+      treasury: {
+        caps: [],
+        minIntervalSeconds: 0,
+        timelockSeconds: 0,
+        materialThreshold: 0,
+        requireCoiFor: [],
+        investment: null,
+      },
+      election: {
+        weightModel: 'one_civic_account_one_vote',
+        perAccountCap: 1,
+        minQuorum: 1,
+        minTurnout: 0,
+        termSeconds: 1,
+      },
+    };
+    // A non-steward cannot propose the room's bounds.
+    const forbidden = await app.request(
+      jsonReq('/v1/rooms/rl/governance/law-packs', 'POST', { law_pack: lawPack }, other.cookie),
+    );
+    expect(forbidden.status).toBe(403);
+
+    // The steward proposes the law-pack...
+    const lp = await app.request(
+      jsonReq('/v1/rooms/rl/governance/law-packs', 'POST', { law_pack: lawPack }, steward.cookie),
+    );
+    expect(lp.status).toBe(201);
+    const { lawPackId } = await json<{ lawPackId: string }>(lp);
+
+    // ...then approves a model bound to it — granted capabilities are intersected
+    // with the law-pack, so the model's requested moderate.remove is dropped.
+    const propose = await app.request(
+      jsonReq(
+        '/v1/rooms/rl/governance/models',
+        'POST',
+        { bundle, prompt_text: 'x' },
+        steward.cookie,
+      ),
+    );
+    const { modelId } = await json<{ modelId: string }>(propose);
+    const approve = await app.request(
+      jsonReq(
+        `/v1/rooms/rl/governance/models/${modelId}/approve`,
+        'POST',
+        { election_id: null, law_pack_id: lawPackId },
+        steward.cookie,
+      ),
+    );
+    const granted = (await json<{ granted: string[] }>(approve)).granted;
+    expect(granted).toContain('moderate.flag');
+    expect(granted).not.toContain('moderate.remove');
+  });
+
   it('returns a 404 for a download from the wrong room', async () => {
     const user = await seedUserWithSession(forum.identity);
     await getGovernanceService().bootstrapSeat('r3', user.userId);

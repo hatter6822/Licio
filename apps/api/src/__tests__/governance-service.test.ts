@@ -223,7 +223,7 @@ describe('GovernanceService — Stage 5 kernel-backed treasury', () => {
   it('executes a within-bounds action via the kernel when crypto is enabled', async () => {
     const h = makeService(true);
     await h.svc.bootstrapSeat('r', 's');
-    const lp = await h.svc.proposeLawPack('r', {
+    const lp = await h.svc.proposeLawPack('r', 's', {
       lawPackId: 'x',
       version: '1',
       allowedProposalTypes: ['treasury'],

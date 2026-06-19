@@ -104,7 +104,7 @@ describe('GovernanceService residual branches', () => {
   it('rejects a malformed treasury action category (crypto on, gateway granted)', async () => {
     const { svc } = make(true);
     await svc.bootstrapSeat('r', 's');
-    const lp = await svc.proposeLawPack('r', {
+    const lp = await svc.proposeLawPack('r', 's', {
       lawPackId: 'x',
       version: '1',
       allowedProposalTypes: ['t'],
@@ -146,6 +146,58 @@ describe('GovernanceService residual branches', () => {
       proposedAt: '2026-06-19T00:00:00.000Z',
     });
     expect(bad.ok).toBe(false); // invalid_action
+  });
+
+  it('binds a custom law-pack that restricts the agent below the model request', async () => {
+    const { svc } = make();
+    await svc.bootstrapSeat('r', 's');
+    // A community law-pack permitting ONLY moderate.flag.
+    const lp = await svc.proposeLawPack('r', 's', {
+      lawPackId: 'x',
+      version: '1',
+      allowedProposalTypes: ['model_prompt_approval'],
+      permittedCapabilities: ['moderate.flag'],
+      treasury: {
+        caps: [],
+        minIntervalSeconds: 0,
+        timelockSeconds: 0,
+        materialThreshold: 0,
+        requireCoiFor: [],
+        investment: null,
+      },
+      election: {
+        weightModel: 'one_civic_account_one_vote',
+        perAccountCap: 1,
+        minQuorum: 1,
+        minTurnout: 0,
+        termSeconds: 1,
+      },
+    });
+    const lawPackId = lp.ok ? lp.value.lawPackId : '';
+    // A model REQUESTING flag + remove.
+    const p = await svc.proposeModel(
+      'r',
+      's',
+      bundle({
+        moderationRules: [
+          {
+            id: 'flag',
+            when: { kind: 'link_count_gte', value: 3 },
+            action: 'flag_for_review',
+            reason: 'x',
+          },
+        ],
+        requestedCapabilities: ['moderate.flag', 'moderate.remove'],
+      }),
+      'p',
+    );
+    const id = p.ok ? p.value.modelId : '';
+    await svc.evaluateModel(id);
+    const approved = await svc.approveModel('r', id, null, lawPackId);
+    if (!approved.ok) throw new Error('approve failed');
+    // requested ∩ permitted = [flag]; the law-pack drops moderate.remove.
+    expect(approved.value.descriptor.granted).toContain('moderate.flag');
+    expect(approved.value.descriptor.granted).not.toContain('moderate.remove');
   });
 });
 

@@ -427,11 +427,21 @@ export class GovernanceService {
 
   // --- Stage 4/5: law-pack + kernel-backed treasury (behind the crypto flag) ---
 
-  /** Register a community-voted law-pack for the room (WS-U.4.1a). */
+  /**
+   * Register a community-voted law-pack for the room (WS-U.4.1a) — the bounds the
+   * agent runs within. Seat-holder only (symmetric with `proposeModel`): the
+   * steward proposes the bounds; binding them is the member-ratification step
+   * (`approveModel` with this `lawPackId`).
+   */
   async proposeLawPack(
     roomId: string,
+    userId: string,
     lawPackInput: unknown,
   ): Promise<GovernanceResult<{ lawPackId: string }>> {
+    const seat = await this.deps.stores.seats.get(roomId);
+    if (!seat || seat.holderUserId !== userId) {
+      return err('not_steward', 'Only the elected room steward may propose a law-pack.');
+    }
     const parsed = lawPackSchema.safeParse(lawPackInput);
     if (!parsed.success) return err('invalid_law_pack', 'The law-pack is invalid.');
     const lawPackId = this.deps.uuid();

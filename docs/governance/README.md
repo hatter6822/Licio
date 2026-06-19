@@ -137,9 +137,17 @@ hypothetical `knomosis → public.rooms` FK is caught.
 
 ## Residuals (tracked)
 
-- **Stages 4 & 6** (Lex-bound lawmaking facilitation; on-chain elections + the full
-  §17.5 anti-capture suite) — the kernel/tally semantics are shipped; the lawmaking
-  *facilitation surface* and the on-chain mode are the next slices.
+- **Stages 4 & 6** — the community **law-pack** (the agent's bounds) is now
+  proposable and bindable: a steward-gated `POST …/governance/law-packs` registers
+  it and `approveModel`'s `law_pack_id` binds it, so the derived capability
+  descriptor is intersected with the community's permitted set (a community can
+  tighten the agent below the model's request). What remains is the Lex-bound
+  lawmaking *facilitation surface* (`lawmaking.summarize/schedule/attest`) and the
+  on-chain election mode + the full §17.5 anti-capture suite — the kernel/tally
+  semantics are shipped; these are the next slices.
+- **Treasury execution** (`executeTreasuryAction`) — implemented and fail-closed
+  behind the crypto flag (off by default); its caller is the WS-L/WS-M wallet +
+  proposal flow, so it stays a tracked residual until that lands.
 - **Web surfaces** — the in-room "governed by" panel, the steward propose/ratify
   surface, and the member-downloadable proposal registry are **shipped**
   (`apps/web/src/components/governance/`). The remaining web residual is the

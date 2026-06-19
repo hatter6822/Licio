@@ -36,8 +36,13 @@ const proposeBodySchema = z
 
 const voteBodySchema = z.object({ candidate_user_id: z.string().min(1).max(128) }).strict();
 const approveBodySchema = z
-  .object({ election_id: z.string().min(1).max(128).nullable().default(null) })
+  .object({
+    election_id: z.string().min(1).max(128).nullable().default(null),
+    /** Bind a community-proposed law-pack (the agent's bounds); null ⇒ default. */
+    law_pack_id: z.string().min(1).max(128).nullable().default(null),
+  })
   .strict();
+const lawPackBodySchema = z.object({ law_pack: z.unknown() }).strict();
 
 export function createGovernanceRoutes() {
   return (
@@ -134,15 +139,37 @@ export function createGovernanceRoutes() {
         authMiddleware(),
         zValidator('json', approveBodySchema),
         async (c) => {
-          const { election_id } = c.req.valid('json');
+          const { election_id, law_pack_id } = c.req.valid('json');
           const result = await getGovernanceService().approveModel(
             c.req.param('roomId'),
             c.req.param('modelId'),
             election_id,
-            null,
+            law_pack_id,
           );
           if (!result.ok) return c.json(deny(result.code, result.message), 409);
           return c.json({ active: result.value.active, granted: result.value.descriptor.granted });
+        },
+      )
+      // --- Community-voted bounds (the law-pack the agent runs within) ---------
+      .post(
+        '/rooms/:roomId/governance/law-packs',
+        authMiddleware(),
+        zValidator('json', lawPackBodySchema),
+        async (c) => {
+          const auth = c.get('auth');
+          if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
+          const result = await getGovernanceService().proposeLawPack(
+            c.req.param('roomId'),
+            auth.userId,
+            c.req.valid('json').law_pack,
+          );
+          if (!result.ok) {
+            return c.json(
+              deny(result.code, result.message),
+              result.code === 'not_steward' ? 403 : 422,
+            );
+          }
+          return c.json({ lawPackId: result.value.lawPackId }, 201);
         },
       )
       // --- "Governed by" agent view ---------------------------------------

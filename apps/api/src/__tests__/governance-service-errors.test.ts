@@ -77,8 +77,18 @@ describe('GovernanceService error paths', () => {
     expect((await svc.executeTreasuryAction('r', input)).ok).toBe(false); // no_capability
   });
 
-  it('proposeLawPack rejects an invalid law-pack', async () => {
+  it('proposeLawPack rejects an invalid law-pack (steward gate passes first)', async () => {
     const svc = make(true);
-    expect((await svc.proposeLawPack('r', { bad: true })).ok).toBe(false);
+    await svc.bootstrapSeat('r', 's');
+    const res = await svc.proposeLawPack('r', 's', { bad: true });
+    expect(res.ok).toBe(false);
+    expect(!res.ok && res.code).toBe('invalid_law_pack');
+  });
+
+  it('proposeLawPack rejects a non-steward', async () => {
+    const svc = make(true);
+    await svc.bootstrapSeat('r', 's');
+    const res = await svc.proposeLawPack('r', 'intruder', { bad: true });
+    expect(!res.ok && res.code).toBe('not_steward');
   });
 });
