@@ -34,12 +34,6 @@ export const submitSearchSchema = z.object({
 });
 export type SubmitSearch = z.infer<typeof submitSearchSchema>;
 
-/** Story conversation deep-reader search: `root` focuses any contribution branch. */
-export const storyCommentsSearchSchema = z.object({
-  root: z.string().uuid().optional().catch(undefined),
-});
-export type StoryCommentsSearch = z.infer<typeof storyCommentsSearchSchema>;
-
 /** Validate (and coerce) the feed search params. Never throws. */
 export function parseFeedSearch(search: Record<string, unknown>): FeedSearch {
   return feedSearchSchema.parse(search);
