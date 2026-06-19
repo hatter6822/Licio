@@ -8,9 +8,12 @@
 > deterministic domain package was built): the **`@licio/governance`** pure domain (policy DSL,
 > proof-carrying kernel, capabilities, election tally), the **`knomosis`** schema + migration
 > `0035` (isolation-proven), the **`GovernanceService`** (seat/elections, model admission gate,
-> bounded moderation agent, kernel-backed treasury), and the **`/v1/rooms/*`** routes + seat
-> bootstrap on room create. Residuals (Stages 4/6, web surfaces, gated Drizzle adapters,
-> doctrine-matrix propagation) are tracked in `docs/governance/README.md`. The shipped WS-K
+> bounded moderation agent, kernel-backed treasury), the **`/v1/rooms/*`** routes + seat
+> bootstrap on room create, and the **web surface** (`apps/web/src/components/governance/`):
+> the in-room "governed by" transparency panel and the elected-steward propose/ratify
+> manager with the member-downloadable proposal registry, both on the room page. Residuals
+> (Stages 4/6, the steward-election voting UI, gated Drizzle adapters, doctrine-matrix
+> propagation) are tracked in `docs/governance/README.md`. The shipped WS-K
 > platform (`@licio/ai-governance` + `apps/api/src/ai-governance` + the `0034` schema + the
 > `/v1/ai/*` routes) is **not discarded** — it is re-scoped into the *platform-side*
 > evaluation, transparency, lineage, and prohibited-use substrate that every community

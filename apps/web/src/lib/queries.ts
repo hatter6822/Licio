@@ -171,6 +171,45 @@ export function useStewardSeatQuery(roomId: string, enabled = true) {
   });
 }
 
+/** WS-U §16.6 — the community governance-model registry (the proposal pipeline
+ *  with platform-admission status). Part of the in-room transparency surface;
+ *  `enabled` defers the fetch behind the read bar. */
+export function useGovernanceModelsQuery(roomId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.governanceModels(roomId),
+    queryFn: () => governanceApi.fetchGovernanceModels(roomId),
+    enabled,
+  });
+}
+
+/** WS-U §16.6 — the elected steward's two powers: propose a community model +
+ *  its prompt. Refreshes the registry and the "governed by" agent view. */
+export function useProposeModelMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { bundle: unknown; prompt_text: string }) =>
+      governanceApi.proposeGovernanceModel(roomId, body),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.governanceModels(roomId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.governedBy(roomId) });
+    },
+  });
+}
+
+/** WS-U §16.6 — record the community's ratification of an eligible model (the
+ *  member-vote step). Activates the in-room agent, so it refreshes BOTH the
+ *  registry and the "governed by" agent view. */
+export function useApproveModelMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (modelId: string) => governanceApi.approveGovernanceModel(roomId, modelId),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.governanceModels(roomId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.governedBy(roomId) });
+    },
+  });
+}
+
 /** WS-Q.5.3b — the room feed (gated by the WS-G content bar; `enabled` lets the
  *  caller defer the fetch until the reader has passed the tier-two bar). */
 export function useRoomFeedQuery(roomId: string, enabled = true) {

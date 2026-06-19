@@ -15,6 +15,7 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
 | Isolated persistence | `packages/db/src/schema/governance.ts` (`knomosis` pgSchema) + migration `0035` | **Shipped** |
 | Runtime service | `apps/api/src/governance/` | **Shipped (Stages 1-3, 5-core)** |
 | HTTP surface | `apps/api/src/routes/governance.ts` (mounted in `v1.ts`); seat bootstrap on room create | **Shipped** |
+| Web surface | `apps/web/src/components/governance/` (mounted on the room page) | **Shipped** |
 
 ### `@licio/governance` (pure domain, I/O-free, never depends on `@licio/db`)
 
@@ -58,6 +59,25 @@ The crypto flag defaults **false** (`config.ts`), so treasury powers do not exis
 by default. In-memory stores back dev/tests; the gated Drizzle adapters bind the
 same interfaces later.
 
+### Web surface (`apps/web/src/components/governance`)
+
+Both surfaces are mounted on the room page behind the WS-Q content read bar:
+
+- **`GovernedByPanel`** — the in-room "how this room is governed" transparency view
+  for every member: whether a community-approved agent governs the room, the powers
+  the community granted it, the recent agent actions (each named as appealable to
+  the platform's human floor), and a one-click **download** of the active,
+  content-addressed model artifact.
+- **`StewardModelManager`** — the elected steward's two powers, and only those: a
+  **propose** form (a declarative `GovernancePolicyBundle` editor seeded with a
+  valid starter policy + an agent prompt, JSON-validated client-side before the
+  POST) and, on a model that has cleared the platform admission gate, a confirm-
+  gated action to **record the community's ratified decision** (which activates the
+  agent). The proposal **registry** — status pipeline + per-proposal digest +
+  member **download** — is shown to every member for transparency; the propose and
+  ratify affordances are gated to the seat holder (`stewardSeat.holder_user_id ===
+  the signed-in user`). No applause primitives, and no vote tallies are rendered.
+
 ### Pay-to-rank isolation
 
 The `knomosis` tables reference ranking/content (`public.rooms`, contributions, the
@@ -73,6 +93,10 @@ hypothetical `knomosis → public.rooms` FK is caught.
   downgrade + freeze, treasury fail-closed + accepted + every error branch),
   config validation, and the HTTP route surface (auth, steward-only, download,
   approve, agent view).
+- `apps/web` — the governance client flows (`governance-api.test.ts`), the
+  `GovernedByPanel` transparency states, and the `StewardModelManager` steward
+  surface (steward-gating, propose with client-side JSON validation, confirm-gated
+  ratify, per-proposal download, loading/error branches, axe a11y).
 - `packages/db` — the extended isolation walk over the governance context.
 
 ## Residuals (tracked)
@@ -80,8 +104,11 @@ hypothetical `knomosis → public.rooms` FK is caught.
 - **Stages 4 & 6** (Lex-bound lawmaking facilitation; on-chain elections + the full
   §17.5 anti-capture suite) — the kernel/tally semantics are shipped; the lawmaking
   *facilitation surface* and the on-chain mode are the next slices.
-- **Web surfaces** — the steward panel, model propose/download/vote UI, and the
-  in-room "governed by" panel (the API is ready; the React surface is pending).
+- **Web surfaces** — the in-room "governed by" panel, the steward propose/ratify
+  surface, and the member-downloadable proposal registry are **shipped**
+  (`apps/web/src/components/governance/`). The remaining web residual is the
+  **steward-election voting UI** (the seat-election ballot surface; the seat +
+  election lifecycle and the read view are shipped) and a richer model-card render.
 - **Gated Drizzle adapters** — the production binding of the store interfaces
   (the in-memory adapters are the dev/test path; the schema + migration are shipped).
 - **Doctrine-matrix propagation** — `CRYPTO_FEATURE_MATRIX` now carries the WS-U note

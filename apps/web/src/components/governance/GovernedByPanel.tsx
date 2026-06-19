@@ -8,6 +8,7 @@
 // steward's propose/approve powers live elsewhere. No applause primitives.
 
 import { downloadGovernanceModel } from '../../lib/governance-api.js';
+import { downloadModelBundle } from '../../lib/governance-download.js';
 import { useGovernedByQuery } from '../../lib/queries.js';
 import { Badge } from '../ui/Badge/index.js';
 import { Button } from '../ui/Button/index.js';
@@ -49,14 +50,7 @@ export function GovernedByPanel({
   const query = useGovernedByQuery(roomId, enabled);
 
   async function handleDownload(modelId: string): Promise<void> {
-    const model = await downloadGovernanceModel(roomId, modelId);
-    const blob = new Blob([JSON.stringify(model.bundle, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `governance-model-${model.artifact_digest.slice(0, 12)}.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+    downloadModelBundle(await downloadGovernanceModel(roomId, modelId));
   }
 
   return (

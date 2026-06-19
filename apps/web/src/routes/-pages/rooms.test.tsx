@@ -42,6 +42,16 @@ vi.mock('../../lib/queries.js', () => ({
     isError: false,
     data: { active: false, model_id: null, granted: [], recent_actions: [] },
   }),
+  // WS-U: the steward model manager renders null for a non-steward with no
+  // models, so an empty registry + null seat keeps these cases unchanged.
+  useStewardSeatQuery: () => ({ data: { seat: null } }),
+  useGovernanceModelsQuery: () => ({
+    isLoading: false,
+    isError: false,
+    data: { steward_user_id: null, models: [] },
+  }),
+  useProposeModelMutation: () => ({ mutate: () => {}, isPending: false }),
+  useApproveModelMutation: () => ({ mutate: () => {}, isPending: false }),
 }));
 
 function baseRoom(over: Partial<RoomDetail>): RoomDetail {
