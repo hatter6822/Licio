@@ -2,10 +2,10 @@
 
 # Local development setup
 
-This document is the **step-by-step guide to running Licio on your own
+This document is the **single step-by-step guide to running Licio on your own
 machine**: prerequisites, backing services, environment configuration,
-the database, and the daily commands. It is the practical companion to
-the other root documents:
+the database, daily commands, seeded test accounts, and user-testing fixtures.
+It is the practical companion to the other root documents:
 
 | Document | Owns |
 |----------|------|
@@ -13,7 +13,7 @@ the other root documents:
 | [`CLAUDE.md`](../CLAUDE.md) | Engineering conventions, the source layout, the security architecture |
 | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | The branch/PR workflow and the CI gate list |
 | [`docs/SPEC.md`](SPEC.md) | The canonical design specification |
-| **`docs/DEVELOPMENT.md`** (this file) | **How to stand up and run a local dev environment** |
+| **`docs/DEVELOPMENT.md`** (this file) | **How to stand up, run, and user-test a local dev environment** |
 
 Where this file and `docs/SPEC.md` disagree, the specification wins.
 Where it and `package.json` disagree about a command, `package.json`
@@ -32,16 +32,17 @@ wins — it is the source of truth for every script.
 7. [Configure environment variables](#7-configure-environment-variables)
 8. [Initialize the database](#8-initialize-the-database)
 9. [Run the application](#9-run-the-application)
-10. [Local HTTPS (optional)](#10-local-https-optional)
-11. [Everyday commands](#11-everyday-commands)
-12. [Testing locally](#12-testing-locally)
-13. [Quality gates and git hooks](#13-quality-gates-and-git-hooks)
-14. [Database and schema workflow](#14-database-and-schema-workflow)
-15. [Optional production-binding env groups](#15-optional-production-binding-env-groups)
-16. [Troubleshooting](#16-troubleshooting)
-17. [Resetting and cleaning up](#17-resetting-and-cleaning-up)
-18. [Editor setup](#18-editor-setup)
-19. [Reference](#19-reference)
+10. [User testing with seeded data](#10-user-testing-with-seeded-data)
+11. [Local HTTPS (optional)](#11-local-https-optional)
+12. [Everyday commands](#12-everyday-commands)
+13. [Testing locally](#13-testing-locally)
+14. [Quality gates and git hooks](#14-quality-gates-and-git-hooks)
+15. [Database and schema workflow](#15-database-and-schema-workflow)
+16. [Optional production-binding env groups](#16-optional-production-binding-env-groups)
+17. [Troubleshooting](#17-troubleshooting)
+18. [Resetting and cleaning up](#18-resetting-and-cleaning-up)
+19. [Editor setup](#19-editor-setup)
+20. [Reference](#20-reference)
 
 ---
 
@@ -132,7 +133,7 @@ apps/web            → shared, invariants (NEVER db)
 apps/api            → shared, db, invariants, ranking
 ```
 
-**Default ports** (all configurable; see Section 7 and Section 10):
+**Default ports** (all configurable; see Section 7 and Section 11):
 
 | Service | Port | Set by |
 |---------|------|--------|
@@ -171,7 +172,7 @@ apps/api            → shared, db, invariants, ranking
 | **Corepack** | Bundled with Node 22 | Installs and pins the exact pnpm version automatically | `corepack --version` |
 | **Docker + Compose** | Optional | Only for running dev against a real PostgreSQL (pgvector) + Redis; `pnpm dev` runs in-memory without it | `docker --version && docker compose version` |
 | **Git** | Any recent version | Version control + the Lefthook git hooks | `git --version` |
-| **mkcert** | Optional | Trusted local certs for HTTPS dev (Section 10) | `mkcert -version` |
+| **mkcert** | Optional | Trusted local certs for HTTPS dev (Section 11) | `mkcert -version` |
 | **OpenSSL** | Optional but handy | Generating `SESSION_SECRET` (Section 7) | `openssl version` |
 
 This is a **pure TypeScript monorepo** — there is no Lean, Rust, Python,
@@ -265,9 +266,9 @@ pnpm install --frozen-lockfile
 
 > **Playwright browsers are not installed by `pnpm install`.** If you plan
 > to run the end-to-end suite, install the browsers separately — see
-> Section 12.
+> Section 13.
 
-After installing, wire the git hooks once (see Section 13 for what they
+After installing, wire the git hooks once (see Section 14 for what they
 do):
 
 ```sh
@@ -356,12 +357,12 @@ Start from the template:
 cp .env.example .env
 ```
 
-`.env` is **gitignored** and a commit hook blocks it (Section 13) — never
+`.env` is **gitignored** and a commit hook blocks it (Section 14) — never
 commit it.
 
 For a basic in-memory dev run you can **skip this section entirely** — `pnpm
 dev` works with no `.env` (Section 1). Configure these variables when you want
-durable Postgres/Redis data, the optional production bindings (Section 15), or
+durable Postgres/Redis data, the optional production bindings (Section 16), or
 to run a production build.
 
 The server environment is validated at boot by a zod schema
@@ -422,17 +423,17 @@ reach the client bundle (a guard rejects anything else).
 > (allowed because `CORS_ORIGIN` matches the web origin), while the
 > same-origin fetchers still ride the proxy. Either way keep `CORS_ORIGIN`,
 > `VITE_API_URL`, and `VITE_APP_URL` consistent (all `http://` for plain dev;
-> all `https://` if you enable `DEV_HTTPS`, Section 10).
+> all `https://` if you enable `DEV_HTTPS`, Section 11).
 
 ### 7.4 Optional / feature-gating variables
 
 All optional. When unset, the related feature is disabled or falls back to
 a dev-safe default. Several are **all-or-none groups** (see 7.6) and are
-covered in detail in Section 15.
+covered in detail in Section 16.
 
 | Variable(s) | Effect when unset |
 |-------------|-------------------|
-| `DEV_HTTPS=true` | HTTP dev (no local TLS). Set to `true` to serve HTTPS (Section 10). Read directly from `process.env`, not the schema |
+| `DEV_HTTPS=true` | HTTP dev (no local TLS). Set to `true` to serve HTTPS (Section 11). Read directly from `process.env`, not the schema |
 | `ALLOW_INSECURE_NULL_MAILER=true` | In `production`, lets the API boot without SES (and stays silent). In development it is an explicit opt-out that silences the dev mailer — codes are no longer surfaced to the log. Read directly from `process.env` |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | Web Push disabled; push endpoints report "unconfigured" |
 | `CHAIN_RPC_URLS` | Only EOA wallet sign-in is available (no contract-wallet EIP-1271/6492 verification) |
@@ -463,7 +464,7 @@ Incomplete S3 configuration: missing S3_BUCKET, S3_ACCESS_KEY_ID (set the whole 
 
 For local development you normally leave **all three groups unset** and
 rely on the dev fallbacks. Only configure them when you specifically want
-to exercise the production bindings (Section 15).
+to exercise the production bindings (Section 16).
 
 ### 7.7 How environment variables get loaded — important
 
@@ -509,7 +510,7 @@ DATABASE_URL=postgresql://licio:licio_dev@localhost:5432/licio_dev pnpm db:migra
 > **Quote JSON / special values.** When you source `.env` (any shell), a value
 > containing double quotes, spaces, or shell metacharacters must be
 > **single-quoted** or the shell mangles it. This matters for the JSON-valued
-> `CHAIN_RPC_URLS` (Section 15): write `CHAIN_RPC_URLS='{"1":"https://..."}'`,
+> `CHAIN_RPC_URLS` (Section 16): write `CHAIN_RPC_URLS='{"1":"https://..."}'`,
 > not bare `{"1":"https://..."}` — without the single quotes the shell strips
 > the inner `"`, and the value parses as malformed (silently disabling the
 > feature).
@@ -555,7 +556,7 @@ docker compose exec postgres psql -U licio -d licio_dev -c '\dx'      # confirm 
 > `pnpm db:migrate` again.
 
 The other database commands (`db:generate`, `db:push`) are for **schema
-authoring** and are covered in Section 14.
+authoring** and are covered in Section 15.
 
 ---
 
@@ -602,9 +603,129 @@ client-side routing works, but anything that calls `/v1/*` needs the API
 `Ctrl-C` in the terminal running `pnpm dev`. Stop the services separately
 with `docker compose stop` when you're done for the day.
 
+## 10. User testing with seeded data
+
+`pnpm dev` is also the fastest way to click through the whole product. The
+API boots with in-memory stores by default and seeds role accounts, rooms,
+stories, comments, moderation data, invariant outputs, and reading signals.
+Use this section when you want to evaluate the product experience rather than
+just verify the toolchain.
+
+### Quick walkthrough
+
+1. Open <http://localhost:5173>.
+2. Sign in with one of the seeded role accounts in the table below.
+3. Visit the front page, a room feed, a story detail page, `#comments`,
+   **Profile → Signal Ledger**, and any steward/admin surface your role allows.
+4. For durable Postgres/Redis testing, remember that the seed is idempotent.
+   Reset the database volume only when you intentionally want a fresh corpus.
+
+### Seeded role accounts
+
+Licio is **passwordless by design**. There is no password field. Real users
+sign in with a passkey (WebAuthn), a one-time email code, or, for adults,
+Sign-In with Ethereum. Passkeys are bound to a physical device and cannot be
+pre-seeded, so these development accounts use the email one-time-code path.
+
+| Role chip | Display name | Email | What it exercises |
+|-----------|--------------|-------|-------------------|
+| **admin** | Ada Admin | `admin@licio.test` | Full RBAC: every steward and admin surface. |
+| **steward** | Sam Steward | `steward@licio.test` | WS-J steward roles `ROLE_SAFETY`, `ROLE_APPEALS`, and `ROLE_INTEGRITY`: report queue, appeals, coordinated-report incidents, governance, and ranking/audit reads. |
+| **expert** | Dr. Erin Expert | `expert@licio.test` | Least-privilege `expert` role: can post top-level content in expert-gated rooms such as *Open Science*, without moderation/admin power. |
+
+There is also a plain demo author, `licio_demo`, that owns most of the seeded
+content. Use the three email accounts above when you need to test role-gated
+behavior. The `.test` top-level domain is reserved by RFC 6761, so these
+addresses are intentionally non-deliverable.
+
+### Signing in with an email one-time code
+
+Because there is no mail server in development, the dev mailer prints the
+one-time code to the API server log — the terminal running `pnpm dev`. This
+only happens when `NODE_ENV=development`.
+
+1. Open <http://localhost:5173> and go to **Sign in**.
+2. Choose **email**, enter one of the seeded addresses, and submit.
+3. Find the `auth.mail.dev_code` log line in the `pnpm dev` terminal:
+
+   ```text
+   INFO: auth.mail.dev_code
+       to: "admin@licio.test"
+       kind: "login"
+       code: "Y3A2KY5D"
+   ```
+
+4. Enter the 8-character `code` in the app. The code is single-use, expires
+   in 10 minutes, and is bound to the browser that requested it. The seeded
+   accounts already have verified email addresses, so verified-only surfaces
+   such as privacy settings work immediately after sign-in.
+
+### Steward/admin step-up MFA
+
+Some steward/admin actions require **step-up MFA** with TOTP. Email-code
+sign-in creates an ordinary, non-MFA session; the app prompts for step-up when
+you attempt a gated action. In development, enrol an authenticator from
+**Profile → Security**. The dev build may also expose a fail-closed
+"mark verified" helper for local-only verification flows, but no shared TOTP
+secret is seeded. A known shared secret would be a security smell even in
+development.
+
+### Seeded product surfaces
+
+The dev-only seed (`apps/api/src/lib/demo-seed.ts`) is shaped so every major
+reader-facing surface has something meaningful to render:
+
+- Public topic rooms, local rooms, an expert-gated public room, and private
+  rooms with request-to-join or invite join models.
+- Link, original-brief, question, local-update, and native-image stories across
+  public and `room_only` visibility tiers. Upload a video through the composer
+  when you need to test the native-video path.
+- A populated inline comment section on every story, including nested
+  multi-author comments, `evidence` and `correction` enrichments, community
+  summaries, same-origin image/GIF media, and legacy `/threads/$threadId`
+  redirects to the owning story's `#comments` anchor.
+- A non-empty moderation queue and a WS-J report case so steward/admin review
+  surfaces render real queue, review-panel, action-palette, and audit-log data
+  on first boot.
+
+When using Postgres-backed dev data, the seed is transactional and idempotent.
+If you need to discard old seeded data completely, reset the local stack with
+`docker compose down -v` and run `pnpm db:migrate` again before `pnpm dev`.
+
+### Seeded labels and invariant signals
+
+Rating labels describe **conversation state**, never popularity (SPEC §5.6).
+The seed includes stories and signals for all seven labels: Getting Attention,
+Deepening, Well-Sourced, Needs Context, Under Review, Resolved Context, and
+Bridge Active.
+
+The invariant signals are computed through the same WS-H/WS-E paths used by
+production code, not hand-authored fixtures:
+
+- MERI exposure labels appear on feed cards and in the independent-sources
+  drawer. Near-duplicate reposts stay grouped as duplicate context rather than
+  counting as independent support.
+- SCOI divergence appears in the **Where interpretations differ** drawer for
+  stories where seeded lenses genuinely interpret the context differently.
+- Safety posture such as `caution` or `under review` appears descriptively on
+  affected threads.
+- **Profile → Signal Ledger** shows the signed-in user's own bounded attention
+  record: coarse dwell/source/context/branch/return buckets only, never raw
+  traces and never another user's data. As you read, the in-browser signal
+  pipeline adds new bucketed aggregates.
+
+### Development-only safety boundaries
+
+- The dev mailer, local verification helpers, and relaxed development gates are
+  fail-closed. They are allow-listed to local development/test paths and are
+  disabled or unreadable in deployed, staging, production, or `NODE_ENV`-unset
+  contexts.
+- No password, shared TOTP secret, or other reusable credential is seeded.
+- The seed never runs under `NODE_ENV=production`.
+
 ---
 
-## 10. Local HTTPS (optional)
+## 11. Local HTTPS (optional)
 
 Several security mechanisms only work over a secure context: `Secure` and
 `__Host-` session cookies, service workers beyond `localhost`, HSTS, and
@@ -648,7 +769,7 @@ relaxation is needed.
 
 ---
 
-## 11. Everyday commands
+## 12. Everyday commands
 
 All commands run from the repo root unless noted. `package.json` is the
 source of truth; this is the working subset.
@@ -661,7 +782,7 @@ source of truth; this is the working subset.
 | `pnpm lint` | Biome check (format + lint) |
 | `pnpm lint:fix` | Biome auto-fix |
 | `pnpm test` | Vitest across all projects (with the 80% coverage gate when `--coverage`) |
-| `pnpm test:e2e` | Playwright E2E (needs a build + browsers — Section 12) |
+| `pnpm test:e2e` | Playwright E2E (needs a build + browsers — Section 13) |
 | `pnpm db:generate` | Generate a new SQL migration from schema changes |
 | `pnpm db:migrate` | Apply pending migrations |
 | `pnpm db:push` | Push schema directly (development only) |
@@ -699,7 +820,7 @@ pnpm --filter web gen:tokens          # regenerate design-token CSS from the SSO
 
 ---
 
-## 12. Testing locally
+## 13. Testing locally
 
 ### Unit tests (no services required)
 
@@ -774,7 +895,7 @@ script is the explicit gate CI surfaces on every PR.
 
 ---
 
-## 13. Quality gates and git hooks
+## 14. Quality gates and git hooks
 
 ### Pre-commit verification (mandatory before committing)
 
@@ -787,7 +908,7 @@ pnpm test
 ```
 
 After any source change also run the relevant static gates from the
-Section 11 table (`lint:security`, `check:deps`, `check:workspace-deps`,
+Section 12 table (`lint:security`, `check:deps`, `check:workspace-deps`,
 `check:no-applause`, `check:no-raw-egress`), and after a production build,
 `pnpm check:sw`. CI runs all of them on every PR, so running them locally
 saves a round-trip.
@@ -823,7 +944,7 @@ install-script detection). All must pass before merge. See
 
 ---
 
-## 14. Database and schema workflow
+## 15. Database and schema workflow
 
 Schema lives in [`packages/db/src/schema/`](../packages/db) as Drizzle
 table definitions. Migrations are generated SQL in `packages/db/drizzle/`.
@@ -858,7 +979,7 @@ string-concatenated SQL.
 
 ---
 
-## 15. Optional production-binding env groups
+## 16. Optional production-binding env groups
 
 Production swaps the in-memory/dev adapters for real services behind the
 **same interfaces**. You normally leave these unset for local dev; configure
@@ -927,7 +1048,7 @@ CHAIN_RPC_URLS='{"1":"https://...","8453":"https://..."}'
 
 ---
 
-## 16. Troubleshooting
+## 17. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
@@ -941,15 +1062,15 @@ CHAIN_RPC_URLS='{"1":"https://...","8453":"https://..."}'
 | Web loads but `/v1/*` calls 404 (e.g. `:5173/v1/telemetry`, `:5173/v1/security/link-blocklist`) | The API (:3001) isn't running, so the dev proxy has nothing to forward to | The dev server proxies `/v1/*` to :3001 by default — just start the API (`pnpm dev` runs both). The 404 origin being `:5173` means the request reached Vite but the API was down/unreachable |
 | `/v1/*` calls fail with a CORS error | You set a **cross-origin** `VITE_API_URL` and `CORS_ORIGIN` ≠ web origin | For same-origin dev leave `VITE_API_URL` unset (use the proxy). For a cross-origin API, set `VITE_API_URL=http://localhost:3001` and `CORS_ORIGIN=http://localhost:5173`; re-export env; restart `pnpm dev` (Section 7.3) |
 | Vite doesn't see your `VITE_*` values | Vite's env dir is `apps/web`, not the repo root | Export the root `.env` into your shell (Section 7.7) so the `VITE_`-prefixed values are in `process.env` |
-| Login/session flows misbehave on `http://localhost` | `__Host-`/`Secure` cookies require HTTPS | Use the local HTTPS workflow (Section 10) |
+| Login/session flows misbehave on `http://localhost` | `__Host-`/`Secure` cookies require HTTPS | Use the local HTTPS workflow (Section 11) |
 | `redis connection error` warnings in the API log | Redis briefly unreachable | The API connects lazily and the ingest limiter fails closed to a stricter in-memory budget; start Redis (`docker compose up -d redis`) to clear it |
-| Git hooks don't run | Lefthook not installed in this clone | `pnpm exec lefthook install` (Section 13) |
-| Playwright can't download a browser | Network policy blocks the download | Pre-install browsers, or set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` (Section 12) |
-| `pnpm test` "skips" the integration suites | `DATABASE_URL`/`REDIS_URL` not set/reachable | Expected — set them (Section 12) to run the gated suites |
+| Git hooks don't run | Lefthook not installed in this clone | `pnpm exec lefthook install` (Section 14) |
+| Playwright can't download a browser | Network policy blocks the download | Pre-install browsers, or set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` (Section 13) |
+| `pnpm test` "skips" the integration suites | `DATABASE_URL`/`REDIS_URL` not set/reachable | Expected — set them (Section 13) to run the gated suites |
 
 ---
 
-## 17. Resetting and cleaning up
+## 18. Resetting and cleaning up
 
 ```sh
 pnpm clean                 # remove dist/build, coverage, test-results, playwright-report, *.tsbuildinfo, caches
@@ -970,7 +1091,7 @@ git clean -xnd -e .env     # preview, keeping your .env
 
 ---
 
-## 18. Editor setup
+## 19. Editor setup
 
 - **Formatter / linter:** [Biome](https://biomejs.dev) (`biome.json`).
   Install the Biome editor extension and set it as the default formatter so
@@ -987,7 +1108,7 @@ git clean -xnd -e .env     # preview, keeping your .env
 
 ---
 
-## 19. Reference
+## 20. Reference
 
 - **Build/run commands:** [`package.json`](../package.json) (root + each
   workspace) — the source of truth.
