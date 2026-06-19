@@ -239,6 +239,13 @@
       "when": 1781671305000,
       "tag": "0033_ws_t_reply_depth_bucket",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1781849148303,
+      "tag": "0034_ws_k_ai_governance",
+      "breakpoints": true
     }
   ]
 }
