@@ -22,4 +22,11 @@ export * from './safety-suite.js';
 export * from './schemas/index.js';
 export * from './summary-quality.js';
 export * from './summary-render.js';
-export { containsAnyTerm, contentTokens, jaccard, sentenceSplit, tokenize } from './text.js';
+export {
+  containsAnyTerm,
+  contentTokens,
+  jaccard,
+  numbersIn,
+  sentenceSplit,
+  tokenize,
+} from './text.js';
