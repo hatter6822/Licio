@@ -12,8 +12,20 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { getGovernanceService } from '../governance/services.js';
 import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
+import { denyCapability, type StewardActor } from '../moderation/authz.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;
+
+/** Build the WS-J steward actor from the auth context (platform-floor gate). */
+function stewardActorOf(auth: NonNullable<AuthEnv['Variables']['auth']>): StewardActor {
+  return {
+    userId: auth.userId,
+    platformRoles: auth.roles,
+    stewardRoles: auth.stewardRoles,
+    mfaActive: auth.mfaActive,
+    mfaVerified: auth.mfaVerified,
+  };
+}
 
 const proposeBodySchema = z
   .object({
@@ -141,6 +153,9 @@ export function createGovernanceRoutes() {
         const actions = await svc.recentAgentActions(roomId, 20);
         return c.json({
           active: binding?.active ?? false,
+          // A binding that exists but is inactive ⇒ the platform floor has paused
+          // a community-approved agent (distinct from a room that never had one).
+          frozen: binding !== null && !binding.active,
           model_id: binding?.modelId ?? null,
           granted: binding?.capabilityDescriptor.granted ?? [],
           recent_actions: actions.map((a) => ({
@@ -152,6 +167,35 @@ export function createGovernanceRoutes() {
             created_at: a.createdAt,
           })),
         });
+      })
+      // --- Platform-floor freeze (the non-overridable safety control) ---------
+      // Gated by the WS-J `restrict` capability (the ratified steward policy) +
+      // verified MFA: a platform safety steward — NOT the room's elected steward —
+      // may pause or restore a room's community-approved agent at any time
+      // (SPEC §16.6/§24.6). Freezing deactivates the binding, so the agent stops
+      // moderating immediately and the room falls back to the platform floor.
+      .post('/rooms/:roomId/governance/agent/freeze', authMiddleware(), async (c) => {
+        const auth = c.get('auth');
+        if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
+        const denial = denyCapability(stewardActorOf(auth), 'restrict');
+        if (denial) return c.json(deny(denial.code, denial.message), 403);
+        const roomId = c.req.param('roomId');
+        const svc = getGovernanceService();
+        const binding = await svc.getBinding(roomId);
+        if (binding === null) return c.json(deny('no_agent', 'No agent governs this room.'), 404);
+        await svc.freezeAgent(roomId);
+        return c.json({ active: false, frozen: true });
+      })
+      .post('/rooms/:roomId/governance/agent/unfreeze', authMiddleware(), async (c) => {
+        const auth = c.get('auth');
+        if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
+        const denial = denyCapability(stewardActorOf(auth), 'restrict');
+        if (denial) return c.json(deny(denial.code, denial.message), 403);
+        const result = await getGovernanceService().reactivateAgent(c.req.param('roomId'));
+        if (!result.ok || !result.value.reactivated) {
+          return c.json(deny('no_agent', 'No agent binding to reactivate.'), 404);
+        }
+        return c.json({ active: true, frozen: false });
       })
   );
 }

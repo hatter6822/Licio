@@ -119,6 +119,67 @@ describe('WS-U governance routes', () => {
     expect(res.status).toBe(403);
   });
 
+  it('lets a platform steward freeze + restore a room agent; non-stewards are forbidden', async () => {
+    const steward = await seedUserWithSession(forum.identity);
+    const admin = await seedUserWithSession(forum.identity, { admin: true });
+    const plain = await seedUserWithSession(forum.identity);
+    await getGovernanceService().bootstrapSeat('rf', steward.userId);
+    // The room steward proposes + (eager eval to eligible) + approves ⇒ active binding.
+    const propose = await app.request(
+      jsonReq(
+        '/v1/rooms/rf/governance/models',
+        'POST',
+        { bundle, prompt_text: 'x' },
+        steward.cookie,
+      ),
+    );
+    const { modelId } = await json<{ modelId: string }>(propose);
+    await app.request(
+      jsonReq(
+        `/v1/rooms/rf/governance/models/${modelId}/approve`,
+        'POST',
+        { election_id: null },
+        steward.cookie,
+      ),
+    );
+
+    // A non-steward (no MFA / no role) cannot freeze the floor control.
+    const forbidden = await app.request(
+      jsonReq('/v1/rooms/rf/governance/agent/freeze', 'POST', {}, plain.cookie),
+    );
+    expect(forbidden.status).toBe(403);
+
+    // A platform steward freezes ⇒ the agent view reports a floor-paused agent.
+    const freeze = await app.request(
+      jsonReq('/v1/rooms/rf/governance/agent/freeze', 'POST', {}, admin.cookie),
+    );
+    expect(freeze.status).toBe(200);
+    const frozen = await json<{ active: boolean; frozen: boolean }>(
+      await app.request(jsonReq('/v1/rooms/rf/governance/agent', 'GET', undefined, admin.cookie)),
+    );
+    expect(frozen.active).toBe(false);
+    expect(frozen.frozen).toBe(true);
+
+    // The floor restores it ⇒ active again.
+    const unfreeze = await app.request(
+      jsonReq('/v1/rooms/rf/governance/agent/unfreeze', 'POST', {}, admin.cookie),
+    );
+    expect(unfreeze.status).toBe(200);
+    const active = await json<{ active: boolean; frozen: boolean }>(
+      await app.request(jsonReq('/v1/rooms/rf/governance/agent', 'GET', undefined, admin.cookie)),
+    );
+    expect(active.active).toBe(true);
+    expect(active.frozen).toBe(false);
+  });
+
+  it('returns 404 when freezing a room with no agent binding', async () => {
+    const admin = await seedUserWithSession(forum.identity, { admin: true });
+    const res = await app.request(
+      jsonReq('/v1/rooms/none/governance/agent/freeze', 'POST', {}, admin.cookie),
+    );
+    expect(res.status).toBe(404);
+  });
+
   it('returns a 404 for a download from the wrong room', async () => {
     const user = await seedUserWithSession(forum.identity);
     await getGovernanceService().bootstrapSeat('r3', user.userId);

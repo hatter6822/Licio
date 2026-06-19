@@ -72,6 +72,7 @@ describe('governance client flows', () => {
       'GET /v1/rooms/r1/governance/agent': () =>
         jsonResponse({
           active: true,
+          frozen: false,
           model_id: 'm1',
           granted: ['moderate.remove'],
           recent_actions: [],

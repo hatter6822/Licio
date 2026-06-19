@@ -361,6 +361,17 @@ export class GovernanceService {
     return ok(undefined);
   }
 
+  /**
+   * The platform floor re-enables a previously approved (and frozen) agent. This
+   * only flips the existing community-approved binding back to active — it mints
+   * no authority and reinstates no floor-removed content. Returns whether a
+   * binding existed to reactivate (`false` ⇒ the room has no agent).
+   */
+  async reactivateAgent(roomId: string): Promise<GovernanceResult<{ reactivated: boolean }>> {
+    const updated = await this.deps.stores.bindings.setActive(roomId, true);
+    return ok({ reactivated: updated !== null });
+  }
+
   // --- read surface (in-room transparency) ---------------------------------
 
   async listModels(roomId: string) {

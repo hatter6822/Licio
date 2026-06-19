@@ -149,6 +149,26 @@ describe('GovernanceService residual branches', () => {
   });
 });
 
+describe('GovernanceService floor freeze/restore', () => {
+  it('reactivateAgent restores a frozen binding and no-ops a room without one', async () => {
+    const { svc } = make();
+    // No binding ⇒ nothing to reactivate.
+    const empty = await svc.reactivateAgent('empty');
+    expect(empty.ok && empty.value.reactivated).toBe(false);
+    // Approve a model ⇒ active binding; freeze ⇒ inactive; reactivate ⇒ restored.
+    await svc.bootstrapSeat('r', 's');
+    const p = await svc.proposeModel('r', 's', bundle(), 'p');
+    const id = p.ok ? p.value.modelId : '';
+    await svc.evaluateModel(id);
+    await svc.approveModel('r', id, null, null);
+    await svc.freezeAgent('r');
+    expect((await svc.getBinding('r'))?.active).toBe(false);
+    const restored = await svc.reactivateAgent('r');
+    expect(restored.ok && restored.value.reactivated).toBe(true);
+    expect((await svc.getBinding('r'))?.active).toBe(true);
+  });
+});
+
 describe('GovernanceService singleton binding', () => {
   it('setGovernanceService binds the process singleton (the boot wiring point)', () => {
     resetGovernanceService();

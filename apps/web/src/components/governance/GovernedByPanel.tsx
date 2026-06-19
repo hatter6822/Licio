@@ -64,6 +64,15 @@ export function GovernedByPanel({
           title="Couldn't load room governance"
           description="The governance view is unavailable right now."
         />
+      ) : query.data.frozen ? (
+        <div className="mt-2 flex flex-col gap-2">
+          <Badge tone="warning">Agent paused by the platform floor</Badge>
+          <p className="text-sm text-ink-muted">
+            A community-approved AI agent governs this room, but Licio's platform stewards — the
+            non-overridable legal floor — have paused it. The room runs on the platform moderation
+            baseline until the floor restores the agent.
+          </p>
+        </div>
       ) : !query.data.active ? (
         <p className="mt-2 text-sm text-ink-muted">
           This room runs on Licio's platform moderation baseline. Members can elect a steward to

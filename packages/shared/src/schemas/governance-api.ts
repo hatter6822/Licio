@@ -64,6 +64,8 @@ export type AgentActionSummary = z.infer<typeof agentActionSummarySchema>;
 
 export const governedByResponseSchema = z.object({
   active: z.boolean(),
+  /** A community-approved agent exists but the platform floor has paused it. */
+  frozen: z.boolean(),
   model_id: z.string().nullable(),
   granted: z.array(z.string()),
   recent_actions: z.array(agentActionSummarySchema),

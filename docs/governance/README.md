@@ -51,8 +51,13 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
   over-moderation), beneath — never replacing — the platform legal floor.
 - **Stage 3** — the bounded moderation agent: capability-gated decisioning (an
   un-granted action is **downgraded to a human-floor referral**, never escalated),
-  the provenance-triple audit log, and the floor's room-governance-freeze. The
-  agent is **wired into the live contribution path**: `createContribution`
+  the provenance-triple audit log, and the floor's room-governance-freeze — now a
+  live, platform-steward-gated control (`POST …/governance/agent/freeze` +
+  `…/unfreeze`, gated by the WS-J `restrict` capability + verified MFA): a platform
+  safety steward, never the room's elected steward, can pause or restore a room's
+  community-approved agent at any time, and the "governed by" view reports the
+  paused (`frozen`) state. The agent is **wired into the live contribution path**:
+  `createContribution`
   consults the `RoomAgentModerator` seam (`governance/forum-agent.ts`) for any
   room with an active binding and combines its recommendation **floor-dominantly**
   — the agent can raise a contribution's moderation state (flag → `under_review`,
@@ -74,8 +79,9 @@ Both surfaces are mounted on the room page behind the WS-Q content read bar:
 - **`GovernedByPanel`** — the in-room "how this room is governed" transparency view
   for every member: whether a community-approved agent governs the room, the powers
   the community granted it, the recent agent actions (each named as appealable to
-  the platform's human floor), and a one-click **download** of the active,
-  content-addressed model artifact.
+  the platform's human floor), a one-click **download** of the active,
+  content-addressed model artifact, and a distinct **floor-paused** state when the
+  platform floor has frozen a community-approved agent (vs a room that never had one).
 - **`StewardModelManager`** — the elected steward's two powers, and only those: a
   **propose** form (a declarative `GovernancePolicyBundle` editor seeded with a
   valid starter policy + an agent prompt, JSON-validated client-side before the

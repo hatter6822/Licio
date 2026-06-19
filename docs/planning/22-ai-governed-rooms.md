@@ -8,8 +8,8 @@
 > deterministic domain package was built): the **`@licio/governance`** pure domain (policy DSL,
 > proof-carrying kernel, capabilities, election tally), the **`knomosis`** schema + migration
 > `0035` (isolation-proven), the **`GovernanceService`** (seat/elections, model admission gate,
-> bounded moderation agent **wired into the live contribution path** floor-dominantly,
-> kernel-backed treasury), the **`/v1/rooms/*`** routes + seat
+> bounded moderation agent **wired into the live contribution path** floor-dominantly, the
+> platform-floor **freeze/restore** control, kernel-backed treasury), the **`/v1/rooms/*`** routes + seat
 > bootstrap on room create, and the **web surface** (`apps/web/src/components/governance/`):
 > the in-room "governed by" transparency panel and the elected-steward propose/ratify
 > manager with the member-downloadable proposal registry, both on the room page. The nine

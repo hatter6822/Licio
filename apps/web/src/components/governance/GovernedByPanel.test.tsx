@@ -39,10 +39,21 @@ describe('GovernedByPanel', () => {
     mockUseGovernedBy.mockReturnValue({
       isLoading: false,
       isError: false,
-      data: { active: false, model_id: null, granted: [], recent_actions: [] },
+      data: { active: false, frozen: false, model_id: null, granted: [], recent_actions: [] },
     });
     render(<GovernedByPanel roomId="r1" />);
     expect(screen.getByText(/platform moderation baseline/i)).toBeInTheDocument();
+  });
+
+  it('shows a floor-paused state when a community agent is frozen', () => {
+    mockUseGovernedBy.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      data: { active: false, frozen: true, model_id: 'm-1', granted: [], recent_actions: [] },
+    });
+    render(<GovernedByPanel roomId="r1" />);
+    expect(screen.getByText(/paused by the platform floor/i)).toBeInTheDocument();
+    expect(screen.getByText(/non-overridable legal floor/i)).toBeInTheDocument();
   });
 
   it('renders the active agent, its granted powers, actions, and the floor-appeal path', async () => {

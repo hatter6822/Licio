@@ -40,7 +40,7 @@ vi.mock('../../lib/queries.js', () => ({
   useGovernedByQuery: () => ({
     isLoading: false,
     isError: false,
-    data: { active: false, model_id: null, granted: [], recent_actions: [] },
+    data: { active: false, frozen: false, model_id: null, granted: [], recent_actions: [] },
   }),
   // WS-U: the steward model manager renders null for a non-steward with no
   // models, so an empty registry + null seat keeps these cases unchanged.
