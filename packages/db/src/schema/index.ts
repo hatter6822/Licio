@@ -11,6 +11,7 @@ export * from './claim.js';
 export * from './contribution.js';
 export * from './embedding.js';
 export * from './events.js';
+export * from './governance.js';
 export * from './ingestion-review.js';
 export * from './invariants.js';
 export * from './job-lease.js';

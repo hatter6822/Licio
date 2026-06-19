@@ -176,6 +176,59 @@ describe('the SHIPPED isolation contexts', () => {
   });
 });
 
+describe('WS-U knomosis governance context isolation', () => {
+  const KNOMOSIS = [
+    'knomosis.room_steward_seat',
+    'knomosis.steward_election',
+    'knomosis.steward_governance_vote',
+    'knomosis.room_governance_model',
+    'knomosis.room_governance_prompt',
+    'knomosis.room_law_pack',
+    'knomosis.room_agent_binding',
+    'knomosis.agent_action_log',
+    'knomosis.agent_treasury_action',
+  ];
+
+  it('classifies every knomosis governance table into the wallet/Knomosis context', () => {
+    for (const table of KNOMOSIS) {
+      expect(ISOLATION_CONTEXTS.walletTables.has(table), `${table} classified`).toBe(true);
+    }
+  });
+
+  it('holds isolation for the real governance FK shape (users + intra-knomosis only)', () => {
+    const graph: SchemaGraph = {
+      foreignKeys: [
+        { from: 'wallet.wallet_accounts', to: USERS },
+        { from: 'knomosis.room_steward_seat', to: USERS },
+        { from: 'knomosis.steward_election', to: USERS },
+        { from: 'knomosis.steward_governance_vote', to: 'knomosis.steward_election' },
+        { from: 'knomosis.steward_governance_vote', to: USERS },
+        { from: 'knomosis.room_governance_model', to: USERS },
+        { from: 'knomosis.room_governance_prompt', to: 'knomosis.room_governance_model' },
+        { from: 'knomosis.room_governance_prompt', to: USERS },
+        { from: 'knomosis.room_agent_binding', to: 'knomosis.room_governance_model' },
+        { from: 'knomosis.room_agent_binding', to: 'knomosis.room_governance_prompt' },
+        { from: 'knomosis.room_agent_binding', to: 'knomosis.room_law_pack' },
+        // Ranking/content tables independently reference the identity root.
+        { from: 'public.rooms', to: USERS },
+        { from: 'public.contributions', to: USERS },
+      ],
+      views: [],
+    };
+    expect(checkSchemaIsolation(graph, ISOLATION_CONTEXTS).isolated).toBe(true);
+  });
+
+  it('would fail if a governance table ever hard-referenced a ranking table', () => {
+    const graph: SchemaGraph = {
+      foreignKeys: [{ from: 'knomosis.room_steward_seat', to: 'public.rooms' }],
+      views: [],
+    };
+    const result = checkSchemaIsolation(graph, ISOLATION_CONTEXTS);
+    expect(result.isolated).toBe(false);
+    expect(result.offendingPath).toContain('public.rooms');
+  });
+});
+
 describe('introspectSchemaGraph', () => {
   it('assembles FK and view edges from injected information_schema rows', async () => {
     const runQuery = async (sql: string): Promise<IntrospectionRow[]> => {
