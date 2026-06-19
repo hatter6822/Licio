@@ -50,6 +50,88 @@ The maintainer's four binding decisions (the design envelope):
 
 ---
 
+## U.0.1 Resolved architectural decisions (ADR)
+
+The four binding decisions above left several hard questions open. They are resolved here (a
+second round of maintainer decisions, 2026-06-19) so the implementation has a settled spec.
+
+**ADR-1 — A "model" is a declarative governance-policy bundle, not uploaded weights or code.**
+What the steward proposes and members download is a **content-addressed `GovernancePolicyBundle`**:
+a versioned, machine-readable document containing (a) a **moderation rule-set** in a small,
+total, side-effect-free **policy DSL** (predicates over a room-scoped, structured `ModerationContext`
+→ a bounded `ModerationDecision`), (b) **prompt templates** for the natural-language facilitation
+surfaces, and (c) **config** (thresholds, cadences, requested capabilities). **No arbitrary code or
+model weights execute server-side** — the platform-provided runtime *interprets* the bundle
+deterministically. This is the only choice consistent with the sandboxed, fail-closed, deterministic
+security doctrine, it makes the agent's behaviour fully reproducible from the downloadable artifact
+(the accountability core of §16.6), and it keeps WS-K's "governance, not inference" thesis intact.
+A real ML/LLM backend can later back the *advisory* surfaces behind the governed seam (ADR-3); the
+*decision* surfaces stay deterministic.
+
+**ADR-2 — Build the Knomosis foundations as a deterministic in-process kernel behind a seam.**
+Stages 4-6 need the Knomosis gateway/treasury that WS-L/M have not built. Rather than fake crypto or
+defer, the platform ships a **real, deterministic, in-process `GovernanceKernel`** that implements the
+proof-carrying *semantics*: an action is accepted **iff** it carries machine-checkable evidence it
+satisfies the room's `LawPack` preconditions (caps, intervals, categories, timelocks, COI), and the
+kernel returns a typed `Verdict` with that evidence or a typed rejection. The same `KnomosisGateway`
+**port** the kernel implements is the seam the real Lean/Solidity/Rust deployment plugs into later
+(the WS-L v0.4 `POST /v1/actions` contract). This is production logic, not throwaway: the law-pack
+interpreter, the bounded-execution semantics, the reconciliation, and the firewall all stay valid when
+the real kernel swaps in. Everything financial remains behind the **fail-closed crypto flag**; with the
+flag off, the treasury surface and the agent's treasury powers do not exist.
+
+**ADR-3 — Natural-language work uses a governed provider port; the default is deterministic.**
+`SummaryProvider`/`TranslationProvider`/`ExplanationProvider` are governed ports (the WS-K pattern).
+The shipped default is **deterministic and templated** (no external calls, no secrets, unit-testable);
+a real LLM can be configured behind the same audited interface later. **Moderation *decisions* never
+use a non-deterministic provider** — they are pure policy-DSL evaluation — so the 80% deterministic-test
+gate and reproducibility hold regardless of provider config.
+
+**ADR-4 — The agent is a bounded *executor role*, never a key holder (the "no keys, still autonomous"
+resolution).** Routine treasury moves do not require a human to sign each one — that is the point of
+bounded autonomy — yet the agent holds no keys. The resolution: treasury authority lives in a
+**policy-bounded executor**. In the deterministic kernel (now) the executor is the kernel itself,
+which accepts an agent-submitted action only with a valid law-pack-compliance proof. In the real
+deployment (later) the executor is a **smart-contract account / multisig with on-chain spend policy +
+timelock**, where the agent holds a **capability-scoped executor role** (bounded by the on-chain
+law-pack), **not** a private key; the *bound-changing* keys stay with a human multisig, and
+material/irregular actions still trip the timelock + challenge window (§17.6). So: humans hold keys
+and set bounds; the agent executes **within** those bounds without a key; the kernel/contract — not the
+model — enforces them.
+
+**ADR-5 — Prompt injection is defeated by enforcing capabilities *outside* the model.** Room content is
+**untrusted input**. The model's output is never an instruction the runtime obeys — it is a *request*
+the runtime validates against the **capability descriptor** and the **law-pack** before any effect.
+The model cannot grant itself a capability, exceed a cap, reach a floor-reserved action, or move value
+by being "convinced," because none of those are gated by the model's text — they are gated by the
+runtime/kernel. Moderation *decisions* are deterministic policy-DSL evaluation, not free-text
+obedience, so injected "ignore your rules" content has no decision channel. The advisory NL surfaces
+(summaries) are clearly labelled, cited, deterministic, and contestable, and they carry **no**
+authority. The §24.2 red-team admission gate includes an injection-resistance suite.
+
+**ADR-6 — Cost and DoS are bounded.** The deterministic interpreter is O(policy size · context size)
+and cheap. The agent runs **event-driven** (on the existing WS-E contribution/governance consumers),
+never per-keystroke, with **per-room invocation budgets** layered on the existing identity-free
+global fixed-window limiter (SPEC §19.1) — no per-IP state. The optional LLM seam (ADR-3), when
+enabled, carries its own per-room call budget and a fail-closed circuit breaker. Forcing expensive
+agent runs is rate-limited per room, not per identity.
+
+**ADR-7 — Election legitimacy is quorum-gated and fail-safe.** The `LawPack` carries a
+`minQuorum` and `minTurnout`. A single-member room auto-confirms its sole member (no contest). Below
+quorum/turnout, the **incumbent (or bootstrap holder) continues** — a failed election never vacates
+the seat (fail-safe), and the platform floor can always remove a captured/abandoned seat. The default
+weight model is one-civic-account-one-vote with the §17.5 per-account cap; the tie-break is
+incumbent, then earliest-eligible account.
+
+**ADR-8 — "Unbiased lawmaking" is structural for the *tally*, mitigated for *framing*.** The kernel —
+not the agent — computes quorum/threshold/weight/tally, so the **outcome** is structurally
+agent-independent (the agent has no vote/tally/weight capability). The agent does draft the summaries
+members read, which is a residual **framing** channel; this is **mitigated, not eliminated**, by
+determinism + mandatory citations + member-editability + the bias-audit on summary outputs + the
+`machine-generated` label. We state this honestly rather than overclaiming total neutrality.
+
+---
+
 ## U.1 The three-layer authority model
 
 Authority over a room is partitioned into three layers, ordered by precedence. A higher layer
@@ -376,6 +458,14 @@ Each stage is a coherent slice that passes `pnpm typecheck`, `pnpm lint`, `pnpm 
 doctrine gates (`check:policy`, `check:neutrality`, `check:no-applause`, `check:no-raw-egress`,
 `check:workspace-deps`, `check:deps`). Stages are landed in order; later stages are gated by the
 fail-closed crypto flag until their production gates (WS-M/WS-N) clear.
+
+> **Scope decision (ADR-2).** Per the maintainer's second-round decision, Stages 4-6 are built **now**
+> on a **deterministic, in-process `GovernanceKernel`** (the new `@licio/governance` package) that
+> implements the proof-carrying law-pack semantics behind the `KnomosisGateway` port the real
+> WS-L/M deployment plugs into later. The kernel is production logic (law-pack interpreter,
+> bounded-execution, reconciliation, firewall), not throwaway; everything financial stays behind the
+> fail-closed crypto flag. This lifts the "blocked on unbuilt WS-L/M/N" constraint for the *semantics*
+> while leaving real on-chain custody to WS-L/M.
 
 - **Stage 0 — Doctrine ratification (this PR; docs-only).** SPEC §16.6/§17/§24 edits, the
   `docs/policy/` reframing, this charter, and the WS-K/J/L/M plan amendments. No runtime code;
@@ -1251,6 +1341,7 @@ WS-U is complete when:
 | 0.1.0 (DESIGN) | 2026-06-19 | AI-Governed Rooms redesign | Initial cross-cutting charter ratifying the maintainer's four binding decisions: the three-layer authority model (room sovereignty → Knomosis-bounded AI agent → non-overridable platform legal floor), the elected room steward with exactly two powers, the bounded in-room AI agent (moderation, treasury, unbiased lawmaking facilitation), the re-scoped WS-K transparency/evaluation substrate, the preserved pay-to-rank firewall, the adversarial-community threat model, and the six staged implementation PRs. Doctrine-only (Stage 0); no runtime code. |
 | 0.2.0 (DESIGN) | 2026-06-19 | AI-Governed Rooms redesign | Added Part II — the **atomic task decomposition** (49 cards across WS-U.1–U.6) in the house format (ID/Ref/description/acceptance/testing/dependencies), with authoritative Drizzle/zod shapes for the seven new `knomosis`-bounded-context entities (`room_steward_seat`, `steward_election`, `steward_governance_vote`, `room_governance_model`, `room_governance_prompt`, `room_agent_binding`, `agent_action_log`), the WS-D.3.2 isolation-walk extension, the WS-K registry/harness/guard/monitor reuse points, the §15.4 moderation-port parity, the structural-neutrality gate, the signed-action (no-key) submitter, and the fail-closed crypto/jurisdiction gating. Still doctrine-only; implementation-ready. |
 | 0.3.0 (DESIGN) | 2026-06-19 | AI-Governed Rooms redesign | Hardened the plan to house-complete: a ten-point **cross-cutting requirements** block (bounded autonomy, floor supremacy, no-key-custody, no-pay-to-rank, fail-closed crypto/jurisdiction, schema isolation, transparency/reproducibility, appealability, auditability, accessibility/no-applause), a **migration-sequencing** note (`0035`+ in the `knomosis` pgSchema, online-safe, isolation-walk-extended), and a **Definition of done** spanning steward/elections, transparent-evaluated models, the bounded moderation agent, unbiased lawmaking, bounded treasury, maturity, the green-CI gate set, and doctrine fidelity. Verified all cited cross-references (WS-K/D/I/L/M/J/C task IDs) resolve. |
+| 0.4.0 (DESIGN) | 2026-06-19 | AI-Governed Rooms redesign | Added **§U.0.1 Resolved architectural decisions (ADR-1…8)** from the maintainer's second-round decisions, resolving the hard questions left open by the first cut: a "model" is a declarative **`GovernancePolicyBundle`** (DSL + prompt templates + config) interpreted deterministically — not weights/code (ADR-1); the Knomosis foundations ship as a deterministic in-process **`GovernanceKernel`** behind the real-gateway seam (ADR-2); NL work uses a governed provider port, deterministic default (ADR-3); the agent is a **bounded executor role, never a key holder** (ADR-4); prompt injection is defeated by enforcing capabilities **outside** the model (ADR-5); cost/DoS are bounded by event-driven, per-room budgets (ADR-6); elections are quorum-gated and fail-safe (ADR-7); lawmaking neutrality is structural for the tally and honestly only mitigated for summary framing (ADR-8). Begins the runtime build (`@licio/governance` + DB + API + web). |
 
 
 
