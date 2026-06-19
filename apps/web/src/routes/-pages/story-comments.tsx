@@ -63,8 +63,8 @@ function StoryCommentsContent({ storyId, root }: { storyId: string; root?: strin
 
 export function StoryCommentsPage(): React.ReactElement {
   const t = useT();
-  const { storyId } = useParams({ from: '/stories/$storyId/comments' });
-  const { root } = useSearch({ from: '/stories/$storyId/comments' });
+  const { storyId } = useParams({ from: '/stories/$storyId_/comments' });
+  const { root } = useSearch({ from: '/stories/$storyId_/comments' });
   usePageFocus(t('story.comments.title', 'Conversation'));
 
   if (!isValidUuidParam(storyId)) {

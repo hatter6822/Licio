@@ -30,7 +30,7 @@ import { Route as ProfileSavedRouteImport } from './routes/profile_.saved'
 import { Route as ProfileSafetyRouteImport } from './routes/profile_.safety'
 import { Route as ProfilePrivacyRouteImport } from './routes/profile_.privacy'
 import { Route as ProfileNoticesRouteImport } from './routes/profile_.notices'
-import { Route as StoriesStoryIdCommentsRouteImport } from './routes/stories.$storyId.comments'
+import { Route as StoriesStoryIdCommentsRouteImport } from './routes/stories.$storyId_.comments'
 import { Route as RoomsRoomIdGovernanceRouteImport } from './routes/rooms_.$roomId_.governance'
 
 const SupportRoute = SupportRouteImport.update({
@@ -129,9 +129,9 @@ const ProfileNoticesRoute = ProfileNoticesRouteImport.update({
   getParentRoute: () => rootRouteImport,
 } as any)
 const StoriesStoryIdCommentsRoute = StoriesStoryIdCommentsRouteImport.update({
-  id: '/comments',
-  path: '/comments',
-  getParentRoute: () => StoriesStoryIdRoute,
+  id: '/stories/$storyId_/comments',
+  path: '/stories/$storyId/comments',
+  getParentRoute: () => rootRouteImport,
 } as any)
 const RoomsRoomIdGovernanceRoute = RoomsRoomIdGovernanceRouteImport.update({
   id: '/rooms_/$roomId_/governance',
@@ -157,7 +157,7 @@ export interface FileRoutesByFullPath {
   '/profile/signal-ledger': typeof ProfileSignalLedgerRoute
   '/profile/wallet': typeof ProfileWalletRoute
   '/rooms/$roomId': typeof RoomsRoomIdRoute
-  '/stories/$storyId': typeof StoriesStoryIdRouteWithChildren
+  '/stories/$storyId': typeof StoriesStoryIdRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/rooms/$roomId/governance': typeof RoomsRoomIdGovernanceRoute
   '/stories/$storyId/comments': typeof StoriesStoryIdCommentsRoute
@@ -180,7 +180,7 @@ export interface FileRoutesByTo {
   '/profile/signal-ledger': typeof ProfileSignalLedgerRoute
   '/profile/wallet': typeof ProfileWalletRoute
   '/rooms/$roomId': typeof RoomsRoomIdRoute
-  '/stories/$storyId': typeof StoriesStoryIdRouteWithChildren
+  '/stories/$storyId': typeof StoriesStoryIdRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/rooms/$roomId/governance': typeof RoomsRoomIdGovernanceRoute
   '/stories/$storyId/comments': typeof StoriesStoryIdCommentsRoute
@@ -204,10 +204,10 @@ export interface FileRoutesById {
   '/profile_/signal-ledger': typeof ProfileSignalLedgerRoute
   '/profile_/wallet': typeof ProfileWalletRoute
   '/rooms_/$roomId': typeof RoomsRoomIdRoute
-  '/stories/$storyId': typeof StoriesStoryIdRouteWithChildren
+  '/stories/$storyId': typeof StoriesStoryIdRoute
   '/threads_/$threadId': typeof ThreadsThreadIdRoute
   '/rooms_/$roomId_/governance': typeof RoomsRoomIdGovernanceRoute
-  '/stories/$storyId/comments': typeof StoriesStoryIdCommentsRoute
+  '/stories/$storyId_/comments': typeof StoriesStoryIdCommentsRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -278,7 +278,7 @@ export interface FileRouteTypes {
     | '/stories/$storyId'
     | '/threads_/$threadId'
     | '/rooms_/$roomId_/governance'
-    | '/stories/$storyId/comments'
+    | '/stories/$storyId_/comments'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -299,9 +299,10 @@ export interface RootRouteChildren {
   ProfileSignalLedgerRoute: typeof ProfileSignalLedgerRoute
   ProfileWalletRoute: typeof ProfileWalletRoute
   RoomsRoomIdRoute: typeof RoomsRoomIdRoute
-  StoriesStoryIdRoute: typeof StoriesStoryIdRouteWithChildren
+  StoriesStoryIdRoute: typeof StoriesStoryIdRoute
   ThreadsThreadIdRoute: typeof ThreadsThreadIdRoute
   RoomsRoomIdGovernanceRoute: typeof RoomsRoomIdGovernanceRoute
+  StoriesStoryIdCommentsRoute: typeof StoriesStoryIdCommentsRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -439,12 +440,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProfileNoticesRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/stories/$storyId/comments': {
-      id: '/stories/$storyId/comments'
-      path: '/comments'
+    '/stories/$storyId_/comments': {
+      id: '/stories/$storyId_/comments'
+      path: '/stories/$storyId/comments'
       fullPath: '/stories/$storyId/comments'
       preLoaderRoute: typeof StoriesStoryIdCommentsRouteImport
-      parentRoute: typeof StoriesStoryIdRoute
+      parentRoute: typeof rootRouteImport
     }
     '/rooms_/$roomId_/governance': {
       id: '/rooms_/$roomId_/governance'
@@ -456,17 +457,6 @@ declare module '@tanstack/react-router' {
   }
 }
 
-interface StoriesStoryIdRouteChildren {
-  StoriesStoryIdCommentsRoute: typeof StoriesStoryIdCommentsRoute
-}
-
-const StoriesStoryIdRouteChildren: StoriesStoryIdRouteChildren = {
-  StoriesStoryIdCommentsRoute: StoriesStoryIdCommentsRoute,
-}
-
-const StoriesStoryIdRouteWithChildren = StoriesStoryIdRoute._addFileChildren(
-  StoriesStoryIdRouteChildren,
-)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
@@ -486,9 +476,10 @@ const rootRouteChildren: RootRouteChildren = {
   ProfileSignalLedgerRoute: ProfileSignalLedgerRoute,
   ProfileWalletRoute: ProfileWalletRoute,
   RoomsRoomIdRoute: RoomsRoomIdRoute,
-  StoriesStoryIdRoute: StoriesStoryIdRouteWithChildren,
+  StoriesStoryIdRoute: StoriesStoryIdRoute,
   ThreadsThreadIdRoute: ThreadsThreadIdRoute,
   RoomsRoomIdGovernanceRoute: RoomsRoomIdGovernanceRoute,
+  StoriesStoryIdCommentsRoute: StoriesStoryIdCommentsRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

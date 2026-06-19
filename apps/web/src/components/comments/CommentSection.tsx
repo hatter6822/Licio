@@ -158,18 +158,50 @@ function CommentComposer({
   );
 }
 
+function cloneCommentWithReplies(
+  comment: CommentItemType,
+  replies: CommentItemType[],
+): CommentItemType {
+  return {
+    ...comment,
+    replies,
+  };
+}
+
+function rebuildCommentTree(comments: CommentItemType[]): CommentItemType[] {
+  const childrenByParent = new Map<string | null, CommentItemType[]>();
+  const ids = new Set(comments.map((comment) => comment.contribution_id));
+  for (const comment of comments) {
+    const parentId = comment.parent_contribution_id;
+    const bucket = parentId && ids.has(parentId) ? parentId : null;
+    childrenByParent.set(bucket, [...(childrenByParent.get(bucket) ?? []), comment]);
+  }
+
+  const build = (comment: CommentItemType): CommentItemType => {
+    const rebuiltChildren = childrenByParent.get(comment.contribution_id);
+    return cloneCommentWithReplies(
+      comment,
+      (rebuiltChildren ?? comment.replies).map((child) => build(child)),
+    );
+  };
+
+  return (childrenByParent.get(null) ?? []).map((comment) => build(comment));
+}
+
 function CommentItem({
   storyId,
   comment,
   signalDepth = comment.depth,
   visualDepth = 0,
   visualReplyDepth,
+  allowInlineReplyLoader,
 }: {
   storyId: string;
   comment: CommentItemType;
   signalDepth?: number;
   visualDepth?: number;
   visualReplyDepth: 1 | 2;
+  allowInlineReplyLoader: boolean;
 }): React.ReactElement {
   const [replying, setReplying] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -226,6 +258,7 @@ function CommentItem({
               signalDepth={reply.depth}
               visualDepth={visualDepth + 1}
               visualReplyDepth={visualReplyDepth}
+              allowInlineReplyLoader={allowInlineReplyLoader}
             />
           ))}
         </div>
@@ -238,7 +271,7 @@ function CommentItem({
           Show more replies
         </a>
       ) : null}
-      {canShowRepliesHere && comment.has_more_replies ? (
+      {allowInlineReplyLoader && canShowRepliesHere && comment.has_more_replies ? (
         <Button
           type="button"
           variant="secondary"
@@ -269,6 +302,16 @@ export function CommentSection({
   };
   const comments = useStoryCommentsQuery(storyId, commentOptions);
   const stream = useCommentStream(storyId);
+  const renderedComments = useMemo(
+    () =>
+      rootContributionId
+        ? rebuildCommentTree(comments.data?.comments ?? [])
+        : (comments.data?.comments ?? []),
+    [comments.data?.comments, rootContributionId],
+  );
+
+  const allowInlineReplyLoader = !rootContributionId;
+
   const options = useMemo(
     () => [
       { id: 'all' as const, label: 'All' },
@@ -352,18 +395,19 @@ export function CommentSection({
         />
       ) : comments.isLoading ? (
         <p className="text-sm text-ink-muted">Loading comments…</p>
-      ) : comments.data?.comments.length === 0 ? (
+      ) : renderedComments.length === 0 ? (
         <p className="rounded-md border border-line p-4 text-sm text-ink-muted">
           No comments yet. Start the conversation with context or a source.
         </p>
       ) : (
         <div className="flex flex-col gap-3">
-          {comments.data?.comments.map((comment) => (
+          {renderedComments.map((comment) => (
             <CommentItem
               key={comment.contribution_id}
               storyId={storyId}
               comment={comment}
               visualReplyDepth={visualReplyDepth}
+              allowInlineReplyLoader={allowInlineReplyLoader}
             />
           ))}
         </div>

@@ -202,6 +202,57 @@ describe('CommentSection', () => {
     expect(loadMore).toHaveBeenCalledTimes(1);
   });
 
+  it('rebuilds flat focused branch pages into nested reply rows without inline duplicate loading', () => {
+    const branchRoot = comment({
+      contribution_id: '99999999-9999-4999-8999-999999999999',
+      parent_contribution_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      body: 'A focused branch root.',
+      depth: 2,
+      child_count: 1,
+      reply_count: 1,
+      has_more_replies: true,
+    });
+    const child = comment({
+      contribution_id: '88888888-8888-4888-8888-888888888888',
+      parent_contribution_id: branchRoot.contribution_id,
+      body: 'A child row returned flat by the branch API.',
+      depth: 3,
+      child_count: 1,
+      reply_count: 1,
+      has_more_replies: true,
+    });
+    const grandchild = comment({
+      contribution_id: '77777777-7777-4777-8777-777777777777',
+      parent_contribution_id: child.contribution_id,
+      body: 'A grandchild row returned flat by the branch API.',
+      depth: 4,
+    });
+    queryState = {
+      data: {
+        comments: [branchRoot, child, grandchild],
+        next_cursor: null,
+        overview: { comment_count: 3, sources_count: 0, corrections_count: 0 },
+        summary: null,
+      },
+    };
+
+    renderSection({
+      focused: true,
+      visualReplyDepth: 2,
+      rootContributionId: branchRoot.contribution_id,
+    });
+
+    expect(screen.getByText('A focused branch root.')).toBeInTheDocument();
+    expect(screen.getByText('A child row returned flat by the branch API.')).toBeInTheDocument();
+    expect(
+      screen.getByText('A grandchild row returned flat by the branch API.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Load all/ })).not.toBeInTheDocument();
+    expect(recordReplyDepth).toHaveBeenCalledWith(storyId, 2);
+    expect(recordReplyDepth).toHaveBeenCalledWith(storyId, 3);
+    expect(recordReplyDepth).toHaveBeenCalledWith(storyId, 4);
+  });
+
   it('resets visual nesting on the focused branch page so deep roots can keep expanding', () => {
     const deepReply = comment({
       contribution_id: '88888888-8888-4888-8888-888888888888',
