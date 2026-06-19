@@ -205,7 +205,11 @@ function CommentItem({
 }): React.ReactElement {
   const [replying, setReplying] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  const expandedReplies = useStoryCommentsQuery(storyId, { root: comment.contribution_id });
+  const expandedReplies = useStoryCommentsQuery(
+    storyId,
+    { root: comment.contribution_id },
+    allowInlineReplyLoader,
+  );
   const loadedReplies = (expandedReplies.data?.comments ?? []).filter(
     (reply) => reply.contribution_id !== comment.contribution_id,
   );
