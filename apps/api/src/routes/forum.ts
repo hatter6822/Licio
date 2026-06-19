@@ -213,26 +213,6 @@ async function liveContributionProjection(
   return media.length > 0 ? { ...projected, media } : projected;
 }
 
-async function attachCommentMedia(
-  bundle: ReturnType<typeof bundles>,
-  rows: readonly ContributionPublic[],
-  restrictedMedia: boolean,
-): Promise<ContributionPublic[]> {
-  const mint = makeMediaUrlMinter();
-  return Promise.all(
-    rows.map(async (row) => {
-      const media: NonNullable<ContributionPublic['media']> = [];
-      for (const uploadId of row.metadata.attachment_ids ?? []) {
-        const upload = await bundle.forum.uploads.getRecord(uploadId);
-        if (!upload) continue;
-        const item = commentMediaOf(upload, mint, restrictedMedia);
-        if (item) media.push(item);
-      }
-      return media.length > 0 ? { ...row, media } : row;
-    }),
-  );
-}
-
 async function replayFramesAfter(
   bundle: ReturnType<typeof bundles>,
   threadId: string,
@@ -462,11 +442,14 @@ export function createForumRoutes() {
             order: z.enum(['newest', 'oldest']).optional().default('oldest'),
             root: uuidSchema.optional(),
             filter: z.enum(['sources', 'corrections']).optional(),
+            // Nested reply layers to materialize: 1 = inline story section,
+            // 2 = the dedicated comment-centric page (WS-T.7.2).
+            depth: z.coerce.number().int().min(1).max(2).optional().default(1),
           }),
         ),
         async (c) => {
           const { storyId } = c.req.valid('param');
-          const { cursor, order, root, filter } = c.req.valid('query');
+          const { cursor, order, root, filter, depth } = c.req.valid('query');
           const bundle = bundles();
           const identity = getIdentityServices();
           const userId = await softUserId(c.req.header('cookie'), identity);
@@ -485,52 +468,24 @@ export function createForumRoutes() {
             thread.currentSummaryId !== null
               ? (summaries.find((s) => s.summaryId === thread.currentSummaryId) ?? null)
               : null;
-          if (root !== undefined) {
-            const subtree = await subtreeContent(
-              bundle,
-              thread.threadId,
-              root,
-              userId,
-              resolveAuthor,
-              cursor ?? null,
-            );
-            if (!subtree.rootFound) return c.json(notFound, 404);
-            const rowsWithMedia = await attachCommentMedia(
-              bundle,
-              subtree.rows,
-              story.visibility === 'room_only',
-            );
-            return c.json(
-              storyCommentsResponseSchema.parse({
-                comments: rowsWithMedia.map((row) => ({
-                  ...row,
-                  replies: [],
-                  reply_count: row.child_count,
-                  has_more_replies: row.child_count > 0,
-                })),
-                next_cursor: subtree.nextCursor,
-                overview: {
-                  comment_count: Object.values(counts).reduce(
-                    (sum, value) => sum + (value ?? 0),
-                    0,
-                  ),
-                  sources_count: counts.evidence ?? 0,
-                  corrections_count: counts.correction ?? 0,
-                },
-                summary: current ? await toSummaryPublic(current, resolveAuthor) : null,
-              }),
-            );
-          }
           const page = await commentPage(bundle, thread.threadId, userId, resolveAuthor, {
             cursor: cursor ?? null,
             order,
-            ...(filter !== undefined ? { filter } : {}),
+            // Type filters apply to top-level roots only; in focused mode the
+            // listed rows are a single comment's direct replies.
+            ...(filter !== undefined && root === undefined ? { filter } : {}),
+            depth,
+            ...(root !== undefined ? { parentId: root } : {}),
             restrictedMedia: story.visibility === 'room_only',
             mintMediaUrl: makeMediaUrlMinter(),
           });
+          // A focused read of a missing/invisible anchor is a 404 (it cannot
+          // anchor enumeration of the conversation beneath it).
+          if (root !== undefined && !page.rootFound) return c.json(notFound, 404);
           return c.json(
             storyCommentsResponseSchema.parse({
               comments: page.comments,
+              anchor: page.anchor,
               next_cursor: page.nextCursor,
               overview: {
                 comment_count: Object.values(counts).reduce((sum, value) => sum + (value ?? 0), 0),

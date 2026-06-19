@@ -1,8 +1,33 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Time conversions for the quiet-hours UI (WS-C.2.4c). The notification schema
-// stores minutes-from-midnight (exact wraparound math); the WS-B.2.8c control
-// uses "HH:MM" (matching <input type="time">). These two helpers bridge them.
+// Time utilities. The quiet-hours UI (WS-C.2.4c) bridges minutes-from-midnight
+// (exact wraparound math) and "HH:MM" (matching <input type="time">); the
+// comment meta line (WS-T.7.3) renders a compact relative timestamp.
+
+/**
+ * Compact relative timestamp for dense UIs — "now", "5m", "2h", "3d", "2w",
+ * "4mo", "1y" — so a comment's meta line stays a single short row.  The full
+ * LOCALIZED timestamp is surfaced separately (the `<time>` element's `title`),
+ * so no information is lost; this is purely the at-a-glance form.  Pure in
+ * `now` for deterministic tests.  Future instants (clock skew) clamp to "now".
+ */
+export function relativeTimeShort(iso: string, now: number = Date.now()): string {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return '';
+  const sec = Math.round((now - then) / 1000); // > 0 ⇒ in the past
+  if (sec < 45) return 'now';
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h`;
+  const day = Math.round(hr / 24);
+  if (day < 7) return `${day}d`;
+  const wk = Math.round(day / 7);
+  if (wk < 5) return `${wk}w`;
+  const mo = Math.round(day / 30);
+  if (mo < 12) return `${mo}mo`;
+  return `${Math.round(day / 365)}y`;
+}
 
 /** Minutes-from-midnight → "HH:MM" (24-hour, zero-padded). Normalises range. */
 export function minutesToHHMM(minutes: number): string {

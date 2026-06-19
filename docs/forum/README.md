@@ -9,8 +9,12 @@
 | **Plan** | `docs/planning/08-forum-and-conversation.md` (38 atomic tasks) |
 | **Primary consumers** | WS-H (SCOI/MERI inputs), WS-I (ranking reads), WS-J (review queue, moderation states), WS-K (classifier seams) |
 
-The forum is where participation happens: each story now hosts an inline,
-lightly nested comment section.  New writes use the comment-first WS-T contract
+The forum is where participation happens: each story now hosts an inline comment
+section that shows exactly **one nested reply layer** (deeper nesting would eat
+the story's reading area), with a dedicated comment-centric page
+(`/stories/$storyId/comments`) for reading the full conversation — two nested
+layers, re-rootable at any comment via `?root=`, with a persistent return to the
+story.  New writes use the comment-first WS-T contract
 (`comment` plus typed `evidence`/`correction` enrichments), while historical
 contribution types remain readable for backward compatibility.  Rooms scope
 topics and communities, lenses are interpretation contexts for SCOI, and
@@ -30,7 +34,7 @@ defense-in-depth pipeline; the server stores raw Markdown-lite only.
 | `packages/db/drizzle/0008_ws_g_forum.sql` | The WS-G migration (validated against live Postgres 16) |
 | `apps/api/src/forum/` | Stores (in-memory + interfaces), services container, contribution guard chain, story comment reads, live broadcaster, compatibility thread reads, rooms, summaries, transitions, safety seam, GIF/EXIF stripping, config, Drizzle adapters |
 | `apps/api/src/routes/forum.ts`, `routes/rooms.ts` | The §23.2 endpoint surface |
-| `apps/web/src/components/comments/`, `components/composer/` | Inline comment section/composer plus reusable composer affordances (attachments, citations, privacy warning, voice dictation) |
+| `apps/web/src/components/comments/` | Inline one-layer comment section + the shared recursive `CommentNode` (depth-capped per view, "continue"/"show more" links onward) and `CommentParts` (header/media/composer), reused by the dedicated comment page (`routes/-pages/story-comments.tsx`, route `stories.$storyId_.comments.tsx`). Compact density: a single-line meta header (`Author · 3h`, compact relative time from `lib/time.ts` with the full timestamp on the `<time>` title), top-level comments as `neu-raised-sm` tiles, nested replies as flat left-rail threads (no card-in-card), and inline text-link actions (`commentActionClass`) instead of touch-height buttons |
 | `apps/web/src/components/ugc/` | `UgcBody` (THE sanctioned render sink) + the drainer interstitial |
 | `apps/web/src/lib/link-safety.ts` | Runtime blocklist cache + shared detection |
 | `packages/invariants/src/pwatt/low-info-reply.ts` | Conservative low-info classifier (closes the WS-E residual) |
@@ -161,7 +165,7 @@ SCOI divergence summary is absent gracefully until WS-H.4 produces it.
 | Endpoint | Notes |
 |---|---|
 | `POST /v1/contributions` | The guard chain: per-account sliding-window rate limit (10/min default, 429 + exact Retry-After, keyed by non-reversible account ref — never an IP) → thread existence/visibility (hidden story → 404; restricted-room thread → 404 to non-members; archived → 409; safety-restricted → 403) → `client_draft_id` dedup (existing row returns, 200) → per-type cross-record validation (422 with specific messages) → safety pre-checks (flag → `under_review` + review queue) → transactional insert (atomic with the evidence card) → durable `contribution.created` (+`evidence.added`) emission — EXCEPT for safety-held rows, which emit nothing and bump no room activity (scoring/lifecycle/freshness must not count invisible content; emission on release is the WS-J approval seam) |
-| `GET /v1/stories/:id/comments` | Story-owned comment section: keyset-paginated roots with bounded reply previews, optional `sources`/`corrections` filters, and subtree reads via `root`. This is the primary read surface embedded on `/stories/$storyId`; the old global `/threads` directory is retired on the client. |
+| `GET /v1/stories/:id/comments` | Story-owned comment section: keyset-paginated roots with bounded reply previews, optional `sources`/`corrections` filters, and a `depth` (1 = inline section's single nested layer; 2 = the dedicated comment page's two layers) materialized server-side from REPLY_PREVIEW-bounded fetches. A focused read (`?root=<id>`) returns that comment as `anchor` with its direct replies as the paginated comment list (404 if the anchor is missing/invisible) — the dedicated page's re-rootable drill-down. This is the primary read surface embedded on `/stories/$storyId`; the old global `/threads` directory is retired on the client. |
 | `GET /v1/threads/:id` | Back-compat overview/resolution surface. The web client uses it only to redirect old `/threads/$threadId` deep links to the owning story comment section. |
 | `GET /v1/stories/:id/comments/stream` | Same-origin SSE stream for new visible comments; frames carry only the public contribution projection, are revalidated by the read bar, and are covered by score/raw/financial-field introspection tests. |
 | `GET /v1/contributions/:id/anchor` | Semantic deep-link anchor (`thread_id` + subtree root) for legacy/shared contribution links. |
@@ -359,7 +363,7 @@ Chromium + Firefox + WebKit against the preview's enforcing CSP): the
 come out inert (no script/handlers/javascript: remnants, execution flag
 never set), the interstitial intercepts a heuristic-suspicious link and
 Back closes without navigating, a safe link opens a popup under intact
-user activation, story submission renders with shared-schema validation, and the BFF-in-the-loop comment spec opens the inline comment section, verifies the legacy thread redirect, and runs axe on the story conversation surface.
+user activation, story submission renders with shared-schema validation, and the BFF-in-the-loop comment spec opens the inline comment section, verifies the legacy thread redirect, opens the dedicated comment-centric page (and its return-to-story control), and runs axe on both conversation surfaces.
 
 ## Residuals (tracked elsewhere)
 

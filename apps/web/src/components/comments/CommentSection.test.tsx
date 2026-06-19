@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-T.7.2 inline comment section: ONE nested reply layer in visual scope; a
+// reply that continues deeper links to the dedicated comment-centric page rather
+// than nesting further, and a section-level "Show more comments" opens that page.
 import type { CommentItem } from '@licio/shared';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CommentSection } from './CommentSection.js';
 
 const mutate = vi.fn();
-const loadMore = vi.fn();
 const refetch = vi.fn();
 const drain = vi.fn();
 const recordReplyDepth = vi.fn();
@@ -15,6 +19,7 @@ let queryState: {
   data?: {
     comments: CommentItem[];
     next_cursor: string | null;
+    anchor: CommentItem | null;
     overview: { comment_count: number; sources_count: number; corrections_count: number };
     summary: { body: string } | null;
   };
@@ -26,14 +31,45 @@ let queryState: {
 let streamState: { newComments: unknown[] };
 let mutationState: { isPending?: boolean; isError?: boolean };
 
+// Render the router Link as a real anchor whose href reflects `to` with the
+// params interpolated and the search serialized, so destinations are assertable.
+vi.mock('@tanstack/react-router', () => ({
+  Link: ({
+    children,
+    to,
+    params,
+    search,
+    hash,
+    className,
+  }: {
+    children?: ReactNode;
+    to?: string;
+    params?: Record<string, string>;
+    search?: Record<string, string>;
+    hash?: string;
+    className?: string;
+  }) => {
+    let href = to ?? '#';
+    for (const [key, value] of Object.entries(params ?? {})) {
+      href = href.replace(`$${key}`, value);
+    }
+    const query =
+      search && Object.keys(search).length > 0 ? `?${new URLSearchParams(search).toString()}` : '';
+    return (
+      <a href={`${href}${query}${hash ? `#${hash}` : ''}`} className={className}>
+        {children}
+      </a>
+    );
+  },
+}));
+
 vi.mock('../../lib/queries.js', () => ({
-  useStoryCommentsQuery: vi.fn((_storyId: string, _filters: Record<string, string>) => ({
+  useStoryCommentsQuery: vi.fn(() => ({
     data: queryState.data,
     isError: queryState.isError ?? false,
     isLoading: queryState.isLoading ?? false,
     hasMore: queryState.hasMore ?? false,
     isFetchingMore: queryState.isFetchingMore ?? false,
-    loadMore,
     refetch,
   })),
   useCreateCommentMutation: vi.fn(() => ({
@@ -90,6 +126,7 @@ beforeEach(() => {
     data: {
       comments: [],
       next_cursor: null,
+      anchor: null,
       overview: { comment_count: 0, sources_count: 0, corrections_count: 0 },
       summary: null,
     },
@@ -97,7 +134,6 @@ beforeEach(() => {
   streamState = { newComments: [] };
   mutationState = {};
   mutate.mockReset();
-  loadMore.mockReset();
   refetch.mockReset();
   drain.mockReset();
   recordReplyDepth.mockReset();
@@ -118,6 +154,7 @@ describe('CommentSection', () => {
       data: {
         comments: [],
         next_cursor: null,
+        anchor: null,
         overview: { comment_count: 0, sources_count: 0, corrections_count: 0 },
         summary: null,
       },
@@ -126,21 +163,24 @@ describe('CommentSection', () => {
     expect(
       screen.getByText('No comments yet. Start the conversation with context or a source.'),
     ).toBeInTheDocument();
+    // No comments ⇒ no "show more" entry, and never any applause affordance.
+    expect(screen.queryByRole('link', { name: /show more comments/i })).not.toBeInTheDocument();
     expect(screen.queryByText(/like|upvote|karma|reaction/i)).not.toBeInTheDocument();
   });
 
-  it('renders summaries, typed comments, media, reply previews, live stream prompts, and pagination', async () => {
+  it('renders one nested layer; deeper threads link to the dedicated page instead of nesting', () => {
+    const replyId = '55555555-5555-4555-8555-555555555555';
+    // A depth-1 reply that itself has replies — in the inline section it must NOT
+    // nest a third level; it links onward to the comment page rooted at itself.
     const reply = comment({
-      contribution_id: '55555555-5555-4555-8555-555555555555',
+      contribution_id: replyId,
       parent_contribution_id: '33333333-3333-4333-8333-333333333333',
-      author_display_name: null,
-      author_handle: null,
-      body: '',
+      body: 'A reply that continues deeper.',
       depth: 1,
-      reply_count: 0,
+      reply_count: 2,
+      has_more_replies: true,
     });
     queryState = {
-      hasMore: true,
       data: {
         comments: [
           comment({
@@ -156,18 +196,13 @@ describe('CommentSection', () => {
               },
             ],
             replies: [reply],
-            reply_count: 3,
-            has_more_replies: true,
-          }),
-          comment({
-            contribution_id: '77777777-7777-4777-8777-777777777777',
-            type: 'correction',
-            author_display_name: null,
-            author_handle: 'bob',
+            reply_count: 1,
+            has_more_replies: false,
           }),
         ],
-        next_cursor: 'next',
-        overview: { comment_count: 2, sources_count: 1, corrections_count: 1 },
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 2, sources_count: 1, corrections_count: 0 },
         summary: { body: 'Summary **with context**.' },
       },
     };
@@ -177,20 +212,84 @@ describe('CommentSection', () => {
 
     expect(screen.getByLabelText('Conversation overview')).toBeInTheDocument();
     expect(screen.getByText('Source')).toBeInTheDocument();
-    expect(screen.getByText('Correction')).toBeInTheDocument();
     expect(screen.getByAltText('Chart from source')).toBeInTheDocument();
-    expect(screen.getByText(/Animated GIF hidden/)).toBeInTheDocument();
-    expect(screen.getByText('Deleted account')).toBeInTheDocument();
-    expect(screen.getByText('Load all 3 replies')).toBeInTheDocument();
+    // The single nested reply IS shown (one layer)…
+    expect(screen.getByText('A reply that continues deeper.')).toBeInTheDocument();
+    // …and its continuation is a LINK to the page rooted at the reply, not a
+    // third nested comment article.
+    const continueLink = screen.getByRole('link', { name: /continue this thread \(2 replies\)/i });
+    expect(continueLink).toHaveAttribute('href', `/stories/${storyId}/comments?root=${replyId}`);
+    // Reply-depth attention is bucketed at the ABSOLUTE depths (0 and 1).
     expect(recordReplyDepth).toHaveBeenCalledWith(storyId, 0);
     expect(recordReplyDepth).toHaveBeenCalledWith(storyId, 1);
+    // The section-level "Show more comments" opens the dedicated page.
+    expect(screen.getByRole('link', { name: /show more comments/i })).toHaveAttribute(
+      'href',
+      `/stories/${storyId}/comments`,
+    );
+  });
 
-    await userEvent.click(screen.getByRole('button', { name: 'Show 2 new comments' }));
+  it('omits "Show more comments" when every reply is already shown inline', () => {
+    // A top-level comment whose single reply is a leaf with no further replies:
+    // the whole thread fits in one inline layer, so there is nothing "more".
+    const shownReply = comment({
+      contribution_id: '55555555-5555-4555-8555-555555555555',
+      parent_contribution_id: '33333333-3333-4333-8333-333333333333',
+      body: 'A fully-shown reply.',
+      depth: 1,
+      reply_count: 0,
+      has_more_replies: false,
+    });
+    queryState = {
+      hasMore: false,
+      data: {
+        comments: [comment({ replies: [shownReply], reply_count: 1, has_more_replies: false })],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 2, sources_count: 0, corrections_count: 0 },
+        summary: null,
+      },
+    };
+    renderSection();
+    expect(screen.getByText('A fully-shown reply.')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /show more comments/i })).not.toBeInTheDocument();
+    // …and a fully-shown leaf reply offers no dead "continue" link either.
+    expect(screen.queryByRole('link', { name: /continue this thread/i })).not.toBeInTheDocument();
+  });
+
+  it('shows "Show more comments" when more top-level comments remain unfetched', () => {
+    queryState = {
+      hasMore: true,
+      data: {
+        comments: [comment({ reply_count: 0, has_more_replies: false })],
+        next_cursor: 'next',
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
+        summary: null,
+      },
+    };
+    renderSection();
+    expect(screen.getByRole('link', { name: /show more comments/i })).toHaveAttribute(
+      'href',
+      `/stories/${storyId}/comments`,
+    );
+  });
+
+  it('drains the live-comment buffer and refetches on the new-comments prompt', async () => {
+    queryState = {
+      data: {
+        comments: [comment()],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
+        summary: null,
+      },
+    };
+    streamState = { newComments: [{ contribution_id: 'new' }] };
+    renderSection();
+    await userEvent.click(screen.getByRole('button', { name: 'Show 1 new comment' }));
     expect(drain).toHaveBeenCalledTimes(1);
     expect(refetch).toHaveBeenCalledTimes(1);
-
-    await userEvent.click(screen.getByRole('button', { name: 'Load more comments' }));
-    expect(loadMore).toHaveBeenCalledTimes(1);
   });
 
   it('submits top-level comments and replies with the comment write contract', async () => {
@@ -199,6 +298,7 @@ describe('CommentSection', () => {
       data: {
         comments: [parent],
         next_cursor: null,
+        anchor: null,
         overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
         summary: null,
       },

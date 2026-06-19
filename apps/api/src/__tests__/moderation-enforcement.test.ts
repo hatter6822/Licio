@@ -31,6 +31,7 @@ const commentsFor = async (threadId: string, _storyId: string, viewerId: string 
     await commentPage(bundle(), threadId, viewerId, resolveAuthor, {
       cursor: null,
       order: 'oldest',
+      depth: 1,
       restrictedMedia: false,
       mintMediaUrl: (uploadId: string) => `/v1/uploads/${uploadId}`,
     })

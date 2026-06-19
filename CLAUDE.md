@@ -89,9 +89,15 @@ WS-G plus WS-T ship forum and conversation (`docs/forum/README.md`): a
 comment-first contribution model where `comment` is the base live-write type
 and `evidence`/`correction` remain typed enrichments, while the historical
 contribution taxonomy remains readable for backward compatibility.  Each story
-owns an inline, lightly nested comment section backed by the materialized-path
-`contributions` tree (depth-capped, GIN-containment subtree reads), with the
-§15.4 conversation/safety state machines preserved (table-driven legal
+owns an inline comment section backed by the materialized-path `contributions`
+tree (depth-capped, GIN-containment subtree reads) that shows exactly ONE nested
+reply layer to protect the reading area; deeper threads — and the full
+conversation — open in a dedicated comment-centric page
+(`/stories/$storyId/comments`, `depth=2` + `?root=` re-rooting) reached by the
+per-thread "continue" links and the section-level "Show more comments" entry, so
+a reader drills arbitrarily deep one focused view at a time while a persistent
+"Back to the story" control always returns them to the inline section.  The
+§15.4 conversation/safety state machines are preserved (table-driven legal
 transitions, audited transitions emitting `thread.state.changed`).  The WS-G.4
 UGC pipeline remains the only DOM egress path (strict Markdown-lite AST with no
 raw-HTML node → constrained serializer → DOMPurify `licio-ugc` Trusted Types

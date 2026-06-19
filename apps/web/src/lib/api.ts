@@ -257,6 +257,8 @@ export interface StoryCommentsQuery {
   order?: 'newest' | 'oldest';
   filter?: 'sources' | 'corrections';
   root?: string;
+  /** Nested reply layers to materialize: 1 (inline section) or 2 (dedicated page). */
+  depth?: 1 | 2;
 }
 
 export async function fetchStoryComments(
@@ -268,6 +270,7 @@ export async function fetchStoryComments(
   if (query.order) params.set('order', query.order);
   if (query.filter) params.set('filter', query.filter);
   if (query.root) params.set('root', query.root);
+  if (query.depth) params.set('depth', String(query.depth));
   const suffix = params.toString();
   const response = await apiFetch(
     `${API_BASE}/v1/stories/${encodeURIComponent(storyId)}/comments${suffix ? `?${suffix}` : ''}`,
