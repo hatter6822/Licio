@@ -868,7 +868,7 @@ if (env.NODE_ENV !== 'production') {
     // WS-U: make one demo room actually governed so the in-room "governed by"
     // panel + the steward manager render real data on first boot (uses the
     // bound GovernanceService; logs a sample agent action without a queue hold).
-    await seedGovernanceDemo(getGovernanceService());
+    await seedGovernanceDemo(getGovernanceService(), forumServices, ingestionServices);
     logger.info('demo data seeded (development)');
   } catch (err) {
     logger.warn({ err }, 'demo seed skipped (non-fatal)');

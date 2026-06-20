@@ -202,7 +202,8 @@ export function createRoomAgentModerator(
         authorNewToRoom: history.newToRoom,
         priorRemovalsInRoom: history.priorRemovalsInRoom,
       };
-      const result = await svc.moderate(roomId, context, contributionId);
+      // Pass the binding we already read (avoids a second store read, #12).
+      const result = await svc.moderate(roomId, context, contributionId, binding);
       if (!result.ok || result.value === null) return null;
       const state = ACTION_TO_STATE[result.value.action];
       // The reason is only consumed for the author's hold/removal notice; a

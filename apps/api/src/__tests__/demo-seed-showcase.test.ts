@@ -349,7 +349,7 @@ describe('demo seed — media + moderation surfaces', () => {
 describe('demo seed — the WS-U governed-room showcase', () => {
   it('makes one room governed with an active agent + a logged action (no queue hold)', async () => {
     const governance = createGovernanceService({ stores: createInMemoryGovernanceStores() });
-    await seedGovernanceDemo(governance);
+    await seedGovernanceDemo(governance, fx.forum, fx.ingestion);
     const stewardId = DEV_ACCOUNTS.find((a) => a.email === 'steward@licio.test')?.userId;
     // The elected steward holds the seat and an active community agent governs it.
     const seat = await governance.getSeat(GOVERNANCE_DEMO_ROOM_ID);
@@ -357,9 +357,13 @@ describe('demo seed — the WS-U governed-room showcase', () => {
     const binding = await governance.getBinding(GOVERNANCE_DEMO_ROOM_ID);
     expect(binding?.active).toBe(true);
     expect(binding?.capabilityDescriptor.granted).toContain('moderate.flag');
-    // A sample agent action surfaces in the "governed by" panel.
+    // A sample agent action surfaces in the "governed by" panel, referencing a
+    // REAL contribution in the room (not a synthetic id).
     const actions = await governance.recentAgentActions(GOVERNANCE_DEMO_ROOM_ID, 10);
     expect(actions[0]?.actionType).toBe('moderate.flag_for_review');
+    const subjectRef = actions[0]?.subjectRef ?? '';
+    expect(subjectRef).not.toContain(':demo-action');
+    expect(await fx.forum.contributions.getById(subjectRef)).not.toBeNull();
     // An open ratification vote surfaces the member voting UI (an upgrade model).
     const openVote = await governance.getOpenRatification(GOVERNANCE_DEMO_ROOM_ID);
     expect(openVote).not.toBeNull();

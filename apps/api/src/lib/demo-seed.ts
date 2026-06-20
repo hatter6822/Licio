@@ -2027,6 +2027,25 @@ export async function seedModerationDemo(moderation: ModerationServices): Promis
 /** The demo room that ships GOVERNED (WS-U) — "Elections & Governance" (public). */
 export const GOVERNANCE_DEMO_ROOM_ID = R(5);
 
+/** First real published contribution id in a room (the demo agent's subject). */
+async function firstContributionRefInRoom(
+  forum: ForumServices,
+  ingestion: IngestionServices,
+  roomId: string,
+): Promise<string | null> {
+  const stories = await ingestion.stories.listByRoom(roomId, 10);
+  for (const story of stories) {
+    const thread = await ingestion.stories.getThreadByStoryId(story.storyId);
+    if (!thread) continue;
+    const [contribution] = await forum.contributions.listByThread(thread.threadId, {
+      states: ['published'],
+      limit: 1,
+    });
+    if (contribution) return contribution.contributionId;
+  }
+  return null;
+}
+
 /**
  * DEVELOPMENT showcase for WS-U (NEVER in production): make one room actually
  * governed so the "governed by" panel + the steward model-manager render real
@@ -2039,7 +2058,11 @@ export const GOVERNANCE_DEMO_ROOM_ID = R(5);
  * best-effort; runs AFTER the forum seed (the room must exist) + the governance
  * service is bound.
  */
-export async function seedGovernanceDemo(governance: GovernanceService): Promise<void> {
+export async function seedGovernanceDemo(
+  governance: GovernanceService,
+  forum: ForumServices,
+  ingestion: IngestionServices,
+): Promise<void> {
   const steward = U(21); // steward@licio.test
   await governance.bootstrapSeat(GOVERNANCE_DEMO_ROOM_ID, steward);
   const bundle = {
@@ -2073,23 +2096,27 @@ export async function seedGovernanceDemo(governance: GovernanceService): Promise
     null,
   );
   if (!approved.ok) return;
-  // A sample agent action so the "governed by" panel shows activity. A direct
-  // moderate() logs to the agent action log only (no review-queue hold).
-  await governance.moderate(
-    GOVERNANCE_DEMO_ROOM_ID,
-    {
-      contentText: 'check these out https://a.example https://b.example https://c.example',
-      contentKind: 'comment',
-      contentLength: 64,
-      linkCount: 3,
-      mentionCount: 0,
-      hasMediaUpload: false,
-      authorAccountAgeDays: 3,
-      authorNewToRoom: true,
-      priorRemovalsInRoom: 0,
-    },
-    `${GOVERNANCE_DEMO_ROOM_ID}:demo-action`,
-  );
+  // A sample agent action so the "governed by" panel shows activity, referencing
+  // a REAL contribution in the room (not a synthetic id). A direct moderate()
+  // logs to the agent action log only (no review-queue hold).
+  const subjectRef = await firstContributionRefInRoom(forum, ingestion, GOVERNANCE_DEMO_ROOM_ID);
+  if (subjectRef !== null) {
+    await governance.moderate(
+      GOVERNANCE_DEMO_ROOM_ID,
+      {
+        contentText: 'check these out https://a.example https://b.example https://c.example',
+        contentKind: 'comment',
+        contentLength: 64,
+        linkCount: 3,
+        mentionCount: 0,
+        hasMediaUpload: false,
+        authorAccountAgeDays: 3,
+        authorNewToRoom: true,
+        priorRemovalsInRoom: 0,
+      },
+      subjectRef,
+    );
+  }
   // A SECOND eligible model put to an OPEN member ratification vote, so the dev
   // sees the member voting surface alongside the already-active agent (a steward
   // proposing an upgrade the community is currently ratifying).

@@ -34,6 +34,7 @@ import {
 } from '@licio/governance';
 import type { GovernanceConfig } from './config.js';
 import type {
+  BindingRecord,
   GovernanceStores,
   ModelRecord,
   RatificationOutcome,
@@ -530,8 +531,15 @@ export class GovernanceService {
     roomId: string,
     context: ModerationContext,
     subjectRef: string,
+    // The caller (the forum adapter) already read the binding to gate the
+    // author-history lookup; passing it avoids a second store read on the hot
+    // contribution path (#12). Omit it (or pass undefined) to read here.
+    prefetchedBinding?: BindingRecord | null,
   ): Promise<GovernanceResult<ModerationDecision | null>> {
-    const binding = await this.deps.stores.bindings.get(roomId);
+    const binding =
+      prefetchedBinding !== undefined
+        ? prefetchedBinding
+        : await this.deps.stores.bindings.get(roomId);
     if (binding === null || !binding.active) return ok(null);
     const model = await this.deps.stores.models.get(binding.modelId);
     if (!model) return ok(null);
