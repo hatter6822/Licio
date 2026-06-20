@@ -133,7 +133,7 @@ describe('WS-U governance routes', () => {
     // A quorum-meeting approving vote settles to an ACTIVE agent. Casting +
     // settling go through the service (settle is scheduler-driven; no route).
     const svc = getGovernanceService();
-    await svc.castRatificationBallot(vote_id, user.userId, 'approve', true);
+    await svc.castRatificationBallot('r1', vote_id, user.userId, 'approve', true);
     const settled = await svc.settleRatification(vote_id, 1);
     expect(settled.ok && settled.value.activated).toBe(true);
 

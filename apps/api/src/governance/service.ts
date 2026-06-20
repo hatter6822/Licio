@@ -15,6 +15,7 @@ import {
   attestOutcome,
   type Capability,
   type CapabilityDescriptor,
+  canonicalize,
   deriveCapabilityDescriptor,
   type ElectionRules,
   evaluatePolicy,
@@ -192,6 +193,7 @@ export class GovernanceService {
    * vote (defense-in-depth, the WS-D.3.2 isolation boundary).
    */
   async castVote(
+    roomId: string,
     electionId: string,
     voterUserId: string,
     candidateUserId: string,
@@ -199,7 +201,15 @@ export class GovernanceService {
   ): Promise<GovernanceResult<void>> {
     if (!eligible) return err('not_member', 'Only room members may vote in a steward election.');
     const election = await this.deps.stores.elections.get(electionId);
-    if (election === null || election.status !== 'open') {
+    // The election must belong to THIS room: the membership/candidate gate was
+    // computed for the URL room, so a foreign election id must never be voted on
+    // with it (cross-room ballot stuffing).
+    if (election === null || election.roomId !== roomId) {
+      return err('not_found', 'Election not found for this room.');
+    }
+    // Reject after the published close time — `status` only flips on the
+    // scheduler tick, so the window must be enforced here too.
+    if (election.status !== 'open' || this.deps.now().getTime() >= Date.parse(election.closesAt)) {
       return err('not_open', 'Election is not open.');
     }
     const cast = await this.deps.stores.votes.cast({
@@ -369,6 +379,8 @@ export class GovernanceService {
     }
     const prompts = await this.firstPromptFor(modelId);
     if (!prompts) return err('no_prompt', 'No prompt is bound to this model.');
+    const lawCheck = await this.assertLawPackInRoom(roomId, lawPackId);
+    if (!lawCheck.ok) return lawCheck;
     const lawPack = await this.resolveLawPack(roomId, lawPackId);
     const descriptor = deriveCapabilityDescriptor(model.bundle.requestedCapabilities, lawPack);
     // Supersede the previously-approved model (the binding's prior model), so the
@@ -419,6 +431,8 @@ export class GovernanceService {
     if (await this.deps.stores.ratifications.getOpenForRoom(roomId)) {
       return err('vote_open', 'A ratification vote is already open for this room.');
     }
+    const lawCheck = await this.assertLawPackInRoom(roomId, lawPackId);
+    if (!lawCheck.ok) return lawCheck;
     const lawPack = await this.resolveLawPack(roomId, lawPackId);
     const opensAt = this.deps.now();
     const closesAt = new Date(opensAt.getTime() + this.deps.config.electionWindowSeconds * 1000);
@@ -443,6 +457,7 @@ export class GovernanceService {
 
   /** Cast a member ratification ballot (caller-verified room member; one per voter). */
   async castRatificationBallot(
+    roomId: string,
     voteId: string,
     voterUserId: string,
     choice: RatificationChoice,
@@ -450,7 +465,13 @@ export class GovernanceService {
   ): Promise<GovernanceResult<void>> {
     if (!eligible) return err('not_member', 'Only room members may vote on ratification.');
     const vote = await this.deps.stores.ratifications.get(voteId);
-    if (vote === null || vote.status !== 'open') {
+    // The vote must belong to THIS room (the eligibility gate was computed for the
+    // URL room) — never count a foreign room's vote with it.
+    if (vote === null || vote.roomId !== roomId) {
+      return err('not_found', 'Ratification vote not found for this room.');
+    }
+    // Reject after the published close time (status flips only on the tick).
+    if (vote.status !== 'open' || this.deps.now().getTime() >= Date.parse(vote.closesAt)) {
       return err('not_open', 'Ratification vote is not open.');
     }
     const cast = await this.deps.stores.ratificationBallots.cast({
@@ -821,9 +842,28 @@ export class GovernanceService {
   private async resolveLawPack(roomId: string, lawPackId: string | null): Promise<LawPack> {
     if (lawPackId) {
       const stored = await this.deps.stores.lawPacks.get(lawPackId);
-      if (stored) return stored.lawPack;
+      // Defense-in-depth: a law-pack only applies to its OWN room (callers reject
+      // a foreign id up front; this guards any residual cross-room reference).
+      if (stored && stored.roomId === roomId) return stored.lawPack;
     }
     return defaultModerationLawPack(roomId);
+  }
+
+  /**
+   * A supplied law-pack must belong to the room being governed — otherwise a
+   * steward could bind another room's bounds (capabilities + election rules) that
+   * this room never voted. Returns a typed error rather than silently defaulting.
+   */
+  private async assertLawPackInRoom(
+    roomId: string,
+    lawPackId: string | null,
+  ): Promise<GovernanceResult<void>> {
+    if (lawPackId === null) return ok(undefined);
+    const stored = await this.deps.stores.lawPacks.get(lawPackId);
+    if (!stored || stored.roomId !== roomId) {
+      return err('invalid_law_pack', 'The law-pack does not belong to this room.');
+    }
+    return ok(undefined);
   }
 
   /**
@@ -849,9 +889,14 @@ const MOD_ACTION_CAPABILITY: Record<Exclude<ModerationAction, 'allow'>, Capabili
   remove: 'moderate.remove',
 };
 
-/** Canonical-ish string for digesting a bundle (key order is schema-stable here). */
+/**
+ * Canonical, key-order-independent serialization for digesting a bundle — so two
+ * semantically identical bundles with reordered keys hash equal (the
+ * `(room_id, artifact_digest)` duplicate guard holds, and the member-downloadable
+ * digest matches the canonical hash clients compute from `@licio/governance`).
+ */
 function stableBundle(bundle: GovernancePolicyBundle): string {
-  return JSON.stringify(bundle);
+  return canonicalize(bundle);
 }
 
 /** Admission failures: the model's decision must be within each fixture's band. */

@@ -95,9 +95,9 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
     const sched = await h.svc.scheduleElection('r1');
     expect(sched.ok).toBe(true);
     const eid = sched.ok ? sched.value : '';
-    expect((await h.svc.castVote(eid, 'v1', 'cand', true)).ok).toBe(true);
-    expect((await h.svc.castVote(eid, 'v1', 'cand', true)).ok).toBe(false); // idempotent
-    await h.svc.castVote(eid, 'v2', 'cand', true);
+    expect((await h.svc.castVote('r1', eid, 'v1', 'cand', true)).ok).toBe(true);
+    expect((await h.svc.castVote('r1', eid, 'v1', 'cand', true)).ok).toBe(false); // idempotent
+    await h.svc.castVote('r1', eid, 'v2', 'cand', true);
     const settled = await h.svc.settleElection(eid, 3);
     expect(settled.ok && settled.value.winnerUserId).toBe('cand');
     expect((await h.svc.getSeat('r1'))?.holderUserId).toBe('cand');
@@ -105,7 +105,7 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
   });
 
   it('rejects a vote on a non-open election', async () => {
-    expect((await h.svc.castVote('missing', 'v', 'c', true)).ok).toBe(false);
+    expect((await h.svc.castVote('r1', 'missing', 'v', 'c', true)).ok).toBe(false);
   });
 
   it('rejects a ballot from a non-member (membership-gated at the service)', async () => {
@@ -113,7 +113,7 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
     h.advance(YEAR_MS);
     const sched = await h.svc.scheduleElection('r1');
     const eid = sched.ok ? sched.value : '';
-    const denied = await h.svc.castVote(eid, 'outsider', 'cand', false);
+    const denied = await h.svc.castVote('r1', eid, 'outsider', 'cand', false);
     expect(denied.ok).toBe(false);
     expect(!denied.ok && denied.code).toBe('not_member');
   });
@@ -155,7 +155,7 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
     h.advance(YEAR_MS);
     const sched = await h.svc.scheduleElection('r1');
     const eid = sched.ok ? sched.value : '';
-    await h.svc.castVote(eid, 'v1', 'challenger', true);
+    await h.svc.castVote('r1', eid, 'v1', 'challenger', true);
 
     // The bound law-pack requires a quorum of 2; one ballot fails it ⇒ fail-safe
     // (the default law-pack's quorum of 1 would have settled to 'challenger').
@@ -166,6 +166,28 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
     // The next term honours the law-pack's short termSeconds (10s) — proof the
     // term length is law-pack-driven, never a hardcoded config constant.
     expect(Date.parse(seat?.termEnd ?? '') - Date.parse(seat?.termStart ?? '')).toBe(10_000);
+  });
+
+  it('rejects an election ballot bound to another room (cross-room guard)', async () => {
+    await h.svc.bootstrapSeat('rA', 'cA');
+    await h.svc.bootstrapSeat('rB', 'cB');
+    h.advance(YEAR_MS);
+    await h.svc.scheduleElection('rA');
+    const b = await h.svc.scheduleElection('rB');
+    const eidB = b.ok ? b.value : '';
+    // Voting on room B's election while claiming room A's membership is refused.
+    const res = await h.svc.castVote('rA', eidB, 'v1', 'cand', true);
+    expect(!res.ok && res.code).toBe('not_found');
+  });
+
+  it('rejects an election ballot after the close time (before the scheduler tick)', async () => {
+    await h.svc.bootstrapSeat('r1', 'creator');
+    h.advance(YEAR_MS);
+    const sched = await h.svc.scheduleElection('r1');
+    const eid = sched.ok ? sched.value : '';
+    h.advance(8 * 24 * 60 * 60 * 1000); // past the default 7-day voting window
+    const res = await h.svc.castVote('r1', eid, 'v1', 'cand', true);
+    expect(!res.ok && res.code).toBe('not_open');
   });
 });
 
@@ -181,6 +203,38 @@ describe('GovernanceService — Stage 2 model admission', () => {
     const p = await h.svc.proposeModel('r', 'steward', goodBundle(), 'You moderate r.');
     expect(p.ok).toBe(true);
     if (p.ok) expect(p.value.artifactDigest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('content-addresses a bundle independent of key order (canonical digest)', async () => {
+    const ordered = await h.svc.proposeModel('r', 'steward', goodBundle(), 'p');
+    // The SAME bundle with reordered top-level keys, proposed in another room.
+    await h.svc.bootstrapSeat('r2', 'steward');
+    const reordered = await h.svc.proposeModel(
+      'r2',
+      'steward',
+      {
+        requestedCapabilities: ['moderate.remove', 'moderate.flag'],
+        config: {},
+        promptTemplates: {},
+        moderationRules: [
+          {
+            id: 'spam',
+            when: { kind: 'link_count_gte', value: 3 },
+            action: 'remove',
+            reason: 'too many links',
+          },
+        ],
+        name: 'Civility',
+        version: '1',
+        bundleId: 'b',
+      },
+      'p',
+    );
+    expect(ordered.ok && reordered.ok).toBe(true);
+    if (ordered.ok && reordered.ok) {
+      // JSON.stringify would differ on key order; the canonical digest does not.
+      expect(reordered.value.artifactDigest).toBe(ordered.value.artifactDigest);
+    }
   });
 
   it('admits a well-behaved policy and rejects over/under-moderation', async () => {

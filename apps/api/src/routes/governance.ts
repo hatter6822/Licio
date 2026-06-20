@@ -112,12 +112,18 @@ export function createGovernanceRoutes() {
             );
           }
           const result = await getGovernanceService().castVote(
+            roomId,
             c.req.param('electionId'),
             auth.userId,
             candidate_user_id,
             eligible,
           );
-          if (!result.ok) return c.json(deny(result.code, result.message), 409);
+          if (!result.ok) {
+            return c.json(
+              deny(result.code, result.message),
+              result.code === 'not_found' ? 404 : 409,
+            );
+          }
           return c.json({ ok: true });
         },
       )
@@ -215,16 +221,16 @@ export function createGovernanceRoutes() {
           if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
           const eligible = await isRoomMember(c.req.param('roomId'), auth.userId);
           const result = await getGovernanceService().castRatificationBallot(
+            c.req.param('roomId'),
             c.req.param('voteId'),
             auth.userId,
             c.req.valid('json').choice,
             eligible,
           );
           if (!result.ok) {
-            return c.json(
-              deny(result.code, result.message),
-              result.code === 'not_member' ? 403 : 409,
-            );
+            const status =
+              result.code === 'not_member' ? 403 : result.code === 'not_found' ? 404 : 409;
+            return c.json(deny(result.code, result.message), status);
           }
           return c.json({ ok: true });
         },

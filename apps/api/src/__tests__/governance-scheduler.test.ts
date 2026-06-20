@@ -66,9 +66,9 @@ describe('runElectionLifecycle', () => {
     advance(101_000);
     await svc.runElectionLifecycle(async () => 3, now());
     const electionId = await openElectionId(svc, 'r');
-    await svc.castVote(electionId, 'v1', 'challenger', true);
-    await svc.castVote(electionId, 'v2', 'challenger', true);
-    await svc.castVote(electionId, 'v3', 'creator', true);
+    await svc.castVote('r', electionId, 'v1', 'challenger', true);
+    await svc.castVote('r', electionId, 'v2', 'challenger', true);
+    await svc.castVote('r', electionId, 'v3', 'creator', true);
     advance(51_000); // past the voting window
     const result = await svc.runElectionLifecycle(async () => 3, now());
     expect(result.settled).toBe(1);
