@@ -30,6 +30,12 @@ export {
 } from './frontiers.js';
 export { acceptanceKey, classifyResubmission, type ResubmissionInput } from './ingest.js';
 export {
+  type IngestionClass,
+  type IngestionNode,
+  type IngestionResolution,
+  resolveIngestionOrder,
+} from './ingest-order.js';
+export {
   assertInterestSafeForAudience,
   type InterestAudience,
   interestAllowedForAudience,

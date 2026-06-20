@@ -145,3 +145,106 @@ describe('LcapIngestServer.commitRecord (§24.1 stages 1+3)', () => {
     expect(srv.roomSize(ROOM)).toBe(0);
   });
 });
+
+describe('LcapIngestServer.commitBatch (§24.4 ordered batch ingestion)', () => {
+  it('commits a parent before its child even when the child arrives first', async () => {
+    const srv = new LcapIngestServer('net');
+    const { statuses } = await srv.commitBatch([
+      {
+        recordCid: cidB,
+        roomId: ROOM,
+        authorDeviceKeyId: DEVICE,
+        deviceSeq: 1,
+        body: bodyB,
+        validation: vr('authorized_provisional'),
+        requires: [cidA],
+      },
+      {
+        recordCid: cidA,
+        roomId: ROOM,
+        authorDeviceKeyId: DEVICE,
+        deviceSeq: 0,
+        body: bodyA,
+        validation: vr('authorized_provisional'),
+      },
+    ]);
+    // Both accepted; the room log records the parent (seq 0) before the child (seq 1).
+    expect(statuses.every((s) => s.status === 'accepted')).toBe(true);
+    expect(srv.roomSize(ROOM)).toBe(2);
+    expect(srv.isAccepted(cidA)).toBe(true);
+    expect(srv.isAccepted(cidB)).toBe(true);
+  });
+
+  it('quarantines a record with an absent dependency and surfaces a de-duplicated want', async () => {
+    const srv = new LcapIngestServer('net');
+    const { statuses, wants } = await srv.commitBatch([
+      {
+        recordCid: cidB,
+        roomId: ROOM,
+        authorDeviceKeyId: DEVICE,
+        deviceSeq: 1,
+        body: bodyB,
+        validation: vr('authorized_provisional'),
+        requires: [depCid],
+      },
+    ]);
+    expect(statuses[0]?.status).toBe('quarantined_missing_dependency');
+    expect(statuses[0]?.missing_cids).toEqual([depCid]);
+    expect(wants).toEqual([{ cid: depCid, cid_kind: 'record', reason: 'missing_dependency' }]);
+    expect(srv.hasObject(cidB)).toBe(true); // durably stored (stage 1)
+    expect(srv.isAccepted(cidB)).toBe(false); // never emitted (§24.2)
+  });
+
+  it('rejects records trapped in a declared-dependency cycle as bad schema', async () => {
+    const srv = new LcapIngestServer('net');
+    const { statuses } = await srv.commitBatch([
+      {
+        recordCid: cidA,
+        roomId: ROOM,
+        authorDeviceKeyId: DEVICE,
+        deviceSeq: 0,
+        body: bodyA,
+        validation: vr('authorized_provisional'),
+        requires: [cidB],
+      },
+      {
+        recordCid: cidB,
+        roomId: ROOM,
+        authorDeviceKeyId: DEVICE,
+        deviceSeq: 1,
+        body: bodyB,
+        validation: vr('authorized_provisional'),
+        requires: [cidA],
+      },
+    ]);
+    expect(statuses.every((s) => s.status === 'rejected_bad_schema')).toBe(true);
+    expect(srv.roomSize(ROOM)).toBe(0);
+  });
+
+  it('treats an already-accepted dependency as satisfied across batches', async () => {
+    const srv = new LcapIngestServer('net');
+    await srv.commitBatch([
+      {
+        recordCid: cidA,
+        roomId: ROOM,
+        authorDeviceKeyId: DEVICE,
+        deviceSeq: 0,
+        body: bodyA,
+        validation: vr('authorized_provisional'),
+      },
+    ]);
+    const { statuses } = await srv.commitBatch([
+      {
+        recordCid: cidB,
+        roomId: ROOM,
+        authorDeviceKeyId: DEVICE,
+        deviceSeq: 1,
+        body: bodyB,
+        validation: vr('authorized_provisional'),
+        requires: [cidA],
+      },
+    ]);
+    expect(statuses[0]?.status).toBe('accepted');
+    expect(srv.roomSize(ROOM)).toBe(2);
+  });
+});
