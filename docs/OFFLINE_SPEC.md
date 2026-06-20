@@ -2903,17 +2903,18 @@ Shipped as the `@licio/lcap` package (WS-R.0; `docs/lcap/README.md`).
 
 ### Phase 1 — PWA outbox and HTTPS exchange
 
-The identity/record **protocol core** for this phase ships in `@licio/lcap`
-(WS-R.1/R.2); the IndexedDB, endpoint, server-ingestion, and UI bindings below
-are the remaining (I/O) deliverable.
+The identity/record + **sync-decision** protocol core for this phase ships in
+`@licio/lcap` (WS-R.1/R.2 and the WS-R.6/R.7 pulse/exchange/reconciliation
+logic); the IndexedDB, HTTP endpoint, server-ingestion, and UI bindings below are
+the remaining (I/O) deliverable.
 
 ```text
 [x] device enrollment             (cert core: packages/lcap/src/identity/cert.ts)
 [x] capability issuance           (core: packages/lcap/src/identity/capability.ts)
 [x] offline text event signing    (record + proof core: packages/lcap/src/records + cose)
 [ ] IndexedDB lcap_v2 stores
-[ ] pulse/exchange endpoint
-[ ] idempotent server ingestion
+[ ] pulse/exchange endpoint       (decision core: packages/lcap/src/sync — pulse/exchange/budgets/interests/wants; HTTP endpoint = WS-R.12.4)
+[ ] idempotent server ingestion   (idempotency keying: packages/lcap/src/sync/ingest.ts; durable server store = WS-R.12)
 [ ] trust projection UI           (projection logic ships in packages/lcap/src/validate; UI pending)
 ```
 

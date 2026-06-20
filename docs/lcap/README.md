@@ -27,6 +27,11 @@ I/O-free, exhaustively-tested logic:
   partial import + quarantine, bundle manifest);
 - **WS-R.5** the anti-starvation lane scheduler (byte reservations, DRR, the
   clamped finite score) + the `check:lcap-scheduler` CI gate;
+- **WS-R.6** the sync-protocol decision plane (the pulse + frontier diff, exchange
+  request/response assembly, resource/privacy budget shrinking, privacy-scoped
+  interests, wants + resumable range fetch, and idempotent-ingestion keying);
+- **WS-R.7** reconciliation (the §17.1 frontier-first order and `minimalClosure` —
+  the §17.5 closure the lane scheduler now consumes);
 - **WS-R.8** trust projection — the single `validate(record)` entry point over the
   §18.2 state lattice;
 - **WS-R.9** the RFC 9162 Merkle / checkpoint plane (inclusion + consistency
@@ -35,14 +40,15 @@ I/O-free, exhaustively-tested logic:
 - **WS-R.13** conflict-table dispatch + the trust/safety-aware visible-thread
   projection.
 
-The remaining WS-R cards are predominantly **I/O integration** — the `lcap_v2`
+The remaining WS-R cards are **I/O integration** — the `lcap_v2`
 IndexedDB layer (WS-R.11), the server ingestion/reconciliation routes + DB schema
-(WS-R.12), the sync-protocol wire orchestration (WS-R.6/R.7), the DoS/privacy
+(WS-R.12) that drive this decision plane over the wire, the DoS/privacy
 controls (WS-R.14), the transport profiles (WS-R.15), the WS-S encryption-envelope
 seam (WS-R.16), the client surface (WS-R.17), and the network simulator
 (WS-R.18) — plus the entire WS-S private-rooms plane.  Those bind this pure core
 to Postgres / IndexedDB / Hono / the browser and are **not yet started** (see
-"Status" below).
+"Status" below).  The optional, non-authoritative set-reconciliation filters
+(WS-R.7.3) are deferred by the spec itself.
 
 ## What is implemented (WS-R.0 — `packages/lcap`)
 
@@ -105,6 +111,8 @@ packages/lcap/
     ├── block/                    -- descriptor, fixed-size chunking, attachment split, compression
     ├── pack/                     -- uvarint, streaming writer/reader, partial import, manifest
     ├── scheduler/               -- reservations, candidate closure, DRR allocator, clamped score
+    ├── sync/                     -- §16/§17 sync-decision plane: closure, frontiers, pulse,
+    │                                reconcile order, budgets, interests, wants/resume, exchange
     ├── checkpoint/              -- RFC 9162 merkle, room log, checkpoint, inclusion/consistency, witness
     ├── validate/                -- the §18 trust-state lattice + the single validate() entry point
     ├── liveness/                -- liveness state machine, receipts, durable-outbox logic
@@ -115,7 +123,7 @@ packages/lcap/
 
 ## Testing
 
-`pnpm --filter @licio/lcap test` runs the suite standalone (≈18 files, ~166 tests
+`pnpm --filter @licio/lcap test` runs the suite standalone (≈30 files, ~246 tests
 at the time of writing). Highlights: per-major-type CBOR byte assertions + the
 §9.1.5 integer table + the full decode rejection matrix; CID known-answer
 grounding (SHA-256 of "" and "abc"); the ES256 low-S boundary matrix and the
@@ -126,9 +134,14 @@ compression-bomb abort; the packfile round-trip + cap + tamper matrix; the
 **exhaustive RFC 9162 Merkle** inclusion (all leaves, sizes 1-9) and consistency
 (all first/second pairs) proofs with fork/rewrite detection; the full
 `validate()` trust-projection staged matrix incl. the no-transport-trust
-property; and the scheduler's anti-starvation invariants (also enforced by the
-named `pnpm check:lcap-scheduler` CI gate over adversarial fixtures). Package
-coverage is comfortably above the 80% global gate.
+property; the scheduler's anti-starvation invariants (also enforced by the
+named `pnpm check:lcap-scheduler` CI gate over adversarial fixtures); and the
+sync-decision plane — `minimalClosure` sufficiency/cycle-safety + scheduler
+integration, the frontier behind/ahead matrix, pulse build/apply, the §17.1
+reconciliation ordering, monotonic budget shrinking, the interest privacy/leak
+matrix, want priority + resume ranges, the idempotency pre-gate, and exchange
+assembly + status handling. Package coverage is comfortably above the 80% global
+gate.
 
 Browser↔Node crypto-interop vector replay (the gated WS-R.0.5b leg) is wired
 through the same committed vectors; a Playwright/WebCrypto cross-runtime harness
@@ -144,11 +157,12 @@ is a later card (the package is already runtime-agnostic via `runtime.ts`).
 | WS-R.3 — blocks, chunking, attachment laziness, compression | 3.1 – 3.4 | **Shipped** |
 | WS-R.4 — packfile / `.licio-bundle` (writer, reader, import, manifest) | 4.1 – 4.4 | **Shipped** |
 | WS-R.5 — lane scheduler + `check:lcap-scheduler` gate | 5.1 – 5.4 | **Shipped** |
+| WS-R.6 — sync protocol (pulse, exchange, interests, wants, budgets, idempotency) | 6.1 – 6.5 | **Shipped** (decision plane; HTTP wire = WS-R.12.4) |
+| WS-R.7 — reconciliation (frontier-first order, `minimalClosure`) | 7.1 – 7.2 | **Shipped** (7.3 set-recon filters deferred by spec) |
 | WS-R.8 — trust projection (`validate`) | 8.1 – 8.3 | **Shipped** |
 | WS-R.9 — Merkle / checkpoint / inclusion / consistency / witness | 9.2 – 9.4 | **Shipped** (9.1 server-append logic core; DB binding in WS-R.12) |
 | WS-R.10 — liveness, receipts, durable outbox | 10.1 – 10.3 | **Shipped** (IndexedDB binding in WS-R.11) |
 | WS-R.13 — conflict dispatch + visible-thread projection | 13.1 – 13.2 | **Shipped** |
-| WS-R.6/R.7 — sync protocol + reconciliation | — | Planned (closure resolver consumed by R.5.2a; wire orchestration not yet) |
 | WS-R.11/R.12/R.14 — IndexedDB, server ingestion + DB schema, DoS controls | — | Planned (I/O integration) |
 | WS-R.15/R.16/R.17/R.18 — transports, encryption envelope, client UI, simulator | — | Planned |
 | WS-S — Private P2P Rooms (E2EE) | all | Planned (`docs/PRIVATE_SPEC.md`) |
