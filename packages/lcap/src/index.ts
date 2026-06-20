@@ -19,6 +19,7 @@
 // hand-rolled (OFFLINE_SPEC §31.1).  Only the `schemas/` layer uses zod, the
 // monorepo's normative schema baseline (OFFLINE_SPEC line 102 names the
 // `packages/lcap/src/schemas/` zod schemas as normative).
+export * from './block/index.js';
 export * from './cbor/index.js';
 export * from './checkpoint/index.js';
 export * from './cid/index.js';
@@ -26,4 +27,6 @@ export * from './cose/index.js';
 export * from './identity/index.js';
 export * from './priority.js';
 export * from './records/index.js';
+export * from './scheduler/index.js';
 export * from './schemas/index.js';
+export * from './validate/index.js';

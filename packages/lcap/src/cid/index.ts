@@ -76,7 +76,8 @@ export interface ParsedCid {
   readonly digest: Uint8Array;
 }
 
-async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
+/** SHA-256 of `bytes` as a 32-byte digest (the primitive behind every CID). */
+export async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
   const digest = await getSubtle().digest('SHA-256', toBufferSource(bytes));
   return new Uint8Array(digest);
 }
