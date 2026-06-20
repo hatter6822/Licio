@@ -25,6 +25,11 @@ const ALLOWED_WORKSPACE_DEPS: Record<string, string[]> = {
   // elections, ratification, lawmaking — NEVER @licio/db (the governance math has
   // no database access by construction; the pay-to-rank firewall posture).
   '@licio/governance': ['@licio/shared'],
+  // Pure LCAP protocol core (WS-R): deterministic CBOR, CIDs, COSE detached
+  // proofs, schemas, validation — NEVER @licio/db (the offline-availability
+  // protocol library has no database access by construction; the zero-dependency
+  // core carries only WebCrypto + Compression Streams, OFFLINE_SPEC §31.1).
+  '@licio/lcap': ['@licio/shared'],
   web: ['@licio/shared', '@licio/invariants', '@licio/ai-governance'],
   api: [
     '@licio/shared',
@@ -43,6 +48,7 @@ const WORKSPACE_PACKAGES = [
   '@licio/ranking',
   '@licio/ai-governance',
   '@licio/governance',
+  '@licio/lcap',
 ];
 
 const PACKAGE_PATHS: Record<string, string> = {
@@ -52,6 +58,7 @@ const PACKAGE_PATHS: Record<string, string> = {
   '@licio/ranking': resolve(ROOT, 'packages/ranking/package.json'),
   '@licio/ai-governance': resolve(ROOT, 'packages/ai-governance/package.json'),
   '@licio/governance': resolve(ROOT, 'packages/governance/package.json'),
+  '@licio/lcap': resolve(ROOT, 'packages/lcap/package.json'),
   web: resolve(ROOT, 'apps/web/package.json'),
   api: resolve(ROOT, 'apps/api/package.json'),
 };
@@ -63,6 +70,7 @@ const SOURCE_DIRS: Record<string, string> = {
   '@licio/ranking': resolve(ROOT, 'packages/ranking/src'),
   '@licio/ai-governance': resolve(ROOT, 'packages/ai-governance/src'),
   '@licio/governance': resolve(ROOT, 'packages/governance/src'),
+  '@licio/lcap': resolve(ROOT, 'packages/lcap/src'),
   web: resolve(ROOT, 'apps/web/src'),
   api: resolve(ROOT, 'apps/api/src'),
 };

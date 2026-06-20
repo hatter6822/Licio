@@ -278,8 +278,14 @@ WS-M proposal-data wiring; a real model backend; the WS-P experiment-log consume
 are tracked in `docs/ai-governance/README.md`.  Workstreams WS-L
 through WS-P are planned (planning documents exist under `docs/planning/`;
 implementation not yet started, beyond the WS-O.4.5 adversarial suite and that
-E2E-harness seed).  See
-"Implementation roadmap" below for the full status table.
+E2E-harness seed).  The extension workstream **WS-R** (Decentralized Data Plane,
+Part I — offline content availability / LCAP v0.2) has begun: its **WS-R.0
+protocol foundation** is shipped as the new `@licio/lcap` package — a
+zero-dependency core implementing LCAP's deterministic CBOR (LDC), content-
+addressed CIDs, COSE_Sign1 detached ES256 low-S proofs, downgrade-resistant
+suite agility, and strict closed-schema records/proofs, all conformance-vector-
+pinned (`docs/lcap/README.md`); WS-R.1–18 and the WS-S private-rooms plane remain
+planned.  See "Implementation roadmap" below for the full status table.
 
 ## Build and run
 
@@ -333,6 +339,7 @@ pnpm --filter @licio/invariants build  # build invariants package
 pnpm --filter @licio/ranking build  # build ranking package
 pnpm --filter @licio/ai-governance build  # build AI-governance package
 pnpm --filter @licio/governance build  # build AI-governed-rooms domain package
+pnpm --filter @licio/lcap build     # build LCAP offline-availability protocol core
 ```
 
 `package.json` (root and per-workspace) is the source of truth for
@@ -832,7 +839,7 @@ licio/
 │           ├── pipeline.ts              --   the deterministic constrained-optimization
 │           │                                 core (serving AND replay execute this)
 │           └── __tests__/               --   124 deterministic unit/property tests
-│   └── ai-governance/           -- WS-K pure AI-governance domain (no I/O; browser-safe)
+│   ├── ai-governance/           -- WS-K pure AI-governance domain (no I/O; browser-safe)
 │       └── src/
 │           ├── schemas/                 --   model card, registry, NIST/ISO risk assessment,
 │           │                                 inventory, prohibited-use, data lineage, output
@@ -850,6 +857,15 @@ licio/
 │           ├── labels.ts                --   the upgrade-only provenance label ladder
 │           ├── canonical-json.ts        --   deterministic config-hash serialization
 │           └── __tests__/               --   ~13 deterministic unit/property suites
+│   └── lcap/                    -- WS-R LCAP v0.2 protocol core (no I/O; zero npm deps in
+│       └── src/                 --   the codec/CID/COSE core; browser-safe; NEVER @licio/db)
+│           ├── runtime.ts              --   WebCrypto adapter (no node: import leak)
+│           ├── cbor/                   --   LDC deterministic CBOR (encode/decode/errors/types)
+│           ├── cid/                    --   §9.2 CID construction + RFC 4648 base32
+│           ├── cose/                   --   aad, ecdsa (low-S), keys, suites, sign1 (COSE_Sign1)
+│           ├── schemas/                --   strict zod records/proofs + LDC codec pairing
+│           ├── test-vectors/           --   normative golden corpus (cbor/cid/sign1 .json)
+│           └── __tests__/              --   unit + conformance-replay + determinism properties
 ├── scripts/                     -- build validation and security gates
 │   ├── validate-build.ts        --   post-build orchestrator
 │   ├── check-bundle-size.ts     --   initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz
@@ -920,6 +936,12 @@ duplicated here.
                             NEVER @licio/db — the WS-U AI-governed-rooms domain
                             (policy DSL, kernel, capabilities, elections) has
                             no database access by construction)
+@licio/lcap                (depends on @licio/shared, zod; browser-safe,
+                            NEVER @licio/db — the WS-R LCAP protocol core
+                            (deterministic CBOR, CIDs, COSE detached proofs,
+                            schemas) has no database access by construction;
+                            the codec/CID/COSE core carries zero npm imports —
+                            WebCrypto + a hand-rolled CBOR/COSE subset only)
 
 apps/web                   (depends on @licio/shared, @licio/invariants,
                             @licio/ai-governance; NEVER @licio/db — enforced
@@ -1334,7 +1356,7 @@ Status:
 | WS-O | Security and reliability | Planned (WS-O.4.5 adversarial hardening shipped) |
 | WS-P | Experimentation and launch | Planned |
 | WS-Q | Content–room ownership and visibility | Complete |
-| WS-R | Offline content availability (LCAP v0.2) | Planned (extension; `docs/OFFLINE_SPEC.md`) |
+| WS-R | Offline content availability (LCAP v0.2) | In progress (extension; `docs/OFFLINE_SPEC.md`) — **WS-R.0 protocol foundation (`@licio/lcap`) shipped**: deterministic CBOR (LDC), CID construction, COSE_Sign1 detached ES256 low-S proofs, downgrade-resistant suite agility, and strict closed-schema records/proofs, all conformance-vector-pinned (`docs/lcap/README.md`); WS-R.1–18 planned |
 | WS-S | Private P2P rooms (E2EE) | Planned (extension; `docs/PRIVATE_SPEC.md`) |
 | WS-T | Conversation as comments | Complete |
 | WS-U | AI-governed rooms (redesign) | Doctrine ratified (Stage 0) + runtime Stages 1-4 & 5-core shipped: the `@licio/governance` pure domain (policy DSL, proof-carrying kernel, capabilities, elections, member ratification, lawmaking facilitation), the `knomosis` schema + migrations `0035`–`0038` (isolation-proven), the `GovernanceService` (member-gated/law-pack-driven seat elections, model admission + member ratification vote, bounded moderation agent with real author-history + author statement-of-reasons notices, deterministic lawmaking facilitation, kernel-backed treasury), and the rate-limited, uuid-validated, room-content-bar-gated `/v1/rooms/*` governance + ratification + lawmaking routes (ballots room-bound + close-time-enforced; one-open-ratification atomic); residuals (the WS-M lawmaking trigger + on-chain election mode, the remaining web surfaces, gated Drizzle adapters) tracked in `docs/governance/README.md` |
@@ -1495,6 +1517,7 @@ file counts at current state:
 | packages/ranking | ~7 (denylist + versioned-artifact pinning, strict schemas, §5.5 profile fuzzing + baseline weights, §5.4 arithmetic, penalties/constraints incl. tie enforcement, dedup/balancing, templates + x-pseudo localization, pipeline determinism, replay diff) | node | `pnpm --filter @licio/ranking test` |
 | packages/ai-governance | ~13 (the prohibited-use guard + §24.5 matrix, the upgrade-only label ladder, the canonical inventory + risk assessments, the bias-audit math (two-proportion z-test + small-cohort), hallucination/safety/red-team, the harness selection/decision/reproducibility, the §24.3 summary-quality constraints + renderer, accuracy, canonical JSON, and the schema refinements) | node | `pnpm --filter @licio/ai-governance test` |
 | packages/governance | ~5 (WS-U AI-governed-rooms domain: the moderation policy DSL + interpreter, the proof-carrying treasury kernel + investment bands, the capability model + derivation (floor-reserved structural disjointness), the quorum-gated fail-safe election tally, and the canonical-JSON content addressing) | node | `pnpm --filter @licio/governance test` |
+| packages/lcap | ~10 (WS-R LCAP v0.2 protocol core: the LDC deterministic-CBOR encoder/decoder + the §9.1.5 integer table + the full decode rejection matrix, CID construction (SHA-256 known-answer grounded) + RFC 4648 base32, ES256 low-S + the malleability-twin defense, COSE_Sign1 build/verify + the §10.2.4 six-step matrix, device-key/COSE_Key round-trip, suite agility/downgrade, strict closed-schema records/proofs + LDC codec pairing, the conformance-corpus replay, and the P1/P2/P3 determinism properties) | node | `pnpm --filter @licio/lcap test` |
 | scripts | ~4 | node | via root `pnpm test` (policy project) |
 
 WS-D, WS-E, WS-F, WS-G, WS-H, and WS-I add **gated** integration tests

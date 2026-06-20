@@ -2891,12 +2891,14 @@ unless the exact meaning is shown.
 
 ### Phase 0 — Record identity and proofs
 
+Shipped as the `@licio/lcap` package (WS-R.0; `docs/lcap/README.md`).
+
 ```text
-[ ] deterministic CBOR v2 profile
-[ ] record_cid independent of proof bytes
-[ ] detached proof object
-[ ] ES256 low-S test vectors
-[ ] strict zod schemas
+[x] deterministic CBOR v2 profile        (packages/lcap/src/cbor)
+[x] record_cid independent of proof bytes (packages/lcap/src/cid + cose; property-pinned)
+[x] detached proof object                 (COSE_Sign1, packages/lcap/src/cose/sign1.ts)
+[x] ES256 low-S test vectors              (packages/lcap/src/cose/ecdsa.ts + test-vectors/sign1.json)
+[x] strict zod schemas                    (packages/lcap/src/schemas)
 ```
 
 ### Phase 1 — PWA outbox and HTTPS exchange

@@ -4,6 +4,8 @@
 
 > This document **supersedes and replaces** the two former planning documents `19-offline-content-availability.md` (WS-R) and `20-private-p2p-rooms.md` (WS-S). All `WS-R.*` and `WS-S.*` card IDs, spec references (`Ref:`), acceptance criteria, and testing notes are preserved **verbatim**; only the surrounding framing is unified. The two source specifications (`docs/OFFLINE_SPEC.md`, `docs/PRIVATE_SPEC.md`) remain the normative sources and are unchanged by this merge.
 
+> **Implementation status (current).** **WS-R.0 (Foundations: deterministic encoding, CIDs, and the crypto profile) is COMPLETE** — cards WS-R.0.1 → WS-R.0.8 ship as the new zero-dependency `@licio/lcap` workspace package (the LDC deterministic-CBOR codec + conformance corpus, CID construction + base32, the COSE detached-proof envelope with ES256 low-S canonicalization, device-key/COSE_Key handling + the runtime adapter, downgrade-resistant suite agility, and the strict closed-schema records/proofs paired with LDC decode). See `docs/lcap/README.md` for the per-card mapping and `packages/lcap/` for the code (10 test files, conformance-vector-pinned). The remaining WS-R cards (WS-R.1 identity-chain validation onward through WS-R.18) and the entire WS-S private-rooms plane are **not yet started**; the next card up the dependency graph is **WS-R.1**.
+
 ---
 
 ## Overview — two planes, one upgrade

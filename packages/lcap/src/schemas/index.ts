@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+export {
+  type ConsistencyProofRecordV2,
+  consistencyProofRecordV2Schema,
+  type InclusionProofRecordV2,
+  inclusionProofRecordV2Schema,
+  type RoomCheckpointRecordV2,
+  roomCheckpointRecordV2Schema,
+  treeAlgorithmSchema,
+  type WitnessStatementRecordV2,
+  witnessStatementRecordV2Schema,
+} from './checkpoint.js';
+export {
+  decodeAndRouteRecord,
+  decodeProof,
+  decodeWithSchema,
+  encodeWithSchema,
+  type LcapRecordV2,
+  ldcToPlain,
+  plainToLdc,
+  RecordSchemaError,
+  type RecordSchemaErrorReason,
+} from './codec.js';
+export {
+  anyCidSchema,
+  blockCidSchema,
+  bytesSchema,
+  chunkCidSchema,
+  cidSchemaOf,
+  compressionIdSchema,
+  epochMsSchema,
+  type LcapOperation,
+  type LcapVisibilityScope,
+  lcapOperationSchema,
+  lcapRecordKindSchema,
+  prioritySchema,
+  recordCidSchema,
+  uintSchema,
+  visibilityScopeSchema,
+} from './common.js';
+export {
+  type DetachedProofV2Record,
+  detachedProofV2Schema,
+  proofKindSchema,
+  proofScopeSchema,
+} from './proof.js';
+export {
+  type BlockDescriptorV2,
+  blockDescriptorV2Schema,
+  blockRoleSchema,
+  type CapabilityRecordV2,
+  type ChunkDescriptorV2,
+  type ContributionEventRecordV2,
+  capabilityRecordV2Schema,
+  chunkDescriptorV2Schema,
+  chunkingDescriptorV2Schema,
+  compressionDescriptorV2Schema,
+  contributionEventRecordV2Schema,
+  contributionEventTypeSchema,
+  type DeviceCertificateRecordV2,
+  deviceCertificateRecordV2Schema,
+  type ForkEvidenceV2,
+  forkEvidenceV2Schema,
+  gossipContextSchema,
+  type RevocationRecordV2,
+  revocationRecordV2Schema,
+} from './records.js';
