@@ -50,8 +50,8 @@ describe('LcapIngestServer.commitRecord (§24.1 stages 1+3)', () => {
     expect(res.status.status).toBe('accepted');
     expect(res.roomSeq).toBe(0);
     expect(res.receiptType).toBe('accepted');
-    expect(srv.roomSize(ROOM)).toBe(1);
-    expect(srv.isAccepted(cidA)).toBe(true);
+    expect(await srv.roomSize(ROOM)).toBe(1);
+    expect(await srv.isAccepted(cidA)).toBe(true);
   });
 
   it('is idempotent by record_cid: a re-commit is already_have and never re-appends', async () => {
@@ -68,7 +68,7 @@ describe('LcapIngestServer.commitRecord (§24.1 stages 1+3)', () => {
     const again = await srv.commitRecord(input);
     expect(again.status.status).toBe('already_have');
     expect(again.roomSeq).toBe(0);
-    expect(srv.roomSize(ROOM)).toBe(1); // exactly one canonical entry
+    expect(await srv.roomSize(ROOM)).toBe(1); // exactly one canonical entry
   });
 
   it('rejects a record whose body does not match its claimed CID, storing nothing', async () => {
@@ -82,8 +82,8 @@ describe('LcapIngestServer.commitRecord (§24.1 stages 1+3)', () => {
       validation: vr('authorized_provisional'),
     });
     expect(res.status.status).toBe('rejected_bad_cid');
-    expect(srv.hasObject(cidA)).toBe(false);
-    expect(srv.roomSize(ROOM)).toBe(0);
+    expect(await srv.hasObject(cidA)).toBe(false);
+    expect(await srv.roomSize(ROOM)).toBe(0);
   });
 
   it('quarantines a record with unmet dependencies, emitting wants and not appending', async () => {
@@ -100,8 +100,8 @@ describe('LcapIngestServer.commitRecord (§24.1 stages 1+3)', () => {
     expect(res.status.missing_cids).toEqual([depCid]);
     expect(res.wants).toEqual([{ cid: depCid, cid_kind: 'record', reason: 'missing_dependency' }]);
     expect(res.receiptType).toBe('quarantined');
-    expect(srv.roomSize(ROOM)).toBe(0); // §24.2 — never emitted
-    expect(srv.isAccepted(cidA)).toBe(false);
+    expect(await srv.roomSize(ROOM)).toBe(0); // §24.2 — never emitted
+    expect(await srv.isAccepted(cidA)).toBe(false);
   });
 
   it('detects a device fork: a distinct CID at an accepted (key, seq) yields fork evidence', async () => {
@@ -124,8 +124,8 @@ describe('LcapIngestServer.commitRecord (§24.1 stages 1+3)', () => {
     });
     expect(fork.status.status).toBe('conflict_device_fork');
     expect(fork.receiptType).toBeUndefined();
-    expect(srv.roomSize(ROOM)).toBe(1); // no second canonical record
-    expect(srv.getForkEvidence()).toEqual([
+    expect(await srv.roomSize(ROOM)).toBe(1); // no second canonical record
+    expect(await srv.getForkEvidence()).toEqual([
       { authorDeviceKeyId: DEVICE, deviceSeq: 5, existingCid: cidA, conflictingCid: cidB },
     ]);
   });
@@ -142,7 +142,7 @@ describe('LcapIngestServer.commitRecord (§24.1 stages 1+3)', () => {
     });
     expect(res.status.status).toBe('rejected_revoked');
     expect(res.receiptType).toBe('rejected');
-    expect(srv.roomSize(ROOM)).toBe(0);
+    expect(await srv.roomSize(ROOM)).toBe(0);
   });
 });
 
@@ -170,9 +170,9 @@ describe('LcapIngestServer.commitBatch (§24.4 ordered batch ingestion)', () => 
     ]);
     // Both accepted; the room log records the parent (seq 0) before the child (seq 1).
     expect(statuses.every((s) => s.status === 'accepted')).toBe(true);
-    expect(srv.roomSize(ROOM)).toBe(2);
-    expect(srv.isAccepted(cidA)).toBe(true);
-    expect(srv.isAccepted(cidB)).toBe(true);
+    expect(await srv.roomSize(ROOM)).toBe(2);
+    expect(await srv.isAccepted(cidA)).toBe(true);
+    expect(await srv.isAccepted(cidB)).toBe(true);
   });
 
   it('quarantines a record with an absent dependency and surfaces a de-duplicated want', async () => {
@@ -191,8 +191,8 @@ describe('LcapIngestServer.commitBatch (§24.4 ordered batch ingestion)', () => 
     expect(statuses[0]?.status).toBe('quarantined_missing_dependency');
     expect(statuses[0]?.missing_cids).toEqual([depCid]);
     expect(wants).toEqual([{ cid: depCid, cid_kind: 'record', reason: 'missing_dependency' }]);
-    expect(srv.hasObject(cidB)).toBe(true); // durably stored (stage 1)
-    expect(srv.isAccepted(cidB)).toBe(false); // never emitted (§24.2)
+    expect(await srv.hasObject(cidB)).toBe(true); // durably stored (stage 1)
+    expect(await srv.isAccepted(cidB)).toBe(false); // never emitted (§24.2)
   });
 
   it('rejects records trapped in a declared-dependency cycle as bad schema', async () => {
@@ -218,7 +218,7 @@ describe('LcapIngestServer.commitBatch (§24.4 ordered batch ingestion)', () => 
       },
     ]);
     expect(statuses.every((s) => s.status === 'rejected_bad_schema')).toBe(true);
-    expect(srv.roomSize(ROOM)).toBe(0);
+    expect(await srv.roomSize(ROOM)).toBe(0);
   });
 
   it('treats an already-accepted dependency as satisfied across batches', async () => {
@@ -245,7 +245,7 @@ describe('LcapIngestServer.commitBatch (§24.4 ordered batch ingestion)', () => 
       },
     ]);
     expect(statuses[0]?.status).toBe('accepted');
-    expect(srv.roomSize(ROOM)).toBe(2);
+    expect(await srv.roomSize(ROOM)).toBe(2);
   });
 
   it('aborts the whole import when the §27.2 graph guard rejects (duplicate dependency)', async () => {
@@ -265,6 +265,6 @@ describe('LcapIngestServer.commitBatch (§24.4 ordered batch ingestion)', () => 
     // quarantine), and nothing is stored or wanted.
     expect(statuses[0]?.status).toBe('rejected_bad_schema');
     expect(wants).toEqual([]);
-    expect(srv.hasObject(cidB)).toBe(false);
+    expect(await srv.hasObject(cidB)).toBe(false);
   });
 });

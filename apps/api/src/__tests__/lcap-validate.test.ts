@@ -47,7 +47,7 @@ describe('LcapIngestServer — server-computed validation (R.12.1b)', () => {
     const res = await srv.commitRecord(base());
     expect(res.status.status).toBe('accepted');
     expect(res.roomSeq).toBe(0);
-    expect(srv.isAccepted(fx.recordCid)).toBe(true);
+    expect(await srv.isAccepted(fx.recordCid)).toBe(true);
   });
 
   it('quarantines and wants the capability when it is not registered', async () => {
@@ -56,7 +56,7 @@ describe('LcapIngestServer — server-computed validation (R.12.1b)', () => {
     expect(res.status.status).toBe('quarantined_missing_dependency');
     expect(res.status.missing_cids).toContain(fx.capabilityCid);
     expect(res.wants.some((w) => w.cid === fx.capabilityCid)).toBe(true);
-    expect(srv.isAccepted(fx.recordCid)).toBe(false);
+    expect(await srv.isAccepted(fx.recordCid)).toBe(false);
   });
 
   it('rejects a record signed by a key other than its certified device key', async () => {
@@ -72,7 +72,7 @@ describe('LcapIngestServer — server-computed validation (R.12.1b)', () => {
     });
     const res = await srv.commitRecord({ ...base(), proofs: [forgedProof] });
     expect(res.status.status).toBe('rejected_bad_signature');
-    expect(srv.isAccepted(fx.recordCid)).toBe(false);
+    expect(await srv.isAccepted(fx.recordCid)).toBe(false);
   });
 
   it('rejects a record whose device key has been revoked', async () => {
@@ -88,13 +88,13 @@ describe('LcapIngestServer — server-computed validation (R.12.1b)', () => {
     });
     const res = await srv.commitRecord(base());
     expect(res.status.status).toBe('rejected_revoked');
-    expect(srv.isAccepted(fx.recordCid)).toBe(false);
+    expect(await srv.isAccepted(fx.recordCid)).toBe(false);
   });
 
   it('computes the verdict per record inside commitBatch (no injected verdicts)', async () => {
     const srv = await serverWith();
     const { statuses } = await srv.commitBatch([base()]);
     expect(statuses[0]?.status).toBe('accepted');
-    expect(srv.roomSize(ROOM)).toBe(1);
+    expect(await srv.roomSize(ROOM)).toBe(1);
   });
 });

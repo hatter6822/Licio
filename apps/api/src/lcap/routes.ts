@@ -82,19 +82,19 @@ function parseRange(
   return { start, end };
 }
 
-function serveObject(
+async function serveObject(
   server: LcapIngestServer,
   kind: ContentKind,
   cid: string,
   rangeHeader?: string,
-): Response {
+): Promise<Response> {
   // A malformed CID is a non-retriable 400 (§22.1.1) — fail before any lookup.
   try {
     parseCid(cid);
   } catch {
     return json(400, { error: 'bad_cid' });
   }
-  const obj = server.getObject(cid);
+  const obj = await server.getObject(cid);
   if (!obj || obj.kind !== kind) {
     return json(404, { error: 'not_found' });
   }
@@ -169,7 +169,7 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
   const contributions: CommitRecordInput[] = [];
   for (const [cid, frame] of frames) {
     const cidKind = FRAME_CID_KIND[frame.frameKind];
-    const had = server.hasObject(cid);
+    const had = await server.hasObject(cid);
     const stored = await server.putObject(cid, cidKind, frame.payload);
     if (!stored) {
       statuses.push({ cid, cid_kind: cidKind, status: 'rejected_bad_cid' });

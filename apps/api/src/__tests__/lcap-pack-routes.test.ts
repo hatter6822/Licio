@@ -81,7 +81,7 @@ describe('POST /api/lcap/v2/packs — bundle import (WS-R.12.4)', () => {
     expect(data.statuses).toContainEqual(
       expect.objectContaining({ cid: fx.recordCid, status: 'accepted' }),
     );
-    expect(srv.isAccepted(fx.recordCid)).toBe(true);
+    expect(await srv.isAccepted(fx.recordCid)).toBe(true);
   });
 
   it('durably stores proof + block frames so they are fetchable via the GET routes', async () => {

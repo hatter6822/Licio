@@ -1,24 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// In-memory server-side LCAP ingestion (OFFLINE_SPEC §24.1, WS-R.12.1a/c binding).
-// Binds the pure `ingestRecord` commit-stage decision (@licio/lcap) to real,
-// stateful server I/O: a content-addressed store (stage 1 — CID-verified
-// durability), the per-room canonical acceptance log (`RoomLog`), an acceptance
-// index (idempotency by `record_cid`), and a device-sequence index (authoritative
-// server-side fork detection — never the client's local accounting).  The
-// validation stage (R.12.1b) runs in the caller and is supplied as a
-// `ValidationResult`; the Postgres binding + the Hono routes (WS-R.12.2/12.4) are
-// the remaining I/O cards.  In-memory by design — the project ships in-memory
-// stores first, then gated Drizzle adapters.
+// Server-side LCAP ingestion engine (OFFLINE_SPEC §24.1, WS-R.12.1a/b/c binding).
+// Binds the pure `ingestRecord` commit-stage decision + the shared `validate()`
+// (@licio/lcap) to the durable `LcapServerStore` boundary (store.ts): a
+// content-addressed store (stage 1 — CID-verified durability), the per-room
+// canonical acceptance log, an acceptance index (idempotency by `record_cid`), and
+// a device-sequence index (authoritative server-side fork detection — never the
+// client's local accounting).  The store is in-memory by default; the gated
+// Drizzle/Postgres adapter is WS-R.12.2 part 2.  The engine itself holds the
+// registered identity state (certs/capabilities/authority keys/revocations) the
+// §18.3 validation deps read.
 //
-// The §24.2 "never emit before validation" rule is preserved end to end: the room
-// log is written ONLY when `ingestRecord` returns `appendToRoomLog`, which is true
-// only for a freshly-accepted record.
+// The §24.2 "never emit before validation" rule is preserved end to end: the
+// acceptance log is written ONLY when `ingestRecord` returns `appendToRoomLog`,
+// which is true only for a freshly-accepted record.
 
 import {
   type CapabilityBundle,
   type CertificateBundle,
-  type CidKind,
   type ConsensusInput,
   checkDependencyGraph,
   cidFor,
@@ -32,23 +31,21 @@ import {
   type ObjectStatusV2,
   RevocationIndex,
   type RevocationRecordV2,
-  RoomLog,
   resolveIngestionOrder,
   type ValidationResult,
   validate,
   type WantRequestV2,
 } from '@licio/lcap';
+import {
+  type ForkEvidence,
+  InMemoryLcapServerStore,
+  type LcapContentKind,
+  type LcapServerStore,
+  type StoredObject,
+} from './store.js';
 
-/** The Merkle tree algorithm for room logs (RFC 9162, §19.1.1). */
-const TREE_ALGORITHM = 'RFC9162_SHA256' as const;
-
-type ContentKind = Extract<CidKind, 'record' | 'proof' | 'block' | 'chunk'>;
-
-interface StoredObject {
-  readonly kind: ContentKind;
-  readonly bytes: Uint8Array;
-  validationState: 'stored_unverified' | 'server_accepted';
-}
+// The content/acceptance state lives behind the LcapServerStore boundary (store.ts).
+export type { ForkEvidence, StoredObject };
 
 export interface CommitRecordInput {
   /** The claimed record CID (re-verified against `body` before any store). */
@@ -100,25 +97,13 @@ export interface CommitRecordResult {
   readonly roomSeq?: number;
 }
 
-/** Append-only fork evidence (§24.3, WS-R.2.4): two distinct CIDs at one (key, seq). */
-export interface ForkEvidence {
-  readonly authorDeviceKeyId: string;
-  readonly deviceSeq: number;
-  readonly existingCid: string;
-  readonly conflictingCid: string;
-}
-
 /**
- * An in-memory server ingestion engine.  One instance per LCAP network; rooms
- * are created lazily on first accept.  Pure-decision logic lives in
- * `@licio/lcap` — this class owns only the stateful I/O it binds.
+ * A server ingestion engine.  One instance per LCAP network; durable state lives
+ * behind the injected `LcapServerStore` (in-memory by default).  Pure-decision
+ * logic lives in `@licio/lcap` — this class owns the binding + the registered
+ * identity state the §18.3 validation deps read.
  */
 export class LcapIngestServer {
-  private readonly cas = new Map<string, StoredObject>();
-  private readonly rooms = new Map<string, RoomLog>();
-  private readonly accepted = new Set<string>();
-  private readonly deviceSeqIndex = new Map<string, string>();
-  private readonly forkEvidence: ForkEvidence[] = [];
   // Registered identity state backing the §18.3 validation deps (R.12.1b).
   private readonly certs = new Map<string, CertificateBundle>();
   private readonly certKeys = new Map<string, CryptoKey>();
@@ -130,41 +115,42 @@ export class LcapIngestServer {
   /**
    * @param networkId the LCAP network this server serves.
    * @param now a clock for validation freshness (default `Date.now`; injectable in tests).
+   * @param store the durable state backend (default in-memory; the gated Drizzle
+   *   adapter is WS-R.12.2 part 2).
    */
   constructor(
     private readonly networkId: string,
     private readonly now: () => number = () => Date.now(),
+    private readonly store: LcapServerStore = new InMemoryLcapServerStore(networkId),
   ) {}
 
   /** Stage 1 (R.12.1a): CID-verified durable store; idempotent by CID. */
-  async putObject(cid: string, kind: ContentKind, bytes: Uint8Array): Promise<boolean> {
+  async putObject(cid: string, kind: LcapContentKind, bytes: Uint8Array): Promise<boolean> {
     const computed = await cidFor(kind, bytes);
     if (computed !== cid) return false; // rejected_bad_cid — never stored
-    if (!this.cas.has(cid))
-      this.cas.set(cid, { kind, bytes, validationState: 'stored_unverified' });
+    await this.store.storeObject(cid, kind, bytes);
     return true;
   }
 
-  hasObject(cid: string): boolean {
-    return this.cas.has(cid);
+  hasObject(cid: string): Promise<boolean> {
+    return this.store.hasObject(cid);
   }
 
   /** Read a held object's bytes + kind by CID (§29 content fetch), or undefined. */
-  getObject(cid: string): { readonly kind: ContentKind; readonly bytes: Uint8Array } | undefined {
-    const obj = this.cas.get(cid);
-    return obj ? { kind: obj.kind, bytes: obj.bytes } : undefined;
+  getObject(cid: string): Promise<StoredObject | undefined> {
+    return this.store.getObject(cid);
   }
 
-  isAccepted(cid: string): boolean {
-    return this.accepted.has(cid);
+  isAccepted(cid: string): Promise<boolean> {
+    return this.store.isAccepted(cid);
   }
 
-  roomSize(roomId: string): number {
-    return this.rooms.get(roomId)?.size ?? 0;
+  roomSize(roomId: string): Promise<number> {
+    return this.store.roomSize(roomId);
   }
 
-  getForkEvidence(): readonly ForkEvidence[] {
-    return this.forkEvidence;
+  getForkEvidence(): Promise<readonly ForkEvidence[]> {
+    return this.store.listForkEvidence();
   }
 
   // --- R.12.1b: registered identity state + the shared `validate()` assembly ----
@@ -233,26 +219,13 @@ export class LcapIngestServer {
     });
   }
 
-  private room(roomId: string): RoomLog {
-    let log = this.rooms.get(roomId);
-    if (!log) {
-      log = new RoomLog(TREE_ALGORITHM, this.networkId);
-      this.rooms.set(roomId, log);
-    }
-    return log;
-  }
-
-  private static deviceKey(keyId: string, seq: number): string {
-    return `${keyId} ${seq}`;
-  }
-
   /**
    * Stages 1-3 (R.12.1a/b/c): store the body (CID-verified), COMPUTE the verdict
    * via `validate()` when one is not supplied (the real path — `input.proofs` +
    * registered identity state), decide via the pure `ingestRecord`, then — only on
-   * accept — append to the room log, mark `server_accepted`, and claim the device
-   * sequence.  Idempotent by `record_cid`; a distinct CID at an already-claimed
-   * `(device_key, seq)` yields fork evidence and never a second canonical record.
+   * accept — append to the room's acceptance log + claim the device sequence (both
+   * through the store).  Idempotent by `record_cid`; a distinct CID at an
+   * already-claimed `(device_key, seq)` yields fork evidence, never a second record.
    */
   async commitRecord(input: CommitRecordInput): Promise<CommitRecordResult> {
     // Stage 1: CID integrity + durable store (never trust the caller's CID claim).
@@ -278,9 +251,8 @@ export class LcapIngestServer {
 
     // Authoritative (server-side) idempotency + fork detection — independent of
     // the client's local accounting (WS-R.12.3).
-    const alreadyHave = this.accepted.has(input.recordCid);
-    const dkey = LcapIngestServer.deviceKey(input.authorDeviceKeyId, input.deviceSeq);
-    const claimant = this.deviceSeqIndex.get(dkey);
+    const alreadyHave = await this.store.isAccepted(input.recordCid);
+    const claimant = await this.store.getDeviceClaimant(input.authorDeviceKeyId, input.deviceSeq);
     const deviceForkDetected = claimant !== undefined && claimant !== input.recordCid;
 
     const outcome = ingestRecord({
@@ -290,17 +262,14 @@ export class LcapIngestServer {
 
     let roomSeq: number | undefined;
     if (outcome.appendToRoomLog) {
-      roomSeq = await this.room(input.roomId).append(input.recordCid);
-      this.accepted.add(input.recordCid);
-      this.deviceSeqIndex.set(dkey, input.recordCid);
-      const obj = this.cas.get(input.recordCid);
-      if (obj) obj.validationState = 'server_accepted';
+      roomSeq = await this.store.appendAcceptance(input.roomId, input.recordCid);
+      await this.store.setDeviceClaimant(input.authorDeviceKeyId, input.deviceSeq, input.recordCid);
     } else if (alreadyHave) {
-      roomSeq = this.room(input.roomId).seqOf(input.recordCid);
+      roomSeq = await this.store.roomSeqOf(input.roomId, input.recordCid);
     }
 
     if (outcome.gossipForkEvidence && claimant !== undefined) {
-      this.forkEvidence.push({
+      await this.store.appendForkEvidence({
         authorDeviceKeyId: input.authorDeviceKeyId,
         deviceSeq: input.deviceSeq,
         existingCid: claimant,
@@ -358,7 +327,20 @@ export class LcapIngestServer {
       };
     }
 
-    const resolution = resolveIngestionOrder(nodes, (cid) => this.accepted.has(cid));
+    // The resolver's `isHeld` predicate is synchronous, but acceptance lives in the
+    // (async) store; pre-fetch it for every referenced CID.  Intra-batch dependencies
+    // are ordered by the resolver itself, so only EXTERNAL acceptance is queried here.
+    const referenced = new Set<string>();
+    for (const node of nodes) {
+      referenced.add(node.cid);
+      for (const req of node.requires) referenced.add(req);
+    }
+    const acceptedExternally = new Set<string>();
+    for (const cid of referenced) {
+      if (await this.store.isAccepted(cid)) acceptedExternally.add(cid);
+    }
+
+    const resolution = resolveIngestionOrder(nodes, (cid) => acceptedExternally.has(cid));
 
     const statuses: ObjectStatusV2[] = [];
     const wants: WantRequestV2[] = [];
