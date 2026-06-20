@@ -50,6 +50,12 @@ export {
   wantCategory,
 } from './reconcile.js';
 export {
+  type IngestionInput,
+  type IngestionOutcome,
+  type IngestionReceiptType,
+  ingestRecord,
+} from './server-ingest.js';
+export {
   buildResumeWant,
   buildWant,
   effectiveWantPriority,

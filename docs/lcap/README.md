@@ -39,11 +39,17 @@ I/O-free, exhaustively-tested logic:
 - **WS-R.10** the liveness model + receipts + durable-outbox logic;
 - **WS-R.13** conflict-table dispatch + the trust/safety-aware visible-thread
   projection.
+- **WS-R.12.1 (decision core)** the server-ingestion commit-stage orchestrator
+  (`ingestRecord`) — idempotency + the shared `validate()` projected through the
+  §25.1 conflict table + the §24.2 room-log-append gate + receipt issuance +
+  missing-dependency wants; the Postgres CAS/room-log store and the Hono routes
+  (WS-R.12.2/12.4) are the deferred I/O binding.
 
 The remaining WS-R cards are **I/O integration** — the `lcap_v2`
-IndexedDB layer (WS-R.11), the server ingestion/reconciliation routes + DB schema
-(WS-R.12) that drive this decision plane over the wire, the DoS/privacy
-controls (WS-R.14), the transport profiles (WS-R.15), the WS-S encryption-envelope
+IndexedDB layer (WS-R.11), the server CAS/room-log store + DB schema + Hono routes
+(WS-R.12.2/12.4) that drive the shipped ingestion decision over the wire, the
+DoS/privacy controls (WS-R.14), the transport profiles (WS-R.15), the WS-S
+encryption-envelope
 seam (WS-R.16), the client surface (WS-R.17), and the network simulator
 (WS-R.18) — plus the entire WS-S private-rooms plane.  Those bind this pure core
 to Postgres / IndexedDB / Hono / the browser and are **not yet started** (see
@@ -112,7 +118,7 @@ packages/lcap/
     ├── pack/                     -- uvarint, streaming writer/reader, partial import, manifest
     ├── scheduler/               -- reservations, candidate closure, DRR allocator, clamped score
     ├── sync/                     -- §16/§17 sync-decision plane: closure, frontiers, pulse,
-    │                                reconcile order, budgets, interests, wants/resume, exchange
+    │                                reconcile, budgets, interests, wants/resume, exchange, server-ingest
     ├── checkpoint/              -- RFC 9162 merkle, room log, checkpoint, inclusion/consistency, witness
     ├── validate/                -- the §18 trust-state lattice + the single validate() entry point
     ├── liveness/                -- liveness state machine, receipts, durable-outbox logic
@@ -123,7 +129,7 @@ packages/lcap/
 
 ## Testing
 
-`pnpm --filter @licio/lcap test` runs the suite standalone (≈30 files, ~246 tests
+`pnpm --filter @licio/lcap test` runs the suite standalone (≈31 files, ~253 tests
 at the time of writing). Highlights: per-major-type CBOR byte assertions + the
 §9.1.5 integer table + the full decode rejection matrix; CID known-answer
 grounding (SHA-256 of "" and "abc"); the ES256 low-S boundary matrix and the
@@ -139,9 +145,11 @@ named `pnpm check:lcap-scheduler` CI gate over adversarial fixtures); and the
 sync-decision plane — `minimalClosure` sufficiency/cycle-safety + scheduler
 integration, the frontier behind/ahead matrix, pulse build/apply, the §17.1
 reconciliation ordering, monotonic budget shrinking, the interest privacy/leak
-matrix, want priority + resume ranges, the idempotency pre-gate, and exchange
-assembly + status handling. Package coverage is comfortably above the 80% global
-gate.
+matrix, want priority + resume ranges, the idempotency pre-gate, exchange
+assembly + status handling, and the server-ingestion commit-stage decision
+(`ingestRecord`: idempotency, the §25.1 conflict-table projection, the §24.2
+room-log-append gate, receipts, and missing-dependency wants). Package coverage is
+comfortably above the 80% global gate.
 
 Browser↔Node crypto-interop vector replay (the gated WS-R.0.5b leg) is wired
 through the same committed vectors; a Playwright/WebCrypto cross-runtime harness
@@ -163,7 +171,8 @@ is a later card (the package is already runtime-agnostic via `runtime.ts`).
 | WS-R.9 — Merkle / checkpoint / inclusion / consistency / witness | 9.2 – 9.4 | **Shipped** (9.1 server-append logic core; DB binding in WS-R.12) |
 | WS-R.10 — liveness, receipts, durable outbox | 10.1 – 10.3 | **Shipped** (IndexedDB binding in WS-R.11) |
 | WS-R.13 — conflict dispatch + visible-thread projection | 13.1 – 13.2 | **Shipped** |
-| WS-R.11/R.12/R.14 — IndexedDB, server ingestion + DB schema, DoS controls | — | Planned (I/O integration) |
+| WS-R.12 — server ingestion | 12.1 | **Decision core shipped** (`ingestRecord`); CAS/room-log store + Hono routes (12.2/12.4) = I/O |
+| WS-R.11/R.14 — IndexedDB store, DoS controls | — | Planned (I/O integration) |
 | WS-R.15/R.16/R.17/R.18 — transports, encryption envelope, client UI, simulator | — | Planned |
 | WS-S — Private P2P Rooms (E2EE) | all | Planned (`docs/PRIVATE_SPEC.md`) |
 
