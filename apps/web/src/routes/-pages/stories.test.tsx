@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Story detail page (WS-C.1.1b + the WS-I.2.6b explanation surface): the
-// served distribution reason renders verbatim, and the "Inspect your reading
-// signals" link resolves to the reader's OWN Signal Ledger (SPEC §13.5 —
-// explanations are inspectable; the ledger shows the exact bucketed signals
-// behind them). Rendered inside a real (memory-history) router so the link
-// target is proven to RESOLVE, not just to exist as an href.
+// Story detail page (WS-C.1.1b). The page deliberately does NOT surface the
+// per-item distribution reason, the source/provenance line, or an "inspect
+// signals" link: source provenance is a feed-card concern, and readers inspect
+// their OWN reading signals from their profile (`/profile/signal-ledger`). This
+// suite covers the WS-G.3.3 inline comment section — it embeds when the story
+// carries a thread and is omitted otherwise — rendered inside a real
+// (memory-history) router so route resolution is exercised for real.
 import 'fake-indexeddb/auto';
 import type { StoryDetail } from '@licio/shared';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -17,8 +18,7 @@ import {
   Outlet,
   RouterProvider,
 } from '@tanstack/react-router';
-import { render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 const STORY: StoryDetail = {
@@ -60,47 +60,6 @@ vi.mock('../../lib/api.js', async (importOriginal) => {
 const { StoryDetailPage } = await import('./stories.js');
 const { fetchStory } = await import('../../lib/api.js');
 
-function renderStoryPage() {
-  const rootRoute = createRootRoute({ component: Outlet });
-  const storyRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: '/stories/$storyId',
-    component: StoryDetailPage,
-  });
-  const ledgerRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: '/profile/signal-ledger',
-    component: () => <h1>Signal Ledger</h1>,
-  });
-  const router = createRouter({
-    routeTree: rootRoute.addChildren([storyRoute, ledgerRoute]),
-    history: createMemoryHistory({ initialEntries: [`/stories/${STORY.story_id}`] }),
-  });
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
-    <QueryClientProvider client={client}>
-      <RouterProvider router={router as never} />
-    </QueryClientProvider>,
-  );
-  return router;
-}
-
-describe('StoryDetailPage explanation surface (WS-I.2.6b / §13.5)', () => {
-  it('renders the served distribution reason verbatim', async () => {
-    renderStoryPage();
-    expect(await screen.findByText(STORY.distribution_reason)).toBeInTheDocument();
-  });
-
-  it('links "Inspect your reading signals" to the Signal Ledger — and it resolves', async () => {
-    const router = renderStoryPage();
-    const link = await screen.findByRole('link', { name: 'Inspect your reading signals' });
-    expect(link).toHaveAttribute('href', '/profile/signal-ledger');
-    await userEvent.click(link);
-    await waitFor(() => expect(router.state.location.pathname).toBe('/profile/signal-ledger'));
-    expect(await screen.findByRole('heading', { name: 'Signal Ledger' })).toBeInTheDocument();
-  });
-});
-
 describe('StoryDetailPage conversation link (WS-G.3.3)', () => {
   const THREAD_ID = '44444444-4444-4444-8444-444444444444';
 
@@ -111,18 +70,13 @@ describe('StoryDetailPage conversation link (WS-G.3.3)', () => {
       path: '/stories/$storyId',
       component: StoryDetailPage,
     });
-    const ledgerRoute = createRoute({
-      getParentRoute: () => rootRoute,
-      path: '/profile/signal-ledger',
-      component: () => <h1>Signal Ledger</h1>,
-    });
     const threadRoute = createRoute({
       getParentRoute: () => rootRoute,
       path: '/threads/$threadId',
       component: () => <h1>Thread</h1>,
     });
     const router = createRouter({
-      routeTree: rootRoute.addChildren([storyRoute, ledgerRoute, threadRoute]),
+      routeTree: rootRoute.addChildren([storyRoute, threadRoute]),
       history: createMemoryHistory({ initialEntries: [`/stories/${STORY.story_id}`] }),
     });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -145,7 +99,7 @@ describe('StoryDetailPage conversation link (WS-G.3.3)', () => {
     vi.mocked(fetchStory).mockResolvedValueOnce({ ...STORY, thread_id: null });
     renderWithThreadRoute();
     // The story content has loaded…
-    expect(await screen.findByText(STORY.distribution_reason)).toBeInTheDocument();
+    expect(await screen.findByText(STORY.body_summary)).toBeInTheDocument();
     // …but there is no embedded conversation affordance.
     expect(screen.queryByRole('heading', { name: 'Conversation' })).not.toBeInTheDocument();
   });

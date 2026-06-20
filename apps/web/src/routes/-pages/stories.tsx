@@ -5,7 +5,7 @@
 // for the signal processor; opening the in-app reader records a source-open
 // (WS-C.4.2). Source content is rendered by the sandboxed WS-B.2.7 reader.
 import type { StoryDetail } from '@licio/shared';
-import { Link, useNavigate, useParams } from '@tanstack/react-router';
+import { useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { CommentSection } from '../../components/comments/index.js';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
@@ -138,19 +138,6 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 onDismiss={() => setLoopPromptDismissed(true)}
               />
             ) : null}
-            <p className="text-sm text-ink-muted">{data.source}</p>
-            {/* WS-I.2.6b: the specific distribution reason, with the link
-                into the reader's OWN Signal Ledger for deep inspection
-                (SPEC §13.5 — explanations are inspectable, never vague). */}
-            <div className="flex flex-col gap-1">
-              <p className="text-sm text-ink">{data.distribution_reason}</p>
-              <Link
-                to="/profile/signal-ledger"
-                className="text-sm text-primary-on-soft underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-              >
-                {t('story.inspectSignals', 'Inspect your reading signals')}
-              </Link>
-            </div>
             {data.media ? (
               <StoryMedia
                 url={data.media.url}
