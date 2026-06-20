@@ -63,7 +63,8 @@ whole-batch node-count cap checked first so the guard cannot itself be a DoS
 vector).  The remaining WS-R cards are **I/O integration** — the `lcap_v2`
 IndexedDB layer (WS-R.11), the Postgres schema (WS-R.12.2) + the rest of the Hono
 routes (WS-R.12.4 — the §29 content-READ endpoints `GET /api/lcap/v2/{records,
-proofs,blocks}/:cid` and the CSRF-exempt, rate-limited pack-import `POST
+proofs,blocks}/:cid` (with RFC 7233 resumable range/206 + 416 reads) and the
+CSRF-exempt, rate-limited pack-import `POST
 /api/lcap/v2/packs` (read under the WS-R.4.2 caps → every CID-verified frame durably
 stored, so its proofs/blocks are then fetchable via the GET routes → identity frames
 registered → contributions committed through validate→guard→commit → one §16.11

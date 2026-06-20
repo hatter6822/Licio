@@ -56,7 +56,38 @@ function json(status: number, obj: unknown): Response {
   });
 }
 
-function serveObject(server: LcapIngestServer, kind: ContentKind, cid: string): Response {
+/** Parse a single RFC 7233 `bytes=` range against `size`; `null` ⇒ serve full. */
+function parseRange(
+  header: string,
+  size: number,
+): { start: number; end: number } | 'unsatisfiable' | null {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!match) return null; // unparseable / multi-range → ignore, serve the full 200
+  const startStr = match[1] ?? '';
+  const endStr = match[2] ?? '';
+  if (startStr === '' && endStr === '') return null;
+  let start: number;
+  let end: number;
+  if (startStr === '') {
+    // Suffix range `bytes=-N`: the last N bytes.
+    const n = Number(endStr);
+    if (n === 0) return 'unsatisfiable';
+    start = Math.max(0, size - n);
+    end = size - 1;
+  } else {
+    start = Number(startStr);
+    end = endStr === '' ? size - 1 : Math.min(Number(endStr), size - 1);
+  }
+  if (start > end || start >= size) return 'unsatisfiable';
+  return { start, end };
+}
+
+function serveObject(
+  server: LcapIngestServer,
+  kind: ContentKind,
+  cid: string,
+  rangeHeader?: string,
+): Response {
   // A malformed CID is a non-retriable 400 (§22.1.1) — fail before any lookup.
   try {
     parseCid(cid);
@@ -67,11 +98,34 @@ function serveObject(server: LcapIngestServer, kind: ContentKind, cid: string): 
   if (!obj || obj.kind !== kind) {
     return json(404, { error: 'not_found' });
   }
+  const bytes = obj.bytes;
+  const headers: Record<string, string> = {
+    'content-type': CONTENT_TYPE[kind],
+    'accept-ranges': 'bytes',
+  };
+
+  // Resumable fetch (§29 `…/range`): a satisfiable range → 206; otherwise 416.
+  if (rangeHeader !== undefined && rangeHeader !== '') {
+    const range = parseRange(rangeHeader, bytes.length);
+    if (range === 'unsatisfiable') {
+      return new Response(null, {
+        status: 416,
+        headers: { 'content-range': `bytes */${bytes.length}` },
+      });
+    }
+    if (range) {
+      // `.slice` copies, so the body never aliases the in-memory store buffer.
+      return new Response(bytes.slice(range.start, range.end + 1), {
+        status: 206,
+        headers: {
+          ...headers,
+          'content-range': `bytes ${range.start}-${range.end}/${bytes.length}`,
+        },
+      });
+    }
+  }
   // A fresh copy so the response body never aliases the in-memory store buffer.
-  return new Response(new Uint8Array(obj.bytes), {
-    status: 200,
-    headers: { 'content-type': CONTENT_TYPE[kind] },
-  });
+  return new Response(new Uint8Array(bytes), { status: 200, headers });
 }
 
 // §22.1.1: oversized inputs are 413; any other read failure is a non-retriable 422.
@@ -181,9 +235,13 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
 /** The §29 LCAP routes.  Mounted at `/api/lcap/v2` (see `app.ts`). */
 export function createLcapRoutes(server: LcapIngestServer = getLcapIngestServer()): Hono {
   const app = new Hono();
-  app.get('/records/:cid', (c) => serveObject(server, 'record', c.req.param('cid')));
-  app.get('/proofs/:cid', (c) => serveObject(server, 'proof', c.req.param('cid')));
-  app.get('/blocks/:cid', (c) => serveObject(server, 'block', c.req.param('cid')));
+  const read =
+    (kind: ContentKind) =>
+    (c: { req: { param: (k: string) => string; header: (k: string) => string | undefined } }) =>
+      serveObject(server, kind, c.req.param('cid'), c.req.header('range'));
+  app.get('/records/:cid', read('record'));
+  app.get('/proofs/:cid', read('proof'));
+  app.get('/blocks/:cid', read('block'));
   app.post('/packs', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) =>
     ingestPack(server, new Uint8Array(await c.req.arrayBuffer())),
   );

@@ -52,6 +52,49 @@ describe('createLcapRoutes — §29 content reads', () => {
   });
 });
 
+describe('createLcapRoutes — §29 resumable range reads (RFC 7233)', () => {
+  it('advertises Accept-Ranges on a full 200 read', async () => {
+    const res = await createLcapRoutes(server).request(`/records/${recordCid}`);
+    expect(res.headers.get('accept-ranges')).toBe('bytes');
+  });
+
+  it('serves a satisfiable byte range as 206 with Content-Range and the slice', async () => {
+    const res = await createLcapRoutes(server).request(`/records/${recordCid}`, {
+      headers: { Range: 'bytes=0-4' },
+    });
+    expect(res.status).toBe(206);
+    expect(res.headers.get('content-range')).toBe(`bytes 0-4/${recordBody.length}`);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(recordBody.slice(0, 5));
+  });
+
+  it('serves an open-ended suffix range to the end of the object', async () => {
+    const res = await createLcapRoutes(server).request(`/records/${recordCid}`, {
+      headers: { Range: 'bytes=6-' },
+    });
+    expect(res.status).toBe(206);
+    expect(res.headers.get('content-range')).toBe(
+      `bytes 6-${recordBody.length - 1}/${recordBody.length}`,
+    );
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(recordBody.slice(6));
+  });
+
+  it('returns 416 with Content-Range for a range beyond the object size', async () => {
+    const res = await createLcapRoutes(server).request(`/records/${recordCid}`, {
+      headers: { Range: 'bytes=100-200' },
+    });
+    expect(res.status).toBe(416);
+    expect(res.headers.get('content-range')).toBe(`bytes */${recordBody.length}`);
+  });
+
+  it('ignores an unparseable Range header and serves the full 200', async () => {
+    const res = await createLcapRoutes(server).request(`/records/${recordCid}`, {
+      headers: { Range: 'rows=1-2' },
+    });
+    expect(res.status).toBe(200);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(recordBody);
+  });
+});
+
 describe('mounted at /api/lcap/v2 (GET passes the global CSRF + security middleware)', () => {
   it('serves a held record through the full app', async () => {
     const mounted = new LcapIngestServer('net');
