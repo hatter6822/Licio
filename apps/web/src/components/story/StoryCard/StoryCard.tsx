@@ -79,7 +79,10 @@ export function StoryCard({
           reached from the story page's in-app reader. Keeping the title as text
           (never a nested <a>) is what prevents the "<a> cannot be a descendant
           of <a>" hydration error when the card sits inside a route link. */}
-      <Heading id={titleId} className="text-xl font-semibold text-ink">
+      {/* `pe-12` reserves the top-right corner for the feed wrapper's overlaid
+          Report control (StoryFeedLink renders an h-12 w-12 button at end-2/top-2
+          above this card), so a long title can never run underneath it. */}
+      <Heading id={titleId} className="pe-12 text-xl font-semibold text-ink">
         {story.title}
       </Heading>
 
@@ -157,32 +160,37 @@ export function StoryCard({
         </div>
       ) : null}
 
-      {/* Interactive actions LAST in the DOM (announced after content).
-          Revealed on hover/keyboard focus; always present for AT + keyboard. */}
-      <div className="flex flex-wrap gap-2 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
-        {onSave ? (
-          <Button variant="ghost" onClick={onSave}>
-            <Icon name="bookmark" className="size-4" />
-            {t('common.save', 'Save')}
-          </Button>
-        ) : null}
-        {onOpenContext ? (
-          <Button variant="ghost" onClick={onOpenContext}>
-            <Icon name="circle-info" className="size-4" />
-            {t('storycard.context', 'Context')}
-          </Button>
-        ) : null}
-        {onMore ? (
-          <Button
-            iconOnly
-            variant="ghost"
-            aria-label={t('common.more', 'More actions')}
-            onClick={onMore}
-          >
-            <Icon name="more-horizontal" />
-          </Button>
-        ) : null}
-      </div>
+      {/* Interactive actions LAST in the DOM (announced after content), revealed
+          on hover/keyboard focus. Rendered ONLY when the host wires at least one
+          handler: the feed wrapper (StoryFeedLink) wires none, so feed cards
+          carry no empty action row; SwipeableStoryCard (WS-B.2.2) supplies these
+          as the keyboard-accessible alternative to its gestures. */}
+      {onSave || onOpenContext || onMore ? (
+        <div className="flex flex-wrap gap-2 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
+          {onSave ? (
+            <Button variant="ghost" onClick={onSave}>
+              <Icon name="bookmark" className="size-4" />
+              {t('common.save', 'Save')}
+            </Button>
+          ) : null}
+          {onOpenContext ? (
+            <Button variant="ghost" onClick={onOpenContext}>
+              <Icon name="circle-info" className="size-4" />
+              {t('storycard.context', 'Context')}
+            </Button>
+          ) : null}
+          {onMore ? (
+            <Button
+              iconOnly
+              variant="ghost"
+              aria-label={t('common.more', 'More actions')}
+              onClick={onMore}
+            >
+              <Icon name="more-horizontal" />
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
     </article>
   );
 }

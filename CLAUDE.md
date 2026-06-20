@@ -419,7 +419,7 @@ licio/
 │   │       │   ├── feed/                -- FeedModeSwitcher, DiminishingReturnsPrompt
 │   │       │   ├── rooms/               -- RoomCreateForm + RoomSettingsForm (WS-Q.5.3c)
 │   │       │   ├── story/               -- StoryCard, ContextCard, RatingLabel,
-│   │       │   │                           ExposureLabel, IndependentSourcesDrawer,
+│   │       │   │                           ExposureLabel, TopicRepeatsButton,
 │   │       │   │                           WhereInterpretationsDiffer (WS-H), StoryMedia +
 │   │       │   │                           AuthorVisibilityControl + feed-card (WS-Q.5)
 │   │       │   ├── safety/              -- ReportButton/ReportSheet (two-tap report),

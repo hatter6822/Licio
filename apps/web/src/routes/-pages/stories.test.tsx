@@ -47,7 +47,6 @@ vi.mock('../../lib/api.js', async (importOriginal) => {
     ...actual,
     fetchStory: vi.fn().mockResolvedValue(STORY),
     fetchStoryInterpretations: vi.fn().mockRejectedValue(new Error('not computed')),
-    fetchIndependentSources: vi.fn().mockRejectedValue(new Error('not computed')),
     fetchStoryComments: vi.fn().mockResolvedValue({
       comments: [],
       next_cursor: null,

@@ -66,16 +66,6 @@ export function useStoryInterpretationsQuery(storyId: string, enabled = true) {
   });
 }
 
-/** MERI independent-sources drawer data (WS-H.2.3b). */
-export function useIndependentSourcesQuery(storyId: string, enabled = true) {
-  return useQuery({
-    queryKey: queryKeys.independentSources(storyId),
-    queryFn: () => api.fetchIndependentSources(storyId),
-    enabled,
-    ...cachePolicy.feed,
-  });
-}
-
 export function useThreadQuery(threadId: string, enabled = true) {
   return useQuery({
     queryKey: queryKeys.thread(threadId),

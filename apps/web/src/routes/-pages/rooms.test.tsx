@@ -96,6 +96,7 @@ function feedItem(over: Partial<FeedItem>): FeedItem {
     exposure_label: null,
     more_on_this_story: [],
     context_card: null,
+    topic_ids: [],
     ...over,
   } as FeedItem;
 }

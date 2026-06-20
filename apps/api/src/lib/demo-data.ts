@@ -39,6 +39,7 @@ const feedWater: FeedItem = {
   safety_state: 'ok',
   more_on_this_story: [],
   context_card: null,
+  topic_ids: ['water-quality'],
 };
 
 const feedZoning: FeedItem = {
@@ -55,6 +56,7 @@ const feedZoning: FeedItem = {
   safety_state: 'ok',
   more_on_this_story: [],
   context_card: null,
+  topic_ids: ['zoning'],
 };
 
 const feedTransit: FeedItem = {
@@ -70,6 +72,7 @@ const feedTransit: FeedItem = {
   safety_state: 'caution',
   more_on_this_story: [],
   context_card: null,
+  topic_ids: ['transit'],
 };
 
 export const DEMO_FEED: FeedItem[] = [feedWater, feedZoning, feedTransit];

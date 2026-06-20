@@ -11,10 +11,8 @@ import { CommentSection } from '../../components/comments/index.js';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
 import { ReportButton } from '../../components/safety/ReportSheet.js';
 import { AuthorVisibilityControl } from '../../components/story/AuthorVisibilityControl/index.js';
-import { IndependentSourcesDrawer } from '../../components/story/IndependentSourcesDrawer/index.js';
 import { ShareStoryButton } from '../../components/story/ShareStoryButton/index.js';
 import { StoryMedia } from '../../components/story/StoryMedia/index.js';
-import { TopicRepeatsPreference } from '../../components/story/TopicRepeatsPreference/index.js';
 import { WhereInterpretationsDiffer } from '../../components/story/WhereInterpretationsDiffer/index.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
@@ -22,7 +20,6 @@ import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { NarrowLoopPrompt } from '../../components/wellbeing/NarrowLoopPrompt/index.js';
 import { useT } from '../../i18n/index.js';
 import {
-  useIndependentSourcesQuery,
   useSavedStoriesQuery,
   useStoryInterpretationsQuery,
   useStoryQuery,
@@ -64,7 +61,6 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
   const t = useT();
   const story = useStoryQuery(storyId);
   const interpretations = useStoryInterpretationsQuery(storyId);
-  const independentSources = useIndependentSourcesQuery(storyId);
   const [readerOpen, setReaderOpen] = useState(false);
   const [loopPromptDismissed, setLoopPromptDismissed] = useState(false);
   const openId = useRef(`source-${storyId}`);
@@ -179,12 +175,8 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 {...(data.room_visibility ? { roomVisibility: data.room_visibility } : {})}
               />
             ) : null}
-            {topicIds?.[0] ? <TopicRepeatsPreference topicId={topicIds[0]} /> : null}
             {interpretations.data ? (
               <WhereInterpretationsDiffer data={interpretations.data} />
-            ) : null}
-            {independentSources.data ? (
-              <IndependentSourcesDrawer data={independentSources.data} />
             ) : null}
           </article>
         )

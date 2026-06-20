@@ -5,6 +5,7 @@
 // (invalid HTML that React reports as a hydration error). These tests pin that
 // structural invariant and the two-distinct-links behaviour.
 import type { FeedItem } from '@licio/shared';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
@@ -45,6 +46,7 @@ function feedItem(over: Partial<FeedItem>): FeedItem {
     exposure_label: null,
     more_on_this_story: [],
     context_card: null,
+    topic_ids: [],
     ...over,
   } as FeedItem;
 }
@@ -98,5 +100,24 @@ describe('StoryFeedLink', () => {
   it('has no accessibility violations', async () => {
     const { container } = renderItem(feedItem({ url: 'https://example.org/x' }));
     expect(await checkA11y(container)).toHaveNoViolations();
+  });
+
+  it('mounts the per-topic repeats control for a topic-tagged story (hidden for anon readers)', () => {
+    // A topic-tagged item wires in the TopicRepeatsButton (WS-H.2.3c); for an
+    // anonymous reader it renders nothing, while the always-on Report
+    // affordance stays present. (Its signed-in behaviour is unit-tested in
+    // TopicRepeatsButton.test.tsx.)
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <ul className="flex flex-col gap-3">
+          <StoryFeedLink item={feedItem({ topic_ids: ['water-quality'] })} />
+        </ul>
+      </QueryClientProvider>,
+    );
+    expect(screen.getByRole('button', { name: /report this story/i })).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /adjust how often this topic repeats/i }),
+    ).not.toBeInTheDocument();
   });
 });

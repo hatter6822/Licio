@@ -406,10 +406,12 @@ raw MinHash/syndication candidate sets are not tier-scoped). Served from
 STORED shadow outputs only — a page load never triggers computation.
 
 Client: `ExposureLabel` (four §7.6 labels — rendered on FEED CARDS from
-the `exposure_label` the feed wire now carries, resolved from stored MERI
-gains, and in the drawer), `IndependentSourcesDrawer` (now with the
-"Same coverage elsewhere" co-group members — near-duplicates by MinHash +
-confirmed-syndication siblings, visibility-gated server-side),
+the `exposure_label` the feed wire carries, resolved from stored MERI
+gains; the standalone `IndependentSourcesDrawer` was retired as redundant
+with the card's exposure label, though its
+`GET /v1/stories/:id/independent-sources` lineage read — the "Same coverage
+elsewhere" co-group members (near-duplicates by MinHash + confirmed-
+syndication siblings, visibility-gated server-side) — remains available),
 `WhereInterpretationsDiffer` (+ the needs-context framing; human lens
 NAMES resolved through the room when available), the composer
 `ContextWarning` (dismissible; the user can always proceed), the

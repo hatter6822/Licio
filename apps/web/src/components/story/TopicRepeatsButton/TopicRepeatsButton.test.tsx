@@ -1,21 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Per-topic repeats preference (WS-H.2.3c): the control initializes from
-// the SAVED durable preference, and — the load-bearing property — writes
-// the MERGED map so changing one topic can never wipe another topic's
-// stored preference (the server PATCH replaces the map wholesale). Hidden
-// until the current map is loaded (a blind write would be destructive) and
-// for anonymous readers.
+// Per-topic repeats control on a story card (WS-H.2.3c): a bottom-right icon
+// button opens a compact sheet whose radio options write the MERGED durable
+// preference map (changing one topic never wipes another's preference). The
+// control is hidden until the current map is loaded and for anonymous readers.
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useAuthStore } from '../../../stores/auth.js';
-import { TopicRepeatsPreference } from './TopicRepeatsPreference.js';
+import { TopicRepeatsButton } from './TopicRepeatsButton.js';
 
 const fetchPrivacySettings = vi.hoisted(() => vi.fn());
 const patchPrivacySettings = vi.hoisted(() => vi.fn());
 vi.mock('../../../lib/privacy-api.js', () => ({ fetchPrivacySettings, patchPrivacySettings }));
+
+const TRIGGER = 'Adjust how often this topic repeats';
 
 const SETTINGS = {
   privacy_settings: {},
@@ -29,7 +29,7 @@ function renderControl(topicId: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <TopicRepeatsPreference topicId={topicId} />
+      <TopicRepeatsButton topicId={topicId} />
     </QueryClientProvider>,
   );
 }
@@ -47,10 +47,10 @@ afterEach(() => {
   patchPrivacySettings.mockReset();
 });
 
-describe('TopicRepeatsPreference (WS-H.2.3c)', () => {
+describe('TopicRepeatsButton (WS-H.2.3c)', () => {
   it('renders nothing for anonymous readers', () => {
     renderControl('water');
-    expect(screen.queryByText('Repeats on this topic')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: TRIGGER })).not.toBeInTheDocument();
   });
 
   it('hides until the current map is loaded (a blind write would wipe it)', async () => {
@@ -62,21 +62,21 @@ describe('TopicRepeatsPreference (WS-H.2.3c)', () => {
       }),
     );
     renderControl('water');
-    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: TRIGGER })).not.toBeInTheDocument();
     release(SETTINGS);
-    await waitFor(() => expect(screen.getByRole('combobox')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('button', { name: TRIGGER })).toBeInTheDocument());
   });
 
-  it('initializes from the saved preference and writes the MERGED map', async () => {
+  it('opens on the saved value and writes the MERGED map', async () => {
     signIn();
     fetchPrivacySettings.mockResolvedValue(SETTINGS);
     patchPrivacySettings.mockResolvedValue(SETTINGS);
     renderControl('water');
-    const select = await screen.findByRole('combobox');
-    // Saved value, not the default.
-    expect(select).toHaveValue('fewer_repeats');
-    await userEvent.selectOptions(select, 'show_all');
-    // (mutate passes a TanStack context second argument; assert the payload.)
+    await userEvent.click(await screen.findByRole('button', { name: TRIGGER }));
+    // The saved value is pre-selected in the sheet.
+    expect(await screen.findByRole('radio', { name: 'Show fewer repeats' })).toBeChecked();
+    // Choosing a different option writes the merged map.
+    await userEvent.click(screen.getByRole('radio', { name: 'Show all updates' }));
     expect(patchPrivacySettings.mock.calls[0]?.[0]).toEqual({
       personalization_settings: {
         // The OTHER topic's preference survives the single-topic change.
@@ -89,6 +89,7 @@ describe('TopicRepeatsPreference (WS-H.2.3c)', () => {
     signIn();
     fetchPrivacySettings.mockResolvedValue(SETTINGS);
     renderControl('zoning');
-    expect(await screen.findByRole('combobox')).toHaveValue('balanced');
+    await userEvent.click(await screen.findByRole('button', { name: TRIGGER }));
+    expect(await screen.findByRole('radio', { name: 'Balanced' })).toBeChecked();
   });
 });
