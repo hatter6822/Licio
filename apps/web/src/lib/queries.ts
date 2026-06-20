@@ -246,6 +246,20 @@ export function useJoinRoomMutation(roomId: string) {
   });
 }
 
+/** Leave a room (drops the subscription, ending governance participation).
+ *  Refreshes the room + directory so the membership affordance and any
+ *  joined-filtered lists reflect the change. */
+export function useLeaveRoomMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.leaveRoom(roomId),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.room(roomId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.rooms() });
+    },
+  });
+}
+
 /** WS-Q.5.3c — create a room with the visibility/join/posting axes; refreshes
  *  the directory on success. */
 export function useCreateRoomMutation() {

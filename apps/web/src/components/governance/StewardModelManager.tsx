@@ -74,11 +74,17 @@ export interface StewardModelManagerProps {
   roomId: string;
   /** Defer the fetches until the reader has passed the room's read bar. */
   enabled?: boolean;
+  /** True when the reader has an ACTIVE subscription to this room. A member (an
+   *  active subscription OR the elected steward) may cast a ratification ballot;
+   *  a non-member is shown how to join instead — mirroring the backend gate
+   *  (`isRoomMember`), so the buttons never 403. */
+  joined?: boolean;
 }
 
 export function StewardModelManager({
   roomId,
   enabled = true,
+  joined = false,
 }: StewardModelManagerProps): React.ReactElement | null {
   const seat = useStewardSeatQuery(roomId, enabled);
   const models = useGovernanceModelsQuery(roomId, enabled);
@@ -87,6 +93,7 @@ export function StewardModelManager({
 
   const holder = seat.data?.seat?.holder_user_id ?? null;
   const isSteward = holder !== null && holder === currentUserId;
+  const isMember = joined || isSteward;
   const items = models.data?.models ?? [];
   const openVote = ratification.data?.vote ?? null;
 
@@ -104,7 +111,9 @@ export function StewardModelManager({
 
       {isSteward ? <ProposeForm roomId={roomId} /> : null}
 
-      {openVote ? <RatificationVotePanel roomId={roomId} vote={openVote} /> : null}
+      {openVote ? (
+        <RatificationVotePanel roomId={roomId} vote={openVote} canVote={isMember} />
+      ) : null}
 
       <div className="mt-4">
         <h3 className="text-sm font-medium">Proposals</h3>
@@ -140,9 +149,11 @@ export function StewardModelManager({
 function RatificationVotePanel({
   roomId,
   vote,
+  canVote,
 }: {
   roomId: string;
   vote: OpenVote;
+  canVote: boolean;
 }): React.ReactElement {
   const cast = useCastBallotMutation(roomId);
   const [error, setError] = useState<string | null>(null);
@@ -172,7 +183,9 @@ function RatificationVotePanel({
         Members are voting on whether to adopt this model. It activates only if the vote reaches
         quorum with an approving majority by {new Date(vote.closes_at).toLocaleString()}.
       </p>
-      {done ? (
+      {!canVote ? (
+        <p className="text-ink-muted text-sm">Join the room to take part in this vote.</p>
+      ) : done ? (
         <p className="text-sm text-ink">Your ballot is recorded. Thank you.</p>
       ) : (
         <div className="flex flex-wrap gap-2">

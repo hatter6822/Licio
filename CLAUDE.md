@@ -417,7 +417,8 @@ licio/
 │   │       │   │                           CitationCapture, PrivacyWarning, VoiceDictation)
 │   │       │   ├── comments/            -- Inline CommentSection + comment composer/media (WS-T)
 │   │       │   ├── feed/                -- FeedModeSwitcher, DiminishingReturnsPrompt
-│   │       │   ├── rooms/               -- RoomCreateForm + RoomSettingsForm (WS-Q.5.3c)
+│   │       │   ├── rooms/               -- RoomCreateForm + RoomSettingsForm + RoomMembership
+│   │       │   │                           (WS-Q.5.3c; join/leave ⇒ governance membership)
 │   │       │   ├── story/               -- StoryCard, ContextCard, RatingLabel,
 │   │       │   │                           ExposureLabel, TopicRepeatsButton,
 │   │       │   │                           WhereInterpretationsDiffer (WS-H), StoryMedia +

@@ -219,8 +219,14 @@ hypothetical `knomosis → public.rooms` FK is caught.
   proposal flow, so it stays a tracked residual until that lands.
 - **Web surfaces** — the in-room "governed by" panel, the steward propose surface,
   the member-downloadable proposal registry, AND the **member ratification voting
-  panel** (open vote → Approve/Reject + live tally) are **shipped**
-  (`apps/web/src/components/governance/`). The remaining web residual is the
+  panel** (open vote → Approve/Reject + live tally, now **membership-gated** — a
+  non-member sees "Join the room to take part in this vote" rather than a ballot
+  that would 403) are **shipped** (`apps/web/src/components/governance/`). The
+  prerequisite **room membership affordance** — joining a room to become the active
+  member that governance voting requires (`isRoomMember`) — is wired for public AND
+  private rooms via `RoomMembership` (`apps/web/src/components/rooms/RoomMembership/`):
+  a public room joins immediately, a private room by request/invite, with a Leave
+  control and an anonymous sign-in prompt. The remaining web residual is the
   **steward-election ballot UI** (the *seat*-election candidate vote — distinct
   from model ratification; the seat election lifecycle and read view are shipped)
   and a richer model-card render.
