@@ -143,4 +143,45 @@ describe('POST /api/lcap/v2/packs — bundle import (WS-R.12.4)', () => {
     });
     expect(res.status).not.toBe(403);
   });
+
+  it('is idempotent: re-importing the same pack reports already_have for every object', async () => {
+    const srv = new LcapIngestServer(NET, () => NOW);
+    await registerIdentity(srv, fx);
+    setLcapIngestServer(srv);
+    const app = createApp();
+
+    await app.request('/api/lcap/v2/packs', { method: 'POST', body: packBytes }); // first import
+    const res = await app.request('/api/lcap/v2/packs', { method: 'POST', body: packBytes }); // again
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { statuses: { cid: string; status: string }[] };
+    expect(data.statuses.find((s) => s.cid === fx.recordCid)?.status).toBe('already_have');
+    expect(data.statuses.find((s) => s.cid === proofCid)?.status).toBe('already_have');
+    expect(data.statuses.find((s) => s.cid === blockCid)?.status).toBe('already_have');
+  });
+
+  it('reports rejected_bad_cid for a frame whose payload does not match its CID', async () => {
+    setLcapIngestServer(new LcapIngestServer(NET, () => NOW));
+    const enc = new TextEncoder();
+    const declaredCid = await cidFor('block', enc.encode('declared'));
+    const badPack = writePack({
+      objects: [
+        {
+          cid: declaredCid, // a valid-format CID …
+          cidKind: 'block',
+          frameKind: 'block',
+          payload: enc.encode('actual-and-different'), // … that does not address this payload
+          lane: 'B4',
+          priority: 2,
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1_000_000,
+    });
+
+    const res = await createApp().request('/api/lcap/v2/packs', { method: 'POST', body: badPack });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { statuses: { cid: string; status: string }[] };
+    expect(data.statuses.find((s) => s.cid === declaredCid)?.status).toBe('rejected_bad_cid');
+  });
 });

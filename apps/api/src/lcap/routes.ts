@@ -169,13 +169,16 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
   const contributions: CommitRecordInput[] = [];
   for (const [cid, frame] of frames) {
     const cidKind = FRAME_CID_KIND[frame.frameKind];
+    const had = server.hasObject(cid);
     const stored = await server.putObject(cid, cidKind, frame.payload);
     if (!stored) {
       statuses.push({ cid, cid_kind: cidKind, status: 'rejected_bad_cid' });
       continue;
     }
+    // An object we already held is `already_have`; a fresh one is `stored_unverified`.
+    const storedStatus: ObjectStatusV2['status'] = had ? 'already_have' : 'stored_unverified';
     if (frame.frameKind !== 'record_body') {
-      statuses.push({ cid, cid_kind: cidKind, status: 'stored_unverified' });
+      statuses.push({ cid, cid_kind: cidKind, status: storedStatus });
       continue;
     }
     let record: ReturnType<typeof decodeAndRouteRecord>;
@@ -196,7 +199,7 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
             proof: authorityProof,
           });
         }
-        statuses.push({ cid, cid_kind: 'record', status: 'stored_unverified' });
+        statuses.push({ cid, cid_kind: 'record', status: storedStatus });
         break;
       case 'room_capability':
         if (authorityProof) {
@@ -206,11 +209,11 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
             proof: authorityProof,
           });
         }
-        statuses.push({ cid, cid_kind: 'record', status: 'stored_unverified' });
+        statuses.push({ cid, cid_kind: 'record', status: storedStatus });
         break;
       case 'revocation':
         server.registerRevocation(record);
-        statuses.push({ cid, cid_kind: 'record', status: 'stored_unverified' });
+        statuses.push({ cid, cid_kind: 'record', status: storedStatus });
         break;
       case 'contribution_event':
         contributions.push({
@@ -223,7 +226,7 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
         });
         break; // commitBatch reports the contribution's status
       default:
-        statuses.push({ cid, cid_kind: 'record', status: 'stored_unverified' });
+        statuses.push({ cid, cid_kind: 'record', status: storedStatus });
         break;
     }
   }
