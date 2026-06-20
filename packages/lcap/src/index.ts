@@ -32,4 +32,5 @@ export * from './priority.js';
 export * from './records/index.js';
 export * from './scheduler/index.js';
 export * from './schemas/index.js';
+export * from './sync/index.js';
 export * from './validate/index.js';
