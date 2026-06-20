@@ -442,7 +442,7 @@ browser IPFS/libp2p public-block bridge (public blocks only)
 native Android courier (Capacitor: Nearby Connections / Wi-Fi Direct / Bluetooth / hotspot / USB)
 ```
 
-All transports move the *same* packs through the *same* `validate(record_cid)` (no parallel data model or trust path); every one is off by default and consent-gated, and correctness never depends on any single transport.
+All transports move the *same* packs through the *same* `validate(record_cid)` (no parallel data model or trust path), and correctness never depends on any single transport. **HTTPS fetch and manual `.licio-bundle` files are the always-available baseline** (a plain PWA uses them with no opt-in); the **discovery/P2P transports** (WebTransport, WebRTC, the IPFS public-block bridge, and the native courier) are **off by default and consent-gated** per operational mode, and disabled in Stealth/Emergency.
 
 Transport never decides trust.
 
@@ -2082,8 +2082,9 @@ Both reuse the *same* packs, the single `validate(record_cid)`, the lane schedul
 
 **Status (maintainer decision, 2026-06): first-class, required v0.2 transport** (previously deferred), constrained to **public blocks only** and gated on review.
 
-LCAP already content-addresses every block (§9). The bridge is a browser **Helia / js-libp2p** integration (in the same code-split optional module as the WebRTC transport, §31.1) that publishes and fetches **public** blocks by their LCAP `block_cid` over bitswap. It MUST:
+LCAP already content-addresses every block (§9), but the LCAP `block_cid` is a **custom §9 layout, not an IPFS CID**, so the bridge defines a fixed, **verification-preserving mapping** between the two. Because every LCAP block CID embeds a `sha2-256` multihash (`0x12 0x20 || digest`, §9.2), the bridge announces and requests over bitswap under the **standard IPFS CIDv1 with the `raw` multicodec (0x55) and that same `sha2-256` multihash** — i.e. `ipfs_cid = CIDv1(raw, 0x12 0x20 || digest)`, sharing the exact digest of the `block_cid`. On every fetched block it recomputes and verifies the LCAP `block_cid` over the received bytes **before any use**, so DHT/bitswap interop never weakens LCAP hash verification (the IPFS CID is only an interop wrapper; the LCAP `block_cid` remains the trust anchor). The bridge is a browser **Helia / js-libp2p** integration (in the same code-split optional module as the WebRTC transport, §31.1) that publishes and fetches **public** blocks by this mapping. It MUST:
 
+- use the fixed **`CIDv1(raw, sha2-256) ⇄ block_cid`** mapping (shared `sha2-256` digest) to announce/request blocks, and recompute + verify the LCAP `block_cid` on every fetched block before use;
 - publish/serve **only `public`-visibility blocks** — never `in_room`, `private`, ciphertext, or any private-room hint (structurally enforced against the room/visibility model and takedown state);
 - pass a **required privacy/moderation/abuse-review gate** before any block reaches the public DHT, with auditable provenance and takedown-driven republication halt;
 - verify every fetched block against its `block_cid` exactly like any other ingress (no transport trust, §18.4);
@@ -2684,7 +2685,7 @@ packages/db/src/schema/lcap.ts
   Drizzle schema additions
 ```
 
-`apps/web` MUST NOT import `@licio/db`. `packages/lcap` MUST be a pure shared package with **zero** runtime npm dependencies and no database dependency. `@licio/lcap-p2p` MAY depend only on `@licio/shared` + `@licio/lcap` and is consumed by `apps/web` solely through the lazily-loaded `apps/web/src/lcap/transports/` chunk.
+`apps/web` MUST NOT import `@licio/db`. `packages/lcap` MUST be a pure shared package with **zero** runtime npm dependencies and no database dependency. `@licio/lcap-p2p`'s only permitted **workspace** dependencies are `@licio/shared` + `@licio/lcap` (never `@licio/db`); it additionally carries the reviewed transport **npm** dependencies it exists to isolate — Helia / js-libp2p (and any WebRTC helper) — each of which passes the §31.1 dependency-addition checklist and stays out of the core bundle because the package is consumed by `apps/web` solely through the lazily-loaded `apps/web/src/lcap/transports/` chunk (excluded from the `apps/web` `< 15` direct-production-dep count).
 
 ### 31.1 Dependency budget and bundle strategy
 

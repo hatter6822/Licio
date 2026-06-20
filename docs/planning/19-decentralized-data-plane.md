@@ -1541,13 +1541,14 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 ---
 
-### WS-R.15.6a WebRTC data-channel P2P transport + HTTPS signaling
-**ID:** WS-R.15.6a | **Ref:** OFFLINE_SPEC §22.6, §16.3, §18.4
+### WS-R.15.6a WebRTC data-channel P2P transport + server-blind signaling
+**ID:** WS-R.15.6a | **Ref:** OFFLINE_SPEC §22.6, §16.3, §18.4, §19.1, §26.4
 
-**Description:** In the code-split `@licio/lcap-p2p` package, implement a WebRTC `RTCDataChannel` `LcapTransport` for browser↔browser pack exchange. **Signaling (SDP/ICE) rides the existing Licio HTTPS API** via a session-bound `POST /api/lcap/v2/p2p/signal` rendezvous, with public STUN for NAT discovery. It reuses the `LcapTransport` seam (WS-R.15.4b), the scheduler order, and `validate`; it is **off by default**. The WebRTC + (15.7) Helia deps live behind the `@licio/lcap-p2p` workspace boundary and a separately code-split `apps/web/src/lcap/transports/` chunk so the web `<15` budget and the < 200 KB initial-bundle gate both hold.
+**Description:** In the code-split `@licio/lcap-p2p` package, implement a WebRTC `RTCDataChannel` `LcapTransport` for browser↔browser pack exchange. **Signaling rides the existing Licio HTTPS API** via a session-bound `POST /api/lcap/v2/p2p/signal` rendezvous that routes an **end-to-end-encrypted, opaque signaling blob** between the two members — the server **never parses SDP/ICE, observes no peer IP, and logs only the opaque ciphertext** (mirroring the WS-S.6.2 encrypted-signaling pattern and preserving the §19.1 "the data plane reads no client network address" doctrine; ICE candidates / peer IPs are a §26.4 live-connection property of the direct browser-to-browser channel only, never of the server). Public STUN provides **client-side** NAT discovery. It reuses the `LcapTransport` seam (WS-R.15.4b), the scheduler order, and `validate`; it is **off by default**. The WebRTC + (15.7) Helia deps live behind the `@licio/lcap-p2p` workspace boundary and a separately code-split `apps/web/src/lcap/transports/` chunk so the web `<15` budget and the < 200 KB initial-bundle gate both hold.
 
 **Acceptance criteria:**
-- Two authenticated browsers establish an `RTCDataChannel` via HTTPS signaling + STUN and exchange a scheduler-ordered pack; received frames go through the same reader/validator (source-independence holds).
+- The `/api/lcap/v2/p2p/signal` rendezvous routes only **opaque, E2E-encrypted** signaling blobs: a static + runtime check proves the server never parses SDP/ICE and never reads/logs a peer IP (§19.1 parity with the rest of the data plane); ICE candidates appear only at the live datachannel between the two browsers.
+- Two authenticated browsers establish an `RTCDataChannel` via the E2E-encrypted signaling rendezvous + STUN and exchange a scheduler-ordered pack; received frames go through the same reader/validator (source-independence holds).
 - The transport is off by default and opt-in per mode; `@licio/lcap-p2p` is `workspace:*`-excluded and the chunk is separately code-split (budgets green).
 
 **Testing:** Gated/E2E (two Playwright contexts) — datachannel exchange + trust-state equivalence to HTTPS; budget + code-split assertions.
@@ -1574,10 +1575,10 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 ### WS-R.15.7a Browser IPFS/libp2p (Helia) public-block bridge, code-split
 **ID:** WS-R.15.7a | **Ref:** OFFLINE_SPEC §22.7, §13.1, §9.2
 
-**Description:** In `@licio/lcap-p2p`, implement a Helia / js-libp2p bridge that publishes and fetches **public blocks only** by their LCAP `block_cid` (content addressing reuses the §9 CIDs; bitswap exchange), loaded **only** from the separately code-split transports chunk so the initial-bundle gate holds. A fetched block is verified against its `block_cid` exactly like any other ingress (no transport trust); the bridge stores/serves nothing private/in-room/ciphertext. Off by default.
+**Description:** In `@licio/lcap-p2p`, implement a Helia / js-libp2p bridge that publishes and fetches **public blocks only**, loaded **only** from the separately code-split transports chunk so the initial-bundle gate holds. Because the LCAP `block_cid` is a custom §9 layout (not an IPFS CID), the bridge announces/requests over bitswap using the fixed **verification-preserving mapping** `ipfs_cid = CIDv1(raw 0x55, sha2-256 multihash)` over the **same `sha2-256` digest** the `block_cid` already embeds (§9.2), then recomputes and verifies the LCAP `block_cid` over every fetched block **before any use** — so DHT interop never weakens LCAP hash verification (no transport trust). The bridge stores/serves nothing private/in-room/ciphertext. Off by default.
 
 **Acceptance criteria:**
-- The bridge publishes/fetches public blocks by `block_cid`; a fetched block is CID-verified before use (no transport trust); only `public`-visibility blocks are selectable.
+- The bridge announces/fetches via the `CIDv1(raw, sha2-256) ⇄ block_cid` mapping (shared digest); a fetched block is re-verified against its LCAP `block_cid` before use (no transport trust); only `public`-visibility blocks are selectable.
 - Helia/js-libp2p is confined to `@licio/lcap-p2p` (workspace-excluded) and the separately code-split chunk; the < 200 KB initial-bundle and `apps/web` `<15` budgets hold; the dependency-addition checklist (no install scripts, license, transitive count, SBOM) passes.
 
 **Testing:** Gated/E2E — publish/fetch a public block by CID + CID-verify; public-only selection; bundle-size + code-split + budget assertions.
