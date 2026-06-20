@@ -1,6 +1,6 @@
 # The Decentralized Data Plane — Offline Content Availability (WS-R / LCAP v0.2) and Private P2P Rooms (WS-S / E2EE)
 
-**Status:** the two post-WS-Q decentralization workstreams, unified into one upgrade. | **Milestone:** M3+ core resilience & privacy — **WS-R is elevated to launch-relevant (P1)** by the 2026-06 maintainer decision (first-class native-courier + browser-P2P/WebTransport/IPFS transports); **WS-S** remains a post-M3 privacy extension (P3, separate storage/sync/trust/authority plane). | **Priority:** P1 (WS-R) · P3 (WS-S) | **Dependencies:** WS-C/D/E/F/G/Q (all complete) for both planes; WS-S additionally consumes **WS-O** (reproducible builds + transparency log) for its update channel. | **Source specs:** `docs/OFFLINE_SPEC.md` (LCAP v0.2 → Part I / WS-R) and `docs/PRIVATE_SPEC.md` (→ Part II / WS-S). | **Waves:** WS-R Wave 8 (pulled earlier; elevated), WS-S Wave 11 (parallelizable with WS-R — independent except the optional LCAP-pack CAR reuse). | **Estimated duration:** WS-R 16–22 weeks, WS-S 18–24 weeks (parallelizable with two teams; ~30–40 weeks single-team sequential). | **Task count:** 161 atomic cards (Part I / WS-R: 99 · Part II / WS-S: 62).
+**Status:** the two post-WS-Q decentralization workstreams, unified into one upgrade. | **Milestone:** M3+ core resilience & privacy — **WS-R is elevated to launch-relevant (P1)** by the 2026-06 maintainer decision (first-class native-courier + browser-P2P/WebTransport/IPFS transports); **WS-S** remains a post-M3 privacy extension (P3, separate storage/sync/trust/authority plane). | **Priority:** P1 (WS-R) · P3 (WS-S) | **Dependencies:** WS-C/D/E/F/G/Q (all complete) for both planes; WS-S additionally consumes **WS-O** (reproducible builds + transparency log) for its update channel. | **Source specs:** `docs/OFFLINE_SPEC.md` (LCAP v0.2 → Part I / WS-R) and `docs/PRIVATE_SPEC.md` (→ Part II / WS-S). | **Waves:** WS-R Wave 8 (pulled earlier; elevated), WS-S Wave 11 (parallelizable with WS-R — independent except the optional LCAP-pack CAR reuse). | **Estimated duration:** WS-R 16–22 weeks, WS-S 18–24 weeks (parallelizable with two teams; ~30–40 weeks single-team sequential). | **Task count:** 171 atomic cards (Part I / WS-R: 104 · Part II / WS-S: 67) — the original 161 with nine bundled cards intelligently decomposed into smaller, independently-testable sub-cards (+10).
 
 > This document **supersedes and replaces** the two former planning documents `19-offline-content-availability.md` (WS-R) and `20-private-p2p-rooms.md` (WS-S). All `WS-R.*` and `WS-S.*` card IDs, spec references (`Ref:`), acceptance criteria, and testing notes are preserved **verbatim**; only the surrounding framing is unified. The two source specifications (`docs/OFFLINE_SPEC.md`, `docs/PRIVATE_SPEC.md`) remain the normative sources and are unchanged by this merge.
 
@@ -26,7 +26,7 @@ They **compose at exactly one seam**: LCAP transports WS-S **ciphertext + opaque
 | Content addressing | LCAP CID over the **signed plaintext** body (proof bytes excluded) | CIDv1 / IPLD over **ciphertext** (encrypt-before-CID; no plaintext CID ever) |
 | Source spec | `docs/OFFLINE_SPEC.md` | `docs/PRIVATE_SPEC.md` |
 | New package(s) / shell | `packages/lcap`, `@licio/lcap-p2p`, `apps/courier` | `packages/private-p2p` |
-| Cards | 99 (WS-R.0 – WS-R.18) | 62 (WS-S.0 – WS-S.11) |
+| Cards | 104 (WS-R.0 – WS-R.18) | 67 (WS-S.0 – WS-S.11) |
 
 ## Shared foundations and the single composition seam
 
@@ -44,13 +44,13 @@ Both planes are almost entirely net-new code that touches the running app only a
 
 ## How this document is organized
 
-**Part I (WS-R)** and **Part II (WS-S)** each carry their full plane-specific overview (touched-modules / integration-point tables, relationship notes, and conventions) followed by every atomic card **verbatim**. The **unified back-matter** at the end gives the one cross-plane dependency graph (both sub-graphs + the seam), the combined phase/wave plan, the merged milestone-gate table, and the combined definition of done. All 161 card IDs (`WS-R.0.1` … `WS-R.18.6`, `WS-S.0.1` … `WS-S.11.6`) are unchanged.
+**Part I (WS-R)** and **Part II (WS-S)** each carry their full plane-specific overview (touched-modules / integration-point tables, relationship notes, and conventions) followed by every atomic card. The **unified back-matter** at the end gives the one cross-plane dependency graph (both sub-graphs + the seam), the combined phase/wave plan, the merged milestone-gate table, and the combined definition of done. The original card IDs (`WS-R.0.1` … `WS-R.18.6`, `WS-S.0.1` … `WS-S.11.6`) are all preserved; nine bundled cards have since been **decomposed into smaller, independently-testable sub-cards** (e.g. `WS-R.9.2 → 9.2a/9.2b`, `WS-S.3.6 → 3.6a/3.6b/3.6c`), bringing the total to **171** — each card a single deliverable reviewable, testable, and reversible in ≤ 1–3 engineering days (§30.8).
 
 ---
 
 # Part I — WS-R: Offline Content Availability (LCAP v0.2)
 
-*Source spec: `docs/OFFLINE_SPEC.md`. The plane-specific overview, touched-modules table, relationship notes, and conventions follow; then the 99 WS-R cards (WS-R.0 foundations → WS-R.18 acceptance). The cross-plane back-matter is unified at the end of the document.*
+*Source spec: `docs/OFFLINE_SPEC.md`. The plane-specific overview, touched-modules table, relationship notes, and conventions follow; then the 104 WS-R cards (WS-R.0 foundations → WS-R.18 acceptance). The cross-plane back-matter is unified at the end of the document.*
 
 ## Overview
 
@@ -521,7 +521,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 ### WS-R.4.1 Streaming pack writer
 **ID:** WS-R.4.1 | **Ref:** OFFLINE_SPEC §14.3, §14.4, §14.5
 
-**Description:** Implement `packages/lcap/src/pack/writer.ts` producing the §14.3 layout: magic `LCAPACK2\n`, LDC `PackHeaderV2`, LDC `PackTableV2` (object table **before** frames so a receiver can decide to import/skip/range-fetch), then `PackFrameV2`s, optional trailer. The writer streams (bounded memory) and is **parameterized by a caller-provided ordered object list** — the scheduler (WS-R.5.2c) produces that order at integration time (WS-R.15.1), so the writer build-depends only on the schemas/codec, not the scheduler. It labels privacy (`privacy_label`) and lanes from the entries it is given.
+**Description:** Implement `packages/lcap/src/pack/writer.ts` producing the §14.3 layout: magic `LCAPACK2\n`, LDC `PackHeaderV2`, LDC `PackTableV2` (object table **before** frames so a receiver can decide to import/skip/range-fetch), then `PackFrameV2`s, optional trailer. The writer streams (bounded memory) and is **parameterized by a caller-provided ordered object list** — the scheduler (WS-R.5.2c) produces that order at integration time (WS-R.15.1a), so the writer build-depends only on the schemas/codec, not the scheduler. It labels privacy (`privacy_label`) and lanes from the entries it is given.
 
 **Acceptance criteria:**
 - Output starts with the magic, then header, then table, then frames; table precedes frames.
@@ -693,7 +693,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 **Testing:** Unit — pulse build/apply; frontier-diff correctness; truncated-after-pulse advancement.
 
-**Dependencies:** WS-R.0.7, WS-R.1.4, WS-R.9.2.
+**Dependencies:** WS-R.0.7, WS-R.1.4, WS-R.9.2b.
 
 ---
 
@@ -863,7 +863,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 ### WS-R.8.2c Validation stage 3 — consensus (steps 11-15) + the single entry point
 **ID:** WS-R.8.2c | **Ref:** OFFLINE_SPEC §18.3 (11-15), §18.2
 
-**Description:** Implement the consensus stage and the public `validate(record_cid)` that runs 8.2a→b→c and returns `(trust_state, missing_cids)`: (11) check known revocations (WS-R.1.4) → `revoked`; (12) check device-sequence/fork (WS-R.2.4) → `conflicting`; (13) check checkpoint inclusion if available (WS-R.9.3) → toward `checkpointed`; (14) check checkpoint consistency if available → `conflicting` on a fork; (15) fold all facts into the final state (incl. `stale_authorized` when the local revocation/checkpoint frontier is behind, and `witnessed` when a witness statement is present). `validate` is the **single entry point both client and server call** (one implementation), persisting to `trust_projection`.
+**Description:** Implement the consensus stage and the public `validate(record_cid)` that runs 8.2a→b→c and returns `(trust_state, missing_cids)`: (11) check known revocations (WS-R.1.4) → `revoked`; (12) check device-sequence/fork (WS-R.2.4) → `conflicting`; (13) check checkpoint inclusion if available (WS-R.9.3a) → toward `checkpointed`; (14) check checkpoint consistency if available (WS-R.9.3b) → `conflicting` on a fork; (15) fold all facts into the final state (incl. `stale_authorized` when the local revocation/checkpoint frontier is behind, and `witnessed` when a witness statement is present). `validate` is the **single entry point both client and server call** (one implementation), persisting to `trust_projection`.
 
 **Acceptance criteria:**
 - The final state is the lub of all discharged facts; revocation/fork/stale/witnessed are reflected exactly; nothing upgrades past missing evidence.
@@ -872,7 +872,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 **Testing:** Unit — steps 11-15 matrix; full-pipeline state lub; client≡server output on shared fixtures; missing-deps reporting.
 
-**Dependencies:** WS-R.8.2b, WS-R.2.4, WS-R.9.3, WS-R.1.4.
+**Dependencies:** WS-R.8.2b, WS-R.2.4, WS-R.9.3a, WS-R.9.3b, WS-R.1.4.
 
 ---
 
@@ -901,7 +901,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 **Acceptance criteria:**
 - A record appends exactly once at a monotonic `room_seq` after acceptance; re-acceptance is idempotent.
 - Append order is topological per §24.4; no child precedes a required parent.
-- The log feeds checkpoint scheduling (WS-R.9.2) and display ordering (WS-R.2.3).
+- The log feeds checkpoint scheduling (WS-R.9.2b) and display ordering (WS-R.2.3).
 
 **Testing:** Gated integration (Postgres) — append ordering; idempotent re-append; topological constraint.
 
@@ -909,35 +909,67 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 ---
 
-### WS-R.9.2 Merkle tree + checkpoint record
-**ID:** WS-R.9.2 | **Ref:** OFFLINE_SPEC §19.1.1, §19.2
+### WS-R.9.2a Merkle tree hashing (both algorithms) + tree vectors
+**ID:** WS-R.9.2a | **Ref:** OFFLINE_SPEC §19.1.1
 
-**Description:** Implement the §19.1.1 Merkle tree with RFC 6962/9162 domain-separated hashing — empty `= SHA-256("")`, leaf `= SHA-256(0x00 || cid_bytes)` over the 36-byte record `cid_bytes`, node `= SHA-256(0x01 || left || right)`, RFC 6962 §2.1 split. Support both `tree_algorithm` values: `RFC9162_SHA256` (CT-tool compatible, RECOMMENDED) and `LCAP_MERKLE_V2` (leaf prefix `0x00 || domain_separator_hash || cid_bytes` binding the tree to one network). Implement the signed `room_checkpoint` record (root, tree size, policy/revocation epochs, previous checkpoint, signer authority) + its authority proof.
+**Description:** Implement the pure §19.1.1 Merkle tree in `packages/lcap/src/checkpoint/merkle.ts`: `merkleRoot(leafCids: Uint8Array[], algorithm): Uint8Array` and `treeFromLeaves(...)` over RFC 6962/9162 domain-separated hashing — empty `= SHA-256("")`, leaf `= SHA-256(0x00 || leaf_payload)`, node `= SHA-256(0x01 || left || right)`, with the RFC 6962 §2.1 largest-power-of-two split for odd leaf counts. Support both `tree_algorithm` values via a single hashing strategy: `RFC9162_SHA256` (leaf payload = the 36-byte record `cid_bytes`; CT-tool compatible, RECOMMENDED) and `LCAP_MERKLE_V2` (leaf payload = `domain_separator_hash || cid_bytes`, binding the tree to one network so a leaf from network A cannot verify against network B's checkpoint). No record/proof I/O — this is leaf-bytes-in, root-out, plus the internal node array used by inclusion/consistency (WS-R.9.3a/b). Commit `test-vectors/merkle.json` (leaf set → root, for both algorithms, including empty/single/odd-count trees).
 
 **Acceptance criteria:**
-- Leaf/node hashing matches committed vectors for both algorithms; a verifier rejects a proof computed under a different algorithm than the checkpoint names.
-- The checkpoint requires a valid authority proof; `tree_size`/`merkle_root`/epochs are bound into the signed body.
-- `RFC9162_SHA256` output is byte-compatible with a standard CT verifier.
+- Leaf/node hashing matches the committed vectors for both algorithms; empty, single-leaf, two-leaf, and odd-leaf (e.g. 5-leaf) trees produce the documented roots.
+- `RFC9162_SHA256` output is byte-identical to a reference CT (RFC 9162) implementation for the same leaf set.
+- `LCAP_MERKLE_V2` binds the domain separator into every leaf; the same `cid_bytes` under two different `network_id`s yields different roots.
 
-**Testing:** Unit — tree-hash vectors (both algorithms); checkpoint build/verify; cross-algorithm-proof rejection.
+**Testing:** Unit — tree-hash vectors (both algorithms); empty/single/odd-count split; RFC-9162 cross-check; network-binding differential.
 
-**Dependencies:** WS-R.0.6a, WS-R.0.6b, WS-R.9.1.
+**Dependencies:** WS-R.0.3, WS-R.0.1.
 
 ---
 
-### WS-R.9.3 Inclusion + consistency proofs
-**ID:** WS-R.9.3 | **Ref:** OFFLINE_SPEC §19.1.2, §19.3, §19.4
+### WS-R.9.2b `room_checkpoint` record + authority proof
+**ID:** WS-R.9.2b | **Ref:** OFFLINE_SPEC §19.1.1, §19.2
 
-**Description:** Implement `inclusion_proof` and `consistency_proof` records and the RFC 9162 verification algorithms — inclusion (§2.1.3) recomputes a candidate root from `(leaf_index, tree_size, proof_hashes, leaf_cid)` and requires equality with the checkpoint root; consistency (§2.1.4) requires the new root provably extends the old with no leaf rewritten/removed. A failed consistency check between two checkpoints the same authority signed is fork/equivocation evidence (WS-R.9.4).
+**Description:** Implement the signed `room_checkpoint` record in `packages/lcap/src/checkpoint/record.ts`: a closed-schema body (`room_id` or `room_id_hash`, `tree_algorithm`, `tree_size`, `merkle_root`, `policy_epoch`, `revocation_epoch`, `prev_checkpoint_cid?`, `signer_key_id`, validity window) plus its `authority_signature` proof built via WS-R.0.6a and verified via WS-R.0.6b. The `merkle_root` is computed by WS-R.9.2a over the WS-R.9.1 room-log slice `[0, tree_size)`. The `tree_algorithm` named in the body is the ONLY algorithm a verifier may use against this checkpoint (no per-proof override), so a checkpoint and its proofs cannot disagree on the hashing rule.
 
 **Acceptance criteria:**
-- A valid inclusion proof verifies a record's membership against a checkpoint; a tampered proof/leaf fails.
-- A valid consistency proof links successive checkpoints; a rewritten-history pair fails and raises fork evidence.
-- Verification is byte-compatible with RFC 9162 for `RFC9162_SHA256`.
+- A checkpoint is untrusted without a valid authority proof; `tree_algorithm`/`tree_size`/`merkle_root`/`policy_epoch`/`revocation_epoch`/`prev_checkpoint_cid` are all inside the signed body.
+- A checkpoint whose `merkle_root` does not equal `merkleRoot(log[0:tree_size], tree_algorithm)` fails verification; a proof computed under a different algorithm than the checkpoint names is rejected at WS-R.9.3a/b.
+- `prev_checkpoint_cid` chains successive checkpoints for the consistency check (WS-R.9.3b).
 
-**Testing:** Unit — inclusion/consistency happy path + tamper; consistency-failure → fork-evidence wiring; vector replay.
+**Testing:** Unit — checkpoint build/verify; missing/forged-authority-proof rejection; root-mismatch rejection; chain linkage.
 
-**Dependencies:** WS-R.9.2.
+**Dependencies:** WS-R.9.2a, WS-R.0.6a, WS-R.0.6b, WS-R.9.1.
+
+---
+
+### WS-R.9.3a Inclusion proof record + RFC 9162 verifier
+**ID:** WS-R.9.3a | **Ref:** OFFLINE_SPEC §19.1.2, §19.3
+
+**Description:** Implement the `inclusion_proof` record and the RFC 9162 §2.1.3 verifier in `packages/lcap/src/checkpoint/inclusion.ts`: `verifyInclusion({ leaf_index, tree_size, proof_hashes, leaf_cid, checkpoint })` recomputes a candidate root from `(leaf_index, tree_size, proof_hashes, leaf_cid)` using the checkpoint's named `tree_algorithm` (WS-R.9.2a hashing) and requires byte equality with the checkpoint's `merkle_root`. Out-of-range `leaf_index ≥ tree_size`, a wrong-length `proof_hashes` for the `(index, size)` pair, or a non-matching root each fail with a typed status. The proof record is closed-schema and carries the `checkpoint_cid` it is proven against.
+
+**Acceptance criteria:**
+- A valid inclusion proof verifies a record's membership against its checkpoint; a tampered proof hash, wrong `leaf_index`, wrong `leaf_cid`, or wrong `tree_size` fails.
+- The recomputed-root path uses the checkpoint's `tree_algorithm` only; verification is byte-compatible with RFC 9162 §2.1.3 for `RFC9162_SHA256` (cross-checked against a reference vector).
+- `test-vectors/inclusion.json` (tree + index → proof → root) is committed and replayed.
+
+**Testing:** Unit — happy path + the four tamper cases; out-of-range index; RFC-9162 vector replay.
+
+**Dependencies:** WS-R.9.2a, WS-R.9.2b.
+
+---
+
+### WS-R.9.3b Consistency proof record + verifier + fork-evidence trigger
+**ID:** WS-R.9.3b | **Ref:** OFFLINE_SPEC §19.1.2, §19.4
+
+**Description:** Implement the `consistency_proof` record and the RFC 9162 §2.1.4 verifier in `packages/lcap/src/checkpoint/consistency.ts`: `verifyConsistency({ first_size, second_size, proof_hashes, first_root, second_root, tree_algorithm })` requires that the second (larger) tree provably **extends** the first with no leaf rewritten, reordered, or removed. The two roots come from two checkpoints the same authority signed (linked by `prev_checkpoint_cid`, WS-R.9.2b). A failed consistency check between two same-authority checkpoints is equivocation: it returns a typed `consistency_failed` result carrying both checkpoints + their authority proofs, which WS-R.9.4 packages as C0/P0 `fork_evidence`. This card owns the verifier + the failure signal; WS-R.9.4 owns the evidence object and gossip.
+
+**Acceptance criteria:**
+- A valid consistency proof links successive checkpoints of the same room/authority; a rewritten-history or shrunk-tree pair fails.
+- A consistency failure emits the typed `consistency_failed` signal with both checkpoints' bodies + proofs (consumed by WS-R.9.4), never a silent pass.
+- Verification is byte-compatible with RFC 9162 §2.1.4 for `RFC9162_SHA256`; `test-vectors/consistency.json` is committed and replayed.
+
+**Testing:** Unit — happy path + rewritten/shrunk tamper; `consistency_failed` signal shape; RFC-9162 vector replay.
+
+**Dependencies:** WS-R.9.3a, WS-R.9.2b.
 
 ---
 
@@ -953,7 +985,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 **Testing:** Unit — witness verify; checkpoint-fork detection; evidence assembly + P0 classification.
 
-**Dependencies:** WS-R.9.2, WS-R.2.4.
+**Dependencies:** WS-R.9.2b, WS-R.9.3b (consumes the `consistency_failed` signal), WS-R.2.4.
 
 ---
 
@@ -1003,7 +1035,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 **Testing:** Unit — hard-pin survives eviction sweep (property); retry scheduling. Gated — IndexedDB durability.
 
-**Dependencies:** WS-R.11.3.
+**Dependencies:** WS-R.11.3b.
 
 ---
 
@@ -1020,7 +1052,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 **Testing:** Unit — eviction-order property over a mixed store; hard-pin invariance.
 
-**Dependencies:** WS-R.11.3.
+**Dependencies:** WS-R.11.3a.
 
 ---
 
@@ -1040,19 +1072,35 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 ---
 
-### WS-R.11.3 IndexedDB `lcap_v2` stores
-**ID:** WS-R.11.3 | **Ref:** OFFLINE_SPEC §23.1, §23.2
+### WS-R.11.3a `lcap_v2` IndexedDB schema + indexes + versioned migration
+**ID:** WS-R.11.3a | **Ref:** OFFLINE_SPEC §23.1
 
-**Description:** Implement the dedicated `lcap_v2` IndexedDB database (separate from the existing `licio` DB) with the §23.1 stores (`records`, `proofs`, `blocks`, `chunks`, `manifests`, `outbox`, `quarantine`, `trust_projection`, `liveness`, `frontiers`, `receipts`, `gc_index`) and indexes for room/priority/state/pin-class. Follow §23.2 best practices: no `getAll` on large stores, cursors/streaming for bundle import/export, blobs/chunk records for large blocks, metadata/blob separation, transactional verification-state commit, capped transaction size, transient-quota retry.
+**Description:** Implement the dedicated `lcap_v2` IndexedDB database in `apps/web/src/lcap/db.ts` (a **separate** database from the existing `licio` DB, `apps/web/src/offline/db.ts`, so LCAP versioning/GC/quarantine evolve without migrating the WS-C stores) with the §23.1 object stores — `records`, `proofs`, `blocks`, `chunks`, `manifests`, `outbox`, `quarantine`, `trust_projection`, `liveness`, `frontiers`, `receipts`, `gc_index` — their key paths, and the secondary indexes for room / priority / trust-state / pin-class lookups. Provide the versioned `onupgradeneeded` migration scaffold (open → create stores/indexes on version bump) following the WS-C migration pattern. This card owns the schema shape only; the §23.2 access-pattern/durability layer is WS-R.11.3b.
 
 **Acceptance criteria:**
-- `lcap_v2` is created with all stores/indexes and never collides with `licio`; a versioned migration path exists.
-- Large blocks store as blobs/chunks; import/export streams via cursors; verification state commits transactionally.
-- Old-phone caps and transient-quota retry are enforced.
+- `lcap_v2` is created with all twelve stores + their indexes and **never collides** with the `licio` database name/version; a `DB_NAME = 'lcap_v2'` constant mirrors the `licio` pattern.
+- Each store's key path + secondary indexes (room, priority, state, pin-class) exist and are queryable; a versioned upgrade path adds a store/index without data loss.
+- A static check asserts `apps/web/src/lcap` does not open or migrate the `licio` database.
 
-**Testing:** Unit (`fake-indexeddb`) — schema/migration; cursor streaming; transactional commit. Gated — quota-retry path.
+**Testing:** Unit (`fake-indexeddb`) — store/index creation; versioned upgrade; name-isolation from `licio`.
 
 **Dependencies:** WS-R.0.1.
+
+---
+
+### WS-R.11.3b §23.2 IndexedDB durability layer (streaming, blob separation, transactional commit, quota retry)
+**ID:** WS-R.11.3b | **Ref:** OFFLINE_SPEC §23.2
+
+**Description:** Implement the §23.2 access-pattern + durability layer over the WS-R.11.3a schema: **no `getAll`** on large stores (cursor iteration only); cursor/streaming reads+writes for bundle import/export (bounded memory); large blocks stored as `Blob`/chunk records with **metadata↔blob separation** (descriptor row + separate blob row); **transactional** verification-state commit (a record's body + proof + trust-state advance commit atomically so a crash never leaves a half-verified record); **capped transaction size** for old phones (split large imports into bounded transactions); and **transient-quota retry** (on `QuotaExceededError`, shed P4 ambient cache per WS-R.11.1 and retry, surfacing pressure honestly). All LCAP store access funnels through this layer.
+
+**Acceptance criteria:**
+- No code path calls `getAll` on `records`/`blocks`/`chunks`; import/export streams via cursors with bounded memory; large blocks store as separated blob+metadata rows.
+- Verification-state commit is transactional (body+proof+state atomic); a simulated mid-commit crash leaves no half-verified record.
+- Old-phone transaction caps hold; a transient quota error sheds ambient cache and retries rather than failing the write.
+
+**Testing:** Unit (`fake-indexeddb`) — cursor-only streaming; blob/metadata separation; transactional-commit atomicity; capped-transaction split. Gated — quota-retry path.
+
+**Dependencies:** WS-R.11.3a, WS-R.11.1.
 
 ---
 
@@ -1125,7 +1173,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 ### WS-R.12.1c Ingestion stage 3 — accept, room-log append, checkpoint trigger, receipts/wants
 **ID:** WS-R.12.1c | **Ref:** OFFLINE_SPEC §24.1 (accept/append/return), §24.2, §24.5
 
-**Description:** Implement the commit stage: for accept-eligible records, idempotently accept by `record_cid` + semantic uniqueness (WS-R.12.3), **append to the room log** (WS-R.9.1) under a transaction, mark `validation_state = server_accepted`, and **trigger the checkpoint schedule** (WS-R.9.2 runs on the maintenance tick). Emit signed/authenticated receipts (WS-R.10.2) for stored/accepted/rejected/quarantined_missing_dependency/checkpointed, and return the per-object `ObjectStatusV2[]` plus `WantRequestV2[]` for the precise missing dependencies. The MUST-NOT-emit-before-validation rule (§24.2) holds because acceptance is the only path that writes the room log.
+**Description:** Implement the commit stage: for accept-eligible records, idempotently accept by `record_cid` + semantic uniqueness (WS-R.12.3), **append to the room log** (WS-R.9.1) under a transaction, mark `validation_state = server_accepted`, and **trigger the checkpoint schedule** (WS-R.9.2b runs on the maintenance tick). Emit signed/authenticated receipts (WS-R.10.2) for stored/accepted/rejected/quarantined_missing_dependency/checkpointed, and return the per-object `ObjectStatusV2[]` plus `WantRequestV2[]` for the precise missing dependencies. The MUST-NOT-emit-before-validation rule (§24.2) holds because acceptance is the only path that writes the room log.
 
 **Acceptance criteria:**
 - Canonical emission (room-log append + `server_accepted`) happens only for records that passed stage 2; quarantined/rejected records never reach the log.
@@ -1182,7 +1230,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 **Testing:** Gated integration — endpoint contract + status-code matrix; bundle-import-uses-same-validator; rate-limit `429`.
 
-**Dependencies:** WS-R.12.1c, WS-R.6.2, WS-R.9.3.
+**Dependencies:** WS-R.12.1c, WS-R.6.2, WS-R.9.3a, WS-R.9.3b.
 
 ---
 
@@ -1222,19 +1270,35 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 ## WS-R.14 Privacy and denial-of-service controls
 
-### WS-R.14.1 Resource caps + malicious-graph detection
-**ID:** WS-R.14.1 | **Ref:** OFFLINE_SPEC §27.1, §27.2
+### WS-R.14.1a Centralized §27.1 resource caps + shared chokepoint
+**ID:** WS-R.14.1a | **Ref:** OFFLINE_SPEC §27.1
 
-**Description:** Centralize the §27.1 caps (max pack/header/table/frame/uncompressed sizes, max compression ratio, max manifest entries, max dependency depth, max missing deps per object, max proofs per record, max signature failures per import, max quarantine bytes, max CPU time per import batch) and the §27.2 malicious-graph detectors (cycles, excessive fan-out/depth, duplicate deps, private metadata in public exports, unknown critical fields). Every parser path consumes the shared cap config.
+**Description:** Centralize the §27.1 resource caps in `packages/lcap/src/limits/caps.ts` as one frozen config object — max pack / header / table / frame / uncompressed sizes, max compression (expansion) ratio, max manifest entries, max dependency depth, max missing deps per object, max proofs per record, max signature failures per import, max quarantine bytes, max CPU time per import batch — and a single enforcement helper every parser path (WS-R.4.2 reader, WS-R.3.4 decompressor, WS-R.12.1a server parse) consumes. A breach aborts with `rejected_resource_limit` carrying the violated cap name. Caps are profile-tunable (old-phone vs server) but never disable-able.
 
 **Acceptance criteria:**
-- Every cap is enforced at the single shared chokepoint; a breach aborts with `rejected_resource_limit`.
-- Cyclic/over-fan-out/over-deep dependency graphs are detected and rejected before expansion.
-- Private metadata in a public export is detected and blocked.
+- Every listed cap is enforced at the single shared chokepoint; a breach aborts with `rejected_resource_limit` naming the cap.
+- No parser path hard-codes a limit outside the shared config; a static check asserts the reader/decompressor/server-parse all import the shared caps.
+- Caps are profile-tunable but cannot be set to unlimited.
 
-**Testing:** Unit — each cap boundary; graph-attack detection. Security — fuzz + dependency-bomb corpus (WS-R.18.4).
+**Testing:** Unit — each cap boundary (at/over); shared-config-only assertion; profile tuning bounds.
 
 **Dependencies:** WS-R.4.2.
+
+---
+
+### WS-R.14.1b §27.2 malicious-dependency-graph detectors
+**ID:** WS-R.14.1b | **Ref:** OFFLINE_SPEC §27.2
+
+**Description:** Implement the §27.2 malicious-graph detectors in `packages/lcap/src/limits/graph-guard.ts`, run over the declared dependency DAG **before** any closure expansion: cycle detection, excessive fan-out, excessive depth, duplicate dependencies, **private metadata in a public export**, and unknown critical fields. Each detector returns a typed rejection (`rejected_resource_limit` / `rejected_bad_schema` / a privacy rejection) consumed by the reader (WS-R.4.2) and the server parse (WS-R.12.1a). Detection runs within the WS-R.14.1a CPU/time cap so the guard itself cannot be a DoS vector.
+
+**Acceptance criteria:**
+- Cyclic, over-fan-out, over-deep, and duplicate-dep graphs are detected and rejected **before** expansion; private metadata in a public export is detected and blocked.
+- An unknown critical field fails closed (`rejected_bad_schema`); each detector returns its exact status code.
+- The guard executes within the §27.1 CPU/time cap (it cannot be turned into a DoS).
+
+**Testing:** Unit — each detector (cycle/fan-out/depth/dup/private-metadata/unknown-critical) with its status. Security — dependency-bomb corpus (WS-R.18.4).
+
+**Dependencies:** WS-R.14.1a.
 
 ---
 
@@ -1248,7 +1312,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 - Stealth mode disables discovery/advertising/background sync and uses generic filenames.
 - No private-room membership/contact/social-graph leaks to unknown peers or relays.
 
-**Testing:** Unit — disclosure completeness; stealth-mode toggles. E2E — export-warning flow (WS-R.15.1 import/export E2E).
+**Testing:** Unit — disclosure completeness; stealth-mode toggles. E2E — export-warning flow (WS-R.15.1a/15.1b import/export E2E).
 
 **Dependencies:** WS-R.6.3, WS-R.4.4.
 
@@ -1288,19 +1352,35 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 ## WS-R.15 Transport profiles
 
-### WS-R.15.1 Manual `.licio-bundle` export/import flow
-**ID:** WS-R.15.1 | **Ref:** OFFLINE_SPEC §22.2
+### WS-R.15.1a Manual `.licio-bundle` export flow
+**ID:** WS-R.15.1a | **Ref:** OFFLINE_SPEC §22.2
 
-**Description:** Implement the REQUIRED manual bundle transport in `apps/web/src/lcap/bundleExport.ts` / `bundleImport.ts`: export (choose scope → privacy warning → size estimate → included lanes/priorities → stream pack → save/share file → record `exported` liveness) and import (select file → check size/magic → parse header/table under caps → summary before render → stream frames → verify CIDs/schemas/proofs → quarantine missing deps → commit verified/provisional → update liveness). Uses the platform File System Access / download + file-input APIs (no npm dependency).
+**Description:** Implement the REQUIRED bundle **export** transport in `apps/web/src/lcap/bundleExport.ts`: choose scope → show the WS-R.14.2 privacy warning → size estimate → display included lanes/priorities → stream the pack via the WS-R.4.1 writer → save/share the file (platform File System Access / download APIs, no npm dependency) → record `exported` liveness (WS-R.10.1). High-risk exports offer a generic, room/topic-free filename (WS-R.4.4). The export is parameterized by the scheduler-emitted object order so C0/control material leads.
 
 **Acceptance criteria:**
-- Export shows the privacy warning + size + lanes before producing the file and records `exported` liveness.
-- Import shows a summary before rendering, verifies every frame, and quarantines missing deps — nothing renders before trust projection.
-- Round-trip: a bundle exported from one profile imports into another with no semantic change (WS-R.18.5).
+- Export shows the privacy warning + size estimate + included lanes **before** producing the file, and records `exported` liveness afterward.
+- The pack streams with bounded memory (WS-R.4.1) in scheduler order; a high-risk export offers a generic filename.
+- No npm dependency (platform file APIs only).
 
-**Testing:** E2E (Playwright + axe) — export/import happy path + malformed-file rejection; a11y on each state.
+**Testing:** E2E (Playwright + axe) — export happy path + privacy-warning-before-file; a11y on each state; generic-filename option.
 
-**Dependencies:** WS-R.4.1, WS-R.4.2, WS-R.14.2.
+**Dependencies:** WS-R.4.1, WS-R.14.2, WS-R.10.1.
+
+---
+
+### WS-R.15.1b Manual `.licio-bundle` import flow
+**ID:** WS-R.15.1b | **Ref:** OFFLINE_SPEC §22.2, §14.7
+
+**Description:** Implement the bundle **import** transport in `apps/web/src/lcap/bundleImport.ts`: select file → check size/magic → parse header/table under the WS-R.14.1a caps → show a **summary before render** → stream frames through the WS-R.4.2 reader (verify CIDs/schemas/proofs) → quarantine missing-dependency records (WS-R.4.3) → commit verified/provisional objects → update liveness. **Nothing renders before trust projection** (WS-R.8.3). A malformed/oversized/truncated file fails cleanly with a typed status.
+
+**Acceptance criteria:**
+- Import shows a summary **before** rendering, verifies every frame, quarantines missing deps, and renders nothing before trust projection.
+- A malformed/oversized/truncated file is rejected/quarantined cleanly (no crash, no partial trusted render).
+- Round-trip: a bundle exported by WS-R.15.1a imports here with no semantic change (proven in WS-R.18.5).
+
+**Testing:** E2E (Playwright + axe) — import happy path + malformed-file rejection + summary-before-render; a11y on each state.
+
+**Dependencies:** WS-R.4.2, WS-R.4.3, WS-R.8.3, WS-R.14.1a.
 
 ---
 
@@ -1365,7 +1445,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 **Testing:** Native-build CI smoke (APK builds, app boots, client hash matches the web build); CSP-in-WebView assertion.
 
-**Dependencies:** WS-R.15.1, WS-R.11.4.
+**Dependencies:** WS-R.15.1a, WS-R.15.1b, WS-R.11.4.
 
 ---
 
@@ -1402,7 +1482,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 ### WS-R.15.4d Wi-Fi Direct / local hotspot / Bluetooth / USB channels
 **ID:** WS-R.15.4d | **Ref:** OFFLINE_SPEC §22.5
 
-**Description:** Extend the courier with the remaining §22.5 channels behind the *same* `CourierTransport` adapter: Wi-Fi Direct + local hotspot (higher-throughput LAN ferry), Bluetooth file transfer (low-bandwidth C0/T1 ferry), and USB import/export (reuses the WS-R.15.1 `.licio-bundle` path — **no new format**). Each channel selects chunk size and lane budget from its transport profile (§13.2/§15) so Bluetooth stays C0-first while LAN uses larger chunks.
+**Description:** Extend the courier with the remaining §22.5 channels behind the *same* `CourierTransport` adapter: Wi-Fi Direct + local hotspot (higher-throughput LAN ferry), Bluetooth file transfer (low-bandwidth C0/T1 ferry), and USB import/export (reuses the WS-R.15.1a/15.1b `.licio-bundle` path — **no new format**). Each channel selects chunk size and lane budget from its transport profile (§13.2/§15) so Bluetooth stays C0-first while LAN uses larger chunks.
 
 **Acceptance criteria:**
 - Each channel moves the same packs through the same adapter; chunk size + lane budget follow the channel's transport profile (LAN larger; Bluetooth small + C0-first).
@@ -1629,11 +1709,11 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 **Acceptance criteria:**
 - Every listed vector exists and is asserted both directions where applicable.
-- The corpus is the normative pin for determinism (referenced by WS-R.0.2c/0.3/0.6a/0.6b and WS-R.9.2/9.3).
+- The corpus is the normative pin for determinism (referenced by WS-R.0.2c/0.3/0.6a/0.6b and WS-R.9.2a/9.2b/9.3a/9.3b).
 
 **Testing:** Unit — vector replay across the codec/CID/COSE/Merkle modules.
 
-**Dependencies:** WS-R.0.6b, WS-R.9.3.
+**Dependencies:** WS-R.0.6b, WS-R.9.3a, WS-R.9.3b.
 
 ---
 
@@ -1696,7 +1776,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 **Testing:** Security suite + fuzz; regression fixtures for any discovered crash.
 
-**Dependencies:** WS-R.14.1, WS-R.0.8, WS-R.4.2.
+**Dependencies:** WS-R.14.1a, WS-R.14.1b, WS-R.0.8, WS-R.4.2.
 
 ---
 
@@ -1711,7 +1791,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 **Testing:** Gated cross-runtime suite (Node unit + Playwright) over the WS-R.18.1 corpus.
 
-**Dependencies:** WS-R.18.1, WS-R.15.1.
+**Dependencies:** WS-R.18.1, WS-R.15.1a, WS-R.15.1b.
 
 ---
 
@@ -1733,7 +1813,7 @@ LCAP is **almost entirely net-new code** in the new locations plus a new DB sche
 
 # Part II — WS-S: Private P2P Rooms (End-to-End Encrypted)
 
-*Source spec: `docs/PRIVATE_SPEC.md`. The plane-specific overview (room-class model, server-non-storage integration points, relationship notes, and conventions) follows; then the 62 WS-S cards (WS-S.0 framing → WS-S.11 audit/launch). The cross-plane back-matter is unified at the end of the document.*
+*Source spec: `docs/PRIVATE_SPEC.md`. The plane-specific overview (room-class model, server-non-storage integration points, relationship notes, and conventions) follows; then the 67 WS-S cards (WS-S.0 framing → WS-S.11 audit/launch). The cross-plane back-matter is unified at the end of the document.*
 
 ## Overview
 
@@ -2087,19 +2167,51 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 ---
 
-### WS-S.3.6 Local key store (tiers) + recovery kit + threshold recovery
-**ID:** WS-S.3.6 | **Ref:** PRIVATE_SPEC §10.8, §16.2, §12.6, §12.6.1
+### WS-S.3.6a Local key store + four protection tiers + Argon2id KDF
+**ID:** WS-S.3.6a | **Ref:** PRIVATE_SPEC §10.8, §16.2
 
-**Description:** Implement the `LocalPrivateKeyRecord` store with the four protection tiers (passphrase-Argon2id / WebCrypto non-extractable wrap / passkey-assisted / local key agent) and Argon2id (RFC 9106) or a similarly-reviewed memory-hard KDF for passphrase exports. Implement the recovery kit (encrypted member/device recovery capability) and **capability-based threshold recovery** (§12.6.1: M distinct admin-signed RecoveryAuthorize ops → MLS Add + epoch rotation; NOT secret-sharing the root key by default). Lost-all-keys is unrecoverable — no false recovery path (§12.7).
+**Description:** Implement the `LocalPrivateKeyRecord` store (IndexedDB, in the private chunk) holding room/epoch signing keys, MLS state secrets, and exporter material, with the four protection tiers selectable per room: (1) passphrase-wrapped via **Argon2id** (RFC 9106, or a similarly-reviewed memory-hard KDF, loaded in the private chunk); (2) WebCrypto **non-extractable** wrap (raw key never serializable — `exportKey` rejects, mirroring the WS-C draft-crypto posture); (3) passkey-assisted unlock; (4) a seam for the Tier-3 local key agent (WS-S.10.3). High-risk rooms require tier 2+ or strict update pinning. This card owns key-at-rest only; recovery is WS-S.3.6b/c.
 
 **Acceptance criteria:**
-- Keys are protected at the configured tier; passphrase exports use Argon2id; high-risk rooms require the local agent or strict update pinning.
-- The recovery kit is strong-passphrase/hardware-bound; threshold recovery counts M distinct admin authorizations via signed ops, not reconstructed key material.
-- Support is never offered a recovery path for a fully-lost room.
+- Keys are protected at the configured tier; the non-extractable tier's `exportKey` rejects and no JWK is ever at rest; passphrase exports use Argon2id with reviewed parameters.
+- Tier selection is per-room and persisted; high-risk rooms cannot select the weakest tier without update pinning.
+- The Argon2id/memory-hard KDF loads only inside the lazily code-split private chunk, never the core bundle.
 
-**Testing:** Unit — per-tier protect/unlock; recovery-kit round-trip; threshold-count enforcement; lost-all-keys is terminal.
+**Testing:** Unit — per-tier protect/unlock; non-extractability assertion; Argon2id parameter pinning; chunk-isolation of the KDF.
 
 **Dependencies:** WS-S.3.1a, WS-S.3.5.
+
+---
+
+### WS-S.3.6b Recovery kit + terminal lost-all-keys path
+**ID:** WS-S.3.6b | **Ref:** PRIVATE_SPEC §12.6, §12.7, §16.2
+
+**Description:** Implement the recovery kit: an encrypted member/device recovery capability (strong-passphrase- or hardware-bound) that lets a member re-derive their own access on a new device **without** any platform involvement. Implement the §12.7 terminality rule structurally: if all member keys for a room are lost, the room is **unrecoverable** — there is no platform recovery path, no support escalation, and the UI/support copy never implies one. The recovery kit export reuses the WS-S.3.6a key store + the honest-non-goals copy (WS-S.0.3).
+
+**Acceptance criteria:**
+- A recovery kit round-trips a member's access onto a new device with no server call; it is passphrase/hardware-bound and never stored server-side.
+- A fully-lost room is terminal: no code path, support tool, or copy offers recovery (a static check forbids a "recover room" server endpoint).
+- The recovery-kit creation flow shows the §12.7 "Licio cannot recover this for you" disclosure.
+
+**Testing:** Unit — recovery-kit round-trip (new device); no-server-call assertion; lost-all-keys terminality; disclosure presence.
+
+**Dependencies:** WS-S.3.6a.
+
+---
+
+### WS-S.3.6c Capability-based threshold recovery (M admin authorizations)
+**ID:** WS-S.3.6c | **Ref:** PRIVATE_SPEC §12.6.1
+
+**Description:** Implement **capability-based** threshold recovery (§12.6.1): M distinct admin-signed `RecoveryAuthorize` ops (each a normal authority-validated op, WS-S.5.1) combine to authorize an **MLS Add + epoch rotation** that re-admits a recovering member — explicitly **NOT** Shamir/secret-sharing of the room root key (no key material is ever reconstructed or transmitted). The M-of-N policy is room-configured; each authorization is an independent signed op counted by distinct admin device key, and the recovery completes through the normal membership-op + epoch-rotation path (WS-S.5.1/WS-S.3.1b).
+
+**Acceptance criteria:**
+- Threshold recovery counts **M distinct** admin authorizations via signed ops, not reconstructed key material; fewer than M, or M from non-distinct admins, does not authorize.
+- A successful threshold recovery is an ordinary MLS Add + epoch rotation (removed/old epochs stay sealed); no root key is ever shared or rebuilt.
+- The M-of-N policy is room-configured and enforced at validation time.
+
+**Testing:** Unit — distinct-admin threshold counting; below-threshold rejection; recovery-as-MLS-Add path; no-secret-sharing assertion.
+
+**Dependencies:** WS-S.3.6a, WS-S.5.1.
 
 ---
 
@@ -2195,7 +2307,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 **Acceptance criteria:**
 - Every membership/role op is capability-checked; no platform role can authorize one.
 - Add/remove produce an MLS commit + new epoch + new manifest commitment + rotated topics/blind-ids.
-- Threshold rooms require the configured M distinct admin authorizations (WS-S.3.6).
+- Threshold rooms require the configured M distinct admin authorizations (WS-S.3.6c).
 
 **Testing:** Unit — capability gate per op; epoch-rotation-on-membership-change; threshold enforcement.
 
@@ -2482,7 +2594,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 ### WS-S.7.1 Creation wizard + mandatory disclosures
 **ID:** WS-S.7.1 | **Ref:** PRIVATE_SPEC §12.1, §20.2; Appendix A
 
-**Description:** Implement `PrivateRoomCreate.tsx` running the §12.1 / Appendix A sequence: show + require the §6 disclosure and the five acknowledgments (WS-S.0.3); verify the private-mode bundle signature/hash (WS-S.10.2) BEFORE generating keys; generate device signing + HPKE keys; create the MLS group; derive epoch-0 secrets; create the encrypted manifest + first membership op; store encrypted blocks locally; optionally create the server stub (no content/CIDs/heads); start blind rendezvous if policy allows; render from local reducer state. Creation fields: name, directory mode (unlisted default), transport mode (relay-preferred default), replication target, allow-blind-push (off default), require-admin-approval (on default), recovery-kit (now/later).
+**Description:** Implement `PrivateRoomCreate.tsx` running the §12.1 / Appendix A sequence: show + require the §6 disclosure and the five acknowledgments (WS-S.0.3); verify the private-mode bundle signature/hash (WS-S.10.2a) BEFORE generating keys; generate device signing + HPKE keys; create the MLS group; derive epoch-0 secrets; create the encrypted manifest + first membership op; store encrypted blocks locally; optionally create the server stub (no content/CIDs/heads); start blind rendezvous if policy allows; render from local reducer state. Creation fields: name, directory mode (unlisted default), transport mode (relay-preferred default), replication target, allow-blind-push (off default), require-admin-approval (on default), recovery-kit (now/later).
 
 **Acceptance criteria:**
 - Creation is blocked until acknowledgments are checked AND the bundle is verified; the server never receives manifest plaintext/member list/op heads.
@@ -2491,7 +2603,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** E2E (Playwright + axe) — full creation flow incl. acknowledgment gating + bundle-verify gate; no-server-content request assertion.
 
-**Dependencies:** WS-S.5.4b, WS-S.3.6, WS-S.10.2.
+**Dependencies:** WS-S.5.4b, WS-S.3.6b, WS-S.10.2b.
 
 ---
 
@@ -2555,25 +2667,41 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit — health rendering vs targets; lock-on-unverified-bundle. E2E (axe) — health panel + lock screen.
 
-**Dependencies:** WS-S.7.2, WS-S.10.2.
+**Dependencies:** WS-S.7.2, WS-S.10.2b.
 
 ---
 
 ## WS-S.8 Media and attachments
 
-### WS-S.8.1 Local media pipeline (sniff / strip / chunk / encrypt / manifest)
-**ID:** WS-S.8.1 | **Ref:** PRIVATE_SPEC §17.1, §17.2, §13.6
+### WS-S.8.1a Local media validation + metadata strip + accessibility gate
+**ID:** WS-S.8.1a | **Ref:** PRIVATE_SPEC §17.1, §17.2
 
-**Description:** Implement the local-only media pipeline in a worker (no server scan gate / object storage): file selection → local MIME sniff + size checks → local metadata stripping (reuse the WS-G byte-level EXIF stripper + video container neutralization) → optional local thumbnail/poster → required alt text (image) / captions (video) → chunk → encrypt (WS-S.3.3a, per-chunk) → encrypted `PrivateAttachmentManifestPlainV1` → P2P block sync. If a type cannot be safely stripped, show the §17.2 warning.
+**Description:** Implement the front of the local-only media pipeline in `apps/web/src/private-p2p/media/validate.ts` (a Web Worker; **no** server scan gate or object-storage endpoint is touched): file selection → byte-level MIME sniff + size/duration caps → local metadata stripping (reuse the shipped WS-G byte-level EXIF stripper and the WS-Q video-container neutralizer) → optional local thumbnail/poster generation → the required-accessibility gate (alt text for images, captions/description for video, enforced before the item can be sent). If a type cannot be safely stripped, surface the §17.2 unstrippable-type warning and block send. Output is a validated, metadata-free plaintext byte stream + accessibility metadata, ready for WS-S.8.1b; this card performs no encryption.
 
 **Acceptance criteria:**
-- Media is stripped + chunked + encrypted locally; no server upload/scan endpoint is touched.
-- The attachment manifest carries encrypted-chunk CIDs + plaintext/ciphertext hashes + a `metadata_stripped` flag + size class (exact small sizes hidden via padding).
-- Unstrippable types warn the user before send.
+- Sniff + size/duration caps + metadata strip run entirely locally; a static assertion proves no server upload/scan endpoint is reachable from this module.
+- The accessibility gate blocks send until alt text / captions are present; an unstrippable type shows the §17.2 warning and cannot be sent.
+- The WS-G EXIF stripper and WS-Q video neutralizer are reused verbatim (no second metadata-stripping implementation).
 
-**Testing:** Unit — sniff/strip/chunk/encrypt/manifest; no-server-call assertion; padding hides small exact sizes.
+**Testing:** Unit — sniff/strip/thumbnail; accessibility-gate enforcement; unstrippable-type warning; no-server-call assertion.
 
-**Dependencies:** WS-S.3.3a, WS-S.5.2.
+**Dependencies:** WS-S.5.2, WS-G EXIF stripper + WS-Q video neutralizer (shipped).
+
+---
+
+### WS-S.8.1b Local chunk + per-chunk encrypt + encrypted attachment manifest
+**ID:** WS-S.8.1b | **Ref:** PRIVATE_SPEC §17.1, §13.6
+
+**Description:** Implement the encrypting tail of the media pipeline in `apps/web/src/private-p2p/media/encrypt-manifest.ts`: take WS-S.8.1a's validated plaintext stream → fixed-size chunk → encrypt **per chunk** under a fresh object key + nonce (WS-S.3.3a) → content-address each ciphertext chunk (CIDv1 over ciphertext, WS-S.4.2) → assemble the encrypted `PrivateAttachmentManifestPlainV1` (encrypted-chunk CIDs in order, per-chunk plaintext+ciphertext SHA-256, total plaintext size, a `metadata_stripped` flag, and a **padded `size_class`** that hides exact small sizes) → hand the chunks + manifest to the P2P block sync (WS-S.6.4). The manifest itself is an op-referenced object so it rides the reducer like any other content.
+
+**Acceptance criteria:**
+- Each chunk is encrypted under a unique key+nonce and content-addressed over **ciphertext**; the manifest lists encrypted-chunk CIDs + plaintext/ciphertext hashes + `metadata_stripped` + a padded `size_class`.
+- Padding hides exact small sizes (a 3 KB and a 7 KB image fall in the same advertised class); the manifest round-trips into the reducer state.
+- No plaintext chunk or plaintext CID is ever produced or stored.
+
+**Testing:** Unit — chunk/encrypt/manifest assembly; per-chunk nonce-uniqueness; size-class padding; ciphertext-only CID assertion; manifest reducer round-trip.
+
+**Dependencies:** WS-S.8.1a, WS-S.3.3a, WS-S.4.2.
 
 ---
 
@@ -2589,7 +2717,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit — lazy chunk fetch + bounded prefetch; no-autoplay; no-convergent-dedup assertion. E2E — stream play/pause/resume.
 
-**Dependencies:** WS-S.8.1.
+**Dependencies:** WS-S.8.1b.
 
 ---
 
@@ -2605,7 +2733,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit — each control; alt-required/caption-support; local-only perceptual hash. E2E (axe) — media a11y.
 
-**Dependencies:** WS-S.8.1.
+**Dependencies:** WS-S.8.1b.
 
 ---
 
@@ -2626,19 +2754,35 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 ---
 
-### WS-S.9.2 Migration wizard + import modes (Phases 2-4)
-**ID:** WS-S.9.2 | **Ref:** PRIVATE_SPEC §24.2 (Phases 2-4), §24.3
+### WS-S.9.2a Migration wizard shell + P2P destination creation + member re-invite (Phase 2)
+**ID:** WS-S.9.2a | **Ref:** PRIVATE_SPEC §24.2 (Phase 2), §24.3
 
-**Description:** Implement the migration wizard: create the P2P destination (keys/manifest local; server stores only a stub if unlisted/listed); choose an import mode (Fresh start / Selected import / Full import / Redacted import) with the §24.3 disclosure that imported history was previously server-hosted and migration cannot make past server access impossible; re-invite members through P2P invites (server subscriptions do not grant P2P access).
+**Description:** Implement the migration wizard shell that creates the **new** P2P destination room — never an in-place upgrade of the server room: generate room keys + initial MLS group locally, write only an optional directory stub server-side (if listed/unlisted), and re-invite members through P2P invites (WS-S.3.4) so that **old server subscriptions confer no P2P access**. Surface the §24.3 framing up front ("this improves privacy from this point forward; it cannot make past server access impossible"). This card creates the destination and membership; the content import modes are WS-S.9.2b.
 
 **Acceptance criteria:**
-- The wizard creates a P2P room locally + an optional stub; the four import modes work and disclose their leakage honestly.
-- Members are re-invited via P2P; old server subscriptions confer no P2P access.
-- The §24.3 "improves privacy from this point forward" copy is shown before any import.
+- The wizard creates a brand-new P2P room (local keys/MLS group) + at most a directory stub; the original server room is untouched at this stage.
+- Members are re-invited via P2P invites; a former server subscriber with no P2P invite gets **no** access.
+- The §24.3 "improves privacy from this point forward" disclosure renders before any destination is created.
 
-**Testing:** Unit — import-mode behavior + disclosure. E2E — create-destination + selected-import + re-invite.
+**Testing:** Unit — destination-creation + stub-optionality; re-invite-not-subscription. E2E — create-destination + re-invite flow.
 
 **Dependencies:** WS-S.7.1, WS-S.7.4.
+
+---
+
+### WS-S.9.2b Import modes (Fresh / Selected / Full / Redacted) + per-mode leakage disclosure (Phases 3-4)
+**ID:** WS-S.9.2b | **Ref:** PRIVATE_SPEC §24.2 (Phases 3-4), §24.3
+
+**Description:** Implement the four §24.2 content-import modes that copy server-hosted history into the WS-S.9.2a destination as new encrypted ops: **Fresh start** (no import), **Selected import** (chosen threads/items), **Full import** (all readable history), **Redacted import** (import with author-chosen removals). Each mode shows the §24.3 honest disclosure that imported history **was previously server-hosted** and that importing it does not retroactively make that past access impossible. Imported items become ordinary encrypted content ops in the new room (re-authored under the importer's device key, with provenance noted), never a server-readable copy.
+
+**Acceptance criteria:**
+- All four modes work; each imported item becomes a normal encrypted op in the destination (no server-readable copy is created by import).
+- Every mode shows the "imported history was server-hosted / cannot un-share the past" disclosure before importing.
+- Redacted import omits author-chosen items; Selected import imports exactly the chosen set; Fresh start imports nothing.
+
+**Testing:** Unit — per-mode import set + disclosure presence; no-server-copy assertion. E2E — selected-import end-to-end into the destination.
+
+**Dependencies:** WS-S.9.2a.
 
 ---
 
@@ -2654,7 +2798,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Gated integration — freeze + purge across the enumerated tables; retained-record disclosure. E2E — frozen-room banner.
 
-**Dependencies:** WS-S.9.2.
+**Dependencies:** WS-S.9.2b.
 
 ---
 
@@ -2676,19 +2820,35 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 ---
 
-### WS-S.10.2 Transparency log + SW update pinning + room lock
-**ID:** WS-S.10.2 | **Ref:** PRIVATE_SPEC §20.6, §22.4, §27.5
+### WS-S.10.2a Transparency-log verify-before-unlock primitive
+**ID:** WS-S.10.2a | **Ref:** PRIVATE_SPEC §20.6, §22.4
 
-**Description:** Implement the code-transparency log of signed private-mode bundle hashes and the service-worker update pinning that verifies the running private chunk against the pinned, signed, logged hash — via the WS-O.3.2e runtime verification primitive (fail-closed lookup + signature verification against the WS-O.3.2b transparency log) — before unlocking room keys. If the bundle is unsigned / not in the log / hash-mismatched, private rooms LOCK before any key unlock with the §20.6 message; CSP/Trusted Types/no-dynamic-remote-code stay enforced. Add `check:private-bundle-transparency` to CI. On a verified-safe client after an incident, rotate room keys (§27.5).
+**Description:** Implement the code-transparency check that decides whether the running private chunk is trustworthy: a fail-closed lookup + signature verification of the running private-mode bundle hash against the WS-O.3.2b transparency log, via the WS-O.3.2e runtime-verification primitive, exposed as `assertPrivateBundleTrusted(): TrustedBundleVerdict`. The verdict gates room-key unlock (consumed by WS-S.10.2b). Unsigned, not-in-log, and hash-mismatched all return an explicit untrusted verdict (never a soft pass); a log/network read failure is **untrusted** (fail-closed). This card owns the verdict only — no SW or UI side-effects.
 
 **Acceptance criteria:**
-- Room keys never unlock until the running private chunk matches a signed, transparency-logged hash.
-- An unverified/mismatched bundle locks private rooms (keys stay sealed) with the exact §20.6 copy.
-- The SW cannot silently load dynamic remote private code; `check:private-bundle-transparency` runs in CI.
+- The verdict is `trusted` only when the running chunk hash is signed AND present in the transparency log AND signature-valid; every other case (incl. unreadable log) is `untrusted`.
+- The primitive performs no key unlock and no SW mutation itself; it is a pure verdict consumed by WS-S.10.2b.
+- The verdict reuses the WS-O.3.2e/3.2b primitives verbatim (no second transparency-verification implementation).
 
-**Testing:** Unit — verify-before-unlock; lock-on-mismatch. E2E — unsigned/mismatched bundle locks the room; CSP blocks inline/eval (WS-S.11.4).
+**Testing:** Unit — trusted/unsigned/not-in-log/mismatch/unreadable verdict matrix; fail-closed on read error.
 
 **Dependencies:** WS-S.10.1, WS-O.3.2e (runtime verification primitive), WS-O.3.2b (per-chunk attestation + transparency log).
+
+---
+
+### WS-S.10.2b SW update pinning + room-lock-on-unverified + post-incident rotation + CI gate
+**ID:** WS-S.10.2b | **Ref:** PRIVATE_SPEC §20.6, §27.5
+
+**Description:** Enforce the WS-S.10.2a verdict end-to-end: the service worker **pins** the private chunk and refuses to silently load a dynamic remote private bundle (CSP / Trusted Types / no-dynamic-remote-code stay enforced); on an `untrusted` verdict, private rooms **LOCK before any key unlock** with the exact §20.6 message and keys stay sealed; after a verified-safe client recovers from an incident, trigger room-key rotation (§27.5). Add the `check:private-bundle-transparency` CI gate asserting the pin + lock path. This card owns the SW pinning, the lock UX hook (rendered by WS-S.7.5), and the rotation trigger.
+
+**Acceptance criteria:**
+- Room keys never unlock unless WS-S.10.2a returns `trusted`; an `untrusted` verdict locks private rooms (keys sealed) with the exact §20.6 copy.
+- The SW cannot silently load dynamic remote private code (pinned chunk; CSP blocks inline/eval); `check:private-bundle-transparency` runs in CI.
+- After a verified-safe recovery, room-key rotation (§27.5) is triggered.
+
+**Testing:** Unit — lock-on-untrusted; pin-refuses-remote; rotation-trigger. E2E — unsigned/mismatched bundle locks the room; CSP blocks inline/eval (WS-S.11.4).
+
+**Dependencies:** WS-S.10.2a.
 
 ---
 
@@ -2704,7 +2864,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Unit/contract — agent API contract; no-raw-key-egress; origin auth. (Full E2E only if shipped in v1.)
 
-**Dependencies:** WS-S.3.6, WS-S.10.2.
+**Dependencies:** WS-S.3.6a, WS-S.10.2a.
 
 ---
 
@@ -2736,7 +2896,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Playwright request-capture suite; CI wiring.
 
-**Dependencies:** WS-S.7.4, WS-S.6.6, WS-S.8.1.
+**Dependencies:** WS-S.7.4, WS-S.6.6, WS-S.8.1b.
 
 ---
 
@@ -2767,7 +2927,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** E2E + unit — the five mandatory cases (lock-on-unsigned/mismatch; CSP-blocks-eval; no-unlock-before-verify); plus the conditional key-agent-refuses-unverified case behind the WS-S.10.3-in-scope flag.
 
-**Dependencies:** WS-S.10.2 (mandatory); WS-S.10.3 (conditional — only if the Tier-3 agent is in v1 scope, §30.3).
+**Dependencies:** WS-S.10.2b (mandatory); WS-S.10.3 (conditional — only if the Tier-3 agent is in v1 scope, §30.3).
 
 ---
 
@@ -2783,7 +2943,7 @@ WS-S is **mostly net-new code** in a new shared workspace + a lazily code-split 
 
 **Testing:** Doc review gate + `check:no-private-cid-egress`; a tabletop incident-drill checklist (§26.7).
 
-**Dependencies:** WS-S.1.5, WS-S.3.6.
+**Dependencies:** WS-S.1.5, WS-S.3.6b, WS-S.3.6c.
 
 ---
 
@@ -2825,21 +2985,21 @@ R.0.2a/0.3/0.7 ─ R.4.1 ─ R.4.2 ─ R.4.3 ; R.4.1 ─ R.4.4     (pack writer 
 R.6.1 ─ R.6.2 ─ R.6.3 ; R.6.2 ─ R.6.4 ; R.6.2/R.2.4 ─ R.6.5
 R.6.1/R.1.4 ─ R.7.1 ─ R.7.3
 R.1.4/R.1.5 ─ R.8.1 ─ R.8.2a ─ R.8.2b ─ R.8.2c ─ R.8.3     (validate: integrity → authority → consensus)
-R.12.2 ─ R.9.1 ─ R.9.2 ─ R.9.3 ─ R.9.4                     (room log → Merkle/checkpoint → proofs → witness)
+R.12.2 ─ R.9.1 ─ R.9.2a ─ R.9.2b ─ R.9.3a ─ R.9.3b ─ R.9.4                     (room log → Merkle/checkpoint → proofs → witness)
 R.12.2 ─ R.12.1a ─ R.12.1b (←R.8.2c) ─ R.12.1c (←R.9.1, R.12.3, R.10.2)   ;   R.12.2 ─ R.12.3
-R.12.1c/R.6.2/R.9.3 ─ R.12.4
-R.10.2 ─ R.10.1 ; R.11.3 ─ R.10.3
-R.11.3 ─ R.11.1 ─ R.11.2 ─ R.11.4 ; R.2.1/R.1.2 ─ R.11.5
+R.12.1c/R.6.2/R.9.3a/R.9.3b ─ R.12.4
+R.10.2 ─ R.10.1 ; R.11.3b ─ R.10.3
+R.11.3a ─ R.11.1 ─ R.11.3b ; R.11.1 ─ R.11.2 ─ R.11.4 ; R.2.1/R.1.2 ─ R.11.5
 R.8.2c/R.2.4/R.9.4 ─ R.13.1 ─ R.13.2
-R.4.2 ─ R.14.1 ; R.6.3/R.4.4 ─ R.14.2 ; R.0.7 ─ R.14.3 ; R.0.7 ─ R.14.4
-R.4.* ─ R.15.1 ; R.6.1 ─ R.15.2 ; R.12.4/R.14.4 ─ R.15.3
-R.15.1/R.11.4 ─ R.15.4a ─ R.15.4b ─ R.15.4c ─ R.15.4d ; R.15.4b ─ R.15.4e ; R.15.4d/R.15.4e/R.18.3a ─ R.15.4f   (Capacitor courier)
+R.4.2 ─ R.14.1a ─ R.14.1b ; R.6.3/R.4.4 ─ R.14.2 ; R.0.7 ─ R.14.3 ; R.0.7 ─ R.14.4
+R.4.1/R.14.2 ─ R.15.1a ; R.4.2/R.4.3/R.8.3 ─ R.15.1b ; R.6.1 ─ R.15.2 ; R.12.4/R.14.4 ─ R.15.3
+R.15.1a/R.15.1b/R.11.4 ─ R.15.4a ─ R.15.4b ─ R.15.4c ─ R.15.4d ; R.15.4b ─ R.15.4e ; R.15.4d/R.15.4e/R.18.3a ─ R.15.4f   (Capacitor courier)
 R.12.4 ─ R.15.5 (WebTransport) ; R.15.4b/R.12.4 ─ R.15.6a ─ R.15.6b ; R.15.6a ─ R.15.7a ─ R.15.7b   (WebRTC ; Helia IPFS bridge)
 R.15.6a/R.15.7a ─ R.15.8 (budget+egress gate) ; R.15.5/R.15.6b/R.15.7b/R.18.3a ─ R.15.9 (transport sim/interop)
 R.2.1/R.11.5 ─ R.16.1  (bridge to WS-S)
 R.8.1/R.10.1 ─ R.17.1 ─ R.17.3 ; R.11.2/R.6.2 ─ R.17.2
-R.0.6b/R.9.3 ─ R.18.1 ; R.5.4/R.8.3/R.10.3 ─ R.18.2 ; R.8.3/R.9.4/R.5.4 ─ R.18.3a ─ R.18.3b
-R.14.1/R.0.8/R.4.2 ─ R.18.4 ; R.18.1/R.15.1 ─ R.18.5 ; (all) ─ R.18.6
+R.0.6b/R.9.3a/R.9.3b ─ R.18.1 ; R.5.4/R.8.3/R.10.3 ─ R.18.2 ; R.8.3/R.9.4/R.5.4 ─ R.18.3a ─ R.18.3b
+R.14.1a/R.14.1b/R.0.8/R.4.2 ─ R.18.4 ; R.18.1/R.15.1a/R.15.1b ─ R.18.5 ; (all) ─ R.18.6
 ```
 
 The graph is acyclic. Three cycles present in earlier cuts were removed: the pack writer (R.4.1) now takes a **caller-provided** object order rather than build-depending on the scheduler (R.5.2c); the room-log append (R.9.1) is a DB primitive that the ingestion commit stage (R.12.1c) *calls* rather than the reverse; and the relay quota policy (R.14.4) is standalone (depends only on the schemas R.0.7) while the relay service (R.15.3) *consumes* it — the first cut had R.14.4↔R.15.3 mutually depending. The dependency-closure helper (R.7.2) is scheduler-independent and feeds R.5.2a. The **elevated transports keep the graph acyclic**: the shared `LcapTransport` seam (R.15.4b) depends only on the validated core (R.4.2/R.5.2c/R.8.3) and is *consumed* by the courier (R.15.4c–f), WebRTC (R.15.6a), and WebTransport (R.15.5); the IPFS bridge (R.15.7a) rides the WebRTC P2P groundwork (R.15.6a) and the CID/block layer (R.0.3/R.3.1); and R.15.4f/R.15.9 depend on the simulator (R.18.3a), which depends on the core (R.8.3/R.9.4/R.5.4), never on any R.15 transport — so there is no back-edge from the transports into the simulator.
@@ -2856,16 +3016,16 @@ S.0.1 ─ S.1.1 ─┬─ S.1.2 ─┐
                └─ S.1.4 ─┘
 S.2.1 ─ S.2.2 ─ S.2.3
 S.2.3 ─ S.3.1a ─ S.3.1b ─ S.3.2 ─ S.3.3a ─ S.3.3b        (MLS → exporter → HKDF → body AEAD → key-wrap)
-S.3.1a ─ S.3.4 ; S.2.2 ─ S.3.5 ; S.3.1a/3.5 ─ S.3.6 ; S.3.3a/3.3b/3.4/3.5 ─ S.3.7
+S.3.1a ─ S.3.4 ; S.2.2 ─ S.3.5 ; S.3.1a/3.5 ─ S.3.6a ─ S.3.6b ; S.3.6a/S.5.1 ─ S.3.6c ; S.3.3a/3.3b/3.4/3.5 ─ S.3.7
 S.2.1 ─ S.4.1 ─ S.4.2 ─ S.4.4 ; S.4.1 + S.6.3 ─ S.4.3
 S.2.3/S.3.1a ─ S.5.1 ─ S.5.2 ─ S.5.3a ─ S.5.3b ─ S.5.3c ─ S.5.4a ─ S.5.4b   (ops → validate ×3 → order → fold)
 S.5.4b ─ S.5.5 ─ S.5.6 ; S.5.4b ─ S.5.8 ; S.5.2 ─ S.5.7
 S.3.2 ─ S.6.1a ─ S.6.1b ; S.6.1a ─ S.6.2 ; S.3.5/S.6.1a ─ S.6.3 ─ S.6.4 ; S.5.3a ─ S.6.5 ; S.1.2/S.6.1a ─ S.6.6
-S.5.4b/S.3.6/S.10.2 ─ S.7.1 ; S.7.4 ─ S.7.2 ─ S.7.3 ; S.3.4/S.5.1 ─ S.7.4 ; S.7.2/S.10.2 ─ S.7.5
-S.3.3a/S.5.2 ─ S.8.1 ─ S.8.2 ; S.8.1 ─ S.8.3
-S.0.2 ─ S.9.1 ; S.7.1/S.7.4 ─ S.9.2 ─ S.9.3
-S.2.1 ─ S.10.1 ─ S.10.2 ─ S.10.3
-S.3.7/S.5.5 ─ S.11.1 ; S.7.4/S.6.6/S.8.1 ─ S.11.2 ; S.1.5/S.6.4 ─ S.11.3 ; S.10.2/S.10.3 ─ S.11.4 ; S.1.5/S.3.6 ─ S.11.5 ; (all) ─ S.11.6
+S.5.4b/S.3.6b/S.10.2b ─ S.7.1 ; S.7.4 ─ S.7.2 ─ S.7.3 ; S.3.4/S.5.1 ─ S.7.4 ; S.7.2/S.10.2b ─ S.7.5
+S.5.2 ─ S.8.1a ─ S.8.1b ─ S.8.2 ; S.8.1b ─ S.8.3
+S.0.2 ─ S.9.1 ; S.7.1/S.7.4 ─ S.9.2a ─ S.9.2b ─ S.9.3
+S.2.1 ─ S.10.1 ─ S.10.2a ─ S.10.2b ; S.3.6a/S.10.2a ─ S.10.3
+S.3.7/S.5.5 ─ S.11.1 ; S.7.4/S.6.6/S.8.1b ─ S.11.2 ; S.1.5/S.6.4 ─ S.11.3 ; S.10.2b/S.10.3 ─ S.11.4 ; S.1.5/S.3.6b/S.3.6c ─ S.11.5 ; (all) ─ S.11.6
 ```
 
 The graph is acyclic. Note the one apparent back-edge `S.4.1 + S.6.3 ─ S.4.3`: the private block-exchange protocols (S.4.3) gate on the membership-proving handshake (S.6.3), which depends on S.6.1a and S.3.5, not on S.4.3 — so the order is S.4.1/S.3.5/S.6.1a → S.6.3 → S.4.3, with no loop.
@@ -2915,10 +3075,10 @@ The two planes parallelize. Within each, the per-plane "Cross-stream order" note
 | C0 cannot starve | R.5.2b, R.5.4 | C0 reservation precedes DRR; `check:lcap-scheduler` proves control/dependency closure never preempted by media/bulk. |
 | Outbox durability | R.10.3 | Hard pins survive eviction; signed-unsent records retry on every opportunity. |
 | Revocation propagation | R.1.4, R.7.1 | Revocations are P0/C0, reconciled before content; stale frontiers labelled. |
-| Checkpoint consistency | R.9.2, R.9.3, R.9.4 | Inclusion/consistency verify (RFC 9162-compatible); equivocation → gossiped fork evidence. |
+| Checkpoint consistency | R.9.2a/b, R.9.3a/b, R.9.4 | Inclusion/consistency verify (RFC 9162-compatible); equivocation → gossiped fork evidence. |
 | LCAP doctrine | R.14.3 | No raw attention/IP/location/applause field in any LCAP schema; gates in CI. |
 | Honest UI | R.17.1 | No single "verified"/"delivered" badge; provisional/stale/conflict/revoked/rejected explicit. |
-| Malformed-pack safety | R.4.2, R.14.1, R.18.4 | Bombs/forks/downgrade/replay rejected; nothing renders before trust projection. |
+| Malformed-pack safety | R.4.2, R.14.1a/b, R.18.4 | Bombs/forks/downgrade/replay rejected; nothing renders before trust projection. |
 | Transports first-class | R.15.4a–f, R.15.5, R.15.6a/b, R.15.7a/b, R.15.9 | Native Capacitor courier + WebTransport + WebRTC P2P + browser-IPFS public bridge ship as **required** transports reusing the same packs / `validate` / scheduler; the correctness-independent-of-transport property holds (any transport subset, HTTPS-only included, reaches the identical accepted set + trust state). |
 | Transport privacy + budget | R.15.4e, R.15.6b, R.15.7b, R.15.8 | No peer IP / multiaddr / radio identifier in any LCAP schema (`check:lcap-schema-egress` over `@licio/lcap-p2p` + `apps/courier`); the P2P deps are workspace-excluded + separately code-split (the `<15` web budget and < 200 KB initial-bundle gate hold); IPFS publishes public blocks only behind the review gate; all P2P/courier reach is off by default and Stealth/Emergency-disabled. |
 | Docs byte-identical | R.18.6 | CLAUDE.md ≡ AGENTS.md; README + index updated; version bumped; no session URL. |
@@ -2934,7 +3094,7 @@ The two planes parallelize. Within each, the per-plane "Cross-stream order" note
 | Canonical determinism | S.2.2, S.5.4a, S.5.4b | One DAG-CBOR profile pins AAD/signatures/CIDs/reducer; the Lamport order extends causality; reducer output is byte-identical across shuffled delivery. |
 | AAD/nonce discipline | S.3.3a, S.3.3b, S.3.7 | Body and key-wrap AADs are canonical fixed-shape; fresh object key + nonce per object; `wrapping_epoch`-bound wrap; nonce reuse is impossible (asserted). |
 | No metadata egress | S.11.2 | No outbound request carries private title/body/URL/CID/op-id/thread-id/member-list/invite-fragment/key/exact-unlisted-room-id. |
-| Update-channel trust | S.10.1, S.10.2 | Reproducible signed private bundle in a transparency log; keys never unlock on an unverified bundle; rooms lock. |
+| Update-channel trust | S.10.1, S.10.2a/b | Reproducible signed private bundle in a transparency log; keys never unlock on an unverified bundle; rooms lock. |
 | Honest non-goals | S.0.3, S.7.5 | Creation/removal disclosures + Tier-1 limitation + replication/recovery honesty shown in-product. |
 | Dependency budget | S.2.1 | Heavy P2P deps isolated to the workspace + lazy chunk; `apps/web` budget and initial-bundle gate unchanged. |
 | Docs byte-identical | S.11.6 | CLAUDE.md ≡ AGENTS.md; README + index updated; version bumped; no session URL. |
