@@ -4,7 +4,7 @@
 **Prepared date:** June 13, 2026  
 **Last refined:** June 15, 2026  
 **Target project:** [`hatter6822/Licio`](https://github.com/hatter6822/Licio)  
-**Primary platform:** Licio Progressive Web App, with optional future courier and relay components  
+**Primary platform:** Licio Progressive Web App, with first-class native-courier (Capacitor), browser-P2P (WebTransport/WebRTC), IPFS-public-bridge, and relay components (consent-gated, off by default; elevated 2026-06)  
 **Primary objective:** maximize useful verified data availability, liveness, and throughput under intermittent connectivity, hostile networks, cheap older smartphones, limited battery, limited storage, and incomplete trust
 
 ---
@@ -37,11 +37,12 @@ The recommended v0.2 architecture is:
 │ lane scheduler · custody/storage receipts · liveness state machine  │
 ├─────────────────────────────────────────────────────────────────────┤
 │ Convergence transports                                              │
-│ HTTPS · manual bundles · QR · local relay · optional Android courier│
+│ HTTPS · manual bundles · QR · local relay · WebTransport (HTTP/3)   │
+│ WebRTC P2P · IPFS public bridge · native courier (Capacitor)        │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-LCAP v0.2 MUST remain useful when the only available transport is a PWA performing brief HTTPS requests. Manual `.licio-bundle` transfer MUST remain a first-class transport, not a fallback. Native Android, Nearby Connections, Wi-Fi Direct, Bluetooth, WebTransport, WebRTC, public IPFS, and erasure-coded broadcast MAY be added later, but they MUST NOT be required for the core protocol.
+LCAP v0.2 MUST remain useful when the only available transport is a PWA performing brief HTTPS requests. Manual `.licio-bundle` transfer MUST remain a first-class transport, not a fallback. The WebTransport, WebRTC, public-IPFS, and native-Android-courier (Nearby Connections / Wi-Fi Direct / Bluetooth) transports are **first-class, in-scope deliverables** (maintainer decision, 2026-06) — but elevating them to *required to build* does not make any of them *required to run*: the **core protocol's correctness MUST NOT depend on any single transport**, and HTTPS + manual bundle MUST stay sufficient on their own. Erasure-coded broadcast and other future transports MAY be added later under the same rule.
 
 ---
 
@@ -315,7 +316,7 @@ LCAP assumes:
 - brief Wi-Fi access;
 - networks with captive portals, filtering, throttling, or total outages;
 - local Wi-Fi without internet;
-- device-to-device transfer through files or future courier apps;
+- device-to-device transfer through files, the native courier (Capacitor), or browser P2P (WebRTC);
 - untrusted local relays;
 - old Android phones and low-end browsers;
 - unreliable browser background execution;
@@ -435,9 +436,13 @@ HTTPS fetch
 manual .licio-bundle files
 QR micro-bundles
 local relay endpoints
-future native courier transports
-future WebTransport/WebRTC/IPFS bridges
+WebTransport (HTTP/3) server transport
+WebRTC browser↔browser data-channel P2P
+browser IPFS/libp2p public-block bridge (public blocks only)
+native Android courier (Capacitor: Nearby Connections / Wi-Fi Direct / Bluetooth / hotspot / USB)
 ```
+
+All transports move the *same* packs through the *same* `validate(record_cid)` (no parallel data model or trust path); every one is off by default and consent-gated, and correctness never depends on any single transport.
 
 Transport never decides trust.
 
@@ -2035,7 +2040,9 @@ A relay MUST NOT:
 
 ### 22.5 Android courier profile
 
-The optional Android courier SHOULD move the same packs as every other transport.
+**Status (maintainer decision, 2026-06): first-class, required v0.2 transport** (previously optional). The native Android courier is now an in-scope deliverable, packaged as a **Capacitor** shell that loads the *unchanged* Licio PWA (same CSP, Trusted Types, service worker, and `lcap_v2` IndexedDB) and exposes the native radio links through a typed plugin. Elevating its priority does **not** relax doctrine: the courier MUST move the *same* packs through the *same* `validate(record_cid)` and lane scheduler (no separate data model or trust path), MUST be off by default and consent-gated (disabled in Stealth/Emergency), and MUST never let a radio/peer identifier enter an LCAP schema. **Correctness MUST NOT depend on the courier** — HTTPS + manual bundle remain sufficient alone.
+
+The courier MUST move the same packs as every other transport.
 
 It MAY use:
 
@@ -2064,11 +2071,25 @@ The courier MUST NOT create a separate data model or trust path.
 
 ### 22.6 WebTransport/WebRTC profile
 
-Deferred. These may improve browser-to-server or browser-to-browser transfer in some environments but MUST NOT be core v0.2 requirements.
+**Status (maintainer decision, 2026-06): first-class, required v0.2 transports** (previously deferred).
+
+- **WebTransport (HTTP/3 / QUIC) server transport.** A lower-latency, loss-tolerant browser↔server alternative to the HTTPS profile (§22.1) for flaky mobile links. It uses the platform `WebTransport` API (no npm dependency), reuses the §16 exchange protocol + scheduler order + the single `validate`, preserves the same session/auth/CSRF posture via a session-bound handshake, and MUST fall back to HTTPS when unsupported or blocked.
+- **WebRTC data-channel P2P transport.** A browser↔browser transport over `RTCDataChannel` that moves the *same* packs directly between two clients. Signaling (SDP/ICE) rides the existing Licio HTTPS API (a session-bound rendezvous) with public STUN for NAT discovery; an optional, self-hosted TURN relay (off by default) MAY mask peer IPs ("relay-only ICE"). The heavier WebRTC/IPFS browser code lives in a dedicated, **code-split** optional module so the initial-bundle and dependency budgets (§31.1) are not regressed.
+
+Both reuse the *same* packs, the single `validate(record_cid)`, the lane scheduler, and the trust pipeline (no parallel data model or trust path, §18.4). Both are **off by default and consent-gated** per operational mode (disabled in Stealth/Emergency, §33). A WebRTC connection's peer IPs/ICE candidates are a *live-connection* property (as with any HTTPS request) that MUST be disclosed in the connection-privacy UI and MUST NOT be written into any LCAP record/proof/receipt/log schema (§26.4). **Correctness MUST NOT depend on either transport** — HTTPS + manual bundle remain sufficient alone.
 
 ### 22.7 Public IPFS/libp2p bridge
 
-Deferred. LCAP uses content addressing internally. A public IPFS/libp2p bridge MAY later publish selected public blocks after privacy, moderation, and abuse review.
+**Status (maintainer decision, 2026-06): first-class, required v0.2 transport** (previously deferred), constrained to **public blocks only** and gated on review.
+
+LCAP already content-addresses every block (§9). The bridge is a browser **Helia / js-libp2p** integration (in the same code-split optional module as the WebRTC transport, §31.1) that publishes and fetches **public** blocks by their LCAP `block_cid` over bitswap. It MUST:
+
+- publish/serve **only `public`-visibility blocks** — never `in_room`, `private`, ciphertext, or any private-room hint (structurally enforced against the room/visibility model and takedown state);
+- pass a **required privacy/moderation/abuse-review gate** before any block reaches the public DHT, with auditable provenance and takedown-driven republication halt;
+- verify every fetched block against its `block_cid` exactly like any other ingress (no transport trust, §18.4);
+- stay off by default and never expose libp2p multiaddrs/peer ids into an LCAP schema (§26.4).
+
+The bridge is an additional *egress/availability* path, never the base layer — the base layer stays HTTPS + manual bundle, and **correctness MUST NOT depend on IPFS** (§37.2).
 
 ---
 
@@ -2635,11 +2656,24 @@ apps/web/src/lcap/
   sync.ts                   pulse/exchange/fetch orchestration
   bundleExport.ts           streaming export
   bundleImport.ts           safe import/quarantine
-  trustBadges.ts            UI state projection
+  trustBadges.tsx           UI state projection (React)
   storagePolicy.ts          GC and storage modes
+  transports/               code-split transport chunk (WebTransport, and the
+                            lazy entry to @licio/lcap-p2p); never in the initial bundle
+
+packages/lcap-p2p/          OPTIONAL workspace package (@licio/lcap-p2p): WebRTC
+  src/webrtc/               data-channel transport + HTTPS-signaling client
+  src/ipfs/                 Helia/js-libp2p public-block bridge (public blocks only)
+                            — carries the heavier deps behind a workspace boundary so
+                            apps/web's <15 direct-dep budget and the initial-bundle gate hold
+
+apps/courier/               OPTIONAL Capacitor Android native shell: loads the unchanged
+  android/                  web client; a typed Nearby Connections / Wi-Fi Direct plugin
+  src/plugin/               streams the same packs over native radio links. @capacitor/*
+                            deps are build/native-scoped, not apps/web production deps
 
 apps/api/src/lcap/
-  routes.ts                 Hono endpoints
+  routes.ts                 Hono endpoints (incl. the P2P-signaling rendezvous + WebTransport)
   ingest.ts                 pack ingestion
   verify.ts                 proof/capability/revocation checks
   reconcile.ts              room log append and dependency resolution
@@ -2650,7 +2684,7 @@ packages/db/src/schema/lcap.ts
   Drizzle schema additions
 ```
 
-`apps/web` MUST NOT import `@licio/db`. `packages/lcap` SHOULD be a pure shared package with no database dependency.
+`apps/web` MUST NOT import `@licio/db`. `packages/lcap` MUST be a pure shared package with **zero** runtime npm dependencies and no database dependency. `@licio/lcap-p2p` MAY depend only on `@licio/shared` + `@licio/lcap` and is consumed by `apps/web` solely through the lazily-loaded `apps/web/src/lcap/transports/` chunk.
 
 ### 31.1 Dependency budget and bundle strategy
 
@@ -2658,8 +2692,9 @@ LCAP MUST fit Licio's existing budgets (CLAUDE.md): `apps/web` < 15 and `apps/ap
 
 - **Prefer Web platform APIs.** SHA-256 and ECDSA come from **WebCrypto** (`crypto.subtle`); pack/HTTP compression comes from **Compression Streams** (§13.5); chunk storage from **IndexedDB**. None of these is an npm dependency.
 - **Hand-roll the deterministic CBOR subset.** LDC (§9.1) is a small, closed grammar — integers, byte/text strings, arrays, maps, three simple values. A purpose-built encoder/decoder in `packages/lcap/src/cbor/` is a few hundred lines, avoids a general-purpose CBOR/COSE dependency, and is easier to pin to the conformance vectors than a third-party library. The same applies to the COSE_Sign1 `Sig_structure` (§10.2), which is one fixed array shape.
-- **Keep heavy/optional work out of the core web bundle.** `packages/lcap` itself is `workspace:*` (excluded from the `apps/web` direct-dep count). The web LCAP module (`apps/web/src/lcap/`) MUST be **code-split** and loaded only when sync/bundle features are used, so the initial-load bundle-size gate is unaffected. Any genuinely large optional transport (future WebTransport/WebRTC/courier) MUST be a separately chunked, lazily loaded module.
-- **No new `any`, no raw egress.** LCAP schemas pass the same trust-boundary zod validation as the rest of Licio and MUST satisfy `check:no-raw-egress` and `check:no-applause` (§3.7): no attention traces, no client IP/location, no like/vote/karma fields anywhere in LCAP records, proofs, or receipts.
+- **Zero-dependency core.** `packages/lcap` (the codec/CID/COSE/schema/validate/pack/scheduler/sync core) MUST carry **zero** runtime npm dependencies and is `workspace:*` (excluded from the `apps/web` direct-dep count). The web LCAP module (`apps/web/src/lcap/`) MUST be **code-split** and loaded only when sync/bundle features are used, so the initial-load bundle-size gate is unaffected.
+- **Isolate the elevated optional-transport dependencies (WebRTC, Helia/js-libp2p, Capacitor).** The 2026-06 elevation of WebTransport/WebRTC/IPFS/courier to first-class transports introduces reviewed dependencies that MUST be structurally prevented from regressing the budgets: (a) **WebTransport** uses the platform `WebTransport` API — no dependency; (b) the **WebRTC** plumbing and the **Helia/js-libp2p** browser bridge live in a dedicated optional workspace package `@licio/lcap-p2p` (`workspace:*`, excluded from the `apps/web` `<15` direct-production-dep count) loaded **only** from a separately code-split `apps/web/src/lcap/transports/` chunk, so they never enter the < 200 KB initial bundle; (c) the **native courier's** `@capacitor/*` dependencies live in the `apps/courier` native-shell project (build/native scope), not in `apps/web` production deps. Each such dependency MUST pass the CLAUDE.md §6.12.12 dependency-addition checklist (no install scripts, AGPL-compatible license, transitive count reviewed, SBOM updated). A CI gate asserts the P2P deps never reach `apps/web`'s direct-dep set or the initial bundle.
+- **No new `any`, no raw egress, no transport-metadata in schemas.** LCAP schemas pass the same trust-boundary zod validation as the rest of Licio and MUST satisfy `check:no-raw-egress` and `check:no-applause` (§3.7): no attention traces, no client IP/location, no like/vote/karma fields anywhere in LCAP records, proofs, or receipts. The elevated transports add no exception: WebRTC peer IPs/ICE candidates, libp2p multiaddrs/peer ids, and courier radio identifiers are live-connection properties that MUST NOT appear in any LCAP schema (a new `check:lcap-schema-egress` gate scans `packages/lcap`, `@licio/lcap-p2p`, and `apps/courier`).
 
 ---
 
@@ -2897,7 +2932,7 @@ unless the exact meaning is shown.
 [ ] receipts
 ```
 
-### Phase 4 — Relay
+### Phase 4 — Relay and WebTransport
 
 ```text
 [ ] untrusted relay service
@@ -2905,27 +2940,35 @@ unless the exact meaning is shown.
 [ ] relay pulse/exchange
 [ ] upstream sync
 [ ] LAN documentation
+[ ] WebTransport (HTTP/3) server transport + HTTPS fallback
 ```
 
-### Phase 5 — Optional courier
+### Phase 5 — Native courier and browser P2P (required, 2026-06)
 
 ```text
-[ ] Android proof-of-concept
-[ ] manual file bridge first
-[ ] local encrypted cache
-[ ] Nearby/Wi-Fi Direct/Bluetooth transports
-[ ] explicit discovery controls
+[ ] Capacitor native shell loading the unchanged web client + native-build CI
+[ ] shared LcapTransport seam (HTTPS/relay/courier/WebRTC all implement it)
+[ ] Nearby Connections typed plugin + chunked pack streaming
+[ ] Wi-Fi Direct / hotspot / Bluetooth / USB channels (USB == .licio-bundle)
+[ ] courier controls + private-content exclusion + radio-metadata disclosure
+[ ] WebRTC data-channel P2P transport + HTTPS signaling + STUN
+[ ] WebRTC NAT traversal + connection-privacy controls (optional TURN, off by default)
+[ ] off by default; disabled in Stealth/Emergency; no transport metadata in schemas
 ```
 
-### Phase 6 — Advanced trust and privacy
+### Phase 6 — IPFS public bridge, transport hardening, and advanced trust/privacy
 
 ```text
+[ ] browser Helia/js-libp2p public-block bridge (code-split, public blocks only)
+[ ] IPFS publish review gate + public-only structural enforcement + takedown halt
+[ ] transport dependency-budget + schema-egress CI gates (P2P deps isolated)
+[ ] transport network-simulation scenarios + correctness-independent-of-transport
 [ ] witness network
 [ ] private-room MLS design
 [ ] optional Ed25519/PQ hybrid proofs
 [ ] smarter set reconciliation
 [ ] optional erasure coding for one-way broadcast
-[ ] external security audit
+[ ] external security audit (incl. the P2P/courier transport surface)
 ```
 
 ---
@@ -2949,6 +2992,13 @@ LCAP v0.2 is not production-ready for high-risk use until:
 [ ] import/export privacy warnings are implemented
 [ ] threat model is reviewed by an external security reviewer
 [ ] private-room replication is disabled or separately audited
+[ ] every transport (HTTPS, bundle, QR, relay, WebTransport, WebRTC, IPFS, courier) funnels through the one validate/LcapTransport seam
+[ ] correctness-independent-of-transport: any transport subset (HTTPS-only included) reaches the identical accepted set + trust state
+[ ] no peer IP / multiaddr / radio identifier appears in any LCAP schema (check:lcap-schema-egress over @licio/lcap-p2p + apps/courier)
+[ ] WebRTC/IPFS deps stay code-split + workspace-excluded (initial-bundle < 200 KB gz and apps/web < 15 direct-dep budgets hold)
+[ ] IPFS publishes public blocks only, behind the privacy/moderation/abuse-review gate, with takedown-driven republication halt
+[ ] all P2P/courier transport reach is off by default and disabled in Stealth/Emergency
+[ ] the apps/courier Capacitor native build is green in CI and loads the unchanged web client
 ```
 
 ---
@@ -2959,13 +3009,13 @@ LCAP v0.2 is not production-ready for high-risk use until:
 
 Deferred. BPv7 is the right architectural inspiration but too heavy for the first Licio PWA implementation.
 
-### 37.2 Public IPFS as the base layer
+### 37.2 Public IPFS as the *base layer*
 
-Deferred. Content addressing is useful internally, but public DHT participation introduces moderation, privacy, browser-networking, and abuse complexity.
+Still rejected **as the base layer**: the base transport stays HTTPS + manual bundle, and correctness MUST NOT depend on any DHT. The moderation/privacy/abuse complexity of public DHT participation is real and is the reason the in-scope IPFS bridge (§22.7, elevated 2026-06) is constrained to **public blocks only, behind a required privacy/moderation/abuse-review gate**, as an additional egress — not a foundation.
 
 ### 37.3 Browser Bluetooth mesh
 
-Rejected as a v0.2 requirement. Browser Bluetooth/Wi-Fi mesh is not portable enough for the baseline PWA.
+*Browser* Bluetooth/Wi-Fi mesh (the Web Bluetooth API) remains rejected for v0.2 — it is not portable enough for the baseline PWA. This does **not** defer P2P: browser-to-browser transfer is delivered by the in-scope **WebRTC** data-channel transport (§22.6), and native Bluetooth / Wi-Fi Direct / Nearby Connections are delivered by the in-scope **Capacitor courier** (§22.5) — both elevated to first-class in 2026-06.
 
 ### 37.4 Proof-of-work posting
 
@@ -3001,6 +3051,11 @@ Rejected. `record_cid` must be independent of proof bytes for deduplication, mul
 | False UI certainty | High | explicit trust/liveness labels |
 | Dependency bombs | High | caps on depth/fan-out/missing deps |
 | Algorithm downgrade | High | fail-closed suite negotiation |
+| WebRTC/courier peer-IP & radio-metadata exposure | High | transport-layer only, never in schemas; pre-connection disclosure; off by default; Stealth/Emergency-disabled; optional relay-only-ICE (TURN) to mask IP |
+| Public DHT (IPFS) abuse / moderation evasion | High | public blocks only; required privacy/moderation/abuse-review gate; takedown-driven republication halt; content-addressed; never private/in-room/ciphertext |
+| Heavy P2P dependency (Helia/js-libp2p) supply chain | Medium | confined to the code-split `@licio/lcap-p2p` workspace pkg; §6.12.12 dependency-addition review; install-script ban; SBOM; `pnpm audit` gate |
+| Native courier attack surface (Capacitor shell) | Medium | loads the unchanged web client (same CSP/Trusted Types); reuses the single validate pipeline; no parallel data model; native deps build-scoped |
+| NAT traversal / TURN operational cost & privacy | Medium | STUN-first; TURN optional, self-hosted, off by default; correctness independent of any transport |
 
 ---
 
@@ -3017,12 +3072,15 @@ These are anchors for implementers. The LCAP spec should cite exact versions whe
 - RFC 6962 — Certificate Transparency v1, the origin of the domain-separated leaf/node Merkle hashing reused in §19.1.1.
 - RFC 9162 — Certificate Transparency v2, especially Merkle inclusion and consistency proofs (§2.1.3/§2.1.4).
 - RFC 9420 / RFC 9750 — Messaging Layer Security protocol and architecture for future private-room group keying.
-- RFC 9000 / RFC 9114 — QUIC and HTTP/3, optional transport performance improvements.
+- RFC 9000 / RFC 9114 — QUIC and HTTP/3, the substrate for the WebTransport server transport (§22.6).
+- W3C WebTransport API — the browser↔server WebTransport transport (§22.6); uses the platform API, no dependency.
+- W3C WebRTC 1.0 + IETF RTCWEB (RFC 8825/8826/8827/8829 — overview, security, security architecture, JSEP) — the browser↔browser data-channel transport (§22.6).
+- libp2p specifications (Kademlia DHT, bitswap, multiformats/CID, multiaddr) and the Helia/js-libp2p implementations — the public-block IPFS bridge (§22.7), public blocks only behind review; code-split to protect the bundle/dependency budgets (§31.1).
 - RFC 8878 / RFC 9659 — zstd media/content coding and window limits, optional negotiated compression.
 - RFC 6330 / RFC 8681 — optional future erasure/FEC designs for one-way or lossy broadcast; not required in v0.2.
 - NIST FIPS 203/204/205 — post-quantum key encapsulation and signature standards for future algorithm agility.
 - MDN Web Crypto, Service Worker, IndexedDB, StorageManager, Background Sync, and Compression Streams documentation for PWA implementation constraints.
-- Android Nearby Connections and Wi-Fi Direct documentation for optional native courier work.
+- Android Nearby Connections and Wi-Fi Direct documentation, and the Capacitor framework, for the first-class native courier (§22.5): a Capacitor shell loads the unchanged web client and a typed plugin bridges the native radio links.
 - Briar and Bridgefy security analyses as practical lessons: offline mesh can be useful, but unaudited or misleading security claims can endanger users.
 
 ---

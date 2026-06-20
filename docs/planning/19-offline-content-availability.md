@@ -1,6 +1,6 @@
 # WS-R: Offline Content Availability (LCAP v0.2)
 
-**Milestone:** Post-M3 resilience extension (lands after the WS-Q content model; not launch-blocking for the core social product) | **Priority:** P3 | **Dependencies:** WS-C (PWA shell, offline/IndexedDB, service worker), WS-D (account authority, device keys, sessions), WS-E (event/topic registry, attention doctrine), WS-F (stories/sources), WS-G (forum/rooms), WS-Q (room-owned content + visibility) — all complete | **Source spec:** `docs/OFFLINE_SPEC.md` (LCAP v0.2) | **Wave:** 10 (parallelizable with WS-S after WS-R.0) | **Estimated duration:** 12-16 weeks | **Task count:** 88 atomic cards
+**Milestone:** M3+ core resilience — **elevated to launch-relevant by maintainer decision (2026-06)**: the offline core *and* the native-courier and browser-P2P/WebTransport/IPFS transports are now first-class, in-scope v0.2 deliverables, not deferred extensions. | **Priority:** P1 (raised from P3) | **Dependencies:** WS-C (PWA shell, offline/IndexedDB, service worker), WS-D (account authority, device keys, sessions), WS-E (event/topic registry, attention doctrine), WS-F (stories/sources), WS-G (forum/rooms), WS-Q (room-owned content + visibility) — all complete | **Source spec:** `docs/OFFLINE_SPEC.md` (LCAP v0.2) | **Wave:** 8 (pulled earlier from Wave 10; parallelizable with WS-S after WS-R.0) | **Estimated duration:** 16-22 weeks (the elevated native courier + browser-P2P/WebTransport/IPFS transports add ~4-6 weeks over the transport-deferred baseline) | **Task count:** 99 atomic cards
 
 ---
 
@@ -13,11 +13,13 @@ LCAP is organized as four planes (OFFLINE_SPEC §8):
     record plane     deterministic record bodies → record_cids; blocks → block_cids
     trust plane      detached proofs · device certs · capabilities · revocations · checkpoints · witnesses
     sync plane       pulse + exchange · anti-entropy · lane scheduler · liveness state machine · receipts
-    transport plane  HTTPS · manual .licio-bundle · QR · local relay · (future) Android courier
+    transport plane  HTTPS · manual .licio-bundle · QR · local relay · WebTransport (HTTP/3) ·
+                     WebRTC browser↔browser P2P · browser IPFS/libp2p (Helia) public-block bridge ·
+                     native Android courier (Capacitor: Nearby Connections / Wi-Fi Direct / Bluetooth)
 
-The baseline MUST work inside the existing PWA using HTTPS, service workers, IndexedDB, WebCrypto, and ordinary file import/export (OFFLINE_SPEC §3.1). Manual `.licio-bundle` transfer is a first-class transport, not a fallback. Native radio transports are optional and gated.
+The baseline MUST work inside the existing PWA using HTTPS, service workers, IndexedDB, WebCrypto, and ordinary file import/export (OFFLINE_SPEC §3.1). Manual `.licio-bundle` transfer is a first-class transport, not a fallback. **Per the 2026-06 maintainer decision, the native radio courier (Capacitor: Nearby Connections / Wi-Fi Direct / Bluetooth) and the browser-to-browser P2P transports (WebTransport over HTTP/3, WebRTC data channels, and a browser IPFS/libp2p public-block bridge) are now first-class, in-scope v0.2 deliverables — fully implemented, decomposed, and gated, no longer "prototype-only" or "documentation-only" deferrals.** They remain **consent-gated and off by default** (transport reach is opt-in per operational mode, disabled in Stealth/Emergency), because elevating their *priority* never relaxes the doctrine: every promoted transport reuses the *same* packs, the single `validate(record_cid)`, the lane scheduler, and the trust pipeline (no parallel data model or trust path, OFFLINE_SPEC §22.5/§18.4), and **correctness never depends on any single transport** — HTTPS + manual bundle stay sufficient on their own (§22.6/§22.7).
 
-LCAP is **almost entirely net-new code** in three new locations plus a new DB schema file; it touches the running app only at well-defined seams (service-worker hooks, a sibling IndexedDB database, the no-raw-egress/no-applause CI gates, and read-only reuse of WS-D device identity). It does **not** modify the WS-E attention pipeline, the WS-I ranking math, or any existing wire schema.
+LCAP is **almost entirely net-new code** in the new locations plus a new DB schema file; it touches the running app only at well-defined seams (service-worker hooks, a sibling IndexedDB database, the no-raw-egress/no-applause CI gates, reuse of WS-D account identity, and the WS-D account/room **authority signing keys** that WS-R provisions — see WS-R.1.1/1.2). It does **not** modify the WS-E attention pipeline, the WS-I ranking math, or any existing wire schema. The two elevated transport families add their own strictly-bounded seams: a **Capacitor native shell** (`apps/courier/`, a new native build + CI job that loads the *unchanged* web client and exposes radio P2P through a typed plugin) and a **code-split browser-P2P module** (`@licio/lcap-p2p`, a dedicated optional workspace package carrying the heavier WebRTC/Helia dependencies so they never enter the initial bundle and never count against the `apps/web` `<15` direct-production-dependency budget — see "Dependency posture" below).
 
 ### New and touched modules (verified against the shipped tree)
 
@@ -28,10 +30,12 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 | Server integration | `apps/api/src/lcap/` (new) | Hono `/api/lcap/v2/*` routes, pack ingestion, proof/capability/revocation verify, room-log reconcile, Merkle checkpoints, receipt emission |
 | Database | `packages/db/src/schema/lcap.ts` (new) + migrations | `lcap_records`, `lcap_proofs`, `lcap_blocks`, `lcap_chunks`, `lcap_device_certs`, `lcap_capabilities`, `lcap_capability_usage`, `lcap_revocations`, `lcap_room_log`, `lcap_room_checkpoints`, `lcap_receipts`, `lcap_quarantine`, `lcap_fork_evidence` (OFFLINE_SPEC §30) |
 | Local-DB coexistence | `apps/web/src/offline/db.ts` (`DB_NAME = 'licio'`) | none — LCAP uses a separate `lcap_v2` database (OFFLINE_SPEC §23.1); no migration of WS-C stores |
-| Device identity | WS-D `webauthn-credential` / `wallet-auth-credential` / account authority | read-only reuse: the account authority signs `device_certificate` records; LCAP device keys are new, room-scoped signing keys (OFFLINE_SPEC §11) |
+| Device identity | WS-D `webauthn-credential` / `wallet-auth-credential` / account model + a **new server authority signing key** | the account *model* (`account_id`) is reused read-only, but WS-D ships **no** server-held asymmetric signing key (only HKDF hashing, AES-GCM, HMAC-SigV4, and push-scoped VAPID), so WS-R **provisions** the `licio_account_authority` and `RoomAuthority` ES256 signing keys (generation, SecretBox encrypt-at-rest, an `*_AUTHORITY_*` env group mirroring `SES_*`/VAPID, `account_epoch` rotation) that sign `device_certificate` / `room_capability` records; LCAP device keys are new, room-scoped, non-extractable signing keys (OFFLINE_SPEC §10.5, §11 — see WS-R.1.1/1.2) |
 | Service worker | `apps/web/public/sw-push.js` + `sw-register.ts` | add C0-first sync-on-connectivity hook; no remote `importScripts`; respects data/battery/privacy mode (OFFLINE_SPEC §23.3); `check:sw` stays green |
-| Crypto / compression primitives | WebCrypto `crypto.subtle`, Compression Streams | SHA-256 + ES256 + AES-256-GCM from the platform; gzip/deflate from the platform — **no new npm dependency** (OFFLINE_SPEC §31.1) |
-| Privacy gates | `check:no-raw-egress`, `check:no-applause` | extended to scan `packages/lcap`, `apps/web/src/lcap`, `apps/api/src/lcap` (OFFLINE_SPEC §3.7) |
+| Crypto / compression primitives | WebCrypto `crypto.subtle`, Compression Streams | SHA-256 + ES256 + AES-256-GCM from the platform; gzip/deflate from the platform — **the LCAP core (`packages/lcap`) keeps zero runtime npm dependencies** (OFFLINE_SPEC §31.1) |
+| Native courier shell | `apps/courier/` (new Capacitor project) + `@capacitor/*` + a typed Nearby-Connections/Wi-Fi-Direct plugin | wraps the **unchanged** web client in a Capacitor Android shell; a typed native plugin streams the *same* packs over Nearby Connections / Wi-Fi Direct / Bluetooth / local hotspot / USB; a new native build + CI job; Capacitor/native deps are **build/native-scoped**, not `apps/web` web-production deps (WS-R.15.4a–f) |
+| Browser P2P transport | `@licio/lcap-p2p/` (new optional workspace package) consumed by a **code-split** `apps/web/src/lcap/transports/` chunk | carries the heavier WebRTC + Helia/js-libp2p deps **behind a workspace boundary** so they never enter the initial bundle (200 KB gz gate holds) and never count against the `apps/web` `<15` direct-production-dep budget; WebTransport uses the platform API (no dep); all three reuse the pack/validation/scheduler/trust pipeline (WS-R.15.5–15.9) |
+| Privacy gates | `check:no-raw-egress`, `check:no-applause`, `check:lcap-schema-egress` | extended to scan `packages/lcap`, `@licio/lcap-p2p`, `apps/web/src/lcap`, `apps/api/src/lcap`, and `apps/courier` source; assert no transport-layer IP / radio / multiaddr / peer identifier ever appears in an LCAP **schema** (it lives only at the live-connection layer) (OFFLINE_SPEC §3.7, §26.4) |
 | Private-room bridge | `docs/PRIVATE_SPEC.md` (WS-S) | LCAP carries only ciphertext + opaque room hints for `private_p2p` rooms; the `.licio-bundle` pack MAY serve as WS-S's encrypted CAR (OFFLINE_SPEC §28.1) |
 
 ### Relationship to other specs and workstreams
@@ -49,8 +53,10 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 - **Fail-closed everywhere.** Unknown critical fields, unknown algorithms, undecodable framing, missing dependencies, and unreadable trust state all fail closed (§9.1.4, §10.3, §27); nothing renders as trusted before trust projection (§18).
 - **C0 cannot starve.** The lane scheduler's byte reservation guarantees control/liveness traffic moves first in every budget (§15); a named starvation test gates CI.
 - **Hard pins are never GC'd.** The local outbox, drafts, own proofs, active cert/capability, and fresh revocations are hard-pinned and survive normal eviction (§20.5, §21.2).
-- **No new dependency; lazy-loaded.** LCAP uses WebCrypto + Compression Streams + IndexedDB; the deterministic-CBOR/COSE subset is hand-rolled in `packages/lcap` (§31.1). The web LCAP module is code-split so the initial-load bundle-size gate (< 200 KB gz) does not regress. `apps/web` MUST NOT import `@licio/db`.
-- **Doctrine gates extended.** `check:no-raw-egress` and `check:no-applause` are extended to the new LCAP source trees; a new `check:lcap-schema-egress` asserts no IP/location/attention field name appears in any LCAP record/proof/receipt schema.
+- **Dependency posture: zero-dep core, isolated optional-transport deps (ABSOLUTE).** The **LCAP core** (`packages/lcap`) uses only WebCrypto + Compression Streams + IndexedDB and carries **zero** runtime npm dependencies — the deterministic-CBOR/COSE subset is hand-rolled (§31.1). The web LCAP module (`apps/web/src/lcap`) is code-split so the initial-load bundle-size gate (< 200 KB gz) does not regress, and `apps/web` MUST NOT import `@licio/db`. The **elevated optional transports** introduce reviewed dependencies that are structurally prevented from regressing either budget: the browser WebRTC/IPFS stack (Helia/js-libp2p) lives in a dedicated optional workspace package `@licio/lcap-p2p` (`workspace:*`, excluded from the `apps/web` `<15` direct-production-dep count) loaded only from a **separately code-split** `apps/web/src/lcap/transports/` chunk (never in the initial bundle); the native courier's `@capacitor/*` deps live in the `apps/courier` native-shell project (build/native scope, not a web production dep); WebTransport uses the platform API (no dependency). Every such dependency passes the Section 6.12.12 dependency-addition checklist (no install scripts, AGPL-compatible license, transitive count reviewed, SBOM updated) — see "Dependency posture" under WS-R.15.
+- **Transport priority never relaxes doctrine (ABSOLUTE).** Elevating a transport's *priority* changes only its scheduling and decomposition, never its trust or privacy posture: (a) every transport reuses the *same* packs, the single `validate(record_cid)`, the lane scheduler, and the trust pipeline — **no parallel data model or trust path** (§22.5, §18.4); (b) **correctness never depends on any single transport** — HTTPS + manual bundle remain sufficient alone, and every P2P/courier path has a documented fallback (§22.6/§22.7); (c) transport reach is **opt-in per operational mode, off by default, and disabled in Stealth/Emergency** (§33); (d) the IPFS bridge publishes **public blocks only**, behind a required privacy/moderation/abuse-review gate (§22.7).
+- **Transport-layer metadata is never an LCAP schema field (ABSOLUTE).** WebRTC ICE/STUN/TURN peer IPs, libp2p multiaddrs, and Nearby/Wi-Fi-Direct/Bluetooth radio identifiers are inherent to those *live connections* (exactly as the IP behind any HTTPS request is) but MUST NOT appear in any LCAP record/proof/receipt/log schema. They are disclosed in the transport's privacy warning, kept at the connection layer only, and asserted out of the schema surface by `check:lcap-schema-egress` (extended to the P2P/courier source).
+- **Doctrine gates extended.** `check:no-raw-egress` and `check:no-applause` are extended to the new LCAP source trees (incl. `@licio/lcap-p2p` and `apps/courier`); a new `check:lcap-schema-egress` asserts no IP/location/attention/multiaddr/radio-identifier field name appears in any LCAP record/proof/receipt schema.
 - **UI honesty (§34).** Trust and liveness are never collapsed into a single "verified"/"delivered" badge; the UI exposes provisional/stale/conflict/revoked/rejected states explicitly and avoids the words *secure/trusted/delivered/final/safe* unless the exact meaning is shown.
 - **Task sizing (Section 30.8).** Every card is one deliverable — one schema, one codec, one verifier, one endpoint, one store, one client state — reviewable, testable, and reversible in ≤ 1-3 engineering days. Sub-area headers group cards; the dependency graph at the end fixes their order.
 
@@ -1282,34 +1288,219 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 
 ---
 
-### WS-R.15.4 Android courier profile (deferred PoC; manual file bridge first)
-**ID:** WS-R.15.4 | **Ref:** OFFLINE_SPEC §22.5, §33.3, §37
+> **Dependency posture (elevated transports — WS-R.15.4 onward).** The 2026-06 maintainer
+> decision elevates the native courier and the browser-P2P/WebTransport/IPFS bridges to
+> first-class, in-scope v0.2 transports. To honor it **without** regressing Licio's hard
+> budgets, the heavier browser deps (WebRTC plumbing + Helia/js-libp2p) live in a dedicated
+> optional workspace package **`@licio/lcap-p2p`** (`workspace:*`, excluded from the
+> `apps/web` `<15` direct-production-dep count) that is loaded **only** from a separately
+> code-split `apps/web/src/lcap/transports/` chunk (never in the < 200 KB initial bundle); the
+> native courier's `@capacitor/*` deps live in a new **`apps/courier`** native-shell project
+> (build/native scope, not a web production dep); WebTransport uses the platform API (no dep).
+> All three reuse the *same* packs, the single `validate(record_cid)`, the lane scheduler, and
+> the trust pipeline (no parallel data model or trust path), are **off by default and
+> consent-gated per operational mode** (disabled in Stealth/Emergency), and never let
+> transport-layer metadata (peer IP, multiaddr, radio id) enter any LCAP schema. **Correctness
+> never depends on any single transport** — HTTPS + manual bundle remain sufficient alone.
 
-**Description:** Specify and prototype (not ship) the optional Android courier that moves the **same packs** as every other transport over Nearby Connections / Wi-Fi Direct / Bluetooth / local hotspot / USB, with explicit controls (discovery/advertising on-off, who can exchange, which rooms/priorities, storage/battery budget, private-content exclusion). The courier MUST NOT create a separate data model or trust path. Phase 5 begins with a manual file bridge before any radio transport.
+**WS-R.15.4 — Native Android courier (Capacitor), cards a–f.** The previously-deferred Android courier is now a shipped, first-class transport that moves the *same* packs over native radio links via a Capacitor shell wrapping the unchanged web client; it is decomposed into the six cards below (15.4a–f).
+
+### WS-R.15.4a Capacitor native shell + native-build CI
+**ID:** WS-R.15.4a | **Ref:** OFFLINE_SPEC §22.5, §33.3, §31
+
+**Description:** Scaffold `apps/courier/` as a Capacitor Android project that loads the **unchanged** built web client (same CSP, Trusted Types, service worker, and `lcap_v2` IndexedDB) inside the system WebView, plus a `pnpm --filter courier build` + a new native-build CI job that produces a debug APK. The courier is the *same* PWA in a native shell — **no courier-only web fork, no parallel data model.** `@capacitor/*` and plugin deps are confined to `apps/courier` (build/native scope) and never added to `apps/web` production deps, so `check:deps` (`apps/web` < 15) and the initial-bundle gate are unaffected.
 
 **Acceptance criteria:**
-- The courier reuses the LCAP pack + validation pipeline; no parallel data model.
-- All discovery/advertising/scope/budget controls are explicit and default-conservative.
-- v0.2 requires none of this; it is a documented Phase-5 deferral with a manual-file-bridge first step.
+- `apps/courier` builds a debug APK in CI; the loaded client is byte-identical to the web build (a hash check forbids a courier-only fork).
+- CSP / Trusted Types / service-worker posture survives in the WebView (no `script-src`/TT relaxation); `check:deps` web budget and the < 200 KB initial-bundle gate are unchanged.
+- Native deps live only in `apps/courier`; the Section 6.12.12 dependency-addition checklist (no install scripts, AGPL-compatible license, transitive review, SBOM) passes.
 
-**Testing:** Design doc + manual-file-bridge PoC test; controls matrix (when implemented).
+**Testing:** Native-build CI smoke (APK builds, app boots, client hash matches the web build); CSP-in-WebView assertion.
 
-**Dependencies:** WS-R.15.1.
+**Dependencies:** WS-R.15.1, WS-R.11.4.
 
 ---
 
-### WS-R.15.5 WebTransport / WebRTC / IPFS bridges (deferred)
-**ID:** WS-R.15.5 | **Ref:** OFFLINE_SPEC §22.6, §22.7, §37.2
+### WS-R.15.4b Courier transport adapter over the shared `LcapTransport` seam
+**ID:** WS-R.15.4b | **Ref:** OFFLINE_SPEC §22.5, §16.3, §18.4
 
-**Description:** Record the deferral of WebTransport/WebRTC browser-to-browser/server transports and any public IPFS/libp2p bridge. These MAY improve transfer in some environments but MUST NOT be core v0.2 requirements; a public IPFS bridge may later publish only selected **public** blocks after privacy/moderation/abuse review. Correctness MUST never depend on a particular transport.
+**Description:** Define/realize the shared `LcapTransport` interface (pulse / exchange / want / range over an abstract bidirectional byte channel — the same seam the HTTPS and relay transports implement) and implement `CourierTransport`, which streams the *same* scheduler-ordered packs (WS-R.5.2c) over a native channel handle. The adapter performs **no** validation of its own: every received frame goes through the WS-R.4.2 reader + `validate(record_cid)` exactly as HTTPS does. This card structurally establishes "no separate trust path" for the courier and is the seam WebRTC (15.6) and WebTransport (15.5) also implement.
 
 **Acceptance criteria:**
-- The deferral is documented with the review gates required before any future enablement.
-- No core LCAP behavior depends on these transports.
+- `CourierTransport` implements the identical `LcapTransport` seam as HTTPS/relay; a property test asserts a courier-delivered pack and an HTTPS-delivered pack reach **identical** trust state (source-independence, §18.4).
+- The adapter streams scheduler-ordered packs with bounded memory and never bypasses the reader/validator.
 
-**Testing:** Documentation gate only (no v0.2 implementation).
+**Testing:** Unit — adapter conforms to the seam; source-independence property (courier ≡ HTTPS trust state); streaming-memory bound.
 
-**Dependencies:** none (deferral record).
+**Dependencies:** WS-R.4.2, WS-R.5.2c, WS-R.8.3.
+
+---
+
+### WS-R.15.4c Nearby Connections typed plugin + chunked pack streaming
+**ID:** WS-R.15.4c | **Ref:** OFFLINE_SPEC §22.5, §13.2
+
+**Description:** Implement a typed Capacitor plugin bridging Android **Nearby Connections** (advertise / discover / request-connection / accept / send-payload / receive) to TS as an `LcapTransport` byte channel; stream packs as bounded chunks (transport-profile chunk sizes, §13.2) with backpressure; verify each reassembled block CID on receipt. The JS↔native boundary is strict-zod-validated and bounded by the §27.1 resource caps.
+
+**Acceptance criteria:**
+- The plugin advertises/discovers, establishes a Nearby channel, and streams packs as size-profiled chunks that reassemble with per-chunk **and** block-CID verification.
+- The JS↔native boundary is zod-validated and cap-bounded; a malformed native payload fails closed (`rejected_*`/`quarantined_*`), never crashes the shell.
+
+**Testing:** Native instrumentation/contract test (two emulators exchange a pack); JS-boundary zod accept/reject matrix; chunk/reassembly verification.
+
+**Dependencies:** WS-R.15.4a, WS-R.15.4b, WS-R.3.2.
+
+---
+
+### WS-R.15.4d Wi-Fi Direct / local hotspot / Bluetooth / USB channels
+**ID:** WS-R.15.4d | **Ref:** OFFLINE_SPEC §22.5
+
+**Description:** Extend the courier with the remaining §22.5 channels behind the *same* `CourierTransport` adapter: Wi-Fi Direct + local hotspot (higher-throughput LAN ferry), Bluetooth file transfer (low-bandwidth C0/T1 ferry), and USB import/export (reuses the WS-R.15.1 `.licio-bundle` path — **no new format**). Each channel selects chunk size and lane budget from its transport profile (§13.2/§15) so Bluetooth stays C0-first while LAN uses larger chunks.
+
+**Acceptance criteria:**
+- Each channel moves the same packs through the same adapter; chunk size + lane budget follow the channel's transport profile (LAN larger; Bluetooth small + C0-first).
+- USB transfer is exactly a `.licio-bundle` import/export (no courier-specific format or trust path).
+
+**Testing:** Per-channel contract test; transport-profile-selection unit; USB-equals-bundle-path assertion.
+
+**Dependencies:** WS-R.15.4c.
+
+---
+
+### WS-R.15.4e Courier controls, private-content exclusion, and metadata-privacy disclosure
+**ID:** WS-R.15.4e | **Ref:** OFFLINE_SPEC §22.5, §26.2, §26.3, §33.5
+
+**Description:** Implement the mandatory §22.5 explicit controls (discovery on/off, advertising on/off, who-can-exchange, which rooms/priorities are shared, storage budget, battery budget, **private-content exclusion** default-deny) and the courier privacy disclosure enumerating radio-metadata exposure (device name, endpoint/MAC id, physical proximity, who can see you advertising). Stealth/Emergency modes force discovery **and** advertising off; private/in-room/ciphertext content is never advertised or sent over the courier unless encrypted + room-policy-permitted + user-selected (WS-R.11.5). No radio/peer identifier is ever written to an LCAP schema (`check:lcap-schema-egress` covers `apps/courier`).
+
+**Acceptance criteria:**
+- All seven §22.5 controls exist and default conservative; private-content exclusion is default-deny and enforced **before** any pack is offered to a peer.
+- The radio-metadata disclosure renders before advertising/discovery starts; Stealth/Emergency force the radios off.
+- No radio/peer identifier appears in any LCAP record/proof/receipt; the schema-egress gate scans courier source.
+
+**Testing:** Unit — control matrix + private-exclusion default-deny; Stealth/Emergency force-off; schema-egress gate over courier source. E2E — disclosure-before-discovery flow.
+
+**Dependencies:** WS-R.15.4b, WS-R.11.5, WS-R.14.2, WS-R.17.2.
+
+---
+
+### WS-R.15.4f Courier integration, two-device E2E, and simulator ferry scenario
+**ID:** WS-R.15.4f | **Ref:** OFFLINE_SPEC §22.5, §32.3, §38
+
+**Description:** Wire the courier into the WS-R.18.3a discrete-event simulator as a "radio ferry" link model (intermittent proximity, asymmetric bandwidth) with a malicious-courier strategy (withhold / flood / lie) and assert the §32.3 metrics (C0 ahead of media over the ferry; fork/revocation propagation within bounded contacts). Add the native-bridge contract E2E (two emulators converge a room thread with **no internet**) and confirm the manual-file-bridge fallback when radios are off. Map the courier risks into the §38 register.
+
+**Acceptance criteria:**
+- The simulator runs a courier-ferry scenario with the malicious-courier strategy; metrics hold (media never beats C0; fork detected within bounded contacts).
+- A two-device emulator E2E converges a room thread offline-only; the manual-file-bridge fallback works with radios disabled.
+- Courier risks (radio metadata, native attack surface) appear in the §38 register with mitigations.
+
+**Testing:** Simulation scenario + metric assertions; two-emulator integration E2E; radios-off fallback path.
+
+**Dependencies:** WS-R.15.4d, WS-R.15.4e, WS-R.18.3a.
+
+---
+
+### WS-R.15.5 WebTransport (HTTP/3) server transport
+**ID:** WS-R.15.5 | **Ref:** OFFLINE_SPEC §22.6
+
+**Description:** Implement a WebTransport (HTTP/3 / QUIC) `LcapTransport` for browser↔server pack exchange as a lower-latency, loss-tolerant alternative to HTTPS on flaky mobile links; it reuses the §16 exchange protocol, the scheduler order, and the single `validate`. Uses the **platform** `WebTransport` API (no npm dependency) and MUST fall back to HTTPS when unsupported or blocked — correctness never depends on it. A session-bound handshake preserves the same auth/CSRF posture as the HTTPS routes.
+
+**Acceptance criteria:**
+- Browser↔server pack exchange works over WebTransport with automatic HTTPS fallback; the wire protocol + validation are identical to the HTTPS path (no parallel model).
+- No new npm dependency (platform API); the session-bound handshake preserves the auth/CSRF posture; correctness holds with WebTransport disabled.
+
+**Testing:** Gated integration — WebTransport exchange + HTTPS-fallback equivalence; auth-bound handshake; same-`validate` assertion.
+
+**Dependencies:** WS-R.12.4, WS-R.6.2.
+
+---
+
+### WS-R.15.6a WebRTC data-channel P2P transport + HTTPS signaling
+**ID:** WS-R.15.6a | **Ref:** OFFLINE_SPEC §22.6, §16.3, §18.4
+
+**Description:** In the code-split `@licio/lcap-p2p` package, implement a WebRTC `RTCDataChannel` `LcapTransport` for browser↔browser pack exchange. **Signaling (SDP/ICE) rides the existing Licio HTTPS API** via a session-bound `POST /api/lcap/v2/p2p/signal` rendezvous, with public STUN for NAT discovery. It reuses the `LcapTransport` seam (WS-R.15.4b), the scheduler order, and `validate`; it is **off by default**. The WebRTC + (15.7) Helia deps live behind the `@licio/lcap-p2p` workspace boundary and a separately code-split `apps/web/src/lcap/transports/` chunk so the web `<15` budget and the < 200 KB initial-bundle gate both hold.
+
+**Acceptance criteria:**
+- Two authenticated browsers establish an `RTCDataChannel` via HTTPS signaling + STUN and exchange a scheduler-ordered pack; received frames go through the same reader/validator (source-independence holds).
+- The transport is off by default and opt-in per mode; `@licio/lcap-p2p` is `workspace:*`-excluded and the chunk is separately code-split (budgets green).
+
+**Testing:** Gated/E2E (two Playwright contexts) — datachannel exchange + trust-state equivalence to HTTPS; budget + code-split assertions.
+
+**Dependencies:** WS-R.15.4b, WS-R.12.4, WS-R.5.2c.
+
+---
+
+### WS-R.15.6b WebRTC NAT traversal + connection-privacy controls
+**ID:** WS-R.15.6b | **Ref:** OFFLINE_SPEC §22.6, §26.2, §26.4, §33.5
+
+**Description:** Add NAT traversal — STUN-first with **optional self-hosted TURN, off by default** — and the connection-privacy controls: a clear disclosure that a *direct* WebRTC connection exposes peer IPs to the other party (via ICE candidates), a "relay-only ICE (hide my IP via TURN)" option, and **force-disable in Stealth/Emergency**. Peer IPs/ICE candidates are a live-connection property only and are never written to any LCAP schema (`check:lcap-schema-egress` covers `@licio/lcap-p2p`). Private/in-room content is default-deny over P2P unless encrypted + permitted (WS-R.11.5).
+
+**Acceptance criteria:**
+- STUN-first with optional TURN; the IP-exposure disclosure precedes any direct connection; relay-only-ICE masks the IP via TURN when selected; Stealth/Emergency force WebRTC off.
+- No peer IP/ICE candidate is persisted in an LCAP record/proof/receipt; the schema-egress gate scans the P2P source.
+
+**Testing:** Unit — STUN/TURN config + relay-only-ICE path; disclosure-before-connect; Stealth force-off; schema-egress gate over P2P source.
+
+**Dependencies:** WS-R.15.6a, WS-R.11.5, WS-R.14.2.
+
+---
+
+### WS-R.15.7a Browser IPFS/libp2p (Helia) public-block bridge, code-split
+**ID:** WS-R.15.7a | **Ref:** OFFLINE_SPEC §22.7, §13.1, §9.2
+
+**Description:** In `@licio/lcap-p2p`, implement a Helia / js-libp2p bridge that publishes and fetches **public blocks only** by their LCAP `block_cid` (content addressing reuses the §9 CIDs; bitswap exchange), loaded **only** from the separately code-split transports chunk so the initial-bundle gate holds. A fetched block is verified against its `block_cid` exactly like any other ingress (no transport trust); the bridge stores/serves nothing private/in-room/ciphertext. Off by default.
+
+**Acceptance criteria:**
+- The bridge publishes/fetches public blocks by `block_cid`; a fetched block is CID-verified before use (no transport trust); only `public`-visibility blocks are selectable.
+- Helia/js-libp2p is confined to `@licio/lcap-p2p` (workspace-excluded) and the separately code-split chunk; the < 200 KB initial-bundle and `apps/web` `<15` budgets hold; the dependency-addition checklist (no install scripts, license, transitive count, SBOM) passes.
+
+**Testing:** Gated/E2E — publish/fetch a public block by CID + CID-verify; public-only selection; bundle-size + code-split + budget assertions.
+
+**Dependencies:** WS-R.15.6a, WS-R.3.1, WS-R.0.3.
+
+---
+
+### WS-R.15.7b IPFS publish review gate + public-only structural enforcement
+**ID:** WS-R.15.7b | **Ref:** OFFLINE_SPEC §22.7, §37.2, §21.4, §26.4
+
+**Description:** Implement the **required** privacy/moderation/abuse-review gate that must pass before any block is published to the public DHT, plus structural public-only enforcement: a block is publishable only if its source record is `public` visibility (never `in_room`/`private`/ciphertext, never a private-room hint), confirmed against the WS-Q visibility model and WS-J takedown state. Published-block provenance is auditable, and a WS-J takedown retracts further republication.
+
+**Acceptance criteria:**
+- No block reaches the public DHT without passing the review gate; only `public`-visibility blocks qualify (in_room/private/ciphertext structurally excluded).
+- A WS-J takedown halts further republication of the affected block; the gate decision is audited.
+
+**Testing:** Unit — public-only enforcement matrix (each visibility/ciphertext case); review-gate-required; takedown-halts-republish.
+
+**Dependencies:** WS-R.15.7a, WS-R.11.5.
+
+---
+
+### WS-R.15.8 Transport dependency-budget governance + metadata-privacy gates
+**ID:** WS-R.15.8 | **Ref:** OFFLINE_SPEC §31.1, §3.7, §26.4; CLAUDE.md Section 6.12.12
+
+**Description:** Make the optional-transport dependency posture structurally enforced rather than conventional: assert `@licio/lcap-p2p` is `workspace:*` and excluded from the `apps/web` `<15` direct-production-dep count; assert the WebRTC/Helia code lives only in a separately code-split chunk (initial-bundle gate unaffected); extend `check:lcap-schema-egress` + `check:no-raw-egress` + `check:no-applause` over `@licio/lcap-p2p` and `apps/courier`; run the Section 6.12.12 dependency-addition checklist (install-script ban, license, transitive review) and update the SBOM for Helia / js-libp2p / `@capacitor/*`. Register `@licio/lcap-p2p` in `scripts/check-workspace-deps.ts` (allowed deps: `@licio/shared`, `@licio/lcap`).
+
+**Acceptance criteria:**
+- CI proves the P2P deps never enter the initial bundle and never count against the web direct-dep budget; a deliberately mis-placed Helia import in `apps/web` source fails a gate.
+- The extended egress/applause/schema-egress gates scan the new trees; the SBOM includes the new transitive trees; install-script detection stays green.
+
+**Testing:** The gates themselves (positive/negative fixtures); SBOM diff; budget + code-split assertions; CI wiring.
+
+**Dependencies:** WS-R.15.6a, WS-R.15.7a, WS-R.14.3.
+
+---
+
+### WS-R.15.9 Transport simulator scenarios + interop + correctness-independent-of-transport
+**ID:** WS-R.15.9 | **Ref:** OFFLINE_SPEC §22.6, §22.7, §32.3, §32.5
+
+**Description:** Add WebTransport / WebRTC / IPFS link models + adversary strategies (DHT flood/eclipse, malicious WebRTC peer, NAT-blocked, signaling-server-down) to the WS-R.18.3a simulator and assert: C0 is never starved over any transport; fork/revocation propagate; and the **correctness-independent-of-transport** property — the *same* accepted set + trust state is reached with any subset of transports enabled, HTTPS-only included. Cross-transport interop: a block published via IPFS, a pack ferried by courier, and one fetched over WebRTC all reconcile to identical canonical state.
+
+**Acceptance criteria:**
+- Each transport scenario runs with its adversary strategy; the C0-cannot-starve and fork/revocation metrics hold across transports.
+- A property test: enabling/disabling any transport subset yields the identical accepted set + trust projection (transport-independence).
+- Cross-transport interop reconciles to one canonical state.
+
+**Testing:** Simulation scenarios + metric assertions; transport-independence property; cross-transport interop.
+
+**Dependencies:** WS-R.15.5, WS-R.15.6b, WS-R.15.7b, WS-R.18.3a.
 
 ---
 
@@ -1479,7 +1670,7 @@ LCAP is **almost entirely net-new code** in three new locations plus a new DB sc
 ### WS-R.18.6 Acceptance gates, docs, index, version
 **ID:** WS-R.18.6 | **Ref:** OFFLINE_SPEC §36; Documentation rules (CLAUDE.md)
 
-**Description:** Wire the §36 acceptance gates as CI checks and a launch checklist (record_cid/proof separation; deterministic vectors stable; browser↔Node interop; malformed-pack fuzz; C0-starvation; outbox durability; revocation propagation; checkpoint consistency; reviewed UI trust labels; no raw attention/IP/location in LCAP schemas; low-end-Android storage-pressure behavior; import/export privacy warnings; external threat-model review; private-room replication disabled or separately audited). In the same change set, add `docs/offline/README.md` (implementation reference), register WS-R in `docs/planning/00-index.md`, update the `CLAUDE.md`/`AGENTS.md` roadmap row (kept byte-identical), and bump the root `package.json` PATCH version. No `claude.ai/code/session_*` URL in any doc or PR body.
+**Description:** Wire the §36 acceptance gates as CI checks and a launch checklist (record_cid/proof separation; deterministic vectors stable; browser↔Node interop; malformed-pack fuzz; C0-starvation; outbox durability; revocation propagation; checkpoint consistency; reviewed UI trust labels; no raw attention/IP/location in LCAP schemas; low-end-Android storage-pressure behavior; import/export privacy warnings; external threat-model review; private-room replication disabled or separately audited; **and the elevated-transport gates — every transport funnels through the one `validate`/`LcapTransport` seam (no parallel trust path); the correctness-independent-of-transport property holds; no peer IP/multiaddr/radio identifier in any LCAP schema; the WebRTC/IPFS deps stay code-split + workspace-excluded so the < 200 KB initial-bundle and `apps/web` `<15` budgets hold; the IPFS public-only review gate is enforced; all P2P/courier reach is off by default and Stealth/Emergency-disabled; the `apps/courier` Capacitor native build is green**). In the same change set, add `docs/offline/README.md` (implementation reference), register WS-R in `docs/planning/00-index.md`, update the `CLAUDE.md`/`AGENTS.md` roadmap row (kept byte-identical), and bump the root `package.json` PATCH version. No `claude.ai/code/session_*` URL in any doc or PR body.
 
 **Acceptance criteria:**
 - Every §36 gate has a corresponding CI check or signed-off manual gate; the checklist is in the README.
@@ -1517,16 +1708,19 @@ R.10.2 ─ R.10.1 ; R.11.3 ─ R.10.3
 R.11.3 ─ R.11.1 ─ R.11.2 ─ R.11.4 ; R.2.1/R.1.2 ─ R.11.5
 R.8.2c/R.2.4/R.9.4 ─ R.13.1 ─ R.13.2
 R.4.2 ─ R.14.1 ; R.6.3/R.4.4 ─ R.14.2 ; R.0.7 ─ R.14.3 ; R.0.7 ─ R.14.4
-R.4.* ─ R.15.1 ─ R.15.4 ; R.6.1 ─ R.15.2 ; R.12.4/R.14.4 ─ R.15.3 ; (defer) R.15.5
+R.4.* ─ R.15.1 ; R.6.1 ─ R.15.2 ; R.12.4/R.14.4 ─ R.15.3
+R.15.1/R.11.4 ─ R.15.4a ─ R.15.4b ─ R.15.4c ─ R.15.4d ; R.15.4b ─ R.15.4e ; R.15.4d/R.15.4e/R.18.3a ─ R.15.4f   (Capacitor courier)
+R.12.4 ─ R.15.5 (WebTransport) ; R.15.4b/R.12.4 ─ R.15.6a ─ R.15.6b ; R.15.6a ─ R.15.7a ─ R.15.7b   (WebRTC ; Helia IPFS bridge)
+R.15.6a/R.15.7a ─ R.15.8 (budget+egress gate) ; R.15.5/R.15.6b/R.15.7b/R.18.3a ─ R.15.9 (transport sim/interop)
 R.2.1/R.11.5 ─ R.16.1  (bridge to WS-S)
 R.8.1/R.10.1 ─ R.17.1 ─ R.17.3 ; R.11.2/R.6.2 ─ R.17.2
 R.0.6b/R.9.3 ─ R.18.1 ; R.5.4/R.8.3/R.10.3 ─ R.18.2 ; R.8.3/R.9.4/R.5.4 ─ R.18.3a ─ R.18.3b
 R.14.1/R.0.8/R.4.2 ─ R.18.4 ; R.18.1/R.15.1 ─ R.18.5 ; (all) ─ R.18.6
 ```
 
-The graph is acyclic. Three cycles present in earlier cuts were removed: the pack writer (R.4.1) now takes a **caller-provided** object order rather than build-depending on the scheduler (R.5.2c); the room-log append (R.9.1) is a DB primitive that the ingestion commit stage (R.12.1c) *calls* rather than the reverse; and the relay quota policy (R.14.4) is standalone (depends only on the schemas R.0.7) while the relay service (R.15.3) *consumes* it — the first cut had R.14.4↔R.15.3 mutually depending. The dependency-closure helper (R.7.2) is scheduler-independent and feeds R.5.2a.
+The graph is acyclic. Three cycles present in earlier cuts were removed: the pack writer (R.4.1) now takes a **caller-provided** object order rather than build-depending on the scheduler (R.5.2c); the room-log append (R.9.1) is a DB primitive that the ingestion commit stage (R.12.1c) *calls* rather than the reverse; and the relay quota policy (R.14.4) is standalone (depends only on the schemas R.0.7) while the relay service (R.15.3) *consumes* it — the first cut had R.14.4↔R.15.3 mutually depending. The dependency-closure helper (R.7.2) is scheduler-independent and feeds R.5.2a. The **elevated transports keep the graph acyclic**: the shared `LcapTransport` seam (R.15.4b) depends only on the validated core (R.4.2/R.5.2c/R.8.3) and is *consumed* by the courier (R.15.4c–f), WebRTC (R.15.6a), and WebTransport (R.15.5); the IPFS bridge (R.15.7a) rides the WebRTC P2P groundwork (R.15.6a) and the CID/block layer (R.0.3/R.3.1); and R.15.4f/R.15.9 depend on the simulator (R.18.3a), which depends on the core (R.8.3/R.9.4/R.5.4), never on any R.15 transport — so there is no back-edge from the transports into the simulator.
 
-Cross-stream order: **R.0** (LDC codec → CID → AAD → ECDSA → COSE → schemas → suites) is the gate for everything. Then **R.1** (identity/capabilities/revocations) and **R.2/R.3** (records/blocks) in parallel; **R.5** (closure → scheduler front → DRR → score) and **R.4** (pack) co-develop but are decoupled (the writer consumes the scheduler's emitted order at integration in R.15.1); **R.6/R.7/R.8** (sync/reconciliation/trust) build on records + scheduler; **R.9** (checkpoints) sits on the server **R.12** DB; **R.10/R.11** (liveness/storage) underpin the client; **R.13/R.14** (conflict/privacy-DoS) harden; **R.15/R.16** (transports/private bridge) and **R.17** (UI) ride the validated core; **R.18** (tests/sim/acceptance) runs continuously and gates the close. The phase mapping to OFFLINE_SPEC §35 is: Phase 0 = R.0; Phase 1 = R.1/R.6/R.11/R.12; Phase 2 = R.3/R.4/R.5/R.15.1–2; Phase 3 = R.9/R.10; Phase 4 = R.15.3; Phase 5 = R.15.4; Phase 6 = R.7.3/R.16/witness hardening/PQ reservation.
+Cross-stream order: **R.0** (LDC codec → CID → AAD → ECDSA → COSE → schemas → suites) is the gate for everything. Then **R.1** (identity/capabilities/revocations) and **R.2/R.3** (records/blocks) in parallel; **R.5** (closure → scheduler front → DRR → score) and **R.4** (pack) co-develop but are decoupled (the writer consumes the scheduler's emitted order at integration in R.15.1); **R.6/R.7/R.8** (sync/reconciliation/trust) build on records + scheduler; **R.9** (checkpoints) sits on the server **R.12** DB; **R.10/R.11** (liveness/storage) underpin the client; **R.13/R.14** (conflict/privacy-DoS) harden; **R.15** (the now-elevated transports — manual bundle/QR/relay **plus** the first-class WebTransport, WebRTC P2P, browser-IPFS bridge, and native Capacitor courier) and **R.16** (private bridge) and **R.17** (UI) ride the validated core; **R.18** (tests/sim/acceptance) runs continuously and gates the close. The phase mapping to OFFLINE_SPEC §35 (correspondingly de-deferred in the spec) is: Phase 0 = R.0; Phase 1 = R.1/R.6/R.11/R.12; Phase 2 = R.3/R.4/R.5/R.15.1–2; Phase 3 = R.9/R.10; **Phase 4 = R.15.3 (relay) + R.15.5 (WebTransport)**; **Phase 5 = R.15.4a–f (native Capacitor courier) + R.15.6a/b (WebRTC P2P)**; **Phase 6 = R.15.7a/b (browser-IPFS public bridge) + R.15.8 (transport budget/egress gate) + R.15.9 (transport simulation/interop) + R.7.3/R.16/witness hardening/PQ reservation**. Because the transports depend on the validated core, "elevated priority" pulls the *workstream* earlier (Wave 8) and makes these transports **required, not optional** — it does not reorder them ahead of R.0–R.14, which they require by construction.
 
 ## Milestone gate additions
 
@@ -1543,16 +1737,18 @@ Cross-stream order: **R.0** (LDC codec → CID → AAD → ECDSA → COSE → sc
 | LCAP doctrine | R.14.3 | No raw attention/IP/location/applause field in any LCAP schema; gates in CI. |
 | Honest UI | R.17.1 | No single "verified"/"delivered" badge; provisional/stale/conflict/revoked/rejected explicit. |
 | Malformed-pack safety | R.4.2, R.14.1, R.18.4 | Bombs/forks/downgrade/replay rejected; nothing renders before trust projection. |
+| Transports first-class | R.15.4a–f, R.15.5, R.15.6a/b, R.15.7a/b, R.15.9 | Native Capacitor courier + WebTransport + WebRTC P2P + browser-IPFS public bridge ship as **required** transports reusing the same packs / `validate` / scheduler; the correctness-independent-of-transport property holds (any transport subset, HTTPS-only included, reaches the identical accepted set + trust state). |
+| Transport privacy + budget | R.15.4e, R.15.6b, R.15.7b, R.15.8 | No peer IP / multiaddr / radio identifier in any LCAP schema (`check:lcap-schema-egress` over `@licio/lcap-p2p` + `apps/courier`); the P2P deps are workspace-excluded + separately code-split (the `<15` web budget and < 200 KB initial-bundle gate hold); IPFS publishes public blocks only behind the review gate; all P2P/courier reach is off by default and Stealth/Emergency-disabled. |
 | Docs byte-identical | R.18.6 | CLAUDE.md ≡ AGENTS.md; README + index updated; version bumped; no session URL. |
 
 ## Definition of done (workstream)
 
 - LCAP records are identified by the deterministic body hash only; signatures are detached COSE_Sign1 proofs; `record_cid` is independent of proof bytes, pinned by conformance vectors that pass in browser and Node.
-- The full trust pipeline — device certificate → capability → device proof → revocation knowledge → checkpoint inclusion/consistency → witnesses — is implemented; every ingress (HTTPS, bundle, QR, relay, courier) funnels through the single shared `validate(record_cid)`, and the path of arrival never confers trust.
+- The full trust pipeline — device certificate → capability → device proof → revocation knowledge → checkpoint inclusion/consistency → witnesses — is implemented; **every** ingress (HTTPS, manual bundle, QR, relay, WebTransport, WebRTC P2P, browser-IPFS bridge, native Capacitor courier) funnels through the single shared `validate(record_cid)` via one `LcapTransport` seam, and the path of arrival never confers trust.
 - The lane scheduler guarantees C0/dependency closure can never be starved by media/bulk, proven by the named `check:lcap-scheduler` gate and the §32.2 property suite; the durable outbox hard-pins local material against eviction.
 - Server ingestion quarantines before commit, accepts idempotently by `record_cid`, appends topologically to the room log, issues signed receipts, and exposes the §29 endpoints with the §22.1.1 HTTP status mapping; the `lcap_v2` IndexedDB and the new `lcap_*` Postgres tables coexist with the shipped stores without migration of either.
-- Manual `.licio-bundle` export/import is a first-class transport with full privacy disclosure; QR micro-bundles carry C0 control material; the untrusted relay can store/serve/receipt but never accept; courier and WebTransport/IPFS bridges are documented deferrals that reuse the same packs and trust path.
+- Manual `.licio-bundle` export/import is a first-class transport with full privacy disclosure; QR micro-bundles carry C0 control material; the untrusted relay can store/serve/receipt but never accept; and — per the 2026-06 maintainer decision — the **native Capacitor courier (Nearby Connections / Wi-Fi Direct / Bluetooth / hotspot / USB), WebTransport (HTTP/3), WebRTC browser↔browser P2P, and the browser-IPFS/libp2p public-block bridge are all shipped, first-class transports** (not deferrals): each reuses the same packs and the single trust path, is off by default and consent-gated per mode (Stealth/Emergency-disabled), exposes no transport-layer metadata into any LCAP schema, and confines its dependencies to the code-split `@licio/lcap-p2p` workspace package or the `apps/courier` native shell so the web `<15` dep budget and the < 200 KB initial-bundle gate hold; the IPFS bridge publishes public blocks only behind a required privacy/moderation/abuse-review gate.
 - Private-room content is carried as ciphertext + opaque hints only; LCAP owns no group-key authority (that is WS-S / PRIVATE_SPEC §10), and no plaintext/key/op-head/real-private-room-id ever enters an LCAP record, log, or receipt.
 - The UI exposes trust and liveness as distinct, honest, accessible states (WCAG 2.2 AA), never collapsing them into one badge and never using *secure/trusted/delivered/final/safe* without exact meaning; the six operational modes (incl. Emergency text and Stealth) apply their budget/discovery policies.
 - The deterministic-vector, property, network-simulation, security/fuzz, and browser↔Node interop suites pass; the §36 acceptance gates are wired in CI; high-risk/private-room use is documented as gated on external security review.
-- `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm lint:security`, `pnpm check:deps`, `pnpm check:workspace-deps`, `pnpm check:no-applause`, `pnpm check:no-raw-egress`, `pnpm check:lcap-schema-egress`, `pnpm check:lcap-scheduler`, `pnpm check:sw`, and `pnpm check:policy` all pass; the web LCAP module is code-split (initial-bundle gate unaffected); docs are updated in the same change set and the PATCH version is bumped.
+- `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm lint:security`, `pnpm check:deps`, `pnpm check:workspace-deps`, `pnpm check:no-applause`, `pnpm check:no-raw-egress`, `pnpm check:lcap-schema-egress`, `pnpm check:lcap-scheduler`, `pnpm check:sw`, and `pnpm check:policy` all pass; the web LCAP core **and** the `@licio/lcap-p2p` WebRTC/IPFS transport chunk are code-split (the < 200 KB initial-bundle gate and the `apps/web` `<15` direct-production-dep budget both hold, with `@licio/lcap-p2p` registered in `scripts/check-workspace-deps.ts`); the `apps/courier` Capacitor native build is green in CI; docs are updated in the same change set and the PATCH version is bumped.
