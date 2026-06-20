@@ -51,8 +51,12 @@ content-addressed store, the per-room `RoomLog` acceptance log, authoritative
 idempotency by `record_cid`, server-side device-fork detection over the pure
 `ingestRecord`, and `commitBatch` — ordered batch ingestion driven by the §24.4
 `resolveIngestionOrder` resolver: parents/certs/capabilities before children,
-absent dependencies quarantined with precise wants, dependency cycles rejected).
-The remaining WS-R cards are **I/O integration** — the `lcap_v2`
+absent dependencies quarantined with precise wants, dependency cycles rejected),
+and graph-guarded before any expansion by the §27.2 `checkDependencyGraph`
+(WS-R.14.2 — cycle/fan-out/depth/duplicate-dependency/private-in-public/unknown-
+critical-field detectors, each mapped to a §16.11 wire rejection code, with the
+whole-batch node-count cap checked first so the guard cannot itself be a DoS
+vector).  The remaining WS-R cards are **I/O integration** — the `lcap_v2`
 IndexedDB layer (WS-R.11), the Postgres schema (WS-R.12.2) + Hono routes
 (WS-R.12.4) that durably back and expose that binding over the wire, the
 DoS/privacy controls (WS-R.14), the transport profiles (WS-R.15), the WS-S
@@ -179,7 +183,8 @@ is a later card (the package is already runtime-agnostic via `runtime.ts`).
 | WS-R.10 — liveness, receipts, durable outbox | 10.1 – 10.3 | **Shipped** (IndexedDB binding in WS-R.11) |
 | WS-R.13 — conflict dispatch + visible-thread projection | 13.1 – 13.2 | **Shipped** |
 | WS-R.12 — server ingestion | 12.1 | **Decision core + §24.4 resolver + in-memory binding shipped** (`ingestRecord`, `resolveIngestionOrder`; `apps/api/src/lcap` `LcapIngestServer` incl. `commitBatch`); Postgres schema + Hono routes (12.2/12.4) = I/O |
-| WS-R.11/R.14 — IndexedDB store, DoS controls | — | Planned (I/O integration) |
+| WS-R.14 — DoS controls | 14.2 | **Malicious-graph guard shipped** (`checkDependencyGraph`, §27.2; wired into `commitBatch`); resource-cap centralization (14.1) + the rest = follow-up |
+| WS-R.11 — IndexedDB store | — | Planned (I/O integration) |
 | WS-R.15/R.16/R.17/R.18 — transports, encryption envelope, client UI, simulator | — | Planned |
 | WS-S — Private P2P Rooms (E2EE) | all | Planned (`docs/PRIVATE_SPEC.md`) |
 

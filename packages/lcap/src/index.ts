@@ -26,6 +26,7 @@ export * from './cid/index.js';
 export * from './conflict/index.js';
 export * from './cose/index.js';
 export * from './identity/index.js';
+export * from './limits/index.js';
 export * from './liveness/index.js';
 export * from './pack/index.js';
 export * from './priority.js';

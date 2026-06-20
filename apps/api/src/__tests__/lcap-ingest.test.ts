@@ -247,4 +247,24 @@ describe('LcapIngestServer.commitBatch (§24.4 ordered batch ingestion)', () => 
     expect(statuses[0]?.status).toBe('accepted');
     expect(srv.roomSize(ROOM)).toBe(2);
   });
+
+  it('aborts the whole import when the §27.2 graph guard rejects (duplicate dependency)', async () => {
+    const srv = new LcapIngestServer('net');
+    const { statuses, wants } = await srv.commitBatch([
+      {
+        recordCid: cidB,
+        roomId: ROOM,
+        authorDeviceKeyId: DEVICE,
+        deviceSeq: 1,
+        body: bodyB,
+        validation: vr('authorized_provisional'),
+        requires: [depCid, depCid], // a malformed duplicate dependency
+      },
+    ]);
+    // The guard rejects pre-resolution as bad schema (vs. the resolver's mere
+    // quarantine), and nothing is stored or wanted.
+    expect(statuses[0]?.status).toBe('rejected_bad_schema');
+    expect(wants).toEqual([]);
+    expect(srv.hasObject(cidB)).toBe(false);
+  });
 });
