@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-R.12.4 — the §29 pack-import endpoint (POST /api/lcap/v2/packs).  A real
+// `.licio-bundle` carrying a signed contribution + its detached proof is read
+// under the WS-R.4.2 caps and committed through the server's validate→guard→commit
+// pipeline.  The endpoint is CSRF-exempt (device-cert-authenticated content) and
+// applies the §22.1.1 request-status mapping.
+
+import { cidFor, detachedProofV2Schema, encodeWithSchema, writePack } from '@licio/lcap';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { createApp } from '../app.js';
+import { LcapIngestServer } from '../lcap/server-ingest.js';
+import { setLcapIngestServer } from '../lcap/service.js';
+import {
+  buildLcapFixtures,
+  type LcapFixtures,
+  NET,
+  NOW,
+  registerIdentity,
+} from './lcap-fixtures.js';
+
+let fx: LcapFixtures;
+let packBytes: Uint8Array;
+
+beforeAll(async () => {
+  fx = await buildLcapFixtures();
+  const proofBytes = encodeWithSchema(detachedProofV2Schema, fx.proof);
+  const proofCid = await cidFor('proof', proofBytes);
+  packBytes = writePack({
+    objects: [
+      {
+        cid: fx.recordCid,
+        cidKind: 'record',
+        frameKind: 'record_body',
+        payload: fx.body,
+        lane: 'M3',
+        priority: 1,
+      },
+      {
+        cid: proofCid,
+        cidKind: 'proof',
+        frameKind: 'proof',
+        payload: proofBytes,
+        lane: 'T1',
+        priority: 1,
+        providesProofFor: fx.recordCid,
+      },
+    ],
+    transportProfile: 'manual_bundle',
+    privacyLabel: 'public',
+    maxUncompressedBytes: 1_000_000,
+  });
+});
+
+describe('POST /api/lcap/v2/packs — bundle import (WS-R.12.4)', () => {
+  it('imports a pack and commits its contribution against pre-registered identity', async () => {
+    const srv = new LcapIngestServer(NET, () => NOW);
+    await registerIdentity(srv, fx);
+    setLcapIngestServer(srv);
+
+    const res = await createApp().request('/api/lcap/v2/packs', {
+      method: 'POST',
+      body: packBytes,
+    });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { statuses: { cid: string; status: string }[] };
+    expect(data.statuses).toContainEqual(
+      expect.objectContaining({ cid: fx.recordCid, status: 'accepted' }),
+    );
+    expect(srv.isAccepted(fx.recordCid)).toBe(true);
+  });
+
+  it('quarantines the contribution and wants the capability when identity is unregistered', async () => {
+    const srv = new LcapIngestServer(NET, () => NOW);
+    await registerIdentity(srv, fx, { capability: false }); // cert + authority but no capability
+    setLcapIngestServer(srv);
+
+    const res = await createApp().request('/api/lcap/v2/packs', {
+      method: 'POST',
+      body: packBytes,
+    });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      statuses: { cid: string; status: string }[];
+      wants: { cid: string }[];
+    };
+    expect(data.statuses[0]?.status).toBe('quarantined_missing_dependency');
+    expect(data.wants.some((w) => w.cid === fx.capabilityCid)).toBe(true);
+  });
+
+  it('rejects a malformed (non-pack) body as a non-retriable 422', async () => {
+    setLcapIngestServer(new LcapIngestServer(NET, () => NOW));
+    const res = await createApp().request('/api/lcap/v2/packs', {
+      method: 'POST',
+      body: new Uint8Array([1, 2, 3, 4]),
+    });
+    expect(res.status).toBe(422);
+  });
+
+  it('is CSRF-exempt: the POST is not blocked with 403 for lacking a token', async () => {
+    setLcapIngestServer(new LcapIngestServer(NET, () => NOW));
+    const res = await createApp().request('/api/lcap/v2/packs', {
+      method: 'POST',
+      body: new Uint8Array([0]),
+    });
+    expect(res.status).not.toBe(403);
+  });
+});
