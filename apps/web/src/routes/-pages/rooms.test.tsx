@@ -8,7 +8,8 @@ import type { FeedItem, RoomDetail } from '@licio/shared';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useAuthStore } from '../../stores/auth.js';
 import { checkA11y } from '../../test/axe.js';
 import { RoomDetailBody } from './rooms.js';
 
@@ -33,9 +34,11 @@ vi.mock('@tanstack/react-router', () => ({
 
 const roomFeed = vi.hoisted(() => vi.fn());
 const joinRoom = vi.hoisted(() => vi.fn());
+const leaveRoom = vi.hoisted(() => vi.fn());
 vi.mock('../../lib/queries.js', () => ({
   useRoomFeedQuery: (_roomId: string, enabled: boolean) => roomFeed(enabled),
   useJoinRoomMutation: () => ({ mutate: joinRoom, isPending: false }),
+  useLeaveRoomMutation: () => ({ mutate: leaveRoom, isPending: false }),
   // WS-U: the room page now renders the "governed by" panel (its own query).
   useGovernedByQuery: () => ({
     isLoading: false,
@@ -96,6 +99,7 @@ function feedItem(over: Partial<FeedItem>): FeedItem {
     exposure_label: null,
     more_on_this_story: [],
     context_card: null,
+    topic_ids: [],
     ...over,
   } as FeedItem;
 }
@@ -109,9 +113,16 @@ function renderBody(room: RoomDetail) {
   );
 }
 
+beforeEach(() => {
+  // RoomMembership shows the join/leave affordance only to a signed-in reader (an
+  // anonymous one is prompted to sign in); these cases test signed-in members.
+  useAuthStore.setState({ status: 'authenticated', user: { id: 'u1' } } as never);
+});
 afterEach(() => {
   roomFeed.mockReset();
   joinRoom.mockReset();
+  leaveRoom.mockReset();
+  useAuthStore.setState({ status: 'unauthenticated', user: null } as never);
 });
 
 describe('RoomDetailBody (WS-Q.5.3a/b)', () => {

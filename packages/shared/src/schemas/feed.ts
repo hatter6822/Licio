@@ -120,6 +120,11 @@ export const feedItemSchema = z.object({
   more_on_this_story: z.array(uuidSchema).max(12).default([]),
   /** SCOI context card when interpretations diverge (WS-I.2.4c). */
   context_card: feedContextCardSchema.nullable().default(null),
+  /** Topic-cluster ids for the story (descriptive; never a ranking input).
+   *  Powers the per-card "repeats on this topic" preference and WS-H.6.1a
+   *  client loop tracking. Capped at 8; defaults to empty so producers that
+   *  predate topic tagging stay valid on the wire. */
+  topic_ids: z.array(z.string().min(1).max(128)).max(8).default([]),
 });
 export type FeedItem = z.infer<typeof feedItemSchema>;
 
@@ -144,8 +149,8 @@ export type FeedQuery = z.infer<typeof feedQuerySchema>;
 export const storyDetailSchema = feedItemSchema.extend({
   body_summary: z.string(),
   thread_id: uuidSchema.nullable(),
-  /** Topic-cluster ids (WS-H.6.1a client loop tracking; descriptive only). */
-  topic_ids: z.array(z.string().min(1).max(128)).max(8).default([]),
+  /** `topic_ids` is inherited from `feedItemSchema` (shared by the feed card
+   *  and the detail read; powers WS-H.6.1a client loop tracking). */
   /** WS-Q.5.4a — true when the requesting user authored this story (gates the
    *  author visibility control). Absent ⇒ not the owner. */
   is_owner: z.boolean().optional(),

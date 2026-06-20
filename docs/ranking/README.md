@@ -332,9 +332,11 @@ kill-switch changes, and config writes.
 
 Every served item carries a `distribution_reason` rendered from a
 registered, parameterized template (free-form strings cannot reach the
-wire); the story page renders it with an "Inspect your reading signals"
-link into the reader's OWN Signal Ledger (§13.5 — explanations are
-inspectable, never vague). Room counts are only claimed when genuinely
+wire); the FEED CARD (`StoryCard`) renders it. The story DETAIL page
+deliberately omits the per-item reason and the source/provenance line —
+readers inspect their OWN Signal Ledger from their profile
+(`/profile/signal-ledger`); §13.5 explanations remain inspectable, never
+vague. Room counts are only claimed when genuinely
 multi-room (the single-room evidence variant makes no count claim). The
 renderer is LOCALIZATION-READY: `renderTemplate(id, params, locale)`
 guards prohibited language on the canonical English rendering (the
@@ -478,7 +480,7 @@ feeding the bridge/expert-queue dashboard), the
 | Neutrality | `apps/api/src/__tests__/ranking-neutrality.test.ts` | The ten WS-I.3 tests |
 | Gated integration | `apps/api/src/__tests__/ranking-integration.test.ts` | Drizzle adapters against the REAL migration chain (PK-collision concurrency, jsonb audit-dimension queries, retention sweep, the privacy-bucket CHECK, DISTINCT ON `getLatestMany`, by-timestamp `getAt`, TRUE keyset pagination with same-timestamp tie-breaks, `listByTypeSince`, bulk safety/story/thread reads); runs in CI's service containers |
 | Performance (RUN_PERF) | `apps/api/src/__tests__/ranking-performance.test.ts` | The pure core at a 10 000-candidate stress pool (p99 budget + byte-identical determinism across runs) and decision-log point/keyset latency at depth against live Postgres — measured operating points recorded, never run in CI |
-| Client | `apps/web/src/routes/-pages/stories.test.tsx` | The story page renders the served distribution reason verbatim and the "Inspect your reading signals" link RESOLVES to the Signal Ledger inside a real (memory-history) router |
+| Client | `apps/web/src/routes/-pages/stories.test.tsx` | The story page embeds the WS-G.3.3 inline comment section when the story carries a thread and omits it otherwise, inside a real (memory-history) router (the per-item distribution reason, the source line, and the inspect-signals link were removed from the DETAIL page — signals are inspected from the profile) |
 
 ## Residuals (tracked elsewhere)
 

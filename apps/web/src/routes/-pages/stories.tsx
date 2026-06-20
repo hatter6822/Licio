@@ -5,16 +5,14 @@
 // for the signal processor; opening the in-app reader records a source-open
 // (WS-C.4.2). Source content is rendered by the sandboxed WS-B.2.7 reader.
 import type { StoryDetail } from '@licio/shared';
-import { Link, useNavigate, useParams } from '@tanstack/react-router';
+import { useNavigate, useParams } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { CommentSection } from '../../components/comments/index.js';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
 import { ReportButton } from '../../components/safety/ReportSheet.js';
 import { AuthorVisibilityControl } from '../../components/story/AuthorVisibilityControl/index.js';
-import { IndependentSourcesDrawer } from '../../components/story/IndependentSourcesDrawer/index.js';
 import { ShareStoryButton } from '../../components/story/ShareStoryButton/index.js';
 import { StoryMedia } from '../../components/story/StoryMedia/index.js';
-import { TopicRepeatsPreference } from '../../components/story/TopicRepeatsPreference/index.js';
 import { WhereInterpretationsDiffer } from '../../components/story/WhereInterpretationsDiffer/index.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
@@ -22,7 +20,6 @@ import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { NarrowLoopPrompt } from '../../components/wellbeing/NarrowLoopPrompt/index.js';
 import { useT } from '../../i18n/index.js';
 import {
-  useIndependentSourcesQuery,
   useSavedStoriesQuery,
   useStoryInterpretationsQuery,
   useStoryQuery,
@@ -64,7 +61,6 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
   const t = useT();
   const story = useStoryQuery(storyId);
   const interpretations = useStoryInterpretationsQuery(storyId);
-  const independentSources = useIndependentSourcesQuery(storyId);
   const [readerOpen, setReaderOpen] = useState(false);
   const [loopPromptDismissed, setLoopPromptDismissed] = useState(false);
   const openId = useRef(`source-${storyId}`);
@@ -138,19 +134,6 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 onDismiss={() => setLoopPromptDismissed(true)}
               />
             ) : null}
-            <p className="text-sm text-ink-muted">{data.source}</p>
-            {/* WS-I.2.6b: the specific distribution reason, with the link
-                into the reader's OWN Signal Ledger for deep inspection
-                (SPEC §13.5 — explanations are inspectable, never vague). */}
-            <div className="flex flex-col gap-1">
-              <p className="text-sm text-ink">{data.distribution_reason}</p>
-              <Link
-                to="/profile/signal-ledger"
-                className="text-sm text-primary-on-soft underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-              >
-                {t('story.inspectSignals', 'Inspect your reading signals')}
-              </Link>
-            </div>
             {data.media ? (
               <StoryMedia
                 url={data.media.url}
@@ -192,12 +175,8 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                 {...(data.room_visibility ? { roomVisibility: data.room_visibility } : {})}
               />
             ) : null}
-            {topicIds?.[0] ? <TopicRepeatsPreference topicId={topicIds[0]} /> : null}
             {interpretations.data ? (
               <WhereInterpretationsDiffer data={interpretations.data} />
-            ) : null}
-            {independentSources.data ? (
-              <IndependentSourcesDrawer data={independentSources.data} />
             ) : null}
           </article>
         )

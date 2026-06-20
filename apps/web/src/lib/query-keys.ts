@@ -9,7 +9,6 @@ export const queryKeys = {
   feed: (mode: FeedMode = 'balanced') => ['feed', mode] as const,
   story: (storyId: string) => ['story', storyId] as const,
   storyInterpretations: (storyId: string) => ['story', storyId, 'interpretations'] as const,
-  independentSources: (storyId: string) => ['story', storyId, 'independent-sources'] as const,
   storyComments: (
     storyId: string,
     options: {

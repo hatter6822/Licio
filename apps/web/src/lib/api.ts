@@ -29,8 +29,6 @@ import {
   featureFlagsResponseSchema,
   feedPreferencesSchema,
   feedResponseSchema,
-  type IndependentSourcesResponse,
-  independentSourcesResponseSchema,
   type NotificationPreferences,
   notificationPreferencesSchema,
   okAckSchema,
@@ -236,15 +234,6 @@ export async function fetchStoryInterpretations(
     param: { storyId },
   });
   return parseResponse(response, storyInterpretationsResponseSchema);
-}
-
-export async function fetchIndependentSources(
-  storyId: string,
-): Promise<IndependentSourcesResponse> {
-  const response = await client.v1.stories[':storyId']['independent-sources'].$get({
-    param: { storyId },
-  });
-  return parseResponse(response, independentSourcesResponseSchema);
 }
 
 export async function fetchThread(threadId: string): Promise<ThreadDetail> {

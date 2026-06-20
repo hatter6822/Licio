@@ -268,6 +268,7 @@ async function buildFeedItems(
         exposure_label: exposureLabel,
         more_on_this_story: [...entry.moreOnThisStory].slice(0, 12),
         context_card: entry.contextCard,
+        topic_ids: story.topicIds.slice(0, 8),
       }),
     );
   }

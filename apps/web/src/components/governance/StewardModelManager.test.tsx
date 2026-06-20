@@ -3,8 +3,9 @@
 // WS-U steward write surface + member ratification voting: a non-steward with no
 // proposals/vote sees nothing; a member sees the read-only registry; the elected
 // steward gets the propose form and can open a ratification vote on an eligible
-// model; and when a vote is open, any member can cast an approve/reject ballot.
-// Accessible; governance counts only (no applause primitives).
+// model; when a vote is open, a member casts an approve/reject ballot while a
+// non-member is prompted to join instead. Accessible; governance counts only
+// (no applause primitives).
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAuthStore } from '../../stores/auth.js';
@@ -176,7 +177,7 @@ describe('StewardModelManager (WS-U §16.6)', () => {
       in_favor: 1,
       opposed: 0,
     });
-    const { container } = render(<StewardModelManager roomId="r1" />);
+    const { container } = render(<StewardModelManager roomId="r1" joined />);
     expect(screen.getByText(/ratification vote open/i)).toBeInTheDocument();
     expect(screen.getByText(/in favour: 1/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /^approve$/i }));
@@ -200,10 +201,47 @@ describe('StewardModelManager (WS-U §16.6)', () => {
       in_favor: 0,
       opposed: 0,
     });
-    render(<StewardModelManager roomId="r1" />);
+    render(<StewardModelManager roomId="r1" joined />);
     fireEvent.click(screen.getByRole('button', { name: /^reject$/i }));
     expect(castMutate).toHaveBeenCalledWith({ voteId: 'v1', choice: 'reject' }, expect.anything());
     expect(screen.getByText(/could not record your ballot/i)).toBeInTheDocument();
+  });
+
+  it('asks a non-member to join instead of showing ballot buttons', () => {
+    seatHeldBy('someone-else');
+    signInAs('reader-1');
+    openVote({
+      vote_id: 'v1',
+      model_id: 'm1',
+      opens_at: '2026-06-19T00:00:00.000Z',
+      closes_at: '2026-06-26T00:00:00.000Z',
+      min_quorum: 2,
+      in_favor: 0,
+      opposed: 0,
+    });
+    // `joined` defaults to false: a signed-in non-member (not the steward).
+    render(<StewardModelManager roomId="r1" />);
+    expect(screen.getByText(/ratification vote open/i)).toBeInTheDocument();
+    expect(screen.getByText(/join the room to take part in this vote/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^approve$/i })).not.toBeInTheDocument();
+  });
+
+  it('lets a room steward without a subscription cast a ballot (member via role)', () => {
+    seatHeldBy('someone-else'); // not the elected seat holder
+    signInAs('role-steward');
+    openVote({
+      vote_id: 'v1',
+      model_id: 'm1',
+      opens_at: '2026-06-19T00:00:00.000Z',
+      closes_at: '2026-06-26T00:00:00.000Z',
+      min_quorum: 2,
+      in_favor: 0,
+      opposed: 0,
+    });
+    // joined defaults false, but the viewer holds a steward role → isRoomMember.
+    render(<StewardModelManager roomId="r1" isRoomSteward />);
+    expect(screen.getByRole('button', { name: /^approve$/i })).toBeInTheDocument();
+    expect(screen.queryByText(/join the room to take part/i)).not.toBeInTheDocument();
   });
 
   it('shows the registry loading and error states to the steward', () => {

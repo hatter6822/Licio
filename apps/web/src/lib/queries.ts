@@ -66,16 +66,6 @@ export function useStoryInterpretationsQuery(storyId: string, enabled = true) {
   });
 }
 
-/** MERI independent-sources drawer data (WS-H.2.3b). */
-export function useIndependentSourcesQuery(storyId: string, enabled = true) {
-  return useQuery({
-    queryKey: queryKeys.independentSources(storyId),
-    queryFn: () => api.fetchIndependentSources(storyId),
-    enabled,
-    ...cachePolicy.feed,
-  });
-}
-
 export function useThreadQuery(threadId: string, enabled = true) {
   return useQuery({
     queryKey: queryKeys.thread(threadId),
@@ -249,6 +239,20 @@ export function useJoinRoomMutation(roomId: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => api.joinRoom(roomId),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.room(roomId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.rooms() });
+    },
+  });
+}
+
+/** Leave a room (drops the subscription, ending governance participation).
+ *  Refreshes the room + directory so the membership affordance and any
+ *  joined-filtered lists reflect the change. */
+export function useLeaveRoomMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.leaveRoom(roomId),
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.room(roomId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.rooms() });

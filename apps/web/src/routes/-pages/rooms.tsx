@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react';
 import { GovernedByPanel } from '../../components/governance/GovernedByPanel.js';
 import { StewardModelManager } from '../../components/governance/StewardModelManager.js';
 import { RoomCreateForm } from '../../components/rooms/RoomCreateForm/index.js';
+import { RoomMembership } from '../../components/rooms/RoomMembership/index.js';
 import { RoomSettingsForm } from '../../components/rooms/RoomSettingsForm/index.js';
 import { StoryFeedLink } from '../../components/story/StoryFeedLink/index.js';
 import { Button } from '../../components/ui/Button/index.js';
@@ -18,12 +19,7 @@ import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { RestrictedState } from '../../components/ui/RestrictedState/index.js';
 import { useT } from '../../i18n/index.js';
 import { cn } from '../../lib/cn.js';
-import {
-  useJoinRoomMutation,
-  useRoomFeedQuery,
-  useRoomQuery,
-  useRoomsQuery,
-} from '../../lib/queries.js';
+import { useRoomFeedQuery, useRoomQuery, useRoomsQuery } from '../../lib/queries.js';
 import { raisedInteractive, raisedSurface } from '../../lib/surfaces.js';
 import { track } from '../../lib/telemetry.js';
 import { isValidUuidParam } from '../../routing/guards.js';
@@ -153,7 +149,6 @@ export function RoomDetailBody({
   // show that steward the join UI and never load the feed.
   const contentVisible = !isPrivate || room.joined || room.is_steward === true;
   const feed = useRoomFeedQuery(roomId, contentVisible);
-  const join = useJoinRoomMutation(roomId);
   // WS-Q.6.2 — the steward settings UI is part of the flag-gated room controls.
   const binaryVisibilityUi = useFeatureFlagStore(selectContentSurface).binary_visibility_ui;
 
@@ -174,31 +169,11 @@ export function RoomDetailBody({
       </div>
       {room.description ? <p className="text-ink-muted">{room.description}</p> : null}
 
-      {/* Non-members of a private room: join affordance + honest-limits notice;
-          NO content renders until the bar passes (WS-Q.5.3a). */}
-      {isPrivate && !room.joined ? (
-        <div className="flex flex-col gap-2 rounded-lg border border-line bg-surface-sunken p-4">
-          {room.join_pending ? (
-            <p className="text-ink text-sm">
-              {t('room.join.pending', 'Your request to join is pending a steward decision.')}
-            </p>
-          ) : room.join_model === 'invite' ? (
-            <p className="text-ink text-sm">{t('room.join.invite', 'This room is invite only.')}</p>
-          ) : (
-            <Button variant="primary" onClick={() => join.mutate()} disabled={join.isPending}>
-              {room.join_model === 'open'
-                ? t('room.join.open', 'Join room')
-                : t('room.join.request', 'Request to join')}
-            </Button>
-          )}
-          <p className="text-ink-muted text-xs">
-            {t(
-              'room.join.notice',
-              'Private from the public — not from moderation, and not encrypted.',
-            )}
-          </p>
-        </div>
-      ) : null}
+      {/* Membership affordance (WS-Q.5.3a + WS-U §16.6): join to become a member —
+          the gate room governance voting enforces. Public rooms join immediately;
+          private rooms by request/invite. Handles every state (incl. leave) and
+          is independent of content visibility (a public room reads without it). */}
+      <RoomMembership roomId={roomId} room={room} />
 
       {room.governance !== null ? (
         <Link
@@ -221,8 +196,17 @@ export function RoomDetailBody({
       {contentVisible ? <GovernedByPanel roomId={roomId} /> : null}
 
       {/* WS-U §16.6 — the elected steward's two powers (propose a model + prompt;
-          record the community's ratified decision) + the proposal registry. */}
-      {contentVisible ? <StewardModelManager roomId={roomId} /> : null}
+          record the community's ratified decision) + the proposal registry. The
+          member ratification vote is gated on membership: an active subscription
+          (`joined`) OR a room steward role (`is_steward`), matching the backend
+          `isRoomMember` gate so an unsubscribed room steward can still vote. */}
+      {contentVisible ? (
+        <StewardModelManager
+          roomId={roomId}
+          joined={room.joined}
+          isRoomSteward={room.is_steward === true}
+        />
+      ) : null}
 
       {/* Tier two: the room feed (in-room chip on every room_only item). */}
       {contentVisible ? (
