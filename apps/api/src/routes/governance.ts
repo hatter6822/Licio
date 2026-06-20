@@ -12,6 +12,7 @@
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { roomContentVisibleToUser } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
 import { getGovernanceService } from '../governance/services.js';
 import { rateLimit } from '../lib/rate-limit.js';
@@ -37,6 +38,27 @@ async function isRoomMember(roomId: string, userId: string): Promise<boolean> {
   const subscription = await rooms.getSubscription(roomId, userId);
   if (subscription?.status === 'active') return true;
   return (await rooms.stewardRolesFor(roomId, userId)).length > 0;
+}
+
+/**
+ * The WS-Q content read bar for governance reads: a PRIVATE room's governance
+ * data (model ids/digests, the downloadable bundle, the agent view) is members/
+ * stewards-only — otherwise an authenticated non-member could enumerate and
+ * download a private room's policy. A room absent from the forum store is a
+ * governance-only fixture with no content bar to apply.
+ */
+async function governanceReadable(roomId: string, userId: string | null): Promise<boolean> {
+  const forum = getForumServices();
+  const room = await forum.rooms.getById(roomId);
+  if (room === null) return true;
+  if (await roomContentVisibleToUser(forum, room, userId)) return true;
+  // The elected governance steward always sees their own room's governance, even
+  // if they hold no forum subscription/steward role.
+  if (userId !== null) {
+    const seat = await getGovernanceService().getSeat(roomId);
+    if (seat?.holderUserId === userId) return true;
+  }
+  return false;
 }
 
 const proposeBodySchema = z
@@ -155,10 +177,14 @@ export function createGovernanceRoutes() {
         },
       )
       .get('/rooms/:roomId/governance/models', authMiddleware(), async (c) => {
+        const roomId = c.req.param('roomId');
+        if (!(await governanceReadable(roomId, c.get('auth')?.userId ?? null))) {
+          return c.json(deny('not_found', 'Room governance not found.'), 404);
+        }
         const svc = getGovernanceService();
-        const seat = await svc.getSeat(c.req.param('roomId'));
+        const seat = await svc.getSeat(roomId);
         // The model list is part of the in-room transparency surface.
-        const models = await svc.listModels(c.req.param('roomId'));
+        const models = await svc.listModels(roomId);
         return c.json({
           steward_user_id: seat?.holderUserId ?? null,
           models: models.map((m) => ({
@@ -171,8 +197,12 @@ export function createGovernanceRoutes() {
         });
       })
       .get('/rooms/:roomId/governance/models/:modelId/download', authMiddleware(), async (c) => {
+        const roomId = c.req.param('roomId');
+        if (!(await governanceReadable(roomId, c.get('auth')?.userId ?? null))) {
+          return c.json(deny('not_found', 'Model not found.'), 404);
+        }
         const model = await getGovernanceService().getModel(c.req.param('modelId'));
-        if (!model || model.roomId !== c.req.param('roomId')) {
+        if (!model || model.roomId !== roomId) {
           return c.json(deny('not_found', 'Model not found.'), 404);
         }
         // Member-downloadable, integrity-pinned artifact (the accountability core).
@@ -237,6 +267,9 @@ export function createGovernanceRoutes() {
       )
       .get('/rooms/:roomId/governance/ratification', authMiddleware(), async (c) => {
         const roomId = c.req.param('roomId');
+        if (!(await governanceReadable(roomId, c.get('auth')?.userId ?? null))) {
+          return c.json(deny('not_found', 'Room governance not found.'), 404);
+        }
         const svc = getGovernanceService();
         const vote = await svc.getOpenRatification(roomId);
         if (!vote) return c.json({ vote: null }, 200);
@@ -317,6 +350,9 @@ export function createGovernanceRoutes() {
       // --- "Governed by" agent view ---------------------------------------
       .get('/rooms/:roomId/governance/agent', authMiddleware(), async (c) => {
         const roomId = c.req.param('roomId');
+        if (!(await governanceReadable(roomId, c.get('auth')?.userId ?? null))) {
+          return c.json(deny('not_found', 'Room governance not found.'), 404);
+        }
         const svc = getGovernanceService();
         const binding = await svc.getBinding(roomId);
         const actions = await svc.recentAgentActions(roomId, 20);

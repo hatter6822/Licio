@@ -103,6 +103,39 @@ describe('WS-K routes', () => {
     expect(blocked.status).toBe(200);
   });
 
+  it('accepts a hallucination payload on the evaluate route (generation models need it)', async () => {
+    const aiTeam = await seedUserWithSession(forum.identity, { admin: true });
+    const res = await app.request(
+      jsonReq(
+        '/v1/ai/admin/models/evaluate',
+        'POST',
+        {
+          model_name: 'summary-generator',
+          version: '1.0.0',
+          modalities: ['generation'],
+          risk_level: 'high',
+          hallucination: {
+            statements: [
+              {
+                text: 'The vote passed on Tuesday.',
+                cited_ids: ['c1'],
+                cited_source_texts: ['The council vote passed on Tuesday.'],
+              },
+            ],
+            source_text: 'The council vote passed on Tuesday.',
+            valid_citation_ids: ['c1'],
+          },
+        },
+        aiTeam.cookie,
+      ),
+    );
+    // The strict schema previously rejected `hallucination` (422); it is now
+    // accepted and fed to the harness, which returns a decision.
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { decision: { evaluations?: unknown[] } };
+    expect(body.decision).toBeDefined();
+  });
+
   it('gates the review queue to stewards', async () => {
     const regular = await seedUserWithSession(forum.identity);
     const steward = await seedUserWithSession(forum.identity, { steward: true });
@@ -144,9 +177,44 @@ describe('WS-K routes', () => {
     );
     expect(report.status).toBe(201);
 
+    // The summary must exist before it can be reported (no bogus-id pollution).
+    await ai.summaries.putDraft({
+      summaryId: 'sum-1',
+      threadId: 'thread-1',
+      draft: {},
+      outputId: 'out-1',
+      qualityPassed: true,
+      createdAt: new Date(ai.now()).toISOString(),
+    });
     const summaryReport = await app.request(
       jsonReq('/v1/ai/summaries/sum-1/report', 'POST', { reason: 'fake_citation' }, user.cookie),
     );
     expect(summaryReport.status).toBe(201);
+
+    // Reporting a non-existent summary/translation is a 404 (not queue pollution).
+    expect(
+      (
+        await app.request(
+          jsonReq(
+            '/v1/ai/summaries/ghost/report',
+            'POST',
+            { reason: 'fake_citation' },
+            user.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await app.request(
+          jsonReq(
+            '/v1/ai/translations/ghost/report',
+            'POST',
+            { reason: 'mistranslation' },
+            user.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(404);
   });
 });

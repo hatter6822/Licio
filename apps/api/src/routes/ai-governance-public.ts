@@ -114,6 +114,7 @@ export function createAiGovernancePublicRoutes() {
             c.req.param('id'),
             c.req.valid('json').reason,
           );
+          if (report === null) return c.json(deny('not_found', 'Translation not found.'), 404);
           return c.json({ report }, 201);
         },
       )
@@ -132,6 +133,7 @@ export function createAiGovernancePublicRoutes() {
             body.reason,
             body.correction_text ?? null,
           );
+          if (report === null) return c.json(deny('not_found', 'Summary not found.'), 404);
           return c.json({ report }, 201);
         },
       )

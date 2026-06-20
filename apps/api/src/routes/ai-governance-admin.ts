@@ -76,6 +76,26 @@ const evaluateBodySchema = z
         dataset_versions: z.array(datasetVersionSchema).optional(),
       })
       .optional(),
+    // Hallucination/grounding evaluation — REQUIRED by the harness for every
+    // generation model and every high/critical-risk model, so the admin surface
+    // must be able to submit it (else such models can never clear the gate).
+    hallucination: z
+      .object({
+        statements: z.array(
+          z
+            .object({
+              text: z.string(),
+              cited_ids: z.array(z.string()),
+              cited_source_texts: z.array(z.string()).optional(),
+            })
+            .strict(),
+        ),
+        source_text: z.string(),
+        valid_citation_ids: z.array(z.string()),
+        accepted_with_documentation: z.boolean().optional(),
+        dataset_versions: z.array(datasetVersionSchema).optional(),
+      })
+      .optional(),
     safety: z
       .object({
         cases: z.array(
@@ -166,6 +186,31 @@ export function createAiGovernanceAdminRoutes() {
                       : {}),
                     ...(body.bias.dataset_versions
                       ? { datasetVersions: body.bias.dataset_versions }
+                      : {}),
+                  },
+                }
+              : {}),
+            ...(body.hallucination
+              ? {
+                  hallucination: {
+                    input: {
+                      statements: body.hallucination.statements.map((s) => ({
+                        text: s.text,
+                        cited_ids: s.cited_ids,
+                        ...(s.cited_source_texts
+                          ? { cited_source_texts: s.cited_source_texts }
+                          : {}),
+                      })),
+                      source_text: body.hallucination.source_text,
+                      valid_citation_ids: new Set(body.hallucination.valid_citation_ids),
+                    },
+                    ...(body.hallucination.accepted_with_documentation !== undefined
+                      ? {
+                          acceptedWithDocumentation: body.hallucination.accepted_with_documentation,
+                        }
+                      : {}),
+                    ...(body.hallucination.dataset_versions
+                      ? { datasetVersions: body.hallucination.dataset_versions }
                       : {}),
                   },
                 }

@@ -242,7 +242,10 @@ export async function reportSummary(
   summaryId: string,
   reason: SummaryReportReason,
   correctionText: string | null,
-): Promise<SummaryReport> {
+): Promise<SummaryReport | null> {
+  // The target must be a real AI summary draft — otherwise any authenticated
+  // user could pollute the steward queue + report metrics with arbitrary ids.
+  if ((await deps.aiSummaries.getDraft(summaryId)) === null) return null;
   const report = summaryReportSchema.parse({
     report_id: `srep-${randomUUID()}`,
     summary_id: summaryId,

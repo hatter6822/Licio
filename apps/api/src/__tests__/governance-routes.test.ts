@@ -430,6 +430,67 @@ describe('WS-U governance routes', () => {
     expect(body2.summary.summary).toContain('Adopt a digest');
   });
 
+  it('enforces the room content bar on governance reads for a private room', async () => {
+    const steward = await seedUserWithSession(forum.identity);
+    const member = await seedUserWithSession(forum.identity);
+    const outsider = await seedUserWithSession(forum.identity);
+    const roomId = randomUUID();
+    // A PRIVATE forum room with a governance seat + a proposed model.
+    await forum.forum.rooms.insert({
+      roomId,
+      name: `Room ${roomId.slice(0, 8)}`,
+      slug: `room-${roomId.slice(0, 8)}`,
+      description: null,
+      roomType: 'global_topic',
+      visibility: 'private',
+      joinModel: 'request_approval',
+      postingPolicy: 'all_members',
+      createdBy: steward.userId,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+    });
+    await getGovernanceService().bootstrapSeat(roomId, steward.userId);
+    const propose = await app.request(
+      jsonReq(
+        `/v1/rooms/${roomId}/governance/models`,
+        'POST',
+        { bundle, prompt_text: 'x' },
+        steward.cookie,
+      ),
+    );
+    const { modelId } = await json<{ modelId: string }>(propose);
+    await joinRoom(forum, roomId, member.userId);
+
+    const models = (cookie: string) =>
+      app.request(jsonReq(`/v1/rooms/${roomId}/governance/models`, 'GET', undefined, cookie));
+    const download = (cookie: string) =>
+      app.request(
+        jsonReq(
+          `/v1/rooms/${roomId}/governance/models/${modelId}/download`,
+          'GET',
+          undefined,
+          cookie,
+        ),
+      );
+
+    // An outsider (authenticated non-member) cannot enumerate or download.
+    expect((await models(outsider.cookie)).status).toBe(404);
+    expect((await download(outsider.cookie)).status).toBe(404);
+    expect(
+      (
+        await app.request(
+          jsonReq(`/v1/rooms/${roomId}/governance/agent`, 'GET', undefined, outsider.cookie),
+        )
+      ).status,
+    ).toBe(404);
+    // The elected steward and an active member can.
+    expect((await models(steward.cookie)).status).toBe(200);
+    expect((await models(member.cookie)).status).toBe(200);
+    expect((await download(member.cookie)).status).toBe(200);
+  });
+
   it('returns a 404 for a download from the wrong room', async () => {
     const user = await seedUserWithSession(forum.identity);
     await getGovernanceService().bootstrapSeat('r3', user.userId);

@@ -138,7 +138,10 @@ export async function reportTranslation(
   deps: TranslationDeps,
   translationId: string,
   reason: TranslationReportReason,
-): Promise<TranslationReport> {
+): Promise<TranslationReport | null> {
+  // The target must be a real AI translation — otherwise any authenticated user
+  // could pollute the steward queue + report metrics with arbitrary ids.
+  if ((await deps.translations.get(translationId)) === null) return null;
   const report = translationReportSchema.parse({
     report_id: `trep-${randomUUID()}`,
     translation_id: translationId,

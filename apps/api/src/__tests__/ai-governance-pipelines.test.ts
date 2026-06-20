@@ -185,11 +185,26 @@ describe('WS-K.1.4a summary generation', () => {
 
   it('records a user report and routes it to review', async () => {
     const f = fresh();
+    // The summary must exist before it can be reported (no bogus-id pollution).
+    await f.ai.summaries.putDraft({
+      summaryId: 'sum-1',
+      threadId: 'thread-1',
+      draft: {},
+      outputId: 'out-1',
+      qualityPassed: true,
+      createdAt: new Date(f.ai.now()).toISOString(),
+    });
     await reportSummary(summaryDeps(f), 'sum-1', 'fake_citation', 'citation does not exist');
     const reports = await f.ai.summaries.listReports('sum-1');
     expect(reports[0]?.reason).toBe('fake_citation');
     const pending = await f.ai.reviewQueue.list({ kind: 'reported_summary' }, 10);
     expect(pending).toHaveLength(1);
+  });
+
+  it('refuses a report for a non-existent summary (no bogus-id pollution)', async () => {
+    const f = fresh();
+    expect(await reportSummary(summaryDeps(f), 'nope', 'fake_citation', null)).toBeNull();
+    expect(await f.ai.reviewQueue.list({ kind: 'reported_summary' }, 10)).toHaveLength(0);
   });
 });
 
@@ -244,7 +259,13 @@ describe('WS-K.2.1a translation', () => {
       translation.translation_id,
       'mistranslation',
     );
-    expect(report.reason).toBe('mistranslation');
+    expect(report?.reason).toBe('mistranslation');
+  });
+
+  it('refuses a report for a non-existent translation (no bogus-id pollution)', async () => {
+    const f = fresh();
+    expect(await reportTranslation(translationDeps(f), 'nope', 'mistranslation')).toBeNull();
+    expect(await f.ai.reviewQueue.list({ kind: 'reported_translation' }, 10)).toHaveLength(0);
   });
 });
 
