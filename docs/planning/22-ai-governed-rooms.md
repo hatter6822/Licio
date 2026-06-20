@@ -2,22 +2,27 @@
 
 **Milestone:** M3 (governance substrate) → M4-M5 (treasury powers) | **Priority:** 3-5 | **Dependencies:** WS-K (model-governance substrate — re-scoped, see below), WS-G/WS-Q (rooms, content visibility, conversation/safety state machine), WS-J (platform trust & safety — becomes the legal floor), WS-L (Knomosis gateway, wallets, Lex bounds), WS-M (treasury, law-packs, proposals), WS-H (invariants — unbiased-facilitation audits), WS-N (jurisdiction/compliance) | **Wave:** 5 (substrate) → 8 (treasury) | **Estimated duration:** staged (see §U.7)
 
-> **Status: DOCTRINE RATIFIED + RUNTIME STAGES 1-3 & 5-core SHIPPED (2026-06-19).** Stage 0
+> **Status: DOCTRINE RATIFIED + RUNTIME STAGES 1-4 & 5-core SHIPPED (2026-06-20).** Stage 0
 > amended `docs/SPEC.md` (§16.6, §17, §24.1, §24.5, §24.6), the `docs/policy/` register, and the
 > WS-K/J/L/M plans. The runtime then landed (rather than reusing WS-K alone, a dedicated
 > deterministic domain package was built): the **`@licio/governance`** pure domain (policy DSL,
-> proof-carrying kernel, capabilities, election tally), the **`knomosis`** schema + migration
-> `0035` (isolation-proven), the **`GovernanceService`** (seat/elections, model admission gate,
-> bounded moderation agent **wired into the live contribution path** floor-dominantly, the
+> proof-carrying kernel, capabilities, election tally, member ratification, lawmaking
+> facilitation), the **`knomosis`** schema + migrations `0035`–`0037` (isolation-proven), the
+> **`GovernanceService`** (member-gated + law-pack-driven seat elections, model admission gate,
+> bounded moderation agent **wired into the live contribution path** floor-dominantly — deciding
+> over REAL author-history signals + canonical link/mention counts, and emitting the author's
+> **statement-of-reasons notice** on a hold/removal (no silent sanctions), the
 > **member ratification vote** (the only path to an active agent — quorum-gated, fail-safe,
 > superseding the prior model), the platform-floor **freeze/restore** control, the lease-guarded
-> **election + ratification scheduler** (terms rotate yearly; votes settle at close),
-> kernel-backed treasury), the **`/v1/rooms/*`** routes + seat
-> bootstrap on room create, and the **web surface** (`apps/web/src/components/governance/`):
+> **election + ratification scheduler** (terms rotate per the law-pack; votes settle at close),
+> deterministic **lawmaking facilitation** (capability-gated summary/schedule/attest; the agent
+> never computes a tally), kernel-backed treasury), the rate-limited **`/v1/rooms/*`** routes +
+> seat bootstrap on room create, and the **web surface** (`apps/web/src/components/governance/`):
 > the in-room "governed by" transparency panel and the elected-steward propose/ratify
-> manager with the member-downloadable proposal registry, both on the room page. The nine
+> manager with the member-downloadable proposal registry, both on the room page. The eleven
 > stores have gated Drizzle adapters bound at boot (migration `0036` adds the vote PK + model
-> digest uniqueness). Residuals (Stages 4/6, the steward-election voting UI, doctrine-matrix
+> digest uniqueness; `0037` adds the model-ratification tables). Residuals (the WS-M lawmaking
+> trigger + on-chain election mode (Stage 4/6), the steward-election voting UI, doctrine-matrix
 > propagation) are tracked in `docs/governance/README.md`. The shipped WS-K
 > platform (`@licio/ai-governance` + `apps/api/src/ai-governance` + the `0034` schema + the
 > `/v1/ai/*` routes) is **not discarded** — it is re-scoped into the *platform-side*

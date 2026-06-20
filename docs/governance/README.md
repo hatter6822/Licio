@@ -49,7 +49,13 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
   (`scheduler.ts` → `runElectionLifecycle`): it opens an election for every seat
   whose term has elapsed and settles every closed election (the eligible-voter
   count is a soft cross-context read of room membership), so a creator-bootstrapped
-  seat actually rotates yearly rather than staying fixed.
+  seat actually rotates yearly rather than staying fixed. Ballots are
+  **membership-gated** — `castVote` fail-closes on a non-member (symmetric with
+  the ratification ballot), and the route additionally requires the *candidate* to
+  be a room member (a steward is elected from among the room's own members). The
+  tally rules AND the next term length come from the room's **community-voted
+  law-pack** (`election` bounds: quorum, turnout, per-account cap, term), defaulting
+  to the platform baseline — never a hardcoded constant.
 - **Stage 2** — community model/prompt registry, content-addressing, and the
   **platform admission gate**: the model's deterministic decisions must fall within
   the platform `[min,max]` severity band on every fixture (catching under- and
@@ -74,15 +80,35 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
   room with an active binding and combine its recommendation **floor-dominantly**
   — the agent can raise a contribution's moderation state (flag → `under_review`,
   remove → `removed`) but can never lower or reverse a platform-floor decision.
-  Agent-held content is routed to the human review queue (the appeal path) and is
-  suppressed from scoring emission exactly like a WS-J hold.
+  The agent decides over a `ModerationContext` carrying **real author-history
+  signals** (account age from the identity articulation node, room familiarity from
+  the subscription/steward state, prior in-room removals) and **canonical**
+  link/mention counts (one token per URL; an email is not a mention), so a room
+  policy that gates on those signals actually fires. Agent-held content is routed to
+  the human review queue (the appeal path), suppressed from scoring emission exactly
+  like a WS-J hold, AND — no silent sanctions — the author receives a
+  **statement-of-reasons notice** carrying the agent's own reason: a COMMUNITY-layer
+  notice (no platform taxonomy reason code, the queued human review as its recourse)
+  distinct from a platform-floor enforcement.
+- **Stage 4 (facilitation)** — deterministic lawmaking facilitation
+  (`@licio/governance` `summarizeProposal`/`scheduleProposalVote`/`attestOutcome`),
+  exposed as capability-gated `facilitateSummary`/`Schedule`/`Attest`: each requires
+  the matching `lawmaking.*` capability on the active binding (else a typed
+  refusal), and every facilitation is logged with the provenance triple. The agent
+  attests a PLATFORM-COMPUTED outcome — it has no vote/tally/weight capability, so
+  it can never compute or bias a result (ADR-8). The elected steward can trigger a
+  neutral summary (`POST …/governance/lawmaking/summarize`); schedule/attest are
+  exercisable primitives whose production trigger is the WS-M proposal lifecycle.
 - **Stage 5 (core)** — the kernel-backed treasury executor: fail-closed when crypto
   is off, capability- and kernel-gated when on, the agent holding no keys; the
   verdict is logged.
 
 The crypto flag defaults **false** (`config.ts`), so treasury powers do not exist
 by default. In-memory stores back dev/tests; the gated Drizzle adapters bind the
-same interfaces later.
+same interfaces later. Every governance **write** route carries an identity-free
+per-endpoint fixed-window budget (SPEC §19.1 load-shedding, never per-IP), placed
+before auth: member ballots get a roomier budget than the steward writes, and the
+platform-floor freeze stays unlimited so an emergency pause is always available.
 
 ### Web surface (`apps/web/src/components/governance`)
 
@@ -128,11 +154,20 @@ hypothetical `knomosis → public.rooms` FK is caught.
 
 ## Tests
 
-- `packages/governance` — 30 deterministic unit/property tests (97% stmts).
-- `apps/api` — the service vertical (seat/election, admission, moderation +
-  downgrade + freeze, treasury fail-closed + accepted + every error branch),
-  config validation, and the HTTP route surface (auth, steward-only, download,
-  approve, agent view).
+- `packages/governance` — deterministic unit/property tests, incl. the lawmaking
+  facilitation suite (`lawmaking.test.ts`: deterministic summary/schedule/attest +
+  the inconclusive-when-unsettled path).
+- `apps/api` — the service vertical (seat/election incl. the member-gate + the
+  law-pack-driven settle, admission, moderation + downgrade + freeze, the Stage 4
+  lawmaking facilitation + per-capability gating in `governance-lawmaking.test.ts`,
+  treasury fail-closed + accepted + every error branch), the real author-history
+  reader + canonical token counting (`governance-author-history.test.ts`), config
+  validation, and the HTTP route surface (auth, steward-only, download, the
+  election-vote member/candidate gate, the lawmaking summary route, the write
+  rate-limit ceiling, agent view).
+- `apps/api` — the agent on the contribution path
+  (`governance-agent-moderation.test.ts`) + the author statement-of-reasons notice
+  on a hold/removal (`moderation-prechecks-wiring.test.ts`).
 - `apps/web` — the governance client flows (`governance-api.test.ts`), the
   `GovernedByPanel` transparency states, and the `StewardModelManager` steward
   surface (steward-gating, propose with client-side JSON validation, confirm-gated
@@ -152,14 +187,17 @@ hypothetical `knomosis → public.rooms` FK is caught.
 
 ## Residuals (tracked)
 
-- **Stages 4 & 6** — the community **law-pack** (the agent's bounds) is now
+- **Stages 4 & 6** — the community **law-pack** (the agent's bounds) is
   proposable and bindable: a steward-gated `POST …/governance/law-packs` registers
   it and `approveModel`'s `law_pack_id` binds it, so the derived capability
   descriptor is intersected with the community's permitted set (a community can
-  tighten the agent below the model's request). What remains is the Lex-bound
-  lawmaking *facilitation surface* (`lawmaking.summarize/schedule/attest`) and the
-  on-chain election mode + the full §17.5 anti-capture suite — the kernel/tally
-  semantics are shipped; these are the next slices.
+  tighten the agent below the model's request). The deterministic lawmaking
+  *facilitation* primitives (`lawmaking.summarize/schedule/attest`) are now
+  **shipped** and capability-gated (summary wired to a steward route; see Stage 4
+  above). What remains is the WS-M proposal-lifecycle *trigger* that drives
+  schedule/attest end-to-end, the on-chain election mode, and the full §17.5
+  anti-capture suite — the kernel/tally/facilitation semantics are shipped; these
+  are the next slices.
 - **Treasury execution** (`executeTreasuryAction`) — implemented and fail-closed
   behind the crypto flag (off by default); its caller is the WS-L/WS-M wallet +
   proposal flow, so it stays a tracked residual until that lands.
