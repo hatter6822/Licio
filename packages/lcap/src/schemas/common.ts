@@ -33,6 +33,12 @@ export const prioritySchema = z.union([
   z.literal(4),
 ]);
 
+/** A scheduling lane (§15.1). */
+export const lcapLaneSchema = z.enum(['C0', 'T1', 'E2', 'M3', 'B4']);
+
+/** A content-addressed object kind (§9.2). */
+export const cidKindSchema = z.enum(['record', 'proof', 'block', 'chunk']);
+
 /** Per-item visibility scope (§11.3, §12.1). */
 export const visibilityScopeSchema = z.enum(['public', 'in_room', 'private']);
 export type LcapVisibilityScope = z.infer<typeof visibilityScopeSchema>;

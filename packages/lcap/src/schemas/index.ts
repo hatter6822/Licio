@@ -40,6 +40,20 @@ export {
   visibilityScopeSchema,
 } from './common.js';
 export {
+  type BundleManifestRecordV2,
+  bundleManifestRecordV2Schema,
+  type PackFrameHeaderV2,
+  type PackHeaderV2,
+  type PackTableEntryV2,
+  type PackTableV2,
+  packFrameHeaderV2Schema,
+  packHeaderV2Schema,
+  packPrivacyLabelSchema,
+  packTableEntryV2Schema,
+  packTableV2Schema,
+  transportProfileSchema,
+} from './pack.js';
+export {
   type DetachedProofV2Record,
   detachedProofV2Schema,
   proofKindSchema,

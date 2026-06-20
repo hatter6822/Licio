@@ -29,9 +29,6 @@ export const DEFAULT_DECOMPRESS_LIMITS: DecompressLimits = {
 export class CompressionBombError extends Error {
   override readonly name = 'CompressionBombError';
   readonly reason = 'rejected_resource_limit' as const;
-  constructor(message: string) {
-    super(message);
-  }
 }
 
 function concat(parts: readonly Uint8Array[], total: number): Uint8Array {

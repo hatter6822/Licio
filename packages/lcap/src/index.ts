@@ -25,6 +25,7 @@ export * from './checkpoint/index.js';
 export * from './cid/index.js';
 export * from './cose/index.js';
 export * from './identity/index.js';
+export * from './pack/index.js';
 export * from './priority.js';
 export * from './records/index.js';
 export * from './scheduler/index.js';
