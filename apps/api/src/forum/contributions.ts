@@ -105,6 +105,16 @@ export const FORUM_TO_EVENT_TYPE: Readonly<Record<ContributionType, EventContrib
   comment: 'explanation',
 };
 
+/** Contribution moderation states ordered by restrictiveness (higher wins when
+ *  combining the platform floor with the WS-U in-room agent — the agent can only
+ *  raise the state, never lower a floor decision). */
+type ModState = 'published' | 'under_review' | 'removed';
+const MOD_STATE_RANK: Readonly<Record<ModState, number>> = {
+  published: 0,
+  under_review: 1,
+  removed: 2,
+};
+
 export type ContributionRejection =
   | { status: 404; code: 'not_found'; message: string }
   | { status: 403; code: 'thread_restricted'; message: string }
@@ -469,20 +479,50 @@ export async function createContribution(
     );
   }
 
-  // 5. Safety pre-checks (WS-J.2.6 seam): flag → under_review + queue;
+  // The contribution id is minted here (before the safety/agent passes) so the
+  // WS-U agent action log can reference it as the moderated subject.
+  const contributionId = randomUUID();
+
+  // 5. Safety pre-checks (WS-J.2.6 floor seam): flag → under_review + queue;
   //    block → removed (high-confidence spam/malware auto-block, appealable).
   //    The duplicate-flood detector counts distinct ROOMS, so pass the thread's
   //    real home room (NOT the thread id — same-room reposts are one room).
   const verdict = await forum.safety.classify(request, { userId, roomId: thread.roomId });
-  const moderationState =
+  const floorState: ModState =
     verdict.disposition === 'block'
       ? 'removed'
       : verdict.disposition === 'flag'
         ? 'under_review'
         : 'published';
 
+  // 5b. WS-U bounded in-room agent (SPEC §24.6): when the room has an active
+  //     community-approved binding, the agent may add caution within its
+  //     community-granted capabilities. Combined FLOOR-DOMINANTLY (max
+  //     restriction) — the agent can never reduce a floor decision or reinstate a
+  //     floor removal (it holds no floor-reserved capability). The agent action
+  //     (with its provenance triple) is logged inside the GovernanceService.
+  let moderationState: ModState = floorState;
+  let agentEscalated = false;
+  let agentReason: string | null = null;
+  if (thread.roomId !== null && forum.agentModerator !== null) {
+    const agent = await forum.agentModerator.moderateContribution({
+      roomId: thread.roomId,
+      contributionId,
+      authorUserId: userId,
+      type: request.type,
+      body: request.body,
+      citationCount: 'citations' in request && request.citations ? request.citations.length : 0,
+      attachmentCount: request.attachment_ids?.length ?? 0,
+    });
+    if (agent !== null && MOD_STATE_RANK[agent.state] > MOD_STATE_RANK[moderationState]) {
+      moderationState = agent.state;
+      agentEscalated = true;
+      agentReason = agent.reason ?? null;
+      forum.metrics.increment('contributions.agent_moderated');
+    }
+  }
+
   // 6. Transactional insert (with the evidence card for evidence types).
-  const contributionId = randomUUID();
   let evidenceCard: ForumEvidenceCardInput | undefined;
   if (request.type === 'evidence') {
     const claim = await ingestion.claims.getById(request.target_claim_id);
@@ -606,6 +646,42 @@ export async function createContribution(
           authorUserId: userId,
           reasonCode: verdict.reasonCode ?? 'MOD_SPAM_001',
           reasons: verdict.reasons,
+        });
+      }
+    } else if (agentEscalated) {
+      // The WS-U in-room agent held/removed content the floor cleared: route it
+      // to human review (the appealable-to-floor path). The agent action itself
+      // is already in the knomosis agent_action_log with its provenance triple.
+      forum.metrics.increment(
+        moderationState === 'removed'
+          ? 'contributions.agent_blocked'
+          : 'contributions.agent_flagged',
+      );
+      await ingestion.reviewQueue.insert({
+        kind: 'contribution_safety_hold',
+        storyId: thread.storyId,
+        context: {
+          contribution_id: contribution.contributionId,
+          thread_id: contribution.threadId,
+          reasons: ['in_room_agent'],
+          disposition: moderationState === 'removed' ? 'block' : 'flag',
+          source: 'in_room_agent',
+        },
+        status: 'pending',
+        resolution: null,
+        resolvedBy: null,
+        resolvedAt: null,
+        notBefore: null,
+      });
+      // No silent sanction: the author gets the agent's statement of reasons.
+      // AWAITED inside the compensating try (a hold is only legitimate WITH its
+      // author notice, mirroring the auto-block path).
+      if (forum.autoModerationSink !== null) {
+        await forum.autoModerationSink.recordAgentHold({
+          contributionId: contribution.contributionId,
+          authorUserId: userId,
+          removed: moderationState === 'removed',
+          reason: agentReason,
         });
       }
     }
@@ -899,12 +975,47 @@ export async function editContribution(
       rejection: { status: 404, code: 'not_found', message: 'Contribution not found' },
     };
   }
-  // Edit-to-introduce-spam/malware is caught here: a `block` disposition removes
-  // the edit (appealable system action); `flag` holds it for review.
-  if (verdict.disposition !== 'clear' && edited.moderationState === 'published') {
-    const targetState = verdict.disposition === 'block' ? 'removed' : 'under_review';
-    forum.metrics.increment('contributions.edit_safety_flagged');
-    const held = await forum.contributions.setModerationState(contributionId, targetState);
+  // The WS-U in-room agent RE-MODERATES the edited content (parity with the
+  // create path, WS-U §24.6): an edit-to-violate-the-community-policy is caught
+  // here too. Combined FLOOR-DOMINANTLY with the platform verdict (the agent can
+  // only add caution, never lower a floor decision).
+  const floorState: ModState =
+    verdict.disposition === 'block'
+      ? 'removed'
+      : verdict.disposition === 'flag'
+        ? 'under_review'
+        : 'published';
+  let target: ModState = floorState;
+  let agentEscalated = false;
+  let agentReason: string | null = null;
+  if (editThread?.roomId != null && forum.agentModerator !== null) {
+    const agent = await forum.agentModerator.moderateContribution({
+      roomId: editThread.roomId,
+      contributionId,
+      authorUserId: userId,
+      type: existing.type,
+      body: patch.body ?? existing.body,
+      citationCount: (patch.citations ?? existing.citations).length,
+      attachmentCount: Array.isArray(existing.metadata['attachment_ids'])
+        ? existing.metadata['attachment_ids'].length
+        : 0,
+    });
+    if (agent !== null && MOD_STATE_RANK[agent.state] > MOD_STATE_RANK[target]) {
+      target = agent.state;
+      agentReason = agent.reason ?? null;
+      agentEscalated = true;
+    }
+  }
+  // Edit-to-introduce-spam/malware (floor) or to-violate-community-policy (agent)
+  // is caught here: `removed` removes the edit (appealable system action);
+  // `under_review` holds it for review.
+  if (target !== 'published' && edited.moderationState === 'published') {
+    forum.metrics.increment(
+      agentEscalated && verdict.disposition === 'clear'
+        ? 'contributions.edit_agent_flagged'
+        : 'contributions.edit_safety_flagged',
+    );
+    const held = await forum.contributions.setModerationState(contributionId, target);
     if (verdict.disposition === 'block' && forum.autoModerationSink !== null) {
       // Awaited (not background): the auto-removal's appealable action/audit/
       // notice must be durable with the removal (no silent auto-removal).
@@ -922,8 +1033,9 @@ export async function editContribution(
       context: {
         contribution_id: contributionId,
         thread_id: existing.threadId,
-        reasons: verdict.reasons,
+        reasons: verdict.disposition !== 'clear' ? verdict.reasons : ['in_room_agent'],
         trigger: 'edit',
+        ...(agentEscalated ? { source: 'in_room_agent' } : {}),
       },
       status: 'pending',
       resolution: null,
@@ -931,6 +1043,16 @@ export async function editContribution(
       resolvedAt: null,
       notBefore: null,
     });
+    // The in-room agent held an edit the floor cleared: notify the author with
+    // the agent's statement of reasons (no silent sanction).
+    if (agentEscalated && verdict.disposition === 'clear' && forum.autoModerationSink !== null) {
+      await forum.autoModerationSink.recordAgentHold({
+        contributionId,
+        authorUserId: userId,
+        removed: target === 'removed',
+        reason: agentReason,
+      });
+    }
     forum.metrics.increment('contributions.edited');
     return { ok: true, contribution: held ?? edited };
   }

@@ -21,7 +21,14 @@ describe('RBAC policy matrix', () => {
     expert: ['self.manage'],
     moderator: ['self.manage', 'moderation.act'],
     steward: ['self.manage', 'moderation.act', 'steward.audit.read'],
-    admin: ['self.manage', 'moderation.act', 'steward.audit.read', 'admin.role.assign'],
+    admin: [
+      'self.manage',
+      'moderation.act',
+      'steward.audit.read',
+      'admin.role.assign',
+      // The AI team (WS-K.1.1b): register/version/deprecate models + the deploy gate.
+      'ai.model.manage',
+    ],
   };
 
   for (const role of ROLES) {

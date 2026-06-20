@@ -6,6 +6,19 @@
 
 ALL Knomosis and wallet features are behind feature flags, disabled by default. Crypto NEVER blocks the core social product. No crypto task blocks steps 1-9 of the implementation plan (Section 30.2). Wallet data is schema-isolated from ranking -- the WalletAccount table lives in the Knomosis bounded context, separated from feed ranking and ordinary social analytics (Sections 21.5, 22.2). Every transaction gets a full-disclosure preview before signing (Section 17.8). Fail-closed: unknown jurisdiction = no crypto features; unknown contract = rejected; missing flag = disabled. The Knomosis integration follows a staged critical path: K0 due diligence, K1 simulation, K2 testnet gateway, K3 testnet treasury, K4 capped production, K5 mature governance (Section 30.7).
 
+> **AI-governed-rooms redesign (2026-06-19) — Lex bounds + a non-key-holding agent submitter.**
+> See `docs/planning/22-ai-governed-rooms.md` (WS-U) and SPEC §16.6/§17.6/§24.6. Under the
+> redesign, a room's community-approved AI agent may submit **treasury and governance actions**,
+> but only as **signed actions** to the gateway (`POST /v1/actions`) within the room's
+> community-voted **Lex** law-pack, which the proof-carrying kernel enforces. WS-L additions:
+> bind the room law-pack to Knomosis **Lex** rules (the voted caps/intervals/categories/timelocks
+> the kernel checks); expose the gateway signed-action submitter to the bounded agent runtime
+> (WS-U Stage 4-5). Every existing WS-L invariant is **inherited unchanged and is what makes the
+> agent safe** — most critically **No-private-key-custody** (the agent never holds, requests,
+> stores, or recovers keys; it only submits signed actions), **No-blind-signing**,
+> **Crypto-behind-flags / fail-closed**, **schema-isolation / no-pay-to-rank**, and
+> **reorg-aware reconciliation**. The WS-L.3.6a standing-read seam stays governance-only.
+
 ### Architectural invariants enforced by this workstream
 
 These invariants are repeated here so every task author can verify their work against them without leaving the document. Each is testable and each maps to one or more acceptance criteria below.

@@ -18,6 +18,7 @@ export * from './events/index.js';
 export * from './feature-flags.js';
 export * from './feed.js';
 export * from './forum-api.js';
+export * from './governance-api.js';
 export * from './identity-records.js';
 export * from './invariants-api.js';
 export * from './moderation-api.js';

@@ -196,5 +196,26 @@ export function createAutoModerationSink(services: ModerationServices): AutoMode
       });
       services.metrics.increment('moderation.auto_block');
     },
+    async recordAgentHold(input): Promise<void> {
+      // A COMMUNITY-layer action (the room's voted agent), distinct from a
+      // platform-floor enforcement: it carries NO platform taxonomy reason code,
+      // and its recourse is the human review already queued + the support contact
+      // — so the notice references the contribution (not a WS-J action) and is not
+      // an in-app WS-J appeal. The provenance triple lives in the knomosis log.
+      const verb = input.removed ? 'removed' : 'held for review';
+      const detail = input.reason ? ` (${input.reason})` : '';
+      const note =
+        `This room's community-approved agent ${verb} your contribution${detail}. ` +
+        'A human reviewer will check it and you will be notified of the outcome.';
+      await createActionNotice(services, {
+        userId: input.authorUserId,
+        actionId: input.contributionId,
+        action: input.removed ? 'remove' : 'hide',
+        reasonCode: null,
+        appealable: false,
+        appealAvailableNote: note,
+      });
+      services.metrics.increment('moderation.agent_hold_notice');
+    },
   };
 }

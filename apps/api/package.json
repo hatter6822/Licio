@@ -14,7 +14,9 @@
   "dependencies": {
     "@hono/node-server": "^2.0.4",
     "@hono/zod-validator": "^0.8.0",
+    "@licio/ai-governance": "workspace:*",
     "@licio/db": "workspace:*",
+    "@licio/governance": "workspace:*",
     "@licio/invariants": "workspace:*",
     "@licio/ranking": "workspace:*",
     "@licio/shared": "workspace:*",

@@ -1,0 +1,269 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// AI summary pipeline (WS-K.1.4a/b/c, SPEC §15.4/§24.3). Generates the never-final
+// automated draft from a thread's root contributions as a STRUCTURED draft
+// (facts/claims/interpretations, explicit unresolved questions and minority
+// views), runs the §24.3 quality constraints AND the source-grounding/attribution
+// checks, and ONLY publishes (as the WS-G automated_draft layer, machine-generated
+// label) when both pass — otherwise the draft is withheld and routed to steward
+// review. Every summary writes an AIOutputRecord; users can report a published
+// summary (routes to review + the model-improvement loop).
+
+import { randomUUID } from 'node:crypto';
+import {
+  type AiSummaryDraft,
+  aiSummaryDraftSchema,
+  checkSummaryQuality,
+  detectHallucination,
+  type GroundingStatement,
+  renderSummaryDraft,
+  type SummaryReport,
+  type SummaryReportReason,
+  sentenceSplit,
+  summaryReportSchema,
+  type ThreadQualitySignals,
+} from '@licio/ai-governance';
+import type {
+  ContributionRecord,
+  ContributionStore,
+  SummaryStore as ForumSummaryStore,
+} from '../forum/stores.js';
+import type { StoryStore } from '../ingestion/stores.js';
+import type { ProhibitedUseGuard } from './guard.js';
+import type { AiGovernanceMetrics } from './metrics.js';
+import { THREAD_SUMMARIZER } from './models.js';
+import { recordAiOutput } from './output-records.js';
+import type { AiOutputRecordStore, AiReviewQueueStore, SummaryStore } from './stores.js';
+
+/** Default harassment/slur markers (non-graphic; production injects the WS-A
+ *  policy denylist). The check fails a summary that reproduces any of these. */
+export const DEFAULT_SLUR_DENYLIST: readonly string[] = ['idiot', 'moron', 'scum', 'vermin'];
+
+const ROOT_CAP = 12;
+
+export interface SummaryPipelineDeps {
+  contributions: ContributionStore;
+  forumSummaries: ForumSummaryStore;
+  stories: StoryStore;
+  aiSummaries: SummaryStore;
+  outputRecords: AiOutputRecordStore;
+  reviewQueue: AiReviewQueueStore;
+  guard: ProhibitedUseGuard;
+  slurDenylist?: () => readonly string[];
+  minActivity: () => number;
+  metrics: AiGovernanceMetrics;
+  log: (event: string, meta: Record<string, unknown>) => void;
+  now: () => number;
+}
+
+function firstSentence(body: string): string {
+  const sentence = sentenceSplit(body)[0] ?? body.trim();
+  return (sentence.slice(0, 2000) || '(no content)').trim();
+}
+
+/** Build a structured draft from the thread's root contributions. */
+function buildDraft(
+  threadId: string,
+  roots: readonly ContributionRecord[],
+  outputId: string,
+  nowIso: string,
+): AiSummaryDraft {
+  const statements = roots.map((root) => {
+    const isFact = root.type === 'evidence';
+    return {
+      kind: isFact ? ('fact' as const) : ('claim' as const),
+      text: firstSentence(root.body),
+      attribution: isFact ? null : 'A participant',
+      cited_contribution_ids: [root.contributionId],
+      cited_evidence_ids: [],
+    };
+  });
+  const unresolved = roots
+    .flatMap((r) => sentenceSplit(r.body))
+    .filter((s) => s.endsWith('?'))
+    .slice(0, 5);
+  const minorityRoot = roots.length >= 3 ? roots[roots.length - 1] : undefined;
+  const minority = minorityRoot
+    ? [
+        {
+          text: firstSentence(minorityRoot.body),
+          cited_contribution_ids: [minorityRoot.contributionId],
+        },
+      ]
+    : [];
+  return aiSummaryDraftSchema.parse({
+    thread_id: threadId,
+    statements,
+    unresolved_questions: unresolved,
+    minority_views: minority,
+    covered_contribution_ids: roots.map((r) => r.contributionId),
+    model_name: THREAD_SUMMARIZER.name,
+    model_version: THREAD_SUMMARIZER.version,
+    output_id: outputId,
+    generated_at: nowIso,
+  } satisfies AiSummaryDraft);
+}
+
+/** Thread-derived signals the quality check uses (independent of the draft). */
+function signalsFor(roots: readonly ContributionRecord[]): ThreadQualitySignals {
+  const nonEvidenceRoots = roots.filter((r) => r.type !== 'evidence').length;
+  const hasOpenQuestions = roots.some((r) => /\?/.test(r.body));
+  return {
+    hasOpenQuestions,
+    hasMinorityView: roots.length >= 3,
+    hasDisputedClaim: nonEvidenceRoots >= 2,
+  };
+}
+
+export type SummaryOutcome =
+  | { ok: true; published: boolean; summaryId: string }
+  | { ok: false; reason: 'thread_not_found' | 'insufficient_activity' };
+
+/** Generate (and conditionally publish) an automated draft summary. */
+export async function generateThreadSummary(
+  deps: SummaryPipelineDeps,
+  threadId: string,
+): Promise<SummaryOutcome> {
+  const thread = await deps.stories.getThreadById(threadId);
+  if (thread === null) return { ok: false, reason: 'thread_not_found' };
+  const roots = await deps.contributions.listRoots(threadId, {
+    states: ['published'],
+    limit: ROOT_CAP,
+    order: 'oldest',
+  });
+  if (roots.length < deps.minActivity()) return { ok: false, reason: 'insufficient_activity' };
+
+  await deps.guard.enforce({
+    use_case_id: 'summarization',
+    capability: 'summarize_thread',
+    caller: 'summary-pipeline',
+    context_ref: threadId,
+    effect: 'advisory',
+    uses_wealth_signals: false,
+    targets_risk_identity: false,
+  });
+
+  const nowIso = new Date(deps.now()).toISOString();
+  const output = await recordAiOutput(deps.outputRecords, {
+    modelName: THREAD_SUMMARIZER.name,
+    modelVersion: THREAD_SUMMARIZER.version,
+    promptTemplateId: THREAD_SUMMARIZER.promptTemplateId,
+    config: THREAD_SUMMARIZER.config,
+    inputRefs: roots.map((r) => r.contributionId),
+    outputRef: threadId,
+    useCaseId: 'summarization',
+    nowIso,
+  });
+  const draft = buildDraft(threadId, roots, output.output_id, nowIso);
+
+  // §24.3 quality constraints + source-grounding/attribution checks.
+  const quality = checkSummaryQuality(draft, signalsFor(roots), {
+    slurDenylist: deps.slurDenylist?.() ?? DEFAULT_SLUR_DENYLIST,
+  });
+  const groundingStatements: GroundingStatement[] = draft.statements.map((s) => {
+    const cited = roots.find((r) => r.contributionId === s.cited_contribution_ids[0]);
+    return {
+      text: s.text,
+      cited_ids: s.cited_contribution_ids,
+      ...(cited ? { cited_source_texts: [cited.body] } : {}),
+    };
+  });
+  const validCitationIds = new Set(roots.map((r) => r.contributionId));
+  const grounding = detectHallucination(
+    {
+      statements: groundingStatements,
+      source_text: roots.map((r) => r.body).join('\n'),
+      valid_citation_ids: validCitationIds,
+    },
+    { rateThreshold: 0 },
+  );
+
+  const summaryId = `sum-ai-${randomUUID()}`;
+  const passed = quality.passed && grounding.passed;
+  await deps.aiSummaries.putDraft({
+    summaryId,
+    threadId,
+    draft: draft as unknown as Record<string, unknown>,
+    outputId: output.output_id,
+    qualityPassed: passed,
+    createdAt: nowIso,
+  });
+
+  if (!passed) {
+    // Withhold publication; route to steward review (never publish a summary
+    // that fails the quality or grounding gate — §24.3).
+    await deps.reviewQueue.insert({
+      kind: 'flagged_hallucination',
+      subjectRef: summaryId,
+      context: {
+        thread_id: threadId,
+        quality_failures: quality.constraints.filter((c) => !c.passed).map((c) => c.constraint),
+        hallucination_rate: grounding.hallucination_rate,
+        output_id: output.output_id,
+      },
+      status: 'pending',
+      resolution: null,
+      resolvedBy: null,
+    });
+    deps.metrics.increment('ai.summary.withheld');
+    deps.log('summary.quality.evaluated', { thread_id: threadId, passed: false });
+    return { ok: true, published: false, summaryId };
+  }
+
+  // Publish as the WS-G automated_draft layer (machine-generated, never final).
+  const rendered = renderSummaryDraft(draft);
+  await deps.forumSummaries.insert({
+    summaryId,
+    threadId,
+    layer: 'automated_draft',
+    body: rendered.body,
+    citedBranchIds: rendered.cited_contribution_ids,
+    citedContributionIds: rendered.cited_contribution_ids,
+    citedEvidenceIds: rendered.cited_evidence_ids,
+    unresolvedUncertainty: rendered.unresolved_uncertainty,
+    minorityViewsNote: rendered.minority_views_note,
+    authoredBy: null,
+    approvedBy: null,
+  });
+  deps.metrics.increment('ai.summary.generated');
+  deps.metrics.gauge('ai.summary.branch_coverage', draft.covered_contribution_ids.length);
+  deps.log('summary.generated', {
+    thread_id: threadId,
+    branches: draft.covered_contribution_ids.length,
+    citations: rendered.cited_contribution_ids.length + rendered.cited_evidence_ids.length,
+  });
+  deps.log('summary.quality.evaluated', { thread_id: threadId, passed: true });
+  return { ok: true, published: true, summaryId };
+}
+
+/** A user reports a summary (WS-K.1.4c). Reporter identity is never stored. */
+export async function reportSummary(
+  deps: SummaryPipelineDeps,
+  summaryId: string,
+  reason: SummaryReportReason,
+  correctionText: string | null,
+): Promise<SummaryReport | null> {
+  // The target must be a real AI summary draft — otherwise any authenticated
+  // user could pollute the steward queue + report metrics with arbitrary ids.
+  if ((await deps.aiSummaries.getDraft(summaryId)) === null) return null;
+  const report = summaryReportSchema.parse({
+    report_id: `srep-${randomUUID()}`,
+    summary_id: summaryId,
+    reason,
+    correction_text: correctionText,
+    reported_at: new Date(deps.now()).toISOString(),
+  } satisfies SummaryReport);
+  await deps.aiSummaries.putReport(report);
+  await deps.reviewQueue.insert({
+    kind: 'reported_summary',
+    subjectRef: summaryId,
+    context: { reason },
+    status: 'pending',
+    resolution: null,
+    resolvedBy: null,
+  });
+  deps.metrics.increment('ai.summary.reported');
+  deps.metrics.increment(`ai.summary.reported.${reason}`);
+  deps.log('summary.reported', { summary_id: summaryId, reason });
+  return report;
+}

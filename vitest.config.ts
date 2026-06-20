@@ -17,6 +17,8 @@ export default defineConfig({
         'packages/db/src/**/*.ts',
         'packages/invariants/src/**/*.ts',
         'packages/ranking/src/**/*.ts',
+        'packages/ai-governance/src/**/*.ts',
+        'packages/governance/src/**/*.ts',
         'apps/api/src/**/*.ts',
         'apps/web/src/**/*.ts',
         'apps/web/src/**/*.tsx',
@@ -45,6 +47,7 @@ export default defineConfig({
         'apps/api/src/invariants/drizzle-invariant-stores.ts',
         'apps/api/src/ranking/drizzle-ranking-stores.ts',
         'apps/api/src/moderation/drizzle-moderation-stores.ts',
+        'apps/api/src/governance/drizzle-governance-stores.ts',
         'packages/db/src/similarity.ts',
         // Dev/test-only entrypoint + fixtures (never production): the in-memory
         // E2E server is run by Playwright, not vitest, and the demo seed/data are
@@ -67,6 +70,8 @@ export default defineConfig({
       { test: { ...nodeProjectTest('db'), root: 'packages/db' } },
       { test: { ...nodeProjectTest('invariants'), root: 'packages/invariants' } },
       { test: { ...nodeProjectTest('ranking'), root: 'packages/ranking' } },
+      { test: { ...nodeProjectTest('ai-governance'), root: 'packages/ai-governance' } },
+      { test: { ...nodeProjectTest('governance'), root: 'packages/governance' } },
       { test: { ...nodeProjectTest('api'), root: 'apps/api' } },
       { test: { ...webProjectTest, root: 'apps/web' } },
       { test: { ...policyProjectTest, root: 'scripts' } },

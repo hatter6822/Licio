@@ -36,6 +36,24 @@ const joinRoom = vi.hoisted(() => vi.fn());
 vi.mock('../../lib/queries.js', () => ({
   useRoomFeedQuery: (_roomId: string, enabled: boolean) => roomFeed(enabled),
   useJoinRoomMutation: () => ({ mutate: joinRoom, isPending: false }),
+  // WS-U: the room page now renders the "governed by" panel (its own query).
+  useGovernedByQuery: () => ({
+    isLoading: false,
+    isError: false,
+    data: { active: false, frozen: false, model_id: null, granted: [], recent_actions: [] },
+  }),
+  // WS-U: the steward model manager renders null for a non-steward with no
+  // models, so an empty registry + null seat keeps these cases unchanged.
+  useStewardSeatQuery: () => ({ data: { seat: null } }),
+  useGovernanceModelsQuery: () => ({
+    isLoading: false,
+    isError: false,
+    data: { steward_user_id: null, models: [] },
+  }),
+  useRatificationQuery: () => ({ isLoading: false, isError: false, data: { vote: null } }),
+  useProposeModelMutation: () => ({ mutate: () => {}, isPending: false }),
+  useOpenRatificationMutation: () => ({ mutate: () => {}, isPending: false }),
+  useCastBallotMutation: () => ({ mutate: () => {}, isPending: false }),
 }));
 
 function baseRoom(over: Partial<RoomDetail>): RoomDetail {

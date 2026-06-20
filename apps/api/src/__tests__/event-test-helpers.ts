@@ -85,6 +85,8 @@ export async function seedUserWithSession(
     handle?: string;
     /** Seed a TOTP-cleared steward (the WS-E admin-surface bar, WS-D.1.5b). */
     steward?: boolean;
+    /** Seed a TOTP-cleared `admin` (the AI team — `ai.model.manage`, WS-K.1.1b). */
+    admin?: boolean;
     /** Seed a platform `expert` (WS-D RBAC; may post in expert-gated rooms). */
     expert?: boolean;
     /** The suite's pinned clock (account creation backdates from it). */
@@ -104,11 +106,17 @@ export async function seedUserWithSession(
       privacySettings: opts.privacySettings ?? defaultPrivacySettings(),
       personalizationSettings: defaultPersonalizationSettings(),
       reputationSummary: emptyReputationSummary(),
-      roles: opts.steward ? ['user', 'steward'] : opts.expert ? ['user', 'expert'] : ['user'],
+      roles: opts.admin
+        ? ['user', 'admin']
+        : opts.steward
+          ? ['user', 'steward']
+          : opts.expert
+            ? ['user', 'expert']
+            : ['user'],
     },
     (opts.nowMs ?? Date.now()) - (opts.accountAgeMs ?? SEEDED_ACCOUNT_AGE_MS),
   );
-  if (opts.steward) {
+  if (opts.steward || opts.admin) {
     await identity.store.setAuth(user.userId, { mfaEnabled: true });
   }
   await identity.store.addWebauthn({
@@ -129,7 +137,7 @@ export async function seedUserWithSession(
     credentialRef: `cred-${user.userId}`,
     deviceLabel: 'test',
     rememberMe: false,
-    mfaVerified: opts.steward ?? false,
+    mfaVerified: opts.steward === true || opts.admin === true,
   });
   const cookie = buildSessionCookie(created.token, created.maxAgeSec).split(';')[0] as string;
   return { userId: user.userId, cookie };

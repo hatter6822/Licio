@@ -14,6 +14,12 @@
 import { serve } from '@hono/node-server';
 import { validateServerEnv } from '@licio/shared/env';
 import { Hono } from 'hono';
+import { seedAiGovernance } from './ai-governance/seed.js';
+import {
+  createInMemoryAiGovernanceServices,
+  setAiGovernanceServices,
+} from './ai-governance/services.js';
+import { registerAiGovernanceConsumers } from './ai-governance/wiring.js';
 import { createApp } from './app.js';
 import { registerDefaultConsumers } from './events/consumers.js';
 import {
@@ -25,6 +31,7 @@ import {
   registerForumConsumers,
   setForumServices,
 } from './forum/services.js';
+import { buildAuthorHistoryReader, createRoomAgentModerator } from './governance/forum-agent.js';
 import { buildIdentityServicesFromEnv, setIdentityServices } from './identity/services.js';
 import {
   createInMemoryIngestionServices,
@@ -88,6 +95,20 @@ const forumServices = createInMemoryForumServices({
   log: (event, meta) => logger.info(meta, event),
 });
 await forumServices.reloadConfig();
+// WS-U: the contribution path consults the in-room agent (uses the lazy
+// in-memory GovernanceService singleton in the harness), with real author-history
+// signals over the harness's in-memory stores.
+forumServices.agentModerator = createRoomAgentModerator({
+  readAuthorHistory: buildAuthorHistoryReader({
+    getUser: (id) => identityServices.store.getUser(id),
+    getSubscription: (roomId, id) => forumServices.rooms.getSubscription(roomId, id),
+    stewardRolesFor: (roomId, id) => forumServices.rooms.stewardRolesFor(roomId, id),
+    listUserContributions: (id, limit) => forumServices.contributions.listByUser(id, null, limit),
+    getThreadRoomId: async (threadId) =>
+      (await ingestionServices.stories.getThreadById(threadId))?.roomId ?? null,
+    now: () => Date.now(),
+  }),
+});
 setForumServices(forumServices);
 registerForumConsumers(eventServices, ingestionServices, forumServices);
 
@@ -125,7 +146,20 @@ setRankingServices(rankingServices);
 }
 setIdentityServices(identityServices);
 
+// WS-K AI & model governance: register + deploy the governed models through the
+// real gate and seed the inventory/lineage, so the governance surfaces work in
+// the BFF harness.
+const aiGovernanceServices = createInMemoryAiGovernanceServices(eventServices, {
+  log: (event, meta) => logger.info(meta, event),
+});
+aiGovernanceServices.ingestion = ingestionServices;
+aiGovernanceServices.forum = forumServices;
+await aiGovernanceServices.reloadConfig();
+setAiGovernanceServices(aiGovernanceServices);
+registerAiGovernanceConsumers(eventServices, aiGovernanceServices);
+
 await seedForumDemoData(forumServices, ingestionServices, identityServices.store);
+await seedAiGovernance(aiGovernanceServices);
 
 // --- App: the test-auth route first (no CSRF — it bootstraps the session),
 // then the full production app for everything else. --------------------------

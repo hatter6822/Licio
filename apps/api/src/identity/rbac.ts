@@ -17,6 +17,7 @@ export const ACTIONS = [
   'moderation.act', // take moderation actions
   'steward.audit.read', // read the audit log / steward review surfaces
   'admin.role.assign', // assign/revoke roles
+  'ai.model.manage', // register/version/deprecate AI models + run the deploy gate (the "AI team", WS-K.1.1b)
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 
@@ -37,8 +38,22 @@ export const POLICY: Readonly<Record<Role, readonly Action[]>> = {
   expert: ['self.manage'],
   moderator: ['self.manage', 'moderation.act'],
   steward: ['self.manage', 'moderation.act', 'steward.audit.read'],
-  admin: ['self.manage', 'moderation.act', 'steward.audit.read', 'admin.role.assign'],
+  admin: [
+    'self.manage',
+    'moderation.act',
+    'steward.audit.read',
+    'admin.role.assign',
+    // The AI team (WS-K.1.1b): only this capability may register/version/
+    // deprecate models and drive the deployment gate. Like every other action
+    // here, it never joins wallet identity to attention/ranking data.
+    'ai.model.manage',
+  ],
 };
+
+/** Whether ANY of the actor's roles is on the AI team (WS-K.1.1b). */
+export function isAiTeam(roles: readonly Role[]): boolean {
+  return authorize(roles, 'ai.model.manage');
+}
 
 /** Whether ANY of the actor's roles grants `action`. */
 export function authorize(roles: readonly Role[], action: Action): boolean {

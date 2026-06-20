@@ -7,6 +7,16 @@ import { serve } from '@hono/node-server';
 import { createDbClient } from '@licio/db';
 import { stewardRolesQueues } from '@licio/shared';
 import { validateServerEnv } from '@licio/shared/env';
+import {
+  AI_GOVERNANCE_SCHEDULER_INTERVAL_MS,
+  startAiGovernanceScheduler,
+} from './ai-governance/scheduler.js';
+import { seedAiGovernance } from './ai-governance/seed.js';
+import {
+  createInMemoryAiGovernanceServices,
+  setAiGovernanceServices,
+} from './ai-governance/services.js';
+import { registerAiGovernanceConsumers } from './ai-governance/wiring.js';
 import { createApp } from './app.js';
 import { registerDefaultConsumers } from './events/consumers.js';
 import {
@@ -53,6 +63,18 @@ import {
   setForumServices,
 } from './forum/services.js';
 import { toContributionPublic } from './forum/threads.js';
+import { resolveGovernanceConfig } from './governance/config.js';
+import { createDrizzleGovernanceStores } from './governance/drizzle-governance-stores.js';
+import { buildAuthorHistoryReader, createRoomAgentModerator } from './governance/forum-agent.js';
+import {
+  GOVERNANCE_SCHEDULER_INTERVAL_MS,
+  startGovernanceScheduler,
+} from './governance/scheduler.js';
+import {
+  createGovernanceService,
+  getGovernanceService,
+  setGovernanceService,
+} from './governance/services.js';
 import {
   DrizzleAuditStore,
   DrizzleIdentityStore,
@@ -116,7 +138,12 @@ import {
   setInvariantServices,
 } from './invariants/services.js';
 import { demoStory } from './lib/demo-data.js';
-import { seedForumDemoData, seedModerationDemo, seedOperationalSignals } from './lib/demo-seed.js';
+import {
+  seedForumDemoData,
+  seedGovernanceDemo,
+  seedModerationDemo,
+  seedOperationalSignals,
+} from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
 import { effectiveStewardRoles } from './moderation/authz.js';
 import { createDrizzleModerationStores } from './moderation/drizzle-moderation-stores.js';
@@ -736,6 +763,50 @@ rankingServices.moderation = createDefaultModerationStateProvider({
   shadowedSubjects: (ids) => moderationServices.actions.listActiveShadowedSubjects(ids),
 });
 
+// WS-K AI & model governance: the registry/deployment gate, prohibited-use
+// guard, evaluation harness, data lineage, audit-sensitive output records, the
+// content/summary/translation/governance pipelines, and runtime monitoring. The
+// ingestion + forum seams are injected so the durable WS-E consumer can classify/
+// extract during ingestion and the summary pipeline can read threads. (Gated
+// Drizzle adapters for the WS-K stores are a tracked residual; the in-memory
+// stores serve every environment until they land.)
+const aiGovernanceServices = createInMemoryAiGovernanceServices(eventServices, {
+  log: (event, meta) => logger.info(meta, event),
+});
+aiGovernanceServices.ingestion = ingestionServices;
+aiGovernanceServices.forum = forumServices;
+await aiGovernanceServices.reloadConfig();
+setAiGovernanceServices(aiGovernanceServices);
+registerAiGovernanceConsumers(eventServices, aiGovernanceServices);
+
+// WS-U AI-governed rooms: bind the GovernanceService process singleton to the
+// production Drizzle stores (the isolated `knomosis` context) when a database is
+// configured, else the in-memory stores. Done BEFORE serving, so the routes and
+// the room-create seat bootstrap resolve the bound service. The crypto flag stays
+// fail-closed by default (no treasury powers); in-room moderation + simulated
+// elections need no crypto.
+setGovernanceService(
+  createGovernanceService({
+    config: resolveGovernanceConfig(),
+    ...(db ? { stores: createDrizzleGovernanceStores(db) } : {}),
+  }),
+);
+// The forum contribution path consults the in-room agent (subordinate to the
+// platform floor) for any room with an active community-approved binding. The
+// agent's author-history signals are read from the real identity + forum +
+// ingestion stores (only for governed rooms, on this path).
+forumServices.agentModerator = createRoomAgentModerator({
+  readAuthorHistory: buildAuthorHistoryReader({
+    getUser: (id) => identityServices.store.getUser(id),
+    getSubscription: (roomId, id) => forumServices.rooms.getSubscription(roomId, id),
+    stewardRolesFor: (roomId, id) => forumServices.rooms.stewardRolesFor(roomId, id),
+    listUserContributions: (id, limit) => forumServices.contributions.listByUser(id, null, limit),
+    getThreadRoomId: async (threadId) =>
+      (await ingestionServices.stories.getThreadById(threadId))?.roomId ?? null,
+    now: () => Date.now(),
+  }),
+});
+
 // Development demo seed (NEVER in production): populate rooms, stories, threads,
 // and multi-author comments through the REAL stores so a fresh dev database
 // renders end-to-end data on boot. Idempotent (a no-op once seeded) and
@@ -790,6 +861,14 @@ if (env.NODE_ENV !== 'production') {
     );
     // WS-J: a small report queue so the dev console shows real data on boot.
     await seedModerationDemo(moderationServices);
+    // WS-K: register + DEPLOY the governed models through the real gate, and seed
+    // the risk assessments / lineage / AI inventory so the governance surfaces
+    // render on first boot. Idempotent (register is a no-op once present).
+    await seedAiGovernance(aiGovernanceServices);
+    // WS-U: make one demo room actually governed so the in-room "governed by"
+    // panel + the steward manager render real data on first boot (uses the
+    // bound GovernanceService; logs a sample agent action without a queue hold).
+    await seedGovernanceDemo(getGovernanceService(), forumServices, ingestionServices);
     logger.info('demo data seeded (development)');
   } catch (err) {
     logger.warn({ err }, 'demo seed skipped (non-fatal)');
@@ -868,6 +947,32 @@ startModerationScheduler(
   moderationServices,
   (err, task) => logger.error({ err, task }, 'moderation scheduler task failed'),
   MODERATION_SCHEDULER_INTERVAL_MS,
+  { lease: makeJobLease() },
+);
+
+// Hourly WS-K maintenance: config reload, runtime monitoring (drift/report-rate
+// alerts + human-approved rollback recommendations), and accuracy recompute from
+// steward corrections — under its own job lease.
+startAiGovernanceScheduler(
+  aiGovernanceServices,
+  (err, task) => logger.error({ err, task }, 'ai-governance scheduler task failed'),
+  AI_GOVERNANCE_SCHEDULER_INTERVAL_MS,
+  { lease: makeJobLease() },
+);
+
+// Hourly WS-U maintenance: the steward-election lifecycle (open elections for
+// elapsed terms; settle closed elections, kernel-tallied + fail-safe) — under its
+// own job lease. The eligible-voter count is a soft cross-context read of room
+// membership (no FK; the pay-to-rank isolation boundary holds).
+startGovernanceScheduler(
+  {
+    service: getGovernanceService(),
+    eligibleVoterCount: (roomId) => forumServices.rooms.countMembers(roomId),
+    log: (event, meta) => logger.info(meta, event),
+    now: () => Date.now(),
+  },
+  (err, task) => logger.error({ err, task }, 'governance scheduler task failed'),
+  GOVERNANCE_SCHEDULER_INTERVAL_MS,
   { lease: makeJobLease() },
 );
 

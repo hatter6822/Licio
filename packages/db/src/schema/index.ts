@@ -5,11 +5,13 @@
 // schema (WS-D.3).  The schema-isolation test (WS-D.3.2) proves no FK/view join
 // path bridges the wallet context and the ranking/attention context.
 
+export * from './ai-governance.js';
 export * from './audit-log.js';
 export * from './claim.js';
 export * from './contribution.js';
 export * from './embedding.js';
 export * from './events.js';
+export * from './governance.js';
 export * from './ingestion-review.js';
 export * from './invariants.js';
 export * from './job-lease.js';

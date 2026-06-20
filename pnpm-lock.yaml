@@ -43,9 +43,15 @@ importers:
       '@hono/zod-validator':
         specifier: ^0.8.0
         version: 0.8.0(hono@4.12.25)(zod@4.4.3)
+      '@licio/ai-governance':
+        specifier: workspace:*
+        version: link:../../packages/ai-governance
       '@licio/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@licio/governance':
+        specifier: workspace:*
+        version: link:../../packages/governance
       '@licio/invariants':
         specifier: workspace:*
         version: link:../../packages/invariants
@@ -95,6 +101,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@licio/ai-governance':
+        specifier: workspace:*
+        version: link:../../packages/ai-governance
       '@licio/invariants':
         specifier: workspace:*
         version: link:../../packages/invariants
@@ -184,6 +193,15 @@ importers:
         specifier: ^1.0.0
         version: 1.3.0(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(terser@5.48.0)(tsx@4.22.4))
 
+  packages/ai-governance:
+    dependencies:
+      '@licio/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+
   packages/db:
     dependencies:
       '@licio/shared':
@@ -202,6 +220,15 @@ importers:
       drizzle-kit:
         specifier: ^0.31.0
         version: 0.31.10
+
+  packages/governance:
+    dependencies:
+      '@licio/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
 
   packages/invariants:
     dependencies:

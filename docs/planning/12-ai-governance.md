@@ -2,6 +2,36 @@
 
 **Milestone:** M3 | **Priority:** 3 | **Dependencies:** WS-G (forum/threads/evidence for summarization + claim graph), WS-H (invariant platform conventions for model/invariant cards), WS-F (ingestion for topic classification + claim extraction), WS-J.2 (steward review queue) | **Wave:** 5 | **Estimated duration:** 3 weeks
 
+> **Status: COMPLETE.**  Implemented as the browser-safe `@licio/ai-governance`
+> domain package (schemas + deterministic governance math) + the
+> `apps/api/src/ai-governance` services, the `packages/db` schema + migration
+> `0034`, the `/v1/ai/*` routes, and the `apps/web` `AiLabel` provenance badge.
+> All twelve definition-of-done conditions hold; the governed models are
+> deterministic providers (the value is the GOVERNANCE, not ML inference) so a
+> real backend swaps in behind the unchanged registry/evaluation/guard surface.
+> The implementation reference (architecture, per-section status, testing,
+> production wiring, and the tracked residuals — gated Drizzle adapters, deeper
+> client render-path integration, WS-M proposal-data wiring, a real model
+> backend, the WS-P experiment-log consumer) is `docs/ai-governance/README.md`.
+
+> **RE-SCOPED by the AI-governed-rooms redesign (2026-06-19) — see
+> `docs/planning/22-ai-governed-rooms.md` (WS-U) and SPEC §16.6/§24.1/§24.5/§24.6.** The
+> maintainer's binding redesign inverts the AI posture for *in-room* governance: every room has
+> an **elected steward** (creator first, then a yearly Knomosis election) whose only two powers
+> are to **propose a community-approved, member-downloadable AI model** and **its prompt**, both
+> ratified by a Knomosis member vote; the approved **in-room AI agent** may then moderate, manage
+> the room treasury, and facilitate lawmaking **within community-voted, kernel-enforced bounds,
+> holding no keys, subordinate to a non-overridable platform legal floor**. This WS-K platform is
+> **re-scoped, not discarded**: its registry, evaluation harness (bias/hallucination/safety/
+> red-team), prohibited-use guard, data-lineage, output-records, and label surface become the
+> **platform-side admission gate and transparency substrate** for community-uploaded room models
+> (WS-U §U.4) — a community model is ineligible for adoption until it clears this gate, and its
+> exact bytes are hash-pinned and member-downloadable. The §24.1-rooted "AI never autonomously
+> spends/approves/sanctions" framing in the *Overview* below is **superseded for in-room
+> governance** by the bounded-autonomy doctrine (it still holds at the **platform** layer); read
+> it together with WS-U. No shipped WS-K capability is removed; the new per-room adopt path
+> (elected steward + member vote + the bounded-agent runtime) lands in the WS-U staged PRs.
+
 ## Overview
 
 Every AI model used in Licio has a model card, undergoes bias/safety evaluation, and has documented prohibited uses. AI outputs are labeled as machine-generated and are user/steward-editable. No autonomous treasury execution, no investment advice, no manipulative voting recommendations.
@@ -17,7 +47,7 @@ AI inventory + risk assessment (NIST/ISO)
           → human-in-the-loop correction + data lineage + version logging
 ```
 
-Per Section 24.1, AI is never the sole authority for high-impact moderation (except a narrowly defined emergency class) and AI never autonomously spends funds, approves proposals, or issues final sanctions. Per Section 24.2, the platform maintains model cards (ranking, safety, summarization, invariant models), data lineage for training/evaluation, bias/subgroup audits, human review for appeals and ambiguous cases, AI-generated labeling, preserved source citations, user reporting of bad outputs, no unsupported factual claims, logged model version and prompt/configuration for audit-sensitive outputs, and red-team testing before launch.
+Per Section 24.1 (as amended by the redesign — see the re-scope note above), **at the platform layer** AI is never the sole authority for high-impact moderation (except a narrowly defined emergency class) and platform AI never autonomously spends funds, approves proposals, or issues final sanctions; in-room *bounded* autonomy (a community-approved agent moderating/managing-treasury/facilitating-lawmaking within kernel-enforced limits) is governed by SPEC §24.6 / WS-U. Per Section 24.2, the platform maintains model cards (ranking, safety, summarization, invariant models), data lineage for training/evaluation, bias/subgroup audits, human review for appeals and ambiguous cases, AI-generated labeling, preserved source citations, user reporting of bad outputs, no unsupported factual claims, logged model version and prompt/configuration for audit-sensitive outputs, and red-team testing before launch.
 
 ### Shared conventions
 
@@ -790,7 +820,7 @@ Implement the Section 24.5 permitted/prohibited matrix for AI around Knomosis go
 
 **Observability:** Emit `governance.ai.summary.generated` (with cited-field count and uncertainty-flag presence) and `governance.ai.capability.blocked` (prohibited attempts); a governance dashboard tracks advisory output volume and any blocked-capability attempts.
 
-**Security/privacy:** This task is the AI-side counterpart to the ranking pay-to-rank controls: it bars wealth profiling and wealth-based feed personalization, and bars rewriting proposals to hide risk/recipient identity from compliance — using the same pre-execution guard that cannot be bypassed. All governance AI output is advisory and contestable, never autonomous (Section 24.1, 24.5).
+**Security/privacy:** This task is the AI-side counterpart to the ranking pay-to-rank controls: it bars wealth profiling and wealth-based feed personalization, and bars rewriting proposals to hide risk/recipient identity from compliance — using the same pre-execution guard that cannot be bypassed. This platform-layer governance AI output is advisory and contestable, never autonomous (Section 24.1, 24.5); the wealth-profiling, wealth-based-personalization, and risk-hiding-rewrite bars remain absolute at every layer, including the in-room bounded agent (SPEC §24.6 / WS-U).
 
 ---
 

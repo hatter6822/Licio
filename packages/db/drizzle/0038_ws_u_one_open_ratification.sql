@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "model_ratification_one_open_per_room" ON "knomosis"."model_ratification" USING btree ("room_id") WHERE "knomosis"."model_ratification"."status" = 'open';

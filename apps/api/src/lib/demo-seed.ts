@@ -32,6 +32,7 @@ import { attentionPurgeAfterIso } from '../events/privacy-gate.js';
 import type { EventPipelineServices } from '../events/services.js';
 import type { NewStoredEvent } from '../events/stores.js';
 import type { ForumServices } from '../forum/services.js';
+import type { GovernanceService } from '../governance/service.js';
 import type { Role } from '../identity/rbac.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
@@ -2021,4 +2022,121 @@ export async function seedModerationDemo(moderation: ModerationServices): Promis
       local_operation_id: `demo-report-${i}`,
     });
   }
+}
+
+/** The demo room that ships GOVERNED (WS-U) — "Elections & Governance" (public). */
+export const GOVERNANCE_DEMO_ROOM_ID = R(5);
+
+/** First real published contribution id in a room (the demo agent's subject). */
+async function firstContributionRefInRoom(
+  forum: ForumServices,
+  ingestion: IngestionServices,
+  roomId: string,
+): Promise<string | null> {
+  const stories = await ingestion.stories.listByRoom(roomId, 10);
+  for (const story of stories) {
+    const thread = await ingestion.stories.getThreadByStoryId(story.storyId);
+    if (!thread) continue;
+    const [contribution] = await forum.contributions.listByThread(thread.threadId, {
+      states: ['published'],
+      limit: 1,
+    });
+    if (contribution) return contribution.contributionId;
+  }
+  return null;
+}
+
+/**
+ * DEVELOPMENT showcase for WS-U (NEVER in production): make one room actually
+ * governed so the "governed by" panel + the steward model-manager render real
+ * data on `pnpm dev`. The elected steward (steward@licio.test, U(21)) proposes a
+ * community model that flags link-spam; it clears the platform admission gate; a
+ * member ratification activates the in-room agent; and one sample agent action is
+ * logged via a DIRECT moderate() call — which writes only the agent action log,
+ * NOT the human review queue, so the dev moderation queue stays the curated WS-J
+ * set. Idempotent (bootstrap/propose are existence/duplicate-guarded) and
+ * best-effort; runs AFTER the forum seed (the room must exist) + the governance
+ * service is bound.
+ */
+export async function seedGovernanceDemo(
+  governance: GovernanceService,
+  forum: ForumServices,
+  ingestion: IngestionServices,
+): Promise<void> {
+  const steward = U(21); // steward@licio.test
+  await governance.bootstrapSeat(GOVERNANCE_DEMO_ROOM_ID, steward);
+  const bundle = {
+    bundleId: 'demo-civility',
+    version: '1',
+    name: 'Community civility policy',
+    moderationRules: [
+      {
+        id: 'link-spam',
+        when: { kind: 'link_count_gte', value: 3 },
+        action: 'flag_for_review',
+        reason: 'Posts with several links are sent for human review.',
+      },
+    ],
+    promptTemplates: { summary: 'Summarize the discussion neutrally and briefly.' },
+    config: { summaryStyle: 'neutral_brief', explanationVerbosity: 'standard' },
+    // moderation + the Stage 4 lawmaking summary (both permitted by the default
+    // law-pack) so the dev "governed by" panel shows real facilitation activity.
+    requestedCapabilities: ['moderate.flag', 'lawmaking.summarize'],
+  };
+  const proposed = await governance.proposeModel(
+    GOVERNANCE_DEMO_ROOM_ID,
+    steward,
+    bundle,
+    'Be neutral and concise; cite the community rule when you act, and never exceed your granted powers.',
+  );
+  if (!proposed.ok) return;
+  await governance.evaluateModel(proposed.value.modelId);
+  const approved = await governance.approveModel(
+    GOVERNANCE_DEMO_ROOM_ID,
+    proposed.value.modelId,
+    null,
+    null,
+  );
+  if (!approved.ok) return;
+  // A sample agent action so the "governed by" panel shows activity, referencing
+  // a REAL contribution in the room (not a synthetic id). A direct moderate()
+  // logs to the agent action log only (no review-queue hold).
+  const subjectRef = await firstContributionRefInRoom(forum, ingestion, GOVERNANCE_DEMO_ROOM_ID);
+  if (subjectRef !== null) {
+    await governance.moderate(
+      GOVERNANCE_DEMO_ROOM_ID,
+      {
+        contentText: 'check these out https://a.example https://b.example https://c.example',
+        contentKind: 'comment',
+        contentLength: 64,
+        linkCount: 3,
+        mentionCount: 0,
+        hasMediaUpload: false,
+        authorAccountAgeDays: 3,
+        authorNewToRoom: true,
+        priorRemovalsInRoom: 0,
+      },
+      subjectRef,
+    );
+  }
+  // A Stage 4 lawmaking facilitation (a neutral proposal summary) so the panel
+  // also shows the agent's lawmaking activity — capability-gated, deterministic.
+  await governance.facilitateSummary(GOVERNANCE_DEMO_ROOM_ID, {
+    proposalId: 'demo-proposal-1',
+    title: 'Adopt a weekly community digest',
+    body: 'Members propose an opt-in weekly digest summarising the most-discussed threads.',
+    options: ['Adopt', 'Reject'],
+  });
+  // A SECOND eligible model put to an OPEN member ratification vote, so the dev
+  // sees the member voting surface alongside the already-active agent (a steward
+  // proposing an upgrade the community is currently ratifying).
+  const upgrade = await governance.proposeModel(
+    GOVERNANCE_DEMO_ROOM_ID,
+    steward,
+    { ...bundle, bundleId: 'demo-civility-v2', name: 'Community civility policy v2' },
+    'Prefer a warning before a removal; otherwise as before.',
+  );
+  if (!upgrade.ok) return;
+  await governance.evaluateModel(upgrade.value.modelId);
+  await governance.openRatification(GOVERNANCE_DEMO_ROOM_ID, steward, upgrade.value.modelId, null);
 }

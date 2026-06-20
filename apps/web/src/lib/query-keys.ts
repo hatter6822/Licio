@@ -23,6 +23,11 @@ export const queryKeys = {
   rooms: () => ['rooms'] as const,
   room: (roomId: string) => ['room', roomId] as const,
   roomFeed: (roomId: string) => ['room', roomId, 'feed'] as const,
+  // WS-U AI-governed rooms.
+  governedBy: (roomId: string) => ['room', roomId, 'governed-by'] as const,
+  stewardSeat: (roomId: string) => ['room', roomId, 'steward'] as const,
+  governanceModels: (roomId: string) => ['room', roomId, 'governance-models'] as const,
+  ratification: (roomId: string) => ['room', roomId, 'ratification'] as const,
   authStatus: () => ['auth-status'] as const,
   settings: () => ['settings'] as const,
   signalLedger: () => ['signal-ledger'] as const,

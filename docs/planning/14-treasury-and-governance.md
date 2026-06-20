@@ -10,6 +10,22 @@ Room governance enables communities to manage shared resources through structure
 
 This workstream is the application layer of the four-layer Knomosis interpretation (Section 17.2): rooms, charters, proposals, treasuries, bounties, grants, payment intents, wallet UX, compliance checks, and ranking separation. It assumes nothing about finality, withdrawal timing, fault-proof windows, supported tokens, or cost; every such property is read from the pinned deployment manifest (WS-L.1.1a) and validated by reconciliation (WS-L.3.4).
 
+> **AI-governed-rooms redesign (2026-06-19) — elected steward, Knomosis-vote model/prompt
+> approval, and an AI-executed treasury within bounds.** See `docs/planning/22-ai-governed-rooms.md`
+> (WS-U) and SPEC §16.6/§17.4/§17.5/§17.6/§24.6. WS-M additions: (1) the **elected room steward**
+> seat + yearly **Knomosis election** (`room_steward_seat`, `steward_election`, in the `knomosis`
+> bounded context); (2) **model/prompt approval as a governance proposal type** (member-ratified
+> by Knomosis vote); (3) the community-approved **AI agent as executor** of voted-interval reports,
+> member benefits/distributions, and the community-**voted investment strategy for the room
+> treasury** — each executing through the kernel within the law-pack's caps/intervals/categories/
+> timelocks/COI, with **the agent holding no keys** (it submits signed actions via WS-L). The
+> seven WS-M invariants below are **inherited unchanged** and are precisely the safety envelope:
+> invariant 3 (**platform-moderation supremacy**) is the Layer-3 legal floor the agent can never
+> countermand, and invariant 4 (**no pay-to-rank**) firewalls the agent from ranking exactly as it
+> firewalls the treasury. Managing the *room treasury* within voted bounds is permitted;
+> personalized financial advice to, or wealth profiling of, *individual users* stays prohibited
+> (SPEC §24.5).
+
 ### Invariants this workstream must never violate
 
 These constraints are restated here because every task below inherits them, and reviewers must reject any change that weakens them:

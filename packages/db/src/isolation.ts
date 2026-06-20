@@ -52,8 +52,27 @@ const DEFAULT_ARTICULATION: ReadonlySet<Relation> = new Set(['public.users']);
 // `assertContextsClassified` (fail-closed).
 // ---------------------------------------------------------------------------
 
-/** Wallet/Knomosis bounded-context tables (financial wallet only). */
-export const WALLET_CONTEXT_TABLES: ReadonlySet<Relation> = new Set(['wallet.wallet_accounts']);
+/**
+ * Wallet/Knomosis bounded-context tables: the financial wallet plus the WS-U
+ * AI-governed-rooms governance/treasury tables in the `knomosis` schema. Each is
+ * a BFS seed of the pay-to-rank isolation proof — none may reach a ranking table.
+ * They reference `public.rooms`/content only by SOFT ref (no FK), so the only
+ * hard outward edge is to `public.users` (the articulation node).
+ */
+export const WALLET_CONTEXT_TABLES: ReadonlySet<Relation> = new Set([
+  'wallet.wallet_accounts',
+  'knomosis.room_steward_seat',
+  'knomosis.steward_election',
+  'knomosis.steward_governance_vote',
+  'knomosis.room_governance_model',
+  'knomosis.room_governance_prompt',
+  'knomosis.model_ratification',
+  'knomosis.model_ratification_ballot',
+  'knomosis.room_law_pack',
+  'knomosis.room_agent_binding',
+  'knomosis.agent_action_log',
+  'knomosis.agent_treasury_action',
+]);
 
 /**
  * Ranking/attention bounded-context tables (WS-E.3.1).  These are the BFS
@@ -119,7 +138,7 @@ export const RANKING_CONTEXT_TABLES: ReadonlySet<Relation> = new Set<Relation>([
 ]);
 
 /** Schemas whose every table must be classified into a context (fail-closed). */
-export const CONTEXT_SCHEMAS: readonly string[] = ['wallet'];
+export const CONTEXT_SCHEMAS: readonly string[] = ['wallet', 'knomosis'];
 
 /** The canonical isolation contexts consumed by the CI test (WS-D.3.2). */
 export const ISOLATION_CONTEXTS: IsolationContexts = {

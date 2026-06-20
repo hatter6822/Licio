@@ -17,17 +17,41 @@ const ALLOWED_WORKSPACE_DEPS: Record<string, string[]> = {
   // Pure ranking domain logic (WS-I): NEVER @licio/db — the ranking math has
   // no database access by construction (pay-to-rank firewall, SPEC §21.5).
   '@licio/ranking': ['@licio/shared', '@licio/invariants'],
-  web: ['@licio/shared', '@licio/invariants'],
-  api: ['@licio/shared', '@licio/db', '@licio/invariants', '@licio/ranking'],
+  // Pure AI-governance domain logic (WS-K): schemas + deterministic evaluation
+  // math, no database access (it never imports @licio/db) — the same firewall
+  // posture as @licio/ranking. Browser-safe so the web client can render labels.
+  '@licio/ai-governance': ['@licio/shared'],
+  // Pure AI-governed-rooms domain logic (WS-U): policy DSL, kernel, capabilities,
+  // elections, ratification, lawmaking — NEVER @licio/db (the governance math has
+  // no database access by construction; the pay-to-rank firewall posture).
+  '@licio/governance': ['@licio/shared'],
+  web: ['@licio/shared', '@licio/invariants', '@licio/ai-governance'],
+  api: [
+    '@licio/shared',
+    '@licio/db',
+    '@licio/invariants',
+    '@licio/ranking',
+    '@licio/ai-governance',
+    '@licio/governance',
+  ],
 };
 
-const WORKSPACE_PACKAGES = ['@licio/shared', '@licio/db', '@licio/invariants', '@licio/ranking'];
+const WORKSPACE_PACKAGES = [
+  '@licio/shared',
+  '@licio/db',
+  '@licio/invariants',
+  '@licio/ranking',
+  '@licio/ai-governance',
+  '@licio/governance',
+];
 
 const PACKAGE_PATHS: Record<string, string> = {
   '@licio/shared': resolve(ROOT, 'packages/shared/package.json'),
   '@licio/db': resolve(ROOT, 'packages/db/package.json'),
   '@licio/invariants': resolve(ROOT, 'packages/invariants/package.json'),
   '@licio/ranking': resolve(ROOT, 'packages/ranking/package.json'),
+  '@licio/ai-governance': resolve(ROOT, 'packages/ai-governance/package.json'),
+  '@licio/governance': resolve(ROOT, 'packages/governance/package.json'),
   web: resolve(ROOT, 'apps/web/package.json'),
   api: resolve(ROOT, 'apps/api/package.json'),
 };
@@ -37,6 +61,8 @@ const SOURCE_DIRS: Record<string, string> = {
   '@licio/db': resolve(ROOT, 'packages/db/src'),
   '@licio/invariants': resolve(ROOT, 'packages/invariants/src'),
   '@licio/ranking': resolve(ROOT, 'packages/ranking/src'),
+  '@licio/ai-governance': resolve(ROOT, 'packages/ai-governance/src'),
+  '@licio/governance': resolve(ROOT, 'packages/governance/src'),
   web: resolve(ROOT, 'apps/web/src'),
   api: resolve(ROOT, 'apps/api/src'),
 };

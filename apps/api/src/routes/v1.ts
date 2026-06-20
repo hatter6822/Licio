@@ -76,9 +76,12 @@ import { feedMediaOf } from '../lib/story-media.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { serveFeed } from '../ranking/service.js';
 import { getRankingServices } from '../ranking/services.js';
+import { createAiGovernanceAdminRoutes } from './ai-governance-admin.js';
+import { createAiGovernancePublicRoutes } from './ai-governance-public.js';
 import { createAuthRoutes } from './auth.js';
 import { createEventsRoutes } from './events.js';
 import { createForumRoutes } from './forum.js';
+import { createGovernanceRoutes } from './governance.js';
 import { createIngestionAdminRoutes } from './ingestion-admin.js';
 import { createInvariantsAdminRoutes } from './invariants-admin.js';
 import {
@@ -492,6 +495,21 @@ export function createV1Routes() {
       // viewer, and transparency export.
       .route('/', createTrustSafetyRoutes())
       .route('/moderation', createModerationConsoleRoutes())
+
+      // --- AI and model governance (WS-K) -------------------------------------
+      // Public: model-card lookup (transparency), translation, and summary/
+      // translation reports.  Admin: AI-team model lifecycle (register/version/
+      // evaluate/deploy/deprecate) + the deploy gate, runtime config, the
+      // inventory/blocked/runtime read surfaces, and the steward review queue.
+      .route('/', createAiGovernancePublicRoutes())
+      .route('/ai/admin', createAiGovernanceAdminRoutes())
+
+      // --- AI-governed rooms (WS-U) -------------------------------------------
+      // The elected-steward seat + elections, the community model/prompt registry
+      // (propose / list / member-downloadable artifact / approve), and the
+      // "governed by" agent view.  Steward-only writes are enforced by the
+      // service; treasury powers stay behind the fail-closed crypto flag.
+      .route('/', createGovernanceRoutes())
 
       // --- Settings sync (SPEC §23.2 /feed/preferences) ---------------------
       .get('/settings', (c) => {

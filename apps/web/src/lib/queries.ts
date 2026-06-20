@@ -28,6 +28,7 @@ import {
 } from '../offline/read-through.js';
 import * as api from './api.js';
 import { fetchCredentials, fetchSecurityActivity, fetchSessions } from './auth-api.js';
+import * as governanceApi from './governance-api.js';
 import {
   fetchDeletionStatus,
   fetchExportStatus,
@@ -148,6 +149,86 @@ export function useRoomQuery(roomId: string) {
     queryKey: queryKeys.room(roomId),
     queryFn: () => api.fetchRoom(roomId),
     ...cachePolicy.room,
+  });
+}
+
+/** WS-U §24.6 — the in-room "governed by" transparency view (active agent +
+ *  recent agent actions). `enabled` defers the fetch behind the read bar. */
+export function useGovernedByQuery(roomId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.governedBy(roomId),
+    queryFn: () => governanceApi.fetchGovernedBy(roomId),
+    enabled,
+  });
+}
+
+/** WS-U §16.6 — the elected-room-steward seat (holder + term). */
+export function useStewardSeatQuery(roomId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.stewardSeat(roomId),
+    queryFn: () => governanceApi.fetchStewardSeat(roomId),
+    enabled,
+  });
+}
+
+/** WS-U §16.6 — the community governance-model registry (the proposal pipeline
+ *  with platform-admission status). Part of the in-room transparency surface;
+ *  `enabled` defers the fetch behind the read bar. */
+export function useGovernanceModelsQuery(roomId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.governanceModels(roomId),
+    queryFn: () => governanceApi.fetchGovernanceModels(roomId),
+    enabled,
+  });
+}
+
+/** WS-U §16.6 — the elected steward's two powers: propose a community model +
+ *  its prompt. Refreshes the registry and the "governed by" agent view. */
+export function useProposeModelMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { bundle: unknown; prompt_text: string }) =>
+      governanceApi.proposeGovernanceModel(roomId, body),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.governanceModels(roomId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.governedBy(roomId) });
+    },
+  });
+}
+
+/** WS-U §16.6 — the room's open member ratification vote (the in-room voting
+ *  surface), or null. `enabled` defers the fetch behind the read bar. */
+export function useRatificationQuery(roomId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.ratification(roomId),
+    queryFn: () => governanceApi.fetchRatification(roomId),
+    enabled,
+  });
+}
+
+/** WS-U §16.6 — the steward opens a member ratification vote on an eligible
+ *  model. Refreshes the registry and the open-vote surface. */
+export function useOpenRatificationMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (modelId: string) => governanceApi.openRatification(roomId, modelId),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.ratification(roomId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.governanceModels(roomId) });
+    },
+  });
+}
+
+/** WS-U §16.6 — a member casts an approve/reject ratification ballot. Refreshes
+ *  the open-vote surface (the live tally). */
+export function useCastBallotMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { voteId: string; choice: 'approve' | 'reject' }) =>
+      governanceApi.castRatificationBallot(roomId, input.voteId, input.choice),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.ratification(roomId) });
+    },
   });
 }
 

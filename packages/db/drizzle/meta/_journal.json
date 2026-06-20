@@ -239,6 +239,41 @@
       "when": 1781671305000,
       "tag": "0033_ws_t_reply_depth_bucket",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1781849148303,
+      "tag": "0034_ws_k_ai_governance",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1781890674971,
+      "tag": "0035_ws_u_ai_governed_rooms",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1781896109097,
+      "tag": "0036_ws_u_governance_uniqueness",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1781908928466,
+      "tag": "0037_ws_u_model_ratification",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1781918677596,
+      "tag": "0038_ws_u_one_open_ratification",
+      "breakpoints": true
     }
   ]
 }

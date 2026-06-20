@@ -7,7 +7,7 @@
 // classifier seam, metrics, and the deterministic demo seed (development
 // only — production never seeds fixtures).
 import { createHash } from 'node:crypto';
-import type { IntegritySignalDetectedEvent } from '@licio/shared';
+import type { ContributionType, IntegritySignalDetectedEvent } from '@licio/shared';
 import { InMemorySlidingWindowStore, type SlidingWindowStore } from '../events/ingest-limiter.js';
 import type { EventPipelineServices } from '../events/services.js';
 import { getIdentityServices } from '../identity/services.js';
@@ -72,6 +72,45 @@ export interface AutoModerationSink {
     reasonCode: string;
     reasons: string[];
   }): Promise<void>;
+  /**
+   * WS-U: the in-room community agent held/removed a contribution. Emits the
+   * author's statement-of-reasons notice (no silent sanction) — a COMMUNITY
+   * action carrying no platform reason code, with the human-floor review as its
+   * recourse. The agent's provenance triple is already in the knomosis audit log.
+   */
+  recordAgentHold(input: {
+    contributionId: string;
+    authorUserId: string;
+    removed: boolean;
+    reason: string | null;
+  }): Promise<void>;
+}
+
+/**
+ * WS-U bounded in-room agent seam (SPEC §16.6/§24.6). When the thread's room has
+ * an active community-approved governance binding, this returns the agent's
+ * deterministic, capability-gated moderation recommendation for a contribution;
+ * `null` ⇒ no active agent (the platform floor alone decides). The decision is
+ * combined FLOOR-DOMINANTLY by the caller (the agent can only add caution, never
+ * reduce or reverse a floor decision — it holds no floor-reserved capability).
+ * The governance adapter (`governance/forum-agent.ts`) is assigned at boot;
+ * `null` keeps the forum usable standalone.
+ */
+export interface RoomAgentModerator {
+  moderateContribution(input: {
+    roomId: string;
+    contributionId: string;
+    /** The contribution author (for the SPEC §24.6 author-history signals). */
+    authorUserId: string;
+    type: ContributionType;
+    body: string;
+    citationCount: number;
+    attachmentCount: number;
+  }): Promise<{
+    state: 'published' | 'under_review' | 'removed';
+    /** The community-policy statement of reasons (for the author notice). */
+    reason?: string;
+  } | null>;
 }
 
 export interface ForumServices {
@@ -90,6 +129,8 @@ export interface ForumServices {
   relationshipReader: ViewerRelationshipReader | null;
   /** WS-J.2.6 auto-block accountability seam (assigned at boot; null = none). */
   autoModerationSink: AutoModerationSink | null;
+  /** WS-U bounded in-room agent seam (assigned at boot; null = no agent). */
+  agentModerator: RoomAgentModerator | null;
   metrics: ForumMetrics;
   config: () => ForumRuntimeConfig;
   reloadConfig: () => Promise<ForumRuntimeConfig>;
@@ -111,6 +152,7 @@ export interface InMemoryForumOptions {
   commentBroadcaster?: CommentBroadcaster;
   relationshipReader?: ViewerRelationshipReader;
   autoModerationSink?: AutoModerationSink;
+  agentModerator?: RoomAgentModerator;
   limiterStore?: SlidingWindowStore;
   log?: (event: string, meta: Record<string, unknown>) => void;
   now?: () => number;
@@ -154,6 +196,7 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
     commentBroadcaster: options.commentBroadcaster ?? new InMemoryCommentBroadcaster(),
     relationshipReader: options.relationshipReader ?? null,
     autoModerationSink: options.autoModerationSink ?? null,
+    agentModerator: options.agentModerator ?? null,
     metrics,
     config: () => config,
     reloadConfig: async () => config,
