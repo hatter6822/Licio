@@ -7,7 +7,7 @@
 > WS-K/J/L/M plans. The runtime then landed (rather than reusing WS-K alone, a dedicated
 > deterministic domain package was built): the **`@licio/governance`** pure domain (policy DSL,
 > proof-carrying kernel, capabilities, election tally, member ratification, lawmaking
-> facilitation), the **`knomosis`** schema + migrations `0035`–`0037` (isolation-proven), the
+> facilitation), the **`knomosis`** schema + migrations `0035`–`0038` (isolation-proven), the
 > **`GovernanceService`** (member-gated + law-pack-driven seat elections, model admission gate,
 > bounded moderation agent **wired into the live contribution path** floor-dominantly — deciding
 > over REAL author-history signals + canonical link/mention counts, and emitting the author's
@@ -21,7 +21,9 @@
 > the in-room "governed by" transparency panel and the elected-steward propose/ratify
 > manager with the member-downloadable proposal registry, both on the room page. The eleven
 > stores have gated Drizzle adapters bound at boot (migration `0036` adds the vote PK + model
-> digest uniqueness; `0037` adds the model-ratification tables). Residuals (the WS-M lawmaking
+> digest uniqueness; `0037` adds the model-ratification tables; `0038` adds the one-open-per-room
+> partial unique index). The route layer is uuid-validated + room-content-bar-gated, ballots are
+> room-bound + close-time-enforced, and law-pack binding is room-scoped. Residuals (the WS-M lawmaking
 > trigger + on-chain election mode (Stage 4/6), the steward-election voting UI, doctrine-matrix
 > propagation) are tracked in `docs/governance/README.md`. The shipped WS-K
 > platform (`@licio/ai-governance` + `apps/api/src/ai-governance` + the `0034` schema + the

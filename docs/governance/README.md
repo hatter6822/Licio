@@ -12,7 +12,7 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
 | Layer | Where | Status |
 |---|---|---|
 | Pure domain (kernel, DSL, capabilities, elections) | `packages/governance` (`@licio/governance`) | **Shipped** |
-| Isolated persistence | `packages/db/src/schema/governance.ts` (`knomosis` pgSchema) + migrations `0035`–`0037` | **Shipped** |
+| Isolated persistence | `packages/db/src/schema/governance.ts` (`knomosis` pgSchema) + migrations `0035`–`0038` | **Shipped** |
 | Production store binding | `apps/api/src/governance/drizzle-governance-stores.ts` (gated; bound at boot when `DATABASE_URL` is set) | **Shipped** |
 | Runtime service | `apps/api/src/governance/` | **Shipped (Stages 1-3, 5-core)** |
 | HTTP surface | `apps/api/src/routes/governance.ts` (mounted in `v1.ts`); seat bootstrap on room create | **Shipped** |
@@ -135,14 +135,30 @@ Both surfaces are mounted on the room page behind the WS-Q content read bar:
 
 The eleven store interfaces have gated Postgres adapters over the `knomosis` tables,
 bound at boot (`apps/api/src/index.ts`) when `DATABASE_URL` is set (the in-memory
-adapters remain the dev/test path). Two invariants the in-memory adapters held by
-convention are now enforced by the schema (migration `0036`), so the production
-path can rely on them instead of a read-then-write race:
+adapters remain the dev/test path). Concurrency invariants the in-memory adapters
+held by convention are enforced by the schema, so the production path relies on
+them instead of a read-then-write race:
 
 - the **steward vote** carries a composite primary key `(election_id,
-  voter_user_id)`, so a double ballot collides (idempotent `cast`); and
+  voter_user_id)`, so a double ballot collides (idempotent `cast`, migration `0036`);
 - the **governance model** carries a unique index on `(room_id, artifact_digest)`,
-  so a duplicate proposal collides (`insert` returns null).
+  so a duplicate proposal collides (`insert` returns null, migration `0036`); and
+- the **model ratification** carries a partial unique index on `(room_id) WHERE
+  status = 'open'` (migration `0038`), so two concurrent opens cannot both create
+  an open vote (`insert` returns null on the second — the atomic one-open-per-room
+  guard).
+
+### Review hardening (cross-room + access control)
+
+The route/service layer additionally enforces, with tests: ballots are bound to
+their subject's room (a vote/ratification id from another room is a 404, never
+counted with this room's membership gate); ballots are rejected once `closesAt`
+has passed (independent of the scheduler tick); a supplied law-pack must belong to
+the room (no foreign bounds); model digests use the `@licio/governance`
+`canonicalize()` (key-order-independent); the read surfaces (model list/download,
+agent view, ratification view) pass the WS-Q room content bar (a private room's
+governance data is members/stewards-only); and every governance route validates
+its uuid path params (a malformed id is a controlled 422, never a Postgres 500).
 
 ### Pay-to-rank isolation
 
