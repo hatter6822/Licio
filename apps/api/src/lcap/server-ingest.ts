@@ -149,6 +149,12 @@ export class LcapIngestServer {
     return this.cas.has(cid);
   }
 
+  /** Read a held object's bytes + kind by CID (§29 content fetch), or undefined. */
+  getObject(cid: string): { readonly kind: ContentKind; readonly bytes: Uint8Array } | undefined {
+    const obj = this.cas.get(cid);
+    return obj ? { kind: obj.kind, bytes: obj.bytes } : undefined;
+  }
+
   isAccepted(cid: string): boolean {
     return this.accepted.has(cid);
   }

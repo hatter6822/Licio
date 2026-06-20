@@ -61,8 +61,11 @@ dependency cycles rejected), and graph-guarded before any expansion by the §27.
 critical-field detectors, each mapped to a §16.11 wire rejection code, with the
 whole-batch node-count cap checked first so the guard cannot itself be a DoS
 vector).  The remaining WS-R cards are **I/O integration** — the `lcap_v2`
-IndexedDB layer (WS-R.11), the Postgres schema (WS-R.12.2) + Hono routes
-(WS-R.12.4) that durably back and expose that binding over the wire, the
+IndexedDB layer (WS-R.11), the Postgres schema (WS-R.12.2) + the rest of the Hono
+routes (WS-R.12.4 — the §29 content-READ endpoints `GET /api/lcap/v2/{records,
+proofs,blocks}/:cid` with the §22.1.1 status mapping are shipped and mounted; the
+ingestion/exchange/pulse/pack endpoints remain) that durably back and expose that
+binding over the wire, the
 DoS/privacy controls (WS-R.14), the transport profiles (WS-R.15), the WS-S
 encryption-envelope
 seam (WS-R.16), the client surface (WS-R.17), and the network simulator
@@ -186,7 +189,7 @@ is a later card (the package is already runtime-agnostic via `runtime.ts`).
 | WS-R.9 — Merkle / checkpoint / inclusion / consistency / witness | 9.2 – 9.4 | **Shipped** (9.1 server-append logic core; DB binding in WS-R.12) |
 | WS-R.10 — liveness, receipts, durable outbox | 10.1 – 10.3 | **Shipped** (IndexedDB binding in WS-R.11) |
 | WS-R.13 — conflict dispatch + visible-thread projection | 13.1 – 13.2 | **Shipped** |
-| WS-R.12 — server ingestion | 12.1 | **Decision core + §24.4 resolver + server-computed validation + in-memory binding shipped** (`ingestRecord`, `resolveIngestionOrder`, `validate`; `apps/api/src/lcap` `LcapIngestServer` incl. `validateContribution`/`commitBatch`); Hono routes + Postgres schema (12.4/12.2) = I/O |
+| WS-R.12 — server ingestion | 12.1, 12.4 (reads) | **Decision core + §24.4 resolver + server-computed validation + in-memory binding + §29 content-read routes shipped** (`ingestRecord`, `resolveIngestionOrder`, `validate`; `apps/api/src/lcap` `LcapIngestServer` incl. `validateContribution`/`commitBatch`; `routes.ts` `GET …/{records,proofs,blocks}/:cid`); the rest of 12.4 (ingestion/exchange/pulse/pack) + Postgres schema (12.2) = I/O |
 | WS-R.14 — DoS controls | 14.2 | **Malicious-graph guard shipped** (`checkDependencyGraph`, §27.2; wired into `commitBatch`); resource-cap centralization (14.1) + the rest = follow-up |
 | WS-R.11 — IndexedDB store | — | Planned (I/O integration) |
 | WS-R.15/R.16/R.17/R.18 — transports, encryption envelope, client UI, simulator | — | Planned |
