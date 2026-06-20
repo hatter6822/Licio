@@ -38,6 +38,7 @@ const ALLOWED_WORKSPACE_DEPS: Record<string, string[]> = {
     '@licio/ranking',
     '@licio/ai-governance',
     '@licio/governance',
+    '@licio/lcap',
   ],
 };
 

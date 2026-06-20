@@ -45,9 +45,13 @@ I/O-free, exhaustively-tested logic:
   missing-dependency wants; the Postgres CAS/room-log store and the Hono routes
   (WS-R.12.2/12.4) are the deferred I/O binding.
 
-The remaining WS-R cards are **I/O integration** — the `lcap_v2`
-IndexedDB layer (WS-R.11), the server CAS/room-log store + DB schema + Hono routes
-(WS-R.12.2/12.4) that drive the shipped ingestion decision over the wire, the
+The WS-R.12.1a/c server binding is shipped **in-memory** in
+`apps/api/src/lcap/server-ingest.ts` (`LcapIngestServer` — a CID-verified
+content-addressed store, the per-room `RoomLog` acceptance log, authoritative
+idempotency by `record_cid`, and server-side device-fork detection over the pure
+`ingestRecord`).  The remaining WS-R cards are **I/O integration** — the `lcap_v2`
+IndexedDB layer (WS-R.11), the Postgres schema (WS-R.12.2) + Hono routes
+(WS-R.12.4) that durably back and expose that binding over the wire, the
 DoS/privacy controls (WS-R.14), the transport profiles (WS-R.15), the WS-S
 encryption-envelope
 seam (WS-R.16), the client surface (WS-R.17), and the network simulator
@@ -171,7 +175,7 @@ is a later card (the package is already runtime-agnostic via `runtime.ts`).
 | WS-R.9 — Merkle / checkpoint / inclusion / consistency / witness | 9.2 – 9.4 | **Shipped** (9.1 server-append logic core; DB binding in WS-R.12) |
 | WS-R.10 — liveness, receipts, durable outbox | 10.1 – 10.3 | **Shipped** (IndexedDB binding in WS-R.11) |
 | WS-R.13 — conflict dispatch + visible-thread projection | 13.1 – 13.2 | **Shipped** |
-| WS-R.12 — server ingestion | 12.1 | **Decision core shipped** (`ingestRecord`); CAS/room-log store + Hono routes (12.2/12.4) = I/O |
+| WS-R.12 — server ingestion | 12.1 | **Decision core + in-memory binding shipped** (`ingestRecord`; `apps/api/src/lcap` `LcapIngestServer`); Postgres schema + Hono routes (12.2/12.4) = I/O |
 | WS-R.11/R.14 — IndexedDB store, DoS controls | — | Planned (I/O integration) |
 | WS-R.15/R.16/R.17/R.18 — transports, encryption envelope, client UI, simulator | — | Planned |
 | WS-S — Private P2P Rooms (E2EE) | all | Planned (`docs/PRIVATE_SPEC.md`) |
