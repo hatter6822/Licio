@@ -8,6 +8,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { queryKeys } from '../../../lib/query-keys.js';
 import { useAuthStore } from '../../../stores/auth.js';
 import { TopicRepeatsButton } from './TopicRepeatsButton.js';
 
@@ -82,6 +83,30 @@ describe('TopicRepeatsButton (WS-H.2.3c)', () => {
         // The OTHER topic's preference survives the single-topic change.
         topic_repeat_preference: { water: 'show_all', transit: 'show_all' },
       },
+    });
+  });
+
+  it('optimistically writes the merged map to the cache so a sibling button merges against it', async () => {
+    signIn();
+    fetchPrivacySettings.mockResolvedValue(SETTINGS);
+    // The PATCH stays in flight, so ONLY the optimistic write touches the cache
+    // (no refetch reverts it) — the deterministic proof of the merge mechanism.
+    patchPrivacySettings.mockReturnValue(new Promise(() => {}));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <TopicRepeatsButton topicId="zoning" />
+      </QueryClientProvider>,
+    );
+    await userEvent.click(await screen.findByRole('button', { name: TRIGGER }));
+    await userEvent.click(await screen.findByRole('radio', { name: 'Show fewer repeats' }));
+    const cached = client.getQueryData(queryKeys.durablePrivacySettings()) as typeof SETTINGS;
+    // The OTHER topics survive and `zoning` is added — a sibling button reading
+    // the cache now sees this change, so it cannot clobber it.
+    expect(cached.personalization_settings.topic_repeat_preference).toEqual({
+      water: 'fewer_repeats',
+      transit: 'show_all',
+      zoning: 'fewer_repeats',
     });
   });
 

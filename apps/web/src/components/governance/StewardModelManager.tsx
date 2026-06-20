@@ -74,17 +74,23 @@ export interface StewardModelManagerProps {
   roomId: string;
   /** Defer the fetches until the reader has passed the room's read bar. */
   enabled?: boolean;
-  /** True when the reader has an ACTIVE subscription to this room. A member (an
-   *  active subscription OR the elected steward) may cast a ratification ballot;
-   *  a non-member is shown how to join instead — mirroring the backend gate
-   *  (`isRoomMember`), so the buttons never 403. */
+  /** True when the reader has an ACTIVE subscription to this room. A member may
+   *  cast a ratification ballot; a non-member is shown how to join instead —
+   *  mirroring the backend gate (`isRoomMember`), so the buttons never 403. */
   joined?: boolean;
+  /** True when the reader holds a steward ROLE in this room (`room.is_steward`).
+   *  The backend `isRoomMember` gate counts a room steward as a member (active
+   *  subscription OR steward role) even WITHOUT a subscription, so a room steward
+   *  must be able to cast a ballot — not be told to join (RoomMembership renders
+   *  no join affordance for them, since they are already members via the role). */
+  isRoomSteward?: boolean;
 }
 
 export function StewardModelManager({
   roomId,
   enabled = true,
   joined = false,
+  isRoomSteward = false,
 }: StewardModelManagerProps): React.ReactElement | null {
   const seat = useStewardSeatQuery(roomId, enabled);
   const models = useGovernanceModelsQuery(roomId, enabled);
@@ -93,7 +99,9 @@ export function StewardModelManager({
 
   const holder = seat.data?.seat?.holder_user_id ?? null;
   const isSteward = holder !== null && holder === currentUserId;
-  const isMember = joined || isSteward;
+  // A member, per the backend `isRoomMember`: an active subscription OR a room
+  // steward role (the elected seat holder, who is subscribed, is covered too).
+  const isMember = joined || isRoomSteward || isSteward;
   const items = models.data?.models ?? [];
   const openVote = ratification.data?.vote ?? null;
 

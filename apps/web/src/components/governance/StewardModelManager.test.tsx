@@ -226,6 +226,24 @@ describe('StewardModelManager (WS-U §16.6)', () => {
     expect(screen.queryByRole('button', { name: /^approve$/i })).not.toBeInTheDocument();
   });
 
+  it('lets a room steward without a subscription cast a ballot (member via role)', () => {
+    seatHeldBy('someone-else'); // not the elected seat holder
+    signInAs('role-steward');
+    openVote({
+      vote_id: 'v1',
+      model_id: 'm1',
+      opens_at: '2026-06-19T00:00:00.000Z',
+      closes_at: '2026-06-26T00:00:00.000Z',
+      min_quorum: 2,
+      in_favor: 0,
+      opposed: 0,
+    });
+    // joined defaults false, but the viewer holds a steward role → isRoomMember.
+    render(<StewardModelManager roomId="r1" isRoomSteward />);
+    expect(screen.getByRole('button', { name: /^approve$/i })).toBeInTheDocument();
+    expect(screen.queryByText(/join the room to take part/i)).not.toBeInTheDocument();
+  });
+
   it('shows the registry loading and error states to the steward', () => {
     seatHeldBy('steward-1');
     signInAs('steward-1');

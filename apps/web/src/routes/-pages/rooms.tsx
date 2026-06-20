@@ -197,8 +197,16 @@ export function RoomDetailBody({
 
       {/* WS-U §16.6 — the elected steward's two powers (propose a model + prompt;
           record the community's ratified decision) + the proposal registry. The
-          member ratification vote is gated on membership (`joined`). */}
-      {contentVisible ? <StewardModelManager roomId={roomId} joined={room.joined} /> : null}
+          member ratification vote is gated on membership: an active subscription
+          (`joined`) OR a room steward role (`is_steward`), matching the backend
+          `isRoomMember` gate so an unsubscribed room steward can still vote. */}
+      {contentVisible ? (
+        <StewardModelManager
+          roomId={roomId}
+          joined={room.joined}
+          isRoomSteward={room.is_steward === true}
+        />
+      ) : null}
 
       {/* Tier two: the room feed (in-room chip on every room_only item). */}
       {contentVisible ? (

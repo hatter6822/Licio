@@ -85,6 +85,17 @@ describe('RoomMembership (WS-Q.5.3a / WS-U §16.6)', () => {
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 
+  it('shows the honest-limits notice to an anonymous reader of a private room', () => {
+    render(
+      <RoomMembership
+        roomId="r1"
+        room={baseRoom({ visibility: 'private', join_model: 'request_approval' })}
+      />,
+    );
+    expect(screen.getByRole('link', { name: /^sign in$/i })).toBeInTheDocument();
+    expect(screen.getByText(/private from the public/i)).toBeInTheDocument();
+  });
+
   it('lets a signed-in non-member join an open public room', async () => {
     signIn();
     render(<RoomMembership roomId="r1" room={baseRoom({})} />);
@@ -119,6 +130,7 @@ describe('RoomMembership (WS-Q.5.3a / WS-U §16.6)', () => {
       />,
     );
     expect(screen.getByText(/invite only/i)).toBeInTheDocument();
+    expect(screen.getByText(/private from the public/i)).toBeInTheDocument();
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 
@@ -138,10 +150,20 @@ describe('RoomMembership (WS-Q.5.3a / WS-U §16.6)', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('shows a pending state for an applicant (no join button)', () => {
+  it('shows a pending state for an applicant — with the limits notice (no join button)', () => {
     signIn();
-    render(<RoomMembership roomId="r1" room={baseRoom({ join_pending: true })} />);
+    render(
+      <RoomMembership
+        roomId="r1"
+        room={baseRoom({
+          visibility: 'private',
+          join_model: 'request_approval',
+          join_pending: true,
+        })}
+      />,
+    );
     expect(screen.getByText(/pending a steward decision/i)).toBeInTheDocument();
+    expect(screen.getByText(/private from the public/i)).toBeInTheDocument();
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 });

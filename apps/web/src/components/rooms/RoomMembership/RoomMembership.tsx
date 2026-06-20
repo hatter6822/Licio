@@ -16,6 +16,7 @@
 //   • pending            → "request pending" note
 //   • invite (outsider)  → "invite only" note
 //   • open / request     → Join / Request to join + governance note
+// Every non-member PRIVATE-room state also carries the honest-limits notice.
 // Mirrors the join/leave backend (POST/DELETE /v1/rooms/:roomId/join).
 import type { RoomDetail } from '@licio/shared';
 import { Link } from '@tanstack/react-router';
@@ -40,6 +41,17 @@ export function RoomMembership({ roomId, room }: RoomMembershipProps): React.Rea
   const leave = useLeaveRoomMutation(roomId);
   const [error, setError] = useState<string | null>(null);
   const governed = room.governance !== null;
+  // The honest-limits disclosure (SPEC §6.9) shown for EVERY private-room
+  // non-member state — anonymous, pending, invite, and joinable — so a reader
+  // deciding whether to request access (or waiting on it) always sees that
+  // "private" means private from the public, NOT from moderation, and that the
+  // room is not encrypted.
+  const privateNotice =
+    room.visibility === 'private' ? (
+      <p className="text-ink-muted text-xs">
+        {t('room.join.notice', 'Private from the public — not from moderation, and not encrypted.')}
+      </p>
+    ) : null;
 
   const fail = (e: unknown): void =>
     setError(
@@ -68,6 +80,7 @@ export function RoomMembership({ roomId, room }: RoomMembershipProps): React.Rea
         >
           {t('room.membership.signInLink', 'Sign in')}
         </Link>
+        {privateNotice}
       </div>
     );
   }
@@ -115,6 +128,7 @@ export function RoomMembership({ roomId, room }: RoomMembershipProps): React.Rea
         <p className="text-ink text-sm">
           {t('room.join.pending', 'Your request to join is pending a steward decision.')}
         </p>
+        {privateNotice}
       </div>
     );
   }
@@ -124,6 +138,7 @@ export function RoomMembership({ roomId, room }: RoomMembershipProps): React.Rea
     return (
       <div className={SECTION}>
         <p className="text-ink text-sm">{t('room.join.invite', 'This room is invite only.')}</p>
+        {privateNotice}
       </div>
     );
   }
@@ -152,14 +167,7 @@ export function RoomMembership({ roomId, room }: RoomMembershipProps): React.Rea
             )
           : t('room.membership.join', 'Join to take part in this room.')}
       </p>
-      {room.visibility === 'private' ? (
-        <p className="text-ink-muted text-xs">
-          {t(
-            'room.join.notice',
-            'Private from the public — not from moderation, and not encrypted.',
-          )}
-        </p>
-      ) : null}
+      {privateNotice}
       {error ? <p className="text-error-on-soft text-xs">{error}</p> : null}
     </div>
   );
