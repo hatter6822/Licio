@@ -877,8 +877,9 @@ licio/
 │   │   ├── 04-pwa-client.md             -- WS-C
 │   │   ├── 05–17-*.md                   -- WS-D through WS-P
 │   │   ├── 18-content-and-room-model.md -- WS-Q (room-owned content + visibility)
-│   │   ├── 19-offline-content-availability.md -- WS-R (LCAP v0.2; ext of OFFLINE_SPEC.md)
-│   │   └── 20-private-p2p-rooms.md      -- WS-S (E2EE P2P rooms; ext of PRIVATE_SPEC.md)
+│   │   └── 19-decentralized-data-plane.md -- WS-R (LCAP v0.2) + WS-S (E2EE P2P rooms): the
+│   │                                          Decentralized Data Plane (supersedes 19/20;
+│   │                                          ext of OFFLINE_SPEC.md + PRIVATE_SPEC.md)
 │   ├── design-system/           -- design system documentation
 │   ├── pwa-client/              -- PWA implementation documentation
 │   ├── identity/                -- WS-D implementation reference
