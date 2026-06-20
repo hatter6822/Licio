@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-R.12.4 — the §29 pack-import endpoint (POST /api/lcap/v2/packs).  A real
-// `.licio-bundle` carrying a signed contribution + its detached proof is read
-// under the WS-R.4.2 caps and committed through the server's validate→guard→commit
-// pipeline.  The endpoint is CSRF-exempt (device-cert-authenticated content) and
-// applies the §22.1.1 request-status mapping.
+// `.licio-bundle` carrying a signed contribution + its detached proof + a block is
+// read under the WS-R.4.2 caps; every frame is durably stored (so the GET routes
+// can serve them) and the contribution is committed through the server's
+// validate→guard→commit pipeline.  The endpoint is CSRF-exempt
+// (device-cert-authenticated content) and applies the §22.1.1 status mapping.
 
 import { cidFor, detachedProofV2Schema, encodeWithSchema, writePack } from '@licio/lcap';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -21,11 +22,16 @@ import {
 
 let fx: LcapFixtures;
 let packBytes: Uint8Array;
+let proofCid: string;
+let blockCid: string;
+let blockBytes: Uint8Array;
 
 beforeAll(async () => {
   fx = await buildLcapFixtures();
   const proofBytes = encodeWithSchema(detachedProofV2Schema, fx.proof);
-  const proofCid = await cidFor('proof', proofBytes);
+  proofCid = await cidFor('proof', proofBytes);
+  blockBytes = new TextEncoder().encode('an-imported-block');
+  blockCid = await cidFor('block', blockBytes);
   packBytes = writePack({
     objects: [
       {
@@ -44,6 +50,14 @@ beforeAll(async () => {
         lane: 'T1',
         priority: 1,
         providesProofFor: fx.recordCid,
+      },
+      {
+        cid: blockCid,
+        cidKind: 'block',
+        frameKind: 'block',
+        payload: blockBytes,
+        lane: 'B4',
+        priority: 2,
       },
     ],
     transportProfile: 'manual_bundle',
@@ -70,6 +84,29 @@ describe('POST /api/lcap/v2/packs — bundle import (WS-R.12.4)', () => {
     expect(srv.isAccepted(fx.recordCid)).toBe(true);
   });
 
+  it('durably stores proof + block frames so they are fetchable via the GET routes', async () => {
+    const srv = new LcapIngestServer(NET, () => NOW);
+    await registerIdentity(srv, fx);
+    setLcapIngestServer(srv);
+    const app = createApp();
+
+    const imported = await app.request('/api/lcap/v2/packs', { method: 'POST', body: packBytes });
+    expect(imported.status).toBe(200);
+    const data = (await imported.json()) as { statuses: { cid: string; status: string }[] };
+    expect(data.statuses).toContainEqual(
+      expect.objectContaining({ cid: proofCid, status: 'stored_unverified' }),
+    );
+    expect(data.statuses).toContainEqual(
+      expect.objectContaining({ cid: blockCid, status: 'stored_unverified' }),
+    );
+
+    const proofRes = await app.request(`/api/lcap/v2/proofs/${proofCid}`);
+    expect(proofRes.status).toBe(200);
+    const blockRes = await app.request(`/api/lcap/v2/blocks/${blockCid}`);
+    expect(blockRes.status).toBe(200);
+    expect(new Uint8Array(await blockRes.arrayBuffer())).toEqual(blockBytes);
+  });
+
   it('quarantines the contribution and wants the capability when identity is unregistered', async () => {
     const srv = new LcapIngestServer(NET, () => NOW);
     await registerIdentity(srv, fx, { capability: false }); // cert + authority but no capability
@@ -84,7 +121,8 @@ describe('POST /api/lcap/v2/packs — bundle import (WS-R.12.4)', () => {
       statuses: { cid: string; status: string }[];
       wants: { cid: string }[];
     };
-    expect(data.statuses[0]?.status).toBe('quarantined_missing_dependency');
+    const recordStatus = data.statuses.find((s) => s.cid === fx.recordCid);
+    expect(recordStatus?.status).toBe('quarantined_missing_dependency');
     expect(data.wants.some((w) => w.cid === fx.capabilityCid)).toBe(true);
   });
 

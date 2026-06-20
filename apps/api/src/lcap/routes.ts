@@ -6,9 +6,10 @@
 //     that learns a `want` (from an ingestion response) can fetch the missing
 //     object.  Reads are GETs, so the global CSRF middleware passes them through.
 //   - pack IMPORT (POST /packs): the §29 bundle-import path.  A `.licio-bundle` is
-//     read under the WS-R.4.2 caps, its identity frames (certs/capabilities/
-//     revocations) are registered, and its contribution records are committed
-//     through the same validate()→graph-guard→commit pipeline as every other path.
+//     read under the WS-R.4.2 caps; every CID-verified frame is durably stored (so
+//     the READ routes can serve its proofs/blocks), its identity frames (certs/
+//     capabilities/revocations) are registered, and its contribution records are
+//     committed through the same validate()→graph-guard→commit pipeline.
 //     Ingestion is device-certificate-authenticated CONTENT (the records carry
 //     their own COSE proofs), so the endpoint is CSRF-exempt (registered in the
 //     CSRF middleware, like the public takedowns intake) and bounded by a global
@@ -23,6 +24,7 @@ import {
   type DetachedProofV2,
   decodeAndRouteRecord,
   decodeProof,
+  type ObjectStatusV2,
   parseCid,
   readPack,
 } from '@licio/lcap';
@@ -38,6 +40,14 @@ const CONTENT_TYPE: Record<ContentKind, string> = {
   proof: 'application/cbor',
   block: 'application/octet-stream',
 };
+
+// A pack frame's content-addressed kind (the §16.11 `cid_kind` + the store key).
+const FRAME_CID_KIND = {
+  record_body: 'record',
+  proof: 'proof',
+  block: 'block',
+  chunk: 'chunk',
+} as const satisfies Record<string, ObjectStatusV2['cid_kind']>;
 
 function json(status: number, obj: unknown): Response {
   return new Response(JSON.stringify(obj), {
@@ -70,9 +80,12 @@ function packErrorStatus(status: string): 413 | 422 {
 }
 
 /**
- * Import a `.licio-bundle`: read it under the WS-R.4.2 caps, register its identity
- * frames, then commit its contributions through the server's validate→guard→commit
- * pipeline.  Returns the per-object §16.11 statuses + the de-duplicated wants.
+ * Import a `.licio-bundle`: read it under the WS-R.4.2 caps, DURABLY STORE every
+ * CID-verified frame (so its records/proofs/blocks become fetchable via the GET
+ * routes), register its identity frames, then commit its contributions through the
+ * server's validate→guard→commit pipeline.  Returns one §16.11 status per object
+ * (non-contributions `stored_unverified`/`rejected_bad_cid` here; contributions
+ * from the commit) + the de-duplicated wants.
  */
 async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<Response> {
   const read = await readPack(body);
@@ -81,30 +94,42 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
   }
   const { frames } = read.pack;
 
-  // Group detached proofs by the record_cid they attest.
+  // Group detached proofs by the record_cid they attest (for the contribution commit).
   const proofsByRecord = new Map<string, DetachedProofV2[]>();
   for (const frame of frames.values()) {
     if (frame.frameKind !== 'proof') continue;
-    let proof: DetachedProofV2;
     try {
-      proof = decodeProof(frame.payload);
+      const proof = decodeProof(frame.payload);
+      const list = proofsByRecord.get(proof.record_cid) ?? [];
+      list.push(proof);
+      proofsByRecord.set(proof.record_cid, list);
     } catch {
-      continue; // a malformed proof frame is ignored; its record will quarantine
+      // a malformed proof frame is ignored; the record it would attest will quarantine
     }
-    const list = proofsByRecord.get(proof.record_cid) ?? [];
-    list.push(proof);
-    proofsByRecord.set(proof.record_cid, list);
   }
 
-  // Register identity frames; collect contributions for the ordered batch commit.
+  // Store every frame (CID re-verified by putObject) + register identity frames;
+  // collect contributions for the ordered batch commit.  Non-contribution objects
+  // get their §16.11 status here; contributions get theirs from commitBatch.
+  const statuses: ObjectStatusV2[] = [];
   const contributions: CommitRecordInput[] = [];
   for (const [cid, frame] of frames) {
-    if (frame.frameKind !== 'record_body') continue;
+    const cidKind = FRAME_CID_KIND[frame.frameKind];
+    const stored = await server.putObject(cid, cidKind, frame.payload);
+    if (!stored) {
+      statuses.push({ cid, cid_kind: cidKind, status: 'rejected_bad_cid' });
+      continue;
+    }
+    if (frame.frameKind !== 'record_body') {
+      statuses.push({ cid, cid_kind: cidKind, status: 'stored_unverified' });
+      continue;
+    }
     let record: ReturnType<typeof decodeAndRouteRecord>;
     try {
       record = decodeAndRouteRecord(frame.payload);
     } catch {
-      continue; // a malformed record frame is skipped (not committed)
+      statuses.push({ cid, cid_kind: 'record', status: 'rejected_bad_schema' });
+      continue;
     }
     const proofs = proofsByRecord.get(cid) ?? [];
     const authorityProof = proofs[0];
@@ -117,6 +142,7 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
             proof: authorityProof,
           });
         }
+        statuses.push({ cid, cid_kind: 'record', status: 'stored_unverified' });
         break;
       case 'room_capability':
         if (authorityProof) {
@@ -126,9 +152,11 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
             proof: authorityProof,
           });
         }
+        statuses.push({ cid, cid_kind: 'record', status: 'stored_unverified' });
         break;
       case 'revocation':
         server.registerRevocation(record);
+        statuses.push({ cid, cid_kind: 'record', status: 'stored_unverified' });
         break;
       case 'contribution_event':
         contributions.push({
@@ -139,14 +167,15 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
           body: frame.payload,
           proofs,
         });
-        break;
+        break; // commitBatch reports the contribution's status
       default:
+        statuses.push({ cid, cid_kind: 'record', status: 'stored_unverified' });
         break;
     }
   }
 
   const result = await server.commitBatch(contributions);
-  return json(200, { statuses: result.statuses, wants: result.wants });
+  return json(200, { statuses: [...statuses, ...result.statuses], wants: result.wants });
 }
 
 /** The §29 LCAP routes.  Mounted at `/api/lcap/v2` (see `app.ts`). */
