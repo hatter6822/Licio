@@ -25,6 +25,15 @@ describe('WS-K.1.2c detectPii', () => {
   it('returns nothing for clean text', () => {
     expect(detectPii('a perfectly ordinary summary sentence')).toEqual([]);
   });
+  it('stays linear on a long no-@ run (bounded email regex; ReDoS-safe)', () => {
+    // A long run of email-class chars with no '@' is the polynomial-ReDoS input;
+    // bounded quantifiers keep it linear. Assert it returns fast with no email.
+    const adversarial = `${'%'.repeat(50_000)} no at sign here`;
+    const start = Date.now();
+    const findings = detectPii(adversarial);
+    expect(Date.now() - start).toBeLessThan(1_000);
+    expect(findings.some((f) => f.kind === 'email')).toBe(false);
+  });
 });
 
 describe('WS-K.1.2c containsHarmfulContent', () => {

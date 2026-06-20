@@ -13,7 +13,10 @@
 import type { SafetyCategoryResult, SafetyResult } from './schemas/evaluation.js';
 import { containsAnyTerm } from './text.js';
 
-const EMAIL_PATTERN = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i;
+// Bounded quantifiers (RFC 5321 limits: local-part ≤64, domain ≤255, a generous
+// TLD cap) so the unanchored scan stays LINEAR — an unbounded `+` here is a
+// polynomial-ReDoS on a long run of class chars (e.g. many '%') with no '@'.
+const EMAIL_PATTERN = /[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,255}\.[a-z]{2,24}/i;
 const WALLET_PATTERN = /\b0x[a-f0-9]{40}\b/i;
 /** A phone-like run: 9–15 digits with optional +/separators. */
 const PHONE_CANDIDATE = /\+?\d[\d\s().-]{7,17}\d/g;
