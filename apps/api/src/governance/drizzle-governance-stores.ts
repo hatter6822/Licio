@@ -32,7 +32,7 @@ import type {
   RatificationResult,
   Verdict,
 } from '@licio/governance';
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import type {
   AgentActionRecord,
   AgentActionStore,
@@ -618,23 +618,32 @@ export class DrizzleRatificationVoteStore implements RatificationVoteStore {
     this.#db = db;
   }
 
-  async insert(vote: RatificationVoteRecord): Promise<RatificationVoteRecord> {
-    await this.#db.insert(modelRatifications).values({
-      voteId: vote.voteId,
-      roomId: vote.roomId,
-      modelId: vote.modelId,
-      lawPackId: vote.lawPackId,
-      status: vote.status,
-      opensAt: new Date(vote.opensAt),
-      closesAt: new Date(vote.closesAt),
-      minQuorum: vote.minQuorum,
-      openedByUserId: vote.openedByUserId,
-      tally: vote.tally,
-      outcome: vote.outcome,
-      createdAt: new Date(vote.createdAt),
-      settledAt: vote.settledAt ? new Date(vote.settledAt) : null,
-    });
-    return vote;
+  async insert(vote: RatificationVoteRecord): Promise<RatificationVoteRecord | null> {
+    // A second OPEN vote for the room collides on the partial unique index
+    // (one-open-per-room) and returns [] — the atomic guard against two opens.
+    const rows = await this.#db
+      .insert(modelRatifications)
+      .values({
+        voteId: vote.voteId,
+        roomId: vote.roomId,
+        modelId: vote.modelId,
+        lawPackId: vote.lawPackId,
+        status: vote.status,
+        opensAt: new Date(vote.opensAt),
+        closesAt: new Date(vote.closesAt),
+        minQuorum: vote.minQuorum,
+        openedByUserId: vote.openedByUserId,
+        tally: vote.tally,
+        outcome: vote.outcome,
+        createdAt: new Date(vote.createdAt),
+        settledAt: vote.settledAt ? new Date(vote.settledAt) : null,
+      })
+      .onConflictDoNothing({
+        target: modelRatifications.roomId,
+        where: sql`${modelRatifications.status} = 'open'`,
+      })
+      .returning();
+    return rows[0] ? toRatification(rows[0]) : null;
   }
 
   async get(voteId: string): Promise<RatificationVoteRecord | null> {

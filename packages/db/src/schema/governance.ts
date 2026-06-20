@@ -10,6 +10,7 @@
 // "no pay-to-rank" guarantee. The schema-isolation test classifies every table
 // here into the wallet/Knomosis context and proves the BFS never reaches ranking.
 
+import { sql } from 'drizzle-orm';
 import {
   boolean,
   index,
@@ -195,6 +196,12 @@ export const modelRatifications = knomosisSchema.table(
   (t) => [
     index('model_ratification_room_idx').on(t.roomId),
     index('model_ratification_model_idx').on(t.modelId),
+    // At most ONE open ratification per room: a partial unique index makes a
+    // second concurrent open collide (the atomic one-open-per-room guard), so the
+    // scheduler can never settle two activations for the same room.
+    uniqueIndex('model_ratification_one_open_per_room')
+      .on(t.roomId)
+      .where(sql`${t.status} = 'open'`),
   ],
 );
 export type ModelRatificationRow = typeof modelRatifications.$inferSelect;

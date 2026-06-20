@@ -178,7 +178,9 @@ export interface LawPackStore {
   clear(): Promise<void>;
 }
 export interface RatificationVoteStore {
-  insert(vote: RatificationVoteRecord): Promise<RatificationVoteRecord>;
+  /** Insert a vote; returns null when an OPEN vote already exists for the room
+   *  (the one-open-per-room invariant — a DB partial unique index in prod). */
+  insert(vote: RatificationVoteRecord): Promise<RatificationVoteRecord | null>;
   get(voteId: string): Promise<RatificationVoteRecord | null>;
   /** The single OPEN vote for a room (at most one at a time), or null. */
   getOpenForRoom(roomId: string): Promise<RatificationVoteRecord | null>;
@@ -338,6 +340,13 @@ export class InMemoryLawPackStore implements LawPackStore {
 export class InMemoryRatificationVoteStore implements RatificationVoteStore {
   private readonly votes = new Map<string, RatificationVoteRecord>();
   async insert(vote: RatificationVoteRecord) {
+    // Enforce one OPEN vote per room atomically (mirrors the DB partial unique
+    // index), so two concurrent opens cannot both succeed.
+    if (vote.status === 'open') {
+      for (const v of this.votes.values()) {
+        if (v.roomId === vote.roomId && v.status === 'open') return null;
+      }
+    }
     this.votes.set(vote.voteId, vote);
     return vote;
   }

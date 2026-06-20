@@ -10,6 +10,7 @@
 // the WS-J `restrict` capability; treasury stays behind the fail-closed crypto flag.
 
 import { zValidator } from '@hono/zod-validator';
+import { uuidSchema } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { roomContentVisibleToUser } from '../forum/rooms.js';
@@ -77,6 +78,16 @@ const ratificationOpenBodySchema = z
   .strict();
 const ballotBodySchema = z.object({ choice: z.enum(['approve', 'reject']) }).strict();
 const lawPackBodySchema = z.object({ law_pack: z.unknown() }).strict();
+// Secondary uuid path params are also store keys (uuid columns) — validate them
+// too, so a malformed id is a controlled 422, never a Postgres-parse 500. Each
+// includes roomId so the Hono RPC `param` inference keeps it (a param-only schema
+// would otherwise narrow the route's inferred params and break typed callers).
+const validateElectionId = zValidator(
+  'param',
+  z.object({ roomId: uuidSchema, electionId: uuidSchema }),
+);
+const validateModelId = zValidator('param', z.object({ roomId: uuidSchema, modelId: uuidSchema }));
+const validateVoteId = zValidator('param', z.object({ roomId: uuidSchema, voteId: uuidSchema }));
 // The proposal is validated by the service (proposalInputSchema), mirroring the
 // `bundle: z.unknown()` propose contract.
 const lawmakingSummaryBodySchema = z.object({ proposal: z.unknown() }).strict();
@@ -91,6 +102,10 @@ export function createGovernanceRoutes() {
   const voteLimit = rateLimit({ limit: 600, windowMs: 60_000 });
   return (
     new Hono<AuthEnv>()
+      // Every governance route is room-scoped: reject a non-UUID roomId with a
+      // controlled 422 BEFORE it reaches the (uuid-typed) knomosis stores, so a
+      // malformed path can never raise a Postgres parse error / 500.
+      .use('/rooms/:roomId/*', zValidator('param', z.object({ roomId: uuidSchema })))
       // --- Steward seat + elections ---------------------------------------
       .get('/rooms/:roomId/steward', authMiddleware(), async (c) => {
         const svc = getGovernanceService();
@@ -111,6 +126,7 @@ export function createGovernanceRoutes() {
         '/rooms/:roomId/elections/:electionId/vote',
         voteLimit,
         authMiddleware(),
+        validateElectionId,
         zValidator('json', voteBodySchema),
         async (c) => {
           const auth = c.get('auth');
@@ -196,22 +212,27 @@ export function createGovernanceRoutes() {
           })),
         });
       })
-      .get('/rooms/:roomId/governance/models/:modelId/download', authMiddleware(), async (c) => {
-        const roomId = c.req.param('roomId');
-        if (!(await governanceReadable(roomId, c.get('auth')?.userId ?? null))) {
-          return c.json(deny('not_found', 'Model not found.'), 404);
-        }
-        const model = await getGovernanceService().getModel(c.req.param('modelId'));
-        if (!model || model.roomId !== roomId) {
-          return c.json(deny('not_found', 'Model not found.'), 404);
-        }
-        // Member-downloadable, integrity-pinned artifact (the accountability core).
-        return c.json({
-          model_id: model.modelId,
-          artifact_digest: model.artifactDigest,
-          bundle: model.bundle,
-        });
-      })
+      .get(
+        '/rooms/:roomId/governance/models/:modelId/download',
+        authMiddleware(),
+        validateModelId,
+        async (c) => {
+          const roomId = c.req.param('roomId');
+          if (!(await governanceReadable(roomId, c.get('auth')?.userId ?? null))) {
+            return c.json(deny('not_found', 'Model not found.'), 404);
+          }
+          const model = await getGovernanceService().getModel(c.req.param('modelId'));
+          if (!model || model.roomId !== roomId) {
+            return c.json(deny('not_found', 'Model not found.'), 404);
+          }
+          // Member-downloadable, integrity-pinned artifact (the accountability core).
+          return c.json({
+            model_id: model.modelId,
+            artifact_digest: model.artifactDigest,
+            bundle: model.bundle,
+          });
+        },
+      )
       // --- Member ratification vote (the ONLY path to an active agent) ---------
       // The steward opens a vote on an eligible model (optionally binding a
       // law-pack); members cast yes/no ballots; the scheduler settles it at the
@@ -221,6 +242,7 @@ export function createGovernanceRoutes() {
         '/rooms/:roomId/governance/models/:modelId/ratification',
         stewardWriteLimit,
         authMiddleware(),
+        validateModelId,
         zValidator('json', ratificationOpenBodySchema),
         async (c) => {
           const auth = c.get('auth');
@@ -245,6 +267,7 @@ export function createGovernanceRoutes() {
         '/rooms/:roomId/governance/ratifications/:voteId/ballot',
         voteLimit,
         authMiddleware(),
+        validateVoteId,
         zValidator('json', ballotBodySchema),
         async (c) => {
           const auth = c.get('auth');

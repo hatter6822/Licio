@@ -428,16 +428,16 @@ export class GovernanceService {
     if (model.status !== 'eligible') {
       return err('not_eligible', 'Only an eligible model may be put to a ratification vote.');
     }
-    if (await this.deps.stores.ratifications.getOpenForRoom(roomId)) {
-      return err('vote_open', 'A ratification vote is already open for this room.');
-    }
     const lawCheck = await this.assertLawPackInRoom(roomId, lawPackId);
     if (!lawCheck.ok) return lawCheck;
     const lawPack = await this.resolveLawPack(roomId, lawPackId);
     const opensAt = this.deps.now();
     const closesAt = new Date(opensAt.getTime() + this.deps.config.electionWindowSeconds * 1000);
     const voteId = this.deps.uuid();
-    await this.deps.stores.ratifications.insert({
+    // The insert is the ATOMIC one-open-per-room guard (DB partial unique index /
+    // in-memory check) — a read-then-insert pre-check would race two concurrent
+    // opens into two open votes. A null result ⇒ a vote is already open.
+    const inserted = await this.deps.stores.ratifications.insert({
       voteId,
       roomId,
       modelId,
@@ -452,6 +452,7 @@ export class GovernanceService {
       createdAt: opensAt.toISOString(),
       settledAt: null,
     });
+    if (!inserted) return err('vote_open', 'A ratification vote is already open for this room.');
     return ok({ voteId });
   }
 

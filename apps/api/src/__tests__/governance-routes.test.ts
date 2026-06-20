@@ -74,17 +74,32 @@ describe('WS-U governance routes', () => {
   });
 
   it('rejects unauthenticated access', async () => {
-    const res = await app.request(jsonReq('/v1/rooms/r1/steward', 'GET'));
+    const res = await app.request(
+      jsonReq('/v1/rooms/00000000-0000-4000-8000-000000000001/steward', 'GET'),
+    );
     expect(res.status).toBe(401);
+  });
+
+  it('rejects a malformed (non-UUID) roomId with a controlled 4xx, never a 500', async () => {
+    const user = await seedUserWithSession(forum.identity);
+    const res = await app.request(
+      jsonReq('/v1/rooms/not-a-uuid/steward', 'GET', undefined, user.cookie),
+    );
+    expect(res.status).toBe(400);
   });
 
   it('drives the full steward → model → ratify → agent flow', async () => {
     const user = await seedUserWithSession(forum.identity);
-    await getGovernanceService().bootstrapSeat('r1', user.userId);
+    await getGovernanceService().bootstrapSeat('00000000-0000-4000-8000-000000000001', user.userId);
 
     // Seat read.
     const seatRes = await app.request(
-      jsonReq('/v1/rooms/r1/steward', 'GET', undefined, user.cookie),
+      jsonReq(
+        '/v1/rooms/00000000-0000-4000-8000-000000000001/steward',
+        'GET',
+        undefined,
+        user.cookie,
+      ),
     );
     expect(seatRes.status).toBe(200);
     expect((await json<{ seat: { holder_user_id: string } }>(seatRes)).seat.holder_user_id).toBe(
@@ -94,7 +109,7 @@ describe('WS-U governance routes', () => {
     // Steward proposes a model (eagerly evaluated to eligible).
     const propose = await app.request(
       jsonReq(
-        '/v1/rooms/r1/governance/models',
+        '/v1/rooms/00000000-0000-4000-8000-000000000001/governance/models',
         'POST',
         { bundle, prompt_text: 'Moderate r1.' },
         user.cookie,
@@ -106,40 +121,71 @@ describe('WS-U governance routes', () => {
 
     // Listed as eligible.
     const list = await app.request(
-      jsonReq('/v1/rooms/r1/governance/models', 'GET', undefined, user.cookie),
+      jsonReq(
+        '/v1/rooms/00000000-0000-4000-8000-000000000001/governance/models',
+        'GET',
+        undefined,
+        user.cookie,
+      ),
     );
     const listed = (await json<{ models: { status: string }[] }>(list)).models;
     expect(listed[0]?.status).toBe('eligible');
 
     // Member-downloadable, integrity-pinned artifact.
     const dl = await app.request(
-      jsonReq(`/v1/rooms/r1/governance/models/${modelId}/download`, 'GET', undefined, user.cookie),
+      jsonReq(
+        `/v1/rooms/00000000-0000-4000-8000-000000000001/governance/models/${modelId}/download`,
+        'GET',
+        undefined,
+        user.cookie,
+      ),
     );
     expect((await json<{ bundle: { name: string } }>(dl)).bundle.name).toBe('Civility');
 
     // The steward opens a MEMBER ratification vote (the only path to activation).
     const open = await app.request(
-      jsonReq(`/v1/rooms/r1/governance/models/${modelId}/ratification`, 'POST', {}, user.cookie),
+      jsonReq(
+        `/v1/rooms/00000000-0000-4000-8000-000000000001/governance/models/${modelId}/ratification`,
+        'POST',
+        {},
+        user.cookie,
+      ),
     );
     expect(open.status).toBe(201);
     const { vote_id } = await json<{ vote_id: string }>(open);
 
     // The open vote surfaces with its live tally.
     const view = await app.request(
-      jsonReq('/v1/rooms/r1/governance/ratification', 'GET', undefined, user.cookie),
+      jsonReq(
+        '/v1/rooms/00000000-0000-4000-8000-000000000001/governance/ratification',
+        'GET',
+        undefined,
+        user.cookie,
+      ),
     );
     expect((await json<{ vote: { model_id: string } | null }>(view)).vote?.model_id).toBe(modelId);
 
     // A quorum-meeting approving vote settles to an ACTIVE agent. Casting +
     // settling go through the service (settle is scheduler-driven; no route).
     const svc = getGovernanceService();
-    await svc.castRatificationBallot('r1', vote_id, user.userId, 'approve', true);
+    await svc.castRatificationBallot(
+      '00000000-0000-4000-8000-000000000001',
+      vote_id,
+      user.userId,
+      'approve',
+      true,
+    );
     const settled = await svc.settleRatification(vote_id, 1);
     expect(settled.ok && settled.value.activated).toBe(true);
 
     // "Governed by" view shows the active agent.
     const agent = await app.request(
-      jsonReq('/v1/rooms/r1/governance/agent', 'GET', undefined, user.cookie),
+      jsonReq(
+        '/v1/rooms/00000000-0000-4000-8000-000000000001/governance/agent',
+        'GET',
+        undefined,
+        user.cookie,
+      ),
     );
     const agentBody = await json<{ active: boolean; model_id: string }>(agent);
     expect(agentBody.active).toBe(true);
@@ -149,10 +195,13 @@ describe('WS-U governance routes', () => {
   it('opens a ratification vote (steward only) and gates ballots to room members', async () => {
     const steward = await seedUserWithSession(forum.identity);
     const other = await seedUserWithSession(forum.identity);
-    await getGovernanceService().bootstrapSeat('rv', steward.userId);
+    await getGovernanceService().bootstrapSeat(
+      '00000000-0000-4000-8000-000000000002',
+      steward.userId,
+    );
     const propose = await app.request(
       jsonReq(
-        '/v1/rooms/rv/governance/models',
+        '/v1/rooms/00000000-0000-4000-8000-000000000002/governance/models',
         'POST',
         { bundle, prompt_text: 'x' },
         steward.cookie,
@@ -162,13 +211,23 @@ describe('WS-U governance routes', () => {
 
     // A non-steward cannot open the vote.
     const forbiddenOpen = await app.request(
-      jsonReq(`/v1/rooms/rv/governance/models/${modelId}/ratification`, 'POST', {}, other.cookie),
+      jsonReq(
+        `/v1/rooms/00000000-0000-4000-8000-000000000002/governance/models/${modelId}/ratification`,
+        'POST',
+        {},
+        other.cookie,
+      ),
     );
     expect(forbiddenOpen.status).toBe(403);
 
     // The steward opens it.
     const open = await app.request(
-      jsonReq(`/v1/rooms/rv/governance/models/${modelId}/ratification`, 'POST', {}, steward.cookie),
+      jsonReq(
+        `/v1/rooms/00000000-0000-4000-8000-000000000002/governance/models/${modelId}/ratification`,
+        'POST',
+        {},
+        steward.cookie,
+      ),
     );
     expect(open.status).toBe(201);
     const { vote_id } = await json<{ vote_id: string }>(open);
@@ -176,7 +235,7 @@ describe('WS-U governance routes', () => {
     // A non-member's ballot is rejected (membership-gated).
     const nonMember = await app.request(
       jsonReq(
-        `/v1/rooms/rv/governance/ratifications/${vote_id}/ballot`,
+        `/v1/rooms/00000000-0000-4000-8000-000000000002/governance/ratifications/${vote_id}/ballot`,
         'POST',
         { choice: 'approve' },
         other.cookie,
@@ -186,14 +245,14 @@ describe('WS-U governance routes', () => {
 
     // A room member (here, a community steward of the room) may vote.
     await forum.forum.rooms.addSteward({
-      roomId: 'rv',
+      roomId: '00000000-0000-4000-8000-000000000002',
       userId: other.userId,
       role: 'community_steward',
       assignedAt: new Date().toISOString(),
     });
     const ok = await app.request(
       jsonReq(
-        `/v1/rooms/rv/governance/ratifications/${vote_id}/ballot`,
+        `/v1/rooms/00000000-0000-4000-8000-000000000002/governance/ratifications/${vote_id}/ballot`,
         'POST',
         { choice: 'approve' },
         other.cookie,
@@ -218,20 +277,20 @@ describe('WS-U governance routes', () => {
       }),
     );
     const svc = getGovernanceService();
-    await svc.bootstrapSeat('re', steward.userId);
+    await svc.bootstrapSeat('00000000-0000-4000-8000-000000000008', steward.userId);
     t += 101_000; // the term has elapsed ⇒ an election can open
-    const sched = await svc.scheduleElection('re');
+    const sched = await svc.scheduleElection('00000000-0000-4000-8000-000000000008');
     const electionId = sched.ok ? sched.value : '';
     expect(electionId).not.toBe('');
 
     // `member` and `candidate` are active room members; `outsider` is not.
-    await joinRoom(forum, 're', member.userId);
-    await joinRoom(forum, 're', candidate.userId);
+    await joinRoom(forum, '00000000-0000-4000-8000-000000000008', member.userId);
+    await joinRoom(forum, '00000000-0000-4000-8000-000000000008', candidate.userId);
 
     const vote = (cookie: string, candidateUserId: string) =>
       app.request(
         jsonReq(
-          `/v1/rooms/re/elections/${electionId}/vote`,
+          `/v1/rooms/00000000-0000-4000-8000-000000000008/elections/${electionId}/vote`,
           'POST',
           { candidate_user_id: candidateUserId },
           cookie,
@@ -255,7 +314,9 @@ describe('WS-U governance routes', () => {
     let sawRateLimited = false;
     for (let i = 0; i < 130; i += 1) {
       const res = await app.request(
-        jsonReq('/v1/rooms/rlim/governance/law-packs', 'POST', { law_pack: {} }),
+        jsonReq('/v1/rooms/00000000-0000-4000-8000-000000000007/governance/law-packs', 'POST', {
+          law_pack: {},
+        }),
       );
       if (res.status === 429) {
         sawRateLimited = true;
@@ -269,9 +330,17 @@ describe('WS-U governance routes', () => {
   it('forbids a non-steward from proposing', async () => {
     const steward = await seedUserWithSession(forum.identity);
     const other = await seedUserWithSession(forum.identity);
-    await getGovernanceService().bootstrapSeat('r2', steward.userId);
+    await getGovernanceService().bootstrapSeat(
+      '00000000-0000-4000-8000-000000000003',
+      steward.userId,
+    );
     const res = await app.request(
-      jsonReq('/v1/rooms/r2/governance/models', 'POST', { bundle, prompt_text: 'x' }, other.cookie),
+      jsonReq(
+        '/v1/rooms/00000000-0000-4000-8000-000000000003/governance/models',
+        'POST',
+        { bundle, prompt_text: 'x' },
+        other.cookie,
+      ),
     );
     expect(res.status).toBe(403);
   });
@@ -280,44 +349,81 @@ describe('WS-U governance routes', () => {
     const steward = await seedUserWithSession(forum.identity);
     const admin = await seedUserWithSession(forum.identity, { admin: true });
     const plain = await seedUserWithSession(forum.identity);
-    await getGovernanceService().bootstrapSeat('rf', steward.userId);
+    await getGovernanceService().bootstrapSeat(
+      '00000000-0000-4000-8000-000000000004',
+      steward.userId,
+    );
     // Propose + (eager-eval) eligible via the routes; activate via the service's
     // internal primitive (the production path is a member vote, exercised above).
     const propose = await app.request(
       jsonReq(
-        '/v1/rooms/rf/governance/models',
+        '/v1/rooms/00000000-0000-4000-8000-000000000004/governance/models',
         'POST',
         { bundle, prompt_text: 'x' },
         steward.cookie,
       ),
     );
     const { modelId } = await json<{ modelId: string }>(propose);
-    await getGovernanceService().approveModel('rf', modelId, null, null);
+    await getGovernanceService().approveModel(
+      '00000000-0000-4000-8000-000000000004',
+      modelId,
+      null,
+      null,
+    );
 
     // A non-steward (no MFA / no role) cannot freeze the floor control.
     const forbidden = await app.request(
-      jsonReq('/v1/rooms/rf/governance/agent/freeze', 'POST', {}, plain.cookie),
+      jsonReq(
+        '/v1/rooms/00000000-0000-4000-8000-000000000004/governance/agent/freeze',
+        'POST',
+        {},
+        plain.cookie,
+      ),
     );
     expect(forbidden.status).toBe(403);
 
     // A platform steward freezes ⇒ the agent view reports a floor-paused agent.
     const freeze = await app.request(
-      jsonReq('/v1/rooms/rf/governance/agent/freeze', 'POST', {}, admin.cookie),
+      jsonReq(
+        '/v1/rooms/00000000-0000-4000-8000-000000000004/governance/agent/freeze',
+        'POST',
+        {},
+        admin.cookie,
+      ),
     );
     expect(freeze.status).toBe(200);
     const frozen = await json<{ active: boolean; frozen: boolean }>(
-      await app.request(jsonReq('/v1/rooms/rf/governance/agent', 'GET', undefined, admin.cookie)),
+      await app.request(
+        jsonReq(
+          '/v1/rooms/00000000-0000-4000-8000-000000000004/governance/agent',
+          'GET',
+          undefined,
+          admin.cookie,
+        ),
+      ),
     );
     expect(frozen.active).toBe(false);
     expect(frozen.frozen).toBe(true);
 
     // The floor restores it ⇒ active again.
     const unfreeze = await app.request(
-      jsonReq('/v1/rooms/rf/governance/agent/unfreeze', 'POST', {}, admin.cookie),
+      jsonReq(
+        '/v1/rooms/00000000-0000-4000-8000-000000000004/governance/agent/unfreeze',
+        'POST',
+        {},
+        admin.cookie,
+      ),
     );
     expect(unfreeze.status).toBe(200);
     const active = await json<{ active: boolean; frozen: boolean }>(
-      await app.request(jsonReq('/v1/rooms/rf/governance/agent', 'GET', undefined, admin.cookie)),
+      await app.request(
+        jsonReq(
+          '/v1/rooms/00000000-0000-4000-8000-000000000004/governance/agent',
+          'GET',
+          undefined,
+          admin.cookie,
+        ),
+      ),
     );
     expect(active.active).toBe(true);
     expect(active.frozen).toBe(false);
@@ -326,7 +432,12 @@ describe('WS-U governance routes', () => {
   it('returns 404 when freezing a room with no agent binding', async () => {
     const admin = await seedUserWithSession(forum.identity, { admin: true });
     const res = await app.request(
-      jsonReq('/v1/rooms/none/governance/agent/freeze', 'POST', {}, admin.cookie),
+      jsonReq(
+        '/v1/rooms/00000000-0000-4000-8000-000000000011/governance/agent/freeze',
+        'POST',
+        {},
+        admin.cookie,
+      ),
     );
     expect(res.status).toBe(404);
   });
@@ -334,7 +445,10 @@ describe('WS-U governance routes', () => {
   it('lets the steward propose a law-pack and bind it at approve; non-stewards forbidden', async () => {
     const steward = await seedUserWithSession(forum.identity);
     const other = await seedUserWithSession(forum.identity);
-    await getGovernanceService().bootstrapSeat('rl', steward.userId);
+    await getGovernanceService().bootstrapSeat(
+      '00000000-0000-4000-8000-000000000005',
+      steward.userId,
+    );
     const lawPack = {
       lawPackId: 'x',
       version: '1',
@@ -358,13 +472,23 @@ describe('WS-U governance routes', () => {
     };
     // A non-steward cannot propose the room's bounds.
     const forbidden = await app.request(
-      jsonReq('/v1/rooms/rl/governance/law-packs', 'POST', { law_pack: lawPack }, other.cookie),
+      jsonReq(
+        '/v1/rooms/00000000-0000-4000-8000-000000000005/governance/law-packs',
+        'POST',
+        { law_pack: lawPack },
+        other.cookie,
+      ),
     );
     expect(forbidden.status).toBe(403);
 
     // The steward proposes the law-pack...
     const lp = await app.request(
-      jsonReq('/v1/rooms/rl/governance/law-packs', 'POST', { law_pack: lawPack }, steward.cookie),
+      jsonReq(
+        '/v1/rooms/00000000-0000-4000-8000-000000000005/governance/law-packs',
+        'POST',
+        { law_pack: lawPack },
+        steward.cookie,
+      ),
     );
     expect(lp.status).toBe(201);
     const { lawPackId } = await json<{ lawPackId: string }>(lp);
@@ -374,14 +498,19 @@ describe('WS-U governance routes', () => {
     // model requests remove + flag; the law-pack permits only flag.
     const propose = await app.request(
       jsonReq(
-        '/v1/rooms/rl/governance/models',
+        '/v1/rooms/00000000-0000-4000-8000-000000000005/governance/models',
         'POST',
         { bundle, prompt_text: 'x' },
         steward.cookie,
       ),
     );
     const { modelId } = await json<{ modelId: string }>(propose);
-    const activated = await getGovernanceService().approveModel('rl', modelId, null, lawPackId);
+    const activated = await getGovernanceService().approveModel(
+      '00000000-0000-4000-8000-000000000005',
+      modelId,
+      null,
+      lawPackId,
+    );
     if (!activated.ok) throw new Error('activation failed');
     expect(activated.value.descriptor.granted).toContain('moderate.flag');
     expect(activated.value.descriptor.granted).not.toContain('moderate.remove');
@@ -391,7 +520,7 @@ describe('WS-U governance routes', () => {
     const steward = await seedUserWithSession(forum.identity);
     const other = await seedUserWithSession(forum.identity);
     const svc = getGovernanceService();
-    await svc.bootstrapSeat('rlaw', steward.userId);
+    await svc.bootstrapSeat('00000000-0000-4000-8000-000000000006', steward.userId);
     // A model that requests the lawmaking.summarize capability (default law-pack
     // permits it), activated via the internal primitive.
     const lawBundle = {
@@ -400,26 +529,31 @@ describe('WS-U governance routes', () => {
     };
     const propose = await app.request(
       jsonReq(
-        '/v1/rooms/rlaw/governance/models',
+        '/v1/rooms/00000000-0000-4000-8000-000000000006/governance/models',
         'POST',
         { bundle: lawBundle, prompt_text: 'x' },
         steward.cookie,
       ),
     );
     const { modelId } = await json<{ modelId: string }>(propose);
-    await svc.approveModel('rlaw', modelId, null, null);
+    await svc.approveModel('00000000-0000-4000-8000-000000000006', modelId, null, null);
 
     const proposal = { proposalId: 'p1', title: 'Adopt a digest', body: 'An opt-in digest.' };
     // A non-steward cannot trigger facilitation.
     const forbidden = await app.request(
-      jsonReq('/v1/rooms/rlaw/governance/lawmaking/summarize', 'POST', { proposal }, other.cookie),
+      jsonReq(
+        '/v1/rooms/00000000-0000-4000-8000-000000000006/governance/lawmaking/summarize',
+        'POST',
+        { proposal },
+        other.cookie,
+      ),
     );
     expect(forbidden.status).toBe(403);
 
     // The steward gets a neutral, deterministic summary.
     const res = await app.request(
       jsonReq(
-        '/v1/rooms/rlaw/governance/lawmaking/summarize',
+        '/v1/rooms/00000000-0000-4000-8000-000000000006/governance/lawmaking/summarize',
         'POST',
         { proposal },
         steward.cookie,
@@ -493,14 +627,19 @@ describe('WS-U governance routes', () => {
 
   it('returns a 404 for a download from the wrong room', async () => {
     const user = await seedUserWithSession(forum.identity);
-    await getGovernanceService().bootstrapSeat('r3', user.userId);
+    await getGovernanceService().bootstrapSeat('00000000-0000-4000-8000-000000000009', user.userId);
     const propose = await app.request(
-      jsonReq('/v1/rooms/r3/governance/models', 'POST', { bundle, prompt_text: 'x' }, user.cookie),
+      jsonReq(
+        '/v1/rooms/00000000-0000-4000-8000-000000000009/governance/models',
+        'POST',
+        { bundle, prompt_text: 'x' },
+        user.cookie,
+      ),
     );
     const { modelId } = await json<{ modelId: string }>(propose);
     const dl = await app.request(
       jsonReq(
-        `/v1/rooms/other/governance/models/${modelId}/download`,
+        `/v1/rooms/00000000-0000-4000-8000-000000000010/governance/models/${modelId}/download`,
         'GET',
         undefined,
         user.cookie,

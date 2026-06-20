@@ -433,6 +433,25 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
     });
     expect((await ratifications.getOpenForRoom(roomId))?.voteId).toBe(voteId);
 
+    // A second OPEN vote for the same room collides on the partial unique index
+    // (one-open-per-room) and returns null — the atomic concurrency guard.
+    const secondOpen = await ratifications.insert({
+      voteId: randomUUID(),
+      roomId,
+      modelId,
+      lawPackId: null,
+      status: 'open',
+      opensAt: t,
+      closesAt: t,
+      minQuorum: 1,
+      openedByUserId: stewardId,
+      tally: null,
+      outcome: null,
+      createdAt: t,
+      settledAt: null,
+    });
+    expect(secondOpen).toBeNull();
+
     const first = await ratificationBallots.cast({
       voteId,
       voterUserId: voterId,

@@ -267,6 +267,13 @@
       "when": 1781908928466,
       "tag": "0037_ws_u_model_ratification",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1781918677596,
+      "tag": "0038_ws_u_one_open_ratification",
+      "breakpoints": true
     }
   ]
 }

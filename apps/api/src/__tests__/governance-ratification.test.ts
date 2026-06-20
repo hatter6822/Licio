@@ -227,4 +227,17 @@ describe('GovernanceService ratification', () => {
     const res = await svc.openRatification('rA', 's', mA, lawPackId);
     expect(!res.ok && res.code).toBe('invalid_law_pack');
   });
+
+  it('allows at most ONE open ratification per room — the atomic insert guard', async () => {
+    const { svc } = make();
+    await svc.bootstrapSeat('r', 's');
+    const m1 = await proposeEligible(svc, 'r', 's');
+    const m2 = await proposeEligible(svc, 'r', 's', { bundleId: 'b2', name: 'n2' });
+    expect((await svc.openRatification('r', 's', m1, null)).ok).toBe(true);
+    // A second open — even for a DIFFERENT model — collides on the one-open-
+    // per-room guard (the insert returns null), so no second open vote is created.
+    const second = await svc.openRatification('r', 's', m2, null);
+    expect(second.ok).toBe(false);
+    expect(!second.ok && second.code).toBe('vote_open');
+  });
 });
