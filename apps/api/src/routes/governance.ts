@@ -55,6 +55,9 @@ const ratificationOpenBodySchema = z
   .strict();
 const ballotBodySchema = z.object({ choice: z.enum(['approve', 'reject']) }).strict();
 const lawPackBodySchema = z.object({ law_pack: z.unknown() }).strict();
+// The proposal is validated by the service (proposalInputSchema), mirroring the
+// `bundle: z.unknown()` propose contract.
+const lawmakingSummaryBodySchema = z.object({ proposal: z.unknown() }).strict();
 
 export function createGovernanceRoutes() {
   // Identity-free per-endpoint cost ceilings (SPEC §19.1): governance writes are
@@ -272,6 +275,37 @@ export function createGovernanceRoutes() {
             );
           }
           return c.json({ lawPackId: result.value.lawPackId }, 201);
+        },
+      )
+      // --- Lawmaking facilitation (Stage 4) -----------------------------------
+      // The elected steward asks the room's agent to produce a NEUTRAL,
+      // deterministic summary of a proposal — performed ONLY if the community
+      // granted the agent `lawmaking.summarize` (else 409 no_capability). The
+      // agent has no vote/tally capability, so it can never compute an outcome.
+      .post(
+        '/rooms/:roomId/governance/lawmaking/summarize',
+        stewardWriteLimit,
+        authMiddleware(),
+        zValidator('json', lawmakingSummaryBodySchema),
+        async (c) => {
+          const auth = c.get('auth');
+          if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
+          const roomId = c.req.param('roomId');
+          const svc = getGovernanceService();
+          const seat = await svc.getSeat(roomId);
+          if (!seat || seat.holderUserId !== auth.userId) {
+            return c.json(
+              deny('not_steward', 'Only the elected room steward may facilitate.'),
+              403,
+            );
+          }
+          const result = await svc.facilitateSummary(roomId, c.req.valid('json').proposal);
+          if (!result.ok) {
+            const status =
+              result.code === 'no_agent' || result.code === 'no_capability' ? 409 : 422;
+            return c.json(deny(result.code, result.message), status);
+          }
+          return c.json({ summary: result.value });
         },
       )
       // --- "Governed by" agent view ---------------------------------------

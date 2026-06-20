@@ -10,7 +10,9 @@
 // can freeze the agent at any time.
 
 import {
+  type AttestableResult,
   actionSeverity,
+  attestOutcome,
   type Capability,
   type CapabilityDescriptor,
   deriveCapabilityDescriptor,
@@ -25,12 +27,18 @@ import {
   type ModerationAction,
   type ModerationContext,
   type ModerationDecision,
+  type OutcomeAttestation,
+  type ProposalSummary,
+  proposalInputSchema,
   type RatificationChoice,
+  scheduleProposalVote,
+  summarizeProposal,
   type TreasuryHistoryEntry,
   tallyElection,
   tallyRatification,
   treasuryActionSchema,
   type Verdict,
+  type VoteSchedule,
 } from '@licio/governance';
 import type { GovernanceConfig } from './config.js';
 import type {
@@ -579,6 +587,109 @@ export class GovernanceService {
   async reactivateAgent(roomId: string): Promise<GovernanceResult<{ reactivated: boolean }>> {
     const updated = await this.deps.stores.bindings.setActive(roomId, true);
     return ok({ reactivated: updated !== null });
+  }
+
+  // --- Stage 4: lawmaking facilitation (capability-gated, deterministic) ----
+  //
+  // The agent may FACILITATE community lawmaking within its granted capabilities:
+  // summarise a proposal neutrally, schedule its vote window, and attest a
+  // PLATFORM-COMPUTED outcome. It has NO vote/tally/weight capability, so it can
+  // never compute or bias a result (ADR-8). Every facilitation is capability-gated
+  // and logged with the provenance triple; an ungranted capability is refused
+  // (never silently performed). The proposal data is supplied by the caller (the
+  // WS-M proposal lifecycle wires these once it lands).
+
+  /** Produce a neutral proposal summary (requires `lawmaking.summarize`). */
+  async facilitateSummary(
+    roomId: string,
+    proposalInput: unknown,
+  ): Promise<GovernanceResult<ProposalSummary>> {
+    const gate = await this.requireFacilitation(roomId, 'lawmaking.summarize');
+    if (!gate.ok) return gate;
+    const parsed = proposalInputSchema.safeParse(proposalInput);
+    if (!parsed.success) return err('invalid_proposal', 'The proposal is invalid.');
+    const summary = summarizeProposal(parsed.data);
+    await this.logFacilitation(
+      gate.value,
+      'lawmaking.summarize',
+      parsed.data.proposalId,
+      summary.summary,
+    );
+    return ok(summary);
+  }
+
+  /** Schedule a proposal vote window (requires `lawmaking.schedule`). */
+  async facilitateSchedule(
+    roomId: string,
+    proposalId: string,
+  ): Promise<GovernanceResult<VoteSchedule>> {
+    const gate = await this.requireFacilitation(roomId, 'lawmaking.schedule');
+    if (!gate.ok) return gate;
+    const schedule = scheduleProposalVote(
+      proposalId,
+      this.deps.now().getTime(),
+      this.deps.config.electionWindowSeconds,
+    );
+    await this.logFacilitation(
+      gate.value,
+      'lawmaking.schedule',
+      proposalId,
+      `Vote window ${schedule.opensAt} → ${schedule.closesAt}.`,
+    );
+    return ok(schedule);
+  }
+
+  /**
+   * Attest a PLATFORM-COMPUTED vote outcome (requires `lawmaking.attest`). The
+   * caller passes the settled tally (from `tallyElection`/`tallyRatification`);
+   * the agent only restates it — it cannot compute or weight it (ADR-8).
+   */
+  async facilitateAttest(
+    roomId: string,
+    proposalId: string,
+    result: AttestableResult,
+  ): Promise<GovernanceResult<OutcomeAttestation>> {
+    const gate = await this.requireFacilitation(roomId, 'lawmaking.attest');
+    if (!gate.ok) return gate;
+    const attestation = attestOutcome(proposalId, result);
+    await this.logFacilitation(gate.value, 'lawmaking.attest', proposalId, attestation.statement);
+    return ok(attestation);
+  }
+
+  /** Resolve the active binding and assert it carries the lawmaking capability. */
+  private async requireFacilitation(
+    roomId: string,
+    capability: Capability,
+  ): Promise<GovernanceResult<BindingRecord>> {
+    const binding = await this.deps.stores.bindings.get(roomId);
+    if (binding === null || !binding.active) {
+      return err('no_agent', 'No active agent for the room.');
+    }
+    if (!hasCapability(binding.capabilityDescriptor, capability)) {
+      return err('no_capability', `The agent lacks the ${capability} capability.`);
+    }
+    return ok(binding);
+  }
+
+  /** Append a facilitation action to the agent audit log (the provenance triple). */
+  private async logFacilitation(
+    binding: BindingRecord,
+    actionType: string,
+    subjectRef: string,
+    statementOfReasons: string,
+  ): Promise<void> {
+    await this.deps.stores.agentActions.append({
+      actionId: this.deps.uuid(),
+      roomId: binding.roomId,
+      bindingModelId: binding.modelId,
+      promptHash: this.deps.digest(`${binding.modelId}:${binding.promptId}`),
+      actionType,
+      subjectRef,
+      lawPackRuleRef: null,
+      statementOfReasons,
+      reversible: true,
+      createdAt: this.iso(),
+    });
   }
 
   // --- read surface (in-room transparency) ---------------------------------

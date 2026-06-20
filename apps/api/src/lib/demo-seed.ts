@@ -2079,7 +2079,9 @@ export async function seedGovernanceDemo(
     ],
     promptTemplates: { summary: 'Summarize the discussion neutrally and briefly.' },
     config: { summaryStyle: 'neutral_brief', explanationVerbosity: 'standard' },
-    requestedCapabilities: ['moderate.flag'],
+    // moderation + the Stage 4 lawmaking summary (both permitted by the default
+    // law-pack) so the dev "governed by" panel shows real facilitation activity.
+    requestedCapabilities: ['moderate.flag', 'lawmaking.summarize'],
   };
   const proposed = await governance.proposeModel(
     GOVERNANCE_DEMO_ROOM_ID,
@@ -2117,6 +2119,14 @@ export async function seedGovernanceDemo(
       subjectRef,
     );
   }
+  // A Stage 4 lawmaking facilitation (a neutral proposal summary) so the panel
+  // also shows the agent's lawmaking activity — capability-gated, deterministic.
+  await governance.facilitateSummary(GOVERNANCE_DEMO_ROOM_ID, {
+    proposalId: 'demo-proposal-1',
+    title: 'Adopt a weekly community digest',
+    body: 'Members propose an opt-in weekly digest summarising the most-discussed threads.',
+    options: ['Adopt', 'Reject'],
+  });
   // A SECOND eligible model put to an OPEN member ratification vote, so the dev
   // sees the member voting surface alongside the already-active agent (a steward
   // proposing an upgrade the community is currently ratifying).

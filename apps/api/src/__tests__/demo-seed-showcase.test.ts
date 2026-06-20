@@ -357,13 +357,15 @@ describe('demo seed — the WS-U governed-room showcase', () => {
     const binding = await governance.getBinding(GOVERNANCE_DEMO_ROOM_ID);
     expect(binding?.active).toBe(true);
     expect(binding?.capabilityDescriptor.granted).toContain('moderate.flag');
-    // A sample agent action surfaces in the "governed by" panel, referencing a
-    // REAL contribution in the room (not a synthetic id).
+    // Agent actions surface in the "governed by" panel: a moderation hold against
+    // a REAL contribution (not a synthetic id) and a Stage 4 lawmaking summary.
     const actions = await governance.recentAgentActions(GOVERNANCE_DEMO_ROOM_ID, 10);
-    expect(actions[0]?.actionType).toBe('moderate.flag_for_review');
-    const subjectRef = actions[0]?.subjectRef ?? '';
+    const moderation = actions.find((a) => a.actionType === 'moderate.flag_for_review');
+    expect(moderation).toBeDefined();
+    const subjectRef = moderation?.subjectRef ?? '';
     expect(subjectRef).not.toContain(':demo-action');
     expect(await fx.forum.contributions.getById(subjectRef)).not.toBeNull();
+    expect(actions.some((a) => a.actionType === 'lawmaking.summarize')).toBe(true);
     // An open ratification vote surfaces the member voting UI (an upgrade model).
     const openVote = await governance.getOpenRatification(GOVERNANCE_DEMO_ROOM_ID);
     expect(openVote).not.toBeNull();

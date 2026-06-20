@@ -387,6 +387,49 @@ describe('WS-U governance routes', () => {
     expect(activated.value.descriptor.granted).not.toContain('moderate.remove');
   });
 
+  it('lets the steward ask the agent to summarise a proposal (lawmaking.summarize)', async () => {
+    const steward = await seedUserWithSession(forum.identity);
+    const other = await seedUserWithSession(forum.identity);
+    const svc = getGovernanceService();
+    await svc.bootstrapSeat('rlaw', steward.userId);
+    // A model that requests the lawmaking.summarize capability (default law-pack
+    // permits it), activated via the internal primitive.
+    const lawBundle = {
+      ...bundle,
+      requestedCapabilities: ['moderate.flag', 'lawmaking.summarize'],
+    };
+    const propose = await app.request(
+      jsonReq(
+        '/v1/rooms/rlaw/governance/models',
+        'POST',
+        { bundle: lawBundle, prompt_text: 'x' },
+        steward.cookie,
+      ),
+    );
+    const { modelId } = await json<{ modelId: string }>(propose);
+    await svc.approveModel('rlaw', modelId, null, null);
+
+    const proposal = { proposalId: 'p1', title: 'Adopt a digest', body: 'An opt-in digest.' };
+    // A non-steward cannot trigger facilitation.
+    const forbidden = await app.request(
+      jsonReq('/v1/rooms/rlaw/governance/lawmaking/summarize', 'POST', { proposal }, other.cookie),
+    );
+    expect(forbidden.status).toBe(403);
+
+    // The steward gets a neutral, deterministic summary.
+    const res = await app.request(
+      jsonReq(
+        '/v1/rooms/rlaw/governance/lawmaking/summarize',
+        'POST',
+        { proposal },
+        steward.cookie,
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body2 = await json<{ summary: { proposal_id?: string; summary: string } }>(res);
+    expect(body2.summary.summary).toContain('Adopt a digest');
+  });
+
   it('returns a 404 for a download from the wrong room', async () => {
     const user = await seedUserWithSession(forum.identity);
     await getGovernanceService().bootstrapSeat('r3', user.userId);
