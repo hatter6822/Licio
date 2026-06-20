@@ -49,10 +49,14 @@ The WS-R.12.1a/b/c server binding is shipped **in-memory** in
 `apps/api/src/lcap/server-ingest.ts` (`LcapIngestServer` — a CID-verified
 content-addressed store, the per-room `RoomLog` acceptance log, authoritative
 idempotency by `record_cid`, server-side device-fork detection over the pure
-`ingestRecord`, and `commitBatch` — ordered batch ingestion driven by the §24.4
-`resolveIngestionOrder` resolver: parents/certs/capabilities before children,
-absent dependencies quarantined with precise wants, dependency cycles rejected),
-and graph-guarded before any expansion by the §27.2 `checkDependencyGraph`
+`ingestRecord`, **server-computed validation** (`validateContribution` runs the
+same `validate()` the client uses over registered identity state — device
+certificates, room capabilities, account/room authority keys, and revocations —
+so a verdict is never trusted from the client), and `commitBatch` — ordered batch
+ingestion driven by the §24.4 `resolveIngestionOrder` resolver: parents/certs/
+capabilities before children, absent dependencies quarantined with precise wants,
+dependency cycles rejected), and graph-guarded before any expansion by the §27.2
+`checkDependencyGraph`
 (WS-R.14.2 — cycle/fan-out/depth/duplicate-dependency/private-in-public/unknown-
 critical-field detectors, each mapped to a §16.11 wire rejection code, with the
 whole-batch node-count cap checked first so the guard cannot itself be a DoS
@@ -182,7 +186,7 @@ is a later card (the package is already runtime-agnostic via `runtime.ts`).
 | WS-R.9 — Merkle / checkpoint / inclusion / consistency / witness | 9.2 – 9.4 | **Shipped** (9.1 server-append logic core; DB binding in WS-R.12) |
 | WS-R.10 — liveness, receipts, durable outbox | 10.1 – 10.3 | **Shipped** (IndexedDB binding in WS-R.11) |
 | WS-R.13 — conflict dispatch + visible-thread projection | 13.1 – 13.2 | **Shipped** |
-| WS-R.12 — server ingestion | 12.1 | **Decision core + §24.4 resolver + in-memory binding shipped** (`ingestRecord`, `resolveIngestionOrder`; `apps/api/src/lcap` `LcapIngestServer` incl. `commitBatch`); Postgres schema + Hono routes (12.2/12.4) = I/O |
+| WS-R.12 — server ingestion | 12.1 | **Decision core + §24.4 resolver + server-computed validation + in-memory binding shipped** (`ingestRecord`, `resolveIngestionOrder`, `validate`; `apps/api/src/lcap` `LcapIngestServer` incl. `validateContribution`/`commitBatch`); Hono routes + Postgres schema (12.4/12.2) = I/O |
 | WS-R.14 — DoS controls | 14.2 | **Malicious-graph guard shipped** (`checkDependencyGraph`, §27.2; wired into `commitBatch`); resource-cap centralization (14.1) + the rest = follow-up |
 | WS-R.11 — IndexedDB store | — | Planned (I/O integration) |
 | WS-R.15/R.16/R.17/R.18 — transports, encryption envelope, client UI, simulator | — | Planned |
