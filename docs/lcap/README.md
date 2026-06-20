@@ -12,10 +12,37 @@ LCAP is a delay-tolerant, content-addressed, signed synchronization protocol tha
 lets Licio content stay creatable, verifiable, transferable, and reconcilable
 under intermittent connectivity, hostile networks, and incomplete trust. The full
 workstream is large (104 cards across WS-R.0 → WS-R.18). **This cut ships the
-WS-R.0 protocol foundation** — the `@licio/lcap` record + trust-plane core that
-every later card builds on. The sync plane, transport profiles, server/web
-integration, packfiles, lane scheduler, and the WS-S private-rooms plane are
-**not yet started** (see "Status" below).
+entire pure-protocol core of WS-R** as the zero-dependency `@licio/lcap` package
+— the record, trust, and sync-decision planes implemented as deterministic,
+I/O-free, exhaustively-tested logic:
+
+- **WS-R.0** foundations (deterministic CBOR / CIDs / COSE-ES256 proofs / schemas);
+- **WS-R.1** identity (device certs, capabilities, the signing chain, revocation,
+  the §18.3 steps-6-11 identity-chain validator);
+- **WS-R.2** the record graph (contribution mapping, edit/tombstone projection,
+  display ordering, device-fork detection);
+- **WS-R.3** blocks, fixed-size chunking + reassembly, attachment laziness, and
+  Compression-Streams gzip/deflate with bomb caps;
+- **WS-R.4** the packfile / `.licio-bundle` format (streaming writer/reader,
+  partial import + quarantine, bundle manifest);
+- **WS-R.5** the anti-starvation lane scheduler (byte reservations, DRR, the
+  clamped finite score) + the `check:lcap-scheduler` CI gate;
+- **WS-R.8** trust projection — the single `validate(record)` entry point over the
+  §18.2 state lattice;
+- **WS-R.9** the RFC 9162 Merkle / checkpoint plane (inclusion + consistency
+  proofs, witnesses, fork evidence);
+- **WS-R.10** the liveness model + receipts + durable-outbox logic;
+- **WS-R.13** conflict-table dispatch + the trust/safety-aware visible-thread
+  projection.
+
+The remaining WS-R cards are predominantly **I/O integration** — the `lcap_v2`
+IndexedDB layer (WS-R.11), the server ingestion/reconciliation routes + DB schema
+(WS-R.12), the sync-protocol wire orchestration (WS-R.6/R.7), the DoS/privacy
+controls (WS-R.14), the transport profiles (WS-R.15), the WS-S encryption-envelope
+seam (WS-R.16), the client surface (WS-R.17), and the network simulator
+(WS-R.18) — plus the entire WS-S private-rooms plane.  Those bind this pure core
+to Postgres / IndexedDB / Hono / the browser and are **not yet started** (see
+"Status" below).
 
 ## What is implemented (WS-R.0 — `packages/lcap`)
 
@@ -66,26 +93,42 @@ packages/lcap/
 ├── tsconfig.json                -- strict, composite; references ../shared
 ├── vitest.config.ts             -- node project, reuses vitest.shared
 └── src/
-    ├── index.ts                 -- public surface (cbor / cid / cose / schemas)
+    ├── index.ts                 -- public surface (all sub-areas re-exported)
     ├── runtime.ts               -- WebCrypto adapter + BufferSource helper (no node: leak)
+    ├── priority.ts              -- the §15.1.1 priority ↔ class ↔ lane SSOT
     ├── cbor/                     -- LDC deterministic CBOR (encode, decode, errors, types)
-    ├── cid/                      -- CID construction + RFC 4648 base32
+    ├── cid/                      -- CID construction + RFC 4648 base32 + sha256
     ├── cose/                     -- aad, ecdsa (low-S), keys, suites, sign1 (build + verify)
-    ├── schemas/                  -- strict zod records/proofs + the LDC codec pairing
+    ├── schemas/                  -- strict zod records/proofs/pack/checkpoint/receipt + the LDC codec
+    ├── identity/                 -- cert, capability, sequence chain, revocation, chain validator
+    ├── records/                  -- contribution mapping, edit/tombstone projection, fork detection
+    ├── block/                    -- descriptor, fixed-size chunking, attachment split, compression
+    ├── pack/                     -- uvarint, streaming writer/reader, partial import, manifest
+    ├── scheduler/               -- reservations, candidate closure, DRR allocator, clamped score
+    ├── checkpoint/              -- RFC 9162 merkle, room log, checkpoint, inclusion/consistency, witness
+    ├── validate/                -- the §18 trust-state lattice + the single validate() entry point
+    ├── liveness/                -- liveness state machine, receipts, durable-outbox logic
+    ├── conflict/                -- §25.1 conflict dispatch + visible-thread projection
     ├── test-vectors/             -- normative golden corpus (cbor/cid/sign1 .json)
     └── __tests__/                -- unit + conformance-replay + determinism property suites
 ```
 
 ## Testing
 
-`pnpm --filter @licio/lcap test` runs the suite standalone (10 files, 83 tests at
-the time of writing): per-major-type byte assertions and the §9.1.5 integer table,
-the full decode rejection matrix with offsets, CID known-answer grounding
-(SHA-256 of "" and "abc"), the ES256 low-S boundary matrix and the malleability
-twin, COSE_Sign1 multi-proof identity and the six-step verifier matrix, strict
-schema rejection + version routing, the conformance-corpus replay, and the
-P1/P2/P3 determinism properties. Package coverage is comfortably above the 80%
-global gate.
+`pnpm --filter @licio/lcap test` runs the suite standalone (≈18 files, ~166 tests
+at the time of writing). Highlights: per-major-type CBOR byte assertions + the
+§9.1.5 integer table + the full decode rejection matrix; CID known-answer
+grounding (SHA-256 of "" and "abc"); the ES256 low-S boundary matrix and the
+malleability twin; the COSE_Sign1 six-step verifier matrix; the identity-chain
+accept/quarantine/reject/revoke matrix; the arrival-order-independent thread
+projection; chunk reassembly with corrupt-chunk localization and a
+compression-bomb abort; the packfile round-trip + cap + tamper matrix; the
+**exhaustive RFC 9162 Merkle** inclusion (all leaves, sizes 1-9) and consistency
+(all first/second pairs) proofs with fork/rewrite detection; the full
+`validate()` trust-projection staged matrix incl. the no-transport-trust
+property; and the scheduler's anti-starvation invariants (also enforced by the
+named `pnpm check:lcap-scheduler` CI gate over adversarial fixtures). Package
+coverage is comfortably above the 80% global gate.
 
 Browser↔Node crypto-interop vector replay (the gated WS-R.0.5b leg) is wired
 through the same committed vectors; a Playwright/WebCrypto cross-runtime harness
@@ -95,12 +138,22 @@ is a later card (the package is already runtime-agnostic via `runtime.ts`).
 
 | Area | Cards | Status |
 |---|---|---|
-| WS-R.0 — foundations (encoding, CID, COSE/ECDSA, schemas) | 0.1 – 0.8 | **Shipped** (`packages/lcap`) |
-| WS-R.1 — identity, certificates, capabilities, revocations | 1.1 – 1.5 | Planned (schemas exist; consumption/validation services not yet) |
-| WS-R.2 – R.18 — record graph, blocks, packs, scheduler, sync, trust projection, transports, client/server integration | — | Planned |
+| WS-R.0 — foundations (encoding, CID, COSE/ECDSA, schemas) | 0.1 – 0.8 | **Shipped** |
+| WS-R.1 — identity, certificates, capabilities, revocations, chain validator | 1.1 – 1.5 | **Shipped** |
+| WS-R.2 — event records, projection, ordering, fork detection | 2.1 – 2.4 | **Shipped** |
+| WS-R.3 — blocks, chunking, attachment laziness, compression | 3.1 – 3.4 | **Shipped** |
+| WS-R.4 — packfile / `.licio-bundle` (writer, reader, import, manifest) | 4.1 – 4.4 | **Shipped** |
+| WS-R.5 — lane scheduler + `check:lcap-scheduler` gate | 5.1 – 5.4 | **Shipped** |
+| WS-R.8 — trust projection (`validate`) | 8.1 – 8.3 | **Shipped** |
+| WS-R.9 — Merkle / checkpoint / inclusion / consistency / witness | 9.2 – 9.4 | **Shipped** (9.1 server-append logic core; DB binding in WS-R.12) |
+| WS-R.10 — liveness, receipts, durable outbox | 10.1 – 10.3 | **Shipped** (IndexedDB binding in WS-R.11) |
+| WS-R.13 — conflict dispatch + visible-thread projection | 13.1 – 13.2 | **Shipped** |
+| WS-R.6/R.7 — sync protocol + reconciliation | — | Planned (closure resolver consumed by R.5.2a; wire orchestration not yet) |
+| WS-R.11/R.12/R.14 — IndexedDB, server ingestion + DB schema, DoS controls | — | Planned (I/O integration) |
+| WS-R.15/R.16/R.17/R.18 — transports, encryption envelope, client UI, simulator | — | Planned |
 | WS-S — Private P2P Rooms (E2EE) | all | Planned (`docs/PRIVATE_SPEC.md`) |
 
-The next card up the dependency graph is **WS-R.1** (the identity chain:
-device-certificate authority proofs, capability consumption + the device-sequence
-hash chain, revocation scheduling, and `validateIdentityChain`), which consumes
-the WS-R.0 primitives directly.
+The pure-protocol core is complete; the next slices bind it to infrastructure —
+the `lcap_v2` IndexedDB store (WS-R.11), the Hono `/api/lcap/v2/*` ingestion +
+reconciliation routes over the `packages/db/src/schema/lcap.ts` schema
+(WS-R.12), and the sync pulse/exchange wire orchestration (WS-R.6/R.7).

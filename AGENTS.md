@@ -279,13 +279,31 @@ are tracked in `docs/ai-governance/README.md`.  Workstreams WS-L
 through WS-P are planned (planning documents exist under `docs/planning/`;
 implementation not yet started, beyond the WS-O.4.5 adversarial suite and that
 E2E-harness seed).  The extension workstream **WS-R** (Decentralized Data Plane,
-Part I — offline content availability / LCAP v0.2) has begun: its **WS-R.0
-protocol foundation** is shipped as the new `@licio/lcap` package — a
-zero-dependency core implementing LCAP's deterministic CBOR (LDC), content-
-addressed CIDs, COSE_Sign1 detached ES256 low-S proofs, downgrade-resistant
-suite agility, and strict closed-schema records/proofs, all conformance-vector-
-pinned (`docs/lcap/README.md`); WS-R.1–18 and the WS-S private-rooms plane remain
-planned.  See "Implementation roadmap" below for the full status table.
+Part I — offline content availability / LCAP v0.2) has shipped its **entire
+pure-protocol core** as the new zero-dependency `@licio/lcap` package: the
+deterministic CBOR (LDC) codec, content-addressed CIDs, COSE_Sign1 detached
+ES256 low-S proofs with downgrade-resistant suite agility, and strict
+closed-schema records/proofs (WS-R.0); the identity chain — device certificates,
+room capabilities, revocation, and the §18.3 steps-6-11 chain validator (WS-R.1);
+the record graph — contribution mapping, append-only edit/tombstone projection,
+display ordering, device-fork detection (WS-R.2); blocks, fixed-size
+chunking/reassembly, attachment laziness, and Compression-Streams gzip/deflate
+with bomb caps (WS-R.3); the packfile / `.licio-bundle` format — streaming
+writer/reader, partial import + quarantine, signed manifest (WS-R.4); the
+anti-starvation lane scheduler (byte reservations, deficit-round-robin, the
+clamped finite score) behind the `check:lcap-scheduler` CI gate (WS-R.5); the
+single `validate()` trust-projection entry point over the §18.2 state lattice
+(WS-R.8); the RFC 9162 Merkle / checkpoint plane — inclusion + consistency
+proofs, witnesses, fork evidence (WS-R.9); the liveness / receipts /
+durable-outbox model (WS-R.10); and the §25.1 conflict-table dispatch + the
+trust/safety-aware visible-thread projection (WS-R.13) — all I/O-free,
+exhaustively tested, and conformance-vector-pinned (`docs/lcap/README.md`).  The
+remaining WS-R cards are predominantly **I/O integration** (the `lcap_v2`
+IndexedDB store, the server ingestion/reconciliation routes + DB schema, the sync
+wire orchestration, the DoS/privacy controls, the transport profiles, the client
+surface, and the network simulator); they, and the entire WS-S private-rooms
+(E2EE) plane, remain planned.  See "Implementation roadmap" below for the full
+status table.
 
 ## Build and run
 
@@ -313,6 +331,7 @@ pnpm check:workspace-deps           # workspace boundary enforcement (pkg.json +
 pnpm check:policy                   # doctrine/policy document validation
 pnpm check:neutrality               # the ten WS-I.3 ranking-neutrality tests
 pnpm check:adversarial              # the WS-O.4.5 ensemble adversarial suite
+pnpm check:lcap-scheduler           # the WS-R.5.4 LCAP lane anti-starvation gate
 pnpm check:no-applause              # no likes/votes/karma/reactions in components + routes
 pnpm check:no-raw-egress            # no raw attention traces leaving the browser
 pnpm check:sw                       # SW security scan (run after build)
@@ -859,11 +878,21 @@ licio/
 │           └── __tests__/               --   ~13 deterministic unit/property suites
 │   └── lcap/                    -- WS-R LCAP v0.2 protocol core (no I/O; zero npm deps in
 │       └── src/                 --   the codec/CID/COSE core; browser-safe; NEVER @licio/db)
-│           ├── runtime.ts              --   WebCrypto adapter (no node: import leak)
+│           ├── runtime.ts              --   WebCrypto adapter + BufferSource helper (no node: leak)
+│           ├── priority.ts             --   §15.1.1 priority ↔ class ↔ lane SSOT
 │           ├── cbor/                   --   LDC deterministic CBOR (encode/decode/errors/types)
-│           ├── cid/                    --   §9.2 CID construction + RFC 4648 base32
+│           ├── cid/                    --   §9.2 CID construction + RFC 4648 base32 + sha256
 │           ├── cose/                   --   aad, ecdsa (low-S), keys, suites, sign1 (COSE_Sign1)
-│           ├── schemas/                --   strict zod records/proofs + LDC codec pairing
+│           ├── schemas/                --   strict zod records/proofs/pack/checkpoint/receipt + LDC codec
+│           ├── identity/               --   cert, capability, sequence chain, revocation, chain validator
+│           ├── records/                --   contribution mapping, edit/tombstone projection, fork detection
+│           ├── block/                  --   descriptor, fixed-size chunking, attachment split, compression
+│           ├── pack/                   --   uvarint, streaming writer/reader, partial import, manifest
+│           ├── scheduler/              --   reservations, candidate closure, DRR allocator, clamped score
+│           ├── checkpoint/             --   RFC 9162 merkle, room log, inclusion/consistency, witness
+│           ├── validate/               --   §18 trust-state lattice + the single validate() entry point
+│           ├── liveness/               --   liveness state machine, receipts, durable-outbox logic
+│           ├── conflict/               --   §25.1 conflict dispatch + visible-thread projection
 │           ├── test-vectors/           --   normative golden corpus (cbor/cid/sign1 .json)
 │           └── __tests__/              --   unit + conformance-replay + determinism properties
 ├── scripts/                     -- build validation and security gates
@@ -1356,7 +1385,7 @@ Status:
 | WS-O | Security and reliability | Planned (WS-O.4.5 adversarial hardening shipped) |
 | WS-P | Experimentation and launch | Planned |
 | WS-Q | Content–room ownership and visibility | Complete |
-| WS-R | Offline content availability (LCAP v0.2) | In progress (extension; `docs/OFFLINE_SPEC.md`) — **WS-R.0 protocol foundation (`@licio/lcap`) shipped**: deterministic CBOR (LDC), CID construction, COSE_Sign1 detached ES256 low-S proofs, downgrade-resistant suite agility, and strict closed-schema records/proofs, all conformance-vector-pinned (`docs/lcap/README.md`); WS-R.1–18 planned |
+| WS-R | Offline content availability (LCAP v0.2) | In progress (extension; `docs/OFFLINE_SPEC.md`) — **pure-protocol core (`@licio/lcap`) shipped**: WS-R.0 foundations (deterministic CBOR/LDC, CIDs, COSE_Sign1 ES256 low-S proofs, suite agility, closed-schema records), WS-R.1 identity chain (§18.3 validator), WS-R.2 record graph + fork detection, WS-R.3 blocks/chunking/compression, WS-R.4 packfile/`.licio-bundle`, WS-R.5 lane scheduler + `check:lcap-scheduler` gate, WS-R.8 `validate()` trust projection, WS-R.9 RFC 9162 Merkle/checkpoint, WS-R.10 liveness/receipts/outbox, WS-R.13 conflict dispatch — all conformance-vector-pinned (`docs/lcap/README.md`); the remaining I/O-integration cards (WS-R.6/7/11/12/14/15/16/17/18) planned |
 | WS-S | Private P2P rooms (E2EE) | Planned (extension; `docs/PRIVATE_SPEC.md`) |
 | WS-T | Conversation as comments | Complete |
 | WS-U | AI-governed rooms (redesign) | Doctrine ratified (Stage 0) + runtime Stages 1-4 & 5-core shipped: the `@licio/governance` pure domain (policy DSL, proof-carrying kernel, capabilities, elections, member ratification, lawmaking facilitation), the `knomosis` schema + migrations `0035`–`0038` (isolation-proven), the `GovernanceService` (member-gated/law-pack-driven seat elections, model admission + member ratification vote, bounded moderation agent with real author-history + author statement-of-reasons notices, deterministic lawmaking facilitation, kernel-backed treasury), and the rate-limited, uuid-validated, room-content-bar-gated `/v1/rooms/*` governance + ratification + lawmaking routes (ballots room-bound + close-time-enforced; one-open-ratification atomic); residuals (the WS-M lawmaking trigger + on-chain election mode, the remaining web surfaces, gated Drizzle adapters) tracked in `docs/governance/README.md` |
@@ -1517,7 +1546,7 @@ file counts at current state:
 | packages/ranking | ~7 (denylist + versioned-artifact pinning, strict schemas, §5.5 profile fuzzing + baseline weights, §5.4 arithmetic, penalties/constraints incl. tie enforcement, dedup/balancing, templates + x-pseudo localization, pipeline determinism, replay diff) | node | `pnpm --filter @licio/ranking test` |
 | packages/ai-governance | ~13 (the prohibited-use guard + §24.5 matrix, the upgrade-only label ladder, the canonical inventory + risk assessments, the bias-audit math (two-proportion z-test + small-cohort), hallucination/safety/red-team, the harness selection/decision/reproducibility, the §24.3 summary-quality constraints + renderer, accuracy, canonical JSON, and the schema refinements) | node | `pnpm --filter @licio/ai-governance test` |
 | packages/governance | ~5 (WS-U AI-governed-rooms domain: the moderation policy DSL + interpreter, the proof-carrying treasury kernel + investment bands, the capability model + derivation (floor-reserved structural disjointness), the quorum-gated fail-safe election tally, and the canonical-JSON content addressing) | node | `pnpm --filter @licio/governance test` |
-| packages/lcap | ~10 (WS-R LCAP v0.2 protocol core: the LDC deterministic-CBOR encoder/decoder + the §9.1.5 integer table + the full decode rejection matrix, CID construction (SHA-256 known-answer grounded) + RFC 4648 base32, ES256 low-S + the malleability-twin defense, COSE_Sign1 build/verify + the §10.2.4 six-step matrix, device-key/COSE_Key round-trip, suite agility/downgrade, strict closed-schema records/proofs + LDC codec pairing, the conformance-corpus replay, and the P1/P2/P3 determinism properties) | node | `pnpm --filter @licio/lcap test` |
+| packages/lcap | ~20 (WS-R LCAP v0.2 pure-protocol core: the LDC deterministic-CBOR encoder/decoder + the §9.1.5 integer table + the full decode rejection matrix, CID construction (SHA-256 known-answer grounded) + RFC 4648 base32, ES256 low-S + the malleability-twin defense, COSE_Sign1 build/verify + the §10.2.4 six-step matrix, device-key/COSE_Key round-trip, suite agility/downgrade, strict closed-schema records/proofs + LDC codec pairing, the §18.3 identity-chain accept/quarantine/reject/revoke matrix, arrival-order-independent record projection + fork detection, blocks/chunk reassembly + compression-bomb abort, the packfile round-trip/cap/tamper matrix, the exhaustive RFC 9162 Merkle inclusion/consistency proofs, the `validate()` trust-projection staged matrix, liveness/receipts, conflict dispatch, the conformance-corpus replay, and the P1/P2/P3 determinism properties) | node | `pnpm --filter @licio/lcap test` |
 | scripts | ~4 | node | via root `pnpm test` (policy project) |
 
 WS-D, WS-E, WS-F, WS-G, WS-H, and WS-I add **gated** integration tests
@@ -1554,7 +1583,8 @@ production app).  Both run in CI's E2E job.
 5. Test & coverage (Vitest + V8 coverage + JUnit XML; Postgres/pgvector +
    Redis service containers so the gated integration suites run too; plus
    the named `check:neutrality` step — the ten WS-I.3 ranking-neutrality
-   tests as an explicit pay-to-rank gate on every PR)
+   tests as an explicit pay-to-rank gate on every PR — and the
+   `check:lcap-scheduler` step, the WS-R.5.4 LCAP lane anti-starvation gate)
 6. Build & size check (production build + bundle-size gate)
 7. E2E tests (Playwright, requires build)
 8. Security audit (pnpm audit, SBOM, build validation, AGPL headers,
