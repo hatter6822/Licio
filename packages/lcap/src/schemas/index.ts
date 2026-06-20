@@ -60,6 +60,12 @@ export {
   proofScopeSchema,
 } from './proof.js';
 export {
+  objectStatusCodeSchema,
+  objectStatusV2Schema,
+  type ReceiptRecordV2,
+  receiptRecordV2Schema,
+} from './receipt.js';
+export {
   type BlockDescriptorV2,
   blockDescriptorV2Schema,
   blockRoleSchema,
