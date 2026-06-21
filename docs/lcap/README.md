@@ -231,10 +231,16 @@ is a later card (the package is already runtime-agnostic via `runtime.ts`).
 | WS-R.12 — server ingestion | 12.1, 12.2, 12.4 | **Decision core + §24.4 resolver + server-computed validation + in-memory & gated-Drizzle bindings + the full §29 route surface shipped** (`ingestRecord`, `resolveIngestionOrder`, `validate`; `apps/api/src/lcap` `LcapIngestServer` incl. `validateContribution`/`commitBatch`/frontiers/room-Merkle reads; `routes.ts` content reads + `POST …/packs` + `/pulse` (incl. C0 `critical_pack`) + `/exchange` (incl. `response_pack`) + `/rooms/:id/{checkpoint,proofs/*}` + `/bundles/import` + `GET /bundles/export` (room closure via the migration-`0040` closure index); the `LcapServerStore` boundary over migrations `0039`+`0040`) — **§29 route surface complete**; only the WS-R.15.1a export UI flow remains of 12.4 |
 | WS-R.14 — privacy + DoS controls | 14.1a, 14.1b, 14.2, 14.3, 14.4 | **Shipped**: the §27.1 resource-cap SSOT (`limits/caps.ts` — one frozen config every parser path sources, profile-tunable/never-disable-able, `checkCap`/`enforceCap`; the server parse enforces the CPU-time + quarantine-byte caps, 14.1a); the §27.2 graph guard run over the pack's DECLARED DAG before storage (14.1b); the §27.3 relay quotas + §27.4 no-PoW/no-address policy (`limits/relay-quota.ts`, 14.4); the §26.2 export-disclosure + §26.3 stealth policy (`privacy/`, 14.2 — interest-privacy in R.6.3); the §3.7/§36 doctrine CI gates (`check:lcap-schema-egress` + no-applause/no-raw-egress over the LCAP trees, 14.3). The 14.2 export UI flow is WS-R.15.1a |
 | WS-R.11 — IndexedDB client offline store | 11.1 – 11.5 | **Shipped** (`apps/web/src/lcap`: `lcap_v2` schema + durability + pinning/eviction + storage modes + C0-first sync + replication gate); durability layer / SW hooks = follow-up |
-| WS-R.15/R.16/R.17/R.18 — transports, encryption envelope, client UI, simulator | — | Planned |
+| WS-R.15 — transport profiles | 15.3 | **Relay decision core shipped** (`apps/api/src/lcap/relay.ts` `LcapRelay`: store/serve by CID + receipts + §27.3 quotas + private-content refusal + the structural "cannot accept"); the rest is client-UI / native / external-dep — 15.1a/b/5 (bundle export+import UI, WebTransport) = web UI; 15.4a-f (native Android courier) = the new `apps/courier`; 15.2/15.6/15.7 (QR, WebRTC, IPFS) = new deps |
+| WS-R.16/R.17/R.18 — encryption envelope, client UI, simulator | — | Planned (R.16 blocked on WS-S; R.17 = the LCAP client surface; R.18 = the network simulator) |
 | WS-S — Private P2P Rooms (E2EE) | all | Planned (`docs/PRIVATE_SPEC.md`) |
 
-The pure-protocol core is complete; the next slices bind it to infrastructure —
-the `lcap_v2` IndexedDB store (WS-R.11), the Hono `/api/lcap/v2/*` ingestion +
-reconciliation routes over the `packages/db/src/schema/lcap.ts` schema
-(WS-R.12), and the sync pulse/exchange wire orchestration (WS-R.6/R.7).
+The pure-protocol core, the server ingestion + the full §29 route surface, the client
+offline store, the privacy + DoS control plane (WS-R.14), and the untrusted-relay
+decision core (WS-R.15.3) are complete.  The remaining cards are predominantly
+**client-UI / native-shell / external-dependency / WS-S-blocked**: the bundle
+export+import UI (WS-R.15.1a/b) + WebTransport (WS-R.15.5) + the client surface
+(WS-R.17), the native Android courier (WS-R.15.4, a new `apps/courier` Capacitor
+shell), the QR/WebRTC/IPFS transports (WS-R.15.2/6/7, new dependencies), the WS-S
+encryption-envelope seam (WS-R.16, blocked on WS-S), and the network simulator
+(WS-R.18).
