@@ -9,6 +9,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { cidFor } from '../cid/index.js';
 import type { ConflictSituation } from '../conflict/index.js';
+import { objectStatusV2Schema } from '../schemas/index.js';
 import { ingestRecord } from '../sync/index.js';
 import type { ValidationResult } from '../validate/index.js';
 
@@ -59,6 +60,57 @@ describe('ingestRecord (§24.1 commit-stage decision)', () => {
       { cid: missingCid, cid_kind: 'record', reason: 'missing_dependency' },
     ]);
     expect(out.missingCids).toEqual([missingCid]);
+  });
+
+  it('drops identity-dependency pseudo-keys so the wire status/wants stay CID-clean', () => {
+    // validate() reports a missing proof/cert/signer-key/authority-key as a DIAGNOSTIC
+    // pseudo-key, not a content CID.  Those are invalid under `anyCidSchema`, so if they
+    // reached the wire `missing_cids`/`want` the whole exchange-response parse would throw.
+    // ingestRecord must surface only the well-formed CID(s); the pseudo-keys are dropped.
+    const out = ingestRecord({
+      alreadyHave: false,
+      situation: {
+        validation: vr('proof_verified', {
+          missingCids: [
+            `proof_for:${missingCid}`,
+            'signer_key:dev-abc',
+            'device_certificate:dev-abc',
+            'account_authority_key:acct-1:0',
+            'room_authority_key:room-1:0',
+            missingCid, // the one genuinely fetchable CID
+          ],
+        }),
+      },
+    });
+    expect(out.status).toBe('quarantined_missing_dependency');
+    expect(out.missingCids).toEqual([missingCid]);
+    expect(out.wants).toEqual([
+      { cid: missingCid, cid_kind: 'record', reason: 'missing_dependency' },
+    ]);
+    // The wire projection must now parse: every `missing_cids` entry is a valid CID.
+    expect(() =>
+      objectStatusV2Schema.parse({
+        cid: missingCid,
+        cid_kind: 'record',
+        status: out.status,
+        missing_cids: out.missingCids,
+      }),
+    ).not.toThrow();
+  });
+
+  it('reports no fetchable CID when the missing dependency is purely an identity pseudo-key', () => {
+    // A quarantine whose only unmet dependency is a missing signer key has nothing the peer
+    // can fetch by CID — the honest wire answer is an empty `missing_cids`, never a throw.
+    const out = ingestRecord({
+      alreadyHave: false,
+      situation: { validation: vr('proof_verified', { missingCids: ['signer_key:dev-xyz'] }) },
+    });
+    expect(out.status).toBe('quarantined_missing_dependency');
+    expect(out.missingCids).toEqual([]);
+    expect(out.wants).toEqual([]);
+    expect(() =>
+      objectStatusV2Schema.parse({ cid: missingCid, cid_kind: 'record', status: out.status }),
+    ).not.toThrow();
   });
 
   it('keeps a bad-signature body as forensic, never appends, issues a rejected receipt', () => {

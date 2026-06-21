@@ -55,19 +55,29 @@ function receiptForStatus(status: ObjectStatusCode): IngestionReceiptType {
   return undefined; // conflict_device_fork → fork evidence is gossiped, not receipted
 }
 
-/** Build `missing_dependency` wants for each resolvable missing CID (§16.8). */
-function wantsForMissing(missingCids: readonly string[]): WantRequestV2[] {
-  const wants: WantRequestV2[] = [];
+/**
+ * The well-formed, fetchable-by-CID subset of a raw `missingCids` set, each paired with
+ * its CID kind (§16.8).  `validate()` reports some missing dependencies as DIAGNOSTIC
+ * pseudo-keys rather than content CIDs — a missing signer key (`signer_key:<id>`), device
+ * certificate (`device_certificate:<id>`), proof (`proof_for:<cid>`), or authority key
+ * (`account_authority_key:…` / `room_authority_key:…`).  None of those is a content object
+ * the peer can send by CID, and each is invalid under `anyCidSchema`, so they MUST NOT
+ * reach the wire `missing_cids`/`want` fields — a single one would throw the whole
+ * `ObjectStatusV2` / exchange-response parse.  This is the single chokepoint that keeps
+ * BOTH wire projections (the wants AND the reported `missingCids`) CID-clean.
+ */
+function fetchableMissing(
+  missingCids: readonly string[],
+): readonly { cid: string; kind: CidKind }[] {
+  const out: { cid: string; kind: CidKind }[] = [];
   for (const cid of missingCids) {
-    let kind: CidKind;
     try {
-      kind = parseCid(cid).kind;
+      out.push({ cid, kind: parseCid(cid).kind });
     } catch {
-      continue; // never want a malformed CID
+      // a diagnostic pseudo-key or malformed CID — never fetchable by CID, never on the wire
     }
-    wants.push({ cid, cid_kind: kind, reason: 'missing_dependency' });
   }
-  return wants;
+  return out;
 }
 
 /**
@@ -93,13 +103,23 @@ export function ingestRecord(input: IngestionInput): IngestionOutcome {
 
   const outcome = dispatchConflict(input.situation);
   const { status } = outcome;
-  const missingCids = outcome.missingCids ?? [];
+  // Project only the well-formed CID subset onto the wire: both `missingCids` and the
+  // derived `wants` are `anyCidSchema`-clean, so a quarantine for a missing IDENTITY
+  // dependency (a proof/cert/key, which validate() reports as a non-CID pseudo-key) can
+  // never throw the `ObjectStatusV2` / exchange-response parse — the peer sees an honest
+  // `quarantined_missing_dependency` with no fetchable CID and re-sends the identity closure.
+  const fetchable = fetchableMissing(outcome.missingCids ?? []);
   return {
     status,
     appendToRoomLog: status === 'accepted',
     issueReceipt: receiptForStatus(status),
-    wants: status === 'quarantined_missing_dependency' ? wantsForMissing(missingCids) : [],
-    missingCids,
+    wants:
+      status === 'quarantined_missing_dependency'
+        ? fetchable.map(
+            (f): WantRequestV2 => ({ cid: f.cid, cid_kind: f.kind, reason: 'missing_dependency' }),
+          )
+        : [],
+    missingCids: fetchable.map((f) => f.cid),
     keepForensic: outcome.keepForensic ?? false,
     gossipForkEvidence: outcome.gossipForkEvidence ?? false,
   };
