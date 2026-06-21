@@ -162,12 +162,13 @@ const EXEMPT_PATHS = new Set([
   // The LCAP sync surface (WS-R.12.4) is device-certificate-authenticated CONTENT:
   // records carry their own COSE proofs (validate() is the real authentication), and
   // a native sync client holds NO session cookie — so there is no session for CSRF to
-  // ride. `/packs` imports content; `/pulse` is a non-state-changing frontier
-  // exchange that returns only public tree sizes + the revocation epoch. Abuse is
-  // bounded by each endpoint's own rate limit + the §27 resource caps + the §27.2
-  // malicious-graph guard before any expansion.
+  // ride. `/packs` + `/exchange` import content (every record self-authenticating);
+  // `/pulse` is a non-state-changing frontier exchange that returns only public tree
+  // sizes + the revocation epoch. Abuse is bounded by each endpoint's own rate limit +
+  // the §27 resource caps + the §27.2 malicious-graph guard before any expansion.
   '/api/lcap/v2/packs',
   '/api/lcap/v2/pulse',
+  '/api/lcap/v2/exchange',
 ]);
 // WS-D identity/privacy endpoints rely on `SameSite=Strict` + the opaque session
 // model (and a per-flow `login_attempt_id` binding) as the CSRF defense, so they do

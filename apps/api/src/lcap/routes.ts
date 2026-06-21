@@ -1,37 +1,52 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// The §29 LCAP HTTP API (WS-R.12.4).  Two surfaces so far:
+// The §29 LCAP HTTP API (WS-R.12.4).  Four surfaces:
 //
 //   - content READS (GET by CID): serve held, content-addressed objects so a peer
 //     that learns a `want` (from an ingestion response) can fetch the missing
 //     object.  Reads are GETs, so the global CSRF middleware passes them through.
-//   - pack IMPORT (POST /packs): the §29 bundle-import path.  A `.licio-bundle` is
-//     read under the WS-R.4.2 caps; every CID-verified frame is durably stored (so
-//     the READ routes can serve its proofs/blocks), its identity frames (certs/
+//   - pack IMPORT (POST /packs, §29.3): the bundle-import path.  A `.licio-bundle`
+//     is read under the WS-R.4.2 caps; every CID-verified frame is durably stored
+//     (so the READ routes can serve its proofs/blocks), its identity frames (certs/
 //     capabilities/revocations) are registered, and its contribution records are
 //     committed through the same validate()→graph-guard→commit pipeline.
-//     Ingestion is device-certificate-authenticated CONTENT (the records carry
-//     their own COSE proofs), so the endpoint is CSRF-exempt (registered in the
-//     CSRF middleware, like the public takedowns intake) and bounded by a global
-//     fixed-window rate limit + the §27 caps + the graph guard.
+//   - pulse (POST /pulse, §29.1): the tiny C0 frontier exchange — validate the
+//     client pulse fail-closed, return the server's frontiers (per-room checkpoint
+//     sizes + the global revocation epoch).
+//   - exchange (POST /exchange, §29.2): the main bidirectional path — ingest an
+//     optional push pack through the SHARED WS-R.4.2 validator, then return the
+//     server's frontiers + the `wanted_from_client` the frontier diff derives.
 //
-// §22.1.1 status mapping: reads → 200 held / 404 not-held / 400 malformed CID;
-// pack import → 200 processed (per-object outcomes inside) / 413 oversized /
-// 422 malformed / 429 rate-limited (+Retry-After, from the limiter).  Content is
-// self-authenticating, so serving or accepting it implies no transport trust.
+// All four are device-certificate-authenticated CONTENT (records carry their own
+// COSE proofs; validate() is the real authentication) and a native sync client
+// holds NO session cookie, so the POST surfaces are CSRF-exempt (registered in the
+// CSRF middleware, like the public takedowns intake) and bounded by per-endpoint
+// rate limits + the §27 caps + the §27.2 graph guard.
+//
+// §22.1.1 request-level status mapping: reads → 200 held / 404 not-held / 400
+// malformed CID; pack import / pulse / exchange → 200 processed (per-object
+// outcomes inside) / 413 oversized / 400 undecodable / 422 schema-invalid / 429
+// rate-limited (+Retry-After, from the limiter).  Content is self-authenticating,
+// so serving or accepting it implies no transport trust.
 
 import {
+  applyPulse,
+  buildExchangeResponse,
   type DetachedProofV2,
   decode,
   decodeAndRouteRecord,
   decodeProof,
   encodeWithSchema,
+  exchangeRequestV2Schema,
+  exchangeResponseV2Schema,
   ldcToPlain,
   type ObjectStatusV2,
   parseCid,
   pulseResponseV2Schema,
   readPack,
+  type SyncPulseV2,
   syncPulseV2Schema,
+  type WantRequestV2,
 } from '@licio/lcap';
 import { Hono } from 'hono';
 import { rateLimit } from '../lib/rate-limit.js';
@@ -138,18 +153,33 @@ function packErrorStatus(status: string): 413 | 422 {
   return status.startsWith('oversized') || status === 'too_many_entries' ? 413 : 422;
 }
 
+/** A successful pack ingestion: the per-object §16.11 statuses + de-duplicated wants. */
+interface PackIngestOutcome {
+  readonly statuses: ObjectStatusV2[];
+  readonly wants: readonly WantRequestV2[];
+}
+
+/** The shared WS-R.4.2 validator outcome — a read failure (with its HTTP status) or the result. */
+type PackIngestResult =
+  | { readonly ok: false; readonly httpStatus: 413 | 422; readonly error: string }
+  | ({ readonly ok: true } & PackIngestOutcome);
+
 /**
- * Import a `.licio-bundle`: read it under the WS-R.4.2 caps, DURABLY STORE every
- * CID-verified frame (so its records/proofs/blocks become fetchable via the GET
- * routes), register its identity frames, then commit its contributions through the
- * server's validate→guard→commit pipeline.  Returns one §16.11 status per object
- * (non-contributions `stored_unverified`/`rejected_bad_cid` here; contributions
- * from the commit) + the de-duplicated wants.
+ * The shared pack-ingestion core used by BOTH `/packs` and the exchange `push_pack`
+ * (the card's "bundle import shares the WS-R.4.2 validator"): read the pack under the
+ * §27 caps, DURABLY STORE every CID-verified frame (so its records/proofs/blocks
+ * become fetchable via the GET routes), register its identity frames, then commit its
+ * contributions through the server's validate→guard→commit pipeline.  Returns one
+ * §16.11 status per object (non-contributions `stored_unverified`/`already_have`/
+ * `rejected_bad_cid` here; contributions from the commit) + the de-duplicated wants.
  */
-async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<Response> {
+async function ingestPackFrames(
+  server: LcapIngestServer,
+  body: Uint8Array,
+): Promise<PackIngestResult> {
   const read = await readPack(body);
   if (!read.ok) {
-    return json(packErrorStatus(read.status), { error: read.status });
+    return { ok: false, httpStatus: packErrorStatus(read.status), error: read.status };
   }
   const { frames } = read.pack;
 
@@ -237,7 +267,16 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
   }
 
   const result = await server.commitBatch(contributions);
-  return json(200, { statuses: [...statuses, ...result.statuses], wants: result.wants });
+  return { ok: true, statuses: [...statuses, ...result.statuses], wants: result.wants };
+}
+
+/** §29.3 `POST /packs`: ingest a pack and report the per-object outcomes inline. */
+async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<Response> {
+  const result = await ingestPackFrames(server, body);
+  if (!result.ok) {
+    return json(result.httpStatus, { error: result.error });
+  }
+  return json(200, { statuses: result.statuses, wants: result.wants });
 }
 
 // A pulse is a tiny frontier message; anything larger is over the request budget.
@@ -272,6 +311,91 @@ async function handlePulse(server: LcapIngestServer, body: Uint8Array): Promise<
   });
 }
 
+// An exchange MAY carry a push pack, so it is bounded by the larger §16.5 request budget.
+const MAX_EXCHANGE_REQUEST_BYTES = 1024 * 1024;
+
+/** The bounded set of CIDs a client pulse references (for a synchronous `have` lookup). */
+function pulseReferencedCids(pulse: SyncPulseV2): string[] {
+  const cids: string[] = [];
+  for (const f of pulse.checkpoint_frontier) {
+    if (f.latest_checkpoint_cid !== undefined) cids.push(f.latest_checkpoint_cid);
+  }
+  for (const f of pulse.revocation_frontier) {
+    if (f.latest_revocation_checkpoint_cid !== undefined) {
+      cids.push(f.latest_revocation_checkpoint_cid);
+    }
+  }
+  for (const cid of pulse.critical_have ?? []) cids.push(cid);
+  return cids;
+}
+
+/**
+ * §29.2 `POST /exchange`: the main bidirectional sync path.  Ingest the (optional)
+ * push pack through the SHARED WS-R.4.2 validator (idempotent by record_cid →
+ * `accepted_push`), then return the server's pulse (frontiers) plus the
+ * `wanted_from_client` the server's own frontier diff derives (what the server is
+ * behind on, given the client's advertised frontier).  Content the client `want`s is
+ * fetched via the GET routes; the optional server-push `response_pack` is the
+ * WS-R.12.4 follow-up that needs import-captured object metadata.  §22.1.1: oversized
+ * → 413; undecodable → 400; schema-invalid → 422; processed → 200 (per-object
+ * outcomes — including `quarantined_*`/`rejected_*`/`conflict_*` — inside the body).
+ */
+async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promise<Response> {
+  if (body.length > MAX_EXCHANGE_REQUEST_BYTES) {
+    return json(413, { error: 'oversized_request' });
+  }
+  let decoded: unknown;
+  try {
+    decoded = ldcToPlain(decode(body));
+  } catch {
+    return json(400, { error: 'undecodable' });
+  }
+  const parsed = exchangeRequestV2Schema.safeParse(decoded);
+  if (!parsed.success) {
+    return json(422, { error: 'invalid_exchange_request' });
+  }
+  const request = parsed.data;
+
+  // 1) Ingest the optional push pack through the shared validator (idempotent).
+  let acceptedPush: ObjectStatusV2[] | undefined;
+  if (request.push_pack !== undefined) {
+    const ingest = await ingestPackFrames(server, request.push_pack);
+    if (!ingest.ok) {
+      // A push pack that breaches the §27 caps fails the whole request (§22.1.1).
+      return json(ingest.httpStatus, { error: ingest.error });
+    }
+    acceptedPush = ingest.statuses;
+  }
+
+  // 2) The server's frontier diff against the client's advertised frontier: what the
+  // server is behind on (`wanted_from_client`).  `applyPulse` needs a synchronous
+  // `have` predicate, so pre-fetch the bounded set of CIDs the client pulse references.
+  const have = new Set<string>();
+  for (const cid of pulseReferencedCids(request.pulse)) {
+    if (await server.hasObject(cid)) have.add(cid);
+  }
+  const reaction = applyPulse({
+    remote: request.pulse,
+    localCheckpointFrontier: await server.checkpointFrontier(),
+    localRevocationFrontier: server.revocationFrontier(),
+    locallyHave: (cid) => have.has(cid),
+  });
+  const wantedFromClient: readonly WantRequestV2[] = reaction.wants;
+
+  // 3) `ok`: the exchange itself completed; the client fetches any `want` via the GET
+  // routes.  Per-object push outcomes (if any) carry their own §16.11 status.
+  const response = buildExchangeResponse({
+    pulse: await server.serverPulse(),
+    status: 'ok',
+    ...(acceptedPush !== undefined ? { acceptedPush } : {}),
+    ...(wantedFromClient.length > 0 ? { wantedFromClient } : {}),
+  });
+  return new Response(encodeWithSchema(exchangeResponseV2Schema, response), {
+    status: 200,
+    headers: { 'content-type': 'application/cbor' },
+  });
+}
+
 /**
  * The §29 LCAP routes.  Mounted at `/api/lcap/v2` (see `app.ts`).  The server is
  * resolved PER REQUEST (not at mount): the default singleton — which may bind a
@@ -293,6 +417,9 @@ export function createLcapRoutes(override?: LcapIngestServer): Hono {
   );
   app.post('/pulse', rateLimit({ limit: 120, windowMs: 60_000 }), async (c) =>
     handlePulse(server(), new Uint8Array(await c.req.arrayBuffer())),
+  );
+  app.post('/exchange', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) =>
+    handleExchange(server(), new Uint8Array(await c.req.arrayBuffer())),
   );
   return app;
 }
