@@ -342,6 +342,7 @@ async function ingestPackFrames(
           roomId: record.home_room_id,
           authorDeviceKeyId: record.author_device_key_id,
           deviceSeq: record.device_seq,
+          capabilityCid: record.capability_cid,
           body: frame.payload,
           proofs,
           ...(requires.size > 0 ? { requires: [...requires] } : {}),

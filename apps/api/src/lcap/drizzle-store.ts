@@ -12,6 +12,7 @@
 import {
   type DbExecutor,
   lcapAcceptance,
+  lcapCapabilityUsage,
   lcapDeviceSeq,
   lcapForkEvidence,
   lcapObjects,
@@ -19,12 +20,24 @@ import {
 } from '@licio/db';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import type {
+  AcceptContributionResult,
+  CapabilityQuotaLimits,
   ForkEvidence,
   LcapContentKind,
   LcapServerStore,
   RecordEdgeRelation,
   StoredObject,
 } from './store.js';
+
+/** A Postgres unique/PK violation (SQLSTATE 23505) — used to retry a seq/cid race. */
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === '23505'
+  );
+}
 
 export class DrizzleLcapServerStore implements LcapServerStore {
   readonly #db: DbExecutor;
@@ -93,6 +106,72 @@ export class DrizzleLcapServerStore implements LcapServerStore {
       if (now !== undefined) return now;
     }
     throw new Error('appendAcceptance: exhausted room-sequence allocation retries');
+  }
+
+  async acceptContribution(
+    roomId: string,
+    cid: string,
+    eventBytes: number,
+    quota: CapabilityQuotaLimits,
+  ): Promise<AcceptContributionResult> {
+    // The whole accept is one transaction so the quota check + the room-log append + the
+    // budget debit commit together (or not at all).  A (room_id, seq) PK collision with a
+    // concurrent same-room accept (possibly under a different capability, so not serialized
+    // by the usage-row lock below) aborts the tx; the outer loop retries.
+    for (let attempt = 0; attempt < 10_000; attempt++) {
+      try {
+        return await this.#db.transaction(async (tx): Promise<AcceptContributionResult> => {
+          // Idempotency: an already-accepted cid keeps its seq and is NOT re-debited.
+          const existing = await tx
+            .select({ seq: lcapAcceptance.seq })
+            .from(lcapAcceptance)
+            .where(eq(lcapAcceptance.cid, cid))
+            .limit(1);
+          if (existing[0] !== undefined) return { ok: true, seq: existing[0].seq };
+
+          // Ensure the usage row exists, then LOCK it (`FOR UPDATE`) so the check + debit for
+          // THIS capability is serialized — two concurrent accepts cannot both pass the check.
+          await tx
+            .insert(lcapCapabilityUsage)
+            .values({ capabilityId: quota.capabilityId })
+            .onConflictDoNothing();
+          const usageRows = await tx
+            .select({
+              eventCount: lcapCapabilityUsage.eventCount,
+              totalBytes: lcapCapabilityUsage.totalBytes,
+            })
+            .from(lcapCapabilityUsage)
+            .where(eq(lcapCapabilityUsage.capabilityId, quota.capabilityId))
+            .for('update');
+          const events = usageRows[0]?.eventCount ?? 0;
+          const totalBytes = usageRows[0]?.totalBytes ?? 0;
+          if (events + 1 > quota.maxEvents) return { ok: false, reason: 'offline_event_quota' };
+          if (totalBytes + eventBytes > quota.maxTotalBytes) {
+            return { ok: false, reason: 'total_payload_quota' };
+          }
+
+          // Allocate the next per-room seq + append (PK guards uniqueness) and debit the
+          // budget — all in this transaction, so the debit happens iff the append commits.
+          const countRows = await tx
+            .select({ count: sql<number>`count(*)::int` })
+            .from(lcapAcceptance)
+            .where(eq(lcapAcceptance.roomId, roomId));
+          const seq = countRows[0]?.count ?? 0;
+          await tx.insert(lcapAcceptance).values({ roomId, seq, cid });
+          await tx
+            .update(lcapCapabilityUsage)
+            .set({ eventCount: events + 1, totalBytes: totalBytes + eventBytes })
+            .where(eq(lcapCapabilityUsage.capabilityId, quota.capabilityId));
+          return { ok: true, seq };
+        });
+      } catch (err) {
+        // A seq/cid race aborts the tx — retry; the idempotency check then short-circuits a
+        // concurrent same-cid accept and the seq is re-allocated at the new room count.
+        if (isUniqueViolation(err) && attempt < 9_999) continue;
+        throw err;
+      }
+    }
+    throw new Error('acceptContribution: exhausted accept retries');
   }
 
   async roomSeqOf(roomId: string, cid: string): Promise<number | undefined> {

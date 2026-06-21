@@ -8,6 +8,7 @@
 import {
   buildAndSign,
   type CapabilityBundle,
+  type CapabilityRecordV2,
   type CertificateBundle,
   type ContributionEventRecordV2,
   cidFor,
@@ -240,4 +241,72 @@ export async function mintExportRequest(
   });
   const proofBody = encodeWithSchema(detachedProofV2Schema, proof);
   return encodeWithSchema(exportRequestEnvelopeV2Schema, { request, proof_body: proofBody });
+}
+
+/**
+ * Mint a room capability with quota (and id) overrides, signed by the fixture room
+ * authority — for exercising the §18.3 step 9 aggregate-quota enforcement.
+ */
+export async function mintCapability(
+  fx: LcapFixtures,
+  overrides: {
+    capabilityId?: string;
+    quotas?: Partial<CapabilityRecordV2['quotas']>;
+  } = {},
+): Promise<{ bundle: CapabilityBundle; cid: string }> {
+  const bundle = await issueCapability({
+    authorityPrivateKey: fx.roomAuthority.privateKey,
+    authoritySignerKeyId: ROOM_AUTHORITY_SIGNER,
+    capability: {
+      ...fx.capBundle.capability,
+      capability_id: overrides.capabilityId ?? 'cap-custom',
+      quotas: { ...fx.capBundle.capability.quotas, ...overrides.quotas },
+    },
+    networkId: NET,
+  });
+  return { bundle, cid: await cidFor('record', bundle.body) };
+}
+
+/**
+ * Mint a device-signed contribution at a given device sequence citing `capabilityCid` —
+ * for building a multi-event device chain (e.g. to exhaust a capability's event quota).
+ */
+export async function mintContribution(
+  fx: LcapFixtures,
+  params: {
+    deviceSeq: number;
+    capabilityCid: string;
+    prevDeviceRecordCid?: string;
+    text?: string;
+  },
+): Promise<{ recordCid: string; body: Uint8Array; proof: DetachedProofV2 }> {
+  const contribution: ContributionEventRecordV2 = {
+    record_version: 2,
+    kind: 'contribution_event',
+    event_type: 'post',
+    home_room_id: ROOM,
+    visibility_scope: 'in_room',
+    author_account_id: ACCOUNT,
+    author_device_id: 'dev-1',
+    author_device_key_id: DEVICE_KEY,
+    device_seq: params.deviceSeq,
+    capability_cid: params.capabilityCid,
+    policy_epoch_claim: POLICY_EPOCH,
+    revocation_epoch_claim: 0,
+    client_nonce: new Uint8Array([params.deviceSeq + 1, 2, 3, 4]),
+    priority: 1,
+    ...(params.prevDeviceRecordCid !== undefined
+      ? { prev_device_record_cid: params.prevDeviceRecordCid }
+      : {}),
+  };
+  const body = encodeContributionEvent(contribution);
+  const proof = await buildAndSign({
+    privateKey: fx.device.privateKey,
+    signerKeyId: DEVICE_KEY,
+    proofKind: 'device_signature',
+    recordKind: 'contribution_event',
+    recordBody: body,
+    networkId: NET,
+  });
+  return { recordCid: await cidFor('record', body), body, proof };
 }

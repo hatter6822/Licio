@@ -9,6 +9,7 @@
 import {
   createDbClient,
   lcapAcceptance,
+  lcapCapabilityUsage,
   lcapDeviceSeq,
   lcapForkEvidence,
   lcapObjects,
@@ -49,6 +50,61 @@ function contract(makeStore: () => LcapServerStore): void {
     expect(await store.roomSize('r1')).toBe(2); // the re-append did NOT add a second leaf
     expect(await store.roomSeqOf('r1', 'b')).toBe(1);
     expect(await store.roomSeqOf('r1', 'absent')).toBeUndefined();
+  });
+
+  it('accepts contributions within the capability quotas and rejects over-budget ones (§18.3 step 9)', async () => {
+    const store = makeStore();
+    const quota = { capabilityId: 'cap-A', maxEvents: 2, maxTotalBytes: 100 };
+    expect(await store.acceptContribution('room', 'e0', 40, quota)).toEqual({ ok: true, seq: 0 });
+    expect(await store.acceptContribution('room', 'e1', 40, quota)).toEqual({ ok: true, seq: 1 });
+    // A third event exceeds max_offline_events (2) → rejected, not appended.
+    expect(await store.acceptContribution('room', 'e2', 10, quota)).toEqual({
+      ok: false,
+      reason: 'offline_event_quota',
+    });
+    expect(await store.roomSize('room')).toBe(2);
+    expect(await store.isAccepted('e2')).toBe(false);
+  });
+
+  it('rejects a contribution that would exceed max_total_payload_bytes', async () => {
+    const store = makeStore();
+    const quota = { capabilityId: 'cap-B', maxEvents: 10, maxTotalBytes: 100 };
+    expect(await store.acceptContribution('room', 'e0', 60, quota)).toEqual({ ok: true, seq: 0 });
+    // 60 + 50 = 110 > 100 → the total-payload quota.
+    expect(await store.acceptContribution('room', 'e1', 50, quota)).toEqual({
+      ok: false,
+      reason: 'total_payload_quota',
+    });
+    // A smaller event still fits (60 + 40 = 100 ≤ 100).
+    expect(await store.acceptContribution('room', 'e2', 40, quota)).toEqual({ ok: true, seq: 1 });
+  });
+
+  it('re-accepting a record is idempotent and never re-debits the capability budget', async () => {
+    const store = makeStore();
+    const quota = { capabilityId: 'cap-C', maxEvents: 1, maxTotalBytes: 1000 };
+    expect(await store.acceptContribution('room', 'e0', 100, quota)).toEqual({ ok: true, seq: 0 });
+    // Re-accept the SAME record: idempotent (same seq), and it must NOT consume the budget twice.
+    expect(await store.acceptContribution('room', 'e0', 100, quota)).toEqual({ ok: true, seq: 0 });
+    // A DIFFERENT record now exceeds maxEvents=1 — proving the budget was debited exactly once.
+    expect(await store.acceptContribution('room', 'e1', 100, quota)).toEqual({
+      ok: false,
+      reason: 'offline_event_quota',
+    });
+    expect(await store.roomSize('room')).toBe(1);
+  });
+
+  it('enforces max_offline_events under concurrent accepts — never over budget', async () => {
+    const store = makeStore();
+    const quota = { capabilityId: 'cap-D', maxEvents: 5, maxTotalBytes: 1_000_000 };
+    const cids = Array.from({ length: 20 }, (_, i) => `cc${i}`);
+    const results = await Promise.all(
+      cids.map((cid) => store.acceptContribution('roomD', cid, 10, quota)),
+    );
+    const acceptedSeqs = results.flatMap((r) => (r.ok ? [r.seq] : []));
+    // Exactly maxEvents accepted, with distinct gap-free seqs; the rest fail the event quota.
+    expect([...acceptedSeqs].sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4]);
+    for (const r of results) if (!r.ok) expect(r.reason).toBe('offline_event_quota');
+    expect(await store.roomSize('roomD')).toBe(5);
   });
 
   it('lists exactly the rooms that have accepted records (drives the sync frontier)', async () => {
@@ -161,6 +217,7 @@ describe.skipIf(!DB_URL)('DrizzleLcapServerStore (contract, live Postgres)', () 
     await db.delete(lcapForkEvidence);
     await db.delete(lcapDeviceSeq);
     await db.delete(lcapAcceptance);
+    await db.delete(lcapCapabilityUsage);
     await db.delete(lcapObjects);
     await db.delete(lcapRecordClosure);
   });

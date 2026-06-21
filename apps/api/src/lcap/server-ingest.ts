@@ -82,6 +82,12 @@ export interface CommitRecordInput {
   readonly authorDeviceKeyId: string;
   /** The per-device sequence number claimed by this record. */
   readonly deviceSeq: number;
+  /**
+   * The cited capability's record CID, so the server can resolve its aggregate quotas and
+   * debit the §18.3 step 9 budget on accept.  Absent only on the injected-validation apply
+   * hook (no registered capability → no aggregate-quota enforcement on that test path).
+   */
+  readonly capabilityCid?: string;
   /** The deterministic record bytes (proof bytes excluded; the CID's preimage). */
   readonly body: Uint8Array;
   /**
@@ -467,8 +473,40 @@ export class LcapIngestServer {
         input.recordCid,
       );
       if (claimant === input.recordCid) {
-        // We hold the (key, seq) claim → append to the canonical log (idempotent).
-        roomSeq = await this.store.appendAcceptance(input.roomId, input.recordCid);
+        // We hold the (key, seq) claim.  Append to the canonical log AND enforce the
+        // capability's aggregate quotas (§18.3 step 9) atomically as one accept: the budget
+        // is debited iff the record is freshly accepted (idempotent by cid).  An over-budget
+        // record is rejected `rejected_quota` and never appends.  The injected-validation
+        // apply hook (no registered capability) falls back to a raw append (no aggregate quota).
+        const capBundle =
+          input.capabilityCid !== undefined
+            ? this.capabilities.get(input.capabilityCid)
+            : undefined;
+        if (capBundle) {
+          const accepted = await this.store.acceptContribution(
+            input.roomId,
+            input.recordCid,
+            input.body.length,
+            {
+              capabilityId: capBundle.capability.capability_id,
+              maxEvents: capBundle.capability.quotas.max_offline_events,
+              maxTotalBytes: capBundle.capability.quotas.max_total_payload_bytes,
+            },
+          );
+          if (accepted.ok) {
+            roomSeq = accepted.seq;
+          } else {
+            // Aggregate quota exhausted — reject without appending (the device-seq claim
+            // stands; the capability budget is NOT debited).  `rejected_quota` (§16.11).
+            return {
+              status: { cid: input.recordCid, cid_kind: 'record', status: 'rejected_quota' },
+              wants: [],
+              receiptType: 'rejected',
+            };
+          }
+        } else {
+          roomSeq = await this.store.appendAcceptance(input.roomId, input.recordCid);
+        }
       } else {
         // A different record already claimed this (key, seq) → THIS record is a device fork.
         forkClaimant = claimant;

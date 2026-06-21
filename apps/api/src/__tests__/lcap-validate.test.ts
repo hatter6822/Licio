@@ -23,6 +23,8 @@ import {
   buildLcapFixtures,
   DEVICE_KEY,
   type LcapFixtures,
+  mintCapability,
+  mintContribution,
   mintDeviceRevocation,
   NET,
   NOW,
@@ -168,5 +170,79 @@ describe('LcapIngestServer — server-computed validation (R.12.1b)', () => {
     // that cites it will quarantine, not validate against an unverified key).
     const srv = new LcapIngestServer(NET, () => NOW);
     expect(await srv.registerCertificate(fx.certBundle)).toBe('unverified');
+  });
+
+  it('rejects a contribution that exhausts the capability aggregate event quota (§18.3 step 9)', async () => {
+    // Register the cert + authority but a capability whose budget is a SINGLE offline event.
+    const srv = await serverWith({ capability: false });
+    const tight = await mintCapability(fx, {
+      capabilityId: 'cap-tight',
+      quotas: { max_offline_events: 1 },
+    });
+    await srv.registerCapability(tight.bundle);
+    const e0 = await mintContribution(fx, { deviceSeq: 0, capabilityCid: tight.cid });
+    const e1 = await mintContribution(fx, {
+      deviceSeq: 1,
+      capabilityCid: tight.cid,
+      prevDeviceRecordCid: e0.recordCid,
+    });
+
+    // The first event fits the budget and is accepted (debiting the single allowed event).
+    const r0 = await srv.commitRecord({
+      recordCid: e0.recordCid,
+      roomId: ROOM,
+      authorDeviceKeyId: DEVICE_KEY,
+      deviceSeq: 0,
+      capabilityCid: tight.cid,
+      body: e0.body,
+      proofs: [e0.proof],
+    });
+    expect(r0.status.status).toBe('accepted');
+
+    // The second event is a valid identity chain but exhausts the capability's event budget,
+    // so it is rejected `rejected_quota` and never appended (the aggregate quota is enforced).
+    const r1 = await srv.commitRecord({
+      recordCid: e1.recordCid,
+      roomId: ROOM,
+      authorDeviceKeyId: DEVICE_KEY,
+      deviceSeq: 1,
+      capabilityCid: tight.cid,
+      body: e1.body,
+      proofs: [e1.proof],
+    });
+    expect(r1.status.status).toBe('rejected_quota');
+    expect(r1.receiptType).toBe('rejected');
+    expect(await srv.isAccepted(e1.recordCid)).toBe(false);
+  });
+
+  it('accepts a second event when the capability budget allows more than one (no false quota)', async () => {
+    const srv = await serverWith({ capability: false });
+    const cap = await mintCapability(fx, {
+      capabilityId: 'cap-roomy',
+      quotas: { max_offline_events: 2 },
+    });
+    await srv.registerCapability(cap.bundle);
+    const e0 = await mintContribution(fx, { deviceSeq: 0, capabilityCid: cap.cid });
+    const e1 = await mintContribution(fx, {
+      deviceSeq: 1,
+      capabilityCid: cap.cid,
+      prevDeviceRecordCid: e0.recordCid,
+    });
+    const commit = (
+      e: { recordCid: string; body: Uint8Array; proof: typeof fx.proof },
+      seq: number,
+    ) =>
+      srv.commitRecord({
+        recordCid: e.recordCid,
+        roomId: ROOM,
+        authorDeviceKeyId: DEVICE_KEY,
+        deviceSeq: seq,
+        capabilityCid: cap.cid,
+        body: e.body,
+        proofs: [e.proof],
+      });
+    expect((await commit(e0, 0)).status.status).toBe('accepted');
+    expect((await commit(e1, 1)).status.status).toBe('accepted');
+    expect(await srv.roomSize(ROOM)).toBe(2);
   });
 });

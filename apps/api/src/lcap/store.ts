@@ -27,6 +27,21 @@ export interface StoredObject {
   readonly bytes: Uint8Array;
 }
 
+/** A capability's aggregate quotas (§11.3) the accept gate enforces across offline events. */
+export interface CapabilityQuotaLimits {
+  /** The stable grant id (`capability_id`) the usage is accounted against. */
+  readonly capabilityId: string;
+  /** §18.3 step 9 `max_offline_events`: the total events this capability may author. */
+  readonly maxEvents: number;
+  /** §18.3 step 9 `max_total_payload_bytes`: the total event-body bytes it may author. */
+  readonly maxTotalBytes: number;
+}
+
+/** The outcome of a quota-gated accept: the room seq, or the first aggregate quota violated. */
+export type AcceptContributionResult =
+  | { readonly ok: true; readonly seq: number }
+  | { readonly ok: false; readonly reason: 'offline_event_quota' | 'total_payload_quota' };
+
 /** Append-only fork evidence (§24.3, WS-R.2.4): two distinct CIDs at one (key, seq). */
 export interface ForkEvidence {
   readonly authorDeviceKeyId: string;
@@ -55,6 +70,21 @@ export interface LcapServerStore {
    * never a phantom seq for a record absent from the log.
    */
   appendAcceptance(roomId: string, cid: string): Promise<number>;
+  /**
+   * Accept a contribution into the room log WHILE enforcing its capability's aggregate
+   * quotas, ATOMICALLY (§11.3 / §18.3 step 9).  IDEMPOTENT by `cid`: a re-accept returns the
+   * existing seq and NEVER re-debits the capability.  For a fresh record the capability's
+   * running (events, total_bytes) is checked against the quotas and — only if within budget —
+   * incremented in the SAME atomic step as the room-log append, so the budget is debited
+   * exactly once per accepted record and concurrent accepts cannot exceed it.  On a quota
+   * violation nothing is appended and nothing is debited.
+   */
+  acceptContribution(
+    roomId: string,
+    cid: string,
+    eventBytes: number,
+    quota: CapabilityQuotaLimits,
+  ): Promise<AcceptContributionResult>;
   /** The room sequence of an already-accepted cid, or `undefined`. */
   roomSeqOf(roomId: string, cid: string): Promise<number | undefined>;
   roomSize(roomId: string): Promise<number>;
@@ -94,6 +124,8 @@ export class InMemoryLcapServerStore implements LcapServerStore {
   // Per-room ordered acceptance log: the cid at index i has room sequence i.
   private readonly rooms = new Map<string, string[]>();
   private readonly accepted = new Set<string>();
+  // capability_id → its running aggregate usage (the §18.3 step 9 budget accounting).
+  private readonly capabilityUsage = new Map<string, { events: number; totalBytes: number }>();
   private readonly deviceSeqIndex = new Map<string, string>();
   private readonly forkEvidence: ForkEvidence[] = [];
   // Record-export closure edges, keyed by `${relation} ${recordCid}`.
@@ -142,6 +174,32 @@ export class InMemoryLcapServerStore implements LcapServerStore {
     log.push(cid);
     this.accepted.add(cid);
     return Promise.resolve(seq);
+  }
+
+  acceptContribution(
+    roomId: string,
+    cid: string,
+    eventBytes: number,
+    quota: CapabilityQuotaLimits,
+  ): Promise<AcceptContributionResult> {
+    const log = this.ensureRoomLog(roomId);
+    const existing = log.indexOf(cid);
+    if (existing >= 0) return Promise.resolve({ ok: true, seq: existing }); // idempotent, no re-debit
+    const usage = this.capabilityUsage.get(quota.capabilityId) ?? { events: 0, totalBytes: 0 };
+    if (usage.events + 1 > quota.maxEvents) {
+      return Promise.resolve({ ok: false, reason: 'offline_event_quota' });
+    }
+    if (usage.totalBytes + eventBytes > quota.maxTotalBytes) {
+      return Promise.resolve({ ok: false, reason: 'total_payload_quota' });
+    }
+    const seq = log.length;
+    log.push(cid);
+    this.accepted.add(cid);
+    this.capabilityUsage.set(quota.capabilityId, {
+      events: usage.events + 1,
+      totalBytes: usage.totalBytes + eventBytes,
+    });
+    return Promise.resolve({ ok: true, seq });
   }
 
   roomSeqOf(roomId: string, cid: string): Promise<number | undefined> {
