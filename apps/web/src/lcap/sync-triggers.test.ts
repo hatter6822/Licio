@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createSyncOrchestrator,
+  initBatteryTracking,
   readSyncConditions,
   requestBackgroundSync,
   type SyncConditions,
@@ -132,5 +133,49 @@ describe('requestBackgroundSync', () => {
     expect(await requestBackgroundSync()).toBe(false);
     mockServiceWorker({ ready: Promise.resolve({}) }); // no sync manager
     expect(await requestBackgroundSync()).toBe(false);
+  });
+});
+
+describe('initBatteryTracking (§23.3 low-battery)', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(globalThis.navigator as object, 'getBattery');
+  });
+
+  function mockBattery(b: { level: number; charging: boolean }): void {
+    Object.defineProperty(globalThis.navigator, 'getBattery', {
+      value: () => Promise.resolve({ ...b, addEventListener() {}, removeEventListener() {} }),
+      configurable: true,
+    });
+  }
+
+  it('suppresses auto-sync on a non-charging low battery, and resets on teardown', async () => {
+    mockBattery({ level: 0.1, charging: false });
+    const teardown = initBatteryTracking();
+    try {
+      await vi.waitFor(() => expect(readSyncConditions('standard').batteryLow).toBe(true));
+      expect(shouldAutoSync(readSyncConditions('standard'))).toBe(false);
+    } finally {
+      teardown();
+    }
+    expect(readSyncConditions('standard').batteryLow).toBe(false); // teardown resets the signal
+  });
+
+  it('does not suppress when the device is charging (even at a low level)', async () => {
+    mockBattery({ level: 0.05, charging: true });
+    const teardown = initBatteryTracking();
+    try {
+      // Allow the async getBattery().then to settle, then confirm the signal stayed false.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(readSyncConditions('standard').batteryLow).toBe(false);
+    } finally {
+      teardown();
+    }
+  });
+
+  it('is a no-op where the Battery Status API is unavailable (signal stays false)', () => {
+    // No navigator.getBattery → no-op teardown; the signal stays false (honest "unknown").
+    const teardown = initBatteryTracking();
+    expect(readSyncConditions('standard').batteryLow).toBe(false);
+    teardown();
   });
 });

@@ -77,4 +77,17 @@ describe('startLcapSync (WS-R.11.4 hooks wiring)', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('does NOT auto-sync on app open in Stealth mode (§23.3 gated, not forced)', async () => {
+    const fetchMock = vi.fn(
+      async (_url: string) => new Response(new Uint8Array() as BodyInit, { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    // App open is a GATED automatic trigger: Stealth must suppress the pulse entirely, so a
+    // Stealth-mode device never auto-contacts the server (not even on open).
+    startLcapSync({ getStorageMode: () => 'stealth', debounceMs: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
