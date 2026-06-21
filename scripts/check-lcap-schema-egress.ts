@@ -18,8 +18,15 @@ const ROOT = resolve(import.meta.dirname, '..');
 const SCHEMA_DIRS = [
   resolve(ROOT, 'packages/lcap/src/schemas'),
   resolve(ROOT, 'packages/lcap-p2p/src'),
+  // The WS-R.15.4 native courier shell: no radio/peer/IP identifier may enter any LCAP
+  // schema the courier defines (radio metadata is a live-connection property only,
+  // §26.4); the generated android/ build output is skipped by SKIP_DIRS below.
+  resolve(ROOT, 'apps/courier'),
 ];
 const TEST_FILE = /\.(?:test|spec)\.tsx?$/;
+
+// Directories never worth walking (deps, test trees, generated native/build output).
+const SKIP_DIRS = new Set(['node_modules', '__tests__', 'build', '.gradle', 'dist']);
 
 /**
  * Forbidden field-name tokens. Each must never appear (outside comments) in an LCAP
@@ -94,7 +101,7 @@ function collect(dir: string): string[] {
   if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) return out;
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
-    if (entry.isDirectory() && entry.name !== 'node_modules' && entry.name !== '__tests__') {
+    if (entry.isDirectory() && !SKIP_DIRS.has(entry.name)) {
       out.push(...collect(full));
     } else if (entry.isFile() && /\.ts$/.test(entry.name) && !TEST_FILE.test(entry.name)) {
       out.push(full);

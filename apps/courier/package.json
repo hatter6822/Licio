@@ -1,0 +1,19 @@
+{
+  "name": "courier",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "description": "WS-R.15.4a — the Licio native Android courier: a Capacitor shell that loads the UNCHANGED web build inside the system WebView and carries the same LCAP packs over native radio links. No courier-only web fork, no parallel data model.",
+  "type": "module",
+  "scripts": {
+    "sync": "cap sync android",
+    "build:apk": "cap sync android && cd android && ./gradlew --offline assembleDebug || (cd android && ./gradlew assembleDebug)",
+    "build": "node ./scripts/check-no-fork.mjs && cap sync android && node ./scripts/check-no-fork.mjs --assets && cd android && ./gradlew assembleDebug",
+    "verify:no-fork": "node ./scripts/check-no-fork.mjs"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/cli": "^7.0.0",
+    "@capacitor/core": "^7.0.0"
+  }
+}
