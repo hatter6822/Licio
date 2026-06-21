@@ -337,8 +337,9 @@ pnpm check:policy                   # doctrine/policy document validation
 pnpm check:neutrality               # the ten WS-I.3 ranking-neutrality tests
 pnpm check:adversarial              # the WS-O.4.5 ensemble adversarial suite
 pnpm check:lcap-scheduler           # the WS-R.5.4 LCAP lane anti-starvation gate
-pnpm check:no-applause              # no likes/votes/karma/reactions in components + routes
-pnpm check:no-raw-egress            # no raw attention traces leaving the browser
+pnpm check:lcap-schema-egress       # no IP/location/attention/applause field in any LCAP schema
+pnpm check:no-applause              # no likes/votes/karma/reactions in components + routes + LCAP
+pnpm check:no-raw-egress            # no raw attention traces leaving the browser (+ the LCAP plane)
 pnpm check:sw                       # SW security scan (run after build)
 
 # Supply chain and build validation.
@@ -1624,7 +1625,8 @@ production app).  Both run in CI's E2E job.
 
 **CI pipeline.**  `.github/workflows/ci.yml` runs 8 jobs on every PR:
 
-1. Lint & format (Biome + security lint + policy + no-raw-egress)
+1. Lint & format (Biome + security lint + policy + no-raw-egress +
+   no-applause + the WS-R.14.3 `check:lcap-schema-egress` LCAP doctrine gate)
 2. Type check (strict-mode across all workspaces)
 3. Lockfile integrity
 4. Dependency budget

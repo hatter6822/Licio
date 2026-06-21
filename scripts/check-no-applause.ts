@@ -10,7 +10,14 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
-const SCAN_DIRS = [resolve(ROOT, 'apps/web/src/components'), resolve(ROOT, 'apps/web/src/routes')];
+const SCAN_DIRS = [
+  resolve(ROOT, 'apps/web/src/components'),
+  resolve(ROOT, 'apps/web/src/routes'),
+  // The LCAP offline data plane (WS-R.14.3) — no applause may cross peers either.
+  resolve(ROOT, 'packages/lcap/src'),
+  resolve(ROOT, 'apps/web/src/lcap'),
+  resolve(ROOT, 'apps/api/src/lcap'),
+];
 
 // Curated to avoid false positives ("looks like", "Save", "Bridge Active").
 const FORBIDDEN: Array<{ pattern: RegExp; message: string }> = [
