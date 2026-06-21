@@ -32,6 +32,7 @@ jobs:
       - run: pnpm check:no-raw-egress
       - run: pnpm check:no-applause
       - run: pnpm check:lcap-schema-egress
+      - run: pnpm check:lcap-p2p-split
 
   typecheck:
     name: Type Check

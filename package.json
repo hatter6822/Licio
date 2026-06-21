@@ -18,6 +18,7 @@
     "lint:security": "tsx scripts/lint-security.ts",
     "check:no-applause": "tsx scripts/check-no-applause.ts",
     "check:no-raw-egress": "tsx scripts/check-no-raw-egress.ts",
+    "check:lcap-p2p-split": "tsx scripts/check-lcap-p2p-split.ts",
     "check:lcap-schema-egress": "tsx scripts/check-lcap-schema-egress.ts",
     "check:sw": "tsx scripts/check-sw-security.ts",
     "lint:lockfile": "tsx scripts/check-lockfile.ts",

@@ -39,7 +39,16 @@ const ALLOWED_WORKSPACE_DEPS: Record<string, string[]> = {
   // export/import flows — it runs the real pack writer/reader + validate()
   // client-side (no server round-trip), loaded as a lazy dynamic-import chunk
   // so the protocol core never enters the initial bundle. NEVER @licio/db.
-  web: ['@licio/shared', '@licio/invariants', '@licio/ai-governance', '@licio/lcap'],
+  // @licio/lcap-p2p is permitted but MUST be loaded DYNAMICALLY only (the WS-R.15.8
+  // code-split gate `check:lcap-p2p-split` proves no static import in apps/web), so the
+  // P2P/transport protocol code stays out of the initial bundle.
+  web: [
+    '@licio/shared',
+    '@licio/invariants',
+    '@licio/ai-governance',
+    '@licio/lcap',
+    '@licio/lcap-p2p',
+  ],
   api: [
     '@licio/shared',
     '@licio/db',

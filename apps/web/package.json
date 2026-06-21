@@ -17,6 +17,7 @@
     "@licio/ai-governance": "workspace:*",
     "@licio/invariants": "workspace:*",
     "@licio/lcap": "workspace:*",
+    "@licio/lcap-p2p": "workspace:*",
     "@licio/shared": "workspace:*",
     "@tanstack/react-query": "^5.62.0",
     "@tanstack/react-router": "^1.93.0",
