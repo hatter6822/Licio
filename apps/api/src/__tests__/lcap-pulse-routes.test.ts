@@ -214,6 +214,38 @@ describe('POST /pulse — §29.1 critical_pack (C0 server-push)', () => {
     if (read.ok) expect(read.pack.frames.has(blockCid)).toBe(true);
   });
 
+  it('clamps the critical_pack to the client-advertised budget, not the 64KB C0 max', async () => {
+    const srv = new LcapIngestServer(NET);
+    const blockBytes = enc.encode('a small C0 block — fits the 64KB cap but not a 1-byte budget');
+    const blockCid = await cidFor('block', blockBytes);
+    await srv.putObject(blockCid, 'block', blockBytes);
+    // A tiny advertised response budget: with the clamp, the held block (which would fit
+    // the 64KB C0 cap) does NOT fit this budget, so no critical_pack is returned (it stays
+    // fetchable via the GET routes) — proving the server honours the peer's budget.
+    const pulse = encodeWithSchema(
+      syncPulseV2Schema,
+      buildPulse({
+        nodeId: 'client-1',
+        sessionNonce: new Uint8Array([1, 2, 3, 4]),
+        transportProfile: 'https',
+        privacyMode: 'public',
+        budgets: { ...DEFAULT_BUDGET, max_response_bytes: 1 },
+        supportedSuites: ['ES256'],
+        supportedCompression: ['none'],
+        supportedPackVersions: [2],
+        checkpointFrontier: [],
+        revocationFrontier: [],
+        criticalWant: [blockCid],
+      }),
+    );
+    const res = await createLcapRoutes(srv).request('/pulse', { method: 'POST', body: pulse });
+    const decoded = decodeWithSchema(
+      pulseResponseV2Schema,
+      new Uint8Array(await res.arrayBuffer()),
+    );
+    expect('critical_pack' in decoded).toBe(false);
+  });
+
   it('omits critical_pack when the server holds none of the critical_want', async () => {
     const srv = new LcapIngestServer(NET);
     const absent = await cidFor('block', enc.encode('absent-block'));

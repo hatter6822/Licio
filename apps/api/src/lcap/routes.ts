@@ -392,11 +392,18 @@ async function handlePulse(server: LcapIngestServer, body: Uint8Array): Promise<
     return json(422, { error: 'invalid_pulse' });
   }
 
-  // The C0 fast path: bundle the client's critical_want objects we hold, tiny budget.
+  // The C0 fast path: bundle the client's critical_want objects we hold, tiny budget —
+  // never larger than what the peer explicitly advertised (e.g. minimal mode's small
+  // max_response_bytes), so the server cannot return a critical_pack over the receiver's
+  // budget.
   let criticalPack: Uint8Array | undefined;
   const criticalWant = parsed.data.critical_want ?? [];
   if (criticalWant.length > 0) {
-    const repacked = await repackHeldObjects(server, criticalWant, MAX_CRITICAL_PACK_BYTES);
+    const criticalBudget = Math.min(
+      MAX_CRITICAL_PACK_BYTES,
+      parsed.data.budgets.max_response_bytes,
+    );
+    const repacked = await repackHeldObjects(server, criticalWant, criticalBudget);
     if (repacked.pack !== undefined) criticalPack = repacked.pack;
   }
 
@@ -600,6 +607,9 @@ async function handleExport(
   if (cids.length === 0) return json(404, { error: 'not_found' });
   const repacked = await repackHeldObjects(server, cids, MAX_EXPORT_BYTES);
   if (repacked.pack === undefined) return json(404, { error: 'not_found' });
+  // A room whose closure exceeds the export budget must FAIL loudly, not silently hand
+  // back a partial `.licio-bundle` missing later records/proofs/blocks (§29.8).
+  if (repacked.truncated) return json(413, { error: 'export_too_large' });
   return new Response(new Uint8Array(repacked.pack), {
     status: 200,
     headers: {
