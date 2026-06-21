@@ -23,7 +23,13 @@ import type {
   ReaderCaps,
 } from '@licio/lcap';
 import { LCAP_STORE } from './db.js';
-import { importInCappedTransactions, type ProofRow, putBlock, type RecordRow } from './store.js';
+import {
+  filterPresentKeys,
+  importInCappedTransactions,
+  type ProofRow,
+  putBlock,
+  type RecordRow,
+} from './store.js';
 
 const LANES: readonly LcapLane[] = ['C0', 'T1', 'E2', 'M3', 'B4'];
 
@@ -112,10 +118,36 @@ export async function importBundleObjects(
   return options ? importPack(pack, options) : importPack(pack);
 }
 
+/**
+ * The pack CIDs we ALREADY hold (records / proofs / blocks / chunks).  Passed to
+ * `importBundleObjects` as `alreadyHave` so a RE-import reports them `already_have` and
+ * never re-commits: re-committing would overwrite a record we may already hold at HIGHER
+ * trust (e.g. `authorized`/`checkpointed`) back down to `integrity_verified`.  Trust
+ * projection is monotonic (WS-R.8.3), so an import must never downgrade.
+ */
+export async function heldCidsFor(db: IDBDatabase, pack: ParsedPack): Promise<Set<string>> {
+  const recordCids: string[] = [];
+  const proofCids: string[] = [];
+  const blobCids: string[] = []; // a block AND a standalone chunk both land CID-addressed in `blocks`
+  for (const [cid, frame] of pack.frames) {
+    if (frame.frameKind === 'record_body') recordCids.push(cid);
+    else if (frame.frameKind === 'proof') proofCids.push(cid);
+    else blobCids.push(cid); // 'block' | 'chunk'
+  }
+  const [records, proofs, blobs] = await Promise.all([
+    filterPresentKeys(db, LCAP_STORE.records, recordCids),
+    filterPresentKeys(db, LCAP_STORE.proofs, proofCids),
+    filterPresentKeys(db, LCAP_STORE.blocks, blobCids),
+  ]);
+  return new Set([...records, ...proofs, ...blobs]);
+}
+
 export interface CommitCounts {
   readonly records: number;
   readonly proofs: number;
   readonly blocks: number;
+  /** Standalone `chunk` frames persisted CID-addressed (durable, retrievable by CID). */
+  readonly chunks: number;
   readonly quarantined: number;
   readonly rejected: number;
   readonly alreadyHave: number;
@@ -157,6 +189,7 @@ export async function commitImportedBundle(
   const trustRows: Array<{ recordCid: string; state: string; lastEvaluated: number }> = [];
   const livenessRows: LivenessRow[] = [];
   const blockWrites: Array<{ cid: string; bytes: Uint8Array }> = [];
+  const chunkWrites: Array<{ cid: string; bytes: Uint8Array }> = [];
 
   for (const [cid, frame] of importResult.imported) {
     const entry = entryByCid.get(cid);
@@ -186,8 +219,13 @@ export async function commitImportedBundle(
       });
     } else if (frame.frameKind === 'block') {
       blockWrites.push({ cid, bytes: frame.payload });
+    } else if (frame.frameKind === 'chunk') {
+      // A standalone, CID-verified chunk is content the bundle carried — persist it
+      // CID-addressed (durable, retrievable by its chunk CID via `readBlockBytes`) rather
+      // than dropping verified bytes.  It carries no parent-block/index association in the
+      // v0.2 pack format, so reassembling it INTO a partial block is a tracked follow-up.
+      chunkWrites.push({ cid, bytes: frame.payload });
     }
-    // Standalone `chunk` frames are not part of the renderable core import; skipped.
   }
 
   // Quarantine rows from the per-object statuses (the precise missing prerequisites).
@@ -229,11 +267,19 @@ export async function commitImportedBundle(
       [block.bytes],
     );
   }
+  for (const chunk of chunkWrites) {
+    await putBlock(
+      db,
+      { blockCid: chunk.cid, state: 'integrity_verified', size: chunk.bytes.length },
+      [chunk.bytes],
+    );
+  }
 
   return {
     records: recordRows.length,
     proofs: proofRows.length,
     blocks: blockWrites.length,
+    chunks: chunkWrites.length,
     quarantined: quarantineRows.length,
     rejected,
     alreadyHave,

@@ -25,6 +25,7 @@ import {
   type BundleSummary,
   type CommitCounts,
   commitImportedBundle,
+  heldCidsFor,
   importBundleObjects,
   readBundleForImport,
 } from '../../../lcap/bundle-import.js';
@@ -127,8 +128,11 @@ export function OfflineBundlePanel({
     if (importState.phase !== 'summarized') return;
     setImportState({ phase: 'committing' });
     try {
-      const result = await importBundleObjects(importState.pack);
       const db = await getLcapDb();
+      // Objects we already hold are reported `already_have` and skipped on commit, so a
+      // re-import never overwrites a record held at higher trust back to integrity-only.
+      const alreadyHave = await heldCidsFor(db, importState.pack);
+      const result = await importBundleObjects(importState.pack, { alreadyHave });
       const counts = await commitImportedBundle(db, importState.pack, result);
       setImportState({ phase: 'done', counts });
     } catch {

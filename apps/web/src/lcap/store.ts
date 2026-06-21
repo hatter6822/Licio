@@ -93,6 +93,34 @@ async function getByKey<T>(
   return result;
 }
 
+/**
+ * The subset of `keys` already present in `store`, checked via `getKey` (the primary key
+ * only — NO value is deserialized) inside ONE readonly transaction.  Used to learn which
+ * objects we already hold before a re-import, so already-held objects are NOT re-committed
+ * (re-committing would overwrite a record we may hold at HIGHER trust — e.g. `authorized`
+ * — back down to `integrity_verified`; trust projection is monotonic and must never be
+ * downgraded by an import, WS-R.8.3).  All requests are issued synchronously on the same
+ * transaction, so it stays alive until they settle.
+ */
+export async function filterPresentKeys(
+  db: IDBDatabase,
+  store: LcapStoreName,
+  keys: readonly string[],
+): Promise<Set<string>> {
+  const present = new Set<string>();
+  if (keys.length === 0) return present;
+  const tx = db.transaction(store, 'readonly');
+  const objectStore = tx.objectStore(store);
+  await Promise.all(
+    keys.map(async (key) => {
+      const found = await promisifyRequest<IDBValidKey | undefined>(objectStore.getKey(key));
+      if (found !== undefined) present.add(key);
+    }),
+  );
+  await txComplete(tx);
+  return present;
+}
+
 // --- Cursor-only iteration (NEVER getAll). ----------------------------------------
 
 /**

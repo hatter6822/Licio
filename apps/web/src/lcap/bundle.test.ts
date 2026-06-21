@@ -9,7 +9,7 @@
 //   - a malformed/truncated file is rejected cleanly with a typed status;
 //   - a missing-dependency record is quarantined with its precise missing CIDs.
 import 'fake-indexeddb/auto';
-import { cidFor } from '@licio/lcap';
+import { cidFor, writePack } from '@licio/lcap';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildBundle,
@@ -18,7 +18,12 @@ import {
   gatherRoomExport,
   prepareRoomExport,
 } from './bundle-export.js';
-import { commitImportedBundle, importBundleObjects, readBundleForImport } from './bundle-import.js';
+import {
+  commitImportedBundle,
+  heldCidsFor,
+  importBundleObjects,
+  readBundleForImport,
+} from './bundle-import.js';
 import {
   getLcapDb,
   LCAP_DB_VERSION,
@@ -27,7 +32,7 @@ import {
   openLcapDb,
   resetLcapDbConnection,
 } from './db.js';
-import { collectByCursor, type RecordRow } from './store.js';
+import { collectByCursor, type RecordRow, readBlockBytes } from './store.js';
 
 let db: IDBDatabase;
 
@@ -203,6 +208,139 @@ describe('bundle import — quarantine (WS-R.4.3)', () => {
     expect(counts.quarantined).toBe(1);
     expect(counts.missingCids).toContain(missingDep);
     expect(counts.records).toBe(0); // the record is held back, not stored as renderable
+    db2.close();
+  });
+});
+
+describe('bundle import — re-import never downgrades held trust (review)', () => {
+  it('reports already-held objects as already_have and preserves their higher trust', async () => {
+    // The store already holds this record at `proof_verified` (a higher trust than an
+    // import's integrity-only).  Re-importing the SAME bundle must NOT overwrite it back
+    // down — trust projection is monotonic (WS-R.8.3).
+    const seeded = await seedRecord('room-A', 'held already at higher trust');
+    const exportData = await gatherRoomExport(db, 'room-A');
+    const disclosure = await exportDisclosure(exportData.items);
+    const bundle = await buildBundle({ objects: exportData.objects, disclosure });
+
+    const read = await readBundleForImport(bundle);
+    if (!read.ok) throw new Error('read failed');
+
+    const alreadyHave = await heldCidsFor(db, read.pack);
+    expect(alreadyHave.has(seeded.recordCid)).toBe(true); // we hold it → it must be skipped
+    const result = await importBundleObjects(read.pack, { alreadyHave });
+    const counts = await commitImportedBundle(db, read.pack, result);
+
+    expect(counts.records).toBe(0); // nothing re-committed
+    expect(counts.alreadyHave).toBeGreaterThanOrEqual(1);
+
+    const stored = await collectByCursor<RecordRow>(db, LCAP_STORE.records);
+    const row = stored.find((r) => r.recordCid === seeded.recordCid);
+    expect(row?.state).toBe('proof_verified'); // NOT downgraded to integrity_verified
+  });
+
+  it('WITHOUT the held set, a naive re-import would downgrade (proves the guard matters)', async () => {
+    // Contrast case: a fresh store seeded at proof_verified, re-imported with NO alreadyHave,
+    // shows the downgrade the production guard now prevents.
+    const db2 = await openLcapDb(
+      `lcap_v2-downgrade-${Math.random().toString(36).slice(2)}`,
+      LCAP_DB_VERSION,
+      LCAP_MIGRATIONS,
+    );
+    const body = new TextEncoder().encode('downgrade demo');
+    const recordCid = await cidFor('record', body);
+    const tx = db2.transaction(LCAP_STORE.records, 'readwrite');
+    tx.objectStore(LCAP_STORE.records).put({
+      recordCid,
+      body,
+      kind: 'contribution_event',
+      lane: 'T1',
+      priority: 1,
+      roomHash: 'room-A',
+      state: 'authorized_provisional',
+      size: body.length,
+    });
+    await new Promise<void>((res, rej) => {
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+    });
+
+    const bundle = writePack({
+      objects: [
+        {
+          cid: recordCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: body,
+          lane: 'T1',
+          priority: 1,
+          recordKind: 'contribution_event',
+          roomIdHash: new TextEncoder().encode('room-A'),
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1 << 20,
+    });
+    const read = await readBundleForImport(bundle);
+    if (!read.ok) throw new Error('read failed');
+    // Old buggy call shape: no alreadyHave → re-commits → overwrites the higher trust.
+    const result = await importBundleObjects(read.pack);
+    await commitImportedBundle(db2, read.pack, result);
+    const stored = await collectByCursor<RecordRow>(db2, LCAP_STORE.records);
+    expect(stored.find((r) => r.recordCid === recordCid)?.state).toBe('integrity_verified');
+    db2.close();
+  });
+});
+
+describe('bundle import — standalone chunk frames are persisted, not dropped (review)', () => {
+  it('persists a CID-verified standalone chunk durably + retrievable by its CID', async () => {
+    const recordBody = new TextEncoder().encode('record alongside a chunk');
+    const recordCid = await cidFor('record', recordBody);
+    const chunkBytes = new TextEncoder().encode('a standalone, CID-verified chunk payload');
+    const chunkCid = await cidFor('chunk', chunkBytes);
+
+    const bundle = writePack({
+      objects: [
+        {
+          cid: recordCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: recordBody,
+          lane: 'T1',
+          priority: 1,
+          recordKind: 'contribution_event',
+          roomIdHash: new TextEncoder().encode('room-A'),
+        },
+        {
+          cid: chunkCid,
+          cidKind: 'chunk',
+          frameKind: 'chunk',
+          payload: chunkBytes,
+          lane: 'M3',
+          priority: 3,
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1 << 20,
+    });
+
+    const db2 = await openLcapDb(
+      `lcap_v2-chunk-${Math.random().toString(36).slice(2)}`,
+      LCAP_DB_VERSION,
+      LCAP_MIGRATIONS,
+    );
+    const read = await readBundleForImport(bundle);
+    if (!read.ok) throw new Error('read failed');
+    expect(read.summary.byKind.chunk).toBe(1);
+    const result = await importBundleObjects(read.pack);
+    const counts = await commitImportedBundle(db2, read.pack, result);
+
+    expect(counts.records).toBe(1);
+    expect(counts.chunks).toBe(1); // the verified chunk is persisted, not silently dropped
+    const reassembled = await readBlockBytes(db2, chunkCid); // retrievable by its CID
+    expect(reassembled).toBeDefined();
+    expect(Array.from(reassembled ?? [])).toEqual(Array.from(chunkBytes)); // byte-for-byte
     db2.close();
   });
 });
