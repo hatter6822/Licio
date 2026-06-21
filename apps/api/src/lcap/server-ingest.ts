@@ -16,10 +16,12 @@
 // which is true only for a freshly-accepted record.
 
 import {
+  buildCheckpoint,
   buildPulse,
   buildPulseResponse,
   type CapabilityBundle,
   type CertificateBundle,
+  type CheckpointBundle,
   type CheckpointFrontierV2,
   type ConsensusInput,
   type CryptoSuiteId,
@@ -53,6 +55,7 @@ import {
   roomIdHash,
   SERVER_CAPS,
   type SyncPulseV2,
+  signCheckpoint,
   type TreeAlgorithm,
   type ValidationResult,
   validate,
@@ -150,6 +153,18 @@ export class LcapIngestServer {
   // include the signer cert (resolvable only by device key id, not from the contribution body).
   private readonly deviceCertCids = new Map<string, string>();
   private readonly revocations = new RevocationIndex();
+  // Room-authority SIGNING keys (the private counterpart of `roomAuthorityKeys`) for rooms this
+  // node is authoritative over, so it can ISSUE signed `room_checkpoint` records (WS-R.9.2b).  In
+  // production these come from the SecretBox-encrypted `*_AUTHORITY_*` key group; a room with no
+  // signer here is simply not checkpointed by this node (the §29.7 read falls back to the head).
+  private readonly roomAuthoritySigners = new Map<
+    string,
+    { privateKey: CryptoKey; signerKeyId: string; policyEpoch: number }
+  >();
+  // The latest signed checkpoint this node issued per room (the chain head + the §29.7 served
+  // value + the §17.2 frontier `latest_checkpoint_cid`).  The bytes also live in the CAS, so the
+  // checkpoint + its proof are fetchable by CID like any other object.
+  private readonly latestCheckpoints = new Map<string, { bundle: CheckpointBundle; cid: string }>();
 
   /**
    * @param networkId the LCAP network this server serves.
@@ -355,6 +370,107 @@ export class LcapIngestServer {
   ): void {
     this.roomAuthorityKeys.set(`${roomId} ${policyEpoch}`, key);
     this.authoritySigners.set(signerKeyId, { key, scope: 'room', scopeId: roomId });
+  }
+
+  /**
+   * Register the room-authority SIGNING key for a room this node is authoritative over, so it can
+   * ISSUE signed `room_checkpoint` records (WS-R.9.2b).  This is the private counterpart of
+   * `registerRoomAuthorityKey`; a node that issues checkpoints registers BOTH (the public key
+   * verifies its own + peers' checkpoints, the private key signs new ones).
+   */
+  registerRoomAuthoritySigner(
+    roomId: string,
+    policyEpoch: number,
+    privateKey: CryptoKey,
+    signerKeyId: string,
+  ): void {
+    this.roomAuthoritySigners.set(roomId, { privateKey, signerKeyId, policyEpoch });
+  }
+
+  /**
+   * Issue (build + room-authority-sign + durably store) a `room_checkpoint` over the room's
+   * current canonical acceptance log (WS-R.9.2b / §24.1 checkpoint trigger).  IDEMPOTENT by tree
+   * size: a re-issue at an unchanged `tree_size` returns the existing checkpoint (no churn,
+   * stable chain).  Successive checkpoints chain via `previous_checkpoint_cid`.  Returns the
+   * signed bundle, or `undefined` when this node holds no signer for the room or the log is empty
+   * (an empty room has nothing to attest).  The checkpoint body + its proof land in the CAS, so
+   * both are fetchable by CID through the §29 GET routes.
+   */
+  async issueCheckpoint(roomId: string): Promise<CheckpointBundle | undefined> {
+    const signer = this.roomAuthoritySigners.get(roomId);
+    if (!signer) return undefined;
+    const log = await this.buildRoomLog(roomId);
+    if (log.size === 0) return undefined; // nothing accepted yet — no checkpoint to attest
+    const prev = this.latestCheckpoints.get(roomId);
+    if (prev && prev.bundle.checkpoint.tree_size === log.size) return prev.bundle; // idempotent
+
+    const checkpoint = await buildCheckpoint(log, {
+      roomId,
+      treeSize: log.size,
+      policyEpoch: signer.policyEpoch,
+      revocationEpoch: this.revocations.knownEpoch,
+      issuedAtMs: this.now(),
+      signerAuthorityId: signer.signerKeyId,
+      ...(prev ? { previousCheckpointCid: prev.cid } : {}),
+    });
+    const bundle = await signCheckpoint({
+      authorityPrivateKey: signer.privateKey,
+      authoritySignerKeyId: signer.signerKeyId,
+      checkpoint,
+      networkId: this.networkId,
+    });
+    // Durably store the checkpoint record + its proof so both are fetchable by CID (§29).
+    const cid = await cidFor('record', bundle.body);
+    await this.store.storeObject(cid, 'record', bundle.body);
+    const proofBytes = encodeWithSchema(detachedProofV2Schema, bundle.proof);
+    await this.store.storeObject(await cidFor('proof', proofBytes), 'proof', proofBytes);
+    this.latestCheckpoints.set(roomId, { bundle, cid });
+    return bundle;
+  }
+
+  /**
+   * The §24.1 checkpoint maintenance tick: issue a fresh checkpoint for every room whose log has
+   * grown since its last one (idempotent for unchanged rooms).  Returns the rooms checkpointed.
+   */
+  async issueAllCheckpoints(): Promise<readonly string[]> {
+    const issued: string[] = [];
+    for (const roomId of await this.store.listRooms()) {
+      const before = this.latestCheckpoints.get(roomId)?.cid;
+      const bundle = await this.issueCheckpoint(roomId);
+      if (bundle && this.latestCheckpoints.get(roomId)?.cid !== before) issued.push(roomId);
+    }
+    return issued;
+  }
+
+  /** The latest signed checkpoint this node issued for a room (the §29.7 served value), or none. */
+  latestCheckpoint(roomId: string): { bundle: CheckpointBundle; cid: string } | undefined {
+    return this.latestCheckpoints.get(roomId);
+  }
+
+  /**
+   * The §29.7 wire form of a room's latest signed checkpoint: the CID-addressed record body + its
+   * detached authority proof (both also fetchable individually via the §29 GET routes).  A peer
+   * decodes + verifies the proof against the room authority key, then checks `merkle_root` against
+   * its own log.  `undefined` when this node has issued no checkpoint for the room.
+   */
+  async latestCheckpointWire(roomId: string): Promise<
+    | {
+        cid: string;
+        recordBody: Uint8Array;
+        proofCid: string;
+        proofBody: Uint8Array;
+      }
+    | undefined
+  > {
+    const latest = this.latestCheckpoints.get(roomId);
+    if (!latest) return undefined;
+    const proofBody = encodeWithSchema(detachedProofV2Schema, latest.bundle.proof);
+    return {
+      cid: latest.cid,
+      recordBody: latest.bundle.body,
+      proofCid: await cidFor('proof', proofBody),
+      proofBody,
+    };
   }
 
   /**
@@ -733,17 +849,20 @@ export class LcapIngestServer {
   /**
    * The §17.2 checkpoint frontier: one entry per room that has accepted records,
    * keyed by the privacy-scoped `room_id_hash` and reporting the room log's current
-   * size (its §22 leaf count).  No `latest_checkpoint_cid` is emitted until
-   * checkpoint issuance lands — the honest "how far along" signal is the tree size,
-   * which already lets a peer detect it is behind on a room (§17.2).
+   * size (its §22 leaf count) plus the `latest_checkpoint_cid` once this node has
+   * issued a signed checkpoint for the room (WS-R.9.2b).  The tree size alone already
+   * lets a peer detect it is behind; the checkpoint CID lets it fetch + verify the
+   * signed head against the authority key.
    */
   async checkpointFrontier(): Promise<CheckpointFrontierV2[]> {
     const rooms = await this.store.listRooms();
     const frontier: CheckpointFrontierV2[] = [];
     for (const roomId of rooms) {
+      const checkpointCid = this.latestCheckpoints.get(roomId)?.cid;
       frontier.push({
         room_id_hash: await roomIdHash(this.networkId, roomId),
         latest_tree_size: await this.store.roomSize(roomId),
+        ...(checkpointCid !== undefined ? { latest_checkpoint_cid: checkpointCid } : {}),
       });
     }
     return frontier;
@@ -809,8 +928,9 @@ export class LcapIngestServer {
   /**
    * The §29.7 room tree head: the current tree size + Merkle root.  This is the
    * UNSIGNED head (size 0 → the RFC 9162 empty-tree hash); the authority-signed
-   * `CheckpointRecordV2` attesting a witnessed root is checkpoint issuance, a later
-   * card.  Inclusion/consistency proofs verify against this root regardless.
+   * `room_checkpoint` attesting a root is issued separately by `issueCheckpoint`
+   * (served alongside this head when present, via `latestCheckpointWire`).
+   * Inclusion/consistency proofs verify against this root regardless.
    */
   async roomTreeHead(
     roomId: string,

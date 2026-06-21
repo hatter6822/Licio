@@ -566,16 +566,30 @@ function toHex(bytes: Uint8Array): string {
 }
 
 /**
- * §29.7 `GET /rooms/:roomId/checkpoint`: the room's current (unsigned) Merkle tree
- * head — size + root over the canonical acceptance order.  An unknown/empty room is
- * a well-defined size-0 head (the RFC 9162 empty-tree hash), so this is always 200.
+ * §29.7 `GET /rooms/:roomId/checkpoint`: the room's current Merkle tree head — size +
+ * root over the canonical acceptance order — PLUS the latest authority-signed
+ * `room_checkpoint` (WS-R.9.2b) when this node has issued one (the record + its detached
+ * proof, both CID-addressed; a peer verifies the proof against the room authority key and
+ * checks `merkle_root` against its own log).  An unknown/empty room is a well-defined
+ * size-0 head (the RFC 9162 empty-tree hash), so this is always 200.
  */
 async function handleRoomCheckpoint(server: LcapIngestServer, roomId: string): Promise<Response> {
   const head = await server.roomTreeHead(roomId);
+  const signed = await server.latestCheckpointWire(roomId);
   return json(200, {
     tree_size: head.treeSize,
     root_hash: toHex(head.rootHash),
     tree_algorithm: head.algorithm,
+    ...(signed
+      ? {
+          checkpoint: {
+            cid: signed.cid,
+            record_body: toHex(signed.recordBody),
+            proof_cid: signed.proofCid,
+            proof_body: toHex(signed.proofBody),
+          },
+        }
+      : {}),
   });
 }
 
