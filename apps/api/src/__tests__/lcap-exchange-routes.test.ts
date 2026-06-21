@@ -239,10 +239,12 @@ describe('POST /exchange — §29.2 response_pack (server-push of client wants)'
     await srv.putObject(fx.recordCid, 'record', fx.body);
     await srv.putObject(proofCid, 'proof', proofBytes);
 
-    // A tiny response budget forces a one-object pack → partial.
+    // A budget that fits exactly the first want (record + 256B frame overhead) serves one
+    // object and drops the proof → partial with a one-object response_pack.  (A budget
+    // below even the first object would serve nothing — the first want is not exempt.)
     const tightPulse: SyncPulseV2 = {
       ...clientPulse(),
-      budgets: { ...DEFAULT_BUDGET, max_response_bytes: 1 },
+      budgets: { ...DEFAULT_BUDGET, max_response_bytes: fx.body.length + 256 },
     };
     const res = await createLcapRoutes(srv).request('/exchange', {
       method: 'POST',

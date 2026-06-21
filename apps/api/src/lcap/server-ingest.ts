@@ -447,6 +447,13 @@ export class LcapIngestServer {
     for (const [cid, missing] of resolution.quarantined) {
       const input = byCid.get(cid);
       if (!input) continue;
+      // Bound the per-object missing-dependency fan-out (§27.1): a small pack must not
+      // produce an unbounded quarantine status / `wants` response via a transitive
+      // dependency explosion.  Past the cap the object is rejected, nothing stored.
+      if (missing.length > this.caps.maxMissingDepsPerObject) {
+        statuses.push({ cid, cid_kind: 'record', status: 'rejected_resource_limit' });
+        continue;
+      }
       quarantineBytes += input.body.length;
       if (overCpuBudget() || !checkCap(quarantineBytes, 'maxQuarantineBytes', this.caps).ok) {
         statuses.push({ cid, cid_kind: 'record', status: 'rejected_resource_limit' });

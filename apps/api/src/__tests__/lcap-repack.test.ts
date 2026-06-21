@@ -79,12 +79,24 @@ describe('repackHeldObjects (§16.7 hints; content-derived lane/priority)', () =
     expect(result.served).toEqual([]);
   });
 
-  it('truncates to the byte budget and reports it (the first object always fits)', async () => {
+  it('respects the byte budget even for the first held object (no first-object bypass)', async () => {
     const srv = await heldServer();
-    // A budget below the second object forces a one-object pack + truncated=true.
-    const result = await repackHeldObjects(srv, [fx.recordCid, proofCid, blockCid], 1);
-    expect(result.served).toHaveLength(1);
-    expect(result.truncated).toBe(true);
-    expect(result.served[0]).toBe(fx.recordCid);
+    // A 1-byte budget is below even the first object.  The first want must NOT be served
+    // in excess of the advertised budget: nothing is served and the exchange is marked
+    // partial (the peer fetches it via the resumable GET range routes).
+    const tiny = await repackHeldObjects(srv, [fx.recordCid, proofCid, blockCid], 1);
+    expect(tiny.served).toEqual([]);
+    expect(tiny.truncated).toBe(true);
+    expect(tiny.pack).toBeUndefined();
+
+    // A budget that fits exactly the first object (its payload + the 256B frame overhead)
+    // serves one object and truncates the remainder.
+    const oneFit = await repackHeldObjects(
+      srv,
+      [fx.recordCid, proofCid, blockCid],
+      fx.body.length + 256,
+    );
+    expect(oneFit.served).toEqual([fx.recordCid]);
+    expect(oneFit.truncated).toBe(true);
   });
 });

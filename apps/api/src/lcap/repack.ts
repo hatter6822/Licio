@@ -144,8 +144,11 @@ export async function repackHeldObjects(
     const derived = packObjectFor(cid, stored);
     if (!derived) continue; // undecodable — never repacked
     const projected = bytes + derived.object.payload.length + FRAME_OVERHEAD_BYTES;
-    if (objects.length > 0 && projected > maxBytes) {
-      truncated = true; // keep within the peer's budget; the rest stays fetchable via GET
+    if (projected > maxBytes) {
+      // Respect the peer's response budget even for the FIRST want: a tiny advertised
+      // budget must not be overrun by a single large held object (it stays fetchable via
+      // the resumable GET range routes).  Mark the exchange partial and stop.
+      truncated = true;
       break;
     }
     objects.push(derived.object);

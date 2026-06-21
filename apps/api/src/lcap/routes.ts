@@ -43,6 +43,7 @@ import {
   parseCid,
   pulseResponseV2Schema,
   readPack,
+  SERVER_CAPS,
   type SyncPulseV2,
   syncPulseV2Schema,
   type WantRequestV2,
@@ -75,6 +76,22 @@ function json(status: number, obj: unknown): Response {
     status,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+/**
+ * Reject an upload by its declared `Content-Length` BEFORE the body is buffered into
+ * memory (the LCAP POST handlers call `arrayBuffer()`, which materializes the whole
+ * request).  A present, oversized length is refused with 413 up front; an absent or
+ * chunked length still falls back to the post-buffer §27.1 caps inside the handler.
+ */
+function declaredLengthExceeds(
+  c: { req: { header: (k: string) => string | undefined } },
+  max: number,
+): boolean {
+  const raw = c.req.header('content-length');
+  if (raw === undefined) return false;
+  const len = Number(raw);
+  return Number.isFinite(len) && len > max;
 }
 
 /** Parse a single RFC 7233 `bytes=` range against `size`; `null` ⇒ serve full. */
@@ -211,7 +228,10 @@ async function ingestPackFrames(
   // and index each record→proof edge for the §29.8 room-export closure.
   const proofsByRecord = new Map<string, DetachedProofV2[]>();
   for (const [cid, frame] of frames) {
-    if (frame.frameKind !== 'proof') continue;
+    // Only a CID-VERIFIED proof frame may authorize a record/identity object: a frame
+    // whose payload does not hash to its declared proof CID is `rejected_bad_cid` (not
+    // stored/fetchable), so its signature must not be allowed to authorize anything here.
+    if (frame.frameKind !== 'proof' || !frame.cidVerified) continue;
     try {
       const proof = decodeProof(frame.payload);
       const list = proofsByRecord.get(proof.record_cid) ?? [];
@@ -252,7 +272,9 @@ async function ingestPackFrames(
       statuses.push({ cid, cid_kind: 'record', status: 'rejected_bad_schema' });
       continue;
     }
-    const proofs = proofsByRecord.get(cid) ?? [];
+    // Bound the per-record proof fan-in (§27.1): a pack cannot force thousands of key
+    // lookups / signature checks for one record before it quarantines or rejects.
+    const proofs = (proofsByRecord.get(cid) ?? []).slice(0, SERVER_CAPS.maxProofsPerRecord);
     const authorityProof = proofs[0];
     switch (record.kind) {
       case 'device_certificate':
@@ -280,15 +302,11 @@ async function ingestPackFrames(
         statuses.push({ cid, cid_kind: 'record', status: storedStatus });
         break;
       case 'contribution_event': {
-        contributions.push({
-          recordCid: cid,
-          roomId: record.home_room_id,
-          authorDeviceKeyId: record.author_device_key_id,
-          deviceSeq: record.device_seq,
-          body: frame.payload,
-          proofs,
-        });
-        // Index the contribution's declared block deps for the export closure (§29.8).
+        // Split the table's declared deps: block deps index the §29.8 export closure;
+        // RECORD deps (parent/previous record) are prerequisites passed to commitBatch so
+        // a child/edit/moderation record with an absent record dependency quarantines
+        // (and surfaces a want) instead of being appended to the canonical room log.
+        const requires: string[] = [];
         for (const dep of entryByCid.get(cid)?.deps ?? []) {
           let depKind: string;
           try {
@@ -297,7 +315,17 @@ async function ingestPackFrames(
             continue; // a malformed dep CID is ignored (the record will quarantine anyway)
           }
           if (depKind === 'block') await server.indexRecordEdge(cid, dep, 'block');
+          else if (depKind === 'record') requires.push(dep);
         }
+        contributions.push({
+          recordCid: cid,
+          roomId: record.home_room_id,
+          authorDeviceKeyId: record.author_device_key_id,
+          deviceSeq: record.device_seq,
+          body: frame.payload,
+          proofs,
+          ...(requires.length > 0 ? { requires } : {}),
+        });
         break; // commitBatch reports the contribution's status
       }
       default:
@@ -601,21 +629,29 @@ export function createLcapRoutes(override?: LcapIngestServer): Hono {
   );
   // §29.8 bundle export (GET → CSRF passes): a room's content closure as a pack.
   app.get('/bundles/export', (c) => handleExport(server(), c.req.query('room')));
-  app.post('/packs', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) =>
-    ingestPack(server(), new Uint8Array(await c.req.arrayBuffer())),
-  );
+  app.post('/packs', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) => {
+    if (declaredLengthExceeds(c, SERVER_CAPS.maxPackBytes))
+      return json(413, { error: 'oversized_request' });
+    return ingestPack(server(), new Uint8Array(await c.req.arrayBuffer()));
+  });
   // §29.8 bundle import: the web-UI alias of /packs (same validator; CSRF-protected
   // — it is NOT in the CSRF-exempt set, so a session-bearing browser flow keeps the
   // double-submit token).
-  app.post('/bundles/import', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) =>
-    ingestPack(server(), new Uint8Array(await c.req.arrayBuffer())),
-  );
-  app.post('/pulse', rateLimit({ limit: 120, windowMs: 60_000 }), async (c) =>
-    handlePulse(server(), new Uint8Array(await c.req.arrayBuffer())),
-  );
-  app.post('/exchange', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) =>
-    handleExchange(server(), new Uint8Array(await c.req.arrayBuffer())),
-  );
+  app.post('/bundles/import', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) => {
+    if (declaredLengthExceeds(c, SERVER_CAPS.maxPackBytes))
+      return json(413, { error: 'oversized_request' });
+    return ingestPack(server(), new Uint8Array(await c.req.arrayBuffer()));
+  });
+  app.post('/pulse', rateLimit({ limit: 120, windowMs: 60_000 }), async (c) => {
+    if (declaredLengthExceeds(c, MAX_PULSE_REQUEST_BYTES))
+      return json(413, { error: 'oversized_request' });
+    return handlePulse(server(), new Uint8Array(await c.req.arrayBuffer()));
+  });
+  app.post('/exchange', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) => {
+    if (declaredLengthExceeds(c, SERVER_CAPS.maxPackBytes))
+      return json(413, { error: 'oversized_request' });
+    return handleExchange(server(), new Uint8Array(await c.req.arrayBuffer()));
+  });
   // §29 WebRTC server-blind signaling rendezvous (WS-R.15.6a): route an OPAQUE sealed
   // blob to an opaque recipient key. The body is never decoded here (server-blindness);
   // session-bound + CSRF-protected (NOT in the CSRF-exempt set) — a browser P2P flow

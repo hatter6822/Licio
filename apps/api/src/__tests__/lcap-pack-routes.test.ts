@@ -187,6 +187,55 @@ describe('POST /api/lcap/v2/packs — bundle import (WS-R.12.4)', () => {
   });
 });
 
+describe('POST /api/lcap/v2/packs — review hardening', () => {
+  const enc = new TextEncoder();
+
+  it('rejects an oversized upload by Content-Length before buffering the body (413)', async () => {
+    setLcapIngestServer(new LcapIngestServer(NET, () => NOW));
+    const res = await createApp().request('/api/lcap/v2/packs', {
+      method: 'POST',
+      headers: { 'content-length': String(64 * 1024 * 1024 + 1) }, // > SERVER_CAPS.maxPackBytes
+      body: new Uint8Array([0]),
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it('quarantines a contribution whose declared RECORD dependency is absent (not accepted)', async () => {
+    const srv = new LcapIngestServer(NET, () => NOW);
+    await registerIdentity(srv, fx);
+    setLcapIngestServer(srv);
+    const absentParent = await cidFor('record', enc.encode('absent parent record'));
+    const pack = writePack({
+      objects: [
+        {
+          cid: fx.recordCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: fx.body,
+          lane: 'M3',
+          priority: 1,
+          deps: [absentParent], // a record-type prerequisite the server does not hold
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1_000_000,
+    });
+    const res = await createApp().request('/api/lcap/v2/packs', { method: 'POST', body: pack });
+    const data = (await res.json()) as {
+      statuses: { cid: string; status: string }[];
+      wants: { cid: string }[];
+    };
+    // The record dep is now honored: the record quarantines + wants the parent, and is
+    // NOT appended to the canonical room log (before the fix it was accepted outright).
+    expect(data.statuses.find((s) => s.cid === fx.recordCid)?.status).toBe(
+      'quarantined_missing_dependency',
+    );
+    expect(data.wants.some((w) => w.cid === absentParent)).toBe(true);
+    expect(await srv.isAccepted(fx.recordCid)).toBe(false);
+  });
+});
+
 describe('POST /bundles/import — the §29.8 web alias (same validator)', () => {
   it('ingests a pack identically to /packs through the shared validator', async () => {
     const srv = new LcapIngestServer(NET, () => NOW);
