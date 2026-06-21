@@ -195,6 +195,16 @@ describe('stage 1 — integrity + proof (WS-R.8.2a)', () => {
     expect(noKey.missingCids.some((c) => c.startsWith('signer_key:'))).toBe(true);
   });
 
+  it('does not let a non-author key authorize a contribution (no device impersonation)', async () => {
+    // A proof whose signer_key_id differs from the record's claimed author_device_key_id
+    // must NOT mark the record proof-verified — otherwise a registered attacker device
+    // could sign a body naming the victim's author key + sequence and have it accepted.
+    const impersonating: DetachedProofV2 = { ...proof, signer_key_id: 'attacker-key' };
+    const result = await validate(input({ proofs: [impersonating] }));
+    expect(result.state).toBe('integrity_verified'); // never proof_verified / authorized
+    expect(result.missingCids.some((c) => c.startsWith('proof_for:'))).toBe(true);
+  });
+
   it('rejects a present-but-bad signature (canonical, wrong) and an out-of-range one', async () => {
     // A real low-S signature over different bytes → crypto failure at step 6.
     const wrong = await buildAndSign({

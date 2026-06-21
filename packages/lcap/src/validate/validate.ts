@@ -119,7 +119,18 @@ export async function validate(input: ValidationInput): Promise<ValidationResult
   }
   facts.recordKind = record.kind;
 
-  const applicable = input.proofs.filter((p) => p.record_cid === computedCid);
+  // A contribution's device proof MUST be signed by the key the record claims as its
+  // author (§18.3 step 5): otherwise any registered device could sign a body naming a
+  // VICTIM's `author_device_key_id` + sequence and have it accepted as the victim's
+  // record (impersonation + sequence consumption).  Non-contribution records are signed
+  // by their issuing authority, so the author binding does not apply to them.
+  const authorDeviceKeyId =
+    record.kind === 'contribution_event' ? record.author_device_key_id : undefined;
+  const applicable = input.proofs.filter(
+    (p) =>
+      p.record_cid === computedCid &&
+      (authorDeviceKeyId === undefined || p.signer_key_id === authorDeviceKeyId),
+  );
   if (applicable.length === 0) missing.add(`proof_for:${computedCid}`);
 
   let proofVerified = false;
