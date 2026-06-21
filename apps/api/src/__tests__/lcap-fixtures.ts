@@ -148,8 +148,10 @@ export async function registerIdentity(
   fx: LcapFixtures,
   opts: { capability?: boolean } = {},
 ): Promise<void> {
-  await server.registerCertificate(fx.certBundle);
+  // The root-of-trust authority keys MUST be registered before the certificate: a cert is
+  // only indexed once its account-authority proof verifies against the registered key.
   server.registerAccountAuthorityKey(ACCOUNT, ACCOUNT_EPOCH, fx.accountAuthority.publicKey);
   server.registerRoomAuthorityKey(ROOM, POLICY_EPOCH, fx.roomAuthority.publicKey);
+  await server.registerCertificate(fx.certBundle);
   if (opts.capability !== false) await server.registerCapability(fx.capBundle);
 }

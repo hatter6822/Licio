@@ -6,7 +6,12 @@
 // feeds the verdict into the commit stage.  No injected verdict here: the outcome
 // follows only from cryptography + registered authority, never the arrival path.
 
-import { buildAndSign, generateDeviceKey } from '@licio/lcap';
+import {
+  buildAndSign,
+  exportPublicKeyCose,
+  generateDeviceKey,
+  issueDeviceCertificate,
+} from '@licio/lcap';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { LcapIngestServer } from '../lcap/server-ingest.js';
 import {
@@ -96,5 +101,38 @@ describe('LcapIngestServer — server-computed validation (R.12.1b)', () => {
     const { statuses } = await srv.commitBatch([base()]);
     expect(statuses[0]?.status).toBe('accepted');
     expect(await srv.roomSize(ROOM)).toBe(1);
+  });
+
+  it('refuses an unverified certificate and never poisons the registered device key (#7b)', async () => {
+    const srv = await serverWith();
+    // A genuine re-registration verifies against the account authority.
+    expect(await srv.registerCertificate(fx.certBundle)).toBe('registered');
+
+    // An attacker forges a certificate binding the SAME device_key_id to ITS OWN public
+    // key, "signed" by a key that is NOT the account authority.  If this overwrote
+    // certKeys[DEVICE_KEY], the victim's genuine signatures would then fail (DoS).
+    const attacker = await generateDeviceKey();
+    const forgedCert = await issueDeviceCertificate({
+      authorityPrivateKey: attacker.privateKey, // NOT the account-authority key
+      authoritySignerKeyId: 'attacker',
+      certificate: {
+        ...fx.certBundle.certificate,
+        public_key_cose: await exportPublicKeyCose(attacker.publicKey),
+      },
+      networkId: NET,
+    });
+    expect(await srv.registerCertificate(forgedCert)).toBe('unverified');
+
+    // The victim's genuine contribution still accepts — the device key was NOT displaced.
+    const res = await srv.commitRecord(base());
+    expect(res.status.status).toBe('accepted');
+  });
+
+  it('does not register a certificate whose account-authority key is unknown (#7b)', async () => {
+    // No identity registered at all: the root-of-trust authority key is unknown, so even a
+    // genuinely-issued cert cannot be trusted yet — it is not indexed (the contribution
+    // that cites it will quarantine, not validate against an unverified key).
+    const srv = new LcapIngestServer(NET, () => NOW);
+    expect(await srv.registerCertificate(fx.certBundle)).toBe('unverified');
   });
 });

@@ -51,6 +51,7 @@ import {
   type TreeAlgorithm,
   type ValidationResult,
   validate,
+  verifyDeviceCertificate,
   type WantRequestV2,
 } from '@licio/lcap';
 import {
@@ -210,13 +211,34 @@ export class LcapIngestServer {
 
   // --- R.12.1b: registered identity state + the shared `validate()` assembly ----
 
-  /** Register a device certificate (indexed by device key id); imports its key. */
-  async registerCertificate(bundle: CertificateBundle): Promise<void> {
+  /**
+   * Register a device certificate (indexed by device key id) AFTER verifying its
+   * account-authority proof — never on an unverified cert.  The signer-key resolver
+   * (`validate()` Stage 1) reads `certKeys` to check a contribution's OWN signature, so a
+   * cert that overwrote `certKeys[device_key_id]` with attacker COSE bytes would make the
+   * victim's valid signatures fail verification (impersonation / DoS).  We resolve the
+   * account-authority key for the cert's `(account_id, account_epoch)` and require the
+   * `authority_signature` proof to verify over the cert body within its validity window;
+   * only then is the device key imported.  An unknown authority key or a failed proof
+   * leaves any existing (already-verified) entry UNTOUCHED — an unverified cert can never
+   * displace a known device key.  Returns whether the cert was registered.
+   */
+  async registerCertificate(bundle: CertificateBundle): Promise<'registered' | 'unverified'> {
+    const authorityKey = this.accountAuthorityKeys.get(
+      `${bundle.certificate.account_id} ${bundle.certificate.account_epoch}`,
+    );
+    if (!authorityKey) return 'unverified'; // root-of-trust authority key unknown
+    const verified = await verifyDeviceCertificate(bundle, authorityKey, {
+      networkId: this.networkId,
+      nowMs: this.now(),
+    });
+    if (!verified.ok) return 'unverified';
     this.certs.set(bundle.certificate.device_key_id, bundle);
     this.certKeys.set(
       bundle.certificate.device_key_id,
       await importPublicKeyCose(bundle.certificate.public_key_cose),
     );
+    return 'registered';
   }
 
   /** Register a room capability; returns its CID (the resolver + want key). */
