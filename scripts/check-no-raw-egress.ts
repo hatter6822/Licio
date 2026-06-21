@@ -23,6 +23,7 @@ const AGGREGATE_SCHEMA = resolve(ROOT, 'packages/shared/src/schemas/attention.ts
 // attention trace and no network/location identifier may cross untrusted peers.
 const LCAP_DIRS = [
   resolve(ROOT, 'packages/lcap/src'),
+  resolve(ROOT, 'packages/lcap-p2p/src'),
   resolve(ROOT, 'apps/web/src/lcap'),
   resolve(ROOT, 'apps/api/src/lcap'),
 ];

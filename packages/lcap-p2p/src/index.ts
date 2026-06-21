@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // @licio/lcap-p2p — the OPTIONAL, code-split peer-to-peer + public-bridge transports
-// for LCAP (WS-R.15.6/15.7).  Zero npm runtime dependencies (browser WebRTC + platform
-// fetch + WebCrypto only); depends only on @licio/shared + @licio/lcap.  Every transport
-// here reuses the @licio/lcap `LcapTransport` seam, the §16 exchange, the scheduler
-// order, and `validate` — it is a new CARRIER, never a new trust model.  It is off by
-// default and lives behind a separately code-split chunk so the web `<15` direct-dep
-// budget and the <200KB initial-bundle gate both hold.
+// for LCAP (WS-R.15.6/15.7).  No npm dependency beyond the monorepo's shared `zod`
+// schema baseline: the carriers themselves use only browser WebRTC + platform fetch +
+// WebCrypto, and the package depends only on @licio/shared + @licio/lcap (+ zod).  Every
+// transport here reuses the @licio/lcap `LcapTransport` seam, the §16 exchange, the
+// scheduler order, and `validate` — it is a new CARRIER, never a new trust model.  It is
+// off by default and lives behind a separately code-split chunk so the web `<15`
+// direct-dep budget and the <200KB initial-bundle gate both hold.
 
 // IPFS public-block gateway bridge — dependency-free, verification-preserving (WS-R.15.7).
 export {

@@ -15,6 +15,7 @@ const SCAN_DIRS = [
   resolve(ROOT, 'apps/web/src/routes'),
   // The LCAP offline data plane (WS-R.14.3) — no applause may cross peers either.
   resolve(ROOT, 'packages/lcap/src'),
+  resolve(ROOT, 'packages/lcap-p2p/src'),
   resolve(ROOT, 'apps/web/src/lcap'),
   resolve(ROOT, 'apps/api/src/lcap'),
 ];

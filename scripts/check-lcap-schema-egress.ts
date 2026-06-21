@@ -12,7 +12,13 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
-const SCHEMA_DIR = resolve(ROOT, 'packages/lcap/src/schemas');
+// The LCAP schema surface (`@licio/lcap` schemas) + the optional-transport plane
+// (`@licio/lcap-p2p`, whose server-blind signaling envelope MUST carry no IP/location
+// field — the §19.1 server-blindness depends on it).
+const SCHEMA_DIRS = [
+  resolve(ROOT, 'packages/lcap/src/schemas'),
+  resolve(ROOT, 'packages/lcap-p2p/src'),
+];
 const TEST_FILE = /\.(?:test|spec)\.tsx?$/;
 
 /**
@@ -110,9 +116,11 @@ export function findSchemaEgressIssues(filename: string, content: string): strin
 }
 
 function main(): void {
-  const files = collect(SCHEMA_DIR);
+  const files = SCHEMA_DIRS.flatMap((dir) => collect(dir));
   if (files.length === 0) {
-    console.error(`check:lcap-schema-egress FAILED — no LCAP schema files found at ${SCHEMA_DIR}`);
+    console.error(
+      `check:lcap-schema-egress FAILED — no LCAP schema files found in ${SCHEMA_DIRS.join(', ')}`,
+    );
     process.exit(1);
   }
   const errors: string[] = [];
