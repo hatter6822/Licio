@@ -396,6 +396,79 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
   });
 }
 
+/** Lowercase hex for a byte array (the deterministic §29.7 proof/root encoding). */
+function toHex(bytes: Uint8Array): string {
+  let out = '';
+  for (const b of bytes) out += b.toString(16).padStart(2, '0');
+  return out;
+}
+
+/**
+ * §29.7 `GET /rooms/:roomId/checkpoint`: the room's current (unsigned) Merkle tree
+ * head — size + root over the canonical acceptance order.  An unknown/empty room is
+ * a well-defined size-0 head (the RFC 9162 empty-tree hash), so this is always 200.
+ */
+async function handleRoomCheckpoint(server: LcapIngestServer, roomId: string): Promise<Response> {
+  const head = await server.roomTreeHead(roomId);
+  return json(200, {
+    tree_size: head.treeSize,
+    root_hash: toHex(head.rootHash),
+    tree_algorithm: head.algorithm,
+  });
+}
+
+/**
+ * §29.7 `GET /rooms/:roomId/proofs/inclusion?record_cid=…`: the RFC 9162 inclusion
+ * path for a record in the room's log.  Missing/malformed `record_cid` → 400; a
+ * record not in the room → 404; otherwise 200 with the audit path (hex).
+ */
+async function handleRoomInclusion(
+  server: LcapIngestServer,
+  roomId: string,
+  recordCid: string | undefined,
+): Promise<Response> {
+  if (recordCid === undefined || recordCid === '') {
+    return json(400, { error: 'missing_record_cid' });
+  }
+  try {
+    parseCid(recordCid);
+  } catch {
+    return json(400, { error: 'bad_cid' });
+  }
+  const proof = await server.roomInclusionProof(roomId, recordCid);
+  if (!proof) return json(404, { error: 'not_found' });
+  return json(200, {
+    tree_size: proof.treeSize,
+    leaf_index: proof.leafIndex,
+    audit_path: proof.auditPath.map(toHex),
+    tree_algorithm: proof.algorithm,
+  });
+}
+
+/**
+ * §29.7 `GET /rooms/:roomId/proofs/consistency?old=…&new=…`: the RFC 9162
+ * consistency proof that the `new`-size prefix extends the `old`-size prefix.
+ * Missing sizes or sizes outside `0 ≤ old ≤ new ≤ tree_size` → a non-retriable 400.
+ */
+async function handleRoomConsistency(
+  server: LcapIngestServer,
+  roomId: string,
+  oldStr: string | undefined,
+  newStr: string | undefined,
+): Promise<Response> {
+  if (oldStr === undefined || newStr === undefined) {
+    return json(400, { error: 'missing_sizes' });
+  }
+  const result = await server.roomConsistencyProof(roomId, Number(oldStr), Number(newStr));
+  if (result === 'out_of_range') return json(400, { error: 'out_of_range' });
+  return json(200, {
+    first_size: result.firstSize,
+    second_size: result.secondSize,
+    proof: result.proof.map(toHex),
+    tree_algorithm: result.algorithm,
+  });
+}
+
 /**
  * The §29 LCAP routes.  Mounted at `/api/lcap/v2` (see `app.ts`).  The server is
  * resolved PER REQUEST (not at mount): the default singleton — which may bind a
@@ -412,6 +485,16 @@ export function createLcapRoutes(override?: LcapIngestServer): Hono {
   app.get('/records/:cid', read('record'));
   app.get('/proofs/:cid', read('proof'));
   app.get('/blocks/:cid', read('block'));
+  // §29.7 room checkpoint / inclusion / consistency reads (GETs → CSRF passes).
+  app.get('/rooms/:roomId/checkpoint', (c) =>
+    handleRoomCheckpoint(server(), c.req.param('roomId')),
+  );
+  app.get('/rooms/:roomId/proofs/inclusion', (c) =>
+    handleRoomInclusion(server(), c.req.param('roomId'), c.req.query('record_cid')),
+  );
+  app.get('/rooms/:roomId/proofs/consistency', (c) =>
+    handleRoomConsistency(server(), c.req.param('roomId'), c.req.query('old'), c.req.query('new')),
+  );
   app.post('/packs', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) =>
     ingestPack(server(), new Uint8Array(await c.req.arrayBuffer())),
   );

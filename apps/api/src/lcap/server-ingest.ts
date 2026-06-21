@@ -38,9 +38,11 @@ import {
   type RevocationFrontierV2,
   RevocationIndex,
   type RevocationRecordV2,
+  RoomLog,
   resolveIngestionOrder,
   roomIdHash,
   type SyncPulseV2,
+  type TreeAlgorithm,
   type ValidationResult,
   validate,
   type WantRequestV2,
@@ -456,5 +458,89 @@ export class LcapIngestServer {
    */
   async pulseResponse(): Promise<PulseResponseV2> {
     return buildPulseResponse({ pulse: await this.serverPulse() });
+  }
+
+  // --- WS-R.12.4: the §29.7 room checkpoint / inclusion / consistency reads --------
+
+  // The §19.1 room-log tree algorithm (RFC 9162 SHA-256, the protocol default).
+  private static readonly TREE_ALGORITHM: TreeAlgorithm = 'RFC9162_SHA256';
+
+  /**
+   * Reconstruct the room's §19.1 Merkle log from the store's canonical acceptance
+   * order.  The log is rebuilt per request from the leaf CIDs (O(n) leaf hashes) —
+   * persisting the tree is a later optimization (RoomLog's documented production
+   * binding); the result is identical either way.
+   */
+  private async buildRoomLog(roomId: string): Promise<RoomLog> {
+    const log = new RoomLog(LcapIngestServer.TREE_ALGORITHM, this.networkId);
+    for (const cid of await this.store.roomLog(roomId)) await log.append(cid);
+    return log;
+  }
+
+  /**
+   * The §29.7 room tree head: the current tree size + Merkle root.  This is the
+   * UNSIGNED head (size 0 → the RFC 9162 empty-tree hash); the authority-signed
+   * `CheckpointRecordV2` attesting a witnessed root is checkpoint issuance, a later
+   * card.  Inclusion/consistency proofs verify against this root regardless.
+   */
+  async roomTreeHead(
+    roomId: string,
+  ): Promise<{ treeSize: number; rootHash: Uint8Array; algorithm: TreeAlgorithm }> {
+    const log = await this.buildRoomLog(roomId);
+    return {
+      treeSize: log.size,
+      rootHash: await log.rootAt(),
+      algorithm: LcapIngestServer.TREE_ALGORITHM,
+    };
+  }
+
+  /** The §29.7 inclusion proof for `recordCid` in `roomId`, or `undefined` if absent. */
+  async roomInclusionProof(
+    roomId: string,
+    recordCid: string,
+  ): Promise<
+    | { treeSize: number; leafIndex: number; auditPath: Uint8Array[]; algorithm: TreeAlgorithm }
+    | undefined
+  > {
+    const log = await this.buildRoomLog(roomId);
+    const leafIndex = log.seqOf(recordCid);
+    if (leafIndex === undefined) return undefined;
+    return {
+      treeSize: log.size,
+      leafIndex,
+      auditPath: await log.inclusionProof(leafIndex),
+      algorithm: LcapIngestServer.TREE_ALGORITHM,
+    };
+  }
+
+  /**
+   * The §29.7 consistency proof that the `second`-size prefix extends the `first`-
+   * size prefix (RFC 9162 §2.1.4).  `'out_of_range'` when the sizes are not
+   * `0 ≤ first ≤ second ≤ tree_size` integers (a non-retriable 400).
+   */
+  async roomConsistencyProof(
+    roomId: string,
+    first: number,
+    second: number,
+  ): Promise<
+    | { firstSize: number; secondSize: number; proof: Uint8Array[]; algorithm: TreeAlgorithm }
+    | 'out_of_range'
+  > {
+    const log = await this.buildRoomLog(roomId);
+    if (
+      !Number.isInteger(first) ||
+      !Number.isInteger(second) ||
+      first < 0 ||
+      second < first ||
+      second > log.size
+    ) {
+      return 'out_of_range';
+    }
+    return {
+      firstSize: first,
+      secondSize: second,
+      proof: await log.consistencyProof(first, second),
+      algorithm: LcapIngestServer.TREE_ALGORITHM,
+    };
   }
 }

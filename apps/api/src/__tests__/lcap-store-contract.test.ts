@@ -58,6 +58,16 @@ function contract(makeStore: () => LcapServerStore): void {
     expect([...(await store.listRooms())].sort()).toEqual(['r1', 'r2']);
   });
 
+  it('returns the room log in canonical acceptance order (the §19.1 Merkle leaves)', async () => {
+    const store = makeStore();
+    expect(await store.roomLog('r1')).toEqual([]);
+    await store.appendAcceptance('r1', 'a');
+    await store.appendAcceptance('r1', 'b');
+    await store.appendAcceptance('r2', 'c');
+    expect(await store.roomLog('r1')).toEqual(['a', 'b']); // order = seq, scoped per room
+    expect(await store.roomLog('r2')).toEqual(['c']);
+  });
+
   it('records the first device-(key,seq) claimant and ignores later writers', async () => {
     const store = makeStore();
     expect(await store.getDeviceClaimant('k', 5)).toBeUndefined();

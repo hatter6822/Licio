@@ -48,6 +48,8 @@ export interface LcapServerStore {
   roomSize(roomId: string): Promise<number>;
   /** Every room that has at least one accepted record (drives the sync frontier). */
   listRooms(): Promise<readonly string[]>;
+  /** The room's accepted CIDs in canonical acceptance order (the §19.1 Merkle leaves). */
+  roomLog(roomId: string): Promise<readonly string[]>;
   getDeviceClaimant(deviceKeyId: string, deviceSeq: number): Promise<string | undefined>;
   /** Record the FIRST claimant of a (key, seq); a later distinct CID is fork evidence. */
   setDeviceClaimant(deviceKeyId: string, deviceSeq: number, cid: string): Promise<void>;
@@ -72,7 +74,7 @@ export class InMemoryLcapServerStore implements LcapServerStore {
     return `${keyId} ${seq}`;
   }
 
-  private roomLog(roomId: string): string[] {
+  private ensureRoomLog(roomId: string): string[] {
     let log = this.rooms.get(roomId);
     if (!log) {
       log = [];
@@ -100,7 +102,7 @@ export class InMemoryLcapServerStore implements LcapServerStore {
   }
 
   appendAcceptance(roomId: string, cid: string): Promise<number> {
-    const log = this.roomLog(roomId);
+    const log = this.ensureRoomLog(roomId);
     const seq = log.length;
     log.push(cid);
     this.accepted.add(cid);
@@ -121,6 +123,11 @@ export class InMemoryLcapServerStore implements LcapServerStore {
     const rooms: string[] = [];
     for (const [roomId, log] of this.rooms) if (log.length > 0) rooms.push(roomId);
     return Promise.resolve(rooms);
+  }
+
+  roomLog(roomId: string): Promise<readonly string[]> {
+    // A copy so the caller can never mutate the canonical acceptance order.
+    return Promise.resolve([...(this.rooms.get(roomId) ?? [])]);
   }
 
   getDeviceClaimant(deviceKeyId: string, deviceSeq: number): Promise<string | undefined> {
