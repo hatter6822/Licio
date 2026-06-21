@@ -1,0 +1,247 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-R.15.1b — the manual `.licio-bundle` IMPORT flow (OFFLINE_SPEC §22.2, §14.7).
+// Reads a user-selected file through the real WS-R.4.2 reader under the §27.1 caps
+// (CID/schema/structure verified), builds a SUMMARY the UI shows BEFORE rendering or
+// committing anything, runs the WS-R.4.3 partial import (quarantining missing-
+// dependency records), then commits the verified objects to the WS-R.11 `lcap_v2`
+// store at INTEGRITY-ONLY trust.  Nothing is marked authorized and nothing renders
+// before trust projection (WS-R.8.3): the records land at `integrity_verified`, which
+// the read path treats as not-yet-renderable.  A malformed/oversized/truncated file
+// fails cleanly with a typed status (no crash, no partial trusted render).
+//
+// The `@licio/lcap` codec runs CLIENT-SIDE, loaded at call time via dynamic import
+// (the lazy chunk); types are `import type` (erased).
+
+import type {
+  ImportOptions,
+  ImportResult,
+  LcapLane,
+  ObjectStatusV2,
+  PackReadStatus,
+  ParsedPack,
+  ReaderCaps,
+} from '@licio/lcap';
+import { LCAP_STORE } from './db.js';
+import { importInCappedTransactions, type ProofRow, putBlock, type RecordRow } from './store.js';
+
+const LANES: readonly LcapLane[] = ['C0', 'T1', 'E2', 'M3', 'B4'];
+
+export interface BundleSummary {
+  readonly totalObjects: number;
+  readonly byKind: Readonly<Record<'record' | 'proof' | 'block' | 'chunk', number>>;
+  readonly byLane: Readonly<Record<LcapLane, number>>;
+  readonly containsLanes: readonly LcapLane[];
+  readonly totalPayloadBytes: number;
+  readonly criticalCount: number;
+  /** The distinct rooms the table declares (decoded from each entry's room_id_hash). */
+  readonly rooms: readonly string[];
+  readonly privacyLabel: string;
+  readonly transportProfile: string;
+  readonly integrityVerified: number;
+  readonly integrityFailed: number;
+}
+
+/**
+ * Build the pre-render summary from a parsed pack — counts, lanes, size, rooms, and
+ * how many frames pass CID integrity.  PURE (no I/O): the UI renders this BEFORE any
+ * commit or content render, so the user decides with full disclosure (§14.7).
+ */
+export function summarizeBundle(pack: ParsedPack): BundleSummary {
+  const byKind = { record: 0, proof: 0, block: 0, chunk: 0 };
+  const byLane: Record<LcapLane, number> = { C0: 0, T1: 0, E2: 0, M3: 0, B4: 0 };
+  const rooms = new Set<string>();
+  let totalPayloadBytes = 0;
+  let criticalCount = 0;
+
+  for (const entry of pack.entries) {
+    byKind[entry.cid_kind] += 1;
+    byLane[entry.lane] += 1;
+    totalPayloadBytes += entry.length;
+    if (entry.priority === 0) criticalCount += 1;
+    if (entry.room_id_hash !== undefined) rooms.add(new TextDecoder().decode(entry.room_id_hash));
+  }
+
+  let integrityVerified = 0;
+  let integrityFailed = 0;
+  for (const frame of pack.frames.values()) {
+    if (frame.cidVerified) integrityVerified += 1;
+    else integrityFailed += 1;
+  }
+
+  return {
+    totalObjects: pack.entries.length,
+    byKind,
+    byLane,
+    containsLanes: pack.header.contains_lanes.filter((lane) => LANES.includes(lane)),
+    totalPayloadBytes,
+    criticalCount,
+    rooms: [...rooms].sort(),
+    privacyLabel: pack.header.privacy_label,
+    transportProfile: pack.header.transport_profile,
+    integrityVerified,
+    integrityFailed,
+  };
+}
+
+export type BundleReadOutcome =
+  | { readonly ok: true; readonly pack: ParsedPack; readonly summary: BundleSummary }
+  | { readonly ok: false; readonly status: PackReadStatus };
+
+/**
+ * Read + integrity-verify a bundle file under resource caps (WS-R.4.2 reader).  On
+ * success, also returns the pre-render summary.  A malformed/oversized/truncated file
+ * returns a typed `status` and NOTHING is rendered.
+ */
+export async function readBundleForImport(
+  bytes: Uint8Array,
+  caps?: ReaderCaps,
+): Promise<BundleReadOutcome> {
+  const { readPack } = await import('@licio/lcap');
+  const result = caps ? await readPack(bytes, caps) : await readPack(bytes);
+  if (!result.ok) return { ok: false, status: result.status };
+  return { ok: true, pack: result.pack, summary: summarizeBundle(result.pack) };
+}
+
+/** Run the WS-R.4.3 partial import (statuses + the storable verified frames). */
+export async function importBundleObjects(
+  pack: ParsedPack,
+  options?: ImportOptions,
+): Promise<ImportResult> {
+  const { importPack } = await import('@licio/lcap');
+  return options ? importPack(pack, options) : importPack(pack);
+}
+
+export interface CommitCounts {
+  readonly records: number;
+  readonly proofs: number;
+  readonly blocks: number;
+  readonly quarantined: number;
+  readonly rejected: number;
+  readonly alreadyHave: number;
+  /** The outstanding prerequisite CIDs across all quarantined objects (deduped). */
+  readonly missingCids: readonly string[];
+}
+
+interface LivenessRow {
+  readonly cid: string;
+  readonly state: string;
+  readonly updatedAt: number;
+}
+
+interface QuarantineRow {
+  readonly cid: string;
+  readonly reason: string;
+  readonly firstSeen: number;
+  readonly missingDeps: readonly string[];
+  readonly byteSize: number;
+}
+
+/**
+ * Commit the verified objects to the `lcap_v2` store at INTEGRITY-ONLY trust, and
+ * record quarantine rows for missing-dependency objects.  Records land at
+ * `integrity_verified` (not authorized) so the read path does NOT render them before
+ * trust projection (WS-R.8.3).  Blocks are stored metadata↔blob-separated; a bundle
+ * import is an out-of-band (`peer_stored`-equivalent) liveness observation.
+ */
+export async function commitImportedBundle(
+  db: IDBDatabase,
+  pack: ParsedPack,
+  importResult: ImportResult,
+  nowMs: number = Date.now(),
+): Promise<CommitCounts> {
+  const entryByCid = new Map(pack.entries.map((entry) => [entry.cid, entry]));
+
+  const recordRows: RecordRow[] = [];
+  const proofRows: ProofRow[] = [];
+  const trustRows: Array<{ recordCid: string; state: string; lastEvaluated: number }> = [];
+  const livenessRows: LivenessRow[] = [];
+  const blockWrites: Array<{ cid: string; bytes: Uint8Array }> = [];
+
+  for (const [cid, frame] of importResult.imported) {
+    const entry = entryByCid.get(cid);
+    if (frame.frameKind === 'record_body') {
+      const roomHash =
+        entry?.room_id_hash !== undefined ? new TextDecoder().decode(entry.room_id_hash) : '';
+      recordRows.push({
+        recordCid: cid,
+        body: frame.payload,
+        kind: entry?.record_kind ?? 'unknown',
+        lane: entry?.lane ?? 'T1',
+        priority: entry?.priority ?? 1,
+        roomHash,
+        state: 'integrity_verified',
+        size: frame.payload.length,
+        ...(entry?.deps ? { deps: [...entry.deps] } : {}),
+      });
+      trustRows.push({ recordCid: cid, state: 'integrity_verified', lastEvaluated: nowMs });
+      livenessRows.push({ cid, state: 'peer_stored', updatedAt: nowMs });
+    } else if (frame.frameKind === 'proof') {
+      proofRows.push({
+        proofCid: cid,
+        proofBody: frame.payload,
+        recordCid: entry?.provides_proof_for ?? '',
+        signerKeyId: '',
+        verificationState: 'integrity_verified',
+      });
+    } else if (frame.frameKind === 'block') {
+      blockWrites.push({ cid, bytes: frame.payload });
+    }
+    // Standalone `chunk` frames are not part of the renderable core import; skipped.
+  }
+
+  // Quarantine rows from the per-object statuses (the precise missing prerequisites).
+  const quarantineRows: QuarantineRow[] = [];
+  const missing = new Set<string>();
+  let rejected = 0;
+  let alreadyHave = 0;
+  for (const status of importResult.statuses) {
+    if (status.status === 'quarantined_missing_dependency') {
+      const missingCids = quarantineMissing(status);
+      for (const dep of missingCids) missing.add(dep);
+      quarantineRows.push({
+        cid: status.cid,
+        reason: 'missing_dependency',
+        firstSeen: nowMs,
+        missingDeps: missingCids,
+        byteSize: pack.frames.get(status.cid)?.payload.length ?? 0,
+      });
+    } else if (status.status === 'rejected_bad_cid') {
+      rejected += 1;
+    } else if (status.status === 'already_have') {
+      alreadyHave += 1;
+    }
+  }
+
+  // Persist (capped transactions; blocks metadata↔blob separated).
+  if (recordRows.length > 0) await importInCappedTransactions(db, LCAP_STORE.records, recordRows);
+  if (proofRows.length > 0) await importInCappedTransactions(db, LCAP_STORE.proofs, proofRows);
+  if (trustRows.length > 0)
+    await importInCappedTransactions(db, LCAP_STORE.trustProjection, trustRows);
+  if (livenessRows.length > 0)
+    await importInCappedTransactions(db, LCAP_STORE.liveness, livenessRows);
+  if (quarantineRows.length > 0)
+    await importInCappedTransactions(db, LCAP_STORE.quarantine, quarantineRows);
+  for (const block of blockWrites) {
+    await putBlock(
+      db,
+      { blockCid: block.cid, state: 'integrity_verified', size: block.bytes.length },
+      [block.bytes],
+    );
+  }
+
+  return {
+    records: recordRows.length,
+    proofs: proofRows.length,
+    blocks: blockWrites.length,
+    quarantined: quarantineRows.length,
+    rejected,
+    alreadyHave,
+    missingCids: [...missing].sort(),
+  };
+}
+
+/** Extract the missing-dependency CIDs from a quarantine status (typed-narrow). */
+function quarantineMissing(status: ObjectStatusV2): readonly string[] {
+  return 'missing_cids' in status && Array.isArray(status.missing_cids) ? status.missing_cids : [];
+}

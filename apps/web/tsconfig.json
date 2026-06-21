@@ -14,6 +14,8 @@
       "@licio/invariants/*": ["../../packages/invariants/src/*"],
       "@licio/ai-governance": ["../../packages/ai-governance/src"],
       "@licio/ai-governance/*": ["../../packages/ai-governance/src/*"],
+      "@licio/lcap": ["../../packages/lcap/src"],
+      "@licio/lcap/*": ["../../packages/lcap/src/*"],
       "api": ["../api/src/app.ts"]
     }
   },
@@ -22,6 +24,7 @@
     { "path": "../../packages/shared" },
     { "path": "../../packages/invariants" },
     { "path": "../../packages/ai-governance" },
+    { "path": "../../packages/lcap" },
     { "path": "../api" }
   ]
 }

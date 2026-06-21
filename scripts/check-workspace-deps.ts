@@ -30,7 +30,11 @@ const ALLOWED_WORKSPACE_DEPS: Record<string, string[]> = {
   // protocol library has no database access by construction; the zero-dependency
   // core carries only WebCrypto + Compression Streams, OFFLINE_SPEC §31.1).
   '@licio/lcap': ['@licio/shared'],
-  web: ['@licio/shared', '@licio/invariants', '@licio/ai-governance'],
+  // WS-R.15.1a/b: the web client takes @licio/lcap for the OFFLINE bundle
+  // export/import flows — it runs the real pack writer/reader + validate()
+  // client-side (no server round-trip), loaded as a lazy dynamic-import chunk
+  // so the protocol core never enters the initial bundle. NEVER @licio/db.
+  web: ['@licio/shared', '@licio/invariants', '@licio/ai-governance', '@licio/lcap'],
   api: [
     '@licio/shared',
     '@licio/db',

@@ -29,6 +29,7 @@ import { Route as ProfileSecurityRouteImport } from './routes/profile_.security'
 import { Route as ProfileSavedRouteImport } from './routes/profile_.saved'
 import { Route as ProfileSafetyRouteImport } from './routes/profile_.safety'
 import { Route as ProfilePrivacyRouteImport } from './routes/profile_.privacy'
+import { Route as ProfileOfflineRouteImport } from './routes/profile_.offline'
 import { Route as ProfileNoticesRouteImport } from './routes/profile_.notices'
 import { Route as StoriesStoryIdCommentsRouteImport } from './routes/stories.$storyId_.comments'
 import { Route as RoomsRoomIdGovernanceRouteImport } from './routes/rooms_.$roomId_.governance'
@@ -123,6 +124,11 @@ const ProfilePrivacyRoute = ProfilePrivacyRouteImport.update({
   path: '/profile/privacy',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProfileOfflineRoute = ProfileOfflineRouteImport.update({
+  id: '/profile_/offline',
+  path: '/profile/offline',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ProfileNoticesRoute = ProfileNoticesRouteImport.update({
   id: '/profile_/notices',
   path: '/profile/notices',
@@ -149,6 +155,7 @@ export interface FileRoutesByFullPath {
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
   '/profile/notices': typeof ProfileNoticesRoute
+  '/profile/offline': typeof ProfileOfflineRoute
   '/profile/privacy': typeof ProfilePrivacyRoute
   '/profile/safety': typeof ProfileSafetyRoute
   '/profile/saved': typeof ProfileSavedRoute
@@ -172,6 +179,7 @@ export interface FileRoutesByTo {
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
   '/profile/notices': typeof ProfileNoticesRoute
+  '/profile/offline': typeof ProfileOfflineRoute
   '/profile/privacy': typeof ProfilePrivacyRoute
   '/profile/safety': typeof ProfileSafetyRoute
   '/profile/saved': typeof ProfileSavedRoute
@@ -196,6 +204,7 @@ export interface FileRoutesById {
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
   '/profile_/notices': typeof ProfileNoticesRoute
+  '/profile_/offline': typeof ProfileOfflineRoute
   '/profile_/privacy': typeof ProfilePrivacyRoute
   '/profile_/safety': typeof ProfileSafetyRoute
   '/profile_/saved': typeof ProfileSavedRoute
@@ -221,6 +230,7 @@ export interface FileRouteTypes {
     | '/submit'
     | '/support'
     | '/profile/notices'
+    | '/profile/offline'
     | '/profile/privacy'
     | '/profile/safety'
     | '/profile/saved'
@@ -244,6 +254,7 @@ export interface FileRouteTypes {
     | '/submit'
     | '/support'
     | '/profile/notices'
+    | '/profile/offline'
     | '/profile/privacy'
     | '/profile/safety'
     | '/profile/saved'
@@ -267,6 +278,7 @@ export interface FileRouteTypes {
     | '/submit'
     | '/support'
     | '/profile_/notices'
+    | '/profile_/offline'
     | '/profile_/privacy'
     | '/profile_/safety'
     | '/profile_/saved'
@@ -291,6 +303,7 @@ export interface RootRouteChildren {
   SubmitRoute: typeof SubmitRoute
   SupportRoute: typeof SupportRoute
   ProfileNoticesRoute: typeof ProfileNoticesRoute
+  ProfileOfflineRoute: typeof ProfileOfflineRoute
   ProfilePrivacyRoute: typeof ProfilePrivacyRoute
   ProfileSafetyRoute: typeof ProfileSafetyRoute
   ProfileSavedRoute: typeof ProfileSavedRoute
@@ -433,6 +446,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProfilePrivacyRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/profile_/offline': {
+      id: '/profile_/offline'
+      path: '/profile/offline'
+      fullPath: '/profile/offline'
+      preLoaderRoute: typeof ProfileOfflineRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/profile_/notices': {
       id: '/profile_/notices'
       path: '/profile/notices'
@@ -467,6 +487,7 @@ const rootRouteChildren: RootRouteChildren = {
   SubmitRoute: SubmitRoute,
   SupportRoute: SupportRoute,
   ProfileNoticesRoute: ProfileNoticesRoute,
+  ProfileOfflineRoute: ProfileOfflineRoute,
   ProfilePrivacyRoute: ProfilePrivacyRoute,
   ProfileSafetyRoute: ProfileSafetyRoute,
   ProfileSavedRoute: ProfileSavedRoute,
