@@ -266,17 +266,18 @@ first-object budget, missing-dependency cap, the CSRF-protected signaling-drain 
 `@licio/lcap` `verifyRevocationAuthority`, and **the server bundle export gated by a
 device-signed, freshness-windowed `may_export_bundle` capability (#5)** via the new
 `verifyExportAuthorization` — `GET /bundles/export` is now a CSRF-exempt, gated
-`POST`), and the web bundle import (standalone CID-verified chunk frames now persisted
+`POST`), the web bundle import (standalone CID-verified chunk frames now persisted
 CID-addressed instead of dropped, and re-import gated by the already-held set so it never
-downgrades a record held at higher trust).
-**Two remain as tracked debt** — both are gated-Postgres concurrency work that must be
-designed correctly rather than rushed, with the closure target named:
+downgrades a record held at higher trust), and **the two gated-Postgres accept-path
+concurrency races (#2/#3)**: the `(authorDeviceKeyId, deviceSeq)` claim is now an atomic
+`claimDeviceSeq` (`INSERT … ON CONFLICT DO UPDATE`-to-a-no-op `… RETURNING cid`, so the
+losing concurrent record is reported `conflict_device_fork`, never a second accept), and
+`appendAcceptance` is idempotent + allocates the per-room seq atomically (insert at the
+current count, retry on a `(room_id, seq)` PK collision; `.returning()` is non-empty only
+on a real insert, so a phantom seq is impossible).  **All review findings are now fixed
++ tested** — the #2/#3 concurrency cases are in the parameterized store-contract test and
+were validated against real Postgres (concurrent accepts get distinct, gap-free seqs;
+concurrent claims admit exactly one winner).
 
-| # | Sev | Location | Finding | Closure target |
-|---|-----|----------|---------|----------------|
-| 3 | P1 | `server-ingest.ts` device-seq | The `(authorDeviceKeyId, deviceSeq)` claim is read (`getDeviceClaimant`) then written (`setDeviceClaimant`) non-atomically, so two concurrent records for the same device-seq can both be accepted under Postgres instead of one being reported `conflict_device_fork`. | **Atomic claim-before-append** — a conditional `INSERT … ON CONFLICT DO NOTHING RETURNING` device-seq claim in the Drizzle adapter, the loser detected + reported as a fork; in-memory adapter is single-threaded (no race). |
-| 2 | P1 | `drizzle-store.ts` acceptance-seq | Concurrent accepts compute the same `roomSize` and `onConflictDoNothing` hides one insert, yet `appendAcceptance` still returns that sequence — the caller reports the record accepted while it is absent from the room log. | **Allocate the per-room sequence atomically** (a single SQL statement / serialized transaction); detect the conflict and retry or fail rather than returning a phantom seq. Parameterized store-contract concurrency test. |
-
-These are scoped for a focused follow-up on this branch; none is launch-blocking
-(the LCAP server binding is gated/in-memory and pre-production), and the pay-to-rank
-firewall + fail-closed crypto are unaffected.
+None was launch-blocking (the LCAP server binding is gated/in-memory and pre-production),
+and the pay-to-rank firewall + fail-closed crypto were unaffected throughout.
