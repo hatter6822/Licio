@@ -131,14 +131,25 @@ export async function runExchangeRound(
  * {@link TransportUnavailableError} (or any failure) falls through to the next.  The
  * result records which transport succeeded.  Because the order always ends with the
  * server anchor (when present), a reachable server guarantees a correct outcome.
+ *
+ * When the request carries a non-public pack, the caller passes its `privacyLabel`: a
+ * transport that cannot carry it (`carriesPrivate: false` — every peer/public carrier)
+ * is SKIPPED, so `in_room`/private bytes are never tried on a public-only peer transport
+ * before falling back to the server anchor (§21.4/§26.4).  Omit the label for a public
+ * request (any transport may carry it).
  */
 export async function fallbackExchange(
   transports: readonly LcapTransport[],
   requestMessage: Uint8Array,
   preference: readonly TransportId[] = DEFAULT_TRANSPORT_PREFERENCE,
   signal?: AbortSignal,
+  privacyLabel?: PackHeaderV2['privacy_label'],
 ): Promise<{ transport: TransportId; response: Uint8Array } | null> {
   for (const transport of selectTransports(transports, preference)) {
+    // The carriage gate, BEFORE any bytes are sent on this transport.
+    if (privacyLabel !== undefined && !transportMayCarry(transport.capabilities, privacyLabel)) {
+      continue;
+    }
     try {
       const response = await runExchangeRound(transport, requestMessage, signal);
       if (response !== null) return { transport: transport.capabilities.id, response };

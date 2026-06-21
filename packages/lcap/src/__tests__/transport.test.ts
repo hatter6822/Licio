@@ -111,4 +111,20 @@ describe('fallbackExchange — skips failures, succeeds via the anchor', () => {
     const b = fakeTransport('https', { failOpen: true });
     expect(await fallbackExchange([a, b], new Uint8Array([1]))).toBeNull();
   });
+
+  it('skips a public-only transport for a non-public pack (carriage gate)', async () => {
+    const log: string[] = [];
+    const webrtc = fakeTransport('webrtc', { response: new Uint8Array([5]), log }); // carriesPrivate:false
+    const https = fakeTransport('https', { response: new Uint8Array([7]), log }); // carriesPrivate:true
+    const result = await fallbackExchange(
+      [https, webrtc],
+      new Uint8Array([1]),
+      undefined,
+      undefined,
+      'contains_in_room_metadata', // a non-public pack
+    );
+    // The peer carrier is never even opened; the private bytes ride only the anchor.
+    expect(result?.transport).toBe('https');
+    expect(log.some((entry) => entry.startsWith('webrtc'))).toBe(false);
+  });
 });

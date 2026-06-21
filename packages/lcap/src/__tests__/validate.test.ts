@@ -320,6 +320,19 @@ describe('stage 3 — consensus (WS-R.8.2c)', () => {
     expect(result.state).toBe('checkpointed');
   });
 
+  it('does not reach checkpointed with an inclusion proof for a DIFFERENT record', async () => {
+    // A proof whose target_record_cid is some other record must not raise this record's
+    // trust to checkpointed (no inclusion-proof confusion across records).
+    const otherTarget = {
+      ...inclusionProof,
+      target_record_cid: await cidFor('record', new Uint8Array([7, 7, 7])),
+    };
+    const result = await validate(
+      input({ consensus: { inclusion: { proof: otherTarget, checkpoint } } }),
+    );
+    expect(result.state).toBe('authorized_provisional');
+  });
+
   it('reaches witnessed (the lub over checkpoint + witness)', async () => {
     const result = await validate(
       input({

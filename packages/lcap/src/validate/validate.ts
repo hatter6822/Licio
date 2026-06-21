@@ -220,12 +220,20 @@ export async function validate(input: ValidationInput): Promise<ValidationResult
       achieved = maxPositive(achieved, 'server_stored');
 
     if (consensus?.inclusion) {
-      const included = await verifyInclusionProof(
-        consensus.inclusion.proof,
-        consensus.inclusion.checkpoint,
-        input.ctx.networkId,
-      );
-      if (included.ok) achieved = maxPositive(achieved, 'checkpointed');
+      // Bind the inclusion proof to THIS record (and its room): a valid checkpoint
+      // inclusion proof for some OTHER record must not raise this record's trust to
+      // `checkpointed` (§18.3 step 13).
+      const proof = consensus.inclusion.proof;
+      const boundToRecord = proof.target_record_cid === input.recordCid;
+      const boundToRoom = facts.roomId === undefined || proof.room_id === facts.roomId;
+      if (boundToRecord && boundToRoom) {
+        const included = await verifyInclusionProof(
+          proof,
+          consensus.inclusion.checkpoint,
+          input.ctx.networkId,
+        );
+        if (included.ok) achieved = maxPositive(achieved, 'checkpointed');
+      }
     }
 
     if (consensus?.consistency) {
