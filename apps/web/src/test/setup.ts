@@ -33,6 +33,20 @@ Object.defineProperty(window, 'scrollTo', {
   configurable: true,
 });
 
+// jsdom does not honor an anchor's `download` attribute: a real browser saves the
+// blob and never navigates, but jsdom treats a programmatic `anchor.click()` on a
+// `download` link as a navigation it cannot perform, logging "Not implemented:
+// navigation to another Document". Our file-download helpers (the LCAP
+// `.licio-bundle` export, governance model bundles, the DSAR archive) create and
+// click exactly such an anchor. Mirror the browser: a `download` anchor's click is a
+// no-op navigation in tests. Non-download anchors keep jsdom's behavior, and a
+// per-instance `click` override (as the DSAR-export test uses) still shadows this.
+const anchorClick = HTMLAnchorElement.prototype.click;
+HTMLAnchorElement.prototype.click = function click(this: HTMLAnchorElement): void {
+  if (this.hasAttribute('download')) return;
+  anchorClick.call(this);
+};
+
 afterEach(() => {
   cleanup();
 });

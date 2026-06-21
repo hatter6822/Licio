@@ -206,6 +206,25 @@ export class LcapIngestServer {
   }
 
   /**
+   * The §11.4 "media bytes" a contribution brings in: the summed ACTUAL stored size of ALL the
+   * blocks it references (its `block` edges — the body/media/attachment closure — present in the
+   * CAS at accept).  The figure is the server's own CID-verified byte length, never the author's
+   * declaration.  The server does not parse per-block roles, so every referenced block counts
+   * (the conservative reading of §11.4 "referenced block sizes"; per-role weighting needs the
+   * attachment-manifest descriptors and is a tracked refinement).  A referenced block not yet
+   * held contributes 0 — cross-pack lazy media is bounded by the §27.1 block caps and the
+   * `max_offline_events` count, and is charged when it arrives in the contribution's own pack.
+   */
+  private async referencedMediaBytes(recordCid: string): Promise<number> {
+    let mediaBytes = 0;
+    for (const blockCid of await this.store.recordEdges(recordCid, 'block')) {
+      const obj = await this.store.getObject(blockCid);
+      if (obj) mediaBytes += obj.bytes.length;
+    }
+    return mediaBytes;
+  }
+
+  /**
    * The §29.8 export closure for a room: its accepted records in acceptance order, each
    * preceded by the IDENTITY it needs to validate (its cited capability + the signer's device
    * certificate, each with their authority proofs) and followed by its own proofs then its
@@ -483,21 +502,29 @@ export class LcapIngestServer {
             ? this.capabilities.get(input.capabilityCid)
             : undefined;
         if (capBundle) {
+          // The §18.3 step 9 `max_media_bytes` debit: the summed stored size of the media
+          // blocks this contribution ships (its referenced blocks present at accept; §11.4
+          // "media bytes").  Computed from the record's `block` edges + the actual CID-verified
+          // byte length the server holds, so it is never the author's declared figure.
+          const mediaBytes = await this.referencedMediaBytes(input.recordCid);
           const accepted = await this.store.acceptContribution(
             input.roomId,
             input.recordCid,
             input.body.length,
+            mediaBytes,
             {
               capabilityId: capBundle.capability.capability_id,
               maxEvents: capBundle.capability.quotas.max_offline_events,
               maxTotalBytes: capBundle.capability.quotas.max_total_payload_bytes,
+              maxMediaBytes: capBundle.capability.quotas.max_media_bytes,
             },
           );
           if (accepted.ok) {
             roomSeq = accepted.seq;
           } else {
-            // Aggregate quota exhausted — reject without appending (the device-seq claim
-            // stands; the capability budget is NOT debited).  `rejected_quota` (§16.11).
+            // Aggregate quota exhausted (events / total payload / media) — reject without
+            // appending (the device-seq claim stands; the capability budget is NOT debited).
+            // `rejected_quota` (§16.11).
             return {
               status: { cid: input.recordCid, cid_kind: 'record', status: 'rejected_quota' },
               wants: [],

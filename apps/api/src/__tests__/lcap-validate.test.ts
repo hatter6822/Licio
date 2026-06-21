@@ -8,6 +8,7 @@
 
 import {
   buildAndSign,
+  cidFor,
   encodeWithSchema,
   exportPublicKeyCose,
   generateDeviceKey,
@@ -244,5 +245,80 @@ describe('LcapIngestServer — server-computed validation (R.12.1b)', () => {
     expect((await commit(e0, 0)).status.status).toBe('accepted');
     expect((await commit(e1, 1)).status.status).toBe('accepted');
     expect(await srv.roomSize(ROOM)).toBe(2);
+  });
+
+  it('charges referenced media against max_media_bytes and rejects an over-budget event (§18.3 step 9)', async () => {
+    // A capability whose media budget is 200 bytes; the event/payload budgets stay roomy.
+    const srv = await serverWith({ capability: false });
+    const cap = await mintCapability(fx, {
+      capabilityId: 'cap-media',
+      quotas: { max_media_bytes: 200 },
+    });
+    await srv.registerCapability(cap.bundle);
+
+    // e0 references a 150-byte media block — the server stores it + links the block edge (as
+    // the §29.3 pack-ingest path does from the contribution's body/table deps).
+    const e0 = await mintContribution(fx, { deviceSeq: 0, capabilityCid: cap.cid });
+    const b0 = new Uint8Array(150);
+    const b0Cid = await cidFor('block', b0);
+    await srv.putObject(b0Cid, 'block', b0);
+    await srv.indexRecordEdge(e0.recordCid, b0Cid, 'block');
+    const r0 = await srv.commitRecord({
+      recordCid: e0.recordCid,
+      roomId: ROOM,
+      authorDeviceKeyId: DEVICE_KEY,
+      deviceSeq: 0,
+      capabilityCid: cap.cid,
+      body: e0.body,
+      proofs: [e0.proof],
+    });
+    // 150 ≤ 200 → accepted, debiting 150 of the media budget.
+    expect(r0.status.status).toBe('accepted');
+
+    // e1 references a 100-byte block — 150 + 100 = 250 > 200 → rejected_quota, never appended.
+    const e1 = await mintContribution(fx, {
+      deviceSeq: 1,
+      capabilityCid: cap.cid,
+      prevDeviceRecordCid: e0.recordCid,
+    });
+    const b1 = new Uint8Array(100);
+    const b1Cid = await cidFor('block', b1);
+    await srv.putObject(b1Cid, 'block', b1);
+    await srv.indexRecordEdge(e1.recordCid, b1Cid, 'block');
+    const r1 = await srv.commitRecord({
+      recordCid: e1.recordCid,
+      roomId: ROOM,
+      authorDeviceKeyId: DEVICE_KEY,
+      deviceSeq: 1,
+      capabilityCid: cap.cid,
+      body: e1.body,
+      proofs: [e1.proof],
+    });
+    expect(r1.status.status).toBe('rejected_quota');
+    expect(r1.receiptType).toBe('rejected');
+    expect(await srv.isAccepted(e1.recordCid)).toBe(false);
+    expect(await srv.roomSize(ROOM)).toBe(1);
+  });
+
+  it('does not charge media for a text-only contribution (no referenced blocks)', async () => {
+    // A capability that allows NO media at all still accepts a text-only event (0 ≤ 0): the
+    // media budget is only consumed by referenced media blocks, never by the signed event body.
+    const srv = await serverWith({ capability: false });
+    const cap = await mintCapability(fx, {
+      capabilityId: 'cap-text-only',
+      quotas: { max_media_bytes: 0 },
+    });
+    await srv.registerCapability(cap.bundle);
+    const e0 = await mintContribution(fx, { deviceSeq: 0, capabilityCid: cap.cid });
+    const r0 = await srv.commitRecord({
+      recordCid: e0.recordCid,
+      roomId: ROOM,
+      authorDeviceKeyId: DEVICE_KEY,
+      deviceSeq: 0,
+      capabilityCid: cap.cid,
+      body: e0.body,
+      proofs: [e0.proof],
+    });
+    expect(r0.status.status).toBe('accepted');
   });
 });

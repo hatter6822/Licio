@@ -337,6 +337,24 @@ async function ingestPackFrames(
           if (depKind === 'block') await server.indexRecordEdge(cid, dep, 'block');
           else if (depKind === 'record') requires.add(dep);
         }
+        // Index the SIGNED BODY's directly-referenced media blocks too (the body is signed, the
+        // pack table is not).  This makes the §18.3 step 9 media-byte charge + the §29.8 export
+        // closure see what the author committed to, not only what the table happened to declare —
+        // a malicious pack cannot drop a body-declared block from the media accounting.  The
+        // store de-duplicates the edge, so a block named in both the body and the table is one
+        // edge (charged once).
+        for (const ref of [
+          record.body_block_cid,
+          record.attachment_manifest_cid,
+          ...(record.source_snapshot_cids ?? []),
+        ]) {
+          if (ref === undefined) continue;
+          try {
+            if (parseCid(ref).kind === 'block') await server.indexRecordEdge(cid, ref, 'block');
+          } catch {
+            // a malformed body CID is ignored (the record will quarantine on validate anyway)
+          }
+        }
         contributions.push({
           recordCid: cid,
           roomId: record.home_room_id,

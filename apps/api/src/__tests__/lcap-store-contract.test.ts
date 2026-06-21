@@ -54,11 +54,17 @@ function contract(makeStore: () => LcapServerStore): void {
 
   it('accepts contributions within the capability quotas and rejects over-budget ones (§18.3 step 9)', async () => {
     const store = makeStore();
-    const quota = { capabilityId: 'cap-A', maxEvents: 2, maxTotalBytes: 100 };
-    expect(await store.acceptContribution('room', 'e0', 40, quota)).toEqual({ ok: true, seq: 0 });
-    expect(await store.acceptContribution('room', 'e1', 40, quota)).toEqual({ ok: true, seq: 1 });
+    const quota = { capabilityId: 'cap-A', maxEvents: 2, maxTotalBytes: 100, maxMediaBytes: 0 };
+    expect(await store.acceptContribution('room', 'e0', 40, 0, quota)).toEqual({
+      ok: true,
+      seq: 0,
+    });
+    expect(await store.acceptContribution('room', 'e1', 40, 0, quota)).toEqual({
+      ok: true,
+      seq: 1,
+    });
     // A third event exceeds max_offline_events (2) → rejected, not appended.
-    expect(await store.acceptContribution('room', 'e2', 10, quota)).toEqual({
+    expect(await store.acceptContribution('room', 'e2', 10, 0, quota)).toEqual({
       ok: false,
       reason: 'offline_event_quota',
     });
@@ -68,43 +74,148 @@ function contract(makeStore: () => LcapServerStore): void {
 
   it('rejects a contribution that would exceed max_total_payload_bytes', async () => {
     const store = makeStore();
-    const quota = { capabilityId: 'cap-B', maxEvents: 10, maxTotalBytes: 100 };
-    expect(await store.acceptContribution('room', 'e0', 60, quota)).toEqual({ ok: true, seq: 0 });
+    const quota = { capabilityId: 'cap-B', maxEvents: 10, maxTotalBytes: 100, maxMediaBytes: 0 };
+    expect(await store.acceptContribution('room', 'e0', 60, 0, quota)).toEqual({
+      ok: true,
+      seq: 0,
+    });
     // 60 + 50 = 110 > 100 → the total-payload quota.
-    expect(await store.acceptContribution('room', 'e1', 50, quota)).toEqual({
+    expect(await store.acceptContribution('room', 'e1', 50, 0, quota)).toEqual({
       ok: false,
       reason: 'total_payload_quota',
     });
     // A smaller event still fits (60 + 40 = 100 ≤ 100).
-    expect(await store.acceptContribution('room', 'e2', 40, quota)).toEqual({ ok: true, seq: 1 });
+    expect(await store.acceptContribution('room', 'e2', 40, 0, quota)).toEqual({
+      ok: true,
+      seq: 1,
+    });
+  });
+
+  it('rejects a contribution that would exceed max_media_bytes (§18.3 step 9)', async () => {
+    const store = makeStore();
+    const quota = {
+      capabilityId: 'cap-M',
+      maxEvents: 10,
+      maxTotalBytes: 1_000_000,
+      maxMediaBytes: 100,
+    };
+    // The event body fits; the referenced-media charge is the second positional cost.
+    expect(await store.acceptContribution('room', 'm0', 5, 60, quota)).toEqual({
+      ok: true,
+      seq: 0,
+    });
+    // 60 + 50 = 110 > 100 media → the media quota (the event-payload budget is untouched).
+    expect(await store.acceptContribution('room', 'm1', 5, 50, quota)).toEqual({
+      ok: false,
+      reason: 'media_payload_quota',
+    });
+    expect(await store.isAccepted('m1')).toBe(false);
+    // A smaller media charge still fits (60 + 40 = 100 ≤ 100).
+    expect(await store.acceptContribution('room', 'm2', 5, 40, quota)).toEqual({
+      ok: true,
+      seq: 1,
+    });
+    expect(await store.roomSize('room')).toBe(2);
+  });
+
+  it('debits the event, payload, and media budgets independently', async () => {
+    const store = makeStore();
+    // A roomy event/payload budget but a tight media budget — only the media quota bites.
+    const quota = {
+      capabilityId: 'cap-MX',
+      maxEvents: 10,
+      maxTotalBytes: 1_000_000,
+      maxMediaBytes: 30,
+    };
+    expect(await store.acceptContribution('rx', 'x0', 500, 20, quota)).toEqual({
+      ok: true,
+      seq: 0,
+    });
+    // 20 + 20 = 40 > 30 media, even though events (2 ≤ 10) and payload (1000 ≤ 1e6) are fine.
+    expect(await store.acceptContribution('rx', 'x1', 500, 20, quota)).toEqual({
+      ok: false,
+      reason: 'media_payload_quota',
+    });
+    // A zero-media event still posts (the media budget is not consumed by text-only events).
+    expect(await store.acceptContribution('rx', 'x2', 500, 0, quota)).toEqual({ ok: true, seq: 1 });
   });
 
   it('re-accepting a record is idempotent and never re-debits the capability budget', async () => {
     const store = makeStore();
-    const quota = { capabilityId: 'cap-C', maxEvents: 1, maxTotalBytes: 1000 };
-    expect(await store.acceptContribution('room', 'e0', 100, quota)).toEqual({ ok: true, seq: 0 });
+    const quota = { capabilityId: 'cap-C', maxEvents: 1, maxTotalBytes: 1000, maxMediaBytes: 100 };
+    expect(await store.acceptContribution('room', 'e0', 100, 50, quota)).toEqual({
+      ok: true,
+      seq: 0,
+    });
     // Re-accept the SAME record: idempotent (same seq), and it must NOT consume the budget twice.
-    expect(await store.acceptContribution('room', 'e0', 100, quota)).toEqual({ ok: true, seq: 0 });
+    expect(await store.acceptContribution('room', 'e0', 100, 50, quota)).toEqual({
+      ok: true,
+      seq: 0,
+    });
     // A DIFFERENT record now exceeds maxEvents=1 — proving the budget was debited exactly once.
-    expect(await store.acceptContribution('room', 'e1', 100, quota)).toEqual({
+    expect(await store.acceptContribution('room', 'e1', 100, 0, quota)).toEqual({
       ok: false,
       reason: 'offline_event_quota',
     });
     expect(await store.roomSize('room')).toBe(1);
   });
 
+  it('re-accepting a record never re-debits the media budget either', async () => {
+    const store = makeStore();
+    // Media budget allows exactly one 50-byte charge; a re-accept must not exhaust it.
+    const quota = {
+      capabilityId: 'cap-MI',
+      maxEvents: 10,
+      maxTotalBytes: 1_000_000,
+      maxMediaBytes: 60,
+    };
+    expect(await store.acceptContribution('rmi', 'i0', 1, 50, quota)).toEqual({ ok: true, seq: 0 });
+    expect(await store.acceptContribution('rmi', 'i0', 1, 50, quota)).toEqual({ ok: true, seq: 0 });
+    // 50 (debited once) + 20 = 70 > 60 confirms the re-accept did not re-debit (else it would be 100).
+    expect(await store.acceptContribution('rmi', 'i1', 1, 20, quota)).toEqual({
+      ok: false,
+      reason: 'media_payload_quota',
+    });
+    // …but a 10-byte charge fits (50 + 10 = 60 ≤ 60), proving exactly 50 was debited.
+    expect(await store.acceptContribution('rmi', 'i2', 1, 10, quota)).toEqual({ ok: true, seq: 1 });
+  });
+
   it('enforces max_offline_events under concurrent accepts — never over budget', async () => {
     const store = makeStore();
-    const quota = { capabilityId: 'cap-D', maxEvents: 5, maxTotalBytes: 1_000_000 };
+    const quota = {
+      capabilityId: 'cap-D',
+      maxEvents: 5,
+      maxTotalBytes: 1_000_000,
+      maxMediaBytes: 1_000_000,
+    };
     const cids = Array.from({ length: 20 }, (_, i) => `cc${i}`);
     const results = await Promise.all(
-      cids.map((cid) => store.acceptContribution('roomD', cid, 10, quota)),
+      cids.map((cid) => store.acceptContribution('roomD', cid, 10, 0, quota)),
     );
     const acceptedSeqs = results.flatMap((r) => (r.ok ? [r.seq] : []));
     // Exactly maxEvents accepted, with distinct gap-free seqs; the rest fail the event quota.
     expect([...acceptedSeqs].sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4]);
     for (const r of results) if (!r.ok) expect(r.reason).toBe('offline_event_quota');
     expect(await store.roomSize('roomD')).toBe(5);
+  });
+
+  it('enforces max_media_bytes under concurrent accepts — never over budget', async () => {
+    const store = makeStore();
+    // Budget for exactly 5 × 10-byte media charges; 20 concurrent accepts must not exceed it.
+    const quota = {
+      capabilityId: 'cap-DM',
+      maxEvents: 1_000_000,
+      maxTotalBytes: 1_000_000,
+      maxMediaBytes: 50,
+    };
+    const cids = Array.from({ length: 20 }, (_, i) => `dm${i}`);
+    const results = await Promise.all(
+      cids.map((cid) => store.acceptContribution('roomDM', cid, 1, 10, quota)),
+    );
+    const acceptedSeqs = results.flatMap((r) => (r.ok ? [r.seq] : []));
+    expect([...acceptedSeqs].sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4]);
+    for (const r of results) if (!r.ok) expect(r.reason).toBe('media_payload_quota');
+    expect(await store.roomSize('roomDM')).toBe(5);
   });
 
   it('lists exactly the rooms that have accepted records (drives the sync frontier)', async () => {

@@ -293,23 +293,34 @@ None of the above was launch-blocking (the LCAP server binding is gated/in-memor
 pre-production), and the pay-to-rank firewall + fail-closed crypto were unaffected
 throughout.
 
-**Aggregate capability quotas — shipped.**  Beyond the per-event `max_single_event_bytes`
-the §18.3 chain validator already enforced, the server now enforces a capability's
-*aggregate* quotas (`max_offline_events`, `max_total_payload_bytes`) — the stateful
-per-capability accounting a pure, per-record `validate()` cannot hold.  A durable
-per-capability usage counter lives on the `LcapServerStore` boundary
-(`lcap_capability_usage`, migration `0041`); `acceptContribution` debits it as ONE atomic
-step with the room-log append — idempotent by `record_cid` (a re-accept never re-debits),
-the check + debit serialized per capability (the Drizzle adapter locks the usage row
-`FOR UPDATE`, with an outer retry on the room-seq race; the in-memory adapter is
-single-threaded), so concurrent accepts can never exceed the budget.  `commitRecord` routes
-a fresh accept through this gate; an over-budget contribution is `rejected_quota` (§16.11)
-and never appended (the device-seq claim stands; the budget is not debited).  Proven against
-real Postgres (within-budget accept, event-count + total-bytes rejection, idempotent
-re-accept, a concurrent-accept cap at exactly `max_offline_events`, and the end-to-end
-`rejected_quota` wiring).
+**Aggregate capability quotas — shipped (all three).**  Beyond the per-event
+`max_single_event_bytes` the §18.3 chain validator already enforced, the server now enforces
+all three of a capability's *aggregate* quotas — `max_offline_events`,
+`max_total_payload_bytes`, AND `max_media_bytes` — the stateful per-capability accounting a
+pure, per-record `validate()` cannot hold.  A durable per-capability usage counter (event
+count, total payload bytes, media bytes) lives on the `LcapServerStore` boundary
+(`lcap_capability_usage`, migrations `0041` + `0042`); `acceptContribution` checks + debits all
+three as ONE atomic step with the room-log append — idempotent by `record_cid` (a re-accept
+never re-debits), the check + debit serialized per capability (the Drizzle adapter locks the
+usage row `FOR UPDATE`, with an outer retry on the room-seq race; the in-memory adapter is
+single-threaded), so concurrent accepts can never exceed any budget.  `commitRecord` routes a
+fresh accept through this gate; an over-budget contribution (events, payload, OR media) is
+`rejected_quota` (§16.11) and never appended (the device-seq claim stands; no budget is
+debited).  Proven against real Postgres (within-budget accept, event-count / total-bytes /
+media-bytes rejection, idempotent re-accept, a concurrent-accept cap at exactly the budget,
+and the end-to-end `rejected_quota` wiring).
 
-The one remaining sub-item is `max_media_bytes`: it needs media-size accounting at accept
-(summing the contribution's referenced block sizes), which is fuzzy when media arrives
-separately from the event — a distinct, smaller follow-up tracked here, not a blocker for
-the event-count / total-payload budgets above.
+The `max_media_bytes` charge for a contribution is the summed ACTUAL stored size of the blocks
+it references — its `block` edges (the §29.8 export closure index), derived tamper-resistantly
+from BOTH the signed body's block references (`body_block_cid` / `attachment_manifest_cid` /
+block-kind `source_snapshot_cids`) AND the pack table's declared block deps, de-duplicated.
+The figure is always the server's own CID-verified byte length, never the author's declaration.
+The server does not parse per-block roles, so every referenced block counts (the conservative
+reading of §11.4 "referenced block sizes"; per-role weighting from the attachment-manifest
+descriptors is a tracked refinement).  Media that ships in the contribution's own pack is
+charged in full at accept (the §13.4 common case: the body/thumbnail/manifest blocks are P1/P2
+and travel with the event); cross-pack lazy P3 media that arrives in a *separate* later pack
+contributes 0 at accept and is otherwise bounded by the §27.1 block caps and the
+`max_offline_events` count — retroactively charging a late block against an already-accepted
+contribution's capability (a block→capability reverse index) is the remaining refinement,
+tracked here.

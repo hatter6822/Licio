@@ -42,17 +42,20 @@ export const lcapAcceptance = pgTable(
 );
 
 /**
- * Per-capability aggregate usage (§11.3 / §18.3 step 9): the running event count + total
- * payload bytes a capability has spent, so the server enforces `max_offline_events` and
- * `max_total_payload_bytes` across a device's offline events.  Incremented atomically as
- * part of acceptance (the increment is tied to a freshly-accepted record, so it is
- * idempotent by `record_cid` and a re-submit never double-debits).  Keyed by the stable
- * grant id (`capability_id`), not the content CID.
+ * Per-capability aggregate usage (§11.3 / §18.3 step 9): the running event count, total
+ * payload bytes, and media bytes a capability has spent, so the server enforces
+ * `max_offline_events`, `max_total_payload_bytes`, and `max_media_bytes` across a device's
+ * offline events.  Incremented atomically as part of acceptance (the increment is tied to a
+ * freshly-accepted record, so it is idempotent by `record_cid` and a re-submit never
+ * double-debits).  `media_bytes` is the summed stored size of the media blocks each accepted
+ * contribution ships (its referenced blocks present at accept).  Keyed by the stable grant id
+ * (`capability_id`), not the content CID.
  */
 export const lcapCapabilityUsage = pgTable('lcap_capability_usage', {
   capabilityId: text('capability_id').primaryKey(),
   eventCount: integer('event_count').notNull().default(0),
   totalBytes: bigint('total_bytes', { mode: 'number' }).notNull().default(0),
+  mediaBytes: bigint('media_bytes', { mode: 'number' }).notNull().default(0),
 });
 
 /** The device-sequence claimant index: the first record to claim a (key, seq) wins. */
