@@ -45,6 +45,7 @@ import {
   ingestRecord,
   type ObjectStatusV2,
   type PulseResponseV2,
+  type ReceiptRecordV2,
   type ResourceCaps,
   type RevocationAuthorityBinding,
   type RevocationFrontierV2,
@@ -56,6 +57,7 @@ import {
   SERVER_CAPS,
   type SyncPulseV2,
   signCheckpoint,
+  signReceipt,
   type TreeAlgorithm,
   type ValidationResult,
   validate,
@@ -165,6 +167,10 @@ export class LcapIngestServer {
   // value + the §17.2 frontier `latest_checkpoint_cid`).  The bytes also live in the CAS, so the
   // checkpoint + its proof are fetchable by CID like any other object.
   private readonly latestCheckpoints = new Map<string, { bundle: CheckpointBundle; cid: string }>();
+  // The node's receipt-signing key (the §20.4 issuer).  When configured, the server emits signed
+  // `receipt` records for ingestion outcomes (WS-R.10.2); without it, no receipt is emitted (a
+  // receipt is only an availability HINT, never content trust, so its absence is always safe).
+  private receiptIssuer?: { privateKey: CryptoKey; signerKeyId: string; nodeId: string };
 
   /**
    * @param networkId the LCAP network this server serves.
@@ -471,6 +477,118 @@ export class LcapIngestServer {
       proofCid: await cidFor('proof', proofBody),
       proofBody,
     };
+  }
+
+  /**
+   * Configure this node's receipt-signing identity (the §20.4 issuer), so ingestion outcomes
+   * are attested by signed `receipt` records (WS-R.10.2).  In production the key comes from the
+   * SecretBox-encrypted node-key group; `nodeId` defaults to this server's pulse node id.
+   */
+  configureReceiptIssuer(privateKey: CryptoKey, signerKeyId: string, nodeId?: string): void {
+    this.receiptIssuer = {
+      privateKey,
+      signerKeyId,
+      nodeId: nodeId ?? `lcap-server:${this.networkId}`,
+    };
+  }
+
+  /** The §20.4 receipt type a per-object status belongs to (or none — receipts attest handling). */
+  private static receiptTypeForStatus(
+    status: ObjectStatusV2['status'],
+  ): ReceiptRecordV2['receipt_type'] | undefined {
+    if (status === 'accepted') return 'accepted';
+    if (
+      status === 'stored_unverified' ||
+      status === 'stored_pending' ||
+      status === 'already_have'
+    ) {
+      return 'stored';
+    }
+    if (status.startsWith('quarantined')) return 'quarantined';
+    if (status.startsWith('rejected') || status === 'conflict_device_fork') return 'rejected';
+    return undefined;
+  }
+
+  /**
+   * Issue signed `receipt` records over a batch's per-object statuses (WS-R.10.2 / §24.5),
+   * grouped by receipt type (one `accepted` / `stored` / `quarantined` / `rejected` receipt over
+   * its members, each carrying the per-object `status_detail`).  Each receipt's record + detached
+   * proof are durably stored (CID-addressed, fetchable via §29), and every covered status is
+   * stamped with its `receipt_cid`.  A receipt is an availability HINT + audit evidence, never
+   * content trust — a forged issuer is just an untrusted hint.  No-op (statuses unchanged, no
+   * receipts) when no issuer is configured.
+   */
+  async issueReceipts(statuses: readonly ObjectStatusV2[]): Promise<{
+    statuses: ObjectStatusV2[];
+    receipts: {
+      cid: string;
+      recordBody: Uint8Array;
+      proofCid: string;
+      proofBody: Uint8Array;
+      record: ReceiptRecordV2;
+    }[];
+  }> {
+    const issuer = this.receiptIssuer;
+    if (!issuer) return { statuses: statuses.map((s) => ({ ...s })), receipts: [] };
+
+    // Group the statuses by the receipt type their outcome maps to (preserving order).
+    const byType = new Map<ReceiptRecordV2['receipt_type'], ObjectStatusV2[]>();
+    for (const s of statuses) {
+      const receiptType = LcapIngestServer.receiptTypeForStatus(s.status);
+      if (receiptType === undefined) continue;
+      const group = byType.get(receiptType);
+      if (group) group.push(s);
+      else byType.set(receiptType, [s]);
+    }
+
+    const receiptCidByCid = new Map<string, string>();
+    const receipts: {
+      cid: string;
+      recordBody: Uint8Array;
+      proofCid: string;
+      proofBody: Uint8Array;
+      record: ReceiptRecordV2;
+    }[] = [];
+    for (const [receiptType, group] of byType) {
+      const record: ReceiptRecordV2 = {
+        record_version: 2,
+        kind: 'receipt',
+        receipt_type: receiptType,
+        issuer_node_id: issuer.nodeId,
+        subject_cids: group.map((s) => s.cid),
+        issued_at_claim_ms: this.now(),
+        // The per-object verdict (a mutable copy — `ObjectStatusV2` is readonly-typed; the
+        // receipt schema's `status_detail` array is mutable).  Carries the FINE status (e.g.
+        // which rejection reason), self-describing the receipt without the response statuses.
+        status_detail: group.map((s) => ({
+          cid: s.cid,
+          cid_kind: s.cid_kind,
+          status: s.status,
+          ...(s.missing_cids !== undefined ? { missing_cids: [...s.missing_cids] } : {}),
+          ...(s.detail_code !== undefined ? { detail_code: s.detail_code } : {}),
+          ...(s.receipt_cid !== undefined ? { receipt_cid: s.receipt_cid } : {}),
+        })),
+      };
+      const bundle = await signReceipt({
+        issuerPrivateKey: issuer.privateKey,
+        issuerSignerKeyId: issuer.signerKeyId,
+        receipt: record,
+        networkId: this.networkId,
+      });
+      const cid = await cidFor('record', bundle.body);
+      await this.store.storeObject(cid, 'record', bundle.body);
+      const proofBody = encodeWithSchema(detachedProofV2Schema, bundle.proof);
+      const proofCid = await cidFor('proof', proofBody);
+      await this.store.storeObject(proofCid, 'proof', proofBody);
+      receipts.push({ cid, recordBody: bundle.body, proofCid, proofBody, record });
+      for (const s of group) receiptCidByCid.set(s.cid, cid);
+    }
+
+    const stamped = statuses.map((s) => {
+      const receiptCid = receiptCidByCid.get(s.cid);
+      return receiptCid !== undefined ? { ...s, receipt_cid: receiptCid } : { ...s };
+    });
+    return { statuses: stamped, receipts };
   }
 
   /**

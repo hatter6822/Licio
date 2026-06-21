@@ -4,8 +4,9 @@
 //
 //   - content READS (§29.4-6, GET by CID): serve held, content-addressed objects so
 //     a peer that learns a `want` can fetch the missing object (RFC 7233 ranges).
-//   - room reads (§29.7, GET /rooms/:id/{checkpoint,proofs/*}): the unsigned tree
-//     head + RFC 9162 inclusion/consistency proofs over the §19.1 room log.
+//   - room reads (§29.7, GET /rooms/:id/{checkpoint,proofs/*}): the tree head + the
+//     latest authority-signed `room_checkpoint` (when issued) + RFC 9162
+//     inclusion/consistency proofs over the §19.1 room log.
 //   - bundle EXPORT (§29.8, POST /bundles/export): a room's content closure (records +
 //     each record's proofs + referenced blocks) repacked from held bytes, GATED by a
 //     device-signed `may_export_bundle` capability for the room (the export gate).
@@ -14,8 +15,8 @@
 //     contributions committed through validate()→graph-guard→commit.
 //   - bundle IMPORT (§29.8, POST /bundles/import): the web-UI alias of /packs.
 //   - pulse (§29.1, POST /pulse) + exchange (§29.2, POST /exchange): the frontier
-//     exchange + the main bidirectional path (push-pack ingest + frontiers +
-//     `wanted_from_client` + a served content pack).
+//     exchange + the main bidirectional path (push-pack ingest → signed receipts +
+//     frontiers + `wanted_from_client` + a served content pack).
 //
 // Content is device-certificate-authenticated (records carry their own COSE proofs;
 // validate() is the real authentication), so GETs + the native POSTs (/packs, /pulse,
@@ -47,6 +48,7 @@ import {
   type ObjectStatusV2,
   parseCid,
   pulseResponseV2Schema,
+  type ReceiptRecordV2,
   readPack,
   SERVER_CAPS,
   type SyncPulseV2,
@@ -403,7 +405,25 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
   if (!result.ok) {
     return json(result.httpStatus, { error: result.error });
   }
-  return json(200, { statuses: result.statuses, wants: result.wants });
+  // §20.4 / WS-R.10.2: attest the outcomes with signed receipts (when this node has a receipt
+  // issuer).  The statuses are stamped with their `receipt_cid`; the full signed receipts
+  // (record + proof, both CID-addressed + stored) are returned inline so the client can persist
+  // AND verify them without a round trip.  No issuer ⇒ no `receipts` (a receipt is only a hint).
+  const { statuses, receipts } = await server.issueReceipts(result.statuses);
+  return json(200, {
+    statuses,
+    wants: result.wants,
+    ...(receipts.length > 0
+      ? {
+          receipts: receipts.map((r) => ({
+            cid: r.cid,
+            record_body: toHex(r.recordBody),
+            proof_cid: r.proofCid,
+            proof_body: toHex(r.proofBody),
+          })),
+        }
+      : {}),
+  });
 }
 
 // A pulse is a tiny frontier message; anything larger is over the request budget.
@@ -504,15 +524,21 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
   }
   const request = parsed.data;
 
-  // 1) Ingest the optional push pack through the shared validator (idempotent).
+  // 1) Ingest the optional push pack through the shared validator (idempotent), then attest the
+  // outcomes with signed receipts (§20.4 / WS-R.10.2): the `accepted_push` statuses are stamped
+  // with their `receipt_cid` and the receipt records ride the response's `receipts` field (their
+  // record + proof are CID-addressed in the CAS).  No issuer ⇒ the statuses pass through unchanged.
   let acceptedPush: ObjectStatusV2[] | undefined;
+  let pushReceipts: ReceiptRecordV2[] | undefined;
   if (request.push_pack !== undefined) {
     const ingest = await ingestPackFrames(server, request.push_pack);
     if (!ingest.ok) {
       // A push pack that breaches the §27 caps fails the whole request (§22.1.1).
       return json(ingest.httpStatus, { error: ingest.error });
     }
-    acceptedPush = ingest.statuses;
+    const issued = await server.issueReceipts(ingest.statuses);
+    acceptedPush = issued.statuses;
+    if (issued.receipts.length > 0) pushReceipts = issued.receipts.map((r) => r.record);
   }
 
   // 2) The server's frontier diff against the client's advertised frontier: what the
@@ -549,6 +575,7 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
     pulse: await server.serverPulse(),
     status,
     ...(acceptedPush !== undefined ? { acceptedPush } : {}),
+    ...(pushReceipts !== undefined ? { receipts: pushReceipts } : {}),
     ...(wantedFromClient.length > 0 ? { wantedFromClient } : {}),
     ...(responsePack !== undefined ? { responsePack } : {}),
   });
