@@ -98,12 +98,16 @@ mounted through the global security middleware:
 - the §29.7 room reads `GET /api/lcap/v2/rooms/:roomId/{checkpoint,proofs/inclusion,
   proofs/consistency}` — the (unsigned) tree head + RFC 9162 inclusion/consistency
   proofs computed over the §19.1 room log reconstructed from the canonical acceptance
-  order; the served proofs verify against an independently-built log.
+  order; the served proofs verify against an independently-built log;
+- the §29.8 `GET /api/lcap/v2/bundles/export?room=…` — a room's content closure (its
+  accepted records, each followed by its proofs then its referenced blocks) repacked
+  from held bytes via an import-captured record→proof/record→block closure index
+  (`indexRecordEdge`/`recordEdges` over migration `0040`); UNSIGNED (each record
+  self-authenticates via its included proof), re-importable, generic filename.
 
-The remaining WS-R cards are **I/O integration** — the WS-R.12.4 bundle-EXPORT residual
-(`GET /bundles/export` gathers a room's full record→proof→block closure, so it needs a
-proof/block index; the authority-signed checkpoint record is checkpoint issuance), the
-DoS/privacy controls (WS-R.14), the transport profiles (WS-R.15), the WS-S
+The remaining WS-R cards are **I/O integration** — the WS-R.15.1a bundle-export UI
+flow (the server `GET /bundles/export` is shipped; the authority-signed checkpoint
+record is checkpoint issuance), the transport profiles (WS-R.15), the WS-S
 encryption-envelope seam (WS-R.16), the client surface (WS-R.17), and the network
 simulator (WS-R.18) — plus the entire WS-S private-rooms plane.  Those bind this pure core to Postgres / IndexedDB /
 Hono / the browser and are **not yet started** (see "Status" below).  The optional,
@@ -224,7 +228,7 @@ is a later card (the package is already runtime-agnostic via `runtime.ts`).
 | WS-R.9 — Merkle / checkpoint / inclusion / consistency / witness | 9.2 – 9.4 | **Shipped** (9.1 server-append logic core; DB binding in WS-R.12) |
 | WS-R.10 — liveness, receipts, durable outbox | 10.1 – 10.3 | **Shipped** (IndexedDB binding in WS-R.11) |
 | WS-R.13 — conflict dispatch + visible-thread projection | 13.1 – 13.2 | **Shipped** |
-| WS-R.12 — server ingestion | 12.1, 12.2, 12.4 | **Decision core + §24.4 resolver + server-computed validation + in-memory & gated-Drizzle bindings + the full §29 route surface shipped** (`ingestRecord`, `resolveIngestionOrder`, `validate`; `apps/api/src/lcap` `LcapIngestServer` incl. `validateContribution`/`commitBatch`/frontiers/room-Merkle reads; `routes.ts` content reads + `POST …/packs` + `/pulse` (incl. C0 `critical_pack`) + `/exchange` (incl. `response_pack`) + `/rooms/:id/{checkpoint,proofs/*}` + `/bundles/import`; the `LcapServerStore` boundary over migration `0039`); the 12.4 bundle-EXPORT residual (a room's record→proof→block closure index) = follow-up |
+| WS-R.12 — server ingestion | 12.1, 12.2, 12.4 | **Decision core + §24.4 resolver + server-computed validation + in-memory & gated-Drizzle bindings + the full §29 route surface shipped** (`ingestRecord`, `resolveIngestionOrder`, `validate`; `apps/api/src/lcap` `LcapIngestServer` incl. `validateContribution`/`commitBatch`/frontiers/room-Merkle reads; `routes.ts` content reads + `POST …/packs` + `/pulse` (incl. C0 `critical_pack`) + `/exchange` (incl. `response_pack`) + `/rooms/:id/{checkpoint,proofs/*}` + `/bundles/import` + `GET /bundles/export` (room closure via the migration-`0040` closure index); the `LcapServerStore` boundary over migrations `0039`+`0040`) — **§29 route surface complete**; only the WS-R.15.1a export UI flow remains of 12.4 |
 | WS-R.14 — privacy + DoS controls | 14.1a, 14.1b, 14.2, 14.3, 14.4 | **Shipped**: the §27.1 resource-cap SSOT (`limits/caps.ts` — one frozen config every parser path sources, profile-tunable/never-disable-able, `checkCap`/`enforceCap`; the server parse enforces the CPU-time + quarantine-byte caps, 14.1a); the §27.2 graph guard run over the pack's DECLARED DAG before storage (14.1b); the §27.3 relay quotas + §27.4 no-PoW/no-address policy (`limits/relay-quota.ts`, 14.4); the §26.2 export-disclosure + §26.3 stealth policy (`privacy/`, 14.2 — interest-privacy in R.6.3); the §3.7/§36 doctrine CI gates (`check:lcap-schema-egress` + no-applause/no-raw-egress over the LCAP trees, 14.3). The 14.2 export UI flow is WS-R.15.1a |
 | WS-R.11 — IndexedDB client offline store | 11.1 – 11.5 | **Shipped** (`apps/web/src/lcap`: `lcap_v2` schema + durability + pinning/eviction + storage modes + C0-first sync + replication gate); durability layer / SW hooks = follow-up |
 | WS-R.15/R.16/R.17/R.18 — transports, encryption envelope, client UI, simulator | — | Planned |
