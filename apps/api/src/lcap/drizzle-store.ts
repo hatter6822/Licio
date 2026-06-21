@@ -15,9 +15,16 @@ import {
   lcapDeviceSeq,
   lcapForkEvidence,
   lcapObjects,
+  lcapRecordClosure,
 } from '@licio/db';
 import { and, asc, eq, sql } from 'drizzle-orm';
-import type { ForkEvidence, LcapContentKind, LcapServerStore, StoredObject } from './store.js';
+import type {
+  ForkEvidence,
+  LcapContentKind,
+  LcapServerStore,
+  RecordEdgeRelation,
+  StoredObject,
+} from './store.js';
 
 export class DrizzleLcapServerStore implements LcapServerStore {
   readonly #db: DbExecutor;
@@ -141,5 +148,27 @@ export class DrizzleLcapServerStore implements LcapServerStore {
       })
       .from(lcapForkEvidence)
       .orderBy(asc(lcapForkEvidence.id));
+  }
+
+  async indexRecordEdge(
+    recordCid: string,
+    relatedCid: string,
+    relation: RecordEdgeRelation,
+  ): Promise<void> {
+    await this.#db
+      .insert(lcapRecordClosure)
+      .values({ recordCid, relatedCid, relation })
+      .onConflictDoNothing();
+  }
+
+  async recordEdges(recordCid: string, relation: RecordEdgeRelation): Promise<readonly string[]> {
+    const rows = await this.#db
+      .select({ relatedCid: lcapRecordClosure.relatedCid })
+      .from(lcapRecordClosure)
+      .where(
+        and(eq(lcapRecordClosure.recordCid, recordCid), eq(lcapRecordClosure.relation, relation)),
+      )
+      .orderBy(asc(lcapRecordClosure.relatedCid));
+    return rows.map((r) => r.relatedCid);
   }
 }

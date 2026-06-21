@@ -1,36 +1,33 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// The §29 LCAP HTTP API (WS-R.12.4).  Four surfaces:
+// The §29 LCAP HTTP API (WS-R.12.4) — the full surface:
 //
-//   - content READS (GET by CID): serve held, content-addressed objects so a peer
-//     that learns a `want` (from an ingestion response) can fetch the missing
-//     object.  Reads are GETs, so the global CSRF middleware passes them through.
-//   - pack IMPORT (POST /packs, §29.3): the bundle-import path.  A `.licio-bundle`
-//     is read under the WS-R.4.2 caps; every CID-verified frame is durably stored
-//     (so the READ routes can serve its proofs/blocks), its identity frames (certs/
-//     capabilities/revocations) are registered, and its contribution records are
-//     committed through the same validate()→graph-guard→commit pipeline.
-//   - pulse (POST /pulse, §29.1): the tiny C0 frontier exchange — validate the
-//     client pulse fail-closed, return the server's frontiers (per-room checkpoint
-//     sizes + the global revocation epoch).
-//   - exchange (POST /exchange, §29.2): the main bidirectional path — ingest an
-//     optional push pack through the SHARED WS-R.4.2 validator, then return the
-//     server's frontiers + the `wanted_from_client` the frontier diff derives.
+//   - content READS (§29.4-6, GET by CID): serve held, content-addressed objects so
+//     a peer that learns a `want` can fetch the missing object (RFC 7233 ranges).
+//   - room reads (§29.7, GET /rooms/:id/{checkpoint,proofs/*}): the unsigned tree
+//     head + RFC 9162 inclusion/consistency proofs over the §19.1 room log.
+//   - bundle EXPORT (§29.8, GET /bundles/export?room=…): a room's content closure
+//     (records + each record's proofs + referenced blocks) repacked from held bytes.
+//   - pack IMPORT (§29.3, POST /packs): a `.licio-bundle` read under the WS-R.4.2
+//     caps; every CID-verified frame durably stored, identity frames registered,
+//     contributions committed through validate()→graph-guard→commit.
+//   - bundle IMPORT (§29.8, POST /bundles/import): the web-UI alias of /packs.
+//   - pulse (§29.1, POST /pulse) + exchange (§29.2, POST /exchange): the frontier
+//     exchange + the main bidirectional path (push-pack ingest + frontiers +
+//     `wanted_from_client` + a served content pack).
 //
-// All four are device-certificate-authenticated CONTENT (records carry their own
-// COSE proofs; validate() is the real authentication) and a native sync client
-// holds NO session cookie, so the POST surfaces are CSRF-exempt (registered in the
-// CSRF middleware, like the public takedowns intake) and bounded by per-endpoint
-// rate limits + the §27 caps + the §27.2 graph guard.
-//
-// §22.1.1 request-level status mapping: reads → 200 held / 404 not-held / 400
-// malformed CID; pack import / pulse / exchange → 200 processed (per-object
-// outcomes inside) / 413 oversized / 400 undecodable / 422 schema-invalid / 429
-// rate-limited (+Retry-After, from the limiter).  Content is self-authenticating,
-// so serving or accepting it implies no transport trust.
+// Content is device-certificate-authenticated (records carry their own COSE proofs;
+// validate() is the real authentication), so GETs + the native POSTs (/packs,
+// /pulse, /exchange) are CSRF-EXEMPT (a native sync client holds no session cookie)
+// and bounded by per-endpoint rate limits + the §27 caps + the §27.2 graph guard.
+// The web-UI /bundles/import is NOT exempt — a session-bearing browser flow keeps the
+// CSRF token.  §22.1.1 request-level status mapping: 200 processed (per-object
+// outcomes inside) / 404 not-held / 400 malformed / 413 oversized / 422 schema-
+// invalid / 429 rate-limited.  Serving/accepting content implies no transport trust.
 
 import {
   applyPulse,
+  BUNDLE_MIME,
   buildExchangeResponse,
   type DetachedProofV2,
   decode,
@@ -40,6 +37,7 @@ import {
   exchangeRequestV2Schema,
   exchangeResponseV2Schema,
   type GraphGuardNode,
+  genericBundleFilename,
   ldcToPlain,
   type ObjectStatusV2,
   parseCid,
@@ -208,19 +206,24 @@ async function ingestPackFrames(
     };
   }
 
-  // Group detached proofs by the record_cid they attest (for the contribution commit).
+  // Group detached proofs by the record_cid they attest (for the contribution commit)
+  // and index each record→proof edge for the §29.8 room-export closure.
   const proofsByRecord = new Map<string, DetachedProofV2[]>();
-  for (const frame of frames.values()) {
+  for (const [cid, frame] of frames) {
     if (frame.frameKind !== 'proof') continue;
     try {
       const proof = decodeProof(frame.payload);
       const list = proofsByRecord.get(proof.record_cid) ?? [];
       list.push(proof);
       proofsByRecord.set(proof.record_cid, list);
+      await server.indexRecordEdge(proof.record_cid, cid, 'proof');
     } catch {
       // a malformed proof frame is ignored; the record it would attest will quarantine
     }
   }
+
+  // The pack table by CID — the declared deps drive the record→block export closure.
+  const entryByCid = new Map(read.pack.entries.map((entry) => [entry.cid, entry] as const));
 
   // Store every frame (CID re-verified by putObject) + register identity frames;
   // collect contributions for the ordered batch commit.  Non-contribution objects
@@ -275,7 +278,7 @@ async function ingestPackFrames(
         server.registerRevocation(record);
         statuses.push({ cid, cid_kind: 'record', status: storedStatus });
         break;
-      case 'contribution_event':
+      case 'contribution_event': {
         contributions.push({
           recordCid: cid,
           roomId: record.home_room_id,
@@ -284,7 +287,18 @@ async function ingestPackFrames(
           body: frame.payload,
           proofs,
         });
+        // Index the contribution's declared block deps for the export closure (§29.8).
+        for (const dep of entryByCid.get(cid)?.deps ?? []) {
+          let depKind: string;
+          try {
+            depKind = parseCid(dep).kind;
+          } catch {
+            continue; // a malformed dep CID is ignored (the record will quarantine anyway)
+          }
+          if (depKind === 'block') await server.indexRecordEdge(cid, dep, 'block');
+        }
         break; // commitBatch reports the contribution's status
+      }
       default:
         statuses.push({ cid, cid_kind: 'record', status: storedStatus });
         break;
@@ -528,6 +542,36 @@ async function handleRoomConsistency(
   });
 }
 
+// A room export stays well under the reader's max pack size so it always re-imports.
+const MAX_EXPORT_BYTES = 32 * 1024 * 1024;
+
+/**
+ * §29.8 `GET /bundles/export?room=…`: produce a `.licio-bundle` of a room's content
+ * closure — its accepted records (acceptance order) each followed by its proofs then
+ * its referenced blocks — repacked from held bytes.  Every object is CID-verified on
+ * re-import and each record self-authenticates via its included proof, so the pack is
+ * UNSIGNED (the platform holds no key; the user-attested manifest is the WS-R.15.1a
+ * client flow).  Missing `room` → 400; an empty/unknown room → 404; otherwise 200 with
+ * the generic (room/topic-free) download filename (§26.3 / WS-R.4.4).
+ */
+async function handleExport(
+  server: LcapIngestServer,
+  roomId: string | undefined,
+): Promise<Response> {
+  if (roomId === undefined || roomId === '') return json(400, { error: 'missing_room' });
+  const cids = await server.exportRoomClosureCids(roomId);
+  if (cids.length === 0) return json(404, { error: 'not_found' });
+  const repacked = await repackHeldObjects(server, cids, MAX_EXPORT_BYTES);
+  if (repacked.pack === undefined) return json(404, { error: 'not_found' });
+  return new Response(new Uint8Array(repacked.pack), {
+    status: 200,
+    headers: {
+      'content-type': BUNDLE_MIME,
+      'content-disposition': `attachment; filename="${genericBundleFilename()}"`,
+    },
+  });
+}
+
 /**
  * The §29 LCAP routes.  Mounted at `/api/lcap/v2` (see `app.ts`).  The server is
  * resolved PER REQUEST (not at mount): the default singleton — which may bind a
@@ -554,13 +598,14 @@ export function createLcapRoutes(override?: LcapIngestServer): Hono {
   app.get('/rooms/:roomId/proofs/consistency', (c) =>
     handleRoomConsistency(server(), c.req.param('roomId'), c.req.query('old'), c.req.query('new')),
   );
+  // §29.8 bundle export (GET → CSRF passes): a room's content closure as a pack.
+  app.get('/bundles/export', (c) => handleExport(server(), c.req.query('room')));
   app.post('/packs', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) =>
     ingestPack(server(), new Uint8Array(await c.req.arrayBuffer())),
   );
   // §29.8 bundle import: the web-UI alias of /packs (same validator; CSRF-protected
   // — it is NOT in the CSRF-exempt set, so a session-bearing browser flow keeps the
-  // double-submit token).  Bundle EXPORT is the WS-R.12.4 follow-up (it repacks held
-  // content, so it needs the import-captured object lane/priority/deps metadata).
+  // double-submit token).
   app.post('/bundles/import', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) =>
     ingestPack(server(), new Uint8Array(await c.req.arrayBuffer())),
   );

@@ -12,6 +12,7 @@ import {
   lcapDeviceSeq,
   lcapForkEvidence,
   lcapObjects,
+  lcapRecordClosure,
   migrationsFolder,
 } from '@licio/db';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
@@ -77,6 +78,20 @@ function contract(makeStore: () => LcapServerStore): void {
     expect(await store.getDeviceClaimant('k', 6)).toBeUndefined();
   });
 
+  it('indexes record→proof / record→block closure edges idempotently, scoped by relation', async () => {
+    const store = makeStore();
+    expect(await store.recordEdges('rec', 'proof')).toEqual([]);
+    await store.indexRecordEdge('rec', 'proofA', 'proof');
+    await store.indexRecordEdge('rec', 'proofA', 'proof'); // idempotent
+    await store.indexRecordEdge('rec', 'blockA', 'block');
+    await store.indexRecordEdge('rec', 'blockB', 'block');
+    await store.indexRecordEdge('other', 'proofZ', 'proof');
+    expect(await store.recordEdges('rec', 'proof')).toEqual(['proofA']);
+    expect([...(await store.recordEdges('rec', 'block'))].sort()).toEqual(['blockA', 'blockB']);
+    expect(await store.recordEdges('other', 'proof')).toEqual(['proofZ']);
+    expect(await store.recordEdges('rec', 'proof')).not.toContain('proofZ');
+  });
+
   it('appends + lists fork evidence in insertion order', async () => {
     const store = makeStore();
     expect(await store.listForkEvidence()).toEqual([]);
@@ -122,6 +137,7 @@ describe.skipIf(!DB_URL)('DrizzleLcapServerStore (contract, live Postgres)', () 
     await db.delete(lcapDeviceSeq);
     await db.delete(lcapAcceptance);
     await db.delete(lcapObjects);
+    await db.delete(lcapRecordClosure);
   });
 
   contract(() => new DrizzleLcapServerStore(db));

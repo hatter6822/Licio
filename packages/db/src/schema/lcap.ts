@@ -61,7 +61,23 @@ export const lcapForkEvidence = pgTable('lcap_fork_evidence', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * Record-export closure edges (WS-R.12.4 §29.8): record→proof + record→block edges
+ * captured at import, so a room export can gather each record's trust + media closure
+ * without scanning the whole CAS.  CID-addressed (no FK edges; the offline plane).
+ */
+export const lcapRecordClosure = pgTable(
+  'lcap_record_closure',
+  {
+    recordCid: text('record_cid').notNull(),
+    relatedCid: text('related_cid').notNull(),
+    relation: text('relation').notNull(), // 'proof' | 'block'
+  },
+  (t) => [primaryKey({ columns: [t.recordCid, t.relatedCid, t.relation] })],
+);
+
 export type LcapObjectRow = typeof lcapObjects.$inferSelect;
 export type LcapAcceptanceRow = typeof lcapAcceptance.$inferSelect;
 export type LcapDeviceSeqRow = typeof lcapDeviceSeq.$inferSelect;
 export type LcapForkEvidenceRow = typeof lcapForkEvidence.$inferSelect;
+export type LcapRecordClosureRow = typeof lcapRecordClosure.$inferSelect;

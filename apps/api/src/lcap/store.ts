@@ -16,6 +16,9 @@ import type { CidKind } from '@licio/lcap';
 
 export type LcapContentKind = Extract<CidKind, 'record' | 'proof' | 'block' | 'chunk'>;
 
+/** A record's export-closure edge kind: a proof that attests it, or a block it references. */
+export type RecordEdgeRelation = 'proof' | 'block';
+
 export interface StoredObject {
   readonly kind: LcapContentKind;
   readonly bytes: Uint8Array;
@@ -55,6 +58,14 @@ export interface LcapServerStore {
   setDeviceClaimant(deviceKeyId: string, deviceSeq: number, cid: string): Promise<void>;
   appendForkEvidence(evidence: ForkEvidence): Promise<void>;
   listForkEvidence(): Promise<readonly ForkEvidence[]>;
+  /** Index a record→proof / record→block edge for room-export closure (idempotent). */
+  indexRecordEdge(
+    recordCid: string,
+    relatedCid: string,
+    relation: RecordEdgeRelation,
+  ): Promise<void>;
+  /** The CIDs related to `recordCid` by `relation` (its proofs or its referenced blocks). */
+  recordEdges(recordCid: string, relation: RecordEdgeRelation): Promise<readonly string[]>;
 }
 
 /**
@@ -69,9 +80,15 @@ export class InMemoryLcapServerStore implements LcapServerStore {
   private readonly accepted = new Set<string>();
   private readonly deviceSeqIndex = new Map<string, string>();
   private readonly forkEvidence: ForkEvidence[] = [];
+  // Record-export closure edges, keyed by `${relation} ${recordCid}`.
+  private readonly recordClosure = new Map<string, Set<string>>();
 
   private static deviceKey(keyId: string, seq: number): string {
     return `${keyId} ${seq}`;
+  }
+
+  private static edgeKey(relation: RecordEdgeRelation, recordCid: string): string {
+    return `${relation} ${recordCid}`;
   }
 
   private ensureRoomLog(roomId: string): string[] {
@@ -148,5 +165,25 @@ export class InMemoryLcapServerStore implements LcapServerStore {
 
   listForkEvidence(): Promise<readonly ForkEvidence[]> {
     return Promise.resolve(this.forkEvidence);
+  }
+
+  indexRecordEdge(
+    recordCid: string,
+    relatedCid: string,
+    relation: RecordEdgeRelation,
+  ): Promise<void> {
+    const key = InMemoryLcapServerStore.edgeKey(relation, recordCid);
+    let set = this.recordClosure.get(key);
+    if (!set) {
+      set = new Set();
+      this.recordClosure.set(key, set);
+    }
+    set.add(relatedCid);
+    return Promise.resolve();
+  }
+
+  recordEdges(recordCid: string, relation: RecordEdgeRelation): Promise<readonly string[]> {
+    const set = this.recordClosure.get(InMemoryLcapServerStore.edgeKey(relation, recordCid));
+    return Promise.resolve(set ? [...set] : []);
   }
 }

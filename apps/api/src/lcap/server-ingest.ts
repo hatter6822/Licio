@@ -58,6 +58,7 @@ import {
   InMemoryLcapServerStore,
   type LcapContentKind,
   type LcapServerStore,
+  type RecordEdgeRelation,
   type StoredObject,
 } from './store.js';
 
@@ -172,6 +173,39 @@ export class LcapIngestServer {
 
   getForkEvidence(): Promise<readonly ForkEvidence[]> {
     return this.store.listForkEvidence();
+  }
+
+  /** Index a record→proof / record→block edge for the §29.8 room-export closure. */
+  indexRecordEdge(
+    recordCid: string,
+    relatedCid: string,
+    relation: RecordEdgeRelation,
+  ): Promise<void> {
+    return this.store.indexRecordEdge(recordCid, relatedCid, relation);
+  }
+
+  /**
+   * The §29.8 export closure for a room: its accepted records in acceptance order,
+   * each immediately followed by its proofs then its referenced blocks (so the
+   * importer meets a record's trust + media before the record itself reorders into
+   * place).  De-duplicated; only the CIDs — the route repacks the held bytes.
+   */
+  async exportRoomClosureCids(roomId: string): Promise<string[]> {
+    const records = await this.store.roomLog(roomId);
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const push = (cid: string): void => {
+      if (!seen.has(cid)) {
+        seen.add(cid);
+        out.push(cid);
+      }
+    };
+    for (const recordCid of records) {
+      push(recordCid);
+      for (const proofCid of await this.store.recordEdges(recordCid, 'proof')) push(proofCid);
+      for (const blockCid of await this.store.recordEdges(recordCid, 'block')) push(blockCid);
+    }
+    return out;
   }
 
   // --- R.12.1b: registered identity state + the shared `validate()` assembly ----
