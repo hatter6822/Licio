@@ -404,27 +404,43 @@ export class LcapIngestServer {
     // Authoritative (server-side) idempotency + fork detection — independent of
     // the client's local accounting (WS-R.12.3).
     const alreadyHave = await this.store.isAccepted(input.recordCid);
-    const claimant = await this.store.getDeviceClaimant(input.authorDeviceKeyId, input.deviceSeq);
-    const deviceForkDetected = claimant !== undefined && claimant !== input.recordCid;
 
-    const outcome = ingestRecord({
-      alreadyHave,
-      situation: deviceForkDetected ? { validation, deviceForkDetected: true } : { validation },
-    });
+    // The device fork is decided ATOMICALLY at claim time, NOT by a read-then-write: a
+    // racy `getDeviceClaimant` then `setDeviceClaimant` would let two concurrent records for
+    // one (key, seq) both read "unclaimed" and both accept.  So first compute the verdict
+    // IGNORING fork; only a would-accept record claims the sequence, and the claim's winner
+    // decides accept-vs-fork.
+    const provisional = ingestRecord({ alreadyHave, situation: { validation } });
 
+    let outcome = provisional;
     let roomSeq: number | undefined;
-    if (outcome.appendToRoomLog) {
-      roomSeq = await this.store.appendAcceptance(input.roomId, input.recordCid);
-      await this.store.setDeviceClaimant(input.authorDeviceKeyId, input.deviceSeq, input.recordCid);
+    let forkClaimant: string | undefined;
+    if (provisional.appendToRoomLog) {
+      const claimant = await this.store.claimDeviceSeq(
+        input.authorDeviceKeyId,
+        input.deviceSeq,
+        input.recordCid,
+      );
+      if (claimant === input.recordCid) {
+        // We hold the (key, seq) claim → append to the canonical log (idempotent).
+        roomSeq = await this.store.appendAcceptance(input.roomId, input.recordCid);
+      } else {
+        // A different record already claimed this (key, seq) → THIS record is a device fork.
+        forkClaimant = claimant;
+        outcome = ingestRecord({
+          alreadyHave,
+          situation: { validation, deviceForkDetected: true },
+        });
+      }
     } else if (alreadyHave) {
       roomSeq = await this.store.roomSeqOf(input.roomId, input.recordCid);
     }
 
-    if (outcome.gossipForkEvidence && claimant !== undefined) {
+    if (outcome.gossipForkEvidence && forkClaimant !== undefined) {
       await this.store.appendForkEvidence({
         authorDeviceKeyId: input.authorDeviceKeyId,
         deviceSeq: input.deviceSeq,
-        existingCid: claimant,
+        existingCid: forkClaimant,
         conflictingCid: input.recordCid,
       });
     }

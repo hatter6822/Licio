@@ -44,7 +44,13 @@ export interface LcapServerStore {
   /** Persist a (caller-CID-verified) object; idempotent by CID. */
   storeObject(cid: string, kind: LcapContentKind, bytes: Uint8Array): Promise<void>;
   isAccepted(cid: string): Promise<boolean>;
-  /** Append to the room's canonical acceptance log + mark accepted; returns the seq. */
+  /**
+   * Append to the room's canonical acceptance log + mark accepted; returns the seq.
+   * IDEMPOTENT: re-appending an already-accepted cid returns its EXISTING seq (never a
+   * second leaf).  The per-room seq is allocated ATOMICALLY, so concurrent accepts receive
+   * distinct, gap-free sequences and the returned seq is always the cid's real position —
+   * never a phantom seq for a record absent from the log.
+   */
   appendAcceptance(roomId: string, cid: string): Promise<number>;
   /** The room sequence of an already-accepted cid, or `undefined`. */
   roomSeqOf(roomId: string, cid: string): Promise<number | undefined>;
@@ -54,8 +60,15 @@ export interface LcapServerStore {
   /** The room's accepted CIDs in canonical acceptance order (the §19.1 Merkle leaves). */
   roomLog(roomId: string): Promise<readonly string[]>;
   getDeviceClaimant(deviceKeyId: string, deviceSeq: number): Promise<string | undefined>;
-  /** Record the FIRST claimant of a (key, seq); a later distinct CID is fork evidence. */
-  setDeviceClaimant(deviceKeyId: string, deviceSeq: number, cid: string): Promise<void>;
+  /**
+   * ATOMICALLY claim a (key, seq) for `cid` and return the WINNING claimant: `cid` itself
+   * if it won (or is already the claimant — idempotent), otherwise the cid that claimed it
+   * first.  The first claimant wins permanently; a return value other than `cid` means THIS
+   * record is a device fork (it must not append to the room log).  This single atomic
+   * operation replaces a racy read-then-write so two concurrent records for one (key, seq)
+   * can never both be accepted.
+   */
+  claimDeviceSeq(deviceKeyId: string, deviceSeq: number, cid: string): Promise<string>;
   appendForkEvidence(evidence: ForkEvidence): Promise<void>;
   listForkEvidence(): Promise<readonly ForkEvidence[]>;
   /** Index a record→proof / record→block edge for room-export closure (idempotent). */
@@ -120,6 +133,8 @@ export class InMemoryLcapServerStore implements LcapServerStore {
 
   appendAcceptance(roomId: string, cid: string): Promise<number> {
     const log = this.ensureRoomLog(roomId);
+    const existing = log.indexOf(cid);
+    if (existing >= 0) return Promise.resolve(existing); // idempotent: keep the original seq
     const seq = log.length;
     log.push(cid);
     this.accepted.add(cid);
@@ -152,10 +167,12 @@ export class InMemoryLcapServerStore implements LcapServerStore {
     return Promise.resolve(this.deviceSeqIndex.get(key));
   }
 
-  setDeviceClaimant(deviceKeyId: string, deviceSeq: number, cid: string): Promise<void> {
+  claimDeviceSeq(deviceKeyId: string, deviceSeq: number, cid: string): Promise<string> {
     const key = InMemoryLcapServerStore.deviceKey(deviceKeyId, deviceSeq);
-    if (!this.deviceSeqIndex.has(key)) this.deviceSeqIndex.set(key, cid); // first writer wins
-    return Promise.resolve();
+    const existing = this.deviceSeqIndex.get(key);
+    if (existing !== undefined) return Promise.resolve(existing); // first claimant wins
+    this.deviceSeqIndex.set(key, cid);
+    return Promise.resolve(cid);
   }
 
   appendForkEvidence(evidence: ForkEvidence): Promise<void> {

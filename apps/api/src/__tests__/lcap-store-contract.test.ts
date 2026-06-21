@@ -44,8 +44,9 @@ function contract(makeStore: () => LcapServerStore): void {
     expect(await store.appendAcceptance('r1', 'a')).toBe(0);
     expect(await store.appendAcceptance('r1', 'b')).toBe(1);
     expect(await store.appendAcceptance('r2', 'c')).toBe(0); // seq is per-room
+    expect(await store.appendAcceptance('r1', 'a')).toBe(0); // idempotent: keeps the first seq
     expect(await store.isAccepted('a')).toBe(true);
-    expect(await store.roomSize('r1')).toBe(2);
+    expect(await store.roomSize('r1')).toBe(2); // the re-append did NOT add a second leaf
     expect(await store.roomSeqOf('r1', 'b')).toBe(1);
     expect(await store.roomSeqOf('r1', 'absent')).toBeUndefined();
   });
@@ -69,13 +70,37 @@ function contract(makeStore: () => LcapServerStore): void {
     expect(await store.roomLog('r2')).toEqual(['c']);
   });
 
-  it('records the first device-(key,seq) claimant and ignores later writers', async () => {
+  it('claims the first device-(key,seq) atomically and reports the winner to losers', async () => {
     const store = makeStore();
     expect(await store.getDeviceClaimant('k', 5)).toBeUndefined();
-    await store.setDeviceClaimant('k', 5, 'cidA');
-    await store.setDeviceClaimant('k', 5, 'cidB'); // the first writer wins
+    expect(await store.claimDeviceSeq('k', 5, 'cidA')).toBe('cidA'); // first claimant wins
+    expect(await store.claimDeviceSeq('k', 5, 'cidB')).toBe('cidA'); // loser learns the winner
+    expect(await store.claimDeviceSeq('k', 5, 'cidA')).toBe('cidA'); // idempotent re-claim
     expect(await store.getDeviceClaimant('k', 5)).toBe('cidA');
     expect(await store.getDeviceClaimant('k', 6)).toBeUndefined();
+  });
+
+  it('allocates distinct, gap-free seqs under concurrent accepts — no phantom seq (#2)', async () => {
+    const store = makeStore();
+    const cids = Array.from({ length: 20 }, (_, i) => `c${i}`);
+    const seqs = await Promise.all(cids.map((cid) => store.appendAcceptance('rc', cid)));
+    // Together the returned seqs are exactly 0..19 (distinct + gap-free), and EACH seq is the
+    // cid's REAL position in the canonical log — never a phantom seq for an absent record.
+    expect([...seqs].sort((a, b) => a - b)).toEqual(cids.map((_, i) => i));
+    const log = await store.roomLog('rc');
+    for (let i = 0; i < cids.length; i++) expect(log[seqs[i] as number]).toBe(cids[i]);
+    expect(await store.roomSize('rc')).toBe(20);
+  });
+
+  it('admits exactly one winner under concurrent claims for one (key, seq) (#3)', async () => {
+    const store = makeStore();
+    const cids = Array.from({ length: 20 }, (_, i) => `d${i}`);
+    const winners = await Promise.all(cids.map((cid) => store.claimDeviceSeq('kx', 9, cid)));
+    // Every claim reports the SAME winner, and that winner is one of the contenders.
+    const winner = winners[0] as string;
+    expect(new Set(winners)).toEqual(new Set([winner]));
+    expect(cids).toContain(winner);
+    expect(await store.getDeviceClaimant('kx', 9)).toBe(winner);
   });
 
   it('indexes record→proof / record→block closure edges idempotently, scoped by relation', async () => {

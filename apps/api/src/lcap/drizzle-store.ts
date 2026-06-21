@@ -71,9 +71,28 @@ export class DrizzleLcapServerStore implements LcapServerStore {
   }
 
   async appendAcceptance(roomId: string, cid: string): Promise<number> {
-    const seq = await this.roomSize(roomId);
-    await this.#db.insert(lcapAcceptance).values({ roomId, seq, cid }).onConflictDoNothing();
-    return seq;
+    // Idempotent: an already-accepted cid keeps its original seq (the globally-UNIQUE cid).
+    const existing = await this.roomSeqOf(roomId, cid);
+    if (existing !== undefined) return existing;
+    // Allocate the next per-room seq ATOMICALLY: insert at the current count and, on a
+    // (room_id, seq) collision with a concurrent accept, retry at the new count.  The PK
+    // (room_id, seq) guarantees no two records share a seq, and `.returning()` after
+    // ON CONFLICT DO NOTHING is non-empty ONLY when THIS row was actually inserted — so we
+    // never return a phantom seq for a record absent from the log (the prior bug).
+    for (let attempt = 0; attempt < 10_000; attempt++) {
+      const seq = await this.roomSize(roomId);
+      const inserted = await this.#db
+        .insert(lcapAcceptance)
+        .values({ roomId, seq, cid })
+        .onConflictDoNothing()
+        .returning({ seq: lcapAcceptance.seq });
+      if (inserted[0] !== undefined) return inserted[0].seq;
+      // Nothing inserted → either this cid raced in (return its real seq) or a concurrent
+      // accept took `seq` (retry at the new count).
+      const now = await this.roomSeqOf(roomId, cid);
+      if (now !== undefined) return now;
+    }
+    throw new Error('appendAcceptance: exhausted room-sequence allocation retries');
   }
 
   async roomSeqOf(roomId: string, cid: string): Promise<number | undefined> {
@@ -121,12 +140,20 @@ export class DrizzleLcapServerStore implements LcapServerStore {
     return rows[0]?.cid;
   }
 
-  async setDeviceClaimant(deviceKeyId: string, deviceSeq: number, cid: string): Promise<void> {
-    // The first claimant of a (key, seq) wins; a later distinct CID is fork evidence.
-    await this.#db
+  async claimDeviceSeq(deviceKeyId: string, deviceSeq: number, cid: string): Promise<string> {
+    // Atomic first-claimant-wins: ON CONFLICT DO UPDATE to a NO-OP (keep the existing cid)
+    // so RETURNING yields the CURRENT claimant — the new cid on a fresh insert, or the prior
+    // winner on a conflict.  The conflicting INSERT takes a row lock, serializing concurrent
+    // claims, so a return value other than `cid` is an authoritative device fork.
+    const rows = await this.#db
       .insert(lcapDeviceSeq)
       .values({ deviceKeyId, deviceSeq, cid })
-      .onConflictDoNothing();
+      .onConflictDoUpdate({
+        target: [lcapDeviceSeq.deviceKeyId, lcapDeviceSeq.deviceSeq],
+        set: { cid: sql`${lcapDeviceSeq.cid}` }, // no-op: keep the first claimant
+      })
+      .returning({ cid: lcapDeviceSeq.cid });
+    return rows[0]?.cid ?? cid;
   }
 
   async appendForkEvidence(evidence: ForkEvidence): Promise<void> {
