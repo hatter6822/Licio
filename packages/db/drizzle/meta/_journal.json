@@ -274,6 +274,13 @@
       "when": 1781918677596,
       "tag": "0038_ws_u_one_open_ratification",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1781999598252,
+      "tag": "0039_ws_r_lcap_server_store",
+      "breakpoints": true
     }
   ]
 }

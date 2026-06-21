@@ -49,9 +49,11 @@ The WS-R.12.1a/b/c server binding is shipped in
 `apps/api/src/lcap/server-ingest.ts` (`LcapIngestServer`).  Its durable state — a
 CID-verified content-addressed store, the per-room acceptance log, the acceptance
 index (idempotency by `record_cid`), and append-only device-fork evidence — lives
-behind the **`LcapServerStore` async boundary** (`store.ts`, WS-R.12.2): an
-in-memory adapter ships now; the gated Drizzle/Postgres adapter is part 2.  The
-engine binds the pure `ingestRecord` decision + **server-computed validation** (`validateContribution` runs the
+behind the **`LcapServerStore` async boundary** (`store.ts`, WS-R.12.2), with BOTH
+an in-memory adapter and a **gated Drizzle/Postgres adapter** (`drizzle-store.ts`,
+migration `0039`, selected by `service.ts` when `DATABASE_URL` is set), proven
+interchangeable by the parameterized store-contract test.  The engine binds the pure
+`ingestRecord` decision + **server-computed validation** (`validateContribution` runs the
 same `validate()` the client uses over registered identity state — device
 certificates, room capabilities, account/room authority keys, and revocations —
 so a verdict is never trusted from the client), and `commitBatch` — ordered batch

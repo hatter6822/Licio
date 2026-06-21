@@ -235,18 +235,24 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
   return json(200, { statuses: [...statuses, ...result.statuses], wants: result.wants });
 }
 
-/** The §29 LCAP routes.  Mounted at `/api/lcap/v2` (see `app.ts`). */
-export function createLcapRoutes(server: LcapIngestServer = getLcapIngestServer()): Hono {
+/**
+ * The §29 LCAP routes.  Mounted at `/api/lcap/v2` (see `app.ts`).  The server is
+ * resolved PER REQUEST (not at mount): the default singleton — which may bind a
+ * Postgres client — is constructed only when a request actually arrives, so merely
+ * building the app never opens a DB connection.  Tests pass an explicit override.
+ */
+export function createLcapRoutes(override?: LcapIngestServer): Hono {
+  const server = (): LcapIngestServer => override ?? getLcapIngestServer();
   const app = new Hono();
   const read =
     (kind: ContentKind) =>
     (c: { req: { param: (k: string) => string; header: (k: string) => string | undefined } }) =>
-      serveObject(server, kind, c.req.param('cid'), c.req.header('range'));
+      serveObject(server(), kind, c.req.param('cid'), c.req.header('range'));
   app.get('/records/:cid', read('record'));
   app.get('/proofs/:cid', read('proof'));
   app.get('/blocks/:cid', read('block'));
   app.post('/packs', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) =>
-    ingestPack(server, new Uint8Array(await c.req.arrayBuffer())),
+    ingestPack(server(), new Uint8Array(await c.req.arrayBuffer())),
   );
   return app;
 }

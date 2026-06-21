@@ -4,18 +4,15 @@
 // ingestion engine binds — the content-addressed store + the per-room canonical
 // acceptance log + the device-sequence index + append-only fork evidence — behind
 // an ASYNC interface so the in-memory adapter (here) and the gated Drizzle/Postgres
-// adapter (WS-R.12.2 part 2) are interchangeable.  The engine's pure-decision logic
+// adapter (drizzle-store.ts) are interchangeable.  The engine's pure-decision logic
 // lives in `@licio/lcap`; this owns only persistence.
 //
-// The room "log" is exposed as an ordered acceptance sequence (append → seq, size,
-// seqOf) rather than a live Merkle tree: the RFC 9162 tree is derivable from the
-// ordered leaves when checkpoint issuance lands (a later card), so a Postgres
-// adapter persists rows, not tree state.  The in-memory adapter keeps a `RoomLog`.
+// The room "log" is an ordered acceptance sequence (append → seq, size, seqOf), not
+// a live Merkle tree: the RFC 9162 tree is derivable from the ordered leaves when
+// checkpoint issuance lands (a later card), so neither adapter persists tree state.
+// CIDs are OPAQUE keys here — the engine verifies them; the store never parses one.
 
-import { type CidKind, RoomLog } from '@licio/lcap';
-
-/** The Merkle tree algorithm for room logs (RFC 9162, §19.1.1). */
-const TREE_ALGORITHM = 'RFC9162_SHA256' as const;
+import type { CidKind } from '@licio/lcap';
 
 export type LcapContentKind = Extract<CidKind, 'record' | 'proof' | 'block' | 'chunk'>;
 
@@ -50,6 +47,7 @@ export interface LcapServerStore {
   roomSeqOf(roomId: string, cid: string): Promise<number | undefined>;
   roomSize(roomId: string): Promise<number>;
   getDeviceClaimant(deviceKeyId: string, deviceSeq: number): Promise<string | undefined>;
+  /** Record the FIRST claimant of a (key, seq); a later distinct CID is fork evidence. */
   setDeviceClaimant(deviceKeyId: string, deviceSeq: number, cid: string): Promise<void>;
   appendForkEvidence(evidence: ForkEvidence): Promise<void>;
   listForkEvidence(): Promise<readonly ForkEvidence[]>;
@@ -57,25 +55,25 @@ export interface LcapServerStore {
 
 /**
  * The in-memory adapter — the project's default (in-memory stores first, then a
- * gated Drizzle adapter).  One instance per LCAP network; rooms are created lazily.
+ * gated Drizzle adapter).  Network-agnostic: the engine scopes COSE/validation by
+ * network; the store is a plain key-value + ordered-log backend.
  */
 export class InMemoryLcapServerStore implements LcapServerStore {
   private readonly cas = new Map<string, StoredObject>();
-  private readonly rooms = new Map<string, RoomLog>();
+  // Per-room ordered acceptance log: the cid at index i has room sequence i.
+  private readonly rooms = new Map<string, string[]>();
   private readonly accepted = new Set<string>();
   private readonly deviceSeqIndex = new Map<string, string>();
   private readonly forkEvidence: ForkEvidence[] = [];
-
-  constructor(private readonly networkId: string) {}
 
   private static deviceKey(keyId: string, seq: number): string {
     return `${keyId} ${seq}`;
   }
 
-  private room(roomId: string): RoomLog {
+  private roomLog(roomId: string): string[] {
     let log = this.rooms.get(roomId);
     if (!log) {
-      log = new RoomLog(TREE_ALGORITHM, this.networkId);
+      log = [];
       this.rooms.set(roomId, log);
     }
     return log;
@@ -99,18 +97,21 @@ export class InMemoryLcapServerStore implements LcapServerStore {
     return Promise.resolve(this.accepted.has(cid));
   }
 
-  async appendAcceptance(roomId: string, cid: string): Promise<number> {
-    const seq = await this.room(roomId).append(cid);
+  appendAcceptance(roomId: string, cid: string): Promise<number> {
+    const log = this.roomLog(roomId);
+    const seq = log.length;
+    log.push(cid);
     this.accepted.add(cid);
-    return seq;
+    return Promise.resolve(seq);
   }
 
   roomSeqOf(roomId: string, cid: string): Promise<number | undefined> {
-    return Promise.resolve(this.rooms.get(roomId)?.seqOf(cid));
+    const idx = this.rooms.get(roomId)?.indexOf(cid) ?? -1;
+    return Promise.resolve(idx < 0 ? undefined : idx);
   }
 
   roomSize(roomId: string): Promise<number> {
-    return Promise.resolve(this.rooms.get(roomId)?.size ?? 0);
+    return Promise.resolve(this.rooms.get(roomId)?.length ?? 0);
   }
 
   getDeviceClaimant(deviceKeyId: string, deviceSeq: number): Promise<string | undefined> {
@@ -119,7 +120,8 @@ export class InMemoryLcapServerStore implements LcapServerStore {
   }
 
   setDeviceClaimant(deviceKeyId: string, deviceSeq: number, cid: string): Promise<void> {
-    this.deviceSeqIndex.set(InMemoryLcapServerStore.deviceKey(deviceKeyId, deviceSeq), cid);
+    const key = InMemoryLcapServerStore.deviceKey(deviceKeyId, deviceSeq);
+    if (!this.deviceSeqIndex.has(key)) this.deviceSeqIndex.set(key, cid); // first writer wins
     return Promise.resolve();
   }
 

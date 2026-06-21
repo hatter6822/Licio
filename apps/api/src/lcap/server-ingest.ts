@@ -121,7 +121,7 @@ export class LcapIngestServer {
   constructor(
     private readonly networkId: string,
     private readonly now: () => number = () => Date.now(),
-    private readonly store: LcapServerStore = new InMemoryLcapServerStore(networkId),
+    private readonly store: LcapServerStore = new InMemoryLcapServerStore(),
   ) {}
 
   /** Stage 1 (R.12.1a): CID-verified durable store; idempotent by CID. */
