@@ -95,6 +95,34 @@ export function equivocationFork(): SimScenario {
   };
 }
 
+/**
+ * Redundant transports for the §32.5 transport-independence property: A→B and B→C are
+ * each reachable over MULTIPLE transports (webrtc + https; webrtc + ipfs_bridge), so any
+ * non-empty transport subset that still connects the graph must reconcile to the SAME
+ * accepted set.  The simulator's REAL scheduler + closure ingest identically regardless
+ * of which carrier delivered the bytes (a new transport is a carrier, never a model).
+ */
+export function transportIndependence(): SimScenario {
+  return {
+    objects: [
+      { cid: 'lcapr_p0', priority: 0, bytes: 200 },
+      { cid: 'lcapr_p1', priority: 1, bytes: 2 * KB },
+    ],
+    nodes: [
+      { id: 'A', holds: ['lcapr_p0', 'lcapr_p1'] },
+      { id: 'B', holds: [] },
+      { id: 'C', holds: [] },
+    ],
+    contacts: [
+      { atMs: 0, a: 'A', b: 'B', transport: 'webrtc' },
+      { atMs: 0, a: 'A', b: 'B', transport: 'https' },
+      { atMs: 1000, a: 'B', b: 'C', transport: 'webrtc' },
+      { atMs: 1000, a: 'B', b: 'C', transport: 'ipfs_bridge' },
+    ],
+    contactBudgetBytes: 1 << 20,
+  };
+}
+
 /** A record gated on a dependency that arrives only later: quarantine then clearance. */
 export function quarantineThenClear(): SimScenario {
   return {

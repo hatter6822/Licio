@@ -18,6 +18,7 @@ import {
   quarantineRatio,
   quarantineThenClear,
   run,
+  transportIndependence,
   withholdingRelay,
 } from '../test-vectors/sim/index.js';
 
@@ -78,6 +79,31 @@ describe('equivocation (§32.3 — fork detection)', () => {
     // C receives both forkX (from A) and forkY (from B) → fork detected at the 2nd contact.
     expect(forkDetectionContact(result, 'author:pos7')).not.toBeNull();
     expect(result.forksDetected.some((f) => f.node === 'C')).toBe(true);
+  });
+});
+
+describe('transport independence (§32.5 / WS-R.15.9)', () => {
+  it('reconciles to the identical accepted set under any connecting transport subset', () => {
+    const scenario = transportIndependence();
+    const everything = run(7, scenario);
+    // Each subset still connects A→B→C, so the accepted set must be identical.
+    const subsets = [
+      ['webrtc'],
+      ['https', 'ipfs_bridge'],
+      ['webrtc', 'https', 'ipfs_bridge'],
+    ] as const;
+    for (const subset of subsets) {
+      const partial = run(7, scenario, { enabledTransports: subset });
+      expect(partial.held).toEqual(everything.held);
+      expect(allHold(partial, ['B', 'C'], ['lcapr_p0', 'lcapr_p1'])).toBe(true);
+    }
+  });
+
+  it('a transport subset that severs the graph cannot deliver (no magic)', () => {
+    // Only the A→B leg's transports; the B→C leg (webrtc/ipfs_bridge) is disabled.
+    const partial = run(7, transportIndependence(), { enabledTransports: ['https'] });
+    expect(allHold(partial, ['B'], ['lcapr_p0', 'lcapr_p1'])).toBe(true);
+    expect(allHold(partial, ['C'], ['lcapr_p0'])).toBe(false); // C unreachable on https only
   });
 });
 

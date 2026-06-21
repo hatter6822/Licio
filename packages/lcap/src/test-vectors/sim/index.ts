@@ -8,6 +8,7 @@ export type {
   ContactSpec,
   LinkModel,
   NodeBehavior,
+  RunOptions,
   SimNodeSpec,
   SimObject,
   SimResult,
@@ -26,5 +27,6 @@ export {
   equivocationFork,
   manualFerry,
   quarantineThenClear,
+  transportIndependence,
   withholdingRelay,
 } from './scenarios.js';

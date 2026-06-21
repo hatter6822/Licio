@@ -13,6 +13,7 @@
 import { defaultLane, type LcapPriority } from '../../priority.js';
 import { scheduleTransfer } from '../../scheduler/index.js';
 import type { ScheduledCandidate } from '../../scheduler/types.js';
+import type { TransportId } from '../../transport/index.js';
 import { makePrng } from './prng.js';
 
 /** A content object in the simulated world. */
@@ -41,6 +42,13 @@ export interface ContactSpec {
   readonly atMs: number;
   readonly a: string;
   readonly b: string;
+  /** Which transport carries this contact (for the §32.5 transport-independence test). */
+  readonly transport?: TransportId;
+}
+
+export interface RunOptions {
+  /** Only contacts on these transports happen (default: ALL). */
+  readonly enabledTransports?: readonly TransportId[];
 }
 
 export interface LinkModel {
@@ -211,8 +219,9 @@ function digest(arrivals: readonly ArrivalEvent[]): string {
  * closure; the seeded link model perturbs delivery.  Reproducible: equal `(seed,
  * scenario)` ⇒ equal `arrivals`/`held`/`traceDigest`.
  */
-export function run(seed: number, scenario: SimScenario): SimResult {
+export function run(seed: number, scenario: SimScenario, options: RunOptions = {}): SimResult {
   const prng = makePrng(seed);
+  const enabled = options.enabledTransports ? new Set(options.enabledTransports) : null;
   const link: Required<LinkModel> = {
     lossProb: scenario.link?.lossProb ?? 0,
     dupProb: scenario.link?.dupProb ?? 0,
@@ -234,6 +243,9 @@ export function run(seed: number, scenario: SimScenario): SimResult {
     .sort((x, y) => x.contact.atMs - y.contact.atMs || x.index - y.index);
 
   for (const { contact, index } of ordered) {
+    // A contact on a disabled transport simply does not happen (the §32.5 test toggles
+    // transport subsets; an untagged contact is always enabled).
+    if (enabled && contact.transport !== undefined && !enabled.has(contact.transport)) continue;
     const a = nodes.get(contact.a);
     const b = nodes.get(contact.b);
     if (!a || !b) continue;
