@@ -39,6 +39,7 @@ import {
   encodeWithSchema,
   exchangeRequestV2Schema,
   exchangeResponseV2Schema,
+  type GraphGuardNode,
   ldcToPlain,
   type ObjectStatusV2,
   parseCid,
@@ -183,6 +184,29 @@ async function ingestPackFrames(
     return { ok: false, httpStatus: packErrorStatus(read.status), error: read.status };
   }
   const { frames } = read.pack;
+
+  // §27.2 malicious-graph guard (WS-R.14.1b), over the pack table's DECLARED
+  // dependency DAG, BEFORE any storage/expansion: a hostile graph (cycle / fan-out /
+  // depth / duplicate deps) aborts the whole import — the graph is untrusted, so no
+  // frame is stored.  Run under the server's §27.1 caps; each object gets the guard's
+  // §16.11 rejection code (a 200 carrying per-object rejections, §22.1.1).
+  const guardNodes: GraphGuardNode[] = read.pack.entries.map((entry) => ({
+    cid: entry.cid,
+    requires: entry.deps ?? [],
+    ...(entry.flags?.private_metadata === true ? { hasPrivateMetadata: true } : {}),
+  }));
+  const guard = server.checkImportGraph(guardNodes);
+  if (!guard.ok) {
+    return {
+      ok: true,
+      statuses: read.pack.entries.map((entry) => ({
+        cid: entry.cid,
+        cid_kind: entry.cid_kind,
+        status: guard.code,
+      })),
+      wants: [],
+    };
+  }
 
   // Group detached proofs by the record_cid they attest (for the contribution commit).
   const proofsByRecord = new Map<string, DetachedProofV2[]>();

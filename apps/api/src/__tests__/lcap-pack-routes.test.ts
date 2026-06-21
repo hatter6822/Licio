@@ -214,3 +214,49 @@ describe('POST /bundles/import — the §29.8 web alias (same validator)', () =>
     expect(res.status).toBe(403);
   });
 });
+
+describe('§27.2 graph guard on import (WS-R.14.1b)', () => {
+  it('rejects a pack whose table declares a dependency cycle, storing nothing', async () => {
+    const enc = new TextEncoder();
+    const aBytes = enc.encode('cycle-block-a');
+    const bBytes = enc.encode('cycle-block-b');
+    const aCid = await cidFor('block', aBytes);
+    const bCid = await cidFor('block', bBytes);
+    // A 2-cycle in the DECLARED dependency DAG: a→b, b→a.
+    const cyclicPack = writePack({
+      objects: [
+        {
+          cid: aCid,
+          cidKind: 'block',
+          frameKind: 'block',
+          payload: aBytes,
+          lane: 'B4',
+          priority: 4,
+          deps: [bCid],
+        },
+        {
+          cid: bCid,
+          cidKind: 'block',
+          frameKind: 'block',
+          payload: bBytes,
+          lane: 'B4',
+          priority: 4,
+          deps: [aCid],
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1_000_000,
+    });
+
+    const srv = new LcapIngestServer(NET, () => NOW);
+    const res = await createLcapRoutes(srv).request('/packs', { method: 'POST', body: cyclicPack });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { statuses: { cid: string; status: string }[] };
+    // The whole import is rejected before any expansion; the cycle → rejected_bad_schema.
+    expect(data.statuses.every((s) => s.status === 'rejected_bad_schema')).toBe(true);
+    // Nothing was stored — the graph is untrusted, so no frame reached the store.
+    expect(await srv.hasObject(aCid)).toBe(false);
+    expect(await srv.hasObject(bCid)).toBe(false);
+  });
+});

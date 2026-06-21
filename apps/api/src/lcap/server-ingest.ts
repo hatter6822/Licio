@@ -28,6 +28,8 @@ import {
   cidFor,
   DEFAULT_BUDGET,
   type DetachedProofV2,
+  type GraphGuardNode,
+  type GraphGuardResult,
   graphLimitsFromCaps,
   type IdentityChainDeps,
   type IngestionClass,
@@ -318,6 +320,21 @@ export class LcapIngestServer {
    * trapped in a declared-dependency cycle.  A prerequisite counts as held once it
    * has been canonically accepted (this batch or a prior one).
    */
+  /**
+   * Run the §27.2 malicious-dependency-graph guard (WS-R.14.1b) over a DECLARED
+   * dependency DAG under THIS server's §27.1 caps profile, BEFORE any closure
+   * expansion.  A hostile graph (cycle / fan-out / depth / duplicate deps) is
+   * rejected cheaply so it can never become a CPU/memory amplification vector.  The
+   * server import path (`ingestPackFrames`) calls this over the pack table's
+   * declared deps; `commitBatch` calls it over the batch's `requires`.
+   */
+  checkImportGraph(nodes: readonly GraphGuardNode[]): GraphGuardResult {
+    return checkDependencyGraph(nodes, {
+      audience: 'restricted',
+      limits: graphLimitsFromCaps(this.caps),
+    });
+  }
+
   async commitBatch(inputs: readonly CommitRecordInput[]): Promise<CommitBatchResult> {
     const byCid = new Map<string, CommitRecordInput>();
     const nodes: IngestionNode[] = [];
@@ -333,13 +350,8 @@ export class LcapIngestServer {
 
     // §27.2 malicious-graph guard, BEFORE any resolution/expansion: a hostile
     // dependency DAG (cycle, fan-out, depth, duplicate deps) aborts the whole
-    // import — the graph is untrusted, so no part of it is expanded.  Its limits
-    // come from THIS server's §27.1 caps profile (WS-R.14.1a), not a hard-coded
-    // default.
-    const guard = checkDependencyGraph(nodes, {
-      audience: 'restricted',
-      limits: graphLimitsFromCaps(this.caps),
-    });
+    // import — the graph is untrusted, so no part of it is expanded.
+    const guard = this.checkImportGraph(nodes);
     if (!guard.ok) {
       return {
         statuses: nodes.map((node) => ({
