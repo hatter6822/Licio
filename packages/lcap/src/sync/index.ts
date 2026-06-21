@@ -45,6 +45,7 @@ export {
 export {
   applyPulse,
   buildPulse,
+  buildPulseResponse,
   type PulseInputs,
   type PulseReaction,
 } from './pulse.js';
@@ -55,6 +56,7 @@ export {
   reconciliationRank,
   wantCategory,
 } from './reconcile.js';
+export { roomIdHash } from './room-hash.js';
 export {
   type IngestionInput,
   type IngestionOutcome,

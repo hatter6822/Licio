@@ -16,11 +16,16 @@
 // which is true only for a freshly-accepted record.
 
 import {
+  buildPulse,
+  buildPulseResponse,
   type CapabilityBundle,
   type CertificateBundle,
+  type CheckpointFrontierV2,
   type ConsensusInput,
+  type CryptoSuiteId,
   checkDependencyGraph,
   cidFor,
+  DEFAULT_BUDGET,
   type DetachedProofV2,
   type IdentityChainDeps,
   type IngestionClass,
@@ -29,9 +34,13 @@ import {
   importPublicKeyCose,
   ingestRecord,
   type ObjectStatusV2,
+  type PulseResponseV2,
+  type RevocationFrontierV2,
   RevocationIndex,
   type RevocationRecordV2,
   resolveIngestionOrder,
+  roomIdHash,
+  type SyncPulseV2,
   type ValidationResult,
   validate,
   type WantRequestV2,
@@ -384,5 +393,68 @@ export class LcapIngestServer {
     }
 
     return { statuses, wants };
+  }
+
+  // --- WS-R.12.4: the §16.2/§17.2/§17.3 sync frontier + the §29.1 pulse -----------
+
+  // The server's fixed advertised sync capabilities (it is a public HTTPS relay).
+  private static readonly SUPPORTED_SUITES: readonly CryptoSuiteId[] = ['ES256'];
+  private static readonly SUPPORTED_COMPRESSION = ['none', 'gzip', 'deflate'] as const;
+  private static readonly SUPPORTED_PACK_VERSIONS = [2] as const;
+
+  /**
+   * The §17.2 checkpoint frontier: one entry per room that has accepted records,
+   * keyed by the privacy-scoped `room_id_hash` and reporting the room log's current
+   * size (its §22 leaf count).  No `latest_checkpoint_cid` is emitted until
+   * checkpoint issuance lands — the honest "how far along" signal is the tree size,
+   * which already lets a peer detect it is behind on a room (§17.2).
+   */
+  async checkpointFrontier(): Promise<CheckpointFrontierV2[]> {
+    const rooms = await this.store.listRooms();
+    const frontier: CheckpointFrontierV2[] = [];
+    for (const roomId of rooms) {
+      frontier.push({
+        room_id_hash: await roomIdHash(this.networkId, roomId),
+        latest_tree_size: await this.store.roomSize(roomId),
+      });
+    }
+    return frontier;
+  }
+
+  /** The §17.3 revocation frontier: the highest global revocation epoch the server holds. */
+  revocationFrontier(): RevocationFrontierV2[] {
+    return [{ scope: 'global', revocation_epoch: this.revocations.knownEpoch }];
+  }
+
+  /**
+   * Assemble the server's own pulse (frontiers + capabilities), fail-closed-validated.
+   * The session nonce is a fresh random value per call (the pulse is a transient,
+   * un-hashed wire message; §16.2).
+   */
+  async serverPulse(): Promise<SyncPulseV2> {
+    const sessionNonce = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(sessionNonce);
+    return buildPulse({
+      nodeId: `lcap-server:${this.networkId}`,
+      sessionNonce,
+      transportProfile: 'https',
+      privacyMode: 'public',
+      budgets: DEFAULT_BUDGET,
+      supportedSuites: LcapIngestServer.SUPPORTED_SUITES,
+      supportedCompression: LcapIngestServer.SUPPORTED_COMPRESSION,
+      supportedPackVersions: LcapIngestServer.SUPPORTED_PACK_VERSIONS,
+      checkpointFrontier: await this.checkpointFrontier(),
+      revocationFrontier: this.revocationFrontier(),
+    });
+  }
+
+  /**
+   * The §29.1 pulse response: the server's pulse (frontiers).  An inline
+   * `critical_pack` for the client's `critical_want` C0 objects is a WS-R.12.4
+   * follow-up (it needs the import-captured lane/priority metadata to repack); a
+   * client that learns it is behind from the frontiers fetches via the GET routes.
+   */
+  async pulseResponse(): Promise<PulseResponseV2> {
+    return buildPulseResponse({ pulse: await this.serverPulse() });
   }
 }

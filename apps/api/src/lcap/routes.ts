@@ -22,11 +22,16 @@
 
 import {
   type DetachedProofV2,
+  decode,
   decodeAndRouteRecord,
   decodeProof,
+  encodeWithSchema,
+  ldcToPlain,
   type ObjectStatusV2,
   parseCid,
+  pulseResponseV2Schema,
   readPack,
+  syncPulseV2Schema,
 } from '@licio/lcap';
 import { Hono } from 'hono';
 import { rateLimit } from '../lib/rate-limit.js';
@@ -235,6 +240,38 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
   return json(200, { statuses: [...statuses, ...result.statuses], wants: result.wants });
 }
 
+// A pulse is a tiny frontier message; anything larger is over the request budget.
+const MAX_PULSE_REQUEST_BYTES = 256 * 1024;
+
+/**
+ * §29.1 `POST /pulse`: validate the client's pulse fail-closed, then return the
+ * server's pulse (frontiers) as a `PulseResponseV2`.  §22.1.1 mapping: oversized
+ * body → 413; an undecodable body → 400 (malformed framing); a decodable body that
+ * fails the pulse schema → 422 (a semantic violation); processed → 200.  The client
+ * runs the local frontier diff (`applyPulse`) against the returned frontiers to
+ * learn what it is behind on, then fetches via the GET content routes.
+ */
+async function handlePulse(server: LcapIngestServer, body: Uint8Array): Promise<Response> {
+  if (body.length > MAX_PULSE_REQUEST_BYTES) {
+    return json(413, { error: 'oversized_request' });
+  }
+  let decoded: unknown;
+  try {
+    decoded = ldcToPlain(decode(body));
+  } catch {
+    return json(400, { error: 'undecodable' });
+  }
+  // Fail closed: a malformed client pulse is rejected before we do any work.
+  if (!syncPulseV2Schema.safeParse(decoded).success) {
+    return json(422, { error: 'invalid_pulse' });
+  }
+  const response = await server.pulseResponse();
+  return new Response(encodeWithSchema(pulseResponseV2Schema, response), {
+    status: 200,
+    headers: { 'content-type': 'application/cbor' },
+  });
+}
+
 /**
  * The §29 LCAP routes.  Mounted at `/api/lcap/v2` (see `app.ts`).  The server is
  * resolved PER REQUEST (not at mount): the default singleton — which may bind a
@@ -253,6 +290,9 @@ export function createLcapRoutes(override?: LcapIngestServer): Hono {
   app.get('/blocks/:cid', read('block'));
   app.post('/packs', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) =>
     ingestPack(server(), new Uint8Array(await c.req.arrayBuffer())),
+  );
+  app.post('/pulse', rateLimit({ limit: 120, windowMs: 60_000 }), async (c) =>
+    handlePulse(server(), new Uint8Array(await c.req.arrayBuffer())),
   );
   return app;
 }

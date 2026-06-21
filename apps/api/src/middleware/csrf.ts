@@ -159,12 +159,15 @@ const EXEMPT_PATHS = new Set([
   '/api/security/csp-report',
   '/v1/telemetry',
   '/v1/takedowns',
-  // LCAP pack import (WS-R.12.4) is device-certificate-authenticated CONTENT: the
-  // records carry their own COSE proofs (validate() is the real authentication),
-  // and a native sync client holds NO session cookie — so there is no session for
-  // CSRF to ride. Abuse is bounded by the endpoint's own global rate limit + the
-  // §27 resource caps + the §27.2 malicious-graph guard before any expansion.
+  // The LCAP sync surface (WS-R.12.4) is device-certificate-authenticated CONTENT:
+  // records carry their own COSE proofs (validate() is the real authentication), and
+  // a native sync client holds NO session cookie — so there is no session for CSRF to
+  // ride. `/packs` imports content; `/pulse` is a non-state-changing frontier
+  // exchange that returns only public tree sizes + the revocation epoch. Abuse is
+  // bounded by each endpoint's own rate limit + the §27 resource caps + the §27.2
+  // malicious-graph guard before any expansion.
   '/api/lcap/v2/packs',
+  '/api/lcap/v2/pulse',
 ]);
 // WS-D identity/privacy endpoints rely on `SameSite=Strict` + the opaque session
 // model (and a per-flow `login_attempt_id` binding) as the CSRF defense, so they do

@@ -10,9 +10,10 @@ import { cidFor } from '../cid/index.js';
 import {
   type ExchangeBudgetV2,
   exchangeBudgetV2Schema,
+  pulseResponseV2Schema,
   syncPulseV2Schema,
 } from '../schemas/index.js';
-import { applyPulse, buildPulse, type PulseInputs } from '../sync/index.js';
+import { applyPulse, buildPulse, buildPulseResponse, type PulseInputs } from '../sync/index.js';
 
 const enc = new TextEncoder();
 
@@ -188,6 +189,31 @@ describe('applyPulse (§16.2 frontier diff)', () => {
       locallyHave: () => false,
     });
     expect(reaction.wants.map((w) => w.reason)).toEqual(['revocation_gap', 'checkpoint_gap']);
+  });
+});
+
+describe('buildPulseResponse (§29.1)', () => {
+  it('wraps the pulse and omits absent optionals', () => {
+    const response = buildPulseResponse({ pulse: buildPulse(inputs()) });
+    expect(() => pulseResponseV2Schema.parse(response)).not.toThrow();
+    expect('critical_pack' in response).toBe(false);
+    expect('retry_after_ms' in response).toBe(false);
+  });
+
+  it('carries an inline critical pack + retry hint when provided', () => {
+    const pack = new Uint8Array([9, 9, 9]);
+    const response = buildPulseResponse({
+      pulse: buildPulse(inputs()),
+      criticalPack: pack,
+      retryAfterMs: 1500,
+    });
+    expect(response.critical_pack).toEqual(pack);
+    expect(response.retry_after_ms).toBe(1500);
+  });
+
+  it('fails closed on an invalid embedded pulse', () => {
+    const badPulse = { ...buildPulse(inputs()), node_id: '' };
+    expect(() => buildPulseResponse({ pulse: badPulse })).toThrow();
   });
 });
 

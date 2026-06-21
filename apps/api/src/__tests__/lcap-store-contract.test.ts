@@ -49,6 +49,15 @@ function contract(makeStore: () => LcapServerStore): void {
     expect(await store.roomSeqOf('r1', 'absent')).toBeUndefined();
   });
 
+  it('lists exactly the rooms that have accepted records (drives the sync frontier)', async () => {
+    const store = makeStore();
+    expect(await store.listRooms()).toEqual([]);
+    await store.appendAcceptance('r1', 'a');
+    await store.appendAcceptance('r1', 'b'); // same room counts once
+    await store.appendAcceptance('r2', 'c');
+    expect([...(await store.listRooms())].sort()).toEqual(['r1', 'r2']);
+  });
+
   it('records the first device-(key,seq) claimant and ignores later writers', async () => {
     const store = makeStore();
     expect(await store.getDeviceClaimant('k', 5)).toBeUndefined();

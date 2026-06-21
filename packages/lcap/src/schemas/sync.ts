@@ -254,3 +254,19 @@ export const exchangeResponseV2Schema = z
   })
   .strict();
 export type ExchangeResponseV2 = z.infer<typeof exchangeResponseV2Schema>;
+
+/**
+ * §29.1 pulse response — the server's own pulse (frontiers), optionally carrying a
+ * tiny critical pack inline (the C0 case: deliver C0 objects the client advertised
+ * as `critical_want` in one round trip) and a back-off hint.  The body content is
+ * still self-authenticating — `critical_pack` is a normal pack the receiver
+ * verifies — so the envelope grants no transport trust.
+ */
+export const pulseResponseV2Schema = z
+  .object({
+    pulse: syncPulseV2Schema,
+    critical_pack: bytesSchema.optional(),
+    retry_after_ms: uintSchema.optional(),
+  })
+  .strict();
+export type PulseResponseV2 = z.infer<typeof pulseResponseV2Schema>;

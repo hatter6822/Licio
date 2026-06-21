@@ -110,6 +110,8 @@ export {
   laneSummaryV2Schema,
   type ObjectSummaryV2,
   objectSummaryV2Schema,
+  type PulseResponseV2,
+  pulseResponseV2Schema,
   type RevocationFrontierV2,
   revocationFrontierV2Schema,
   type SyncPrivacyMode,

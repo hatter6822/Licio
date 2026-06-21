@@ -14,6 +14,8 @@ import {
   type CheckpointFrontierV2,
   type ExchangeBudgetV2,
   type LaneSummaryV2,
+  type PulseResponseV2,
+  pulseResponseV2Schema,
   type RevocationFrontierV2,
   type SyncPrivacyMode,
   type SyncPulseV2,
@@ -67,6 +69,22 @@ export function buildPulse(inputs: PulseInputs): SyncPulseV2 {
   if (inputs.laneSummary !== undefined) pulse['lane_summary'] = [...inputs.laneSummary];
   // Fail closed: a malformed pulse throws here rather than going on the wire.
   return syncPulseV2Schema.parse(pulse);
+}
+
+/**
+ * Assemble + fail-closed-validate a §29.1 `PulseResponseV2` — the server's pulse
+ * plus an optional inline critical pack (the C0 one-round-trip case) and a back-off
+ * hint.  Absent optionals are omitted (never `null`), so the envelope stays minimal.
+ */
+export function buildPulseResponse(params: {
+  readonly pulse: SyncPulseV2;
+  readonly criticalPack?: Uint8Array;
+  readonly retryAfterMs?: number;
+}): PulseResponseV2 {
+  const response: Record<string, unknown> = { pulse: params.pulse };
+  if (params.criticalPack !== undefined) response['critical_pack'] = params.criticalPack;
+  if (params.retryAfterMs !== undefined) response['retry_after_ms'] = params.retryAfterMs;
+  return pulseResponseV2Schema.parse(response);
 }
 
 /** The reaction to a remote pulse: what we want, what we can offer, and posture. */

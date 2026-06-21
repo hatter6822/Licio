@@ -46,6 +46,8 @@ export interface LcapServerStore {
   /** The room sequence of an already-accepted cid, or `undefined`. */
   roomSeqOf(roomId: string, cid: string): Promise<number | undefined>;
   roomSize(roomId: string): Promise<number>;
+  /** Every room that has at least one accepted record (drives the sync frontier). */
+  listRooms(): Promise<readonly string[]>;
   getDeviceClaimant(deviceKeyId: string, deviceSeq: number): Promise<string | undefined>;
   /** Record the FIRST claimant of a (key, seq); a later distinct CID is fork evidence. */
   setDeviceClaimant(deviceKeyId: string, deviceSeq: number, cid: string): Promise<void>;
@@ -112,6 +114,13 @@ export class InMemoryLcapServerStore implements LcapServerStore {
 
   roomSize(roomId: string): Promise<number> {
     return Promise.resolve(this.rooms.get(roomId)?.length ?? 0);
+  }
+
+  listRooms(): Promise<readonly string[]> {
+    // Only rooms with at least one accepted record (an empty log carries no frontier).
+    const rooms: string[] = [];
+    for (const [roomId, log] of this.rooms) if (log.length > 0) rooms.push(roomId);
+    return Promise.resolve(rooms);
   }
 
   getDeviceClaimant(deviceKeyId: string, deviceSeq: number): Promise<string | undefined> {

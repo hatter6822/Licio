@@ -86,6 +86,14 @@ export class DrizzleLcapServerStore implements LcapServerStore {
     return rows[0]?.count ?? 0;
   }
 
+  async listRooms(): Promise<readonly string[]> {
+    const rows = await this.#db
+      .selectDistinct({ roomId: lcapAcceptance.roomId })
+      .from(lcapAcceptance)
+      .orderBy(asc(lcapAcceptance.roomId));
+    return rows.map((r) => r.roomId);
+  }
+
   async getDeviceClaimant(deviceKeyId: string, deviceSeq: number): Promise<string | undefined> {
     const rows = await this.#db
       .select({ cid: lcapDeviceSeq.cid })
