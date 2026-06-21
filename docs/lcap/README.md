@@ -99,14 +99,17 @@ mounted through the global security middleware:
   proofs/consistency}` — the (unsigned) tree head + RFC 9162 inclusion/consistency
   proofs computed over the §19.1 room log reconstructed from the canonical acceptance
   order; the served proofs verify against an independently-built log;
-- the §29.8 `GET /api/lcap/v2/bundles/export?room=…` — a room's content closure (its
-  accepted records, each followed by its proofs then its referenced blocks) repacked
-  from held bytes via an import-captured record→proof/record→block closure index
+- the §29.8 `POST /api/lcap/v2/bundles/export` — a room's content closure (its accepted
+  records, each followed by its proofs then its referenced blocks) repacked from held
+  bytes via an import-captured record→proof/record→block closure index
   (`indexRecordEdge`/`recordEdges` over migration `0040`); UNSIGNED (each record
-  self-authenticates via its included proof), re-importable, generic filename.
+  self-authenticates via its included proof), re-importable, generic filename.  GATED:
+  the POST carries a device-signed, freshness-windowed `export_request` and proceeds only
+  when the requester holds a non-revoked, authority-signed `may_export_bundle` capability
+  for the room (`verifyExportAuthorization`; CSRF-exempt + rate-limited — review #5).
 
 The remaining WS-R cards are **I/O integration** — the WS-R.15.1a bundle-export UI
-flow (the server `GET /bundles/export` is shipped; the authority-signed checkpoint
+flow (the server `POST /bundles/export` is shipped; the authority-signed checkpoint
 record is checkpoint issuance), the transport profiles (WS-R.15), the WS-S
 encryption-envelope seam (WS-R.16), the client surface (WS-R.17), and the network
 simulator (WS-R.18) — plus the entire WS-S private-rooms plane.  Those bind this pure core to Postgres / IndexedDB /
@@ -228,7 +231,7 @@ is a later card (the package is already runtime-agnostic via `runtime.ts`).
 | WS-R.9 — Merkle / checkpoint / inclusion / consistency / witness | 9.2 – 9.4 | **Shipped** (9.1 server-append logic core; DB binding in WS-R.12) |
 | WS-R.10 — liveness, receipts, durable outbox | 10.1 – 10.3 | **Shipped** (IndexedDB binding in WS-R.11) |
 | WS-R.13 — conflict dispatch + visible-thread projection | 13.1 – 13.2 | **Shipped** |
-| WS-R.12 — server ingestion | 12.1, 12.2, 12.4 | **Decision core + §24.4 resolver + server-computed validation + in-memory & gated-Drizzle bindings + the full §29 route surface shipped** (`ingestRecord`, `resolveIngestionOrder`, `validate`; `apps/api/src/lcap` `LcapIngestServer` incl. `validateContribution`/`commitBatch`/frontiers/room-Merkle reads; `routes.ts` content reads + `POST …/packs` + `/pulse` (incl. C0 `critical_pack`) + `/exchange` (incl. `response_pack`) + `/rooms/:id/{checkpoint,proofs/*}` + `/bundles/import` + `GET /bundles/export` (room closure via the migration-`0040` closure index); the `LcapServerStore` boundary over migrations `0039`+`0040`) — **§29 route surface complete** (the WS-R.15.1a/b client bundle UI shipped under WS-R.15) |
+| WS-R.12 — server ingestion | 12.1, 12.2, 12.4 | **Decision core + §24.4 resolver + server-computed validation + in-memory & gated-Drizzle bindings + the full §29 route surface shipped** (`ingestRecord`, `resolveIngestionOrder`, `validate`; `apps/api/src/lcap` `LcapIngestServer` incl. `validateContribution`/`commitBatch`/frontiers/room-Merkle reads; `routes.ts` content reads + `POST …/packs` + `/pulse` (incl. C0 `critical_pack`) + `/exchange` (incl. `response_pack`) + `/rooms/:id/{checkpoint,proofs/*}` + `/bundles/import` + `POST /bundles/export` (room closure via the migration-`0040` closure index; capability-gated, review #5); the `LcapServerStore` boundary over migrations `0039`+`0040`) — **§29 route surface complete** (the WS-R.15.1a/b client bundle UI shipped under WS-R.15) |
 | WS-R.14 — privacy + DoS controls | 14.1a, 14.1b, 14.2, 14.3, 14.4 | **Shipped**: the §27.1 resource-cap SSOT (`limits/caps.ts` — one frozen config every parser path sources, profile-tunable/never-disable-able, `checkCap`/`enforceCap`; the server parse enforces the CPU-time + quarantine-byte caps, 14.1a); the §27.2 graph guard run over the pack's DECLARED DAG before storage (14.1b); the §27.3 relay quotas + §27.4 no-PoW/no-address policy (`limits/relay-quota.ts`, 14.4); the §26.2 export-disclosure + §26.3 stealth policy (`privacy/`, 14.2 — interest-privacy in R.6.3); the §3.7/§36 doctrine CI gates (`check:lcap-schema-egress` + no-applause/no-raw-egress over the LCAP trees, 14.3). The 14.2 export UI flow is WS-R.15.1a |
 | WS-R.11 — IndexedDB client offline store | 11.1 – 11.5 | **Shipped** (`apps/web/src/lcap`: `lcap_v2` schema + durability + pinning/eviction + storage modes + C0-first sync + replication gate); durability layer / SW hooks = follow-up |
 | WS-R.15 — transport profiles + the seam | 15.1a/b, 15.2, 15.3, 15.4b, 15.5, 15.6, 15.7 | **The transport plane is shipped over one seam.** The **§22.6 `LcapTransport` seam** (`packages/lcap/src/transport`): the byte-channel interface every carrier implements + the selection policy that forces a server-mediated transport LAST (the always-correct anchor) + the public-only carriage gate + the fallback driver (15.4b). The **WS-R.15.1a/b offline `.licio-bundle` export+import** run CLIENT-LOCAL (`apps/web/src/lcap/bundle-{export,import}.ts` + `OfflineBundlePanel` + `/profile/offline`), the real pack writer/reader in a lazy chunk. The **WS-R.15.3 relay decision core** (`apps/api/src/lcap/relay.ts` `LcapRelay`). The client carriers over the seam (`apps/web/src/lcap/transports`): the **HTTPS anchor**, the platform **WebTransport** adapter + feature-detect (15.5), the **courier** ferry over a `CourierMedium` (15.4b; the native Nearby/BLE channels ride the same adapter behind the deferred Capacitor shell 15.4a/c/d), and the **registry** running `fallbackExchange` with WebRTC loaded by DYNAMIC import. The new code-split **`@licio/lcap-p2p`** package: the **WebRTC** data-channel transport + the server-blind AES-GCM signaling envelope (its AAD length-prefix-binds room + peer pair, an unambiguous canonical encoding, so a captured blob opens in no other room/peer context) + the §26.4 ICE/NAT-privacy policy (15.6a/b) and the dependency-free **IPFS gateway bridge** — the verification-preserving `block_cid ⇄ CIDv1(raw,sha2-256)` map, CID-re-verified on BOTH the fetch path (an untrusted gateway returning wrong bytes is rejected) and the publish path (mislabeled bytes are never pinned), public-only publish (15.7a/b). The **§22.3 QR micro-bundle** (`apps/web/src/lcap/transports/qr`): a hand-rolled byte-mode encoder (jsQR-round-trip-proven) + lazy jsQR still-image decode (15.2). Server: the server-blind `POST /api/lcap/v2/p2p/signal` rendezvous + the CSRF-protected `POST …/p2p/signal/poll` drain (15.6a). Gates: `check:lcap-p2p-split` (no static @licio/lcap-p2p import in apps/web) + the egress/applause gates extended over the new trees (15.8). **Deferred:** the native Android Capacitor shell (15.4a/c/d/e/f — needs the Android toolchain) |
@@ -260,16 +263,17 @@ CID-verified-proof gating, proof fan-in cap, Content-Length pre-buffer 413, repa
 first-object budget, missing-dependency cap, the CSRF-protected signaling-drain POST,
 **the device-certificate account-authority verification before key indexing (#7b)**, and
 **the revocation authority + scope verification before indexing (#7)** via the new
-`@licio/lcap` `verifyRevocationAuthority`), and the web bundle import (standalone
-CID-verified chunk frames now persisted CID-addressed instead of dropped, and re-import
-gated by the already-held set so it never downgrades a record held at higher trust).
-**Two remain as tracked debt** — each needs gated-Postgres concurrency work or a new
-authorization surface that must be designed correctly rather than rushed, with the
-closure target named:
+`@licio/lcap` `verifyRevocationAuthority`, and **the server bundle export gated by a
+device-signed, freshness-windowed `may_export_bundle` capability (#5)** via the new
+`verifyExportAuthorization` — `GET /bundles/export` is now a CSRF-exempt, gated
+`POST`), and the web bundle import (standalone CID-verified chunk frames now persisted
+CID-addressed instead of dropped, and re-import gated by the already-held set so it never
+downgrades a record held at higher trust).
+**Two remain as tracked debt** — both are gated-Postgres concurrency work that must be
+designed correctly rather than rushed, with the closure target named:
 
 | # | Sev | Location | Finding | Closure target |
 |---|-----|----------|---------|----------------|
-| 5 | P1 | `routes.ts` `GET /bundles/export` | Server-side room-wide export is reachable with no session/capability check (GETs bypass CSRF), so anyone with a room id can pull a room's accepted closure where LCAP holds in_room/private content. | **Gate by a room-capability possession proof** (maintainer-chosen): a signed, freshness-windowed export request whose subject device holds a non-revoked `may_export_bundle` capability for the room; verified via the registered identity state. |
 | 3 | P1 | `server-ingest.ts` device-seq | The `(authorDeviceKeyId, deviceSeq)` claim is read (`getDeviceClaimant`) then written (`setDeviceClaimant`) non-atomically, so two concurrent records for the same device-seq can both be accepted under Postgres instead of one being reported `conflict_device_fork`. | **Atomic claim-before-append** — a conditional `INSERT … ON CONFLICT DO NOTHING RETURNING` device-seq claim in the Drizzle adapter, the loser detected + reported as a fork; in-memory adapter is single-threaded (no race). |
 | 2 | P1 | `drizzle-store.ts` acceptance-seq | Concurrent accepts compute the same `roomSize` and `onConflictDoNothing` hides one insert, yet `appendAcceptance` still returns that sequence — the caller reports the record accepted while it is absent from the room log. | **Allocate the per-room sequence atomically** (a single SQL statement / serialized transaction); detect the conflict and retry or fail rather than returning a phantom seq. Parameterized store-contract concurrency test. |
 
