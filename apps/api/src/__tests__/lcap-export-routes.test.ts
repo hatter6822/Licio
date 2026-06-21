@@ -11,6 +11,7 @@ import {
   cidFor,
   detachedProofV2Schema,
   encodeWithSchema,
+  generateDeviceKey,
   readPack,
   writePack,
 } from '@licio/lcap';
@@ -22,11 +23,17 @@ import { setLcapIngestServer } from '../lcap/service.js';
 import {
   buildLcapFixtures,
   type LcapFixtures,
+  mintExportRequest,
   NET,
   NOW,
   ROOM,
   registerIdentity,
 } from './lcap-fixtures.js';
+
+/** POST an export request envelope to the export route. */
+async function postExport(srv: LcapIngestServer, envelope: Uint8Array): Promise<Response> {
+  return createLcapRoutes(srv).request('/bundles/export', { method: 'POST', body: envelope });
+}
 
 const enc = new TextEncoder();
 
@@ -88,10 +95,10 @@ async function importedServer(): Promise<LcapIngestServer> {
   return srv;
 }
 
-describe('GET /bundles/export — §29.8 room content closure', () => {
-  it("exports the room's record + proof + block closure, re-importable", async () => {
+describe('POST /bundles/export — §29.8 capability-gated room content closure (#5)', () => {
+  it("exports the room's record + proof + block closure when authorized, re-importable", async () => {
     const srv = await importedServer();
-    const res = await createLcapRoutes(srv).request(`/bundles/export?room=${ROOM}`);
+    const res = await postExport(srv, await mintExportRequest(fx));
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe(BUNDLE_MIME);
     expect(res.headers.get('content-disposition')).toContain('.licio-bundle');
@@ -114,20 +121,66 @@ describe('GET /bundles/export — §29.8 room content closure', () => {
     expect(cids).toEqual([fx.recordCid, proofCid, blockCid]);
   });
 
-  it('returns 404 for an empty/unknown room and 400 for a missing room param', async () => {
-    const srv = new LcapIngestServer(NET, () => NOW);
-    const app = createLcapRoutes(srv);
-    expect((await app.request('/bundles/export?room=never-seen')).status).toBe(404);
-    expect((await app.request('/bundles/export')).status).toBe(400);
+  it('rejects an unsigned/malformed export request with 400', async () => {
+    const srv = await importedServer();
+    const res = await postExport(srv, new Uint8Array([1, 2, 3, 4]));
+    expect(res.status).toBe(400);
+  });
+
+  it('forbids a forged-signature export request with 403 (the gate)', async () => {
+    const srv = await importedServer();
+    // The request claims the certified device key id but is signed by an imposter.
+    const imposter = await generateDeviceKey();
+    const forged = await mintExportRequest(fx, { signer: imposter });
+    const res = await postExport(srv, forged);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { reason?: string }).reason).toBe('rejected_bad_signature');
+  });
+
+  it('forbids a stale (outside the freshness window) export request with 403', async () => {
+    const srv = await importedServer();
+    const stale = await mintExportRequest(fx, { issuedAtMs: NOW - 10 * 60_000 });
+    const res = await postExport(srv, stale);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { reason?: string }).reason).toBe('rejected_stale_request');
+  });
+
+  it('forbids a request whose capability is not registered with 403', async () => {
+    const srv = await importedServer();
+    const unknownCap = await cidFor('record', enc.encode('not-a-registered-capability'));
+    const res = await postExport(srv, await mintExportRequest(fx, { capabilityCid: unknownCap }));
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { reason?: string }).reason).toBe('rejected_unknown_capability');
+  });
+
+  it('forbids a request for a room the capability does not cover with 403', async () => {
+    const srv = await importedServer();
+    // The capability is for ROOM; ask to export a different room with it.
+    const res = await postExport(srv, await mintExportRequest(fx, { roomId: 'some-other-room' }));
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { reason?: string }).reason).toBe('rejected_room_mismatch');
   });
 });
 
-describe('mounted at /api/lcap/v2/bundles/export (GET passes the global middleware)', () => {
-  it('serves the export through the full app', async () => {
+describe('mounted at /api/lcap/v2/bundles/export (CSRF-exempt device-authenticated POST)', () => {
+  it('serves an authorized export through the full app', async () => {
     setLcapIngestServer(await importedServer());
-    const res = await createApp().request(`/api/lcap/v2/bundles/export?room=${ROOM}`);
+    const res = await createApp().request('/api/lcap/v2/bundles/export', {
+      method: 'POST',
+      body: await mintExportRequest(fx),
+    });
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe(BUNDLE_MIME);
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+  });
+
+  it('still forbids an unauthorized export through the full app (gate enforced end-to-end)', async () => {
+    setLcapIngestServer(await importedServer());
+    const imposter = await generateDeviceKey();
+    const res = await createApp().request('/api/lcap/v2/bundles/export', {
+      method: 'POST',
+      body: await mintExportRequest(fx, { signer: imposter }),
+    });
+    expect(res.status).toBe(403);
   });
 });

@@ -24,11 +24,13 @@ import {
   validateIdentityChain,
   verifyCapability,
   verifyDeviceCertificate,
+  verifyExportAuthorization,
   verifyRevocationAuthority,
 } from '../identity/index.js';
 import { revocationPriority } from '../identity/revocation.js';
 import { defaultLane } from '../priority.js';
 import { encodeWithSchema } from '../schemas/codec.js';
+import { type ExportRequestV2, exportRequestV2Schema } from '../schemas/export-request.js';
 import {
   type CapabilityRecordV2,
   type ContributionEventRecordV2,
@@ -533,5 +535,102 @@ describe('verifyRevocationAuthority (§11.5, WS-R.1.4)', () => {
       networkId: NETWORK,
     });
     expect(res).toEqual({ ok: false, status: 'rejected_bad_authority_proof' });
+  });
+});
+
+describe('verifyExportAuthorization (§29.8 export gate, WS-R.1)', () => {
+  async function signedRequest(capCid: string): Promise<{
+    request: ExportRequestV2;
+    body: Uint8Array;
+    proof: Awaited<ReturnType<typeof buildAndSign>>;
+  }> {
+    const request: ExportRequestV2 = {
+      record_version: 2,
+      kind: 'export_request',
+      room_id: 'room-1',
+      capability_cid: capCid,
+      issued_at_ms: NOW,
+      request_nonce: new Uint8Array([4, 3, 2, 1]),
+    };
+    const body = encodeWithSchema(exportRequestV2Schema, request);
+    const proof = await buildAndSign({
+      privateKey: device.privateKey,
+      signerKeyId: 'key-1',
+      proofKind: 'device_signature',
+      recordKind: 'export_request',
+      recordBody: body,
+      networkId: NETWORK,
+    });
+    return { request, body, proof };
+  }
+
+  const deps = (revocations = new RevocationIndex()) => ({
+    resolveCapability: (c: string) => (c === capabilityCid ? capBundle : undefined),
+    resolveRoomAuthorityKey: (r: string) => (r === 'room-1' ? roomAuthority.publicKey : undefined),
+    resolveDevicePublicKey: (d: string) => (d === 'key-1' ? device.publicKey : undefined),
+    revocations,
+  });
+
+  it('authorizes a fresh, device-signed request citing a may_export_bundle capability', async () => {
+    const { request, body, proof } = await signedRequest(capabilityCid);
+    const res = await verifyExportAuthorization({
+      request,
+      body,
+      proof,
+      deps: deps(),
+      ctx: { networkId: NETWORK, nowMs: NOW },
+    });
+    expect(res).toEqual({ ok: true, roomId: 'room-1', capabilityId: 'cap-1' });
+  });
+
+  it('denies a request whose capability forbids bundle export', async () => {
+    const noExportCap = await issueCapability({
+      authorityPrivateKey: roomAuthority.privateKey,
+      authoritySignerKeyId: 'room-authority-1',
+      capability: {
+        ...capBundle.capability,
+        capability_id: 'cap-no-export',
+        transfer_policy: { ...capBundle.capability.transfer_policy, may_export_bundle: false },
+      },
+      networkId: NETWORK,
+    });
+    const noExportCid = await cidFor('record', noExportCap.body);
+    const { request, body, proof } = await signedRequest(noExportCid);
+    const res = await verifyExportAuthorization({
+      request,
+      body,
+      proof,
+      deps: {
+        resolveCapability: (c) => (c === noExportCid ? noExportCap : undefined),
+        resolveRoomAuthorityKey: () => roomAuthority.publicKey,
+        resolveDevicePublicKey: () => device.publicKey,
+        revocations: new RevocationIndex(),
+      },
+      ctx: { networkId: NETWORK, nowMs: NOW },
+    });
+    expect(res).toEqual({ ok: false, status: 'rejected_export_not_permitted' });
+  });
+
+  it('denies a request whose device has been revoked', async () => {
+    const revocations = new RevocationIndex();
+    revocations.index({
+      record_version: 2,
+      kind: 'revocation',
+      revocation_id: 'r1',
+      revoked_kind: 'device',
+      revoked_id: 'key-1',
+      account_id: 'acct-1',
+      effective_at_ms: NOW - 1,
+      revocation_epoch: 1,
+    });
+    const { request, body, proof } = await signedRequest(capabilityCid);
+    const res = await verifyExportAuthorization({
+      request,
+      body,
+      proof,
+      deps: deps(revocations),
+      ctx: { networkId: NETWORK, nowMs: NOW },
+    });
+    expect(res).toEqual({ ok: false, status: 'rejected_revoked' });
   });
 });

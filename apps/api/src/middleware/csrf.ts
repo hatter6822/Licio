@@ -169,6 +169,13 @@ const EXEMPT_PATHS = new Set([
   '/api/lcap/v2/packs',
   '/api/lcap/v2/pulse',
   '/api/lcap/v2/exchange',
+  // The §29.8 server export is gated by a device-signed, freshness-windowed `export_request`
+  // (the requester must hold a non-revoked `may_export_bundle` capability for the room); the
+  // signature IS the authentication, and a native peer holds no session cookie — so, like
+  // `/packs`, there is no session for CSRF to ride. Abuse is bounded by its own rate limit +
+  // the export gate. (The web-UI `/bundles/import` alias stays NON-exempt — it is a
+  // session-bearing browser flow that keeps the double-submit token.)
+  '/api/lcap/v2/bundles/export',
 ]);
 // WS-D identity/privacy endpoints rely on `SameSite=Strict` + the opaque session
 // model (and a per-flow `login_attempt_id` binding) as the CSRF defense, so they do

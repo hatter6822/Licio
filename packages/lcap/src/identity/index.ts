@@ -32,6 +32,13 @@ export {
   validateIdentityChain,
 } from './chain.js';
 export {
+  type ExportAuthorizationContext,
+  type ExportAuthorizationDeps,
+  type ExportAuthorizationResult,
+  type ExportAuthorizationStatus,
+  verifyExportAuthorization,
+} from './export-authorization.js';
+export {
   RevocationIndex,
   type RevokedKind,
   revocationPriority,

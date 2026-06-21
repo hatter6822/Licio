@@ -6,8 +6,9 @@
 //     a peer that learns a `want` can fetch the missing object (RFC 7233 ranges).
 //   - room reads (§29.7, GET /rooms/:id/{checkpoint,proofs/*}): the unsigned tree
 //     head + RFC 9162 inclusion/consistency proofs over the §19.1 room log.
-//   - bundle EXPORT (§29.8, GET /bundles/export?room=…): a room's content closure
-//     (records + each record's proofs + referenced blocks) repacked from held bytes.
+//   - bundle EXPORT (§29.8, POST /bundles/export): a room's content closure (records +
+//     each record's proofs + referenced blocks) repacked from held bytes, GATED by a
+//     device-signed `may_export_bundle` capability for the room (the export gate).
 //   - pack IMPORT (§29.3, POST /packs): a `.licio-bundle` read under the WS-R.4.2
 //     caps; every CID-verified frame durably stored, identity frames registered,
 //     contributions committed through validate()→graph-guard→commit.
@@ -17,11 +18,11 @@
 //     `wanted_from_client` + a served content pack).
 //
 // Content is device-certificate-authenticated (records carry their own COSE proofs;
-// validate() is the real authentication), so GETs + the native POSTs (/packs,
-// /pulse, /exchange) are CSRF-EXEMPT (a native sync client holds no session cookie)
-// and bounded by per-endpoint rate limits + the §27 caps + the §27.2 graph guard.
-// The web-UI /bundles/import is NOT exempt — a session-bearing browser flow keeps the
-// CSRF token.  §22.1.1 request-level status mapping: 200 processed (per-object
+// validate() is the real authentication), so GETs + the native POSTs (/packs, /pulse,
+// /exchange, and /bundles/export — gated by a device-signed export request) are
+// CSRF-EXEMPT (a native sync client holds no session cookie) and bounded by per-endpoint
+// rate limits + the §27 caps + the §27.2 graph guard.  The web-UI /bundles/import is NOT
+// exempt — a session-bearing browser flow keeps the CSRF token.  §22.1.1 request-level status mapping: 200 processed (per-object
 // outcomes inside) / 404 not-held / 400 malformed / 413 oversized / 422 schema-
 // invalid / 429 rate-limited.  Serving/accepting content implies no transport trust.
 
@@ -33,9 +34,13 @@ import {
   decode,
   decodeAndRouteRecord,
   decodeProof,
+  decodeWithSchema,
+  type ExportRequestEnvelopeV2,
   encodeWithSchema,
   exchangeRequestV2Schema,
   exchangeResponseV2Schema,
+  exportRequestEnvelopeV2Schema,
+  exportRequestV2Schema,
   type GraphGuardNode,
   genericBundleFilename,
   ldcToPlain,
@@ -594,20 +599,37 @@ async function handleRoomConsistency(
 const MAX_EXPORT_BYTES = 32 * 1024 * 1024;
 
 /**
- * §29.8 `GET /bundles/export?room=…`: produce a `.licio-bundle` of a room's content
- * closure — its accepted records (acceptance order) each followed by its proofs then
- * its referenced blocks — repacked from held bytes.  Every object is CID-verified on
- * re-import and each record self-authenticates via its included proof, so the pack is
- * UNSIGNED (the platform holds no key; the user-attested manifest is the WS-R.15.1a
- * client flow).  Missing `room` → 400; an empty/unknown room → 404; otherwise 200 with
- * the generic (room/topic-free) download filename (§26.3 / WS-R.4.4).
+ * §29.8 `POST /bundles/export`: produce a `.licio-bundle` of a room's content closure —
+ * its accepted records (acceptance order) each followed by its proofs then its referenced
+ * blocks — repacked from held bytes.  GATED: a server export discloses the room's accepted
+ * content (which may hold in_room material), so the POST body carries a device-signed,
+ * freshness-windowed `export_request` envelope, and the export proceeds ONLY when the
+ * requester holds a non-revoked, authority-signed `may_export_bundle` capability for the
+ * room (the export gate, WS-R.12.4 / review #5).  Every object is CID-verified on re-import
+ * and each record self-authenticates via its included proof, so the pack itself is UNSIGNED
+ * (the platform holds no key).  Bad envelope/proof → 400; a failed gate → 403; an
+ * empty/unknown room → 404; an over-budget closure → 413; otherwise 200 with the generic
+ * (room/topic-free) download filename (§26.3 / WS-R.4.4).
  */
-async function handleExport(
-  server: LcapIngestServer,
-  roomId: string | undefined,
-): Promise<Response> {
-  if (roomId === undefined || roomId === '') return json(400, { error: 'missing_room' });
-  const cids = await server.exportRoomClosureCids(roomId);
+async function handleExport(server: LcapIngestServer, body: Uint8Array): Promise<Response> {
+  let envelope: ExportRequestEnvelopeV2;
+  try {
+    envelope = decodeWithSchema(exportRequestEnvelopeV2Schema, body);
+  } catch {
+    return json(400, { error: 'bad_export_request' });
+  }
+  let proof: DetachedProofV2;
+  try {
+    proof = decodeProof(envelope.proof_body);
+  } catch {
+    return json(400, { error: 'bad_export_request' });
+  }
+  // Re-encode the request to the canonical body the proof covers (the `record_cid` preimage).
+  const requestBody = encodeWithSchema(exportRequestV2Schema, envelope.request);
+  const auth = await server.authorizeExport(envelope.request, requestBody, proof);
+  if (!auth.ok) return json(403, { error: 'export_forbidden', reason: auth.status });
+
+  const cids = await server.exportRoomClosureCids(auth.roomId);
   if (cids.length === 0) return json(404, { error: 'not_found' });
   const repacked = await repackHeldObjects(server, cids, MAX_EXPORT_BYTES);
   if (repacked.pack === undefined) return json(404, { error: 'not_found' });
@@ -653,8 +675,14 @@ export function createLcapRoutes(override?: LcapIngestServer): Hono {
   app.get('/rooms/:roomId/proofs/consistency', (c) =>
     handleRoomConsistency(server(), c.req.param('roomId'), c.req.query('old'), c.req.query('new')),
   );
-  // §29.8 bundle export (GET → CSRF passes): a room's content closure as a pack.
-  app.get('/bundles/export', (c) => handleExport(server(), c.req.query('room')));
+  // §29.8 bundle export: a room's content closure as a pack, GATED by a device-signed
+  // `may_export_bundle` capability (review #5).  A POST (it carries the signed export
+  // request), CSRF-exempt + rate-limited like the other device-authenticated LCAP routes.
+  app.post('/bundles/export', rateLimit({ limit: 30, windowMs: 60_000 }), async (c) => {
+    if (declaredLengthExceeds(c, SERVER_CAPS.maxPackBytes))
+      return json(413, { error: 'oversized_request' });
+    return handleExport(server(), new Uint8Array(await c.req.arrayBuffer()));
+  });
   app.post('/packs', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) => {
     if (declaredLengthExceeds(c, SERVER_CAPS.maxPackBytes))
       return json(413, { error: 'oversized_request' });

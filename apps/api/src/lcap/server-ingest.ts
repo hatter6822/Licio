@@ -28,6 +28,8 @@ import {
   cidFor,
   DEFAULT_BUDGET,
   type DetachedProofV2,
+  type ExportAuthorizationResult,
+  type ExportRequestV2,
   type GraphGuardNode,
   type GraphGuardResult,
   graphLimitsFromCaps,
@@ -53,6 +55,7 @@ import {
   type ValidationResult,
   validate,
   verifyDeviceCertificate,
+  verifyExportAuthorization,
   verifyRevocationAuthority,
   type WantRequestV2,
 } from '@licio/lcap';
@@ -307,6 +310,32 @@ export class LcapIngestServer {
     if (!result.ok) return 'unverified';
     this.revocations.index(revocation);
     return 'registered';
+  }
+
+  /**
+   * Authorize a §29.8 bundle export against the registered identity state (the export
+   * gate): the device-signed, freshness-windowed `export_request` must cite a non-revoked
+   * `may_export_bundle` capability for the room, authority-signed and unexpired, and be
+   * signed by that capability's subject device.  Returns the authorization verdict; the
+   * route produces the bundle only on `ok`.
+   */
+  authorizeExport(
+    request: ExportRequestV2,
+    body: Uint8Array,
+    proof: DetachedProofV2,
+  ): Promise<ExportAuthorizationResult> {
+    return verifyExportAuthorization({
+      request,
+      body,
+      proof,
+      deps: {
+        resolveCapability: (c) => this.capabilities.get(c),
+        resolveRoomAuthorityKey: (r, e) => this.roomAuthorityKeys.get(`${r} ${e}`),
+        resolveDevicePublicKey: (d) => this.certKeys.get(d),
+        revocations: this.revocations,
+      },
+      ctx: { networkId: this.networkId, nowMs: this.now() },
+    });
   }
 
   private identityDeps(): IdentityChainDeps {

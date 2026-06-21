@@ -65,6 +65,9 @@ export const lcapRecordKindSchema = z.enum([
   'fork_evidence',
   'availability_advertisement',
   'policy_object',
+  // A transient (never-stored) device-signed authorization to export a room's content
+  // closure (§29.8 export gate): it appears only as a detached proof's `record_kind`.
+  'export_request',
 ]);
 
 /** Operations a room capability may authorize (§4.1). */

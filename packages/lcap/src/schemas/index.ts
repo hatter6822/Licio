@@ -40,6 +40,12 @@ export {
   visibilityScopeSchema,
 } from './common.js';
 export {
+  type ExportRequestEnvelopeV2,
+  type ExportRequestV2,
+  exportRequestEnvelopeV2Schema,
+  exportRequestV2Schema,
+} from './export-request.js';
+export {
   type BundleManifestRecordV2,
   bundleManifestRecordV2Schema,
   type PackFrameHeaderV2,

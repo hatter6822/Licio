@@ -13,9 +13,13 @@ import {
   cidFor,
   type DetachedProofV2,
   type DeviceKeyPair,
+  detachedProofV2Schema,
+  type ExportRequestV2,
   encodeContributionEvent,
   encodeWithSchema,
   exportPublicKeyCose,
+  exportRequestEnvelopeV2Schema,
+  exportRequestV2Schema,
   generateDeviceKey,
   issueCapability,
   issueDeviceCertificate,
@@ -199,4 +203,41 @@ export async function mintDeviceRevocation(
     networkId: NET,
   });
   return { revocation, body, proof };
+}
+
+/**
+ * Mint a device-signed `export_request` envelope (the §29.8 export gate input): the
+ * subject device signs a freshness-windowed request citing a `may_export_bundle`
+ * capability for the room.  Returns the encoded envelope bytes to POST to /bundles/export.
+ */
+export async function mintExportRequest(
+  fx: LcapFixtures,
+  params: {
+    roomId?: string;
+    capabilityCid?: string;
+    issuedAtMs?: number;
+    nonce?: Uint8Array;
+    signer?: DeviceKeyPair;
+    signerKeyId?: string;
+  } = {},
+): Promise<Uint8Array> {
+  const request: ExportRequestV2 = {
+    record_version: 2,
+    kind: 'export_request',
+    room_id: params.roomId ?? ROOM,
+    capability_cid: params.capabilityCid ?? fx.capabilityCid,
+    issued_at_ms: params.issuedAtMs ?? NOW,
+    request_nonce: params.nonce ?? new Uint8Array([9, 8, 7, 6]),
+  };
+  const body = encodeWithSchema(exportRequestV2Schema, request);
+  const proof = await buildAndSign({
+    privateKey: (params.signer ?? fx.device).privateKey,
+    signerKeyId: params.signerKeyId ?? DEVICE_KEY,
+    proofKind: 'device_signature',
+    recordKind: 'export_request',
+    recordBody: body,
+    networkId: NET,
+  });
+  const proofBody = encodeWithSchema(detachedProofV2Schema, proof);
+  return encodeWithSchema(exportRequestEnvelopeV2Schema, { request, proof_body: proofBody });
 }
