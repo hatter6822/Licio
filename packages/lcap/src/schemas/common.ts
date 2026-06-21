@@ -7,14 +7,21 @@
 
 import { z } from 'zod';
 import { type CidKind, parseCid } from '../cid/index.js';
+import { isUint8Array } from '../runtime.js';
 
 /**
  * A CBOR byte string (public keys, signatures, hashes, nonces; §9.1.2).  Uses
  * `z.custom` rather than `z.instanceof` so the inferred type is the general
  * `Uint8Array` (any backing buffer), matching what the codec / WebCrypto produce
  * — `z.instanceof(Uint8Array)` would narrow to `Uint8Array<ArrayBuffer>` (TS 5.7+).
+ *
+ * The guard is realm-tolerant: a `Uint8Array` that crosses a realm boundary (a Web
+ * Worker, a different global, or the jsdom↔Node split in tests) fails `instanceof`
+ * against this module's constructor, so it also accepts the brand tag.  This only
+ * WIDENS acceptance to genuine byte arrays (a `DataView`/`ArrayBuffer` tags
+ * differently) — the encoded bytes are identical, so determinism is unaffected.
  */
-export const bytesSchema = z.custom<Uint8Array>((value) => value instanceof Uint8Array, {
+export const bytesSchema = z.custom<Uint8Array>((value) => isUint8Array(value), {
   message: 'expected a Uint8Array',
 });
 

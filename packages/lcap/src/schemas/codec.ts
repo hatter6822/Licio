@@ -11,6 +11,7 @@ import type { z } from 'zod';
 import { decode } from '../cbor/decode.js';
 import { encode } from '../cbor/encode.js';
 import type { LdcMap, LdcValue } from '../cbor/types.js';
+import { isUint8Array } from '../runtime.js';
 import { type DetachedProofV2Record, detachedProofV2Schema } from './proof.js';
 import {
   type CapabilityRecordV2,
@@ -44,7 +45,7 @@ export class RecordSchemaError extends Error {
  * scalars pass through; byte strings stay `Uint8Array`.
  */
 export function ldcToPlain(value: LdcValue): unknown {
-  if (value instanceof Uint8Array) return value;
+  if (isUint8Array(value)) return value;
   if (value instanceof Map) {
     const obj: Record<string, unknown> = {};
     for (const [key, child] of value) {
@@ -67,7 +68,7 @@ export function ldcToPlain(value: LdcValue): unknown {
  */
 export function plainToLdc(value: unknown): LdcValue {
   if (value === null) return null;
-  if (value instanceof Uint8Array) return value;
+  if (isUint8Array(value)) return value;
   if (Array.isArray(value)) return value.map((child) => plainToLdc(child));
   switch (typeof value) {
     case 'boolean':
@@ -100,12 +101,7 @@ export function encodeWithSchema<T>(schema: z.ZodType<T>, value: T): Uint8Array 
 
 function asPlainObject(bytes: Uint8Array): Record<string, unknown> {
   const plain = ldcToPlain(decode(bytes));
-  if (
-    typeof plain !== 'object' ||
-    plain === null ||
-    Array.isArray(plain) ||
-    plain instanceof Uint8Array
-  ) {
+  if (typeof plain !== 'object' || plain === null || Array.isArray(plain) || isUint8Array(plain)) {
     throw new RecordSchemaError('not_a_map');
   }
   return plain as Record<string, unknown>;

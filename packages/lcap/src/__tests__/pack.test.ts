@@ -85,6 +85,30 @@ describe('writer + reader (WS-R.4.1/4.2)', () => {
     }
   });
 
+  it('carries a per-object room_id_hash through the table for pre-read routing', async () => {
+    const roomIdHash = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+    const inRoom = await obj('record_body', new TextEncoder().encode('in-room record'), {
+      roomIdHash,
+    });
+    // A control object with no room: account-scoped, omits room_id_hash.
+    const control = await obj('record_body', new TextEncoder().encode('account control'), {
+      lane: 'C0',
+      priority: 0,
+    });
+    const pack = writePack({
+      objects: [inRoom, control],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1 << 20,
+    });
+    const read = await readPack(pack, CAPS);
+    if (!read.ok) throw new Error('read failed');
+    const byCid = new Map(read.pack.entries.map((e) => [e.cid, e]));
+    // The room-bearing record's hash round-trips byte-for-byte; the control omits it.
+    expect(byCid.get(inRoom.cid)?.room_id_hash).toEqual(roomIdHash);
+    expect(byCid.get(control.cid)?.room_id_hash).toBeUndefined();
+  });
+
   it('honors caps and rejects bad magic / truncation', async () => {
     const objects = [await obj('block', new Uint8Array(5000).fill(1))];
     const pack = writePack({

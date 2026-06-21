@@ -13,6 +13,7 @@
 //   - text is validated UTF-8 + NFC; floats, tags, undefined, and other simple
 //     values are refused (§9.1.2).
 
+import { isUint8Array } from '../runtime.js';
 import { LdcEncodeError } from './errors.js';
 import type { LdcKey, LdcMap, LdcValue } from './types.js';
 
@@ -182,7 +183,7 @@ export function encode(value: LdcValue, path = ''): Uint8Array {
     case 'string':
       return encodeText(value, path);
     case 'object': {
-      if (value instanceof Uint8Array) return encodeBytes(value, path);
+      if (isUint8Array(value)) return encodeBytes(value, path);
       if (value instanceof Map) return encodeMap(value, path);
       if (Array.isArray(value)) return encodeArray(value, path);
       throw new LdcEncodeError('unsupported_type', path);

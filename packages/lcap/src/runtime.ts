@@ -14,6 +14,21 @@ export class LcapCryptoUnavailableError extends Error {
   }
 }
 
+/**
+ * A realm-tolerant `Uint8Array` guard.  `instanceof Uint8Array` is fragile across a
+ * realm boundary (a Web Worker, a different global, or the jsdom↔Node split in tests):
+ * a byte array built in one realm fails `instanceof` against another realm's
+ * constructor, so the codec would mis-encode it as a CBOR array of integers.  The
+ * brand tag is stable across realms, so this guard recognizes ANY genuine
+ * `Uint8Array` (while a `DataView`/`ArrayBuffer` tags differently and is still
+ * rejected).  The single source for "is this a CBOR byte string?" across the codec.
+ */
+export function isUint8Array(value: unknown): value is Uint8Array {
+  return (
+    value instanceof Uint8Array || Object.prototype.toString.call(value) === '[object Uint8Array]'
+  );
+}
+
 let cached: Crypto | undefined;
 
 /** Resolve the global `Crypto` object, or throw `LcapCryptoUnavailableError`. */

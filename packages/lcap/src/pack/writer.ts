@@ -32,6 +32,12 @@ export interface PackObject {
   readonly recordKind?: PackTableEntryV2['record_kind'];
   readonly deps?: readonly string[];
   readonly providesProofFor?: string;
+  /**
+   * The §14.4 room-id hash, so a receiver can group/route by room from the table
+   * BEFORE reading any payload (the table-before-frames layout exists for exactly
+   * this).  Optional: control/identity material is account-scoped and omits it.
+   */
+  readonly roomIdHash?: PackTableEntryV2['room_id_hash'];
   readonly flags?: PackTableEntryV2['flags'];
 }
 
@@ -80,6 +86,7 @@ function buildHeaderAndTable(params: WritePackParams): { header: Uint8Array; tab
       ...(object.providesProofFor !== undefined
         ? { provides_proof_for: object.providesProofFor }
         : {}),
+      ...(object.roomIdHash !== undefined ? { room_id_hash: object.roomIdHash } : {}),
       ...(object.flags !== undefined ? { flags: object.flags } : {}),
     });
     containsLanes.add(object.lane);
