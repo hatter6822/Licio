@@ -8,6 +8,7 @@
 // decisions belong to the importer + `validate`.
 
 import { type CidKind, cidFor } from '../cid/index.js';
+import { SERVER_CAPS } from '../limits/caps.js';
 import { decodeWithSchema } from '../schemas/codec.js';
 import {
   type PackFrameHeaderV2,
@@ -29,14 +30,34 @@ export interface ReaderCaps {
   readonly maxEntries: number;
 }
 
+// Sourced from the §27.1 caps SSOT (WS-R.14.1a) — no limit is hard-coded here.
 export const DEFAULT_READER_CAPS: ReaderCaps = {
-  maxPackBytes: 64 * 1024 * 1024,
-  maxHeaderBytes: 64 * 1024,
-  maxTableBytes: 4 * 1024 * 1024,
-  maxFrameHeaderBytes: 4 * 1024,
-  maxFramePayloadBytes: 16 * 1024 * 1024,
-  maxEntries: 100_000,
+  maxPackBytes: SERVER_CAPS.maxPackBytes,
+  maxHeaderBytes: SERVER_CAPS.maxHeaderBytes,
+  maxTableBytes: SERVER_CAPS.maxTableBytes,
+  maxFrameHeaderBytes: SERVER_CAPS.maxFrameHeaderBytes,
+  maxFramePayloadBytes: SERVER_CAPS.maxFramePayloadBytes,
+  maxEntries: SERVER_CAPS.maxManifestEntries,
 };
+
+/** Project a {@link ResourceCaps} profile into the reader's cap view. */
+export function readerCapsFromCaps(caps: {
+  readonly maxPackBytes: number;
+  readonly maxHeaderBytes: number;
+  readonly maxTableBytes: number;
+  readonly maxFrameHeaderBytes: number;
+  readonly maxFramePayloadBytes: number;
+  readonly maxManifestEntries: number;
+}): ReaderCaps {
+  return {
+    maxPackBytes: caps.maxPackBytes,
+    maxHeaderBytes: caps.maxHeaderBytes,
+    maxTableBytes: caps.maxTableBytes,
+    maxFrameHeaderBytes: caps.maxFrameHeaderBytes,
+    maxFramePayloadBytes: caps.maxFramePayloadBytes,
+    maxEntries: caps.maxManifestEntries,
+  };
+}
 
 export type PackReadStatus =
   | 'bad_magic'

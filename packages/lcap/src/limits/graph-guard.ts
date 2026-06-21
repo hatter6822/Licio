@@ -20,6 +20,7 @@
 // reader (WS-R.4.2) and the server parse (WS-R.12.1a) consume it.
 
 import type { ObjectStatusCode } from '../pack/status.js';
+import { SERVER_CAPS } from './caps.js';
 
 /** A received object's declared dependency edges + the parse-layer content flags. */
 export interface GraphGuardNode {
@@ -42,12 +43,25 @@ export interface GraphGuardLimits {
   readonly maxDepth: number;
 }
 
-// Conservative defaults; WS-R.14.1 will fold these into the central §27.1 caps SSOT.
+// Sourced from the §27.1 caps SSOT (WS-R.14.1a) — never hard-coded here.
 export const DEFAULT_GRAPH_LIMITS: GraphGuardLimits = Object.freeze({
-  maxNodes: 4096,
-  maxFanOut: 64,
-  maxDepth: 64,
+  maxNodes: SERVER_CAPS.maxGraphNodes,
+  maxFanOut: SERVER_CAPS.maxFanOut,
+  maxDepth: SERVER_CAPS.maxDependencyDepth,
 });
+
+/** Project a {@link ResourceCaps} profile into the graph guard's limit view. */
+export function graphLimitsFromCaps(caps: {
+  readonly maxGraphNodes: number;
+  readonly maxFanOut: number;
+  readonly maxDependencyDepth: number;
+}): GraphGuardLimits {
+  return Object.freeze({
+    maxNodes: caps.maxGraphNodes,
+    maxFanOut: caps.maxFanOut,
+    maxDepth: caps.maxDependencyDepth,
+  });
+}
 
 /** The §16.11 rejection codes a graph breach can produce. */
 export type GraphRejectionCode = Extract<

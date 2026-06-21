@@ -1,5 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 export {
+  type CapCheck,
+  type CapName,
+  type CapProfile,
+  capsForProfile,
+  checkCap,
+  clampCaps,
+  enforceCap,
+  OLD_PHONE_CAPS,
+  type ResourceCaps,
+  ResourceLimitError,
+  SERVER_CAPS,
+} from './caps.js';
+export {
   checkDependencyGraph,
   DEFAULT_GRAPH_LIMITS,
   type ExportAudience,
@@ -8,4 +21,5 @@ export {
   type GraphGuardNode,
   type GraphGuardResult,
   type GraphRejectionCode,
+  graphLimitsFromCaps,
 } from './graph-guard.js';

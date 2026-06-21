@@ -20,6 +20,7 @@ export {
   type ParsedFrame,
   type ParsedPack,
   type ReaderCaps,
+  readerCapsFromCaps,
   readPack,
 } from './reader.js';
 export type {

@@ -23,10 +23,12 @@ import {
   type CheckpointFrontierV2,
   type ConsensusInput,
   type CryptoSuiteId,
+  checkCap,
   checkDependencyGraph,
   cidFor,
   DEFAULT_BUDGET,
   type DetachedProofV2,
+  graphLimitsFromCaps,
   type IdentityChainDeps,
   type IngestionClass,
   type IngestionNode,
@@ -35,12 +37,14 @@ import {
   ingestRecord,
   type ObjectStatusV2,
   type PulseResponseV2,
+  type ResourceCaps,
   type RevocationFrontierV2,
   RevocationIndex,
   type RevocationRecordV2,
   RoomLog,
   resolveIngestionOrder,
   roomIdHash,
+  SERVER_CAPS,
   type SyncPulseV2,
   type TreeAlgorithm,
   type ValidationResult,
@@ -125,14 +129,18 @@ export class LcapIngestServer {
 
   /**
    * @param networkId the LCAP network this server serves.
-   * @param now a clock for validation freshness (default `Date.now`; injectable in tests).
+   * @param now a clock for validation freshness + the §27.1 import CPU-time guard
+   *   (default `Date.now`; injectable in tests).
    * @param store the durable state backend (default in-memory; the gated Drizzle
    *   adapter is WS-R.12.2 part 2).
+   * @param caps the §27.1 resource caps profile (default the server ceiling; an
+   *   old-phone relay passes `OLD_PHONE_CAPS`).  Never disable-able.
    */
   constructor(
     private readonly networkId: string,
     private readonly now: () => number = () => Date.now(),
     private readonly store: LcapServerStore = new InMemoryLcapServerStore(),
+    private readonly caps: ResourceCaps = SERVER_CAPS,
   ) {}
 
   /** Stage 1 (R.12.1a): CID-verified durable store; idempotent by CID. */
@@ -325,8 +333,13 @@ export class LcapIngestServer {
 
     // §27.2 malicious-graph guard, BEFORE any resolution/expansion: a hostile
     // dependency DAG (cycle, fan-out, depth, duplicate deps) aborts the whole
-    // import — the graph is untrusted, so no part of it is expanded.
-    const guard = checkDependencyGraph(nodes, { audience: 'restricted' });
+    // import — the graph is untrusted, so no part of it is expanded.  Its limits
+    // come from THIS server's §27.1 caps profile (WS-R.14.1a), not a hard-coded
+    // default.
+    const guard = checkDependencyGraph(nodes, {
+      audience: 'restricted',
+      limits: graphLimitsFromCaps(this.caps),
+    });
     if (!guard.ok) {
       return {
         statuses: nodes.map((node) => ({
@@ -362,19 +375,37 @@ export class LcapIngestServer {
       wants.push({ cid, cid_kind: 'record', reason: 'missing_dependency' });
     };
 
+    // §27.1 import CPU-time guard (WS-R.14.1a): a batch that runs past the cap stops
+    // processing and rejects the remainder — a slow-import flood cannot pin a worker.
+    const startMs = this.now();
+    const overCpuBudget = (): boolean =>
+      !checkCap(this.now() - startMs, 'maxCpuTimeMsPerImportBatch', this.caps).ok;
+
     // Satisfiable records, parents before children: the full stage-1+3 commit.
     for (const cid of resolution.order) {
       const input = byCid.get(cid);
       if (!input) continue;
+      if (overCpuBudget()) {
+        statuses.push({ cid, cid_kind: 'record', status: 'rejected_resource_limit' });
+        continue;
+      }
       const res = await this.commitRecord(input);
       statuses.push(res.status);
       for (const want of res.wants) addWant(want.cid);
     }
 
-    // Records with absent dependencies: durably store (stage 1), quarantine, want.
+    // Records with absent dependencies: durably store (stage 1), quarantine, want —
+    // bounded by the §27.1 quarantine-byte cap so a missing-dep flood cannot fill the
+    // store (and by the same CPU-time guard).
+    let quarantineBytes = 0;
     for (const [cid, missing] of resolution.quarantined) {
       const input = byCid.get(cid);
       if (!input) continue;
+      quarantineBytes += input.body.length;
+      if (overCpuBudget() || !checkCap(quarantineBytes, 'maxQuarantineBytes', this.caps).ok) {
+        statuses.push({ cid, cid_kind: 'record', status: 'rejected_resource_limit' });
+        continue; // never store past the quarantine cap
+      }
       const stored = await this.putObject(cid, 'record', input.body);
       if (!stored) {
         statuses.push({ cid, cid_kind: 'record', status: 'rejected_bad_cid' });

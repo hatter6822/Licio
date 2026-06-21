@@ -8,6 +8,7 @@
 // `rejected_resource_limit`.  CIDs are computed over the uncompressed canonical
 // bytes (§9.4), so compression never changes a block's identity.
 
+import { SERVER_CAPS } from '../limits/caps.js';
 import { toBufferSource } from '../runtime.js';
 
 /** Compression algorithms available without a dependency. */
@@ -20,9 +21,10 @@ export interface DecompressLimits {
   readonly maxExpansionRatio: number;
 }
 
+// Sourced from the §27.1 caps SSOT (WS-R.14.1a) — no limit is hard-coded here.
 export const DEFAULT_DECOMPRESS_LIMITS: DecompressLimits = {
-  maxUncompressedBytes: 8 * 1024 * 1024,
-  maxExpansionRatio: 100,
+  maxUncompressedBytes: SERVER_CAPS.maxUncompressedBytes,
+  maxExpansionRatio: SERVER_CAPS.maxExpansionRatio,
 };
 
 /** Thrown when decompression exceeds a configured cap (a compression bomb). */
