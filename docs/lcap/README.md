@@ -99,14 +99,17 @@ mounted through the global security middleware:
   proofs/consistency}` — the (unsigned) tree head + RFC 9162 inclusion/consistency
   proofs computed over the §19.1 room log reconstructed from the canonical acceptance
   order; the served proofs verify against an independently-built log;
-- the §29.8 `POST /api/lcap/v2/bundles/export` — a room's content closure (its accepted
-  records, each followed by its proofs then its referenced blocks) repacked from held
-  bytes via an import-captured record→proof/record→block closure index
-  (`indexRecordEdge`/`recordEdges` over migration `0040`); UNSIGNED (each record
-  self-authenticates via its included proof), re-importable, generic filename.  GATED:
-  the POST carries a device-signed, freshness-windowed `export_request` and proceeds only
-  when the requester holds a non-revoked, authority-signed `may_export_bundle` capability
-  for the room (`verifyExportAuthorization`; CSRF-exempt + rate-limited — review #5).
+- the §29.8 `POST /api/lcap/v2/bundles/export` — a room's content closure repacked from
+  held bytes via an import-captured closure index (`indexRecordEdge`/`recordEdges` over
+  migration `0040`).  SELF-CONTAINED + re-validatable: each accepted record is led by the
+  IDENTITY it needs to validate (its cited capability + the signer's device certificate,
+  each with their authority proofs — a record→`identity` edge), then its own proofs, then
+  its referenced blocks, so a re-import into a server holding only the root-of-trust
+  authority keys VALIDATES the contribution (not merely stores it).  UNSIGNED (each record
+  self-authenticates via its included proof), generic filename.  GATED: the POST carries a
+  device-signed, freshness-windowed `export_request` and proceeds only when the requester
+  holds a non-revoked, authority-signed `may_export_bundle` capability for the room
+  (`verifyExportAuthorization`; CSRF-exempt + rate-limited — review #5).
 
 The remaining WS-R cards are **I/O integration** — the WS-R.15.1a bundle-export UI
 flow (the server `POST /bundles/export` is shipped; the authority-signed checkpoint
@@ -279,5 +282,24 @@ on a real insert, so a phantom seq is impossible).  **All review findings are no
 were validated against real Postgres (concurrent accepts get distinct, gap-free seqs;
 concurrent claims admit exactly one winner).
 
-None was launch-blocking (the LCAP server binding is gated/in-memory and pre-production),
-and the pay-to-rank firewall + fail-closed crypto were unaffected throughout.
+A further completeness improvement made the §29.8 export **self-contained**: each record's
+export closure now leads with the IDENTITY it needs to validate (its capability + the
+signer's device certificate, each with authority proofs — a record→`identity` edge), so a
+re-import into a server holding only the root-of-trust authority keys VALIDATES the
+contribution rather than quarantining it (proven by a round-trip test against real
+Postgres).
+
+None of the above was launch-blocking (the LCAP server binding is gated/in-memory and
+pre-production), and the pay-to-rank firewall + fail-closed crypto were unaffected
+throughout.
+
+**Tracked follow-up (not from the review's P1/P2 set): aggregate capability quotas.**  The
+§18.3 chain validator (`@licio/lcap` `validateIdentityChain`) enforces a capability's
+per-event `max_single_event_bytes`, but NOT its *aggregate* quotas (`max_offline_events`,
+`max_total_payload_bytes`) — those require stateful per-(capability) usage accounting that
+`validate()` (a pure, per-record function) cannot hold.  The pure `CapabilityUsageTracker`
+(`@licio/lcap` `identity/sequence.ts`) already implements the math; the closure target is a
+durable per-capability usage counter on the `LcapServerStore` boundary that the server
+increments on accept and checks before accept (parallel to the device-seq index), wired as
+its own focused card so the aggregate-quota enforcement is designed + concurrency-tested
+correctly rather than rushed.
