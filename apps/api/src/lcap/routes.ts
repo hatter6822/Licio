@@ -257,6 +257,9 @@ async function ingestPackFrames(
   // get their §16.11 status here; contributions get theirs from commitBatch.
   const statuses: ObjectStatusV2[] = [];
   const contributions: CommitRecordInput[] = [];
+  // The §29.8 identity-closure edges to index AFTER the frame loop (so every cert frame in
+  // this pack is registered before we resolve a contribution's signer-cert CID).
+  const identityEdges: { recordCid: string; capabilityCid: string; deviceKeyId: string }[] = [];
   for (const [cid, frame] of frames) {
     const cidKind = FRAME_CID_KIND[frame.frameKind];
     const had = await server.hasObject(cid);
@@ -343,12 +346,26 @@ async function ingestPackFrames(
           proofs,
           ...(requires.size > 0 ? { requires: [...requires] } : {}),
         });
+        identityEdges.push({
+          recordCid: cid,
+          capabilityCid: record.capability_cid,
+          deviceKeyId: record.author_device_key_id,
+        });
         break; // commitBatch reports the contribution's status
       }
       default:
         statuses.push({ cid, cid_kind: 'record', status: storedStatus });
         break;
     }
+  }
+
+  // Index each contribution's IDENTITY closure (its cited capability + the signer's device
+  // certificate) for the §29.8 export — done AFTER the full frame loop so every cert frame in
+  // this pack has been registered and its CID is resolvable (pack frame order is not fixed).
+  for (const edge of identityEdges) {
+    await server.indexRecordEdge(edge.recordCid, edge.capabilityCid, 'identity');
+    const certCid = server.deviceCertCid(edge.deviceKeyId);
+    if (certCid !== undefined) await server.indexRecordEdge(edge.recordCid, certCid, 'identity');
   }
 
   const result = await server.commitBatch(contributions);

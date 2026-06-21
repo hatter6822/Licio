@@ -28,8 +28,10 @@ import {
   cidFor,
   DEFAULT_BUDGET,
   type DetachedProofV2,
+  detachedProofV2Schema,
   type ExportAuthorizationResult,
   type ExportRequestV2,
+  encodeWithSchema,
   type GraphGuardNode,
   type GraphGuardResult,
   graphLimitsFromCaps,
@@ -138,6 +140,9 @@ export class LcapIngestServer {
   // revocation's `authority_signature` proof can be resolved by signer id and scope-checked
   // (a revocation carries no authority epoch — the signer id identifies the exact key).
   private readonly authoritySigners = new Map<string, RevocationAuthorityBinding>();
+  // device_key_id → its certificate's record CID, so a contribution's §29.8 export closure can
+  // include the signer cert (resolvable only by device key id, not from the contribution body).
+  private readonly deviceCertCids = new Map<string, string>();
   private readonly revocations = new RevocationIndex();
 
   /**
@@ -195,10 +200,12 @@ export class LcapIngestServer {
   }
 
   /**
-   * The §29.8 export closure for a room: its accepted records in acceptance order,
-   * each immediately followed by its proofs then its referenced blocks (so the
-   * importer meets a record's trust + media before the record itself reorders into
-   * place).  De-duplicated; only the CIDs — the route repacks the held bytes.
+   * The §29.8 export closure for a room: its accepted records in acceptance order, each
+   * preceded by the IDENTITY it needs to validate (its cited capability + the signer's device
+   * certificate, each with their authority proofs) and followed by its own proofs then its
+   * referenced blocks — so the importer meets a record's trust material + media and can
+   * VALIDATE the contribution, not merely store it (a self-contained, re-validatable export).
+   * De-duplicated; only the CIDs — the route repacks the held bytes.
    */
   async exportRoomClosureCids(roomId: string): Promise<string[]> {
     const records = await this.store.roomLog(roomId);
@@ -210,9 +217,17 @@ export class LcapIngestServer {
         out.push(cid);
       }
     };
+    const pushWithProofs = async (cid: string): Promise<void> => {
+      push(cid);
+      for (const proofCid of await this.store.recordEdges(cid, 'proof')) push(proofCid);
+    };
     for (const recordCid of records) {
-      push(recordCid);
-      for (const proofCid of await this.store.recordEdges(recordCid, 'proof')) push(proofCid);
+      // Identity closure FIRST (capability + signer cert + their authority proofs), then the
+      // record + its proofs, then its blocks.  A shared capability/cert is emitted once.
+      for (const identityCid of await this.store.recordEdges(recordCid, 'identity')) {
+        await pushWithProofs(identityCid);
+      }
+      await pushWithProofs(recordCid);
       for (const blockCid of await this.store.recordEdges(recordCid, 'block')) push(blockCid);
     }
     return out;
@@ -247,13 +262,43 @@ export class LcapIngestServer {
       bundle.certificate.device_key_id,
       await importPublicKeyCose(bundle.certificate.public_key_cose),
     );
+    // Durably store the cert + its authority proof + index its CID so it is fetchable
+    // (GET /records) and can join a §29.8 export closure even when registered out-of-band.
+    const certCid = await cidFor('record', bundle.body);
+    this.deviceCertCids.set(bundle.certificate.device_key_id, certCid);
+    await this.storeIdentityClosure(certCid, bundle.body, bundle.proof);
     return 'registered';
+  }
+
+  /** The registered device certificate's record CID for a device key id (export closure). */
+  deviceCertCid(deviceKeyId: string): string | undefined {
+    return this.deviceCertCids.get(deviceKeyId);
+  }
+
+  /**
+   * Durably store an identity record's body + its authority proof, and index the
+   * record→proof edge, so the §29.8 export closure carries the full, re-validatable
+   * identity material (not just the bare record) regardless of registration path.
+   */
+  private async storeIdentityClosure(
+    recordCid: string,
+    body: Uint8Array,
+    proof: DetachedProofV2,
+  ): Promise<void> {
+    await this.store.storeObject(recordCid, 'record', body);
+    const proofBytes = encodeWithSchema(detachedProofV2Schema, proof);
+    const proofCid = await cidFor('proof', proofBytes);
+    await this.store.storeObject(proofCid, 'proof', proofBytes);
+    await this.store.indexRecordEdge(recordCid, proofCid, 'proof');
   }
 
   /** Register a room capability; returns its CID (the resolver + want key). */
   async registerCapability(bundle: CapabilityBundle): Promise<string> {
     const cid = await cidFor('record', bundle.body);
     this.capabilities.set(cid, bundle);
+    // Durably store the capability + its room-authority proof so it is fetchable + can join
+    // an export closure as re-validatable identity material.
+    await this.storeIdentityClosure(cid, bundle.body, bundle.proof);
     return cid;
   }
 

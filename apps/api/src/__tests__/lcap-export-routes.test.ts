@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-R.12.4 — the §29.8 bundle EXPORT endpoint (GET /api/lcap/v2/bundles/export).
-// A room's content closure (accepted records + each record's proofs + referenced
-// blocks) is gathered via the import-captured record→proof/record→block index and
-// repacked from held bytes.  Proven by a round trip: import a pack → export the room
-// → re-read the exported pack and confirm the full closure is present + re-importable.
+// WS-R.12.4 — the §29.8 bundle EXPORT endpoint (POST /api/lcap/v2/bundles/export),
+// capability-gated (review #5).  A room's content closure — each record led by the
+// IDENTITY it needs to validate (its capability + the signer's device certificate, each
+// with authority proofs), then its own proofs + referenced blocks — is gathered via the
+// import-captured closure index and repacked from held bytes.  Proven by a round trip:
+// import a pack → export → re-import into a FRESH server holding only the root authority
+// keys and confirm the contribution VALIDATES (a self-contained, re-validatable export).
 
 import {
   BUNDLE_MIME,
@@ -21,12 +23,17 @@ import { createLcapRoutes } from '../lcap/routes.js';
 import { LcapIngestServer } from '../lcap/server-ingest.js';
 import { setLcapIngestServer } from '../lcap/service.js';
 import {
+  ACCOUNT,
+  ACCOUNT_AUTHORITY_SIGNER,
+  ACCOUNT_EPOCH,
   buildLcapFixtures,
   type LcapFixtures,
   mintExportRequest,
   NET,
   NOW,
+  POLICY_EPOCH,
   ROOM,
+  ROOM_AUTHORITY_SIGNER,
   registerIdentity,
 } from './lcap-fixtures.js';
 
@@ -114,11 +121,45 @@ describe('POST /bundles/export — §29.8 capability-gated room content closure 
     for (const frame of exported.pack.frames.values()) expect(frame.cidVerified).toBe(true);
   });
 
-  it('orders each record immediately before its proofs and blocks', async () => {
+  it('leads each record with its identity closure (capability + signer cert), then proofs + blocks', async () => {
     const srv = await importedServer();
     const cids = await srv.exportRoomClosureCids(ROOM);
-    expect(cids[0]).toBe(fx.recordCid);
-    expect(cids).toEqual([fx.recordCid, proofCid, blockCid]);
+    const certCid = await cidFor('record', fx.certBundle.body);
+    // The identity records the contribution needs to VALIDATE lead the closure, so a re-import
+    // has the trust material; the contribution then precedes its own proof, then its block.
+    expect(cids).toContain(fx.capabilityCid);
+    expect(cids).toContain(certCid);
+    expect(cids.indexOf(fx.capabilityCid)).toBeLessThan(cids.indexOf(fx.recordCid));
+    expect(cids.indexOf(certCid)).toBeLessThan(cids.indexOf(fx.recordCid));
+    expect(cids.indexOf(fx.recordCid)).toBeLessThan(cids.indexOf(proofCid));
+    expect(cids.indexOf(proofCid)).toBeLessThan(cids.indexOf(blockCid));
+  });
+
+  it('exports a SELF-CONTAINED bundle: re-import into a fresh server validates the contribution', async () => {
+    const srv = await importedServer();
+    const res = await postExport(srv, await mintExportRequest(fx));
+    expect(res.status).toBe(200);
+    const bundle = new Uint8Array(await res.arrayBuffer());
+
+    // A fresh server holding ONLY the root-of-trust authority keys — NOT the cert/capability.
+    const fresh = new LcapIngestServer(NET, () => NOW);
+    fresh.registerAccountAuthorityKey(
+      ACCOUNT,
+      ACCOUNT_EPOCH,
+      fx.accountAuthority.publicKey,
+      ACCOUNT_AUTHORITY_SIGNER,
+    );
+    fresh.registerRoomAuthorityKey(
+      ROOM,
+      POLICY_EPOCH,
+      fx.roomAuthority.publicKey,
+      ROOM_AUTHORITY_SIGNER,
+    );
+    const imp = await createLcapRoutes(fresh).request('/packs', { method: 'POST', body: bundle });
+    expect(imp.status).toBe(200);
+    // The export carried the cert + capability + their authority proofs, so the contribution
+    // VALIDATES against the re-imported identity (not merely stored) → accepted.
+    expect(await fresh.isAccepted(fx.recordCid)).toBe(true);
   });
 
   it('rejects an unsigned/malformed export request with 400', async () => {

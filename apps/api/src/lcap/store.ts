@@ -16,8 +16,11 @@ import type { CidKind } from '@licio/lcap';
 
 export type LcapContentKind = Extract<CidKind, 'record' | 'proof' | 'block' | 'chunk'>;
 
-/** A record's export-closure edge kind: a proof that attests it, or a block it references. */
-export type RecordEdgeRelation = 'proof' | 'block';
+/**
+ * A record's export-closure edge kind: a proof that attests it, a block it references, or an
+ * identity record it needs to validate (its cited capability / the signer's device certificate).
+ */
+export type RecordEdgeRelation = 'proof' | 'block' | 'identity';
 
 export interface StoredObject {
   readonly kind: LcapContentKind;
