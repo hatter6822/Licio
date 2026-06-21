@@ -54,6 +54,25 @@ describe('SignalMailbox — opaque store-and-forward', () => {
     const blobs = [new Uint8Array([1]), new Uint8Array([2, 2]), new Uint8Array()];
     expect(unframeBlobs(frameBlobs(blobs))).toEqual(blobs);
   });
+
+  it('unframes UNTRUSTED input fail-closed: malformed/truncated frames never throw', () => {
+    // The drain response is parsed from an untrusted network body, so unframeBlobs must
+    // fail closed: return the well-formed prefix (or nothing), never throw or over-read.
+    expect(unframeBlobs(new Uint8Array())).toEqual([]); // not even a count
+    // A declared count of 3 but only one complete frame present → just that frame.
+    const oneGood = frameBlobs([new Uint8Array([7, 7])]);
+    const forgedCount = new Uint8Array(oneGood.length);
+    forgedCount.set(oneGood);
+    forgedCount[0] = 3; // claim 3 blobs; only 1 is actually encoded
+    expect(unframeBlobs(forgedCount)).toEqual([new Uint8Array([7, 7])]);
+    // A length prefix that overruns the buffer stops the parse (no over-read).
+    // Layout: count=1, len=100 (one byte, <0x80), then only 2 payload bytes present.
+    expect(unframeBlobs(new Uint8Array([1, 100, 9, 9]))).toEqual([]);
+    // A truncated length varint (high-bit set, no continuation) stops cleanly.
+    expect(unframeBlobs(new Uint8Array([1, 0x80]))).toEqual([]);
+    // A forged enormous count cannot spin or over-allocate — the loop is buffer-bounded.
+    expect(unframeBlobs(new Uint8Array([0xff, 0xff, 0xff, 0x7f]))).toEqual([]);
+  });
 });
 
 describe('signaling routes (§29 /p2p/signal)', () => {

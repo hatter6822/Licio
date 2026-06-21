@@ -60,7 +60,11 @@ export type PublishOutcome =
   | { readonly ok: true; readonly ipfsCid: string }
   | {
       readonly ok: false;
-      readonly reason: PublishDecision['reason'] | 'no_pinning_endpoint' | 'pin_error';
+      readonly reason:
+        | PublishDecision['reason']
+        | 'no_pinning_endpoint'
+        | 'cid_mismatch'
+        | 'pin_error';
     };
 
 export class IpfsBridge {
@@ -104,6 +108,9 @@ export class IpfsBridge {
       return { ok: false, reason: decision.reason === '' ? 'not_public' : decision.reason };
     }
     if (!this.config.pinningUrl) return { ok: false, reason: 'no_pinning_endpoint' };
+    // Never publish bytes that do not hash to the block_cid we are announcing them under
+    // (a caller bug would otherwise pin mislabeled content into the public DHT).
+    if (!(await verifyCid(blockCid, bytes))) return { ok: false, reason: 'cid_mismatch' };
     const ipfsCid = ipfsCidForBlockCid(blockCid);
     try {
       const response = await this.fetchFn(this.config.pinningUrl, {

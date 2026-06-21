@@ -145,4 +145,70 @@ describe('WebRTC data-channel transport (§22.6)', () => {
     ch.fireClose();
     expect(await pending).toBeNull();
   });
+
+  it('coerces ArrayBuffer and string payloads to bytes and ignores junk', async () => {
+    const ch = fakeChannel();
+    const t = new WebrtcTransport(ch);
+    // An ArrayBuffer (the real RTCDataChannel binaryType='arraybuffer' shape).
+    ch.deliver(new Uint8Array([5, 6, 7]).buffer as unknown as Uint8Array);
+    expect(await t.receive()).toEqual(new Uint8Array([5, 6, 7]));
+    // A string payload (a peer that sent text) is UTF-8 encoded.
+    ch.onmessage?.({ data: 'hi' });
+    expect(await t.receive()).toEqual(new TextEncoder().encode('hi'));
+    // A non-coercible payload (a number) is dropped, not buffered.
+    ch.onmessage?.({ data: 42 });
+    const pending = t.receive();
+    ch.deliver(new Uint8Array([8]));
+    expect(await pending).toEqual(new Uint8Array([8]));
+  });
+
+  it('open() resolves when the channel is open and throws once it is not', async () => {
+    const ch = fakeChannel();
+    const t = new WebrtcTransport(ch);
+    await expect(t.open()).resolves.toBeUndefined();
+    ch.readyState = 'closed';
+    await expect(t.open()).rejects.toThrow(/not open/);
+  });
+
+  it('send() writes to an open channel and refuses once it has closed', async () => {
+    const sent: Uint8Array[] = [];
+    const ch = fakeChannel();
+    ch.send = (b) => sent.push(b);
+    const t = new WebrtcTransport(ch);
+    await t.send(new Uint8Array([1, 2, 3]));
+    expect(sent).toEqual([new Uint8Array([1, 2, 3])]);
+    ch.readyState = 'closing';
+    await expect(t.send(new Uint8Array([4]))).rejects.toThrow(/closed before send/);
+  });
+
+  it('receive() honours an abort signal by resolving null and clearing the waiter', async () => {
+    const ch = fakeChannel();
+    const t = new WebrtcTransport(ch);
+    const controller = new AbortController();
+    const pending = t.receive(controller.signal);
+    controller.abort();
+    expect(await pending).toBeNull();
+    // A later delivery does not erroneously resolve the already-aborted receive.
+    ch.deliver(new Uint8Array([9]));
+    expect(await t.receive()).toEqual(new Uint8Array([9]));
+  });
+
+  it('close() marks the transport closed and closes a still-open channel', async () => {
+    let closedCalls = 0;
+    const ch = fakeChannel();
+    const realClose = ch.close;
+    ch.close = () => {
+      closedCalls += 1;
+      realClose();
+    };
+    const t = new WebrtcTransport(ch);
+    await t.close();
+    expect(closedCalls).toBe(1);
+    expect(ch.readyState).toBe('closed');
+    // Idempotent: a second close does not call channel.close again (already closed).
+    await t.close();
+    expect(closedCalls).toBe(1);
+    // A subsequent receive returns null (closed).
+    expect(await t.receive()).toBeNull();
+  });
 });

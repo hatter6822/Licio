@@ -54,20 +54,29 @@ function ab(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
     : new Uint8Array(bytes);
 }
 
-/** The AAD binding a seal to its routing context (room + peer pair). */
+/**
+ * The AAD binding a seal to its routing context (room + peer pair).  Each variable
+ * component is LENGTH-PREFIXED (4-byte big-endian) so the encoding is unambiguous —
+ * `(room=X, from=Y)` can never serialize to the same bytes as `(room=X', from=Y')`,
+ * regardless of the components' contents or lengths — so a sealed blob cannot be opened
+ * in any context but the one it was sealed for.
+ */
 function aad(env: Pick<SignalEnvelopeV2, 'room_id_hash' | 'from' | 'to'>): Uint8Array {
-  const prefix = new TextEncoder().encode('lcap:p2p:signal:v2');
-  const from = new TextEncoder().encode(`|${env.from}|`);
-  const to = new TextEncoder().encode(`${env.to}`);
-  const out = new Uint8Array(prefix.length + env.room_id_hash.length + from.length + to.length);
-  let o = 0;
-  out.set(prefix, o);
-  o += prefix.length;
-  out.set(env.room_id_hash, o);
-  o += env.room_id_hash.length;
-  out.set(from, o);
-  o += from.length;
-  out.set(to, o);
+  const enc = new TextEncoder();
+  const parts = [env.room_id_hash, enc.encode(env.from), enc.encode(env.to)];
+  const prefix = enc.encode('lcap:p2p:signal:v2');
+  let total = prefix.length;
+  for (const part of parts) total += 4 + part.length;
+  const out = new Uint8Array(total);
+  const view = new DataView(out.buffer);
+  out.set(prefix, 0);
+  let o = prefix.length;
+  for (const part of parts) {
+    view.setUint32(o, part.length, false); // big-endian length prefix
+    o += 4;
+    out.set(part, o);
+    o += part.length;
+  }
   return out;
 }
 

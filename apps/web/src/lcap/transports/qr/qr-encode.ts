@@ -258,28 +258,82 @@ function applyMask(base: Matrix, functionMap: readonly boolean[][], maskIndex: n
   return m;
 }
 
-/** Penalty rule 1 (runs of 5+ same-colour modules) — enough to pick a decodable mask. */
-function penalty(m: Matrix): number {
-  const size = m.length;
+// The two §8.8.2 rule-3 finder-like patterns (1:1:3:1:1 with a 4-module light run).
+const RULE3_PATTERNS: readonly (readonly number[])[] = [
+  [1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0],
+  [0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1],
+];
+
+/** Rule-3 penalty over one line (row or column), via a positional getter. */
+function rule3Line(get: (k: number) => number, len: number): number {
   let score = 0;
-  for (let r = 0; r < size; r++) {
-    for (let c = 0; c < size; c++) {
-      for (const [dr, dc] of [
-        [0, 1],
-        [1, 0],
-      ] as const) {
-        let run = 1;
-        while (
-          c + dc * run < size &&
-          r + dr * run < size &&
-          mget(m, r + dr * run, c + dc * run) === mget(m, r, c)
-        ) {
-          run++;
+  for (let j = 0; j + 11 <= len; j++) {
+    for (const pattern of RULE3_PATTERNS) {
+      let match = true;
+      for (let k = 0; k < 11; k++) {
+        if (get(j + k) !== pattern[k]) {
+          match = false;
+          break;
         }
-        if (run >= 5) score += 3 + (run - 5);
+      }
+      if (match) score += 40;
+    }
+  }
+  return score;
+}
+
+/**
+ * The full ISO/IEC 18004 §8.8.2 mask penalty — all FOUR rules, so mask selection is
+ * spec-correct (not just "a decodable mask"): (1) runs of 5+ same-colour modules in
+ * rows/columns, each MAXIMAL run scored once; (2) 2×2 same-colour blocks; (3) the
+ * finder-like 1:1:3:1:1 pattern in rows/columns; (4) the dark-module proportion's
+ * deviation from 50%.
+ */
+function penalty(m: Matrix): number {
+  const n = m.length;
+  let score = 0;
+
+  // Rule 1 — maximal same-colour runs of length ≥5 in each row and column.
+  for (let i = 0; i < n; i++) {
+    for (const axis of [0, 1] as const) {
+      let runColor = -1;
+      let runLen = 0;
+      for (let j = 0; j < n; j++) {
+        const v = axis === 0 ? mget(m, i, j) : mget(m, j, i);
+        if (v === runColor) {
+          runLen += 1;
+        } else {
+          if (runLen >= 5) score += 3 + (runLen - 5);
+          runColor = v;
+          runLen = 1;
+        }
+      }
+      if (runLen >= 5) score += 3 + (runLen - 5);
+    }
+  }
+
+  // Rule 2 — 2×2 blocks of one colour (3 points each).
+  for (let r = 0; r < n - 1; r++) {
+    for (let c = 0; c < n - 1; c++) {
+      const v = mget(m, r, c);
+      if (v === mget(m, r, c + 1) && v === mget(m, r + 1, c) && v === mget(m, r + 1, c + 1)) {
+        score += 3;
       }
     }
   }
+
+  // Rule 3 — the finder-like pattern in rows and columns (40 points each).
+  for (let i = 0; i < n; i++) {
+    score += rule3Line((k) => mget(m, i, k), n);
+    score += rule3Line((k) => mget(m, k, i), n);
+  }
+
+  // Rule 4 — dark-module proportion deviation from 50%.
+  let dark = 0;
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (mget(m, r, c) === 1) dark += 1;
+  const percent = (dark * 100) / (n * n);
+  score += Math.floor(Math.abs(percent - 50) / 5) * 10;
+
   return score;
 }
 

@@ -16,9 +16,17 @@ import {
   bundleFilename,
   exportDisclosure,
   gatherRoomExport,
+  prepareRoomExport,
 } from './bundle-export.js';
 import { commitImportedBundle, importBundleObjects, readBundleForImport } from './bundle-import.js';
-import { LCAP_DB_VERSION, LCAP_MIGRATIONS, LCAP_STORE, openLcapDb } from './db.js';
+import {
+  getLcapDb,
+  LCAP_DB_VERSION,
+  LCAP_MIGRATIONS,
+  LCAP_STORE,
+  openLcapDb,
+  resetLcapDbConnection,
+} from './db.js';
 import { collectByCursor, type RecordRow } from './store.js';
 
 let db: IDBDatabase;
@@ -124,6 +132,34 @@ describe('bundle export → import round-trip (WS-R.15.1a/b)', () => {
     expect(disclosure.hasInRoomMetadata).toBe(true);
     expect(disclosure.recipientsMayCopyOnward).toBe(true);
     expect(disclosure.approxSizeBytes).toBeGreaterThan(0);
+  });
+
+  it('prepareRoomExport gathers + discloses against the shared lcap_v2 connection', async () => {
+    // Drive the memoised-connection convenience wrapper against the default db.
+    resetLcapDbConnection();
+    const shared = await getLcapDb();
+    const body = new TextEncoder().encode('shared-conn record');
+    const recordCid = await cidFor('record', body);
+    await new Promise<void>((res, rej) => {
+      const tx = shared.transaction(LCAP_STORE.records, 'readwrite');
+      tx.objectStore(LCAP_STORE.records).put({
+        recordCid,
+        body,
+        kind: 'contribution_event',
+        lane: 'T1',
+        priority: 1,
+        roomHash: 'room-shared',
+        state: 'proof_verified',
+        size: body.length,
+      });
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+    });
+    const prepared = await prepareRoomExport('room-shared');
+    expect(prepared.recordCount).toBe(1);
+    expect(prepared.disclosure.roomIds).toEqual(['room-shared']);
+    shared.close();
+    resetLcapDbConnection();
   });
 });
 

@@ -10,7 +10,7 @@
 // candidates / peer IPs are a live-connection property of the direct browser↔browser
 // channel only — they never reach this server.
 
-import { readUvarint, writeUvarint } from '@licio/lcap';
+import { readUvarint, type UvarintRead, writeUvarint } from '@licio/lcap';
 
 /** A pending opaque blob queued for a recipient, with its enqueue time (for TTL). */
 interface QueuedBlob {
@@ -113,15 +113,32 @@ export function frameBlobs(blobs: readonly Uint8Array[]): Uint8Array {
   return out;
 }
 
-/** Inverse of {@link frameBlobs} (the client drains its pending blobs with this). */
+/**
+ * Inverse of {@link frameBlobs} (the client drains its pending blobs with this).  Parses
+ * an UNTRUSTED network response, so it fails closed: a truncated or malformed frame stops
+ * the parse and returns the well-formed prefix rather than throwing, and the loop is
+ * bounded by the buffer length (each iteration consumes ≥1 byte) so a forged `count` can
+ * never spin or over-allocate.
+ */
 export function unframeBlobs(bytes: Uint8Array): Uint8Array[] {
   const out: Uint8Array[] = [];
   let pos = 0;
-  const count = readUvarint(bytes, pos);
+  let count: UvarintRead;
+  try {
+    count = readUvarint(bytes, pos);
+  } catch {
+    return out; // not even a count → nothing to parse
+  }
   pos += count.bytesRead;
-  for (let i = 0; i < count.value; i++) {
-    const len = readUvarint(bytes, pos);
+  for (let i = 0; i < count.value && pos < bytes.length; i++) {
+    let len: UvarintRead;
+    try {
+      len = readUvarint(bytes, pos);
+    } catch {
+      break; // truncated length prefix
+    }
     pos += len.bytesRead;
+    if (len.value > bytes.length - pos) break; // declared payload overruns the buffer
     out.push(bytes.slice(pos, pos + len.value));
     pos += len.value;
   }
