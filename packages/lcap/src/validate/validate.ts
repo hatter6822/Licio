@@ -159,6 +159,10 @@ export async function validate(input: ValidationInput): Promise<ValidationResult
     const chain = await validateIdentityChain(record, input.identityDeps, {
       networkId: input.ctx.networkId,
       nowMs: input.ctx.nowMs,
+      // Pass the signed record's byte size so the capability's `max_single_event_bytes`
+      // quota is actually enforced (it is a no-op when `eventBytes` is absent) — a valid
+      // capability must not let an oversized offline event through (WS-R.1 §18.3 step 9).
+      eventBytes: input.body.length,
       ...(input.ctx.minAccountEpoch !== undefined
         ? { minAccountEpoch: input.ctx.minAccountEpoch }
         : {}),

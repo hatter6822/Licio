@@ -32,7 +32,12 @@ export interface ImportResult {
 /** Import a parsed pack, producing a per-object status and the storable set. */
 export function importPack(pack: ParsedPack, options: ImportOptions = {}): ImportResult {
   const alreadyHave = options.alreadyHave ?? new Set<string>();
-  const present = new Set(pack.frames.keys());
+  // A dependency counts as present only if it is a frame whose CID VERIFIED (and will
+  // therefore actually be stored) or one already held — a corrupt `rejected_bad_cid`
+  // frame must NOT satisfy another object's `deps` (WS-R.4.3), else that object would be
+  // imported with a dependency that is in fact absent.
+  const present = new Set<string>();
+  for (const [cid, frame] of pack.frames) if (frame.cidVerified) present.add(cid);
   const entryByCid = new Map(pack.entries.map((entry) => [entry.cid, entry]));
   const statuses: ObjectStatusV2[] = [];
   const imported = new Map<string, ParsedFrame>();

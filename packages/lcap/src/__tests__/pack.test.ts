@@ -20,6 +20,35 @@ import {
   writePack,
   writeUvarint,
 } from '../pack/index.js';
+import { decodeWithSchema, encodeWithSchema } from '../schemas/codec.js';
+import { packFrameHeaderV2Schema, packHeaderV2Schema, packTableV2Schema } from '../schemas/pack.js';
+
+/** Concatenate byte chunks (test helper for hand-crafting packs). */
+function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const c of chunks) {
+    out.set(c, o);
+    o += c.length;
+  }
+  return out;
+}
+
+/** Build one wire frame `uvarint(headerLen) || header || payload` (test helper). */
+function rawFrame(
+  frameKind: 'record_body' | 'proof' | 'block' | 'chunk',
+  cid: string,
+  payload: Uint8Array,
+): Uint8Array {
+  const header = encodeWithSchema(packFrameHeaderV2Schema, {
+    frame_kind: frameKind,
+    cid,
+    payload_len: payload.length,
+  });
+  return concatBytes([writeUvarint(header.length), header, payload]);
+}
 
 const CAPS = {
   maxPackBytes: 1 << 20,
@@ -149,6 +178,134 @@ describe('writer + reader (WS-R.4.1/4.2)', () => {
     expect(read.pack.frames.get(wrongCid)?.cidVerified).toBe(false);
     const { statuses } = importPack(read.pack);
     expect(statuses[0]?.status).toBe('rejected_bad_cid');
+  });
+});
+
+describe('table↔frame integrity + table cap (WS-R.4.2)', () => {
+  it('rejects a pack carrying a frame absent from the object table', async () => {
+    // A malicious bundle could advertise benign/zero objects in the table (what the UI
+    // discloses) yet smuggle extra frames the importer commits.  The reader must reject.
+    const aPayload = new TextEncoder().encode('declared record A');
+    const aCid = await cidFor('record', aPayload);
+    const aFrame = rawFrame('record_body', aCid, aPayload);
+    const hiddenPayload = new TextEncoder().encode('HIDDEN block not in the table');
+    const hiddenCid = await cidFor('block', hiddenPayload);
+
+    const header = encodeWithSchema(packHeaderV2Schema, {
+      pack_version: 2,
+      transport_profile: 'manual_bundle',
+      privacy_label: 'public',
+      max_uncompressed_bytes: 1 << 16,
+      contains_lanes: ['T1'],
+    });
+    const table = encodeWithSchema(packTableV2Schema, {
+      entries: [
+        {
+          cid: aCid,
+          cid_kind: 'record',
+          lane: 'T1',
+          priority: 1,
+          offset: 0,
+          length: aFrame.length,
+        },
+      ],
+    });
+    const pack = concatBytes([
+      PACK_MAGIC,
+      writeUvarint(header.length),
+      header,
+      writeUvarint(table.length),
+      table,
+      aFrame,
+      rawFrame('block', hiddenCid, hiddenPayload), // extra frame — NOT in the table
+    ]);
+    const res = await readPack(pack, CAPS);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.status).toBe('table_frame_mismatch');
+  });
+
+  it('rejects a pack whose frame kind diverges from its table entry', async () => {
+    const payload = new TextEncoder().encode('payload');
+    const cid = await cidFor('block', payload);
+    const header = encodeWithSchema(packHeaderV2Schema, {
+      pack_version: 2,
+      transport_profile: 'manual_bundle',
+      privacy_label: 'public',
+      max_uncompressed_bytes: 1 << 16,
+      contains_lanes: ['T1'],
+    });
+    // The table declares the cid as a `record`; the frame carries it as a `block`.
+    const blockFrame = rawFrame('block', cid, payload);
+    const table = encodeWithSchema(packTableV2Schema, {
+      entries: [
+        { cid, cid_kind: 'record', lane: 'T1', priority: 1, offset: 0, length: blockFrame.length },
+      ],
+    });
+    const pack = concatBytes([
+      PACK_MAGIC,
+      writeUvarint(header.length),
+      header,
+      writeUvarint(table.length),
+      table,
+      blockFrame,
+    ]);
+    const res = await readPack(pack, CAPS);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.status).toBe('table_frame_mismatch');
+  });
+
+  it('does not let a corrupt dependency frame satisfy another object (quarantines it)', async () => {
+    // A record depends on a block whose frame is present but fails CID verification.  The
+    // corrupt frame must NOT count as the dependency being present (WS-R.4.3): the record
+    // quarantines rather than importing with an absent dependency.
+    const depPayload = new TextEncoder().encode('the real dependency block');
+    const depCid = await cidFor('block', depPayload);
+    const recPayload = new TextEncoder().encode('a record that needs the block');
+    const rec = await obj('record_body', recPayload, { deps: [depCid] });
+    const corruptDep: PackObject = {
+      cid: depCid, // declared as depCid…
+      cidKind: 'block',
+      frameKind: 'block',
+      payload: new TextEncoder().encode('CORRUPTED — does not hash to depCid'), // …but corrupt
+      lane: 'B4',
+      priority: 4,
+    };
+    const pack = writePack({
+      objects: [rec, corruptDep],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1 << 16,
+    });
+    const read = await readPack(pack, CAPS); // table↔frame cids match (only the payload is bad)
+    expect(read.ok).toBe(true);
+    if (!read.ok) return;
+    const result = importPack(read.pack);
+    const byCid = new Map(result.statuses.map((s) => [s.cid, s.status]));
+    expect(byCid.get(depCid)).toBe('rejected_bad_cid');
+    expect(byCid.get(rec.cid)).toBe('quarantined_missing_dependency');
+    expect(result.imported.has(rec.cid)).toBe(false);
+  });
+
+  it('decodeWithSchema honors an explicit decode limit (the reader passes the table cap)', async () => {
+    // The reader decodes the table up to maxTableBytes, not the default 1 MiB LDC limit,
+    // so a table within the configured cap is not spuriously rejected (WS-R.14.1a).
+    const cid = await cidFor('record', new Uint8Array([1]));
+    const bytes = encodeWithSchema(packTableV2Schema, {
+      entries: [{ cid, cid_kind: 'record', lane: 'T1', priority: 1, offset: 0, length: 1 }],
+    });
+    expect(() =>
+      decodeWithSchema(packTableV2Schema, bytes, {
+        maxDepth: 16,
+        maxBytes: bytes.length - 1, // too tight → rejected
+        maxItems: 1000,
+      }),
+    ).toThrow();
+    const ok = decodeWithSchema(packTableV2Schema, bytes, {
+      maxDepth: 16,
+      maxBytes: bytes.length, // sufficient → decodes
+      maxItems: 1000,
+    });
+    expect(ok.entries.length).toBe(1);
   });
 });
 

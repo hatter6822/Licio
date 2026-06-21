@@ -7,6 +7,7 @@
 // establishes integrity (CID↔payload) and structure; schema/proof/policy
 // decisions belong to the importer + `validate`.
 
+import { DEFAULT_DECODE_LIMITS } from '../cbor/types.js';
 import { type CidKind, cidFor } from '../cid/index.js';
 import { SERVER_CAPS } from '../limits/caps.js';
 import { decodeWithSchema } from '../schemas/codec.js';
@@ -69,7 +70,8 @@ export type PackReadStatus =
   | 'truncated'
   | 'bad_header_schema'
   | 'bad_table_schema'
-  | 'bad_frame_schema';
+  | 'bad_frame_schema'
+  | 'table_frame_mismatch';
 
 const FRAME_KIND_TO_CID: Readonly<Record<PackFrameHeaderV2['frame_kind'], CidKind>> = {
   record_body: 'record',
@@ -142,7 +144,14 @@ export async function readPack(
   if (pos + tableLen > bytes.length) return { ok: false, status: 'truncated' };
   let entries: PackTableEntryV2[];
   try {
-    entries = decodeWithSchema(packTableV2Schema, bytes.slice(pos, pos + tableLen)).entries;
+    // Decode the table up to the CONFIGURED table cap, not the default 1 MiB LDC
+    // limit: a table within `maxTableBytes` must not be rejected as bad schema
+    // (WS-R.14.1a).  `maxBytes` already bounds the work, so `maxItems` rides it.
+    entries = decodeWithSchema(packTableV2Schema, bytes.slice(pos, pos + tableLen), {
+      maxDepth: DEFAULT_DECODE_LIMITS.maxDepth,
+      maxBytes: caps.maxTableBytes,
+      maxItems: caps.maxTableBytes,
+    }).entries;
   } catch {
     return { ok: false, status: 'bad_table_schema' };
   }
@@ -183,6 +192,23 @@ export async function readPack(
       payload,
       cidVerified: expectedCid === frameHeader.cid,
     });
+  }
+
+  // Enforce the writer's strict 1:1 table↔frame correspondence (WS-R.4.2): every table
+  // entry has exactly its frame (matching cid + kind) and there are NO extra frames.
+  // The UI summary/disclosure and the §27.2 graph guard read `entries`, while import /
+  // ingest iterate `frames` — so a pack whose two halves diverge could advertise zero or
+  // benign objects yet commit hidden frames.  Reject any divergence before returning ok.
+  const entryCids = new Set<string>();
+  for (const entry of entries) {
+    entryCids.add(entry.cid);
+    const frame = frames.get(entry.cid);
+    if (!frame || FRAME_KIND_TO_CID[frame.frameKind] !== entry.cid_kind) {
+      return { ok: false, status: 'table_frame_mismatch' }; // missing or kind-mismatched frame
+    }
+  }
+  if (frames.size !== entryCids.size) {
+    return { ok: false, status: 'table_frame_mismatch' }; // a frame with no table entry
   }
 
   return { ok: true, pack: { header, entries, frames } };

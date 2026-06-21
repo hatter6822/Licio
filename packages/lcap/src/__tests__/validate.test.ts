@@ -216,6 +216,31 @@ describe('stage 1 — integrity + proof (WS-R.8.2a)', () => {
 });
 
 describe('stage 2 — authority chain (WS-R.8.2b)', () => {
+  it('rejects an event over the capability single-event quota (rejected_quota)', async () => {
+    // The fixture capability caps a single event at 1000 bytes.  validate must thread the
+    // signed record's byte size into the chain so the quota is enforced (WS-R.1 §18.3
+    // step 9); absent the size the chain would wrongly reach authorized_provisional.
+    const oversized: ContributionEventRecordV2 = {
+      ...contribution,
+      client_nonce: new Uint8Array(2000).fill(7), // pushes the body past max_single_event_bytes
+    };
+    const oversizedBody = encodeContributionEvent(oversized);
+    expect(oversizedBody.length).toBeGreaterThan(1000);
+    const oversizedCid = await cidFor('record', oversizedBody);
+    const oversizedProof = await buildAndSign({
+      privateKey: device.privateKey,
+      signerKeyId: 'key-1',
+      proofKind: 'device_signature',
+      recordKind: 'contribution_event',
+      recordBody: oversizedBody,
+      networkId: NET,
+    });
+    const result = await validate(
+      input({ body: oversizedBody, recordCid: oversizedCid, proofs: [oversizedProof] }),
+    );
+    expect(result.rejection).toBe('rejected_quota');
+  });
+
   it('reaches authorized_provisional on a full valid chain', async () => {
     const result = await validate(input());
     expect(result.state).toBe('authorized_provisional');

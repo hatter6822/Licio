@@ -10,7 +10,7 @@
 import type { z } from 'zod';
 import { decode } from '../cbor/decode.js';
 import { encode } from '../cbor/encode.js';
-import type { LdcMap, LdcValue } from '../cbor/types.js';
+import type { LdcDecodeLimits, LdcMap, LdcValue } from '../cbor/types.js';
 import { isUint8Array } from '../runtime.js';
 import { type DetachedProofV2Record, detachedProofV2Schema } from './proof.js';
 import {
@@ -89,9 +89,19 @@ export function plainToLdc(value: unknown): LdcValue {
   }
 }
 
-/** Decode canonical LDC bytes and strict-validate them through `schema`. */
-export function decodeWithSchema<T>(schema: z.ZodType<T>, bytes: Uint8Array): T {
-  return schema.parse(ldcToPlain(decode(bytes)));
+/**
+ * Decode canonical LDC bytes and strict-validate them through `schema`.  An optional
+ * `limits` raises (or tightens) the LDC decode budget for THIS call — the pack reader
+ * passes its configured `maxTableBytes`/`maxEntries` here so a table that is within the
+ * advertised §27.1 cap but larger than the default 1 MiB LDC limit decodes instead of
+ * being spuriously rejected as `bad_table_schema` (WS-R.14.1a).
+ */
+export function decodeWithSchema<T>(
+  schema: z.ZodType<T>,
+  bytes: Uint8Array,
+  limits?: LdcDecodeLimits,
+): T {
+  return schema.parse(ldcToPlain(limits ? decode(bytes, limits) : decode(bytes)));
 }
 
 /** Strict-validate `value` through `schema` and re-encode it canonically. */
