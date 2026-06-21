@@ -126,8 +126,21 @@ export type LcapRecordV2 =
 
 /**
  * Decode a record body and route it to the schema for its `kind`, rejecting an
- * unsupported `record_version` or unknown `kind` (§9.1.4).  This is the single
- * entry point a verifier uses to turn untrusted bytes into a validated record.
+ * unsupported `record_version` or unknown `kind` (§9.1.4).  This is the single entry
+ * point the trust verifier uses to turn untrusted bytes into a validated record, so it
+ * routes exactly the four kinds that travel as `record_body` frames AND pass through
+ * `validate()`: the contribution event and the three identity records (device
+ * certificate, room capability, revocation).
+ *
+ * The other v0.2 record kinds — room checkpoints, inclusion/consistency proofs, witness
+ * statements, receipts, bundle manifests, fork evidence — are NOT routed here BY DESIGN:
+ * they are control material that never arrives as a `record_body` frame and does not go
+ * through `validate()`'s contribution/identity trust projection (which would be
+ * meaningless for them).  Each travels its own channel with its own encode + verify —
+ * checkpoints / inclusion / consistency over the §29.7 GET routes, receipts in the
+ * exchange `receipts`/`ack_receipts` fields, the manifest in the pack header, fork
+ * evidence gossiped — so reaching this `default` with one of those kinds means it was
+ * wrongly placed in a record frame, which is correctly `rejected_bad_schema`.
  */
 export function decodeAndRouteRecord(bytes: Uint8Array): LcapRecordV2 {
   const plain = asPlainObject(bytes);
