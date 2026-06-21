@@ -52,6 +52,7 @@ import { rateLimit } from '../lib/rate-limit.js';
 import { repackHeldObjects } from './repack.js';
 import type { CommitRecordInput, LcapIngestServer } from './server-ingest.js';
 import { getLcapIngestServer } from './service.js';
+import { frameBlobs, getSignalMailbox } from './signaling.js';
 
 type ContentKind = 'record' | 'proof' | 'block';
 
@@ -615,5 +616,24 @@ export function createLcapRoutes(override?: LcapIngestServer): Hono {
   app.post('/exchange', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) =>
     handleExchange(server(), new Uint8Array(await c.req.arrayBuffer())),
   );
+  // §29 WebRTC server-blind signaling rendezvous (WS-R.15.6a): route an OPAQUE sealed
+  // blob to an opaque recipient key. The body is never decoded here (server-blindness);
+  // session-bound + CSRF-protected (NOT in the CSRF-exempt set) — a browser P2P flow
+  // keeps the double-submit token.
+  app.post('/p2p/signal', rateLimit({ limit: 120, windowMs: 60_000 }), async (c) => {
+    const result = getSignalMailbox().post(
+      c.req.query('to'),
+      new Uint8Array(await c.req.arrayBuffer()),
+      Date.now(),
+    );
+    return new Response(null, { status: result.ok ? 202 : result.status });
+  });
+  app.get('/p2p/signal', rateLimit({ limit: 240, windowMs: 60_000 }), (c) => {
+    const blobs = getSignalMailbox().drain(c.req.query('peer'), Date.now());
+    return new Response(new Uint8Array(frameBlobs(blobs)), {
+      status: 200,
+      headers: { 'content-type': 'application/octet-stream' },
+    });
+  });
   return app;
 }
