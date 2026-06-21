@@ -293,13 +293,23 @@ None of the above was launch-blocking (the LCAP server binding is gated/in-memor
 pre-production), and the pay-to-rank firewall + fail-closed crypto were unaffected
 throughout.
 
-**Tracked follow-up (not from the review's P1/P2 set): aggregate capability quotas.**  The
-§18.3 chain validator (`@licio/lcap` `validateIdentityChain`) enforces a capability's
-per-event `max_single_event_bytes`, but NOT its *aggregate* quotas (`max_offline_events`,
-`max_total_payload_bytes`) — those require stateful per-(capability) usage accounting that
-`validate()` (a pure, per-record function) cannot hold.  The pure `CapabilityUsageTracker`
-(`@licio/lcap` `identity/sequence.ts`) already implements the math; the closure target is a
-durable per-capability usage counter on the `LcapServerStore` boundary that the server
-increments on accept and checks before accept (parallel to the device-seq index), wired as
-its own focused card so the aggregate-quota enforcement is designed + concurrency-tested
-correctly rather than rushed.
+**Aggregate capability quotas — shipped.**  Beyond the per-event `max_single_event_bytes`
+the §18.3 chain validator already enforced, the server now enforces a capability's
+*aggregate* quotas (`max_offline_events`, `max_total_payload_bytes`) — the stateful
+per-capability accounting a pure, per-record `validate()` cannot hold.  A durable
+per-capability usage counter lives on the `LcapServerStore` boundary
+(`lcap_capability_usage`, migration `0041`); `acceptContribution` debits it as ONE atomic
+step with the room-log append — idempotent by `record_cid` (a re-accept never re-debits),
+the check + debit serialized per capability (the Drizzle adapter locks the usage row
+`FOR UPDATE`, with an outer retry on the room-seq race; the in-memory adapter is
+single-threaded), so concurrent accepts can never exceed the budget.  `commitRecord` routes
+a fresh accept through this gate; an over-budget contribution is `rejected_quota` (§16.11)
+and never appended (the device-seq claim stands; the budget is not debited).  Proven against
+real Postgres (within-budget accept, event-count + total-bytes rejection, idempotent
+re-accept, a concurrent-accept cap at exactly `max_offline_events`, and the end-to-end
+`rejected_quota` wiring).
+
+The one remaining sub-item is `max_media_bytes`: it needs media-size accounting at accept
+(summing the contribution's referenced block sizes), which is fuzzy when media arrives
+separately from the event — a distinct, smaller follow-up tracked here, not a blocker for
+the event-count / total-payload budgets above.
