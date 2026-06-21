@@ -64,13 +64,17 @@ dependency cycles rejected), and graph-guarded before any expansion by the §27.
 (WS-R.14.2 — cycle/fan-out/depth/duplicate-dependency/private-in-public/unknown-
 critical-field detectors, each mapped to a §16.11 wire rejection code, with the
 whole-batch node-count cap checked first so the guard cannot itself be a DoS
-vector).  The WS-R.11 client offline store has begun in `apps/web/src/lcap`: the
-`lcap_v2` IndexedDB schema (`db.ts` — the 12 §23.1 stores + room/priority/state/
-pin-class indexes + the versioned migration, a SEPARATE database from the WS-C
-`licio` store, with a static isolation check, WS-R.11.3a) and the §21.2 pinning-class
-+ eviction-order policy (`gc.ts` — hard-pin invariance; user/policy pins outrank the
-ambient-cache tiers, WS-R.11.1).  The remaining WS-R cards are **I/O integration** —
-the rest of WS-R.11 (the §23.2 durability layer, storage modes, SW sync hooks) + the rest of the Hono
+vector).  The **WS-R.11 client offline store is complete** in `apps/web/src/lcap`:
+the `lcap_v2` IndexedDB schema (`db.ts` — the 12 §23.1 stores + indexes + versioned
+migration, a SEPARATE database from the WS-C `licio` store, with a static isolation
+check, R.11.3a); the §23.2 durability layer (`store.ts` — cursor-only streaming,
+blob↔metadata separation, ATOMIC verified-record commit, capped transactions, and
+transient-quota retry, R.11.3b); the §21.2 pinning/eviction policy (`gc.ts` — hard-pin
+invariance, R.11.1); the §21.3 storage modes + pressure degradation (`storage-modes.ts`,
+R.11.2); the §23.3 C0-first sync orchestration (`sync-triggers.ts`, R.11.4); and the
+§21.4 privacy-aware replication gate (`replication.ts` — private content is default-deny
+unless encrypted + permitted + user-selected, R.11.5).  The remaining WS-R cards are
+**I/O integration** — the rest of the Hono
 routes (WS-R.12.4 — the §29 content-READ endpoints `GET /api/lcap/v2/{records,
 proofs,blocks}/:cid` (with RFC 7233 resumable range/206 + 416 reads) and the
 CSRF-exempt, rate-limited pack-import `POST
