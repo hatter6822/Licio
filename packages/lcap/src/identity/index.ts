@@ -37,6 +37,15 @@ export {
   revocationPriority,
 } from './revocation.js';
 export {
+  type RevocationAuthorityBinding,
+  type RevocationAuthorityResult,
+  type RevocationAuthorityScope,
+  type RevocationAuthorityStatus,
+  revocationAuthorityScope,
+  type VerifyRevocationAuthorityParams,
+  verifyRevocationAuthority,
+} from './revocation-authority.js';
+export {
   type CapabilityUsage,
   CapabilityUsageTracker,
   type ConsumeResult,

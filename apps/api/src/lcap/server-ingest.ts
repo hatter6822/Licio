@@ -40,6 +40,7 @@ import {
   type ObjectStatusV2,
   type PulseResponseV2,
   type ResourceCaps,
+  type RevocationAuthorityBinding,
   type RevocationFrontierV2,
   RevocationIndex,
   type RevocationRecordV2,
@@ -52,6 +53,7 @@ import {
   type ValidationResult,
   validate,
   verifyDeviceCertificate,
+  verifyRevocationAuthority,
   type WantRequestV2,
 } from '@licio/lcap';
 import {
@@ -129,6 +131,10 @@ export class LcapIngestServer {
   private readonly capabilities = new Map<string, CapabilityBundle>();
   private readonly accountAuthorityKeys = new Map<string, CryptoKey>();
   private readonly roomAuthorityKeys = new Map<string, CryptoKey>();
+  // Authority keys indexed by their COSE `signer_key_id` + the scope/id they govern, so a
+  // revocation's `authority_signature` proof can be resolved by signer id and scope-checked
+  // (a revocation carries no authority epoch — the signer id identifies the exact key).
+  private readonly authoritySigners = new Map<string, RevocationAuthorityBinding>();
   private readonly revocations = new RevocationIndex();
 
   /**
@@ -248,19 +254,59 @@ export class LcapIngestServer {
     return cid;
   }
 
-  /** Register an account-authority public key (it signs device certificates). */
-  registerAccountAuthorityKey(accountId: string, accountEpoch: number, key: CryptoKey): void {
+  /**
+   * Register an account-authority public key (it signs device certificates + account-scoped
+   * revocations).  `signerKeyId` is the COSE id its proofs carry, indexed so a revocation's
+   * authority proof resolves to this key + the account it governs.
+   */
+  registerAccountAuthorityKey(
+    accountId: string,
+    accountEpoch: number,
+    key: CryptoKey,
+    signerKeyId: string,
+  ): void {
     this.accountAuthorityKeys.set(`${accountId} ${accountEpoch}`, key);
+    this.authoritySigners.set(signerKeyId, { key, scope: 'account', scopeId: accountId });
   }
 
-  /** Register a room-authority public key (it signs capabilities + checkpoints). */
-  registerRoomAuthorityKey(roomId: string, policyEpoch: number, key: CryptoKey): void {
+  /**
+   * Register a room-authority public key (it signs capabilities, checkpoints, and
+   * room-scoped revocations).  `signerKeyId` is indexed so a capability/room_policy
+   * revocation's authority proof resolves to this key + the room it governs.
+   */
+  registerRoomAuthorityKey(
+    roomId: string,
+    policyEpoch: number,
+    key: CryptoKey,
+    signerKeyId: string,
+  ): void {
     this.roomAuthorityKeys.set(`${roomId} ${policyEpoch}`, key);
+    this.authoritySigners.set(signerKeyId, { key, scope: 'room', scopeId: roomId });
   }
 
-  /** Index a revocation (device / capability / account / room_policy / proof). */
-  registerRevocation(revocation: RevocationRecordV2): void {
+  /**
+   * Index a revocation (device / capability / account / room_policy / proof) ONLY after its
+   * `authority_signature` proof verifies by a key with jurisdiction over the revoked target
+   * (account authority for device/account/proof; room authority for capability/room_policy).
+   * Without this gate a CSRF-exempt pack could index an arbitrary revocation and deny
+   * service to any device/account/capability (§27 DoS) — `RevocationIndex` is trusted by
+   * step 11 of the chain with no downstream re-check.  Returns whether it was indexed.
+   */
+  async registerRevocation(
+    revocation: RevocationRecordV2,
+    body: Uint8Array,
+    proof: DetachedProofV2,
+  ): Promise<'registered' | 'unverified'> {
+    const result = await verifyRevocationAuthority({
+      revocation,
+      body,
+      proof,
+      resolveAuthority: (id) => this.authoritySigners.get(id),
+      networkId: this.networkId,
+    });
+    if (!result.ok) return 'unverified';
     this.revocations.index(revocation);
+    return 'registered';
   }
 
   private identityDeps(): IdentityChainDeps {

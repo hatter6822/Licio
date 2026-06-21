@@ -14,10 +14,13 @@ import {
   type DetachedProofV2,
   type DeviceKeyPair,
   encodeContributionEvent,
+  encodeWithSchema,
   exportPublicKeyCose,
   generateDeviceKey,
   issueCapability,
   issueDeviceCertificate,
+  type RevocationRecordV2,
+  revocationRecordV2Schema,
 } from '@licio/lcap';
 import type { LcapIngestServer } from '../lcap/server-ingest.js';
 
@@ -27,6 +30,8 @@ export const ROOM = 'room-1';
 export const DEVICE_KEY = 'key-1';
 export const ACCOUNT = 'acct-1';
 export const ACCOUNT_EPOCH = 1;
+export const ACCOUNT_AUTHORITY_SIGNER = 'account-authority-1';
+export const ROOM_AUTHORITY_SIGNER = 'room-authority-1';
 export const POLICY_EPOCH = 2;
 
 export interface LcapFixtures {
@@ -50,7 +55,7 @@ export async function buildLcapFixtures(): Promise<LcapFixtures> {
 
   const certBundle = await issueDeviceCertificate({
     authorityPrivateKey: accountAuthority.privateKey,
-    authoritySignerKeyId: 'account-authority-1',
+    authoritySignerKeyId: ACCOUNT_AUTHORITY_SIGNER,
     certificate: {
       record_version: 2,
       kind: 'device_certificate',
@@ -69,7 +74,7 @@ export async function buildLcapFixtures(): Promise<LcapFixtures> {
 
   const capBundle = await issueCapability({
     authorityPrivateKey: roomAuthority.privateKey,
-    authoritySignerKeyId: 'room-authority-1',
+    authoritySignerKeyId: ROOM_AUTHORITY_SIGNER,
     capability: {
       record_version: 2,
       kind: 'room_capability',
@@ -150,8 +155,48 @@ export async function registerIdentity(
 ): Promise<void> {
   // The root-of-trust authority keys MUST be registered before the certificate: a cert is
   // only indexed once its account-authority proof verifies against the registered key.
-  server.registerAccountAuthorityKey(ACCOUNT, ACCOUNT_EPOCH, fx.accountAuthority.publicKey);
-  server.registerRoomAuthorityKey(ROOM, POLICY_EPOCH, fx.roomAuthority.publicKey);
+  server.registerAccountAuthorityKey(
+    ACCOUNT,
+    ACCOUNT_EPOCH,
+    fx.accountAuthority.publicKey,
+    ACCOUNT_AUTHORITY_SIGNER,
+  );
+  server.registerRoomAuthorityKey(
+    ROOM,
+    POLICY_EPOCH,
+    fx.roomAuthority.publicKey,
+    ROOM_AUTHORITY_SIGNER,
+  );
   await server.registerCertificate(fx.certBundle);
   if (opts.capability !== false) await server.registerCapability(fx.capBundle);
+}
+
+/**
+ * Mint an account-authority-signed device revocation + its detached proof, ready to feed
+ * `registerRevocation` (the account authority governs device-scoped revocations, §11.5).
+ */
+export async function mintDeviceRevocation(
+  fx: LcapFixtures,
+  params: { revokedDeviceKeyId: string; revocationEpoch: number; revocationId?: string },
+): Promise<{ revocation: RevocationRecordV2; body: Uint8Array; proof: DetachedProofV2 }> {
+  const revocation: RevocationRecordV2 = {
+    record_version: 2,
+    kind: 'revocation',
+    revocation_id: params.revocationId ?? `rev-${params.revokedDeviceKeyId}`,
+    revoked_kind: 'device',
+    revoked_id: params.revokedDeviceKeyId,
+    account_id: ACCOUNT, // the account authority for ACCOUNT governs its device revocations
+    effective_at_ms: NOW - 500,
+    revocation_epoch: params.revocationEpoch,
+  };
+  const body = encodeWithSchema(revocationRecordV2Schema, revocation);
+  const proof = await buildAndSign({
+    privateKey: fx.accountAuthority.privateKey,
+    signerKeyId: ACCOUNT_AUTHORITY_SIGNER,
+    proofKind: 'authority_signature',
+    recordKind: 'revocation',
+    recordBody: body,
+    networkId: NET,
+  });
+  return { revocation, body, proof };
 }

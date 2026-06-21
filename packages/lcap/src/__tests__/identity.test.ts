@@ -8,6 +8,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { cidFor } from '../cid/index.js';
 import { type DeviceKeyPair, exportPublicKeyCose, generateDeviceKey } from '../cose/keys.js';
+import { buildAndSign } from '../cose/sign1.js';
 import {
   type CapabilityBundle,
   CapabilityUsageTracker,
@@ -17,14 +18,23 @@ import {
   type IdentityChainDeps,
   issueCapability,
   issueDeviceCertificate,
+  type RevocationAuthorityBinding,
   RevocationIndex,
+  revocationAuthorityScope,
   validateIdentityChain,
   verifyCapability,
   verifyDeviceCertificate,
+  verifyRevocationAuthority,
 } from '../identity/index.js';
 import { revocationPriority } from '../identity/revocation.js';
 import { defaultLane } from '../priority.js';
-import type { CapabilityRecordV2, ContributionEventRecordV2 } from '../schemas/records.js';
+import { encodeWithSchema } from '../schemas/codec.js';
+import {
+  type CapabilityRecordV2,
+  type ContributionEventRecordV2,
+  type RevocationRecordV2,
+  revocationRecordV2Schema,
+} from '../schemas/records.js';
 
 const NETWORK = 'test';
 const NOW = 1_000_000;
@@ -347,5 +357,181 @@ describe('identity-chain validation (WS-R.1.5)', () => {
     });
     expect(result.status).toBe('authorized');
     if (result.status === 'authorized') expect(result.revocationFrontierStale).toBe(true);
+  });
+});
+
+describe('verifyRevocationAuthority (§11.5, WS-R.1.4)', () => {
+  const ACCOUNT = 'acct-rev';
+  const ROOM = 'room-rev';
+  const SIGNER = 'acct-authority-rev';
+
+  async function mint(
+    over: Partial<RevocationRecordV2> & { revoked_kind: RevocationRecordV2['revoked_kind'] },
+    signer: DeviceKeyPair,
+    signerKeyId: string,
+  ): Promise<{
+    revocation: RevocationRecordV2;
+    body: Uint8Array;
+    proof: Awaited<ReturnType<typeof buildAndSign>>;
+  }> {
+    const revocation: RevocationRecordV2 = {
+      record_version: 2,
+      kind: 'revocation',
+      revocation_id: 'rev-x',
+      revoked_id: 'target-x',
+      effective_at_ms: NOW - 100,
+      revocation_epoch: 1,
+      ...over,
+    };
+    const body = encodeWithSchema(revocationRecordV2Schema, revocation);
+    const proof = await buildAndSign({
+      privateKey: signer.privateKey,
+      signerKeyId,
+      proofKind: 'authority_signature',
+      recordKind: 'revocation',
+      recordBody: body,
+      networkId: NETWORK,
+    });
+    return { revocation, body, proof };
+  }
+
+  it('maps revoked kinds to the governing authority scope', () => {
+    expect(revocationAuthorityScope('device')).toBe('account');
+    expect(revocationAuthorityScope('account')).toBe('account');
+    expect(revocationAuthorityScope('proof')).toBe('account');
+    expect(revocationAuthorityScope('capability')).toBe('room');
+    expect(revocationAuthorityScope('room_policy')).toBe('room');
+  });
+
+  it('accepts an account-authority-signed device revocation in scope', async () => {
+    const { revocation, body, proof } = await mint(
+      { revoked_kind: 'device', revoked_id: 'dev-1', account_id: ACCOUNT },
+      accountAuthority,
+      SIGNER,
+    );
+    const binding: RevocationAuthorityBinding = {
+      key: accountAuthority.publicKey,
+      scope: 'account',
+      scopeId: ACCOUNT,
+    };
+    const res = await verifyRevocationAuthority({
+      revocation,
+      body,
+      proof,
+      resolveAuthority: (id) => (id === SIGNER ? binding : undefined),
+      networkId: NETWORK,
+    });
+    expect(res).toEqual({ ok: true, scope: 'account', scopeId: ACCOUNT });
+  });
+
+  it('rejects a non-authority proof kind', async () => {
+    const { revocation, body } = await mint(
+      { revoked_kind: 'device', revoked_id: 'dev-1', account_id: ACCOUNT },
+      accountAuthority,
+      SIGNER,
+    );
+    const deviceProof = await buildAndSign({
+      privateKey: accountAuthority.privateKey,
+      signerKeyId: SIGNER,
+      proofKind: 'device_signature', // wrong kind
+      recordKind: 'revocation',
+      recordBody: body,
+      networkId: NETWORK,
+    });
+    const res = await verifyRevocationAuthority({
+      revocation,
+      body,
+      proof: deviceProof,
+      resolveAuthority: () => ({
+        key: accountAuthority.publicKey,
+        scope: 'account',
+        scopeId: ACCOUNT,
+      }),
+      networkId: NETWORK,
+    });
+    expect(res).toEqual({ ok: false, status: 'rejected_wrong_proof_kind' });
+  });
+
+  it('rejects a revocation that names no governing id (missing scope binding)', async () => {
+    const { revocation, body, proof } = await mint(
+      { revoked_kind: 'device', revoked_id: 'dev-1' }, // no account_id
+      accountAuthority,
+      SIGNER,
+    );
+    const res = await verifyRevocationAuthority({
+      revocation,
+      body,
+      proof,
+      resolveAuthority: () => ({
+        key: accountAuthority.publicKey,
+        scope: 'account',
+        scopeId: ACCOUNT,
+      }),
+      networkId: NETWORK,
+    });
+    expect(res).toEqual({ ok: false, status: 'rejected_missing_scope_binding' });
+  });
+
+  it('rejects an unknown authority signer', async () => {
+    const { revocation, body, proof } = await mint(
+      { revoked_kind: 'device', revoked_id: 'dev-1', account_id: ACCOUNT },
+      accountAuthority,
+      SIGNER,
+    );
+    const res = await verifyRevocationAuthority({
+      revocation,
+      body,
+      proof,
+      resolveAuthority: () => undefined, // signer not registered
+      networkId: NETWORK,
+    });
+    expect(res).toEqual({ ok: false, status: 'rejected_unknown_authority' });
+  });
+
+  it('rejects an authority whose scope/id does not govern the target', async () => {
+    // A ROOM authority cannot sign a device (account-scoped) revocation.
+    const { revocation, body, proof } = await mint(
+      { revoked_kind: 'device', revoked_id: 'dev-1', account_id: ACCOUNT },
+      accountAuthority,
+      SIGNER,
+    );
+    const res = await verifyRevocationAuthority({
+      revocation,
+      body,
+      proof,
+      resolveAuthority: () => ({ key: accountAuthority.publicKey, scope: 'room', scopeId: ROOM }),
+      networkId: NETWORK,
+    });
+    expect(res).toEqual({ ok: false, status: 'rejected_authority_scope_mismatch' });
+  });
+
+  it('rejects a forged signature (right scope, wrong key)', async () => {
+    const imposter = await generateDeviceKey();
+    const { revocation, body } = await mint(
+      { revoked_kind: 'device', revoked_id: 'dev-1', account_id: ACCOUNT },
+      accountAuthority,
+      SIGNER,
+    );
+    const forged = await buildAndSign({
+      privateKey: imposter.privateKey, // signed by the imposter …
+      signerKeyId: SIGNER, // … but claims the authority signer id
+      proofKind: 'authority_signature',
+      recordKind: 'revocation',
+      recordBody: body,
+      networkId: NETWORK,
+    });
+    const res = await verifyRevocationAuthority({
+      revocation,
+      body,
+      proof: forged,
+      // resolve to the GENUINE authority key — the forged signature must fail against it
+      resolveAuthority: () => ({
+        key: accountAuthority.publicKey,
+        scope: 'account',
+        scopeId: ACCOUNT,
+      }),
+      networkId: NETWORK,
+    });
+    expect(res).toEqual({ ok: false, status: 'rejected_bad_authority_proof' });
   });
 });

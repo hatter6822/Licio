@@ -8,16 +8,22 @@
 
 import {
   buildAndSign,
+  encodeWithSchema,
   exportPublicKeyCose,
   generateDeviceKey,
   issueDeviceCertificate,
+  type RevocationRecordV2,
+  revocationRecordV2Schema,
 } from '@licio/lcap';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { LcapIngestServer } from '../lcap/server-ingest.js';
 import {
+  ACCOUNT,
+  ACCOUNT_AUTHORITY_SIGNER,
   buildLcapFixtures,
   DEVICE_KEY,
   type LcapFixtures,
+  mintDeviceRevocation,
   NET,
   NOW,
   ROOM,
@@ -80,20 +86,48 @@ describe('LcapIngestServer — server-computed validation (R.12.1b)', () => {
     expect(await srv.isAccepted(fx.recordCid)).toBe(false);
   });
 
-  it('rejects a record whose device key has been revoked', async () => {
+  it('rejects a record whose device key has been revoked (authority-signed revocation)', async () => {
     const srv = await serverWith();
-    srv.registerRevocation({
-      record_version: 2,
-      kind: 'revocation',
-      revocation_id: 'rev-1',
-      revoked_kind: 'device',
-      revoked_id: DEVICE_KEY,
-      effective_at_ms: NOW - 500,
-      revocation_epoch: 1,
+    const rev = await mintDeviceRevocation(fx, {
+      revokedDeviceKeyId: DEVICE_KEY,
+      revocationEpoch: 1,
     });
+    expect(await srv.registerRevocation(rev.revocation, rev.body, rev.proof)).toBe('registered');
     const res = await srv.commitRecord(base());
     expect(res.status.status).toBe('rejected_revoked');
     expect(await srv.isAccepted(fx.recordCid)).toBe(false);
+  });
+
+  it('refuses an unsigned/forged-authority revocation — no revoke-by-anyone DoS (#7)', async () => {
+    const srv = await serverWith();
+    // A revocation "signed" by a non-authority key that merely CLAIMS the authority signer
+    // id.  If it indexed, any peer could revoke an arbitrary device (the chain trusts the
+    // RevocationIndex at step 11 with no downstream re-check).
+    const imposter = await generateDeviceKey();
+    const revocation: RevocationRecordV2 = {
+      record_version: 2,
+      kind: 'revocation',
+      revocation_id: 'forged-rev',
+      revoked_kind: 'device',
+      revoked_id: DEVICE_KEY,
+      account_id: ACCOUNT,
+      effective_at_ms: NOW - 500,
+      revocation_epoch: 9,
+    };
+    const body = encodeWithSchema(revocationRecordV2Schema, revocation);
+    const forgedProof = await buildAndSign({
+      privateKey: imposter.privateKey, // NOT the account authority …
+      signerKeyId: ACCOUNT_AUTHORITY_SIGNER, // … but claims its signer id
+      proofKind: 'authority_signature',
+      recordKind: 'revocation',
+      recordBody: body,
+      networkId: NET,
+    });
+    expect(await srv.registerRevocation(revocation, body, forgedProof)).toBe('unverified');
+
+    // The device was NOT revoked by the forged proof — the victim's contribution accepts.
+    const res = await srv.commitRecord(base());
+    expect(res.status.status).toBe('accepted');
   });
 
   it('computes the verdict per record inside commitBatch (no injected verdicts)', async () => {

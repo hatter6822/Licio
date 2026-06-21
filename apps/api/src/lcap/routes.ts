@@ -299,7 +299,11 @@ async function ingestPackFrames(
         statuses.push({ cid, cid_kind: 'record', status: storedStatus });
         break;
       case 'revocation':
-        server.registerRevocation(record);
+        // Index ONLY a revocation whose authority proof verifies for its scope; an
+        // unsigned/wrong-authority revocation is stored (bytes fetchable) but never indexed.
+        if (authorityProof) {
+          await server.registerRevocation(record, frame.payload, authorityProof);
+        }
         statuses.push({ cid, cid_kind: 'record', status: storedStatus });
         break;
       case 'contribution_event': {

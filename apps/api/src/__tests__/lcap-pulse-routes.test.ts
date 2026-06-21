@@ -9,14 +9,18 @@
 // diff (`applyPulse`) to learn what it is behind on.
 
 import {
+  buildAndSign,
   buildPulse,
   cidFor,
   DEFAULT_BUDGET,
+  type DeviceKeyPair,
   decodeWithSchema,
   encodeWithSchema,
+  generateDeviceKey,
   pulseResponseV2Schema,
   type RevocationRecordV2,
   readPack,
+  revocationRecordV2Schema,
   roomIdHash,
   syncPulseV2Schema,
   type ValidationResult,
@@ -63,15 +67,40 @@ async function seedRoom(server: LcapIngestServer, roomId: string, tag: string): 
   });
 }
 
+const ACCOUNT = 'acct-1';
+const ACCOUNT_SIGNER = 'account-authority-1';
+
 const revocation = (epoch: number, id: string): RevocationRecordV2 => ({
   record_version: 2,
   kind: 'revocation',
   revocation_id: `rev-${id}`,
   revoked_kind: 'device',
   revoked_id: id,
+  account_id: ACCOUNT, // account-scoped: the account authority for ACCOUNT signs it
   effective_at_ms: 1_000,
   revocation_epoch: epoch,
 });
+
+/** Register the account authority on `server` and index an authority-signed revocation. */
+async function indexRevocation(
+  server: LcapIngestServer,
+  authority: DeviceKeyPair,
+  epoch: number,
+  id: string,
+): Promise<void> {
+  const rev = revocation(epoch, id);
+  const body = encodeWithSchema(revocationRecordV2Schema, rev);
+  const proof = await buildAndSign({
+    privateKey: authority.privateKey,
+    signerKeyId: ACCOUNT_SIGNER,
+    proofKind: 'authority_signature',
+    recordKind: 'revocation',
+    recordBody: body,
+    networkId: NET,
+  });
+  const status = await server.registerRevocation(rev, body, proof);
+  if (status !== 'registered') throw new Error(`revocation not registered: ${status}`);
+}
 
 describe('LcapIngestServer frontier derivation (§17.2/§17.3)', () => {
   it('reports one checkpoint-frontier entry per non-empty room, keyed by room_id_hash', async () => {
@@ -96,10 +125,12 @@ describe('LcapIngestServer frontier derivation (§17.2/§17.3)', () => {
 
   it('reports the global revocation epoch (0 by default, the max indexed otherwise)', async () => {
     const server = new LcapIngestServer(NET);
+    const authority = await generateDeviceKey();
+    server.registerAccountAuthorityKey(ACCOUNT, 1, authority.publicKey, ACCOUNT_SIGNER);
     expect(server.revocationFrontier()).toEqual([{ scope: 'global', revocation_epoch: 0 }]);
-    server.registerRevocation(revocation(3, 'd1'));
-    server.registerRevocation(revocation(7, 'd2'));
-    server.registerRevocation(revocation(5, 'd3'));
+    await indexRevocation(server, authority, 3, 'd1');
+    await indexRevocation(server, authority, 7, 'd2');
+    await indexRevocation(server, authority, 5, 'd3');
     expect(server.revocationFrontier()).toEqual([{ scope: 'global', revocation_epoch: 7 }]);
   });
 
