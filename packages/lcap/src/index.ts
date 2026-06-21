@@ -30,6 +30,7 @@ export * from './limits/index.js';
 export * from './liveness/index.js';
 export * from './pack/index.js';
 export * from './priority.js';
+export * from './privacy/index.js';
 export * from './records/index.js';
 export * from './scheduler/index.js';
 export * from './schemas/index.js';
