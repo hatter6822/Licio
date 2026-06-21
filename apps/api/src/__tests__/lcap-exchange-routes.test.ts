@@ -19,6 +19,8 @@ import {
   exchangeRequestV2Schema,
   exchangeResponseV2Schema,
   type RevocationFrontierV2,
+  readPack,
+  type SyncPulseV2,
   syncPulseV2Schema,
   writePack,
 } from '@licio/lcap';
@@ -39,11 +41,12 @@ const enc = new TextEncoder();
 
 let fx: LcapFixtures;
 let pushPack: Uint8Array;
+let proofBytes: Uint8Array;
 let proofCid: string;
 
 beforeAll(async () => {
   fx = await buildLcapFixtures();
-  const proofBytes = encodeWithSchema(detachedProofV2Schema, fx.proof);
+  proofBytes = encodeWithSchema(detachedProofV2Schema, fx.proof);
   proofCid = await cidFor('proof', proofBytes);
   pushPack = writePack({
     objects: [
@@ -198,6 +201,66 @@ describe('POST /exchange — §29.2 bidirectional sync', () => {
       body: new Uint8Array(1024 * 1024 + 1),
     });
     expect(res.status).toBe(413);
+  });
+});
+
+describe('POST /exchange — §29.2 response_pack (server-push of client wants)', () => {
+  it('serves a response_pack of the client wants the server holds, readable back', async () => {
+    const srv = new LcapIngestServer(NET, () => NOW);
+    await srv.putObject(fx.recordCid, 'record', fx.body);
+    await srv.putObject(proofCid, 'proof', proofBytes);
+
+    const res = await createLcapRoutes(srv).request('/exchange', {
+      method: 'POST',
+      body: exchangeBytes({
+        pulse: clientPulse(),
+        interests: [],
+        want: [
+          { cid: fx.recordCid, cid_kind: 'record', reason: 'explicit_user_request' },
+          { cid: proofCid, cid_kind: 'proof', reason: 'explicit_user_request' },
+        ],
+      }),
+    });
+    const decoded = decodeWithSchema(
+      exchangeResponseV2Schema,
+      new Uint8Array(await res.arrayBuffer()),
+    );
+    expect(decoded.status).toBe('ok');
+    expect(decoded.response_pack).toBeDefined();
+    const read = await readPack(decoded.response_pack as Uint8Array);
+    expect(read.ok).toBe(true);
+    if (read.ok) {
+      expect([...read.pack.frames.keys()].sort()).toEqual([fx.recordCid, proofCid].sort());
+    }
+  });
+
+  it('marks the exchange partial when a held want is dropped for the response budget', async () => {
+    const srv = new LcapIngestServer(NET, () => NOW);
+    await srv.putObject(fx.recordCid, 'record', fx.body);
+    await srv.putObject(proofCid, 'proof', proofBytes);
+
+    // A tiny response budget forces a one-object pack → partial.
+    const tightPulse: SyncPulseV2 = {
+      ...clientPulse(),
+      budgets: { ...DEFAULT_BUDGET, max_response_bytes: 1 },
+    };
+    const res = await createLcapRoutes(srv).request('/exchange', {
+      method: 'POST',
+      body: exchangeBytes({
+        pulse: tightPulse,
+        interests: [],
+        want: [
+          { cid: fx.recordCid, cid_kind: 'record', reason: 'explicit_user_request' },
+          { cid: proofCid, cid_kind: 'proof', reason: 'explicit_user_request' },
+        ],
+      }),
+    });
+    const decoded = decodeWithSchema(
+      exchangeResponseV2Schema,
+      new Uint8Array(await res.arrayBuffer()),
+    );
+    expect(decoded.status).toBe('partial');
+    expect(decoded.response_pack).toBeDefined();
   });
 });
 

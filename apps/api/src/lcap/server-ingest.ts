@@ -451,13 +451,16 @@ export class LcapIngestServer {
   }
 
   /**
-   * The §29.1 pulse response: the server's pulse (frontiers).  An inline
-   * `critical_pack` for the client's `critical_want` C0 objects is a WS-R.12.4
-   * follow-up (it needs the import-captured lane/priority metadata to repack); a
-   * client that learns it is behind from the frontiers fetches via the GET routes.
+   * The §29.1 pulse response: the server's pulse (frontiers) plus an optional inline
+   * `critical_pack` (the C0 one-round-trip case — the route repacks the client's
+   * `critical_want` objects the server holds).  A client that still lacks something
+   * after the frontiers fetches it via the GET routes.
    */
-  async pulseResponse(): Promise<PulseResponseV2> {
-    return buildPulseResponse({ pulse: await this.serverPulse() });
+  async pulseResponse(criticalPack?: Uint8Array): Promise<PulseResponseV2> {
+    return buildPulseResponse({
+      pulse: await this.serverPulse(),
+      ...(criticalPack !== undefined ? { criticalPack } : {}),
+    });
   }
 
   // --- WS-R.12.4: the §29.7 room checkpoint / inclusion / consistency reads --------

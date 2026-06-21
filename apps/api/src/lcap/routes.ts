@@ -50,6 +50,7 @@ import {
 } from '@licio/lcap';
 import { Hono } from 'hono';
 import { rateLimit } from '../lib/rate-limit.js';
+import { repackHeldObjects } from './repack.js';
 import type { CommitRecordInput, LcapIngestServer } from './server-ingest.js';
 import { getLcapIngestServer } from './service.js';
 
@@ -287,14 +288,18 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
 
 // A pulse is a tiny frontier message; anything larger is over the request budget.
 const MAX_PULSE_REQUEST_BYTES = 256 * 1024;
+// The §29.1 C0 case is for severe bandwidth, so the inline critical pack stays tiny.
+const MAX_CRITICAL_PACK_BYTES = 64 * 1024;
 
 /**
  * §29.1 `POST /pulse`: validate the client's pulse fail-closed, then return the
- * server's pulse (frontiers) as a `PulseResponseV2`.  §22.1.1 mapping: oversized
- * body → 413; an undecodable body → 400 (malformed framing); a decodable body that
- * fails the pulse schema → 422 (a semantic violation); processed → 200.  The client
- * runs the local frontier diff (`applyPulse`) against the returned frontiers to
- * learn what it is behind on, then fetches via the GET content routes.
+ * server's pulse (frontiers) as a `PulseResponseV2` — plus, for the C0
+ * one-round-trip case, an inline `critical_pack` of the client's `critical_want`
+ * objects the server holds (capped tiny; the rest stays fetchable via the GET
+ * routes).  §22.1.1 mapping: oversized body → 413; an undecodable body → 400
+ * (malformed framing); a decodable body that fails the pulse schema → 422 (a
+ * semantic violation); processed → 200.  The client runs the local frontier diff
+ * (`applyPulse`) against the returned frontiers to learn what else it is behind on.
  */
 async function handlePulse(server: LcapIngestServer, body: Uint8Array): Promise<Response> {
   if (body.length > MAX_PULSE_REQUEST_BYTES) {
@@ -307,10 +312,20 @@ async function handlePulse(server: LcapIngestServer, body: Uint8Array): Promise<
     return json(400, { error: 'undecodable' });
   }
   // Fail closed: a malformed client pulse is rejected before we do any work.
-  if (!syncPulseV2Schema.safeParse(decoded).success) {
+  const parsed = syncPulseV2Schema.safeParse(decoded);
+  if (!parsed.success) {
     return json(422, { error: 'invalid_pulse' });
   }
-  const response = await server.pulseResponse();
+
+  // The C0 fast path: bundle the client's critical_want objects we hold, tiny budget.
+  let criticalPack: Uint8Array | undefined;
+  const criticalWant = parsed.data.critical_want ?? [];
+  if (criticalWant.length > 0) {
+    const repacked = await repackHeldObjects(server, criticalWant, MAX_CRITICAL_PACK_BYTES);
+    if (repacked.pack !== undefined) criticalPack = repacked.pack;
+  }
+
+  const response = await server.pulseResponse(criticalPack);
   return new Response(encodeWithSchema(pulseResponseV2Schema, response), {
     status: 200,
     headers: { 'content-type': 'application/cbor' },
@@ -338,13 +353,13 @@ function pulseReferencedCids(pulse: SyncPulseV2): string[] {
 /**
  * §29.2 `POST /exchange`: the main bidirectional sync path.  Ingest the (optional)
  * push pack through the SHARED WS-R.4.2 validator (idempotent by record_cid →
- * `accepted_push`), then return the server's pulse (frontiers) plus the
- * `wanted_from_client` the server's own frontier diff derives (what the server is
- * behind on, given the client's advertised frontier).  Content the client `want`s is
- * fetched via the GET routes; the optional server-push `response_pack` is the
- * WS-R.12.4 follow-up that needs import-captured object metadata.  §22.1.1: oversized
- * → 413; undecodable → 400; schema-invalid → 422; processed → 200 (per-object
- * outcomes — including `quarantined_*`/`rejected_*`/`conflict_*` — inside the body).
+ * `accepted_push`); return the server's pulse (frontiers), the `wanted_from_client`
+ * the server's own frontier diff derives (what the server is behind on, given the
+ * client's advertised frontier), AND a `response_pack` of the client's `want` CIDs
+ * the server holds — repacked within the client's response budget (the rest stays
+ * fetchable via the GET routes; truncation marks the exchange `partial`).  §22.1.1:
+ * oversized → 413; undecodable → 400; schema-invalid → 422; processed → 200
+ * (per-object outcomes — `quarantined_*`/`rejected_*`/`conflict_*` — inside the body).
  */
 async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promise<Response> {
   if (body.length > MAX_EXCHANGE_REQUEST_BYTES) {
@@ -388,13 +403,27 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
   });
   const wantedFromClient: readonly WantRequestV2[] = reaction.wants;
 
-  // 3) `ok`: the exchange itself completed; the client fetches any `want` via the GET
-  // routes.  Per-object push outcomes (if any) carry their own §16.11 status.
+  // 3) Serve the client's explicit wants the server holds, repacked within the
+  // client's response budget.  A held want dropped for budget → `partial` (the peer
+  // re-exchanges or fetches the remainder via the GET routes); otherwise `ok`.
+  let responsePack: Uint8Array | undefined;
+  let status: 'ok' | 'partial' = 'ok';
+  if (request.want !== undefined && request.want.length > 0) {
+    const repacked = await repackHeldObjects(
+      server,
+      request.want.map((w) => w.cid),
+      request.pulse.budgets.max_response_bytes,
+    );
+    if (repacked.pack !== undefined) responsePack = repacked.pack;
+    if (repacked.truncated) status = 'partial';
+  }
+
   const response = buildExchangeResponse({
     pulse: await server.serverPulse(),
-    status: 'ok',
+    status,
     ...(acceptedPush !== undefined ? { acceptedPush } : {}),
     ...(wantedFromClient.length > 0 ? { wantedFromClient } : {}),
+    ...(responsePack !== undefined ? { responsePack } : {}),
   });
   return new Response(encodeWithSchema(exchangeResponseV2Schema, response), {
     status: 200,

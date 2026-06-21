@@ -16,6 +16,7 @@ import {
   encodeWithSchema,
   pulseResponseV2Schema,
   type RevocationRecordV2,
+  readPack,
   roomIdHash,
   syncPulseV2Schema,
   type ValidationResult,
@@ -133,7 +134,7 @@ describe('POST /pulse — §29.1 status mapping', () => {
     expect(decoded.pulse.node_id).toBe(`lcap-server:${NET}`);
     expect(decoded.pulse.checkpoint_frontier).toHaveLength(1);
     expect(decoded.pulse.checkpoint_frontier[0]?.latest_tree_size).toBe(1);
-    // Frontiers-only in this slice: no inline critical pack.
+    // This client advertised no critical_want, so no inline critical pack is built.
     expect('critical_pack' in decoded).toBe(false);
   });
 
@@ -168,6 +169,63 @@ describe('POST /pulse — §29.1 status mapping', () => {
       body: huge,
     });
     expect(res.status).toBe(413);
+  });
+});
+
+describe('POST /pulse — §29.1 critical_pack (C0 server-push)', () => {
+  /** A client pulse advertising `criticalWant`, encoded. */
+  function pulseWantingBytes(criticalWant: readonly string[]): Uint8Array {
+    return encodeWithSchema(
+      syncPulseV2Schema,
+      buildPulse({
+        nodeId: 'client-1',
+        sessionNonce: new Uint8Array([1, 2, 3, 4]),
+        transportProfile: 'https',
+        privacyMode: 'public',
+        budgets: DEFAULT_BUDGET,
+        supportedSuites: ['ES256'],
+        supportedCompression: ['none'],
+        supportedPackVersions: [2],
+        checkpointFrontier: [],
+        revocationFrontier: [],
+        criticalWant: [...criticalWant],
+      }),
+    );
+  }
+
+  it('returns an inline critical_pack of the critical_want objects the server holds', async () => {
+    const srv = new LcapIngestServer(NET);
+    const blockBytes = enc.encode('c0-critical-block');
+    const blockCid = await cidFor('block', blockBytes);
+    await srv.putObject(blockCid, 'block', blockBytes);
+
+    const res = await createLcapRoutes(srv).request('/pulse', {
+      method: 'POST',
+      body: pulseWantingBytes([blockCid]),
+    });
+    expect(res.status).toBe(200);
+    const decoded = decodeWithSchema(
+      pulseResponseV2Schema,
+      new Uint8Array(await res.arrayBuffer()),
+    );
+    expect(decoded.critical_pack).toBeDefined();
+    const read = await readPack(decoded.critical_pack as Uint8Array);
+    expect(read.ok).toBe(true);
+    if (read.ok) expect(read.pack.frames.has(blockCid)).toBe(true);
+  });
+
+  it('omits critical_pack when the server holds none of the critical_want', async () => {
+    const srv = new LcapIngestServer(NET);
+    const absent = await cidFor('block', enc.encode('absent-block'));
+    const res = await createLcapRoutes(srv).request('/pulse', {
+      method: 'POST',
+      body: pulseWantingBytes([absent]),
+    });
+    const decoded = decodeWithSchema(
+      pulseResponseV2Schema,
+      new Uint8Array(await res.arrayBuffer()),
+    );
+    expect('critical_pack' in decoded).toBe(false);
   });
 });
 

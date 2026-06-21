@@ -87,21 +87,25 @@ mounted through the global security middleware:
 - the §29.1 `POST /api/lcap/v2/pulse` C0 frontier exchange + the §29.2
   `POST /api/lcap/v2/exchange` main bidirectional path — both return the server's
   §17.2/§17.3 frontiers (per-room checkpoint tree sizes keyed by the shared
-  `roomIdHash`, the global revocation epoch); the exchange ingests its optional push
-  pack through the shared validator (→ `accepted_push`) and derives `wanted_from_client`
-  from the server's own frontier diff (`applyPulse`);
+  `roomIdHash`, the global revocation epoch) AND serve the peer's explicit wants as a
+  budget-bounded content pack (the pulse's C0 `critical_pack`, the exchange's
+  `response_pack`; `repack.ts` repacks held objects from their bytes with
+  content-derived §15.1.1 lane/priority hints + a conservative privacy label —
+  serving by CID like the GET routes, so no new exposure — and marks the exchange
+  `partial` when a held want is dropped for the response budget); the exchange also
+  ingests its optional push pack through the shared validator (→ `accepted_push`) and
+  derives `wanted_from_client` from the server's own frontier diff (`applyPulse`);
 - the §29.7 room reads `GET /api/lcap/v2/rooms/:roomId/{checkpoint,proofs/inclusion,
   proofs/consistency}` — the (unsigned) tree head + RFC 9162 inclusion/consistency
   proofs computed over the §19.1 room log reconstructed from the canonical acceptance
   order; the served proofs verify against an independently-built log.
 
-The remaining WS-R cards are **I/O integration** — the WS-R.12.4 content-push residual
-(bundle EXPORT + the exchange `response_pack` + the pulse `critical_pack`, which repack
-held content so they need import-captured object lane/priority/deps metadata; the
-authority-signed checkpoint record is checkpoint issuance), the DoS/privacy controls
-(WS-R.14), the transport profiles (WS-R.15), the WS-S encryption-envelope seam
-(WS-R.16), the client surface (WS-R.17), and the network simulator (WS-R.18) — plus the
-entire WS-S private-rooms plane.  Those bind this pure core to Postgres / IndexedDB /
+The remaining WS-R cards are **I/O integration** — the WS-R.12.4 bundle-EXPORT residual
+(`GET /bundles/export` gathers a room's full record→proof→block closure, so it needs a
+proof/block index; the authority-signed checkpoint record is checkpoint issuance), the
+DoS/privacy controls (WS-R.14), the transport profiles (WS-R.15), the WS-S
+encryption-envelope seam (WS-R.16), the client surface (WS-R.17), and the network
+simulator (WS-R.18) — plus the entire WS-S private-rooms plane.  Those bind this pure core to Postgres / IndexedDB /
 Hono / the browser and are **not yet started** (see "Status" below).  The optional,
 non-authoritative set-reconciliation filters (WS-R.7.3) are deferred by the spec itself.
 
@@ -220,7 +224,7 @@ is a later card (the package is already runtime-agnostic via `runtime.ts`).
 | WS-R.9 — Merkle / checkpoint / inclusion / consistency / witness | 9.2 – 9.4 | **Shipped** (9.1 server-append logic core; DB binding in WS-R.12) |
 | WS-R.10 — liveness, receipts, durable outbox | 10.1 – 10.3 | **Shipped** (IndexedDB binding in WS-R.11) |
 | WS-R.13 — conflict dispatch + visible-thread projection | 13.1 – 13.2 | **Shipped** |
-| WS-R.12 — server ingestion | 12.1, 12.2, 12.4 | **Decision core + §24.4 resolver + server-computed validation + in-memory & gated-Drizzle bindings + the full §29 route surface shipped** (`ingestRecord`, `resolveIngestionOrder`, `validate`; `apps/api/src/lcap` `LcapIngestServer` incl. `validateContribution`/`commitBatch`/frontiers/room-Merkle reads; `routes.ts` content reads + `POST …/packs` + `/pulse` + `/exchange` + `/rooms/:id/{checkpoint,proofs/*}` + `/bundles/import`; the `LcapServerStore` boundary over migration `0039`); the 12.4 content-push residual — bundle export + exchange `response_pack` + pulse `critical_pack` (need import-captured object metadata) = follow-up |
+| WS-R.12 — server ingestion | 12.1, 12.2, 12.4 | **Decision core + §24.4 resolver + server-computed validation + in-memory & gated-Drizzle bindings + the full §29 route surface shipped** (`ingestRecord`, `resolveIngestionOrder`, `validate`; `apps/api/src/lcap` `LcapIngestServer` incl. `validateContribution`/`commitBatch`/frontiers/room-Merkle reads; `routes.ts` content reads + `POST …/packs` + `/pulse` (incl. C0 `critical_pack`) + `/exchange` (incl. `response_pack`) + `/rooms/:id/{checkpoint,proofs/*}` + `/bundles/import`; the `LcapServerStore` boundary over migration `0039`); the 12.4 bundle-EXPORT residual (a room's record→proof→block closure index) = follow-up |
 | WS-R.14 — DoS controls | 14.2 | **Malicious-graph guard shipped** (`checkDependencyGraph`, §27.2; wired into `commitBatch`); resource-cap centralization (14.1) + the rest = follow-up |
 | WS-R.11 — IndexedDB client offline store | 11.1 – 11.5 | **Shipped** (`apps/web/src/lcap`: `lcap_v2` schema + durability + pinning/eviction + storage modes + C0-first sync + replication gate); durability layer / SW hooks = follow-up |
 | WS-R.15/R.16/R.17/R.18 — transports, encryption envelope, client UI, simulator | — | Planned |
