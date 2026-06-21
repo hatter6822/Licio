@@ -64,8 +64,13 @@ dependency cycles rejected), and graph-guarded before any expansion by the §27.
 (WS-R.14.2 — cycle/fan-out/depth/duplicate-dependency/private-in-public/unknown-
 critical-field detectors, each mapped to a §16.11 wire rejection code, with the
 whole-batch node-count cap checked first so the guard cannot itself be a DoS
-vector).  The remaining WS-R cards are **I/O integration** — the `lcap_v2`
-IndexedDB layer (WS-R.11), the Postgres schema (WS-R.12.2) + the rest of the Hono
+vector).  The WS-R.11 client offline store has begun in `apps/web/src/lcap`: the
+`lcap_v2` IndexedDB schema (`db.ts` — the 12 §23.1 stores + room/priority/state/
+pin-class indexes + the versioned migration, a SEPARATE database from the WS-C
+`licio` store, with a static isolation check, WS-R.11.3a) and the §21.2 pinning-class
++ eviction-order policy (`gc.ts` — hard-pin invariance; user/policy pins outrank the
+ambient-cache tiers, WS-R.11.1).  The remaining WS-R cards are **I/O integration** —
+the rest of WS-R.11 (the §23.2 durability layer, storage modes, SW sync hooks) + the rest of the Hono
 routes (WS-R.12.4 — the §29 content-READ endpoints `GET /api/lcap/v2/{records,
 proofs,blocks}/:cid` (with RFC 7233 resumable range/206 + 416 reads) and the
 CSRF-exempt, rate-limited pack-import `POST
