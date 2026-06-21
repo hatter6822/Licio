@@ -8,9 +8,10 @@
 // record is labeled by the FURTHEST propagation either signal has honestly observed.
 //
 // The state unions mirror `@licio/lcap` (`validate/states.ts`, `liveness/states.ts`)
-// locally — apps/web does not depend on `@licio/lcap` (the workspace boundary +
-// bundle leanness, the WS-R.11 client-store pattern).  A drift here is caught by the
-// completeness test (every state is covered) + review against the canonical unions.
+// locally so these ALWAYS-available trust badges stay off the lazy bundle-codec chunk
+// apps/web loads `@licio/lcap` into (only the WS-R.15.1 import/export flows pull the
+// codec, dynamically).  A drift here is caught by the completeness test (every state
+// is covered) + review against the canonical unions.
 
 /** §18.2 trust state (mirror of `@licio/lcap` `TrustState`). */
 export type LcapTrustState =

@@ -16,8 +16,9 @@
 //   - Emergency — text/control only, ALL media off, P0/P1 only, one-tap export of a
 //                 selected public emergency thread.
 //
-// The stealth flag values mirror @licio/lcap's `STEALTH_ON` (apps/web does not depend
-// on @licio/lcap — the WS-R.11 bundle-leanness pattern); the per-mode test pins them.
+// The stealth flag values mirror @licio/lcap's `STEALTH_ON` locally, keeping this
+// always-available surface off the lazy bundle-codec chunk apps/web loads @licio/lcap
+// into for the WS-R.15.1 import/export flows; the per-mode test pins them.
 
 import { STORAGE_MODES, type StorageMode, type StorageModeConfig } from './storage-modes.js';
 
