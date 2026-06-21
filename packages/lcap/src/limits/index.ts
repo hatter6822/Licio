@@ -23,3 +23,12 @@ export {
   type GraphRejectionCode,
   graphLimitsFromCaps,
 } from './graph-guard.js';
+export {
+  type AdmissionDecision,
+  type AdmissionReason,
+  type AdmissionRequest,
+  admitRelayObject,
+  DEFAULT_RELAY_QUOTA,
+  type RelayQuotaConfig,
+  type RelayUsage,
+} from './relay-quota.js';
