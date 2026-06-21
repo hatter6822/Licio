@@ -686,7 +686,10 @@ export function createLcapRoutes(override?: LcapIngestServer): Hono {
     );
     return new Response(null, { status: result.ok ? 202 : result.status });
   });
-  app.get('/p2p/signal', rateLimit({ limit: 240, windowMs: 60_000 }), (c) => {
+  // The drain DELETES the peer's queued blobs, so it is a state-changing POST (CSRF-
+  // protected, like the post above — NOT a GET, which would bypass CSRF + the session and
+  // let any unauthenticated party that learns a peer key consume another peer's queue).
+  app.post('/p2p/signal/poll', rateLimit({ limit: 240, windowMs: 60_000 }), (c) => {
     const blobs = getSignalMailbox().drain(c.req.query('peer'), Date.now());
     return new Response(new Uint8Array(frameBlobs(blobs)), {
       status: 200,

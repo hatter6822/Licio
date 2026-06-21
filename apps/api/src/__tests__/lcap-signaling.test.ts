@@ -76,16 +76,17 @@ describe('SignalMailbox — opaque store-and-forward', () => {
 });
 
 describe('signaling routes (§29 /p2p/signal)', () => {
-  it('round-trips an opaque blob through POST then GET', async () => {
+  it('round-trips an opaque blob through POST then a POST drain', async () => {
     const app = createLcapRoutes();
     const key = `peer${Math.random().toString(36).slice(2)}`;
     const blob = new Uint8Array([5, 6, 7, 8]);
     const post = await app.request(`/p2p/signal?to=${key}`, { method: 'POST', body: blob });
     expect(post.status).toBe(202);
 
-    const get = await app.request(`/p2p/signal?peer=${key}`);
-    expect(get.status).toBe(200);
-    const framed = new Uint8Array(await get.arrayBuffer());
+    // The drain is a state-changing POST (CSRF-protected), not a GET.
+    const drained = await app.request(`/p2p/signal/poll?peer=${key}`, { method: 'POST' });
+    expect(drained.status).toBe(200);
+    const framed = new Uint8Array(await drained.arrayBuffer());
     expect(unframeBlobs(framed)).toEqual([blob]);
   });
 
