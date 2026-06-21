@@ -251,21 +251,25 @@ tracked follow-up.
 
 ### Ingestion-path hardening (external review, June 2026)
 
-A deep external review of the WS-R server ingestion path surfaced 15 findings.
-**Eleven are fixed + tested** (pure core — pack reader table↔frame correspondence and
-table-cap decode, importer verified-frame dependency set, validate event-size quota;
-api routes — record-dependency `requires`, CID-verified-proof gating, proof fan-in cap,
-Content-Length pre-buffer 413, repack first-object budget, missing-dependency cap, the
-CSRF-protected signaling-drain POST).
-**Four remain as tracked debt** — each needs new authorization/crypto surface or
-gated-Postgres concurrency work that must be designed correctly rather than rushed, with
-the closure target named:
+A deep external review of the WS-R server ingestion + bundle paths surfaced findings
+across several waves.  **The fixed + tested set** spans the pure core (pack reader
+table↔frame correspondence and table-cap decode, importer verified-frame dependency
+set, validate event-size quota, and the wire `missing_cids`/`wants` kept CID-clean of
+validate()'s identity pseudo-keys), the api routes (record-dependency `requires`,
+CID-verified-proof gating, proof fan-in cap, Content-Length pre-buffer 413, repack
+first-object budget, missing-dependency cap, the CSRF-protected signaling-drain POST,
+**the device-certificate account-authority verification before key indexing (#7b)**, and
+**the revocation authority + scope verification before indexing (#7)** via the new
+`@licio/lcap` `verifyRevocationAuthority`), and the web bundle import (standalone
+CID-verified chunk frames now persisted CID-addressed instead of dropped, and re-import
+gated by the already-held set so it never downgrades a record held at higher trust).
+**Two remain as tracked debt** — each needs gated-Postgres concurrency work or a new
+authorization surface that must be designed correctly rather than rushed, with the
+closure target named:
 
 | # | Sev | Location | Finding | Closure target |
 |---|-----|----------|---------|----------------|
 | 5 | P1 | `routes.ts` `GET /bundles/export` | Server-side room-wide export is reachable with no session/capability check (GETs bypass CSRF), so anyone with a room id can pull a room's accepted closure where LCAP holds in_room/private content. | **Gate by a room-capability possession proof** (maintainer-chosen): a signed, freshness-windowed export request whose subject device holds a non-revoked `may_export_bundle` capability for the room; verified via the registered identity state. |
-| 7 | P1 | `routes.ts` revocation branch | `registerRevocation` indexes any syntactically valid revocation with no authority check; `validateIdentityChain` then trusts the `RevocationIndex`, so a CSRF-exempt pack can revoke arbitrary device/account/capability ids (DoS). | **Verify the revocation's signed authority chain + scope** (account authority for device/account/proof; room authority for capability/room_policy) before indexing — a new `@licio/lcap` revocation-authority verifier reused by the route. |
-| 7b | P1 | `routes.ts` certificate branch | `registerCertificate` overwrites the process-wide cert/key maps keyed by `device_key_id` BEFORE the account-authority proof is verified, so a hostile `/packs` upload can replace a known device key with attacker COSE bytes and make that device's valid contributions fail proof verification (DoS). | **Verify the account-authority proof before registering** (same family as #7): resolve the account-authority key for the cert's `(account_id, account_epoch)`, `verifyDetached` the authority proof over the cert body, and refuse to overwrite an existing key on an unverified cert. |
 | 3 | P1 | `server-ingest.ts` device-seq | The `(authorDeviceKeyId, deviceSeq)` claim is read (`getDeviceClaimant`) then written (`setDeviceClaimant`) non-atomically, so two concurrent records for the same device-seq can both be accepted under Postgres instead of one being reported `conflict_device_fork`. | **Atomic claim-before-append** — a conditional `INSERT … ON CONFLICT DO NOTHING RETURNING` device-seq claim in the Drizzle adapter, the loser detected + reported as a fork; in-memory adapter is single-threaded (no race). |
 | 2 | P1 | `drizzle-store.ts` acceptance-seq | Concurrent accepts compute the same `roomSize` and `onConflictDoNothing` hides one insert, yet `appendAcceptance` still returns that sequence — the caller reports the record accepted while it is absent from the room log. | **Allocate the per-room sequence atomically** (a single SQL statement / serialized transaction); detect the conflict and retry or fail rather than returning a phantom seq. Parameterized store-contract concurrency test. |
 
