@@ -42,7 +42,7 @@ function asLane(value: string, priority: LcapPriority): LcapLane {
 }
 
 /** Record kinds that carry identity/device material (a §26.2 disclosure). */
-const IDENTITY_KINDS = new Set(['device_certificate', 'capability', 'revocation']);
+const IDENTITY_KINDS = new Set(['device_certificate', 'room_capability', 'revocation']);
 
 export interface RoomExport {
   /** The pack objects, ordered control-first (lower priority number leads). */

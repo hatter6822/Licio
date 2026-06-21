@@ -196,6 +196,14 @@ export function OfflineBundlePanel({
                     'Anyone you share it with can read it — and pass it on.',
                   )}
                 </li>
+                {exportState.data.disclosure.carriesIdentities ? (
+                  <li>
+                    {t(
+                      'lcap.bundle.disclosureIdentities',
+                      'Includes device/identity material (certificates or capabilities) that reveals account and device identifiers.',
+                    )}
+                  </li>
+                ) : null}
               </ul>
               <div className="flex gap-2">
                 <Button variant="primary" size="md" onClick={doExport}>

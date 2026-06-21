@@ -234,6 +234,17 @@ describe('POST /api/lcap/v2/packs — review hardening', () => {
     expect(data.wants.some((w) => w.cid === absentParent)).toBe(true);
     expect(await srv.isAccepted(fx.recordCid)).toBe(false);
   });
+
+  it('serves stored media chunks via GET /chunks/:cid so chunk wants can be cleared', async () => {
+    const srv = new LcapIngestServer(NET, () => NOW);
+    setLcapIngestServer(srv);
+    const chunkBytes = enc.encode('a-media-chunk-payload');
+    const chunkCid = await cidFor('chunk', chunkBytes);
+    await srv.putObject(chunkCid, 'chunk', chunkBytes);
+    const res = await createApp().request(`/api/lcap/v2/chunks/${chunkCid}`);
+    expect(res.status).toBe(200);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(chunkBytes);
+  });
 });
 
 describe('POST /bundles/import — the §29.8 web alias (same validator)', () => {

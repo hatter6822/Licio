@@ -55,12 +55,13 @@ import type { CommitRecordInput, LcapIngestServer } from './server-ingest.js';
 import { getLcapIngestServer } from './service.js';
 import { frameBlobs, getSignalMailbox } from './signaling.js';
 
-type ContentKind = 'record' | 'proof' | 'block';
+type ContentKind = 'record' | 'proof' | 'block' | 'chunk';
 
 const CONTENT_TYPE: Record<ContentKind, string> = {
   record: 'application/cbor',
   proof: 'application/cbor',
   block: 'application/octet-stream',
+  chunk: 'application/octet-stream',
 };
 
 // A pack frame's content-addressed kind (the §16.11 `cid_kind` + the store key).
@@ -617,6 +618,10 @@ export function createLcapRoutes(override?: LcapIngestServer): Hono {
   app.get('/records/:cid', read('record'));
   app.get('/proofs/:cid', read('proof'));
   app.get('/blocks/:cid', read('block'));
+  // Media chunks are stored, repacked, and advertised as `chunk` wants, so they need a
+  // resumable read route too — else a chunk dropped from a budget-limited response_pack
+  // could never be fetched to clear the want (§29.4-6).
+  app.get('/chunks/:cid', read('chunk'));
   // §29.7 room checkpoint / inclusion / consistency reads (GETs → CSRF passes).
   app.get('/rooms/:roomId/checkpoint', (c) =>
     handleRoomCheckpoint(server(), c.req.param('roomId')),
