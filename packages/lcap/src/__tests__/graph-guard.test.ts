@@ -85,6 +85,21 @@ describe('checkDependencyGraph (§27.2 detectors)', () => {
     expect(res).toMatchObject({ ok: false, code: 'rejected_resource_limit', detector: 'depth' });
   });
 
+  it('rejects a very long chain as depth without overflowing the call stack', () => {
+    // A chain far deeper than maxDepth — and deep enough that a naive full recursion
+    // would blow the JS stack.  The guard must stop short and reject as `depth`.
+    const LEN = 20_000;
+    const chain: GraphGuardNode[] = [];
+    for (let i = 0; i < LEN; i++) {
+      chain.push(node(`c${i}`, i + 1 < LEN ? [`c${i + 1}`] : []));
+    }
+    const res = checkDependencyGraph(chain, {
+      audience: 'restricted',
+      limits: { maxNodes: LEN + 1, maxFanOut: 64, maxDepth: 64 },
+    });
+    expect(res).toMatchObject({ ok: false, code: 'rejected_resource_limit', detector: 'depth' });
+  });
+
   it('does not count external (out-of-batch) prerequisites toward depth', () => {
     // A→B→(external); the in-batch chain depth is 2, within the cap.
     const res = checkDependencyGraph([node('A', ['B']), node('B', ['external'])], {

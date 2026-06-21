@@ -149,6 +149,31 @@ describe('allocation invariants (WS-R.5.2b, 5.4)', () => {
     );
   });
 
+  it('keeps media gated while a C0 object is blocked on a not-yet-placed prerequisite', () => {
+    // A C0 control object depends on a T1 object: until the WHOLE C0 closure (the T1 dep
+    // then the C0 object) is placed, no media may ship (§15.2 anti-starvation).
+    const t1dep = cand({ cid: 't1dep', lane: 'T1', priority: 1, bytes: 100 });
+    const c0blocked = cand({
+      cid: 'c0blocked',
+      lane: 'C0',
+      priority: 0,
+      bytes: 100,
+      requires: ['t1dep'],
+    });
+    const media = Array.from({ length: 5 }, (_, i) =>
+      cand({ cid: `m${i}`, lane: 'M3', priority: 3, bytes: 10_000 }),
+    );
+    const result = scheduleTransfer([...media, c0blocked, t1dep], {
+      budgetBytes: 600 * 1024,
+      mediaRequested: true,
+      nowMs: 0,
+    });
+    const c0Index = result.order.findIndex((c) => c.cid === 'c0blocked');
+    const firstMediaIndex = result.order.findIndex((c) => c.lane === 'M3');
+    expect(c0Index).toBeGreaterThanOrEqual(0); // the C0 object is placed (after its dep)
+    expect(firstMediaIndex).toBeGreaterThan(c0Index); // media only AFTER the C0 closure lands
+  });
+
   it('stops before budget overflow and is deterministic', () => {
     const candidates = Array.from({ length: 5 }, (_, i) =>
       cand({ cid: `t${i}`, lane: 'T1', priority: 1, bytes: 3000 }),

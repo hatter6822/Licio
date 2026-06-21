@@ -134,9 +134,12 @@ export function checkDependencyGraph(
   // (3) Cycle + depth in one bounded DFS over in-batch edges.
   const color = new Map<string, 1 | 2>(); // 1 = on stack, 2 = done
   const depthMemo = new Map<string, number>();
-  const state = { cycleCid: undefined as string | undefined };
+  const state = {
+    cycleCid: undefined as string | undefined,
+    tooDeepCid: undefined as string | undefined,
+  };
 
-  const visit = (cid: string): number => {
+  const visit = (cid: string, pathDepth: number): number => {
     const c = color.get(cid);
     if (c === 1) {
       state.cycleCid = cid;
@@ -145,11 +148,18 @@ export function checkDependencyGraph(
     if (c === 2) return depthMemo.get(cid) ?? 0;
     const node = byCid.get(cid);
     if (node === undefined) return 0; // external prerequisite — a leaf, not expanded
+    // Stop BEFORE recursing past the depth cap: a long in-batch chain is rejected as
+    // `depth` rather than followed deep enough to overflow the call stack (§27.2).  The
+    // recursion is therefore bounded to maxDepth + 1 frames regardless of chain length.
+    if (pathDepth > limits.maxDepth) {
+      state.tooDeepCid = cid;
+      return 0;
+    }
     color.set(cid, 1);
     let maxChild = 0;
     for (const req of node.requires) {
-      const d = visit(req);
-      if (state.cycleCid !== undefined) return 0;
+      const d = visit(req, pathDepth + 1);
+      if (state.cycleCid !== undefined || state.tooDeepCid !== undefined) return 0;
       if (d > maxChild) maxChild = d;
     }
     color.set(cid, 2);
@@ -160,9 +170,12 @@ export function checkDependencyGraph(
 
   for (const node of byCid.values()) {
     if (color.get(node.cid) === 2) continue;
-    const depth = visit(node.cid);
+    const depth = visit(node.cid, 0);
     if (state.cycleCid !== undefined) {
       return reject('rejected_bad_schema', 'cycle', state.cycleCid);
+    }
+    if (state.tooDeepCid !== undefined) {
+      return reject('rejected_resource_limit', 'depth', state.tooDeepCid);
     }
     if (depth > limits.maxDepth) {
       return reject('rejected_resource_limit', 'depth', node.cid);

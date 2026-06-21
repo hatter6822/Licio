@@ -77,12 +77,24 @@ export function allocate(
     return false;
   };
 
-  // True while any C0 object is still schedulable (eligible + fits budget).  No
-  // M3/B4 byte may be sent while this holds (the hard §15.2 ordering invariant);
-  // a C0 object blocked only by an unmet dependency still counts (its eligible
-  // dependency keeps this true until the whole C0 closure is placed).
+  // A CID still pending placement in any lane (so a not-yet-placed prerequisite of a
+  // blocked C0 object is recognised as available, not absent).
+  const isPending = (cid: string): boolean =>
+    LANE_ORDER.some((lane) => remaining[lane].some((c) => c.cid === cid));
+
+  // True while any C0 object is still schedulable.  No M3/B4 byte may be sent while this
+  // holds (the hard §15.2 ordering invariant).  A C0 object blocked ONLY by unmet
+  // dependencies that are themselves still placed-or-pending counts too: its closure is
+  // in progress, so the media gate stays closed until the whole C0 closure lands.  A C0
+  // object blocked by a genuinely absent (external, never-placeable) dependency does NOT
+  // hold the gate (it can never be scheduled).
   const schedulableC0Remaining = (): boolean =>
-    remaining.C0.some((candidate) => isEligible(candidate) && fitsBudget(candidate, 'C0'));
+    remaining.C0.some(
+      (candidate) =>
+        fitsBudget(candidate, 'C0') &&
+        (isEligible(candidate) ||
+          candidate.requires.every((dep) => placed.has(dep) || isPending(dep))),
+    );
 
   // Phase 1 — C0 minimum reservation (before any other lane is served).
   while (usedByLane.C0 < laneBudget.c0MinBytes && emitFromLane('C0', true)) {
