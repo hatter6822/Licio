@@ -35,4 +35,5 @@ export * from './records/index.js';
 export * from './scheduler/index.js';
 export * from './schemas/index.js';
 export * from './sync/index.js';
+export * from './transport/index.js';
 export * from './validate/index.js';
