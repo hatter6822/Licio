@@ -7,7 +7,15 @@
 // validate→guard→commit pipeline.  The endpoint is CSRF-exempt
 // (device-cert-authenticated content) and applies the §22.1.1 status mapping.
 
-import { cidFor, detachedProofV2Schema, encodeWithSchema, writePack } from '@licio/lcap';
+import {
+  buildAndSign,
+  type ContributionEventRecordV2,
+  cidFor,
+  detachedProofV2Schema,
+  encodeContributionEvent,
+  encodeWithSchema,
+  writePack,
+} from '@licio/lcap';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
 import { createLcapRoutes } from '../lcap/routes.js';
@@ -233,6 +241,66 @@ describe('POST /api/lcap/v2/packs — review hardening', () => {
     );
     expect(data.wants.some((w) => w.cid === absentParent)).toBe(true);
     expect(await srv.isAccepted(fx.recordCid)).toBe(false);
+  });
+
+  it('derives record prerequisites from the SIGNED BODY even when the pack table omits deps', async () => {
+    const srv = new LcapIngestServer(NET, () => NOW);
+    await registerIdentity(srv, fx);
+    setLcapIngestServer(srv);
+    const absentParent = await cidFor('record', enc.encode('absent body-declared parent'));
+    // A child whose BODY names a parent record, but whose pack TABLE entry declares no
+    // deps at all — a malicious pack stripping the table must not bypass the prerequisite.
+    const child: ContributionEventRecordV2 = {
+      ...fx.contribution,
+      parent_record_cids: [absentParent],
+      client_nonce: new Uint8Array([9, 9, 9]),
+    };
+    const childBody = encodeContributionEvent(child);
+    const childCid = await cidFor('record', childBody);
+    const childProof = await buildAndSign({
+      privateKey: fx.device.privateKey,
+      signerKeyId: 'key-1',
+      proofKind: 'device_signature',
+      recordKind: 'contribution_event',
+      recordBody: childBody,
+      networkId: NET,
+    });
+    const childProofBytes = encodeWithSchema(detachedProofV2Schema, childProof);
+    const childProofCid = await cidFor('proof', childProofBytes);
+    const pack = writePack({
+      objects: [
+        {
+          cid: childCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: childBody,
+          lane: 'T1',
+          priority: 1,
+        }, // deliberately NO table deps
+        {
+          cid: childProofCid,
+          cidKind: 'proof',
+          frameKind: 'proof',
+          payload: childProofBytes,
+          lane: 'T1',
+          priority: 1,
+          providesProofFor: childCid,
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1_000_000,
+    });
+    const res = await createApp().request('/api/lcap/v2/packs', { method: 'POST', body: pack });
+    const data = (await res.json()) as {
+      statuses: { cid: string; status: string }[];
+      wants: { cid: string }[];
+    };
+    expect(data.statuses.find((s) => s.cid === childCid)?.status).toBe(
+      'quarantined_missing_dependency',
+    );
+    expect(data.wants.some((w) => w.cid === absentParent)).toBe(true);
+    expect(await srv.isAccepted(childCid)).toBe(false);
   });
 
   it('serves stored media chunks via GET /chunks/:cid so chunk wants can be cleared', async () => {

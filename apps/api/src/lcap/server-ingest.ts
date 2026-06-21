@@ -427,7 +427,10 @@ export class LcapIngestServer {
     const overCpuBudget = (): boolean =>
       !checkCap(this.now() - startMs, 'maxCpuTimeMsPerImportBatch', this.caps).ok;
 
-    // Satisfiable records, parents before children: the full stage-1+3 commit.
+    // Satisfiable records, parents before children: the full stage-1+3 commit.  A record
+    // is "accepted" for prerequisite purposes only once it reaches the room log (a
+    // `roomSeq`); seed with the externally-accepted set.
+    const acceptedInBatch = new Set<string>(acceptedExternally);
     for (const cid of resolution.order) {
       const input = byCid.get(cid);
       if (!input) continue;
@@ -435,9 +438,25 @@ export class LcapIngestServer {
         statuses.push({ cid, cid_kind: 'record', status: 'rejected_resource_limit' });
         continue;
       }
+      // A required predecessor present in THIS batch must have actually been ACCEPTED, not
+      // merely ordered ahead: if an in-pack prerequisite was rejected/quarantined upstream,
+      // this dependent must quarantine too (and want it) rather than append to the canonical
+      // room log with an unaccepted prerequisite (§24.4).
+      const unmet = (input.requires ?? []).filter((req) => !acceptedInBatch.has(req));
+      if (unmet.length > 0) {
+        statuses.push({
+          cid,
+          cid_kind: 'record',
+          status: 'quarantined_missing_dependency',
+          missing_cids: unmet,
+        });
+        for (const dep of unmet) addWant(dep);
+        continue;
+      }
       const res = await this.commitRecord(input);
       statuses.push(res.status);
       for (const want of res.wants) addWant(want.cid);
+      if (res.roomSeq !== undefined) acceptedInBatch.add(cid);
     }
 
     // Records with absent dependencies: durably store (stage 1), quarantine, want —

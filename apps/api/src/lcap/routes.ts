@@ -303,11 +303,18 @@ async function ingestPackFrames(
         statuses.push({ cid, cid_kind: 'record', status: storedStatus });
         break;
       case 'contribution_event': {
-        // Split the table's declared deps: block deps index the §29.8 export closure;
-        // RECORD deps (parent/previous record) are prerequisites passed to commitBatch so
-        // a child/edit/moderation record with an absent record dependency quarantines
-        // (and surfaces a want) instead of being appended to the canonical room log.
-        const requires: string[] = [];
+        // Record prerequisites come from the SIGNED BODY (authoritative), not just the
+        // attacker-controlled pack table: a malicious pack could omit table `deps` while
+        // the body names a parent/previous/target/replaced record, letting a reply / edit
+        // / moderation action append without the referenced record being accepted.  Union
+        // the body-declared record CIDs with the table's record deps into `requires`; the
+        // table's block deps still index the §29.8 export closure.
+        const requires = new Set<string>();
+        if (record.prev_device_record_cid) requires.add(record.prev_device_record_cid);
+        if (record.replaces_record_cid) requires.add(record.replaces_record_cid);
+        if (record.target_record_cid) requires.add(record.target_record_cid);
+        if (record.thread_root_cid) requires.add(record.thread_root_cid);
+        for (const parent of record.parent_record_cids ?? []) requires.add(parent);
         for (const dep of entryByCid.get(cid)?.deps ?? []) {
           let depKind: string;
           try {
@@ -316,7 +323,7 @@ async function ingestPackFrames(
             continue; // a malformed dep CID is ignored (the record will quarantine anyway)
           }
           if (depKind === 'block') await server.indexRecordEdge(cid, dep, 'block');
-          else if (depKind === 'record') requires.push(dep);
+          else if (depKind === 'record') requires.add(dep);
         }
         contributions.push({
           recordCid: cid,
@@ -325,7 +332,7 @@ async function ingestPackFrames(
           deviceSeq: record.device_seq,
           body: frame.payload,
           proofs,
-          ...(requires.length > 0 ? { requires } : {}),
+          ...(requires.size > 0 ? { requires: [...requires] } : {}),
         });
         break; // commitBatch reports the contribution's status
       }
