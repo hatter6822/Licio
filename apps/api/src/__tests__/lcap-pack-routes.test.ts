@@ -10,6 +10,7 @@
 import { cidFor, detachedProofV2Schema, encodeWithSchema, writePack } from '@licio/lcap';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
+import { createLcapRoutes } from '../lcap/routes.js';
 import { LcapIngestServer } from '../lcap/server-ingest.js';
 import { setLcapIngestServer } from '../lcap/service.js';
 import {
@@ -183,5 +184,33 @@ describe('POST /api/lcap/v2/packs — bundle import (WS-R.12.4)', () => {
     expect(res.status).toBe(200);
     const data = (await res.json()) as { statuses: { cid: string; status: string }[] };
     expect(data.statuses.find((s) => s.cid === declaredCid)?.status).toBe('rejected_bad_cid');
+  });
+});
+
+describe('POST /bundles/import — the §29.8 web alias (same validator)', () => {
+  it('ingests a pack identically to /packs through the shared validator', async () => {
+    const srv = new LcapIngestServer(NET, () => NOW);
+    await registerIdentity(srv, fx);
+    // createLcapRoutes has no app-level CSRF middleware, so this exercises the handler.
+    const res = await createLcapRoutes(srv).request('/bundles/import', {
+      method: 'POST',
+      body: packBytes,
+    });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { statuses: { cid: string; status: string }[] };
+    expect(data.statuses).toContainEqual(
+      expect.objectContaining({ cid: fx.recordCid, status: 'accepted' }),
+    );
+    expect(await srv.isAccepted(fx.recordCid)).toBe(true);
+  });
+
+  it('is CSRF-PROTECTED through the full app (unlike /packs): no token → 403', async () => {
+    setLcapIngestServer(new LcapIngestServer(NET, () => NOW));
+    const res = await createApp().request('/api/lcap/v2/bundles/import', {
+      method: 'POST',
+      body: new Uint8Array([0]),
+    });
+    // The session-bearing web flow keeps the double-submit token; a tokenless POST is blocked.
+    expect(res.status).toBe(403);
   });
 });

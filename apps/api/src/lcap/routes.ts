@@ -270,7 +270,13 @@ async function ingestPackFrames(
   return { ok: true, statuses: [...statuses, ...result.statuses], wants: result.wants };
 }
 
-/** §29.3 `POST /packs`: ingest a pack and report the per-object outcomes inline. */
+/**
+ * §29.3 `POST /packs` (+ the §29.8 `POST /bundles/import` web alias): ingest a pack
+ * through the shared validator and report the per-object outcomes inline.  The two
+ * routes differ only in CSRF posture — `/packs` is exempt (native sync clients hold
+ * no session), `/bundles/import` is a session-bearing web flow that keeps the global
+ * CSRF token — never in validation, which is identical (the card's requirement).
+ */
 async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<Response> {
   const result = await ingestPackFrames(server, body);
   if (!result.ok) {
@@ -496,6 +502,13 @@ export function createLcapRoutes(override?: LcapIngestServer): Hono {
     handleRoomConsistency(server(), c.req.param('roomId'), c.req.query('old'), c.req.query('new')),
   );
   app.post('/packs', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) =>
+    ingestPack(server(), new Uint8Array(await c.req.arrayBuffer())),
+  );
+  // §29.8 bundle import: the web-UI alias of /packs (same validator; CSRF-protected
+  // — it is NOT in the CSRF-exempt set, so a session-bearing browser flow keeps the
+  // double-submit token).  Bundle EXPORT is the WS-R.12.4 follow-up (it repacks held
+  // content, so it needs the import-captured object lane/priority/deps metadata).
+  app.post('/bundles/import', rateLimit({ limit: 60, windowMs: 60_000 }), async (c) =>
     ingestPack(server(), new Uint8Array(await c.req.arrayBuffer())),
   );
   app.post('/pulse', rateLimit({ limit: 120, windowMs: 60_000 }), async (c) =>
