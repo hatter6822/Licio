@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
-import { findEgressIssues, findGuardIssues, findSchemaIssues } from './check-no-raw-egress.js';
+import {
+  findEgressIssues,
+  findGuardIssues,
+  findLcapEgressIssues,
+  findSchemaIssues,
+} from './check-no-raw-egress.js';
 
 describe('findEgressIssues', () => {
   it('passes the sanctioned bucketed-egress import', () => {
@@ -53,5 +58,30 @@ describe('findSchemaIssues', () => {
     expect(findSchemaIssues('z.object({ scrollY: z.number() })')).toEqual([
       expect.stringContaining('scrollY'),
     ]);
+  });
+});
+
+describe('findLcapEgressIssues (WS-R.14.3 LCAP source scan)', () => {
+  it('passes clean LCAP source (incl. content-addressed prose, no bare ip)', () => {
+    expect(findLcapEgressIssues('cid.ts', 'export const x = "content-addressed record";')).toEqual(
+      [],
+    );
+  });
+
+  it('flags a raw-trace field token in LCAP source', () => {
+    expect(findLcapEgressIssues('rec.ts', 'const dwellMs = 1;')).toEqual([
+      expect.stringContaining('dwellMs'),
+    ]);
+  });
+
+  it('flags a network/location identifier token in LCAP source', () => {
+    expect(findLcapEgressIssues('rec.ts', 'const ip_address = peer.addr;')[0]).toContain(
+      'ip_address',
+    );
+    expect(findLcapEgressIssues('rec.ts', 'latitude: z.number()')[0]).toContain('latitude');
+  });
+
+  it('ignores forbidden tokens that only appear in comments', () => {
+    expect(findLcapEgressIssues('rec.ts', '// never store geolocation\nconst x = 1;')).toEqual([]);
   });
 });

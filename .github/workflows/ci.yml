@@ -30,6 +30,9 @@ jobs:
       - run: pnpm lint:security
       - run: pnpm check:policy
       - run: pnpm check:no-raw-egress
+      - run: pnpm check:no-applause
+      - run: pnpm check:lcap-schema-egress
+      - run: pnpm check:lcap-p2p-split
 
   typecheck:
     name: Type Check
@@ -124,6 +127,12 @@ jobs:
       # full suite above). See docs/invariants/ADVERSARIAL-THREATS.md.
       - name: Adversarial ensemble gate (WS-O.4.5)
         run: pnpm check:adversarial
+      # WS-R.5.4: the LCAP lane-scheduler invariants as an EXPLICIT, named gate —
+      # C0 (trust/liveness control) can never be starved by media/bulk, and a
+      # dependent object is never scheduled before its verify/render closure
+      # (OFFLINE_SPEC §15.2).
+      - name: LCAP scheduler gate (WS-R.5.4)
+        run: pnpm check:lcap-scheduler
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:

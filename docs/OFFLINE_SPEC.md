@@ -2891,46 +2891,60 @@ unless the exact meaning is shown.
 
 ### Phase 0 — Record identity and proofs
 
+Shipped as the `@licio/lcap` package (WS-R.0; `docs/lcap/README.md`).
+
 ```text
-[ ] deterministic CBOR v2 profile
-[ ] record_cid independent of proof bytes
-[ ] detached proof object
-[ ] ES256 low-S test vectors
-[ ] strict zod schemas
+[x] deterministic CBOR v2 profile        (packages/lcap/src/cbor)
+[x] record_cid independent of proof bytes (packages/lcap/src/cid + cose; property-pinned)
+[x] detached proof object                 (COSE_Sign1, packages/lcap/src/cose/sign1.ts)
+[x] ES256 low-S test vectors              (packages/lcap/src/cose/ecdsa.ts + test-vectors/sign1.json)
+[x] strict zod schemas                    (packages/lcap/src/schemas)
 ```
 
 ### Phase 1 — PWA outbox and HTTPS exchange
 
+The identity/record + **sync-decision** protocol core for this phase ships in
+`@licio/lcap` (WS-R.1/R.2 and the WS-R.6/R.7 pulse/exchange/reconciliation
+logic); the IndexedDB, HTTP endpoint, server-ingestion, and UI bindings below are
+the remaining (I/O) deliverable.
+
 ```text
-[ ] device enrollment
-[ ] capability issuance
-[ ] offline text event signing
+[x] device enrollment             (cert core: packages/lcap/src/identity/cert.ts)
+[x] capability issuance           (core: packages/lcap/src/identity/capability.ts)
+[x] offline text event signing    (record + proof core: packages/lcap/src/records + cose)
 [ ] IndexedDB lcap_v2 stores
-[ ] pulse/exchange endpoint
-[ ] idempotent server ingestion
-[ ] trust projection UI
+[ ] pulse/exchange endpoint       (decision core: packages/lcap/src/sync — pulse/exchange/budgets/interests/wants; HTTP endpoint = WS-R.12.4)
+[ ] idempotent server ingestion   (idempotency keying: packages/lcap/src/sync/ingest.ts; durable server store = WS-R.12)
+[ ] trust projection UI           (projection logic ships in packages/lcap/src/validate; UI pending)
 ```
 
 ### Phase 2 — Packfiles and manual bundles
 
+The pack **codec** (streaming writer/reader, partial import + quarantine logic,
+malicious-bundle hardening) ships in `@licio/lcap` (WS-R.4); the file-system /
+UI bindings remain.
+
 ```text
-[ ] streaming pack writer
-[ ] streaming pack reader
-[ ] manual export/import
-[ ] quarantine UI
+[x] streaming pack writer         (packages/lcap/src/pack/writer.ts)
+[x] streaming pack reader         (packages/lcap/src/pack/reader.ts)
+[ ] manual export/import          (codec ships in packages/lcap/src/pack/import.ts; file/UI binding pending)
+[ ] quarantine UI                 (import-quarantine logic ships in packages/lcap/src/pack; UI pending)
 [ ] storage budget UI
-[ ] malicious bundle tests
+[x] malicious bundle tests        (packages/lcap/src/__tests__/pack.test.ts: cap/tamper/CID matrix)
 ```
 
 ### Phase 3 — Checkpoints and liveness
 
+The entire **protocol core** of this phase ships in `@licio/lcap`
+(WS-R.9/R.10); durable server persistence of the room log is WS-R.12.
+
 ```text
-[ ] room log append
-[ ] signed checkpoints
-[ ] inclusion proofs
-[ ] consistency proofs
-[ ] liveness state machine
-[ ] receipts
+[x] room log append               (append logic: packages/lcap/src/checkpoint/log.ts; durable store = WS-R.12)
+[x] signed checkpoints            (packages/lcap/src/checkpoint/record.ts)
+[x] inclusion proofs              (RFC 9162: packages/lcap/src/checkpoint/merkle.ts + inclusion.ts)
+[x] consistency proofs            (RFC 9162: packages/lcap/src/checkpoint/merkle.ts + consistency.ts)
+[x] liveness state machine        (packages/lcap/src/liveness/states.ts)
+[x] receipts                      (packages/lcap/src/liveness/receipts.ts)
 ```
 
 ### Phase 4 — Relay and WebTransport

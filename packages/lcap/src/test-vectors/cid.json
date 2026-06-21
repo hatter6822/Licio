@@ -1,0 +1,22 @@
+[
+  {
+    "kind": "record",
+    "body_hex": "",
+    "cid": "lcapr_aeareihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku"
+  },
+  {
+    "kind": "record",
+    "body_hex": "616263",
+    "cid": "lcapr_aeareif2pall7dybz7vecqka3zo24irdwabwdi4wc55jznaq75q7eaavvu"
+  },
+  {
+    "kind": "block",
+    "body_hex": "deadbeef",
+    "cid": "lcapb_aebreic7pdbte5heh6u54vszezob3el6exadoiw4wc4ne7ny2x7kvajzkm"
+  },
+  {
+    "kind": "chunk",
+    "body_hex": "00",
+    "cid": "lcapc_aecbeidogqfzz75tpkmjzjke425xqcrmpcib2p5tg44hnbirumdbpl5adu"
+  }
+]

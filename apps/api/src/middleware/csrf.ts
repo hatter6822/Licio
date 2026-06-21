@@ -159,6 +159,23 @@ const EXEMPT_PATHS = new Set([
   '/api/security/csp-report',
   '/v1/telemetry',
   '/v1/takedowns',
+  // The LCAP sync surface (WS-R.12.4) is device-certificate-authenticated CONTENT:
+  // records carry their own COSE proofs (validate() is the real authentication), and
+  // a native sync client holds NO session cookie — so there is no session for CSRF to
+  // ride. `/packs` + `/exchange` import content (every record self-authenticating);
+  // `/pulse` is a non-state-changing frontier exchange that returns only public tree
+  // sizes + the revocation epoch. Abuse is bounded by each endpoint's own rate limit +
+  // the §27 resource caps + the §27.2 malicious-graph guard before any expansion.
+  '/api/lcap/v2/packs',
+  '/api/lcap/v2/pulse',
+  '/api/lcap/v2/exchange',
+  // The §29.8 server export is gated by a device-signed, freshness-windowed `export_request`
+  // (the requester must hold a non-revoked `may_export_bundle` capability for the room); the
+  // signature IS the authentication, and a native peer holds no session cookie — so, like
+  // `/packs`, there is no session for CSRF to ride. Abuse is bounded by its own rate limit +
+  // the export gate. (The web-UI `/bundles/import` alias stays NON-exempt — it is a
+  // session-bearing browser flow that keeps the double-submit token.)
+  '/api/lcap/v2/bundles/export',
 ]);
 // WS-D identity/privacy endpoints rely on `SameSite=Strict` + the opaque session
 // model (and a per-flow `login_attempt_id` binding) as the CSRF defense, so they do

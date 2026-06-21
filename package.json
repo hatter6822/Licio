@@ -1,6 +1,6 @@
 {
   "name": "licio",
-  "version": "0.4.0",
+  "version": "0.4.8",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "packageManager": "pnpm@9.15.4",
@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "pnpm --parallel --filter web --filter api dev",
-    "build": "pnpm --filter @licio/shared build && pnpm --filter @licio/db --filter @licio/invariants build && pnpm --filter @licio/ranking --filter @licio/governance build && pnpm --filter web --filter api build",
+    "build": "pnpm --filter @licio/shared build && pnpm --filter @licio/db --filter @licio/invariants build && pnpm --filter @licio/ranking --filter @licio/governance --filter @licio/lcap build && pnpm --filter web --filter api build",
     "test": "vitest run",
     "test:e2e": "pnpm --filter web test:e2e",
     "lint": "biome check .",
@@ -18,6 +18,8 @@
     "lint:security": "tsx scripts/lint-security.ts",
     "check:no-applause": "tsx scripts/check-no-applause.ts",
     "check:no-raw-egress": "tsx scripts/check-no-raw-egress.ts",
+    "check:lcap-p2p-split": "tsx scripts/check-lcap-p2p-split.ts",
+    "check:lcap-schema-egress": "tsx scripts/check-lcap-schema-egress.ts",
     "check:sw": "tsx scripts/check-sw-security.ts",
     "lint:lockfile": "tsx scripts/check-lockfile.ts",
     "typecheck": "tsc -b",
@@ -25,6 +27,7 @@
     "check:workspace-deps": "tsx scripts/check-workspace-deps.ts",
     "check:policy": "tsx scripts/check-policy.ts",
     "check:neutrality": "vitest run --project api src/__tests__/ranking-neutrality.test.ts",
+    "check:lcap-scheduler": "tsx scripts/check-lcap-scheduler.ts",
     "check:adversarial": "vitest run --project api src/__tests__/invariants-ensemble-adversarial.test.ts",
     "sbom": "tsx scripts/generate-sbom.ts",
     "db:generate": "pnpm --filter @licio/db exec drizzle-kit generate",

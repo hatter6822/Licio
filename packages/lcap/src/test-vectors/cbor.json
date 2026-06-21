@@ -1,0 +1,273 @@
+[
+  {
+    "name": "uint_0",
+    "value": 0,
+    "hex": "00"
+  },
+  {
+    "name": "uint_23",
+    "value": 23,
+    "hex": "17"
+  },
+  {
+    "name": "uint_24",
+    "value": 24,
+    "hex": "1818"
+  },
+  {
+    "name": "uint_255",
+    "value": 255,
+    "hex": "18ff"
+  },
+  {
+    "name": "uint_256",
+    "value": 256,
+    "hex": "190100"
+  },
+  {
+    "name": "uint_65535",
+    "value": 65535,
+    "hex": "19ffff"
+  },
+  {
+    "name": "uint_65536",
+    "value": 65536,
+    "hex": "1a00010000"
+  },
+  {
+    "name": "uint_2pow32_minus_1",
+    "value": 4294967295,
+    "hex": "1affffffff"
+  },
+  {
+    "name": "uint_2pow32",
+    "value": {
+      "$bigint": "4294967296"
+    },
+    "hex": "1b0000000100000000"
+  },
+  {
+    "name": "uint_2pow64_minus_1",
+    "value": {
+      "$bigint": "18446744073709551615"
+    },
+    "hex": "1bffffffffffffffff"
+  },
+  {
+    "name": "nint_minus_1",
+    "value": -1,
+    "hex": "20"
+  },
+  {
+    "name": "nint_minus_24",
+    "value": -24,
+    "hex": "37"
+  },
+  {
+    "name": "nint_minus_256",
+    "value": -256,
+    "hex": "38ff"
+  },
+  {
+    "name": "nint_min_2pow64",
+    "value": {
+      "$bigint": "-18446744073709551616"
+    },
+    "hex": "3bffffffffffffffff"
+  },
+  {
+    "name": "text_empty",
+    "value": "",
+    "hex": "60"
+  },
+  {
+    "name": "text_a",
+    "value": "a",
+    "hex": "6161"
+  },
+  {
+    "name": "text_ietf",
+    "value": "IETF",
+    "hex": "6449455446"
+  },
+  {
+    "name": "bytes_empty",
+    "value": {
+      "$bytes": ""
+    },
+    "hex": "40"
+  },
+  {
+    "name": "bytes_deadbeef",
+    "value": {
+      "$bytes": "deadbeef"
+    },
+    "hex": "44deadbeef"
+  },
+  {
+    "name": "simple_false",
+    "value": false,
+    "hex": "f4"
+  },
+  {
+    "name": "simple_true",
+    "value": true,
+    "hex": "f5"
+  },
+  {
+    "name": "simple_null",
+    "value": null,
+    "hex": "f6"
+  },
+  {
+    "name": "array_empty",
+    "value": [],
+    "hex": "80"
+  },
+  {
+    "name": "array_123",
+    "value": [1, 2, 3],
+    "hex": "83010203"
+  },
+  {
+    "name": "map_empty",
+    "value": {
+      "$map": []
+    },
+    "hex": "a0"
+  },
+  {
+    "name": "map_sorted",
+    "value": {
+      "$map": [["b", 1], ["a", 2]]
+    },
+    "hex": "a2616102616201"
+  },
+  {
+    "name": "cose_protected_es256",
+    "value": {
+      "$map": [[1, -7]]
+    },
+    "hex": "a10126"
+  },
+  {
+    "name": "external_aad_device_signature",
+    "value": [
+      "LCAP-v0.2:prod:proof:device_signature",
+      2,
+      "prod",
+      "contribution_event",
+      "device_signature"
+    ],
+    "hex": "8578254c4341502d76302e323a70726f643a70726f6f663a6465766963655f7369676e6174757265026470726f6472636f6e747269627574696f6e5f6576656e74706465766963655f7369676e6174757265"
+  },
+  {
+    "name": "record_device_certificate",
+    "value": {
+      "$map": [
+        ["record_version", 2],
+        ["kind", "device_certificate"],
+        ["account_id", "acct-1"],
+        ["device_id", "dev-1"],
+        ["device_key_id", "key-1"],
+        [
+          "public_key_cose",
+          {
+            "$bytes": "010203"
+          }
+        ],
+        ["issued_at_ms", 1000],
+        ["not_before_ms", 1000],
+        ["not_after_ms", 2000],
+        ["issuer", "licio_account_authority"],
+        ["account_epoch", 0]
+      ]
+    },
+    "hex": "ab646b696e64726465766963655f636572746966696361746566697373756572776c6963696f5f6163636f756e745f617574686f72697479696465766963655f6964656465762d316a6163636f756e745f696466616363742d316c6973737565645f61745f6d731903e86c6e6f745f61667465725f6d731907d06d6163636f756e745f65706f6368006d6465766963655f6b65795f6964656b65792d316d6e6f745f6265666f72655f6d731903e86e7265636f72645f76657273696f6e026f7075626c69635f6b65795f636f736543010203"
+  },
+  {
+    "name": "record_room_capability",
+    "value": {
+      "$map": [
+        ["record_version", 2],
+        ["kind", "room_capability"],
+        ["capability_id", "cap-1"],
+        ["subject_account_id", "acct-1"],
+        ["subject_device_id", "dev-1"],
+        ["subject_device_key_id", "key-1"],
+        ["room_id", "room-1"],
+        ["visibility_scope", "public"],
+        ["operations", ["post", "reply"]],
+        ["policy_epoch", 0],
+        ["revocation_epoch_floor", 0],
+        ["not_before_ms", 1000],
+        ["not_after_ms", 2000],
+        [
+          "quotas",
+          {
+            "$map": [
+              ["max_offline_events", 10],
+              ["max_total_payload_bytes", 1000],
+              ["max_single_event_bytes", 100],
+              ["max_media_bytes", 0]
+            ]
+          }
+        ],
+        [
+          "transfer_policy",
+          {
+            "$map": [
+              ["may_export_bundle", true],
+              ["may_share_with_relay", false],
+              ["may_share_with_courier", false],
+              ["may_share_with_unknown_peer", false]
+            ]
+          }
+        ]
+      ]
+    },
+    "hex": "af646b696e646f726f6f6d5f6361706162696c6974796671756f746173a46f6d61785f6d656469615f627974657300726d61785f6f66666c696e655f6576656e74730a766d61785f73696e676c655f6576656e745f62797465731864776d61785f746f74616c5f7061796c6f61645f62797465731903e867726f6f6d5f696466726f6f6d2d316a6f7065726174696f6e738264706f7374657265706c796c6e6f745f61667465725f6d731907d06c706f6c6963795f65706f6368006d6361706162696c6974795f6964656361702d316d6e6f745f6265666f72655f6d731903e86e7265636f72645f76657273696f6e026f7472616e736665725f706f6c696379a4716d61795f6578706f72745f62756e646c65f5746d61795f73686172655f776974685f72656c6179f4766d61795f73686172655f776974685f636f7572696572f4781b6d61795f73686172655f776974685f756e6b6e6f776e5f70656572f4707669736962696c6974795f73636f7065667075626c6963717375626a6563745f6465766963655f6964656465762d31727375626a6563745f6163636f756e745f696466616363742d31757375626a6563745f6465766963655f6b65795f6964656b65792d31767265766f636174696f6e5f65706f63685f666c6f6f7200"
+  },
+  {
+    "name": "record_revocation",
+    "value": {
+      "$map": [
+        ["record_version", 2],
+        ["kind", "revocation"],
+        ["revocation_id", "rev-1"],
+        ["revoked_kind", "device"],
+        ["revoked_id", "dev-1"],
+        ["effective_at_ms", 1000],
+        ["revocation_epoch", 1]
+      ]
+    },
+    "hex": "a7646b696e646a7265766f636174696f6e6a7265766f6b65645f6964656465762d316c7265766f6b65645f6b696e64666465766963656d7265766f636174696f6e5f6964657265762d316e7265636f72645f76657273696f6e026f6566666563746976655f61745f6d731903e8707265766f636174696f6e5f65706f636801"
+  },
+  {
+    "name": "record_contribution_event",
+    "value": {
+      "$map": [
+        ["record_version", 2],
+        ["kind", "contribution_event"],
+        ["event_type", "post"],
+        ["home_room_id", "room-1"],
+        ["visibility_scope", "public"],
+        ["author_account_id", "acct-1"],
+        ["author_device_id", "dev-1"],
+        ["author_device_key_id", "key-1"],
+        ["device_seq", 0],
+        ["capability_cid", "lcapr_aeareidjkg55tqqxrmvj2alri2dta6x5uhvwcyp7rq4yjbvhm2b6pnbjeu"],
+        ["policy_epoch_claim", 0],
+        ["revocation_epoch_claim", 0],
+        [
+          "client_nonce",
+          {
+            "$bytes": "04050607"
+          }
+        ],
+        ["priority", 1]
+      ]
+    },
+    "hex": "ae646b696e6472636f6e747269627574696f6e5f6576656e74687072696f72697479016a6465766963655f736571006a6576656e745f7479706564706f73746c636c69656e745f6e6f6e636544040506076c686f6d655f726f6f6d5f696466726f6f6d2d316e6361706162696c6974795f63696478406c636170725f616561726569646a6b67353574717178726d766a32616c7269326474613678357568767763797037727134796a6276686d326236706e626a65756e7265636f72645f76657273696f6e0270617574686f725f6465766963655f6964656465762d31707669736962696c6974795f73636f7065667075626c696371617574686f725f6163636f756e745f696466616363742d3172706f6c6963795f65706f63685f636c61696d0074617574686f725f6465766963655f6b65795f6964656b65792d31767265766f636174696f6e5f65706f63685f636c61696d00"
+  }
+]

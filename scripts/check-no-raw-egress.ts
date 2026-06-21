@@ -19,6 +19,15 @@ const SIGNAL_DIR = resolve(ROOT, 'apps/web/src/signals');
 const AGGREGATE_FILE = resolve(SIGNAL_DIR, 'aggregate.ts');
 const AGGREGATE_SCHEMA = resolve(ROOT, 'packages/shared/src/schemas/attention.ts');
 
+// The LCAP offline data plane (WS-R.14.3): the same no-raw-egress doctrine — no raw
+// attention trace and no network/location identifier may cross untrusted peers.
+const LCAP_DIRS = [
+  resolve(ROOT, 'packages/lcap/src'),
+  resolve(ROOT, 'packages/lcap-p2p/src'),
+  resolve(ROOT, 'apps/web/src/lcap'),
+  resolve(ROOT, 'apps/api/src/lcap'),
+];
+
 const TEST_FILE = /\.(?:test|spec)\.tsx?$/;
 
 /** Network-egress primitives that must never appear in the signal layer. */
@@ -51,6 +60,24 @@ const FORBIDDEN_SCHEMA_TOKENS = [
   'scrollPositions',
   'dwellMs',
   'durationMs',
+];
+
+/**
+ * Raw-trace + network/location field tokens that must never appear in LCAP source
+ * (qualified forms — `ip_address`, not bare `ip` — avoid "content-addressed" hits).
+ */
+const LCAP_FORBIDDEN_TOKENS = [
+  ...FORBIDDEN_SCHEMA_TOKENS,
+  'ip_address',
+  'ipAddress',
+  'remote_addr',
+  'remoteAddr',
+  'remoteAddress',
+  'x_forwarded',
+  'geoip',
+  'geolocation',
+  'latitude',
+  'longitude',
 ];
 
 /** Strip block + line comments so doctrine prose can mention forbidden constructs. */
@@ -116,6 +143,18 @@ export function findSchemaIssues(content: string): string[] {
   return issues;
 }
 
+/** Pure: raw-trace / network-location field violations in one LCAP source file. */
+export function findLcapEgressIssues(filename: string, content: string): string[] {
+  const code = stripComments(content);
+  const issues: string[] = [];
+  for (const token of LCAP_FORBIDDEN_TOKENS) {
+    if (new RegExp(`\\b${token}\\b`).test(code)) {
+      issues.push(`${filename}: LCAP source names a raw-trace/network-location field "${token}"`);
+    }
+  }
+  return issues;
+}
+
 function main(): void {
   const errors: string[] = [];
   for (const file of collect(SIGNAL_DIR)) {
@@ -123,6 +162,13 @@ function main(): void {
   }
   errors.push(...findGuardIssues(readFileSync(AGGREGATE_FILE, 'utf-8')));
   errors.push(...findSchemaIssues(readFileSync(AGGREGATE_SCHEMA, 'utf-8')));
+
+  // WS-R.14.3: the same doctrine over the LCAP offline data plane.
+  for (const dir of LCAP_DIRS) {
+    for (const file of collect(dir)) {
+      errors.push(...findLcapEgressIssues(file.replace(ROOT, ''), readFileSync(file, 'utf-8')));
+    }
+  }
 
   if (errors.length > 0) {
     console.error('No-raw-egress harness FAILED — attention privacy violation(s):');

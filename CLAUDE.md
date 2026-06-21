@@ -278,8 +278,37 @@ WS-M proposal-data wiring; a real model backend; the WS-P experiment-log consume
 are tracked in `docs/ai-governance/README.md`.  Workstreams WS-L
 through WS-P are planned (planning documents exist under `docs/planning/`;
 implementation not yet started, beyond the WS-O.4.5 adversarial suite and that
-E2E-harness seed).  See
-"Implementation roadmap" below for the full status table.
+E2E-harness seed).  The extension workstream **WS-R** (Decentralized Data Plane,
+Part I — offline content availability / LCAP v0.2) has shipped its **entire
+pure-protocol core** as the new zero-dependency `@licio/lcap` package: the
+deterministic CBOR (LDC) codec, content-addressed CIDs, COSE_Sign1 detached
+ES256 low-S proofs with downgrade-resistant suite agility, and strict
+closed-schema records/proofs (WS-R.0); the identity chain — device certificates,
+room capabilities, revocation, and the §18.3 steps-6-11 chain validator (WS-R.1);
+the record graph — contribution mapping, append-only edit/tombstone projection,
+display ordering, device-fork detection (WS-R.2); blocks, fixed-size
+chunking/reassembly, attachment laziness, and Compression-Streams gzip/deflate
+with bomb caps (WS-R.3); the packfile / `.licio-bundle` format — streaming
+writer/reader, partial import + quarantine, signed manifest (WS-R.4); the
+anti-starvation lane scheduler (byte reservations, deficit-round-robin, the
+clamped finite score) behind the `check:lcap-scheduler` CI gate (WS-R.5); the
+transport-independent sync-decision plane — the pulse + frontier diff, exchange
+request/response assembly, resource/privacy budget shrinking, privacy-scoped
+interests, wants + resumable range fetch, and idempotent-ingestion keying
+(WS-R.6) — plus the §17.1 frontier-first reconciliation order and the §17.5
+`minimalClosure` the scheduler consumes (WS-R.7); the
+single `validate()` trust-projection entry point over the §18.2 state lattice
+(WS-R.8); the RFC 9162 Merkle / checkpoint plane — inclusion + consistency
+proofs, witnesses, fork evidence (WS-R.9); the liveness / receipts /
+durable-outbox model (WS-R.10); and the §25.1 conflict-table dispatch + the
+trust/safety-aware visible-thread projection (WS-R.13) — all I/O-free,
+exhaustively tested, and conformance-vector-pinned (`docs/lcap/README.md`).  The
+remaining WS-R cards are predominantly **I/O integration** (the `lcap_v2`
+IndexedDB store, the server ingestion/reconciliation routes + DB schema, the sync
+wire orchestration, the DoS/privacy controls, the transport profiles, the client
+surface, and the network simulator); they, and the entire WS-S private-rooms
+(E2EE) plane, remain planned.  See "Implementation roadmap" below for the full
+status table.
 
 ## Build and run
 
@@ -307,8 +336,11 @@ pnpm check:workspace-deps           # workspace boundary enforcement (pkg.json +
 pnpm check:policy                   # doctrine/policy document validation
 pnpm check:neutrality               # the ten WS-I.3 ranking-neutrality tests
 pnpm check:adversarial              # the WS-O.4.5 ensemble adversarial suite
-pnpm check:no-applause              # no likes/votes/karma/reactions in components + routes
-pnpm check:no-raw-egress            # no raw attention traces leaving the browser
+pnpm check:lcap-scheduler           # the WS-R.5.4 LCAP lane anti-starvation gate
+pnpm check:lcap-p2p-split           # the WS-R.15.8 gate: apps/web imports @licio/lcap-p2p only dynamically
+pnpm check:lcap-schema-egress       # no IP/location/attention/applause field in any LCAP schema
+pnpm check:no-applause              # no likes/votes/karma/reactions in components + routes + LCAP
+pnpm check:no-raw-egress            # no raw attention traces leaving the browser (+ the LCAP plane)
 pnpm check:sw                       # SW security scan (run after build)
 
 # Supply chain and build validation.
@@ -333,6 +365,8 @@ pnpm --filter @licio/invariants build  # build invariants package
 pnpm --filter @licio/ranking build  # build ranking package
 pnpm --filter @licio/ai-governance build  # build AI-governance package
 pnpm --filter @licio/governance build  # build AI-governed-rooms domain package
+pnpm --filter @licio/lcap build     # build LCAP offline-availability protocol core
+pnpm --filter @licio/lcap-p2p build # build the optional WebRTC/IPFS transport carriers
 ```
 
 `package.json` (root and per-workspace) is the source of truth for
@@ -467,6 +501,17 @@ licio/
 │   │       │   ├── schemas.ts           --   offline record schemas
 │   │       │   ├── notification-meter.ts--   per-day notification budget
 │   │       │   └── eviction.ts          --   iOS eviction detection + reconciliation
+│   │       ├── lcap/                    -- WS-R LCAP client offline store (separate from `licio`)
+│   │       │   ├── db.ts                --   the `lcap_v2` IndexedDB schema: the 12 §23.1
+│   │       │   │                             stores + indexes + versioned migration (WS-R.11.3a)
+│   │       │   ├── store.ts             --   §23.2 durability layer: cursor-only streaming,
+│   │       │   │                             blob↔metadata separation, atomic verified-record
+│   │       │   │                             commit, capped txns, quota retry (WS-R.11.3b)
+│   │       │   ├── gc.ts                --   §21.2 pinning classes + eviction order (WS-R.11.1)
+│   │       │   ├── storage-modes.ts     --   §21.3 storage modes + persistence + pressure
+│   │       │   │                             degradation (WS-R.11.2)
+│   │       │   ├── sync-triggers.ts     --   §23.3 C0-first sync orchestration (WS-R.11.4)
+│   │       │   └── replication.ts       --   §21.4 privacy-aware replication eligibility (WS-R.11.5)
 │   │       ├── signals/                 -- attention signal pipeline
 │   │       │   ├── processor.ts         --   main signal processor
 │   │       │   ├── aggregate.ts         --   bucketed aggregate builder
@@ -704,6 +749,21 @@ licio/
 │           │   ├── scheduler.ts         --   lease-guarded hourly tick
 │           │   ├── wiring.ts            --   deps-builders + the durable classification consumer
 │           │   └── services.ts          --   injectable container + singleton
+│           ├── lcap/                     -- WS-R server-side LCAP I/O binding
+│           │   ├── server-ingest.ts      --   ingestion engine over the pure ingestRecord +
+│           │   │                             validate(): CID-verified commit, idempotency + fork
+│           │   │                             detection (WS-R.12.1a/c), server-computed §18.3
+│           │   │                             validation over registered identity state (R.12.1b),
+│           │   │                             commitBatch (§24.4 ordered, §27.2 graph-guarded);
+│           │   │                             durable state via the LcapServerStore boundary
+│           │   ├── store.ts              --   the LcapServerStore boundary (WS-R.12.2): async CAS +
+│           │   │                             acceptance log + device-seq + fork evidence; the
+│           │   │                             in-memory adapter (CID-opaque, ordered acceptance log)
+│           │   ├── drizzle-store.ts      --   the gated Postgres adapter for LcapServerStore (WS-R.12.2)
+│           │   ├── routes.ts             --   §29 routes: content-read GETs by CID + the
+│           │   │                             pack-import POST /packs (CSRF-exempt, rate-limited;
+│           │   │                             §22.1.1 status), mounted at /api/lcap/v2 (WS-R.12.4)
+│           │   └── service.ts            --   the process-wide ingestion-server singleton
 │           ├── lib/
 │           │   ├── rate-limit.ts        --   global fixed-window budget (no client keying)
 │           │   ├── push-service.ts      --   VAPID push (session-scoped delete)
@@ -802,6 +862,9 @@ licio/
 │   │       │   ├── moderation.ts        --     WS-J cases, reports, actions, append-only
 │   │       │   │                               audit (right-to-erasure-safe trigger), blocks,
 │   │       │   │                               mutes, appeals, notices, incidents (+steward_roles)
+│   │       │   ├── lcap.ts              --     WS-R.12.2 LCAP server state: content store,
+│   │       │   │                               per-room acceptance log, device-seq index,
+│   │       │   │                               fork evidence (no FK edges; CID-addressed)
 │   │       │   └── wallet/wallet-account.ts -- isolated financial WalletAccount
 │   │       ├── isolation.ts             --   wallet↔ranking BFS isolation (WS-D.3.2)
 │   │       ├── client.ts                --   database client initialization
@@ -832,7 +895,7 @@ licio/
 │           ├── pipeline.ts              --   the deterministic constrained-optimization
 │           │                                 core (serving AND replay execute this)
 │           └── __tests__/               --   124 deterministic unit/property tests
-│   └── ai-governance/           -- WS-K pure AI-governance domain (no I/O; browser-safe)
+│   ├── ai-governance/           -- WS-K pure AI-governance domain (no I/O; browser-safe)
 │       └── src/
 │           ├── schemas/                 --   model card, registry, NIST/ISO risk assessment,
 │           │                                 inventory, prohibited-use, data lineage, output
@@ -850,6 +913,31 @@ licio/
 │           ├── labels.ts                --   the upgrade-only provenance label ladder
 │           ├── canonical-json.ts        --   deterministic config-hash serialization
 │           └── __tests__/               --   ~13 deterministic unit/property suites
+│   └── lcap/                    -- WS-R LCAP v0.2 protocol core (no I/O; zero npm deps in
+│       └── src/                 --   the codec/CID/COSE core; browser-safe; NEVER @licio/db)
+│           ├── runtime.ts              --   WebCrypto adapter + BufferSource helper (no node: leak)
+│           ├── priority.ts             --   §15.1.1 priority ↔ class ↔ lane SSOT
+│           ├── cbor/                   --   LDC deterministic CBOR (encode/decode/errors/types)
+│           ├── cid/                    --   §9.2 CID construction + RFC 4648 base32 + sha256
+│           ├── cose/                   --   aad, ecdsa (low-S), keys, suites, sign1 (COSE_Sign1)
+│           ├── schemas/                --   strict zod records/proofs/pack/checkpoint/receipt + LDC codec
+│           ├── identity/               --   cert, capability, sequence chain, revocation, chain validator
+│           ├── limits/                  --   §27.2 malicious-dependency-graph guard (cycle/fan-out/
+│           │                                depth/dup-dep/private-in-public/unknown-field detectors)
+│           ├── records/                --   contribution mapping, edit/tombstone projection, fork detection
+│           ├── block/                  --   descriptor, fixed-size chunking, attachment split, compression
+│           ├── pack/                   --   uvarint, streaming writer/reader, partial import, manifest
+│           ├── scheduler/              --   reservations, candidate closure, DRR allocator, clamped score
+│           ├── sync/                   --   §16/§17 sync-decision plane: closure, frontiers, pulse,
+│           │                                reconcile, budgets, interests, wants/resume, exchange,
+│           │                                server-ingest (§24.1 commit-stage decision),
+│           │                                ingest-order (§24.4 topological validation order)
+│           ├── checkpoint/             --   RFC 9162 merkle, room log, inclusion/consistency, witness
+│           ├── validate/               --   §18 trust-state lattice + the single validate() entry point
+│           ├── liveness/               --   liveness state machine, receipts, durable-outbox logic
+│           ├── conflict/               --   §25.1 conflict dispatch + visible-thread projection
+│           ├── test-vectors/           --   normative golden corpus (cbor/cid/sign1 .json)
+│           └── __tests__/              --   unit + conformance-replay + determinism properties
 ├── scripts/                     -- build validation and security gates
 │   ├── validate-build.ts        --   post-build orchestrator
 │   ├── check-bundle-size.ts     --   initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz
@@ -920,13 +1008,35 @@ duplicated here.
                             NEVER @licio/db — the WS-U AI-governed-rooms domain
                             (policy DSL, kernel, capabilities, elections) has
                             no database access by construction)
+@licio/lcap                (depends on @licio/shared, zod; browser-safe,
+                            NEVER @licio/db — the WS-R LCAP protocol core
+                            (deterministic CBOR, CIDs, COSE detached proofs,
+                            schemas, the transport seam) has no database access
+                            by construction; the codec/CID/COSE core carries
+                            zero npm imports — WebCrypto + a hand-rolled
+                            CBOR/COSE subset only)
+@licio/lcap-p2p            (depends on @licio/shared, @licio/lcap, zod;
+                            browser-safe, NEVER @licio/db — the WS-R.15.6/15.7
+                            OPTIONAL transports: the WebRTC data-channel carrier
+                            + server-blind signaling envelope, and the
+                            dependency-free IPFS gateway bridge.  No npm runtime
+                            dep beyond the shared zod baseline; the carriers use
+                            only browser WebRTC + fetch + WebCrypto.  Code-split:
+                            apps/web loads it by DYNAMIC import only)
 
 apps/web                   (depends on @licio/shared, @licio/invariants,
-                            @licio/ai-governance; NEVER @licio/db — enforced
-                            by check:workspace-deps)
+                            @licio/ai-governance, @licio/lcap, @licio/lcap-p2p;
+                            NEVER @licio/db — enforced by check:workspace-deps.
+                            @licio/lcap is the WS-R.15.1 bundle flows + the
+                            WS-R.15.2/15.4b/15.5 transports; @licio/lcap-p2p is
+                            the WebRTC/IPFS carriers.  Both load as lazy
+                            dynamic-import chunks — `check:lcap-p2p-split`
+                            asserts NO static @licio/lcap-p2p import — so neither
+                            protocol core enters the initial bundle)
 apps/api                   (depends on @licio/shared, @licio/db,
                             @licio/invariants, @licio/ranking,
-                            @licio/ai-governance, @licio/governance)
+                            @licio/ai-governance, @licio/governance,
+                            @licio/lcap)
 ```
 
 `pnpm check:workspace-deps` enforces these boundaries by scanning both
@@ -1185,7 +1295,13 @@ each mutation fetches its own fresh token immediately before sending,
 preventing concurrent nonce sharing.  GETs bypass the chain.
 
 Exempt paths: `/health`, `/api/security/csp-report`, `/v1/telemetry`
-(sendBeacon cannot set custom headers).
+(sendBeacon cannot set custom headers), `/v1/takedowns` (public copyright
+intake — no session to ride), and the WS-R.12.4 native LCAP sync surface
+`/api/lcap/v2/{packs,pulse,exchange}` (device-certificate-authenticated
+content / public frontier reads with no session cookie; abuse bounded by
+each endpoint's own rate limit + the §27 caps + the graph guard).  The
+web-UI `/api/lcap/v2/bundles/import` alias is NOT exempt — a session-bearing
+browser flow keeps the double-submit token.
 
 ### Cookie security
 
@@ -1334,7 +1450,7 @@ Status:
 | WS-O | Security and reliability | Planned (WS-O.4.5 adversarial hardening shipped) |
 | WS-P | Experimentation and launch | Planned |
 | WS-Q | Content–room ownership and visibility | Complete |
-| WS-R | Offline content availability (LCAP v0.2) | Planned (extension; `docs/OFFLINE_SPEC.md`) |
+| WS-R | Offline content availability (LCAP v0.2) | In progress (extension; `docs/OFFLINE_SPEC.md`) — **pure-protocol core (`@licio/lcap`) shipped**: WS-R.0 foundations (deterministic CBOR/LDC, CIDs, COSE_Sign1 ES256 low-S proofs, suite agility, closed-schema records), WS-R.1 identity chain (§18.3 validator), WS-R.2 record graph + fork detection, WS-R.3 blocks/chunking/compression, WS-R.4 packfile/`.licio-bundle`, WS-R.5 lane scheduler + `check:lcap-scheduler` gate, WS-R.6 sync-decision plane (pulse/exchange/interests/wants/budgets/idempotency), WS-R.7 reconciliation (frontier-first order + `minimalClosure`), WS-R.8 `validate()` trust projection, WS-R.9 RFC 9162 Merkle/checkpoint, WS-R.10 liveness/receipts/outbox, WS-R.13 conflict dispatch, the WS-R.12.1 server-ingestion commit-stage decision core (`ingestRecord`), and the WS-R.12.1b §24.4 topological ingestion-order resolver (`resolveIngestionOrder`: prerequisites-before-dependents order with class priority, transitively-absent missing-dependency detection, cycle isolation), and the WS-R.14.2 §27.2 malicious-dependency-graph guard (`checkDependencyGraph`: cycle/fan-out/depth/duplicate-dep/private-in-public/unknown-critical-field detectors mapped to §16.11 wire codes) — all conformance-vector-pinned (`docs/lcap/README.md`); plus the WS-R.12.1a/b/c **in-memory server binding** in `apps/api/src/lcap` (`LcapIngestServer`: CID-verified CAS + per-room acceptance log + authoritative idempotency/fork detection + **server-computed `validate()`** over registered identity state — device certs, room capabilities, account/room authority keys, revocations — never a client-supplied verdict + `commitBatch` ordered batch ingestion, graph-guarded before expansion + §18.3-step-9 aggregate capability-quota enforcement on accept — the atomic, idempotent `acceptContribution` debits a durable per-capability usage counter (`lcap_capability_usage`, migration `0041`) and rejects an over-budget contribution `rejected_quota`) + the WS-R.12.4 §29 routes (the content-read endpoints `GET /api/lcap/v2/{records,proofs,blocks}/:cid` with RFC 7233 resumable range/206 reads; the rate-limited pack-import `POST /api/lcap/v2/packs` — CSRF-exempt, read under the WS-R.4.2 caps, every CID-verified frame durably stored (proofs/blocks then fetchable via the GET routes), identity frames registered, contributions committed through validate→guard→commit, one §16.11 status per object; the §29.1 `POST /pulse` frontier exchange + the §29.2 `POST /exchange` main bidirectional path — both deriving the server's §17.2/§17.3 frontiers via the shared `roomIdHash` and serving the peer's explicit wants as a budget-bounded content pack (the pulse's C0 `critical_pack`, the exchange's `response_pack`, repacked from held bytes with content-derived §15.1.1 lane/priority hints + a conservative privacy label); the exchange also ingesting its push pack through the SAME validator and deriving `wanted_from_client`; the §29.7 room checkpoint/inclusion/consistency reads — RFC 9162 proofs over the reconstructed §19.1 room log; and the §29.8 `POST /bundles/import` web alias + the capability-gated `POST /bundles/export` (a room's self-contained, re-validatable content closure — each record led by the IDENTITY it validates against, its capability + signer device certificate with authority proofs, then its own proofs + blocks — repacked from held bytes + re-importable, via an import-captured closure index over migration `0040`; gated by a device-signed, freshness-windowed `may_export_bundle` capability via `verifyExportAuthorization`) — all with the §22.1.1 status mapping, mounted through the global security middleware) + the WS-R.12.2 `LcapServerStore` boundary (the async store interface — CAS + acceptance log + device-seq + fork evidence — with BOTH the in-memory adapter AND the **gated Drizzle/Postgres adapter** (`drizzle-store.ts` over migration `0039`, DATABASE_URL-gated, selected in `service.ts`), proven by the parameterized store-contract test) + the **WS-R.11 client offline store** (`apps/web/src/lcap`: the `lcap_v2` IndexedDB schema — 12 §23.1 stores + indexes + versioned migration, isolated from the `licio` DB, R.11.3a; the §23.2 durability layer — cursor-only streaming, blob↔metadata separation, atomic verified-record commit, capped transactions, quota-retry, R.11.3b; the §21.2 pinning/eviction policy, R.11.1; the §21.3 storage modes + pressure degradation, R.11.2; the §23.3 C0-first sync orchestration, R.11.4; the §21.4 privacy-aware replication gate, R.11.5); plus **WS-R.14 privacy + DoS controls** — the §27.1 resource-cap SSOT (`limits/caps.ts`: one frozen config every parser path sources, profile-tunable but never disable-able, the `checkCap`/`enforceCap` helper; the server parse enforces the §27.1 CPU-time + quarantine-byte caps, R.14.1a), the §27.2 malicious-graph guard now run over the pack's DECLARED DAG before any storage (R.14.1b), the §27.3 relay admission quotas + the §27.4 no-PoW/no-client-address policy (`limits/relay-quota.ts`, R.14.4), the §26.2 export-disclosure + §26.3 stealth-mode policy (`privacy/`, R.14.2; the interest-privacy half shipped with R.6.3), and the WS-R.14.3 LCAP doctrine CI gates (`check:lcap-schema-egress` + no-applause/no-raw-egress extended over the LCAP trees); plus the **WS-R.15.3 untrusted-relay decision core** (`apps/api/src/lcap/relay.ts` `LcapRelay`: a content-addressed cache that stores/serves by CID, returns storage receipts, enforces the §27.3 quotas + private-content refusal, and STRUCTURALLY cannot accept — no room-log/commit surface; §19.1 opaque peer keys); plus the **WS-R.17 client surface** (`apps/web/src/lcap` + `apps/web/src/components/lcap`: the §34 honest trust/liveness label mapping + the `TrustBadge` — 13 distinct honest labels, never one "secure"/"trusted"/"delivered" badge; the §33 operational modes — minimal/standard/courier/relay/stealth/emergency driving storage/priority/media/discovery/export posture; the §25/§22.1.1/§20 offline-state surfaces — `ConflictWarning` (never-discard fork alert) / `QuarantineNotice` (partial-import wait + `wants` fetch) / `OutboxStatus` (honest queued/retrying/exported chip); these always-available surfaces mirror the state unions locally rather than importing `@licio/lcap`, so they stay off the lazy codec chunk); plus the **WS-R.15.1a/b offline bundle export/import** (`apps/web/src/lcap/bundle-{export,import}.ts` + the `OfflineBundlePanel` / `/profile/offline` route): CLIENT-LOCAL — the REAL @licio/lcap pack writer/reader run in the browser, loaded as a LAZY dynamic-import chunk so the initial bundle is untouched (apps/web now takes @licio/lcap, a `workspace:*` dep outside the <15 budget); export gathers a room's record→proof→block closure with the §26.2 disclosure-before-file + a generic high-risk filename (§26.3); import reads under the §27.1 caps with typed rejection + a pre-render summary + missing-dep quarantine, committing at INTEGRITY-ONLY trust (nothing rendered before trust projection, §8.3); plus the **WS-R transport plane over one `LcapTransport` seam** (WS-R.15.2/15.3/15.4b/15.5/15.6/15.7/15.8 + the §32 simulator): the §22.6 seam (`packages/lcap/src/transport` — server-anchor-last selection + the public-only carriage gate + the fallback driver); the client carriers `apps/web/src/lcap/transports` (the HTTPS anchor, the platform WebTransport adapter, the courier ferry, and the registry running `fallbackExchange` with WebRTC loaded by DYNAMIC import); the new code-split **`@licio/lcap-p2p`** (the WebRTC data-channel transport + the server-blind AES-GCM signaling envelope + the §26.4 ICE/NAT-privacy policy; the DEPENDENCY-FREE IPFS gateway bridge — the verification-preserving `block_cid ⇄ CIDv1(raw,sha2-256)` map, re-verify-before-use, public-only publish); the §22.3 QR micro-bundle (a hand-rolled byte-mode encoder proven by a jsQR round-trip + lazy jsQR still-image decode); the server-blind `POST /api/lcap/v2/p2p/signal` rendezvous (+ the CSRF-protected `POST …/p2p/signal/poll` drain); the `check:lcap-p2p-split` code-split gate + the egress/applause gates extended over the new trees; and the §32.3/§32.5 deterministic network simulator (seeded link model + pluggable adversaries running the REAL scheduler + closure, asserting C0-never-starved / fork-detection / transport-independence).  The remaining WS-R cards are the **native Android Capacitor courier shell** (WS-R.15.4a/c/d/e/f — needs a native build toolchain) and the **WS-S encryption-envelope seam** (WS-R.16, blocked on WS-S); the transport-selection client UI is a tracked follow-up |
 | WS-S | Private P2P rooms (E2EE) | Planned (extension; `docs/PRIVATE_SPEC.md`) |
 | WS-T | Conversation as comments | Complete |
 | WS-U | AI-governed rooms (redesign) | Doctrine ratified (Stage 0) + runtime Stages 1-4 & 5-core shipped: the `@licio/governance` pure domain (policy DSL, proof-carrying kernel, capabilities, elections, member ratification, lawmaking facilitation), the `knomosis` schema + migrations `0035`–`0038` (isolation-proven), the `GovernanceService` (member-gated/law-pack-driven seat elections, model admission + member ratification vote, bounded moderation agent with real author-history + author statement-of-reasons notices, deterministic lawmaking facilitation, kernel-backed treasury), and the rate-limited, uuid-validated, room-content-bar-gated `/v1/rooms/*` governance + ratification + lawmaking routes (ballots room-bound + close-time-enforced; one-open-ratification atomic); residuals (the WS-M lawmaking trigger + on-chain election mode, the remaining web surfaces, gated Drizzle adapters) tracked in `docs/governance/README.md` |
@@ -1472,9 +1588,9 @@ every match.
 
 ## Current development status
 
-**Vitest configuration.**  Seven test projects: shared (node), db (node),
-invariants (node), ranking (node), api (node), web (jsdom), policy
-(node).  Their
+**Vitest configuration.**  Eleven test projects: shared (node), db (node),
+invariants (node), ranking (node), ai-governance (node), governance (node),
+lcap (node), lcap-p2p (node), api (node), web (jsdom), policy (node).  Their
 settings live once in `vitest.shared.ts`; the root `vitest.config.ts`
 composes them into the unified `pnpm test` run + the cross-workspace V8
 coverage gate, and each workspace has a thin local `vitest.config.ts`
@@ -1487,18 +1603,21 @@ file counts at current state:
 
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
-| apps/web | ~134 unit + 8 E2E (6 frontend-only + 2 BFF-in-the-loop specs; incl. the WS-J report flow, the notice-inbox appeal affordance, safety controls, the moderation console panels incl. the appeal-review-before-decide gate, the WS-T comment-flow BFF spec — inline story comments + legacy thread redirect, and the WS-K AI provenance-label component) | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~118 (incl. WS-D identity + the `expert`/`admin` RBAC roles + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-J trust-safety services/routes/stores/units + the gated WS-J Postgres adapters incl. the right-to-erasure path + the WS-K governance backbone/pipelines/routes/stores/coverage + the WS-Q E2E test-auth route + the dev-seed showcase integration test + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
+| apps/web | ~140 unit + 8 E2E (6 frontend-only + 2 BFF-in-the-loop specs; incl. the WS-J report flow, the notice-inbox appeal affordance, safety controls, the moderation console panels incl. the appeal-review-before-decide gate, the WS-T comment-flow BFF spec — inline story comments + legacy thread redirect, the WS-K AI provenance-label component, and the WS-R.11 client-store suites — `lcap_v2` schema, §23.2 durability layer, §21.2 eviction, §21.3 storage modes, §23.3 sync triggers, §21.4 replication) | jsdom / Playwright | `pnpm --filter web test` |
+| apps/api | ~119 (incl. WS-D identity + the `expert`/`admin` RBAC roles + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-J trust-safety services/routes/stores/units + the gated WS-J Postgres adapters incl. the right-to-erasure path + the WS-K governance backbone/pipelines/routes/stores/coverage + the WS-Q E2E test-auth route + the WS-R in-memory LCAP ingestion engine (incl. server-computed §18.3 validation over registered identity state) + the §29 LCAP routes (content reads + the pack-import POST, with shared crypto fixtures) + the LcapServerStore contract over the in-memory + gated Drizzle adapters + the dev-seed showcase integration test + the RUN_PERF benchmarks) | node | `pnpm --filter api test` |
 | packages/shared | ~20 (incl. WS-D–WS-H schemas, URL/lifecycle utils, the §5.6 rating-label SSOT, the UGC pipeline + XSS-vector suite) | node | `pnpm --filter @licio/shared test` |
 | packages/db | ~4 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |
 | packages/invariants | ~19 (PWAtt/MinHash/freshness + the WS-H invariant mathematics: matroid/fiber/GW/sheaf/holonomy/supporting property suites + the regression harness + the SPEC-purpose oracle suite) | node | `pnpm --filter @licio/invariants test` |
 | packages/ranking | ~7 (denylist + versioned-artifact pinning, strict schemas, §5.5 profile fuzzing + baseline weights, §5.4 arithmetic, penalties/constraints incl. tie enforcement, dedup/balancing, templates + x-pseudo localization, pipeline determinism, replay diff) | node | `pnpm --filter @licio/ranking test` |
 | packages/ai-governance | ~13 (the prohibited-use guard + §24.5 matrix, the upgrade-only label ladder, the canonical inventory + risk assessments, the bias-audit math (two-proportion z-test + small-cohort), hallucination/safety/red-team, the harness selection/decision/reproducibility, the §24.3 summary-quality constraints + renderer, accuracy, canonical JSON, and the schema refinements) | node | `pnpm --filter @licio/ai-governance test` |
 | packages/governance | ~5 (WS-U AI-governed-rooms domain: the moderation policy DSL + interpreter, the proof-carrying treasury kernel + investment bands, the capability model + derivation (floor-reserved structural disjointness), the quorum-gated fail-safe election tally, and the canonical-JSON content addressing) | node | `pnpm --filter @licio/governance test` |
+| packages/lcap | ~33 (WS-R LCAP v0.2 pure-protocol core: the LDC deterministic-CBOR encoder/decoder + the §9.1.5 integer table + the full decode rejection matrix, CID construction (SHA-256 known-answer grounded) + RFC 4648 base32, ES256 low-S + the malleability-twin defense, COSE_Sign1 build/verify + the §10.2.4 six-step matrix, device-key/COSE_Key round-trip, suite agility/downgrade, strict closed-schema records/proofs + LDC codec pairing, the §18.3 identity-chain accept/quarantine/reject/revoke matrix, arrival-order-independent record projection + fork detection, blocks/chunk reassembly + compression-bomb abort, the packfile round-trip/cap/tamper matrix, the exhaustive RFC 9162 Merkle inclusion/consistency proofs, the `validate()` trust-projection staged matrix, liveness/receipts, conflict dispatch, the §16/§17 sync-decision plane (`minimalClosure` + scheduler integration, frontier diff, pulse build/apply, reconciliation order, monotonic budget shrinking, the interest privacy/leak matrix, wants + resume ranges, idempotency, exchange assembly + status, the §24.1 server-ingestion commit-stage decision, the §24.4 topological ingestion-order resolver, the §27.2 malicious-graph guard), the conformance-corpus replay, the P1/P2/P3 determinism properties, the §22.6 transport seam (server-anchor-last selection / fallback / public-only carriage gate), and the §32.3/§32.5 deterministic network simulator (seeded link model + pluggable adversaries over the REAL scheduler + closure; the C0-never-starved / fork-detection / transport-independence scenarios)) | node | `pnpm --filter @licio/lcap test` |
+| packages/lcap-p2p | ~2 (WS-R.15.6/15.7 optional transports: the server-blind AES-GCM signaling envelope (AAD-bound, opaque-fields), the §26.4 ICE/NAT-privacy policy (off-by-default / Stealth-force-off / relay-only-requires-TURN), the WebRTC data-channel transport over a fake channel; the `block_cid ⇄ CIDv1(raw,sha2-256)` mapping, the gateway bridge's re-verify-before-use + public-only publish gate) | node | `pnpm --filter @licio/lcap-p2p test` |
 | scripts | ~4 | node | via root `pnpm test` (policy project) |
 
-WS-D, WS-E, WS-F, WS-G, WS-H, and WS-I add **gated** integration tests
-(Postgres + Redis) that run only when `DATABASE_URL` / `REDIS_URL` are set.
+WS-D, WS-E, WS-F, WS-G, WS-H, WS-I, WS-U, and WS-R (the LcapServerStore
+contract) add **gated** integration tests (Postgres + Redis) that run only
+when `DATABASE_URL` / `REDIS_URL` are set.
 CI's Test & Coverage job provisions `pgvector/pgvector:pg16` and `redis:7`
 service containers, so the gated suites RUN in CI; without the env vars
 (e.g. a bare local `pnpm test`) they skip.  The WS-F chain requires a
@@ -1524,14 +1643,16 @@ production app).  Both run in CI's E2E job.
 
 **CI pipeline.**  `.github/workflows/ci.yml` runs 8 jobs on every PR:
 
-1. Lint & format (Biome + security lint + policy + no-raw-egress)
+1. Lint & format (Biome + security lint + policy + no-raw-egress +
+   no-applause + the WS-R.14.3 `check:lcap-schema-egress` LCAP doctrine gate)
 2. Type check (strict-mode across all workspaces)
 3. Lockfile integrity
 4. Dependency budget
 5. Test & coverage (Vitest + V8 coverage + JUnit XML; Postgres/pgvector +
    Redis service containers so the gated integration suites run too; plus
    the named `check:neutrality` step — the ten WS-I.3 ranking-neutrality
-   tests as an explicit pay-to-rank gate on every PR)
+   tests as an explicit pay-to-rank gate on every PR — and the
+   `check:lcap-scheduler` step, the WS-R.5.4 LCAP lane anti-starvation gate)
 6. Build & size check (production build + bundle-size gate)
 7. E2E tests (Playwright, requires build)
 8. Security audit (pnpm audit, SBOM, build validation, AGPL headers,
