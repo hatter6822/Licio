@@ -8,6 +8,7 @@
     { "path": "packages/ai-governance" },
     { "path": "packages/governance" },
     { "path": "packages/lcap" },
+    { "path": "packages/lcap-p2p" },
     { "path": "apps/web" },
     { "path": "apps/api" }
   ]
