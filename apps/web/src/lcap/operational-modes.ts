@@ -132,7 +132,7 @@ export const OPERATIONAL_MODES: Readonly<Record<OperationalMode, OperationalMode
   },
   emergency: {
     mode: 'emergency',
-    storageMode: 'minimal', // small, text-only cache
+    storageMode: 'minimal', // small text/control cache
     maxPriority: 1, // P0/P1 only
     mediaAllowed: false, // ALL media off
     autoDiscovery: false,

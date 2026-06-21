@@ -29,7 +29,7 @@ describe('operational modes — coverage + storage binding', () => {
   it('binds each mode to its §21.3 storage policy', () => {
     expect(storageConfigForMode('courier').mode).toBe('courier');
     expect(storageConfigForMode('stealth').mode).toBe('stealth');
-    // Emergency rides the smallest text-only cache.
+    // Emergency rides the smallest text/control cache.
     expect(storageConfigForMode('emergency').mode).toBe('minimal');
   });
 });
