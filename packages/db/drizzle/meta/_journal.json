@@ -316,6 +316,13 @@
       "when": 1782095167899,
       "tag": "0044_ws_s_private_room_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1782095167900,
+      "tag": "0045_ws_s_no_p2p_room_content",
+      "breakpoints": true
     }
   ]
 }

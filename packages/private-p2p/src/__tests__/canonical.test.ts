@@ -120,6 +120,46 @@ describe('WS-S.2.2 encode rejections', () => {
   });
 });
 
+describe('WS-S.2.2 fail-closed on EXOTIC objects (forgery / collision defense)', () => {
+  // A non-plain object has an empty `Object.keys`, so a permissive encoder would
+  // SILENTLY encode it as an empty map — two different Dates colliding, etc.
+  // The encoder fails closed on anything that is not a plain object / null-proto
+  // dict / Uint8Array / array.  This guards the `z.unknown()` schema fields
+  // (submission_metadata, location_scope, metadata, terms) that reach canonical.
+  const exotic: unknown[] = [
+    new Date(),
+    new Map([['a', 1]]),
+    new Set([1]),
+    /regex/,
+    new Float64Array([1]),
+    new Int8Array([1]),
+    new (class Foo {
+      x = 1;
+    })(),
+  ];
+  for (const value of exotic) {
+    it(`rejects ${Object.getPrototypeOf(value)?.constructor?.name ?? 'exotic'}`, () => {
+      expect(() => canonical(value as CanonicalValue)).toThrow(CanonicalEncodeError);
+    });
+  }
+
+  it('rejects an exotic value NESTED inside a plain object (the z.unknown() path)', () => {
+    expect(() =>
+      canonical({ metadata: { when: new Date() } } as unknown as CanonicalValue),
+    ).toThrow(CanonicalEncodeError);
+    expect(() => canonical([1, new Map()] as unknown as CanonicalValue)).toThrow(
+      CanonicalEncodeError,
+    );
+  });
+
+  it('still ACCEPTS a plain object and a null-prototype dict', () => {
+    expect(() => canonical({ a: 1 })).not.toThrow();
+    const dict = Object.create(null) as Record<string, number>;
+    dict['a'] = 1;
+    expect(hex(canonical(dict))).toBe(hex(canonical({ a: 1 })));
+  });
+});
+
 describe('WS-S.2.2 (P2) round-trip', () => {
   const values: CanonicalValue[] = [
     0,

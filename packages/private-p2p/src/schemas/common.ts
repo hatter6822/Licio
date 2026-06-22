@@ -27,10 +27,25 @@ export const base64UrlSchema = z
   .max(16_384)
   .regex(/^[A-Za-z0-9_-]+$/, 'expected base64url (no padding)');
 
+/** A base64url-encoded INLINE ciphertext: an op / manifest / snapshot body,
+ *  PADDED to a size bucket (§25.4) then AEAD-sealed.  A padded body base64-
+ *  expands well past the small-field limit (a `small-op-16k` body ≈ 22 K chars),
+ *  so this carries a much larger bound than `base64UrlSchema` — but it is still
+ *  BOUNDED for DoS (§27): ~1 MiB of bytes base64url-expanded, ample for any op
+ *  body + custom padding, while media uses chunked CIDs (never an inline body). */
+export const ciphertextBase64Schema = z
+  .string()
+  .min(1)
+  .max(1_398_102)
+  .regex(/^[A-Za-z0-9_-]+$/, 'expected base64url (no padding)');
+
 /** A Lamport timestamp: a non-negative integer serialized as a DECIMAL STRING
- *  (exact beyond 2^53, §14.3.1).  No leading zeros (`0` is allowed alone). */
+ *  (exact beyond 2^53, §14.3.1).  No leading zeros (`0` is allowed alone).  The
+ *  40-digit cap (10^40 ops — astronomically beyond any room's op count) bounds
+ *  the big-integer comparator (§14.3.1) against a giant-string DoS. */
 export const lamportSchema = z
   .string()
+  .max(40)
   .regex(/^(0|[1-9]\d*)$/, 'lamport must be a canonical non-negative decimal string');
 
 /** A COARSE time bucket (never an exact timestamp where avoidable, §5.4). */

@@ -269,6 +269,17 @@ function encodeValue(value: CanonicalValue, path: string): Uint8Array {
     case 'object': {
       if (isUint8Array(value)) return encodeBytes(value);
       if (Array.isArray(value)) return encodeArray(value, path);
+      // FAIL CLOSED on any exotic object (Date, Map, Set, RegExp, typed arrays,
+      // class instances): `Object.keys(...)` is empty for most of them, so the
+      // permissive path would SILENTLY encode them as an empty map — a forgery /
+      // collision vector for a structure that is hashed + signed.  Only a plain
+      // object (`{}` / `Object.create(null)`) is a canonical map.  This matters
+      // because several schemas carry `z.unknown()` fields (`submission_metadata`,
+      // `location_scope`, `metadata`, `terms`) whose contents reach `canonical`.
+      const proto = Object.getPrototypeOf(value);
+      if (proto !== Object.prototype && proto !== null) {
+        throw new CanonicalEncodeError('unsupported_type', path);
+      }
       return encodeObject(value as CanonicalObject, path);
     }
     default:

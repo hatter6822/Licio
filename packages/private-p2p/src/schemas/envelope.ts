@@ -13,6 +13,7 @@
 import { z } from 'zod';
 import {
   base64UrlSchema,
+  ciphertextBase64Schema,
   privateAeadAlgorithmSchema,
   privateCidSchema,
   privateIdSchema,
@@ -63,10 +64,13 @@ export const privateKeyWrapSchema = z
   })
   .strict();
 
-/** The ciphertext payload: an inline body (base64url) OR an ordered chunk list
- *  (encrypted-chunk CIDs over ciphertext) for chunked media (§9.4/§17.1). */
+/** The ciphertext payload: an inline padded body (base64url, op/manifest/
+ *  snapshot) OR an ordered chunk list (encrypted-chunk CIDs over ciphertext)
+ *  for chunked media (§9.4/§17.1).  The inline form uses the LARGER
+ *  `ciphertextBase64Schema` bound — a padded op body exceeds the small-field
+ *  limit. */
 export const privateCiphertextSchema = z.union([
-  base64UrlSchema,
+  ciphertextBase64Schema,
   z.object({ chunk_cids: z.array(privateCidSchema).min(1).max(65_536) }).strict(),
 ]);
 

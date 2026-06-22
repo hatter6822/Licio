@@ -61,6 +61,22 @@ describe('WS-S.2.3 envelope (§10.4) + AAD alignment (§10.5)', () => {
     expect(privateEncryptedEnvelopeSchema.safeParse(chunked).success).toBe(true);
   });
 
+  it('accepts a large inline ciphertext body (the padded-op-body bound, not the small-field one)', () => {
+    // A padded op body (e.g. a `large-op-64k` padding bucket) base64url-expands
+    // well past the 16 KiB small-field cap; `ciphertextBase64Schema` (≈1 MiB)
+    // must accept it where `base64UrlSchema` would have rejected it.
+    const bigBody = 'A'.repeat(90_000);
+    expect(bigBody.length).toBeGreaterThan(16_384);
+    expect(
+      privateEncryptedEnvelopeSchema.safeParse({ ...validEnvelope, ciphertext: bigBody }).success,
+    ).toBe(true);
+    // The ~1 MiB ceiling still bites: a 1.5 MiB body is rejected.
+    const tooBig = 'A'.repeat(1_500_000);
+    expect(
+      privateEncryptedEnvelopeSchema.safeParse({ ...validEnvelope, ciphertext: tooBig }).success,
+    ).toBe(false);
+  });
+
   it('rejects unknown fields (strict)', () => {
     expect(privateEncryptedEnvelopeSchema.safeParse({ ...validEnvelope, extra: 1 }).success).toBe(
       false,
@@ -264,6 +280,16 @@ describe('WS-S.2.3 op envelope (§13.2) — Lamport is a canonical decimal strin
     for (const lamport of ['01', '-1', '1.5', 'x', '']) {
       expect(privateRoomOpSchema.safeParse({ ...baseOp, lamport }).success).toBe(false);
     }
+  });
+
+  it('rejects an over-long lamport string (the big-integer-comparator DoS bound)', () => {
+    expect(privateRoomOpSchema.safeParse({ ...baseOp, lamport: '1'.repeat(41) }).success).toBe(
+      false,
+    );
+    // A 40-digit lamport is still accepted (the bound is generous, not tight).
+    expect(privateRoomOpSchema.safeParse({ ...baseOp, lamport: '9'.repeat(40) }).success).toBe(
+      true,
+    );
   });
 
   it('routes the op body discriminated union (a member.add op)', () => {

@@ -6,29 +6,31 @@ import { tanstackRouter } from '@tanstack/router-plugin/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
+import { stripDevCspMeta } from './src/dev/strip-csp-meta.js';
 
 /**
  * Strip the production CSP `<meta>` from the served `index.html` in the DEV
- * SERVER ONLY (`vite dev`).  `index.html` carries the full production
- * Content-Security-Policy as a `<meta http-equiv>` because it is the SOLE CSP
- * source in the WS-R.15.4a native-courier WebView (which serves the built
- * assets from `https://localhost` with no server headers).  That policy is
- * correct for the production build and the preview server (whose header sends
- * the same CSP), but in the Vite DEV server it breaks the app: HMR injects CSS
- * as inline `<style>` elements and uses inline/eval script + a dev WebSocket,
- * all of which `style-src 'self'` / `require-trusted-types-for 'script'` /
- * `connect-src 'self'` block — leaving the app completely unstyled and flooding
- * the console with CSP violations.  `apply: 'serve'` scopes this to dev only;
- * `vite build` (and therefore the courier `dist` + the preview) keeps the meta
- * untouched, and the real CSP is always enforced in production by the API's
- * `security-headers.ts` header.
+ * SERVER ONLY (`vite dev`).  The pure transform lives in `stripDevCspMeta` (a
+ * unit-tested dev helper); this plugin just applies it on `serve`.  `index.html`
+ * carries the full production Content-Security-Policy as a `<meta http-equiv>`
+ * because it is the SOLE CSP source in the WS-R.15.4a native-courier WebView
+ * (which serves the built assets from `https://localhost` with no server
+ * headers).  That policy is correct for the production build and the preview
+ * server (whose header sends the same CSP), but in the Vite DEV server it breaks
+ * the app: HMR injects CSS as inline `<style>` elements and uses inline/eval
+ * script + a dev WebSocket, all of which `style-src 'self'` /
+ * `require-trusted-types-for 'script'` / `connect-src 'self'` block — leaving
+ * the app completely unstyled and flooding the console with CSP violations.
+ * `apply: 'serve'` scopes this to dev only; `vite build` (and therefore the
+ * courier `dist` + the preview) keeps the meta untouched, and the real CSP is
+ * always enforced in production by the API's `security-headers.ts` header.
  */
 function devStripCspMeta(): Plugin {
   return {
     name: 'licio:dev-strip-csp-meta',
     apply: 'serve',
     transformIndexHtml(html: string): string {
-      return html.replace(/[ \t]*<meta\s+http-equiv="Content-Security-Policy"[\s\S]*?\/>\n?/i, '');
+      return stripDevCspMeta(html);
     },
   };
 }

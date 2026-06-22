@@ -268,7 +268,12 @@ export const contributionEditOpSchema = z
   .object({
     type: z.literal('contribution.edit'),
     contribution_id: privateIdSchema,
-    body_markdown_lite: z.string().max(5_000).optional(),
+    // An edit op carries no `contribution_type` (only the id), so the per-type
+    // cap is the reducer's (WS-S.5.3c) against the known type from state.  The
+    // schema-level bound mirrors the WS-G server edit schema EXACTLY — the
+    // shared `CONTRIBUTION_BODY_LIMITS.comment` (the max across all types), never
+    // a literal, so the two can never drift (the card's stated contract).
+    body_markdown_lite: z.string().max(CONTRIBUTION_BODY_LIMITS.comment).optional(),
     citations: z.array(citationSchema).max(MAX_CITATIONS).optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
   })
