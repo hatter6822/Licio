@@ -779,8 +779,27 @@ If the certs are absent, both servers silently fall back to HTTP.
 > re-export your shell env, Section 7.7), or cross-origin calls and CORS
 > will mismatch.
 
-HMR uses a same-origin WebSocket, covered by `connect-src 'self'` — no CSP
-relaxation is needed.
+### Content-Security-Policy in dev (why the `<meta>` is stripped)
+
+`apps/web/index.html` carries the full production CSP as a
+`<meta http-equiv="Content-Security-Policy">` — it is the **sole** CSP source
+in the WS-R.15.4a native-courier WebView, which serves the built assets from
+`https://localhost` with no server headers. That strict policy is correct for
+the production build and the preview server (whose header sends the same CSP),
+but it **breaks the Vite dev server**: HMR injects CSS as **inline `<style>`
+elements** and uses inline/eval script + a dev WebSocket, all of which
+`style-src 'self'` / `require-trusted-types-for 'script'` / `connect-src 'self'`
+block — leaving the app **completely unstyled** and flooding the console with
+CSP / Trusted-Types violations.
+
+The `devStripCspMeta` Vite plugin (`apps/web/vite.config.ts`, `apply: 'serve'`)
+therefore **strips the CSP `<meta>` from the served `index.html` in the dev
+server only**. `vite build` (and so the courier `dist` + the preview) keeps the
+meta untouched, and the real CSP is always enforced in production by the API's
+`security-headers.ts` header. So if you ever see a blank/unstyled dev page with
+`Refused to apply inline style … 'style-src 'self''` errors, check that this
+plugin is present and active. (HMR's WebSocket is same-origin, covered by
+`connect-src 'self'` in the production policy.)
 
 ---
 
