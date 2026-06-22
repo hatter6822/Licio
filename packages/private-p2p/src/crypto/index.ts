@@ -8,6 +8,7 @@
 // connects the MLS exporter to the §10.2 five-key schedule.
 
 export * from './aead.js';
+export * from './attachment.js';
 export * from './canonical.js';
 export * from './device-blind.js';
 export * from './ecdh.js';
