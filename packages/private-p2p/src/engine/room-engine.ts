@@ -18,14 +18,15 @@
 // always converges regardless of delivery order; the unresolved remainder is
 // quarantined with its typed reason and never rendered.
 
-import { toBase64Url } from '../crypto/runtime.js';
+import { sha256, toBase64Url } from '../crypto/runtime.js';
 import {
   type BootstrapDevice,
   buildOpIntakeContext,
   type HeldEpochKeys,
 } from '../reducer/intake-context.js';
 import { reduceRoom } from '../reducer/reduce.js';
-import type { RoomReducerState } from '../reducer/state.js';
+import { deserializeReducerState, serializeReducerState } from '../reducer/snapshot-state.js';
+import { type RoomReducerState, roomStateCommitment } from '../reducer/state.js';
 import {
   type OpIntakeRejection,
   openOp,
@@ -83,6 +84,17 @@ export interface IngestReport {
   readonly quarantined: QuarantinedEnvelope[];
 }
 
+/** A §14.5 snapshot of the reduced state (the optimization that bounds replay +
+ *  enables §25.6 compaction).  `serializedState` is the body (the caller seals +
+ *  content-addresses it); `stateRoot` is the verifiable §14.5 commitment;
+ *  `coveredOpIds`/`coveredHeads` are the prefix it summarizes. */
+export interface SnapshotResult {
+  readonly serializedState: Uint8Array;
+  readonly stateRoot: string;
+  readonly coveredOpIds: string[];
+  readonly coveredHeads: string[];
+}
+
 export interface PrivateRoomEngineParams {
   readonly roomId: string;
   readonly roomIdCommitment: Uint8Array;
@@ -107,9 +119,22 @@ export class PrivateRoomEngine {
   private readonly storage: PrivateRoomStorage;
   private epochs: Map<number, HeldEpochKeys>;
   private readonly bootstrapDevices: readonly BootstrapDevice[];
-  /** op_id → accepted op (the reducer's input set). */
+  /** op_id → accepted op (the reducer's POST-snapshot input set). */
   private readonly acceptedOps = new Map<string, PrivateRoomOp>();
   private currentState: RoomReducerState;
+  /** The §14.5 snapshot base (a compacted prefix's reduced state), if any. */
+  private baseState: RoomReducerState | undefined;
+  /** The covered heads the base represents (the frontier of the compacted set). */
+  private baseHeads: readonly string[] = [];
+  /** Op ids already folded into `baseState` — re-received ones are ignored. */
+  private readonly coveredOpIds = new Set<string>();
+  /** The max Lamport among compacted ops — so authored ops stay globally
+   *  monotonic after pruning (a compacted + an uncompacted device must agree on
+   *  canonical order, §14.3.1). */
+  private baseMaxLamport = 0n;
+  /** The max `author_seq` per device among compacted ops (preserved across
+   *  pruning so seqs stay monotonic for §15 fork detection). */
+  private readonly baseAuthorSeq = new Map<string, number>();
 
   private constructor(params: PrivateRoomEngineParams) {
     this.roomId = params.roomId;
@@ -118,6 +143,11 @@ export class PrivateRoomEngine {
     this.epochs = new Map(params.epochs);
     this.bootstrapDevices = params.bootstrapDevices ?? [];
     this.currentState = reduceRoom([]);
+  }
+
+  /** Re-fold the post-snapshot ops onto the (optional) snapshot base. */
+  private refold(): void {
+    this.currentState = reduceRoom([...this.acceptedOps.values()], this.baseState);
   }
 
   /** Create an engine and rehydrate it by re-verifying every stored envelope. */
@@ -133,11 +163,14 @@ export class PrivateRoomEngine {
     return this.currentState;
   }
 
-  /** The accepted-DAG heads (the §15.6 announcement frontier). */
+  /** The accepted-DAG heads (the §15.6 announcement frontier).  After a §14.5
+   *  compaction the covered heads are folded in as parentless roots, so a base
+   *  head only stays a head until a post-snapshot op references it. */
   heads(): string[] {
-    return computeHeads(
-      [...this.acceptedOps.values()].map((op) => ({ op_id: op.op_id, parents: op.parents })),
-    );
+    return computeHeads([
+      ...this.baseHeads.map((opId) => ({ op_id: opId, parents: [] as string[] })),
+      ...[...this.acceptedOps.values()].map((op) => ({ op_id: op.op_id, parents: op.parents })),
+    ]);
   }
 
   /** Add/replace the keys for an epoch (e.g. after an MLS commit rotates them). */
@@ -149,7 +182,7 @@ export class PrivateRoomEngine {
    *  string, big-int-safe, §14.3.1) so a new op strictly succeeds every op the
    *  device has seen. */
   nextLamport(): string {
-    let max = 0n;
+    let max = this.baseMaxLamport;
     for (const op of this.acceptedOps.values()) {
       const value = BigInt(op.lamport);
       if (value > max) max = value;
@@ -161,7 +194,8 @@ export class PrivateRoomEngine {
    *  per-device monotonic counter), so re-authoring after a reload never reuses a
    *  sequence number. */
   nextAuthorSeq(deviceId: string): number {
-    let next = 0;
+    const fromBase = this.baseAuthorSeq.get(deviceId);
+    let next = fromBase === undefined ? 0 : fromBase + 1;
     for (const op of this.acceptedOps.values()) {
       if (op.author_device_id === deviceId && op.author_seq >= next) next = op.author_seq + 1;
     }
@@ -201,6 +235,8 @@ export class PrivateRoomEngine {
         pending.delete(key);
         progressed = true;
         const opId = result.op.op_id;
+        // A re-received op already folded into the snapshot base is a no-op.
+        if (this.coveredOpIds.has(opId)) continue;
         if (!this.acceptedOps.has(opId)) {
           this.acceptedOps.set(opId, result.op);
           accepted.push(opId);
@@ -208,8 +244,9 @@ export class PrivateRoomEngine {
         }
       }
       lastResultByKey = reasons;
-      // Re-fold so the next pass resolves devices/keys added by this pass.
-      if (progressed) this.currentState = reduceRoom([...this.acceptedOps.values()]);
+      // Re-fold (onto the snapshot base) so the next pass resolves devices/keys
+      // added by this pass.
+      if (progressed) this.refold();
     }
 
     const quarantined: QuarantinedEnvelope[] = [...pending].map(([key, envelope]) => ({
@@ -285,5 +322,55 @@ export class PrivateRoomEngine {
       throw new Error('importArchive: archive is for a different room');
     }
     return this.ingest(archive.envelopes);
+  }
+
+  // --- §14.5 snapshots + §25.6 compaction -----------------------------------
+
+  /** The §14.5 verifiable state root over the CURRENT reduced state — equal
+   *  logical state ⇒ equal root (a peer re-verifies it against the covered ops). */
+  async stateRoot(): Promise<string> {
+    return toBase64Url(await sha256(roomStateCommitment(this.currentState)));
+  }
+
+  /**
+   * Produce a §14.5 snapshot of the CURRENT state covering every op folded so
+   * far: the serialized body (the caller seals + content-addresses it), the state
+   * root, the covered op ids, and the covered heads (`includes_ops_up_to`).  The
+   * caller then authors a `snapshot.commit` op carrying the root + heads + the
+   * sealed body's CID, and may `compact` to prune the covered ops.
+   */
+  async createSnapshot(): Promise<SnapshotResult> {
+    return {
+      serializedState: serializeReducerState(this.currentState),
+      stateRoot: await this.stateRoot(),
+      coveredOpIds: [...this.coveredOpIds, ...this.acceptedOps.keys()].sort(),
+      coveredHeads: this.heads(),
+    };
+  }
+
+  /**
+   * Compact (§25.6): adopt a snapshot as the fold base and PRUNE the ops it
+   * covers, so subsequent state is `fold(post-snapshot ops, base)`.  Preserves the
+   * max Lamport + per-device seq of the pruned ops so authored ops stay globally
+   * monotonic.  Idempotent — a re-received covered op is then ignored.  The caller
+   * may also drop the pruned envelopes from durable storage.
+   */
+  compact(snapshot: SnapshotResult): void {
+    for (const id of snapshot.coveredOpIds) {
+      const op = this.acceptedOps.get(id);
+      if (op) {
+        const lamport = BigInt(op.lamport);
+        if (lamport > this.baseMaxLamport) this.baseMaxLamport = lamport;
+        const seq = this.baseAuthorSeq.get(op.author_device_id);
+        if (seq === undefined || op.author_seq > seq) {
+          this.baseAuthorSeq.set(op.author_device_id, op.author_seq);
+        }
+      }
+      this.coveredOpIds.add(id);
+      this.acceptedOps.delete(id);
+    }
+    this.baseState = deserializeReducerState(snapshot.serializedState);
+    this.baseHeads = [...snapshot.coveredHeads];
+    this.refold();
   }
 }

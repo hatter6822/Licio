@@ -17,7 +17,12 @@
 import type { PrivateOpBody, PrivateRoomOp } from '../schemas/ops.js';
 import { capabilitiesForRole, OP_REQUIRED_CAPABILITY } from './capabilities.js';
 import { canonicalOpOrder } from './order.js';
-import { emptyRoomState, type MemberState, type RoomReducerState } from './state.js';
+import {
+  cloneRoomState,
+  emptyRoomState,
+  type MemberState,
+  type RoomReducerState,
+} from './state.js';
 
 type OpOf<T extends PrivateOpBody['type']> = Extract<PrivateOpBody, { type: T }>;
 
@@ -364,9 +369,18 @@ function applyOp(state: RoomReducerState, op: PrivateRoomOp): void {
  * Reduce a set of ACCEPTED ops (validated per §14.2) to room state via a pure
  * fold in the §14.3.2 canonical total order.  Deterministic: the output is a
  * function of the op SET only, never delivery order.
+ *
+ * `baseState` (§14.5) seeds the fold from a verified snapshot's state, so the
+ * caller can fold only POST-snapshot ops after old ops are compacted; the result
+ * equals a full fold of every op iff the snapshot covers a causally-closed
+ * prefix (which `PrivateRoomEngine` guarantees — it snapshots at its own heads).
+ * The base is cloned, never mutated.
  */
-export function reduceRoom(acceptedOps: readonly PrivateRoomOp[]): RoomReducerState {
-  const state = emptyRoomState();
+export function reduceRoom(
+  acceptedOps: readonly PrivateRoomOp[],
+  baseState?: RoomReducerState,
+): RoomReducerState {
+  const state = baseState ? cloneRoomState(baseState) : emptyRoomState();
   for (const op of canonicalOpOrder(acceptedOps)) {
     applyOp(state, op);
   }

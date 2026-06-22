@@ -114,6 +114,37 @@ export function emptyRoomState(): RoomReducerState {
   };
 }
 
+/** A deep clone of the reducer state (so a §14.5 snapshot base is never mutated
+ *  by a seeded fold).  Mirrors every container in `RoomReducerState`. */
+export function cloneRoomState(state: RoomReducerState): RoomReducerState {
+  return {
+    members: new Map(
+      [...state.members].map(([k, v]) => [k, { ...v, capabilities: new Set(v.capabilities) }]),
+    ),
+    devices: new Map([...state.devices].map(([k, v]) => [k, { ...v }])),
+    stories: new Map([...state.stories].map(([k, v]) => [k, { ...v, topicIds: [...v.topicIds] }])),
+    threads: new Map([...state.threads].map(([k, v]) => [k, { ...v }])),
+    contributions: new Map([...state.contributions].map(([k, v]) => [k, { ...v }])),
+    summaries: new Map(
+      [...state.summaries].map(([k, v]) => [
+        k,
+        { ...v, citedContributionIds: [...v.citedContributionIds] },
+      ]),
+    ),
+    attachments: new Map([...state.attachments].map(([k, v]) => [k, { ...v }])),
+    recoveryRequests: new Map(
+      [...state.recoveryRequests].map(([k, v]) => [
+        k,
+        { ...v, authorizingDeviceIds: new Set(v.authorizingDeviceIds) },
+      ]),
+    ),
+    seenClientDrafts: new Set(state.seenClientDrafts),
+    snapshots: [...state.snapshots],
+    rejected: [...state.rejected],
+    epoch: state.epoch,
+  };
+}
+
 /** Sort an iterable of [key, value] entries by key (UTF-8 bytewise via `<`). */
 function sortedEntries<V>(map: ReadonlyMap<string, V>): Array<[string, V]> {
   return [...map.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
