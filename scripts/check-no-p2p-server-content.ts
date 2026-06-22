@@ -8,12 +8,14 @@
 import { checkPrivateServerTables } from '@licio/db';
 import {
   apiSource,
+  apiSourceFiles,
   findMissingMarkers,
   type GateViolation,
   P2P_ENDPOINT_REJECTION_MARKERS,
   P2P_RANKING_EXCLUSION_MARKERS,
   P2P_SEARCH_EXCLUSION_MARKERS,
   reportGate,
+  scanNoServerRoomRecovery,
 } from './private-p2p-gates.js';
 
 const violations: GateViolation[] = [
@@ -30,5 +32,7 @@ const violations: GateViolation[] = [
     ],
     apiSource,
   ),
+  // §12.7 — no server-side private-room recovery endpoint may exist.
+  ...scanNoServerRoomRecovery(apiSourceFiles()),
 ];
 reportGate('check:no-p2p-server-content', violations);

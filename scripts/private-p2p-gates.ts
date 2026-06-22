@@ -127,6 +127,53 @@ export function scanDynamicRemoteCode(
 }
 
 // ---------------------------------------------------------------------------
+// §12.7 terminality — there is NO server-side "recover room" path for a private
+// P2P room (the server holds no content/keys/heads, so it CANNOT recover one).
+// Recovery is member-held + passphrase-bound (WS-S.3.6b) only.  These patterns
+// are SPECIFIC to private/p2p-room recovery, so WS-D account recovery
+// (`recoverWithCode`, `recovery_codes`, …) is never matched.
+// ---------------------------------------------------------------------------
+
+export const SERVER_ROOM_RECOVERY_PATTERNS: ReadonlyArray<{ pattern: RegExp; detail: string }> = [
+  {
+    pattern: /recover(?:able)?[-_]?(?:private|p2p)[-_]?room/i,
+    detail: 'private-room server recovery handler',
+  },
+  {
+    pattern: /(?:private|p2p)[-_]?room[-_]?recover/i,
+    detail: 'private-room server recovery handler',
+  },
+  {
+    pattern: /['"`][^'"`]*\/(?:private|p2p)\/[^'"`]*recover[^'"`]*['"`]/i,
+    detail: 'private-room recovery route path',
+  },
+];
+
+/** Scan server source for a forbidden private-room server-recovery endpoint. */
+export function scanNoServerRoomRecovery(
+  files: Array<{ path: string; content: string }>,
+): GateViolation[] {
+  const violations: GateViolation[] = [];
+  for (const { path, content } of files) {
+    const code = stripComments(content);
+    code.split('\n').forEach((line, i) => {
+      for (const { pattern, detail } of SERVER_ROOM_RECOVERY_PATTERNS) {
+        if (pattern.test(line)) violations.push({ file: path, line: i + 1, detail });
+      }
+    });
+  }
+  return violations;
+}
+
+/** Every `apps/api/src` source file (for the whole-tree recovery-endpoint scan). */
+export function apiSourceFiles(): Array<{ path: string; content: string }> {
+  return collectSources(resolve(ROOT, 'apps/api/src')).map((path) => ({
+    path: path.replace(ROOT, ''),
+    content: readFileSync(path, 'utf-8'),
+  }));
+}
+
+// ---------------------------------------------------------------------------
 // The "required marker" gates (§23.3–§23.6): assert the guard/predicate is
 // PRESENT in the source it must live in.  Each returns the list of MISSING
 // markers (empty ⇒ the guard exists).  A reader resolves `apps/api/src/...`.
