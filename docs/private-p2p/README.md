@@ -25,6 +25,15 @@ contract (the keystone), and the private schemas + canonical encoding — landed
 defensive server gates ship first, so a partially-built P2P client can never
 accidentally write server content").
 
+The **entire WS-S.3 cryptographic foundation is now shipped** on top of that
+foundation (all in `packages/private-p2p/src/crypto/`): the §10.2 MLS group
+keying + epoch→key-schedule bridge, the HKDF five-key schedule, the §10.5 two-
+layer object AEAD, the §10.3 HPKE invite bootstrap, §10.7 Ed25519 device
+signatures, and the §10.8 four-tier key store + §12.6/§12.7 recovery kit — every
+primitive a thin, **RFC-vector-pinned** wrapper over WebCrypto (or, for MLS, an
+audited library behind a one-file wrapper).  Only WS-S.3.6c (threshold recovery,
+which needs the reducer's membership ops, WS-S.5.1) is deferred within WS-S.3.
+
 ### WS-S.0 — Terminology, room-class model, product framing
 
 | Card | What shipped | Where |
@@ -51,28 +60,60 @@ accidentally write server content").
 | **WS-S.2.2** | `canonical(...)` / `decodeCanonical(...)` — the ONE DAG-CBOR deterministic profile (RFC 8949 §4.2.1; matches LCAP's LDC rules but a separate zero-dependency impl): shortest-form integers, definite-length only, bytewise-encoded-key map order, optional-omit, UTF-8/NFC, fail-closed reject matrix + §27 resource caps. The encoder **fails closed on any exotic object** (`Date`/`Map`/`Set`/`RegExp`/typed arrays/class instances — non-plain protos): they have an empty `Object.keys`, so a permissive path would silently encode them as an EMPTY MAP — a forgery/collision vector for a signed/hashed structure — and the schemas carry `z.unknown()` fields (`submission_metadata`, `location_scope`, `metadata`, `terms`) that reach `canonical`. Pinned by the P1/P2/P3 determinism + integer-boundary + bomb-abort + exotic-object suite | `packages/private-p2p/src/crypto/canonical.ts` |
 | **WS-S.2.3** | Every strict (`.strict()`) private schema: the §10.4 `PrivateEncryptedEnvelopeV1` (EXTENDED with `capability_root_at_seq`/`chunk_index`/`chunk_total` so a verifier reconstructs both §10.5 AADs entirely from the envelope — `BODY_AAD_ENVELOPE_FIELDS`/`WRAP_AAD_ENVELOPE_FIELDS` are the single source); the §13.1 manifest; the §13.2 op envelope + all op bodies (membership/role/story/thread/contribution/summary/attachment/snapshot/recovery); the §10.3 invite + §12.3 join; the §13.6 attachment manifest; the §13.7 search shard; the §19.4 report package. Every binary field is bounded for §27 DoS: small fields (nonce/sig/key/commitment) ≤ 16 KiB, an inline ciphertext body ≤ ~1 MiB (`ciphertextBase64Schema` — a padded op body exceeds the small bound), the Lamport decimal-string ≤ 40 digits. **Contribution ops reuse the shipped WS-G constants** (`CONTRIBUTION_BODY_LIMITS` incl. the edit-op `.comment` cap, `MAX_CITATIONS`, `citationSchema`, the type/thread enums) so the typed rules cannot drift | `packages/private-p2p/src/schemas/` |
 
+### WS-S.3 — Cryptographic foundation
+
+Every primitive is a thin, **vector-pinned** wrapper over WebCrypto (§10.1
+principle 10), so correctness is proven against official RFC test vectors rather
+than trusted blindly.  All in `packages/private-p2p/src/crypto/`.
+
+| Card | What shipped | Where |
+|---|---|---|
+| **WS-S.3.1a** | The minimal reviewed MLS wrapper over `ts-mls` (RFC 9420): `createGroup`/`generateMemberKeyPackage`/`addMember`/`removeMember`/`commitProposals`/`processWelcome`/`currentEpoch`/`epochAuthenticator` + group-state (de)serialization.  The cipher suite is PINNED to `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` (suite 1) — a module-load assertion fails closed on registry drift, never a runtime default.  The `check:p2p-mls-wrapper` gate forbids a deep `ts-mls` import anywhere else (proven to bite), keeping the library swappable | `crypto/mls.ts`, `scripts/check-mls-wrapper.ts` |
+| **WS-S.3.1b** | The epoch bridge: `room_epoch_secret = MLS-Exporter("licio.private-room.v1.epoch", canonical([room_id_commitment, epoch, manifest_commitment]), 32)` → the §10.2 five-key schedule.  `deriveEpochState` is a pure function of the current epoch, so a commit rotates all five keys atomically (§10.9); a forked manifest yields a different secret (cross-fork content unreadable) | `crypto/epoch.ts` |
+| **WS-S.3.2** | `HKDF-Expand` (RFC 5869 over WebCrypto HMAC) + the TLS-1.3/MLS `HKDF-Expand-Label` + the five per-purpose room keys (`content_wrap`/`sync_topic`/`rendezvous`/`snapshot`/`report`).  Pinned by the RFC 5869 Appendix-A vectors (incl. the empty-salt case HPKE needs) | `crypto/hkdf.ts` |
+| **WS-S.3.3a/b** | The §10.5 two-layer object AEAD (AES-256-GCM): the per-object body seal under the canonical `body_aad`, the object-key wrap under the epoch `content_wrap_key` with the canonical `wrap_aad` (the `wrapping_epoch`-bound replay defense), §25.4 size-bucket padding, and the §10.6 pad-not-compress rule | `crypto/aead.ts` |
+| **WS-S.3.4** | HPKE base-mode invite bootstrap (RFC 9180 suite A.1, DHKEM(X25519,HKDF-SHA256)/HKDF-SHA256/AES-128-GCM), URL-fragment-only invites.  Hand-rolled over WebCrypto X25519 + HKDF + AES-GCM; `openBase` pinned against an `@hpke/core`-sealed ciphertext (cross-implementation conformance); X25519 DH pinned to RFC 7748 §6.1 | `crypto/hpke.ts` |
+| **WS-S.3.5** | Ed25519 device signatures over the canonical envelope (§10.7), WebCrypto-native, room/epoch-scoped.  Pinned by KATs cross-validated against `@noble/curves` (an independent RFC 8032 impl — byte-identical deterministic output) | `crypto/signatures.ts` |
+| **WS-S.3.6a** | The §10.8 four-tier local key store for a room's `RoomKeyMaterial`: (1) Argon2id-passphrase (OWASP-2024 params), (2) WebCrypto non-extractable wrap, (3) passkey PRF, (4) local-key-agent (no local secret).  Material bound to room id + tier via the AEAD AAD; `assertTierAllowedForRoom` enforces the high-risk-tier rule.  At-rest crypto only; the IndexedDB persistence is the client's concern (WS-S.7) | `crypto/key-store.ts` |
+| **WS-S.3.6b** | The portable, passphrase-bound recovery kit (stronger Argon2id) that re-derives access on a new device with NO platform involvement (`importRecoveryKit` is pure — no `fetch`).  §12.7 terminality: the `check:no-p2p-server-content` umbrella now forbids any server-side private-room recovery endpoint (`scanNoServerRoomRecovery`, scoped so WS-D account recovery is never flagged) | `crypto/recovery.ts`, `scripts/private-p2p-gates.ts` |
+| **WS-S.3.7** | The crypto property + fuzz suite: the full two-AEAD pipeline, the §10.9 forward-secrecy property (a removed member cannot decrypt a future epoch), nonce/object-key uniqueness across generated workloads, and fail-closed fuzz of every open/decode path | `__tests__/crypto-properties.test.ts` |
+
+**Dependencies added** (vetted against §6.12.12, all MIT, no install scripts, in
+the code-split private chunk — excluded from the web `<15` budget): `ts-mls`
+(RFC-9420 MLS, 4-package tree), its `@noble/ciphers`/`@noble/curves` peers (the
+X25519/Ed25519 suite), and `@noble/hashes` (Argon2id).  `ts-mls` is not yet
+formally security-audited (its own disclaimer); the one-file wrapper isolates it
+for a future swap to an audited WASM build (tracked residual).
+
 ## Tests
 
 | Suite | Coverage |
 |---|---|
 | `packages/shared` | the §4.1 coherence accept/reject matrix + `roomClassOf`; the disclosure/matrix copy-lint |
 | `packages/db` | the DB↔shared enum mirror; the §8.1 column denylist (allowlist exactness + a forbidden-column fixture that BITES; rendezvous has no room FK); the **gated** Postgres harness: the §8.3 no-p2p-content trigger rejects p2p stories/threads (server rows succeed) + each §4.1 coherence CHECK rejects its incoherent axis tuple by name |
-| `packages/private-p2p` | the canonical determinism/reject/bomb suite (P1/P2/P3 + integer-boundary table); the strict-schema accept/reject + WS-G contribution parity + envelope↔AAD alignment; every op-body type validated (≈97% coverage) |
+| `packages/private-p2p` | the canonical determinism/reject/bomb suite (P1/P2/P3 + integer-boundary table); the strict-schema accept/reject + WS-G contribution parity + envelope↔AAD alignment + every op-body type; **and the WS-S.3 crypto suites** — RFC 5869 HKDF vectors, the AEAD round-trip/AAD-flip/replay/nonce-uniqueness suite, the Ed25519 KATs + RFC 9180 HPKE interop + RFC 7748 X25519, the MLS multi-device/epoch/manifest-fork suite, the four-tier key store + recovery kit, and the forward-secrecy/fuzz properties (crypto 97% stmts / 92% branch) |
 | `apps/api` | the server-gate suite: submission 409 (+ no row created), contribution 404, feed `p2p_room_local_only`, the ranking room-surface exclusion, the search filter, the event-pipeline gate |
-| `scripts` | the seven CI gates proven to bite (clean vs violating fixtures) + the live-source marker regression catch |
+| `scripts` | the seven §23.10 CI gates + the `check:p2p-mls-wrapper` deep-import gate + the §12.7 no-server-recovery scan, all proven to bite (clean vs violating fixtures) + the live-source marker regression catch |
 
 ## Residuals (the next slices)
 
-The crypto/P2P/UI plane is the next work, gated by the foundation above:
+The P2P/reducer/UI plane is the next work, gated by the foundation + the WS-S.3
+crypto above:
 
-- **WS-S.3 — cryptographic foundation** (MLS group keying, the epoch exporter →
-  HKDF-Expand-Label key schedule, the body/key-wrap AEAD, HPKE invite bootstrap,
-  Ed25519 signatures, the local key store + recovery): needs an audited MLS/HPKE
-  TS/WASM library + a memory-hard KDF, declared in `@licio/private-p2p` and
-  code-split.  The cipher suites are pinned in `docs/PRIVATE_SPEC.md` §10.7.
-- **WS-S.4 — Helia/libp2p private profile** (disabled public routing, the CIDv1
-  ciphertext profile + IndexedDB blockstore, the membership-gated block-exchange
-  protocols, the public-gateway rejection guard).
+- **WS-S.3.6c — threshold recovery** (M distinct admin `RecoveryAuthorize` ops →
+  an MLS Add + epoch rotation, NOT secret-sharing): the only WS-S.3 card still
+  open, deferred because it rides the reducer's membership-op validation
+  (WS-S.5.1).
+- **WS-S.4 — the private content-addressing + P2P transport.**  `docs/PRIVATE_SPEC.md`
+  §9.2 recommends a Helia/libp2p stack, but vetting it against §6.12.12 found
+  **580 transitive packages** — a supply-chain surface the LCAP plane (WS-R)
+  deliberately rejected in favour of a dependency-free WebRTC + IPFS-gateway
+  bridge.  The §9.4 **CIDv1-over-ciphertext profile + IndexedDB blockstore** can
+  ship dependency-free (a hand-rolled multihash/multibase like `@licio/lcap`'s
+  `cid/`); the membership-gated **block exchange** can ride the existing
+  `@licio/lcap-p2p` WebRTC carrier (the WS-R.16.1 ↔ WS-S.6.5 ciphertext seam)
+  rather than a fresh libp2p stack.  **The full-Helia-vs-lighter-transport
+  decision is a maintainer call before any P2P dependency is added.**
 - **WS-S.5 — the operation log + deterministic Lamport-ordered reducer**
   (3-stage op validation, the byte-identical fold, the conflict table, snapshots,
   local moderation overlays, local-only encrypted search).
