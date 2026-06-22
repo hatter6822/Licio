@@ -78,7 +78,7 @@ export function PrivateRoomView({ roomId }: PrivateRoomViewProps): React.ReactEl
   return (
     <div className="flex flex-col gap-4">
       <section aria-label={t('privateRoom.view.members', 'Members')}>
-        <h2 className="mb-2 font-semibold text-sm text-soft-foreground">
+        <h2 className="mb-2 font-semibold text-sm text-ink-muted">
           {t('privateRoom.view.members', 'Members')}
         </h2>
         <ul className="flex flex-wrap gap-2">
@@ -89,7 +89,7 @@ export function PrivateRoomView({ roomId }: PrivateRoomViewProps): React.ReactEl
                 {m.memberId === session.memberId
                   ? t('privateRoom.view.you', 'You')
                   : shortId(m.memberId)}
-                <span className="ml-1 text-soft-foreground text-xs">({m.role})</span>
+                <span className="ml-1 text-ink-muted text-xs">({m.role})</span>
               </li>
             ))}
         </ul>
@@ -174,7 +174,7 @@ function StoryCardWithComments({
       <ul className="mt-2 flex flex-col gap-1">
         {comments.map((c) => (
           <li key={c.contributionId} className="text-sm">
-            <span className="text-soft-foreground text-xs">{shortId(c.authorMemberId)}: </span>
+            <span className="text-ink-muted text-xs">{shortId(c.authorMemberId)}: </span>
             {c.bodyMarkdownLite}
           </li>
         ))}

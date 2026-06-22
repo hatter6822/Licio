@@ -75,7 +75,7 @@ export function CreatePrivateRoomWizard({
       </h2>
 
       {/* The §20.2 blocking disclosure — verbatim from the SSOT. */}
-      <p className="neu-inset rounded-lg p-3 text-sm text-soft-foreground" role="note">
+      <p className="neu-inset rounded-lg p-3 text-sm text-ink-muted" role="note">
         {PRIVATE_ROOM_CREATION_DISCLOSURE}
       </p>
 

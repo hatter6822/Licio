@@ -79,7 +79,7 @@ export function PrivateRoomsPage(): React.ReactElement {
                 >
                   {room.name}
                 </Link>
-                <p className="text-soft-foreground text-xs">{room.createdAtBucket}</p>
+                <p className="text-ink-muted text-xs">{room.createdAtBucket}</p>
               </Card>
             </li>
           ))}
