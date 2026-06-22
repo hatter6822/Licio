@@ -18,6 +18,7 @@ import {
 } from '@licio/lcap';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { LcapIngestServer } from '../lcap/server-ingest.js';
+import { InMemoryLcapServerStore } from '../lcap/store.js';
 import {
   ACCOUNT,
   ACCOUNT_AUTHORITY_SIGNER,
@@ -320,5 +321,63 @@ describe('LcapIngestServer — server-computed validation (R.12.1b)', () => {
       proofs: [e0.proof],
     });
     expect(r0.status.status).toBe('accepted');
+  });
+});
+
+describe('LcapIngestServer.indexBodyBlockEdges (§27.1 signed-body reference cap)', () => {
+  const enc = new TextEncoder();
+
+  it('indexes block-kind body references within the cap and ignores non-block refs', async () => {
+    const store = new InMemoryLcapServerStore();
+    const srv = new LcapIngestServer(NET, () => NOW, store);
+    const [b1, b2, recRef] = await Promise.all([
+      cidFor('block', enc.encode('b1')),
+      cidFor('block', enc.encode('b2')),
+      cidFor('record', enc.encode('not-a-block')), // a record CID → must be ignored
+    ]);
+    expect(
+      await srv.indexBodyBlockEdges('lcapr_rec1', {
+        bodyBlockCid: b1,
+        sourceSnapshotCids: [b2, recRef],
+      }),
+    ).toBe(true);
+    expect((await store.recordEdges('lcapr_rec1', 'block')).slice().sort()).toEqual(
+      [b1, b2].sort(),
+    );
+  });
+
+  it('rejects (false) and indexes NOTHING when the declared count exceeds maxFanOut (§27 DoS bound)', async () => {
+    const store = new InMemoryLcapServerStore();
+    const srv = new LcapIngestServer(NET, () => NOW, store); // SERVER_CAPS.maxFanOut = 64
+    const many = await Promise.all(
+      Array.from({ length: 65 }, (_, i) => cidFor('block', enc.encode(`m${i}`))),
+    );
+    expect(await srv.indexBodyBlockEdges('lcapr_rec2', { sourceSnapshotCids: many })).toBe(false);
+    // The unbounded index-write loop never ran: not one edge was written.
+    expect(await store.recordEdges('lcapr_rec2', 'block')).toEqual([]);
+  });
+
+  it('rejects a very large source_snapshot_cids in O(1) without throwing (no huge spread)', async () => {
+    const store = new InMemoryLcapServerStore();
+    const srv = new LcapIngestServer(NET, () => NOW, store);
+    // 200k elements — far beyond any JS spread/argument limit; the `.length` bound must reject
+    // it WITHOUT materializing or spreading it (a spread would throw, turning a clean reject
+    // into a 500).
+    const huge = new Array<string>(200_000).fill('lcapb_x');
+    expect(await srv.indexBodyBlockEdges('lcapr_huge', { sourceSnapshotCids: huge })).toBe(false);
+    expect(await store.recordEdges('lcapr_huge', 'block')).toEqual([]);
+  });
+});
+
+describe('LcapIngestServer.newImportBudget (§27.1 import CPU-time bound)', () => {
+  it('reports over-budget once the clock passes the maxCpuTimeMsPerImportBatch cap', () => {
+    let t = 1000;
+    const srv = new LcapIngestServer(NET, () => t); // SERVER_CAPS cap = 5000ms
+    const overBudget = srv.newImportBudget(); // startMs = 1000
+    expect(overBudget()).toBe(false); // elapsed 0
+    t = 1000 + 4000; // 4s ≤ 5s — still within budget
+    expect(overBudget()).toBe(false);
+    t = 1000 + 6000; // 6s > the 5s import-CPU cap — over budget
+    expect(overBudget()).toBe(true);
   });
 });

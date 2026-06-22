@@ -298,6 +298,22 @@ None of the above was launch-blocking (the LCAP server binding is gated/in-memor
 pre-production), and the pay-to-rank firewall + fail-closed crypto were unaffected
 throughout.
 
+**§27 ingestion-loop bounds — two further DoS fixes.**  The media-byte accounting work
+indexes a contribution's SIGNED-BODY-declared block references (`body_block_cid` /
+`attachment_manifest_cid` / `source_snapshot_cids`).  Unlike the pack TABLE deps (already
+bounded by the §27.2 graph guard's `maxFanOut` and the §27.2 `maxGraphNodes` entry cap),
+these body refs are NOT pack entries, so an unbounded `source_snapshot_cids` array (the
+record schema sets no length) could otherwise drive an unbounded, AWAITED index-write loop
+BEFORE signature validation — amplified on the durable store.  Two bounds close it: (1)
+`indexBodyBlockEdges` rejects a contribution whose declared body-block-reference count
+exceeds the §27.1 `maxFanOut` (`rejected_resource_limit`, nothing indexed) — the count is
+checked before any parse, so an over-cap record costs O(1), and the §18.3 media charge +
+the §29.8 closure stay bounded; (2) the whole parse+store+index phase
+(`ingestPackFrames`) now runs under the §27.1 `maxCpuTimeMsPerImportBatch` budget
+(`newImportBudget`), the same cap `commitBatch` already enforced on the commit phase — so a
+large multi-object pack (its object COUNT bounded by the §27.2/byte caps, but its total
+store/index writes still potentially O(10^5)) is wall-clock-bounded and cannot pin a worker.
+
 **Aggregate capability quotas — shipped (all three).**  Beyond the per-event
 `max_single_event_bytes` the §18.3 chain validator already enforced, the server now enforces
 all three of a capability's *aggregate* quotas — `max_offline_events`,

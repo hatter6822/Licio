@@ -232,10 +232,17 @@ async function ingestPackFrames(
     };
   }
 
+  // §27.1 CPU-time budget for the whole parse+store+index phase (the §27.2 node cap +
+  // the byte caps bound the object COUNT, but the per-object store/index writes can still
+  // total O(10^5) on a durable store; this bounds the wall-clock so no single pack can pin
+  // a worker).  `commitBatch` enforces the same cap on the commit phase.
+  const overImportBudget = server.newImportBudget();
+
   // Group detached proofs by the record_cid they attest (for the contribution commit)
   // and index each record→proof edge for the §29.8 room-export closure.
   const proofsByRecord = new Map<string, DetachedProofV2[]>();
   for (const [cid, frame] of frames) {
+    if (overImportBudget()) break; // §27.1: stop indexing proofs past the CPU budget
     // Only a CID-VERIFIED proof frame may authorize a record/identity object: a frame
     // whose payload does not hash to its declared proof CID is `rejected_bad_cid` (not
     // stored/fetchable), so its signature must not be allowed to authorize anything here.
@@ -264,6 +271,12 @@ async function ingestPackFrames(
   const identityEdges: { recordCid: string; capabilityCid: string; deviceKeyId: string }[] = [];
   for (const [cid, frame] of frames) {
     const cidKind = FRAME_CID_KIND[frame.frameKind];
+    // §27.1 CPU-time bound: past the import budget, reject the remaining objects rather than
+    // letting a large pack's per-object store/index writes run unbounded on a durable store.
+    if (overImportBudget()) {
+      statuses.push({ cid, cid_kind: cidKind, status: 'rejected_resource_limit' });
+      continue;
+    }
     const had = await server.hasObject(cid);
     const stored = await server.putObject(cid, cidKind, frame.payload);
     if (!stored) {
@@ -342,20 +355,22 @@ async function ingestPackFrames(
         // Index the SIGNED BODY's directly-referenced media blocks too (the body is signed, the
         // pack table is not).  This makes the §18.3 step 9 media-byte charge + the §29.8 export
         // closure see what the author committed to, not only what the table happened to declare —
-        // a malicious pack cannot drop a body-declared block from the media accounting.  The
-        // store de-duplicates the edge, so a block named in both the body and the table is one
-        // edge (charged once).
-        for (const ref of [
-          record.body_block_cid,
-          record.attachment_manifest_cid,
-          ...(record.source_snapshot_cids ?? []),
-        ]) {
-          if (ref === undefined) continue;
-          try {
-            if (parseCid(ref).kind === 'block') await server.indexRecordEdge(cid, ref, 'block');
-          } catch {
-            // a malformed body CID is ignored (the record will quarantine on validate anyway)
-          }
+        // a malicious pack cannot drop a body-declared block from the media accounting.  BOUNDED
+        // by the §27.1 reference cap: unlike the table deps (already §27.2-fan-out-guarded above),
+        // these signed-body refs are unguarded, so an over-cap `source_snapshot_cids` is rejected
+        // `rejected_resource_limit` (nothing indexed) rather than driving an unbounded write loop.
+        const indexed = await server.indexBodyBlockEdges(cid, {
+          ...(record.body_block_cid !== undefined ? { bodyBlockCid: record.body_block_cid } : {}),
+          ...(record.attachment_manifest_cid !== undefined
+            ? { attachmentManifestCid: record.attachment_manifest_cid }
+            : {}),
+          ...(record.source_snapshot_cids !== undefined
+            ? { sourceSnapshotCids: record.source_snapshot_cids }
+            : {}),
+        });
+        if (!indexed) {
+          statuses.push({ cid, cid_kind: 'record', status: 'rejected_resource_limit' });
+          break; // too many signed-body block references (§27.1) — bounded rejection
         }
         contributions.push({
           recordCid: cid,

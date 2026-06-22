@@ -45,6 +45,7 @@ import {
   ingestRecord,
   type ObjectStatusV2,
   type PulseResponseV2,
+  parseCid,
   type ReceiptRecordV2,
   type ResourceCaps,
   type RevocationAuthorityBinding,
@@ -224,6 +225,46 @@ export class LcapIngestServer {
     relation: RecordEdgeRelation,
   ): Promise<void> {
     return this.store.indexRecordEdge(recordCid, relatedCid, relation);
+  }
+
+  /**
+   * Index a contribution's SIGNED-BODY-declared media block references (its `block` edges:
+   * `body_block_cid` / `attachment_manifest_cid` / `source_snapshot_cids`) under the §27.1
+   * reference cap (`maxFanOut`).  These refs are NOT part of the §27.2-guarded table DAG, so
+   * without a bound a record naming thousands of `source_snapshot_cids` would drive an
+   * unbounded (awaited) index-write loop here BEFORE signature validation — a §27 DoS,
+   * amplified on the durable store.  The DECLARED count is bounded FIRST (before any parse),
+   * so an over-cap record costs O(1): it indexes NOTHING and returns `false` (the caller
+   * rejects it `rejected_resource_limit`).  Within the cap, each block-kind ref is indexed
+   * (the store de-duplicates, so a block named in both the body and the table is one edge).
+   */
+  async indexBodyBlockEdges(
+    recordCid: string,
+    refs: {
+      readonly bodyBlockCid?: string;
+      readonly attachmentManifestCid?: string;
+      readonly sourceSnapshotCids?: readonly string[];
+    },
+  ): Promise<boolean> {
+    const snapshots = refs.sourceSnapshotCids ?? [];
+    const singles = (refs.bodyBlockCid ? 1 : 0) + (refs.attachmentManifestCid ? 1 : 0);
+    // Bound the DECLARED count via `.length` FIRST — before materializing or spreading the
+    // (possibly huge) `source_snapshot_cids` array — so an over-cap record costs O(1) and a
+    // large spread can never even be attempted.
+    if (singles + snapshots.length > this.caps.maxFanOut) return false;
+    const candidates: string[] = [];
+    if (refs.bodyBlockCid !== undefined) candidates.push(refs.bodyBlockCid);
+    if (refs.attachmentManifestCid !== undefined) candidates.push(refs.attachmentManifestCid);
+    for (const snapshot of snapshots) candidates.push(snapshot); // ≤ maxFanOut here
+    for (const ref of candidates) {
+      try {
+        if (parseCid(ref).kind === 'block')
+          await this.store.indexRecordEdge(recordCid, ref, 'block');
+      } catch {
+        // a malformed body CID is ignored (the record will quarantine/reject on validate)
+      }
+    }
+    return true;
   }
 
   /**
@@ -824,6 +865,20 @@ export class LcapIngestServer {
       audience: 'restricted',
       limits: graphLimitsFromCaps(this.caps),
     });
+  }
+
+  /**
+   * A §27.1 CPU-time budget for one pack import (`maxCpuTimeMsPerImportBatch`), returned as a
+   * cheap `overBudget()` poll.  `commitBatch` already time-bounds the COMMIT phase; the pack
+   * parse + store + edge-index phase (`ingestPackFrames`) uses this to bound ITSELF too, so a
+   * large multi-object pack — whose total store/index writes are bounded by the §27.2 node cap
+   * and the §27.1 byte caps but can still be O(10^5) on a durable store — cannot pin a worker.
+   * The deadline is read from THIS server's caps + clock, mirroring `commitBatch`.
+   */
+  newImportBudget(): () => boolean {
+    const startMs = this.now();
+    return (): boolean =>
+      !checkCap(this.now() - startMs, 'maxCpuTimeMsPerImportBatch', this.caps).ok;
   }
 
   async commitBatch(inputs: readonly CommitRecordInput[]): Promise<CommitBatchResult> {
