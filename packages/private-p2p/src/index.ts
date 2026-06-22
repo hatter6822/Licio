@@ -12,4 +12,5 @@
 // regresses (PRIVATE_SPEC §9.8).
 
 export * from './crypto/index.js';
+export * from './reducer/index.js';
 export * from './schemas/index.js';
