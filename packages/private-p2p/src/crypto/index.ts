@@ -9,6 +9,7 @@
 
 export * from './aead.js';
 export * from './canonical.js';
+export * from './ecdh.js';
 export * from './epoch.js';
 export * from './hkdf.js';
 export * from './hpke.js';
