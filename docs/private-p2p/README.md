@@ -25,14 +25,22 @@ contract (the keystone), and the private schemas + canonical encoding — landed
 defensive server gates ship first, so a partially-built P2P client can never
 accidentally write server content").
 
-The **entire WS-S.3 cryptographic foundation is now shipped** on top of that
+The **entire WS-S.3 cryptographic foundation is shipped** on top of that
 foundation (all in `packages/private-p2p/src/crypto/`): the §10.2 MLS group
 keying + epoch→key-schedule bridge, the HKDF five-key schedule, the §10.5 two-
 layer object AEAD, the §10.3 HPKE invite bootstrap, §10.7 Ed25519 device
-signatures, and the §10.8 four-tier key store + §12.6/§12.7 recovery kit — every
-primitive a thin, **RFC-vector-pinned** wrapper over WebCrypto (or, for MLS, an
-audited library behind a one-file wrapper).  Only WS-S.3.6c (threshold recovery,
-which needs the reducer's membership ops, WS-S.5.1) is deferred within WS-S.3.
+signatures, the §10.8 four-tier key store + §12.6/§12.7 recovery kit, and the
+§12.6.1 threshold recovery — every primitive a thin, **RFC-vector-pinned**
+wrapper over WebCrypto (or, for MLS, an audited library behind a one-file
+wrapper).  All of WS-S.3 (3.1–3.7) is complete.
+
+The **§9.4 private content-addressing and the §14.3 deterministic reducer are
+also shipped** (the maintainer-chosen lighter-transport path — no Helia): the
+dependency-free CIDv1-over-ciphertext profile (`crypto/cid.ts`, WS-S.4.2) and
+the operation-log reducer (`reducer/`, WS-S.5.1–5.5) — the Lamport clock +
+canonical total order, the room/capability state, the pure authority-enforcing
+fold + §14.4 conflict policy, and the structural §14.2 pre-pass — with the
+§14.3.3/§26.1 byte-identical-across-shuffles determinism property pinned.
 
 ### WS-S.0 — Terminology, room-class model, product framing
 
@@ -76,7 +84,22 @@ than trusted blindly.  All in `packages/private-p2p/src/crypto/`.
 | **WS-S.3.5** | Ed25519 device signatures over the canonical envelope (§10.7), WebCrypto-native, room/epoch-scoped.  Pinned by KATs cross-validated against `@noble/curves` (an independent RFC 8032 impl — byte-identical deterministic output) | `crypto/signatures.ts` |
 | **WS-S.3.6a** | The §10.8 four-tier local key store for a room's `RoomKeyMaterial`: (1) Argon2id-passphrase (OWASP-2024 params), (2) WebCrypto non-extractable wrap, (3) passkey PRF, (4) local-key-agent (no local secret).  Material bound to room id + tier via the AEAD AAD; `assertTierAllowedForRoom` enforces the high-risk-tier rule.  At-rest crypto only; the IndexedDB persistence is the client's concern (WS-S.7) | `crypto/key-store.ts` |
 | **WS-S.3.6b** | The portable, passphrase-bound recovery kit (stronger Argon2id) that re-derives access on a new device with NO platform involvement (`importRecoveryKit` is pure — no `fetch`).  §12.7 terminality: the `check:no-p2p-server-content` umbrella now forbids any server-side private-room recovery endpoint (`scanNoServerRoomRecovery`, scoped so WS-D account recovery is never flagged) | `crypto/recovery.ts`, `scripts/private-p2p-gates.ts` |
+| **WS-S.3.6c** | §12.6.1 capability-based threshold recovery: `evaluateRecoveryThreshold` counts DISTINCT recover-capable admins (not devices) who signed `recovery.authorize` ops — M-of-N, room-configured.  NOT secret-sharing (the op carries only ids; a smuggled key field is `.strict()`-rejected); a successful recovery is an ordinary `member.add` = MLS Add + epoch rotation | `reducer/recovery-threshold.ts` |
 | **WS-S.3.7** | The crypto property + fuzz suite: the full two-AEAD pipeline, the §10.9 forward-secrecy property (a removed member cannot decrypt a future epoch), nonce/object-key uniqueness across generated workloads, and fail-closed fuzz of every open/decode path | `__tests__/crypto-properties.test.ts` |
+
+### WS-S.4.2 / WS-S.5 — Content-addressing + the deterministic reducer
+
+The maintainer-chosen **lighter-transport path**: the §9.4 content-addressing and
+the §14.3 reducer ship dependency-free (no Helia); the membership-gated block
+exchange will ride the existing `@licio/lcap-p2p` WebRTC carrier (WS-S.6).
+
+| Card | What shipped | Where |
+|---|---|---|
+| **WS-S.4.2** | The §9.4 CIDv1-over-ciphertext profile (CIDv1 / base32 / sha2-256; dag-cbor `0x71` for metadata, raw `0x55` for media chunks), hand-rolled to avoid the multiformats/Helia tree.  A private CID is ALWAYS over ciphertext (§9.1).  Pinned byte-for-byte to `multiformats`-generated CIDs + RFC 4648 §10 base32 vectors | `crypto/cid.ts` |
+| **WS-S.5.4a** | The Lamport clock (decimal strings, exact beyond 2^53) + the §14.3.2 canonical total order `(lamport, created_at_bucket, author_device_id, op_id)` + the §14.3.1 causality rule | `reducer/order.ts` |
+| **WS-S.5.1** | The §11.3 capability model (room capabilities, never a platform role, §11.4) + the role→capability table + the per-op-type required capability | `reducer/capabilities.ts` |
+| **WS-S.5.4b / 5.5** | The pure deterministic fold (PRIVATE_SPEC §14.3): authority enforced against EVOLVING room state, the §14.4 conflict policy (latest-edit-wins by order position, moderator-tombstone-hides, removed-member rejection, `client_draft_id` dedup, orphan rejection, founder genesis) + `roomStateCommitment` (the §14.3.3 device-convergence commitment) | `reducer/{state,reduce}.ts` |
+| **WS-S.5.3** | The structural §14.2 pre-pass (room match, missing-dependency quarantine, Lamport-after-parents, per-device monotonic sequence / device-fork catch, duplicate op id) — produces the accepted set the fold consumes (the crypto wire-intake steps 1–5 land with WS-S.6 sync) | `reducer/validate.ts` |
 
 **Dependencies added** (vetted against §6.12.12, all MIT, no install scripts, in
 the code-split private chunk — excluded from the web `<15` budget): `ts-mls`
@@ -91,32 +114,33 @@ for a future swap to an audited WASM build (tracked residual).
 |---|---|
 | `packages/shared` | the §4.1 coherence accept/reject matrix + `roomClassOf`; the disclosure/matrix copy-lint |
 | `packages/db` | the DB↔shared enum mirror; the §8.1 column denylist (allowlist exactness + a forbidden-column fixture that BITES; rendezvous has no room FK); the **gated** Postgres harness: the §8.3 no-p2p-content trigger rejects p2p stories/threads (server rows succeed) + each §4.1 coherence CHECK rejects its incoherent axis tuple by name |
-| `packages/private-p2p` | the canonical determinism/reject/bomb suite (P1/P2/P3 + integer-boundary table); the strict-schema accept/reject + WS-G contribution parity + envelope↔AAD alignment + every op-body type; **and the WS-S.3 crypto suites** — RFC 5869 HKDF vectors, the AEAD round-trip/AAD-flip/replay/nonce-uniqueness suite, the Ed25519 KATs + RFC 9180 HPKE interop + RFC 7748 X25519, the MLS multi-device/epoch/manifest-fork suite, the four-tier key store + recovery kit, and the forward-secrecy/fuzz properties (crypto 97% stmts / 92% branch) |
+| `packages/private-p2p` | the canonical + strict-schema suites; the **WS-S.3 crypto suites** — RFC 5869 HKDF vectors, the AEAD round-trip/AAD-flip/replay/nonce-uniqueness suite, the Ed25519 KATs + RFC 9180 HPKE interop + RFC 7748 X25519, the MLS multi-device/epoch/manifest-fork suite, the four-tier key store + recovery kit + threshold recovery, and the forward-secrecy/fuzz properties; **and the WS-S.4.2/5 suites** — the CIDv1 multiformats/RFC-4648 pins, the Lamport/canonical-order tests, the reducer genesis/capability/conflict matrix, the §14.3.3 25-shuffle determinism property, and the structural validation pre-pass (280 tests; crypto + reducer both ≳ 92% coverage) |
 | `apps/api` | the server-gate suite: submission 409 (+ no row created), contribution 404, feed `p2p_room_local_only`, the ranking room-surface exclusion, the search filter, the event-pipeline gate |
 | `scripts` | the seven §23.10 CI gates + the `check:p2p-mls-wrapper` deep-import gate + the §12.7 no-server-recovery scan, all proven to bite (clean vs violating fixtures) + the live-source marker regression catch |
 
 ## Residuals (the next slices)
 
-The P2P/reducer/UI plane is the next work, gated by the foundation + the WS-S.3
-crypto above:
+The P2P-transport / sync / UI plane is the next work, gated by the foundation +
+the WS-S.3 crypto + the WS-S.5 reducer above:
 
-- **WS-S.3.6c — threshold recovery** (M distinct admin `RecoveryAuthorize` ops →
-  an MLS Add + epoch rotation, NOT secret-sharing): the only WS-S.3 card still
-  open, deferred because it rides the reducer's membership-op validation
-  (WS-S.5.1).
-- **WS-S.4 — the private content-addressing + P2P transport.**  `docs/PRIVATE_SPEC.md`
-  §9.2 recommends a Helia/libp2p stack, but vetting it against §6.12.12 found
-  **580 transitive packages** — a supply-chain surface the LCAP plane (WS-R)
-  deliberately rejected in favour of a dependency-free WebRTC + IPFS-gateway
-  bridge.  The §9.4 **CIDv1-over-ciphertext profile + IndexedDB blockstore** can
-  ship dependency-free (a hand-rolled multihash/multibase like `@licio/lcap`'s
-  `cid/`); the membership-gated **block exchange** can ride the existing
-  `@licio/lcap-p2p` WebRTC carrier (the WS-R.16.1 ↔ WS-S.6.5 ciphertext seam)
+- **WS-S.4.1/4.3 — the P2P transport.**  `docs/PRIVATE_SPEC.md` §9.2 recommends a
+  Helia/libp2p stack, but vetting it against §6.12.12 found **580 transitive
+  packages** — a supply-chain surface the LCAP plane (WS-R) deliberately rejected
+  in favour of a dependency-free WebRTC + IPFS-gateway bridge.  Per the maintainer
+  decision, the §9.4 content-addressing (WS-S.4.2, **shipped** dependency-free)
+  and the reducer (WS-S.5, **shipped**) land first; the membership-gated **block
+  exchange** will ride the existing `@licio/lcap-p2p` WebRTC carrier (the
+  WS-R.16.1 ↔ WS-S.6.5 ciphertext seam) plus an IndexedDB blockstore, rather than
+  a fresh libp2p stack.  The §9.4 IDB blockstore (the client persistence half of
+  WS-S.4.2) lands with the WS-S.7 client surface.
   rather than a fresh libp2p stack.  **The full-Helia-vs-lighter-transport
   decision is a maintainer call before any P2P dependency is added.**
-- **WS-S.5 — the operation log + deterministic Lamport-ordered reducer**
-  (3-stage op validation, the byte-identical fold, the conflict table, snapshots,
-  local moderation overlays, local-only encrypted search).
+- **WS-S.5 core — shipped** (the Lamport order, the deterministic fold + §14.4
+  conflict policy, the capability model, and the structural §14.2 pre-pass).  The
+  remaining WS-S.5 sub-cards are follow-ups: **5.6** snapshot verification/replay,
+  **5.7** local moderation overlays, **5.8** local-only encrypted search, and the
+  crypto wire-intake (§14.2 steps 1–5: decode → signature → AEAD-open against the
+  device registry), which integrates with WS-S.6 sync.
 - **WS-S.6 — P2P sync + rendezvous** (blind-id derivation, encrypted signaling,
   the membership-proving handshake, head/block exchange, offline CAR — the
   WS-R.16.1 ↔ WS-S.6.5 seam — and the server rendezvous endpoints).
