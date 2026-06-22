@@ -281,6 +281,7 @@ export async function mintContribution(
     capabilityCid: string;
     prevDeviceRecordCid?: string;
     text?: string;
+    sourceSnapshotCids?: readonly string[];
   },
 ): Promise<{ recordCid: string; body: Uint8Array; proof: DetachedProofV2 }> {
   const contribution: ContributionEventRecordV2 = {
@@ -300,6 +301,9 @@ export async function mintContribution(
     priority: 1,
     ...(params.prevDeviceRecordCid !== undefined
       ? { prev_device_record_cid: params.prevDeviceRecordCid }
+      : {}),
+    ...(params.sourceSnapshotCids !== undefined
+      ? { source_snapshot_cids: [...params.sourceSnapshotCids] }
       : {}),
   };
   const body = encodeContributionEvent(contribution);
