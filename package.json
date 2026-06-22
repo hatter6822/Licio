@@ -27,6 +27,7 @@
     "check:p2p-endpoint-rejections": "tsx scripts/check-p2p-endpoint-rejections.ts",
     "check:p2p-ranking-exclusion": "tsx scripts/check-p2p-ranking-exclusion.ts",
     "check:p2p-search-exclusion": "tsx scripts/check-p2p-search-exclusion.ts",
+    "check:p2p-mls-wrapper": "tsx scripts/check-mls-wrapper.ts",
     "check:sw": "tsx scripts/check-sw-security.ts",
     "lint:lockfile": "tsx scripts/check-lockfile.ts",
     "typecheck": "tsc -b",
