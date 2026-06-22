@@ -329,7 +329,13 @@ jobs:
             unzip -q /tmp/clt.zip -d /tmp/clt
             mv /tmp/clt/cmdline-tools/* "$ANDROID_HOME/cmdline-tools/latest/"
           fi
+          # `yes` keeps writing "y" until sdkmanager closes stdin after the last license, so it
+          # exits on a broken pipe (SIGPIPE/EPIPE).  Under `pipefail` that non-zero fails the step
+          # (`yes: standard output: Broken pipe`), so drop pipefail for JUST this pipeline — the
+          # verdict is then sdkmanager's own exit (a real license failure still aborts the step).
+          set +o pipefail
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          set -o pipefail
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "platform-tools" "platforms;android-35" "build-tools;35.0.0" >/dev/null
           {
