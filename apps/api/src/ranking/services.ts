@@ -150,6 +150,10 @@ export function createCandidateDataPorts(
       const room = await forum.rooms.getById(roomId);
       return room === null ? null : room.visibility;
     },
+    async roomStorageMode(roomId) {
+      const room = await forum.rooms.getById(roomId);
+      return room === null ? null : room.storageMode;
+    },
     async userSeenStories(userId) {
       // Bounded to the catch-up horizon (30d): seen-history serves the
       // recent-items retrievers, and an unbounded scan of a heavy reader's

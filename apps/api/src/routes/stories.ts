@@ -187,7 +187,10 @@ export function createStoriesRoutes() {
               c.header('Retry-After', String(rejection.retryAfterSec));
               return c.json(deny(rejection.code, rejection.message), 429);
             }
-            if (rejection.status === 409) {
+            // WS-S.1.3 — a P2P-room submission is a non-duplicate 409 carrying
+            // no existing-story id; discriminate by code so it serializes as a
+            // plain error, not the duplicate-story shape.
+            if (rejection.status === 409 && rejection.code === 'duplicate_story') {
               return c.json(
                 storyDuplicateResponseSchema.parse({
                   error: { code: 'duplicate_story', message: rejection.message },

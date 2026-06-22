@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 export * from './moderation.js';
+export * from './private-rooms.js';
 
 export const APP_NAME = 'Licio';
 export const APP_VERSION = '0.1.0';

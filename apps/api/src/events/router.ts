@@ -117,6 +117,17 @@ export class EventRouter {
   readonly #maxAttempts: number;
   readonly #seenCapacity: number;
   readonly #onError: (consumer: string, eventId: string, error: unknown) => void;
+  /**
+   * WS-S.1.4 — an OPTIONAL late-bound predicate (`true` ⇒ the room is a Private
+   * P2P room).  When set, an event whose payload references a p2p room is
+   * REFUSED at publish (never delivered to any consumer) and counted, because a
+   * P2P room must emit NO server content event (PRIVATE_SPEC §8.4/§23.7).  This
+   * is defense in depth: the submission/contribution guards already prevent
+   * such events from being created, so a trip here means a bug.  Decoupled by
+   * default (null ⇒ no-op), wired by the forum boot where the room store exists.
+   */
+  #p2pRoomGuard: ((roomId: string) => Promise<boolean>) | null = null;
+  #p2pRoomEventsRejected = 0;
 
   constructor(options: {
     deadLetters: StoreOrProvider<DeadLetterStore>;
@@ -170,8 +181,35 @@ export class EventRouter {
     });
   }
 
+  /**
+   * WS-S.1.4 — wire the Private-P2P-room guard (the forum boot supplies it once
+   * the room store exists; mirrors the search room-visibility late binding).
+   */
+  setP2pRoomGuard(guard: (roomId: string) => Promise<boolean>): void {
+    this.#p2pRoomGuard = guard;
+  }
+
+  /** Count of events refused at publish for referencing a p2p room (§23.7). */
+  get p2pRoomEventsRejected(): number {
+    return this.#p2pRoomEventsRejected;
+  }
+
   /** Deliver a validated event to every subscribed, authorized consumer. */
   async publish(event: LicioEvent): Promise<void> {
+    // WS-S.1.4 — a P2P room emits NO server content event (§8.4): if the event
+    // references a p2p room, refuse to deliver it to ANY consumer + count it.
+    if (this.#p2pRoomGuard !== null) {
+      const roomId = 'room_id' in event && typeof event.room_id === 'string' ? event.room_id : null;
+      if (roomId !== null && (await this.#p2pRoomGuard(roomId))) {
+        this.#p2pRoomEventsRejected += 1;
+        this.#onError(
+          '__router__',
+          event.event_id,
+          new RouterPolicyViolation(`event ${event.event_type} references a Private P2P room`),
+        );
+        return;
+      }
+    }
     for (const consumer of this.#consumers.values()) {
       if (!consumer.topics.includes(event.event_type)) continue;
       // Delivery-time re-check (defense in depth; never trust registration

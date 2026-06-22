@@ -1698,16 +1698,19 @@ export class PostgresSearchIndex implements SearchIndex {
     // content from PUBLIC rooms — BOTH conjuncts (a mislabeled public story in
     // a private room is excluded by the room join).
     const roomScoped = request.room !== undefined;
+    // WS-S.1.4 — server search NEVER indexes/serves a Private P2P room (§23.6),
+    // so EVERY path additionally requires the home room's `storage_mode='server'`
+    // (a p2p room has no server stories, so this also excludes any transient row).
     const storyVisibilityFilter = roomScoped
-      ? sql`s.room_id = ${request.room}::uuid`
-      : sql`s.visibility = 'public' and exists (select 1 from rooms r where r.room_id = s.room_id and r.visibility = 'public')`;
+      ? sql`s.room_id = ${request.room}::uuid and exists (select 1 from rooms r where r.room_id = s.room_id and r.storage_mode = 'server')`
+      : sql`s.visibility = 'public' and exists (select 1 from rooms r where r.room_id = s.room_id and r.visibility = 'public' and r.storage_mode = 'server')`;
     // For claim/evidence hits, the OWNING story's visibility governs. A
     // null-story (cross-story / user-experience) row is global-eligible but
     // never room-scoped.
     const ownerVisibilityFilter = (col: ReturnType<typeof sql>) =>
       roomScoped
-        ? sql`exists (select 1 from stories sv where sv.story_id = ${col} and sv.hidden_state is null and sv.room_id = ${request.room}::uuid)`
-        : sql`(${col} is null or exists (select 1 from stories sv join rooms rv on rv.room_id = sv.room_id where sv.story_id = ${col} and sv.hidden_state is null and sv.visibility = 'public' and rv.visibility = 'public'))`;
+        ? sql`exists (select 1 from stories sv join rooms rv on rv.room_id = sv.room_id where sv.story_id = ${col} and sv.hidden_state is null and sv.room_id = ${request.room}::uuid and rv.storage_mode = 'server')`
+        : sql`(${col} is null or exists (select 1 from stories sv join rooms rv on rv.room_id = sv.room_id where sv.story_id = ${col} and sv.hidden_state is null and sv.visibility = 'public' and rv.visibility = 'public' and rv.storage_mode = 'server'))`;
 
     const rows: Array<{
       result_type: 'story' | 'claim' | 'evidence';

@@ -138,6 +138,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       visibility: 'public',
       joinModel: 'open',
       postingPolicy: 'all_members',
+      storageMode: 'server',
       createdBy: authorId,
       governanceMode: 'ordinary',
       charterSummary: null,

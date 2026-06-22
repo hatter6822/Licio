@@ -21,6 +21,10 @@ const SCAN_DIRS = [
   // The WS-R.15.4 native courier shell (its hand-written TS surface; the generated
   // android/ build artifacts are skipped by SKIP_DIRS below).
   resolve(ROOT, 'apps/courier'),
+  // The WS-S Private P2P rooms plane (cross-plane doctrine §4) — no applause may
+  // appear in any private schema/crypto/reducer/UI tree either.
+  resolve(ROOT, 'packages/private-p2p/src'),
+  resolve(ROOT, 'apps/web/src/private-p2p'),
 ];
 
 // Directories never worth walking (deps + generated native/build output).

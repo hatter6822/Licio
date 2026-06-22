@@ -47,6 +47,7 @@ export type SubmissionRejection =
   | { status: 404; code: string; message: string }
   | { status: 403; code: string; message: string }
   | { status: 400; code: string; message: string }
+  | { status: 409; code: 'p2p_room_requires_client_sync'; message: string }
   | { status: 409; code: 'duplicate_story'; message: string; existingStoryId: string };
 
 /** WS-Q.2.1a — an unknown room OR a private-room outsider/pending applicant get
@@ -174,6 +175,23 @@ export async function submitStory(
   // 1. Destination room exists (404 on unknown — never confirm beyond tier one).
   const room = await forum.rooms.getById(request.room_id);
   if (room === null) return { ok: false, rejection: roomNotFoundRejection() };
+  // 1a. WS-S.1.3 — a Private P2P room is created and synced ENTIRELY on member
+  //     devices (the §8 server non-storage contract): the server MUST NOT create
+  //     a story/thread shell for it.  Reject BEFORE any side effect (auto-join,
+  //     visibility derivation, rate-limit decrement, dedup, create).  In
+  //     practice a p2p room id should never reach this path, so this is the
+  //     defensive keystone that makes server content for a p2p room impossible.
+  if (room.storageMode === 'p2p') {
+    ingestion.metrics.increment('submission.p2p_room_rejected');
+    return {
+      ok: false,
+      rejection: {
+        status: 409,
+        code: 'p2p_room_requires_client_sync',
+        message: 'Private P2P rooms are created and synced locally.',
+      },
+    };
+  }
   // 2. Read bar + ACTIVE membership. A public room is open-join: posting to it
   //    (the composer's required room pick is the consent) auto-joins the author.
   //    A private-room outsider/pending applicant gets 404 (no membership oracle).

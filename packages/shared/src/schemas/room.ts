@@ -42,6 +42,133 @@ export const ROOM_POSTING_POLICIES = ['all_members', 'experts_and_stewards'] as 
 export type RoomPostingPolicy = (typeof ROOM_POSTING_POLICIES)[number];
 export const roomPostingPolicySchema = z.enum(ROOM_POSTING_POLICIES);
 
+// ---------------------------------------------------------------------------
+// WS-S.0.1 — the three private-room axes (PRIVATE_SPEC §4, §4.1).  These are
+// ADDED ALONGSIDE the existing `visibility`/`join_model`/`posting_policy` axes,
+// never by overloading them: `visibility` stays the binary WS-Q server read
+// bar, while `storage_mode` decides WHERE content lives (Licio server vs member
+// devices) and `authority_model` decides WHO holds authority (the platform vs
+// room keys only).  The third room class — `private_p2p` (PRIVATE_SPEC §4) — is
+// exactly `storage_mode = 'p2p'`; "private" UNQUALIFIED is reserved for it
+// (§20.1).  A server-hosted restricted room is a "members-only server room".
+// ---------------------------------------------------------------------------
+
+/** §4.1 — WHERE a room's content lives.  `p2p` content never touches the server
+ *  (the §8 non-storage contract); the column defaults to `server`. */
+export const ROOM_STORAGE_MODES = ['server', 'p2p'] as const;
+export type RoomStorageMode = (typeof ROOM_STORAGE_MODES)[number];
+export const roomStorageModeSchema = z.enum(ROOM_STORAGE_MODES);
+
+/** §4.1 — WHO holds authority.  `platform` = Licio + room roles (server rooms);
+ *  `room_keys` = the room's cryptographic capabilities only (P2P rooms — no
+ *  platform role can read/moderate/recover/add-members, §11.4). */
+export const ROOM_AUTHORITY_MODELS = ['platform', 'room_keys'] as const;
+export type RoomAuthorityModel = (typeof ROOM_AUTHORITY_MODELS)[number];
+export const roomAuthorityModelSchema = z.enum(ROOM_AUTHORITY_MODELS);
+
+/** §4.2 — how discoverable a P2P room's existence is.  `listed` leaks a public
+ *  shell (name/description), `unlisted` leaks only an opaque stub, `detached`
+ *  leaks nothing (no server stub at all).  Server rooms carry no directory
+ *  mode (it is NULL for them). */
+export const ROOM_DIRECTORY_MODES = ['listed', 'unlisted', 'detached'] as const;
+export type RoomDirectoryMode = (typeof ROOM_DIRECTORY_MODES)[number];
+export const roomDirectoryModeSchema = z.enum(ROOM_DIRECTORY_MODES);
+
+/** §4.2 — the MANDATORY default for a P2P room: `unlisted`.  `listed` requires
+ *  explicit user action + plain-language disclosure (WS-S.7.1). */
+export const DEFAULT_P2P_DIRECTORY_MODE: RoomDirectoryMode = 'unlisted';
+
+/**
+ * WS-S.0.1 — the §4.1 coherence rules as ONE strict validator (the SSOT the
+ * DB CHECK constraints in migration `0043` mirror, PRIVATE_SPEC §23.2):
+ *
+ *   storage='server' ⇒ authority='platform' ∧ directory_mode IS NULL
+ *   storage='p2p'    ⇒ authority='room_keys'
+ *                    ∧ visibility='private'
+ *                    ∧ join_model='invite'
+ *                    ∧ directory_mode IS NOT NULL
+ *
+ * `posting_policy` is deliberately NOT constrained: for a P2P room it is
+ * advisory UI only — real posting is capability-gated by the room's signed ops
+ * (PRIVATE_SPEC §4.1), so it is not part of this tuple.  Use `.safeParse(...)`
+ * to test an axis combination (accept ⇒ legal triple; reject ⇒ incoherent).
+ */
+export const roomAxesSchema = z
+  .object({
+    storage_mode: roomStorageModeSchema,
+    authority_model: roomAuthorityModelSchema,
+    visibility: roomVisibilitySchema,
+    join_model: roomJoinModelSchema,
+    /** NULL for server rooms; one of the three modes for P2P rooms. */
+    directory_mode: roomDirectoryModeSchema.nullable(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.storage_mode === 'server') {
+      if (value.authority_model !== 'platform') {
+        ctx.addIssue({
+          code: 'custom',
+          message: "Server-stored rooms must use the 'platform' authority model",
+          path: ['authority_model'],
+        });
+      }
+      // A server room has no P2P directory mode (the column is NULL).
+      if (value.directory_mode !== null) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'Server-stored rooms have no directory mode',
+          path: ['directory_mode'],
+        });
+      }
+    } else {
+      // storage_mode === 'p2p' — the strong privacy class.
+      if (value.authority_model !== 'room_keys') {
+        ctx.addIssue({
+          code: 'custom',
+          message: "Private P2P rooms must use the 'room_keys' authority model",
+          path: ['authority_model'],
+        });
+      }
+      if (value.visibility !== 'private') {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'Private P2P rooms must be private',
+          path: ['visibility'],
+        });
+      }
+      if (value.join_model !== 'invite') {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'Private P2P rooms must use the invite join model',
+          path: ['join_model'],
+        });
+      }
+      if (value.directory_mode === null) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'Private P2P rooms require a directory mode',
+          path: ['directory_mode'],
+        });
+      }
+    }
+  });
+export type RoomAxes = z.infer<typeof roomAxesSchema>;
+
+/** The three room classes (PRIVATE_SPEC §4) derived from the axes: a single
+ *  helper so UI/labels never re-derive the mapping ad hoc. */
+export type RoomClass = 'public_server' | 'restricted_server' | 'private_p2p';
+
+/** Map a coherent axis tuple onto its §4 room class.  `private_p2p` is exactly
+ *  `storage_mode='p2p'`; a server room is `public_server` when publicly visible,
+ *  else `restricted_server` (a "members-only server room"). */
+export function roomClassOf(axes: {
+  storage_mode: RoomStorageMode;
+  visibility: RoomVisibility;
+}): RoomClass {
+  if (axes.storage_mode === 'p2p') return 'private_p2p';
+  return axes.visibility === 'public' ? 'public_server' : 'restricted_server';
+}
+
 /** The three legacy three-value visibility values (migration input only). */
 export type LegacyRoomVisibility = 'public' | 'restricted' | 'expert_led';
 

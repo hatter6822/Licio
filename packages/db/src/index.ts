@@ -9,5 +9,6 @@ export {
 } from './client.js';
 export * from './content-schema-check.js';
 export * from './isolation.js';
+export * from './private-room-guard.js';
 export * from './schema/index.js';
 export * from './similarity.js';

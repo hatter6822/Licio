@@ -61,6 +61,10 @@ export interface SearchDocument {
   storyVisibility: 'public' | 'room_only';
   /** The home room's visibility (§16.1). */
   roomVisibility: 'public' | 'private';
+  /** WS-S.1.4 — the home room's storage mode.  Server search indexes + serves
+   *  ONLY `server`-storage rooms (PRIVATE_SPEC §23.6); a Private P2P room's
+   *  content never reaches the index. */
+  roomStorageMode: 'server' | 'p2p';
 }
 
 /** Title hits weigh A=1.0, body hits B=0.4 (mirrors setweight A/B). */
@@ -112,6 +116,9 @@ export class InMemorySearchIndex implements SearchIndex {
     const scored: Array<{ doc: SearchDocument; relevance: number }> = [];
     for (const doc of await this.#documents()) {
       if (!doc.visible) continue;
+      // WS-S.1.4 — server search NEVER returns Private P2P content (§23.6); a
+      // p2p doc should never be indexed, so this is defense in depth at query.
+      if (doc.roomStorageMode !== 'server') continue;
       // WS-Q.2.5a/b — two-tier visibility:
       //   • room-scoped (`?room=`): only this room's pool (public + room_only of
       //     THIS room); the route has already enforced the room read bar.

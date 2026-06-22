@@ -271,6 +271,10 @@ export function createRoomsRoutes() {
             visibility: axes.visibility,
             joinModel: axes.joinModel,
             postingPolicy: axes.postingPolicy,
+            // WS-S.1.3 — the server room-create endpoint ALWAYS mints a
+            // server-storage room; a Private P2P room is created client-side
+            // and never through this path (the §8 non-storage contract).
+            storageMode: 'server',
             createdBy: auth.userId,
             governanceMode: 'ordinary', // ALWAYS the default (§17.4)
             charterSummary: null,

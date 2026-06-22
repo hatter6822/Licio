@@ -302,6 +302,20 @@
       "when": 1782073622924,
       "tag": "0042_ws_r_lcap_capability_media_bytes",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1782094974497,
+      "tag": "0043_ws_s_private_p2p_rooms",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1782095167899,
+      "tag": "0044_ws_s_private_room_tables",
+      "breakpoints": true
     }
   ]
 }
