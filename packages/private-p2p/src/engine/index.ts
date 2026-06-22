@@ -4,5 +4,6 @@
 // composes the wire-intake, the deterministic reducer, and the op author path
 // behind a storage port a UI or transport drives.
 
+export * from './invite.js';
 export * from './room-engine.js';
 export * from './room-lifecycle.js';
