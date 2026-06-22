@@ -15,8 +15,11 @@
 import type { PrivateEncryptedEnvelope, PrivateRoomStorage } from '@licio/private-p2p';
 
 export const PRIVATE_P2P_DB_NAME = 'licio_private_p2p';
-export const PRIVATE_P2P_DB_VERSION = 1;
+/** v2 adds the `room_sessions` store (the device keys + MLS group + epoch keys a
+ *  room needs to survive a reload — a private room is local-only). */
+export const PRIVATE_P2P_DB_VERSION = 2;
 const ENVELOPE_STORE = 'envelopes';
+export const ROOM_SESSION_STORE = 'room_sessions';
 const ROOM_INDEX = 'by_room';
 
 interface StoredRow {
@@ -25,14 +28,14 @@ interface StoredRow {
   readonly envelope: PrivateEncryptedEnvelope;
 }
 
-function promisify<T>(request: IDBRequest<T>): Promise<T> {
+export function promisify<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
   });
 }
 
-function txDone(tx: IDBTransaction): Promise<void> {
+export function txDone(tx: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error ?? new Error('IndexedDB transaction failed'));
@@ -40,7 +43,10 @@ function txDone(tx: IDBTransaction): Promise<void> {
   });
 }
 
-function openDb(): Promise<IDBDatabase> {
+/** Open (and migrate) the shared `licio_private_p2p` database.  Migrations are
+ *  additive object-store creations inside the single versionchange transaction,
+ *  so a failed upgrade aborts atomically and leaves the DB at its prior version. */
+export function openPrivateP2pDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(PRIVATE_P2P_DB_NAME, PRIVATE_P2P_DB_VERSION);
     request.onupgradeneeded = () => {
@@ -51,6 +57,10 @@ function openDb(): Promise<IDBDatabase> {
         // single room's envelopes for the engine's verify-on-load.
         const store = db.createObjectStore(ENVELOPE_STORE, { keyPath: ['roomId', 'opId'] });
         store.createIndex(ROOM_INDEX, 'roomId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(ROOM_SESSION_STORE)) {
+        // One session per room (the local device's keys + MLS group + epoch keys).
+        db.createObjectStore(ROOM_SESSION_STORE, { keyPath: 'roomId' });
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -68,7 +78,7 @@ export class IndexedDbPrivateRoomStorage implements PrivateRoomStorage {
   constructor(private readonly roomId: string) {}
 
   async putEnvelope(opId: string, envelope: PrivateEncryptedEnvelope): Promise<void> {
-    const db = await openDb();
+    const db = await openPrivateP2pDb();
     try {
       const tx = db.transaction(ENVELOPE_STORE, 'readwrite');
       const row: StoredRow = { roomId: this.roomId, opId, envelope };
@@ -82,7 +92,7 @@ export class IndexedDbPrivateRoomStorage implements PrivateRoomStorage {
   async listEnvelopes(): Promise<
     ReadonlyArray<{ opId: string; envelope: PrivateEncryptedEnvelope }>
   > {
-    const db = await openDb();
+    const db = await openPrivateP2pDb();
     try {
       const tx = db.transaction(ENVELOPE_STORE, 'readonly');
       const index = tx.objectStore(ENVELOPE_STORE).index(ROOM_INDEX);

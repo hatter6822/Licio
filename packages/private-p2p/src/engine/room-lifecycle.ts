@@ -56,7 +56,7 @@ import type { PrivateRoomEngineParams } from './room-engine.js';
 
 /** The op-body INPUT type (pre-zod-defaults): a content op may omit fields the
  *  schema defaults (e.g. `citations`/`metadata`), which `buildRoomOp` parses in. */
-type PrivateOpBodyInput = z.input<typeof privateRoomOpSchema>['body'];
+export type PrivateOpBodyInput = z.input<typeof privateRoomOpSchema>['body'];
 
 type PrivateRoomPolicy = z.infer<typeof privateRoomPolicySchema>;
 
@@ -208,7 +208,10 @@ export async function createPrivateRoom(
   const policy: PrivateRoomPolicy = { ...DEFAULT_PRIVATE_ROOM_POLICY, ...params.policy };
 
   // 1) Founder keys: Ed25519 device signing key, X25519 HPKE invite key, MLS package.
-  const signingKeyPair = await generateDeviceSigningKeyPair();
+  //    The signing PRIVATE key is non-extractable (§10.8) — its public key still
+  //    exports + it still signs + it structured-clones into IndexedDB for the
+  //    persisted session, so its raw bytes never leave WebCrypto.
+  const signingKeyPair = await generateDeviceSigningKeyPair(false);
   const signingPublicKey = toBase64Url(await exportPublicKeyRaw(signingKeyPair.publicKey));
   const hpkeKeyPair = await generateRecipientKeyPair();
   const mlsKeyPackage = await generateMemberKeyPackage(utf8(params.founderDeviceId));

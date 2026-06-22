@@ -117,15 +117,22 @@ reassembles — failing closed on any tamper, missing chunk, or cross-attachment
 splice.  All chunks seal to one uniform ciphertext length, so the wire reveals only
 the chunk count.
 
-The **WS-S.7 apps/web client foundation is shipped** (`apps/web/src/private-p2p/`):
-the IndexedDb `PrivateRoomStorage` adapter (a dedicated, isolated
-`licio_private_p2p` database, per-room) + `loadPrivateRoomEngine` (the
-DYNAMIC-import engine construction).  `@licio/private-p2p` is a `workspace:*` dep
-of apps/web loaded by `import()` ONLY — the `check:private-p2p-split` gate forbids
-a static value import, and the production build confirms the crypto/protocol core
+The **WS-S.7 apps/web client is shipped** (`apps/web/src/private-p2p/`): the
+IndexedDb `PrivateRoomStorage` adapter (a dedicated, isolated `licio_private_p2p`
+database) + the persisted `room_sessions` store (the local device's NON-extractable
+keys, MLS group state, epoch keys, and manifest — what lets a local-only room
+survive a reload) + the `PrivateRoomSession` manager: `create` / `load` / `list` /
+`leave`, plus `postStory` / `postComment` / `authorOp` (deriving op metadata from
+the local DAG).  A jsdom test founds a room, posts content, RELOADS it (a fresh
+engine over the stored keys/group/epochs), and authors AGAIN — proving the
+persisted non-extractable signing key + epoch keys work after reload.  Bytes are
+normalized to same-realm `Uint8Array`s at the storage-read boundary (defensive
+against structured-clone quirks).  `@licio/private-p2p` is a `workspace:*` dep of
+apps/web loaded by `import()` ONLY — the `check:private-p2p-split` gate forbids a
+static value import, and the production build confirms the crypto/protocol core
 stays out of the initial bundle (a separate lazy chunk).  The creation wizard /
-room shell / composer UI consume this foundation next (the rest of WS-S.7), and
-the live WebRTC carrier (WS-S.4.3) feeds the engine's `ingest`.
+room shell / composer UI consume this manager next, and the live WebRTC carrier
+(WS-S.4.3) feeds the engine's `ingest`.
 
 ### WS-S.0 — Terminology, room-class model, product framing
 
