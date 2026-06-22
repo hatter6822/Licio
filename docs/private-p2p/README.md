@@ -46,13 +46,23 @@ search — with the §14.3.3/§26.1 byte-identical-across-shuffles determinism
 property pinned.
 
 The **WS-S.6 P2P sync-decision plane is shipped as a pure, transport-independent
-core** (`sync/`, WS-S.6.1–6.5; the live WebRTC carrier + the server rendezvous
-endpoint are the remaining integration): the §15.2/§15.3 blind rendezvous
-(derivation, sealed announcements, the §15.3.1 authorization property, the
-§15.3.2 metadata mitigations), the §15.4 encrypted signaling + relay-only ICE
-suppression, the §15.5 membership-proving handshake, the §15.6/§15.7/§15.8 head
-announcement + frontier-first reconciliation + fetch-order priority, and the
-§15.9 offline encrypted-archive (CAR) exchange with re-validating import.
+core** (`sync/`, WS-S.6.1–6.6; the live WebRTC carrier is the remaining
+integration): the §15.2/§15.3 blind rendezvous (derivation, sealed
+announcements, the §15.3.1 authorization property, the §15.3.2 metadata
+mitigations), the §15.4 encrypted signaling + relay-only ICE suppression, the
+§15.5 membership-proving handshake, the §15.6/§15.7/§15.8 head announcement +
+frontier-first reconciliation + fetch-order priority, the §15.9 offline
+encrypted-archive (CAR) exchange with re-validating import, and the **§29
+server-blind rendezvous endpoint** (`apps/api`, WS-S.6.6).
+
+The **client-side `PrivateRoomEngine` is shipped** (`engine/`): the pure
+orchestration that composes the §14.2 wire-intake (`openOp`), the §10.4
+device-blind resolution (`buildOpIntakeContext`), the §14.3 fold (`reduceRoom`),
+and the author path (`sealOp`) behind a storage port — so a UI or a transport
+drives one object.  It runs the bounded open→fold fixpoint (an out-of-order
+causal batch converges), re-verifies every envelope on load (§8.3 — storage
+confers no trust), and quarantines what cannot open.  The apps/web IndexedDB
+adapter + UI consume this engine (the remaining WS-S.7 integration).
 
 ### WS-S.0 — Terminology, room-class model, product framing
 
@@ -151,7 +161,7 @@ for a future swap to an audited WASM build (tracked residual).
 |---|---|
 | `packages/shared` | the §4.1 coherence accept/reject matrix + `roomClassOf`; the disclosure/matrix copy-lint |
 | `packages/db` | the DB↔shared enum mirror; the §8.1 column denylist (allowlist exactness + a forbidden-column fixture that BITES; rendezvous has no room FK); the **gated** Postgres harness: the §8.3 no-p2p-content trigger rejects p2p stories/threads (server rows succeed) + each §4.1 coherence CHECK rejects its incoherent axis tuple by name |
-| `packages/private-p2p` | the canonical + strict-schema suites; the **WS-S.3 crypto suites** — RFC 5869 HKDF vectors, the AEAD round-trip/AAD-flip/replay/nonce-uniqueness suite, the Ed25519 KATs + RFC 9180 HPKE interop + RFC 7748 X25519 + RFC 4231 HMAC KATs, the MLS multi-device/epoch/manifest-fork suite, the four-tier key store + recovery kit + threshold recovery, and the forward-secrecy/fuzz properties; the **WS-S.4.2/5 reducer suites** — the CIDv1 multiformats/RFC-4648 pins, the Lamport/canonical-order tests, the reducer genesis/capability/conflict matrix, the §14.3.3 25-shuffle determinism property, the structural pre-pass + the §14.2 stage-1 op-codec seal→open→reduce matrix, and the §14.5/§14.6/§13.7 snapshot/overlay/search suites; **and the WS-S.6 sync suites** — blind rendezvous derivation/authorization/mitigations, the X25519 ECDH agreement, the transcript-bound channel-key separation, signaling seal/open + relay-only ICE filtering, the handshake success + reject matrix, head-sync reconciliation-to-closure + fetch-order, and the offline-archive re-validating import, plus the §10.4 device-blind derivation + the buildOpIntakeContext seal→open-against-state composition (416 tests; crypto + reducer + sync all ≳ 92% coverage) |
+| `packages/private-p2p` | the canonical + strict-schema suites; the **WS-S.3 crypto suites** — RFC 5869 HKDF vectors, the AEAD round-trip/AAD-flip/replay/nonce-uniqueness suite, the Ed25519 KATs + RFC 9180 HPKE interop + RFC 7748 X25519 + RFC 4231 HMAC KATs, the MLS multi-device/epoch/manifest-fork suite, the four-tier key store + recovery kit + threshold recovery, and the forward-secrecy/fuzz properties; the **WS-S.4.2/5 reducer suites** — the CIDv1 multiformats/RFC-4648 pins, the Lamport/canonical-order tests, the reducer genesis/capability/conflict matrix, the §14.3.3 25-shuffle determinism property, the structural pre-pass + the §14.2 stage-1 op-codec seal→open→reduce matrix, and the §14.5/§14.6/§13.7 snapshot/overlay/search suites; **and the WS-S.6 sync suites** — blind rendezvous derivation/authorization/mitigations, the X25519 ECDH agreement, the transcript-bound channel-key separation, signaling seal/open + relay-only ICE filtering, the handshake success + reject matrix, head-sync reconciliation-to-closure + fetch-order, and the offline-archive re-validating import, plus the §10.4 device-blind derivation + the buildOpIntakeContext seal→open-against-state composition, and the PrivateRoomEngine lifecycle (create/author/persist-reload/fixpoint-converge/quarantine) (420 tests; crypto + reducer + sync all ≳ 92% coverage) |
 | `apps/api` | the server-gate suite: submission 409 (+ no row created), contribution 404, feed `p2p_room_local_only`, the ranking room-surface exclusion, the search filter, the event-pipeline gate; **and the WS-S.6.6 rendezvous suite** — the TTL clamp, the §15.3.1 no-existence-oracle (poll never 404s), re-announce-replaces, the signal queue/drain round-trip, aggregate-only metrics, the sweep, route shape-validation/oversized rejection, and the full-app CSRF-exempt mount |
 | `scripts` | the seven §23.10 CI gates + the `check:p2p-mls-wrapper` deep-import gate + the §12.7 no-server-recovery scan, all proven to bite (clean vs violating fixtures) + the live-source marker regression catch |
 

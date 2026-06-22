@@ -26,17 +26,31 @@ export interface HeldEpochKeys {
   readonly contentWrapKey: Uint8Array;
 }
 
+/** A device whose verify key is known OUT OF BAND (the genesis bootstrap): the
+ *  creator's own device, or the member devices a joiner reads from the verified
+ *  room manifest.  Needed because the FOUNDER's key cannot come from reduced
+ *  state when opening the genesis op (the founder is not in state until genesis
+ *  is reduced, which requires opening it first). */
+export interface BootstrapDevice {
+  readonly deviceId: string;
+  readonly signingPublicKey: string;
+}
+
 export interface BuildOpIntakeContextParams {
   readonly state: RoomReducerState;
   readonly roomIdCommitment: Uint8Array;
   /** epoch number → the keys held for that epoch (the device may hold several). */
   readonly epochs: ReadonlyMap<number, HeldEpochKeys>;
+  /** Out-of-band device keys (the genesis bootstrap; state wins on a clash). */
+  readonly extraDevices?: ReadonlyArray<BootstrapDevice>;
 }
 
 /**
  * Build the §14.2 stage-1 context.  For each held epoch, derive the device-blind
- * key and map EVERY device in state (its `author_device_id_blind` at that epoch) →
- * its imported verify key; `contentWrapKeyForEpoch` returns the held wrap key.  A
+ * key and map EVERY known device (its `author_device_id_blind` at that epoch) →
+ * its imported verify key; `contentWrapKeyForEpoch` returns the held wrap key.
+ * "Known devices" = the devices in reduced state PLUS the out-of-band
+ * `extraDevices` (the genesis bootstrap), state winning a `deviceId` clash.  A
  * device whose recorded `signing_public_key` is not a valid Ed25519 key is
  * skipped (its ops then quarantine as `unknown_device`, never a crash).
  */
@@ -49,21 +63,30 @@ export async function buildOpIntakeContext(
   // The same raw verify key imports once, then is reused across epochs.
   const importedByDevice = new Map<string, CryptoKey | null>();
 
+  // Union of state devices + the out-of-band bootstrap (state wins a clash).
+  const deviceKeys = new Map<string, string>();
+  for (const bootstrap of params.extraDevices ?? []) {
+    deviceKeys.set(bootstrap.deviceId, bootstrap.signingPublicKey);
+  }
+  for (const device of state.devices.values()) {
+    deviceKeys.set(device.deviceId, device.signingPublicKey);
+  }
+
   for (const [epoch, held] of epochs) {
     wrapByEpoch.set(epoch, held.contentWrapKey);
     const blindKey = await deriveAuthorDeviceBlindKey(held.roomEpochSecret, roomIdCommitment);
-    for (const device of state.devices.values()) {
-      let key = importedByDevice.get(device.deviceId);
+    for (const [deviceId, signingPublicKey] of deviceKeys) {
+      let key = importedByDevice.get(deviceId);
       if (key === undefined) {
         try {
-          key = await importPublicKeyRaw(fromBase64Url(device.signingPublicKey));
+          key = await importPublicKeyRaw(fromBase64Url(signingPublicKey));
         } catch {
           key = null; // malformed recorded key → leave the device unresolvable
         }
-        importedByDevice.set(device.deviceId, key);
+        importedByDevice.set(deviceId, key);
       }
       if (key === null) continue;
-      const blind = await authorDeviceIdBlindFrom(blindKey, device.deviceId, epoch);
+      const blind = await authorDeviceIdBlindFrom(blindKey, deviceId, epoch);
       blindToKey.set(blind, key);
     }
   }
