@@ -143,6 +143,12 @@ interface StoryDocMeta {
   roomId: string | null;
   storyVisibility: 'public' | 'room_only';
   roomVisibility: 'public' | 'private';
+  /** WS-S.1.4 — every search doc is built from a SERVER story row (a Private
+   *  P2P room has no server stories, the §8 non-storage contract enforced at
+   *  submission), so this is `server` by construction; the InMemorySearchIndex
+   *  filter (and the Drizzle adapter's `storage_mode='server'` predicate) is the
+   *  live type-level backstop (§23.6). */
+  roomStorageMode: 'server' | 'p2p';
 }
 
 /** A null-story (cross-story / user-experience) hit: global-eligible, never
@@ -152,6 +158,7 @@ const FREE_DOC_META: StoryDocMeta = {
   roomId: null,
   storyVisibility: 'public',
   roomVisibility: 'public',
+  roomStorageMode: 'server',
 };
 
 export function buildSearchDocuments(
@@ -173,6 +180,9 @@ export function buildSearchDocuments(
         roomId: story.roomId,
         storyVisibility: story.visibility,
         roomVisibility: roomVis.get(story.roomId) ?? 'private',
+        // A story row only ever belongs to a server room (p2p rooms reject
+        // submission, WS-S.1.3); the query filter excludes anything else.
+        roomStorageMode: 'server',
       };
       storyMeta.set(story.storyId, meta);
       documents.push({
@@ -190,6 +200,7 @@ export function buildSearchDocuments(
         roomId: meta.roomId,
         storyVisibility: meta.storyVisibility,
         roomVisibility: meta.roomVisibility,
+        roomStorageMode: meta.roomStorageMode,
       });
     }
     for (const claim of await allClaims()) {
@@ -210,6 +221,7 @@ export function buildSearchDocuments(
         roomId: meta.roomId,
         storyVisibility: meta.storyVisibility,
         roomVisibility: meta.roomVisibility,
+        roomStorageMode: meta.roomStorageMode,
       });
     }
     for (const card of await allEvidence()) {
@@ -232,6 +244,7 @@ export function buildSearchDocuments(
         roomId: meta.roomId,
         storyVisibility: meta.storyVisibility,
         roomVisibility: meta.roomVisibility,
+        roomStorageMode: meta.roomStorageMode,
       });
     }
     return documents;

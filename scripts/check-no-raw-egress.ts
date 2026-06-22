@@ -29,6 +29,10 @@ const LCAP_DIRS = [
   // The WS-R.15.4 native courier shell (no raw attention trace / network-address field
   // may ferry over radio either); the generated android/ build output is skipped below.
   resolve(ROOT, 'apps/courier'),
+  // The WS-S Private P2P rooms plane (cross-plane doctrine §4) — no raw attention
+  // trace / network-address field may appear in any private tree either.
+  resolve(ROOT, 'packages/private-p2p/src'),
+  resolve(ROOT, 'apps/web/src/private-p2p'),
 ];
 
 // Directories never worth walking (deps + generated native/build output).

@@ -22,6 +22,7 @@ import type {
   RoomNotificationPreferences,
   RoomPostingPolicy,
   RoomStewardRole,
+  RoomStorageMode,
   RoomType,
   RoomVisibility,
   SummaryLayer,
@@ -73,6 +74,11 @@ export interface RoomRecord {
   /** WS-Q.1.2 — the two orthogonal §16.2 axes (binary visibility model). */
   joinModel: RoomJoinModel;
   postingPolicy: RoomPostingPolicy;
+  /** WS-S.1.1 — WHERE the room's content lives (PRIVATE_SPEC §4.1).  Every
+   *  server-created room is `server`; a `p2p` room is client-synced and MUST
+   *  never carry server content (the §8 non-storage contract).  The server
+   *  guards (WS-S.1.3/1.4) reject `p2p` rooms before any content side effect. */
+  storageMode: RoomStorageMode;
   createdBy: string | null;
   governanceMode: GovernanceMode;
   charterSummary: string | null;
@@ -289,10 +295,22 @@ export type RoomCreateOutcome =
   | { ok: true; room: RoomRecord }
   | { ok: false; reason: 'duplicate_name' | 'duplicate_slug' };
 
+/**
+ * The room-insert input.  WS-S.1.1 — `storageMode` is OPTIONAL here and
+ * defaults to `'server'` (mirroring the `rooms.storage_mode` DB column's
+ * `DEFAULT 'server'`), so the overwhelming server-room case stays terse; a
+ * Private P2P room (created only via the dedicated client-synced path) sets it
+ * to `'p2p'` explicitly.  `RoomRecord` itself keeps `storageMode` REQUIRED, so
+ * every READ carries it (the WS-S.1.3/1.4 guards rely on it).
+ */
+export type RoomInsertInput = Omit<RoomRecord, 'createdAt' | 'updatedAt' | 'storageMode'> & {
+  storageMode?: RoomStorageMode;
+};
+
 export interface RoomStore {
   /** Race-safe creation: duplicate name (case-insensitive) or slug within a
    *  room_type returns the conflict outcome (the API maps it to 409). */
-  insert(record: Omit<RoomRecord, 'createdAt' | 'updatedAt'>): Promise<RoomCreateOutcome>;
+  insert(record: RoomInsertInput): Promise<RoomCreateOutcome>;
   getById(roomId: string): Promise<RoomRecord | null>;
   list(opts: {
     roomType?: RoomType;
@@ -726,6 +744,7 @@ export class InMemoryRoomStore implements RoomStore {
       visibility: 'public',
       joinModel: 'open',
       postingPolicy: 'all_members',
+      storageMode: 'server',
       createdBy: null,
       governanceMode: 'ordinary',
       charterSummary: null,
@@ -740,7 +759,7 @@ export class InMemoryRoomStore implements RoomStore {
     return `${roomId} ${userId}`;
   }
 
-  async insert(record: Omit<RoomRecord, 'createdAt' | 'updatedAt'>): Promise<RoomCreateOutcome> {
+  async insert(record: RoomInsertInput): Promise<RoomCreateOutcome> {
     for (const existing of this.#rooms.values()) {
       if (existing.roomType !== record.roomType) continue;
       if (existing.name.toLowerCase() === record.name.toLowerCase()) {
@@ -751,6 +770,8 @@ export class InMemoryRoomStore implements RoomStore {
     const at = iso(this.#now);
     const full: RoomRecord = {
       ...record,
+      // Mirror the DB column default (PRIVATE_SPEC §23.2): omitted ⇒ `server`.
+      storageMode: record.storageMode ?? 'server',
       typeMetadata: { ...record.typeMetadata },
       createdAt: at,
       updatedAt: at,

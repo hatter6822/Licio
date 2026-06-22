@@ -53,6 +53,7 @@ import type {
   LensRecord,
   LensStore,
   RoomCreateOutcome,
+  RoomInsertInput,
   RoomRecord,
   RoomStewardRecord,
   RoomStore,
@@ -522,6 +523,7 @@ export class DrizzleRoomStore implements RoomStore {
       visibility: row.visibility,
       joinModel: row.joinModel,
       postingPolicy: row.postingPolicy,
+      storageMode: row.storageMode,
       createdBy: row.createdBy,
       governanceMode: row.governanceMode,
       charterSummary: row.charterSummary,
@@ -545,7 +547,7 @@ export class DrizzleRoomStore implements RoomStore {
     };
   }
 
-  async insert(record: Omit<RoomRecord, 'createdAt' | 'updatedAt'>): Promise<RoomCreateOutcome> {
+  async insert(record: RoomInsertInput): Promise<RoomCreateOutcome> {
     try {
       // Millisecond-precision timestamps so list() keyset cursors round-trip
       // exactly (see DrizzleContributionStore.insert).
@@ -561,6 +563,8 @@ export class DrizzleRoomStore implements RoomStore {
           visibility: record.visibility,
           joinModel: record.joinModel,
           postingPolicy: record.postingPolicy,
+          // Mirror the DB column default (PRIVATE_SPEC §23.2): omitted ⇒ `server`.
+          storageMode: record.storageMode ?? 'server',
           createdBy: record.createdBy,
           governanceMode: record.governanceMode,
           charterSummary: record.charterSummary,

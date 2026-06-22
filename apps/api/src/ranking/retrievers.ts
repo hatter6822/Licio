@@ -41,6 +41,11 @@ export interface CandidateDataPorts {
   /** WS-Q.4.1b — a room's visibility (`null` for an unknown room ⇒ fail-closed
    *  to non-public). The global retrievers require a PUBLIC room. */
   roomVisibility(roomId: string): Promise<'public' | 'private' | null>;
+  /** WS-S.1.4 — a room's storage mode (`null` for an unknown room ⇒ fail-closed
+   *  to non-server). EVERY retriever requires a SERVER-storage room: a Private
+   *  P2P room's content never lives on the server (PRIVATE_SPEC §8/§23.5), so it
+   *  can never enter a global/topic/room surface. */
+  roomStorageMode(roomId: string): Promise<'server' | 'p2p' | null>;
   /** storyId → last-seen ISO instant from the user's OWN attention rows. */
   userSeenStories(userId: string): Promise<Map<string, string>>;
   /** Latest SCOI signal for a story (null before coverage). */
@@ -108,6 +113,8 @@ async function globallyRetrievable(
 ): Promise<boolean> {
   if (!retrievable(story)) return false;
   if (story.visibility !== 'public') return false;
+  // WS-S.1.4 — a P2P room never serves server-retrieved content (§23.5).
+  if ((await ports.roomStorageMode(story.roomId)) !== 'server') return false;
   return (await ports.roomVisibility(story.roomId)) === 'public';
 }
 
@@ -505,6 +512,9 @@ export class RoomSurfaceRetriever implements CandidateRetriever {
 
   async retrieve(context: RetrieveContext): Promise<Candidate[]> {
     if (context.surface !== 'room' || context.surfaceRoomId === null) return [];
+    // WS-S.1.4 — the room surface never serves a Private P2P room (§23.5); its
+    // content lives only on member devices. Fail-closed on an unknown room.
+    if ((await this.ports.roomStorageMode(context.surfaceRoomId)) !== 'server') return [];
     const out: Candidate[] = [];
     for (const thread of await this.ports.threadsByRoom(context.surfaceRoomId, context.limit)) {
       const storyId = await this.ports.storyIdByThreadId(thread.threadId);

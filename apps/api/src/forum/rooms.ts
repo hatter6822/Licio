@@ -77,6 +77,7 @@ export async function ensureCommonsRoom(forum: ForumServices): Promise<void> {
     visibility: 'public',
     joinModel: 'open',
     postingPolicy: 'all_members',
+    storageMode: 'server',
     createdBy: null,
     governanceMode: 'ordinary',
     charterSummary: null,

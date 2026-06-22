@@ -236,6 +236,14 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
       };
       return config;
     };
+    // WS-S.1.4 — wire the event-pipeline Private-P2P-room gate now that the room
+    // store exists: any content event referencing a p2p room is refused at
+    // publish + counted (§8.4/§23.7). The guards upstream already prevent such
+    // an event from being created, so this is defense in depth.
+    events.router.setP2pRoomGuard(async (roomId) => {
+      const room = await services.rooms.getById(roomId);
+      return room?.storageMode === 'p2p';
+    });
   }
 
   // WS-Q.2.5a — wire the in-memory global-search room-visibility resolver now

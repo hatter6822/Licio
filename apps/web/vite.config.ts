@@ -4,8 +4,36 @@ import { resolve } from 'node:path';
 import tailwindcss from '@tailwindcss/vite';
 import { tanstackRouter } from '@tanstack/router-plugin/vite';
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
+import { stripDevCspMeta } from './src/dev/strip-csp-meta.js';
+
+/**
+ * Strip the production CSP `<meta>` from the served `index.html` in the DEV
+ * SERVER ONLY (`vite dev`).  The pure transform lives in `stripDevCspMeta` (a
+ * unit-tested dev helper); this plugin just applies it on `serve`.  `index.html`
+ * carries the full production Content-Security-Policy as a `<meta http-equiv>`
+ * because it is the SOLE CSP source in the WS-R.15.4a native-courier WebView
+ * (which serves the built assets from `https://localhost` with no server
+ * headers).  That policy is correct for the production build and the preview
+ * server (whose header sends the same CSP), but in the Vite DEV server it breaks
+ * the app: HMR injects CSS as inline `<style>` elements and uses inline/eval
+ * script + a dev WebSocket, all of which `style-src 'self'` /
+ * `require-trusted-types-for 'script'` / `connect-src 'self'` block — leaving
+ * the app completely unstyled and flooding the console with CSP violations.
+ * `apply: 'serve'` scopes this to dev only; `vite build` (and therefore the
+ * courier `dist` + the preview) keeps the meta untouched, and the real CSP is
+ * always enforced in production by the API's `security-headers.ts` header.
+ */
+function devStripCspMeta(): Plugin {
+  return {
+    name: 'licio:dev-strip-csp-meta',
+    apply: 'serve',
+    transformIndexHtml(html: string): string {
+      return stripDevCspMeta(html);
+    },
+  };
+}
 
 function getHttpsConfig(): { key: Buffer; cert: Buffer } | undefined {
   if (process.env['DEV_HTTPS'] !== 'true') return undefined;
@@ -23,6 +51,9 @@ const API_PROXY_TARGET =
 export default defineConfig({
   base: '/',
   plugins: [
+    // Dev-only: remove the production CSP <meta> so Vite HMR (inline styles +
+    // scripts + dev WebSocket) is not blocked. No-op in `vite build`/preview.
+    devStripCspMeta(),
     // File-based routing (WS-C.1.1a). Generates src/routeTree.gen.ts from the
     // route files and auto-code-splits each route's component. Must precede react().
     tanstackRouter({

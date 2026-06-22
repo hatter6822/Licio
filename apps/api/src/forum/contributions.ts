@@ -311,6 +311,19 @@ export async function createContribution(
   // 2. Thread existence + visibility + state.
   const thread = await ingestion.stories.getThreadById(request.thread_id);
   if (!thread) return reject({ status: 404, code: 'not_found', message: 'Thread not found' });
+  // 2a. WS-S.1.3 — defense in depth: a Private P2P room's thread/contribution
+  //     lives ONLY on member devices (the §8 non-storage contract), so a p2p
+  //     thread should never exist server-side.  If one somehow does, refuse the
+  //     write with the same non-oracle 404 the reads use (no membership/exists
+  //     oracle), and emit a security metric — the guard catches a bug, never a
+  //     legitimate write.
+  if (thread.roomId !== null) {
+    const threadRoom = await forum.rooms.getById(thread.roomId);
+    if (threadRoom?.storageMode === 'p2p') {
+      forum.metrics.increment('contributions.p2p_room_rejected');
+      return reject({ status: 404, code: 'not_found', message: 'Thread not found' });
+    }
+  }
   if (!(await threadVisibleToUser(bundle, thread, userId))) {
     return reject({ status: 404, code: 'not_found', message: 'Thread not found' });
   }

@@ -46,6 +46,23 @@ export const postingPolicyEnum = pgEnum('room_posting_policy', [
   'experts_and_stewards',
 ]);
 
+// WS-S.1.1 — the three private-room axes (PRIVATE_SPEC §4.1/§23.2).  Added
+// ALONGSIDE the existing axes; the coherence CHECKs below mirror the
+// `@licio/shared` `roomAxesSchema` superRefine exactly so the storage layer and
+// the wire schema agree.  P2P content NEVER touches the server (§8); these
+// columns only ever describe the room's class + (optionally) a directory stub.
+
+/** §4.1 — WHERE the room's content lives. */
+export const roomStorageModeEnum = pgEnum('room_storage_mode', ['server', 'p2p']);
+/** §4.1 — WHO holds authority (platform vs room cryptographic capabilities). */
+export const roomAuthorityModelEnum = pgEnum('room_authority_model', ['platform', 'room_keys']);
+/** §4.2 — how discoverable a P2P room's existence is (NULL for server rooms). */
+export const roomDirectoryModeEnum = pgEnum('room_directory_mode', [
+  'listed',
+  'unlisted',
+  'detached',
+]);
+
 /** §17.4 governance lifecycle; `ordinary` is always the default. */
 export const governanceModeEnum = pgEnum('governance_mode', [
   'ordinary',
@@ -90,6 +107,14 @@ export const rooms = pgTable(
     // route/service still sets them explicitly per visibility.
     joinModel: joinModelEnum('join_model').notNull().default('open'),
     postingPolicy: postingPolicyEnum('posting_policy').notNull().default('all_members'),
+    // WS-S.1.1 — the §4.1 private-room axes.  Existing rooms (and every
+    // server-created room) are `server`/`platform` with a NULL directory mode
+    // and no stub; only a client-created P2P room is `p2p`/`room_keys`.
+    storageMode: roomStorageModeEnum('storage_mode').notNull().default('server'),
+    authorityModel: roomAuthorityModelEnum('authority_model').notNull().default('platform'),
+    directoryMode: roomDirectoryModeEnum('directory_mode'),
+    /** Opaque pointer to the optional §8.2 directory stub (P2P rooms only). */
+    p2pStubId: uuid('p2p_stub_id'),
     createdBy: uuid('created_by').references(() => users.userId, { onDelete: 'set null' }),
     governanceMode: governanceModeEnum('governance_mode').notNull().default('ordinary'),
     charterSummary: text('charter_summary'),
@@ -124,6 +149,37 @@ export const rooms = pgTable(
     check('rooms_public_join_open', sql`${t.visibility} = 'private' OR ${t.joinModel} = 'open'`),
     // WS-Q.1.2 (§16.1): steward rooms are private.
     check('rooms_steward_private', sql`${t.roomType} <> 'steward' OR ${t.visibility} = 'private'`),
+    // WS-S.1.1 — the §4.1 coherence rules, STRUCTURALLY enforced (PRIVATE_SPEC
+    // §23.2).  These mirror the `@licio/shared` `roomAxesSchema` superRefine, so
+    // no direct write / migration / old API path can persist an incoherent row
+    // (e.g. a P2P room with `platform` authority, a non-private or `open` P2P
+    // room, or a server room carrying a P2P stub) that the wire schema rejects.
+    check(
+      'rooms_storage_authority_coherence',
+      sql`(${t.storageMode} = 'server' AND ${t.authorityModel} = 'platform')
+          OR (${t.storageMode} = 'p2p' AND ${t.authorityModel} = 'room_keys')`,
+    ),
+    check(
+      'rooms_p2p_requires_directory_mode',
+      sql`${t.storageMode} = 'server' OR ${t.directoryMode} IS NOT NULL`,
+    ),
+    // A server room never carries a directory mode (it is NULL for them); this
+    // is the storage-layer half of the shared schema's same rule.
+    check(
+      'rooms_server_no_directory_mode',
+      sql`${t.storageMode} = 'p2p' OR ${t.directoryMode} IS NULL`,
+    ),
+    check(
+      'rooms_p2p_visibility_private',
+      sql`${t.storageMode} = 'server' OR ${t.visibility} = 'private'`,
+    ),
+    // Reuses the WS-Q `join_model` column: closes the gap where a direct write
+    // could persist a P2P room with `open`/`request_approval`.
+    check(
+      'rooms_p2p_join_model_invite',
+      sql`${t.storageMode} = 'server' OR ${t.joinModel} = 'invite'`,
+    ),
+    check('rooms_server_has_no_stub', sql`${t.storageMode} = 'p2p' OR ${t.p2pStubId} IS NULL`),
   ],
 );
 

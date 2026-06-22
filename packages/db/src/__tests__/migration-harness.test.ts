@@ -25,7 +25,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const DB_URL = process.env['DATABASE_URL'];
 const COMMONS = 'c0000000-0000-4000-8000-000000000000';
-/** Journal idx 0–13 are pre-WS-Q; 14–20 are the WS-Q chain. */
+/** Journal idx 0–13 are pre-WS-Q.  Phase 2 applies idx 14 → END (the WS-Q chain
+ *  AND everything after it, incl. the WS-Q.* / WS-R / WS-S migrations) over the
+ *  seeded pre-WS-Q dataset, so the post-WS-Q CHECKs/triggers (e.g. the §4.1
+ *  room-axes coherence constraints + the §8.3 no-p2p-content trigger this suite
+ *  exercises) run against real data. */
 const WSQ_BOUNDARY = 14;
 
 interface JournalEntry {
@@ -120,7 +124,7 @@ describe.skipIf(!DB_URL)('WS-Q.6.1 migration validation harness', () => {
         ${thread(storyNearB, roomPublic)}`,
     );
 
-    // --- Phase 2: the WS-Q chain (idx 14–20) ---------------------------------
+    // --- Phase 2: idx 14 → END (the WS-Q chain + every later migration) -------
     for (const tag of tags.slice(WSQ_BOUNDARY)) {
       for (const stmt of await readStatements(tag)) await client.unsafe(stmt);
     }
@@ -218,5 +222,156 @@ describe.skipIf(!DB_URL)('WS-Q.6.1 migration validation harness', () => {
       `SELECT count(*)::int AS n FROM rooms WHERE room_id = '${COMMONS}'`,
     );
     expect((commons[0] as unknown as { n: number }).n).toBe(1);
+  });
+
+  // WS-S.1.3b / §8.3 — the database guard (migration 0045): NO server table may
+  // accumulate rows for a Private P2P room.  Proves the trigger applied cleanly
+  // AND rejects p2p-room rows on EVERY room-referencing table (the content roots
+  // `stories`/`threads` + the non-content `room_stewards`/`room_subscriptions`/
+  // `lenses`) — the deepest, code-path-independent defense below the
+  // service-layer 409/404 guards — while a server room is unaffected.
+  it('§8.3 trigger rejects ALL server rows referencing a Private P2P room', async () => {
+    const uid = randomUUID();
+    await client.unsafe(
+      `INSERT INTO users (user_id, handle, display_name, privacy_settings, personalization_settings, reputation_summary_private)
+       VALUES ('${uid}', 'p2p_${uid.slice(0, 8)}', 'P2P', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)`,
+    );
+    const p2pRoom = randomUUID();
+    // A COHERENT p2p room (the 0043 CHECKs must pass): room_keys + private +
+    // invite + a directory mode.  The room SHELL is allowed; its CONTENT is not.
+    await client.unsafe(
+      `INSERT INTO rooms (room_id, name, slug, room_type, visibility, join_model, posting_policy, storage_mode, authority_model, directory_mode)
+       VALUES ('${p2pRoom}', 'Secret', 'sec-${p2pRoom.slice(0, 8)}', 'global_topic', 'private', 'invite', 'all_members', 'p2p', 'room_keys', 'unlisted')`,
+    );
+    const sid = randomUUID();
+    const meta = `'{"submission_type":"original_brief","body":"x"}'::jsonb`;
+    const topics = `ARRAY['${randomUUID()}']::uuid[]`;
+    // A story referencing the p2p room is rejected by the trigger (the message
+    // is asserted so a missing-column error could never pass this for the wrong
+    // reason).
+    await expect(
+      client.unsafe(
+        `INSERT INTO stories (story_id, canonical_url, title, title_hash, submitted_by, room_id, topic_ids, submission_type, submission_metadata)
+         VALUES ('${sid}', NULL, 'nope', 'h-${sid.slice(0, 8)}', '${uid}', '${p2pRoom}', ${topics}, 'original_brief', ${meta})`,
+      ),
+    ).rejects.toThrow(/Private P2P room/);
+    // A thread referencing the p2p room is rejected too (its story never exists,
+    // but the trigger guards the thread table independently).
+    await expect(
+      client.unsafe(
+        `INSERT INTO threads (thread_id, story_id, room_id, branch_index)
+         VALUES ('${randomUUID()}', '${sid}', '${p2pRoom}', 0)`,
+      ),
+    ).rejects.toThrow(/Private P2P room/);
+    // The NON-content room-referencing tables are guarded too (§11.4: a p2p room
+    // has no platform steward / server subscription / server lens).
+    await expect(
+      client.unsafe(
+        `INSERT INTO room_stewards (room_id, user_id, role)
+         VALUES ('${p2pRoom}', '${uid}', 'community_steward')`,
+      ),
+    ).rejects.toThrow(/Private P2P room/);
+    await expect(
+      client.unsafe(
+        `INSERT INTO room_subscriptions (room_id, user_id, status, notification_preferences)
+         VALUES ('${p2pRoom}', '${uid}', 'active', '{}'::jsonb)`,
+      ),
+    ).rejects.toThrow(/Private P2P room/);
+    await expect(
+      client.unsafe(
+        `INSERT INTO lenses (lens_id, room_id, name, lens_type)
+         VALUES ('${randomUUID()}', '${p2pRoom}', 'Expert', 'expert')`,
+      ),
+    ).rejects.toThrow(/Private P2P room/);
+    // Appendix-D-style: zero server content rows exist for the p2p room.
+    const n = await client.unsafe(
+      `SELECT count(*)::int AS n FROM stories WHERE room_id = '${p2pRoom}'`,
+    );
+    expect((n[0] as unknown as { n: number }).n).toBe(0);
+  });
+
+  // WS-S.1.1 / §4.1/§23.2 — the migration-0043 coherence CHECKs must REJECT an
+  // incoherent axis tuple at the storage layer, mirroring the `@licio/shared`
+  // `roomAxesSchema` superRefine.  Each case violates EXACTLY ONE constraint
+  // (the others stay satisfiable) and asserts that constraint's name fires, so a
+  // raw INSERT / old API path / migration can never persist an incoherent P2P
+  // (or mislabeled server) room.  The COHERENT-row acceptance is proven by the
+  // §8.3 trigger test above (which first inserts a valid p2p room).
+  it.each([
+    // storage='p2p' but platform authority — violates storage↔authority.
+    {
+      label: 'a p2p room with platform authority',
+      storage: 'p2p',
+      authority: 'platform',
+      visibility: 'private',
+      join: 'invite',
+      directory: "'unlisted'",
+      constraint: 'rooms_storage_authority_coherence',
+    },
+    // storage='server' but room_keys authority — violates storage↔authority.
+    {
+      label: 'a server room with room_keys authority',
+      storage: 'server',
+      authority: 'room_keys',
+      visibility: 'public',
+      join: 'open',
+      directory: 'NULL',
+      constraint: 'rooms_storage_authority_coherence',
+    },
+    // p2p but publicly visible — violates p2p⇒private.
+    {
+      label: 'a public p2p room',
+      storage: 'p2p',
+      authority: 'room_keys',
+      visibility: 'public',
+      join: 'invite',
+      directory: "'unlisted'",
+      constraint: 'rooms_p2p_visibility_private',
+    },
+    // p2p but open-join — violates p2p⇒invite.
+    {
+      label: 'an open-join p2p room',
+      storage: 'p2p',
+      authority: 'room_keys',
+      visibility: 'private',
+      join: 'open',
+      directory: "'unlisted'",
+      constraint: 'rooms_p2p_join_model_invite',
+    },
+    // p2p with no directory mode — violates p2p⇒directory_mode NOT NULL.
+    {
+      label: 'a p2p room with no directory mode',
+      storage: 'p2p',
+      authority: 'room_keys',
+      visibility: 'private',
+      join: 'invite',
+      directory: 'NULL',
+      constraint: 'rooms_p2p_requires_directory_mode',
+    },
+    // server room carrying a directory mode — violates server⇒directory_mode NULL.
+    {
+      label: 'a server room carrying a directory mode',
+      storage: 'server',
+      authority: 'platform',
+      visibility: 'private',
+      join: 'invite',
+      directory: "'listed'",
+      constraint: 'rooms_server_no_directory_mode',
+    },
+  ])('§4.1 coherence CHECK rejects $label', async ({
+    storage,
+    authority,
+    visibility,
+    join,
+    directory,
+    constraint,
+  }) => {
+    const id = randomUUID();
+    await expect(
+      client.unsafe(
+        `INSERT INTO rooms (room_id, name, slug, room_type, visibility, join_model, posting_policy, storage_mode, authority_model, directory_mode)
+           VALUES ('${id}', 'X', 'x-${id.slice(0, 8)}', 'global_topic', '${visibility}', '${join}', 'all_members', '${storage}', '${authority}', ${directory})`,
+      ),
+    ).rejects.toThrow(new RegExp(constraint));
   });
 });

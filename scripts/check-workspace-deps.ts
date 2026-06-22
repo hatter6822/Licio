@@ -35,6 +35,13 @@ const ALLOWED_WORKSPACE_DEPS: Record<string, string[]> = {
   // @licio/lcap, NEVER @licio/db. Confined to a separately code-split chunk + excluded
   // from the apps/web direct-dep budget (WS-R.15.8).
   '@licio/lcap-p2p': ['@licio/shared', '@licio/lcap'],
+  // Pure Private P2P rooms (WS-S) confidentiality & authority domain: canonical
+  // encoding, schemas, crypto (MLS/HPKE/AEAD/KDF/Ed25519), IPLD/CID, reducer,
+  // sync — NEVER @licio/db (no database access by construction) and NEVER
+  // @licio/lcap (the two decentralization planes pin different crypto suites on
+  // purpose and never share keys/code; PRIVATE_SPEC §3, §9.8).  All heavy
+  // P2P/crypto deps are declared HERE + code-split, never in apps/web.
+  '@licio/private-p2p': ['@licio/shared'],
   // WS-R.15.1a/b: the web client takes @licio/lcap for the OFFLINE bundle
   // export/import flows — it runs the real pack writer/reader + validate()
   // client-side (no server round-trip), loaded as a lazy dynamic-import chunk
@@ -69,6 +76,7 @@ const WORKSPACE_PACKAGES = [
   '@licio/governance',
   '@licio/lcap',
   '@licio/lcap-p2p',
+  '@licio/private-p2p',
 ];
 
 const PACKAGE_PATHS: Record<string, string> = {
@@ -80,6 +88,7 @@ const PACKAGE_PATHS: Record<string, string> = {
   '@licio/governance': resolve(ROOT, 'packages/governance/package.json'),
   '@licio/lcap': resolve(ROOT, 'packages/lcap/package.json'),
   '@licio/lcap-p2p': resolve(ROOT, 'packages/lcap-p2p/package.json'),
+  '@licio/private-p2p': resolve(ROOT, 'packages/private-p2p/package.json'),
   web: resolve(ROOT, 'apps/web/package.json'),
   api: resolve(ROOT, 'apps/api/package.json'),
 };
@@ -93,6 +102,7 @@ const SOURCE_DIRS: Record<string, string> = {
   '@licio/governance': resolve(ROOT, 'packages/governance/src'),
   '@licio/lcap': resolve(ROOT, 'packages/lcap/src'),
   '@licio/lcap-p2p': resolve(ROOT, 'packages/lcap-p2p/src'),
+  '@licio/private-p2p': resolve(ROOT, 'packages/private-p2p/src'),
   web: resolve(ROOT, 'apps/web/src'),
   api: resolve(ROOT, 'apps/api/src'),
 };
