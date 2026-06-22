@@ -249,3 +249,110 @@ describe('PrivateRoomEngine — fixpoint convergence + quarantine', () => {
     expect(engine.state().members.size).toBe(0);
   });
 });
+
+describe('PrivateRoomEngine — §15.6 sync surface', () => {
+  it('announces heads + computes what a peer wants', async () => {
+    const r = await room();
+    const engine = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
+    const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
+    await engine.applyLocalOp(
+      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+        op_id: 'genesis',
+        lamport: '1',
+      }),
+      founderSeal,
+    );
+    await engine.applyLocalOp(
+      mkOp(story('s1'), { op_id: 'cs1', author_seq: 1, lamport: '2', parents: ['genesis'] }),
+      founderSeal,
+    );
+
+    const announcement = engine.headAnnouncement('snap-1');
+    expect(announcement.heads).toStrictEqual(['cs1']);
+    expect(announcement.latest_snapshot_id).toBe('snap-1');
+
+    // A fresh peer wants the announced head; once it holds it, it wants nothing.
+    const peer = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
+    expect(peer.wantedFrom(announcement)).toStrictEqual(['cs1']);
+    expect(engine.wantedFrom(announcement)).toStrictEqual([]);
+  });
+});
+
+describe('PrivateRoomEngine — §15.9 archive export/import (two-engine convergence)', () => {
+  it('a second engine converges to the same state by importing the archive', async () => {
+    const r = await room();
+    const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
+    const bob = await makeDevice();
+
+    // Alice builds the room: genesis → add bob → a story.
+    const alice = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
+    await alice.applyLocalOp(
+      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+        op_id: 'genesis',
+        lamport: '1',
+      }),
+      founderSeal,
+    );
+    await alice.applyLocalOp(
+      mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
+        op_id: 'add-bob',
+        author_seq: 1,
+        lamport: '2',
+        parents: ['genesis'],
+      }),
+      founderSeal,
+    );
+    await alice.applyLocalOp(
+      mkOp(story('s1'), { op_id: 'cs1', author_seq: 2, lamport: '3', parents: ['add-bob'] }),
+      founderSeal,
+    );
+
+    const archive = await alice.exportArchive({
+      kind: 'encrypted_member_backup',
+      createdAtBucket: '2026-06-22T00',
+    });
+
+    // Bob — a member with the SAME room keys — imports the archive and converges.
+    const bobEngine = await PrivateRoomEngine.load(
+      r.engineParams(new InMemoryPrivateRoomStorage()),
+    );
+    const report = await bobEngine.importArchive(archive);
+    expect(report.accepted.sort()).toStrictEqual(['add-bob', 'cs1', 'genesis']);
+    expect(bobEngine.state().members.get('founder')?.role).toBe('admin');
+    expect(bobEngine.state().members.get('bob')?.role).toBe('member');
+    expect(bobEngine.state().stories.get('s1')?.title).toBe('Story s1');
+    expect(bobEngine.heads()).toStrictEqual(['cs1']);
+  });
+
+  it('refuses to export an empty room', async () => {
+    const r = await room();
+    const engine = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
+    await expect(
+      engine.exportArchive({ kind: 'encrypted_member_backup', createdAtBucket: '2026-06-22T00' }),
+    ).rejects.toThrow(/no content/);
+  });
+
+  it('refuses to import an archive for a different room', async () => {
+    const r = await room();
+    const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
+    const alice = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
+    await alice.applyLocalOp(
+      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+        op_id: 'genesis',
+        lamport: '1',
+      }),
+      founderSeal,
+    );
+    const archive = await alice.exportArchive({
+      kind: 'encrypted_member_backup',
+      createdAtBucket: '2026-06-22T00',
+    });
+
+    // A different room (fresh commitment) rejects the archive.
+    const other = await room();
+    const otherEngine = await PrivateRoomEngine.load(
+      other.engineParams(new InMemoryPrivateRoomStorage()),
+    );
+    await expect(otherEngine.importArchive(archive)).rejects.toThrow(/different room/);
+  });
+});

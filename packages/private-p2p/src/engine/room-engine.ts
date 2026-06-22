@@ -18,6 +18,7 @@
 // always converges regardless of delivery order; the unresolved remainder is
 // quarantined with its typed reason and never rendered.
 
+import { toBase64Url } from '../crypto/runtime.js';
 import {
   type BootstrapDevice,
   buildOpIntakeContext,
@@ -33,7 +34,18 @@ import {
 } from '../reducer/validate-op.js';
 import type { PrivateEncryptedEnvelope } from '../schemas/envelope.js';
 import type { PrivateRoomOp } from '../schemas/ops.js';
-import { computeHeads } from '../sync/head-sync.js';
+import {
+  buildBlockArchive,
+  decodeBlockArchive,
+  encodeBlockArchive,
+  type PrivateArchiveKind,
+} from '../sync/archive.js';
+import {
+  buildHeadAnnouncement,
+  computeHeads,
+  type HeadAnnouncement,
+  wantedHeads,
+} from '../sync/head-sync.js';
 
 /** The durable boundary for a room's encrypted envelopes (keyed by op id). */
 export interface PrivateRoomStorage {
@@ -195,5 +207,60 @@ export class PrivateRoomEngine {
     }
     const envelope = await sealOp(op, sealParams);
     return this.ingest([envelope]);
+  }
+
+  // --- §15.6 sync surface (the transport drives these) ----------------------
+
+  /** The §15.6 head announcement to send a peer (the engine's frontier + a
+   *  coarse op-count, with an optional latest verified snapshot id). */
+  headAnnouncement(latestSnapshotId?: string): HeadAnnouncement {
+    return buildHeadAnnouncement({
+      acceptedOps: [...this.acceptedOps.values()].map((op) => ({
+        op_id: op.op_id,
+        parents: op.parents,
+      })),
+      ...(latestSnapshotId === undefined ? {} : { latestSnapshotId }),
+    });
+  }
+
+  /** Given a peer's §15.6 announcement, the head op ids the engine still wants
+   *  (the first §15.7 reconciliation step; fetched heads then feed `ingest`). */
+  wantedFrom(announcement: HeadAnnouncement): string[] {
+    return wantedHeads(new Set(this.acceptedOps.keys()), announcement);
+  }
+
+  // --- §15.9 offline archive (export / import) ------------------------------
+
+  /**
+   * Export the room's accepted envelopes as a §15.9 ciphertext-only archive
+   * (`encrypted_member_backup` | `voluntary_report`) for offline sharing.
+   * Throws if the room holds no ops yet (nothing to export).
+   */
+  async exportArchive(params: {
+    readonly kind: PrivateArchiveKind;
+    readonly createdAtBucket: string;
+  }): Promise<Uint8Array> {
+    const stored = await this.storage.listEnvelopes();
+    if (stored.length === 0) throw new Error('exportArchive: the room has no content to export');
+    const archive = buildBlockArchive({
+      kind: params.kind,
+      roomIdHash: toBase64Url(this.roomIdCommitment),
+      createdAtBucket: params.createdAtBucket,
+      envelopes: stored.map((s) => s.envelope),
+    });
+    return encodeBlockArchive(archive);
+  }
+
+  /**
+   * Import a §15.9 archive into this room: decode under caps, confirm it is for
+   * THIS room, then `ingest` every envelope (re-validated — the container confers
+   * no trust).  Rejects an archive for a different room.
+   */
+  async importArchive(bytes: Uint8Array): Promise<IngestReport> {
+    const archive = decodeBlockArchive(bytes);
+    if (archive.room_id_hash !== toBase64Url(this.roomIdCommitment)) {
+      throw new Error('importArchive: archive is for a different room');
+    }
+    return this.ingest(archive.envelopes);
   }
 }
