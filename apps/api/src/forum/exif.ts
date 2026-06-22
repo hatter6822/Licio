@@ -69,21 +69,28 @@ function readU16LE(bytes: Uint8Array, at: number): number {
   return (bytes[at] ?? 0) | ((bytes[at + 1] ?? 0) << 8);
 }
 
+// `>>> 0` coerces the result to UNSIGNED 32-bit: a high length byte (≥ 0x80) sets
+// bit 31, which would otherwise make `<< 24` a NEGATIVE int32.  A negative length
+// slips past the `at + total > bytes.length` bounds checks in `stripJpeg`/`stripPng`/
+// `stripWebp` and rewinds the cursor (`at += total`) into a near-infinite loop / a
+// misparse that could leave metadata un-stripped — so always read these unsigned.
 function readU32BE(bytes: Uint8Array, at: number): number {
   return (
-    ((bytes[at] ?? 0) << 24) |
-    ((bytes[at + 1] ?? 0) << 16) |
-    ((bytes[at + 2] ?? 0) << 8) |
-    (bytes[at + 3] ?? 0)
+    (((bytes[at] ?? 0) << 24) |
+      ((bytes[at + 1] ?? 0) << 16) |
+      ((bytes[at + 2] ?? 0) << 8) |
+      (bytes[at + 3] ?? 0)) >>>
+    0
   );
 }
 
 function readU32LE(bytes: Uint8Array, at: number): number {
   return (
-    (bytes[at] ?? 0) |
-    ((bytes[at + 1] ?? 0) << 8) |
-    ((bytes[at + 2] ?? 0) << 16) |
-    ((bytes[at + 3] ?? 0) << 24)
+    ((bytes[at] ?? 0) |
+      ((bytes[at + 1] ?? 0) << 8) |
+      ((bytes[at + 2] ?? 0) << 16) |
+      ((bytes[at + 3] ?? 0) << 24)) >>>
+    0
   );
 }
 

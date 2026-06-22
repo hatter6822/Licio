@@ -83,6 +83,17 @@ describe('uvarint', () => {
       expect(readUvarint(bytes, 0)).toEqual({ value: v, bytesRead: bytes.length });
     }
   });
+
+  it('rejects a varint that decodes beyond the safe-integer range (no silent rounding)', () => {
+    // 2^53 = 16 * 128^7 → [0x80×7, 0x10]: a high TERMINATOR group pushes the value
+    // past MAX_SAFE_INTEGER.  The scale guard alone misses this (it sits after the
+    // break), so the value must be rejected, not returned rounded.
+    const overMax = Uint8Array.from([0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x10]);
+    expect(() => readUvarint(overMax, 0)).toThrow(/too large/);
+    // 2^53 + 1 is unrepresentable as a double; reject rather than round to 2^53.
+    const rounding = Uint8Array.from([0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x10]);
+    expect(() => readUvarint(rounding, 0)).toThrow(/too large/);
+  });
 });
 
 describe('writer + reader (WS-R.4.1/4.2)', () => {

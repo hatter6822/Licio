@@ -14,7 +14,10 @@ import { parseCid } from '@licio/lcap';
 // RFC 4648 base32, lowercase, no padding — IPFS multibase code 'b'.
 const B32_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567';
 
-/** Encode bytes as multibase-`b` base32 (lowercase, unpadded) — an IPFS CIDv1 text form. */
+/** Encode bytes as multibase-`b` base32 (lowercase, unpadded) — an IPFS CIDv1 text form.
+ *  `value` is masked to the un-emitted low bits after each 5-bit group, so the
+ *  accumulator never exceeds 12 bits and correctness does not rely on JS's 32-bit
+ *  overflow silently dropping stale high bits (cf. `@licio/lcap` `base32Encode`). */
 export function multibaseBase32(bytes: Uint8Array): string {
   let bits = 0;
   let value = 0;
@@ -26,6 +29,7 @@ export function multibaseBase32(bytes: Uint8Array): string {
       bits -= 5;
       out += B32_ALPHABET[(value >>> bits) & 0x1f];
     }
+    value &= (1 << bits) - 1; // keep only the un-emitted low `bits` bits
   }
   if (bits > 0) out += B32_ALPHABET[(value << (5 - bits)) & 0x1f];
   return out;
