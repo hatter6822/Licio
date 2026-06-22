@@ -6,8 +6,11 @@
 
 export * from './capabilities.js';
 export * from './order.js';
+export * from './overlay.js';
 export * from './recovery-threshold.js';
 export * from './reduce.js';
+export * from './search.js';
+export * from './snapshot.js';
 export * from './state.js';
 export * from './validate.js';
 export * from './validate-op.js';
