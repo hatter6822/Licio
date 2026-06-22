@@ -5,6 +5,7 @@
 // model, and the deterministic fold + §14.4 conflict policy.
 
 export * from './capabilities.js';
+export * from './intake-context.js';
 export * from './order.js';
 export * from './overlay.js';
 export * from './recovery-threshold.js';
