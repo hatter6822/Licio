@@ -33,6 +33,7 @@ jobs:
       - run: pnpm check:no-applause
       - run: pnpm check:lcap-schema-egress
       - run: pnpm check:lcap-p2p-split
+      - run: pnpm check:private-p2p-split
       - run: pnpm check:no-p2p-server-content
       - run: pnpm check:no-private-cid-egress
       - run: pnpm check:private-rendezvous-schema

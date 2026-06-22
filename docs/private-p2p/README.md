@@ -65,8 +65,17 @@ confers no trust), quarantines what cannot open, and exposes the §15.6 sync
 surface (`headAnnouncement`/`wantedFrom`) + the §15.9 offline archive
 (`exportArchive`/`importArchive`) — so two engines holding the same room keys
 **converge to byte-identical state by exchanging an archive, with no live
-transport** (proven by a two-engine test).  The apps/web IndexedDB adapter + UI
-consume this engine (the remaining WS-S.7 integration).
+transport** (proven by a two-engine test).
+
+The **WS-S.7 apps/web client foundation is shipped** (`apps/web/src/private-p2p/`):
+the IndexedDb `PrivateRoomStorage` adapter (a dedicated, isolated
+`licio_private_p2p` database, per-room) + `loadPrivateRoomEngine` (the
+DYNAMIC-import engine construction).  `@licio/private-p2p` is a `workspace:*` dep
+of apps/web loaded by `import()` ONLY — the `check:private-p2p-split` gate forbids
+a static value import, and the production build confirms the crypto/protocol core
+stays out of the initial bundle (a separate lazy chunk).  The creation wizard /
+room shell / composer UI consume this foundation next (the rest of WS-S.7), and
+the live WebRTC carrier (WS-S.4.3) feeds the engine's `ingest`.
 
 ### WS-S.0 — Terminology, room-class model, product framing
 

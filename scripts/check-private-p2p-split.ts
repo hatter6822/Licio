@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-R.15.8 — the transport code-split gate.  @licio/lcap-p2p (WebRTC + the IPFS
-// bridge) is an OPTIONAL, off-by-default transport package.  Its protocol code MUST
-// stay out of the apps/web initial bundle, so apps/web may reference it ONLY through a
-// DYNAMIC `import('@licio/lcap-p2p')` (a lazy chunk) — never a static VALUE import that
-// would pull it onto the synchronous path.  A bare `import type … from '@licio/lcap-p2p'`
-// is erased at build and is allowed.  This gate fails the build on a static value import
-// in apps/web/src (the "deliberately mis-placed import fails a gate" acceptance check).
+// WS-S.2.1 — the Private-P2P code-split gate.  @licio/private-p2p (the room
+// confidentiality & authority plane: MLS/HPKE/AEAD/Ed25519 crypto, the reducer,
+// the sync-decision cores, the room engine) is heavy + off the synchronous path.
+// Its protocol/crypto code MUST stay out of the apps/web initial bundle, so
+// apps/web may reference it ONLY through a DYNAMIC `import('@licio/private-p2p')`
+// (a lazy chunk) — never a static VALUE import that would pull it onto the
+// synchronous path.  A bare `import type … from '@licio/private-p2p'` is erased
+// at build and is allowed (the IndexedDB adapter type-imports the storage port).
+// This gate fails the build on a static value import in apps/web/src.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const WEB_SRC = resolve(ROOT, 'apps/web/src');
-const SPECIFIER = '@licio/lcap-p2p';
+const SPECIFIER = '@licio/private-p2p';
 
 /** Strip block + line comments so the word "import" inside a comment cannot
  *  falsely pair with a later `from '…'` across newlines (the `[^;]*?` capture
@@ -22,10 +24,9 @@ function stripComments(src: string): string {
 }
 
 /** Pure: the static-value-import violations in one source (importable for tests). */
-export function findStaticP2pImports(filename: string, rawContent: string): string[] {
+export function findStaticPrivateP2pImports(filename: string, rawContent: string): string[] {
   const content = stripComments(rawContent);
   const issues: string[] = [];
-  // Match `import … from '@licio/lcap-p2p'` and side-effect `import '@licio/lcap-p2p'`.
   const staticFrom = new RegExp(`\\bimport\\b([^;]*?)\\bfrom\\s*['"]${SPECIFIER}['"]`, 'g');
   const sideEffect = new RegExp(`\\bimport\\s*['"]${SPECIFIER}['"]`, 'g');
   for (const match of content.matchAll(staticFrom)) {
@@ -54,15 +55,19 @@ function collect(dir: string): string[] {
 function main(): void {
   const errors: string[] = [];
   for (const file of collect(WEB_SRC)) {
-    errors.push(...findStaticP2pImports(file.replace(ROOT, ''), readFileSync(file, 'utf-8')));
+    errors.push(
+      ...findStaticPrivateP2pImports(file.replace(ROOT, ''), readFileSync(file, 'utf-8')),
+    );
   }
   if (errors.length > 0) {
-    console.error('check:lcap-p2p-split FAILED — @licio/lcap-p2p must be dynamically imported:');
+    console.error(
+      'check:private-p2p-split FAILED — @licio/private-p2p must be dynamically imported:',
+    );
     for (const error of errors) console.error(`  - ${error}`);
     process.exit(1);
   }
   console.log(
-    'check:lcap-p2p-split passed: apps/web references @licio/lcap-p2p only via dynamic import.',
+    'check:private-p2p-split passed: apps/web references @licio/private-p2p only via dynamic import.',
   );
 }
 

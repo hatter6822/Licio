@@ -19,6 +19,7 @@
     "check:no-applause": "tsx scripts/check-no-applause.ts",
     "check:no-raw-egress": "tsx scripts/check-no-raw-egress.ts",
     "check:lcap-p2p-split": "tsx scripts/check-lcap-p2p-split.ts",
+    "check:private-p2p-split": "tsx scripts/check-private-p2p-split.ts",
     "check:lcap-schema-egress": "tsx scripts/check-lcap-schema-egress.ts",
     "check:no-p2p-server-content": "tsx scripts/check-no-p2p-server-content.ts",
     "check:no-private-cid-egress": "tsx scripts/check-no-private-cid-egress.ts",
