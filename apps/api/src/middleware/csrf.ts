@@ -176,6 +176,16 @@ const EXEMPT_PATHS = new Set([
   // the export gate. (The web-UI `/bundles/import` alias stays NON-exempt — it is a
   // session-bearing browser flow that keeps the double-submit token.)
   '/api/lcap/v2/bundles/export',
+  // WS-S.6.6 — the server-blind Private P2P rendezvous endpoints carry only OPAQUE
+  // blind ids + ciphertext + a short TTL (§15.3): the server holds no keys and
+  // performs no ACL (knowledge of the rendezvous_key IS the capability), and a P2P
+  // client holds no session cookie — so there is no session for CSRF to ride.
+  // Abuse is bounded by each endpoint's own global rate limit + the server-side TTL
+  // clamp + the bounded body/field sizes (§21.5/§27.2).
+  '/v1/private-rendezvous/announce',
+  '/v1/private-rendezvous/poll',
+  '/v1/private-rendezvous/signal',
+  '/v1/private-rendezvous/signal/poll',
 ]);
 // WS-D identity/privacy endpoints rely on `SameSite=Strict` + the opaque session
 // model (and a per-flow `login_attempt_id` binding) as the CSRF defense, so they do

@@ -129,6 +129,7 @@ rendezvous endpoint (WS-S.6.6) build on this pure core.
 | **WS-S.6.3** | §15.5 membership-proving handshake: `HandshakeHello` exchange → device-key proof over a transcript binding room/epoch/version + both ephemeral keys + nonces → `verifyPeerHandshake` (fail-closed admission BEFORE block exchange) → `deriveHandshakeSessionKey` (epoch-bound ephemeral ECDH) | `sync/handshake.ts` |
 | **WS-S.6.4** | §15.6/§15.7/§15.8 head-sync: `computeHeads` (accepted-DAG frontier) + coarse op-count bucket; frontier-first reconciliation (`wantedHeads` → `missingParents` to causal closure); the §15.8 fetch order + the §15.7 block request/response + `decideBlockServe` (refuse-large) + capped backoff | `sync/head-sync.ts` |
 | **WS-S.6.5** | §15.9 offline encrypted-archive (CAR): a ciphertext-only, per-room container of encrypted envelopes; `importBlockArchive` re-runs the §14.2 stage-1 validation on EVERY envelope (no container-conferred trust) before any reduce | `sync/archive.ts` |
+| **WS-S.6.6** (server) | §15.3/§15.4/§21.5/§27.2 the server-blind rendezvous endpoints `POST /v1/private-rendezvous/{announce,poll,signal,signal/poll}`: opaque-only (blind ids + ciphertext + TTL, no room/account map), the server-side TTL clamp + bounded body/field sizes, the §15.3.1 no-existence-oracle (`poll` always returns a bounded list, never 404), aggregate-only metrics, IP-free global rate limits, CSRF-exempt (sessionless).  Presence persists to the migration-`0044` `private_rendezvous_records` table (gated Postgres adapter); signals are transient (in-memory mailbox).  This is server-side and deliberately does NOT import `@licio/private-p2p` (the server is blind) | `apps/api/src/private-rendezvous/{stores,service,drizzle-store}.ts`, `apps/api/src/routes/private-rendezvous.ts` |
 
 The pairwise secure channel (`sync/secure-channel.ts`) is the substrate shared by
 §15.4 signaling and the §15.5 handshake: `deriveChannelKey` =
@@ -150,7 +151,7 @@ for a future swap to an audited WASM build (tracked residual).
 | `packages/shared` | the §4.1 coherence accept/reject matrix + `roomClassOf`; the disclosure/matrix copy-lint |
 | `packages/db` | the DB↔shared enum mirror; the §8.1 column denylist (allowlist exactness + a forbidden-column fixture that BITES; rendezvous has no room FK); the **gated** Postgres harness: the §8.3 no-p2p-content trigger rejects p2p stories/threads (server rows succeed) + each §4.1 coherence CHECK rejects its incoherent axis tuple by name |
 | `packages/private-p2p` | the canonical + strict-schema suites; the **WS-S.3 crypto suites** — RFC 5869 HKDF vectors, the AEAD round-trip/AAD-flip/replay/nonce-uniqueness suite, the Ed25519 KATs + RFC 9180 HPKE interop + RFC 7748 X25519 + RFC 4231 HMAC KATs, the MLS multi-device/epoch/manifest-fork suite, the four-tier key store + recovery kit + threshold recovery, and the forward-secrecy/fuzz properties; the **WS-S.4.2/5 reducer suites** — the CIDv1 multiformats/RFC-4648 pins, the Lamport/canonical-order tests, the reducer genesis/capability/conflict matrix, the §14.3.3 25-shuffle determinism property, the structural pre-pass + the §14.2 stage-1 op-codec seal→open→reduce matrix, and the §14.5/§14.6/§13.7 snapshot/overlay/search suites; **and the WS-S.6 sync suites** — blind rendezvous derivation/authorization/mitigations, the X25519 ECDH agreement, the transcript-bound channel-key separation, signaling seal/open + relay-only ICE filtering, the handshake success + reject matrix, head-sync reconciliation-to-closure + fetch-order, and the offline-archive re-validating import (406 tests; crypto + reducer + sync all ≳ 92% coverage) |
-| `apps/api` | the server-gate suite: submission 409 (+ no row created), contribution 404, feed `p2p_room_local_only`, the ranking room-surface exclusion, the search filter, the event-pipeline gate |
+| `apps/api` | the server-gate suite: submission 409 (+ no row created), contribution 404, feed `p2p_room_local_only`, the ranking room-surface exclusion, the search filter, the event-pipeline gate; **and the WS-S.6.6 rendezvous suite** — the TTL clamp, the §15.3.1 no-existence-oracle (poll never 404s), re-announce-replaces, the signal queue/drain round-trip, aggregate-only metrics, the sweep, route shape-validation/oversized rejection, and the full-app CSRF-exempt mount |
 | `scripts` | the seven §23.10 CI gates + the `check:p2p-mls-wrapper` deep-import gate + the §12.7 no-server-recovery scan, all proven to bite (clean vs violating fixtures) + the live-source marker regression catch |
 
 ## Residuals (the next slices)
@@ -163,14 +164,14 @@ persistence + UI):
   §14.4 conflict policy, the capability model, the structural §14.2 pre-pass, the
   §14.2 stage-1 op wire-codec, the §14.5 snapshots, the §14.6 local overlays, and
   the §13.7 local search).
-- **WS-S.6.1–6.5 — shipped** as a pure, transport-independent core (blind
+- **WS-S.6.1–6.6 — shipped.**  The pure, transport-independent core (blind
   rendezvous, encrypted signaling + relay-only mode, the membership-proving
   handshake, head/block reconciliation + fetch-order, and the offline encrypted
-  archive).  **WS-S.6.6 — the server rendezvous endpoint** (`POST
-  /v1/private-rendezvous/announce|poll|signal`, opaque-only, short TTL, blind-id
-  rate limiting with no client IP, aggregate-only metrics, the no-existence-oracle
-  bounded response) over the migration-`0044` `private_rendezvous_records` table —
-  is the next server slice.
+  archive) **plus the server-blind rendezvous endpoint** (`POST
+  /v1/private-rendezvous/{announce,poll,signal,signal/poll}`, opaque-only, the
+  server-side TTL clamp, blind-id-only with no client IP, aggregate-only metrics,
+  the no-existence-oracle bounded response, CSRF-exempt) over the migration-`0044`
+  `private_rendezvous_records` table (gated Postgres adapter; transient signals).
 - **WS-S.4.1/4.3 — the P2P transport.**  `docs/PRIVATE_SPEC.md` §9.2 recommends a
   Helia/libp2p stack, but vetting it against §6.12.12 found **580 transitive
   packages** — a supply-chain surface the LCAP plane (WS-R) deliberately rejected
