@@ -136,6 +136,7 @@ export function ProfilePage(): React.ReactElement {
     { to: '/profile/privacy', label: t('profile.privacy', 'Privacy') },
     { to: '/profile/security', label: t('profile.security', 'Security') },
     { to: '/profile/wallet', label: t('profile.wallet', 'Wallet') },
+    { to: '/private', label: t('profile.privateRooms', 'Private rooms') },
   ];
 
   return (

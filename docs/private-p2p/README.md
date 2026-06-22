@@ -142,9 +142,44 @@ normalized to same-realm `Uint8Array`s at the storage-read boundary (defensive
 against structured-clone quirks).  `@licio/private-p2p` is a `workspace:*` dep of
 apps/web loaded by `import()` ONLY — the `check:private-p2p-split` gate forbids a
 static value import, and the production build confirms the crypto/protocol core
-stays out of the initial bundle (a separate lazy chunk).  The creation wizard /
-room shell / composer UI consume this manager next, and the live WebRTC carrier
-(WS-S.4.3) feeds the engine's `ingest`.
+stays out of the initial bundle (a separate lazy chunk).
+
+The **WS-S.7.4 client UI is shipped** (`apps/web/src/components/private-rooms/` +
+the `/private` + `/private/$roomId` routes, linked from Profile): the
+`CreatePrivateRoomWizard` renders the §20.2 disclosure + the five mandatory
+acknowledgments from the SSOT and BLOCKS creation until all are checked; the
+`PrivateRoomView` loads a local session and renders members + stories + comments
+with a composer.  Both are jsdom + axe tested; the production build confirms the
+crypto plane stays a lazy chunk (initial JS 144.5 KB, the ~100 KB crypto core
+excluded via the `private-p2p` `manualChunks`).
+
+## Remaining work
+
+The single-device room (create / author / read / persist / reload) is complete
+and verified **offline**.  What remains is partitioned by what it needs:
+
+**On-device (network / radio) session — the live transport:**
+- The live WebRTC block-exchange carrier (WS-S.4.3) consuming the shipped
+  §15.4/§15.5/§15.6 signaling/handshake/head-sync cores; the §26.4 ICE/relay
+  privacy posture review.
+- Two-browser convergence E2E (Playwright); the §15.4 live signaling over the
+  shipped server-blind rendezvous endpoint.
+- Membership DELIVERY: the invite→join→admit→welcome blobs (the crypto is shipped
+  + tested in `engine/invite.ts` + `engine/room-lifecycle.ts`) carried over the
+  transport (or a copy-paste UI); syncing an existing room's content wants the
+  transport.
+
+**Follow-ups (offline, not transport-blocked):**
+- apps/web snapshot persistence — drop pruned envelopes from IndexedDB on reload
+  (the engine `createSnapshot`/`compact` + verify-by-recomputation are shipped).
+- A member display-name mapping (the reduced state keys members by id today).
+
+**Server-coupled / later:**
+- WS-S.9 server→private migration (the server-export half needs the server/DB).
+- WS-S.10 update channel (depends on WS-O).
+
+See `docs/private-p2p/SECURITY-REVIEW.md` (WS-S.11) for the threat model +
+mitigations + residual-risk map.
 
 ### WS-S.0 — Terminology, room-class model, product framing
 
