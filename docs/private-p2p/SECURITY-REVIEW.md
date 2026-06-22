@@ -68,6 +68,15 @@ not yet formally security-audited (its own disclaimer) — tracked in the README
   `openOp` (signature → AEAD-open → schema → plaintext-vs-signed-metadata cross-
   check) before it contributes to state; the unresolved remainder is quarantined,
   never rendered.  Storage and container membership confer NO trust.
+- **Structural pre-pass enforced in the fold** (§14.2 steps 6/9/10, §14.3.1):
+  `openOp` proves WHO authored an op; the engine then runs `validateStructure`
+  before `reduceRoom`, so a device fork (two ops at the same `author_seq`), a
+  non-causal `lamport`, a genuinely missing parent, a duplicate `op_id`, or a room
+  mismatch never reaches state even though its envelope opened cryptographically.
+  The check is compaction-aware (a §14.5 base's covered op ids + per-device seq
+  floor seed it) so a pruned parent / cross-snapshot seq is not spuriously
+  quarantined; crypto-valid-but-structurally-invalid ops are retained as §15 fork
+  evidence but excluded from `currentState`.
 - **Forward secrecy at removal** (§10.9): `removeDeviceFromRoom` commits an MLS
   Remove that advances the epoch; the evicted device cannot derive the new epoch
   key, proven by a test where its engine quarantines post-removal content.

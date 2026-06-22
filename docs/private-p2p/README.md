@@ -71,7 +71,11 @@ device of the §10.4 blind (`buildOpIntakeContext` exposes `deviceIdForBlind`):
 because the blind derives from the SHARED epoch secret any member can compute it,
 so the signature alone proves only WHO SIGNED — without the binding a member could
 sign under their own blind yet claim a higher-privilege device's id
-(impersonation).  The binding is proven by an end-to-end reject test.
+(impersonation).  The binding is proven by an end-to-end reject test.  After
+`openOp`, the engine runs the §14.2 structural pre-pass (`validateStructure`,
+compaction-base-aware) before `reduceRoom`, so a device fork (same `author_seq`), a
+non-causal `lamport`, a missing parent, a duplicate `op_id`, or a room mismatch
+never reaches state — proven by runtime-enforcement tests.
 
 The **room-creation + membership orchestration is shipped** (`engine/room-lifecycle.ts`):
 `createPrivateRoom` ties the §10.2 MLS group keying, the epoch→five-key bridge,

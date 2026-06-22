@@ -71,12 +71,21 @@ function genesis(): PrivateRoomOp {
 
 describe('order — Lamport + canonical total order (§14.3)', () => {
   it('compares decimal strings as big integers', () => {
-    expect(compareDecimalStrings('9', '10')).toBeLessThan(0); // length first
+    expect(compareDecimalStrings('9', '10')).toBeLessThan(0);
     expect(compareDecimalStrings('100', '99')).toBeGreaterThan(0);
     expect(compareDecimalStrings('42', '42')).toBe(0);
     expect(compareDecimalStrings('123456789012345678901', '123456789012345678900')).toBeGreaterThan(
       0,
     ); // beyond 2^53
+  });
+
+  it('compares by exact value, not string length (robust to leading zeros)', () => {
+    // The schema (`lamportSchema`) forbids leading zeros, so `canonicalOpOrder`
+    // never sees one — but the comparator's correctness must NOT depend on that.
+    // A length-then-lexicographic shortcut calls these wrong; BigInt is exact.
+    expect(compareDecimalStrings('007', '9')).toBeLessThan(0); // 7 < 9 (length says 3 > 1)
+    expect(compareDecimalStrings('007', '7')).toBe(0); // 7 === 7
+    expect(compareDecimalStrings('010', '9')).toBeGreaterThan(0); // 10 > 9
   });
 
   it('nextLamport = 1 + max(parents ∪ local)', () => {

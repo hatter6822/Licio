@@ -250,6 +250,89 @@ describe('PrivateRoomEngine — fixpoint convergence + quarantine', () => {
   });
 });
 
+describe('PrivateRoomEngine — §14.2 structural validation enforced in state', () => {
+  it('a device fork (two ops at the same author_seq) does not reach state', async () => {
+    const r = await room();
+    const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
+    const engine = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
+
+    const genesis = mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+      op_id: 'genesis',
+      lamport: '1',
+    });
+    // Two founder stories at the SAME author_seq (1) off genesis — a device fork.
+    const a = mkOp(story('s-a'), {
+      op_id: 'forkA',
+      author_seq: 1,
+      lamport: '2',
+      parents: ['genesis'],
+    });
+    const b = mkOp(story('s-b'), {
+      op_id: 'forkB',
+      author_seq: 1,
+      lamport: '3',
+      parents: ['genesis'],
+    });
+
+    const report = await engine.ingest([
+      await sealOp(genesis, founderSeal),
+      await sealOp(a, founderSeal),
+      await sealOp(b, founderSeal),
+    ]);
+    // All three open cryptographically (each is a valid signed op)…
+    expect(report.accepted.sort()).toStrictEqual(['forkA', 'forkB', 'genesis']);
+    // …but only the lower-lamport member of the same-seq pair reaches state; the
+    // fork is quarantined by the structural pre-pass (§14.2 step 9).
+    expect(engine.state().stories.has('s-a')).toBe(true);
+    expect(engine.state().stories.has('s-b')).toBe(false);
+  });
+
+  it('an op with a genuinely missing parent opens but does not reach state', async () => {
+    const r = await room();
+    const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
+    const engine = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
+    await engine.applyLocalOp(
+      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+        op_id: 'genesis',
+        lamport: '1',
+      }),
+      founderSeal,
+    );
+    // Parent 'ghost' was never ingested → missing_dependency, excluded from the fold.
+    const orphan = mkOp(story('s-orphan'), {
+      op_id: 'orphan',
+      author_seq: 1,
+      lamport: '2',
+      parents: ['ghost'],
+    });
+    const report = await engine.ingest([await sealOp(orphan, founderSeal)]);
+    expect(report.accepted).toStrictEqual(['orphan']); // crypto-opened
+    expect(engine.state().stories.has('s-orphan')).toBe(false); // but not folded
+  });
+
+  it('an op whose lamport is not after its parent does not reach state', async () => {
+    const r = await room();
+    const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
+    const engine = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
+    await engine.applyLocalOp(
+      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+        op_id: 'genesis',
+        lamport: '5',
+      }),
+      founderSeal,
+    );
+    // lamport 3 ≤ parent genesis's 5 → violates §14.3.1, excluded from the fold.
+    const acausal = mkOp(story('s-acausal'), {
+      op_id: 'acausal',
+      author_seq: 1,
+      lamport: '3',
+      parents: ['genesis'],
+    });
+    await engine.ingest([await sealOp(acausal, founderSeal)]);
+    expect(engine.state().stories.has('s-acausal')).toBe(false);
+  });
+});
+
 describe('PrivateRoomEngine — §15.6 sync surface', () => {
   it('announces heads + computes what a peer wants', async () => {
     const r = await room();

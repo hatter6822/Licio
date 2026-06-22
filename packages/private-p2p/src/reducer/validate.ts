@@ -33,22 +33,41 @@ export interface StructuralValidationResult {
 }
 
 /**
+ * A causally-closed prefix already accepted before `candidateOps` — e.g. a §14.5
+ * snapshot base whose covered ops are pruned from the candidate set.  Without it,
+ * a post-snapshot op whose parent lives in the (pruned) prefix would be wrongly
+ * quarantined as a missing dependency, and a device's `author_seq` could appear to
+ * "restart" after compaction.
+ */
+export interface StructuralBaseContext {
+  /** Op ids accepted in the prefix (a candidate parent in here is NOT missing). */
+  readonly knownOpIds?: ReadonlySet<string>;
+  /** Per-device max `author_seq` covered by the prefix (the monotonicity floor). */
+  readonly deviceSeqFloor?: ReadonlyMap<string, number>;
+}
+
+/**
  * Run the §14.2 structural checks over `candidateOps` for `roomId`.  In canonical
  * order: reject a `room_id` mismatch (step 6); quarantine an op whose parent is
  * not accepted (step 10 — a genuinely missing dependency); reject a `lamport`
  * not strictly greater than every parent (§14.3.1); reject a non-monotonic
  * per-device `author_seq` (step 9 — also catches a same-seq device fork); reject
- * a duplicate `op_id`.
+ * a duplicate `op_id`.  `base` carries an already-accepted prefix (a §14.5
+ * compaction base) so a candidate referencing a pruned parent / continuing a
+ * device's seq across the snapshot boundary is not spuriously quarantined.
  */
 export function validateStructure(
   candidateOps: readonly PrivateRoomOp[],
   roomId: string,
+  base?: StructuralBaseContext,
 ): StructuralValidationResult {
   const accepted: PrivateRoomOp[] = [];
   const quarantined: RejectedOp[] = [];
   const acceptedLamport = new Map<string, string>();
-  const deviceMaxSeq = new Map<string, number>();
-  const seenOpIds = new Set<string>();
+  // Seed the per-device seq floor + the seen-id set from the accepted prefix.
+  const deviceMaxSeq = new Map<string, number>(base?.deviceSeqFloor);
+  const seenOpIds = new Set<string>(base?.knownOpIds);
+  const knownOpIds = base?.knownOpIds;
 
   for (const op of canonicalOpOrder(candidateOps)) {
     if (seenOpIds.has(op.op_id)) {
@@ -63,11 +82,16 @@ export function validateStructure(
     let missingParent = false;
     for (const parent of op.parents) {
       const lamport = acceptedLamport.get(parent);
-      if (lamport === undefined) {
-        missingParent = true;
-        break;
+      if (lamport !== undefined) {
+        parentLamports.push(lamport);
+        continue;
       }
-      parentLamports.push(lamport);
+      // A parent in the accepted prefix (a compacted base) is present, just pruned
+      // — it was structurally validated before compaction, so its exact lamport is
+      // no longer needed for this op's causality check.
+      if (knownOpIds?.has(parent)) continue;
+      missingParent = true;
+      break;
     }
     if (missingParent) {
       quarantined.push({ opId: op.op_id, reason: 'missing_dependency' });

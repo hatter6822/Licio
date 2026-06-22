@@ -74,4 +74,32 @@ describe('base32 (RFC 4648 §10, lowercase no-pad)', () => {
     expect(base32LowerNoPad(utf8('fooba'))).toBe('mzxw6ytb');
     expect(base32LowerNoPad(utf8('foobar'))).toBe('mzxw6ytboi');
   });
+
+  it('agrees with a BigInt reference at every length (no accumulator overflow)', () => {
+    // An independent, obviously-correct encoder over a BigInt bit-stream — no
+    // 32-bit accumulator, so it cannot share any truncation behavior with the
+    // streaming encoder.  Agreement across lengths up to 40 bytes (well past the
+    // 4-byte point where a 32-bit accumulator would overflow) pins the streaming
+    // encoder's correctness independent of how many bits it happens to read.
+    const reference = (bytes: Uint8Array): string => {
+      if (bytes.length === 0) return '';
+      let acc = 0n;
+      for (const b of bytes) acc = (acc << 8n) | BigInt(b);
+      const totalBits = bytes.length * 8;
+      const outLen = Math.ceil(totalBits / 5);
+      acc <<= BigInt(outLen * 5 - totalBits); // RFC 4648 zero-pads the low bits
+      let out = '';
+      for (let i = outLen - 1; i >= 0; i--) {
+        out += BASE32_REFERENCE_ALPHABET[Number((acc >> BigInt(i * 5)) & 0x1fn)];
+      }
+      return out;
+    };
+    for (let len = 0; len <= 40; len++) {
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = (i * 37 + 11) & 0xff;
+      expect(base32LowerNoPad(bytes)).toBe(reference(bytes));
+    }
+  });
 });
+
+const BASE32_REFERENCE_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567';

@@ -27,6 +27,7 @@ import {
 import { reduceRoom } from '../reducer/reduce.js';
 import { deserializeReducerState, serializeReducerState } from '../reducer/snapshot-state.js';
 import { type RoomReducerState, roomStateCommitment } from '../reducer/state.js';
+import { validateStructure } from '../reducer/validate.js';
 import {
   type OpIntakeRejection,
   openOp,
@@ -145,9 +146,24 @@ export class PrivateRoomEngine {
     this.currentState = reduceRoom([]);
   }
 
-  /** Re-fold the post-snapshot ops onto the (optional) snapshot base. */
+  /**
+   * Re-fold the post-snapshot ops onto the (optional) snapshot base.  The §14.2
+   * structural pre-pass runs FIRST (over the compaction base) so only structurally
+   * valid ops reach the fold: a device fork (same `author_seq`), a non-causal
+   * `lamport`, an op with a genuinely missing parent, a duplicate `op_id`, or a
+   * room mismatch never influences state — even though its envelope opened
+   * cryptographically.  `openOp` proves WHO authored an op; `validateStructure`
+   * proves the op is a well-formed DAG node before `reduceRoom` applies authority.
+   * Crypto-valid-but-structurally-invalid ops stay in `acceptedOps` (retained as
+   * §15 fork evidence + so a later-arriving parent can resolve a child), but they
+   * do not contribute to `currentState`.
+   */
   private refold(): void {
-    this.currentState = reduceRoom([...this.acceptedOps.values()], this.baseState);
+    const structural = validateStructure([...this.acceptedOps.values()], this.roomId, {
+      knownOpIds: this.coveredOpIds,
+      deviceSeqFloor: this.baseAuthorSeq,
+    });
+    this.currentState = reduceRoom(structural.accepted, this.baseState);
   }
 
   /** Create an engine and rehydrate it by re-verifying every stored envelope. */

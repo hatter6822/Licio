@@ -7,11 +7,13 @@
 // components break ties between truly-concurrent ops and are fully determined by
 // op content, so every device derives the IDENTICAL sequence (§14.3.3).
 //
-// `lamport` is a non-negative DECIMAL STRING (exact beyond 2^53).  It is compared
-// as a big integer WITHOUT BigInt parsing: a canonical no-leading-zero decimal
-// string sorts numerically by (length, then lexicographic).  The three string
-// tiebreakers are compared BYTEWISE over their UTF-8 encoding (the same rule the
-// canonical profile uses for map keys), so the order is charset-independent.
+// `lamport` is a non-negative DECIMAL STRING (exact beyond 2^53).  It is parsed to
+// a `bigint` and compared by exact numeric value — correctness is SELF-CONTAINED,
+// not contingent on a leading-zero/canonicalization assumption about the string
+// (the schema forbids leading zeros, but the comparator must not silently mis-
+// order if a non-canonical string ever reaches it).  The three string tiebreakers
+// are compared BYTEWISE over their UTF-8 encoding (the same rule the canonical
+// profile uses for map keys), so the order is charset-independent.
 
 import { compareBytes } from '../crypto/canonical.js';
 import type { PrivateRoomOp } from '../schemas/ops.js';
@@ -19,13 +21,15 @@ import type { PrivateRoomOp } from '../schemas/ops.js';
 const TEXT_ENCODER = new TextEncoder();
 
 /**
- * Compare two canonical non-negative decimal strings as integers.  No leading
- * zeros (the `lamportSchema` invariant) ⇒ the longer string is the larger number,
- * and equal-length strings compare lexicographically.  No BigInt needed.
+ * Compare two non-negative decimal strings by exact integer value, via `bigint`
+ * (exact for an unbounded clock).  This does NOT depend on the no-leading-zero
+ * schema invariant for correctness — `"007"` and `"7"` compare equal, and `"007"`
+ * sorts below `"9"` — so a non-canonical string can never silently mis-order.
  */
 export function compareDecimalStrings(a: string, b: string): number {
-  if (a.length !== b.length) return a.length - b.length;
-  return a < b ? -1 : a > b ? 1 : 0;
+  const av = BigInt(a);
+  const bv = BigInt(b);
+  return av < bv ? -1 : av > bv ? 1 : 0;
 }
 
 /** Bytewise (UTF-8) string comparison — charset-independent and device-stable. */
@@ -36,18 +40,22 @@ function compareUtf8(a: string, b: string): number {
 /**
  * The §14.3.2 canonical total order over `(lamport, created_at_bucket,
  * author_device_id, op_id)`.  Returns a NEW array (input untouched); the result
- * is identical regardless of input order.
+ * is identical regardless of input order.  Each op's `lamport` is parsed to a
+ * `bigint` ONCE (decorate-sort-undecorate) — exact comparison without re-parsing
+ * the decimal string on every comparison.
  */
 export function canonicalOpOrder(ops: readonly PrivateRoomOp[]): PrivateRoomOp[] {
-  return ops.slice().sort((a, b) => {
-    const byLamport = compareDecimalStrings(a.lamport, b.lamport);
-    if (byLamport !== 0) return byLamport;
-    const byBucket = compareUtf8(a.created_at_bucket, b.created_at_bucket);
-    if (byBucket !== 0) return byBucket;
-    const byDevice = compareUtf8(a.author_device_id, b.author_device_id);
-    if (byDevice !== 0) return byDevice;
-    return compareUtf8(a.op_id, b.op_id);
-  });
+  return ops
+    .map((op) => ({ op, lamport: BigInt(op.lamport) }))
+    .sort((a, b) => {
+      if (a.lamport !== b.lamport) return a.lamport < b.lamport ? -1 : 1;
+      const byBucket = compareUtf8(a.op.created_at_bucket, b.op.created_at_bucket);
+      if (byBucket !== 0) return byBucket;
+      const byDevice = compareUtf8(a.op.author_device_id, b.op.author_device_id);
+      if (byDevice !== 0) return byDevice;
+      return compareUtf8(a.op.op_id, b.op.op_id);
+    })
+    .map((entry) => entry.op);
 }
 
 /**

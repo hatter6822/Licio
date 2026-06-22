@@ -30,7 +30,15 @@ async function sha256(data: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await getSubtle().digest('SHA-256', toBufferSource(data)));
 }
 
-/** RFC 4648 base32 (lowercase, NO padding) — the multibase "b" body. */
+/**
+ * RFC 4648 base32 (lowercase, NO padding) — the multibase "b" body.
+ *
+ * `value` holds ONLY the bits not yet emitted: after each 5-bit group is written,
+ * it is masked back down to the `bits` low un-emitted bits.  So the accumulator is
+ * never wider than 12 bits (≤4 carried + 8 appended) and the encoder never relies
+ * on JS's implicit 32-bit truncation to discard stale high bits — correctness is
+ * local to each step rather than a global invariant about which bits get read.
+ */
 export function base32LowerNoPad(bytes: Uint8Array): string {
   let out = '';
   let bits = 0;
@@ -42,6 +50,7 @@ export function base32LowerNoPad(bytes: Uint8Array): string {
       bits -= 5;
       out += BASE32_ALPHABET[(value >>> bits) & 0x1f];
     }
+    value &= (1 << bits) - 1; // keep only the un-emitted low `bits` bits
   }
   if (bits > 0) {
     out += BASE32_ALPHABET[(value << (5 - bits)) & 0x1f];
