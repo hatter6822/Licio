@@ -145,6 +145,29 @@ export class PrivateRoomEngine {
     this.epochs.set(epoch, keys);
   }
 
+  /** The next Lamport stamp to author locally: `max(accepted) + 1` (a decimal
+   *  string, big-int-safe, §14.3.1) so a new op strictly succeeds every op the
+   *  device has seen. */
+  nextLamport(): string {
+    let max = 0n;
+    for (const op of this.acceptedOps.values()) {
+      const value = BigInt(op.lamport);
+      if (value > max) max = value;
+    }
+    return (max + 1n).toString();
+  }
+
+  /** The next `author_seq` for a device: `max(its accepted seqs) + 1` (the §10.4
+   *  per-device monotonic counter), so re-authoring after a reload never reuses a
+   *  sequence number. */
+  nextAuthorSeq(deviceId: string): number {
+    let next = 0;
+    for (const op of this.acceptedOps.values()) {
+      if (op.author_device_id === deviceId && op.author_seq >= next) next = op.author_seq + 1;
+    }
+    return next;
+  }
+
   /**
    * Ingest encrypted envelopes (from a peer, an archive import, or local seal).
    * Runs the bounded open→fold→rebuild-context FIXPOINT so an in-batch causal

@@ -17,6 +17,7 @@ import { exportPublicKeyRaw, generateDeviceSigningKeyPair } from '../crypto/sign
 import { InMemoryPrivateRoomStorage, PrivateRoomEngine } from '../engine/room-engine.js';
 import {
   buildMemberAddOp,
+  buildRoomOp,
   computeManifestCommitment,
   createPrivateRoom,
   DEFAULT_PRIVATE_ROOM_POLICY,
@@ -172,21 +173,23 @@ describe('membership flow — invite + join (two devices, no transport)', () => 
     expect(bobJoin.epochState.keys.rendezvousKey).toStrictEqual(aliceEpoch1.keys.rendezvousKey);
 
     // 5) Alice authors the member.add op (under epoch 1) + applies it.
-    const { op: addBobOp, sealParams: addBobSeal } = await buildMemberAddOp({
-      roomId: 'r',
-      roomIdCommitment: room.roomIdCommitment,
-      epochState: aliceEpoch1,
-      author: {
-        memberId: 'alice',
-        deviceId: 'alice-dev',
-        signingKey: room.founder.signingKeyPair.privateKey,
-        seq: 1,
+    const { op: addBobOp, sealParams: addBobSeal } = await buildMemberAddOp(
+      {
+        roomId: 'r',
+        roomIdCommitment: room.roomIdCommitment,
+        epochState: aliceEpoch1,
+        author: {
+          memberId: 'alice',
+          deviceId: 'alice-dev',
+          signingKey: room.founder.signingKeyPair.privateKey,
+          seq: alice.nextAuthorSeq('alice-dev'),
+        },
+        opId: 'add-bob',
+        parents: alice.heads(),
+        lamport: alice.nextLamport(),
+        createdAt: '2026-06-22T00:00:00Z',
       },
-      opId: 'add-bob',
-      parents: alice.heads(),
-      lamport: '2',
-      createdAt: '2026-06-22T00:00:00Z',
-      newMember: {
+      {
         memberId: 'bob',
         deviceId: 'bob-dev',
         signingPublicKey: bobSigningPub,
@@ -194,7 +197,7 @@ describe('membership flow — invite + join (two devices, no transport)', () => 
         mlsKeyPackage: toBase64Url(encodeKeyPackage(bobBundle.publicPackage)),
         role: 'member',
       },
-    });
+    );
     alice.addEpochKeys(1, heldKeysOf(aliceEpoch1));
     await alice.applyLocalOp(addBobOp, addBobSeal);
     expect(alice.state().members.get('bob')?.role).toBe('member');
@@ -221,5 +224,79 @@ describe('membership flow — invite + join (two devices, no transport)', () => 
     expect(bob.state().members.get('alice')?.role).toBe('admin');
     expect(bob.state().members.get('bob')?.role).toBe('member');
     expect(bob.heads()).toStrictEqual(['add-bob']);
+  });
+});
+
+describe('content authoring — buildRoomOp + engine metadata helpers', () => {
+  it('a founder authors a story + a comment that land in reduced state', async () => {
+    const room = await createPrivateRoom(baseParams());
+    const engine = await PrivateRoomEngine.load({
+      ...room.engineParams,
+      storage: new InMemoryPrivateRoomStorage(),
+    });
+    await engine.applyLocalOp(room.genesisOp, room.sealParams);
+
+    // Author a story (the engine helpers compute parents/lamport/author_seq).
+    const { op: storyOp, sealParams: storySeal } = await buildRoomOp(
+      {
+        roomId: room.roomId,
+        roomIdCommitment: room.roomIdCommitment,
+        epochState: room.epochState,
+        author: {
+          memberId: 'founder',
+          deviceId: 'founder-dev',
+          signingKey: room.founder.signingKeyPair.privateKey,
+          seq: engine.nextAuthorSeq('founder-dev'),
+        },
+        opId: 's1',
+        parents: engine.heads(),
+        lamport: engine.nextLamport(),
+        createdAt: '2026-06-22T00:00:00Z',
+      },
+      {
+        type: 'story.create',
+        story_id: 's1',
+        thread_id: 't1',
+        title: 'Hello',
+        submission_type: 'original_brief',
+        topic_ids: [],
+        submission_metadata: {},
+      },
+    );
+    await engine.applyLocalOp(storyOp, storySeal);
+    expect(engine.state().stories.get('s1')?.title).toBe('Hello');
+
+    // Author a comment on the story's thread.
+    const { op: commentOp, sealParams: commentSeal } = await buildRoomOp(
+      {
+        roomId: room.roomId,
+        roomIdCommitment: room.roomIdCommitment,
+        epochState: room.epochState,
+        author: {
+          memberId: 'founder',
+          deviceId: 'founder-dev',
+          signingKey: room.founder.signingKeyPair.privateKey,
+          seq: engine.nextAuthorSeq('founder-dev'),
+        },
+        opId: 'c1',
+        parents: engine.heads(),
+        lamport: engine.nextLamport(),
+        createdAt: '2026-06-22T00:00:00Z',
+      },
+      {
+        type: 'contribution.create',
+        contribution_id: 'c1',
+        thread_id: 't1',
+        contribution_type: 'comment',
+        body_markdown_lite: 'first!',
+        client_draft_id: 'd1',
+      },
+    );
+    await engine.applyLocalOp(commentOp, commentSeal);
+    expect(engine.state().contributions.get('c1')?.bodyMarkdownLite).toBe('first!');
+
+    // The metadata helpers advanced across the three founder-dev ops.
+    expect(engine.nextAuthorSeq('founder-dev')).toBe(3);
+    expect(engine.nextLamport()).toBe('4');
   });
 });

@@ -52,6 +52,10 @@ import {
 import { type PrivateRoomOp, privateRoomOpSchema } from '../schemas/ops.js';
 import type { PrivateRoomEngineParams } from './room-engine.js';
 
+/** The op-body INPUT type (pre-zod-defaults): a content op may omit fields the
+ *  schema defaults (e.g. `citations`/`metadata`), which `buildRoomOp` parses in. */
+type PrivateOpBodyInput = z.input<typeof privateRoomOpSchema>['body'];
+
 type PrivateRoomPolicy = z.infer<typeof privateRoomPolicySchema>;
 
 /** The §4.1 P2P-room policy defaults (the maintainer-private posture: unlisted,
@@ -361,11 +365,13 @@ export async function joinRoom(params: {
   return { group, epochState };
 }
 
-/** Parameters for `buildMemberAddOp` (a non-genesis admin-authored device add). */
-export interface BuildMemberAddOpParams {
+/** The author + causal metadata shared by every non-genesis op builder.  The
+ *  causal fields (`parents` = current heads, `lamport`, `author.seq`) derive from
+ *  the local DAG — the engine exposes `heads()`/`nextLamport()`/`nextAuthorSeq()`. */
+export interface OpAuthoringBase {
   readonly roomId: string;
   readonly roomIdCommitment: Uint8Array;
-  /** The epoch the op is authored + sealed under (the post-Add epoch). */
+  /** The epoch the op is authored + sealed under. */
   readonly epochState: RoomEpochState;
   readonly author: {
     readonly memberId: string;
@@ -377,56 +383,70 @@ export interface BuildMemberAddOpParams {
   readonly parents: readonly string[];
   readonly lamport: string;
   readonly createdAt?: string;
-  readonly newMember: {
-    readonly memberId: string;
-    readonly deviceId: string;
-    readonly signingPublicKey: string;
-    readonly hpkePublicKey: string;
-    /** base64url of `encodeKeyPackage(newDevice.publicPackage)`. */
-    readonly mlsKeyPackage: string;
-    readonly role: z.infer<typeof privateRoleSchema>;
-  };
   readonly capabilityRootAtSeq?: Uint8Array;
 }
 
 /**
- * Author a §12 `member.add` op (an existing admin adds a device) + the params to
- * seal it under `epochState`.  The op's causal metadata (`parents` = current
- * heads, `lamport`, `author.seq`) is the caller's responsibility — it derives
- * from the local DAG the engine tracks.
+ * Author ANY §13 room op (membership or content) from a `PrivateOpBody` + the
+ * params to seal it under `epochState`.  This is the single op-authoring core
+ * (`buildMemberAddOp` and content authoring both route through it); the reducer's
+ * §11.3 capability check enforces whether the author may apply the op.
  */
-export async function buildMemberAddOp(
-  params: BuildMemberAddOpParams,
+export async function buildRoomOp(
+  base: OpAuthoringBase,
+  body: PrivateOpBodyInput,
 ): Promise<{ op: PrivateRoomOp; sealParams: SealOpParams }> {
-  const createdAt = params.createdAt ?? new Date().toISOString();
+  const createdAt = base.createdAt ?? new Date().toISOString();
   const op = privateRoomOpSchema.parse({
     schema: 'licio.private.op.v1',
-    room_id: params.roomId,
-    epoch: Number(params.epochState.epoch),
-    op_id: params.opId,
-    author_member_id: params.author.memberId,
-    author_device_id: params.author.deviceId,
-    author_seq: params.author.seq,
+    room_id: base.roomId,
+    epoch: Number(base.epochState.epoch),
+    op_id: base.opId,
+    author_member_id: base.author.memberId,
+    author_device_id: base.author.deviceId,
+    author_seq: base.author.seq,
     created_at: createdAt,
     created_at_bucket: createdAt.slice(0, 13),
-    lamport: params.lamport,
-    parents: [...params.parents],
-    body: {
-      type: 'member.add',
-      member_id: params.newMember.memberId,
-      device_id: params.newMember.deviceId,
-      signing_public_key: params.newMember.signingPublicKey,
-      hpke_public_key: params.newMember.hpkePublicKey,
-      mls_key_package: params.newMember.mlsKeyPackage,
-      granted_role: params.newMember.role,
-    },
-  } satisfies PrivateRoomOp);
+    lamport: base.lamport,
+    parents: [...base.parents],
+    body,
+  } satisfies z.input<typeof privateRoomOpSchema>);
   const sealParams = await buildSealParams(
-    params.epochState,
-    params.roomIdCommitment,
-    params.author.deviceId,
-    params.author.signingKey,
-    params.capabilityRootAtSeq ?? (await emptyCapabilityRoot()),
+    base.epochState,
+    base.roomIdCommitment,
+    base.author.deviceId,
+    base.author.signingKey,
+    base.capabilityRootAtSeq ?? (await emptyCapabilityRoot()),
   );
   return { op, sealParams };
+}
+
+/** The device an admin admits (the §12 `member.add` body fields). */
+export interface NewMemberDevice {
+  readonly memberId: string;
+  readonly deviceId: string;
+  readonly signingPublicKey: string;
+  readonly hpkePublicKey: string;
+  /** base64url of `encodeKeyPackage(newDevice.publicPackage)`. */
+  readonly mlsKeyPackage: string;
+  readonly role: z.infer<typeof privateRoleSchema>;
+}
+
+/**
+ * Author a §12 `member.add` op (an existing admin adds a device).  A thin wrapper
+ * over `buildRoomOp` that assembles the member.add body.
+ */
+export function buildMemberAddOp(
+  base: OpAuthoringBase,
+  newMember: NewMemberDevice,
+): Promise<{ op: PrivateRoomOp; sealParams: SealOpParams }> {
+  return buildRoomOp(base, {
+    type: 'member.add',
+    member_id: newMember.memberId,
+    device_id: newMember.deviceId,
+    signing_public_key: newMember.signingPublicKey,
+    hpke_public_key: newMember.hpkePublicKey,
+    mls_key_package: newMember.mlsKeyPackage,
+    granted_role: newMember.role,
+  });
 }
