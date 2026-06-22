@@ -7,6 +7,7 @@
 // WebRTC carrier + server rendezvous endpoints (WS-S.6.2/6.6) build on it.
 
 export * from './handshake.js';
+export * from './head-sync.js';
 export * from './rendezvous.js';
 export * from './secure-channel.js';
 export * from './signaling.js';
