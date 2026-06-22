@@ -6,6 +6,7 @@
 // §15.3.1 authorization property, the §15.3.2 metadata mitigations); the live
 // WebRTC carrier + server rendezvous endpoints (WS-S.6.2/6.6) build on it.
 
+export * from './archive.js';
 export * from './handshake.js';
 export * from './head-sync.js';
 export * from './rendezvous.js';
