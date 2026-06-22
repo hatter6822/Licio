@@ -104,6 +104,10 @@ export class PrivateRoomSession {
   get deviceId(): string {
     return this.session.deviceId;
   }
+  /** The room's display name (from the persisted manifest). */
+  get name(): string {
+    return manifestName(this.session.manifest);
+  }
 
   /** The current reduced room state (members, stories, contributions, …). */
   state(): RoomReducerState {
