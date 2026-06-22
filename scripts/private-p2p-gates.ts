@@ -53,14 +53,25 @@ export interface GateViolation {
 // denylist over the private trees (S.4.4 reuses this gate).
 // ---------------------------------------------------------------------------
 
-/** Public-gateway / public-routing tokens forbidden in any private-p2p tree. */
-export const PUBLIC_GATEWAY_PATTERNS: ReadonlyArray<{ pattern: RegExp; detail: string }> = [
-  { pattern: /ipfs\.io/i, detail: 'public ipfs.io gateway' },
-  { pattern: /dweb\.link/i, detail: 'public dweb.link gateway' },
-  { pattern: /cloudflare-ipfs/i, detail: 'public cloudflare-ipfs gateway' },
-  { pattern: /gateway\.pinata/i, detail: 'public pinata gateway' },
+// Public-gateway / public-routing tokens forbidden in any private-p2p tree.
+// This is a source-scanning DENYLIST, NOT a URL validator: every token is
+// forbidden ANYWHERE on a line (a public-gateway reference is illegal in any
+// position), so the match is an intentional unanchored, case-insensitive
+// substring — it never sanitizes an untrusted URL.  The host tokens are held as
+// plain DATA and matched with `includes` (so there is no unanchored hostname
+// REGEX LITERAL — which a URL-sanitization linter would otherwise flag as a
+// false positive); only the genuinely-structured tokens (a CID path, an
+// optional separator) stay regexes, and neither of those is a hostname.
+const FORBIDDEN_GATEWAY_SUBSTRINGS: ReadonlyArray<{ token: string; detail: string }> = [
+  { token: 'ipfs.io', detail: 'public ipfs.io gateway' },
+  { token: 'dweb.link', detail: 'public dweb.link gateway' },
+  { token: 'cloudflare-ipfs', detail: 'public cloudflare-ipfs gateway' },
+  { token: 'gateway.pinata', detail: 'public pinata gateway' },
+  { token: '/ipns/', detail: 'public-gateway /ipns/ URL path' },
+];
+
+const FORBIDDEN_GATEWAY_REGEXES: ReadonlyArray<{ pattern: RegExp; detail: string }> = [
   { pattern: /\/ipfs\/[a-z0-9]/i, detail: 'public-gateway /ipfs/<cid> URL path' },
-  { pattern: /\/ipns\//i, detail: 'public-gateway /ipns/ URL path' },
   { pattern: /delegated[-_]?routing/i, detail: 'delegated public routing' },
 ];
 
@@ -70,9 +81,12 @@ export function scanPublicGatewayEgress(
   const violations: GateViolation[] = [];
   for (const { path, content } of files) {
     const code = stripComments(content);
-    const lines = code.split('\n');
-    lines.forEach((line, i) => {
-      for (const { pattern, detail } of PUBLIC_GATEWAY_PATTERNS) {
+    code.split('\n').forEach((line, i) => {
+      const lower = line.toLowerCase();
+      for (const { token, detail } of FORBIDDEN_GATEWAY_SUBSTRINGS) {
+        if (lower.includes(token)) violations.push({ file: path, line: i + 1, detail });
+      }
+      for (const { pattern, detail } of FORBIDDEN_GATEWAY_REGEXES) {
         if (pattern.test(line)) violations.push({ file: path, line: i + 1, detail });
       }
     });

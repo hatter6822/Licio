@@ -23,10 +23,12 @@ import {
 
 describe('WS-S.1.5 stripComments', () => {
   it('removes line + block comments but keeps code', () => {
-    expect(stripComments('const x = 1; // ipfs.io is fine in a comment').includes('ipfs.io')).toBe(
-      false,
-    );
-    expect(stripComments('/* uses ipfs.io */ const y = 2;').includes('ipfs.io')).toBe(false);
+    // A neutral sentinel (deliberately NOT a hostname): this unit only proves
+    // comment BODIES are stripped.  The gateway-token-in-a-comment behaviour is
+    // covered end to end by the "ignores a public-gateway reference inside a
+    // comment" scan test below.
+    expect(stripComments('const x = 1; // SENTINEL in a comment').includes('SENTINEL')).toBe(false);
+    expect(stripComments('/* uses SENTINEL */ const y = 2;').includes('SENTINEL')).toBe(false);
     expect(stripComments('const z = 3;').includes('z = 3')).toBe(true);
   });
 });
