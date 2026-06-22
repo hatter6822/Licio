@@ -65,7 +65,13 @@ confers no trust), quarantines what cannot open, and exposes the §15.6 sync
 surface (`headAnnouncement`/`wantedFrom`) + the §15.9 offline archive
 (`exportArchive`/`importArchive`) — so two engines holding the same room keys
 **converge to byte-identical state by exchanging an archive, with no live
-transport** (proven by a two-engine test).
+transport** (proven by a two-engine test).  `openOp` BINDS the plaintext
+`author_device_id` (which the reducer trusts for authority) to the resolved
+device of the §10.4 blind (`buildOpIntakeContext` exposes `deviceIdForBlind`):
+because the blind derives from the SHARED epoch secret any member can compute it,
+so the signature alone proves only WHO SIGNED — without the binding a member could
+sign under their own blind yet claim a higher-privilege device's id
+(impersonation).  The binding is proven by an end-to-end reject test.
 
 The **room-creation + membership orchestration is shipped** (`engine/room-lifecycle.ts`):
 `createPrivateRoom` ties the §10.2 MLS group keying, the epoch→five-key bridge,
@@ -118,12 +124,18 @@ splice.  All chunks seal to one uniform ciphertext length, so the wire reveals o
 the chunk count.
 
 Snapshots + compaction are shipped (WS-S.5.9, §14.5/§25.6): `serializeReducerState`/
-`deserializeReducerState` round-trip the COMPLETE reduced state (capabilities
-re-derived from role); `reduceRoom(ops, base?)` folds onto a snapshot base; and the
-engine's `createSnapshot()` / `compact()` adopt a snapshot as the fold base and
-PRUNE the ops it covers.  Compaction is proven to preserve both the logical state
-and the heads frontier, to keep a compacted engine **byte-identical to a full fold
-of every op** (a compacted and an uncompacted device converge), and to keep
+`deserializeReducerState` round-trip the COMPLETE reduced state — including each
+member's FULL capability set verbatim, NOT re-derived from role: a `role.grant` /
+`role.revoke` op may grant or revoke an individual capability independent of the
+role (§11.3), and `roomStateCommitment` hashes the full set, so re-deriving from
+role alone would silently drop an individual grant and diverge a compacted device's
+state root (and its authority decisions) from an uncompacted one.  `reduceRoom(ops,
+base?)` folds onto a snapshot base; and the engine's `createSnapshot()` /
+`compact()` adopt a snapshot as the fold base and PRUNE the ops it covers.
+Compaction is proven to preserve both the logical state and the heads frontier, to
+keep a compacted engine **byte-identical to a full fold of every op** (a compacted
+and an uncompacted device converge — including an individually granted capability,
+with the post-compaction state root still matching the snapshot's), and to keep
 authored Lamport/seq monotonic across the prune (so the two devices still agree on
 canonical order); a re-received covered op is ignored.  (The apps/web persistence
 of snapshots — dropping pruned envelopes from IndexedDB on reload — is a tracked

@@ -171,6 +171,57 @@ describe('buildOpIntakeContext — seal → reduce → open against state', () =
     if (result.ok) expect(result.op.body.type).toBe('story.create');
   });
 
+  it('rejects an op whose plaintext author_device_id differs from the blind (impersonation defense)', async () => {
+    const s = await setup();
+    const genesis = mkOp(s.founder.body, { op_id: 'genesis', lamport: '1' });
+    // The founder admits bob as a low-privilege member (carrying bob's real key).
+    const bob = await memberAdd('bob', 'bob-dev', 'member');
+    const addBob = mkOp(bob.body, {
+      op_id: 'add-bob',
+      lamport: '2',
+      author_seq: 1,
+      parents: ['genesis'],
+    });
+    const state = reduceRoom([genesis, addBob]);
+
+    // Bob computes HIS OWN blind (he can — the epoch secret is shared) and signs
+    // with HIS key, but forges the plaintext author_device_id to the founder's
+    // admin device so the reducer would apply the op as the admin's.
+    const bobBlind = await deriveAuthorDeviceIdBlind(
+      s.epoch0Secret,
+      s.roomIdCommitment,
+      'bob-dev',
+      0,
+    );
+    const forged = mkOp(
+      { type: 'role.grant', member_id: 'bob', role: 'admin' },
+      {
+        op_id: 'forge',
+        author_member_id: 'founder',
+        author_device_id: 'founder-dev', // ← the lie (the blind resolves to bob-dev)
+        author_seq: 0,
+        lamport: '3',
+        parents: ['add-bob'],
+      },
+    );
+    const envelope = await sealOp(forged, {
+      roomIdCommitment: s.roomIdCommitment,
+      contentWrapKey: s.contentWrapKey,
+      deviceSigningKey: bob.device.privateKey, // signed by BOB
+      authorDeviceIdBlind: bobBlind, // BOB's blind
+      capabilityRootAtSeq: randomBytes(16),
+    });
+
+    const ctx = await buildOpIntakeContext({
+      state,
+      roomIdCommitment: s.roomIdCommitment,
+      epochs: s.epochs,
+    });
+    // The signature verifies (bob is the blind's device), but the plaintext claims
+    // founder-dev → the blind→device binding rejects it before the reducer sees it.
+    expect(await openOp(envelope, ctx)).toMatchObject({ ok: false, reason: 'metadata_mismatch' });
+  });
+
   it('rejects an op whose blind id matches no known device', async () => {
     const s = await setup();
     const genesis = mkOp(s.founder.body, { op_id: 'genesis', lamport: '1' });

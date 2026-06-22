@@ -78,6 +78,7 @@ async function setup() {
     roomIdCommitment,
     contentWrapKeyForEpoch: (e) => (e === 0 ? contentWrapKey : undefined),
     deviceSigningKey: (b) => (b === blind ? device.publicKey : undefined),
+    deviceIdForBlind: (b) => (b === blind ? 'founder-dev' : undefined),
   };
   const roomIdHash = toBase64Url(roomIdCommitment);
   const ops = [

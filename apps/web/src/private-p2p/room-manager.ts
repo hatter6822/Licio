@@ -166,6 +166,17 @@ export class PrivateRoomSession {
     const session = await getRoomSession(roomId);
     if (!session) return null;
     const p2p = await loadP2p();
+    // Re-validate the persisted manifest through the schema (the manager owns the
+    // dynamically-imported schema; this module's type-only import cannot).  A
+    // valid manifest is adopted as typed state; a corrupted DISPLAY-ONLY manifest
+    // must not brick an otherwise-intact room (its envelopes + epoch keys are
+    // independent and the cryptographic binding is the manifest COMMITMENT,
+    // verified at join), so fall back to the opaque value — availability over
+    // strictness for a non-cryptographic field (SPEC §6.9).
+    const manifestResult = p2p.privateRoomManifestSchema.safeParse(session.manifest);
+    const validatedSession = manifestResult.success
+      ? { ...session, manifest: manifestResult.data }
+      : session;
     const epochs = new Map(
       session.epochs.map((entry) => [
         entry.epoch,
@@ -179,7 +190,7 @@ export class PrivateRoomSession {
       epochs,
       bootstrapDevices: session.bootstrapDevices,
     });
-    return new PrivateRoomSession(p2p, engine, session);
+    return new PrivateRoomSession(p2p, engine, validatedSession);
   }
 
   /** Every private room on this device (for a room list). */

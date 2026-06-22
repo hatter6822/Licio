@@ -61,6 +61,7 @@ async function setup() {
     roomIdCommitment,
     contentWrapKeyForEpoch: (epoch: number) => (epoch === 0 ? contentWrapKey : undefined),
     deviceSigningKey: (b: string) => (b === blind ? device.publicKey : undefined),
+    deviceIdForBlind: (b: string) => (b === blind ? 'founder-dev' : undefined),
   };
   return { device, roomIdCommitment, contentWrapKey, blind, sealParams, ctx };
 }
@@ -137,6 +138,20 @@ describe('§14.2 stage-1 reject matrix', () => {
     const env = await sealOp(mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
     const result = await openOp(env, { ...ctx, contentWrapKeyForEpoch: () => randomBytes(32) });
     expect(result).toMatchObject({ ok: false, reason: 'decrypt_failed' });
+  });
+
+  it('a plaintext author_device_id that does not match the blind → metadata_mismatch (impersonation)', async () => {
+    // A VALID op (signed by `device`, sealed under `blind`) whose plaintext claims
+    // a DIFFERENT author_device_id than the blind resolves to ('founder-dev').  The
+    // signature verifies (the signer is the blind's device), so only the
+    // blind→device binding stops the impersonation.
+    const { sealParams, ctx } = await setup();
+    const op = mkOp(memberAdd('founder', 'victim-dev', 'admin'), {
+      author_device_id: 'victim-dev',
+    });
+    const env = await sealOp(op, sealParams);
+    const result = await openOp(env, ctx);
+    expect(result).toMatchObject({ ok: false, reason: 'metadata_mismatch' });
   });
 
   it('a crafted metadata mismatch (AEAD opens, plaintext disagrees) → metadata_mismatch', async () => {
@@ -220,6 +235,7 @@ describe('end-to-end: seal → open → reduce', () => {
       roomIdCommitment,
       contentWrapKeyForEpoch: (e: number) => (e === 0 ? contentWrapKey : undefined),
       deviceSigningKey: (b: string) => (b === blind ? device.publicKey : undefined),
+      deviceIdForBlind: (b: string) => (b === blind ? 'founder-dev' : undefined),
     };
 
     const ops = [

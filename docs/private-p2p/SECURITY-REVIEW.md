@@ -74,6 +74,12 @@ not yet formally security-audited (its own disclaimer) — tracked in the README
 - **Determinism**: the reducer fold is byte-identical across delivery orders
   (§14.3.3, 25-shuffle property); compaction preserves convergence (a compacted
   and an uncompacted device produce identical state) with monotonic Lamport/seq.
+  A §14.5 snapshot serializes each member's FULL capability set verbatim (not
+  re-derived from role): a `role.grant`/`role.revoke` may grant/revoke an
+  individual capability independent of the role, and the state root hashes the
+  full set, so re-deriving from role alone would drop an individual grant and
+  diverge a compacted device's authority decisions from an uncompacted one — a
+  regression test pins the post-compaction state root to the snapshot's.
 
 **Note on the membership model.** History is RETAINED by default (§14.5); a new
 member is granted the historical epoch keys, so forward secrecy is a property of
@@ -85,7 +91,10 @@ creation disclosure ("Removed members may keep content they already received").
 - **Blind rendezvous** (§15.3): blind ids are `HMAC(rendezvous_key, …)` over
   canonical messages; "the key IS the capability" (§15.3.1) — no separate ACL.
 - **Blind device ids** (§10.4): the per-epoch author pseudonym is an HKDF/HMAC
-  derivation, so the same device is unlinkable across epochs to a non-member.
+  derivation, so the same device is unlinkable across epochs to a non-member.  It
+  is an unlinkability pseudonym, NOT an inter-member authenticator (it derives from
+  the shared epoch secret); authorship among members is bound separately — see the
+  author-identity binding in §5.
 - **Size privacy**: op bodies pad to §25.4 buckets; media chunks pad to ONE
   uniform ciphertext length so the wire reveals only the chunk count; the
   attachment manifest carries a coarse `byte_size_class`.
@@ -99,6 +108,15 @@ creation disclosure ("Removed members may keep content they already received").
 
 - The §11.3 capability model gates the fold; an op is applied only if its author
   holds the capability (e.g., only an admin's `member.add`/`snapshot.commit`).
+- **Author-identity binding (impersonation defense).** The reducer keys authority
+  off an op's plaintext `author_device_id`, but the §10.4 blind that resolves the
+  signature-verification key derives from the SHARED epoch secret — so any member
+  can compute any device's blind, and a valid signature proves only WHO SIGNED.
+  `openOp` therefore pins `author_device_id` to the device the blind resolves to
+  (`buildOpIntakeContext.deviceIdForBlind`); without it a member could sign under
+  their own blind yet claim a higher-privilege device's id and have the reducer
+  apply the op as that device.  Proven by an end-to-end reject test (a low-
+  privilege member's forged-author op → `metadata_mismatch`, never reduced).
 - §12.3 join: the invitee proves invite-secret knowledge over a transcript bound
   to its KeyPackage + coarse time (no replay with a different key); the admin
   verifies expiry, `max_uses`, the blind id, and the proof in constant time.

@@ -96,6 +96,31 @@ describe('reducer-state serialization', () => {
     expect(restored.stories.get('s1')?.title).toBe('Hello');
     expect(restored.contributions.get('c1')?.bodyMarkdownLite).toBe('hi');
   });
+
+  it('round-trips an INDIVIDUALLY granted capability (not re-derived from role)', async () => {
+    const room = await founded();
+    const engine = await PrivateRoomEngine.load({
+      ...room.engineParams,
+      storage: new InMemoryPrivateRoomStorage(),
+    });
+    await engine.applyLocalOp(room.genesisOp, room.sealParams);
+    // Grant the founder (admin) a capability her role does NOT imply — `recover`
+    // is the one capability outside the admin role set (§11.3), so her capability
+    // set now diverges from `capabilitiesForRole('admin')`.
+    await author(engine, room, 'g1', {
+      type: 'role.grant',
+      member_id: 'alice',
+      capability: 'recover',
+    });
+    expect(engine.state().members.get('alice')?.role).toBe('admin');
+    expect(engine.state().members.get('alice')?.capabilities.has('recover')).toBe(true);
+
+    const restored = deserializeReducerState(serializeReducerState(engine.state()));
+    // Regression: re-deriving caps from role alone silently dropped `recover`,
+    // diverging the restored state root from the live one.
+    expect(restored.members.get('alice')?.capabilities.has('recover')).toBe(true);
+    expect(roomStateCommitment(restored)).toStrictEqual(roomStateCommitment(engine.state()));
+  });
 });
 
 describe('§14.5 snapshot + §25.6 compaction', () => {
@@ -131,6 +156,33 @@ describe('§14.5 snapshot + §25.6 compaction', () => {
     expect(roomStateCommitment(engine.state())).toStrictEqual(roomStateCommitment(reduceRoom(ops)));
     expect(engine.state().contributions.get('c2')?.bodyMarkdownLite).toBe('after');
     expect(engine.heads()).toStrictEqual(['c2']);
+  });
+
+  it('keeps an individually granted capability across compaction (state root stays stable)', async () => {
+    const room = await founded();
+    const engine = await PrivateRoomEngine.load({
+      ...room.engineParams,
+      storage: new InMemoryPrivateRoomStorage(),
+    });
+    await engine.applyLocalOp(room.genesisOp, room.sealParams);
+    const ops: PrivateRoomOp[] = [room.genesisOp];
+    ops.push(
+      await author(engine, room, 'g1', {
+        type: 'role.grant',
+        member_id: 'alice',
+        capability: 'recover',
+      }),
+    );
+
+    const snapshot = await engine.createSnapshot();
+    engine.compact(snapshot);
+
+    // Verify-by-recomputation: the post-compaction root must still match the root
+    // the snapshot committed to (the bug made these differ — `recover` vanished).
+    expect(await engine.stateRoot()).toBe(snapshot.stateRoot);
+    expect(engine.state().members.get('alice')?.capabilities.has('recover')).toBe(true);
+    // …and a compacted device still equals a full fold of every op.
+    expect(roomStateCommitment(engine.state())).toStrictEqual(roomStateCommitment(reduceRoom(ops)));
   });
 
   it('ignores a re-received op already folded into the snapshot base', async () => {

@@ -10,9 +10,14 @@
 //
 // `openOp` additionally cross-checks that the decrypted plaintext AGREES with the
 // envelope's signed/authenticated metadata (epoch, author_seq, parents, object
-// type, schema): the AEAD binds the envelope metadata, not the plaintext's
-// internal fields, so without this check an author could seal a body under one
-// set of authenticated metadata yet claim different values inside.
+// type, schema, AND author_device_id): the AEAD binds the envelope metadata, not
+// the plaintext's internal fields, so without this check an author could seal a
+// body under one set of authenticated metadata yet claim different values inside.
+// The author_device_id binding is the impersonation defense — the §10.4 blind is
+// computable by any member (it derives from the shared epoch secret), so the
+// signature proves only WHO SIGNED; the reducer keys authority off the plaintext
+// `author_device_id`, which `openOp` therefore pins to the blind's resolved device
+// (`ctx.deviceIdForBlind`).
 
 import {
   buildBodyAad,
@@ -179,6 +184,10 @@ export interface OpIntakeContext {
   contentWrapKeyForEpoch(epoch: number): Uint8Array | undefined;
   /** Resolve the author device's Ed25519 public key from its blinded id. */
   deviceSigningKey(authorDeviceIdBlind: string): CryptoKey | undefined;
+  /** Resolve the REAL device id a blind belongs to (the §10.4 blind is computable
+   *  by any member, so the plaintext `author_device_id` must equal this — the
+   *  impersonation binding, enforced in `openOp`'s metadata cross-check). */
+  deviceIdForBlind(authorDeviceIdBlind: string): string | undefined;
 }
 
 /**
@@ -261,12 +270,17 @@ export async function openOp(
 
   // The plaintext MUST agree with the signed/authenticated envelope metadata
   // (the AEAD binds the metadata, not the plaintext's internal fields), and it
-  // must be for the expected room.
+  // must be for the expected room.  Crucially, the plaintext `author_device_id`
+  // (which the reducer trusts for authority) MUST be the device the blind resolves
+  // to: the §10.4 blind is computable by any member, so the signature only proves
+  // WHO SIGNED — without this binding a member could sign under their own blind yet
+  // claim a higher-privilege device's id (impersonation).
   if (
     op.epoch !== envelope.room_epoch ||
     op.author_seq !== envelope.author_seq ||
     op.schema !== envelope.plaintext_schema ||
     objectTypeForOpBody(op.body.type) !== envelope.object_type ||
+    op.author_device_id !== ctx.deviceIdForBlind(envelope.author_device_id_blind) ||
     !sameStringSet(sortParents(op.parents), envelope.parent_op_ids) ||
     compareBytes(roomIdCommitment, ctx.roomIdCommitment) !== 0
   ) {

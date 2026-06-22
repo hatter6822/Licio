@@ -110,7 +110,12 @@ export async function listRoomSessions(): Promise<StoredRoomSession[]> {
   const db = await openPrivateP2pDb();
   try {
     const tx = db.transaction(ROOM_SESSION_STORE, 'readonly');
-    return (await promisify(tx.objectStore(ROOM_SESSION_STORE).getAll())) as StoredRoomSession[];
+    const rows = (await promisify(
+      tx.objectStore(ROOM_SESSION_STORE).getAll(),
+    )) as StoredRoomSession[];
+    // Honor the StoredRoomSession contract: byte fields are real `Uint8Array`s
+    // (a structured-clone round-trip can otherwise hand back ArrayBuffers).
+    return rows.map(normalizeSession);
   } finally {
     db.close();
   }

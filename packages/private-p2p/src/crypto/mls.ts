@@ -291,8 +291,13 @@ export function encodeKeyPackage(keyPackage: KeyPackage): Uint8Array {
  *  MLSMessage (wrong wireformat, trailing bytes, or undecodable). */
 export function decodeKeyPackage(bytes: Uint8Array): KeyPackage {
   const decoded = decodeMlsMessage(bytes, 0);
-  const message = decoded?.[0];
-  if (message?.wireformat !== 'mls_key_package') {
+  // Reject undecodable bytes OR trailing bytes after a complete message (a
+  // ts-mls decoder returns [value, bytesConsumed]) — no silent suffix.
+  if (!decoded || decoded[1] !== bytes.length) {
+    throw new Error('decodeKeyPackage: not a single complete MLSMessage');
+  }
+  const message = decoded[0];
+  if (message.wireformat !== 'mls_key_package') {
     throw new Error('decodeKeyPackage: not an mls_key_package MLSMessage');
   }
   return message.keyPackage;

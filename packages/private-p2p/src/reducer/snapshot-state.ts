@@ -4,16 +4,19 @@
 // snapshot body must restore the COMPLETE reduced state (so post-snapshot ops can
 // fold on top after old ops are compacted), unlike `roomStateCommitment` which
 // canonical-encodes only the commitment subset for the state root.  Capabilities
-// are NOT serialized — they are re-derived from each member's role on load (the
-// fold always sets `capabilities = capabilitiesForRole(role)`), so the snapshot
-// can never carry a capability set inconsistent with the role.  The body is sealed
-// before it leaves the device; its integrity on load is the §14.5 verify-before-
-// use root check, so a plain JSON encoding is sufficient here.
+// ARE serialized per member: a `role.grant` / `role.revoke` op may grant or revoke
+// an INDIVIDUAL capability independent of the role (§11.3, `reduce.ts`
+// `applyRoleGrant`/`applyRoleRevoke`), so a member's capability set can
+// legitimately diverge from `capabilitiesForRole(role)`.  `roomStateCommitment`
+// hashes the FULL capability set, so re-deriving caps from role alone would
+// silently drop an individual grant — making a compacted device's state root (and
+// its authority decisions in the fold) diverge from an uncompacted device's.  The
+// body is sealed before it leaves the device; its integrity on load is the §14.5
+// verify-before-use root check, so a plain JSON encoding is sufficient here.
 
 import { z } from 'zod';
 import { fromUtf8, utf8 } from '../crypto/runtime.js';
-import { privateRoleSchema } from '../schemas/common.js';
-import { capabilitiesForRole } from './capabilities.js';
+import { privateCapabilitySchema, privateRoleSchema } from '../schemas/common.js';
 import { emptyRoomState, type RoomReducerState } from './state.js';
 
 const snapshotStateSchema = z
@@ -21,7 +24,14 @@ const snapshotStateSchema = z
     schema: z.literal('licio.private.reducer-state.v1'),
     epoch: z.number().int().min(0),
     members: z.array(
-      z.object({ memberId: z.string(), role: privateRoleSchema, removed: z.boolean() }).strict(),
+      z
+        .object({
+          memberId: z.string(),
+          role: privateRoleSchema,
+          capabilities: z.array(privateCapabilitySchema),
+          removed: z.boolean(),
+        })
+        .strict(),
     ),
     devices: z.array(
       z
@@ -106,6 +116,9 @@ export function serializeReducerState(state: RoomReducerState): Uint8Array {
     members: [...state.members.values()].map((m) => ({
       memberId: m.memberId,
       role: m.role,
+      // Serialize the ACTUAL capability set (individual grants/revokes can
+      // diverge from the role); sorted for a stable body encoding.
+      capabilities: [...m.capabilities].sort(),
       removed: m.removed,
     })),
     devices: [...state.devices.values()].map((d) => ({
@@ -175,7 +188,9 @@ export function deserializeReducerState(bytes: Uint8Array): RoomReducerState {
     state.members.set(m.memberId, {
       memberId: m.memberId,
       role: m.role,
-      capabilities: capabilitiesForRole(m.role),
+      // Restore the serialized set verbatim — NOT re-derived from role, so an
+      // individually granted/revoked capability survives a snapshot round-trip.
+      capabilities: new Set(m.capabilities),
       removed: m.removed,
     });
   }

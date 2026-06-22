@@ -108,6 +108,16 @@ describe('createPrivateRoom', () => {
     expect(() => decodeKeyPackage(new Uint8Array([0, 1, 2, 3]))).toThrow();
   });
 
+  it('decodeKeyPackage rejects trailing bytes after a complete message', async () => {
+    const pkg = await generateMemberKeyPackage(utf8('trailing-dev'));
+    const encoded = encodeKeyPackage(pkg.publicPackage);
+    // A well-formed key package with one extra suffix byte must NOT silently decode.
+    const withTrailer = new Uint8Array(encoded.length + 1);
+    withTrailer.set(encoded, 0);
+    expect(() => decodeKeyPackage(encoded)).not.toThrow();
+    expect(() => decodeKeyPackage(withTrailer)).toThrow(/complete/);
+  });
+
   it('commits over a manifest with optional + array policy fields (role-gated)', async () => {
     const created = await createPrivateRoom({
       ...baseParams(),
