@@ -17,6 +17,21 @@ self.addEventListener('message', (event) => {
   }
 });
 
+// WS-R.11.4: best-effort background sync (OFFLINE_SPEC §23.3) — the SECONDARY path to the
+// app-side online/focus/visibility triggers (background sync is unreliable, so it is never
+// the only path). The worker cannot run the app-side lcap_v2 C0-first pass itself; on the
+// C0-sync tag it asks the open window clients to run their pass. No remote code, no eval
+// (the `check:sw` gate stays green).
+self.addEventListener('sync', (event) => {
+  if (event.tag !== 'lcap-c0-sync') return;
+  event.waitUntil(
+    (async () => {
+      const windows = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' });
+      for (const client of windows) client.postMessage({ type: 'lcap-sync' });
+    })(),
+  );
+});
+
 // Citation capture via the PWA share target (WS-G.3.7a). The manifest
 // declares a POST share_target at /share-target; a static host cannot accept
 // a POST, so the worker intercepts it, reads the shared fields, and

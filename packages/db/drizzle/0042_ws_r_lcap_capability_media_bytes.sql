@@ -1,0 +1,1 @@
+ALTER TABLE "lcap_capability_usage" ADD COLUMN "media_bytes" bigint DEFAULT 0 NOT NULL;

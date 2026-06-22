@@ -6,6 +6,7 @@
 // feature flags, session, and the signal collection policy. Pure side-effect
 // orchestration kept out of main.tsx so the wiring is reviewable in one place.
 import { DEFAULT_USER_SETTINGS } from '@licio/shared';
+import { startLcapSync } from '../lcap/sync-boot.js';
 import { expireOldDrafts } from '../offline/drafts.js';
 import {
   initEvictionDetection,
@@ -136,6 +137,11 @@ export function startRuntime(): () => void {
   const teardownProcessor = getSignalProcessor().start();
   const teardownSync = initForegroundSync();
   const teardownEviction = initEvictionDetection({ onEvicted });
+  // WS-R.11.4: the LCAP C0-first sync hooks (§23.3) — sync on app open + regained
+  // connectivity / focus, suppressed offline / in Stealth / under data-saver / on low
+  // battery.  The sync PASS is a DYNAMICALLY-imported chunk, so the @licio/lcap codec
+  // never enters the initial bundle.
+  const teardownLcapSync = startLcapSync();
   // WS-G.3.7c: drafts older than 30 days are cleaned up on app start.
   void expireOldDrafts().catch(() => undefined);
   // Core Web Vitals RUM → privacy-safe telemetry (metric name/value/rating only,
@@ -178,5 +184,6 @@ export function startRuntime(): () => void {
     teardownEviction();
     teardownVitals();
     teardownPolicySync();
+    teardownLcapSync();
   };
 }

@@ -24,6 +24,7 @@ import { setLcapIngestServer } from '../lcap/service.js';
 import {
   buildLcapFixtures,
   type LcapFixtures,
+  mintContribution,
   NET,
   NOW,
   registerIdentity,
@@ -386,5 +387,51 @@ describe('§27.2 graph guard on import (WS-R.14.1b)', () => {
     // Nothing was stored — the graph is untrusted, so no frame reached the store.
     expect(await srv.hasObject(aCid)).toBe(false);
     expect(await srv.hasObject(bCid)).toBe(false);
+  });
+
+  it('rejects a contribution declaring too many signed-body block refs (§27.1 DoS bound)', async () => {
+    const srv = new LcapIngestServer(NET, () => NOW);
+    await registerIdentity(srv, fx);
+    // 65 valid block CIDs in `source_snapshot_cids` — one over SERVER_CAPS.maxFanOut (64).
+    const tooMany = await Promise.all(
+      Array.from({ length: 65 }, (_, i) => cidFor('block', new TextEncoder().encode(`snap-${i}`))),
+    );
+    const over = await mintContribution(fx, {
+      deviceSeq: 0,
+      capabilityCid: fx.capabilityCid,
+      sourceSnapshotCids: tooMany,
+    });
+    const overProofBytes = encodeWithSchema(detachedProofV2Schema, over.proof);
+    const overPack = writePack({
+      objects: [
+        {
+          cid: over.recordCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: over.body,
+          lane: 'M3',
+          priority: 1,
+        },
+        {
+          cid: await cidFor('proof', overProofBytes),
+          cidKind: 'proof',
+          frameKind: 'proof',
+          payload: overProofBytes,
+          lane: 'T1',
+          priority: 1,
+          providesProofFor: over.recordCid,
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1_000_000,
+    });
+    const res = await createLcapRoutes(srv).request('/packs', { method: 'POST', body: overPack });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { statuses: { cid: string; status: string }[] };
+    // The over-cap contribution is rejected at the route BEFORE the unbounded index-write loop.
+    expect(data.statuses.find((s) => s.cid === over.recordCid)?.status).toBe(
+      'rejected_resource_limit',
+    );
   });
 });

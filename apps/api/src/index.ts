@@ -137,6 +137,8 @@ import {
   registerInvariantConsumers,
   setInvariantServices,
 } from './invariants/services.js';
+import { LCAP_SCHEDULER_INTERVAL_MS, startLcapScheduler } from './lcap/scheduler.js';
+import { getLcapIngestServer } from './lcap/service.js';
 import { demoStory } from './lib/demo-data.js';
 import {
   seedForumDemoData,
@@ -973,6 +975,17 @@ startGovernanceScheduler(
   },
   (err, task) => logger.error({ err, task }, 'governance scheduler task failed'),
   GOVERNANCE_SCHEDULER_INTERVAL_MS,
+  { lease: makeJobLease() },
+);
+
+// Hourly WS-R LCAP maintenance: §24.1 checkpoint issuance — issue a fresh
+// authority-signed `room_checkpoint` for every room whose log grew (WS-R.9.2b /
+// WS-R.12.1c "checkpoint trigger"), under its own job lease.  A node holding no
+// room-authority signing keys ticks as a harmless no-op (nothing to issue).
+startLcapScheduler(
+  getLcapIngestServer(),
+  (err, task) => logger.error({ err, task }, 'lcap scheduler task failed'),
+  LCAP_SCHEDULER_INTERVAL_MS,
   { lease: makeJobLease() },
 );
 

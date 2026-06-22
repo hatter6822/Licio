@@ -34,6 +34,7 @@ import { cn } from '../../../lib/cn.js';
 import { Badge } from '../../ui/Badge/index.js';
 import { Button } from '../../ui/Button/index.js';
 import { QuarantineNotice } from '../OfflineStates/index.js';
+import { TrustBadge } from '../TrustBadge/index.js';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -313,6 +314,12 @@ export function OfflineBundlePanel({
                 },
               )}
             </p>
+            {/* The honest §34 trust badge for what the import actually granted: records
+                land at `integrity_verified` / `peer_stored` (WS-R.8.3), which maps to
+                "Cannot verify yet…" — never a claim the projection has not made. */}
+            {importState.counts.records > 0 ? (
+              <TrustBadge trust="integrity_verified" liveness="peer_stored" />
+            ) : null}
             {importState.counts.missingCids.length > 0 ? (
               <QuarantineNotice missingCids={importState.counts.missingCids} />
             ) : null}

@@ -18,7 +18,13 @@ const SCAN_DIRS = [
   resolve(ROOT, 'packages/lcap-p2p/src'),
   resolve(ROOT, 'apps/web/src/lcap'),
   resolve(ROOT, 'apps/api/src/lcap'),
+  // The WS-R.15.4 native courier shell (its hand-written TS surface; the generated
+  // android/ build artifacts are skipped by SKIP_DIRS below).
+  resolve(ROOT, 'apps/courier'),
 ];
+
+// Directories never worth walking (deps + generated native/build output).
+const SKIP_DIRS = new Set(['node_modules', 'build', '.gradle', 'dist']);
 
 // Curated to avoid false positives ("looks like", "Save", "Bridge Active").
 const FORBIDDEN: Array<{ pattern: RegExp; message: string }> = [
@@ -40,7 +46,7 @@ function collect(dir: string): string[] {
   if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) return out;
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
-    if (entry.isDirectory() && entry.name !== 'node_modules') out.push(...collect(full));
+    if (entry.isDirectory() && !SKIP_DIRS.has(entry.name)) out.push(...collect(full));
     else if (entry.isFile() && /\.tsx?$/.test(entry.name) && !TEST_FILE.test(entry.name)) {
       out.push(full);
     }

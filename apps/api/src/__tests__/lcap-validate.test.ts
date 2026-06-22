@@ -8,6 +8,7 @@
 
 import {
   buildAndSign,
+  cidFor,
   encodeWithSchema,
   exportPublicKeyCose,
   generateDeviceKey,
@@ -17,6 +18,7 @@ import {
 } from '@licio/lcap';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { LcapIngestServer } from '../lcap/server-ingest.js';
+import { InMemoryLcapServerStore } from '../lcap/store.js';
 import {
   ACCOUNT,
   ACCOUNT_AUTHORITY_SIGNER,
@@ -244,5 +246,138 @@ describe('LcapIngestServer — server-computed validation (R.12.1b)', () => {
     expect((await commit(e0, 0)).status.status).toBe('accepted');
     expect((await commit(e1, 1)).status.status).toBe('accepted');
     expect(await srv.roomSize(ROOM)).toBe(2);
+  });
+
+  it('charges referenced media against max_media_bytes and rejects an over-budget event (§18.3 step 9)', async () => {
+    // A capability whose media budget is 200 bytes; the event/payload budgets stay roomy.
+    const srv = await serverWith({ capability: false });
+    const cap = await mintCapability(fx, {
+      capabilityId: 'cap-media',
+      quotas: { max_media_bytes: 200 },
+    });
+    await srv.registerCapability(cap.bundle);
+
+    // e0 references a 150-byte media block — the server stores it + links the block edge (as
+    // the §29.3 pack-ingest path does from the contribution's body/table deps).
+    const e0 = await mintContribution(fx, { deviceSeq: 0, capabilityCid: cap.cid });
+    const b0 = new Uint8Array(150);
+    const b0Cid = await cidFor('block', b0);
+    await srv.putObject(b0Cid, 'block', b0);
+    await srv.indexRecordEdge(e0.recordCid, b0Cid, 'block');
+    const r0 = await srv.commitRecord({
+      recordCid: e0.recordCid,
+      roomId: ROOM,
+      authorDeviceKeyId: DEVICE_KEY,
+      deviceSeq: 0,
+      capabilityCid: cap.cid,
+      body: e0.body,
+      proofs: [e0.proof],
+    });
+    // 150 ≤ 200 → accepted, debiting 150 of the media budget.
+    expect(r0.status.status).toBe('accepted');
+
+    // e1 references a 100-byte block — 150 + 100 = 250 > 200 → rejected_quota, never appended.
+    const e1 = await mintContribution(fx, {
+      deviceSeq: 1,
+      capabilityCid: cap.cid,
+      prevDeviceRecordCid: e0.recordCid,
+    });
+    const b1 = new Uint8Array(100);
+    const b1Cid = await cidFor('block', b1);
+    await srv.putObject(b1Cid, 'block', b1);
+    await srv.indexRecordEdge(e1.recordCid, b1Cid, 'block');
+    const r1 = await srv.commitRecord({
+      recordCid: e1.recordCid,
+      roomId: ROOM,
+      authorDeviceKeyId: DEVICE_KEY,
+      deviceSeq: 1,
+      capabilityCid: cap.cid,
+      body: e1.body,
+      proofs: [e1.proof],
+    });
+    expect(r1.status.status).toBe('rejected_quota');
+    expect(r1.receiptType).toBe('rejected');
+    expect(await srv.isAccepted(e1.recordCid)).toBe(false);
+    expect(await srv.roomSize(ROOM)).toBe(1);
+  });
+
+  it('does not charge media for a text-only contribution (no referenced blocks)', async () => {
+    // A capability that allows NO media at all still accepts a text-only event (0 ≤ 0): the
+    // media budget is only consumed by referenced media blocks, never by the signed event body.
+    const srv = await serverWith({ capability: false });
+    const cap = await mintCapability(fx, {
+      capabilityId: 'cap-text-only',
+      quotas: { max_media_bytes: 0 },
+    });
+    await srv.registerCapability(cap.bundle);
+    const e0 = await mintContribution(fx, { deviceSeq: 0, capabilityCid: cap.cid });
+    const r0 = await srv.commitRecord({
+      recordCid: e0.recordCid,
+      roomId: ROOM,
+      authorDeviceKeyId: DEVICE_KEY,
+      deviceSeq: 0,
+      capabilityCid: cap.cid,
+      body: e0.body,
+      proofs: [e0.proof],
+    });
+    expect(r0.status.status).toBe('accepted');
+  });
+});
+
+describe('LcapIngestServer.indexBodyBlockEdges (§27.1 signed-body reference cap)', () => {
+  const enc = new TextEncoder();
+
+  it('indexes block-kind body references within the cap and ignores non-block refs', async () => {
+    const store = new InMemoryLcapServerStore();
+    const srv = new LcapIngestServer(NET, () => NOW, store);
+    const [b1, b2, recRef] = await Promise.all([
+      cidFor('block', enc.encode('b1')),
+      cidFor('block', enc.encode('b2')),
+      cidFor('record', enc.encode('not-a-block')), // a record CID → must be ignored
+    ]);
+    expect(
+      await srv.indexBodyBlockEdges('lcapr_rec1', {
+        bodyBlockCid: b1,
+        sourceSnapshotCids: [b2, recRef],
+      }),
+    ).toBe(true);
+    expect((await store.recordEdges('lcapr_rec1', 'block')).slice().sort()).toEqual(
+      [b1, b2].sort(),
+    );
+  });
+
+  it('rejects (false) and indexes NOTHING when the declared count exceeds maxFanOut (§27 DoS bound)', async () => {
+    const store = new InMemoryLcapServerStore();
+    const srv = new LcapIngestServer(NET, () => NOW, store); // SERVER_CAPS.maxFanOut = 64
+    const many = await Promise.all(
+      Array.from({ length: 65 }, (_, i) => cidFor('block', enc.encode(`m${i}`))),
+    );
+    expect(await srv.indexBodyBlockEdges('lcapr_rec2', { sourceSnapshotCids: many })).toBe(false);
+    // The unbounded index-write loop never ran: not one edge was written.
+    expect(await store.recordEdges('lcapr_rec2', 'block')).toEqual([]);
+  });
+
+  it('rejects a very large source_snapshot_cids in O(1) without throwing (no huge spread)', async () => {
+    const store = new InMemoryLcapServerStore();
+    const srv = new LcapIngestServer(NET, () => NOW, store);
+    // 200k elements — far beyond any JS spread/argument limit; the `.length` bound must reject
+    // it WITHOUT materializing or spreading it (a spread would throw, turning a clean reject
+    // into a 500).
+    const huge = new Array<string>(200_000).fill('lcapb_x');
+    expect(await srv.indexBodyBlockEdges('lcapr_huge', { sourceSnapshotCids: huge })).toBe(false);
+    expect(await store.recordEdges('lcapr_huge', 'block')).toEqual([]);
+  });
+});
+
+describe('LcapIngestServer.newImportBudget (§27.1 import CPU-time bound)', () => {
+  it('reports over-budget once the clock passes the maxCpuTimeMsPerImportBatch cap', () => {
+    let t = 1000;
+    const srv = new LcapIngestServer(NET, () => t); // SERVER_CAPS cap = 5000ms
+    const overBudget = srv.newImportBudget(); // startMs = 1000
+    expect(overBudget()).toBe(false); // elapsed 0
+    t = 1000 + 4000; // 4s ≤ 5s — still within budget
+    expect(overBudget()).toBe(false);
+    t = 1000 + 6000; // 6s > the 5s import-CPU cap — over budget
+    expect(overBudget()).toBe(true);
   });
 });

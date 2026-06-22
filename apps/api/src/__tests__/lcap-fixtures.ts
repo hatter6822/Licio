@@ -98,7 +98,10 @@ export async function buildLcapFixtures(): Promise<LcapFixtures> {
         max_offline_events: 10,
         max_total_payload_bytes: 10000,
         max_single_event_bytes: 1000,
-        max_media_bytes: 0,
+        // A realistic media allowance: a posting capability admits referenced media blocks
+        // (the §18.3 step 9 media-byte charge), comfortably above the tiny test blocks.  The
+        // media-quota tests override this with a tight budget to exercise the over-budget path.
+        max_media_bytes: 1_000_000,
       },
       transfer_policy: {
         may_export_bundle: true,
@@ -278,6 +281,7 @@ export async function mintContribution(
     capabilityCid: string;
     prevDeviceRecordCid?: string;
     text?: string;
+    sourceSnapshotCids?: readonly string[];
   },
 ): Promise<{ recordCid: string; body: Uint8Array; proof: DetachedProofV2 }> {
   const contribution: ContributionEventRecordV2 = {
@@ -297,6 +301,9 @@ export async function mintContribution(
     priority: 1,
     ...(params.prevDeviceRecordCid !== undefined
       ? { prev_device_record_cid: params.prevDeviceRecordCid }
+      : {}),
+    ...(params.sourceSnapshotCids !== undefined
+      ? { source_snapshot_cids: [...params.sourceSnapshotCids] }
       : {}),
   };
   const body = encodeContributionEvent(contribution);

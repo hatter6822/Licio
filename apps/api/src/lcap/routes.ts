@@ -4,8 +4,9 @@
 //
 //   - content READS (§29.4-6, GET by CID): serve held, content-addressed objects so
 //     a peer that learns a `want` can fetch the missing object (RFC 7233 ranges).
-//   - room reads (§29.7, GET /rooms/:id/{checkpoint,proofs/*}): the unsigned tree
-//     head + RFC 9162 inclusion/consistency proofs over the §19.1 room log.
+//   - room reads (§29.7, GET /rooms/:id/{checkpoint,proofs/*}): the tree head + the
+//     latest authority-signed `room_checkpoint` (when issued) + RFC 9162
+//     inclusion/consistency proofs over the §19.1 room log.
 //   - bundle EXPORT (§29.8, POST /bundles/export): a room's content closure (records +
 //     each record's proofs + referenced blocks) repacked from held bytes, GATED by a
 //     device-signed `may_export_bundle` capability for the room (the export gate).
@@ -14,8 +15,8 @@
 //     contributions committed through validate()→graph-guard→commit.
 //   - bundle IMPORT (§29.8, POST /bundles/import): the web-UI alias of /packs.
 //   - pulse (§29.1, POST /pulse) + exchange (§29.2, POST /exchange): the frontier
-//     exchange + the main bidirectional path (push-pack ingest + frontiers +
-//     `wanted_from_client` + a served content pack).
+//     exchange + the main bidirectional path (push-pack ingest → signed receipts +
+//     frontiers + `wanted_from_client` + a served content pack).
 //
 // Content is device-certificate-authenticated (records carry their own COSE proofs;
 // validate() is the real authentication), so GETs + the native POSTs (/packs, /pulse,
@@ -47,6 +48,7 @@ import {
   type ObjectStatusV2,
   parseCid,
   pulseResponseV2Schema,
+  type ReceiptRecordV2,
   readPack,
   SERVER_CAPS,
   type SyncPulseV2,
@@ -230,10 +232,17 @@ async function ingestPackFrames(
     };
   }
 
+  // §27.1 CPU-time budget for the whole parse+store+index phase (the §27.2 node cap +
+  // the byte caps bound the object COUNT, but the per-object store/index writes can still
+  // total O(10^5) on a durable store; this bounds the wall-clock so no single pack can pin
+  // a worker).  `commitBatch` enforces the same cap on the commit phase.
+  const overImportBudget = server.newImportBudget();
+
   // Group detached proofs by the record_cid they attest (for the contribution commit)
   // and index each record→proof edge for the §29.8 room-export closure.
   const proofsByRecord = new Map<string, DetachedProofV2[]>();
   for (const [cid, frame] of frames) {
+    if (overImportBudget()) break; // §27.1: stop indexing proofs past the CPU budget
     // Only a CID-VERIFIED proof frame may authorize a record/identity object: a frame
     // whose payload does not hash to its declared proof CID is `rejected_bad_cid` (not
     // stored/fetchable), so its signature must not be allowed to authorize anything here.
@@ -262,6 +271,12 @@ async function ingestPackFrames(
   const identityEdges: { recordCid: string; capabilityCid: string; deviceKeyId: string }[] = [];
   for (const [cid, frame] of frames) {
     const cidKind = FRAME_CID_KIND[frame.frameKind];
+    // §27.1 CPU-time bound: past the import budget, reject the remaining objects rather than
+    // letting a large pack's per-object store/index writes run unbounded on a durable store.
+    if (overImportBudget()) {
+      statuses.push({ cid, cid_kind: cidKind, status: 'rejected_resource_limit' });
+      continue;
+    }
     const had = await server.hasObject(cid);
     const stored = await server.putObject(cid, cidKind, frame.payload);
     if (!stored) {
@@ -337,6 +352,26 @@ async function ingestPackFrames(
           if (depKind === 'block') await server.indexRecordEdge(cid, dep, 'block');
           else if (depKind === 'record') requires.add(dep);
         }
+        // Index the SIGNED BODY's directly-referenced media blocks too (the body is signed, the
+        // pack table is not).  This makes the §18.3 step 9 media-byte charge + the §29.8 export
+        // closure see what the author committed to, not only what the table happened to declare —
+        // a malicious pack cannot drop a body-declared block from the media accounting.  BOUNDED
+        // by the §27.1 reference cap: unlike the table deps (already §27.2-fan-out-guarded above),
+        // these signed-body refs are unguarded, so an over-cap `source_snapshot_cids` is rejected
+        // `rejected_resource_limit` (nothing indexed) rather than driving an unbounded write loop.
+        const indexed = await server.indexBodyBlockEdges(cid, {
+          ...(record.body_block_cid !== undefined ? { bodyBlockCid: record.body_block_cid } : {}),
+          ...(record.attachment_manifest_cid !== undefined
+            ? { attachmentManifestCid: record.attachment_manifest_cid }
+            : {}),
+          ...(record.source_snapshot_cids !== undefined
+            ? { sourceSnapshotCids: record.source_snapshot_cids }
+            : {}),
+        });
+        if (!indexed) {
+          statuses.push({ cid, cid_kind: 'record', status: 'rejected_resource_limit' });
+          break; // too many signed-body block references (§27.1) — bounded rejection
+        }
         contributions.push({
           recordCid: cid,
           roomId: record.home_room_id,
@@ -385,7 +420,25 @@ async function ingestPack(server: LcapIngestServer, body: Uint8Array): Promise<R
   if (!result.ok) {
     return json(result.httpStatus, { error: result.error });
   }
-  return json(200, { statuses: result.statuses, wants: result.wants });
+  // §20.4 / WS-R.10.2: attest the outcomes with signed receipts (when this node has a receipt
+  // issuer).  The statuses are stamped with their `receipt_cid`; the full signed receipts
+  // (record + proof, both CID-addressed + stored) are returned inline so the client can persist
+  // AND verify them without a round trip.  No issuer ⇒ no `receipts` (a receipt is only a hint).
+  const { statuses, receipts } = await server.issueReceipts(result.statuses);
+  return json(200, {
+    statuses,
+    wants: result.wants,
+    ...(receipts.length > 0
+      ? {
+          receipts: receipts.map((r) => ({
+            cid: r.cid,
+            record_body: toHex(r.recordBody),
+            proof_cid: r.proofCid,
+            proof_body: toHex(r.proofBody),
+          })),
+        }
+      : {}),
+  });
 }
 
 // A pulse is a tiny frontier message; anything larger is over the request budget.
@@ -486,15 +539,21 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
   }
   const request = parsed.data;
 
-  // 1) Ingest the optional push pack through the shared validator (idempotent).
+  // 1) Ingest the optional push pack through the shared validator (idempotent), then attest the
+  // outcomes with signed receipts (§20.4 / WS-R.10.2): the `accepted_push` statuses are stamped
+  // with their `receipt_cid` and the receipt records ride the response's `receipts` field (their
+  // record + proof are CID-addressed in the CAS).  No issuer ⇒ the statuses pass through unchanged.
   let acceptedPush: ObjectStatusV2[] | undefined;
+  let pushReceipts: ReceiptRecordV2[] | undefined;
   if (request.push_pack !== undefined) {
     const ingest = await ingestPackFrames(server, request.push_pack);
     if (!ingest.ok) {
       // A push pack that breaches the §27 caps fails the whole request (§22.1.1).
       return json(ingest.httpStatus, { error: ingest.error });
     }
-    acceptedPush = ingest.statuses;
+    const issued = await server.issueReceipts(ingest.statuses);
+    acceptedPush = issued.statuses;
+    if (issued.receipts.length > 0) pushReceipts = issued.receipts.map((r) => r.record);
   }
 
   // 2) The server's frontier diff against the client's advertised frontier: what the
@@ -531,6 +590,7 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
     pulse: await server.serverPulse(),
     status,
     ...(acceptedPush !== undefined ? { acceptedPush } : {}),
+    ...(pushReceipts !== undefined ? { receipts: pushReceipts } : {}),
     ...(wantedFromClient.length > 0 ? { wantedFromClient } : {}),
     ...(responsePack !== undefined ? { responsePack } : {}),
   });
@@ -548,16 +608,30 @@ function toHex(bytes: Uint8Array): string {
 }
 
 /**
- * §29.7 `GET /rooms/:roomId/checkpoint`: the room's current (unsigned) Merkle tree
- * head — size + root over the canonical acceptance order.  An unknown/empty room is
- * a well-defined size-0 head (the RFC 9162 empty-tree hash), so this is always 200.
+ * §29.7 `GET /rooms/:roomId/checkpoint`: the room's current Merkle tree head — size +
+ * root over the canonical acceptance order — PLUS the latest authority-signed
+ * `room_checkpoint` (WS-R.9.2b) when this node has issued one (the record + its detached
+ * proof, both CID-addressed; a peer verifies the proof against the room authority key and
+ * checks `merkle_root` against its own log).  An unknown/empty room is a well-defined
+ * size-0 head (the RFC 9162 empty-tree hash), so this is always 200.
  */
 async function handleRoomCheckpoint(server: LcapIngestServer, roomId: string): Promise<Response> {
   const head = await server.roomTreeHead(roomId);
+  const signed = await server.latestCheckpointWire(roomId);
   return json(200, {
     tree_size: head.treeSize,
     root_hash: toHex(head.rootHash),
     tree_algorithm: head.algorithm,
+    ...(signed
+      ? {
+          checkpoint: {
+            cid: signed.cid,
+            record_body: toHex(signed.recordBody),
+            proof_cid: signed.proofCid,
+            proof_body: toHex(signed.proofBody),
+          },
+        }
+      : {}),
   });
 }
 

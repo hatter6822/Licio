@@ -112,6 +112,7 @@ export class DrizzleLcapServerStore implements LcapServerStore {
     roomId: string,
     cid: string,
     eventBytes: number,
+    mediaBytes: number,
     quota: CapabilityQuotaLimits,
   ): Promise<AcceptContributionResult> {
     // The whole accept is one transaction so the quota check + the room-log append + the
@@ -139,15 +140,20 @@ export class DrizzleLcapServerStore implements LcapServerStore {
             .select({
               eventCount: lcapCapabilityUsage.eventCount,
               totalBytes: lcapCapabilityUsage.totalBytes,
+              mediaBytes: lcapCapabilityUsage.mediaBytes,
             })
             .from(lcapCapabilityUsage)
             .where(eq(lcapCapabilityUsage.capabilityId, quota.capabilityId))
             .for('update');
           const events = usageRows[0]?.eventCount ?? 0;
           const totalBytes = usageRows[0]?.totalBytes ?? 0;
+          const usedMediaBytes = usageRows[0]?.mediaBytes ?? 0;
           if (events + 1 > quota.maxEvents) return { ok: false, reason: 'offline_event_quota' };
           if (totalBytes + eventBytes > quota.maxTotalBytes) {
             return { ok: false, reason: 'total_payload_quota' };
+          }
+          if (usedMediaBytes + mediaBytes > quota.maxMediaBytes) {
+            return { ok: false, reason: 'media_payload_quota' };
           }
 
           // Allocate the next per-room seq + append (PK guards uniqueness) and debit the
@@ -160,7 +166,11 @@ export class DrizzleLcapServerStore implements LcapServerStore {
           await tx.insert(lcapAcceptance).values({ roomId, seq, cid });
           await tx
             .update(lcapCapabilityUsage)
-            .set({ eventCount: events + 1, totalBytes: totalBytes + eventBytes })
+            .set({
+              eventCount: events + 1,
+              totalBytes: totalBytes + eventBytes,
+              mediaBytes: usedMediaBytes + mediaBytes,
+            })
             .where(eq(lcapCapabilityUsage.capabilityId, quota.capabilityId));
           return { ok: true, seq };
         });

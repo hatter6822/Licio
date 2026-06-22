@@ -16,10 +16,12 @@
 // which is true only for a freshly-accepted record.
 
 import {
+  buildCheckpoint,
   buildPulse,
   buildPulseResponse,
   type CapabilityBundle,
   type CertificateBundle,
+  type CheckpointBundle,
   type CheckpointFrontierV2,
   type ConsensusInput,
   type CryptoSuiteId,
@@ -43,6 +45,8 @@ import {
   ingestRecord,
   type ObjectStatusV2,
   type PulseResponseV2,
+  parseCid,
+  type ReceiptRecordV2,
   type ResourceCaps,
   type RevocationAuthorityBinding,
   type RevocationFrontierV2,
@@ -53,6 +57,8 @@ import {
   roomIdHash,
   SERVER_CAPS,
   type SyncPulseV2,
+  signCheckpoint,
+  signReceipt,
   type TreeAlgorithm,
   type ValidationResult,
   validate,
@@ -150,6 +156,22 @@ export class LcapIngestServer {
   // include the signer cert (resolvable only by device key id, not from the contribution body).
   private readonly deviceCertCids = new Map<string, string>();
   private readonly revocations = new RevocationIndex();
+  // Room-authority SIGNING keys (the private counterpart of `roomAuthorityKeys`) for rooms this
+  // node is authoritative over, so it can ISSUE signed `room_checkpoint` records (WS-R.9.2b).  In
+  // production these come from the SecretBox-encrypted `*_AUTHORITY_*` key group; a room with no
+  // signer here is simply not checkpointed by this node (the §29.7 read falls back to the head).
+  private readonly roomAuthoritySigners = new Map<
+    string,
+    { privateKey: CryptoKey; signerKeyId: string; policyEpoch: number }
+  >();
+  // The latest signed checkpoint this node issued per room (the chain head + the §29.7 served
+  // value + the §17.2 frontier `latest_checkpoint_cid`).  The bytes also live in the CAS, so the
+  // checkpoint + its proof are fetchable by CID like any other object.
+  private readonly latestCheckpoints = new Map<string, { bundle: CheckpointBundle; cid: string }>();
+  // The node's receipt-signing key (the §20.4 issuer).  When configured, the server emits signed
+  // `receipt` records for ingestion outcomes (WS-R.10.2); without it, no receipt is emitted (a
+  // receipt is only an availability HINT, never content trust, so its absence is always safe).
+  private receiptIssuer?: { privateKey: CryptoKey; signerKeyId: string; nodeId: string };
 
   /**
    * @param networkId the LCAP network this server serves.
@@ -203,6 +225,65 @@ export class LcapIngestServer {
     relation: RecordEdgeRelation,
   ): Promise<void> {
     return this.store.indexRecordEdge(recordCid, relatedCid, relation);
+  }
+
+  /**
+   * Index a contribution's SIGNED-BODY-declared media block references (its `block` edges:
+   * `body_block_cid` / `attachment_manifest_cid` / `source_snapshot_cids`) under the §27.1
+   * reference cap (`maxFanOut`).  These refs are NOT part of the §27.2-guarded table DAG, so
+   * without a bound a record naming thousands of `source_snapshot_cids` would drive an
+   * unbounded (awaited) index-write loop here BEFORE signature validation — a §27 DoS,
+   * amplified on the durable store.  The DECLARED count is bounded FIRST (before any parse),
+   * so an over-cap record costs O(1): it indexes NOTHING and returns `false` (the caller
+   * rejects it `rejected_resource_limit`).  Within the cap, each block-kind ref is indexed
+   * (the store de-duplicates, so a block named in both the body and the table is one edge).
+   */
+  async indexBodyBlockEdges(
+    recordCid: string,
+    refs: {
+      readonly bodyBlockCid?: string;
+      readonly attachmentManifestCid?: string;
+      readonly sourceSnapshotCids?: readonly string[];
+    },
+  ): Promise<boolean> {
+    const snapshots = refs.sourceSnapshotCids ?? [];
+    const singles = (refs.bodyBlockCid ? 1 : 0) + (refs.attachmentManifestCid ? 1 : 0);
+    // Bound the DECLARED count via `.length` FIRST — before materializing or spreading the
+    // (possibly huge) `source_snapshot_cids` array — so an over-cap record costs O(1) and a
+    // large spread can never even be attempted.
+    if (singles + snapshots.length > this.caps.maxFanOut) return false;
+    const candidates: string[] = [];
+    if (refs.bodyBlockCid !== undefined) candidates.push(refs.bodyBlockCid);
+    if (refs.attachmentManifestCid !== undefined) candidates.push(refs.attachmentManifestCid);
+    for (const snapshot of snapshots) candidates.push(snapshot); // ≤ maxFanOut here
+    for (const ref of candidates) {
+      try {
+        if (parseCid(ref).kind === 'block')
+          await this.store.indexRecordEdge(recordCid, ref, 'block');
+      } catch {
+        // a malformed body CID is ignored (the record will quarantine/reject on validate)
+      }
+    }
+    return true;
+  }
+
+  /**
+   * The §11.4 "media bytes" a contribution brings in: the summed ACTUAL stored size of ALL the
+   * blocks it references (its `block` edges — the body/media/attachment closure — present in the
+   * CAS at accept).  The figure is the server's own CID-verified byte length, never the author's
+   * declaration.  The server does not parse per-block roles, so every referenced block counts
+   * (the conservative reading of §11.4 "referenced block sizes"; per-role weighting needs the
+   * attachment-manifest descriptors and is a tracked refinement).  A referenced block not yet
+   * held contributes 0 — cross-pack lazy media is bounded by the §27.1 block caps and the
+   * `max_offline_events` count, and is charged when it arrives in the contribution's own pack.
+   */
+  private async referencedMediaBytes(recordCid: string): Promise<number> {
+    let mediaBytes = 0;
+    for (const blockCid of await this.store.recordEdges(recordCid, 'block')) {
+      const obj = await this.store.getObject(blockCid);
+      if (obj) mediaBytes += obj.bytes.length;
+    }
+    return mediaBytes;
   }
 
   /**
@@ -336,6 +417,219 @@ export class LcapIngestServer {
   ): void {
     this.roomAuthorityKeys.set(`${roomId} ${policyEpoch}`, key);
     this.authoritySigners.set(signerKeyId, { key, scope: 'room', scopeId: roomId });
+  }
+
+  /**
+   * Register the room-authority SIGNING key for a room this node is authoritative over, so it can
+   * ISSUE signed `room_checkpoint` records (WS-R.9.2b).  This is the private counterpart of
+   * `registerRoomAuthorityKey`; a node that issues checkpoints registers BOTH (the public key
+   * verifies its own + peers' checkpoints, the private key signs new ones).
+   */
+  registerRoomAuthoritySigner(
+    roomId: string,
+    policyEpoch: number,
+    privateKey: CryptoKey,
+    signerKeyId: string,
+  ): void {
+    this.roomAuthoritySigners.set(roomId, { privateKey, signerKeyId, policyEpoch });
+  }
+
+  /**
+   * Issue (build + room-authority-sign + durably store) a `room_checkpoint` over the room's
+   * current canonical acceptance log (WS-R.9.2b / §24.1 checkpoint trigger).  IDEMPOTENT by tree
+   * size: a re-issue at an unchanged `tree_size` returns the existing checkpoint (no churn,
+   * stable chain).  Successive checkpoints chain via `previous_checkpoint_cid`.  Returns the
+   * signed bundle, or `undefined` when this node holds no signer for the room or the log is empty
+   * (an empty room has nothing to attest).  The checkpoint body + its proof land in the CAS, so
+   * both are fetchable by CID through the §29 GET routes.
+   */
+  async issueCheckpoint(roomId: string): Promise<CheckpointBundle | undefined> {
+    const signer = this.roomAuthoritySigners.get(roomId);
+    if (!signer) return undefined;
+    const log = await this.buildRoomLog(roomId);
+    if (log.size === 0) return undefined; // nothing accepted yet — no checkpoint to attest
+    const prev = this.latestCheckpoints.get(roomId);
+    if (prev && prev.bundle.checkpoint.tree_size === log.size) return prev.bundle; // idempotent
+
+    const checkpoint = await buildCheckpoint(log, {
+      roomId,
+      treeSize: log.size,
+      policyEpoch: signer.policyEpoch,
+      revocationEpoch: this.revocations.knownEpoch,
+      issuedAtMs: this.now(),
+      signerAuthorityId: signer.signerKeyId,
+      ...(prev ? { previousCheckpointCid: prev.cid } : {}),
+    });
+    const bundle = await signCheckpoint({
+      authorityPrivateKey: signer.privateKey,
+      authoritySignerKeyId: signer.signerKeyId,
+      checkpoint,
+      networkId: this.networkId,
+    });
+    // Durably store the checkpoint record + its proof so both are fetchable by CID (§29).
+    const cid = await cidFor('record', bundle.body);
+    await this.store.storeObject(cid, 'record', bundle.body);
+    const proofBytes = encodeWithSchema(detachedProofV2Schema, bundle.proof);
+    await this.store.storeObject(await cidFor('proof', proofBytes), 'proof', proofBytes);
+    this.latestCheckpoints.set(roomId, { bundle, cid });
+    return bundle;
+  }
+
+  /**
+   * The §24.1 checkpoint maintenance tick: issue a fresh checkpoint for every room whose log has
+   * grown since its last one (idempotent for unchanged rooms).  Returns the rooms checkpointed.
+   */
+  async issueAllCheckpoints(): Promise<readonly string[]> {
+    const issued: string[] = [];
+    for (const roomId of await this.store.listRooms()) {
+      const before = this.latestCheckpoints.get(roomId)?.cid;
+      const bundle = await this.issueCheckpoint(roomId);
+      if (bundle && this.latestCheckpoints.get(roomId)?.cid !== before) issued.push(roomId);
+    }
+    return issued;
+  }
+
+  /** The latest signed checkpoint this node issued for a room (the §29.7 served value), or none. */
+  latestCheckpoint(roomId: string): { bundle: CheckpointBundle; cid: string } | undefined {
+    return this.latestCheckpoints.get(roomId);
+  }
+
+  /**
+   * The §29.7 wire form of a room's latest signed checkpoint: the CID-addressed record body + its
+   * detached authority proof (both also fetchable individually via the §29 GET routes).  A peer
+   * decodes + verifies the proof against the room authority key, then checks `merkle_root` against
+   * its own log.  `undefined` when this node has issued no checkpoint for the room.
+   */
+  async latestCheckpointWire(roomId: string): Promise<
+    | {
+        cid: string;
+        recordBody: Uint8Array;
+        proofCid: string;
+        proofBody: Uint8Array;
+      }
+    | undefined
+  > {
+    const latest = this.latestCheckpoints.get(roomId);
+    if (!latest) return undefined;
+    const proofBody = encodeWithSchema(detachedProofV2Schema, latest.bundle.proof);
+    return {
+      cid: latest.cid,
+      recordBody: latest.bundle.body,
+      proofCid: await cidFor('proof', proofBody),
+      proofBody,
+    };
+  }
+
+  /**
+   * Configure this node's receipt-signing identity (the §20.4 issuer), so ingestion outcomes
+   * are attested by signed `receipt` records (WS-R.10.2).  In production the key comes from the
+   * SecretBox-encrypted node-key group; `nodeId` defaults to this server's pulse node id.
+   */
+  configureReceiptIssuer(privateKey: CryptoKey, signerKeyId: string, nodeId?: string): void {
+    this.receiptIssuer = {
+      privateKey,
+      signerKeyId,
+      nodeId: nodeId ?? `lcap-server:${this.networkId}`,
+    };
+  }
+
+  /** The §20.4 receipt type a per-object status belongs to (or none — receipts attest handling). */
+  private static receiptTypeForStatus(
+    status: ObjectStatusV2['status'],
+  ): ReceiptRecordV2['receipt_type'] | undefined {
+    if (status === 'accepted') return 'accepted';
+    if (
+      status === 'stored_unverified' ||
+      status === 'stored_pending' ||
+      status === 'already_have'
+    ) {
+      return 'stored';
+    }
+    if (status.startsWith('quarantined')) return 'quarantined';
+    if (status.startsWith('rejected') || status === 'conflict_device_fork') return 'rejected';
+    return undefined;
+  }
+
+  /**
+   * Issue signed `receipt` records over a batch's per-object statuses (WS-R.10.2 / §24.5),
+   * grouped by receipt type (one `accepted` / `stored` / `quarantined` / `rejected` receipt over
+   * its members, each carrying the per-object `status_detail`).  Each receipt's record + detached
+   * proof are durably stored (CID-addressed, fetchable via §29), and every covered status is
+   * stamped with its `receipt_cid`.  A receipt is an availability HINT + audit evidence, never
+   * content trust — a forged issuer is just an untrusted hint.  No-op (statuses unchanged, no
+   * receipts) when no issuer is configured.
+   */
+  async issueReceipts(statuses: readonly ObjectStatusV2[]): Promise<{
+    statuses: ObjectStatusV2[];
+    receipts: {
+      cid: string;
+      recordBody: Uint8Array;
+      proofCid: string;
+      proofBody: Uint8Array;
+      record: ReceiptRecordV2;
+    }[];
+  }> {
+    const issuer = this.receiptIssuer;
+    if (!issuer) return { statuses: statuses.map((s) => ({ ...s })), receipts: [] };
+
+    // Group the statuses by the receipt type their outcome maps to (preserving order).
+    const byType = new Map<ReceiptRecordV2['receipt_type'], ObjectStatusV2[]>();
+    for (const s of statuses) {
+      const receiptType = LcapIngestServer.receiptTypeForStatus(s.status);
+      if (receiptType === undefined) continue;
+      const group = byType.get(receiptType);
+      if (group) group.push(s);
+      else byType.set(receiptType, [s]);
+    }
+
+    const receiptCidByCid = new Map<string, string>();
+    const receipts: {
+      cid: string;
+      recordBody: Uint8Array;
+      proofCid: string;
+      proofBody: Uint8Array;
+      record: ReceiptRecordV2;
+    }[] = [];
+    for (const [receiptType, group] of byType) {
+      const record: ReceiptRecordV2 = {
+        record_version: 2,
+        kind: 'receipt',
+        receipt_type: receiptType,
+        issuer_node_id: issuer.nodeId,
+        subject_cids: group.map((s) => s.cid),
+        issued_at_claim_ms: this.now(),
+        // The per-object verdict (a mutable copy — `ObjectStatusV2` is readonly-typed; the
+        // receipt schema's `status_detail` array is mutable).  Carries the FINE status (e.g.
+        // which rejection reason), self-describing the receipt without the response statuses.
+        status_detail: group.map((s) => ({
+          cid: s.cid,
+          cid_kind: s.cid_kind,
+          status: s.status,
+          ...(s.missing_cids !== undefined ? { missing_cids: [...s.missing_cids] } : {}),
+          ...(s.detail_code !== undefined ? { detail_code: s.detail_code } : {}),
+          ...(s.receipt_cid !== undefined ? { receipt_cid: s.receipt_cid } : {}),
+        })),
+      };
+      const bundle = await signReceipt({
+        issuerPrivateKey: issuer.privateKey,
+        issuerSignerKeyId: issuer.signerKeyId,
+        receipt: record,
+        networkId: this.networkId,
+      });
+      const cid = await cidFor('record', bundle.body);
+      await this.store.storeObject(cid, 'record', bundle.body);
+      const proofBody = encodeWithSchema(detachedProofV2Schema, bundle.proof);
+      const proofCid = await cidFor('proof', proofBody);
+      await this.store.storeObject(proofCid, 'proof', proofBody);
+      receipts.push({ cid, recordBody: bundle.body, proofCid, proofBody, record });
+      for (const s of group) receiptCidByCid.set(s.cid, cid);
+    }
+
+    const stamped = statuses.map((s) => {
+      const receiptCid = receiptCidByCid.get(s.cid);
+      return receiptCid !== undefined ? { ...s, receipt_cid: receiptCid } : { ...s };
+    });
+    return { statuses: stamped, receipts };
   }
 
   /**
@@ -483,21 +777,29 @@ export class LcapIngestServer {
             ? this.capabilities.get(input.capabilityCid)
             : undefined;
         if (capBundle) {
+          // The §18.3 step 9 `max_media_bytes` debit: the summed stored size of the media
+          // blocks this contribution ships (its referenced blocks present at accept; §11.4
+          // "media bytes").  Computed from the record's `block` edges + the actual CID-verified
+          // byte length the server holds, so it is never the author's declared figure.
+          const mediaBytes = await this.referencedMediaBytes(input.recordCid);
           const accepted = await this.store.acceptContribution(
             input.roomId,
             input.recordCid,
             input.body.length,
+            mediaBytes,
             {
               capabilityId: capBundle.capability.capability_id,
               maxEvents: capBundle.capability.quotas.max_offline_events,
               maxTotalBytes: capBundle.capability.quotas.max_total_payload_bytes,
+              maxMediaBytes: capBundle.capability.quotas.max_media_bytes,
             },
           );
           if (accepted.ok) {
             roomSeq = accepted.seq;
           } else {
-            // Aggregate quota exhausted — reject without appending (the device-seq claim
-            // stands; the capability budget is NOT debited).  `rejected_quota` (§16.11).
+            // Aggregate quota exhausted (events / total payload / media) — reject without
+            // appending (the device-seq claim stands; the capability budget is NOT debited).
+            // `rejected_quota` (§16.11).
             return {
               status: { cid: input.recordCid, cid_kind: 'record', status: 'rejected_quota' },
               wants: [],
@@ -563,6 +865,20 @@ export class LcapIngestServer {
       audience: 'restricted',
       limits: graphLimitsFromCaps(this.caps),
     });
+  }
+
+  /**
+   * A §27.1 CPU-time budget for one pack import (`maxCpuTimeMsPerImportBatch`), returned as a
+   * cheap `overBudget()` poll.  `commitBatch` already time-bounds the COMMIT phase; the pack
+   * parse + store + edge-index phase (`ingestPackFrames`) uses this to bound ITSELF too, so a
+   * large multi-object pack — whose total store/index writes are bounded by the §27.2 node cap
+   * and the §27.1 byte caps but can still be O(10^5) on a durable store — cannot pin a worker.
+   * The deadline is read from THIS server's caps + clock, mirroring `commitBatch`.
+   */
+  newImportBudget(): () => boolean {
+    const startMs = this.now();
+    return (): boolean =>
+      !checkCap(this.now() - startMs, 'maxCpuTimeMsPerImportBatch', this.caps).ok;
   }
 
   async commitBatch(inputs: readonly CommitRecordInput[]): Promise<CommitBatchResult> {
@@ -706,17 +1022,20 @@ export class LcapIngestServer {
   /**
    * The §17.2 checkpoint frontier: one entry per room that has accepted records,
    * keyed by the privacy-scoped `room_id_hash` and reporting the room log's current
-   * size (its §22 leaf count).  No `latest_checkpoint_cid` is emitted until
-   * checkpoint issuance lands — the honest "how far along" signal is the tree size,
-   * which already lets a peer detect it is behind on a room (§17.2).
+   * size (its §22 leaf count) plus the `latest_checkpoint_cid` once this node has
+   * issued a signed checkpoint for the room (WS-R.9.2b).  The tree size alone already
+   * lets a peer detect it is behind; the checkpoint CID lets it fetch + verify the
+   * signed head against the authority key.
    */
   async checkpointFrontier(): Promise<CheckpointFrontierV2[]> {
     const rooms = await this.store.listRooms();
     const frontier: CheckpointFrontierV2[] = [];
     for (const roomId of rooms) {
+      const checkpointCid = this.latestCheckpoints.get(roomId)?.cid;
       frontier.push({
         room_id_hash: await roomIdHash(this.networkId, roomId),
         latest_tree_size: await this.store.roomSize(roomId),
+        ...(checkpointCid !== undefined ? { latest_checkpoint_cid: checkpointCid } : {}),
       });
     }
     return frontier;
@@ -782,8 +1101,9 @@ export class LcapIngestServer {
   /**
    * The §29.7 room tree head: the current tree size + Merkle root.  This is the
    * UNSIGNED head (size 0 → the RFC 9162 empty-tree hash); the authority-signed
-   * `CheckpointRecordV2` attesting a witnessed root is checkpoint issuance, a later
-   * card.  Inclusion/consistency proofs verify against this root regardless.
+   * `room_checkpoint` attesting a root is issued separately by `issueCheckpoint`
+   * (served alongside this head when present, via `latestCheckpointWire`).
+   * Inclusion/consistency proofs verify against this root regardless.
    */
   async roomTreeHead(
     roomId: string,

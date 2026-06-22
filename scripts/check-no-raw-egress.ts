@@ -26,7 +26,13 @@ const LCAP_DIRS = [
   resolve(ROOT, 'packages/lcap-p2p/src'),
   resolve(ROOT, 'apps/web/src/lcap'),
   resolve(ROOT, 'apps/api/src/lcap'),
+  // The WS-R.15.4 native courier shell (no raw attention trace / network-address field
+  // may ferry over radio either); the generated android/ build output is skipped below.
+  resolve(ROOT, 'apps/courier'),
 ];
+
+// Directories never worth walking (deps + generated native/build output).
+const SKIP_DIRS = new Set(['node_modules', 'build', '.gradle', 'dist']);
 
 const TEST_FILE = /\.(?:test|spec)\.tsx?$/;
 
@@ -90,7 +96,7 @@ function collect(dir: string): string[] {
   if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) return out;
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
-    if (entry.isDirectory() && entry.name !== 'node_modules') out.push(...collect(full));
+    if (entry.isDirectory() && !SKIP_DIRS.has(entry.name)) out.push(...collect(full));
     else if (entry.isFile() && /\.tsx?$/.test(entry.name) && !TEST_FILE.test(entry.name)) {
       out.push(full);
     }

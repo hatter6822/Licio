@@ -231,15 +231,15 @@ is a later card (the package is already runtime-agnostic via `runtime.ts`).
 | WS-R.6 — sync protocol (pulse, exchange, interests, wants, budgets, idempotency) | 6.1 – 6.5 | **Shipped** (decision plane; the `/pulse` + `/exchange` HTTP wire shipped in WS-R.12.4) |
 | WS-R.7 — reconciliation (frontier-first order, `minimalClosure`) | 7.1 – 7.2 | **Shipped** (7.3 set-recon filters deferred by spec) |
 | WS-R.8 — trust projection (`validate`) | 8.1 – 8.3 | **Shipped** |
-| WS-R.9 — Merkle / checkpoint / inclusion / consistency / witness | 9.2 – 9.4 | **Shipped** (9.1 server-append logic core; DB binding in WS-R.12) |
-| WS-R.10 — liveness, receipts, durable outbox | 10.1 – 10.3 | **Shipped** (IndexedDB binding in WS-R.11) |
+| WS-R.9 — Merkle / checkpoint / inclusion / consistency / witness | 9.2 – 9.4 | **Shipped** (9.1 server-append logic core; DB binding in WS-R.12).  **Server-side checkpoint ISSUANCE shipped** (WS-R.9.2b): `LcapIngestServer.issueCheckpoint` builds + room-authority-signs (real COSE_Sign1 via `signCheckpoint`) + durably stores a `room_checkpoint` over the canonical log, idempotent by tree size, chained via `previous_checkpoint_cid`, surfaced in the §17.2 frontier + the §29.7 route, on the lease-guarded hourly tick.  Proven against the room-authority key (`verifyCheckpoint`) + an independent merkle-root recompute.  **Production note:** issuance needs a registered room-authority SIGNING key (`registerRoomAuthoritySigner`) — provisioned with the WS-L/WS-M room-governance key lifecycle; a node with no signer simply does not checkpoint (the §29.7 head still serves), so the engine is complete + tested but emits nothing until those keys exist |
+| WS-R.10 — liveness, receipts, durable outbox | 10.1 – 10.3 | **Shipped** (IndexedDB binding in WS-R.11).  **Server-emitted signed receipts shipped** (WS-R.10.2): `LcapIngestServer.issueReceipts` groups ingestion outcomes by type, signs one `receipt` per group (real COSE_Sign1 via `signReceipt`), stamps each status with its `receipt_cid`, durably stores record + proof, and rides them on the §29.3 `/packs` + §29.2 `/exchange` responses — a receipt is an availability HINT, never content trust.  **Production note:** emission needs a configured node receipt key (`configureReceiptIssuer`); without it the statuses pass through unchanged (a missing receipt is always safe) |
 | WS-R.13 — conflict dispatch + visible-thread projection | 13.1 – 13.2 | **Shipped** |
 | WS-R.12 — server ingestion | 12.1, 12.2, 12.4 | **Decision core + §24.4 resolver + server-computed validation + in-memory & gated-Drizzle bindings + the full §29 route surface shipped** (`ingestRecord`, `resolveIngestionOrder`, `validate`; `apps/api/src/lcap` `LcapIngestServer` incl. `validateContribution`/`commitBatch`/frontiers/room-Merkle reads; `routes.ts` content reads + `POST …/packs` + `/pulse` (incl. C0 `critical_pack`) + `/exchange` (incl. `response_pack`) + `/rooms/:id/{checkpoint,proofs/*}` + `/bundles/import` + `POST /bundles/export` (room closure via the migration-`0040` closure index; capability-gated, review #5); the `LcapServerStore` boundary over migrations `0039`+`0040`) — **§29 route surface complete** (the WS-R.15.1a/b client bundle UI shipped under WS-R.15) |
 | WS-R.14 — privacy + DoS controls | 14.1a, 14.1b, 14.2, 14.3, 14.4 | **Shipped**: the §27.1 resource-cap SSOT (`limits/caps.ts` — one frozen config every parser path sources, profile-tunable/never-disable-able, `checkCap`/`enforceCap`; the server parse enforces the CPU-time + quarantine-byte caps, 14.1a); the §27.2 graph guard run over the pack's DECLARED DAG before storage (14.1b); the §27.3 relay quotas + §27.4 no-PoW/no-address policy (`limits/relay-quota.ts`, 14.4); the §26.2 export-disclosure + §26.3 stealth policy (`privacy/`, 14.2 — interest-privacy in R.6.3); the §3.7/§36 doctrine CI gates (`check:lcap-schema-egress` + no-applause/no-raw-egress over the LCAP trees, 14.3). The 14.2 export UI flow is WS-R.15.1a |
-| WS-R.11 — IndexedDB client offline store | 11.1 – 11.5 | **Shipped** (`apps/web/src/lcap`: `lcap_v2` schema + durability + pinning/eviction + storage modes + C0-first sync + replication gate); durability layer / SW hooks = follow-up |
-| WS-R.15 — transport profiles + the seam | 15.1a/b, 15.2, 15.3, 15.4b, 15.5, 15.6, 15.7 | **The transport plane is shipped over one seam.** The **§22.6 `LcapTransport` seam** (`packages/lcap/src/transport`): the byte-channel interface every carrier implements + the selection policy that forces a server-mediated transport LAST (the always-correct anchor) + the public-only carriage gate + the fallback driver (15.4b). The **WS-R.15.1a/b offline `.licio-bundle` export+import** run CLIENT-LOCAL (`apps/web/src/lcap/bundle-{export,import}.ts` + `OfflineBundlePanel` + `/profile/offline`), the real pack writer/reader in a lazy chunk. The **WS-R.15.3 relay decision core** (`apps/api/src/lcap/relay.ts` `LcapRelay`). The client carriers over the seam (`apps/web/src/lcap/transports`): the **HTTPS anchor**, the platform **WebTransport** adapter + feature-detect (15.5), the **courier** ferry over a `CourierMedium` (15.4b; the native Nearby/BLE channels ride the same adapter behind the deferred Capacitor shell 15.4a/c/d), and the **registry** running `fallbackExchange` with WebRTC loaded by DYNAMIC import. The new code-split **`@licio/lcap-p2p`** package: the **WebRTC** data-channel transport + the server-blind AES-GCM signaling envelope (its AAD length-prefix-binds room + peer pair, an unambiguous canonical encoding, so a captured blob opens in no other room/peer context) + the §26.4 ICE/NAT-privacy policy (15.6a/b) and the dependency-free **IPFS gateway bridge** — the verification-preserving `block_cid ⇄ CIDv1(raw,sha2-256)` map, CID-re-verified on BOTH the fetch path (an untrusted gateway returning wrong bytes is rejected) and the publish path (mislabeled bytes are never pinned), public-only publish (15.7a/b). The **§22.3 QR micro-bundle** (`apps/web/src/lcap/transports/qr`): a hand-rolled byte-mode encoder (jsQR-round-trip-proven) + lazy jsQR still-image decode (15.2). Server: the server-blind `POST /api/lcap/v2/p2p/signal` rendezvous + the CSRF-protected `POST …/p2p/signal/poll` drain (15.6a). Gates: `check:lcap-p2p-split` (no static @licio/lcap-p2p import in apps/web) + the egress/applause gates extended over the new trees (15.8). **Deferred:** the native Android Capacitor shell (15.4a/c/d/e/f — needs the Android toolchain) |
-| WS-R.17 — LCAP client surface | 17.1 – 17.3 | **Shipped** (`apps/web/src/lcap` + `apps/web/src/components/lcap`): the §34 honest trust/liveness label mapping (`trust-labels.ts`) + the `TrustBadge` (13 distinct labels, never one "secure"/"trusted"/"delivered" badge); the §33 operational modes (`operational-modes.ts` — minimal/standard/courier/relay/stealth/emergency, each driving storage policy + max priority + media + discovery/advertising/background-sync channels + export posture); the §25/§22.1.1/§20 offline-state surfaces (`OfflineStates/`: `ConflictWarning` — never-discard fork alert, `QuarantineNotice` — partial-import wait + `wants` fetch, `OutboxStatus` — honest queued/retrying/exported chip). These always-available surfaces mirror the state unions locally rather than importing `@licio/lcap` (pinned by completeness tests), so they stay off the lazy codec chunk apps/web loads it into for the WS-R.15.1 bundle flows. Route-mounting onto story/room cards is a follow-up |
-| WS-R.18 — tests, simulator, interop | 18.1 – 18.6 | **Shipped** — the deterministic discrete-event network simulator (`packages/lcap/src/test-vectors/sim`, R.18.3a/b): a seeded link model + pluggable adversaries (honest/withholding/flooding/equivocating) running the REAL scheduler + closure, with the named scenarios asserting the §32.3 metrics (C0 never starved, fork detection, quarantine-then-clear) + the §32.5 transport-independence property (R.15.9). The corpus / property / security / interop legs (R.18.1/2/4/5) are the conformance-vector replay, the P1–P3 determinism properties, the malleability/downgrade/bomb/rejection suites, and the gated browser↔Node crypto-interop vectors already in the `@licio/lcap` suite |
+| WS-R.11 — IndexedDB client offline store | 11.1 – 11.5 | **Shipped** (`apps/web/src/lcap`: `lcap_v2` schema + the §23.2 durability layer + pinning/eviction + storage modes + the §21.4 replication gate). **The §23.3 C0-first sync hooks are wired** (`sync-boot.ts` attaches the online/focus/visibility trigger orchestrator + fires an app-open pulse; `sync-pass.ts` runs ONE minimal frontier-only C0 pulse against `/api/lcap/v2/pulse` from a LAZY dynamic-import chunk so the codec stays off the initial bundle; the SW `sync` handler (`public/sw-push.js`, tag `lcap-c0-sync`) posts the secondary background-sync nudge; booted from `lib/bootstrap.ts`).  **The §23.3 suppression conditions are fully LIVE:** app open, regained connectivity, focus, and the background nudge are ALL gated automatic triggers (only a deliberate user action forces) — suppressed offline, under data-saver, on a non-charging low battery (the Chromium Battery Status API via `initBatteryTracking`; absent ⇒ honestly "unknown"/false), and in **Stealth** mode (the persisted `mode-state` operational mode → its `StorageMode`; Stealth also skips background-sync registration), so a Stealth device never auto-contacts the server, not even on open |
+| WS-R.15 — transport profiles + the seam | 15.1a/b, 15.2, 15.3, 15.4b, 15.5, 15.6, 15.7 | **The transport plane is shipped over one seam.** The **§22.6 `LcapTransport` seam** (`packages/lcap/src/transport`): the byte-channel interface every carrier implements + the selection policy that forces a server-mediated transport LAST (the always-correct anchor) + the public-only carriage gate + the fallback driver (15.4b). The **WS-R.15.1a/b offline `.licio-bundle` export+import** run CLIENT-LOCAL (`apps/web/src/lcap/bundle-{export,import}.ts` + `OfflineBundlePanel` + `/profile/offline`), the real pack writer/reader in a lazy chunk. The **WS-R.15.3 relay decision core** (`apps/api/src/lcap/relay.ts` `LcapRelay`). The client carriers over the seam (`apps/web/src/lcap/transports`): the **HTTPS anchor**, the platform **WebTransport** adapter + feature-detect (15.5), the **courier** ferry over a `CourierMedium` (15.4b; the native Nearby/BLE channels ride the same adapter behind the deferred Capacitor shell 15.4a/c/d), and the **registry** running `fallbackExchange` with WebRTC loaded by DYNAMIC import. The new code-split **`@licio/lcap-p2p`** package: the **WebRTC** data-channel transport + the server-blind AES-GCM signaling envelope (its AAD length-prefix-binds room + peer pair, an unambiguous canonical encoding, so a captured blob opens in no other room/peer context) + the §26.4 ICE/NAT-privacy policy (15.6a/b) and the dependency-free **IPFS gateway bridge** — the verification-preserving `block_cid ⇄ CIDv1(raw,sha2-256)` map, CID-re-verified on BOTH the fetch path (an untrusted gateway returning wrong bytes is rejected) and the publish path (mislabeled bytes are never pinned), public-only publish (15.7a/b). The **§22.3 QR micro-bundle** (`apps/web/src/lcap/transports/qr`): a hand-rolled byte-mode encoder (jsQR-round-trip-proven) + lazy jsQR still-image decode (15.2). Server: the server-blind `POST /api/lcap/v2/p2p/signal` rendezvous + the CSRF-protected `POST …/p2p/signal/poll` drain (15.6a). Gates: `check:lcap-p2p-split` (no static @licio/lcap-p2p import in apps/web) + the egress/applause gates extended over the new trees (15.8). **WS-R.15.4a native Android courier shell shipped:** `apps/courier/` (Capacitor 7, `webDir`→`apps/web/dist`) builds a real debug APK via `pnpm --filter courier build` (the two-stage `check-no-fork` byte-identity gate → `cap sync` → Gradle/Android-SDK), the CSP/Trusted-Types posture preserved in the WebView by the `index.html` `<meta>` CSP mirror, the `@capacitor/*` deps native-scoped (web budgets untouched), a `courier-apk` CI job (SDK from dl.google.com, no third-party action), and the doctrine gates extended over `apps/courier`. **Needs device hardware:** the 15.4c/d native radio plugins (Nearby Connections / Wi-Fi Direct / Bluetooth / USB), 15.4e native force-off enforcement, and the 15.4f two-emulator offline-convergence E2E (a radio-capable emulator with Google Play Services to be verifiable) |
+| WS-R.17 — LCAP client surface | 17.1 – 17.3 | **Shipped** (`apps/web/src/lcap` + `apps/web/src/components/lcap`): the §34 honest trust/liveness label mapping (`trust-labels.ts`) + the `TrustBadge` (13 distinct labels, never one "secure"/"trusted"/"delivered" badge); the §33 operational modes (`operational-modes.ts` — minimal/standard/courier/relay/stealth/emergency, each defining storage policy + max priority + media + discovery/advertising/background-sync channels + export posture), with a persisted current-mode source (`mode-state.ts`) the **C0 sync already reads live** (Stealth suppresses the automatic sync + skips background-sync registration); the user-facing mode SELECTOR and the integration of the mode into the OTHER §33 consumers (media / export / discovery / storage posture) is a tracked follow-up — deliberately deferred so a Stealth control never ships ahead of the full posture it implies; the §25/§22.1.1/§20 offline-state surfaces (`OfflineStates/`: `ConflictWarning` — never-discard fork alert, `QuarantineNotice` — partial-import wait + `wants` fetch, `OutboxStatus` — honest queued/retrying/exported chip). These always-available surfaces mirror the state unions locally rather than importing `@licio/lcap` (pinned by completeness tests), so they stay off the lazy codec chunk apps/web loads it into for the WS-R.15.1 bundle flows. **Mounted where the state is REAL:** the `OfflineBundlePanel` import-done view renders `QuarantineNotice` from a real missing-dependency import AND the `TrustBadge` for the honest integrity-only trust the import actually grants (`integrity_verified`/`peer_stored` → "Cannot verify yet…", never a claim the projection has not made), proven end-to-end against a real bundle round-trip. Mounting badges on API-sourced story/room cards stays a tracked follow-up: those feeds are not yet driven from the `lcap_v2` store, so a badge there would carry no real per-record trust state (and the doctrine forbids a cosmetic trust signal) |
+| WS-R.18 — tests, simulator, interop | 18.1 – 18.6 | **Shipped** — the deterministic discrete-event network simulator (`packages/lcap/src/test-vectors/sim`, R.18.3a/b): a seeded link model + pluggable adversaries (honest/withholding/flooding/equivocating) running the REAL scheduler + closure, with the named scenarios asserting the §32.3 metrics (C0 never starved, fork detection, quarantine-then-clear) + the §32.5 transport-independence property (R.15.9). The corpus / property / security legs (R.18.1/2/4) are the conformance-vector replay, the P1–P3 determinism properties, and the malleability/downgrade/bomb/rejection suites in the `@licio/lcap` suite. **R.18.5 browser↔Node crypto interop** ships as a dedicated Playwright spec (`apps/web/e2e/crypto-interop.spec.ts`): an @licio/lcap low-S signature verifies under raw browser WebCrypto (and its high-S malleability twin is accepted by WebCrypto but rejected by lcap), and a browser-WebCrypto signature verifies under lcap's strict verifier in Node — proving the wire signature bytes interchange in BOTH directions. **R.18.6 ships the §36 acceptance-gate checklist** (see below): 18 of 21 gates automated by a CI check or named test; the 3 manual/hardware gates are called out honestly |
 | WS-R.16 — encryption envelope | 16.1 | Planned (blocked on the WS-S private-rooms key schedule) |
 | WS-S — Private P2P Rooms (E2EE) | all | Planned (`docs/PRIVATE_SPEC.md`) |
 
@@ -249,10 +249,15 @@ the client-local offline bundle export/import (WS-R.15.1a/b), and the **entire t
 plane over one `LcapTransport` seam** — the HTTPS anchor, WebTransport, courier, the
 relay core, the code-split `@licio/lcap-p2p` (WebRTC + the dependency-free IPFS gateway
 bridge), the QR micro-bundle, the server-blind signaling rendezvous, and the §32.3/§32.5
-network simulator (WS-R.18.3) — are complete.  The remaining cards are the **native
-Android Capacitor courier shell** (WS-R.15.4a/c/d/e/f — needs a native build
-environment) and the **WS-S encryption-envelope seam** (WS-R.16, blocked on the WS-S
-private-rooms plane); route-mounting the transport-selection UI onto the client is a
+network simulator (WS-R.18.3), and the **WS-R.15.4a native Android courier shell**
+(`apps/courier` — a Capacitor 7 shell building a real debug APK from the byte-identical
+web build, CSP/TT preserved in the WebView, behind the `check-no-fork` gate + the
+`courier-apk` CI job) are complete.  The remaining courier cards (WS-R.15.4c/d native
+radio plugins — Nearby Connections / Wi-Fi Direct / Bluetooth / USB — the 15.4e native
+force-off enforcement, and the 15.4f two-emulator offline-convergence E2E) need **physical
+Android devices / radio-capable emulators with Google Play Services to be verifiable**;
+the other remaining card is the **WS-S encryption-envelope seam** (WS-R.16, blocked on the
+WS-S private-rooms plane).  Route-mounting the transport-selection UI onto the client is a
 tracked follow-up.
 
 ### Ingestion-path hardening (external review, June 2026)
@@ -293,23 +298,89 @@ None of the above was launch-blocking (the LCAP server binding is gated/in-memor
 pre-production), and the pay-to-rank firewall + fail-closed crypto were unaffected
 throughout.
 
-**Aggregate capability quotas — shipped.**  Beyond the per-event `max_single_event_bytes`
-the §18.3 chain validator already enforced, the server now enforces a capability's
-*aggregate* quotas (`max_offline_events`, `max_total_payload_bytes`) — the stateful
-per-capability accounting a pure, per-record `validate()` cannot hold.  A durable
-per-capability usage counter lives on the `LcapServerStore` boundary
-(`lcap_capability_usage`, migration `0041`); `acceptContribution` debits it as ONE atomic
-step with the room-log append — idempotent by `record_cid` (a re-accept never re-debits),
-the check + debit serialized per capability (the Drizzle adapter locks the usage row
-`FOR UPDATE`, with an outer retry on the room-seq race; the in-memory adapter is
-single-threaded), so concurrent accepts can never exceed the budget.  `commitRecord` routes
-a fresh accept through this gate; an over-budget contribution is `rejected_quota` (§16.11)
-and never appended (the device-seq claim stands; the budget is not debited).  Proven against
-real Postgres (within-budget accept, event-count + total-bytes rejection, idempotent
-re-accept, a concurrent-accept cap at exactly `max_offline_events`, and the end-to-end
-`rejected_quota` wiring).
+**§27 ingestion-loop bounds — two further DoS fixes.**  The media-byte accounting work
+indexes a contribution's SIGNED-BODY-declared block references (`body_block_cid` /
+`attachment_manifest_cid` / `source_snapshot_cids`).  Unlike the pack TABLE deps (already
+bounded by the §27.2 graph guard's `maxFanOut` and the §27.2 `maxGraphNodes` entry cap),
+these body refs are NOT pack entries, so an unbounded `source_snapshot_cids` array (the
+record schema sets no length) could otherwise drive an unbounded, AWAITED index-write loop
+BEFORE signature validation — amplified on the durable store.  Two bounds close it: (1)
+`indexBodyBlockEdges` rejects a contribution whose declared body-block-reference count
+exceeds the §27.1 `maxFanOut` (`rejected_resource_limit`, nothing indexed) — the count is
+checked before any parse, so an over-cap record costs O(1), and the §18.3 media charge +
+the §29.8 closure stay bounded; (2) the whole parse+store+index phase
+(`ingestPackFrames`) now runs under the §27.1 `maxCpuTimeMsPerImportBatch` budget
+(`newImportBudget`), the same cap `commitBatch` already enforced on the commit phase — so a
+large multi-object pack (its object COUNT bounded by the §27.2/byte caps, but its total
+store/index writes still potentially O(10^5)) is wall-clock-bounded and cannot pin a worker.
 
-The one remaining sub-item is `max_media_bytes`: it needs media-size accounting at accept
-(summing the contribution's referenced block sizes), which is fuzzy when media arrives
-separately from the event — a distinct, smaller follow-up tracked here, not a blocker for
-the event-count / total-payload budgets above.
+**Aggregate capability quotas — shipped (all three).**  Beyond the per-event
+`max_single_event_bytes` the §18.3 chain validator already enforced, the server now enforces
+all three of a capability's *aggregate* quotas — `max_offline_events`,
+`max_total_payload_bytes`, AND `max_media_bytes` — the stateful per-capability accounting a
+pure, per-record `validate()` cannot hold.  A durable per-capability usage counter (event
+count, total payload bytes, media bytes) lives on the `LcapServerStore` boundary
+(`lcap_capability_usage`, migrations `0041` + `0042`); `acceptContribution` checks + debits all
+three as ONE atomic step with the room-log append — idempotent by `record_cid` (a re-accept
+never re-debits), the check + debit serialized per capability (the Drizzle adapter locks the
+usage row `FOR UPDATE`, with an outer retry on the room-seq race; the in-memory adapter is
+single-threaded), so concurrent accepts can never exceed any budget.  `commitRecord` routes a
+fresh accept through this gate; an over-budget contribution (events, payload, OR media) is
+`rejected_quota` (§16.11) and never appended (the device-seq claim stands; no budget is
+debited).  Proven against real Postgres (within-budget accept, event-count / total-bytes /
+media-bytes rejection, idempotent re-accept, a concurrent-accept cap at exactly the budget,
+and the end-to-end `rejected_quota` wiring).
+
+The `max_media_bytes` charge for a contribution is the summed ACTUAL stored size of the blocks
+it references — its `block` edges (the §29.8 export closure index), derived tamper-resistantly
+from BOTH the signed body's block references (`body_block_cid` / `attachment_manifest_cid` /
+block-kind `source_snapshot_cids`) AND the pack table's declared block deps, de-duplicated.
+The figure is always the server's own CID-verified byte length, never the author's declaration.
+The server does not parse per-block roles, so every referenced block counts (the conservative
+reading of §11.4 "referenced block sizes"; per-role weighting from the attachment-manifest
+descriptors is a tracked refinement).  Media that ships in the contribution's own pack is
+charged in full at accept (the §13.4 common case: the body/thumbnail/manifest blocks are P1/P2
+and travel with the event); cross-pack lazy P3 media that arrives in a *separate* later pack
+contributes 0 at accept and is otherwise bounded by the §27.1 block caps and the
+`max_offline_events` count — retroactively charging a late block against an already-accepted
+contribution's capability (a block→capability reverse index) is the remaining refinement,
+tracked here.
+
+## Acceptance gates (OFFLINE_SPEC §36 — WS-R.18.6)
+
+§36 enumerates the gates that must hold before LCAP v0.2 is production-ready for
+**high-risk use**.  Each gate below maps to a CI check or a named test.  The gates
+that require **physical hardware** or an **external full-plane review** are called
+out explicitly as manual/pending so no false "secure" claim is implied — the LCAP
+server binding is gated/in-memory and pre-production regardless.
+
+| # | §36 gate | Mechanism | Status |
+|---|---|---|---|
+| 1 | `record_cid` / proof separation | Detached COSE_Sign1 proofs over CID-addressed records; strict closed schemas (`packages/lcap/src/{schemas,cose/sign1.ts}`) | ✅ Automated (`pnpm --filter @licio/lcap test`) |
+| 2 | Deterministic encoding vectors stable | LDC golden corpus + the P1–P3 determinism properties (`packages/lcap/src/test-vectors`, `__tests__`) | ✅ Automated |
+| 3 | Browser ↔ Node crypto interop | `apps/web/e2e/crypto-interop.spec.ts` (Playwright, all three engines) + the Node COSE suite | ✅ Automated (CI E2E job) |
+| 4 | Malformed-pack fuzz | Packfile cap/tamper matrix + the §27.2 dependency-bomb corpus (`limits/__tests__`) | ✅ Automated |
+| 5 | C0-starvation | `pnpm check:lcap-scheduler` + the simulator "C0 never starved" scenario (`test-vectors/sim`) | ✅ Automated (named CI gate) |
+| 6 | Outbox durability | Liveness / receipts / outbox model (WS-R.10) + the client IndexedDB durability layer (`apps/web/src/lcap/store.test.ts`, WS-R.11.3b) | ✅ Automated |
+| 7 | Revocation propagation | §18.3 chain-validator revocation matrix + the simulator revocation race | ✅ Automated |
+| 8 | Checkpoint consistency | RFC 9162 inclusion/consistency suite (WS-R.9) + `apps/api/src/__tests__/lcap-checkpoint-issuance.test.ts` | ✅ Automated |
+| 9 | UI trust labels reviewed | §34 honest label SSOT + `TrustBadge` (13 labels — no single "secure"/"trusted"/"delivered"); mapping pinned by `trust-labels.test.ts` | ✅ Automated mapping + code-review sign-off |
+| 10 | No raw attention / IP / location in LCAP schemas | `pnpm check:lcap-schema-egress` (CI lint job) | ✅ Automated (named CI gate) |
+| 11 | Storage-pressure behavior on low-end Android | §21.3 storage-mode + pressure-degradation units (`apps/web/src/lcap/storage-modes.test.ts`) | ⚠️ Logic automated; **on-device** verification pending hardware (tracked with WS-R.15.4c–f) |
+| 12 | Import / export privacy warnings | §26.2 disclosure-before-file + §26.3 high-risk filename (WS-R.14.2) + the `OfflineBundlePanel` pre-render summary | ✅ Automated |
+| 13 | External threat-model review | Ingestion + bundle paths externally reviewed (June 2026; see above) | ⚠️ Ingestion/bundle reviewed; the **full-plane** external review is a launch gate for high-risk use |
+| 14 | Private-room replication disabled or audited | No WS-S private plane exists yet; the §21.4 replication gate excludes non-public content | ✅ Disabled (re-audit when WS-S lands) |
+| 15 | One `validate` / `LcapTransport` seam | §22.6 seam + the single server-side `validate()`; `pnpm check:lcap-p2p-split` | ✅ Automated (named CI gate) |
+| 16 | Correctness-independent-of-transport | The §32.5 transport-independence property in the simulator (WS-R.15.9) | ✅ Automated |
+| 17 | No peer IP / multiaddr / radio identifier in any LCAP schema | `pnpm check:lcap-schema-egress` over `@licio/lcap-p2p` + `apps/courier` | ✅ Automated (named CI gate) |
+| 18 | WebRTC/IPFS deps code-split + workspace-excluded | `pnpm check:lcap-p2p-split` + the < 200 KB-gz initial-bundle gate + `pnpm check:deps` (web < 15) | ✅ Automated (named CI gates) |
+| 19 | IPFS publishes public blocks only | The bridge's public-only publish gate, CID-re-verified on BOTH the fetch and publish paths (WS-R.15.7b) | ✅ Automated (takedown-driven republication-halt wiring tracked) |
+| 20 | P2P/courier reach off by default; off in Stealth/Emergency | §33 operational modes + the §26.4 ICE off-by-default / Stealth-force-off policy | ✅ Automated |
+| 21 | `apps/courier` native build green in CI | The `courier-apk` CI job (debug APK from the byte-identical web build, behind `check-no-fork`) | ✅ Automated (CI job) |
+
+**Net:** 18 of the 21 gates are enforced by an automated CI check or a named test.
+The remaining three are honest manual/hardware gates — **on-device** low-end-Android
+storage-pressure verification (gate 11) and the **full-plane** external threat-model
+review (gate 13) are pre-production launch gates, and IPFS takedown-driven
+republication-halt (gate 19) is a tracked wiring follow-up.  No part of the LCAP plane
+claims "secure" for high-risk use ahead of gates 11 and 13.
