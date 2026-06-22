@@ -76,6 +76,11 @@ export function toBufferSource(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
     : new Uint8Array(bytes);
 }
 
+/** SHA-256 over `data` via WebCrypto (a general primitive; CID + AAD commitments). */
+export async function sha256(data: Uint8Array): Promise<Uint8Array> {
+  return new Uint8Array(await getSubtle().digest('SHA-256', toBufferSource(data)));
+}
+
 /** Fill a fresh `n`-byte array with cryptographically-strong random bytes. */
 export function randomBytes(n: number): Uint8Array {
   if (!Number.isInteger(n) || n < 0) throw new RangeError(`randomBytes: invalid length ${n}`);
