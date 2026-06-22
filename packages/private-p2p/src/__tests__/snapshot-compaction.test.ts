@@ -204,4 +204,38 @@ describe('§14.5 snapshot + §25.6 compaction', () => {
     expect(report.accepted).toStrictEqual([]);
     expect(roomStateCommitment(engine.state())).toStrictEqual(before);
   });
+
+  it('persists a base + drops pruned envelopes, then reloads from the base', async () => {
+    const room = await founded();
+    const storage = new InMemoryPrivateRoomStorage();
+    const engine = await PrivateRoomEngine.load({ ...room.engineParams, storage });
+    await engine.applyLocalOp(room.genesisOp, room.sealParams);
+    const ops: PrivateRoomOp[] = [room.genesisOp];
+    ops.push(await author(engine, room, 's1', story));
+    ops.push(await author(engine, room, 'c1', comment('c1', 'one')));
+
+    // The client compaction flow: snapshot → compact → export the base → drop the
+    // covered envelopes from durable storage.
+    const snapshot = await engine.createSnapshot();
+    engine.compact(snapshot);
+    const base = engine.exportBase();
+    if (!base) throw new Error('expected a compaction base');
+    await storage.deleteEnvelopes(snapshot.coveredOpIds);
+    expect(await storage.listEnvelopes()).toHaveLength(0); // every op covered + pruned
+
+    // Author MORE after compaction (only this envelope remains in storage).
+    ops.push(await author(engine, room, 'c2', comment('c2', 'after')));
+    expect((await storage.listEnvelopes()).map((e) => e.opId)).toStrictEqual(['c2']);
+
+    // A fresh engine resumes from the persisted base + re-verifies ONLY the
+    // post-snapshot envelope (the pruned ones are gone), converging to a full fold.
+    const reloaded = await PrivateRoomEngine.load({ ...room.engineParams, storage, base });
+    expect(roomStateCommitment(reloaded.state())).toStrictEqual(
+      roomStateCommitment(reduceRoom(ops)),
+    );
+    expect(reloaded.state().contributions.get('c2')?.bodyMarkdownLite).toBe('after');
+    expect(reloaded.heads()).toStrictEqual(['c2']);
+    // The reloaded engine can author further, staying monotonic across the base.
+    expect(reloaded.nextAuthorSeq('alice-dev')).toBe(4);
+  });
 });

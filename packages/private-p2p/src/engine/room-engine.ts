@@ -55,6 +55,8 @@ export interface PrivateRoomStorage {
   putEnvelope(opId: string, envelope: PrivateEncryptedEnvelope): Promise<void>;
   /** Every stored envelope (re-verified on load — storage confers no trust). */
   listEnvelopes(): Promise<ReadonlyArray<{ opId: string; envelope: PrivateEncryptedEnvelope }>>;
+  /** Drop envelopes pruned by a §14.5 compaction (idempotent — absent ids no-op). */
+  deleteEnvelopes(opIds: readonly string[]): Promise<void>;
 }
 
 /** An in-memory `PrivateRoomStorage` (local/dev + tests; apps/web uses IndexedDB). */
@@ -69,6 +71,31 @@ export class InMemoryPrivateRoomStorage implements PrivateRoomStorage {
   listEnvelopes(): Promise<ReadonlyArray<{ opId: string; envelope: PrivateEncryptedEnvelope }>> {
     return Promise.resolve([...this.envelopes].map(([opId, envelope]) => ({ opId, envelope })));
   }
+
+  deleteEnvelopes(opIds: readonly string[]): Promise<void> {
+    for (const id of opIds) this.envelopes.delete(id);
+    return Promise.resolve();
+  }
+}
+
+/**
+ * A persisted §14.5 compaction base for reload (WS-S.7 client persistence): the
+ * serialized reduced state + the covered frontier + the monotonic counters, so a
+ * reloading engine resumes from the base and folds only the post-snapshot
+ * envelopes (the pruned ones were dropped from storage).  This is the device's OWN
+ * previously-verified computation persisted in its OWN store — trusted as local
+ * state: the covered envelopes it summarizes are gone, so it is NOT re-verifiable
+ * by recomputation, exactly as a device trusts its own at-rest epoch secrets.
+ * Peer-received content is ALWAYS re-verified through `openOp` (§8.3) regardless.
+ */
+export interface PersistedSnapshotBase {
+  readonly serializedState: Uint8Array;
+  readonly coveredOpIds: readonly string[];
+  readonly coveredHeads: readonly string[];
+  /** Max Lamport among covered ops (decimal string, big-int-safe). */
+  readonly maxLamport: string;
+  /** Max `author_seq` per device among covered ops (`[deviceId, seq]` entries). */
+  readonly authorSeq: ReadonlyArray<readonly [string, number]>;
 }
 
 /** A quarantined envelope + the §14.2 stage-1 reason it failed to open. */
@@ -107,6 +134,9 @@ export interface PrivateRoomEngineParams {
    *  needed to open the genesis (founder self-add) op before any device is in
    *  reduced state. */
   readonly bootstrapDevices?: ReadonlyArray<BootstrapDevice>;
+  /** A persisted §14.5 compaction base to resume from (WS-S.7): the engine seeds
+   *  it, then `load` ingests only the post-snapshot envelopes still in storage. */
+  readonly base?: PersistedSnapshotBase;
 }
 
 /**
@@ -143,7 +173,16 @@ export class PrivateRoomEngine {
     this.storage = params.storage;
     this.epochs = new Map(params.epochs);
     this.bootstrapDevices = params.bootstrapDevices ?? [];
-    this.currentState = reduceRoom([]);
+    if (params.base) {
+      // Resume from a persisted compaction base (its covered envelopes were pruned
+      // from storage, so only the post-snapshot envelopes will be re-verified).
+      this.baseState = deserializeReducerState(params.base.serializedState);
+      this.baseHeads = [...params.base.coveredHeads];
+      for (const id of params.base.coveredOpIds) this.coveredOpIds.add(id);
+      this.baseMaxLamport = BigInt(params.base.maxLamport);
+      for (const [device, seq] of params.base.authorSeq) this.baseAuthorSeq.set(device, seq);
+    }
+    this.currentState = reduceRoom([], this.baseState);
   }
 
   /**
@@ -388,5 +427,36 @@ export class PrivateRoomEngine {
     this.baseState = deserializeReducerState(snapshot.serializedState);
     this.baseHeads = [...snapshot.coveredHeads];
     this.refold();
+  }
+
+  /**
+   * §25.6 cadence helper: when the post-snapshot op count reaches `threshold`,
+   * snapshot → adopt the base → DROP the covered envelopes from storage → return
+   * the base for the caller to persist.  Below threshold it is a no-op
+   * (`undefined`).  Bounds the replay-fold + re-verification cost across reloads.
+   */
+  async maybeCompact(threshold: number): Promise<PersistedSnapshotBase | undefined> {
+    if (threshold < 1 || this.acceptedOps.size < threshold) return undefined;
+    const snapshot = await this.createSnapshot();
+    this.compact(snapshot);
+    await this.storage.deleteEnvelopes(snapshot.coveredOpIds);
+    return this.exportBase();
+  }
+
+  /**
+   * Export the current §14.5 compaction base for at-rest persistence, or
+   * `undefined` if nothing has been compacted yet.  The caller persists this and
+   * drops the covered envelopes from storage; on reload it is passed back as
+   * `params.base` so only the post-snapshot envelopes are re-verified + folded.
+   */
+  exportBase(): PersistedSnapshotBase | undefined {
+    if (!this.baseState) return undefined;
+    return {
+      serializedState: serializeReducerState(this.baseState),
+      coveredOpIds: [...this.coveredOpIds],
+      coveredHeads: [...this.baseHeads],
+      maxLamport: this.baseMaxLamport.toString(),
+      authorSeq: [...this.baseAuthorSeq],
+    };
   }
 }

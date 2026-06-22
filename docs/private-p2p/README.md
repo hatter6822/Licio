@@ -141,9 +141,16 @@ keep a compacted engine **byte-identical to a full fold of every op** (a compact
 and an uncompacted device converge — including an individually granted capability,
 with the post-compaction state root still matching the snapshot's), and to keep
 authored Lamport/seq monotonic across the prune (so the two devices still agree on
-canonical order); a re-received covered op is ignored.  (The apps/web persistence
-of snapshots — dropping pruned envelopes from IndexedDB on reload — is a tracked
-follow-up; the engine core + the §14.5 verify-by-recomputation root are done.)
+canonical order); a re-received covered op is ignored.  The apps/web client
+PERSISTS this: `PrivateRoomSession` compacts on the §25.6 cadence
+(`maybeCompact` → `exportBase`), persists the base into the session, and DROPS the
+covered envelopes from IndexedDB (`storage.deleteEnvelopes`); on reload the engine
+resumes from the persisted base and re-verifies ONLY the post-snapshot envelopes —
+so a long-lived single-device room's reload cost stays bounded.  The base is the
+device's OWN previously-verified computation in its OWN store (trusted as local
+state, like the at-rest epoch secrets); peer-received content is always re-verified
+through `openOp` (§8.3).  Proven by a jsdom round-trip (compact → prune → reload
+from the base alone → author further).
 
 The **WS-S.7 apps/web client is shipped** (`apps/web/src/private-p2p/`): the
 IndexedDb `PrivateRoomStorage` adapter (a dedicated, isolated `licio_private_p2p`
@@ -186,9 +193,8 @@ and verified **offline**.  What remains is partitioned by what it needs:
   transport.
 
 **Follow-ups (offline, not transport-blocked):**
-- apps/web snapshot persistence — drop pruned envelopes from IndexedDB on reload
-  (the engine `createSnapshot`/`compact` + verify-by-recomputation are shipped).
-- A member display-name mapping (the reduced state keys members by id today).
+- A member display-name mapping (the reduced state keys members by id today; only
+  meaningful with multiple members, which is transport-gated in practice).
 
 **Server-coupled / later:**
 - WS-S.9 server→private migration (the server-export half needs the server/DB).

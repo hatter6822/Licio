@@ -13,6 +13,7 @@
 // import).  `manifest` is stored opaquely (`unknown`) and re-validated by the
 // room manager (which dynamic-imports the schema).
 
+import type { PersistedSnapshotBase } from '@licio/private-p2p';
 import { openPrivateP2pDb, promisify, ROOM_SESSION_STORE, txDone } from './storage.js';
 
 /**
@@ -44,6 +45,15 @@ function normalizeSession(raw: StoredRoomSession): StoredRoomSession {
       roomEpochSecret: toBytes(entry.roomEpochSecret),
       contentWrapKey: toBytes(entry.contentWrapKey),
     })),
+    // The §14.5 base's `serializedState` is the only byte field on the snapshot.
+    ...(raw.snapshotBase
+      ? {
+          snapshotBase: {
+            ...raw.snapshotBase,
+            serializedState: toBytes(raw.snapshotBase.serializedState),
+          },
+        }
+      : {}),
   };
 }
 
@@ -73,6 +83,9 @@ export interface StoredRoomSession {
   /** The §13.1 room manifest (opaque here; re-validated by the manager). */
   readonly manifest: unknown;
   readonly manifestCommitment: Uint8Array;
+  /** The §14.5 compaction base (if the room has been compacted): the engine
+   *  resumes from it and only the post-snapshot envelopes are re-verified. */
+  readonly snapshotBase?: PersistedSnapshotBase;
   /** The genesis bootstrap devices (verify the founder self-add on load). */
   readonly bootstrapDevices: ReadonlyArray<{ deviceId: string; signingPublicKey: string }>;
   /** A coarse creation bucket for the room list (never an exact timestamp). */

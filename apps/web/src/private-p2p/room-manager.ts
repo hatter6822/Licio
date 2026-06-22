@@ -74,6 +74,10 @@ function coarseBucket(date = new Date()): string {
   return date.toISOString().slice(0, 13);
 }
 
+/** §25.6 default compaction cadence: compact after this many post-snapshot ops
+ *  (mirrors the engine `SNAPSHOT_CADENCE.everyOps`; overridable for tests). */
+export const DEFAULT_COMPACT_EVERY_OPS = 1000;
+
 /** Parameters for founding a new private room from the UI. */
 export interface CreatePrivateRoomSessionParams {
   readonly roomName: string;
@@ -81,6 +85,8 @@ export interface CreatePrivateRoomSessionParams {
   readonly description?: string;
   readonly founderMemberId: string;
   readonly founderDeviceId: string;
+  /** Override the §25.6 compaction cadence (default `DEFAULT_COMPACT_EVERY_OPS`). */
+  readonly compactEveryOps?: number;
 }
 
 /**
@@ -93,6 +99,7 @@ export class PrivateRoomSession {
     private readonly p2p: P2pModule,
     private readonly engine: PrivateRoomEngine,
     private session: StoredRoomSession,
+    private readonly compactEveryOps: number,
   ) {}
 
   get roomId(): string {
@@ -158,11 +165,20 @@ export class PrivateRoomSession {
       createdAtBucket: coarseBucket(),
     };
     await putRoomSession(session);
-    return new PrivateRoomSession(p2p, engine, session);
+    return new PrivateRoomSession(
+      p2p,
+      engine,
+      session,
+      params.compactEveryOps ?? DEFAULT_COMPACT_EVERY_OPS,
+    );
   }
 
-  /** Reload a persisted room: reconstruct the engine (re-verifying envelopes). */
-  static async load(roomId: string): Promise<PrivateRoomSession | null> {
+  /** Reload a persisted room: reconstruct the engine (resuming from the §14.5 base
+   *  if one was persisted, so only post-snapshot envelopes are re-verified). */
+  static async load(
+    roomId: string,
+    options?: { readonly compactEveryOps?: number },
+  ): Promise<PrivateRoomSession | null> {
     const session = await getRoomSession(roomId);
     if (!session) return null;
     const p2p = await loadP2p();
@@ -189,8 +205,16 @@ export class PrivateRoomSession {
       storage: new IndexedDbPrivateRoomStorage(roomId),
       epochs,
       bootstrapDevices: session.bootstrapDevices,
+      // Resume from the persisted §14.5 base, if any (its covered envelopes were
+      // pruned, so only the post-snapshot ones are re-verified on load).
+      ...(session.snapshotBase ? { base: session.snapshotBase } : {}),
     });
-    return new PrivateRoomSession(p2p, engine, validatedSession);
+    return new PrivateRoomSession(
+      p2p,
+      engine,
+      validatedSession,
+      options?.compactEveryOps ?? DEFAULT_COMPACT_EVERY_OPS,
+    );
   }
 
   /** Every private room on this device (for a room list). */
@@ -252,6 +276,20 @@ export class PrivateRoomSession {
       body,
     );
     await this.engine.applyLocalOp(op, sealParams);
+    await this.persistCompactionIfDue();
+  }
+
+  /**
+   * Run the §25.6 compaction cadence after authoring: if due, the engine compacts
+   * + drops the covered envelopes from IndexedDB and returns the new base, which
+   * we persist into the session so a reload resumes from it (re-verifying only the
+   * post-snapshot envelopes — bounding reload cost for a long-lived room).
+   */
+  private async persistCompactionIfDue(): Promise<void> {
+    const base = await this.engine.maybeCompact(this.compactEveryOps);
+    if (!base) return;
+    this.session = { ...this.session, snapshotBase: base };
+    await putRoomSession(this.session);
   }
 
   /** Post a story (a top-level content item) into the room. */

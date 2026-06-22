@@ -162,12 +162,15 @@ offline cores they consume are implemented + tested:
 3. **Membership delivery** — the invite→join→admit→welcome blobs (the crypto is
    done + tested) need either the transport or a copy-paste UI; content sync of an
    existing room wants the transport.
-4. **apps/web snapshot persistence** — dropping pruned envelopes from IndexedDB
-   on reload (the engine `createSnapshot`/`compact` + verify-by-recomputation are
-   done).
-5. **Server→private migration** (WS-S.9) — the server-export half needs the
+4. **Server→private migration** (WS-S.9) — the server-export half needs the
    server/DB.
-6. **Update channel** (WS-S.10) — depends on WS-O.
+5. **Update channel** (WS-S.10) — depends on WS-O.
+
+The apps/web §14.5 snapshot persistence (compact-on-cadence → prune IndexedDB
+envelopes → reload-from-base) is now SHIPPED (WS-S.7), so it is no longer a
+residual — the base is the device's own previously-verified computation, trusted
+as local state like the at-rest epoch secrets, while peer-received content is
+always re-verified through `openOp` (§8.3).
 
 ## 9. CI gates protecting these properties
 

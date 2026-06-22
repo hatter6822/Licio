@@ -102,4 +102,18 @@ export class IndexedDbPrivateRoomStorage implements PrivateRoomStorage {
       db.close();
     }
   }
+
+  /** Drop the §14.5-compaction-pruned envelopes (delete by the compound key). */
+  async deleteEnvelopes(opIds: readonly string[]): Promise<void> {
+    if (opIds.length === 0) return;
+    const db = await openPrivateP2pDb();
+    try {
+      const tx = db.transaction(ENVELOPE_STORE, 'readwrite');
+      const store = tx.objectStore(ENVELOPE_STORE);
+      for (const opId of opIds) store.delete([this.roomId, opId]);
+      await txDone(tx);
+    } finally {
+      db.close();
+    }
+  }
 }

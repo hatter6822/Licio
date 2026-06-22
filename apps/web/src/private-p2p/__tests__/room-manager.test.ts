@@ -11,7 +11,7 @@
 // tests included), mirroring how the app loads it.
 import 'fake-indexeddb/auto';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { loadPrivateRoomEngine } from '../room-manager.js';
+import { loadPrivateRoomEngine, PrivateRoomSession } from '../room-manager.js';
 import { IndexedDbPrivateRoomStorage, PRIVATE_P2P_DB_NAME } from '../storage.js';
 
 type P2p = typeof import('@licio/private-p2p');
@@ -120,5 +120,50 @@ describe('loadPrivateRoomEngine — persists to IndexedDB + re-verifies on reloa
     const reloaded = await loadPrivateRoomEngine(params);
     expect(reloaded.state().members.get('founder')?.role).toBe('admin');
     expect(reloaded.heads()).toStrictEqual(['genesis']);
+  });
+});
+
+describe('PrivateRoomSession — §14.5 compaction persistence (WS-S.7)', () => {
+  it('compacts on cadence, prunes the pruned envelopes, and reloads from the base', async () => {
+    // A low cadence so a few posts trigger compaction within the test.
+    const session = await PrivateRoomSession.create({
+      roomName: 'Compact Room',
+      roomType: 'global_topic',
+      founderMemberId: globalThis.crypto.randomUUID(),
+      founderDeviceId: globalThis.crypto.randomUUID(),
+      compactEveryOps: 2,
+    });
+    const roomId = session.roomId;
+    await session.postStory({ title: 'A' });
+    await session.postStory({ title: 'B' });
+    await session.postStory({ title: 'C' });
+    expect([...session.state().stories.values()].map((s) => s.title).sort()).toStrictEqual([
+      'A',
+      'B',
+      'C',
+    ]);
+
+    // Every op was folded into the persisted base → no loose envelopes remain in
+    // IndexedDB (they were pruned by `maybeCompact`).
+    const storage = new IndexedDbPrivateRoomStorage(roomId);
+    expect(await storage.listEnvelopes()).toHaveLength(0);
+
+    // A fresh session reloads from the persisted base ALONE (zero envelopes to
+    // re-verify) and still has the full state.
+    const reloaded = await PrivateRoomSession.load(roomId);
+    if (!reloaded) throw new Error('expected the room to reload');
+    expect([...reloaded.state().stories.values()].map((s) => s.title).sort()).toStrictEqual([
+      'A',
+      'B',
+      'C',
+    ]);
+    // …and it can author further on top of the reloaded base.
+    await reloaded.postStory({ title: 'D' });
+    expect([...reloaded.state().stories.values()].map((s) => s.title).sort()).toStrictEqual([
+      'A',
+      'B',
+      'C',
+      'D',
+    ]);
   });
 });
