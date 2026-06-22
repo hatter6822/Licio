@@ -171,6 +171,33 @@ export function removeMember(group: MlsGroup, leafIndex: number): Promise<Commit
   return commitProposals(group, [{ proposalType: 'remove', remove: { removed: leafIndex } }]);
 }
 
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
+ * Find the MLS leaf index of the device whose KeyPackage basic-credential
+ * identity matches `identity` (the bytes passed to `generateMemberKeyPackage`),
+ * or `undefined` if no such leaf exists.  Leaves occupy EVEN array slots in the
+ * RFC 9420 left-balanced tree, so the leaf index is `arrayIndex / 2` — the value
+ * `removeMember` expects.  Keeping this in the wrapper isolates ts-mls's tree
+ * shape from the rest of the package.
+ */
+export function findDeviceLeafIndex(group: MlsGroup, identity: Uint8Array): number | undefined {
+  const tree = group.state.ratchetTree;
+  for (let i = 0; i < tree.length; i += 2) {
+    const node = tree[i];
+    if (node?.nodeType !== 'leaf') continue;
+    const credential = node.leaf.credential;
+    if (credential.credentialType === 'basic' && bytesEqual(credential.identity, identity)) {
+      return i / 2;
+    }
+  }
+  return undefined;
+}
+
 /** Process a Welcome message, admitting this device into the group at the
  *  committing epoch (the MLS join path). */
 export async function processWelcome(

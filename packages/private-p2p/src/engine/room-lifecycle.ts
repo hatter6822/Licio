@@ -22,6 +22,7 @@ import {
   addMember,
   createGroup,
   encodeKeyPackage,
+  findDeviceLeafIndex,
   generateMemberKeyPackage,
   type KeyPackage,
   type KeyPackageBundle,
@@ -31,6 +32,7 @@ import {
   processWelcome,
   type RatchetTree,
   ratchetTree as ratchetTreeOf,
+  removeMember,
   type Welcome,
 } from '../crypto/mls.js';
 import {
@@ -335,6 +337,34 @@ export async function inviteDevice(
     welcome: outcome.welcome,
     ratchetTree: ratchetTreeOf(outcome.group),
   };
+}
+
+/** The artefacts of removing a device (an MLS Remove commit → new epoch). */
+export interface RemovedDevice {
+  /** The post-Remove group handle (the epoch has advanced; the removed device
+   *  cannot derive the new epoch's keys — forward secrecy). */
+  readonly group: MlsGroup;
+  /** The commit to broadcast to the REMAINING members so they advance epoch. */
+  readonly commit: MLSMessage;
+}
+
+/**
+ * Remove a device from the room's MLS group (§10.9): an MLS Remove commit that
+ * advances the epoch, so the removed device can no longer derive the room keys.
+ * The caller then derives the new epoch state, authors the §12 `member.remove` /
+ * `device.remove` op (`buildRoomOp`), and broadcasts the commit to the remaining
+ * members.  Throws if `deviceIdentity` is not a current group member.
+ */
+export async function removeDeviceFromRoom(
+  group: MlsGroup,
+  deviceIdentity: Uint8Array,
+): Promise<RemovedDevice> {
+  const leafIndex = findDeviceLeafIndex(group, deviceIdentity);
+  if (leafIndex === undefined) {
+    throw new Error('removeDeviceFromRoom: the device is not in the MLS group');
+  }
+  const outcome = await removeMember(group, leafIndex);
+  return { group: outcome.group, commit: outcome.commit };
 }
 
 /** The result of joining from a Welcome: the group handle + the joined epoch's keys. */

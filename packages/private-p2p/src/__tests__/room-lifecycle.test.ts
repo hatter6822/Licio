@@ -10,6 +10,7 @@ import {
   addMember,
   decodeKeyPackage,
   encodeKeyPackage,
+  findDeviceLeafIndex,
   generateMemberKeyPackage,
 } from '../crypto/mls.js';
 import { fromBase64Url, toBase64Url, utf8 } from '../crypto/runtime.js';
@@ -24,6 +25,7 @@ import {
   heldKeysOf,
   inviteDevice,
   joinRoom,
+  removeDeviceFromRoom,
 } from '../engine/room-lifecycle.js';
 import { privateRoomManifestSchema } from '../schemas/manifest.js';
 
@@ -298,5 +300,99 @@ describe('content authoring — buildRoomOp + engine metadata helpers', () => {
     // The metadata helpers advanced across the three founder-dev ops.
     expect(engine.nextAuthorSeq('founder-dev')).toBe(3);
     expect(engine.nextLamport()).toBe('4');
+  });
+});
+
+describe('membership removal — MLS Remove rotates the epoch (forward secrecy)', () => {
+  it('removes a device and the removed device cannot read post-removal content', async () => {
+    const room = await createPrivateRoom({
+      roomId: 'r',
+      founderMemberId: 'alice',
+      founderDeviceId: 'alice-dev',
+      profile: PROFILE,
+      createdAt: '2026-06-22T00:00:00Z',
+    });
+    const aliceSigningPub = room.engineParams.bootstrapDevices?.[0]?.signingPublicKey;
+    if (!aliceSigningPub) throw new Error('expected the founder bootstrap device');
+
+    // Admit Bob (epoch 1); Bob derives epoch-1 keys.
+    const bobBundle = await generateMemberKeyPackage(utf8('bob-dev'));
+    const invited = await inviteDevice(room.group, bobBundle.publicPackage);
+    const bobJoin = await joinRoom({
+      welcome: invited.welcome,
+      bundle: bobBundle,
+      ratchetTree: invited.ratchetTree,
+      roomIdCommitment: room.roomIdCommitment,
+      manifestCommitment: room.manifestCommitment,
+    });
+
+    // The leaf lookup finds each device (and nothing for an unknown identity).
+    expect(findDeviceLeafIndex(invited.group, utf8('alice-dev'))).toBe(0);
+    expect(findDeviceLeafIndex(invited.group, utf8('bob-dev'))).toBe(1);
+    expect(findDeviceLeafIndex(invited.group, utf8('nobody-dev'))).toBeUndefined();
+
+    // Alice removes Bob → epoch 2; the epoch-2 keys differ from epoch-1's.
+    const removed = await removeDeviceFromRoom(invited.group, utf8('bob-dev'));
+    const aliceEpoch2 = await deriveEpochState(
+      removed.group,
+      room.roomIdCommitment,
+      room.manifestCommitment,
+    );
+    expect(Number(aliceEpoch2.epoch)).toBe(2);
+    expect(aliceEpoch2.keys.contentWrapKey).not.toStrictEqual(
+      bobJoin.epochState.keys.contentWrapKey,
+    );
+
+    // Alice authors content under epoch-2.
+    const aliceStorage = new InMemoryPrivateRoomStorage();
+    const alice = await PrivateRoomEngine.load({ ...room.engineParams, storage: aliceStorage });
+    await alice.applyLocalOp(room.genesisOp, room.sealParams);
+    alice.addEpochKeys(2, heldKeysOf(aliceEpoch2));
+    const { op: secretOp, sealParams: secretSeal } = await buildRoomOp(
+      {
+        roomId: 'r',
+        roomIdCommitment: room.roomIdCommitment,
+        epochState: aliceEpoch2,
+        author: {
+          memberId: 'alice',
+          deviceId: 'alice-dev',
+          signingKey: room.founder.signingKeyPair.privateKey,
+          seq: alice.nextAuthorSeq('alice-dev'),
+        },
+        opId: 'secret',
+        parents: alice.heads(),
+        lamport: alice.nextLamport(),
+        createdAt: '2026-06-22T00:00:00Z',
+      },
+      {
+        type: 'story.create',
+        story_id: 'post-removal',
+        thread_id: 't9',
+        title: 'after Bob left',
+        submission_type: 'original_brief',
+        topic_ids: [],
+        submission_metadata: {},
+      },
+    );
+    expect((await alice.applyLocalOp(secretOp, secretSeal)).accepted).toStrictEqual(['secret']);
+    const secretEnvelope = (await aliceStorage.listEnvelopes()).find(
+      (e) => e.opId === 'secret',
+    )?.envelope;
+    if (!secretEnvelope) throw new Error('expected the sealed secret envelope');
+
+    // Bob holds only epoch-0/1 keys → he CANNOT open the epoch-2 content.
+    const bob = await PrivateRoomEngine.load({
+      roomId: 'r',
+      roomIdCommitment: room.roomIdCommitment,
+      epochs: new Map([
+        [0, heldKeysOf(room.epochState)],
+        [1, heldKeysOf(bobJoin.epochState)],
+      ]),
+      bootstrapDevices: [{ deviceId: 'alice-dev', signingPublicKey: aliceSigningPub }],
+      storage: new InMemoryPrivateRoomStorage(),
+    });
+    const bobReport = await bob.ingest([secretEnvelope]);
+    expect(bobReport.accepted).toStrictEqual([]);
+    expect(bobReport.quarantined).toHaveLength(1);
   });
 });
