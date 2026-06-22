@@ -1,0 +1,225 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-S.7.1 — createPrivateRoom: the founding orchestration produces a real,
+// cryptographically-grounded room genesis (real Ed25519 + X25519 + a real
+// serialized MLS KeyPackage), and the result drives PrivateRoomEngine end-to-end.
+import { describe, expect, it } from 'vitest';
+import { deriveEpochState } from '../crypto/epoch.js';
+import { generateRecipientKeyPair } from '../crypto/hpke.js';
+import {
+  addMember,
+  decodeKeyPackage,
+  encodeKeyPackage,
+  generateMemberKeyPackage,
+} from '../crypto/mls.js';
+import { fromBase64Url, toBase64Url, utf8 } from '../crypto/runtime.js';
+import { exportPublicKeyRaw, generateDeviceSigningKeyPair } from '../crypto/signatures.js';
+import { InMemoryPrivateRoomStorage, PrivateRoomEngine } from '../engine/room-engine.js';
+import {
+  buildMemberAddOp,
+  computeManifestCommitment,
+  createPrivateRoom,
+  DEFAULT_PRIVATE_ROOM_POLICY,
+  heldKeysOf,
+  inviteDevice,
+  joinRoom,
+} from '../engine/room-lifecycle.js';
+import { privateRoomManifestSchema } from '../schemas/manifest.js';
+
+const PROFILE = { name: 'Quiet Room', room_type: 'global_topic' } as const;
+
+function baseParams() {
+  return {
+    roomId: 'room-1',
+    founderMemberId: 'founder',
+    founderDeviceId: 'founder-dev',
+    profile: PROFILE,
+    createdAt: '2026-06-22T00:00:00Z',
+  };
+}
+
+describe('createPrivateRoom', () => {
+  it('founds a room whose genesis drives the engine to founder=admin', async () => {
+    const created = await createPrivateRoom(baseParams());
+
+    // The manifest is schema-valid and carries the pinned crypto descriptor.
+    expect(privateRoomManifestSchema.safeParse(created.manifest).success).toBe(true);
+    expect(created.manifest.crypto.current_epoch).toBe(0);
+    expect(created.manifest.policy).toStrictEqual(DEFAULT_PRIVATE_ROOM_POLICY);
+    expect(created.genesisOp.epoch).toBe(0);
+
+    // Drive the engine with the genesis op.
+    const engine = await PrivateRoomEngine.load({
+      ...created.engineParams,
+      storage: new InMemoryPrivateRoomStorage(),
+    });
+    const report = await engine.applyLocalOp(created.genesisOp, created.sealParams);
+    expect(report.accepted).toStrictEqual(['genesis']);
+    expect(engine.state().members.get('founder')?.role).toBe('admin');
+    expect(engine.state().devices.get('founder-dev')?.signingPublicKey).toBe(
+      created.genesisOp.body.type === 'member.add'
+        ? created.genesisOp.body.signing_public_key
+        : undefined,
+    );
+  });
+
+  it('emits a REAL serialized MLS KeyPackage (decodable + usable to add a device)', async () => {
+    const created = await createPrivateRoom(baseParams());
+    expect(created.genesisOp.body.type).toBe('member.add');
+    if (created.genesisOp.body.type !== 'member.add') throw new Error('expected member.add');
+
+    // The genesis op's mls_key_package decodes back to the founder's package…
+    const decoded = decodeKeyPackage(fromBase64Url(created.genesisOp.body.mls_key_package));
+    expect(decoded).toBeDefined();
+
+    // …and the founder's MLS group can admit a second device with a fresh package
+    // (proving the group + package material is real, not a placeholder).
+    const bobPkg = await generateMemberKeyPackage(utf8('bob-dev'));
+    const outcome = await addMember(created.group, bobPkg.publicPackage);
+    expect(outcome.welcome).toBeDefined();
+    expect(outcome.commit).toBeDefined();
+  });
+
+  it('computeManifestCommitment is deterministic and binds the manifest', async () => {
+    const created = await createPrivateRoom(baseParams());
+    const again = await computeManifestCommitment(created.manifest);
+    expect(again).toStrictEqual(created.manifestCommitment);
+
+    // A changed policy yields a different commitment (the manifest is bound).
+    const forked = {
+      ...created.manifest,
+      policy: { ...created.manifest.policy, replication_target: 7 },
+    };
+    const forkedCommitment = await computeManifestCommitment(forked);
+    expect(forkedCommitment).not.toStrictEqual(created.manifestCommitment);
+  });
+
+  it('two rooms get distinct commitments + group ids', async () => {
+    const a = await createPrivateRoom(baseParams());
+    const b = await createPrivateRoom(baseParams());
+    expect(a.roomIdCommitment).not.toStrictEqual(b.roomIdCommitment);
+    expect(a.mlsGroupId).not.toStrictEqual(b.mlsGroupId);
+  });
+
+  it('decodeKeyPackage rejects non-key-package bytes', () => {
+    expect(() => decodeKeyPackage(new Uint8Array([0, 1, 2, 3]))).toThrow();
+  });
+
+  it('commits over a manifest with optional + array policy fields (role-gated)', async () => {
+    const created = await createPrivateRoom({
+      ...baseParams(),
+      policy: { posting_policy: 'role_gated', role_gated_posters: ['admin'] },
+    });
+    expect(created.manifest.policy.role_gated_posters).toStrictEqual(['admin']);
+    // A description (string) + role_gated_posters (array) exercise more of the
+    // canonicalizer; the commitment stays deterministic.
+    const withDesc = {
+      ...created.manifest,
+      profile: { ...created.manifest.profile, description: 'a quiet place' },
+    };
+    expect(await computeManifestCommitment(withDesc)).toStrictEqual(
+      await computeManifestCommitment(withDesc),
+    );
+  });
+});
+
+describe('membership flow — invite + join (two devices, no transport)', () => {
+  it('a joined device derives identical epoch keys and the room state converges', async () => {
+    // 1) Alice founds the room and authors genesis.
+    const room = await createPrivateRoom({
+      roomId: 'r',
+      founderMemberId: 'alice',
+      founderDeviceId: 'alice-dev',
+      profile: PROFILE,
+      createdAt: '2026-06-22T00:00:00Z',
+    });
+    const aliceSigningPub = room.engineParams.bootstrapDevices?.[0]?.signingPublicKey;
+    if (!aliceSigningPub) throw new Error('expected the founder bootstrap device');
+    const alice = await PrivateRoomEngine.load({
+      ...room.engineParams,
+      storage: new InMemoryPrivateRoomStorage(),
+    });
+    await alice.applyLocalOp(room.genesisOp, room.sealParams);
+
+    // 2) Bob's device keys; the inviter only needs his PUBLIC MLS package.
+    const bobSigning = await generateDeviceSigningKeyPair();
+    const bobSigningPub = toBase64Url(await exportPublicKeyRaw(bobSigning.publicKey));
+    const bobHpke = await generateRecipientKeyPair();
+    const bobBundle = await generateMemberKeyPackage(utf8('bob-dev'));
+
+    // 3) Alice admits Bob's device (MLS Add → epoch 1) and derives epoch-1 keys.
+    const invited = await inviteDevice(room.group, bobBundle.publicPackage);
+    const aliceEpoch1 = await deriveEpochState(
+      invited.group,
+      room.roomIdCommitment,
+      room.manifestCommitment,
+    );
+
+    // 4) Bob joins from the Welcome and derives epoch-1 INDEPENDENTLY.
+    const bobJoin = await joinRoom({
+      welcome: invited.welcome,
+      bundle: bobBundle,
+      ratchetTree: invited.ratchetTree,
+      roomIdCommitment: room.roomIdCommitment,
+      manifestCommitment: room.manifestCommitment,
+    });
+
+    // THE convergence property: both sides hold byte-identical epoch-1 keys.
+    expect(Number(bobJoin.epochState.epoch)).toBe(1);
+    expect(bobJoin.epochState.roomEpochSecret).toStrictEqual(aliceEpoch1.roomEpochSecret);
+    expect(bobJoin.epochState.keys.contentWrapKey).toStrictEqual(aliceEpoch1.keys.contentWrapKey);
+    expect(bobJoin.epochState.keys.syncTopicKey).toStrictEqual(aliceEpoch1.keys.syncTopicKey);
+    expect(bobJoin.epochState.keys.rendezvousKey).toStrictEqual(aliceEpoch1.keys.rendezvousKey);
+
+    // 5) Alice authors the member.add op (under epoch 1) + applies it.
+    const { op: addBobOp, sealParams: addBobSeal } = await buildMemberAddOp({
+      roomId: 'r',
+      roomIdCommitment: room.roomIdCommitment,
+      epochState: aliceEpoch1,
+      author: {
+        memberId: 'alice',
+        deviceId: 'alice-dev',
+        signingKey: room.founder.signingKeyPair.privateKey,
+        seq: 1,
+      },
+      opId: 'add-bob',
+      parents: alice.heads(),
+      lamport: '2',
+      createdAt: '2026-06-22T00:00:00Z',
+      newMember: {
+        memberId: 'bob',
+        deviceId: 'bob-dev',
+        signingPublicKey: bobSigningPub,
+        hpkePublicKey: toBase64Url(bobHpke.publicKey),
+        mlsKeyPackage: toBase64Url(encodeKeyPackage(bobBundle.publicPackage)),
+        role: 'member',
+      },
+    });
+    alice.addEpochKeys(1, heldKeysOf(aliceEpoch1));
+    await alice.applyLocalOp(addBobOp, addBobSeal);
+    expect(alice.state().members.get('bob')?.role).toBe('member');
+
+    // 6) Alice exports an archive; Bob (epoch-0 history granted + epoch-1 from the
+    //    join) imports it and CONVERGES to the same membership state.
+    const archive = await alice.exportArchive({
+      kind: 'encrypted_member_backup',
+      createdAtBucket: '2026-06-22T00',
+    });
+    const bob = await PrivateRoomEngine.load({
+      roomId: 'r',
+      roomIdCommitment: room.roomIdCommitment,
+      epochs: new Map([
+        [0, heldKeysOf(room.epochState)],
+        [1, heldKeysOf(bobJoin.epochState)],
+      ]),
+      bootstrapDevices: [{ deviceId: 'alice-dev', signingPublicKey: aliceSigningPub }],
+      storage: new InMemoryPrivateRoomStorage(),
+    });
+    const report = await bob.importArchive(archive);
+
+    expect(report.accepted.sort()).toStrictEqual(['add-bob', 'genesis']);
+    expect(bob.state().members.get('alice')?.role).toBe('admin');
+    expect(bob.state().members.get('bob')?.role).toBe('member');
+    expect(bob.heads()).toStrictEqual(['add-bob']);
+  });
+});

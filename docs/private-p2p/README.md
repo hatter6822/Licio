@@ -67,6 +67,20 @@ surface (`headAnnouncement`/`wantedFrom`) + the §15.9 offline archive
 **converge to byte-identical state by exchanging an archive, with no live
 transport** (proven by a two-engine test).
 
+The **room-creation + membership orchestration is shipped** (`engine/room-lifecycle.ts`):
+`createPrivateRoom` ties the §10.2 MLS group keying, the epoch→five-key bridge,
+the §13.1 manifest (+ its `manifest_commitment`), and the §12.1 founder genesis
+op into ONE node-testable call — every value REAL crypto (a real Ed25519 device
+key, a real X25519 HPKE invite key, and a real serialized MLS KeyPackage via the
+new `encodeKeyPackage`/`decodeKeyPackage` MLS-message wrapper).  `inviteDevice`
+(an MLS Add → commit + Welcome), `joinRoom` (process a Welcome → derive the
+joined epoch's keys), and `buildMemberAddOp` (author the §12 add op under the new
+epoch) complete the membership flow.  The headline test runs the **full two-device
+dance with no transport**: Alice founds the room, admits Bob's device, Bob joins
+from the Welcome and **independently derives byte-identical epoch-1 keys**, then
+an archive exchange converges both engines to the same membership state — the real
+E2EE join, end-to-end, on real MLS/HPKE/Ed25519.
+
 The **WS-S.7 apps/web client foundation is shipped** (`apps/web/src/private-p2p/`):
 the IndexedDb `PrivateRoomStorage` adapter (a dedicated, isolated
 `licio_private_p2p` database, per-room) + `loadPrivateRoomEngine` (the
@@ -174,7 +188,7 @@ for a future swap to an audited WASM build (tracked residual).
 |---|---|
 | `packages/shared` | the §4.1 coherence accept/reject matrix + `roomClassOf`; the disclosure/matrix copy-lint |
 | `packages/db` | the DB↔shared enum mirror; the §8.1 column denylist (allowlist exactness + a forbidden-column fixture that BITES; rendezvous has no room FK); the **gated** Postgres harness: the §8.3 no-p2p-content trigger rejects p2p stories/threads (server rows succeed) + each §4.1 coherence CHECK rejects its incoherent axis tuple by name |
-| `packages/private-p2p` | the canonical + strict-schema suites; the **WS-S.3 crypto suites** — RFC 5869 HKDF vectors, the AEAD round-trip/AAD-flip/replay/nonce-uniqueness suite, the Ed25519 KATs + RFC 9180 HPKE interop + RFC 7748 X25519 + RFC 4231 HMAC KATs, the MLS multi-device/epoch/manifest-fork suite, the four-tier key store + recovery kit + threshold recovery, and the forward-secrecy/fuzz properties; the **WS-S.4.2/5 reducer suites** — the CIDv1 multiformats/RFC-4648 pins, the Lamport/canonical-order tests, the reducer genesis/capability/conflict matrix, the §14.3.3 25-shuffle determinism property, the structural pre-pass + the §14.2 stage-1 op-codec seal→open→reduce matrix, and the §14.5/§14.6/§13.7 snapshot/overlay/search suites; **and the WS-S.6 sync suites** — blind rendezvous derivation/authorization/mitigations, the X25519 ECDH agreement, the transcript-bound channel-key separation, signaling seal/open + relay-only ICE filtering, the handshake success + reject matrix, head-sync reconciliation-to-closure + fetch-order, and the offline-archive re-validating import, plus the §10.4 device-blind derivation + the buildOpIntakeContext seal→open-against-state composition, and the PrivateRoomEngine lifecycle + the §15.6 sync surface + the §15.9 two-engine archive convergence (424 tests; crypto + reducer + sync all ≳ 92% coverage) |
+| `packages/private-p2p` | the canonical + strict-schema suites; the **WS-S.3 crypto suites** — RFC 5869 HKDF vectors, the AEAD round-trip/AAD-flip/replay/nonce-uniqueness suite, the Ed25519 KATs + RFC 9180 HPKE interop + RFC 7748 X25519 + RFC 4231 HMAC KATs, the MLS multi-device/epoch/manifest-fork suite, the four-tier key store + recovery kit + threshold recovery, and the forward-secrecy/fuzz properties; the **WS-S.4.2/5 reducer suites** — the CIDv1 multiformats/RFC-4648 pins, the Lamport/canonical-order tests, the reducer genesis/capability/conflict matrix, the §14.3.3 25-shuffle determinism property, the structural pre-pass + the §14.2 stage-1 op-codec seal→open→reduce matrix, and the §14.5/§14.6/§13.7 snapshot/overlay/search suites; **and the WS-S.6 sync suites** — blind rendezvous derivation/authorization/mitigations, the X25519 ECDH agreement, the transcript-bound channel-key separation, signaling seal/open + relay-only ICE filtering, the handshake success + reject matrix, head-sync reconciliation-to-closure + fetch-order, and the offline-archive re-validating import, plus the §10.4 device-blind derivation + the buildOpIntakeContext seal→open-against-state composition, and the PrivateRoomEngine lifecycle + the §15.6 sync surface + the §15.9 two-engine archive convergence + the WS-S.7.1 room-lifecycle (createPrivateRoom/inviteDevice/joinRoom/buildMemberAddOp + the MLS KeyPackage codec) with the full two-device invite→join→converge membership flow (431 tests; crypto + reducer + sync all ≳ 92% coverage) |
 | `apps/api` | the server-gate suite: submission 409 (+ no row created), contribution 404, feed `p2p_room_local_only`, the ranking room-surface exclusion, the search filter, the event-pipeline gate; **and the WS-S.6.6 rendezvous suite** — the TTL clamp, the §15.3.1 no-existence-oracle (poll never 404s), re-announce-replaces, the signal queue/drain round-trip, aggregate-only metrics, the sweep, route shape-validation/oversized rejection, and the full-app CSRF-exempt mount |
 | `scripts` | the seven §23.10 CI gates + the `check:p2p-mls-wrapper` deep-import gate + the §12.7 no-server-recovery scan, all proven to bite (clean vs violating fixtures) + the live-source marker regression catch |
 

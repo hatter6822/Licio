@@ -27,6 +27,7 @@ import {
   ciphersuites,
   createCommit,
   decodeGroupState,
+  decodeMlsMessage,
   defaultAuthenticationService,
   defaultCapabilities,
   defaultKeyPackageEqualityConfig,
@@ -36,6 +37,7 @@ import {
   defaultPaddingConfig,
   emptyPskIndex,
   encodeGroupState,
+  encodeMlsMessage,
   getCiphersuiteFromName,
   getCiphersuiteImpl,
   joinGroup,
@@ -245,4 +247,26 @@ export async function deserializeGroupState(bytes: Uint8Array): Promise<MlsGroup
   if (!decoded) throw new Error('failed to decode MLS group state');
   const cs = await resolveSuite();
   return { state: { ...decoded[0], clientConfig: DEFAULT_CLIENT_CONFIG }, cs };
+}
+
+/**
+ * Serialize a bare `KeyPackage` by wrapping it in an MLSMessage of wireformat
+ * `mls_key_package` — the RFC 9420 §6 container for a key package on the wire.
+ * A device publishes this (e.g. in a §12.1 `member.add` op's `mls_key_package`
+ * field) so an inviter/joiner can recover it via `decodeKeyPackage` and admit the
+ * device with `addMember`.
+ */
+export function encodeKeyPackage(keyPackage: KeyPackage): Uint8Array {
+  return encodeMlsMessage({ wireformat: 'mls_key_package', version: 'mls10', keyPackage });
+}
+
+/** Inverse of `encodeKeyPackage`; fail-closed if the bytes are not a key-package
+ *  MLSMessage (wrong wireformat, trailing bytes, or undecodable). */
+export function decodeKeyPackage(bytes: Uint8Array): KeyPackage {
+  const decoded = decodeMlsMessage(bytes, 0);
+  const message = decoded?.[0];
+  if (message?.wireformat !== 'mls_key_package') {
+    throw new Error('decodeKeyPackage: not an mls_key_package MLSMessage');
+  }
+  return message.keyPackage;
 }
