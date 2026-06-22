@@ -15,7 +15,7 @@
 // PRK (no separate Extract, exactly as the §10.2 definition states).  This
 // module owns only the derivation math; MLS supplies the secret at the seam.
 
-import { concatBytes, getSubtle, toBufferSource, utf8 } from './runtime.js';
+import { concatBytes, hmacSha256, utf8 } from './runtime.js';
 
 /** SHA-256 output length, in bytes. */
 export const HASH_LEN = 32;
@@ -29,16 +29,6 @@ export const ROOM_KEY_LENGTH = 32;
  * so the version-and-protocol prefix is unambiguously delimited from the label.
  */
 export const HKDF_LABEL_PREFIX = 'licio-priv1 ';
-
-const HMAC_PARAMS = { name: 'HMAC', hash: 'SHA-256' } as const;
-
-/** HMAC-SHA256 over `data` keyed by `key`. */
-async function hmacSha256(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
-  const cryptoKey = await getSubtle().importKey('raw', toBufferSource(key), HMAC_PARAMS, false, [
-    'sign',
-  ]);
-  return new Uint8Array(await getSubtle().sign('HMAC', cryptoKey, toBufferSource(data)));
-}
 
 /**
  * RFC 5869 §2.2 HKDF-Extract: `PRK = HMAC-Hash(salt, IKM)`.  An EMPTY salt is

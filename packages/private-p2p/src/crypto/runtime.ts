@@ -81,6 +81,26 @@ export async function sha256(data: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await getSubtle().digest('SHA-256', toBufferSource(data)));
 }
 
+const HMAC_SHA256_PARAMS = { name: 'HMAC', hash: 'SHA-256' } as const;
+
+/**
+ * HMAC-SHA256 over `data` keyed by `key` — a general PRF (the HKDF schedule's
+ * extract/expand and the §15.3 blind rendezvous-id derivation).  WebCrypto
+ * rejects a zero-length HMAC key, so callers needing the RFC 5869 "empty salt"
+ * case substitute `HashLen` zero bytes (byte-identical for SHA-256) before
+ * calling here.
+ */
+export async function hmacSha256(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
+  const cryptoKey = await getSubtle().importKey(
+    'raw',
+    toBufferSource(key),
+    HMAC_SHA256_PARAMS,
+    false,
+    ['sign'],
+  );
+  return new Uint8Array(await getSubtle().sign('HMAC', cryptoKey, toBufferSource(data)));
+}
+
 /** Fill a fresh `n`-byte array with cryptographically-strong random bytes. */
 export function randomBytes(n: number): Uint8Array {
   if (!Number.isInteger(n) || n < 0) throw new RangeError(`randomBytes: invalid length ${n}`);

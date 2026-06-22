@@ -41,6 +41,7 @@ export type PrivateAeadReason =
   | 'body_too_large_for_policy'
   | 'malformed_padding'
   | 'malformed_wrapped_key'
+  | 'malformed_ciphertext'
   | 'object_key_wrong_length'
   | 'aead_open_failed'
   | 'compression_forbidden';
@@ -223,6 +224,65 @@ export function assertCompressionAllowed(objectType: PrivateObjectType): void {
 
 function importAesGcm(key: Uint8Array, usage: 'encrypt' | 'decrypt'): Promise<CryptoKey> {
   return getSubtle().importKey('raw', toBufferSource(key), { name: 'AES-GCM' }, false, [usage]);
+}
+
+function aesGcmParams(nonce: Uint8Array, aad: Uint8Array | undefined) {
+  return aad === undefined
+    ? ({ name: 'AES-GCM', iv: toBufferSource(nonce) } as const)
+    : ({
+        name: 'AES-GCM',
+        iv: toBufferSource(nonce),
+        additionalData: toBufferSource(aad),
+      } as const);
+}
+
+/**
+ * A generic single-key AES-256-GCM seal over arbitrary `plaintext`, optionally
+ * binding `aad`.  Wire form: `nonce(12) || AEAD-Seal(key, nonce, plaintext,
+ * aad)`, fresh nonce per call.  This is the primitive for objects that are NOT
+ * the two-layer §10.5 op/contribution body (which uses `sealBody` + `wrapKey`):
+ * the at-rest local-search shard (§25.7, no AAD) and the §15.3 rendezvous
+ * announcement (AAD-bound to its record).
+ */
+export async function aeadSeal(
+  key: Uint8Array,
+  plaintext: Uint8Array,
+  aad?: Uint8Array,
+): Promise<Uint8Array> {
+  const nonce = randomBytes(AES_GCM_NONCE_LENGTH);
+  const cryptoKey = await importAesGcm(key, 'encrypt');
+  const ciphertext = new Uint8Array(
+    await getSubtle().encrypt(aesGcmParams(nonce, aad), cryptoKey, toBufferSource(plaintext)),
+  );
+  return concatBytes(nonce, ciphertext);
+}
+
+/**
+ * The inverse of `aeadSeal`: split `nonce || ciphertext` and open under `key` +
+ * `aad`.  Fails closed with `malformed_ciphertext` (too short to hold a nonce +
+ * tag) or `aead_open_failed` (wrong key, tampered ciphertext, or AAD mismatch).
+ */
+export async function aeadOpen(
+  key: Uint8Array,
+  sealed: Uint8Array,
+  aad?: Uint8Array,
+): Promise<Uint8Array> {
+  if (sealed.length < AES_GCM_NONCE_LENGTH + AES_GCM_TAG_LENGTH) {
+    throw new PrivateAeadError(
+      'malformed_ciphertext',
+      'sealed value is too short for a nonce + tag',
+    );
+  }
+  const nonce = sealed.subarray(0, AES_GCM_NONCE_LENGTH);
+  const ciphertext = sealed.subarray(AES_GCM_NONCE_LENGTH);
+  const cryptoKey = await importAesGcm(key, 'decrypt');
+  try {
+    return new Uint8Array(
+      await getSubtle().decrypt(aesGcmParams(nonce, aad), cryptoKey, toBufferSource(ciphertext)),
+    );
+  } catch {
+    throw new PrivateAeadError('aead_open_failed', 'AEAD open failed');
+  }
 }
 
 /** The sealed body: a fresh object key, its nonce, and the body ciphertext. */

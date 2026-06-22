@@ -10,12 +10,18 @@ import {
   fromUtf8,
   getCrypto,
   getSubtle,
+  hmacSha256,
   isUint8Array,
   randomBytes,
+  sha256,
   timingSafeEqual,
   toBase64Url,
   utf8,
 } from '../crypto/runtime.js';
+
+const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+const fromHex = (s: string) =>
+  Uint8Array.from(s.match(/.{2}/g)?.map((h) => Number.parseInt(h, 16)) ?? []);
 
 describe('isUint8Array', () => {
   it('recognizes genuine byte arrays and rejects others', () => {
@@ -105,5 +111,34 @@ describe('WebCrypto resolution', () => {
   it('resolves a usable Crypto and SubtleCrypto', () => {
     expect(typeof getCrypto().getRandomValues).toBe('function');
     expect(typeof getSubtle().digest).toBe('function');
+  });
+});
+
+describe('sha256', () => {
+  it('matches the NIST FIPS-180 known answer for "abc"', async () => {
+    expect(hex(await sha256(utf8('abc')))).toBe(
+      'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+    );
+  });
+});
+
+describe('hmacSha256 (RFC 4231)', () => {
+  it('matches RFC 4231 Test Case 2 (key "Jefe")', async () => {
+    const mac = await hmacSha256(utf8('Jefe'), utf8('what do ya want for nothing?'));
+    expect(hex(mac)).toBe('5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843');
+  });
+
+  it('matches RFC 4231 Test Case 1 (20-byte 0x0b key)', async () => {
+    const key = new Uint8Array(20).fill(0x0b);
+    const mac = await hmacSha256(key, utf8('Hi There'));
+    expect(hex(mac)).toBe('b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7');
+  });
+
+  it('is deterministic and key-sensitive', async () => {
+    const a = hex(await hmacSha256(fromHex('00112233'), utf8('msg')));
+    const b = hex(await hmacSha256(fromHex('00112233'), utf8('msg')));
+    const c = hex(await hmacSha256(fromHex('00112234'), utf8('msg')));
+    expect(a).toBe(b);
+    expect(a).not.toBe(c);
   });
 });
