@@ -195,12 +195,20 @@ export async function verifyPeerHandshake(
   const device = params.resolveDevice(remoteHello.author_device_id);
   if (!device) return { ok: false, reason: 'unknown_device' };
   if (!device.activeAtEpoch) return { ok: false, reason: 'device_not_active' };
-  const valid = await verifyHandshakeProof(
-    device.publicKey,
-    remoteHello,
-    localHello,
-    ctx,
-    params.remoteProofSignature,
-  );
+  // A malformed-but-regex-passing hello field (e.g. `ephemeral_public_key: "A"`)
+  // would make `fromBase64Url` throw inside the proof message; this wire-facing
+  // pre-block-exchange check must fail CLOSED with a typed verdict, not abort.
+  let valid: boolean;
+  try {
+    valid = await verifyHandshakeProof(
+      device.publicKey,
+      remoteHello,
+      localHello,
+      ctx,
+      params.remoteProofSignature,
+    );
+  } catch {
+    return { ok: false, reason: 'proof_invalid' };
+  }
   return valid ? { ok: true } : { ok: false, reason: 'proof_invalid' };
 }

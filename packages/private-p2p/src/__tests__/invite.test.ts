@@ -96,6 +96,56 @@ describe('§10.3 invite + §12.3 join flow', () => {
     expect(verdict).toStrictEqual({ ok: false, reason: 'expired' });
   });
 
+  it('fails closed on a malformed (non-finite) invite expiry', async () => {
+    const room = await founded();
+    const invite = createRoomInvite({
+      roomPublicKey: room.manifest.crypto.room_public_key,
+      grantedRole: 'member',
+      expiresAt: FUTURE,
+    });
+    const bobBundle = await generateMemberKeyPackage(utf8('bob-dev'));
+    const joinReq = await buildJoinRequest({
+      invite,
+      keyPackage: bobBundle.publicPackage,
+      proposedDisplayName: 'Bob',
+      requestedAtBucket: BUCKET,
+    });
+    // A malformed expiry parses to NaN, and `NaN <= now` is false — without the
+    // finite-check it would be treated as never-expiring.
+    const malformed = { ...invite, expires_at: 'not-a-date' };
+    expect(await verifyJoinRequest(malformed, joinReq, { now: NOW })).toStrictEqual({
+      ok: false,
+      reason: 'expired',
+    });
+  });
+
+  it('fails closed on a malformed join-request blind/proof (never throws)', async () => {
+    const room = await founded();
+    const invite = createRoomInvite({
+      roomPublicKey: room.manifest.crypto.room_public_key,
+      grantedRole: 'member',
+      expiresAt: FUTURE,
+    });
+    const bobBundle = await generateMemberKeyPackage(utf8('bob-dev'));
+    const joinReq = await buildJoinRequest({
+      invite,
+      keyPackage: bobBundle.publicPackage,
+      proposedDisplayName: 'Bob',
+      requestedAtBucket: BUCKET,
+    });
+    // 'A' passes the loose base64url regex but is an invalid encoding length.
+    const badBlind = joinRequestSchema.parse({ ...joinReq, invite_id_blind: 'A' });
+    expect(await verifyJoinRequest(invite, badBlind, { now: NOW })).toStrictEqual({
+      ok: false,
+      reason: 'invite_id_mismatch',
+    });
+    const badProof = joinRequestSchema.parse({ ...joinReq, proof_of_invite_secret: 'A' });
+    expect(await verifyJoinRequest(invite, badProof, { now: NOW })).toStrictEqual({
+      ok: false,
+      reason: 'proof_invalid',
+    });
+  });
+
   it('rejects once max_uses is exhausted', async () => {
     const room = await founded();
     const invite = createRoomInvite({

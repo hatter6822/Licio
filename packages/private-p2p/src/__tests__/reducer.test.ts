@@ -346,6 +346,166 @@ describe('§14.4 conflict policy', () => {
   });
 });
 
+describe('WS-S.5.3c reducer hardening (integrity)', () => {
+  function storyBase() {
+    return [
+      genesis(),
+      mkOp(
+        {
+          type: 'story.create',
+          story_id: 's1',
+          thread_id: 't1',
+          title: 'v1',
+          submission_type: 'original_brief',
+          topic_ids: [],
+          submission_metadata: {},
+        },
+        { op_id: 'create-s1', lamport: '2', parents: ['genesis'] },
+      ),
+    ];
+  }
+
+  it('rejects a story.create that reuses another story’s thread (one story per thread)', () => {
+    const reuse = mkOp(
+      {
+        type: 'story.create',
+        story_id: 's2',
+        thread_id: 't1', // already owned by s1
+        title: 'reuse',
+        submission_type: 'original_brief',
+        topic_ids: [],
+        submission_metadata: {},
+      },
+      { op_id: 'create-s2', lamport: '3' },
+    );
+    const state = reduceRoom([...storyBase(), reuse]);
+    expect(state.stories.has('s2')).toBe(false);
+    expect(state.stories.get('s1')?.threadId).toBe('t1');
+    expect(state.rejected.some((r) => r.reason === 'thread_already_in_use')).toBe(true);
+  });
+
+  it('rejects a contribution.create for a thread that does not exist (orphan thread)', () => {
+    const orphan = mkOp(
+      {
+        type: 'contribution.create',
+        contribution_id: 'c1',
+        thread_id: 't-missing',
+        contribution_type: 'comment',
+        body_markdown_lite: 'hi',
+        citations: [],
+        metadata: {},
+        client_draft_id: 'd1',
+      },
+      { lamport: '2', parents: ['genesis'] },
+    );
+    const state = reduceRoom([genesis(), orphan]);
+    expect(state.contributions.has('c1')).toBe(false);
+    expect(state.rejected.some((r) => r.reason === 'thread_missing')).toBe(true);
+  });
+
+  it('enforces the per-type body cap on edit, against the type recorded in state', () => {
+    const create = mkOp(
+      {
+        type: 'contribution.create',
+        contribution_id: 'c1',
+        thread_id: 't1',
+        contribution_type: 'question', // cap 2000
+        body_markdown_lite: 'short question?',
+        citations: [],
+        metadata: {},
+        client_draft_id: 'd1',
+      },
+      { op_id: 'cc1', lamport: '3', parents: ['create-s1'] },
+    );
+    // The edit op schema permits up to comment's 5000-char cap; the reducer must
+    // reject against question's 2000-char cap (the type is not on the edit op).
+    const oversized = mkOp(
+      { type: 'contribution.edit', contribution_id: 'c1', body_markdown_lite: 'x'.repeat(3_000) },
+      { op_id: 'ce1', lamport: '4' },
+    );
+    const state = reduceRoom([...storyBase(), create, oversized]);
+    expect(state.contributions.get('c1')?.bodyMarkdownLite).toBe('short question?');
+    expect(state.contributions.get('c1')?.editCount).toBe(0);
+    expect(state.rejected.some((r) => r.reason === 'body_too_long')).toBe(true);
+  });
+
+  it('applies a within-cap edit of the same type', () => {
+    const create = mkOp(
+      {
+        type: 'contribution.create',
+        contribution_id: 'c1',
+        thread_id: 't1',
+        contribution_type: 'question',
+        body_markdown_lite: 'q',
+        citations: [],
+        metadata: {},
+        client_draft_id: 'd1',
+      },
+      { op_id: 'cc1', lamport: '3', parents: ['create-s1'] },
+    );
+    const okEdit = mkOp(
+      { type: 'contribution.edit', contribution_id: 'c1', body_markdown_lite: 'y'.repeat(1_999) },
+      { op_id: 'ce1', lamport: '4' },
+    );
+    const state = reduceRoom([...storyBase(), create, okEdit]);
+    expect(state.contributions.get('c1')?.bodyMarkdownLite).toBe('y'.repeat(1_999));
+    expect(state.contributions.get('c1')?.editCount).toBe(1);
+  });
+
+  it('re-admits a previously-removed member (clears removed, restores caps)', () => {
+    const addBob = mkOp(
+      {
+        type: 'member.add',
+        member_id: 'bob',
+        device_id: 'bob-dev',
+        signing_public_key: KEY,
+        hpke_public_key: KEY,
+        mls_key_package: KEY,
+        granted_role: 'member',
+      },
+      { op_id: 'add-bob', lamport: '2', parents: ['genesis'] },
+    );
+    const removeBob = mkOp(
+      { type: 'member.remove', member_id: 'bob' },
+      { op_id: 'rm-bob', lamport: '3' },
+    );
+    const readd = mkOp(
+      {
+        type: 'member.add',
+        member_id: 'bob',
+        device_id: 'bob-dev-2',
+        signing_public_key: KEY,
+        hpke_public_key: KEY,
+        mls_key_package: KEY,
+        granted_role: 'member',
+      },
+      { op_id: 'readd-bob', lamport: '4' },
+    );
+    const bobPosts = mkOp(
+      {
+        type: 'story.create',
+        story_id: 'sb',
+        thread_id: 'tb',
+        title: 'back',
+        submission_type: 'original_brief',
+        topic_ids: [],
+        submission_metadata: {},
+      },
+      {
+        op_id: 'bob-story',
+        author_member_id: 'bob',
+        author_device_id: 'bob-dev-2',
+        author_seq: 0,
+        lamport: '5',
+      },
+    );
+    const state = reduceRoom([genesis(), addBob, removeBob, readd, bobPosts]);
+    expect(state.members.get('bob')?.removed).toBe(false);
+    expect(state.devices.get('bob-dev-2')?.removed).toBe(false);
+    expect(state.stories.has('sb')).toBe(true); // the re-admitted member can post again
+  });
+});
+
 describe('§14.3.3 / §26.1 determinism — byte-identical state across shuffled orders', () => {
   function buildDag(): PrivateRoomOp[] {
     const ops: PrivateRoomOp[] = [genesis()];

@@ -208,6 +208,25 @@ describe('the §15.5 reject matrix', () => {
     expect(result).toStrictEqual({ ok: false, reason: 'self_handshake' });
   });
 
+  it('quarantines a malformed hello field as a closed verdict (never throws)', async () => {
+    const a = await makePeer('alice-dev');
+    const b = await makePeer('bob-dev');
+    const ctx = ctxFor(randomBytes(32));
+    const sig = await signHandshakeProof(a.device.privateKey, a.hello, b.hello, ctx);
+    // 'A' passes the loose base64url regex but is an invalid encoding length, so
+    // the proof-message builder's `fromBase64Url` would throw; this wire-facing
+    // pre-block-exchange check must return a typed verdict, not abort.
+    const malformedRemote: HandshakeHello = { ...a.hello, ephemeral_public_key: 'A' };
+    const result = await verifyPeerHandshake({
+      localHello: b.hello,
+      remoteHello: malformedRemote,
+      remoteProofSignature: sig,
+      ctx,
+      resolveDevice: () => ({ publicKey: a.device.publicKey, activeAtEpoch: true }),
+    });
+    expect(result).toStrictEqual({ ok: false, reason: 'proof_invalid' });
+  });
+
   it('a proof is bound to the room (it cannot be replayed into another room)', async () => {
     const a = await makePeer('alice-dev');
     const b = await makePeer('bob-dev');

@@ -18,6 +18,7 @@ import {
   randomBytes,
   timingSafeEqual,
   toBase64Url,
+  tryFromBase64Url,
   utf8,
 } from '../crypto/runtime.js';
 import {
@@ -152,15 +153,25 @@ export async function verifyJoinRequest(
   request: JoinRequest,
   options: VerifyJoinRequestOptions,
 ): Promise<JoinRequestVerdict> {
-  if (new Date(invite.expires_at).getTime() <= options.now.getTime()) {
+  // Fail closed on a non-finite expiry: a malformed `expires_at` string parses to
+  // NaN, and `NaN <= now` is false — without this an unparseable expiry would be
+  // treated as never-expiring (verifiable until `max_uses` is exhausted).
+  const expiresAtMs = new Date(invite.expires_at).getTime();
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= options.now.getTime()) {
     return { ok: false, reason: 'expired' };
   }
   if ((options.usesSoFar ?? 0) >= invite.max_uses) {
     return { ok: false, reason: 'exhausted' };
   }
+  // Decode the wire-supplied (joiner) base64 fields fail-closed: a malformed-but-
+  // regex-passing value must yield a typed verdict, not throw mid-verification.
+  const requestBlind = tryFromBase64Url(request.invite_id_blind);
+  if (!requestBlind) return { ok: false, reason: 'invite_id_mismatch' };
+  const requestProof = tryFromBase64Url(request.proof_of_invite_secret);
+  if (!requestProof) return { ok: false, reason: 'proof_invalid' };
   const secret = fromBase64Url(invite.invite_secret);
   const expectedBlind = await deriveInviteIdBlind(secret, invite.invite_id);
-  if (!timingSafeEqual(fromBase64Url(request.invite_id_blind), fromBase64Url(expectedBlind))) {
+  if (!timingSafeEqual(requestBlind, fromBase64Url(expectedBlind))) {
     return { ok: false, reason: 'invite_id_mismatch' };
   }
   const expectedProof = await deriveJoinProof(
@@ -168,9 +179,7 @@ export async function verifyJoinRequest(
     request.recipient_device_key_package,
     request.requested_at_bucket,
   );
-  if (
-    !timingSafeEqual(fromBase64Url(request.proof_of_invite_secret), fromBase64Url(expectedProof))
-  ) {
+  if (!timingSafeEqual(requestProof, fromBase64Url(expectedProof))) {
     return { ok: false, reason: 'proof_invalid' };
   }
   let keyPackage: KeyPackage;

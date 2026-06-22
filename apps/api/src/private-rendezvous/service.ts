@@ -4,9 +4,13 @@
 // §27.2).  Enforces the server-side bounds the §15.3 design requires regardless
 // of client input:
 //
-//   • TTL clamp — the stored expiry is `min(client_expires_at, now + maxTtlMs)`,
-//     so a malicious client cannot defeat auto-expiry; an already-expired record
-//     is dropped.
+//   • TTL bound — the client's `expires_at` is AAD-bound into the sealed
+//     announcement/signal (the peer reconstructs the AEAD AAD from the returned
+//     `expires_at`), so the server must store it VERBATIM — silently clamping it
+//     would make every otherwise-valid peer fail to decrypt.  Instead the server
+//     REJECTS a record whose TTL exceeds `maxTtlMs` (plus a small clock-skew
+//     tolerance, since the client stamps `expires_at` off its own clock) or that
+//     is already expired, so auto-expiry still cannot be defeated.
 //   • Bounded poll (§15.3.1 no-existence-oracle) — `poll` ALWAYS returns a
 //     bounded list (200), never a 404, so a well-formed-but-unknown blind id is
 //     indistinguishable from a known-but-empty one.
@@ -28,10 +32,14 @@ import {
 } from './stores.js';
 
 export interface RendezvousServiceConfig {
-  /** §15.3.2 — the maximum retention the server allows (clamps the client TTL). */
+  /** §15.3.2 — the maximum retention the server allows (bounds, never rewrites,
+   *  the AAD-bound client TTL: an over-long record is rejected, not clamped). */
   readonly maxTtlMs: number;
   /** §15.3.1 — the bounded poll response size (never an existence oracle). */
   readonly maxRecordsPerPoll: number;
+  /** Tolerance for the client stamping `expires_at` off its own (possibly-ahead)
+   *  clock, so a normal max-TTL record is not rejected for minor skew. */
+  readonly clockSkewToleranceMs: number;
 }
 
 /** Mirrors the §15.3.2 client bounds (`@licio/private-p2p` RENDEZVOUS_MAX_TTL_MS /
@@ -40,6 +48,7 @@ export interface RendezvousServiceConfig {
 export const DEFAULT_RENDEZVOUS_CONFIG: RendezvousServiceConfig = {
   maxTtlMs: 30 * 60 * 1000,
   maxRecordsPerPoll: 256,
+  clockSkewToleranceMs: 5 * 60 * 1000,
 };
 
 /** A presence record as returned to a poller (the room blind id is the poll key). */
@@ -81,19 +90,28 @@ export class RendezvousService {
     private readonly now: () => number = () => Date.now(),
   ) {}
 
-  /** Store a presence record with a server-clamped TTL (drops an expired one). */
+  /** Store a presence record with its AAD-bound TTL verbatim, rejecting (not
+   *  rewriting) one that is already expired or exceeds the server retention bound. */
   async announce(req: AnnounceRequest): Promise<{ stored: boolean }> {
-    const now = this.now();
-    const expiresAt = Math.min(req.expires_at, now + this.config.maxTtlMs);
-    if (expiresAt <= now) return { stored: false };
+    if (!this.withinTtlBound(req.expires_at)) return { stored: false };
     await this.store.announce({
       roomBlindId: req.room_blind_id,
       peerBlindId: req.peer_blind_id,
       encryptedAnnouncement: req.encrypted_announcement,
-      expiresAt,
+      expiresAt: req.expires_at,
     });
     this.metricsState.announces += 1;
     return { stored: true };
+  }
+
+  /** A TTL is accepted iff it is still in the future and within the server bound
+   *  (`maxTtlMs` + a clock-skew tolerance).  The value is never rewritten — it is
+   *  AAD-bound into the sealed payload, so clamping would break peer decryption. */
+  private withinTtlBound(expiresAt: number): boolean {
+    const now = this.now();
+    return (
+      expiresAt > now && expiresAt <= now + this.config.maxTtlMs + this.config.clockSkewToleranceMs
+    );
   }
 
   /**
@@ -114,17 +132,16 @@ export class RendezvousService {
     };
   }
 
-  /** Queue an opaque signal for its recipient, with a server-clamped TTL. */
+  /** Queue an opaque signal for its recipient, storing its AAD-bound TTL verbatim
+   *  and rejecting (not rewriting) one expired or beyond the server bound. */
   async signal(req: SignalRequest): Promise<{ stored: boolean }> {
-    const now = this.now();
-    const expiresAt = Math.min(req.expires_at, now + this.config.maxTtlMs);
-    if (expiresAt <= now) return { stored: false };
+    if (!this.withinTtlBound(req.expires_at)) return { stored: false };
     await this.store.putSignal({
       roomBlindId: req.room_blind_id,
       senderBlindId: req.sender_blind_id,
       recipientBlindId: req.recipient_blind_id,
       ciphertext: req.ciphertext,
-      expiresAt,
+      expiresAt: req.expires_at,
     });
     this.metricsState.signalsPosted += 1;
     return { stored: true };

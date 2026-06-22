@@ -216,6 +216,51 @@ describe('§14.2 stage-1 reject matrix', () => {
     const result = await openOp(env, ctx);
     expect(result).toMatchObject({ ok: false, reason: 'metadata_mismatch' });
   });
+
+  it('malformed base64 in an authenticated field → malformed_encoding (never throws)', async () => {
+    const { sealParams, ctx } = await setup();
+    const env = await sealOp(mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
+    // 'A' passes the loose base64url regex but is an invalid encoding length; the
+    // wire-intake path must quarantine it, not let `fromBase64Url` throw.
+    const result = await openOp({ ...env, signature: 'A' }, ctx);
+    expect(result).toMatchObject({ ok: false, reason: 'malformed_encoding' });
+  });
+
+  it('an unsupported (but schema-permitted) AEAD algorithm → unsupported_algorithm', async () => {
+    const { device, sealParams, ctx } = await setup();
+    const env = await sealOp(mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
+    // Re-sign with the authenticated algorithm flipped to one this path can't open.
+    const { signature: _signature, ...unsigned } = env;
+    const mutated = {
+      ...unsigned,
+      aead: { ...unsigned.aead, algorithm: 'XCHACHA20-POLY1305' as const },
+    };
+    const signature = await signEnvelope(device.privateKey, mutated);
+    const forged = privateEncryptedEnvelopeSchema.parse({
+      ...mutated,
+      signature: toBase64Url(signature),
+    });
+    const result = await openOp(forged, ctx);
+    expect(result).toMatchObject({ ok: false, reason: 'unsupported_algorithm' });
+  });
+
+  it('a wrap epoch that differs from the signed op epoch → epoch_mismatch', async () => {
+    const { device, sealParams, ctx } = await setup();
+    const env = await sealOp(mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
+    // Re-sign with `wrapping_epoch` advanced past the signed `room_epoch`.
+    const { signature: _signature, ...unsigned } = env;
+    const mutated = {
+      ...unsigned,
+      key_wrap: { ...unsigned.key_wrap, wrapping_epoch: unsigned.room_epoch + 1 },
+    };
+    const signature = await signEnvelope(device.privateKey, mutated);
+    const forged = privateEncryptedEnvelopeSchema.parse({
+      ...mutated,
+      signature: toBase64Url(signature),
+    });
+    const result = await openOp(forged, ctx);
+    expect(result).toMatchObject({ ok: false, reason: 'epoch_mismatch' });
+  });
 });
 
 describe('end-to-end: seal → open → reduce', () => {

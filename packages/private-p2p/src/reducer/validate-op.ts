@@ -29,7 +29,7 @@ import {
 } from '../crypto/aead.js';
 import { compareBytes, decodeCanonical } from '../crypto/canonical.js';
 import { canonicalizeRecord } from '../crypto/record-encoding.js';
-import { fromBase64Url, sha256, toBase64Url } from '../crypto/runtime.js';
+import { fromBase64Url, sha256, toBase64Url, tryFromBase64Url } from '../crypto/runtime.js';
 import { signEnvelope, verifyEnvelopeSignature } from '../crypto/signatures.js';
 import type { PrivateObjectType, PrivatePaddingPolicy } from '../schemas/common.js';
 import {
@@ -167,7 +167,10 @@ export type OpIntakeRejection =
   | 'unknown_device'
   | 'signature_invalid'
   | 'no_epoch_key'
+  | 'epoch_mismatch'
+  | 'unsupported_algorithm'
   | 'chunked_op_unsupported'
+  | 'malformed_encoding'
   | 'aad_hash_mismatch'
   | 'decrypt_failed'
   | 'schema_invalid'
@@ -201,7 +204,8 @@ export async function openOp(
   // (3) signature verifies against the author's registered device key.
   const deviceKey = ctx.deviceSigningKey(envelope.author_device_id_blind);
   if (!deviceKey) return { ok: false, reason: 'unknown_device' };
-  const signatureBytes = fromBase64Url(envelope.signature);
+  const signatureBytes = tryFromBase64Url(envelope.signature);
+  if (!signatureBytes) return { ok: false, reason: 'malformed_encoding' };
   if (!(await verifyEnvelopeSignature(deviceKey, envelope, signatureBytes))) {
     return { ok: false, reason: 'signature_invalid' };
   }
@@ -211,12 +215,34 @@ export async function openOp(
     return { ok: false, reason: 'chunked_op_unsupported' };
   }
 
+  // Fail closed unless the authenticated algorithm is the one this path opens
+  // with: the schema permits XCHACHA20-POLY1305, but `openBody`/`unwrapKey` are
+  // AES-256-GCM only, so an envelope claiming another algorithm would otherwise be
+  // opened under the wrong primitive — and a peer honoring the field would reject
+  // the same envelope, diverging state.
+  if (envelope.aead.algorithm !== 'AES-256-GCM') {
+    return { ok: false, reason: 'unsupported_algorithm' };
+  }
+
+  // The wrap epoch is authenticated independently of the signed op epoch; require
+  // equality before opening (§10.5: the object key is wrapped under the OP's OWN
+  // epoch content-wrap key).  Without this a signed envelope could claim op epoch
+  // E yet wrap under another held epoch — a peer holding both epochs would accept
+  // what an epoch-pinned peer rejects as `no_epoch_key`, diverging state.
+  if (envelope.key_wrap.wrapping_epoch !== envelope.room_epoch) {
+    return { ok: false, reason: 'epoch_mismatch' };
+  }
+
   // (4) AEAD opens under an authorized epoch key (unwrap the object key, then
   //     open the body), reconstructing both AADs from authenticated metadata.
   const contentWrapKey = ctx.contentWrapKeyForEpoch(envelope.key_wrap.wrapping_epoch);
   if (!contentWrapKey) return { ok: false, reason: 'no_epoch_key' };
 
-  const roomIdCommitment = fromBase64Url(envelope.room_id_hash);
+  const roomIdCommitment = tryFromBase64Url(envelope.room_id_hash);
+  const capabilityRootAtSeq = tryFromBase64Url(envelope.capability_root_at_seq);
+  if (!roomIdCommitment || !capabilityRootAtSeq) {
+    return { ok: false, reason: 'malformed_encoding' };
+  }
   const bodyAadInput = {
     envelopeVersion: envelope.envelope_version,
     roomIdCommitment,
@@ -226,7 +252,7 @@ export async function openOp(
     parentOpIds: envelope.parent_op_ids,
     authorDeviceIdBlind: envelope.author_device_id_blind,
     authorSeq: envelope.author_seq,
-    capabilityRootAtSeq: fromBase64Url(envelope.capability_root_at_seq),
+    capabilityRootAtSeq,
     chunkIndex: envelope.chunk_index,
     chunkTotal: envelope.chunk_total,
   };

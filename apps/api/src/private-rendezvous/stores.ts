@@ -32,7 +32,8 @@ export const announceRequestSchema = z
     room_blind_id: blindIdSchema,
     peer_blind_id: blindIdSchema,
     encrypted_announcement: announcementCiphertextSchema,
-    /** Absolute ms expiry; the server CLAMPS this to `now + maxTtlMs` (§15.3.2). */
+    /** Absolute ms expiry; AAD-bound in the sealed announcement, so the server
+     *  stores it VERBATIM and instead REJECTS one beyond `now + maxTtlMs` (§15.3.2). */
     expires_at: z.number().int().positive(),
   })
   .strict();

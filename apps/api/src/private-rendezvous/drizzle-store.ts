@@ -13,9 +13,10 @@
 // mailbox; a multi-node deployment needs a shared transient store).
 
 import { type DbExecutor, privateRendezvousRecords } from '@licio/db';
-import { and, eq, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, lte, sql } from 'drizzle-orm';
 import {
   InMemoryRendezvousStore,
+  MAX_RECORDS_PER_ROOM,
   type RendezvousStore,
   type StoredRendezvousRecord,
   type StoredSignal,
@@ -28,21 +29,51 @@ export class DrizzleRendezvousStore implements RendezvousStore {
   constructor(private readonly db: DbExecutor) {}
 
   async announce(record: StoredRendezvousRecord): Promise<void> {
-    // Re-announce replaces the peer's prior record (no stable identity column).
-    await this.db
-      .delete(privateRendezvousRecords)
-      .where(
-        and(
-          eq(privateRendezvousRecords.roomBlindId, record.roomBlindId),
-          eq(privateRendezvousRecords.peerBlindId, record.peerBlindId),
-        ),
+    // Re-announce REPLACES the peer's prior record (no stable identity column,
+    // §15.3.1).  The delete-then-insert must be atomic: two concurrent re-announces
+    // for the same (room, peer) could both delete before either inserts, leaving
+    // duplicate live rows a retrying client uses to consume multiple poll slots.
+    // A transaction-scoped advisory lock keyed on (room, peer) serializes them
+    // without adding a unique constraint (auto-released on commit/rollback).
+    await this.db.transaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtext(${record.roomBlindId}), hashtext(${record.peerBlindId}))`,
       );
-    await this.db.insert(privateRendezvousRecords).values({
-      roomBlindId: record.roomBlindId,
-      peerBlindId: record.peerBlindId,
-      encryptedAnnouncement: record.encryptedAnnouncement,
-      expiresAt: new Date(record.expiresAt),
+      await tx
+        .delete(privateRendezvousRecords)
+        .where(
+          and(
+            eq(privateRendezvousRecords.roomBlindId, record.roomBlindId),
+            eq(privateRendezvousRecords.peerBlindId, record.peerBlindId),
+          ),
+        );
+      await tx.insert(privateRendezvousRecords).values({
+        roomBlindId: record.roomBlindId,
+        peerBlindId: record.peerBlindId,
+        encryptedAnnouncement: record.encryptedAnnouncement,
+        expiresAt: new Date(record.expiresAt),
+      });
+      await this.enforcePerRoomCap(tx, record.roomBlindId);
     });
+  }
+
+  /**
+   * Bound the live rows for a room blind id (§27 anti-flood): keep the
+   * `MAX_RECORDS_PER_ROOM` latest-expiring records and delete the rest, so a flood
+   * under one room blind id cannot crowd real peers out of a `poll(limit)` window.
+   * Mirrors the in-memory store's soonest-expiring eviction.  Single-statement
+   * (delete-where-in-subquery) on the supplied executor (the announce transaction).
+   */
+  private async enforcePerRoomCap(db: DbExecutor, roomBlindId: string): Promise<void> {
+    const overflow = db
+      .select({ id: privateRendezvousRecords.rendezvousId })
+      .from(privateRendezvousRecords)
+      .where(eq(privateRendezvousRecords.roomBlindId, roomBlindId))
+      .orderBy(desc(privateRendezvousRecords.expiresAt))
+      .offset(MAX_RECORDS_PER_ROOM);
+    await db
+      .delete(privateRendezvousRecords)
+      .where(inArray(privateRendezvousRecords.rendezvousId, overflow));
   }
 
   async poll(roomBlindId: string, nowMs: number, limit: number): Promise<StoredRendezvousRecord[]> {

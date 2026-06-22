@@ -14,6 +14,7 @@
 // device are the author's own (the founder's self-add, §12.1) — the one
 // self-authorizing op; every later op is capability-checked.
 
+import { CONTRIBUTION_BODY_LIMITS, type ContributionType } from '@licio/shared';
 import type { PrivateOpBody, PrivateRoomOp } from '../schemas/ops.js';
 import { capabilitiesForRole, OP_REQUIRED_CAPABILITY } from './capabilities.js';
 import { canonicalOpOrder } from './order.js';
@@ -56,14 +57,25 @@ function authorMayApply(state: RoomReducerState, op: PrivateRoomOp, member: Memb
 }
 
 function applyMemberAdd(state: RoomReducerState, body: OpOf<'member.add'>, epoch: number): void {
-  if (!state.members.has(body.member_id)) {
+  const existing = state.members.get(body.member_id);
+  if (!existing) {
     state.members.set(body.member_id, {
       memberId: body.member_id,
       role: body.granted_role,
       capabilities: capabilitiesForRole(body.granted_role),
       removed: false,
     });
+  } else if (existing.removed) {
+    // Re-admit a previously-removed member (e.g. the §12.6.1 threshold-recovery
+    // re-add of a `recovering_member_id`): clear the tombstone and restore the
+    // granted role's capabilities, otherwise every later op from the member stays
+    // rejected as `author_member_removed` even though a new device is added below.
+    existing.removed = false;
+    existing.role = body.granted_role;
+    existing.capabilities = capabilitiesForRole(body.granted_role);
   }
+  // An existing, non-removed member is left untouched (idempotent — preserving any
+  // role.grant/role.revoke deltas applied since the original add).
   if (!state.devices.has(body.device_id)) {
     state.devices.set(body.device_id, {
       deviceId: body.device_id,
@@ -131,6 +143,15 @@ function applyStoryCreate(
   body: OpOf<'story.create'>,
 ): void {
   if (state.stories.has(body.story_id)) return; // idempotent
+  // One story per thread: reject a story that reuses a thread already owned by
+  // another story.  The private-room UI renders comments by `threadId`, so sharing
+  // a thread would conflate two stories' conversation streams.
+  for (const existing of state.stories.values()) {
+    if (existing.threadId === body.thread_id) {
+      reject(state, op.op_id, 'thread_already_in_use');
+      return;
+    }
+  }
   state.stories.set(body.story_id, {
     storyId: body.story_id,
     threadId: body.thread_id,
@@ -205,6 +226,14 @@ function applyContributionCreate(
     state.seenClientDrafts.add(draftKey);
     return;
   }
+  // The target thread must already exist (created by its story.create or a
+  // thread.state).  An orphan contribution would otherwise persist + be searchable
+  // and could later surface under a story that reuses the id, despite never
+  // causally depending on it.
+  if (!state.threads.has(body.thread_id)) {
+    reject(state, op.op_id, 'thread_missing');
+    return;
+  }
   if (
     body.parent_contribution_id !== undefined &&
     !state.contributions.has(body.parent_contribution_id)
@@ -235,8 +264,17 @@ function applyContributionEdit(
     reject(state, op.op_id, 'contribution_missing');
     return;
   }
-  if (body.body_markdown_lite !== undefined)
+  if (body.body_markdown_lite !== undefined) {
+    // The edit op carries no `contribution_type`, so enforce the per-type body cap
+    // (WS-S.5.3c) against the type recorded in state — otherwise an edit could grow
+    // a capped type (e.g. evidence's 500 chars) up to the comment-sized schema max.
+    const cap = CONTRIBUTION_BODY_LIMITS[contribution.contributionType as ContributionType];
+    if (cap !== undefined && body.body_markdown_lite.trim().length > cap) {
+      reject(state, op.op_id, 'body_too_long');
+      return;
+    }
     contribution.bodyMarkdownLite = body.body_markdown_lite;
+  }
   contribution.editCount += 1;
 }
 

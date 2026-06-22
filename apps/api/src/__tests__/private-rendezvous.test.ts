@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-S.6.6 — server-blind rendezvous tests (PRIVATE_SPEC §15.3, §15.4, §21.5,
-// §27.2): the service-level TTL clamp + no-existence-oracle + signal round-trip +
-// aggregate-only metrics; the route-level shape validation / oversized rejection;
-// and the full-app mount proving the endpoints are CSRF-exempt (a P2P client
-// holds no session) and never 404 on poll.
+// §27.2): the service-level TTL bound (reject-not-clamp, since `expires_at` is
+// AAD-bound) + no-existence-oracle + signal round-trip + aggregate-only metrics;
+// the route-level shape validation / oversized rejection (with AND without
+// Content-Length); and the full-app mount proving the endpoints are CSRF-exempt
+// (a P2P client holds no session) and never 404 on poll.
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
+import { runRendezvousTick } from '../private-rendezvous/scheduler.js';
 import {
   DEFAULT_RENDEZVOUS_CONFIG,
   RendezvousService,
@@ -30,7 +32,7 @@ function announceBody(over: Record<string, unknown> = {}) {
   };
 }
 
-describe('RendezvousService — TTL clamp + no-existence-oracle (§15.3)', () => {
+describe('RendezvousService — TTL bound + no-existence-oracle (§15.3)', () => {
   it('announces then polls the record back', async () => {
     const svc = new RendezvousService(new InMemoryRendezvousStore());
     await svc.announce(announceBody());
@@ -40,19 +42,35 @@ describe('RendezvousService — TTL clamp + no-existence-oracle (§15.3)', () =>
     expect(records[0]?.encrypted_announcement).toBe(ANNOUNCEMENT);
   });
 
-  it('clamps a far-future TTL to now + maxTtlMs', async () => {
+  it('rejects a far-future TTL beyond the server bound (no silent clamp)', async () => {
+    const clock = 1_000_000;
+    const svc = new RendezvousService(
+      new InMemoryRendezvousStore(),
+      DEFAULT_RENDEZVOUS_CONFIG,
+      () => clock,
+    );
+    // A 10-hour TTL far exceeds maxTtlMs + skew; the server REJECTS it rather than
+    // clamping — clamping would rewrite the AAD-bound expiry and break peer decrypt.
+    const { stored } = await svc.announce(announceBody({ expires_at: clock + 10 * 60 * 60_000 }));
+    expect(stored).toBe(false);
+    expect((await svc.poll(ROOM_BLIND)).records).toHaveLength(0);
+  });
+
+  it('stores a max-TTL expiry VERBATIM despite minor client-ahead clock skew', async () => {
     let clock = 1_000_000;
     const svc = new RendezvousService(
       new InMemoryRendezvousStore(),
       DEFAULT_RENDEZVOUS_CONFIG,
       () => clock,
     );
-    // Client asks for a 10-hour TTL; the server clamps to 30 min.
-    await svc.announce(announceBody({ expires_at: clock + 10 * 60 * 60_000 }));
-    clock += 29 * 60_000; // 29 min later: still present
+    // Client clock 2 min ahead: it stamps expires_at = serverNow + 30min + 2min,
+    // within the 35-min bound (maxTtl 30 + skew 5), so it stores UNCHANGED.
+    const expiresAt = clock + 30 * 60_000 + 2 * 60_000;
+    const { stored } = await svc.announce(announceBody({ expires_at: expiresAt }));
+    expect(stored).toBe(true);
+    expect((await svc.poll(ROOM_BLIND)).records[0]?.expires_at).toBe(expiresAt);
+    clock += 31 * 60_000; // past a hypothetical 30-min clamp, before the real 32-min expiry
     expect((await svc.poll(ROOM_BLIND)).records).toHaveLength(1);
-    clock += 2 * 60_000; // 31 min total: clamped expiry passed
-    expect((await svc.poll(ROOM_BLIND)).records).toHaveLength(0);
   });
 
   it('drops an already-expired announcement', async () => {
@@ -133,6 +151,26 @@ describe('RendezvousService — signals (§15.4)', () => {
     clock += 2 * 60_000; // both expired
     expect(await svc.sweep()).toBe(1);
   });
+
+  it('the scheduler tick drives the sweep (and swallows a sweep error)', async () => {
+    let clock = 11_000_000;
+    const svc = new RendezvousService(
+      new InMemoryRendezvousStore(),
+      DEFAULT_RENDEZVOUS_CONFIG,
+      () => clock,
+    );
+    await svc.announce(announceBody({ expires_at: clock + 60_000 }));
+    clock += 2 * 60_000; // expired
+    expect(await runRendezvousTick(svc)).toBe(1);
+
+    // A throwing sweep is reported, not propagated (the tick returns 0).
+    const broken = {
+      sweep: () => Promise.reject(new Error('boom')),
+    } as unknown as RendezvousService;
+    let captured: unknown;
+    expect(await runRendezvousTick(broken, (err) => (captured = err))).toBe(0);
+    expect(captured).toBeInstanceOf(Error);
+  });
 });
 
 describe('routes — shape validation + bounds', () => {
@@ -166,8 +204,28 @@ describe('routes — shape validation + bounds', () => {
     ).toBe(400);
   });
 
-  it('rejects an oversized body with 413 (before parsing)', async () => {
+  it('rejects an oversized body with 413 (declared Content-Length)', async () => {
     const res = await post('/announce', announceBody(), { 'content-length': '200000' });
+    expect(res.status).toBe(413);
+  });
+
+  it('enforces the size cap even WITHOUT a Content-Length (streamed/chunked body)', async () => {
+    // A streamed body carries no Content-Length, so the cap must be enforced as the
+    // stream is read — not bypassed until the whole body is buffered + parsed.
+    const huge = 'x'.repeat(200_000);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(huge));
+        controller.close();
+      },
+    });
+    const res = await createPrivateRendezvousRoutes().request('/announce', {
+      method: 'POST',
+      body: stream,
+      headers: { 'content-type': 'application/json' },
+      // A streaming request body requires half-duplex per the Fetch standard.
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
     expect(res.status).toBe(413);
   });
 

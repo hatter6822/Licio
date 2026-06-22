@@ -181,3 +181,17 @@ export function fromBase64Url(text: string): Uint8Array {
   for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
   return out;
 }
+
+/**
+ * Decode a base64url field FAIL-CLOSED: a value that passes the loose base64url
+ * regex but is not a valid encoding length (e.g. `"A"`) must QUARANTINE / reject at
+ * a wire boundary, never throw.  Returns `undefined` instead of throwing, so a
+ * wire-intake path (op/handshake/invite verification) can map it to a typed reason.
+ */
+export function tryFromBase64Url(text: string): Uint8Array | undefined {
+  try {
+    return fromBase64Url(text);
+  } catch {
+    return undefined;
+  }
+}
