@@ -74,6 +74,11 @@ export interface AttachmentState {
   /** The object key wrapped under the epoch `content_wrap_key` (§10.5) — the key
    *  material a member unwraps to open the sealed manifest + chunks. */
   readonly wrappedObjectKey: string;
+  /** The epoch the `attachment.add` op was authored under — i.e. the epoch whose
+   *  `content_wrap_key` the object key is wrapped under (§10.5).  A fetcher needs it
+   *  to unwrap the key + open the manifest/chunks (part of the §14.3.3 converged state,
+   *  so it is committed + snapshot-serialized like every other field). */
+  readonly epoch: number;
 }
 
 /** A recovery request's accumulated distinct admin authorizations (WS-S.3.6c). */
@@ -224,6 +229,7 @@ export function roomStateCommitment(state: RoomReducerState): Uint8Array {
       attachmentId: id,
       manifestCid: a.manifestCid,
       wrappedObjectKey: a.wrappedObjectKey,
+      epoch: a.epoch,
     })),
     recoveryRequests: sortedEntries(state.recoveryRequests).map(([id, r]) => ({
       recoveryRequestId: id,

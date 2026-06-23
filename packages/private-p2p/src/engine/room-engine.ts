@@ -18,9 +18,15 @@
 // always converges regardless of delivery order; the unresolved remainder is
 // quarantined with its typed reason and never rendered.
 
+import {
+  decryptAttachment,
+  type EncryptedAttachment,
+  openAttachmentManifest,
+} from '../crypto/attachment.js';
 import { canonical } from '../crypto/canonical.js';
+import { PRIVATE_CID_CODEC, verifyPrivateCid } from '../crypto/cid.js';
 import { deriveAuthorDeviceIdBlind } from '../crypto/device-blind.js';
-import { sha256, toBase64Url } from '../crypto/runtime.js';
+import { fromBase64Url, sha256, toBase64Url } from '../crypto/runtime.js';
 import { OP_REQUIRED_CAPABILITY } from '../reducer/capabilities.js';
 import {
   type BootstrapDevice,
@@ -69,11 +75,21 @@ export interface PrivateRoomStorage {
   listEnvelopes(): Promise<ReadonlyArray<{ opId: string; envelope: PrivateEncryptedEnvelope }>>;
   /** Drop envelopes pruned by a §14.5 compaction (idempotent — absent ids no-op). */
   deleteEnvelopes(opIds: readonly string[]): Promise<void>;
+  /** §13.6 — persist a CID-addressed content-addressed block (an attachment manifest or
+   *  media chunk; the encrypted BYTES, opaque to storage).  The engine writes a block
+   *  only after verifying its CID, so storage need not re-verify. Idempotent. */
+  putBlock(cid: string, bytes: Uint8Array): Promise<void>;
+  /** A stored block's bytes, or `undefined` if absent.  The engine re-verifies the CID
+   *  on read where trust matters (storage confers no trust). */
+  getBlock(cid: string): Promise<Uint8Array | undefined>;
+  /** Whether a block is stored (drives the §15.8 want-list without fetching bytes). */
+  hasBlock(cid: string): Promise<boolean>;
 }
 
 /** An in-memory `PrivateRoomStorage` (local/dev + tests; apps/web uses IndexedDB). */
 export class InMemoryPrivateRoomStorage implements PrivateRoomStorage {
   private readonly envelopes = new Map<string, PrivateEncryptedEnvelope>();
+  private readonly blocks = new Map<string, Uint8Array>();
 
   putEnvelope(opId: string, envelope: PrivateEncryptedEnvelope): Promise<void> {
     this.envelopes.set(opId, envelope); // last-write-wins (the engine passes the fork winner)
@@ -87,6 +103,19 @@ export class InMemoryPrivateRoomStorage implements PrivateRoomStorage {
   deleteEnvelopes(opIds: readonly string[]): Promise<void> {
     for (const id of opIds) this.envelopes.delete(id);
     return Promise.resolve();
+  }
+
+  putBlock(cid: string, bytes: Uint8Array): Promise<void> {
+    this.blocks.set(cid, bytes);
+    return Promise.resolve();
+  }
+
+  getBlock(cid: string): Promise<Uint8Array | undefined> {
+    return Promise.resolve(this.blocks.get(cid));
+  }
+
+  hasBlock(cid: string): Promise<boolean> {
+    return Promise.resolve(this.blocks.has(cid));
   }
 }
 
@@ -512,6 +541,140 @@ export class PrivateRoomEngine {
       if (want.has(opId)) out.push(envelope);
     }
     return out;
+  }
+
+  // --- §13.6 / §15.7 media block exchange -----------------------------------
+
+  /**
+   * Persist a freshly-encrypted §13.6 attachment's blocks (the sealed manifest + every
+   * sealed chunk, CID-addressed).  The author then issues an `attachment.add` op carrying
+   * `manifest_cid` + `wrapped_object_key`; peers fetch these blocks lazily by CID.
+   */
+  async storeAttachment(encrypted: EncryptedAttachment): Promise<void> {
+    await this.storage.putBlock(encrypted.manifestCid, encrypted.sealedManifest);
+    for (const [cid, bytes] of encrypted.chunks) await this.storage.putBlock(cid, bytes);
+  }
+
+  /** Open a stored attachment manifest under its wrapping epoch's key, or `undefined`
+   *  if the block is missing, the epoch key is unheld, or it fails to open. */
+  private async tryOpenManifest(att: {
+    readonly attachmentId: string;
+    readonly manifestCid: string;
+    readonly wrappedObjectKey: string;
+    readonly epoch: number;
+  }): Promise<Awaited<ReturnType<typeof openAttachmentManifest>> | undefined> {
+    const sealed = await this.storage.getBlock(att.manifestCid);
+    const epoch = this.epochs.get(att.epoch);
+    if (!sealed || !epoch) return undefined;
+    try {
+      return await openAttachmentManifest(
+        sealed,
+        att.attachmentId,
+        {
+          roomIdCommitment: this.roomIdCommitment,
+          roomEpoch: att.epoch,
+          contentWrapKey: epoch.contentWrapKey,
+        },
+        { wrappedObjectKey: fromBase64Url(att.wrappedObjectKey) },
+      );
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * §15.8 — the CIDs this engine still needs to render its attachments: every
+   * `attachment.add`'s manifest CID it lacks, then (once a manifest is held + opens) that
+   * manifest's chunk CIDs it lacks.  Two-phase, because chunk CIDs live INSIDE the
+   * encrypted manifest — so a peer first fetches manifests, then their chunks.
+   */
+  async wantedBlockCids(): Promise<string[]> {
+    const wanted: string[] = [];
+    for (const att of this.currentState.attachments.values()) {
+      if (!(await this.storage.hasBlock(att.manifestCid))) {
+        wanted.push(att.manifestCid);
+        continue; // chunk CIDs are unknown until the manifest is held + opened
+      }
+      const manifest = await this.tryOpenManifest(att);
+      if (!manifest) continue;
+      for (const chunk of manifest.encrypted_chunks) {
+        if (!(await this.storage.hasBlock(chunk.cid))) wanted.push(chunk.cid);
+      }
+    }
+    return wanted;
+  }
+
+  /**
+   * §15.7 — serve requested blocks up to `maxBytes` (the requester's budget); blocks not
+   * held, or that would exceed the budget, are refused so the requester backs off.
+   */
+  async serveBlocks(
+    cids: readonly string[],
+    maxBytes: number,
+  ): Promise<{ served: { cid: string; bytes: Uint8Array }[]; refused: string[] }> {
+    const served: { cid: string; bytes: Uint8Array }[] = [];
+    const refused: string[] = [];
+    let total = 0;
+    for (const cid of cids) {
+      const bytes = await this.storage.getBlock(cid);
+      if (!bytes || total + bytes.length > maxBytes) {
+        refused.push(cid);
+        continue;
+      }
+      total += bytes.length;
+      served.push({ cid, bytes });
+    }
+    return { served, refused };
+  }
+
+  /**
+   * Ingest fetched blocks, VERIFYING each block's CID over its bytes BEFORE storing
+   * (§8.3 — the wire confers no trust; a wrong-CID block is rejected, never stored).
+   */
+  async ingestBlocks(
+    blocks: readonly { cid: string; bytes: Uint8Array }[],
+  ): Promise<{ accepted: string[]; rejected: string[] }> {
+    const accepted: string[] = [];
+    const rejected: string[] = [];
+    for (const { cid, bytes } of blocks) {
+      if (await verifyPrivateCid(bytes, cid, PRIVATE_CID_CODEC.raw)) {
+        await this.storage.putBlock(cid, bytes);
+        accepted.push(cid);
+      } else {
+        rejected.push(cid);
+      }
+    }
+    return { accepted, rejected };
+  }
+
+  /**
+   * Decrypt + reassemble a stored attachment into its plaintext media bytes, or
+   * `undefined` if the manifest or any chunk is not yet fetched / the epoch key is
+   * unheld.  Every chunk's ciphertext CID + AEAD + plaintext commitment is re-verified
+   * (decryptAttachment) — fail-closed on tamper.
+   */
+  async openAttachment(attachmentId: string): Promise<Uint8Array | undefined> {
+    const att = this.currentState.attachments.get(attachmentId);
+    if (!att) return undefined;
+    const manifest = await this.tryOpenManifest(att);
+    const epoch = this.epochs.get(att.epoch);
+    if (!manifest || !epoch) return undefined;
+    const chunksByCid = new Map<string, Uint8Array>();
+    for (const chunk of manifest.encrypted_chunks) {
+      const bytes = await this.storage.getBlock(chunk.cid);
+      if (!bytes) return undefined; // not all chunks fetched yet
+      chunksByCid.set(chunk.cid, bytes);
+    }
+    return decryptAttachment(
+      manifest,
+      chunksByCid,
+      {
+        roomIdCommitment: this.roomIdCommitment,
+        roomEpoch: att.epoch,
+        contentWrapKey: epoch.contentWrapKey,
+      },
+      { wrappedObjectKey: fromBase64Url(att.wrappedObjectKey) },
+    );
   }
 
   // --- §15.9 offline archive (export / import) ------------------------------

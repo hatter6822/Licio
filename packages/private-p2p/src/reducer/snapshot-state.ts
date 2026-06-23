@@ -102,6 +102,7 @@ const snapshotStateSchema = z
           attachmentId: z.string(),
           manifestCid: z.string(),
           wrappedObjectKey: z.string(),
+          epoch: z.number().int().min(0),
         })
         .strict(),
     ),
@@ -179,6 +180,7 @@ export function serializeReducerState(state: RoomReducerState): Uint8Array {
       attachmentId: a.attachmentId,
       manifestCid: a.manifestCid,
       wrappedObjectKey: a.wrappedObjectKey,
+      epoch: a.epoch,
     })),
     recoveryRequests: [...state.recoveryRequests.values()].map((r) => ({
       recoveryRequestId: r.recoveryRequestId,
@@ -264,6 +266,7 @@ export function deserializeReducerState(bytes: Uint8Array): RoomReducerState {
       attachmentId: a.attachmentId,
       manifestCid: a.manifestCid,
       wrappedObjectKey: a.wrappedObjectKey,
+      epoch: a.epoch,
     });
   }
   for (const r of body.recoveryRequests) {

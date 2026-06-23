@@ -16,16 +16,25 @@ import type { PrivateEncryptedEnvelope, PrivateRoomStorage } from '@licio/privat
 
 export const PRIVATE_P2P_DB_NAME = 'licio_private_p2p';
 /** v2 adds the `room_sessions` store (the device keys + MLS group + epoch keys a
- *  room needs to survive a reload — a private room is local-only). */
-export const PRIVATE_P2P_DB_VERSION = 2;
+ *  room needs to survive a reload — a private room is local-only).  v3 adds the
+ *  `blocks` store: CID-addressed §13.6 attachment manifest + media-chunk ciphertext,
+ *  fetched lazily over the §15.7 block exchange. */
+export const PRIVATE_P2P_DB_VERSION = 3;
 const ENVELOPE_STORE = 'envelopes';
 export const ROOM_SESSION_STORE = 'room_sessions';
+const BLOCK_STORE = 'blocks';
 const ROOM_INDEX = 'by_room';
 
 interface StoredRow {
   readonly roomId: string;
   readonly opId: string;
   readonly envelope: PrivateEncryptedEnvelope;
+}
+
+interface StoredBlockRow {
+  readonly roomId: string;
+  readonly cid: string;
+  readonly bytes: Uint8Array;
 }
 
 export function promisify<T>(request: IDBRequest<T>): Promise<T> {
@@ -61,6 +70,11 @@ export function openPrivateP2pDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(ROOM_SESSION_STORE)) {
         // One session per room (the local device's keys + MLS group + epoch keys).
         db.createObjectStore(ROOM_SESSION_STORE, { keyPath: 'roomId' });
+      }
+      if (!db.objectStoreNames.contains(BLOCK_STORE)) {
+        // CID-addressed attachment blocks, compound (roomId, cid) key (idempotent
+        // per room+CID — a content-addressed block is immutable, so re-put is a no-op).
+        db.createObjectStore(BLOCK_STORE, { keyPath: ['roomId', 'cid'] });
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -112,6 +126,46 @@ export class IndexedDbPrivateRoomStorage implements PrivateRoomStorage {
       const store = tx.objectStore(ENVELOPE_STORE);
       for (const opId of opIds) store.delete([this.roomId, opId]);
       await txDone(tx);
+    } finally {
+      db.close();
+    }
+  }
+
+  /** §13.6 — persist a CID-addressed attachment block (idempotent upsert on the
+   *  compound (roomId, cid) key; the engine verified the CID before calling). */
+  async putBlock(cid: string, bytes: Uint8Array): Promise<void> {
+    const db = await openPrivateP2pDb();
+    try {
+      const tx = db.transaction(BLOCK_STORE, 'readwrite');
+      const row: StoredBlockRow = { roomId: this.roomId, cid, bytes };
+      tx.objectStore(BLOCK_STORE).put(row);
+      await txDone(tx);
+    } finally {
+      db.close();
+    }
+  }
+
+  async getBlock(cid: string): Promise<Uint8Array | undefined> {
+    const db = await openPrivateP2pDb();
+    try {
+      const tx = db.transaction(BLOCK_STORE, 'readonly');
+      const row = (await promisify(tx.objectStore(BLOCK_STORE).get([this.roomId, cid]))) as
+        | StoredBlockRow
+        | undefined;
+      return row?.bytes;
+    } finally {
+      db.close();
+    }
+  }
+
+  async hasBlock(cid: string): Promise<boolean> {
+    const db = await openPrivateP2pDb();
+    try {
+      const tx = db.transaction(BLOCK_STORE, 'readonly');
+      const key = (await promisify(tx.objectStore(BLOCK_STORE).getKey([this.roomId, cid]))) as
+        | IDBValidKey
+        | undefined;
+      return key !== undefined;
     } finally {
       db.close();
     }

@@ -20,7 +20,7 @@ import { z } from 'zod';
 import { type CanonicalValue, canonical, decodeCanonical } from '../crypto/canonical.js';
 import { ciphertextBase64Schema, privateIdSchema } from '../schemas/common.js';
 import { privateEncryptedEnvelopeSchema } from '../schemas/envelope.js';
-import { headAnnouncementSchema } from './head-sync.js';
+import { blockRequestSchema, blockResponseSchema, headAnnouncementSchema } from './head-sync.js';
 
 /** The most op ids one §15.7 request may ask for (a DoS bound, like the head cap). */
 export const MAX_OP_IDS_PER_REQUEST = 4_096;
@@ -71,6 +71,8 @@ export const syncMessageSchema = z.discriminatedUnion('schema', [
   opRequestSchema,
   opResponseSchema,
   mlsCommitMessageSchema,
+  blockRequestSchema,
+  blockResponseSchema,
 ]);
 export type SyncMessage = z.infer<typeof syncMessageSchema>;
 

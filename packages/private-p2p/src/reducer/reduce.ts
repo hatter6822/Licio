@@ -309,12 +309,17 @@ function applySummaryCreate(
   });
 }
 
-function applyAttachmentAdd(state: RoomReducerState, body: OpOf<'attachment.add'>): void {
+function applyAttachmentAdd(
+  state: RoomReducerState,
+  body: OpOf<'attachment.add'>,
+  epoch: number,
+): void {
   if (!state.attachments.has(body.attachment_id)) {
     state.attachments.set(body.attachment_id, {
       attachmentId: body.attachment_id,
       manifestCid: body.manifest_cid,
       wrappedObjectKey: body.wrapped_object_key,
+      epoch,
     });
   }
 }
@@ -399,7 +404,7 @@ function applyOp(state: RoomReducerState, op: PrivateRoomOp): void {
       applySummaryCreate(state, op, body);
       return;
     case 'attachment.add':
-      applyAttachmentAdd(state, body);
+      applyAttachmentAdd(state, body, op.epoch);
       return;
     case 'snapshot.commit':
       state.snapshots.push(body.snapshot_id);
