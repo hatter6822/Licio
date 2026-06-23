@@ -283,16 +283,21 @@ slice is closed on the convergence side:
     pruned prefix op-by-op requests the peer's snapshot archive over
     `snapshot_request`/`snapshot_response` and bootstraps from it.
 - **Tracked residuals (closure target: the WS-S two-browser E2E + resilience slice).**
-  - **The full two-browser E2E** (WP-9 / finding 13): `create→invite→join→connect→converge`
-    in two real browser contexts over the live rendezvous.  The node + fake-RTC pair tests
-    prove the protocol end to end — membership rotation, media, and snapshot bootstrap all
-    converge byte-for-byte over `PrivateSyncSession`, and `apps/web/e2e/webrtc-loopback.spec.ts`
-    proves a real Chromium datachannel on-host — so this adds hardware confidence over an
-    already-proven protocol.  Needs the BFF e2e-server to serve `POST /v1/private-rendezvous/*`.
-  - **Multi-peer mesh** (WP-7 / finding 14): dial multiple discovered members (bounded
-    fan-out) + periodic re-poll, rather than the current single-best-peer link.  Single-peer
-    convergence is complete when that peer holds the union; the mesh accelerates the
-    partially-synced-fleet case.
+  - **Real-browser carrier convergence** (WP-9 / finding 13) is **shipped**:
+    `apps/web/e2e/private-carrier.realwebrtc.spec.ts` runs the REAL `connectPrivatePeer`
+    carrier over a real Chromium `RTCPeerConnection` (against the Vite dev server, via the
+    `e2e-carrier-harness` re-export), and two members complete the §15.5 handshake + exchange
+    a frame through the session-key-sealed channel — and it surfaced + fixed a live-ICE bug
+    (the signaling payload dropped `sdpMid`/`sdpMLineIndex`, which a real `addIceCandidate`
+    rejects).  What REMAINS: the full TWO-CONTEXT `create→invite→join→connect→converge` over
+    the live BFF rendezvous endpoint (`POST /v1/private-rendezvous/*`) — the current spec uses
+    an in-page rendezvous bridge and shares epoch keys directly (the §12.3 join is proven
+    separately).
+  - **Multi-peer mesh** (WP-7 / finding 14): the implementation is **shipped + unit-proven**
+    (`maintainMesh` + `PrivateRoomSession.connectMesh` — fill-to-`maxPeers`, remove-on-drop,
+    re-poll; `connectPrivatePeer` skips already-connected peers + returns the verified peer id).
+    What REMAINS: the end-to-end multi-browser mesh proof (the unit tests cover the logic; the
+    live 3-peer fan-out is part of the two-browser E2E slice).
   - Mounting the grant-delivery + media affordances on the room UI beyond the copy-paste
     `InvitePanel`/`JoinPanel`.
 

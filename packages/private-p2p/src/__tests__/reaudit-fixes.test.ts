@@ -1,17 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Regression tests for the WP-1 re-audit findings (the engine-level ones the unit suite
-// originally missed): the §27 retention-pool cap (finding 2) and the serveBlocks
-// not-held/over-budget distinction (finding 4).
+// originally missed): the §27 retention-pool cap (finding 2), the serveBlocks
+// not-held/over-budget distinction (finding 4), and — the CRITICAL one — the §14.5
+// snapshot-authority anchoring (finding 3).
 
 import { describe, expect, it } from 'vitest';
-import { randomBytes, toBase64Url } from '../crypto/runtime.js';
+import { canonical } from '../crypto/canonical.js';
+import { deriveAuthorDeviceIdBlind } from '../crypto/device-blind.js';
+import { deriveEpochState } from '../crypto/epoch.js';
+import { generateRecipientKeyPair } from '../crypto/hpke.js';
+import { encodeKeyPackage, generateMemberKeyPackage } from '../crypto/mls.js';
+import { randomBytes, sha256, toBase64Url, utf8 } from '../crypto/runtime.js';
+import { exportPublicKeyRaw, generateDeviceSigningKeyPair } from '../crypto/signatures.js';
+import { buildMemberAddOp, heldKeysOf, inviteDevice } from '../engine/room-lifecycle.js';
 import {
   createPrivateRoom,
   encryptAttachment,
   InMemoryPrivateRoomStorage,
   PrivateRoomEngine,
 } from '../index.js';
+import { sealSnapshotBundle } from '../reducer/snapshot-seal.js';
+import { deserializeReducerState, serializeReducerState } from '../reducer/snapshot-state.js';
+import { roomStateCommitment } from '../reducer/state.js';
+import { sealOp } from '../reducer/validate-op.js';
+import { privateRoomOpSchema } from '../schemas/ops.js';
+import { buildBlockArchive, encodeBlockArchive } from '../sync/archive.js';
 
 const PROFILE = { name: 'Re-audit', room_type: 'global_topic' } as const;
 
@@ -100,9 +114,181 @@ describe('re-audit finding 4 — serveBlocks refuses only over-budget (held), om
   });
 });
 
+describe('re-audit finding 3 (CRITICAL) — §14.5 snapshot-authority anchoring', () => {
+  // A 2-member room: alice (admin) + bob (a plain `member`).  Bob holds the per-epoch
+  // content key, so bob can SEAL a snapshot body + author a snapshot.commit — but the seal
+  // proves only "a member made this", never "an admin".
+  async function twoMemberRoom() {
+    const room = await createPrivateRoom({
+      roomId: 'r-auth',
+      founderMemberId: 'alice',
+      founderDeviceId: 'alice-dev',
+      profile: PROFILE,
+      createdAt: '2026-06-22T00:00:00Z',
+    });
+    const aliceSigningPub = room.engineParams.bootstrapDevices?.[0]?.signingPublicKey;
+    if (!aliceSigningPub) throw new Error('expected the founder bootstrap device');
+    const alice = await PrivateRoomEngine.load({
+      ...room.engineParams,
+      storage: new InMemoryPrivateRoomStorage(),
+    });
+    await alice.applyLocalOp(room.genesisOp, room.sealParams);
+
+    // Add bob's device as a plain `member` (MLS Add → epoch 1).
+    const bobSigning = await generateDeviceSigningKeyPair();
+    const bobSigningPub = toBase64Url(await exportPublicKeyRaw(bobSigning.publicKey));
+    const bobHpke = await generateRecipientKeyPair();
+    const bobBundle = await generateMemberKeyPackage(utf8('bob-dev'));
+    const invited = await inviteDevice(room.group, bobBundle.publicPackage);
+    const epoch1 = await deriveEpochState(
+      invited.group,
+      room.roomIdCommitment,
+      room.manifestCommitment,
+    );
+    const { op: addBob, sealParams: addBobSeal } = await buildMemberAddOp(
+      {
+        roomId: 'r-auth',
+        roomIdCommitment: room.roomIdCommitment,
+        epochState: epoch1,
+        author: {
+          memberId: 'alice',
+          deviceId: 'alice-dev',
+          signingKey: room.founder.signingKeyPair.privateKey,
+          seq: alice.nextAuthorSeq('alice-dev'),
+        },
+        opId: 'add-bob',
+        parents: alice.heads(),
+        lamport: alice.nextLamport(),
+        createdAt: '2026-06-22T00:00:00Z',
+      },
+      {
+        memberId: 'bob',
+        deviceId: 'bob-dev',
+        signingPublicKey: bobSigningPub,
+        hpkePublicKey: toBase64Url(bobHpke.publicKey),
+        mlsKeyPackage: toBase64Url(encodeKeyPackage(bobBundle.publicPackage)),
+        role: 'member',
+      },
+    );
+    alice.addEpochKeys(1, heldKeysOf(epoch1));
+    await alice.applyLocalOp(addBob, addBobSeal);
+    if (alice.state().members.get('bob')?.role !== 'member') {
+      throw new Error('setup: bob should be a plain member');
+    }
+    return { room, alice, epoch1, aliceSigningPub, bobSigning, bobSigningPub };
+  }
+
+  // Bob forges an archive whose snapshot BODY grants bob `admin`, with a bob-signed
+  // snapshot.commit referencing it (sealed under the epoch-1 content key bob holds).
+  async function forgeAdminArchive(
+    ctx: Awaited<ReturnType<typeof twoMemberRoom>>,
+  ): Promise<Uint8Array> {
+    const { room, alice, epoch1, bobSigning } = ctx;
+    // Forge the reduced state: promote bob to admin (role + the `admin` capability the
+    // snapshot.commit authority check reads).
+    const forged = deserializeReducerState(serializeReducerState(alice.state()));
+    const bobMember = forged.members.get('bob');
+    if (!bobMember) throw new Error('forge: bob missing from state');
+    bobMember.role = 'admin';
+    bobMember.capabilities = new Set([...bobMember.capabilities, 'admin']);
+
+    const coveredHeads = alice.heads();
+    const bundle = {
+      serializedState: serializeReducerState(forged),
+      coveredOps: [] as [string, string][],
+      coveredHeads,
+      maxLamport: '0',
+      authorSeq: [] as [string, number][],
+    };
+    const contentWrapKey = epoch1.keys.contentWrapKey;
+    const sealed = await sealSnapshotBundle(bundle, {
+      roomIdCommitment: room.roomIdCommitment,
+      contentWrapKey,
+      epoch: 1,
+    });
+    const stateRoot = toBase64Url(await sha256(roomStateCommitment(forged)));
+    const op = privateRoomOpSchema.parse({
+      schema: 'licio.private.op.v1',
+      room_id: 'r-auth',
+      epoch: 1,
+      op_id: 'forged-snap-commit',
+      author_member_id: 'bob',
+      author_device_id: 'bob-dev',
+      author_seq: 1,
+      created_at: '2026-06-22T01:00:00Z',
+      created_at_bucket: '2026-06-22T01',
+      lamport: '10',
+      parents: coveredHeads,
+      body: {
+        type: 'snapshot.commit',
+        snapshot_id: 'forged-snap',
+        includes_ops_up_to: coveredHeads,
+        state_merkle_root: stateRoot,
+        snapshot_body_cid: sealed.cid,
+      },
+    });
+    const envelope = await sealOp(op, {
+      roomIdCommitment: room.roomIdCommitment,
+      contentWrapKey,
+      deviceSigningKey: bobSigning.privateKey,
+      authorDeviceIdBlind: await deriveAuthorDeviceIdBlind(
+        epoch1.roomEpochSecret,
+        room.roomIdCommitment,
+        'bob-dev',
+        1,
+      ),
+      capabilityRootAtSeq: await sha256(canonical([])),
+    });
+    return encodeBlockArchive(
+      buildBlockArchive({
+        kind: 'encrypted_member_backup',
+        roomIdHash: toBase64Url(room.roomIdCommitment),
+        createdAtBucket: '2026-06-22T01',
+        envelopes: [envelope],
+        sealedSnapshot: sealed,
+      }),
+    );
+  }
+
+  it('an ESTABLISHED importer REJECTS a non-admin member’s forged admin-snapshot', async () => {
+    const ctx = await twoMemberRoom();
+    const forged = await forgeAdminArchive(ctx);
+    // alice is established (her reduced state has real members), so verifySnapshotCommit
+    // anchors authority on HER trusted state — where bob is a plain member — and the
+    // forged base is NOT adopted.  The privilege escalation is blocked.
+    await ctx.alice.importArchive(forged);
+    expect(ctx.alice.state().members.get('bob')?.role).toBe('member');
+    expect(ctx.alice.state().members.get('bob')?.capabilities.has('admin')).toBe(false);
+  });
+
+  it('a FRESH importer falls back to the body (trust-by-delivery) — completeJoin MUST authenticate the grant', async () => {
+    const ctx = await twoMemberRoom();
+    const forged = await forgeAdminArchive(ctx);
+    // A fresh engine has NO trusted state to anchor on, so it falls back to the body.  This
+    // is safe ONLY because completeJoin delivers the snapshot inside a §10.3-AUTHENTICATED
+    // grant from the inviting admin (never an arbitrary member, see room-lifecycle).  We
+    // assert the fallback branch IS exercised, so a regression of the
+    // `members.size > 0 ? currentState : candidate` anchor is caught here too.
+    const fresh = await PrivateRoomEngine.load({
+      roomId: 'r-auth',
+      roomIdCommitment: ctx.room.roomIdCommitment,
+      epochs: new Map([
+        [0, heldKeysOf(ctx.room.epochState)],
+        [1, heldKeysOf(ctx.epoch1)],
+      ]),
+      bootstrapDevices: [
+        { deviceId: 'alice-dev', signingPublicKey: ctx.aliceSigningPub },
+        { deviceId: 'bob-dev', signingPublicKey: ctx.bobSigningPub },
+      ],
+      storage: new InMemoryPrivateRoomStorage(),
+    });
+    await fresh.importArchive(forged);
+    expect(fresh.state().members.get('bob')?.role).toBe('admin'); // trust-by-delivery fallback
+  });
+});
+
 // NOTE (tracked debt): negative regression tests for findings 1 (applyCommit rejects a
-// bare MLS Proposal), 3 (verifySnapshotCommit rejects a non-admin's FORGED snapshot on an
-// established importer), and 5 (admitJoinRequest rejects a mismatched/colliding device id)
-// require simulating an attacker hand-forging MLS proposal / snapshot / keypackage bytes.
-// The fixes are landed + adversarially verified (the re-audit's verifier confirmed each);
-// these catch-proof tests are a focused follow-up (docs/private-p2p/README residual).
+// bare MLS Proposal) and 5 (admitJoinRequest rejects a mismatched/colliding device id)
+// require simulating an attacker hand-forging MLS proposal / keypackage bytes.  The fixes
+// are landed + adversarially verified; these catch-proof tests are a focused follow-up
+// (docs/private-p2p/README residual).  Finding 3 (CRITICAL) is now covered above.
