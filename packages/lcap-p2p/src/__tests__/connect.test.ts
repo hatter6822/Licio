@@ -194,6 +194,78 @@ describe('WS-R.15.6a connectWebrtc', () => {
     await tb.close();
   });
 
+  it('carries a LARGE multi-fragment pack byte-identically over the live channel', async () => {
+    const link = new FakeLink();
+    const relay = makeRelay();
+    const key = await importSignalKey(KEY_BYTES);
+    const decision = await allow();
+    const common = {
+      decision,
+      signalKey: key,
+      roomIdHash: ROOM,
+      postSignal: relay.postSignal,
+      pollSignal: relay.pollSignal,
+      pollIntervalMs: 1,
+      timeoutMs: 5000,
+    };
+
+    const [chA, chB] = await Promise.all([
+      connectWebrtc({
+        ...common,
+        selfPeerKey: 'alice',
+        remotePeerKey: 'bob',
+        initiator: true,
+        rtcFactory: (config) => new FakePeer(link, 'initiator', config),
+      }),
+      connectWebrtc({
+        ...common,
+        selfPeerKey: 'bob',
+        remotePeerKey: 'alice',
+        initiator: false,
+        rtcFactory: (config) => new FakePeer(link, 'responder', config),
+      }),
+    ]);
+
+    const ta = new WebrtcTransport(chA);
+    const tb = new WebrtcTransport(chB);
+    await ta.open();
+    await tb.open();
+    // A ~50 KiB pack: several full 16 KiB fragments + a tail (modelling a multi-block pack).
+    const pack = new Uint8Array(50 * 1024);
+    for (let i = 0; i < pack.length; i++) pack[i] = (i * 17 + 3) & 0xff;
+    const received = tb.receive();
+    await ta.send(pack);
+    const got = await received;
+    expect(got).not.toBeNull();
+    expect(got?.length).toBe(pack.length);
+    expect(got).toEqual(pack);
+    await ta.close();
+    await tb.close();
+  });
+
+  it('aborts the transport fail-closed on a malformed inbound fragment', async () => {
+    // A peer that emits a single junk datachannel message (bad fragment header) must not be
+    // able to mis-stitch a partial message: the receiving transport tears down + yields null.
+    const ch = {
+      readyState: 'open' as 'connecting' | 'open' | 'closing' | 'closed',
+      binaryType: 'arraybuffer',
+      onmessage: null as ((event: { data: unknown }) => void) | null,
+      onclose: null as (() => void) | null,
+      send() {},
+      close() {
+        this.readyState = 'closed';
+      },
+    };
+    const t = new WebrtcTransport(ch);
+    const pending = t.receive();
+    // An over-cap-version garbage fragment (version byte != 1) — fatal.
+    const junk = new Uint8Array(17 + 1);
+    junk[0] = 9;
+    ch.onmessage?.({ data: junk.buffer });
+    expect(await pending).toBeNull();
+    expect(ch.readyState).toBe('closed');
+  });
+
   it('refuses to connect when the decision disallows WebRTC', async () => {
     const relay = makeRelay();
     const key = await importSignalKey(KEY_BYTES);

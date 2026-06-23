@@ -51,6 +51,14 @@ export {
   type RtcSessionDescriptionInit,
 } from './webrtc/connect.js';
 export {
+  FRAGMENT_HEADER_BYTES,
+  FRAGMENT_PAYLOAD_BYTES,
+  FragmentError,
+  FragmentReassembler,
+  fragmentMessage,
+  MAX_REASSEMBLY_BYTES,
+} from './webrtc/fragment.js';
+export {
   decodeSignalEnvelope,
   decodeSignalMessage,
   encodeSignalEnvelope,
