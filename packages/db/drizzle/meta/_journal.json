@@ -337,6 +337,13 @@
       "when": 1782198300827,
       "tag": "0047_ws_s_room_migration_freeze",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1782198300828,
+      "tag": "0049_ws_r_lcap_publish_review_audit",
+      "breakpoints": true
     }
   ]
 }

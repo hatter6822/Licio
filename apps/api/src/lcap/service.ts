@@ -9,7 +9,17 @@
 
 import { createDbClient } from '@licio/db';
 import { DrizzleLcapServerStore } from './drizzle-store.js';
+import {
+  DrizzlePublishAuditStore,
+  InMemoryPublishAuditStore,
+  type PublishAuditStore,
+} from './publish-audit.js';
 import { LcapPublicPublisher } from './publisher.js';
+import {
+  type BlockPublishReviewStore,
+  DrizzleBlockPublishReviewStore,
+  InMemoryBlockPublishReviewStore,
+} from './review-gate.js';
 import { LcapIngestServer } from './server-ingest.js';
 import { InMemoryLcapServerStore, type LcapServerStore } from './store.js';
 import {
@@ -24,6 +34,8 @@ const DEFAULT_NETWORK_ID = 'licio';
 let server: LcapIngestServer | undefined;
 let publisher: LcapPublicPublisher | undefined | null;
 let provenance: BlockProvenanceStore | undefined;
+let reviewStore: BlockPublishReviewStore | undefined;
+let publishAudit: PublishAuditStore | undefined;
 
 function buildStore(): LcapServerStore {
   const dbUrl = process.env['DATABASE_URL'];
@@ -57,7 +69,8 @@ export function setLcapIngestServer(next: LcapIngestServer): void {
  * Env:
  *   LCAP_IPFS_GATEWAY_URL  — the IPFS HTTP gateway base (read path), e.g. `https://ipfs.io`.
  *   LCAP_IPFS_PINNING_URL  — the pinning/add HTTP endpoint (write path).
- *   DATABASE_URL           — required: the takedown oracle reads live `takedown_requests`.
+ *   DATABASE_URL           — required: the takedown oracle reads live `takedown_requests` and
+ *                            the §22.7 review gate reads live `lcap_block_publish_review`.
  */
 export function getLcapPublicPublisher(): LcapPublicPublisher | undefined {
   if (publisher !== undefined) return publisher ?? undefined;
@@ -68,10 +81,14 @@ export function getLcapPublicPublisher(): LcapPublicPublisher | undefined {
     publisher = null; // cache the "not configured" decision (memoized like the server)
     return undefined;
   }
+  const db = createDbClient(dbUrl);
   publisher = new LcapPublicPublisher({
     gatewayUrl,
     pinningUrl,
-    takedownOracle: drizzleTakedownOracle(createDbClient(dbUrl)),
+    takedownOracle: drizzleTakedownOracle(db),
+    // The §22.7 review gate is REQUIRED — bind the SAME shared review store the steward-review
+    // surface writes to, so a decision recorded there is the decision the gate enforces.
+    reviewStore: getLcapBlockPublishReviewStore(),
   });
   return publisher;
 }
@@ -100,4 +117,46 @@ export function getLcapBlockProvenanceStore(): BlockProvenanceStore {
 /** Replace the provenance store (tests / an explicit binding). */
 export function setLcapBlockProvenanceStore(next: BlockProvenanceStore): void {
   provenance = next;
+}
+
+/**
+ * Gate-19 (WS-R.15.7b) — the shared §22.7 review-decision store: the gated Postgres adapter
+ * when `DATABASE_URL` is set, else the in-memory adapter.  The steward-review surface records
+ * decisions here; the publisher's review gate reads them so an unreviewed block can never
+ * reach the public DHT.
+ */
+export function getLcapBlockPublishReviewStore(): BlockPublishReviewStore {
+  if (!reviewStore) {
+    const dbUrl = process.env['DATABASE_URL'];
+    reviewStore = dbUrl
+      ? new DrizzleBlockPublishReviewStore(createDbClient(dbUrl))
+      : new InMemoryBlockPublishReviewStore();
+  }
+  return reviewStore;
+}
+
+/** Replace the review store (tests / an explicit binding). */
+export function setLcapBlockPublishReviewStore(next: BlockPublishReviewStore): void {
+  reviewStore = next;
+}
+
+/**
+ * Gate-19 (WS-R.15.7b) — the shared append-only public-DHT (re)publish audit store: the gated
+ * Postgres adapter when `DATABASE_URL` is set, else the in-memory adapter.  The route writes
+ * one decision record per (re)publish ATTEMPT (pinned OR refused) so the §22.7 gate decision
+ * is durably auditable.
+ */
+export function getLcapPublishAuditStore(): PublishAuditStore {
+  if (!publishAudit) {
+    const dbUrl = process.env['DATABASE_URL'];
+    publishAudit = dbUrl
+      ? new DrizzlePublishAuditStore(createDbClient(dbUrl))
+      : new InMemoryPublishAuditStore();
+  }
+  return publishAudit;
+}
+
+/** Replace the publish-audit store (tests / an explicit binding). */
+export function setLcapPublishAuditStore(next: PublishAuditStore): void {
+  publishAudit = next;
 }

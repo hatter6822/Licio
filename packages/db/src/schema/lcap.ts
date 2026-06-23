@@ -10,6 +10,7 @@
 import {
   bigint,
   bigserial,
+  boolean,
   index,
   integer,
   pgTable,
@@ -17,9 +18,11 @@ import {
   text,
   timestamp,
   uniqueIndex,
+  uuid,
 } from 'drizzle-orm/pg-core';
 import { bytea } from './_custom.js';
 import { takedownTargetTypeEnum } from './takedown.js';
+import { users } from './user.js';
 
 /** Content-addressed objects (records / proofs / blocks / chunks), keyed by CID. */
 export const lcapObjects = pgTable('lcap_objects', {
@@ -136,6 +139,76 @@ export const lcapBlockProvenance = pgTable(
   ],
 );
 
+/**
+ * Gate-19 (WS-R.15.7b, OFFLINE_SPEC §22.7) — the privacy/moderation/abuse-review decision per
+ * content entity for PUBLIC-DHT publication.
+ *
+ * §22.7 requires a "required privacy/moderation/abuse-review gate before any block reaches the
+ * public DHT".  The takedown oracle answers "was this REMOVED?"; this table answers the prior,
+ * affirmative question "was this content REVIEWED and APPROVED for public-DHT egress?".  A
+ * public block is publishable only when its source content entity has an `approved` row here.
+ * Keyed by exactly the `(target_type, target_id)` coordinate the takedown / provenance use, so
+ * one durable review state covers a content entity regardless of how many blocks derive from
+ * it (PK = the coordinate; the latest decision replaces the prior via upsert).
+ *
+ * `state`: 'pending' (under review — refuses) / 'approved' (the ONLY publishable state) /
+ * 'rejected' (refuses).  `reviewer_user_id` is the steward who decided (kept for audit; the
+ * users FK `set null` on a hard purge so the decision row stays — accountability outlives the
+ * account, like `takedown_requests.actioned_by`).  No FK into the content tables: the offline
+ * plane is CID/coordinate-addressed and isolated from the relational model.
+ */
+export const lcapBlockPublishReview = pgTable(
+  'lcap_block_publish_review',
+  {
+    targetType: takedownTargetTypeEnum('target_type').notNull(),
+    targetId: text('target_id').notNull(),
+    state: text('state').notNull(), // 'pending' | 'approved' | 'rejected'
+    reviewerUserId: uuid('reviewer_user_id').references(() => users.userId, {
+      onDelete: 'set null',
+    }),
+    note: text('note'),
+    decidedAt: timestamp('decided_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.targetType, t.targetId] }),
+    index('lcap_block_publish_review_state_idx').on(t.state),
+  ],
+);
+
+/**
+ * Gate-19 (WS-R.15.7b) — the append-only audit of every public-DHT (re)publish DECISION.
+ *
+ * §22.7 requires "auditable provenance"; the acceptance criterion is "the gate decision is
+ * audited".  One row per publish/republish ATTEMPT (pinned OR refused), capturing the actor,
+ * the block, the resolved content target, the §22.7 review-gate verdict, the takedown
+ * re-check verdict, and the final outcome — the durable, queryable trail the
+ * `PublishOutcome.reason` HTTP response cannot provide.  Append-only: migration 0049 grants
+ * INSERT/SELECT only (no UPDATE/DELETE), mirroring the WS-J moderation append-only posture.
+ * `actor_user_id` is the steward who initiated it (users FK `set null` on a hard purge, so the
+ * decision record outlives the account, like the moderation audit).
+ */
+export const lcapPublishAudit = pgTable(
+  'lcap_publish_audit',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    action: text('action').notNull(), // 'publish' | 'republish'
+    blockCid: text('block_cid').notNull(),
+    targetType: takedownTargetTypeEnum('target_type'),
+    targetId: text('target_id'),
+    actorUserId: uuid('actor_user_id').references(() => users.userId, { onDelete: 'set null' }),
+    reviewVerdict: text('review_verdict').notNull(), // 'approved' | 'review_required' | 'skipped' | 'error'
+    takedownVerdict: text('takedown_verdict').notNull(), // 'clear' | 'halt' | 'unreadable'
+    published: boolean('published').notNull(),
+    outcomeReason: text('outcome_reason').notNull(),
+    ipfsCid: text('ipfs_cid'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('lcap_publish_audit_block_idx').on(t.blockCid),
+    index('lcap_publish_audit_created_idx').on(t.createdAt),
+  ],
+);
+
 export type LcapObjectRow = typeof lcapObjects.$inferSelect;
 export type LcapAcceptanceRow = typeof lcapAcceptance.$inferSelect;
 export type LcapCapabilityUsageRow = typeof lcapCapabilityUsage.$inferSelect;
@@ -144,3 +217,7 @@ export type LcapForkEvidenceRow = typeof lcapForkEvidence.$inferSelect;
 export type LcapRecordClosureRow = typeof lcapRecordClosure.$inferSelect;
 export type LcapBlockProvenanceRow = typeof lcapBlockProvenance.$inferSelect;
 export type LcapBlockProvenanceInsert = typeof lcapBlockProvenance.$inferInsert;
+export type LcapBlockPublishReviewRow = typeof lcapBlockPublishReview.$inferSelect;
+export type LcapBlockPublishReviewInsert = typeof lcapBlockPublishReview.$inferInsert;
+export type LcapPublishAuditRow = typeof lcapPublishAudit.$inferSelect;
+export type LcapPublishAuditInsert = typeof lcapPublishAudit.$inferInsert;
