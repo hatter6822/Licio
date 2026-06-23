@@ -69,6 +69,11 @@ class FakeLink {
   }
 }
 
+// WP-9 regression — every ICE candidate the carrier RECONSTRUCTS + feeds to a peer's
+// addIceCandidate is captured here, so a test can assert the carrier preserved
+// sdpMid/sdpMLineIndex (a real addIceCandidate rejects a candidate with neither).
+const receivedIceCandidates: RtcIceCandidateInit[] = [];
+
 class FakePeer implements RtcPeerConnectionLike {
   onicecandidate: ((event: { candidate: RtcIceCandidateInit | null }) => void) | null = null;
   ondatachannel: ((event: { channel: RtcDataChannelLike }) => void) | null = null;
@@ -85,8 +90,16 @@ class FakePeer implements RtcPeerConnectionLike {
     return { type: 'answer', sdp: 'v=0\r\nfake-answer' };
   }
   async setLocalDescription(): Promise<void> {
+    // A realistic candidate carries sdpMid + sdpMLineIndex (as a browser emits) so the
+    // carrier must convey them; the WP-9 fix relays them and the answerer reconstructs them.
     queueMicrotask(() =>
-      this.onicecandidate?.({ candidate: { candidate: 'candidate:1 1 udp 1 1.2.3.4 9 typ host' } }),
+      this.onicecandidate?.({
+        candidate: {
+          candidate: 'candidate:1 1 udp 1 1.2.3.4 9 typ host',
+          sdpMid: '0',
+          sdpMLineIndex: 0,
+        },
+      }),
     );
     queueMicrotask(() => this.onicecandidate?.({ candidate: null }));
   }
@@ -100,8 +113,10 @@ class FakePeer implements RtcPeerConnectionLike {
       this.link.maybeOpen();
     }
   }
-  async addIceCandidate(): Promise<void> {
-    /* the fake opens on SDP exchange; ICE is exercised but not needed to connect */
+  async addIceCandidate(candidate: RtcIceCandidateInit): Promise<void> {
+    // The fake opens on SDP exchange; here we CAPTURE the reconstructed candidate so a test
+    // can assert the carrier preserved sdpMid/sdpMLineIndex through the wire.
+    receivedIceCandidates.push(candidate);
   }
   close(): void {
     /* no-op */
@@ -287,6 +302,13 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     expect(bob.state().stories.get('carried-story')?.title).toBe('ferried over WebRTC');
     expect(Array.from(p2p.roomStateCommitment(bob.state()))).toEqual(
       Array.from(p2p.roomStateCommitment(alice.state())),
+    );
+    // WP-9 regression: the carrier conveyed sdpMid/sdpMLineIndex with each ICE candidate
+    // (a real addIceCandidate rejects a candidate with neither — the fake-RTC path used to
+    // mask this).  At least one reconstructed candidate must carry the m-line identity.
+    expect(receivedIceCandidates.length).toBeGreaterThan(0);
+    expect(receivedIceCandidates.some((c) => c.sdpMid != null || c.sdpMLineIndex != null)).toBe(
+      true,
     );
     sa.close();
     sb.close();

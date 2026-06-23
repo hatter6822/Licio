@@ -391,15 +391,20 @@ async function establishDataChannel(
   };
 
   pc.onicecandidate = (event): void => {
-    const line = event.candidate?.candidate;
+    const cand = event.candidate;
+    const line = cand?.candidate;
     if (!line) return; // end-of-candidates
     // §15.4 relay-only IP suppression applied BEFORE a candidate leaves this device.
     const allowed = p2p.filterIceCandidatesForMode(p.transportMode, [line]);
     if (allowed.length === 0) return;
+    // Carry sdpMid/sdpMLineIndex: a real addIceCandidate rejects a candidate with neither
+    // (the line alone does not identify the m-line), silently dropping every candidate.
     void sendSignal({
       schema: 'licio.private.signaling_payload.v1',
       kind: 'ice',
       ice_candidate: line,
+      sdp_mid: cand?.sdpMid ?? null,
+      sdp_mline_index: cand?.sdpMLineIndex ?? null,
     });
   };
 
@@ -451,7 +456,11 @@ async function establishDataChannel(
       remoteDescriptionSet = true;
       for (const cand of pendingIce.splice(0)) await pc.addIceCandidate(cand);
     } else if (payload.kind === 'ice' && payload.ice_candidate !== undefined) {
-      const candidate: RtcIceCandidateInit = { candidate: payload.ice_candidate };
+      const candidate: RtcIceCandidateInit = {
+        candidate: payload.ice_candidate,
+        sdpMid: payload.sdp_mid ?? null,
+        sdpMLineIndex: payload.sdp_mline_index ?? null,
+      };
       if (remoteDescriptionSet) await pc.addIceCandidate(candidate);
       else pendingIce.push(candidate); // can't add before the remote description is set
     }

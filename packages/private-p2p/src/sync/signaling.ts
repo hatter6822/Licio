@@ -27,7 +27,10 @@ export type SignalKind = (typeof SIGNAL_KINDS)[number];
 /**
  * The decrypted signaling payload: an SDP offer/answer, a single ICE candidate,
  * or a `bye`.  Strictly typed so a peer cannot smuggle an unexpected shape;
- * offer/answer require `sdp`, `ice` requires `ice_candidate`.
+ * offer/answer require `sdp`, `ice` requires `ice_candidate`.  An ICE candidate also
+ * carries its `sdp_mid`/`sdp_mline_index` — a real `RTCPeerConnection.addIceCandidate`
+ * REJECTS a candidate with neither (the candidate string alone does not identify the
+ * media line), so omitting them silently drops every trickled candidate.
  */
 export const signalingPayloadSchema = z
   .object({
@@ -35,6 +38,8 @@ export const signalingPayloadSchema = z
     kind: z.enum(SIGNAL_KINDS),
     sdp: z.string().min(1).max(64_000).optional(),
     ice_candidate: z.string().min(1).max(2_000).optional(),
+    sdp_mid: z.string().max(256).nullable().optional(),
+    sdp_mline_index: z.number().int().nonnegative().max(1024).nullable().optional(),
   })
   .strict()
   .superRefine((v, ctx) => {
@@ -86,12 +91,16 @@ function signalAad(routing: SignalRouting): Uint8Array {
 
 function serializeSignalingPayload(p: SignalingPayload): CanonicalValue {
   // `canonical` omits `undefined`-valued keys, so absent optional fields drop out
-  // of the encoding (and round-trip back as absent).
+  // of the encoding (and round-trip back as absent).  sdp_mid/sdp_mline_index MUST be
+  // serialized — a real addIceCandidate rejects a candidate that lacks both, so dropping
+  // them here silently breaks live ICE (the WP-9 carrier bug).
   return {
     schema: p.schema,
     kind: p.kind,
     sdp: p.sdp,
     ice_candidate: p.ice_candidate,
+    sdp_mid: p.sdp_mid,
+    sdp_mline_index: p.sdp_mline_index,
   };
 }
 
