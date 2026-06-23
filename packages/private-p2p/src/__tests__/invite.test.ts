@@ -21,6 +21,7 @@ const PROFILE = { name: 'Quiet Room', room_type: 'global_topic' } as const;
 const FUTURE = '2099-01-01T00:00:00Z';
 const NOW = new Date('2026-06-22T00:00:00Z');
 const BUCKET = '2026-06-22T00';
+const DEVICE_SIG = toBase64Url(utf8('bob-device-signing-public-key!!!'));
 
 async function founded() {
   return createPrivateRoom({
@@ -52,6 +53,7 @@ describe('§10.3 invite + §12.3 join flow', () => {
     const joinReq = await buildJoinRequest({
       invite: opened,
       keyPackage: bobBundle.publicPackage,
+      deviceSigningPublicKey: DEVICE_SIG,
       proposedDisplayName: 'Bob',
       requestedAtBucket: BUCKET,
     });
@@ -89,6 +91,7 @@ describe('§10.3 invite + §12.3 join flow', () => {
     const joinReq = await buildJoinRequest({
       invite,
       keyPackage: bobBundle.publicPackage,
+      deviceSigningPublicKey: DEVICE_SIG,
       proposedDisplayName: 'Bob',
       requestedAtBucket: BUCKET,
     });
@@ -107,6 +110,7 @@ describe('§10.3 invite + §12.3 join flow', () => {
     const joinReq = await buildJoinRequest({
       invite,
       keyPackage: bobBundle.publicPackage,
+      deviceSigningPublicKey: DEVICE_SIG,
       proposedDisplayName: 'Bob',
       requestedAtBucket: BUCKET,
     });
@@ -130,6 +134,7 @@ describe('§10.3 invite + §12.3 join flow', () => {
     const joinReq = await buildJoinRequest({
       invite,
       keyPackage: bobBundle.publicPackage,
+      deviceSigningPublicKey: DEVICE_SIG,
       proposedDisplayName: 'Bob',
       requestedAtBucket: BUCKET,
     });
@@ -158,6 +163,7 @@ describe('§10.3 invite + §12.3 join flow', () => {
     const joinReq = await buildJoinRequest({
       invite,
       keyPackage: bobBundle.publicPackage,
+      deviceSigningPublicKey: DEVICE_SIG,
       proposedDisplayName: 'Bob',
       requestedAtBucket: BUCKET,
     });
@@ -176,6 +182,7 @@ describe('§10.3 invite + §12.3 join flow', () => {
     const joinReq = await buildJoinRequest({
       invite,
       keyPackage: bobBundle.publicPackage,
+      deviceSigningPublicKey: DEVICE_SIG,
       proposedDisplayName: 'Bob',
       requestedAtBucket: BUCKET,
     });
@@ -203,6 +210,7 @@ describe('§10.3 invite + §12.3 join flow', () => {
     const joinReq = await buildJoinRequest({
       invite: inviteA,
       keyPackage: bobBundle.publicPackage,
+      deviceSigningPublicKey: DEVICE_SIG,
       proposedDisplayName: 'Bob',
       requestedAtBucket: BUCKET,
     });
@@ -224,15 +232,18 @@ describe('§10.3 invite + §12.3 join flow', () => {
         await buildJoinRequest({
           invite,
           keyPackage: (await generateMemberKeyPackage(utf8('x'))).publicPackage,
+          deviceSigningPublicKey: DEVICE_SIG,
           proposedDisplayName: 'x',
           requestedAtBucket: BUCKET,
         })
       ).invite_id_blind,
       recipient_device_key_package: garbage,
+      device_signing_public_key: DEVICE_SIG,
       proposed_display_name: 'Bob',
       proof_of_invite_secret: await deriveJoinProof(
         fromBase64Url(invite.invite_secret),
         garbage,
+        DEVICE_SIG,
         BUCKET,
       ),
       requested_at_bucket: BUCKET,

@@ -33,6 +33,11 @@ export const joinRequestSchema = z
     invite_id_blind: base64UrlSchema,
     /** The recipient's MLS KeyPackage the Add commit will admit. */
     recipient_device_key_package: base64UrlSchema,
+    /** The recipient's LONG-TERM device signing public key (Ed25519, raw, base64url) —
+     *  the key it will AUTHOR ops with (separate from the MLS leaf signature key, so no
+     *  cross-protocol key reuse, symmetric with the founder).  Bound into
+     *  `proof_of_invite_secret`, so a relay cannot substitute a key it controls. */
+    device_signing_public_key: base64UrlSchema,
     proposed_display_name: z.string().trim().min(1).max(100),
     proof_of_invite_secret: base64UrlSchema,
     requested_at_bucket: timeBucketSchema,
