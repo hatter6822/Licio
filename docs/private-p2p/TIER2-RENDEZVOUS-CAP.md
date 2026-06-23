@@ -15,6 +15,35 @@ not *cap* it. Tier-2 caps each device to one rendezvous slot per
 any poll window. Tier-2 is layered ON TOP of Tier-1 — the sample-poll remains
 the fail-open floor (see §6.10).
 
+## 0. Implementation status & prerequisites
+
+**Deferred to a future session — by design, not neglect.** The maintainer elected to
+implement the recommended BBS core (informed of the §9 draft-maturity risk). A
+*correct, secure* implementation MUST be pinned to the **authoritative IETF byte-exact
+test vectors** — the ciphersuite constants (`P1`, the domain-separation tags) and the
+KeyGen / Sign / ProofGen / pseudonym fixtures — fetched RAW (`git`/`curl`), never
+transcribed from memory and never via a summarizing fetch (a single wrong byte in a
+generator or challenge silently breaks soundness or interop). Without reliable access to
+those vectors in the current environment, hand-rolling would yield UNVERIFIED
+security-critical crypto, so no code is landed here (an early non-vector WIP was removed
+rather than committed).
+
+**Network hosts required (to be whitelisted for the build session):**
+- `datatracker.ietf.org` — the drafts (`draft-irtf-cfrg-bbs-signatures`,
+  `-bbs-blind-signatures`, `-bbs-per-verifier-linkability`).
+- `github.com` + `raw.githubusercontent.com` (+ `codeload.github.com` for `git clone`)
+  — the `decentralized-identity/bbs-signature` reference repo, whose `tooling/fixtures`
+  hold the byte-exact JSON test vectors (the critical input; `gh`/`git`/`curl` give raw
+  bytes, unlike WebFetch).
+
+**Build plan (next session).** Vendor BBS as a THIN layer over `@noble/curves`'s vetted
+BLS12-381 (already a `@licio/private-p2p` dependency — do NOT re-implement pairing
+arithmetic), suite-pinned to the IETF ciphersuite, gated like the MLS wrapper
+(`check:p2p-bbs-wrapper`, no deep imports), loaded only from the lazy private-p2p chunk,
+pinned to the fetched fixtures, and fail-open to Tier-1. Implement + vector-verify in the
+order base BBS (KeyGen/Sign/Verify) → ProofGen/ProofVerify → pseudonym → blind issuance,
+then the §11 cross-stack plumbing.
+
 ---
 
 ## 1. Problem & goal
