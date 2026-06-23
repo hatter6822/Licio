@@ -107,7 +107,12 @@ const VALID_BODIES: Array<{ name: string; body: Record<string, unknown> }> = [
   },
   {
     name: 'attachment.add',
-    body: { type: 'attachment.add', attachment_id: 'att-1', manifest_cid: CID },
+    body: {
+      type: 'attachment.add',
+      attachment_id: 'att-1',
+      manifest_cid: CID,
+      wrapped_object_key: 'AAAA',
+    },
   },
   {
     name: 'snapshot.commit',

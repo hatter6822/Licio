@@ -45,15 +45,9 @@ function normalizeSession(raw: StoredRoomSession): StoredRoomSession {
       roomEpochSecret: toBytes(entry.roomEpochSecret),
       contentWrapKey: toBytes(entry.contentWrapKey),
     })),
-    // The §14.5 base's `serializedState` is the only byte field on the snapshot.
-    ...(raw.snapshotBase
-      ? {
-          snapshotBase: {
-            ...raw.snapshotBase,
-            serializedState: toBytes(raw.snapshotBase.serializedState),
-          },
-        }
-      : {}),
+    // The §14.5 base is the SEALED snapshot (all base64-string + number fields), so
+    // there is no Uint8Array field to reconstruct after a structured-clone round
+    // trip — it is carried through verbatim by the `...raw` spread above.
   };
 }
 

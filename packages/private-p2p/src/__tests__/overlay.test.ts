@@ -136,11 +136,21 @@ function buildState() {
       },
     ),
     mkOp(
-      { type: 'attachment.add', attachment_id: 'a1', manifest_cid: CID },
+      {
+        type: 'attachment.add',
+        attachment_id: 'a1',
+        manifest_cid: CID,
+        wrapped_object_key: 'AAAA',
+      },
       { op_id: 'aa1', lamport: '7', parents: ['cc1'] },
     ),
     mkOp(
-      { type: 'attachment.add', attachment_id: 'a2', manifest_cid: CID },
+      {
+        type: 'attachment.add',
+        attachment_id: 'a2',
+        manifest_cid: CID,
+        wrapped_object_key: 'AAAA',
+      },
       { op_id: 'aa2', lamport: '8', parents: ['cc1'] },
     ),
   ];

@@ -63,6 +63,9 @@ export interface SummaryState {
 export interface AttachmentState {
   readonly attachmentId: string;
   readonly manifestCid: string;
+  /** The object key wrapped under the epoch `content_wrap_key` (§10.5) — the key
+   *  material a member unwraps to open the sealed manifest + chunks. */
+  readonly wrappedObjectKey: string;
 }
 
 /** A recovery request's accumulated distinct admin authorizations (WS-S.3.6c). */
@@ -211,6 +214,7 @@ export function roomStateCommitment(state: RoomReducerState): Uint8Array {
     attachments: sortedEntries(state.attachments).map(([id, a]) => ({
       attachmentId: id,
       manifestCid: a.manifestCid,
+      wrappedObjectKey: a.wrappedObjectKey,
     })),
     recoveryRequests: sortedEntries(state.recoveryRequests).map(([id, r]) => ({
       recoveryRequestId: id,

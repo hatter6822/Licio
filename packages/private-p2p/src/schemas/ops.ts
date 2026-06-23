@@ -304,6 +304,11 @@ export const attachmentAddOpSchema = z
     attachment_id: privateIdSchema,
     /** The CID of the ENCRYPTED attachment manifest (§13.6). */
     manifest_cid: privateCidSchema,
+    /** The attachment object key WRAPPED under the epoch `content_wrap_key`
+     *  (§10.5).  Distributed WITH the manifest reference so any member can unwrap
+     *  it + open the sealed manifest/chunks — without it a peer can fetch the
+     *  manifest CID but holds no key material to decrypt it. */
+    wrapped_object_key: base64UrlSchema,
   })
   .strict();
 

@@ -73,22 +73,41 @@ not yet formally security-audited (its own disclaimer) — tracked in the README
   before `reduceRoom`, so a device fork (two ops at the same `author_seq`), a
   non-causal `lamport`, a genuinely missing parent, a duplicate `op_id`, or a room
   mismatch never reaches state even though its envelope opened cryptographically.
-  The check is compaction-aware (a §14.5 base's covered op ids + per-device seq
-  floor seed it) so a pruned parent / cross-snapshot seq is not spuriously
-  quarantined; crypto-valid-but-structurally-invalid ops are retained as §15 fork
-  evidence but excluded from `currentState`.
+  The check is compaction-aware (a §14.5 base seeds it with every covered op id →
+  its RETAINED `lamport` + the per-device seq floor) so a pruned parent's causality
+  check uses its exact lamport — a compacted device makes the IDENTICAL accept/
+  reject decision as an uncompacted peer (a too-low-lamport op against a pruned
+  parent is rejected on both, never silently accepted on the compacted side);
+  crypto-valid-but-structurally-invalid ops are retained as §15 fork evidence but
+  excluded from `currentState`.
+- **Device-fork convergence** (§15): two valid envelopes with the same `op_id` but
+  different content do NOT resolve order-dependently ("first one wins").  The engine
+  keeps the bytewise-smaller envelope signature — a deterministic, content-derived
+  choice — so every peer converges on the SAME variant regardless of arrival order,
+  and the loser is surfaced as `duplicate_op_id` fork evidence (storage is
+  last-write-wins on the winner).  Proven by an opposite-delivery-order convergence
+  test.
 - **Forward secrecy at removal** (§10.9): `removeDeviceFromRoom` commits an MLS
   Remove that advances the epoch; the evicted device cannot derive the new epoch
   key, proven by a test where its engine quarantines post-removal content.
-- **Determinism**: the reducer fold is byte-identical across delivery orders
-  (§14.3.3, 25-shuffle property); compaction preserves convergence (a compacted
-  and an uncompacted device produce identical state) with monotonic Lamport/seq.
-  A §14.5 snapshot serializes each member's FULL capability set verbatim (not
-  re-derived from role): a `role.grant`/`role.revoke` may grant/revoke an
-  individual capability independent of the role, and the state root hashes the
-  full set, so re-deriving from role alone would drop an individual grant and
-  diverge a compacted device's authority decisions from an uncompacted one — a
-  regression test pins the post-compaction state root to the snapshot's.
+- **Determinism + cross-device compaction**: the reducer fold is byte-identical
+  across delivery orders (§14.3.3, 25-shuffle property).  §14.5 compaction is an
+  IN-BAND, admin-signed `snapshot.commit` op (carrying the state root + covered
+  heads + the sealed body's CID): the snapshot body — the full reduced state PLUS
+  the structural metadata an importer needs (every covered op's lamport, the covered
+  heads, the Lamport ceiling, the seq floor) — is AEAD-sealed under the epoch key
+  and content-addressed.  A compacted room therefore stays convergent with an
+  uncompacted one AND EXPORTS: a fresh device imports the sealed snapshot, opens it
+  under the held epoch key (proving member authorship), and adopts it ONLY if the
+  in-band commit verifies (signed by an `admin` in the body, root matches the body,
+  CID matches the sealed bytes) — a tampered snapshot is NOT adopted (§8.3), proven
+  by a CID-flip test.  Compaction covers ONLY the structurally-accepted prefix, so a
+  crypto-opened-but-structurally-invalid op is never pruned (it resolves when its
+  dependency arrives).  The snapshot serializes each member's FULL capability set
+  verbatim (not re-derived from role), so an individually granted/revoked capability
+  survives the round trip and the post-compaction state root stays stable.  The
+  head announcement is base-aware, so a compacted room still advertises its retained
+  frontier (§15.6).
 
 **Note on the membership model.** History is RETAINED by default (§14.5); a new
 member is granted the historical epoch keys, so forward secrecy is a property of
@@ -166,11 +185,15 @@ offline cores they consume are implemented + tested:
    server/DB.
 5. **Update channel** (WS-S.10) — depends on WS-O.
 
-The apps/web §14.5 snapshot persistence (compact-on-cadence → prune IndexedDB
-envelopes → reload-from-base) is now SHIPPED (WS-S.7), so it is no longer a
-residual — the base is the device's own previously-verified computation, trusted
-as local state like the at-rest epoch secrets, while peer-received content is
-always re-verified through `openOp` (§8.3).
+The apps/web §14.5 snapshot persistence is now SHIPPED (WS-S.7) as the IN-BAND
+sealed `snapshot.commit` (compact-on-cadence → author the admin-signed commit +
+seal the body → prune IndexedDB envelopes → reload-from-base), so it is no longer a
+residual AND it is cross-device-correct: the sealed snapshot body is exported in
+the §15.9 archive and a fresh device imports it under verify-before-use (it adopts
+the base only if the in-band commit verifies — §8.3, never on container trust).
+The reload base is the device's own previously-verified computation, trusted as
+local state like the at-rest epoch secrets; peer-received content is always
+re-verified through `openOp`.
 
 ## 9. CI gates protecting these properties
 

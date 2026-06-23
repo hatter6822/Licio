@@ -311,6 +311,7 @@ function applyAttachmentAdd(state: RoomReducerState, body: OpOf<'attachment.add'
     state.attachments.set(body.attachment_id, {
       attachmentId: body.attachment_id,
       manifestCid: body.manifest_cid,
+      wrappedObjectKey: body.wrapped_object_key,
     });
   }
 }

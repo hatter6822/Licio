@@ -286,6 +286,7 @@ describe('content transitions', () => {
           type: 'attachment.add',
           attachment_id: 'a1',
           manifest_cid: 'bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku',
+          wrapped_object_key: 'AAAA',
         },
         { author_member_id: 'bob', author_device_id: 'bob-dev' },
       ),

@@ -280,13 +280,27 @@ export class PrivateRoomSession {
   }
 
   /**
-   * Run the §25.6 compaction cadence after authoring: if due, the engine compacts
-   * + drops the covered envelopes from IndexedDB and returns the new base, which
-   * we persist into the session so a reload resumes from it (re-verifying only the
-   * post-snapshot envelopes — bounding reload cost for a long-lived room).
+   * Run the §25.6 compaction cadence after authoring: if due, the engine authors an
+   * admin-signed in-band §14.5 `snapshot.commit`, compacts + drops the covered
+   * envelopes from IndexedDB, and returns the new SEALED base, which we persist into
+   * the session so a reload resumes from it (re-verifying only the post-snapshot
+   * envelopes — bounding reload cost for a long-lived room).  A non-admin member's
+   * commit is rejected by the reducer, so `maybeCompact` is a no-op for them.
    */
   private async persistCompactionIfDue(): Promise<void> {
-    const base = await this.engine.maybeCompact(this.compactEveryOps);
+    const epoch = this.currentEpoch();
+    const base = await this.engine.maybeCompact(this.compactEveryOps, {
+      epoch: epoch.epoch,
+      roomEpochSecret: epoch.roomEpochSecret,
+      contentWrapKey: epoch.contentWrapKey,
+      author: {
+        memberId: this.session.memberId,
+        deviceId: this.session.deviceId,
+        signingKey: this.session.signingPrivateKey,
+      },
+      opId: globalThis.crypto.randomUUID(),
+      snapshotId: globalThis.crypto.randomUUID(),
+    });
     if (!base) return;
     this.session = { ...this.session, snapshotBase: base };
     await putRoomSession(this.session);

@@ -11,7 +11,8 @@ import {
   encryptAttachment,
   openAttachmentManifest,
 } from '../crypto/attachment.js';
-import { randomBytes } from '../crypto/runtime.js';
+import { fromBase64Url, randomBytes, toBase64Url } from '../crypto/runtime.js';
+import { attachmentAddOpSchema } from '../schemas/ops.js';
 
 const ROOM_COMMIT = new Uint8Array(32).fill(7);
 const WRAP_KEY = new Uint8Array(32).fill(9);
@@ -68,6 +69,29 @@ describe('encryptAttachment / decryptAttachment (§13.6 media)', () => {
       { wrappedObjectKey: enc.wrappedObjectKey },
     );
     expect(out).toStrictEqual(data);
+  });
+
+  it('the attachment.add op CARRIES the wrapped key — a peer opens the manifest from the op alone', async () => {
+    const enc = await encryptAttachment(randomBytes(3000), params());
+    // The op a member distributes: the manifest CID AND the wrapped object key.
+    const op = attachmentAddOpSchema.parse({
+      type: 'attachment.add',
+      attachment_id: 'att-1',
+      manifest_cid: enc.manifestCid,
+      wrapped_object_key: toBase64Url(enc.wrappedObjectKey),
+    });
+    // A PEER (with only the op + its epoch content-wrap key, no out-of-band key)
+    // reconstructs the object key from the op and opens the sealed manifest.
+    const opened = await openAttachmentManifest(
+      enc.sealedManifest,
+      'att-1',
+      {
+        ...ctx,
+        contentWrapKey: WRAP_KEY,
+      },
+      { wrappedObjectKey: fromBase64Url(op.wrapped_object_key) },
+    );
+    expect(opened.attachment_id).toBe('att-1');
   });
 
   it('opens the sealed manifest object back to the validated manifest', async () => {

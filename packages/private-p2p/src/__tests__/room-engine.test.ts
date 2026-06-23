@@ -11,6 +11,7 @@ import { type PrivateCryptoKeyPair, randomBytes, toBase64Url } from '../crypto/r
 import { exportPublicKeyRaw, generateDeviceSigningKeyPair } from '../crypto/signatures.js';
 import { InMemoryPrivateRoomStorage, PrivateRoomEngine } from '../engine/room-engine.js';
 import type { HeldEpochKeys } from '../reducer/intake-context.js';
+import { roomStateCommitment } from '../reducer/state.js';
 import type { SealOpParams } from '../reducer/validate-op.js';
 import { sealOp } from '../reducer/validate-op.js';
 import { type PrivateOpBody, type PrivateRoomOp, privateRoomOpSchema } from '../schemas/ops.js';
@@ -437,5 +438,51 @@ describe('PrivateRoomEngine — §15.9 archive export/import (two-engine converg
       other.engineParams(new InMemoryPrivateRoomStorage()),
     );
     await expect(otherEngine.importArchive(archive)).rejects.toThrow(/different room/);
+  });
+});
+
+describe('PrivateRoomEngine — device fork (§15) deterministic convergence', () => {
+  async function forkPair(r: Awaited<ReturnType<typeof room>>) {
+    const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
+    const genesisEnv = await sealOp(
+      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+        op_id: 'genesis',
+        lamport: '1',
+      }),
+      founderSeal,
+    );
+    // Two VALID ops sharing op_id 'fork' but with different content (story s-a vs
+    // s-b) at the same causal position — a device fork.
+    const base = { op_id: 'fork', author_seq: 1, lamport: '2', parents: ['genesis'] };
+    const envA = await sealOp(mkOp(story('s-a'), base), founderSeal);
+    const envB = await sealOp(mkOp(story('s-b'), base), founderSeal);
+    return { genesisEnv, envA, envB };
+  }
+
+  it('converges on the SAME fork variant regardless of arrival order', async () => {
+    const r = await room();
+    const { genesisEnv, envA, envB } = await forkPair(r);
+    const e1 = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
+    const e2 = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
+    await e1.ingest([genesisEnv, envA, envB]);
+    await e2.ingest([genesisEnv, envB, envA]); // opposite order
+
+    // Both keep the deterministically-chosen variant (bytewise-smaller signature),
+    // so their state is byte-identical despite the opposite delivery order — the
+    // `has(opId)` first-one-wins drop would have diverged them.
+    expect(roomStateCommitment(e1.state())).toStrictEqual(roomStateCommitment(e2.state()));
+    const e1HasA = e1.state().stories.has('s-a');
+    expect(e2.state().stories.has('s-a')).toBe(e1HasA);
+    expect(e1.state().stories.has('s-b')).toBe(!e1HasA); // exactly one variant in state
+  });
+
+  it('surfaces the losing fork variant as duplicate_op_id evidence (not silently dropped)', async () => {
+    const r = await room();
+    const { genesisEnv, envA, envB } = await forkPair(r);
+    // Deliver the larger-signature variant SECOND so it loses + is reported.
+    const [first, second] = envA.signature < envB.signature ? [envA, envB] : [envB, envA];
+    const engine = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
+    const report = await engine.ingest([genesisEnv, first, second]);
+    expect(report.quarantined.some((q) => q.reason === 'duplicate_op_id')).toBe(true);
   });
 });

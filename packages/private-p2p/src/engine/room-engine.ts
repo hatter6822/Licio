@@ -18,13 +18,22 @@
 // always converges regardless of delivery order; the unresolved remainder is
 // quarantined with its typed reason and never rendered.
 
+import { canonical } from '../crypto/canonical.js';
+import { deriveAuthorDeviceIdBlind } from '../crypto/device-blind.js';
 import { sha256, toBase64Url } from '../crypto/runtime.js';
+import { OP_REQUIRED_CAPABILITY } from '../reducer/capabilities.js';
 import {
   type BootstrapDevice,
   buildOpIntakeContext,
   type HeldEpochKeys,
 } from '../reducer/intake-context.js';
 import { reduceRoom } from '../reducer/reduce.js';
+import {
+  openSnapshotBundle,
+  type SealedSnapshotWire,
+  type SnapshotBundle,
+  sealSnapshotBundle,
+} from '../reducer/snapshot-seal.js';
 import { deserializeReducerState, serializeReducerState } from '../reducer/snapshot-state.js';
 import { type RoomReducerState, roomStateCommitment } from '../reducer/state.js';
 import { validateStructure } from '../reducer/validate.js';
@@ -35,7 +44,7 @@ import {
   sealOp,
 } from '../reducer/validate-op.js';
 import type { PrivateEncryptedEnvelope } from '../schemas/envelope.js';
-import type { PrivateRoomOp } from '../schemas/ops.js';
+import { type PrivateRoomOp, privateRoomOpSchema } from '../schemas/ops.js';
 import {
   buildBlockArchive,
   decodeBlockArchive,
@@ -51,7 +60,9 @@ import {
 
 /** The durable boundary for a room's encrypted envelopes (keyed by op id). */
 export interface PrivateRoomStorage {
-  /** Persist an ACCEPTED envelope under its op id (idempotent — same id, same bytes). */
+  /** Persist an ACCEPTED envelope under its op id, LAST-WRITE-WINS: the engine
+   *  passes the deterministically-chosen winner of a device fork (same op_id,
+   *  different content), so a later write must replace an earlier one for that id. */
   putEnvelope(opId: string, envelope: PrivateEncryptedEnvelope): Promise<void>;
   /** Every stored envelope (re-verified on load — storage confers no trust). */
   listEnvelopes(): Promise<ReadonlyArray<{ opId: string; envelope: PrivateEncryptedEnvelope }>>;
@@ -64,7 +75,7 @@ export class InMemoryPrivateRoomStorage implements PrivateRoomStorage {
   private readonly envelopes = new Map<string, PrivateEncryptedEnvelope>();
 
   putEnvelope(opId: string, envelope: PrivateEncryptedEnvelope): Promise<void> {
-    if (!this.envelopes.has(opId)) this.envelopes.set(opId, envelope);
+    this.envelopes.set(opId, envelope); // last-write-wins (the engine passes the fork winner)
     return Promise.resolve();
   }
 
@@ -80,28 +91,35 @@ export class InMemoryPrivateRoomStorage implements PrivateRoomStorage {
 
 /**
  * A persisted §14.5 compaction base for reload (WS-S.7 client persistence): the
- * serialized reduced state + the covered frontier + the monotonic counters, so a
- * reloading engine resumes from the base and folds only the post-snapshot
- * envelopes (the pruned ones were dropped from storage).  This is the device's OWN
- * previously-verified computation persisted in its OWN store — trusted as local
- * state: the covered envelopes it summarizes are gone, so it is NOT re-verifiable
- * by recomputation, exactly as a device trusts its own at-rest epoch secrets.
- * Peer-received content is ALWAYS re-verified through `openOp` (§8.3) regardless.
+ * SEALED snapshot body (the §14.5 in-band `snapshot.commit` references its CID).
+ * The body carries the full reduced state PLUS the structural metadata a reloading
+ * device needs (every covered op's lamport, the covered heads, the Lamport ceiling,
+ * the per-device seq floor), so reload opens it under the epoch key and folds only
+ * the post-snapshot envelopes.  Persisting the EXACT sealed bytes (not a re-seal)
+ * keeps the committed `snapshot_body_cid` valid, so the same base also exports.
  */
 export interface PersistedSnapshotBase {
-  readonly serializedState: Uint8Array;
-  readonly coveredOpIds: readonly string[];
-  readonly coveredHeads: readonly string[];
-  /** Max Lamport among covered ops (decimal string, big-int-safe). */
-  readonly maxLamport: string;
-  /** Max `author_seq` per device among covered ops (`[deviceId, seq]` entries). */
-  readonly authorSeq: ReadonlyArray<readonly [string, number]>;
+  readonly sealedSnapshot: SealedSnapshotWire;
 }
 
-/** A quarantined envelope + the §14.2 stage-1 reason it failed to open. */
+/** The opened base the constructor seeds from (the sealed body decrypted + parsed). */
+interface OpenedSnapshotBase {
+  readonly state: RoomReducerState;
+  readonly coveredOps: ReadonlyArray<readonly [string, string]>;
+  readonly coveredHeads: readonly string[];
+  readonly maxLamport: string;
+  readonly authorSeq: ReadonlyArray<readonly [string, number]>;
+  readonly sealedSnapshot: SealedSnapshotWire;
+}
+
+/** A quarantined envelope + why it did not contribute to state: a §14.2 stage-1
+ *  failure (`OpIntakeRejection`), or `duplicate_op_id` for the LOSING side of a
+ *  device fork (two valid envelopes with the same `op_id` but different content —
+ *  the engine keeps the deterministically-chosen one, never silently the first). */
+export type IngestQuarantineReason = OpIntakeRejection | 'duplicate_op_id';
 export interface QuarantinedEnvelope {
   readonly envelope: PrivateEncryptedEnvelope;
-  readonly reason: OpIntakeRejection;
+  readonly reason: IngestQuarantineReason;
 }
 
 /** The outcome of an `ingest` / `applyLocalOp` call. */
@@ -113,13 +131,15 @@ export interface IngestReport {
 }
 
 /** A §14.5 snapshot of the reduced state (the optimization that bounds replay +
- *  enables §25.6 compaction).  `serializedState` is the body (the caller seals +
- *  content-addresses it); `stateRoot` is the verifiable §14.5 commitment;
- *  `coveredOpIds`/`coveredHeads` are the prefix it summarizes. */
+ *  enables §25.6 compaction).  `bundle` is the full body (state + structural
+ *  metadata) the caller seals + content-addresses; `stateRoot` is the verifiable
+ *  §14.5 commitment; `coveredOps` (op id → lamport) + `coveredHeads` are the
+ *  structurally-ACCEPTED prefix it summarizes (a crypto-opened-but-structurally-
+ *  invalid op is NOT covered — it stays to resolve when its dependency arrives). */
 export interface SnapshotResult {
-  readonly serializedState: Uint8Array;
+  readonly bundle: SnapshotBundle;
   readonly stateRoot: string;
-  readonly coveredOpIds: string[];
+  readonly coveredOps: ReadonlyArray<readonly [string, string]>;
   readonly coveredHeads: string[];
 }
 
@@ -152,13 +172,19 @@ export class PrivateRoomEngine {
   private readonly bootstrapDevices: readonly BootstrapDevice[];
   /** op_id → accepted op (the reducer's POST-snapshot input set). */
   private readonly acceptedOps = new Map<string, PrivateRoomOp>();
+  /** op_id → the WINNING envelope's signature — so a device fork (a second valid
+   *  envelope with the same op_id but different content) is resolved deterministically
+   *  (keep the bytewise-smaller signature) instead of order-dependently. */
+  private readonly acceptedSignatures = new Map<string, string>();
   private currentState: RoomReducerState;
   /** The §14.5 snapshot base (a compacted prefix's reduced state), if any. */
   private baseState: RoomReducerState | undefined;
   /** The covered heads the base represents (the frontier of the compacted set). */
   private baseHeads: readonly string[] = [];
-  /** Op ids already folded into `baseState` — re-received ones are ignored. */
-  private readonly coveredOpIds = new Set<string>();
+  /** Covered op id → its `lamport` (decimal string) — re-received covered ops are
+   *  ignored, AND a post-snapshot op whose parent is covered is causality-checked
+   *  against the RETAINED lamport (§14.3.1), identically to an uncompacted peer. */
+  private readonly coveredOpLamports = new Map<string, string>();
   /** The max Lamport among compacted ops — so authored ops stay globally
    *  monotonic after pruning (a compacted + an uncompacted device must agree on
    *  canonical order, §14.3.1). */
@@ -166,21 +192,27 @@ export class PrivateRoomEngine {
   /** The max `author_seq` per device among compacted ops (preserved across
    *  pruning so seqs stay monotonic for §15 fork detection). */
   private readonly baseAuthorSeq = new Map<string, number>();
+  /** The current base's sealed snapshot body (the bytes the in-band §14.5
+   *  `snapshot.commit` references) — retained verbatim so `exportArchive` ships the
+   *  exact body the commit's `snapshot_body_cid` covers. */
+  private sealedSnapshot: SealedSnapshotWire | undefined;
 
-  private constructor(params: PrivateRoomEngineParams) {
+  private constructor(params: PrivateRoomEngineParams, openedBase?: OpenedSnapshotBase) {
     this.roomId = params.roomId;
     this.roomIdCommitment = params.roomIdCommitment;
     this.storage = params.storage;
     this.epochs = new Map(params.epochs);
     this.bootstrapDevices = params.bootstrapDevices ?? [];
-    if (params.base) {
-      // Resume from a persisted compaction base (its covered envelopes were pruned
-      // from storage, so only the post-snapshot envelopes will be re-verified).
-      this.baseState = deserializeReducerState(params.base.serializedState);
-      this.baseHeads = [...params.base.coveredHeads];
-      for (const id of params.base.coveredOpIds) this.coveredOpIds.add(id);
-      this.baseMaxLamport = BigInt(params.base.maxLamport);
-      for (const [device, seq] of params.base.authorSeq) this.baseAuthorSeq.set(device, seq);
+    if (openedBase) {
+      // Resume from a §14.5 base (opened from its sealed body): its covered
+      // envelopes were pruned from storage, so only the post-snapshot envelopes
+      // will be re-verified, and a covered parent's retained lamport is reused.
+      this.baseState = openedBase.state;
+      this.baseHeads = [...openedBase.coveredHeads];
+      for (const [id, lamport] of openedBase.coveredOps) this.coveredOpLamports.set(id, lamport);
+      this.baseMaxLamport = BigInt(openedBase.maxLamport);
+      for (const [device, seq] of openedBase.authorSeq) this.baseAuthorSeq.set(device, seq);
+      this.sealedSnapshot = openedBase.sealedSnapshot;
     }
     this.currentState = reduceRoom([], this.baseState);
   }
@@ -198,16 +230,48 @@ export class PrivateRoomEngine {
    * do not contribute to `currentState`.
    */
   private refold(): void {
-    const structural = validateStructure([...this.acceptedOps.values()], this.roomId, {
-      knownOpIds: this.coveredOpIds,
+    this.currentState = reduceRoom(this.structurallyAccepted(), this.baseState);
+  }
+
+  /** The structurally-valid subset of the accepted ops, in canonical order (the
+   *  §14.2 pre-pass over the compaction base), ready for the fold. */
+  private structurallyAccepted(): PrivateRoomOp[] {
+    return validateStructure([...this.acceptedOps.values()], this.roomId, {
+      knownOpLamports: this.coveredOpLamports,
       deviceSeqFloor: this.baseAuthorSeq,
+    }).accepted;
+  }
+
+  /** Open a persisted §14.5 base (its sealed body) under the held epoch key. */
+  private static async openBase(
+    params: PrivateRoomEngineParams,
+  ): Promise<OpenedSnapshotBase | undefined> {
+    if (!params.base) return undefined;
+    const sealed = params.base.sealedSnapshot;
+    const epoch = params.epochs.get(sealed.epoch);
+    if (!epoch) {
+      throw new Error(
+        `PrivateRoomEngine.load: no epoch key for snapshot base epoch ${sealed.epoch}`,
+      );
+    }
+    const bundle = await openSnapshotBundle(sealed, {
+      roomIdCommitment: params.roomIdCommitment,
+      contentWrapKey: epoch.contentWrapKey,
+      epoch: sealed.epoch,
     });
-    this.currentState = reduceRoom(structural.accepted, this.baseState);
+    return {
+      state: deserializeReducerState(bundle.serializedState),
+      coveredOps: bundle.coveredOps,
+      coveredHeads: bundle.coveredHeads,
+      maxLamport: bundle.maxLamport,
+      authorSeq: bundle.authorSeq,
+      sealedSnapshot: sealed,
+    };
   }
 
   /** Create an engine and rehydrate it by re-verifying every stored envelope. */
   static async load(params: PrivateRoomEngineParams): Promise<PrivateRoomEngine> {
-    const engine = new PrivateRoomEngine(params);
+    const engine = new PrivateRoomEngine(params, await PrivateRoomEngine.openBase(params));
     const stored = await params.storage.listEnvelopes();
     await engine.ingest(stored.map((s) => s.envelope));
     return engine;
@@ -218,14 +282,33 @@ export class PrivateRoomEngine {
     return this.currentState;
   }
 
-  /** The accepted-DAG heads (the §15.6 announcement frontier).  After a §14.5
-   *  compaction the covered heads are folded in as parentless roots, so a base
-   *  head only stays a head until a post-snapshot op references it. */
-  heads(): string[] {
-    return computeHeads([
+  /** The head-view union the §15.6 frontier is computed over: the compaction base's
+   *  covered heads as parentless roots PLUS the post-snapshot STRUCTURALLY-VALID
+   *  ops, so a base head stays a head until a valid op references it.  A crypto-
+   *  opened-but-structurally-invalid op (a child ahead of its parent) is excluded —
+   *  it must never be a frontier head a new op (or a snapshot) would build on. */
+  private headViews(): { op_id: string; parents: readonly string[] }[] {
+    return [
       ...this.baseHeads.map((opId) => ({ op_id: opId, parents: [] as string[] })),
-      ...[...this.acceptedOps.values()].map((op) => ({ op_id: op.op_id, parents: op.parents })),
-    ]);
+      ...this.structurallyAccepted().map((op) => ({ op_id: op.op_id, parents: op.parents })),
+    ];
+  }
+
+  /** The accepted-DAG heads (the §15.6 announcement frontier), base-aware. */
+  heads(): string[] {
+    return computeHeads(this.headViews());
+  }
+
+  /** The latest accepted §14.5 snapshot id (the highest-Lamport `snapshot.commit`),
+   *  surfaced in the head announcement so a peer can discover the retained frontier. */
+  private latestSnapshotId(): string | undefined {
+    let latest: { id: string; lamport: bigint } | undefined;
+    for (const op of this.acceptedOps.values()) {
+      if (op.body.type !== 'snapshot.commit') continue;
+      const lamport = BigInt(op.lamport);
+      if (!latest || lamport > latest.lamport) latest = { id: op.body.snapshot_id, lamport };
+    }
+    return latest?.id;
   }
 
   /** Add/replace the keys for an epoch (e.g. after an MLS commit rotates them). */
@@ -269,6 +352,7 @@ export class PrivateRoomEngine {
     for (const envelope of envelopes) pending.set(envelope.signature, envelope);
 
     const accepted: string[] = [];
+    const forks: QuarantinedEnvelope[] = [];
     let lastResultByKey = new Map<string, OpIntakeRejection>();
 
     let progressed = true;
@@ -291,11 +375,26 @@ export class PrivateRoomEngine {
         progressed = true;
         const opId = result.op.op_id;
         // A re-received op already folded into the snapshot base is a no-op.
-        if (this.coveredOpIds.has(opId)) continue;
-        if (!this.acceptedOps.has(opId)) {
+        if (this.coveredOpLamports.has(opId)) continue;
+        const existingSig = this.acceptedSignatures.get(opId);
+        if (existingSig === undefined) {
           this.acceptedOps.set(opId, result.op);
+          this.acceptedSignatures.set(opId, envelope.signature);
           accepted.push(opId);
           await this.storage.putEnvelope(opId, envelope);
+          continue;
+        }
+        if (existingSig === envelope.signature) continue; // exact idempotent re-receive
+        // A device FORK: two valid envelopes, same op_id, different signed content.
+        // Keep the bytewise-smaller signature so every peer converges on the SAME
+        // variant regardless of arrival order; the loser is fork evidence, excluded
+        // from state — never silently dropped by "first one wins".
+        if (envelope.signature < existingSig) {
+          this.acceptedOps.set(opId, result.op);
+          this.acceptedSignatures.set(opId, envelope.signature);
+          await this.storage.putEnvelope(opId, envelope); // overwrite with the winner
+        } else {
+          forks.push({ envelope, reason: 'duplicate_op_id' });
         }
       }
       lastResultByKey = reasons;
@@ -304,10 +403,13 @@ export class PrivateRoomEngine {
       if (progressed) this.refold();
     }
 
-    const quarantined: QuarantinedEnvelope[] = [...pending].map(([key, envelope]) => ({
-      envelope,
-      reason: lastResultByKey.get(key) ?? 'unknown_device',
-    }));
+    const quarantined: QuarantinedEnvelope[] = [
+      ...[...pending].map(([key, envelope]) => ({
+        envelope,
+        reason: lastResultByKey.get(key) ?? ('unknown_device' as IngestQuarantineReason),
+      })),
+      ...forks,
+    ];
     return { accepted, quarantined };
   }
 
@@ -326,15 +428,15 @@ export class PrivateRoomEngine {
 
   // --- §15.6 sync surface (the transport drives these) ----------------------
 
-  /** The §15.6 head announcement to send a peer (the engine's frontier + a
-   *  coarse op-count, with an optional latest verified snapshot id). */
+  /** The §15.6 head announcement to send a peer (the engine's frontier + a coarse
+   *  op-count + the latest verified snapshot id).  Built over the base-aware head
+   *  views so a COMPACTED room still announces its retained frontier (§15.6) — a
+   *  peer would otherwise think a compacted room has nothing to fetch. */
   headAnnouncement(latestSnapshotId?: string): HeadAnnouncement {
+    const snapshotId = latestSnapshotId ?? this.latestSnapshotId();
     return buildHeadAnnouncement({
-      acceptedOps: [...this.acceptedOps.values()].map((op) => ({
-        op_id: op.op_id,
-        parents: op.parents,
-      })),
-      ...(latestSnapshotId === undefined ? {} : { latestSnapshotId }),
+      acceptedOps: this.headViews(),
+      ...(snapshotId === undefined ? {} : { latestSnapshotId: snapshotId }),
     });
   }
 
@@ -347,9 +449,11 @@ export class PrivateRoomEngine {
   // --- §15.9 offline archive (export / import) ------------------------------
 
   /**
-   * Export the room's accepted envelopes as a §15.9 ciphertext-only archive
-   * (`encrypted_member_backup` | `voluntary_report`) for offline sharing.
-   * Throws if the room holds no ops yet (nothing to export).
+   * Export the room as a §15.9 ciphertext-only archive (`encrypted_member_backup`
+   * | `voluntary_report`) for offline sharing.  Carries the retained envelopes AND
+   * — for a COMPACTED room — the §14.5 SEALED snapshot body, so an importer that
+   * never held the pruned ops can still bootstrap (it verifies the body against the
+   * in-band `snapshot.commit`).  Throws if the room holds nothing to export.
    */
   async exportArchive(params: {
     readonly kind: PrivateArchiveKind;
@@ -362,19 +466,32 @@ export class PrivateRoomEngine {
       roomIdHash: toBase64Url(this.roomIdCommitment),
       createdAtBucket: params.createdAtBucket,
       envelopes: stored.map((s) => s.envelope),
+      ...(this.sealedSnapshot ? { sealedSnapshot: this.sealedSnapshot } : {}),
     });
     return encodeBlockArchive(archive);
   }
 
   /**
    * Import a §15.9 archive into this room: decode under caps, confirm it is for
-   * THIS room, then `ingest` every envelope (re-validated — the container confers
-   * no trust).  Rejects an archive for a different room.
+   * THIS room, bootstrap from its §14.5 sealed snapshot if present (so a compacted
+   * room imports without its pruned ops), then `ingest` every envelope (re-
+   * validated — the container confers no trust).  Rejects an archive for a
+   * different room.
    */
   async importArchive(bytes: Uint8Array): Promise<IngestReport> {
     const archive = decodeBlockArchive(bytes);
     if (archive.room_id_hash !== toBase64Url(this.roomIdCommitment)) {
       throw new Error('importArchive: archive is for a different room');
+    }
+    // Bootstrap from a sealed snapshot only when this engine has no base/ops yet
+    // (a fresh restore): adopt it ONLY if it verifies against its in-band commit.
+    if (
+      archive.sealed_snapshot &&
+      !this.sealedSnapshot &&
+      this.acceptedOps.size === 0 &&
+      this.coveredOpLamports.size === 0
+    ) {
+      await this.bootstrapFromSnapshot(archive.sealed_snapshot, archive.envelopes);
     }
     return this.ingest(archive.envelopes);
   }
@@ -388,75 +505,241 @@ export class PrivateRoomEngine {
   }
 
   /**
-   * Produce a §14.5 snapshot of the CURRENT state covering every op folded so
-   * far: the serialized body (the caller seals + content-addresses it), the state
-   * root, the covered op ids, and the covered heads (`includes_ops_up_to`).  The
-   * caller then authors a `snapshot.commit` op carrying the root + heads + the
-   * sealed body's CID, and may `compact` to prune the covered ops.
+   * Build a §14.5 snapshot of the CURRENT state over the structurally-ACCEPTED
+   * prefix: the body (full state + the structural metadata an importer needs —
+   * every covered op's lamport, the covered heads, the Lamport ceiling, the seq
+   * floor), the state root, and the covered (op id → lamport) set.  A crypto-
+   * opened-but-structurally-invalid op (e.g. a child ahead of its parent) is NOT
+   * covered, so compacting can never permanently suppress it.
    */
-  async createSnapshot(): Promise<SnapshotResult> {
-    return {
+  private async buildSnapshot(): Promise<SnapshotResult> {
+    const accepted = this.structurallyAccepted();
+    const coveredOps: [string, string][] = [
+      ...this.coveredOpLamports,
+      ...accepted.map((op): [string, string] => [op.op_id, op.lamport]),
+    ];
+    let maxLamport = this.baseMaxLamport;
+    const authorSeq = new Map(this.baseAuthorSeq);
+    for (const op of accepted) {
+      const lamport = BigInt(op.lamport);
+      if (lamport > maxLamport) maxLamport = lamport;
+      const seq = authorSeq.get(op.author_device_id);
+      if (seq === undefined || op.author_seq > seq)
+        authorSeq.set(op.author_device_id, op.author_seq);
+    }
+    const coveredHeads = this.heads();
+    const bundle: SnapshotBundle = {
       serializedState: serializeReducerState(this.currentState),
-      stateRoot: await this.stateRoot(),
-      coveredOpIds: [...this.coveredOpIds, ...this.acceptedOps.keys()].sort(),
-      coveredHeads: this.heads(),
+      coveredOps,
+      coveredHeads,
+      maxLamport: maxLamport.toString(),
+      authorSeq: [...authorSeq],
     };
+    return { bundle, stateRoot: await this.stateRoot(), coveredOps, coveredHeads };
   }
 
   /**
-   * Compact (§25.6): adopt a snapshot as the fold base and PRUNE the ops it
-   * covers, so subsequent state is `fold(post-snapshot ops, base)`.  Preserves the
-   * max Lamport + per-device seq of the pruned ops so authored ops stay globally
-   * monotonic.  Idempotent — a re-received covered op is then ignored.  The caller
-   * may also drop the pruned envelopes from durable storage.
+   * §14.5 in-band snapshot + §25.6 compaction: seal the current snapshot body
+   * under the epoch key, author an admin-signed `snapshot.commit` op (carrying the
+   * state root + covered heads + the body CID), then prune the covered ops and
+   * adopt the base.  The sealed body is retained verbatim (its CID is the one the
+   * commit references) so `exportArchive` ships an importer-verifiable snapshot.
+   * Returns the persistable base.  The author must hold the `admin` capability
+   * (the reducer rejects the commit otherwise — then nothing is compacted).
    */
-  compact(snapshot: SnapshotResult): void {
-    for (const id of snapshot.coveredOpIds) {
-      const op = this.acceptedOps.get(id);
-      if (op) {
-        const lamport = BigInt(op.lamport);
-        if (lamport > this.baseMaxLamport) this.baseMaxLamport = lamport;
-        const seq = this.baseAuthorSeq.get(op.author_device_id);
-        if (seq === undefined || op.author_seq > seq) {
-          this.baseAuthorSeq.set(op.author_device_id, op.author_seq);
-        }
-      }
-      this.coveredOpIds.add(id);
+  async commitSnapshot(params: CommitSnapshotParams): Promise<PersistedSnapshotBase | undefined> {
+    const snapshot = await this.buildSnapshot();
+    // Nothing structurally-accepted to cover (e.g. every accepted op is awaiting a
+    // missing parent) ⇒ no frontier to commit; the `snapshot.commit` op requires
+    // ≥1 `includes_ops_up_to`, so skip rather than throw on the schema.
+    if (snapshot.coveredHeads.length === 0) return undefined;
+    const sealed = await sealSnapshotBundle(snapshot.bundle, {
+      roomIdCommitment: this.roomIdCommitment,
+      contentWrapKey: params.contentWrapKey,
+      epoch: params.epoch,
+    });
+    const createdAt = params.createdAt ?? new Date().toISOString();
+    const sealParams: SealOpParams = {
+      roomIdCommitment: this.roomIdCommitment,
+      contentWrapKey: params.contentWrapKey,
+      deviceSigningKey: params.author.signingKey,
+      authorDeviceIdBlind: await deriveAuthorDeviceIdBlind(
+        params.roomEpochSecret,
+        this.roomIdCommitment,
+        params.author.deviceId,
+        params.epoch,
+      ),
+      capabilityRootAtSeq: await sha256(canonical([])),
+    };
+    const op = privateRoomOpSchema.parse({
+      schema: 'licio.private.op.v1',
+      room_id: this.roomId,
+      epoch: params.epoch,
+      op_id: params.opId,
+      author_member_id: params.author.memberId,
+      author_device_id: params.author.deviceId,
+      author_seq: this.nextAuthorSeq(params.author.deviceId),
+      created_at: createdAt,
+      created_at_bucket: createdAt.slice(0, 13),
+      lamport: this.nextLamport(),
+      parents: snapshot.coveredHeads,
+      body: {
+        type: 'snapshot.commit',
+        snapshot_id: params.snapshotId,
+        includes_ops_up_to: snapshot.coveredHeads,
+        state_merkle_root: snapshot.stateRoot,
+        snapshot_body_cid: sealed.cid,
+      },
+    });
+    await this.applyLocalOp(op, sealParams);
+    // The commit must be AUTHORIZED (reduced into state — `snapshot.commit` requires
+    // `admin`); an unauthorized op opens cryptographically yet the reducer rejects
+    // it, so it never reaches `state.snapshots`.  Do NOT compact without it (a
+    // snapshot must be backed by an accepted, authorized, in-band commit).
+    if (!this.currentState.snapshots.includes(params.snapshotId)) return undefined;
+    this.compact(snapshot, sealed);
+    await this.storage.deleteEnvelopes(snapshot.coveredOps.map(([id]) => id));
+    return { sealedSnapshot: sealed };
+  }
+
+  /** Adopt a built snapshot as the fold base + prune the covered ops it summarizes
+   *  (the structurally-accepted prefix only). */
+  private compact(snapshot: SnapshotResult, sealed: SealedSnapshotWire): void {
+    for (const [id, lamport] of snapshot.coveredOps) {
+      this.coveredOpLamports.set(id, lamport);
+      const value = BigInt(lamport);
+      if (value > this.baseMaxLamport) this.baseMaxLamport = value;
       this.acceptedOps.delete(id);
+      this.acceptedSignatures.delete(id);
     }
-    this.baseState = deserializeReducerState(snapshot.serializedState);
+    for (const [device, seq] of snapshot.bundle.authorSeq) {
+      const prev = this.baseAuthorSeq.get(device);
+      if (prev === undefined || seq > prev) this.baseAuthorSeq.set(device, seq);
+    }
+    this.baseState = deserializeReducerState(snapshot.bundle.serializedState);
     this.baseHeads = [...snapshot.coveredHeads];
+    this.sealedSnapshot = sealed;
     this.refold();
   }
 
   /**
-   * §25.6 cadence helper: when the post-snapshot op count reaches `threshold`,
-   * snapshot → adopt the base → DROP the covered envelopes from storage → return
-   * the base for the caller to persist.  Below threshold it is a no-op
-   * (`undefined`).  Bounds the replay-fold + re-verification cost across reloads.
+   * Bootstrap a fresh engine from an imported §14.5 sealed snapshot: open the body
+   * under the held epoch key (proving member authorship), then ADOPT it only if its
+   * in-band `snapshot.commit` verifies — signed by an `admin` in the body, its
+   * `state_merkle_root` equals the body's root, `includes_ops_up_to` matches the
+   * body's covered heads, and `snapshot_body_cid` equals the sealed body's CID.  An
+   * unverifiable snapshot is NOT adopted (storage/container confers no trust, §8.3).
    */
-  async maybeCompact(threshold: number): Promise<PersistedSnapshotBase | undefined> {
-    if (threshold < 1 || this.acceptedOps.size < threshold) return undefined;
-    const snapshot = await this.createSnapshot();
-    this.compact(snapshot);
-    await this.storage.deleteEnvelopes(snapshot.coveredOpIds);
-    return this.exportBase();
+  private async bootstrapFromSnapshot(
+    sealed: SealedSnapshotWire,
+    envelopes: readonly PrivateEncryptedEnvelope[],
+  ): Promise<void> {
+    const epoch = this.epochs.get(sealed.epoch);
+    if (!epoch) return;
+    let bundle: SnapshotBundle;
+    try {
+      bundle = await openSnapshotBundle(sealed, {
+        roomIdCommitment: this.roomIdCommitment,
+        contentWrapKey: epoch.contentWrapKey,
+        epoch: sealed.epoch,
+      });
+    } catch {
+      return; // body did not open (tampered / wrong epoch) → do not adopt
+    }
+    const candidate = deserializeReducerState(bundle.serializedState);
+    if (!(await this.verifySnapshotCommit(sealed, bundle, candidate, envelopes))) return;
+    this.baseState = candidate;
+    this.baseHeads = [...bundle.coveredHeads];
+    for (const [id, lamport] of bundle.coveredOps) this.coveredOpLamports.set(id, lamport);
+    this.baseMaxLamport = BigInt(bundle.maxLamport);
+    for (const [device, seq] of bundle.authorSeq) this.baseAuthorSeq.set(device, seq);
+    this.sealedSnapshot = sealed;
+    this.currentState = reduceRoom([], this.baseState);
+  }
+
+  /** Whether the imported sealed snapshot is backed by a valid in-band commit. */
+  private async verifySnapshotCommit(
+    sealed: SealedSnapshotWire,
+    bundle: SnapshotBundle,
+    candidate: RoomReducerState,
+    envelopes: readonly PrivateEncryptedEnvelope[],
+  ): Promise<boolean> {
+    const expectedRoot = toBase64Url(await sha256(roomStateCommitment(candidate)));
+    const expectedHeads = [...bundle.coveredHeads].sort();
+    // Resolve the commit author against the body's OWN device registry (a later
+    // admin's device may not be known to the importer out of band).
+    const ctx = await buildOpIntakeContext({
+      state: candidate,
+      roomIdCommitment: this.roomIdCommitment,
+      epochs: this.epochs,
+      extraDevices: this.bootstrapDevices,
+    });
+    for (const envelope of envelopes) {
+      if (envelope.object_type !== 'snapshot') continue;
+      const result = await openOp(envelope, ctx);
+      if (!result.ok || result.op.body.type !== 'snapshot.commit') continue;
+      const body = result.op.body;
+      if (body.snapshot_body_cid !== sealed.cid) continue;
+      if (body.state_merkle_root !== expectedRoot) continue;
+      if (!sameStrings([...body.includes_ops_up_to].sort(), expectedHeads)) continue;
+      const member = candidate.members.get(result.op.author_member_id);
+      if (!member || member.removed) continue;
+      if (!member.capabilities.has(OP_REQUIRED_CAPABILITY['snapshot.commit'])) continue;
+      return true;
+    }
+    return false;
   }
 
   /**
-   * Export the current §14.5 compaction base for at-rest persistence, or
-   * `undefined` if nothing has been compacted yet.  The caller persists this and
-   * drops the covered envelopes from storage; on reload it is passed back as
-   * `params.base` so only the post-snapshot envelopes are re-verified + folded.
+   * §25.6 cadence helper: when the post-snapshot op count reaches `threshold`,
+   * author the in-band snapshot + compact + DROP the covered envelopes, returning
+   * the base for the caller to persist.  Below threshold (or if the author lacks
+   * `admin`) it is a no-op (`undefined`).  Bounds replay-fold + re-verify cost.
+   */
+  async maybeCompact(
+    threshold: number,
+    params: CommitSnapshotParams,
+  ): Promise<PersistedSnapshotBase | undefined> {
+    if (threshold < 1 || this.acceptedOps.size < threshold) return undefined;
+    return this.commitSnapshot(params);
+  }
+
+  /**
+   * Export the current §14.5 compaction base (the sealed snapshot body) for at-rest
+   * persistence, or `undefined` if nothing has been compacted yet.  On reload it is
+   * passed back as `params.base`; the engine opens it under the held epoch key and
+   * folds only the post-snapshot envelopes on top.
    */
   exportBase(): PersistedSnapshotBase | undefined {
-    if (!this.baseState) return undefined;
-    return {
-      serializedState: serializeReducerState(this.baseState),
-      coveredOpIds: [...this.coveredOpIds],
-      coveredHeads: [...this.baseHeads],
-      maxLamport: this.baseMaxLamport.toString(),
-      authorSeq: [...this.baseAuthorSeq],
-    };
+    return this.sealedSnapshot ? { sealedSnapshot: this.sealedSnapshot } : undefined;
   }
+}
+
+/** Parameters for authoring an in-band §14.5 `snapshot.commit` (admin-signed).
+ *  The engine seals the snapshot body + builds the commit op + its seal params
+ *  internally (the body CID depends on the seal, so the caller cannot pre-build it). */
+export interface CommitSnapshotParams {
+  /** The epoch the snapshot body is sealed under + the commit is authored under. */
+  readonly epoch: number;
+  /** That epoch's secret (to derive the §10.4 author-device blind) + content-wrap
+   *  key (to seal the body + the commit). */
+  readonly roomEpochSecret: Uint8Array;
+  readonly contentWrapKey: Uint8Array;
+  /** The committing admin device (the reducer rejects the commit without `admin`). */
+  readonly author: {
+    readonly memberId: string;
+    readonly deviceId: string;
+    readonly signingKey: CryptoKey;
+  };
+  readonly opId: string;
+  readonly snapshotId: string;
+  /** ISO timestamp for the commit op (defaults to now). */
+  readonly createdAt?: string;
+}
+
+/** Equal string arrays (order-sensitive — callers sort first). */
+function sameStrings(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }

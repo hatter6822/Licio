@@ -143,13 +143,13 @@ describe('PrivateRoomSession — §14.5 compaction persistence (WS-S.7)', () => 
       'C',
     ]);
 
-    // Every op was folded into the persisted base → no loose envelopes remain in
-    // IndexedDB (they were pruned by `maybeCompact`).
+    // The covered ops were folded into the persisted base + pruned from IndexedDB
+    // by `maybeCompact`; only the latest in-band §14.5 snapshot.commit remains.
     const storage = new IndexedDbPrivateRoomStorage(roomId);
-    expect(await storage.listEnvelopes()).toHaveLength(0);
+    expect(await storage.listEnvelopes()).toHaveLength(1);
 
-    // A fresh session reloads from the persisted base ALONE (zero envelopes to
-    // re-verify) and still has the full state.
+    // A fresh session reloads from the persisted SEALED base (re-verifying only the
+    // retained snapshot.commit) and still has the full state.
     const reloaded = await PrivateRoomSession.load(roomId);
     if (!reloaded) throw new Error('expected the room to reload');
     expect([...reloaded.state().stories.values()].map((s) => s.title).sort()).toStrictEqual([

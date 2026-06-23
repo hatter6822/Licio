@@ -92,7 +92,15 @@ const snapshotStateSchema = z
         })
         .strict(),
     ),
-    attachments: z.array(z.object({ attachmentId: z.string(), manifestCid: z.string() }).strict()),
+    attachments: z.array(
+      z
+        .object({
+          attachmentId: z.string(),
+          manifestCid: z.string(),
+          wrappedObjectKey: z.string(),
+        })
+        .strict(),
+    ),
     recoveryRequests: z.array(
       z
         .object({
@@ -165,6 +173,7 @@ export function serializeReducerState(state: RoomReducerState): Uint8Array {
     attachments: [...state.attachments.values()].map((a) => ({
       attachmentId: a.attachmentId,
       manifestCid: a.manifestCid,
+      wrappedObjectKey: a.wrappedObjectKey,
     })),
     recoveryRequests: [...state.recoveryRequests.values()].map((r) => ({
       recoveryRequestId: r.recoveryRequestId,
@@ -177,8 +186,9 @@ export function serializeReducerState(state: RoomReducerState): Uint8Array {
   return utf8(JSON.stringify(body));
 }
 
-/** Restore a `RoomReducerState` from a snapshot body (fail-closed via zod; caps
- *  re-derived from each member's role). */
+/** Restore a `RoomReducerState` from a snapshot body (fail-closed via zod).  Each
+ *  member's capability set is restored VERBATIM from the body — NOT re-derived from
+ *  role — so an individually granted/revoked capability survives the round trip. */
 export function deserializeReducerState(bytes: Uint8Array): RoomReducerState {
   const parsed: unknown = JSON.parse(fromUtf8(bytes));
   const body = snapshotStateSchema.parse(parsed);
@@ -247,6 +257,7 @@ export function deserializeReducerState(bytes: Uint8Array): RoomReducerState {
     state.attachments.set(a.attachmentId, {
       attachmentId: a.attachmentId,
       manifestCid: a.manifestCid,
+      wrappedObjectKey: a.wrappedObjectKey,
     });
   }
   for (const r of body.recoveryRequests) {

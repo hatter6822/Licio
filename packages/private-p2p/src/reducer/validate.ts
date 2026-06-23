@@ -40,8 +40,11 @@ export interface StructuralValidationResult {
  * "restart" after compaction.
  */
 export interface StructuralBaseContext {
-  /** Op ids accepted in the prefix (a candidate parent in here is NOT missing). */
-  readonly knownOpIds?: ReadonlySet<string>;
+  /** Covered op id → its `lamport` (decimal string).  A candidate parent in here
+   *  is NOT missing, and its RETAINED lamport is used for the §14.3.1 causality
+   *  check exactly as an uncompacted peer would — so a compacted device makes the
+   *  IDENTICAL accept/reject decision (never silently skips the check). */
+  readonly knownOpLamports?: ReadonlyMap<string, string>;
   /** Per-device max `author_seq` covered by the prefix (the monotonicity floor). */
   readonly deviceSeqFloor?: ReadonlyMap<string, number>;
 }
@@ -66,8 +69,8 @@ export function validateStructure(
   const acceptedLamport = new Map<string, string>();
   // Seed the per-device seq floor + the seen-id set from the accepted prefix.
   const deviceMaxSeq = new Map<string, number>(base?.deviceSeqFloor);
-  const seenOpIds = new Set<string>(base?.knownOpIds);
-  const knownOpIds = base?.knownOpIds;
+  const seenOpIds = new Set<string>(base?.knownOpLamports?.keys());
+  const knownOpLamports = base?.knownOpLamports;
 
   for (const op of canonicalOpOrder(candidateOps)) {
     if (seenOpIds.has(op.op_id)) {
@@ -86,10 +89,15 @@ export function validateStructure(
         parentLamports.push(lamport);
         continue;
       }
-      // A parent in the accepted prefix (a compacted base) is present, just pruned
-      // — it was structurally validated before compaction, so its exact lamport is
-      // no longer needed for this op's causality check.
-      if (knownOpIds?.has(parent)) continue;
+      // A parent in the accepted prefix (a compacted base) is present, just pruned.
+      // Use its RETAINED lamport for the causality check — NOT skip it — so a
+      // compacted device rejects a too-low lamport exactly as an uncompacted peer
+      // does (else the two diverge on a malicious/stale post-compaction op).
+      const baseLamport = knownOpLamports?.get(parent);
+      if (baseLamport !== undefined) {
+        parentLamports.push(baseLamport);
+        continue;
+      }
       missingParent = true;
       break;
     }

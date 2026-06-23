@@ -121,36 +121,46 @@ splits a blob into uniform §25.4-padded chunks, AEAD-seals each under one attac
 object key BOUND by `chunk_index`/`chunk_total` in its `body_aad` (so a chunk cannot
 be reordered, dropped, or spliced across attachments), and builds the §13.6 manifest
 (every CID over CIPHERTEXT; a coarse `byte_size_class`; the object key wrapped under
-the epoch key).  `decryptAttachment` verifies the ciphertext CID + hash before
-decryption, opens each chunk under its AAD, checks the plaintext commitment, and
-reassembles — failing closed on any tamper, missing chunk, or cross-attachment
-splice.  All chunks seal to one uniform ciphertext length, so the wire reveals only
-the chunk count.
+the epoch key).  The `attachment.add` op carries that `wrapped_object_key` ALONGSIDE
+the manifest CID (and the reducer records it in attachment state), so a peer fetching
+the sealed manifest by CID holds the distributed key material to unwrap + open it —
+without it the manifest would be undecryptable.  `decryptAttachment` verifies the
+ciphertext CID + hash before decryption, opens each chunk under its AAD, checks the
+plaintext commitment, and reassembles — failing closed on any tamper, missing chunk,
+or cross-attachment splice.  All chunks seal to one uniform ciphertext length, so the
+wire reveals only the chunk count.
 
-Snapshots + compaction are shipped (WS-S.5.9, §14.5/§25.6): `serializeReducerState`/
-`deserializeReducerState` round-trip the COMPLETE reduced state — including each
-member's FULL capability set verbatim, NOT re-derived from role: a `role.grant` /
-`role.revoke` op may grant or revoke an individual capability independent of the
-role (§11.3), and `roomStateCommitment` hashes the full set, so re-deriving from
-role alone would silently drop an individual grant and diverge a compacted device's
-state root (and its authority decisions) from an uncompacted one.  `reduceRoom(ops,
-base?)` folds onto a snapshot base; and the engine's `createSnapshot()` /
-`compact()` adopt a snapshot as the fold base and PRUNE the ops it covers.
-Compaction is proven to preserve both the logical state and the heads frontier, to
-keep a compacted engine **byte-identical to a full fold of every op** (a compacted
-and an uncompacted device converge — including an individually granted capability,
-with the post-compaction state root still matching the snapshot's), and to keep
-authored Lamport/seq monotonic across the prune (so the two devices still agree on
-canonical order); a re-received covered op is ignored.  The apps/web client
-PERSISTS this: `PrivateRoomSession` compacts on the §25.6 cadence
-(`maybeCompact` → `exportBase`), persists the base into the session, and DROPS the
-covered envelopes from IndexedDB (`storage.deleteEnvelopes`); on reload the engine
-resumes from the persisted base and re-verifies ONLY the post-snapshot envelopes —
-so a long-lived single-device room's reload cost stays bounded.  The base is the
-device's OWN previously-verified computation in its OWN store (trusted as local
-state, like the at-rest epoch secrets); peer-received content is always re-verified
-through `openOp` (§8.3).  Proven by a jsdom round-trip (compact → prune → reload
-from the base alone → author further).
+Snapshots + compaction are shipped (WS-S.5.9, §14.5/§25.6) as an IN-BAND, admin-signed
+`snapshot.commit`: `serializeReducerState`/`deserializeReducerState` round-trip the
+COMPLETE reduced state — including each member's FULL capability set verbatim, NOT
+re-derived from role (a `role.grant`/`role.revoke` may grant/revoke an individual
+capability independent of role, §11.3; `roomStateCommitment` hashes the full set, so
+re-deriving from role alone would silently drop a grant and diverge a compacted
+device's state root from an uncompacted one).  `engine.commitSnapshot()` seals the
+snapshot body (the full state PLUS the structural metadata an importer needs — every
+covered op's lamport, the covered heads, the Lamport ceiling, the seq floor) under
+the epoch key, content-addresses it, and authors an admin `snapshot.commit` op
+carrying the state root + covered heads + that body CID; it then PRUNES only the
+structurally-accepted covered prefix (a crypto-opened-but-structurally-invalid op is
+never pruned — it resolves when its dependency arrives).  A compacted engine stays
+**byte-identical to an uncompacted device that folded the same ops**, keeps authored
+Lamport/seq monotonic across the prune, and reuses every covered op's RETAINED lamport
+for the §14.3.1 causality check (so a too-low-lamport op against a pruned parent is
+rejected identically on both — no divergence).  A device FORK (two valid envelopes,
+same `op_id`, different content) is resolved deterministically (keep the bytewise-
+smaller signature; the loser is `duplicate_op_id` evidence), so peers converge
+regardless of arrival order.  The head announcement is base-aware (a compacted room
+still advertises its retained frontier, §15.6).  The apps/web client PERSISTS the
+SEALED base: `PrivateRoomSession` compacts on the §25.6 cadence (`maybeCompact` →
+`exportBase`), persists the sealed base into the session, and DROPS the covered
+envelopes from IndexedDB; on reload the engine opens the sealed base under the held
+epoch key and re-verifies ONLY the post-snapshot envelopes.  Crucially, compaction is
+CROSS-DEVICE-CORRECT: `exportArchive` ships the sealed snapshot body, and a fresh
+device's `importArchive` bootstraps from it under verify-before-use — adopting the
+base ONLY if the in-band commit verifies (signed by an `admin` in the body, root
+matches the body, CID matches the bytes); a tampered snapshot is NOT adopted (§8.3).
+Proven by node convergence/lamport/fork tests, a CID-flip tamper test, an
+export→import-on-a-fresh-device test, and a jsdom compact→prune→reload round-trip.
 
 The **WS-S.7 apps/web client is shipped** (`apps/web/src/private-p2p/`): the
 IndexedDb `PrivateRoomStorage` adapter (a dedicated, isolated `licio_private_p2p`

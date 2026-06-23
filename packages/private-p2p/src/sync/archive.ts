@@ -20,6 +20,7 @@
 import { z } from 'zod';
 import { type CanonicalDecodeLimits, decodeCanonical } from '../crypto/canonical.js';
 import { canonicalizeRecord } from '../crypto/record-encoding.js';
+import { type SealedSnapshotWire, sealedSnapshotSchema } from '../reducer/snapshot-seal.js';
 import { type OpIntakeContext, type OpIntakeRejection, openOp } from '../reducer/validate-op.js';
 import { base64UrlSchema, timeBucketSchema } from '../schemas/common.js';
 import {
@@ -50,6 +51,10 @@ export const privateBlockArchiveSchema = z
     room_id_hash: base64UrlSchema,
     created_at_bucket: timeBucketSchema,
     envelopes: z.array(privateEncryptedEnvelopeSchema).min(1).max(PRIVATE_ARCHIVE_MAX_ENVELOPES),
+    /** §14.5 — for a COMPACTED room, the sealed snapshot body the in-band
+     *  `snapshot.commit` (among `envelopes`) references, so an importer that lacks
+     *  the pruned ops can bootstrap (verify-before-use against the commit). */
+    sealed_snapshot: sealedSnapshotSchema.optional(),
   })
   .strict();
 export type PrivateBlockArchive = z.infer<typeof privateBlockArchiveSchema>;
@@ -59,6 +64,7 @@ export interface BuildArchiveParams {
   readonly roomIdHash: string;
   readonly createdAtBucket: string;
   readonly envelopes: readonly PrivateEncryptedEnvelope[];
+  readonly sealedSnapshot?: SealedSnapshotWire;
 }
 
 /**
@@ -78,6 +84,7 @@ export function buildBlockArchive(params: BuildArchiveParams): PrivateBlockArchi
     room_id_hash: params.roomIdHash,
     created_at_bucket: params.createdAtBucket,
     envelopes: params.envelopes,
+    ...(params.sealedSnapshot ? { sealed_snapshot: params.sealedSnapshot } : {}),
   });
 }
 
