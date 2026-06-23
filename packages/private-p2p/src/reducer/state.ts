@@ -14,6 +14,14 @@ export interface MemberState {
   role: PrivateRole;
   capabilities: Set<PrivateCapability>;
   removed: boolean;
+  /**
+   * A NON-cryptographic, admin-chosen display name carried in the signed
+   * `member.add` op (§12.3 / §14.3.3).  It converges across devices (it folds
+   * from the same signed op everywhere) but NEVER participates in authority —
+   * capability checks read `role`/`capabilities` keyed by `memberId` only.
+   * `undefined` when no name was provided (e.g. the founder genesis).
+   */
+  displayName?: string;
 }
 
 export interface DeviceState {
@@ -171,6 +179,7 @@ export function roomStateCommitment(state: RoomReducerState): Uint8Array {
       role: m.role,
       capabilities: sortedStrings(m.capabilities),
       removed: m.removed,
+      displayName: m.displayName ?? null,
     })),
     devices: sortedEntries(state.devices).map(([id, d]) => ({
       deviceId: id,

@@ -38,4 +38,33 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- WS-R.15.4c Nearby Connections courier (OFFLINE_SPEC §22.5).  The radios are
+         off by default and gated by the §22.5 controls (WS-R.15.4e); these declarations
+         only make the runtime requests possible. -->
+
+    <!-- Modern (API 31+) Bluetooth runtime set; neverForLocation so no location is inferred. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <!-- API 33+ proximate Wi-Fi (Nearby Connections), neverForLocation. -->
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
+
+    <!-- Legacy (API <= 30) Bluetooth + the Wi-Fi/Wi-Fi-Direct state the transport needs. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+
+    <!-- Nearby/Wi-Fi scanning on pre-33 still requires fine location (capped so a modern
+         device never grants location for what is purely proximity discovery). -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"
+        android:maxSdkVersion="32" />
 </manifest>

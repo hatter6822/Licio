@@ -59,3 +59,31 @@ export function forkDetectionContact(result: SimResult, forkGroup: string): numb
     .map((f) => f.contactIndex);
   return hits.length === 0 ? null : Math.min(...hits);
 }
+
+/**
+ * Revocation propagation (WS-R.15.4f): the contact index by which EVERY node in
+ * `nodeIds` holds the revocation `cid`, or `null` if some node never does.  This is the
+ * distinct control flow from a fork — a fork must be DETECTED, a revocation must be HELD
+ * by all — and it is measured purely from the arrival trace + the final `held` set.
+ *
+ * A node that STARTED holding the revocation (its origin) contributes contact index `0`
+ * (it held it before any contact mattered).  A node that received it contributes the
+ * contact index of its FIRST accepted arrival of that cid.  The metric is the maximum of
+ * those per-node indices (the slowest node gates "all nodes hold it"); `null` if any
+ * node in `nodeIds` is absent from the final accepted `held` set.
+ */
+export function revocationPropagationContact(
+  result: SimResult,
+  cid: string,
+  nodeIds: readonly string[],
+): number | null {
+  let slowest = 0;
+  for (const id of nodeIds) {
+    if (!(result.held[id] ?? []).includes(cid)) return null; // never reached this node
+    const first = result.arrivals.find((a) => a.node === id && a.cid === cid && a.accepted);
+    // No accepted arrival ⇒ the node held it from the start (origin): contact index 0.
+    const at = first ? first.contactIndex : 0;
+    if (at > slowest) slowest = at;
+  }
+  return slowest;
+}

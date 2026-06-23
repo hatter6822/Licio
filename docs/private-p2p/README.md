@@ -186,28 +186,75 @@ with a composer.  Both are jsdom + axe tested; the production build confirms the
 crypto plane stays a lazy chunk (initial JS 144.5 KB, the ~100 KB crypto core
 excluded via the `private-p2p` `manualChunks`).
 
+The WS-S.7.4 **membership + verification surfaces** are also shipped (behind the
+room view's "Manage members & verify devices" toggle, all jsdom + axe tested):
+- The member list and comment author lines render the §12.3 / §14.3.3
+  NON-cryptographic `displayName` clearly subordinate to the cryptographic member
+  id (`Alice · a1b2c3d4…`), never using the name for any logic; they fall back to
+  the short id when no name is set.
+- `SafetyNumberPanel` (the §15.5 / §20.4 SAS) computes the symmetric safety number
+  for the local ⇄ a chosen member's device (over the long-term signing keys, via
+  `PrivateRoomSession.computeMemberSafetyNumber` → the shipped `computeSafetyNumber`
+  crypto — never reimplemented), renders the 12 five-digit groups for out-of-band
+  comparison, and persists a per-device "verified" toggle LOCALLY (a localStorage
+  set keyed by room + device, sent nowhere, conferring no authority).  The copy
+  makes the trusted-channel requirement explicit.
+- `InvitePanel` (admin) seals a §10.3 invite to an invitee key and renders the
+  URL-fragment-only link to copy (the server never sees it) + the invite record
+  to keep; `JoinPanel` covers both the joiner side (`PrivateRoomSession.prepareJoinRequest`
+  → a recipient key to share + a join-request blob from a pasted invite) and the
+  admin admit side (`admitJoinRequest`: `verifyJoinRequest` → `inviteDevice` (MLS
+  Add) → `buildMemberAddOp` carrying `proposed_display_name`, persisting the
+  advanced group + new epoch keys), surfacing every rejection
+  (expired/exhausted/invite-id/proof/key-package) honestly.
+
+These panels are the COPY-PASTE membership path (the §15.5 live-transport delivery
+of the MLS Welcome that finishes a remote joiner's session is the device-session
+slice below).
+
 ## Remaining work
 
 The single-device room (create / author / read / persist / reload) is complete
-and verified **offline**.  What remains is partitioned by what it needs:
+and verified **offline**, and the **multi-device convergence plane is now shipped
+as a pure, transport-independent core**:
 
-**On-device (network / radio) session — the live transport:**
-- The live WebRTC block-exchange carrier (WS-S.4.3) consuming the shipped
-  §15.4/§15.5/§15.6 signaling/handshake/head-sync cores; the §26.4 ICE/relay
-  privacy posture review.
-- Two-browser convergence E2E (Playwright); the §15.4 live signaling over the
-  shipped server-blind rendezvous endpoint.
-- Membership DELIVERY: the invite→join→admit→welcome blobs (the crypto is shipped
-  + tested in `engine/invite.ts` + `engine/room-lifecycle.ts`) carried over the
-  transport (or a copy-paste UI); syncing an existing room's content wants the
-  transport.
+- **The §15.7 op-exchange wire protocol** (`sync/op-exchange.ts`): the
+  `head_announcement` / `op_request` / `op_response` message union + the canonical
+  codec, plus `PrivateRoomEngine.missingDependencies()` (the frontier-first ancestor
+  walk) and `serveOps()` (serve held envelopes by op id).  A fresh peer **converges
+  to byte-identical reduced state by walking the DAG** through head/want/serve —
+  proven in `room-engine.test.ts` end-to-end through the wire codec.
+- **The event-driven `PrivateSyncSession`** (`apps/web/src/private-p2p/sync-session.ts`):
+  drives announce → want → serve → ingest → re-announce-on-progress over an abstract
+  post-handshake `PeerChannel`, terminating once both peers hold the union; tested for
+  bidirectional convergence, request chunking, and fail-closed decode.
+- **The §15.5 safety number (SAS)** (`crypto/safety-number.ts`) + **the member
+  display-name mapping** (the `member.add` op + reduced `MemberState`, authority-
+  invariant, §14.3.3-converged) — both shipped + tested, with the WS-S.7.4 verify/
+  invite/join UI on top.
+- **Real WebRTC works on the host:** the LCAP `connectWebrtc` live establishment is
+  shipped (`@licio/lcap-p2p`, RTCPeerConnection offer/answer/ICE over the sealed
+  rendezvous), and a real-Chromium-WebRTC datachannel loopback E2E
+  (`apps/web/e2e/webrtc-loopback.spec.ts`) confirms the datachannel + byte path.
 
-**Follow-ups (offline, not transport-blocked):**
-- A member display-name mapping (the reduced state keys members by id today; only
-  meaningful with multiple members, which is transport-gated in practice).
+**What remains transport-gated (the live device-session slice):**
+- The private-p2p **live RTC carrier** that PRODUCES the `PeerChannel` — wiring a real
+  `RTCPeerConnection` to the shipped §15.2/§15.3 blind rendezvous + §15.4 encrypted
+  signaling + §15.5 membership handshake cores (the private plane keeps its OWN driver,
+  never sharing the LCAP carrier — different crypto suites by doctrine).  The
+  convergence math, the orchestration, and the real-WebRTC capability are all
+  independently proven; only this glue + the **full two-browser create→invite→join→
+  connect→converge E2E** remain.
+- Live MLS Welcome delivery that constructs a remote joiner's `PrivateRoomSession`
+  (the admin side — verify + MLS Add + signed `member.add` — runs today via the
+  copy-paste `InvitePanel`/`JoinPanel`).
 
 **Server-coupled / later:**
-- WS-S.9 server→private migration (the server-export half needs the server/DB).
+- WS-S.9 server→private migration: the §24 copy SSOT + the `planMigration` decision
+  core (Fresh/Selected/Full/Redacted + honest leakage disclosures) are **shipped**
+  (`@licio/shared` + `engine/migration.ts`); the server-export half + the wizard UI
+  (which reuses the existing `postStory`/`postComment` authoring over `planMigration`)
+  remain.
 - WS-S.10 update channel (depends on WS-O).
 
 See `docs/private-p2p/SECURITY-REVIEW.md` (WS-S.11) for the threat model +

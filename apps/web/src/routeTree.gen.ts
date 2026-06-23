@@ -32,6 +32,7 @@ import { Route as ProfileSafetyRouteImport } from './routes/profile_.safety'
 import { Route as ProfilePrivacyRouteImport } from './routes/profile_.privacy'
 import { Route as ProfileOfflineRouteImport } from './routes/profile_.offline'
 import { Route as ProfileNoticesRouteImport } from './routes/profile_.notices'
+import { Route as ProfileModeRouteImport } from './routes/profile_.mode'
 import { Route as PrivateRoomIdRouteImport } from './routes/private_.$roomId'
 import { Route as StoriesStoryIdCommentsRouteImport } from './routes/stories.$storyId_.comments'
 import { Route as RoomsRoomIdGovernanceRouteImport } from './routes/rooms_.$roomId_.governance'
@@ -141,6 +142,11 @@ const ProfileNoticesRoute = ProfileNoticesRouteImport.update({
   path: '/profile/notices',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProfileModeRoute = ProfileModeRouteImport.update({
+  id: '/profile_/mode',
+  path: '/profile/mode',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const PrivateRoomIdRoute = PrivateRoomIdRouteImport.update({
   id: '/private_/$roomId',
   path: '/private/$roomId',
@@ -168,6 +174,7 @@ export interface FileRoutesByFullPath {
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
   '/private/$roomId': typeof PrivateRoomIdRoute
+  '/profile/mode': typeof ProfileModeRoute
   '/profile/notices': typeof ProfileNoticesRoute
   '/profile/offline': typeof ProfileOfflineRoute
   '/profile/privacy': typeof ProfilePrivacyRoute
@@ -194,6 +201,7 @@ export interface FileRoutesByTo {
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
   '/private/$roomId': typeof PrivateRoomIdRoute
+  '/profile/mode': typeof ProfileModeRoute
   '/profile/notices': typeof ProfileNoticesRoute
   '/profile/offline': typeof ProfileOfflineRoute
   '/profile/privacy': typeof ProfilePrivacyRoute
@@ -221,6 +229,7 @@ export interface FileRoutesById {
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
   '/private_/$roomId': typeof PrivateRoomIdRoute
+  '/profile_/mode': typeof ProfileModeRoute
   '/profile_/notices': typeof ProfileNoticesRoute
   '/profile_/offline': typeof ProfileOfflineRoute
   '/profile_/privacy': typeof ProfilePrivacyRoute
@@ -249,6 +258,7 @@ export interface FileRouteTypes {
     | '/submit'
     | '/support'
     | '/private/$roomId'
+    | '/profile/mode'
     | '/profile/notices'
     | '/profile/offline'
     | '/profile/privacy'
@@ -275,6 +285,7 @@ export interface FileRouteTypes {
     | '/submit'
     | '/support'
     | '/private/$roomId'
+    | '/profile/mode'
     | '/profile/notices'
     | '/profile/offline'
     | '/profile/privacy'
@@ -301,6 +312,7 @@ export interface FileRouteTypes {
     | '/submit'
     | '/support'
     | '/private_/$roomId'
+    | '/profile_/mode'
     | '/profile_/notices'
     | '/profile_/offline'
     | '/profile_/privacy'
@@ -328,6 +340,7 @@ export interface RootRouteChildren {
   SubmitRoute: typeof SubmitRoute
   SupportRoute: typeof SupportRoute
   PrivateRoomIdRoute: typeof PrivateRoomIdRoute
+  ProfileModeRoute: typeof ProfileModeRoute
   ProfileNoticesRoute: typeof ProfileNoticesRoute
   ProfileOfflineRoute: typeof ProfileOfflineRoute
   ProfilePrivacyRoute: typeof ProfilePrivacyRoute
@@ -493,6 +506,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProfileNoticesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/profile_/mode': {
+      id: '/profile_/mode'
+      path: '/profile/mode'
+      fullPath: '/profile/mode'
+      preLoaderRoute: typeof ProfileModeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/private_/$roomId': {
       id: '/private_/$roomId'
       path: '/private/$roomId'
@@ -528,6 +548,7 @@ const rootRouteChildren: RootRouteChildren = {
   SubmitRoute: SubmitRoute,
   SupportRoute: SupportRoute,
   PrivateRoomIdRoute: PrivateRoomIdRoute,
+  ProfileModeRoute: ProfileModeRoute,
   ProfileNoticesRoute: ProfileNoticesRoute,
   ProfileOfflineRoute: ProfileOfflineRoute,
   ProfilePrivacyRoute: ProfilePrivacyRoute,

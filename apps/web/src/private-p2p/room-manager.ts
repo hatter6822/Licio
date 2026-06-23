@@ -11,10 +11,16 @@
 // the UI drives.
 
 import type {
+  IngestReport,
+  InviteSecret,
+  JoinRequest,
+  JoinRequestVerdict,
+  PrivateEncryptedEnvelope,
   PrivateOpBodyInput,
   PrivateRoomEngine,
   PrivateRoomEngineParams,
   RoomReducerState,
+  SafetyNumber,
 } from '@licio/private-p2p';
 import {
   deleteRoomSession,
@@ -25,6 +31,7 @@ import {
   type StoredRoomSession,
 } from './session-store.js';
 import { IndexedDbPrivateRoomStorage } from './storage.js';
+import { type PeerChannel, PrivateSyncSession, type SyncCodec } from './sync-session.js';
 
 type P2pModule = typeof import('@licio/private-p2p');
 
@@ -74,6 +81,20 @@ function coarseBucket(date = new Date()): string {
   return date.toISOString().slice(0, 13);
 }
 
+/** The §10.3 HPKE invite public key (base64url) from the opaque stored manifest;
+ *  an invitee seals the room secret to it.  `undefined` if the manifest is the
+ *  display-only fallback (a join cannot be minted without it). */
+function manifestRoomPublicKey(manifest: unknown): string | undefined {
+  if (manifest && typeof manifest === 'object' && 'crypto' in manifest) {
+    const crypto = (manifest as { crypto?: unknown }).crypto;
+    if (crypto && typeof crypto === 'object' && 'room_public_key' in crypto) {
+      const key = (crypto as { room_public_key?: unknown }).room_public_key;
+      if (typeof key === 'string') return key;
+    }
+  }
+  return undefined;
+}
+
 /** §25.6 default compaction cadence: compact after this many post-snapshot ops
  *  (mirrors the engine `SNAPSHOT_CADENCE.everyOps`; overridable for tests). */
 export const DEFAULT_COMPACT_EVERY_OPS = 1000;
@@ -119,6 +140,40 @@ export class PrivateRoomSession {
   /** The current reduced room state (members, stories, contributions, …). */
   state(): RoomReducerState {
     return this.engine.state();
+  }
+
+  /**
+   * Begin §15.6/§15.7 sync over an ALREADY-ESTABLISHED, post-handshake duplex
+   * `PeerChannel` (a live WebRTC channel from `connectPrivatePeer`, an offline-archive
+   * relay, or a test loopback).  Drives announce → want → serve → ingest →
+   * re-announce-on-progress to convergence; every served envelope passes the engine's
+   * own `openOp` verify (§8.3 — the wire confers no trust).  Returns the live session
+   * (call `.close()` to stop).  The membership-proving handshake + the channel itself
+   * are the carrier's concern (`connectPrivatePeer`); this is the engine driver.
+   */
+  connectPeer(
+    channel: PeerChannel,
+    options?: {
+      readonly onProgress?: (acceptedOpIds: readonly string[]) => void;
+      readonly onError?: (error: unknown) => void;
+    },
+  ): PrivateSyncSession {
+    const codec: SyncCodec = {
+      encodeSyncMessage: this.p2p.encodeSyncMessage,
+      decodeSyncMessage: this.p2p.decodeSyncMessage,
+    };
+    const sync = new PrivateSyncSession(this.engine, channel, codec, options ?? {});
+    sync.start();
+    return sync;
+  }
+
+  /**
+   * Ingest envelopes delivered out-of-band (a peer push, an imported archive) through
+   * the engine's verify-before-use path (§8.3).  Returns what was accepted vs.
+   * quarantined so a UI can surface sync/quarantine status.
+   */
+  async ingest(envelopes: readonly PrivateEncryptedEnvelope[]): Promise<IngestReport> {
+    return this.engine.ingest(envelopes);
   }
 
   /** Found a new private room, persist its session, and author the genesis op. */
@@ -233,6 +288,34 @@ export class PrivateRoomSession {
     await deleteRoomSession(roomId);
   }
 
+  /** Parse + validate a pasted §10.3 invite JSON through the schema (fail-closed:
+   *  returns `null` on malformed JSON or a non-conforming payload). */
+  static async parseInvite(json: string): Promise<InviteSecret | null> {
+    const p2p = await loadP2p();
+    let value: unknown;
+    try {
+      value = JSON.parse(json);
+    } catch {
+      return null;
+    }
+    const result = p2p.inviteSecretSchema.safeParse(value);
+    return result.success ? result.data : null;
+  }
+
+  /** Parse + validate a pasted §12.3 join-request JSON through the schema
+   *  (fail-closed: `null` on malformed JSON or a non-conforming payload). */
+  static async parseJoinRequest(json: string): Promise<JoinRequest | null> {
+    const p2p = await loadP2p();
+    let value: unknown;
+    try {
+      value = JSON.parse(json);
+    } catch {
+      return null;
+    }
+    const result = p2p.joinRequestSchema.safeParse(value);
+    return result.success ? result.data : null;
+  }
+
   private currentEpoch(): StoredEpochKeys {
     let latest = this.session.epochs[0];
     for (const entry of this.session.epochs) {
@@ -333,5 +416,180 @@ export class PrivateRoomSession {
       client_draft_id: globalThis.crypto.randomUUID(),
     });
     return contributionId;
+  }
+
+  // --- §10.3 invite / §12.3 join / §15.5 safety-number (WS-S.7.4) -------------
+
+  /**
+   * Mint a §10.3 invite and HPKE-seal it to the INVITEE's public key (which the
+   * admin learns out-of-band — the JoinPanel shows it).  Returns BOTH the
+   * `InviteSecret` (the admin keeps it to verify the resulting join request) and
+   * the URL FRAGMENT to deliver out-of-band; the secret lives only in the
+   * fragment, so an ordinary HTTP request never transmits it to a server.
+   * Defaults to a single-use invite expiring in 24h granting `member`.
+   */
+  async createInvite(params: {
+    /** The invitee's HPKE recipient public key (base64url), learned out-of-band. */
+    readonly inviteePublicKey: string;
+    readonly grantedRole?: InviteSecret['granted_role'];
+    readonly expiresAt?: string;
+    readonly maxUses?: number;
+    /** The base URL the fragment hangs off (default: the public join path). */
+    readonly baseUrl?: string;
+  }): Promise<{ invite: InviteSecret; inviteUrl: string }> {
+    const roomPublicKey = manifestRoomPublicKey(this.session.manifest);
+    if (roomPublicKey === undefined) {
+      throw new Error('createInvite: the room manifest carries no invite public key');
+    }
+    const expiresAt = params.expiresAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const invite = this.p2p.createRoomInvite({
+      roomPublicKey,
+      grantedRole: params.grantedRole ?? 'member',
+      expiresAt,
+      ...(params.maxUses === undefined ? {} : { maxUses: params.maxUses }),
+    });
+    const sealed = await this.p2p.sealInvite(
+      this.p2p.fromBase64Url(params.inviteePublicKey),
+      invite,
+    );
+    const inviteUrl = this.p2p.buildInviteUrl(
+      params.baseUrl ?? 'https://licio.app/private/join',
+      sealed,
+    );
+    return { invite, inviteUrl };
+  }
+
+  /**
+   * The invitee side (a device that is NOT yet in a room, so this is static):
+   * generate a fresh HPKE recipient key pair + an MLS KeyPackage, then — given the
+   * sealed invite fragment — open it and build the §12.3 `JoinRequest` blob to
+   * hand back to an admin.  Returns the joiner's HPKE public key (to share with
+   * the admin so they can seal the invite) and a `complete(sealedInvite)` step that
+   * opens the invite (fail-closed, surfacing the `HpkeError.reason`) and produces
+   * the request blob.  The MLS Welcome delivery that finishes the join is the
+   * device-session slice (tracked in docs/private-p2p/README.md).
+   */
+  static async prepareJoinRequest(params: {
+    readonly proposedDisplayName: string;
+    /** A coarse time bucket (never an exact timestamp). */
+    readonly requestedAtBucket?: string;
+  }): Promise<{
+    readonly inviteePublicKey: string;
+    complete(sealedInvite: string): Promise<{ invite: InviteSecret; request: JoinRequest }>;
+  }> {
+    const p2p = await loadP2p();
+    const hpke = await p2p.generateRecipientKeyPair();
+    const keyPackage = await p2p.generateMemberKeyPackage(p2p.utf8(globalThis.crypto.randomUUID()));
+    const inviteePublicKey = p2p.toBase64Url(hpke.publicKey);
+    const requestedAtBucket = params.requestedAtBucket ?? coarseBucket();
+    return {
+      inviteePublicKey,
+      async complete(sealedInvite: string) {
+        const invite = await p2p.openInvite(hpke.privateKey, hpke.publicKey, sealedInvite);
+        const request = await p2p.buildJoinRequest({
+          invite,
+          keyPackage: keyPackage.publicPackage,
+          proposedDisplayName: params.proposedDisplayName,
+          requestedAtBucket,
+        });
+        return { invite, request };
+      },
+    };
+  }
+
+  /**
+   * Verify a pasted §12.3 join request against the invite this admin minted, then
+   * admit the device (the MLS Add → new epoch), author + apply the signed
+   * `member.add` op (carrying `proposed_display_name` into the converged member
+   * display name), persist the advanced group + the new epoch keys, and return the
+   * verdict.  On any rejection (expired/exhausted/invite-id/proof/key-package) the
+   * verdict's `reason` is surfaced verbatim and NO state changes.
+   */
+  async admitJoinRequest(
+    invite: InviteSecret,
+    request: JoinRequest,
+    options?: { readonly usesSoFar?: number; readonly now?: Date },
+  ): Promise<JoinRequestVerdict> {
+    const verdict = await this.p2p.verifyJoinRequest(invite, request, {
+      now: options?.now ?? new Date(),
+      ...(options?.usesSoFar === undefined ? {} : { usesSoFar: options.usesSoFar }),
+    });
+    if (!verdict.ok) return verdict;
+
+    const group = await this.p2p.deserializeGroupState(this.session.mlsGroupState);
+    const invited = await this.p2p.inviteDevice(group, verdict.keyPackage);
+    const newEpochState = await this.p2p.deriveEpochState(
+      invited.group,
+      this.session.roomIdCommitment,
+      this.session.manifestCommitment,
+    );
+    const epoch = Number(newEpochState.epoch);
+    this.engine.addEpochKeys(epoch, this.p2p.heldKeysOf(newEpochState));
+
+    const newMemberId = globalThis.crypto.randomUUID();
+    const newDeviceId = globalThis.crypto.randomUUID();
+    const { op, sealParams } = await this.p2p.buildMemberAddOp(
+      {
+        roomId: this.session.roomId,
+        roomIdCommitment: this.session.roomIdCommitment,
+        epochState: newEpochState,
+        author: {
+          memberId: this.session.memberId,
+          deviceId: this.session.deviceId,
+          signingKey: this.session.signingPrivateKey,
+          seq: this.engine.nextAuthorSeq(this.session.deviceId),
+        },
+        opId: globalThis.crypto.randomUUID(),
+        parents: this.engine.heads(),
+        lamport: this.engine.nextLamport(),
+      },
+      {
+        memberId: newMemberId,
+        deviceId: newDeviceId,
+        // The signed `member.add` records the joining device's LONG-TERM keys: its
+        // Ed25519 signing key (the MLS leaf's signature key) and its HPKE init key —
+        // both authenticated by the verified KeyPackage, so a relay cannot inject a
+        // different device key.
+        signingPublicKey: this.p2p.toBase64Url(verdict.keyPackage.leafNode.signaturePublicKey),
+        hpkePublicKey: this.p2p.toBase64Url(verdict.keyPackage.initKey),
+        mlsKeyPackage: request.recipient_device_key_package,
+        role: verdict.grantedRole,
+        displayName: request.proposed_display_name,
+      },
+    );
+    await this.engine.applyLocalOp(op, sealParams);
+
+    const epochs = [
+      ...this.session.epochs.filter((e) => e.epoch !== epoch),
+      {
+        epoch,
+        roomEpochSecret: newEpochState.roomEpochSecret,
+        contentWrapKey: newEpochState.keys.contentWrapKey,
+      },
+    ];
+    this.session = {
+      ...this.session,
+      mlsGroupState: this.p2p.serializeGroupState(invited.group),
+      epochs,
+    };
+    await putRoomSession(this.session);
+    return verdict;
+  }
+
+  /**
+   * Compute the §15.5 / §20.4 safety number (SAS) for the local device ⇄ another
+   * member's device, for out-of-band comparison over a TRUSTED channel.  Reads
+   * each device's LONG-TERM signing public key from the reduced state (never the
+   * ephemeral session key).  Returns `null` if `otherDeviceId` is unknown.
+   */
+  async computeMemberSafetyNumber(otherDeviceId: string): Promise<SafetyNumber | null> {
+    const state = this.engine.state();
+    const remote = state.devices.get(otherDeviceId);
+    if (!remote || remote.removed) return null;
+    return this.p2p.computeSafetyNumber({
+      roomIdCommitment: this.session.roomIdCommitment,
+      local: { deviceId: this.session.deviceId, signingPublicKey: this.session.signingPublicKey },
+      remote: { deviceId: remote.deviceId, signingPublicKey: remote.signingPublicKey },
+    });
   }
 }

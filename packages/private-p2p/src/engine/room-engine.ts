@@ -55,6 +55,7 @@ import {
   buildHeadAnnouncement,
   computeHeads,
   type HeadAnnouncement,
+  missingParents,
   wantedHeads,
 } from '../sync/head-sync.js';
 
@@ -444,6 +445,42 @@ export class PrivateRoomEngine {
    *  (the first §15.7 reconciliation step; fetched heads then feed `ingest`). */
   wantedFrom(announcement: HeadAnnouncement): string[] {
     return wantedHeads(new Set(this.acceptedOps.keys()), announcement);
+  }
+
+  /**
+   * The §15.7 frontier-first ancestor walk: op ids referenced as a parent by an
+   * OPENED op but NOT yet held (base-aware).  After ingesting a batch of heads, a
+   * structurally-invalid (parent-missing) op is RETAINED in `acceptedOps`, so its
+   * unmet parents surface here; the sync session requests them, ingests, and
+   * recomputes until this is empty — at which point the engine holds the causal
+   * closure and the retained ops fold into state.  Deterministic (sorted, deduped).
+   */
+  missingDependencies(): string[] {
+    const known = new Set<string>(this.acceptedOps.keys());
+    for (const id of this.coveredOpLamports.keys()) known.add(id);
+    const views = [...this.acceptedOps.values()].map((op) => ({
+      op_id: op.op_id,
+      parents: op.parents,
+    }));
+    return missingParents(known, views);
+  }
+
+  /**
+   * Serve the §15.7 op-exchange request: the WINNING envelopes the engine holds for
+   * the requested op ids (a peer fetches these, then runs them through its OWN
+   * `ingest` — storage confers no trust, §8.3).  Reads the persisted envelopes (the
+   * fork-resolution winner is the one stored), so a covered/compacted op the engine
+   * no longer stores is simply not served (the requester gets it via the snapshot
+   * base in an archive).  Bounded by the request set.
+   */
+  async serveOps(opIds: readonly string[]): Promise<PrivateEncryptedEnvelope[]> {
+    if (opIds.length === 0) return [];
+    const want = new Set(opIds);
+    const out: PrivateEncryptedEnvelope[] = [];
+    for (const { opId, envelope } of await this.storage.listEnvelopes()) {
+      if (want.has(opId)) out.push(envelope);
+    }
+    return out;
   }
 
   // --- §15.9 offline archive (export / import) ------------------------------

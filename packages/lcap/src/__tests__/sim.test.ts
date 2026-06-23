@@ -13,10 +13,14 @@ import {
   allMediaFlood,
   equivocationFork,
   forkDetectionContact,
+  maliciousCourier,
   manualFerry,
   mediaBeatingP0,
   quarantineRatio,
   quarantineThenClear,
+  radioFerry,
+  revocationPropagation,
+  revocationPropagationContact,
   run,
   transportIndependence,
   withholdingRelay,
@@ -113,5 +117,70 @@ describe('quarantine then clear (§14.7)', () => {
     expect(allHold(result, ['B'], ['lcapr_parent', 'lcapr_child'])).toBe(true);
     expect(result.quarantined['B']).toEqual([]); // cleared, not left quarantined
     expect(quarantineRatio(result)).toBeGreaterThan(0); // it WAS quarantined at first
+  });
+});
+
+describe('radio ferry (§32.3 — intermittent proximity + asymmetric bandwidth, WS-R.15.4f)', () => {
+  it('is byte-reproducible despite the proximity gate', () => {
+    const a = run(2024, radioFerry());
+    const b = run(2024, radioFerry());
+    expect(b.traceDigest).toBe(a.traceDigest);
+    expect(b.arrivals).toEqual(a.arrivals);
+  });
+
+  it('never lets media beat the C0 over the narrow ferry uplink', () => {
+    // Across many seeds (the proximity gate flips per seed) the C0-never-starved
+    // invariant holds: the asymmetric uplink fits only the P0 first, never media first.
+    for (const seed of [1, 2, 3, 7, 42, 99, 1000, 2024]) {
+      const result = run(seed, radioFerry());
+      expect(mediaBeatingP0(result)).toEqual([]);
+    }
+  });
+
+  it('ferries the P0 to both hops within the scheduled proximity windows', () => {
+    // With 8 windows per hop at p=0.7 the chance both hops miss every window is ~3e-5;
+    // a fixed seed makes the assertion deterministic.
+    const result = run(7, radioFerry());
+    expect(allHold(result, ['B', 'C'], ['lcapr_rf_p0'])).toBe(true);
+    expect(mediaBeatingP0(result)).toEqual([]);
+  });
+});
+
+describe('malicious courier (§32.3 adversary — withhold + flood + equivocate, WS-R.15.4f)', () => {
+  it('detects the fork within bounded contacts even from one courier', () => {
+    const result = run(13, maliciousCourier());
+    const detected = forkDetectionContact(result, 'author:mc');
+    expect(detected).not.toBeNull();
+    expect(detected).toBeLessThanOrEqual(0); // the single contact has index 0
+    expect(result.forksDetected.some((f) => f.node === 'C')).toBe(true);
+  });
+
+  it('quarantines the flooded orphan rather than accepting it', () => {
+    const result = run(13, maliciousCourier());
+    // The courier floods the child ahead of its parent (which it does not hold) ⇒ orphan.
+    expect(allHold(result, ['C'], ['lcapr_mc_child'])).toBe(false);
+    expect(result.quarantined['C']).toContain('lcapr_mc_child');
+    // …yet the control objects it cannot suppress DO arrive.
+    expect(allHold(result, ['C'], ['lcapr_mc_p0'])).toBe(true);
+    // Selective withholding: `extra` (an even-indexed non-control want) was dropped.
+    expect(allHold(result, ['C'], ['lcapr_mc_extra'])).toBe(false);
+  });
+});
+
+describe('revocation propagation (§32.3 — control reaches ALL nodes, WS-R.15.4f)', () => {
+  it('a P0/C0 revocation reaches every node within bounded contacts', () => {
+    const result = run(8, revocationPropagation());
+    const nodes = ['A', 'B', 'C', 'D'];
+    expect(allHold(result, nodes, ['lcapr_revoke_dev9'])).toBe(true);
+    const at = revocationPropagationContact(result, 'lcapr_revoke_dev9', nodes);
+    expect(at).not.toBeNull();
+    // Three ferry hops (contact indices 0,1,2) suffice; bound K = 2 (the last hop).
+    expect(at).toBeLessThanOrEqual(2);
+  });
+
+  it('reports null when a node never receives the revocation', () => {
+    const result = run(8, revocationPropagation());
+    // 'Z' is not in the scenario, so it never holds the revocation.
+    expect(revocationPropagationContact(result, 'lcapr_revoke_dev9', ['A', 'Z'])).toBeNull();
   });
 });

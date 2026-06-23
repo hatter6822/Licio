@@ -64,6 +64,8 @@ function applyMemberAdd(state: RoomReducerState, body: OpOf<'member.add'>, epoch
       role: body.granted_role,
       capabilities: capabilitiesForRole(body.granted_role),
       removed: false,
+      // Non-cryptographic display name (never affects authority, §11.4).
+      ...(body.display_name !== undefined ? { displayName: body.display_name } : {}),
     });
   } else if (existing.removed) {
     // Re-admit a previously-removed member (e.g. the §12.6.1 threshold-recovery
@@ -73,6 +75,7 @@ function applyMemberAdd(state: RoomReducerState, body: OpOf<'member.add'>, epoch
     existing.removed = false;
     existing.role = body.granted_role;
     existing.capabilities = capabilitiesForRole(body.granted_role);
+    if (body.display_name !== undefined) existing.displayName = body.display_name;
   }
   // An existing, non-removed member is left untouched (idempotent — preserving any
   // role.grant/role.revoke deltas applied since the original add).

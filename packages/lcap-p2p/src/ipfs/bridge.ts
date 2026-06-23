@@ -15,6 +15,12 @@
 
 import { verifyCid } from '@licio/lcap';
 import { ipfsCidForBlockCid } from './cid-map.js';
+import {
+  assertPublicGatewayEligible,
+  type PublicGatewayEligibilityInput,
+  type PublicGatewayRejectReason,
+} from './public-gateway-guard.js';
+import { type TakedownOracle, takedownHaltsPublish } from './takedown.js';
 
 export type BlockVisibility = 'public' | 'in_room' | 'private';
 
@@ -50,6 +56,14 @@ export interface IpfsBridgeConfig {
   readonly pinningUrl?: string;
   /** Injectable fetch (defaults to the platform `fetch`); tests pass a fake. */
   readonly fetchFn?: typeof fetch;
+  /**
+   * The Gate-19 publish-time takedown re-check seam.  When set, `publishBlock` consults it
+   * AT PUBLISH TIME (after the static decision, before any network/pin call) so a stale
+   * `BlockPublishInput.takenDown` cannot bypass a takedown that landed since the input was
+   * assembled.  `republish` REQUIRES this oracle and fails closed without it.  The DB-backed
+   * implementation (a query over `takedown_requests`) is a later wave.
+   */
+  readonly takedownOracle?: TakedownOracle;
 }
 
 export type FetchOutcome =
@@ -62,9 +76,12 @@ export type PublishOutcome =
       readonly ok: false;
       readonly reason:
         | PublishDecision['reason']
+        | PublicGatewayRejectReason
         | 'no_pinning_endpoint'
         | 'cid_mismatch'
-        | 'pin_error';
+        | 'pin_error'
+        | 'takedown_recheck_halt'
+        | 'no_takedown_oracle';
     };
 
 export class IpfsBridge {
@@ -98,15 +115,67 @@ export class IpfsBridge {
    * Publish a public block (after the §37.2 gate passes) by pinning its bytes; returns
    * the IPFS CID others fetch it by.  Refuses any non-public/encrypted/taken-down block
    * structurally — the gate is enforced here, not merely advised.
+   *
+   * Defense-in-depth, in order: (1) the static `decision`; (2) the WS-S.4.4
+   * public-gateway eligibility guard over the same signals (independent refusal even if a
+   * caller hand-builds a `publishable: true` decision for non-public content); (3) the
+   * Gate-19 publish-time takedown re-check, when an oracle is configured, so a stale
+   * `takenDown` cannot bypass a takedown that landed since `decision` was computed; then
+   * (4) the CID re-verification and pin.
+   *
+   * `gateway` carries the WS-S.4.4 signals; when omitted it is derived conservatively from
+   * `decision` (a refusing decision yields a refusing guard input), and `privateRoomCid`
+   * defaults to `false` — a caller bridging private content MUST pass it explicitly.
    */
   async publishBlock(
     blockCid: string,
     bytes: Uint8Array,
     decision: PublishDecision,
+    gateway?: PublicGatewayEligibilityInput,
   ): Promise<PublishOutcome> {
     if (!decision.publishable) {
       return { ok: false, reason: decision.reason === '' ? 'not_public' : decision.reason };
     }
+    // WS-S.4.4 — independent public-gateway eligibility (defense-in-depth).
+    const eligibility = assertPublicGatewayEligible(
+      gateway ?? {
+        // A `publishable` decision asserts public/unencrypted/non-taken-down; mirror that
+        // here, but `privateRoomCid` cannot be inferred and stays conservatively false.
+        visibility: 'public',
+        encrypted: false,
+        takenDown: false,
+        privateRoomCid: false,
+      },
+    );
+    if (!eligibility.eligible) {
+      return { ok: false, reason: eligibility.reason === '' ? 'not_public' : eligibility.reason };
+    }
+    // Gate-19 — publish-time takedown re-check (fail-closed when an oracle is present).
+    if (this.config.takedownOracle) {
+      if (await takedownHaltsPublish(this.config.takedownOracle, blockCid)) {
+        return { ok: false, reason: 'takedown_recheck_halt' };
+      }
+    }
+    return this.pin(blockCid, bytes);
+  }
+
+  /**
+   * Re-pin/re-announce an already-published block (the §22.7 republication loop's single
+   * step).  Gate-19 makes this path STRICT: the takedown oracle is REQUIRED — without it
+   * `republish` refuses (`no_takedown_oracle`), and if the oracle reports a takedown (or
+   * throws) the re-pin is halted (`takedown_recheck_halt`).  A stale input can never carry
+   * a taken-down block back onto the public DHT through this path.
+   */
+  async republish(blockCid: string, bytes: Uint8Array): Promise<PublishOutcome> {
+    if (!this.config.takedownOracle) return { ok: false, reason: 'no_takedown_oracle' };
+    if (await takedownHaltsPublish(this.config.takedownOracle, blockCid)) {
+      return { ok: false, reason: 'takedown_recheck_halt' };
+    }
+    return this.pin(blockCid, bytes);
+  }
+
+  /** Verify-then-pin: never pins bytes that do not hash to the announced `block_cid`. */
+  private async pin(blockCid: string, bytes: Uint8Array): Promise<PublishOutcome> {
     if (!this.config.pinningUrl) return { ok: false, reason: 'no_pinning_endpoint' };
     // Never publish bytes that do not hash to the block_cid we are announcing them under
     // (a caller bug would otherwise pin mislabeled content into the public DHT).

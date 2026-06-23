@@ -47,6 +47,14 @@ export const memberAddOpSchema = z
     /** The MLS KeyPackage that the Add commit admits (§10.2). */
     mls_key_package: base64UrlSchema,
     granted_role: privateRoleSchema,
+    /**
+     * A NON-cryptographic, admin-chosen display name (carried into the signed
+     * op so it converges across devices, §14.3.3).  It NEVER affects authority
+     * (capability checks are by member id + role only, §11.3/§11.4); a UI MUST
+     * render it as distinct from — and subordinate to — the cryptographic
+     * member id.  Bounded like the §12.3 join `proposed_display_name`.
+     */
+    display_name: z.string().trim().min(1).max(100).optional(),
   })
   .strict();
 

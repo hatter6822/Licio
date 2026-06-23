@@ -15,6 +15,10 @@ import { Card } from '../../ui/Card/index.js';
 import { EmptyState } from '../../ui/EmptyState/index.js';
 import { Input } from '../../ui/Input/index.js';
 import { LoadingState } from '../../ui/LoadingState/index.js';
+import { InvitePanel } from '../InvitePanel/index.js';
+import { JoinPanel } from '../JoinPanel/index.js';
+import type { VerifiableDevice } from '../SafetyNumberPanel/index.js';
+import { SafetyNumberPanel } from '../SafetyNumberPanel/index.js';
 
 export interface PrivateRoomViewProps {
   roomId: string;
@@ -24,6 +28,25 @@ function shortId(id: string): string {
   return id.length <= 8 ? id : `${id.slice(0, 8)}…`;
 }
 
+/**
+ * Render an author/member label that shows the NON-cryptographic, admin-chosen
+ * display name (when present) clearly subordinate to the cryptographic member id
+ * — e.g. `Alice · a1b2c3d4…`.  The display name is never used for any logic
+ * (authority is keyed by member id only, §11.4); it is a render convenience.
+ * Falls back to the short member id when no name was provided.
+ */
+function memberLabel(memberId: string, displayName?: string): React.ReactElement {
+  if (displayName !== undefined && displayName.length > 0) {
+    return (
+      <>
+        <span>{displayName}</span>
+        <span className="ml-1 font-mono text-ink-muted text-xs"> · {shortId(memberId)}</span>
+      </>
+    );
+  }
+  return <span className="font-mono">{shortId(memberId)}</span>;
+}
+
 export function PrivateRoomView({ roomId }: PrivateRoomViewProps): React.ReactElement {
   const t = useT();
   const [session, setSession] = useState<PrivateRoomSession | null>(null);
@@ -31,6 +54,7 @@ export function PrivateRoomView({ roomId }: PrivateRoomViewProps): React.ReactEl
   const [, setTick] = useState(0);
   const [storyTitle, setStoryTitle] = useState('');
   const [busy, setBusy] = useState(false);
+  const [showManage, setShowManage] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -63,6 +87,20 @@ export function PrivateRoomView({ roomId }: PrivateRoomViewProps): React.ReactEl
   const state = session.state();
   const stories = [...state.stories.values()].filter((s) => !s.tombstoned);
 
+  // Other members' devices (exclude this device + removed devices) — the SAS panel
+  // verifies one of these out-of-band.
+  const otherDevices: VerifiableDevice[] = [...state.devices.values()]
+    .filter((d) => !d.removed && d.deviceId !== session.deviceId)
+    .map((d) => {
+      const member = state.members.get(d.memberId);
+      return {
+        deviceId: d.deviceId,
+        memberId: d.memberId,
+        ...(member?.displayName === undefined ? {} : { displayName: member.displayName }),
+      };
+    });
+  const isAdmin = state.members.get(session.memberId)?.role === 'admin';
+
   async function postStory(): Promise<void> {
     if (!session || storyTitle.trim().length === 0 || busy) return;
     setBusy(true);
@@ -86,14 +124,39 @@ export function PrivateRoomView({ roomId }: PrivateRoomViewProps): React.ReactEl
             .filter((m) => !m.removed)
             .map((m) => (
               <li key={m.memberId} className="neu-raised rounded-full px-3 py-1 text-sm">
-                {m.memberId === session.memberId
-                  ? t('privateRoom.view.you', 'You')
-                  : shortId(m.memberId)}
+                {m.memberId === session.memberId ? (
+                  <span>{t('privateRoom.view.you', 'You')}</span>
+                ) : (
+                  memberLabel(m.memberId, m.displayName)
+                )}
                 <span className="ml-1 text-ink-muted text-xs">({m.role})</span>
               </li>
             ))}
         </ul>
+        <div className="mt-2">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => setShowManage((s) => !s)}
+            aria-expanded={showManage}
+          >
+            {showManage
+              ? t('privateRoom.view.hideManage', 'Hide members & verification')
+              : t('privateRoom.view.showManage', 'Manage members & verify devices')}
+          </Button>
+        </div>
       </section>
+
+      {showManage ? (
+        <section
+          aria-label={t('privateRoom.view.manage', 'Members and verification')}
+          className="flex flex-col gap-4"
+        >
+          <SafetyNumberPanel session={session} devices={otherDevices} />
+          {isAdmin ? <InvitePanel session={session} /> : null}
+          <JoinPanel session={isAdmin ? session : undefined} />
+        </section>
+      ) : null}
 
       <section aria-label={t('privateRoom.view.compose', 'Post a story')} className="flex gap-2">
         <Input
@@ -123,6 +186,7 @@ export function PrivateRoomView({ roomId }: PrivateRoomViewProps): React.ReactEl
               session={session}
               story={story}
               contributions={[...state.contributions.values()]}
+              displayNameOf={(memberId) => state.members.get(memberId)?.displayName}
               onChanged={() => setTick((n) => n + 1)}
             />
           ))
@@ -142,6 +206,7 @@ interface StoryCardWithCommentsProps {
     bodyMarkdownLite: string;
     tombstoned: boolean;
   }>;
+  displayNameOf: (memberId: string) => string | undefined;
   onChanged: () => void;
 }
 
@@ -149,6 +214,7 @@ function StoryCardWithComments({
   session,
   story,
   contributions,
+  displayNameOf,
   onChanged,
 }: StoryCardWithCommentsProps): React.ReactElement {
   const t = useT();
@@ -174,7 +240,9 @@ function StoryCardWithComments({
       <ul className="mt-2 flex flex-col gap-1">
         {comments.map((c) => (
           <li key={c.contributionId} className="text-sm">
-            <span className="text-ink-muted text-xs">{shortId(c.authorMemberId)}: </span>
+            <span className="text-ink-muted text-xs">
+              {memberLabel(c.authorMemberId, displayNameOf(c.authorMemberId))}:{' '}
+            </span>
             {c.bodyMarkdownLite}
           </li>
         ))}

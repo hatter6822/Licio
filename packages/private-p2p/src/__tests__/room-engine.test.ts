@@ -15,6 +15,12 @@ import { roomStateCommitment } from '../reducer/state.js';
 import type { SealOpParams } from '../reducer/validate-op.js';
 import { sealOp } from '../reducer/validate-op.js';
 import { type PrivateOpBody, type PrivateRoomOp, privateRoomOpSchema } from '../schemas/ops.js';
+import {
+  decodeSyncMessage,
+  encodeSyncMessage,
+  type OpRequest,
+  type OpResponse,
+} from '../sync/op-exchange.js';
 
 const ROOM = 'room-1';
 
@@ -484,5 +490,90 @@ describe('PrivateRoomEngine — device fork (§15) deterministic convergence', (
     const engine = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
     const report = await engine.ingest([genesisEnv, first, second]);
     expect(report.quarantined.some((q) => q.reason === 'duplicate_op_id')).toBe(true);
+  });
+});
+
+describe('PrivateRoomEngine — §15.7 op-exchange convergence (two engines, live-protocol)', () => {
+  it('reconciles a fresh peer to byte-identical state via head/want/serve, walking the DAG', async () => {
+    const r = await room();
+    const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
+
+    // Alice authors a 4-hop chain: genesis → cs1 → add-bob → cs2.
+    const alice = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
+    await alice.applyLocalOp(
+      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+        op_id: 'genesis',
+        lamport: '1',
+      }),
+      founderSeal,
+    );
+    await alice.applyLocalOp(
+      mkOp(story('s1'), { op_id: 'cs1', author_seq: 1, lamport: '2', parents: ['genesis'] }),
+      founderSeal,
+    );
+    const bob = await makeDevice();
+    await alice.applyLocalOp(
+      mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
+        op_id: 'add-bob',
+        author_seq: 2,
+        lamport: '3',
+        parents: ['cs1'],
+      }),
+      founderSeal,
+    );
+    await alice.applyLocalOp(
+      mkOp(story('s2'), { op_id: 'cs2', author_seq: 3, lamport: '4', parents: ['add-bob'] }),
+      founderSeal,
+    );
+    expect(alice.heads()).toStrictEqual(['cs2']);
+
+    // A fresh peer holding the SAME room keys + the founder bootstrap pulls from Alice.
+    const peer = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
+
+    // Drive the §15.7 PULL loop entirely THROUGH the wire codec (encode/decode), so the
+    // request/response messages are exercised end-to-end, not just the engine methods.
+    let rounds = 0;
+    // First wanted set = Alice's announced heads the peer lacks.
+    let wantIds = peer.wantedFrom(alice.headAnnouncement());
+    while (wantIds.length > 0) {
+      if (rounds++ > 16) throw new Error('did not converge');
+      // peer → alice: an op_request (round-tripped through the codec).
+      const reqBytes = encodeSyncMessage({
+        schema: 'licio.private.op_request.v1',
+        op_ids: wantIds,
+      });
+      const req = decodeSyncMessage(reqBytes) as OpRequest;
+      // alice serves; the response round-trips through the codec.
+      const served = await alice.serveOps(req.op_ids);
+      const resBytes = encodeSyncMessage({
+        schema: 'licio.private.op_response.v1',
+        envelopes: served,
+      });
+      const res = decodeSyncMessage(resBytes) as OpResponse;
+      // peer ingests (the ONLY trust boundary) and recomputes its wants + missing ancestors.
+      await peer.ingest(res.envelopes);
+      const deps = peer.missingDependencies();
+      const wantedNow = peer.wantedFrom(alice.headAnnouncement());
+      wantIds = [...new Set([...deps, ...wantedNow])].sort();
+    }
+
+    // The peer converged to BYTE-IDENTICAL state with no transport and no archive.
+    expect(peer.heads()).toStrictEqual(['cs2']);
+    expect(peer.state().members.get('bob')?.role).toBe('member');
+    expect(peer.state().stories.get('s2')?.title).toBe('Story s2');
+    expect(Array.from(roomStateCommitment(peer.state()))).toEqual(
+      Array.from(roomStateCommitment(alice.state())),
+    );
+    expect(rounds).toBeGreaterThan(1); // it genuinely walked the multi-hop ancestor chain
+  });
+
+  it('the sync-message codec round-trips a head announcement', () => {
+    const ann = {
+      schema: 'licio.private.head_announcement.v1' as const,
+      heads: ['a', 'b'],
+      op_count_bucket: 0,
+    };
+    const decoded = decodeSyncMessage(encodeSyncMessage(ann));
+    expect(decoded).toStrictEqual(ann);
   });
 });

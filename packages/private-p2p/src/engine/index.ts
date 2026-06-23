@@ -5,5 +5,6 @@
 // behind a storage port a UI or transport drives.
 
 export * from './invite.js';
+export * from './migration.js';
 export * from './room-engine.js';
 export * from './room-lifecycle.js';

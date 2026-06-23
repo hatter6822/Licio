@@ -30,6 +30,8 @@ import {
   readBundleForImport,
 } from '../../../lcap/bundle-import.js';
 import { getLcapDb } from '../../../lcap/db.js';
+import { getOperationalMode } from '../../../lcap/mode-state.js';
+import { exportPostureForMode, mediaPrefetchAllowed } from '../../../lcap/operational-modes.js';
 import { cn } from '../../../lib/cn.js';
 import { Badge } from '../../ui/Badge/index.js';
 import { Button } from '../../ui/Button/index.js';
@@ -62,7 +64,12 @@ export interface OfflineBundlePanelProps {
   readonly roomHash?: string;
   /** A human label for the room, shown in the export heading. */
   readonly roomLabel?: string;
-  /** High-risk posture (stealth/emergency): generic export filename (§26.3). */
+  /**
+   * High-risk posture (stealth/emergency): generic export filename + confirm-before-
+   * export (§26.3).  When omitted it is DERIVED from the current §33 operational mode
+   * (`exportPostureForMode`), so the Stealth/Emergency control actually changes the
+   * export surface here — not a cosmetic flag.
+   */
   readonly highRisk?: boolean;
   readonly className?: string;
 }
@@ -70,13 +77,21 @@ export interface OfflineBundlePanelProps {
 export function OfflineBundlePanel({
   roomHash,
   roomLabel,
-  highRisk = false,
+  highRisk,
   className,
 }: OfflineBundlePanelProps): React.ReactElement {
   const t = useT();
   const [exportState, setExportState] = useState<ExportState>({ phase: 'idle' });
   const [importState, setImportState] = useState<ImportState>({ phase: 'idle' });
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // The §26 export posture: the explicit prop overrides; otherwise the current §33 mode
+  // decides (Stealth/Emergency → generic filename + confirm).  Read once per render from
+  // the persisted mode (a non-reactive module, like the sync gate reads it).
+  const mode = getOperationalMode();
+  const posture = exportPostureForMode(mode);
+  const effectiveHighRisk = highRisk ?? posture.highRisk;
+  const mediaPrefetch = mediaPrefetchAllowed(mode);
 
   const prepareExport = useCallback(async () => {
     if (!roomHash) return;
@@ -99,7 +114,7 @@ export function OfflineBundlePanel({
         objects: exportState.data.objects,
         disclosure: exportState.data.disclosure,
       });
-      const filename = await bundleFilename({ highRisk, roomHash });
+      const filename = await bundleFilename({ highRisk: effectiveHighRisk, roomHash });
       await downloadBundle(bytes, filename);
       setExportState({ phase: 'done', filename });
     } catch {
@@ -108,7 +123,7 @@ export function OfflineBundlePanel({
         message: t('lcap.bundle.exportError', 'Could not prepare the export.'),
       });
     }
-  }, [exportState, roomHash, highRisk, t]);
+  }, [exportState, roomHash, effectiveHighRisk, t]);
 
   const onFileChosen = useCallback(async (file: File) => {
     setImportState({ phase: 'reading' });
@@ -206,6 +221,23 @@ export function OfflineBundlePanel({
                     {t(
                       'lcap.bundle.disclosureIdentities',
                       'Includes device/identity material (certificates or capabilities) that reveals account and device identifiers.',
+                    )}
+                  </li>
+                ) : null}
+                {/* §33 mode-derived posture: honest about how this mode shapes the export. */}
+                {effectiveHighRisk ? (
+                  <li>
+                    {t(
+                      'lcap.bundle.disclosureHighRisk',
+                      'High-risk mode: the file uses a generic name (no room or topic) so it does not reveal its contents at rest.',
+                    )}
+                  </li>
+                ) : null}
+                {!mediaPrefetch && exportState.data.blockCount > 0 ? (
+                  <li>
+                    {t(
+                      'lcap.bundle.disclosureMediaOff',
+                      'This mode does not prefetch media, so some media this room references may not be included.',
                     )}
                   </li>
                 ) : null}

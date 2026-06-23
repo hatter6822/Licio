@@ -9,6 +9,9 @@ import { describe, expect, it } from 'vitest';
 import {
   PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS,
   PRIVATE_ROOM_CREATION_DISCLOSURE,
+  PRIVATE_ROOM_IMPORT_MODES,
+  PRIVATE_ROOM_MIGRATION_PHASES,
+  PRIVATE_ROOM_MIGRATION_WARNING,
   PRIVATE_ROOM_PRIVACY_MATRIX,
   PRIVATE_ROOM_REMOVAL_DISCLOSURE,
   REQUIRED_PRIVATE_ROOM_ACKNOWLEDGMENT_IDS,
@@ -89,7 +92,10 @@ describe('WS-S.0.3 prohibited-language copy-lint (no false absolute promise)', (
   const allCopy = [
     PRIVATE_ROOM_CREATION_DISCLOSURE,
     PRIVATE_ROOM_REMOVAL_DISCLOSURE,
+    PRIVATE_ROOM_MIGRATION_WARNING,
     ...PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS.map((a) => a.label),
+    ...PRIVATE_ROOM_IMPORT_MODES.flatMap((m) => [m.label, m.description, m.disclosure]),
+    ...PRIVATE_ROOM_MIGRATION_PHASES.flatMap((p) => [p.label, p.detail]),
     ...PRIVATE_ROOM_PRIVACY_MATRIX.flatMap((r) => [
       r.question,
       r.public_server,
@@ -105,5 +111,38 @@ describe('WS-S.0.3 prohibited-language copy-lint (no false absolute promise)', (
         expect(forbidden.test(text), `forbidden phrasing in: "${text}"`).toBe(false);
       }
     }
+  });
+});
+
+describe('WS-S.9 migration copy (PRIVATE_SPEC §24)', () => {
+  it('the §24.3 warning is non-retroactive (cannot undo past server access)', () => {
+    expect(PRIVATE_ROOM_MIGRATION_WARNING).toContain('from this point forward');
+    expect(PRIVATE_ROOM_MIGRATION_WARNING).toContain('cannot make past server access impossible');
+    expect(PRIVATE_ROOM_MIGRATION_WARNING).toContain('start fresh');
+  });
+
+  it('has the four §24.2 import modes, each with an honest leakage disclosure', () => {
+    expect(PRIVATE_ROOM_IMPORT_MODES.map((m) => m.id)).toEqual([
+      'fresh',
+      'selected',
+      'full',
+      'redacted',
+    ]);
+    // Every NON-fresh mode must disclose that imported history was server-hosted.
+    for (const mode of PRIVATE_ROOM_IMPORT_MODES) {
+      if (mode.id === 'fresh') continue;
+      expect(mode.disclosure.toLowerCase()).toContain('server');
+    }
+  });
+
+  it('has the six §24.2 migration phases in order (new room, never in-place)', () => {
+    expect(PRIVATE_ROOM_MIGRATION_PHASES.map((p) => p.id)).toEqual([
+      'rename_disclose',
+      'create_destination',
+      'choose_import',
+      'reinvite_members',
+      'freeze_old',
+      'purge_minimize',
+    ]);
   });
 });

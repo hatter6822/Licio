@@ -21,7 +21,43 @@ export {
   type PublishOutcome,
 } from './ipfs/bridge.js';
 export { ipfsCidForBlockCid, ipfsCidV1FromDigest, multibaseBase32 } from './ipfs/cid-map.js';
+// WS-S.4.4 — the public-gateway rejection runtime guard (defense-in-depth).
+export {
+  assertPublicGatewayEligible,
+  type PublicGatewayEligibility,
+  type PublicGatewayEligibilityInput,
+  type PublicGatewayRejectReason,
+} from './ipfs/public-gateway-guard.js';
+// Gate-19 — the takedown-driven republication halt (decision core + oracle seam).
+export {
+  type RepublicationCandidate,
+  type RepublicationSet,
+  republicationSet,
+  TAKEDOWN_STATUSES,
+  type TakedownOracle,
+  type TakedownStatus,
+  takedownHaltsPublish,
+  takedownInForce,
+} from './ipfs/takedown.js';
 // WebRTC browser↔browser data-channel transport + server-blind signaling (WS-R.15.6).
+export {
+  type ConnectableDataChannel,
+  type ConnectWebrtcParams,
+  connectWebrtc,
+  type RtcConfigurationLike,
+  type RtcIceCandidateInit,
+  type RtcPeerConnectionFactory,
+  type RtcPeerConnectionLike,
+  type RtcSessionDescriptionInit,
+} from './webrtc/connect.js';
+export {
+  decodeSignalEnvelope,
+  decodeSignalMessage,
+  encodeSignalEnvelope,
+  encodeSignalMessage,
+  type WebrtcSignalMessage,
+  webrtcSignalMessageSchema,
+} from './webrtc/frame.js';
 export {
   decideWebrtc,
   type IceServerConfig,

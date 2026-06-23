@@ -149,6 +149,8 @@ export interface CreatePrivateRoomParams {
   readonly roomId: string;
   readonly founderMemberId: string;
   readonly founderDeviceId: string;
+  /** An optional non-cryptographic display name for the founder (§14.3.3-converged). */
+  readonly founderDisplayName?: string;
   /** The §13.1 room profile (name/description/room_type). */
   readonly profile: PrivateRoomManifest['profile'];
   /** Policy overrides merged over `DEFAULT_PRIVATE_ROOM_POLICY`. */
@@ -266,6 +268,9 @@ export async function createPrivateRoom(
       hpke_public_key: toBase64Url(hpkeKeyPair.publicKey),
       mls_key_package: toBase64Url(encodeKeyPackage(mlsKeyPackage.publicPackage)),
       granted_role: 'admin',
+      ...(params.founderDisplayName !== undefined
+        ? { display_name: params.founderDisplayName }
+        : {}),
     },
   } satisfies PrivateRoomOp);
 
@@ -463,6 +468,13 @@ export interface NewMemberDevice {
   /** base64url of `encodeKeyPackage(newDevice.publicPackage)`. */
   readonly mlsKeyPackage: string;
   readonly role: z.infer<typeof privateRoleSchema>;
+  /**
+   * An optional NON-cryptographic display name the admin assigns (typically the
+   * joiner's §12.3 `proposed_display_name`, which the admin MAY sanitize or
+   * override).  Carried into the signed op so it converges across devices; it
+   * never affects authority (§11.4).
+   */
+  readonly displayName?: string;
 }
 
 /**
@@ -481,5 +493,6 @@ export function buildMemberAddOp(
     hpke_public_key: newMember.hpkePublicKey,
     mls_key_package: newMember.mlsKeyPackage,
     granted_role: newMember.role,
+    ...(newMember.displayName !== undefined ? { display_name: newMember.displayName } : {}),
   });
 }
