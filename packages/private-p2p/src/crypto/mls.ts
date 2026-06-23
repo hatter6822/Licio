@@ -21,6 +21,7 @@
 // callers; this residual is tracked in docs/private-p2p/README.md.
 
 import {
+  acceptAll,
   type CiphersuiteImpl,
   type ClientState,
   type Credential,
@@ -43,11 +44,14 @@ import {
   joinGroup,
   type KeyPackage,
   type MLSMessage,
+  type MlsPrivateMessage,
+  type MlsPublicMessage,
   createGroup as mlsCreateGroup,
   mlsExporter,
   generateKeyPackage as mlsGenerateKeyPackage,
   type PrivateKeyPackage,
   type Proposal,
+  processMessage,
   type RatchetTree,
   type Welcome,
   zeroOutUint8Array,
@@ -301,4 +305,73 @@ export function decodeKeyPackage(bytes: Uint8Array): KeyPackage {
     throw new Error('decodeKeyPackage: not an mls_key_package MLSMessage');
   }
   return message.keyPackage;
+}
+
+// --- §10.9 commit/welcome processing on EXISTING members + wire codecs ----------------
+//
+// `commitProposals`/`addMember`/`removeMember` are the COMMITTER side (they advance the
+// committer's own group and emit the commit + Welcome).  The functions below complete
+// the membership protocol for the OTHER participants: an existing member APPLIES a
+// received commit to advance to the new epoch (`applyCommit`), and both the commit and
+// the Welcome get serialized for transport so the live carrier (WS-S.4.3) can deliver
+// the new epoch key after a §12.1 add / §10.9 remove.
+
+/**
+ * Apply a received MLS Commit to an EXISTING member's group, advancing it to the
+ * committer's new epoch (RFC 9420 §12.4 — the non-committer transition).  The commit's
+ * proposals are accepted at the MLS layer (`acceptAll`); WHO may add/remove is enforced
+ * separately + authoritatively by the §11.3 capability model on the signed `member.add`/
+ * `member.remove` op that travels alongside, so this is defence-in-depth, not a blind
+ * trust.  Fail-closed: a non-handshake message or any non-`newState` transition throws
+ * (the caller must NOT advance its epoch keys on a rejected commit).
+ */
+export async function applyCommit(group: MlsGroup, commit: MLSMessage): Promise<MlsGroup> {
+  if (commit.wireformat !== 'mls_public_message' && commit.wireformat !== 'mls_private_message') {
+    throw new Error(`applyCommit: expected a handshake message, got ${commit.wireformat}`);
+  }
+  const message: MlsPublicMessage | MlsPrivateMessage = commit;
+  const result = await processMessage(message, group.state, emptyPskIndex, acceptAll, group.cs);
+  if (result.kind !== 'newState') {
+    throw new Error(`applyCommit: expected a newState transition, got ${result.kind}`);
+  }
+  return { state: result.newState, cs: group.cs };
+}
+
+/** Serialize a commit MLSMessage for the wire (the §10.9 epoch-rotation broadcast). */
+export function encodeCommit(commit: MLSMessage): Uint8Array {
+  if (commit.wireformat !== 'mls_public_message' && commit.wireformat !== 'mls_private_message') {
+    throw new Error(`encodeCommit: not a handshake message (${commit.wireformat})`);
+  }
+  return encodeMlsMessage(commit);
+}
+
+/** Inverse of `encodeCommit`; fail-closed (undecodable / trailing bytes / non-handshake). */
+export function decodeCommit(bytes: Uint8Array): MLSMessage {
+  const decoded = decodeMlsMessage(bytes, 0);
+  if (!decoded || decoded[1] !== bytes.length) {
+    throw new Error('decodeCommit: not a single complete MLSMessage');
+  }
+  const message = decoded[0];
+  if (message.wireformat !== 'mls_public_message' && message.wireformat !== 'mls_private_message') {
+    throw new Error(`decodeCommit: not a handshake MLSMessage (${message.wireformat})`);
+  }
+  return message;
+}
+
+/** Serialize a Welcome for the wire (wrapped as an `mls_welcome` MLSMessage, §6). */
+export function encodeWelcomeMessage(welcome: Welcome): Uint8Array {
+  return encodeMlsMessage({ wireformat: 'mls_welcome', version: 'mls10', welcome });
+}
+
+/** Inverse of `encodeWelcomeMessage`; fail-closed if not a single `mls_welcome` message. */
+export function decodeWelcomeMessage(bytes: Uint8Array): Welcome {
+  const decoded = decodeMlsMessage(bytes, 0);
+  if (!decoded || decoded[1] !== bytes.length) {
+    throw new Error('decodeWelcomeMessage: not a single complete MLSMessage');
+  }
+  const message = decoded[0];
+  if (message.wireformat !== 'mls_welcome') {
+    throw new Error(`decodeWelcomeMessage: not an mls_welcome MLSMessage (${message.wireformat})`);
+  }
+  return message.welcome;
 }

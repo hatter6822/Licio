@@ -9,9 +9,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   addMember,
+  applyCommit,
   createGroup,
   currentEpoch,
+  decodeCommit,
+  decodeWelcomeMessage,
   deserializeGroupState,
+  encodeCommit,
+  encodeWelcomeMessage,
   epochAuthenticator,
   generateMemberKeyPackage,
   MLS_CIPHERSUITE_ID,
@@ -40,6 +45,88 @@ async function twoDeviceGroup(): Promise<{
   const bob = await processWelcome(add.welcome, bobKp, ratchetTree(alice));
   return { alice, bob, bobKp };
 }
+
+describe('§10.9 applyCommit — an existing member advances to the committer epoch', () => {
+  it('advances a non-committer to the new epoch + converges the epoch authenticator', async () => {
+    const aliceKp = await generateMemberKeyPackage(utf8('alice'));
+    const bobKp = await generateMemberKeyPackage(utf8('bob'));
+    const carolKp = await generateMemberKeyPackage(utf8('carol'));
+    let alice = await createGroup(utf8('room-x'), aliceKp);
+    // Add bob → epoch 1; bob joins via Welcome.
+    const addBob = await addMember(alice, bobKp.publicPackage);
+    alice = addBob.group;
+    if (!addBob.welcome) throw new Error('no welcome for bob');
+    let bob = await processWelcome(addBob.welcome, bobKp, ratchetTree(alice));
+    expect(currentEpoch(alice)).toBe(1n);
+    expect(currentEpoch(bob)).toBe(1n);
+
+    // Add carol → epoch 2 (committed by alice).  Bob is an EXISTING member, not the
+    // committer; he must advance to epoch 2 by APPLYING alice's commit.
+    const addCarol = await addMember(alice, carolKp.publicPackage);
+    alice = addCarol.group;
+    if (!addCarol.welcome) throw new Error('no welcome for carol');
+    bob = await applyCommit(bob, addCarol.commit);
+
+    expect(currentEpoch(alice)).toBe(2n);
+    expect(currentEpoch(bob)).toBe(2n);
+    // The epoch authenticator is a public commitment to the group state — equal iff
+    // both members hold the identical epoch-2 group.
+    expect(toHex(epochAuthenticator(bob))).toBe(toHex(epochAuthenticator(alice)));
+
+    // The freshly-added carol also lands at epoch 2 with the same authenticator.
+    const carol = await processWelcome(addCarol.welcome, carolKp, ratchetTree(alice));
+    expect(currentEpoch(carol)).toBe(2n);
+    expect(toHex(epochAuthenticator(carol))).toBe(toHex(epochAuthenticator(alice)));
+  });
+
+  it('a Remove commit applied by a remaining member rotates the epoch', async () => {
+    const { alice, bob } = await twoDeviceGroup(); // alice+bob at epoch 1
+    const carolKp = await generateMemberKeyPackage(utf8('carol'));
+    const addCarol = await addMember(alice, carolKp.publicPackage); // epoch 2
+    let a = addCarol.group;
+    let b = await applyCommit(bob, addCarol.commit);
+    expect(currentEpoch(b)).toBe(2n);
+    // alice removes carol (leaf 2) → epoch 3; bob applies the Remove commit.
+    const rm = await removeMember(a, 2);
+    a = rm.group;
+    b = await applyCommit(b, rm.commit);
+    expect(currentEpoch(a)).toBe(3n);
+    expect(currentEpoch(b)).toBe(3n);
+    expect(toHex(epochAuthenticator(b))).toBe(toHex(epochAuthenticator(a)));
+  });
+
+  it('the commit + welcome survive the wire codecs (welcome carries the tree via the §6 extension)', async () => {
+    const aliceKp = await generateMemberKeyPackage(utf8('alice'));
+    const bobKp = await generateMemberKeyPackage(utf8('bob'));
+    const carolKp = await generateMemberKeyPackage(utf8('carol'));
+    let alice = await createGroup(utf8('room-w'), aliceKp);
+    const addBob = await addMember(alice, bobKp.publicPackage);
+    alice = addBob.group;
+    if (!addBob.welcome) throw new Error('no welcome');
+    let bob = await processWelcome(addBob.welcome, bobKp, ratchetTree(alice));
+
+    const addCarol = await addMember(alice, carolKp.publicPackage);
+    alice = addCarol.group;
+    if (!addCarol.welcome) throw new Error('no welcome');
+
+    // Existing member bob applies the commit AFTER a wire round-trip.
+    const commitBytes = encodeCommit(addCarol.commit);
+    bob = await applyCommit(bob, decodeCommit(commitBytes));
+    expect(currentEpoch(bob)).toBe(2n);
+    expect(toHex(epochAuthenticator(bob))).toBe(toHex(epochAuthenticator(alice)));
+
+    // Joiner carol processes the Welcome AFTER a wire round-trip, WITHOUT a separate
+    // ratchet tree — proving the §6 ratchet_tree extension travels inside the Welcome.
+    const welcomeBytes = encodeWelcomeMessage(addCarol.welcome);
+    const carol = await processWelcome(decodeWelcomeMessage(welcomeBytes), carolKp);
+    expect(currentEpoch(carol)).toBe(2n);
+    expect(toHex(epochAuthenticator(carol))).toBe(toHex(epochAuthenticator(alice)));
+
+    // Fail-closed: garbage / wrong-wireformat bytes are rejected.
+    expect(() => decodeCommit(new Uint8Array([1, 2, 3]))).toThrow();
+    expect(() => decodeWelcomeMessage(encodeCommit(addCarol.commit))).toThrow();
+  });
+});
 
 describe('MLS cipher-suite pin (§10.2/§10.7)', () => {
   it('pins MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519 = id 1', () => {
