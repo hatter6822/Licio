@@ -92,6 +92,11 @@ export class DrizzleRendezvousStore implements RendezvousStore {
           gt(privateRendezvousRecords.expiresAt, new Date(nowMs)),
         ),
       )
+      // §27 SAMPLE-POLL (Tier-1 flood dilution): a UNIFORM random sample of the live rows,
+      // not the storage-order front, so an insider presence flood under one room_blind_id
+      // cannot deterministically crowd honest peers out of the poll window.  The sort is
+      // bounded by the per-room cap (MAX_RECORDS_PER_ROOM), so `ORDER BY random()` is cheap.
+      .orderBy(sql`random()`)
       .limit(limit);
     return rows.map((r) => ({
       roomBlindId,

@@ -105,6 +105,25 @@ export const MAX_SIGNALS_PER_PEER = 256;
 export const MAX_SIGNALS_PER_SENDER = 32;
 
 /**
+ * A UNIFORM random sample of `k` items from `items` (caller ensures `k < items.length`),
+ * via a partial Fisher–Yates shuffle: O(k), and each item is equally likely to be selected.
+ * `random` returns [0, 1); the index is clamped so an injected RNG that returns exactly 1
+ * cannot read past the array.  This is load-balancing/fairness randomness, NOT security
+ * randomness — predicting the sample yields no attacker advantage.
+ */
+export function sampleUniform<T>(items: readonly T[], k: number, random: () => number): T[] {
+  const arr = [...items];
+  const n = arr.length;
+  for (let i = 0; i < k; i++) {
+    const j = i + Math.min(n - i - 1, Math.floor(random() * (n - i)));
+    const tmp = arr[i] as T;
+    arr[i] = arr[j] as T;
+    arr[j] = tmp;
+  }
+  return arr.slice(0, k);
+}
+
+/**
  * The in-memory rendezvous store (local/dev default).  Records are keyed by room
  * blind id (inner-keyed by peer blind id so a re-announce replaces); signals are
  * keyed by recipient blind id.  Both maps are capped + swept.
@@ -112,6 +131,12 @@ export const MAX_SIGNALS_PER_SENDER = 32;
 export class InMemoryRendezvousStore implements RendezvousStore {
   private readonly records = new Map<string, Map<string, StoredRendezvousRecord>>();
   private readonly signals = new Map<string, StoredSignal[]>();
+
+  /**
+   * `random` (default `Math.random`) drives the §27 sample-poll; injectable so tests are
+   * deterministic.  It is fairness randomness, not security randomness.
+   */
+  constructor(private readonly random: () => number = Math.random) {}
 
   announce(record: StoredRendezvousRecord): Promise<void> {
     let perRoom = this.records.get(record.roomBlindId);
@@ -142,7 +167,15 @@ export class InMemoryRendezvousStore implements RendezvousStore {
     for (const record of perRoom.values()) {
       if (record.expiresAt > nowMs) live.push(record);
     }
-    return Promise.resolve(live.slice(0, limit));
+    // §27 SAMPLE-POLL (Tier-1 flood dilution): when more live records exist than the poll
+    // window, return a UNIFORM RANDOM SAMPLE rather than the insertion-order front — so an
+    // insider flood under one room_blind_id cannot DETERMINISTICALLY crowd an honest peer out
+    // of every poll (each honest record appears with probability `limit/live` per poll; the
+    // client's repeated polls then discover it).  A genuine per-announcer cap is infeasible
+    // under server-blindness without an anonymous-credential layer (the documented closure
+    // target); this is the cheap mitigation that preserves §15.3.1 (no identity is learned).
+    if (live.length <= limit) return Promise.resolve(live);
+    return Promise.resolve(sampleUniform(live, limit, this.random));
   }
 
   putSignal(signal: StoredSignal): Promise<void> {

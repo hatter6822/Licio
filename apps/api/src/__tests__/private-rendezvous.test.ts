@@ -307,3 +307,56 @@ describe('InMemoryRendezvousStore — signal-queue DoS caps (§27, server-blind)
     expect(drained.some((d) => d.ciphertext === 'THE-OFFER')).toBe(true);
   });
 });
+
+describe('InMemoryRendezvousStore — sample-poll dilutes a presence flood (§27 Tier-1)', () => {
+  // A small deterministic PRNG (mulberry32) so the sampling is reproducible + non-flaky.
+  function mulberry32(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const rec = (peer: string) => ({
+    roomBlindId: 'room',
+    peerBlindId: peer,
+    encryptedAnnouncement: 'a',
+    expiresAt: Date.now() + 60_000,
+  });
+
+  it('an honest record at the BACK of a flood is still reachable + roughly uniform (slice would evict it)', async () => {
+    const store = new InMemoryRendezvousStore(mulberry32(0x5eed));
+    const LIMIT = 4;
+    const FLOOD = 8;
+    // Flood announced FIRST, honest LAST: at insertion position FLOOD ≥ LIMIT, so the old
+    // `slice(0, LIMIT)` would NEVER return the honest record in any poll window.
+    for (let i = 0; i < FLOOD; i++) await store.announce(rec(`flood-${i}`));
+    await store.announce(rec('HONEST'));
+    const total = FLOOD + 1;
+
+    let honestSeen = 0;
+    const POLLS = 300;
+    for (let p = 0; p < POLLS; p++) {
+      const sample = await store.poll('room', Date.now(), LIMIT);
+      expect(sample).toHaveLength(LIMIT);
+      // Every returned record is distinct + a real live record (no duplicates from sampling).
+      expect(new Set(sample.map((r) => r.peerBlindId)).size).toBe(LIMIT);
+      if (sample.some((r) => r.peerBlindId === 'HONEST')) honestSeen += 1;
+    }
+    // Reachable (the old slice would give 0) AND roughly uniform (≈ LIMIT/total = 4/9 ≈ 44%).
+    expect(honestSeen).toBeGreaterThan(0);
+    const rate = honestSeen / POLLS;
+    expect(rate).toBeGreaterThan(0.3);
+    expect(rate).toBeLessThan(0.6);
+  });
+
+  it('returns ALL live records (no sampling / no drop) when at or under the poll limit', async () => {
+    const store = new InMemoryRendezvousStore(mulberry32(1));
+    await store.announce(rec('a'));
+    await store.announce(rec('b'));
+    const all = await store.poll('room', Date.now(), 4);
+    expect(all.map((r) => r.peerBlindId).sort()).toEqual(['a', 'b']);
+  });
+});
