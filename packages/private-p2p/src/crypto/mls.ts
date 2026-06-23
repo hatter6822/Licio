@@ -47,6 +47,7 @@ import {
   type MlsPrivateMessage,
   type MlsPublicMessage,
   createGroup as mlsCreateGroup,
+  createProposal as mlsCreateProposal,
   mlsExporter,
   generateKeyPackage as mlsGenerateKeyPackage,
   type PrivateKeyPackage,
@@ -346,6 +347,24 @@ export async function applyCommit(group: MlsGroup, commit: MLSMessage): Promise<
     );
   }
   return { state: result.newState, cs: group.cs };
+}
+
+/**
+ * Create a bare Add PROPOSAL (NOT a Commit): a member proposes adding a device, but the
+ * epoch does NOT advance until an admin COMMITS it.  A proposal is the SAME handshake
+ * wireformat as a commit, so an existing member that received one (or an attacker that
+ * relays one in an `mls_commit` slot) must NOT mistake it for an epoch advance — this is
+ * the constructor `applyCommit`'s fail-closed epoch-advance guard is tested against.
+ */
+export async function proposeAdd(group: MlsGroup, keyPackage: KeyPackage): Promise<MLSMessage> {
+  const result = await mlsCreateProposal(
+    group.state,
+    true, // a public handshake message (the same wireformat `applyCommit` accepts)
+    { proposalType: 'add', add: { keyPackage } },
+    group.cs,
+  );
+  result.consumed.forEach(zeroOutUint8Array);
+  return result.message;
 }
 
 /** Serialize a commit MLSMessage for the wire (the §10.9 epoch-rotation broadcast). */

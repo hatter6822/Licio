@@ -10,10 +10,17 @@ import { canonical } from '../crypto/canonical.js';
 import { deriveAuthorDeviceIdBlind } from '../crypto/device-blind.js';
 import { deriveEpochState } from '../crypto/epoch.js';
 import { generateRecipientKeyPair } from '../crypto/hpke.js';
-import { encodeKeyPackage, generateMemberKeyPackage } from '../crypto/mls.js';
+import {
+  addMember,
+  applyCommit,
+  currentEpoch,
+  encodeKeyPackage,
+  generateMemberKeyPackage,
+  proposeAdd,
+} from '../crypto/mls.js';
 import { randomBytes, sha256, toBase64Url, utf8 } from '../crypto/runtime.js';
 import { exportPublicKeyRaw, generateDeviceSigningKeyPair } from '../crypto/signatures.js';
-import { buildMemberAddOp, heldKeysOf, inviteDevice } from '../engine/room-lifecycle.js';
+import { buildMemberAddOp, heldKeysOf, inviteDevice, joinRoom } from '../engine/room-lifecycle.js';
 import {
   createPrivateRoom,
   encryptAttachment,
@@ -287,8 +294,42 @@ describe('re-audit finding 3 (CRITICAL) — §14.5 snapshot-authority anchoring'
   });
 });
 
-// NOTE (tracked debt): negative regression tests for findings 1 (applyCommit rejects a
-// bare MLS Proposal) and 5 (admitJoinRequest rejects a mismatched/colliding device id)
-// require simulating an attacker hand-forging MLS proposal / keypackage bytes.  The fixes
-// are landed + adversarially verified; these catch-proof tests are a focused follow-up
-// (docs/private-p2p/README residual).  Finding 3 (CRITICAL) is now covered above.
+describe('re-audit finding 1 — applyCommit rejects a bare MLS Proposal (not an epoch advance)', () => {
+  it('rejects a proposal-as-commit, but accepts a real commit', async () => {
+    // alice founds + adds bob (epoch 1); bob joins and holds his OWN epoch-1 group.
+    const room = await createPrivateRoom({
+      roomId: 'r-commit',
+      founderMemberId: 'alice',
+      founderDeviceId: 'alice-dev',
+      profile: PROFILE,
+      createdAt: '2026-06-22T00:00:00Z',
+    });
+    const bobBundle = await generateMemberKeyPackage(utf8('bob-dev'));
+    const invited = await inviteDevice(room.group, bobBundle.publicPackage); // alice → epoch 1
+    const bobJoin = await joinRoom({
+      welcome: invited.welcome,
+      bundle: bobBundle,
+      ratchetTree: invited.ratchetTree,
+      roomIdCommitment: room.roomIdCommitment,
+      manifestCommitment: room.manifestCommitment,
+    });
+    expect(Number(currentEpoch(bobJoin.group))).toBe(1);
+
+    // A bare Add PROPOSAL from alice (epoch 1) — proposing a third device, NOT committed.
+    // It is the SAME handshake wireformat as a commit, so an attacker could relay it in an
+    // `mls_commit` slot; bob must NOT mistake it for an epoch advance.
+    const charlieBundle = await generateMemberKeyPackage(utf8('charlie-dev'));
+    const proposal = await proposeAdd(invited.group, charlieBundle.publicPackage);
+    await expect(applyCommit(bobJoin.group, proposal)).rejects.toThrow(/did not advance the epoch/);
+
+    // Control: a REAL commit (the MLS Add) DOES advance bob to epoch 2.
+    const realAdd = await addMember(invited.group, charlieBundle.publicPackage); // epoch 1 → 2
+    const advanced = await applyCommit(bobJoin.group, realAdd.commit);
+    expect(Number(currentEpoch(advanced))).toBe(2);
+  });
+});
+
+// NOTE: finding 1 (applyCommit rejects a bare MLS Proposal) and finding 3 (CRITICAL —
+// snapshot-authority anchoring) now have catch-proof regressions above.  Finding 5
+// (admitJoinRequest rejects a mismatched/colliding device id) lives in apps/web — its
+// regression is `apps/web/src/private-p2p/__tests__/admit-device-id.test.ts`.
