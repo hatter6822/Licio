@@ -15,34 +15,31 @@ not *cap* it. Tier-2 caps each device to one rendezvous slot per
 any poll window. Tier-2 is layered ON TOP of Tier-1 — the sample-poll remains
 the fail-open floor (see §6.10).
 
-## 0. Implementation status & prerequisites
+## 0. Implementation status
 
-**Deferred to a future session — by design, not neglect.** The maintainer elected to
-implement the recommended BBS core (informed of the §9 draft-maturity risk). A
-*correct, secure* implementation MUST be pinned to the **authoritative IETF byte-exact
-test vectors** — the ciphersuite constants (`P1`, the domain-separation tags) and the
-KeyGen / Sign / ProofGen / pseudonym fixtures — fetched RAW (`git`/`curl`), never
-transcribed from memory and never via a summarizing fetch (a single wrong byte in a
-generator or challenge silently breaks soundness or interop). Without reliable access to
-those vectors in the current environment, hand-rolling would yield UNVERIFIED
-security-critical crypto, so no code is landed here (an early non-vector WIP was removed
-rather than committed).
+**The cryptographic credential layer is SHIPPED** (`packages/private-p2p/src/crypto/bbs/`
++ `src/rendezvous-cap/`, 31 tests). Built as a THIN layer over `@noble/curves`'s vetted
+BLS12-381 (no re-implemented pairing arithmetic):
 
-**Network hosts required (to be whitelisted for the build session):**
-- `datatracker.ietf.org` — the drafts (`draft-irtf-cfrg-bbs-signatures`,
-  `-bbs-blind-signatures`, `-bbs-per-verifier-linkability`).
-- `github.com` + `raw.githubusercontent.com` (+ `codeload.github.com` for `git clone`)
-  — the `decentralized-identity/bbs-signature` reference repo, whose `tooling/fixtures`
-  hold the byte-exact JSON test vectors (the critical input; `gh`/`git`/`curl` give raw
-  bytes, unlike WebFetch).
+| Layer | Module | Verification |
+|-------|--------|--------------|
+| Base BBS (KeyGen/Sign/Verify, ProofGen/ProofVerify) | `bbs/suite,signature,proof` | **IETF byte-exact vector-pinned** — `BBS_BLS12381G1_XMD:SHA-256_SSWU_RO_`, the `decentralized-identity/bbs-signature` fixtures (`P1`, generators, signature001, proof001/003 incl. the intermediate trace). Fully interoperable. |
+| Per-verifier pseudonym (the nullifier) | `bbs/pseudonym` | Standard Schnorr extension on the vetted base; verified by determinism + cross-context unlinkability + soundness properties (the `-per-verifier-linkability` draft publishes no fixtures). |
+| Blind issuance (admin-unlinkable) | `bbs/blind` | Pedersen commitment + Schnorr PoK; the finalized credential **verifies under the vetted base** (`bbsVerifyScalars` — the composition anchor) + structural blindness (the `-bbs-blind-signatures` draft's vectors are "TBD"). |
+| Rendezvous-cap credential | `rendezvous-cap/credential` | The full cap: request→issue→prove→verify, revocation via epoch rotation, the §6.7 granularity policy. |
 
-**Build plan (next session).** Vendor BBS as a THIN layer over `@noble/curves`'s vetted
-BLS12-381 (already a `@licio/private-p2p` dependency — do NOT re-implement pairing
-arithmetic), suite-pinned to the IETF ciphersuite, gated like the MLS wrapper
-(`check:p2p-bbs-wrapper`, no deep imports), loaded only from the lazy private-p2p chunk,
-pinned to the fetched fixtures, and fail-open to Tier-1. Implement + vector-verify in the
-order base BBS (KeyGen/Sign/Verify) → ProofGen/ProofVerify → pseudonym → blind issuance,
-then the §11 cross-stack plumbing.
+**Honest verification caveat.** The BASE BBS is byte-exact IETF-interop. The pseudonym +
+blind layers have **no published test vectors** (their drafts mark them TBD), so they are
+verified by composition with the vetted base + behavioural properties (round-trip,
+soundness, unlinkability, blindness) — the strongest available short of fixtures. Re-pin to
+official vectors when the drafts publish them. A `check:p2p-bbs-wrapper` gate (mirroring the
+MLS one) should fence deep `@noble/curves/bls12-381` imports to `bbs/`.
+
+**Remaining: the §11 cross-stack plumbing** — the device-record `ncommit`, issuance over
+MLS, the §8.2 wire/allowlist extension (`presence_proof`/`presence_nym` + the per-epoch
+`ipk_e`), the server verify/dedup/fail-open in `apps/api/src/private-rendezvous`, and the
+manifest opt-in flag. Until that lands, the implemented crypto is dormant and the
+rendezvous runs on Tier-1 (the sample-poll) — a strict superset, never a regression.
 
 ---
 
