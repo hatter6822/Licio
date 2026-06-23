@@ -7,6 +7,7 @@
 // takeover by an unverified build.  The pure verifier lives in `@licio/shared`
 // (`verifyUpdateManifest`); this tree is the I/O + SW + React glue.
 
+export { loadLastTrustedSequence, recordTrustedSequence } from './anti-rollback.js';
 export {
   computeRunningBundleDigest,
   discoverPrivateBundleUrl,
@@ -29,6 +30,12 @@ export {
   subscribePrivateBundleGate,
 } from './gate.js';
 export {
+  deviceHasPrivateRooms,
+  type GatedApplyUpdateOptions,
+  gatedApplyUpdate,
+} from './install-sw-pinning.js';
+export {
+  activateVerifiedWorker,
   gateServiceWorkerActivation,
   installSwUpdatePinning,
   type UpdateActivationGate,

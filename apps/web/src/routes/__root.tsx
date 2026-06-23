@@ -14,7 +14,7 @@ import { BrandLogo } from '../components/ui/BrandLogo/index.js';
 import { useToast } from '../components/ui/Toast/index.js';
 import { useT } from '../i18n/index.js';
 import { EVICTION_EVENT } from '../lib/bootstrap.js';
-import { applyUpdate, SW_UPDATE_EVENT } from '../lib/sw-register.js';
+import { SW_UPDATE_EVENT } from '../lib/sw-register.js';
 import { track } from '../lib/telemetry.js';
 import type { ProbeResult } from '../offline/eviction.js';
 import { NotFoundPage } from './-pages/auth.js';
@@ -32,7 +32,27 @@ function useRuntimeToasts(): void {
         message: t('sw.updateAvailable', 'A new version is available.'),
         action: {
           label: t('sw.update', 'Update'),
-          onAction: () => applyUpdate(registration.waiting),
+          // WS-S.10.2b: for a private-room user the incoming bundle is VERIFIED
+          // against the transparency log BEFORE activation (verify-before-unlock,
+          // §20.6); a public-only device keeps the fast path.  On a lock the SW
+          // is NOT activated and a warning toast surfaces the honest §20.6 state.
+          // The verify-before-activate glue (which pulls in the @licio/shared
+          // verifier) is DYNAMICALLY imported here so it never enters the initial
+          // bundle — it runs only when the user accepts an update.
+          onAction: () => {
+            void import('../update/index.js').then(({ gatedApplyUpdate }) =>
+              gatedApplyUpdate(registration.waiting, {
+                onLocked: () =>
+                  toast({
+                    tone: 'warning',
+                    message: t(
+                      'sw.updateLocked',
+                      'This update did not pass private-mode verification. Private rooms stay locked; you can keep using public Licio.',
+                    ),
+                  }),
+              }),
+            );
+          },
         },
       });
     };

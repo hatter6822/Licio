@@ -25,6 +25,7 @@ import {
   type UpdateUntrustedReason,
   verifyUpdateManifest,
 } from '@licio/shared';
+import { recordTrustedSequence } from './anti-rollback.js';
 import { computeRunningBundleDigest, discoverPrivateBundleUrl } from './bundle-digest.js';
 import {
   loadUpdateChannelConfig,
@@ -139,6 +140,9 @@ export async function assertPrivateBundleTrusted(
       // "a log/network read failure is untrusted (fail-closed)").
       verdict = { trusted: false, reason: 'not_in_transparency_log' };
     }
+    // Anti-rollback (§27.5): persist the trusted release sequence as the new
+    // floor (monotonic) so a later validly-signed OLDER bundle is `stale`.
+    if (verdict.trusted) recordTrustedSequence(verdict.releaseSequence);
     publish(verdictToState(verdict));
     return verdict;
   })();

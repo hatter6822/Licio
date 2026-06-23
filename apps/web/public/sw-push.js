@@ -15,11 +15,13 @@
 // worker carrying a new private-mode bundle must NOT silently take over for a
 // private-room user: the trusted client first verifies the incoming bundle
 // against the transparency log (apps/web/src/update/gate.ts) and only then asks
-// to activate. The worker enforces this structurally — a plain `SKIP_WAITING`
-// from a private surface is REFUSED unless it carries `privateBundleVerified:
-// true` (the flag the client sets ONLY after a `trusted` verdict). A public-only
-// client sends `publicOnly: true` and may activate normally. No remote code, no
-// eval, no importScripts — the `check:sw` posture is unchanged.
+// to activate. The worker enforces this structurally via the message contract:
+//   * `privateBundleGated: false` (or absent for a public-only client / device
+//     with no private rooms) ⇒ activate normally;
+//   * `privateBundleGated: true` ⇒ activate ONLY when `privateBundleVerified:
+//     true` is also present (the flag the client sets after a `trusted` verdict).
+// Fail-closed: a gated message missing the verified flag is REFUSED. No remote
+// code, no eval, no importScripts — the `check:sw` posture is unchanged.
 self.addEventListener('message', (event) => {
   if (event.origin && event.origin !== self.location.origin) return;
   if (event.data && event.data.type === 'SKIP_WAITING') {

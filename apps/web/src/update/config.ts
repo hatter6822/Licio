@@ -15,6 +15,13 @@
 // key — and a manifest re-signed by a rotated key verifies under the new build.
 // `withRotatedSigners` lets a recovered client verify against an explicitly
 // rotated set without rebuilding.
+//
+// Anti-rollback (§27.5): the verifier's `stale` floor is the highest release
+// sequence this device previously TRUSTED.  `loadUpdateChannelConfig` reads it
+// back from the persisted store (`anti-rollback.ts`) so the floor is LIVE across
+// reloads; `gate.ts` writes it after a trusted verdict.
+
+import { loadLastTrustedSequence } from './anti-rollback.js';
 
 /** The stable id of the protected artifact (the lazily code-split private chunk). */
 export const PRIVATE_BUNDLE_ARTIFACT_ID = 'private-p2p';
@@ -50,9 +57,13 @@ export interface UpdateChannelConfig {
  */
 export function loadUpdateChannelConfig(): UpdateChannelConfig {
   const env = import.meta.env as Record<string, string | undefined>;
+  const lastTrustedSequence = loadLastTrustedSequence();
   return {
     trustedSignerPublicKeys: parseKeyList(env['VITE_PRIVATE_BUNDLE_SIGNER_KEYS']),
     logPublicKey: env['VITE_PRIVATE_BUNDLE_LOG_KEY']?.trim() ?? '',
+    // Read the persisted anti-rollback floor back so the `stale` verdict is live
+    // across reloads; omitted (undefined) on first run ⇒ the verifier has no floor.
+    ...(lastTrustedSequence !== undefined ? { lastTrustedSequence } : {}),
   };
 }
 
