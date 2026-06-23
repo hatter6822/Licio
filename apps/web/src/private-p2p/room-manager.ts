@@ -22,6 +22,8 @@ import type {
   RoomReducerState,
   SafetyNumber,
 } from '@licio/private-p2p';
+import { connectPrivatePeer, type RtcIceServerLike } from './connect-peer.js';
+import { type FetchLike, httpRendezvousTransport } from './rendezvous-client.js';
 import {
   deleteRoomSession,
   getRoomSession,
@@ -174,6 +176,69 @@ export class PrivateRoomSession {
    */
   async ingest(envelopes: readonly PrivateEncryptedEnvelope[]): Promise<IngestReport> {
     return this.engine.ingest(envelopes);
+  }
+
+  /** Map the manifest's §13.1 transport mode to the carrier's binary mode
+   *  (anything other than `direct_allowed` is treated as relay-only for IP privacy). */
+  private transportMode(): 'relay_only' | 'direct_allowed' {
+    const manifest = this.session.manifest as {
+      profile?: { transport_mode?: unknown };
+    };
+    return manifest?.profile?.transport_mode === 'direct_allowed' ? 'direct_allowed' : 'relay_only';
+  }
+
+  /**
+   * Establish a LIVE WebRTC connection to another current-epoch member and begin
+   * syncing this room over it (WS-S.4.3).  Discovers the peer via the server-blind
+   * §15.2 rendezvous (the rendezvous key IS the capability), seals SDP/ICE under the
+   * §15.4 pairwise channel, proves membership via the §15.5 handshake (the peer's
+   * device must be REGISTERED + ACTIVE in this room's converged state — resolved from
+   * `engine.state().devices`), then drives the §15.7 op-exchange to convergence.
+   * Returns the live sync session (`close()` to disconnect).  Rejects on
+   * timeout/abort or a failed membership handshake (no op is ever served first).
+   */
+  async connect(options?: {
+    readonly transportMode?: 'relay_only' | 'direct_allowed';
+    readonly iceServers?: RtcIceServerLike[];
+    readonly fetchImpl?: FetchLike;
+    readonly signal?: AbortSignal;
+    readonly timeoutMs?: number;
+    readonly onProgress?: (acceptedOpIds: readonly string[]) => void;
+    readonly onError?: (error: unknown) => void;
+  }): Promise<PrivateSyncSession> {
+    const epoch = this.currentEpoch();
+    const keys = await this.p2p.deriveRoomEpochKeys(
+      epoch.roomEpochSecret,
+      this.session.roomIdCommitment,
+    );
+    const fetchImpl: FetchLike =
+      options?.fetchImpl ?? ((url, init) => fetch(url, init as RequestInit | undefined));
+    const channel = await connectPrivatePeer({
+      p2p: this.p2p,
+      rendezvous: httpRendezvousTransport(fetchImpl),
+      roomIdCommitment: this.session.roomIdCommitment,
+      epoch: epoch.epoch,
+      rendezvousKey: keys.rendezvousKey,
+      selfDeviceId: this.session.deviceId,
+      selfSigningKey: this.session.signingPrivateKey,
+      resolveDevice: (deviceId) => {
+        const device = this.engine.state().devices.get(deviceId);
+        if (!device) return undefined;
+        return {
+          signingPublicKey: device.signingPublicKey,
+          activeAtEpoch: !device.removed && device.addedAtEpoch <= epoch.epoch,
+        };
+      },
+      transportMode: options?.transportMode ?? this.transportMode(),
+      nowMs: () => Date.now(),
+      ...(options?.iceServers ? { iceServers: options.iceServers } : {}),
+      ...(options?.signal ? { signal: options.signal } : {}),
+      ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    });
+    return this.connectPeer(channel, {
+      ...(options?.onProgress ? { onProgress: options.onProgress } : {}),
+      ...(options?.onError ? { onError: options.onError } : {}),
+    });
   }
 
   /** Found a new private room, persist its session, and author the genesis op. */
