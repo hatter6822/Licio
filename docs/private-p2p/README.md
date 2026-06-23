@@ -282,11 +282,23 @@ slice is closed on the convergence side:
   - **§14.5 live snapshot fetch** — a compacted/lagging member that cannot fetch the
     pruned prefix op-by-op requests the peer's snapshot archive over
     `snapshot_request`/`snapshot_response` and bootstraps from it.
-- What remains is the full two-browser **create→invite→join→connect→converge** E2E on
-  real browser radios (the node + fake-RTC pair tests prove the protocol end to end —
-  membership rotation, media, and snapshot bootstrap all converge byte-for-byte over
-  `PrivateSyncSession`; a real two-browser run adds hardware confidence) and mounting the
-  grant-delivery + media affordances on the room UI beyond the copy-paste panels.
+- **Tracked residuals (closure target: the WS-S two-browser E2E + resilience slice).**
+  - **The full two-browser E2E** (WP-9 / finding 13): `create→invite→join→connect→converge`
+    in two real browser contexts over the live rendezvous.  The node + fake-RTC pair tests
+    prove the protocol end to end — membership rotation, media, and snapshot bootstrap all
+    converge byte-for-byte over `PrivateSyncSession`, and `apps/web/e2e/webrtc-loopback.spec.ts`
+    proves a real Chromium datachannel on-host — so this adds hardware confidence over an
+    already-proven protocol.  Needs the BFF e2e-server to serve `POST /v1/private-rendezvous/*`.
+  - **Connection resilience** (WP-7 / finding 11): a drop-recovery strategy
+    (`oniceconnectionstatechange` → `restartIce`, a bounded reconnect-on-close loop) + the
+    graceful `bye` teardown signal.  The carrier currently forms one connection per
+    `connect()`; a dropped link surfaces honestly and the user re-presses connect.
+  - **Multi-peer mesh** (WP-7 / finding 14): dial multiple discovered members (bounded
+    fan-out) + periodic re-poll, rather than the current single-best-peer link.  Single-peer
+    convergence is complete when that peer holds the union; the mesh accelerates the
+    partially-synced-fleet case.
+  - Mounting the grant-delivery + media affordances on the room UI beyond the copy-paste
+    `InvitePanel`/`JoinPanel`.
 
 **WS-S.10 — the hardened update channel + WS-O substrate — is shipped:**
 - `packages/shared/src/update/` is the PURE, fail-closed verify-before-unlock core
