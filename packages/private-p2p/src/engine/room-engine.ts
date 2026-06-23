@@ -338,7 +338,7 @@ export class PrivateRoomEngine {
 
   /** The latest accepted §14.5 snapshot id (the highest-Lamport `snapshot.commit`),
    *  surfaced in the head announcement so a peer can discover the retained frontier. */
-  private latestSnapshotId(): string | undefined {
+  latestSnapshotId(): string | undefined {
     let latest: { id: string; lamport: bigint } | undefined;
     for (const op of this.acceptedOps.values()) {
       if (op.body.type !== 'snapshot.commit') continue;
@@ -703,6 +703,25 @@ export class PrivateRoomEngine {
   }
 
   /**
+   * §15.6 — serve this room's archive to a peer that requested a LIVE snapshot bootstrap
+   * (a compacted/lagging member that cannot fetch the pruned prefix op-by-op): the
+   * retained §14.5 sealed snapshot + post-snapshot envelopes, which the requester adopts
+   * via `importArchive` (re-verifying the in-band commit).  `undefined` when there is no
+   * compaction base to bootstrap from (a peer then just continues the op walk).
+   */
+  async snapshotArchive(): Promise<Uint8Array | undefined> {
+    if (this.sealedSnapshot === undefined) return undefined;
+    try {
+      return await this.exportArchive({
+        kind: 'encrypted_member_backup',
+        createdAtBucket: 'snapshot-serve',
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Import a §15.9 archive into this room: decode under caps, confirm it is for
    * THIS room, bootstrap from its §14.5 sealed snapshot if present (so a compacted
    * room imports without its pruned ops), then `ingest` every envelope (re-
@@ -714,14 +733,12 @@ export class PrivateRoomEngine {
     if (archive.room_id_hash !== toBase64Url(this.roomIdCommitment)) {
       throw new Error('importArchive: archive is for a different room');
     }
-    // Bootstrap from a sealed snapshot only when this engine has no base/ops yet
-    // (a fresh restore): adopt it ONLY if it verifies against its in-band commit.
-    if (
-      archive.sealed_snapshot &&
-      !this.sealedSnapshot &&
-      this.acceptedOps.size === 0 &&
-      this.coveredOpLamports.size === 0
-    ) {
+    // Bootstrap from a sealed snapshot when this engine holds no base yet (a fresh
+    // restore OR a lagging member that walked some post-snapshot ops but cannot reach the
+    // pruned prefix op-by-op) — adopt it ONLY if it verifies against its in-band commit;
+    // any already-accepted ops re-fold onto the new base.  A device that ALREADY has a
+    // base keeps it (it already holds a covered prefix).
+    if (archive.sealed_snapshot && !this.sealedSnapshot && this.coveredOpLamports.size === 0) {
       await this.bootstrapFromSnapshot(archive.sealed_snapshot, archive.envelopes);
     }
     return this.ingest(archive.envelopes);
@@ -885,7 +902,10 @@ export class PrivateRoomEngine {
     this.baseMaxLamport = BigInt(bundle.maxLamport);
     for (const [device, seq] of bundle.authorSeq) this.baseAuthorSeq.set(device, seq);
     this.sealedSnapshot = sealed;
-    this.currentState = reduceRoom([], this.baseState);
+    // Re-fold any ALREADY-accepted ops onto the new base (not just `reduceRoom([], base)`):
+    // a lagging member that walked some post-snapshot ops before adopting the snapshot
+    // must keep them, and they now resolve against the base's covered prefix.
+    this.refold();
   }
 
   /** Whether the imported sealed snapshot is backed by a valid in-band commit. */

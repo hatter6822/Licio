@@ -327,4 +327,97 @@ describe('WP-1 cross-epoch sync over the live session (§10.9)', () => {
     sa.close();
     sb.close();
   });
+
+  it('a fresh reader bootstraps from a COMPACTED peer over the live session (finding 4)', async () => {
+    const p2p = await import('@licio/private-p2p');
+    const roomId = 'room-compact-sync';
+    const created = await p2p.createPrivateRoom({
+      roomId,
+      founderMemberId: 'founder',
+      founderDeviceId: 'founder-dev',
+      profile: PROFILE,
+    });
+    const { roomIdCommitment } = created;
+    const epoch = created.epochState;
+    const alice = await p2p.PrivateRoomEngine.load({
+      ...created.engineParams,
+      storage: new p2p.InMemoryPrivateRoomStorage(),
+    });
+    await alice.applyLocalOp(created.genesisOp, created.sealParams);
+
+    const authorStory = async (id: string, title: string): Promise<void> => {
+      const b = await p2p.buildRoomOp(
+        {
+          roomId,
+          roomIdCommitment,
+          epochState: epoch,
+          author: {
+            memberId: 'founder',
+            deviceId: 'founder-dev',
+            signingKey: created.founder.signingKeyPair.privateKey,
+            seq: alice.nextAuthorSeq('founder-dev'),
+          },
+          opId: globalThis.crypto.randomUUID(),
+          parents: alice.heads(),
+          lamport: alice.nextLamport(),
+        },
+        {
+          type: 'story.create',
+          story_id: id,
+          thread_id: `t-${id}`,
+          title,
+          submission_type: 'original_brief',
+          topic_ids: [],
+          submission_metadata: {},
+        },
+      );
+      await alice.applyLocalOp(b.op, b.sealParams);
+    };
+    await authorStory('s1', 'early one');
+    await authorStory('s2', 'early two');
+
+    // Compact alice → genesis/s1/s2 are pruned into a §14.5 base; only the snapshot.commit
+    // + later ops are retained (alice can no longer serve the pruned prefix op-by-op).
+    const base = await alice.commitSnapshot({
+      epoch: Number(epoch.epoch),
+      roomEpochSecret: epoch.roomEpochSecret,
+      contentWrapKey: epoch.keys.contentWrapKey,
+      author: {
+        memberId: 'founder',
+        deviceId: 'founder-dev',
+        signingKey: created.founder.signingKeyPair.privateKey,
+      },
+      opId: globalThis.crypto.randomUUID(),
+      snapshotId: globalThis.crypto.randomUUID(),
+    });
+    expect(base).toBeDefined();
+    await authorStory('s3', 'after snapshot');
+
+    // A fresh reader (a member: holds the epoch key, but no ops + no base).
+    const bob = await p2p.PrivateRoomEngine.load({
+      ...created.engineParams,
+      storage: new p2p.InMemoryPrivateRoomStorage(),
+    });
+    const codec: SyncCodec = {
+      encodeSyncMessage: p2p.encodeSyncMessage,
+      decodeSyncMessage: p2p.decodeSyncMessage,
+    };
+    const { a, b, stats } = pairedChannels();
+    const sa = new PrivateSyncSession(alice, a, codec);
+    const sb = new PrivateSyncSession(bob, b, codec);
+    sa.start();
+    sb.start();
+    await settle(stats);
+
+    // bob could NOT fetch the pruned genesis/s1/s2 op-by-op, so it requested alice's
+    // snapshot archive, bootstrapped from it, and synced the post-snapshot s3 — converging
+    // byte-for-byte (the prefix arrived via the snapshot, the suffix via the op walk).
+    expect(bob.state().stories.get('s1')?.title).toBe('early one');
+    expect(bob.state().stories.get('s3')?.title).toBe('after snapshot');
+    expect(Array.from(p2p.roomStateCommitment(bob.state()))).toEqual(
+      Array.from(p2p.roomStateCommitment(alice.state())),
+    );
+    sa.close();
+    sb.close();
+  });
 });

@@ -65,6 +65,29 @@ export const mlsCommitMessageSchema = z
   .strict();
 export type MlsCommitMessage = z.infer<typeof mlsCommitMessageSchema>;
 
+/**
+ * §15.6 — a request for the peer's retained §14.5 snapshot archive (a compacted/lagging
+ * member that cannot fetch the pruned prefix op-by-op asks for the snapshot to bootstrap).
+ * No fields: "serve me your latest snapshot archive".
+ */
+export const snapshotRequestSchema = z
+  .object({ schema: z.literal('licio.private.snapshot_request.v1') })
+  .strict();
+export type SnapshotRequest = z.infer<typeof snapshotRequestSchema>;
+
+/**
+ * §15.6 — the §15.9 archive (sealed §14.5 snapshot + post-snapshot envelopes), base64.
+ * The requester adopts it via `importArchive`, which re-verifies the in-band
+ * `snapshot.commit` (the container confers no trust, §8.3).
+ */
+export const snapshotResponseSchema = z
+  .object({
+    schema: z.literal('licio.private.snapshot_response.v1'),
+    archive: ciphertextBase64Schema,
+  })
+  .strict();
+export type SnapshotResponse = z.infer<typeof snapshotResponseSchema>;
+
 /** The §15.6/§15.7 sync message union carried on the pairwise channel. */
 export const syncMessageSchema = z.discriminatedUnion('schema', [
   headAnnouncementSchema,
@@ -73,6 +96,8 @@ export const syncMessageSchema = z.discriminatedUnion('schema', [
   mlsCommitMessageSchema,
   blockRequestSchema,
   blockResponseSchema,
+  snapshotRequestSchema,
+  snapshotResponseSchema,
 ]);
 export type SyncMessage = z.infer<typeof syncMessageSchema>;
 

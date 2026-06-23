@@ -27,6 +27,7 @@ import type {
   OpRequest,
   OpResponse,
   PrivateEncryptedEnvelope,
+  SnapshotResponse,
   SyncMessage,
 } from '@licio/private-p2p';
 
@@ -82,6 +83,13 @@ export interface SyncEngineSurface {
   ingestBlocks?(
     blocks: readonly { cid: string; bytes: Uint8Array }[],
   ): Promise<{ accepted: string[]; rejected: string[] }>;
+  /** §15.6 — serve this room's retained §14.5 snapshot archive (or undefined). */
+  snapshotArchive?(): Promise<Uint8Array | undefined>;
+  /** §15.6 — adopt a peer's snapshot archive (re-validated; bootstraps a fresh/lagging
+   *  engine that cannot fetch the pruned prefix op-by-op). */
+  importArchive?(bytes: Uint8Array): Promise<IngestReport>;
+  /** The latest §14.5 snapshot id this engine holds (to detect a peer is ahead). */
+  latestSnapshotId?(): string | undefined;
 }
 
 export interface PrivateSyncSessionOptions {
@@ -119,6 +127,9 @@ export class PrivateSyncSession {
    *  a refused/not-held block is not re-requested.  Cleared when an MLS commit advances
    *  the epoch (a newly-openable manifest may reveal chunk CIDs). */
   private readonly requestedBlocks = new Set<string>();
+  /** Whether we have already asked this peer for its §14.5 snapshot archive (request it
+   *  at most once per stall, so a peer with nothing to serve does not cause a loop). */
+  private snapshotRequested = false;
 
   constructor(
     private readonly engine: SyncEngineSurface,
@@ -210,6 +221,12 @@ export class PrivateSyncSession {
       case 'licio.private.block_response.v1':
         await this.onBlockResponse(message);
         return;
+      case 'licio.private.snapshot_request.v1':
+        await this.onSnapshotRequest();
+        return;
+      case 'licio.private.snapshot_response.v1':
+        await this.onSnapshotResponse(message);
+        return;
     }
   }
 
@@ -244,7 +261,13 @@ export class PrivateSyncSession {
   }
 
   private async onResponse(response: OpResponse): Promise<void> {
-    if (response.envelopes.length === 0) return;
+    if (response.envelopes.length === 0) {
+      // The peer served nothing for what we asked — it may have PRUNED the prefix we need
+      // (a compacted room).  If we are still missing deps and the peer announced a
+      // snapshot we lack, request its snapshot archive to bootstrap (§15.6).
+      await this.maybeRequestSnapshot();
+      return;
+    }
     const report = await this.engine.ingest(response.envelopes);
     this.options.onProgress?.(report.accepted);
     // Walk the causal DAG: any retained op's still-missing parents + any heads of the
@@ -299,6 +322,49 @@ export class PrivateSyncSession {
       response.blocks.map((b) => ({ cid: b.cid, bytes: base64UrlToBytes(b.data) })),
     );
     // A fetched manifest reveals its chunk CIDs → drive the next phase of the fetch.
+    await this.requestBlocks();
+  }
+
+  /**
+   * §15.6 — request the peer's snapshot archive if we are STUCK (still missing deps the
+   * peer did not serve) AND the peer announced a §14.5 snapshot we do not hold.  At most
+   * once per session (a peer with nothing to serve replies empty; we do not loop).
+   */
+  private async maybeRequestSnapshot(): Promise<void> {
+    if (this.closed || this.snapshotRequested || !this.engine.importArchive) return;
+    // STUCK: we still have unmet deps the peer did not serve (it likely pruned them), and
+    // the peer announced a §14.5 snapshot.  Request its archive to bootstrap the prefix.
+    // (We cannot gate on `latestSnapshotId === peerSnapshot`: holding the snapshot.commit
+    // OP — which the op walk fetches — does NOT mean we hold the snapshot BASE/state.)
+    if (this.engine.missingDependencies().length === 0) return;
+    if (this.peerAnnouncement?.latest_snapshot_id === undefined) return;
+    this.snapshotRequested = true;
+    this.sendMessage({ schema: 'licio.private.snapshot_request.v1' });
+  }
+
+  private async onSnapshotRequest(): Promise<void> {
+    if (!this.engine.snapshotArchive) return;
+    const archive = await this.engine.snapshotArchive();
+    if (!archive) return; // nothing retained to serve
+    this.sendMessage({
+      schema: 'licio.private.snapshot_response.v1',
+      archive: bytesToBase64Url(archive),
+    });
+  }
+
+  private async onSnapshotResponse(response: SnapshotResponse): Promise<void> {
+    if (!this.engine.importArchive) return;
+    // Adopt the peer's snapshot (importArchive re-verifies the in-band commit + ingests).
+    await this.engine.importArchive(base64UrlToBytes(response.archive));
+    // The base + post-snapshot ops may have advanced our heads + revealed wants; re-open
+    // the guards and re-drive the walk (the prefix is no longer needed op-by-op).
+    this.requested.clear();
+    this.announce();
+    const next = [
+      ...this.engine.missingDependencies(),
+      ...(this.peerAnnouncement ? this.engine.wantedFrom(this.peerAnnouncement) : []),
+    ];
+    this.requestOps(next);
     await this.requestBlocks();
   }
 }
