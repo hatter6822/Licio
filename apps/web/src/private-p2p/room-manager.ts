@@ -154,6 +154,11 @@ export class PrivateRoomSession {
     private readonly compactEveryOps: number,
   ) {}
 
+  /** Live sync sessions (so a §10.9 membership change can broadcast its MLS commit to
+   *  every currently-connected member).  Closed sessions no-op on send; they are pruned
+   *  lazily on the next broadcast. */
+  private readonly activeSessions = new Set<PrivateSyncSession>();
+
   get roomId(): string {
     return this.session.roomId;
   }
@@ -193,9 +198,59 @@ export class PrivateRoomSession {
       encodeSyncMessage: this.p2p.encodeSyncMessage,
       decodeSyncMessage: this.p2p.decodeSyncMessage,
     };
-    const sync = new PrivateSyncSession(this.engine, channel, codec, options ?? {});
+    const sync = new PrivateSyncSession(this.engine, channel, codec, {
+      ...(options ?? {}),
+      // The manager owns §10.9 commit application (it holds the MLS group); a peer's
+      // commit advances THIS device's epoch + re-opens the pending content.
+      onMlsCommit: (commit, epoch) => this.applyIncomingCommit(commit, epoch),
+    });
+    this.activeSessions.add(sync);
     sync.start();
     return sync;
+  }
+
+  /**
+   * §10.9 — apply an MLS Commit received from a peer over a live session: advance THIS
+   * device's MLS group to the new epoch, derive + install the new epoch keys, re-open the
+   * content that was pending on that key, and persist the advanced group + keys.  The
+   * sync session then re-announces + walks the newly-decryptable frontier.  Fail-closed:
+   * a bad commit throws (applyCommit), leaving the group/keys untouched.
+   */
+  private async applyIncomingCommit(commit: Uint8Array, epoch: number): Promise<void> {
+    const group = await this.p2p.deserializeGroupState(this.session.mlsGroupState);
+    const advanced = await this.p2p.applyCommit(group, this.p2p.decodeCommit(commit));
+    const newEpochState = await this.p2p.deriveEpochState(
+      advanced,
+      this.session.roomIdCommitment,
+      this.session.manifestCommitment,
+    );
+    if (Number(newEpochState.epoch) !== epoch) {
+      throw new Error(
+        `applyIncomingCommit: commit reached epoch ${Number(newEpochState.epoch)}, expected ${epoch}`,
+      );
+    }
+    const epochNum = Number(newEpochState.epoch);
+    this.engine.addEpochKeys(epochNum, this.p2p.heldKeysOf(newEpochState));
+    await this.engine.retryPending();
+    this.session = {
+      ...this.session,
+      mlsGroupState: this.p2p.serializeGroupState(advanced),
+      epochs: [
+        ...this.session.epochs.filter((e) => e.epoch !== epochNum),
+        {
+          epoch: epochNum,
+          roomEpochSecret: newEpochState.roomEpochSecret,
+          contentWrapKey: newEpochState.keys.contentWrapKey,
+        },
+      ],
+    };
+    await putRoomSession(this.session);
+  }
+
+  /** Broadcast a §10.9 MLS commit to every currently-connected member (so existing
+   *  members advance to the new epoch), pruning any closed sessions. */
+  private broadcastCommit(commit: Uint8Array, epoch: number): void {
+    for (const session of this.activeSessions) session.sendMlsCommit(commit, epoch);
   }
 
   /**
@@ -669,6 +724,11 @@ export class PrivateRoomSession {
       epochs,
     };
     await putRoomSession(this.session);
+    // §10.9: deliver the epoch-rotating commit to every currently-connected member so
+    // they advance to the new epoch and can open the new-epoch content (otherwise their
+    // engines would quarantine it no_epoch_key).  The joiner's Welcome is delivered
+    // out-of-band by the admin (the §10.3 invite channel) and consumed via completeJoin.
+    this.broadcastCommit(this.p2p.encodeCommit(invited.commit), epoch);
     return verdict;
   }
 
