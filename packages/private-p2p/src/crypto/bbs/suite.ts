@@ -31,13 +31,22 @@ const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 export const CIPHERSUITE_ID = 'BBS_BLS12381G1_XMD:SHA-256_SSWU_RO_';
 export const API_ID = `${CIPHERSUITE_ID}H2G_HM2S_`;
 
-const DST_SEED = enc(`${API_ID}SIG_GENERATOR_SEED_`);
-const DST_GENERATOR = enc(`${API_ID}SIG_GENERATOR_DST_`);
-const GENERATOR_SEED = enc(`${API_ID}MESSAGE_GENERATOR_SEED`);
-const DST_MAP_MSG = enc(`${API_ID}MAP_MSG_TO_SCALAR_AS_HASH_`);
-/** The hash-to-scalar DST used by `e`, the domain, and the proof challenge. */
+/** The hash-to-scalar DST used by `e`, the domain, and the proof challenge (base interface). */
 export const DST_H2S = enc(`${API_ID}H2S_`);
 export const API_ID_BYTES = enc(API_ID);
+
+/** Per-interface domain-separation tags. The base BBS interface is `api_id` =
+ *  `CIPHERSUITE_ID || "H2G_HM2S_"`; the blind interface (blind.ts) re-instantiates this
+ *  with `api_id = CIPHERSUITE_ID || "BLIND_H2G_HM2S_"` and the `"BLIND_" || api_id` seed
+ *  for the blind generators — all via the SAME vetted primitives below. */
+const dstsFor = (apiId: string) => ({
+  seed: enc(`${apiId}SIG_GENERATOR_SEED_`),
+  generator: enc(`${apiId}SIG_GENERATOR_DST_`),
+  genSeed: enc(`${apiId}MESSAGE_GENERATOR_SEED`),
+  mapMsg: enc(`${apiId}MAP_MSG_TO_SCALAR_AS_HASH_`),
+  h2s: enc(`${apiId}H2S_`),
+});
+const BASE_DSTS = dstsFor(API_ID);
 
 /** The fixed ciphersuite point `P1` (the §test-vector value, verified in the tests). */
 const P1_HEX =
@@ -93,22 +102,32 @@ export function hashToScalar(msg: Uint8Array, dst: Uint8Array = DST_H2S): bigint
   return mod(os2ip(expand_message_xmd(msg, dst, EXPAND_LEN, sha256)));
 }
 
-/** `messages_to_scalars` — map one application message (octets) to a scalar. */
+export type InterfaceDsts = ReturnType<typeof dstsFor>;
+/** Build the domain-separation tag set for an arbitrary BBS interface `api_id`. */
+export const interfaceDsts = (apiId: string): InterfaceDsts => dstsFor(apiId);
+
+/** `messages_to_scalars` — map one application message (octets) to a scalar (base interface).
+ *  Single-arg by design so it is safe as an `Array.map` callback. */
 export function messageToScalar(message: Uint8Array): bigint {
-  return hashToScalar(message, DST_MAP_MSG);
+  return hashToScalar(message, BASE_DSTS.mapMsg);
+}
+
+/** `messages_to_scalars` for an arbitrary interface (the blind interface, blind.ts). */
+export function messageToScalarWith(message: Uint8Array, mapDst: Uint8Array): bigint {
+  return hashToScalar(message, mapDst);
 }
 
 /**
  * `create_generators(count)` (draft §Generators) — `v = expand(seed)`, then for each
  * i: `v = expand(v || I2OSP(i, 8))`, `generator_i = hash_to_curve_g1(v, generator_dst)`.
- * Returns `[Q_1, H_1, …, H_{count-1}]`.
+ * Returns `[Q_1, H_1, …, H_{count-1}]`. `dsts` selects the interface (base by default).
  */
-export function createGenerators(count: number): G1Point[] {
+export function createGenerators(count: number, dsts: InterfaceDsts = BASE_DSTS): G1Point[] {
   const gens: G1Point[] = [];
-  let v = expand_message_xmd(GENERATOR_SEED, DST_SEED, EXPAND_LEN, sha256);
+  let v = expand_message_xmd(dsts.genSeed, dsts.seed, EXPAND_LEN, sha256);
   for (let i = 1; i <= count; i++) {
-    v = expand_message_xmd(concatBytes(v, i2osp(i, 8)), DST_SEED, EXPAND_LEN, sha256);
-    gens.push(bls.G1.hashToCurve(v, { DST: DST_GENERATOR }) as unknown as G1Point);
+    v = expand_message_xmd(concatBytes(v, i2osp(i, 8)), dsts.seed, EXPAND_LEN, sha256);
+    gens.push(bls.G1.hashToCurve(v, { DST: dsts.generator }) as unknown as G1Point);
   }
   return gens;
 }
@@ -130,12 +149,14 @@ export function calculateDomain(
   q1: G1Point,
   hGenerators: readonly G1Point[],
   header: Uint8Array,
+  apiIdBytes: Uint8Array = API_ID_BYTES,
+  h2sDst: Uint8Array = DST_H2S,
 ): bigint {
   const dom: Uint8Array[] = [i2osp(hGenerators.length, 8), g1Bytes(q1)];
   for (const h of hGenerators) dom.push(g1Bytes(h));
-  const domOcts = concatBytes(concatBytes(...dom), API_ID_BYTES);
+  const domOcts = concatBytes(concatBytes(...dom), apiIdBytes);
   const domInput = concatBytes(g2Bytes(pk), domOcts, i2osp(header.length, 8), header);
-  return hashToScalar(domInput, DST_H2S);
+  return hashToScalar(domInput, h2sDst);
 }
 
 /** The pairing check `e(a, x) == e(b, y)` in GT. */

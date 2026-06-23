@@ -121,16 +121,24 @@ export interface ProofInit {
   mTilde: bigint[];
 }
 
+/** The `(Q_1, H[], domain, msgScalars)` a proof is built over. The base interface fills
+ *  this from `setup()`; the blind interface (blind.ts) supplies blind generators + scalars. */
+export interface Prepared {
+  q1: G1Point;
+  h: G1Point[];
+  domain: bigint;
+  msgScalars: bigint[];
+}
+
 /** Shared ProofGen initialization (ProofInit): blind the signature + undisclosed messages. */
 export function genInit(
-  pk: G2Point,
   signature: BbsSignature,
-  messages: readonly Uint8Array[],
+  prepared: Prepared,
   disclosedIndexes: readonly number[],
-  header: Uint8Array,
   rs: bigint[],
 ): ProofInit {
-  const l = messages.length;
+  const { q1, h, domain, msgScalars } = prepared;
+  const l = msgScalars.length;
   const r = disclosedIndexes.length;
   if (r > l) throw new Error('bbs proof: more disclosed than messages');
   for (const i of disclosedIndexes)
@@ -138,7 +146,6 @@ export function genInit(
   const u = l - r;
   if (rs.length !== 5 + u) throw new Error('bbs proof: wrong random-scalar count');
   const undisclosed = complementIndexes(l, new Set(disclosedIndexes));
-  const { q1, h, domain, msgScalars } = setup(pk, header, messages);
   const [r1, r2, eTilde, r1Tilde, r3Tilde] = rs as [bigint, bigint, bigint, bigint, bigint];
   const mTilde = rs.slice(5);
 
@@ -193,34 +200,29 @@ export interface VerifyRecompute {
   q1: G1Point;
   h: G1Point[];
   undisclosed: number[];
-  disclosedScalars: bigint[];
+  disclosedScalars: readonly bigint[];
 }
 
 /** Shared ProofVerifyInit: recompute T1/T2 from the proof + disclosed messages. Returns
  *  null on a structurally-invalid disclosure (caller treats null as INVALID). */
 export function verifyRecompute(
-  pk: G2Point,
   proof: BbsProof,
-  disclosedMessages: readonly Uint8Array[],
+  prepared: { q1: G1Point; h: G1Point[]; domain: bigint },
+  disclosedScalars: readonly bigint[],
   disclosedIndexes: readonly number[],
-  header: Uint8Array,
 ): VerifyRecompute | null {
+  const { q1, h, domain } = prepared;
+  const l = h.length;
   const r = disclosedIndexes.length;
   const u = proof.commitments.length;
-  const l = r + u;
-  if (disclosedMessages.length !== r) return null;
+  if (r + u !== l) return null;
+  if (disclosedScalars.length !== r) return null;
   for (let k = 0; k < r; k++) {
     const idx = disclosedIndexes[k] as number;
     if (idx < 0 || idx >= l) return null;
     if (k > 0 && idx <= (disclosedIndexes[k - 1] as number)) return null; // ascending, distinct
   }
-  const gens = createGenerators(l + 1);
-  const q1 = gens[0];
-  if (q1 === undefined) return null;
-  const h = gens.slice(1);
-  const disclosedScalars = disclosedMessages.map(messageToScalar);
   const undisclosed = complementIndexes(l, new Set(disclosedIndexes));
-  const domain = calculateDomain(pk, q1, h, header);
   const c = proof.challenge;
   const t1 = mul(proof.bBar, c).add(mul(proof.aBar, proof.eHat)).add(mul(proof.d, proof.r1Hat));
   let bv = P1.add(mul(q1, domain));
@@ -254,7 +256,7 @@ export function proofGen(
 ): Uint8Array {
   const u = messages.length - disclosedIndexes.length;
   const rs = (randomScalarsOverride ?? defaultRandomScalars)(5 + u);
-  const init = genInit(pk, signature, messages, disclosedIndexes, header, rs);
+  const init = genInit(signature, setup(pk, header, messages), disclosedIndexes, rs);
   const disclosedScalars = disclosedIndexes.map((i) => init.msgScalars[i] as bigint);
   const challenge = proofChallenge(
     init.aBar,
@@ -286,7 +288,15 @@ export function proofVerify(
   } catch {
     return false;
   }
-  const rec = verifyRecompute(pk, proof, disclosedMessages, disclosedIndexes, header);
+  if (disclosedMessages.length !== disclosedIndexes.length) return false;
+  const l = disclosedIndexes.length + proof.commitments.length;
+  const gens = createGenerators(l + 1);
+  const q1 = gens[0];
+  if (q1 === undefined) return false;
+  const h = gens.slice(1);
+  const disclosedScalars = disclosedMessages.map(messageToScalar);
+  const domain = calculateDomain(pk, q1, h, header);
+  const rec = verifyRecompute(proof, { q1, h, domain }, disclosedScalars, disclosedIndexes);
   if (rec === null) return false;
   const challenge = proofChallenge(
     proof.aBar,

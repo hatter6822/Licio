@@ -27,20 +27,23 @@ import {
   bbsMul,
   genFinalize,
   genInit,
+  type Prepared,
   proofChallenge,
   proofFromBytes,
   proofPairingHolds,
   verifyRecompute,
 } from './proof.js';
-import { type BbsSignature, randomScalar } from './signature.js';
+import { type BbsSignature, randomScalar, setup } from './signature.js';
 import {
   bls,
   CIPHERSUITE_ID,
+  calculateDomain,
   concatBytes,
+  createGenerators,
   type G1Point,
   type G2Point,
   g1Bytes,
-  mod,
+  messageToScalar,
 } from './suite.js';
 
 const NYM_GENERATOR_DST = new TextEncoder().encode(`${CIPHERSUITE_ID}LICIO_NYM_GENERATOR_`);
@@ -65,30 +68,29 @@ export function computePseudonym(nidSecret: bigint, context: Uint8Array): G1Poin
 const pseudonymExtra = (op: G1Point, nym: G1Point, u: G1Point): Uint8Array =>
   concatBytes(g1Bytes(op), g1Bytes(nym), g1Bytes(u));
 
+const defaultRandoms = (count: number): bigint[] =>
+  Array.from({ length: count }, () => randomScalar());
+
 /**
- * Show a credential anonymously while emitting a per-`context` pseudonym bound to the
- * undisclosed message at `nidIndex`. `disclosedIndexes` MUST NOT include `nidIndex`.
+ * Core pseudonym show over a PREPARED generator set (base interface uses `setup()`; the
+ * blind interface, blind.ts, supplies blind generators + scalar messages). Emits a
+ * per-`context` pseudonym bound to the undisclosed message at `nidIndex`.
  */
-export function proveWithPseudonym(
-  pk: G2Point,
+export function proveWithPseudonymPrepared(
   signature: BbsSignature,
-  messages: readonly Uint8Array[],
+  prepared: Prepared,
   nidIndex: number,
   disclosedIndexes: readonly number[],
   context: Uint8Array,
-  header: Uint8Array = new Uint8Array(0),
   ph: Uint8Array = new Uint8Array(0),
   randomScalarsOverride?: (count: number) => bigint[],
 ): PseudonymProof {
-  if (nidIndex < 0 || nidIndex >= messages.length)
+  if (nidIndex < 0 || nidIndex >= prepared.msgScalars.length)
     throw new Error('pseudonym: nidIndex out of range');
   if (disclosedIndexes.includes(nidIndex)) throw new Error('pseudonym: nid must stay undisclosed');
-  const u = messages.length - disclosedIndexes.length;
-  const rs = (
-    randomScalarsOverride ??
-    ((count: number) => Array.from({ length: count }, () => randomScalar()))
-  )(5 + u);
-  const init = genInit(pk, signature, messages, disclosedIndexes, header, rs);
+  const u = prepared.msgScalars.length - disclosedIndexes.length;
+  const rs = (randomScalarsOverride ?? defaultRandoms)(5 + u);
+  const init = genInit(signature, prepared, disclosedIndexes, rs);
 
   const op = deriveNymGenerator(context);
   const nid = init.msgScalars[nidIndex] as bigint;
@@ -113,17 +115,46 @@ export function proveWithPseudonym(
   return { proof: genFinalize(signature, challenge, rs, init), pseudonym };
 }
 
-/** Verify a pseudonym-bound show: the base proof holds AND `pseudonym = OP^nid` for the
- *  credential's own undisclosed `nid`. */
-export function verifyWithPseudonym(
+/**
+ * Show a credential anonymously while emitting a per-`context` pseudonym bound to the
+ * undisclosed message at `nidIndex`. `disclosedIndexes` MUST NOT include `nidIndex`.
+ */
+export function proveWithPseudonym(
+  pk: G2Point,
+  signature: BbsSignature,
+  messages: readonly Uint8Array[],
+  nidIndex: number,
+  disclosedIndexes: readonly number[],
+  context: Uint8Array,
+  header: Uint8Array = new Uint8Array(0),
+  ph: Uint8Array = new Uint8Array(0),
+  randomScalarsOverride?: (count: number) => bigint[],
+): PseudonymProof {
+  return proveWithPseudonymPrepared(
+    signature,
+    setup(pk, header, messages),
+    nidIndex,
+    disclosedIndexes,
+    context,
+    ph,
+    randomScalarsOverride,
+  );
+}
+
+/**
+ * Core pseudonym verify over a PREPARED generator set (`{q1, h, domain}`) + disclosed
+ * SCALARS. The blind interface supplies blind generators; the base wrapper builds them
+ * from `createGenerators`/`messages_to_scalars`.
+ */
+export function verifyWithPseudonymPrepared(
   pk: G2Point,
   proofBytes: Uint8Array,
   pseudonym: G1Point,
-  disclosedMessages: readonly Uint8Array[],
+  prepared: { q1: G1Point; h: G1Point[]; domain: bigint },
+  disclosedScalars: readonly bigint[],
   disclosedIndexes: readonly number[],
   nidIndex: number,
   context: Uint8Array,
-  header: Uint8Array = new Uint8Array(0),
   ph: Uint8Array = new Uint8Array(0),
 ): boolean {
   if (disclosedIndexes.includes(nidIndex)) return false;
@@ -136,7 +167,7 @@ export function verifyWithPseudonym(
     return false;
   }
   if (pseudonym.is0()) return false; // a degenerate nym (nid ≡ 0) is not a valid identity
-  const rec = verifyRecompute(pk, proof, disclosedMessages, disclosedIndexes, header);
+  const rec = verifyRecompute(proof, prepared, disclosedScalars, disclosedIndexes);
   if (rec === null) return false;
   const l = disclosedIndexes.length + proof.commitments.length;
   if (nidIndex < 0 || nidIndex >= l) return false;
@@ -161,4 +192,50 @@ export function verifyWithPseudonym(
   );
   if (challenge !== proof.challenge) return false;
   return proofPairingHolds(proof, pk);
+}
+
+/** Verify a pseudonym-bound show: the base proof holds AND `pseudonym = OP^nid` for the
+ *  credential's own undisclosed `nid`. Builds the base generator set from `createGenerators`. */
+export function verifyWithPseudonym(
+  pk: G2Point,
+  proofBytes: Uint8Array,
+  pseudonym: G1Point,
+  disclosedMessages: readonly Uint8Array[],
+  disclosedIndexes: readonly number[],
+  nidIndex: number,
+  context: Uint8Array,
+  header: Uint8Array = new Uint8Array(0),
+  ph: Uint8Array = new Uint8Array(0),
+): boolean {
+  let proof: BbsProof;
+  try {
+    proof = proofFromBytes(proofBytes);
+  } catch {
+    return false;
+  }
+  if (disclosedMessages.length !== disclosedIndexes.length) return false;
+  const l = disclosedIndexes.length + proof.commitments.length;
+  const gens = createGenerators(l + 1);
+  const q1 = gens[0];
+  if (q1 === undefined) return false;
+  const h = gens.slice(1);
+  let domain: bigint;
+  try {
+    pk.assertValidity();
+    domain = calculateDomain(pk, q1, h, header);
+  } catch {
+    return false;
+  }
+  const disclosedScalars = disclosedMessages.map(messageToScalar);
+  return verifyWithPseudonymPrepared(
+    pk,
+    proofBytes,
+    pseudonym,
+    { q1, h, domain },
+    disclosedScalars,
+    disclosedIndexes,
+    nidIndex,
+    context,
+    ph,
+  );
 }

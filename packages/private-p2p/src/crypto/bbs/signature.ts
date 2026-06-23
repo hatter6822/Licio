@@ -26,6 +26,7 @@ import {
   ORDER,
   os2ip,
   P1,
+  pairingEqual,
   scalarBytes,
 } from './suite.js';
 
@@ -134,6 +135,38 @@ export function bbsVerify(
   const lhs = bls.pairing(signature.a, pk);
   const rhs = bls.pairing(signature.a.multiply(signature.e).subtract(b), G2.BASE);
   return bls.fields.Fp12.eql(bls.fields.Fp12.mul(lhs, rhs), bls.fields.Fp12.ONE);
+}
+
+/**
+ * Verify a BBS signature directly against a SCALAR message vector + an explicit message-
+ * generator set (the composition anchor for blind issuance, blind.ts): checks that
+ * `(A, e)` is a valid base BBS signature over `B = P1 + q1·domain + Σ msgGens_i·msgScalars_i`.
+ * This is the SAME vetted pairing check as `bbsVerify`, lifted to scalars/generators.
+ */
+export function bbsVerifyScalars(
+  pk: G2Point,
+  signature: BbsSignature,
+  q1: G1Point,
+  msgGens: readonly G1Point[],
+  msgScalars: readonly bigint[],
+  header: Uint8Array = new Uint8Array(0),
+): boolean {
+  if (signature.e <= 0n || signature.e >= ORDER) return false;
+  if (msgGens.length !== msgScalars.length) return false;
+  try {
+    if (signature.a.is0()) return false;
+    signature.a.assertValidity();
+    pk.assertValidity();
+  } catch {
+    return false;
+  }
+  const domain = calculateDomain(pk, q1, msgGens, header);
+  let b = P1.add(q1.multiply(domain));
+  for (let i = 0; i < msgScalars.length; i++) {
+    const s = mod(msgScalars[i] as bigint);
+    if (s !== 0n) b = b.add((msgGens[i] as G1Point).multiply(s));
+  }
+  return pairingEqual(signature.a, pk.add(G2.BASE.multiply(signature.e)), b, G2.BASE);
 }
 
 /** Serialize a signature to its 80-byte wire form (`A || e`). */
