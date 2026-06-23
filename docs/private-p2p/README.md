@@ -263,10 +263,30 @@ slice is closed on the convergence side:
   status).  A node integration test converges two real engines over the real
   op-exchange codec; the carrier node test converges two engines over a fake-RTC pair
   + in-memory rendezvous AND covers the fail-closed handshake-reject case.
+- The live carrier now converges across the FULL lifecycle, not a single static epoch:
+  - **§10.9 epoch rotation** — `admitJoinRequest`/`removeMember` broadcast the MLS commit
+    over an `mls_commit` sync message to every connected member; each applies it
+    (`applyCommit` → derive + install the new epoch keys → `retryPending`), so
+    post-membership-change content opens instead of quarantining `no_epoch_key`.  The
+    engine RETAINS (does not drop) an op awaiting an epoch key and re-opens it when the
+    key arrives (the self-heal), and the session's request guard means a served-but-
+    unopenable op never livelocks.
+  - **§12.3 `completeJoin`** — `admitJoinRequest` returns a GRANT (the MLS Welcome + the
+    current device roster + a §14.5 snapshot sealed under the new epoch); the joiner
+    `completeJoin`s it into a usable `PrivateRoomSession` that sees the existing
+    members/devices/content WITHOUT the historical keys it never held (forward secrecy),
+    and authors with its own proof-bound device signing key.
+  - **§13.6 media** — `block_request`/`block_response` carry CID-addressed attachment
+    blocks; the session lazily fetches the manifest then its chunks after op convergence
+    and `decryptAttachment`s them (re-verifying every CID before storing).
+  - **§14.5 live snapshot fetch** — a compacted/lagging member that cannot fetch the
+    pruned prefix op-by-op requests the peer's snapshot archive over
+    `snapshot_request`/`snapshot_response` and bootstraps from it.
 - What remains is the full two-browser **create→invite→join→connect→converge** E2E on
-  real browser radios + live MLS Welcome delivery that constructs a remote joiner's
-  `PrivateRoomSession` (the admin side — verify + MLS Add + signed `member.add` — runs
-  today via the copy-paste `InvitePanel`/`JoinPanel`).
+  real browser radios (the node + fake-RTC pair tests prove the protocol end to end —
+  membership rotation, media, and snapshot bootstrap all converge byte-for-byte over
+  `PrivateSyncSession`; a real two-browser run adds hardware confidence) and mounting the
+  grant-delivery + media affordances on the room UI beyond the copy-paste panels.
 
 **WS-S.10 — the hardened update channel + WS-O substrate — is shipped:**
 - `packages/shared/src/update/` is the PURE, fail-closed verify-before-unlock core
