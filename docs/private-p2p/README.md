@@ -46,8 +46,10 @@ search — with the §14.3.3/§26.1 byte-identical-across-shuffles determinism
 property pinned.
 
 The **WS-S.6 P2P sync-decision plane is shipped as a pure, transport-independent
-core** (`sync/`, WS-S.6.1–6.6; the live WebRTC carrier is the remaining
-integration): the §15.2/§15.3 blind rendezvous (derivation, sealed
+core** (`sync/`, WS-S.6.1–6.6) AND the **WS-S.4.3 live WebRTC carrier is now wired on
+top** (`apps/web/src/private-p2p/connect-peer.ts` `connectPrivatePeer` → a
+membership-proven `PeerChannel` → `PrivateSyncSession`, converging two real engines):
+the §15.2/§15.3 blind rendezvous (derivation, sealed
 announcements, the §15.3.1 authorization property, the §15.3.2 metadata
 mitigations), the §15.4 encrypted signaling + relay-only ICE suppression, the
 §15.5 membership-proving handshake, the §15.6/§15.7/§15.8 head announcement +
@@ -237,25 +239,80 @@ as a pure, transport-independent core**:
   rendezvous), and a real-Chromium-WebRTC datachannel loopback E2E
   (`apps/web/e2e/webrtc-loopback.spec.ts`) confirms the datachannel + byte path.
 
-**What remains transport-gated (the live device-session slice):**
-- The private-p2p **live RTC carrier** that PRODUCES the `PeerChannel` — wiring a real
-  `RTCPeerConnection` to the shipped §15.2/§15.3 blind rendezvous + §15.4 encrypted
-  signaling + §15.5 membership handshake cores (the private plane keeps its OWN driver,
-  never sharing the LCAP carrier — different crypto suites by doctrine).  The
-  convergence math, the orchestration, and the real-WebRTC capability are all
-  independently proven; only this glue + the **full two-browser create→invite→join→
-  connect→converge E2E** remain.
-- Live MLS Welcome delivery that constructs a remote joiner's `PrivateRoomSession`
-  (the admin side — verify + MLS Add + signed `member.add` — runs today via the
-  copy-paste `InvitePanel`/`JoinPanel`).
+**The WS-S.4.3 live private-p2p WebRTC carrier is now shipped** — the device-session
+slice is closed on the convergence side:
+- `connectPrivatePeer` (`apps/web/src/private-p2p/connect-peer.ts`) composes the
+  shipped pure cores into a real `RTCPeerConnection` → a post-handshake `PeerChannel`
+  (the private plane's OWN driver — it shares no crypto with the LCAP carrier, by
+  doctrine): the §15.2/§15.3 blind rendezvous derives the room/peer blind ids,
+  signaling is X25519-ECDH SEALED before it reaches the server (`sealSignal`/
+  `openSignal`, relay-only ICE suppression applied per-candidate), and the §15.5
+  membership-proving handshake verifies the remote device is REGISTERED + ACTIVE at
+  the epoch BEFORE any op frame is served (a `MessageInbox` queues so a fast peer's
+  first frame is never dropped; a failed handshake tears the connection down and
+  rejects — no op is ever served first).
+- `apps/web/src/private-p2p/rendezvous-client.ts` (`httpRendezvousTransport`) is the
+  zod-validated fetch transport over `POST /v1/private-rendezvous/{announce,poll,
+  signal,signal/poll}` (blind ids + ciphertext + clamped TTL only; `poll` is never an
+  existence oracle).  `PrivateRoomSession.connect()` derives the epoch keys, builds
+  the transport + a `resolveDevice` over `engine.state().devices`, calls
+  `connectPrivatePeer`, and hands the channel to `PrivateSyncSession` (the §15.7
+  op-exchange) so two REAL engines **converge to byte-identical reduced state by
+  walking the DAG**.  A "Connect & sync with members" control in `PrivateRoomView`
+  drives it (`session.connect(...)` with live `idle/connecting/connected/error`
+  status).  A node integration test converges two real engines over the real
+  op-exchange codec; the carrier node test converges two engines over a fake-RTC pair
+  + in-memory rendezvous AND covers the fail-closed handshake-reject case.
+- What remains is the full two-browser **create→invite→join→connect→converge** E2E on
+  real browser radios + live MLS Welcome delivery that constructs a remote joiner's
+  `PrivateRoomSession` (the admin side — verify + MLS Add + signed `member.add` — runs
+  today via the copy-paste `InvitePanel`/`JoinPanel`).
 
-**Server-coupled / later:**
-- WS-S.9 server→private migration: the §24 copy SSOT + the `planMigration` decision
-  core (Fresh/Selected/Full/Redacted + honest leakage disclosures) are **shipped**
-  (`@licio/shared` + `engine/migration.ts`); the server-export half + the wizard UI
-  (which reuses the existing `postStory`/`postComment` authoring over `planMigration`)
-  remain.
-- WS-S.10 update channel (depends on WS-O).
+**WS-S.10 — the hardened update channel + WS-O substrate — is shipped:**
+- `packages/shared/src/update/` is the PURE, fail-closed verify-before-unlock core
+  (`verifyUpdateManifest` / `decideUpdateActivation`): a private room activates ONLY
+  when the running bundle is maintainer-Ed25519-SIGNED over a body whose
+  `bundle_digest` equals the SHA-256 of the RUNNING bytes, PRESENT in the append-only
+  transparency log (proven by an RFC 9162 inclusion proof against a log-signed
+  checkpoint), and NOT stale (anti-rollback).  Anything else — unsigned, untrusted
+  signer, digest mismatch, bad checkpoint signature, a proof that does not reconstruct
+  the signed root, or any read/crypto failure — yields a typed UNTRUSTED verdict that
+  LOCKS the rooms.  There is no soft pass and no "unknown ⇒ allow" branch.
+- `apps/web/src/update/` is the client gate (`assertPrivateBundleTrusted` hashes the
+  running bundle, verifies, and locks on failure with the §20.6 copy) + the SW pinning
+  that refuses a silent takeover by an unverified bundle.  The new `check:update-channel`
+  CI gate proves that wiring stays present.  `ensurePrivateBundleTrusted()` is wired
+  into `PrivateRoomSession.{create,load}` and `loadPrivateRoomEngine`, engaged only
+  when a signer set is build-pinned.
+
+**WS-S.9 — server→private migration — is now functional end-to-end:**
+- The §24 copy SSOT + the `planMigration` decision core (Fresh/Selected/Full/Redacted
+  + honest leakage disclosures) were already shipped; now the server-export half + the
+  wizard are wired.  `apps/api/src/forum/migration-export.ts`
+  (`exportRoomForMigration` / `freezeRoomForMigration` / `purgeRoomForMigration`) is
+  steward-gated (404-over-403, never a membership oracle) and refuses p2p rooms; a
+  server-enforced read-only freeze (migration `0047`, a `frozen` flag) gates purge
+  fail-closed (freeze-before-purge, so the §8 disclosure stays honest), with
+  `purge`/`anonymize` modes.  `POST /v1/rooms/:roomId/migration/{export,freeze,purge}`
+  expose it.
+- The 6-phase `MigrationWizard` (`apps/web/src/components/migration/`, the
+  `/private/migrate` route): disclose → create the P2P destination → choose import
+  mode → re-invite members → freeze the old room → purge/minimize.
+  `apps/web/src/private-p2p/migrate.ts` (`reauthorIntoPrivateRoom`) runs `planMigration`
+  over the export and re-authors each planned item into the destination session via
+  `postStory`/`postComment` (which ENCRYPT as they author — the server never sees the
+  re-encrypted content).
+
+**WS-S.11 — the audit suite — is shipped** (`packages/private-p2p` +
+`apps/api/src/__tests__`): a 3+-peer convergence matrix (star / chain-relay /
+concurrent-author / out-of-order+duplicate topologies, asserting identical
+`roomStateCommitment`), the no-server-content umbrella audit (the §8.1/§8.2 column
+denylist + the endpoint 409/404/feed-409 rejections + the gated §8.3-trigger leg),
+and the rendezvous-privacy audit (opaque-only storage, `.strict()` identity-field
+rejection, the §8.2 allowlist, the TTL upper bound, transient signals) — which fixed a
+latent `DrizzleRendezvousStore.poll` Date-bind bug (it now binds `gt(expiresAt,
+new Date(nowMs))` as a proper param, mirroring the cleanup `lte`).  A pinned
+known-answer **SAS (safety number)** vector locks `computeSafetyNumber` against drift.
 
 See `docs/private-p2p/SECURITY-REVIEW.md` (WS-S.11) for the threat model +
 mitigations + residual-risk map.

@@ -111,13 +111,61 @@ mounted through the global security middleware:
   holds a non-revoked, authority-signed `may_export_bundle` capability for the room
   (`verifyExportAuthorization`; CSRF-exempt + rate-limited — review #5).
 
-The remaining WS-R cards are **I/O integration** — the WS-R.15.1a bundle-export UI
-flow (the server `POST /bundles/export` is shipped; the authority-signed checkpoint
-record is checkpoint issuance), the transport profiles (WS-R.15), the WS-S
-encryption-envelope seam (WS-R.16), the client surface (WS-R.17), and the network
-simulator (WS-R.18) — plus the entire WS-S private-rooms plane.  Those bind this pure core to Postgres / IndexedDB /
-Hono / the browser and are **not yet started** (see "Status" below).  The optional,
-non-authoritative set-reconciliation filters (WS-R.7.3) are deferred by the spec itself.
+The transport plane is now **driven live, not just defined.**  `syncRoomOverP2p`
+(`apps/web/src/lcap/transports/sync-over-p2p.ts`, WS-R.15.6) is the FIRST real
+runtime consumer of the WebRTC carrier: it derives a PUBLIC signaling key by HKDF
+over the public `roomIdHash` (`signal-key.ts` `derivePublicSignalKeyBytes` — the
+PUBLIC plane only; signaling secrecy is never LCAP's trust root, content-addressing
++ COSE_Sign1 are), establishes a live `WebrtcTransport` over the server-blind
+rendezvous (`connectLcapWebrtc`, dynamic-import only so `check:lcap-p2p-split`
+holds), and runs ONE §16 exchange through `offlineExchange` — whose
+`selectTransports` still forces the HTTPS anchor LAST (the anchor-last + public-only
+carriage policy is structurally preserved even though the WebRTC peer is preferred);
+it falls back to the anchor alone when the channel never opens, so correctness never
+depends on the optional carrier.  Because an SCTP datachannel message has a
+small cross-browser-safe size limit, `@licio/lcap-p2p`'s `webrtc/fragment.ts`
+(`fragmentMessage` / `FragmentReassembler`) splits an exchange pack into ≤ 16 KiB
+self-describing fragments and reassembles the EXACT bytes fail-closed (a bad
+version / out-of-order seq / conflicting in-flight header / over-cap declared
+length aborts the reassembly; the 16 MiB §27 DoS bound caps the memory one inbound
+exchange may pin before the validator sees it).
+
+**WS-R.16.1 — the cross-plane bundle bridge — is shipped**
+(`apps/web/src/lcap/cross-plane-bridge.ts`): a WS-S private-p2p
+`PrivateEncryptedEnvelope` rides inside an LCAP `.licio-bundle` as an opaque
+`encrypted_payload` block whose CID is computed over the CIPHERTEXT bytes (§28.1 —
+a plaintext CID for private content can never exist).  `exportPrivateEnvelopesToBundle`
+labels the carrier suite `MLS-derived-AEAD`, so the §28.2 schema STRUCTURALLY forbids
+a plaintext digest/size hint (§10.6); the only hints carried are already-public
+fields (the epoch counter, the AEAD nonce, the `aad_hash` commitment).
+`importBundleToPrivateEnvelopes` re-hashes every block (CID + structure only — it
+NEVER decrypts) and re-parses each recovered ciphertext through the private-p2p
+envelope schema, then HANDS the opaque envelopes to the caller so the private-p2p
+engine performs the real trust projection (§8.3 — the container confers no trust;
+a stale/forged envelope round-trips opaquely and is quarantined later).
+
+**Gate-19 (WS-R.15.7b / WS-S.4.4) is now closed against REAL takedown state.**
+`@licio/lcap-p2p`'s `IpfsBridge` carries the structural public-only + takedown-recheck
+gate but cannot import `@licio/db`; the production DB binding lives on the apps/api
+side: `lcap_block_provenance` (migration `0046`) maps `block_cid → (target_type,
+target_id)`, `apps/api/src/lcap/takedown-oracle.ts` (`DrizzleTakedownOracle`)
+resolves a block CID to its content targets and reads the live takedown status
+through the single `takedownInForce` rule (fail-closed — a thrown query is treated
+as a halt, never as "no takedown"), and `publisher.ts` (`LcapPublicPublisher`)
+re-checks the live oracle at PUBLISH **and** republish behind
+`assertPublicGatewayEligible` + `decideBlockPublish`.  The env-gated
+`POST /api/lcap/v2/public-bridge/{publish,republish}` route (503
+`public_bridge_not_configured` unless `LCAP_IPFS_GATEWAY_URL` /
+`LCAP_IPFS_PINNING_URL` / `DATABASE_URL` are all set) is the real caller — so
+`@licio/lcap-p2p` is now an `apps/api` workspace dependency (the server-side binding
+it structurally cannot carry itself; budget-exempt, no initial-bundle constraint, so
+`check:lcap-p2p-split` does not apply).
+
+The remaining WS-R cards are **I/O integration** — the transport profiles' remaining
+adapters (WS-R.15), the client surface polish (WS-R.17), and the network simulator
+(WS-R.18) — plus the live two-browser convergence E2E for the WS-S private plane.
+The optional, non-authoritative set-reconciliation filters (WS-R.7.3) are deferred by
+the spec itself.
 
 ## What is implemented (WS-R.0 — `packages/lcap`)
 
