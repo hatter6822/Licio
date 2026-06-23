@@ -10,6 +10,7 @@
 import { useEffect, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
+import type { PrivateSyncSession } from '../../../private-p2p/sync-session.js';
 import { Button } from '../../ui/Button/index.js';
 import { Card } from '../../ui/Card/index.js';
 import { EmptyState } from '../../ui/EmptyState/index.js';
@@ -55,6 +56,11 @@ export function PrivateRoomView({ roomId }: PrivateRoomViewProps): React.ReactEl
   const [storyTitle, setStoryTitle] = useState('');
   const [busy, setBusy] = useState(false);
   const [showManage, setShowManage] = useState(false);
+  const [sync, setSync] = useState<PrivateSyncSession | null>(null);
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'connecting' | 'connected' | 'error'>(
+    'idle',
+  );
+  const [syncError, setSyncError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -69,6 +75,13 @@ export function PrivateRoomView({ roomId }: PrivateRoomViewProps): React.ReactEl
       cancelled = true;
     };
   }, [roomId]);
+
+  // Tear down any live sync when the room changes or the view unmounts.
+  useEffect(() => {
+    return () => {
+      sync?.close();
+    };
+  }, [sync]);
 
   if (loading) return <LoadingState label={t('privateRoom.view.loading', 'Loading room…')} />;
   if (!session) {
@@ -113,6 +126,27 @@ export function PrivateRoomView({ roomId }: PrivateRoomViewProps): React.ReactEl
     }
   }
 
+  // Establish a LIVE peer connection (WS-S.4.3): discover a member via the server-blind
+  // rendezvous, prove membership (§15.5), and sync over WebRTC.  Re-renders on progress.
+  async function connectToMembers(): Promise<void> {
+    if (!session || syncStatus === 'connecting') return;
+    setSyncStatus('connecting');
+    setSyncError('');
+    try {
+      const live = await session.connect({
+        timeoutMs: 25_000,
+        onProgress: () => setTick((n) => n + 1),
+        onError: (e) => setSyncError(e instanceof Error ? e.message : String(e)),
+      });
+      setSync(live);
+      setSyncStatus('connected');
+      setTick((n) => n + 1);
+    } catch (e) {
+      setSyncStatus('error');
+      setSyncError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <section aria-label={t('privateRoom.view.members', 'Members')}>
@@ -144,6 +178,30 @@ export function PrivateRoomView({ roomId }: PrivateRoomViewProps): React.ReactEl
               ? t('privateRoom.view.hideManage', 'Hide members & verification')
               : t('privateRoom.view.showManage', 'Manage members & verify devices')}
           </Button>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={connectToMembers}
+            disabled={syncStatus === 'connecting'}
+          >
+            {syncStatus === 'connecting'
+              ? t('privateRoom.view.connecting', 'Connecting to members…')
+              : syncStatus === 'connected'
+                ? t('privateRoom.view.resync', 'Connected — reconnect')
+                : t('privateRoom.view.connect', 'Connect & sync with members')}
+          </Button>
+          {syncStatus === 'connected' ? (
+            <span className="text-ink-muted text-xs">
+              {t('privateRoom.view.live', 'Live — syncing over an encrypted peer connection')}
+            </span>
+          ) : null}
+          {syncStatus === 'error' && syncError ? (
+            <span className="text-ink-muted text-xs" role="status">
+              {t('privateRoom.view.syncFailed', 'Could not connect:')} {syncError}
+            </span>
+          ) : null}
         </div>
       </section>
 
