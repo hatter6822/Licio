@@ -16,14 +16,17 @@ const INITIAL_JS_BUDGET_BYTES = 200 * 1024;
 const TOTAL_JS_BUDGET_BYTES = 320 * 1024;
 const CSS_BUDGET_BYTES = 50 * 1024;
 
-// WS-S.2.1 — the Private P2P rooms stack (Helia/libp2p + MLS + HPKE + a
-// memory-hard KDF) is large and lazily code-split; it would blow the core
-// 320 KiB TOTAL-JS budget even though it never enters the initial load
-// (PRIVATE_SPEC §9.8).  So the private chunk gets its OWN measured budget and
-// is EXCLUDED from the core total — never silently exempt.  Vite names the lazy
-// chunk after the dynamically-imported `private-p2p` module, so its built asset
-// file name contains `private-p2p`; this pattern keys the separate bucket.
-const PRIVATE_CHUNK_PATTERN = /private-p2p/;
+// WS-S.2.1 / WS-R — the optional DECENTRALIZATION planes are large and lazily
+// code-split, reached ONLY through dynamic imports (check:private-p2p-split /
+// check:lcap-p2p-split), so they carry no weight for a user who never opts into
+// E2EE rooms or P2P/courier sync.  They would blow the core 320 KiB TOTAL-JS
+// budget even though they never enter the initial load (PRIVATE_SPEC §9.8), so
+// each gets its OWN measured budget and is EXCLUDED from the core total — never
+// silently exempt.  Two chunks qualify: the `private-p2p` plane (the E2EE rooms
+// stack — MLS/HPKE/curves + the room engine) and the `lcap-p2p` plane (the
+// optional WebRTC/IPFS + courier transport carriers).  Vite names each lazy chunk
+// after its plane, so the built asset file name contains `private-p2p`/`lcap-p2p`.
+const PRIVATE_CHUNK_PATTERN = /private-p2p|lcap-p2p/;
 const PRIVATE_CHUNK_BUDGET_BYTES = 2048 * 1024;
 
 interface BundleSizeReport {

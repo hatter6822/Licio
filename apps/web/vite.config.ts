@@ -210,6 +210,19 @@ export default defineConfig({
           ) {
             return 'private-p2p';
           }
+          // WS-R — the LCAP P2P decentralization TRANSPORT plane (the optional WebRTC/IPFS
+          // carriers + the courier sync transports) is, like the private plane, an
+          // optional lazy plane reached ONLY through dynamic imports (check:lcap-p2p-split)
+          // — it carries no weight for a user who never opts into P2P/courier sync.  Keep
+          // it in ONE `lcap-p2p` chunk with its OWN budget, excluded from the core total
+          // (separately budgeted, never silently exempt — see check-bundle-size.ts).
+          if (
+            id.includes('packages/lcap-p2p') ||
+            id.includes('@licio/lcap-p2p') ||
+            id.includes('apps/web/src/lcap/transports')
+          ) {
+            return 'lcap-p2p';
+          }
         },
       },
     },
