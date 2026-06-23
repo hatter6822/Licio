@@ -738,6 +738,27 @@ production code, not hand-authored fixtures:
 - No password, shared TOTP secret, or other reusable credential is seeded.
 - The seed never runs under `NODE_ENV=production`.
 
+### Decentralized-data-plane surfaces (WS-R / WS-S)
+
+The offline (LCAP) and private-P2P (E2EE) surfaces are **client-local by
+construction** — their content lives in the browser's own IndexedDB, never on the
+server — so the server seed produces **no** P2P room (by design, not a gap; a
+`storage_mode='p2p'` row is structurally rejected by the §8.3 database trigger).
+Exercise them directly in the running app:
+
+| Route | Surface | What to try |
+|-------|---------|-------------|
+| `/private` | Private (E2EE) rooms list + `CreatePrivateRoomWizard` | Create a room (5 blocking acknowledgments); it is stored only on this device (`licio_private_p2p` IndexedDB). |
+| `/private/$roomId` | `PrivateRoomView` | Post a story/comment; open `InvitePanel`/`JoinPanel` (copy-paste the recipient key → sealed invite → join request → **grant** → `completeJoin`); verify a device's safety number (`SafetyNumberPanel`); "Connect & sync with members" drives the live WebRTC carrier. |
+| `/private/migrate` | `MigrationWizard` | Re-author a server room's content into a destination private room (freeze → re-author → purge). |
+| `/profile/offline` | `OfflineBundlePanel` + `P2pSyncPanel` | Export/import a `.licio-bundle` (incl. a private room's ciphertext via the cross-plane bridge); run a live LCAP P2P sync over WebRTC. |
+| `/profile/mode` | `OperationalModeSelector` + `TransportStatus` + `CourierRunner` | Switch operational mode (minimal/standard/courier/relay/stealth/emergency); drive the native courier (off by default; Stealth/Emergency force it off; the radio-metadata disclosure must be acknowledged first). |
+
+A second device/browser profile is needed to exercise the two-device invite→join
+flow end to end. The crypto/protocol cores load only via dynamic import (the
+`private-p2p` / `lcap-p2p` lazy chunks), so the initial bundle is unaffected — open
+DevTools → Network to watch the chunk load when you first enter `/private`.
+
 ---
 
 ## 11. Local HTTPS (optional)

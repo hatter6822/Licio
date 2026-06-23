@@ -203,3 +203,20 @@ re-verified through `openOp`.
 `check:p2p-search-exclusion`, `check:private-p2p-split`, `check:p2p-mls-wrapper`,
 plus `check:no-applause` / `check:no-raw-egress` / `check:lcap-schema-egress`
 extended over the private trees.
+
+## 10. Risk register (PRIVATE_SPEC §38-equivalent)
+
+Symmetric with `docs/OFFLINE_SPEC.md` §38 (the LCAP transport/radio register), this
+indexes the WS-S-specific risks so a regression names the risk it reopens.  Each row
+is Risk → Impact → implemented Mitigation (+ residual where the mitigation is partial).
+
+| Risk | Impact | Mitigation (implemented) | Residual |
+|------|--------|--------------------------|----------|
+| **ts-mls is not formally audited** | A flaw in the MLS library could weaken group keying / forward secrecy | Suite-pinned (`MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`) behind a one-file wrapper; `check:p2p-mls-wrapper` forbids deep imports; RFC-9420 vectors + a multi-device/epoch/manifest-fork suite pin behaviour; the epoch→key-schedule bridge is independently HKDF-vector-pinned | Tracked: a future swap to an audited/WASM build (`docs/lcap/README.md`) |
+| **Rendezvous traffic-timing leak** | A global observer correlates announce/poll timing to infer co-membership | Blind ids over canonical messages (the server sees no room id); §15.3.2 coarse time-bucketing + jitter + cover records + high-risk steering; IP-free rate limits; `poll` is never an existence oracle | Timing correlation by a global passive adversary is out of scope (documented honest limit) |
+| **Blind-device-id linkability** | Linking a device's ops across epochs / de-pseudonymizing the author | Per-epoch HKDF-derived device blind (`deriveAuthorDeviceIdBlind`); `openOp` BINDS the signed `author_device_id` to the resolved blind (prevents higher-privilege-device impersonation), proven by a reject test | Linkability WITHIN one epoch is inherent (members share the epoch secret) — by design |
+| **Removal-vs-join forward-secrecy asymmetry** | An evicted device reads post-removal content; a fresh joiner reads pre-join history | MLS Remove rotates the epoch (evicted device cannot derive the new key — quarantine test); a joiner gets ONLY the current-epoch snapshot via the grant (no historical keys) — both directions tested | — |
+| **Recovery-threshold trustee compromise** | M colluding recover-capable admins re-admit an attacker | §12.6.1 threshold recovery is capability-based, NOT secret-sharing — the op carries no key; recovery is an ordinary authority-checked MLS Add; M distinct admins required | Trustee collusion ≥ M is the documented trust assumption |
+| **Snapshot tamper (compaction / bootstrap)** | A forged §14.5 snapshot injects false state into a bootstrapping device | Verify-before-use: the sealed body opens only under the epoch key, and is adopted ONLY if its in-band `snapshot.commit` verifies (admin-signed, `state_merkle_root` matches the recomputed root, covered heads match); the full reduced state — incl. `displayName` + the attachment `epoch` — round-trips so the root is reproducible | — |
+| **Invite leak** | A leaked invite admits an attacker | Invite secret is HPKE-sealed to the invitee + delivered in a URL fragment (server-blind); the join request proves invite knowledge over a transcript bound to the KeyPackage + the proof-bound device signing key (a relay cannot substitute either); `max_uses` + expiry enforced constant-time | A leaked-BEFORE-use invite within its budget is the holder's responsibility (honest limit) |
+| **Live-carrier metadata to a DTLS-terminating relay** | A malicious TURN reads sync metadata (op ids, head structure) | Post-handshake op frames AEAD-sealed under the §15.5 step-4 pairwise session key (over per-op AEAD + DTLS); relay-only mode sets `iceTransportPolicy:'relay'` (no host-IP gather) | — |
