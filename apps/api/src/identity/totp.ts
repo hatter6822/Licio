@@ -26,6 +26,7 @@ export function base32Encode(data: Buffer): string {
       out += BASE32_ALPHABET[(value >>> (bits - 5)) & 31];
       bits -= 5;
     }
+    value &= (1 << bits) - 1; // keep only the un-emitted low bits (no 32-bit overflow reliance)
   }
   if (bits > 0) {
     out += BASE32_ALPHABET[(value << (5 - bits)) & 31];
@@ -48,6 +49,7 @@ export function base32Decode(input: string): Buffer {
       out.push((value >>> (bits - 8)) & 0xff);
       bits -= 8;
     }
+    value &= (1 << bits) - 1; // keep only the un-emitted low bits (no 32-bit overflow reliance)
   }
   return Buffer.from(out);
 }

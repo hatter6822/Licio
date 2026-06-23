@@ -1,6 +1,6 @@
 {
   "name": "licio",
-  "version": "0.4.12",
+  "version": "0.4.20",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "packageManager": "pnpm@9.15.4",
@@ -19,6 +19,7 @@
     "check:no-applause": "tsx scripts/check-no-applause.ts",
     "check:no-raw-egress": "tsx scripts/check-no-raw-egress.ts",
     "check:lcap-p2p-split": "tsx scripts/check-lcap-p2p-split.ts",
+    "check:private-p2p-split": "tsx scripts/check-private-p2p-split.ts",
     "check:lcap-schema-egress": "tsx scripts/check-lcap-schema-egress.ts",
     "check:no-p2p-server-content": "tsx scripts/check-no-p2p-server-content.ts",
     "check:no-private-cid-egress": "tsx scripts/check-no-private-cid-egress.ts",
@@ -27,6 +28,7 @@
     "check:p2p-endpoint-rejections": "tsx scripts/check-p2p-endpoint-rejections.ts",
     "check:p2p-ranking-exclusion": "tsx scripts/check-p2p-ranking-exclusion.ts",
     "check:p2p-search-exclusion": "tsx scripts/check-p2p-search-exclusion.ts",
+    "check:p2p-mls-wrapper": "tsx scripts/check-mls-wrapper.ts",
     "check:sw": "tsx scripts/check-sw-security.ts",
     "lint:lockfile": "tsx scripts/check-lockfile.ts",
     "typecheck": "tsc -b",

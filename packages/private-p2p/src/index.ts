@@ -11,5 +11,8 @@
 // code-split route chunk, so the core PWA's < 200 KB initial bundle never
 // regresses (PRIVATE_SPEC §9.8).
 
-export * from './crypto/canonical.js';
+export * from './crypto/index.js';
+export * from './engine/index.js';
+export * from './reducer/index.js';
 export * from './schemas/index.js';
+export * from './sync/index.js';

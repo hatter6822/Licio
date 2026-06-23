@@ -409,7 +409,12 @@ function decodeItem(r: Reader): DecodedCanonicalValue {
     case 5: {
       const count = toBoundedCount(readArgument(r, ai, headOffset), r, headOffset);
       r.depth += 1;
-      const obj: { [key: string]: DecodedCanonicalValue } = {};
+      // A NULL-prototype object: a canonical map key is arbitrary text, so a key
+      // like `__proto__` (legitimate inside a `z.unknown()` field) must become an
+      // OWN property — on a plain `{}` it would invoke the prototype setter and
+      // drop/mutate the field, breaking the `canonical(decodeCanonical(b))` round
+      // trip (and risking prototype pollution).  `Object.keys` still enumerates it.
+      const obj: { [key: string]: DecodedCanonicalValue } = Object.create(null);
       let prevKey: Uint8Array | null = null;
       for (let i = 0; i < count; i++) {
         const keyStart = r.pos;

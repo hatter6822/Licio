@@ -81,7 +81,9 @@ const IDENTITY_ID = 'identity';
 function canonicalKey(p: AttributePermutation): string {
   const entries = Object.entries(p.mapping)
     .filter(([from, to]) => from !== to)
-    .sort(([x], [y]) => x.localeCompare(y))
+    // Codepoint order, NOT localeCompare: a "canonical" key must be deterministic
+    // across runtimes/ICU versions, never locale-dependent.
+    .sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0))
     .map(([from, to]) => `${from}>${to}`)
     .join(',');
   return `${p.attribute}|${entries}`;

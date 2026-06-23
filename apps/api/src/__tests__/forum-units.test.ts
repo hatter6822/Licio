@@ -589,6 +589,62 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
     expect(stripWebp(truncatedWebp)).toEqual({ ok: false, reason: 'malformed' });
   });
 
+  it('rejects a 32-bit chunk length with the high bit set (unsigned read, no negative-length misparse)', () => {
+    // PNG first-chunk length = 0xffffffff: as a SIGNED int32 this is −1, which slips
+    // past `at + total > bytes.length` and would let the stripper accept a malformed
+    // file (or rewind the cursor).  Read UNSIGNED it is a huge length → malformed.
+    const png = new Uint8Array([
+      0x89,
+      0x50,
+      0x4e,
+      0x47,
+      0x0d,
+      0x0a,
+      0x1a,
+      0x0a, // signature
+      0xff,
+      0xff,
+      0xff,
+      0xff, // first chunk length — high bit set
+      0x49,
+      0x48,
+      0x44,
+      0x52, // "IHDR"
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+    ]);
+    expect(stripPng(png)).toEqual({ ok: false, reason: 'malformed' });
+
+    // WebP first-chunk size = 0xffffffff (LE) → unsigned huge → malformed.
+    const webp = new Uint8Array([
+      0x52,
+      0x49,
+      0x46,
+      0x46, // RIFF
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x57,
+      0x45,
+      0x42,
+      0x50, // WEBP
+      0x56,
+      0x50,
+      0x38,
+      0x58, // "VP8X"
+      0xff,
+      0xff,
+      0xff,
+      0xff, // chunk size — high bit set
+      0x00,
+      0x00,
+    ]);
+    expect(stripWebp(webp)).toEqual({ ok: false, reason: 'malformed' });
+  });
+
   it('passes a clean JPEG through unchanged-but-verified (stripped=false)', () => {
     const clean = new Uint8Array([
       0xff,

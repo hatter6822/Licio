@@ -14,8 +14,16 @@ const ROOT = resolve(import.meta.dirname, '..');
 const WEB_SRC = resolve(ROOT, 'apps/web/src');
 const SPECIFIER = '@licio/lcap-p2p';
 
+/** Strip block + line comments so the word "import" inside a comment cannot
+ *  falsely pair with a later `from '…'` across newlines (the `[^;]*?` capture
+ *  spans newlines for multi-line imports).  The `[^:]` guard preserves `://`. */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+}
+
 /** Pure: the static-value-import violations in one source (importable for tests). */
-export function findStaticP2pImports(filename: string, content: string): string[] {
+export function findStaticP2pImports(filename: string, rawContent: string): string[] {
+  const content = stripComments(rawContent);
   const issues: string[] = [];
   // Match `import … from '@licio/lcap-p2p'` and side-effect `import '@licio/lcap-p2p'`.
   const staticFrom = new RegExp(`\\bimport\\b([^;]*?)\\bfrom\\s*['"]${SPECIFIER}['"]`, 'g');

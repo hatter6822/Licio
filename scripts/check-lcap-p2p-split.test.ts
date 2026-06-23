@@ -29,4 +29,12 @@ describe('findStaticP2pImports (WS-R.15.8 code-split gate)', () => {
   it('ignores an unrelated package import', () => {
     expect(findStaticP2pImports('a.ts', `import { x } from '@licio/lcap';`)).toEqual([]);
   });
+
+  it('does not let the word "import" in a comment falsely pair with a real type import', () => {
+    const src = [
+      '// loaded by a DYNAMIC import in the registry.',
+      "import type { DataChannelLike } from '@licio/lcap-p2p';",
+    ].join('\n');
+    expect(findStaticP2pImports('registry.ts', src)).toEqual([]);
+  });
 });

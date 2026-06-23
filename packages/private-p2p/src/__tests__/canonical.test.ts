@@ -85,6 +85,29 @@ describe('WS-S.2.2 (P1) map-key order independence — equal value ⇒ equal byt
     const out = canonical({ aa: 1, a: 2 });
     expect(hex(out)).toBe('a261610262616101');
   });
+
+  it('preserves a `__proto__` map key through decode (null-prototype, no pollution)', () => {
+    // A canonical map key is arbitrary text, so `__proto__` is legitimate inside a
+    // z.unknown() field.  Decoding into a plain `{}` would invoke the prototype
+    // setter and drop the field; decode must use a null-prototype object so it
+    // becomes an OWN property and `canonical(decodeCanonical(b))` stays identical.
+    const input: Record<string, CanonicalValue> = Object.create(null);
+    // `Object.defineProperty` (not the `['__proto__']` accessor) sets an OWN
+    // `__proto__` data property — exactly the shape a decoded map must reproduce.
+    Object.defineProperty(input, '__proto__', {
+      value: 'x',
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    input['a'] = 1;
+    const bytes = canonical(input);
+    const decoded = decodeCanonical(bytes) as Record<string, CanonicalValue>;
+    expect(Object.getPrototypeOf(decoded)).toBe(null); // no prototype pollution
+    expect(Object.getOwnPropertyNames(decoded)).toContain('__proto__');
+    expect(Object.getOwnPropertyDescriptor(decoded, '__proto__')?.value).toBe('x');
+    expect(hex(canonical(decoded))).toBe(hex(bytes)); // byte-identical round trip
+  });
 });
 
 describe('WS-S.2.2 encode rejections', () => {

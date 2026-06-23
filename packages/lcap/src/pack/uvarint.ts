@@ -30,6 +30,11 @@ export function readUvarint(bytes: Uint8Array, offset: number): UvarintRead {
     const b = bytes[offset + bytesRead] as number;
     bytesRead += 1;
     value += (b & 0x7f) * scale;
+    // Reject as soon as the ACCUMULATED value leaves the safe-integer range —
+    // checking `value` (not just `scale`) catches the terminator-byte case the
+    // scale guard misses (it sits after the `break`), where a high final group
+    // would otherwise round to a wrong length instead of being rejected.
+    if (value > Number.MAX_SAFE_INTEGER) throw new Error('uvarint too large');
     if ((b & 0x80) === 0) break;
     scale *= 128;
     if (scale > Number.MAX_SAFE_INTEGER) throw new Error('uvarint too large');

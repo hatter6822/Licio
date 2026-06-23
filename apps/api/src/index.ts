@@ -166,6 +166,11 @@ import {
   startModerationScheduler,
 } from './moderation/scheduler.js';
 import { createInMemoryModerationServices, setModerationServices } from './moderation/services.js';
+import {
+  RENDEZVOUS_SCHEDULER_INTERVAL_MS,
+  startRendezvousScheduler,
+} from './private-rendezvous/scheduler.js';
+import { getRendezvousService } from './private-rendezvous/service.js';
 import { loadPwattRuntimeConfig } from './pwatt/config.js';
 import {
   EVENT_PIPELINE_SCHEDULER_INTERVAL_MS,
@@ -986,6 +991,16 @@ startLcapScheduler(
   getLcapIngestServer(),
   (err, task) => logger.error({ err, task }, 'lcap scheduler task failed'),
   LCAP_SCHEDULER_INTERVAL_MS,
+  { lease: makeJobLease() },
+);
+
+// WS-S.6.6 server-blind rendezvous: reap expired presence rows + transient
+// signals on a sub-window cadence so they cannot accumulate past the advertised
+// short rendezvous window (§15.3.2), under its own job lease.
+startRendezvousScheduler(
+  getRendezvousService(),
+  (err, task) => logger.error({ err, task }, 'rendezvous scheduler task failed'),
+  RENDEZVOUS_SCHEDULER_INTERVAL_MS,
   { lease: makeJobLease() },
 );
 

@@ -12,11 +12,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   apiSource,
+  apiSourceFiles,
   findMissingMarkers,
   P2P_ENDPOINT_REJECTION_MARKERS,
   P2P_RANKING_EXCLUSION_MARKERS,
   P2P_SEARCH_EXCLUSION_MARKERS,
   scanDynamicRemoteCode,
+  scanNoServerRoomRecovery,
   scanPublicGatewayEgress,
   stripComments,
 } from './private-p2p-gates.js';
@@ -52,6 +54,43 @@ describe('WS-S.1.5 check:no-private-cid-egress — public-gateway scan', () => {
     expect(
       scanPublicGatewayEgress([{ path: 'c.ts', content: '// never use ipfs.io for private CIDs' }]),
     ).toEqual([]);
+  });
+});
+
+describe('WS-S.3.6b §12.7 — no server-side private-room recovery endpoint', () => {
+  it('passes clean server source', () => {
+    expect(
+      scanNoServerRoomRecovery([{ path: 'routes/rooms.ts', content: 'app.post("/v1/rooms", h);' }]),
+    ).toEqual([]);
+  });
+
+  it('does NOT flag WS-D account recovery (recoverWithCode / recovery_codes)', () => {
+    expect(
+      scanNoServerRoomRecovery([
+        {
+          path: 'identity/codes.ts',
+          content: 'export function recoverWithCode(recovery_codes) {}',
+        },
+        { path: 'routes/auth.ts', content: 'app.post("/v1/auth/recovery", handler);' },
+      ]),
+    ).toEqual([]);
+  });
+
+  it('catches a private-room server recovery handler or route', () => {
+    expect(
+      scanNoServerRoomRecovery([
+        { path: 'routes/p.ts', content: 'export async function recoverPrivateRoom(id) {}' },
+      ]).length,
+    ).toBeGreaterThan(0);
+    expect(
+      scanNoServerRoomRecovery([
+        { path: 'routes/p.ts', content: 'app.post("/private/rooms/:id/recover", handler);' },
+      ]).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('finds NO recovery endpoint in the live apps/api source', () => {
+    expect(scanNoServerRoomRecovery(apiSourceFiles())).toEqual([]);
   });
 });
 
