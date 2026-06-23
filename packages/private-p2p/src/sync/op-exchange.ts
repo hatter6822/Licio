@@ -18,7 +18,7 @@
 
 import { z } from 'zod';
 import { type CanonicalValue, canonical, decodeCanonical } from '../crypto/canonical.js';
-import { privateIdSchema } from '../schemas/common.js';
+import { ciphertextBase64Schema, privateIdSchema } from '../schemas/common.js';
 import { privateEncryptedEnvelopeSchema } from '../schemas/envelope.js';
 import { headAnnouncementSchema } from './head-sync.js';
 
@@ -43,11 +43,34 @@ export const opResponseSchema = z
   .strict();
 export type OpResponse = z.infer<typeof opResponseSchema>;
 
+/** The largest serialized MLS commit a peer will carry (a §27 DoS bound; an MLS
+ *  handshake message for a small room is well under this). */
+export const MAX_MLS_COMMIT_BYTES = 256 * 1024;
+
+/**
+ * §10.9 — an MLS Commit delivered to an EXISTING member so it advances to the new
+ * epoch after an add/remove (the new content is sealed under the new epoch key the
+ * commit installs).  `commit` is `encodeCommit(...)` base64; `epoch` is the new MLS
+ * epoch the recipient should reach.  The recipient applies it (`applyCommit` →
+ * `deriveEpochState` → `addEpochKeys` → `retryPending`) before its sealed content can
+ * open.  The bytes are opaque to the transport (already a public MLS handshake message,
+ * itself confidentiality-protected by MLS); the live channel adds DTLS on top.
+ */
+export const mlsCommitMessageSchema = z
+  .object({
+    schema: z.literal('licio.private.mls_commit.v1'),
+    commit: ciphertextBase64Schema,
+    epoch: z.number().int().nonnegative(),
+  })
+  .strict();
+export type MlsCommitMessage = z.infer<typeof mlsCommitMessageSchema>;
+
 /** The §15.6/§15.7 sync message union carried on the pairwise channel. */
 export const syncMessageSchema = z.discriminatedUnion('schema', [
   headAnnouncementSchema,
   opRequestSchema,
   opResponseSchema,
+  mlsCommitMessageSchema,
 ]);
 export type SyncMessage = z.infer<typeof syncMessageSchema>;
 
