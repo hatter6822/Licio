@@ -162,7 +162,10 @@ import {
 } from './session-store.js';
 import { IndexedDbPrivateRoomStorage } from './storage.js';
 import {
+  type MeshController,
+  type MeshDial,
   maintainConnection,
+  maintainMesh,
   type PeerChannel,
   PrivateSyncSession,
   type ReconnectController,
@@ -471,7 +474,7 @@ export class PrivateRoomSession {
     );
     const fetchImpl: FetchLike =
       options?.fetchImpl ?? ((url, init) => fetch(url, init as RequestInit | undefined));
-    const channel = await connectPrivatePeer({
+    const { channel } = await connectPrivatePeer({
       p2p: this.p2p,
       rendezvous: httpRendezvousTransport(fetchImpl),
       roomIdCommitment: this.session.roomIdCommitment,
@@ -534,6 +537,77 @@ export class PrivateRoomSession {
         ...(options?.onStatus ? { onStatus: options.onStatus } : {}),
       },
     );
+  }
+
+  /**
+   * §15.6 — connect to a bounded MESH of online members (not just the first peer found),
+   * so the local engine converges with the union ALL of them hold.  Each peer gets its own
+   * `PrivateSyncSession`; a dropped peer frees a slot the re-poll refills.  Returns a
+   * `MeshController` (`close()` leaves every peer, `peers()` lists the connected set).
+   */
+  connectMesh(options?: {
+    readonly transportMode?: 'relay_only' | 'direct_allowed';
+    readonly iceServers?: RtcIceServerLike[];
+    readonly fetchImpl?: FetchLike;
+    /** Per-dial deadline (default 8s) — a dial that finds no NEW peer times out → the
+     *  mesh waits one re-poll interval and tries again. */
+    readonly dialTimeoutMs?: number;
+    readonly onProgress?: (acceptedOpIds: readonly string[]) => void;
+    readonly onError?: (error: unknown) => void;
+    readonly maxPeers?: number;
+    readonly rePollIntervalMs?: number;
+    readonly onMeshChange?: (peers: readonly string[]) => void;
+  }): MeshController {
+    const fetchImpl: FetchLike =
+      options?.fetchImpl ?? ((url, init) => fetch(url, init as RequestInit | undefined));
+    const dialTimeoutMs = options?.dialTimeoutMs ?? 8_000;
+    const dial: MeshDial = async (connected, onDrop) => {
+      const epoch = this.currentEpoch();
+      const keys = await this.p2p.deriveRoomEpochKeys(
+        epoch.roomEpochSecret,
+        this.session.roomIdCommitment,
+      );
+      let result: { channel: PeerChannel; peerDeviceId: string };
+      try {
+        result = await connectPrivatePeer({
+          p2p: this.p2p,
+          rendezvous: httpRendezvousTransport(fetchImpl),
+          roomIdCommitment: this.session.roomIdCommitment,
+          epoch: epoch.epoch,
+          rendezvousKey: keys.rendezvousKey,
+          selfDeviceId: this.session.deviceId,
+          selfSigningKey: this.session.signingPrivateKey,
+          resolveDevice: (deviceId) => {
+            const device = this.engine.state().devices.get(deviceId);
+            if (!device) return undefined;
+            return {
+              signingPublicKey: device.signingPublicKey,
+              activeAtEpoch: !device.removed && device.addedAtEpoch <= epoch.epoch,
+            };
+          },
+          excludePeerDeviceIds: connected,
+          transportMode: options?.transportMode ?? this.transportMode(),
+          nowMs: () => Date.now(),
+          timeoutMs: dialTimeoutMs,
+          ...(options?.iceServers ? { iceServers: options.iceServers } : {}),
+        });
+      } catch {
+        return null; // no NEW peer within the dial deadline — re-poll later
+      }
+      const session = this.connectPeer(result.channel, {
+        ...(options?.onProgress ? { onProgress: options.onProgress } : {}),
+        ...(options?.onError ? { onError: options.onError } : {}),
+        onClose: (graceful) => onDrop(result.peerDeviceId, graceful),
+      });
+      return { peerId: result.peerDeviceId, session };
+    };
+    return maintainMesh(dial, {
+      ...(options?.maxPeers !== undefined ? { maxPeers: options.maxPeers } : {}),
+      ...(options?.rePollIntervalMs !== undefined
+        ? { rePollIntervalMs: options.rePollIntervalMs }
+        : {}),
+      ...(options?.onMeshChange ? { onMeshChange: options.onMeshChange } : {}),
+    });
   }
 
   /** Found a new private room, persist its session, and author the genesis op. */

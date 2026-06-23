@@ -230,7 +230,7 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
       rtcFactory: () => new FakePeer(link),
     } satisfies Partial<ConnectPrivatePeerParams>;
 
-    const [chAlice, chBob] = await Promise.all([
+    const [{ channel: chAlice, peerDeviceId: alicePeer }, { channel: chBob }] = await Promise.all([
       connectPrivatePeer({
         ...base,
         selfDeviceId: 'founder-dev',
@@ -244,6 +244,8 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
         resolveDevice: resolve,
       }),
     ]);
+    // The handshake surfaces the verified peer device id (the mesh keys connected peers by it).
+    expect(alicePeer).toBe('device-b');
 
     // The handshake passed on both sides ⇒ live PeerChannels.  Now drive the op-exchange.
     const codec: SyncCodec = {

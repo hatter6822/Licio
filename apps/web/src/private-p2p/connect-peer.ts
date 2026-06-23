@@ -135,6 +135,9 @@ export interface ConnectPrivatePeerParams {
   /** This device's Ed25519 signing private key (for the §15.5 membership proof). */
   readonly selfSigningKey: CryptoKey;
   readonly resolveDevice: DeviceResolver;
+  /** §15.6 mesh — device ids to skip in discovery (already-connected peers), so each dial
+   *  finds a NEW member rather than re-connecting the first one found. */
+  readonly excludePeerDeviceIds?: ReadonlySet<string>;
   /** §15.4 transport mode (relay-only suppresses IP-revealing ICE candidates). */
   readonly transportMode: 'relay_only' | 'direct_allowed';
   readonly iceServers?: RtcIceServerLike[];
@@ -164,7 +167,9 @@ interface DiscoveredPeer {
  * the remote device; rejects (tearing the connection down) on timeout, abort, or a
  * failed handshake.
  */
-export async function connectPrivatePeer(params: ConnectPrivatePeerParams): Promise<PeerChannel> {
+export async function connectPrivatePeer(
+  params: ConnectPrivatePeerParams,
+): Promise<{ channel: PeerChannel; peerDeviceId: string }> {
   const { p2p, rendezvous, roomIdCommitment, epoch, rendezvousKey, selfDeviceId, nowMs } = params;
   const timeoutMs = params.timeoutMs ?? 30_000;
   const pollIntervalMs = params.pollIntervalMs ?? 250;
@@ -222,6 +227,8 @@ export async function connectPrivatePeer(params: ConnectPrivatePeerParams): Prom
       try {
         const ann = await p2p.openRendezvousAnnouncement(record, rendezvousKey);
         if (ann.peer_device_id === selfDeviceId) continue;
+        // Mesh: skip a peer we are already connected to, so each dial finds a NEW member.
+        if (params.excludePeerDeviceIds?.has(ann.peer_device_id)) continue;
         peer = {
           peerBlindId: record.peer_blind_id,
           peerDeviceId: ann.peer_device_id,
@@ -312,7 +319,10 @@ export async function connectPrivatePeer(params: ConnectPrivatePeerParams): Prom
 
     // 5. Expose the post-handshake channel (binary frames only, each AEAD-sealed under the
     //    §15.5 step-4 session key; the handshake used strings).
-    return wrapDataChannel(dc, inbox, opStash, cleanup, p2p, sessionKey);
+    return {
+      channel: wrapDataChannel(dc, inbox, opStash, cleanup, p2p, sessionKey),
+      peerDeviceId: peer.peerDeviceId,
+    };
   } catch (error) {
     cleanup();
     throw error;
