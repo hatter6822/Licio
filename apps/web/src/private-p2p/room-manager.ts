@@ -850,7 +850,14 @@ export class PrivateRoomSession {
     this.engine.addEpochKeys(epoch, this.p2p.heldKeysOf(newEpochState));
 
     const newMemberId = globalThis.crypto.randomUUID();
-    const newDeviceId = globalThis.crypto.randomUUID();
+    // The reducer deviceId is set to the joiner's MLS leaf identity (the bytes it chose
+    // for its KeyPackage), so `utf8(deviceId)` resolves the MLS leaf for a later removal
+    // (findDeviceLeafIndex) — uniform with the founder, whose identity IS utf8(deviceId).
+    const cred = verdict.keyPackage.leafNode.credential;
+    const newDeviceId =
+      cred.credentialType === 'basic'
+        ? this.p2p.fromUtf8(cred.identity)
+        : globalThis.crypto.randomUUID();
     const { op, sealParams } = await this.p2p.buildMemberAddOp(
       {
         roomId: this.session.roomId,
@@ -1011,6 +1018,68 @@ export class PrivateRoomSession {
     };
     await putRoomSession(session);
     return new PrivateRoomSession(p2p, engine, session, DEFAULT_COMPACT_EVERY_OPS);
+  }
+
+  /**
+   * §10.9 — remove a device: the MLS Remove ROTATES the epoch, the signed
+   * `device.remove` op is authored at the NEW epoch (so the evicted device, lacking the
+   * new key, cannot read it), the advanced group + new epoch keys are persisted, and the
+   * rotating commit is broadcast to connected members (so they advance too).  After this
+   * the evicted device's engine quarantines all post-removal content — forward secrecy.
+   * `deviceId` is resolved to the MLS leaf via `utf8(deviceId)` (the device-id invariant).
+   * Throws if the device is not in the MLS group.
+   */
+  async removeMember(params: {
+    readonly memberId: string;
+    readonly deviceId: string;
+    readonly reason?: string;
+  }): Promise<void> {
+    const group = await this.p2p.deserializeGroupState(this.session.mlsGroupState);
+    const removed = await this.p2p.removeDeviceFromRoom(group, this.p2p.utf8(params.deviceId));
+    const newEpochState = await this.p2p.deriveEpochState(
+      removed.group,
+      this.session.roomIdCommitment,
+      this.session.manifestCommitment,
+    );
+    const epoch = Number(newEpochState.epoch);
+    this.engine.addEpochKeys(epoch, this.p2p.heldKeysOf(newEpochState));
+    const { op, sealParams } = await this.p2p.buildRoomOp(
+      {
+        roomId: this.session.roomId,
+        roomIdCommitment: this.session.roomIdCommitment,
+        epochState: newEpochState,
+        author: {
+          memberId: this.session.memberId,
+          deviceId: this.session.deviceId,
+          signingKey: this.session.signingPrivateKey,
+          seq: this.engine.nextAuthorSeq(this.session.deviceId),
+        },
+        opId: globalThis.crypto.randomUUID(),
+        parents: this.engine.heads(),
+        lamport: this.engine.nextLamport(),
+      },
+      {
+        type: 'device.remove',
+        member_id: params.memberId,
+        device_id: params.deviceId,
+        ...(params.reason === undefined ? {} : { reason: params.reason }),
+      },
+    );
+    await this.engine.applyLocalOp(op, sealParams);
+    this.session = {
+      ...this.session,
+      mlsGroupState: this.p2p.serializeGroupState(removed.group),
+      epochs: [
+        ...this.session.epochs.filter((e) => e.epoch !== epoch),
+        {
+          epoch,
+          roomEpochSecret: newEpochState.roomEpochSecret,
+          contentWrapKey: newEpochState.keys.contentWrapKey,
+        },
+      ],
+    };
+    await putRoomSession(this.session);
+    this.broadcastCommit(this.p2p.encodeCommit(removed.commit), epoch);
   }
 
   /**

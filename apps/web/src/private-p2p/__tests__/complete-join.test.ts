@@ -86,4 +86,48 @@ describe('WP-1 §12.3 completeJoin (finding 2)', () => {
       'Hello from the new device',
     );
   });
+
+  it('removeMember rotates the epoch — the evicted device cannot read post-removal content (§10.9)', async () => {
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'Quiet Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    await founder.postStory({ title: 'Story', threadId: 't1' });
+
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const { invite, inviteUrl } = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const fragment = inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length);
+    const { request } = await prep.complete(fragment);
+    const { grant } = await founder.admitJoinRequest(invite, request);
+    if (!grant) throw new Error('expected a grant');
+    const joiner = await prep.completeJoin(grant);
+    expect(founder.state().devices.get(grant.assignedDeviceId)?.removed).toBe(false);
+
+    // Founder evicts the joiner → the MLS Remove rotates the epoch.
+    await founder.removeMember({
+      memberId: grant.assignedMemberId,
+      deviceId: grant.assignedDeviceId,
+    });
+    expect(founder.state().devices.get(grant.assignedDeviceId)?.removed).toBe(true);
+
+    // Founder authors post-removal content (under the NEW epoch the joiner never holds).
+    const secretId = await founder.postComment({ threadId: 't1', body: 'after eviction' });
+    expect(founder.state().contributions.get(secretId)?.bodyMarkdownLite).toBe('after eviction');
+
+    // Forward secrecy: serve the post-removal content to the evicted device — it cannot
+    // open it (no new-epoch key), so its state never gains the secret comment.
+    const afterArchive = await founder.exportArchive();
+    await joiner.importArchive(afterArchive);
+    expect(joiner.state().contributions.has(secretId)).toBe(false);
+  });
 });
