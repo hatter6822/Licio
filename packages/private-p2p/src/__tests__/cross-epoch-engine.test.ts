@@ -130,8 +130,8 @@ describe('WP-1 cross-epoch engine self-heal (§10.9)', () => {
     await alice.applyLocalOp(created.genesisOp, created.sealParams);
     const env = (await alice.serveOps([created.genesisOp.op_id]))[0];
     if (!env) throw new Error('no genesis envelope');
-    // Corrupt the ciphertext → AEAD-open fails → a PERMANENT reason, not recoverable.
-    const tampered = { ...env, ciphertext: `${env.ciphertext.slice(0, -4)}AAAA` };
+    // Corrupt the signature → signature verify fails → a PERMANENT reason, not recoverable.
+    const tampered = { ...env, signature: `${env.signature.slice(0, -4)}AAAA` };
     const bob = await PrivateRoomEngine.load({
       ...created.engineParams,
       storage: new InMemoryPrivateRoomStorage(),
