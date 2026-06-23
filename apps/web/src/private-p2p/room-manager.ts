@@ -161,13 +161,35 @@ import {
   type StoredRoomSession,
 } from './session-store.js';
 import { IndexedDbPrivateRoomStorage } from './storage.js';
-import { type PeerChannel, PrivateSyncSession, type SyncCodec } from './sync-session.js';
+import {
+  maintainConnection,
+  type PeerChannel,
+  PrivateSyncSession,
+  type ReconnectController,
+  type ReconnectStatus,
+  type SyncCodec,
+} from './sync-session.js';
 
 type P2pModule = typeof import('@licio/private-p2p');
 
 /** Lazily load the code-split `@licio/private-p2p` chunk. */
 async function loadP2p(): Promise<P2pModule> {
   return import('@licio/private-p2p');
+}
+
+/**
+ * Derive a device id deterministically from its Ed25519 signing public key (base64url):
+ * `base64url(SHA-256(rawPubKey))`.  Used so device_id is a 1:1 function of the
+ * proof-bound key — a joiner cannot pick a colliding id, and the SAME value is the MLS
+ * KeyPackage credential identity, so `utf8(deviceId)` resolves the leaf for removal.  The
+ * admin re-derives this from the proof-bound `verdict.deviceSigningPublicKey` and checks
+ * the keypackage identity matches (fail-closed), binding the reducer device to the key.
+ */
+async function deviceIdFromSigningKey(
+  p2p: P2pModule,
+  signingPublicKeyB64Url: string,
+): Promise<string> {
+  return p2p.toBase64Url(await p2p.sha256(p2p.fromBase64Url(signingPublicKeyB64Url)));
 }
 
 /** Thrown when the §20.6 verify-before-unlock gate locks: the running private-mode
@@ -321,6 +343,7 @@ export class PrivateRoomSession {
     options?: {
       readonly onProgress?: (acceptedOpIds: readonly string[]) => void;
       readonly onError?: (error: unknown) => void;
+      readonly onClose?: (graceful: boolean) => void;
     },
   ): PrivateSyncSession {
     const codec: SyncCodec = {
@@ -439,6 +462,7 @@ export class PrivateRoomSession {
     readonly timeoutMs?: number;
     readonly onProgress?: (acceptedOpIds: readonly string[]) => void;
     readonly onError?: (error: unknown) => void;
+    readonly onClose?: (graceful: boolean) => void;
   }): Promise<PrivateSyncSession> {
     const epoch = this.currentEpoch();
     const keys = await this.p2p.deriveRoomEpochKeys(
@@ -472,7 +496,44 @@ export class PrivateRoomSession {
     return this.connectPeer(channel, {
       ...(options?.onProgress ? { onProgress: options.onProgress } : {}),
       ...(options?.onError ? { onError: options.onError } : {}),
+      ...(options?.onClose ? { onClose: options.onClose } : {}),
     });
+  }
+
+  /**
+   * §15.4 — connect AND auto-maintain the connection across network drops (the mobile/NAT
+   * reality): on a non-graceful channel drop it RE-DIALS with bounded backoff; a peer that
+   * sent `bye` (a deliberate leave) or a local `close()` stops it.  Returns a controller —
+   * `close()` to stop + gracefully leave, `status()` for the live lifecycle.
+   */
+  connectAndMaintain(options?: {
+    readonly transportMode?: 'relay_only' | 'direct_allowed';
+    readonly iceServers?: RtcIceServerLike[];
+    readonly fetchImpl?: FetchLike;
+    readonly timeoutMs?: number;
+    readonly onProgress?: (acceptedOpIds: readonly string[]) => void;
+    readonly onError?: (error: unknown) => void;
+    readonly maxAttempts?: number;
+    readonly backoffMs?: number;
+    readonly onStatus?: (status: ReconnectStatus) => void;
+  }): ReconnectController {
+    return maintainConnection(
+      (onClose) =>
+        this.connect({
+          ...(options?.transportMode ? { transportMode: options.transportMode } : {}),
+          ...(options?.iceServers ? { iceServers: options.iceServers } : {}),
+          ...(options?.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+          ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+          ...(options?.onProgress ? { onProgress: options.onProgress } : {}),
+          ...(options?.onError ? { onError: options.onError } : {}),
+          onClose,
+        }),
+      {
+        ...(options?.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),
+        ...(options?.backoffMs !== undefined ? { backoffMs: options.backoffMs } : {}),
+        ...(options?.onStatus ? { onStatus: options.onStatus } : {}),
+      },
+    );
   }
 
   /** Found a new private room, persist its session, and author the genesis op. */
@@ -791,7 +852,12 @@ export class PrivateRoomSession {
     // the founder).  Its public key rides the join request, proof-bound (§12.3).
     const signing = await p2p.generateDeviceSigningKeyPair(false);
     const deviceSigningPublicKey = p2p.toBase64Url(await p2p.exportPublicKeyRaw(signing.publicKey));
-    const keyPackage = await p2p.generateMemberKeyPackage(p2p.utf8(globalThis.crypto.randomUUID()));
+    // The device id is DERIVED from the (proof-bound) signing key, not chosen freely, and
+    // doubles as the MLS KeyPackage credential identity — so device_id is a 1:1 function
+    // of the unforgeable key (no joiner-chosen collision), and `utf8(deviceId)` still
+    // resolves the MLS leaf for §10.9 removal (the admin re-derives + checks the same).
+    const deviceId = await deviceIdFromSigningKey(p2p, deviceSigningPublicKey);
+    const keyPackage = await p2p.generateMemberKeyPackage(p2p.utf8(deviceId));
     const inviteePublicKey = p2p.toBase64Url(hpke.publicKey);
     const requestedAtBucket = params.requestedAtBucket ?? coarseBucket();
     return {
@@ -850,14 +916,20 @@ export class PrivateRoomSession {
     this.engine.addEpochKeys(epoch, this.p2p.heldKeysOf(newEpochState));
 
     const newMemberId = globalThis.crypto.randomUUID();
-    // The reducer deviceId is set to the joiner's MLS leaf identity (the bytes it chose
-    // for its KeyPackage), so `utf8(deviceId)` resolves the MLS leaf for a later removal
-    // (findDeviceLeafIndex) — uniform with the founder, whose identity IS utf8(deviceId).
+    // SECURITY: the reducer device id is DERIVED from the proof-bound signing key, NOT
+    // taken from the joiner-chosen KeyPackage credential identity (which the joiner fully
+    // controls + MLS dedups only by signature key, so a joiner could otherwise collide an
+    // existing device_id, desyncing the reducer from MLS and mis-targeting removal).  The
+    // joiner set its KeyPackage identity to this SAME derived value (prepareJoinRequest),
+    // so `utf8(deviceId)` still resolves the leaf for §10.9 removal.  Fail-closed: reject
+    // a KeyPackage whose credential identity does not match the derived id, or a collision
+    // with an existing device.
+    const newDeviceId = await deviceIdFromSigningKey(this.p2p, verdict.deviceSigningPublicKey);
     const cred = verdict.keyPackage.leafNode.credential;
-    const newDeviceId =
-      cred.credentialType === 'basic'
-        ? this.p2p.fromUtf8(cred.identity)
-        : globalThis.crypto.randomUUID();
+    const credIdentity = cred.credentialType === 'basic' ? this.p2p.fromUtf8(cred.identity) : '';
+    if (credIdentity !== newDeviceId || this.engine.state().devices.has(newDeviceId)) {
+      return { verdict: { ok: false, reason: 'malformed_key_package' } };
+    }
     const { op, sealParams } = await this.p2p.buildMemberAddOp(
       {
         roomId: this.session.roomId,

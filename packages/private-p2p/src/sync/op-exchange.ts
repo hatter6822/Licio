@@ -88,6 +88,14 @@ export const snapshotResponseSchema = z
   .strict();
 export type SnapshotResponse = z.infer<typeof snapshotResponseSchema>;
 
+/**
+ * §15.4 — a graceful teardown signal: "I am closing this session intentionally."  The
+ * recipient distinguishes a deliberate leave (do NOT reconnect) from a network drop
+ * (reconnect).  No fields.
+ */
+export const byeMessageSchema = z.object({ schema: z.literal('licio.private.bye.v1') }).strict();
+export type ByeMessage = z.infer<typeof byeMessageSchema>;
+
 /** The §15.6/§15.7 sync message union carried on the pairwise channel. */
 export const syncMessageSchema = z.discriminatedUnion('schema', [
   headAnnouncementSchema,
@@ -98,6 +106,7 @@ export const syncMessageSchema = z.discriminatedUnion('schema', [
   blockResponseSchema,
   snapshotRequestSchema,
   snapshotResponseSchema,
+  byeMessageSchema,
 ]);
 export type SyncMessage = z.infer<typeof syncMessageSchema>;
 

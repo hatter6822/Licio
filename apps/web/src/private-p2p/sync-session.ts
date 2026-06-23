@@ -106,6 +106,12 @@ export interface PrivateSyncSessionOptions {
    * request guard.  Absent (e.g. a relay with no group), an incoming commit is ignored.
    */
   readonly onMlsCommit?: (commit: Uint8Array, epoch: number) => Promise<void>;
+  /**
+   * §15.4 — called when the underlying channel drops (NOT a local `close()`).
+   * `graceful` is true when the peer sent a `bye` first (a deliberate leave) — a
+   * reconnect manager should reconnect on a non-graceful drop but NOT on a graceful one.
+   */
+  readonly onClose?: (graceful: boolean) => void;
 }
 
 /** The §15.7 op-id request cap (mirrors `MAX_OP_IDS_PER_REQUEST` in the package). */
@@ -130,6 +136,12 @@ export class PrivateSyncSession {
   /** Whether we have already asked this peer for its §14.5 snapshot archive (request it
    *  at most once per stall, so a peer with nothing to serve does not cause a loop). */
   private snapshotRequested = false;
+  /** Whether the peer sent a `bye` (a deliberate leave) — so a channel drop is reported
+   *  as graceful (do not reconnect). */
+  private peerSaidBye = false;
+  /** Whether close() was called locally — so the resulting channel onClose does not
+   *  fire `options.onClose` (the caller already knows it is tearing down). */
+  private selfClosed = false;
 
   constructor(
     private readonly engine: SyncEngineSurface,
@@ -144,14 +156,23 @@ export class PrivateSyncSession {
   start(): void {
     this.channel.onMessage((frame) => this.enqueue(() => this.handleFrame(frame)));
     this.channel.onClose?.(() => {
+      const wasOpen = !this.closed;
       this.closed = true;
+      // Report an EXTERNAL drop to the reconnect manager (a local close() set selfClosed,
+      // and the caller already knows it is tearing down).  graceful ⇔ the peer said bye.
+      if (wasOpen && !this.selfClosed) this.options.onClose?.(this.peerSaidBye);
     });
     this.announce();
   }
 
-  /** Tear down (idempotent). */
-  close(): void {
+  /**
+   * Tear down (idempotent).  `graceful` (default) sends a §15.4 `bye` first so the peer
+   * does not treat the close as a network drop + reconnect; pass `false` to drop silently.
+   */
+  close(graceful = true): void {
     if (this.closed) return;
+    if (graceful) this.sendMessage({ schema: 'licio.private.bye.v1' });
+    this.selfClosed = true;
     this.closed = true;
     this.channel.close();
   }
@@ -226,6 +247,11 @@ export class PrivateSyncSession {
         return;
       case 'licio.private.snapshot_response.v1':
         await this.onSnapshotResponse(message);
+        return;
+      case 'licio.private.bye.v1':
+        // The peer is leaving deliberately — mark it so the imminent channel drop is
+        // reported as graceful (the reconnect manager must NOT reconnect to a leaver).
+        this.peerSaidBye = true;
         return;
     }
   }
@@ -317,12 +343,23 @@ export class PrivateSyncSession {
   }
 
   private async onBlockResponse(response: BlockResponse): Promise<void> {
-    if (!this.engine.ingestBlocks || response.blocks.length === 0) return;
-    await this.engine.ingestBlocks(
-      response.blocks.map((b) => ({ cid: b.cid, bytes: base64UrlToBytes(b.data) })),
-    );
-    // A fetched manifest reveals its chunk CIDs → drive the next phase of the fetch.
-    await this.requestBlocks();
+    if (!this.engine.ingestBlocks) return;
+    // A block REFUSED for budget (the server's per-request byte cap) is still held by the
+    // peer — un-guard it so it is re-requested on the next pass.  Otherwise an attachment
+    // larger than one request's budget would strand its tail chunks forever (the guard
+    // only clears on an MLS commit).  A genuinely not-held CID is simply re-requested once
+    // and refused again — bounded, because progress on OTHER blocks is what re-drives.
+    for (const cid of response.refused_cids) this.requestedBlocks.delete(cid);
+    if (response.blocks.length > 0) {
+      await this.engine.ingestBlocks(
+        response.blocks.map((b) => ({ cid: b.cid, bytes: base64UrlToBytes(b.data) })),
+      );
+    }
+    // A fetched manifest reveals its chunk CIDs, and budget-refused chunks are now
+    // re-requestable → drive the next phase of the fetch (only if progress was possible).
+    if (response.blocks.length > 0 || response.refused_cids.length > 0) {
+      await this.requestBlocks();
+    }
   }
 
   /**
@@ -367,4 +404,105 @@ export class PrivateSyncSession {
     this.requestOps(next);
     await this.requestBlocks();
   }
+}
+
+/** A handle to a maintained (auto-reconnecting) connection. */
+export interface ReconnectController {
+  /** Stop maintaining + gracefully close the current session (no further reconnects). */
+  close(): void;
+  /** The current lifecycle status. */
+  status(): ReconnectStatus;
+}
+
+export type ReconnectStatus = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'failed';
+
+export interface MaintainOptions {
+  /** Max reconnect attempts after a non-graceful drop before giving up (default 5). */
+  readonly maxAttempts?: number;
+  /** Base backoff (ms); attempt N waits `backoffMs * 2^(N-1)`, capped (default 1000). */
+  readonly backoffMs?: number;
+  /** Cap on the backoff delay (default 30s). */
+  readonly maxBackoffMs?: number;
+  /** Injectable sleep (tests pump a fake clock). */
+  readonly sleep?: (ms: number) => Promise<void>;
+  /** Observe the connection lifecycle. */
+  readonly onStatus?: (status: ReconnectStatus) => void;
+}
+
+/** A live session handle a `dial` returns. */
+export interface DialedSession {
+  close(graceful?: boolean): void;
+}
+
+/**
+ * §15.4 — maintain a connection across network drops: dial, and on a NON-GRACEFUL channel
+ * drop (the peer did not send `bye`) RE-DIAL with bounded exponential backoff.  A graceful
+ * drop (the peer left), a local `close()`, or exhausting `maxAttempts` stops reconnecting.
+ * A successful (re)connect resets the backoff.  `dial` is INJECTED so this is transport-
+ * agnostic + unit-testable: it receives the `onClose(graceful)` to wire into the session it
+ * creates (e.g. `PrivateSyncSession`'s `onClose` option) and returns a handle to close.
+ */
+export function maintainConnection(
+  dial: (onClose: (graceful: boolean) => void) => Promise<DialedSession>,
+  options: MaintainOptions = {},
+): ReconnectController {
+  const maxAttempts = options.maxAttempts ?? 5;
+  const backoffMs = options.backoffMs ?? 1_000;
+  const maxBackoffMs = options.maxBackoffMs ?? 30_000;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let stopping = false;
+  let current: DialedSession | null = null;
+  let attempt = 0;
+  let status: ReconnectStatus = 'connecting';
+  const setStatus = (s: ReconnectStatus): void => {
+    status = s;
+    options.onStatus?.(s);
+  };
+  const delayFor = (n: number): number => Math.min(backoffMs * 2 ** (n - 1), maxBackoffMs);
+
+  const onClose = (graceful: boolean): void => {
+    current = null;
+    if (stopping || graceful) {
+      setStatus('closed');
+      return;
+    }
+    if (attempt >= maxAttempts) {
+      setStatus('failed');
+      return;
+    }
+    attempt += 1;
+    setStatus('reconnecting');
+    void sleep(delayFor(attempt)).then(() => {
+      if (!stopping) void run();
+    });
+  };
+
+  const run = async (): Promise<void> => {
+    if (stopping) return;
+    setStatus(attempt === 0 ? 'connecting' : 'reconnecting');
+    try {
+      current = await dial(onClose);
+      attempt = 0; // a successful (re)connect resets the backoff window
+      setStatus('connected');
+    } catch {
+      if (stopping || attempt >= maxAttempts) {
+        setStatus('failed');
+        return;
+      }
+      attempt += 1;
+      await sleep(delayFor(attempt));
+      if (!stopping) await run();
+    }
+  };
+
+  void run();
+  return {
+    close(): void {
+      stopping = true;
+      current?.close(true);
+      current = null;
+      setStatus('closed');
+    },
+    status: () => status,
+  };
 }
