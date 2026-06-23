@@ -191,16 +191,19 @@ export default defineConfig({
           if (id.includes('node_modules/react-dom') || id.includes('node_modules/react')) {
             return 'react';
           }
-          // WS-S.2.1 — keep the entire Private P2P crypto/protocol plane (the
-          // `@licio/private-p2p` core + its MLS/HPKE/curve deps) in ONE lazily
-          // loaded chunk whose file name contains `private-p2p`, so it is measured
-          // against its own budget and excluded from the core total (it is reached
-          // only by the dynamic import in `private-p2p/room-manager.ts`).  These
-          // deps are reachable in apps/web ONLY through that plane, so this never
-          // pulls them into the initial bundle.
+          // WS-S.2.1 — keep the entire Private P2P plane in ONE lazily loaded chunk
+          // whose file name contains `private-p2p`, so it is measured against its OWN
+          // budget and excluded from the core total (PRIVATE_SPEC §9.8 — the private
+          // plane is separately budgeted, never part of the public app's weight).  This
+          // covers: the `@licio/private-p2p` core + its MLS/HPKE/curve deps, AND the
+          // apps/web private-plane GLUE (`apps/web/src/private-p2p/*` — the room manager,
+          // the live carrier, the sync session, the rendezvous client, the storage
+          // adapter).  All of it is reached ONLY through the dynamic import in
+          // `private-p2p/room-manager.ts`, so it never enters the initial bundle.
           if (
             id.includes('packages/private-p2p') ||
             id.includes('@licio/private-p2p') ||
+            id.includes('apps/web/src/private-p2p') ||
             id.includes('node_modules/ts-mls') ||
             id.includes('node_modules/@noble') ||
             id.includes('node_modules/@hpke')
