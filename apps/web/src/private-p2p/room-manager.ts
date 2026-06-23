@@ -22,6 +22,8 @@ import type {
   RoomReducerState,
   SafetyNumber,
 } from '@licio/private-p2p';
+import { loadUpdateChannelConfig } from '../update/config.js';
+import { requirePrivateBundleTrusted } from '../update/gate.js';
 import { connectPrivatePeer, type RtcIceServerLike } from './connect-peer.js';
 import { type FetchLike, httpRendezvousTransport } from './rendezvous-client.js';
 import {
@@ -42,6 +44,32 @@ async function loadP2p(): Promise<P2pModule> {
   return import('@licio/private-p2p');
 }
 
+/** Thrown when the §20.6 verify-before-unlock gate locks: the running private-mode
+ *  bundle is not reproducible/signed/transparency-logged, so room keys stay sealed. */
+export class PrivateBundleLockedError extends Error {
+  constructor(readonly reason: string) {
+    super(`private bundle locked (verify-before-unlock): ${reason}`);
+    this.name = 'PrivateBundleLockedError';
+  }
+}
+
+/**
+ * §20.6 / WS-S.10 verify-before-unlock.  When the update channel is CONFIGURED (a
+ * maintainer signer set is pinned into this build), the running private-mode bundle
+ * MUST be reproducible + signed + present in the transparency log before any room key
+ * is unlocked; an untrusted verdict throws `PrivateBundleLockedError` (rooms lock with
+ * the §20.6 copy).  A no-op when NO signer set is configured (dev/test) — the control
+ * engages only when a release pins it, and a build-pinned signer set cannot be
+ * unconfigured by an attacker (it is baked into the bundle, not runtime state).
+ */
+async function ensurePrivateBundleTrusted(): Promise<void> {
+  if (loadUpdateChannelConfig().trustedSignerPublicKeys.length === 0) return;
+  const verdict = await requirePrivateBundleTrusted();
+  if (!verdict.trusted) {
+    throw new PrivateBundleLockedError(verdict.reason ?? 'not_in_transparency_log');
+  }
+}
+
 /** Engine params minus storage (the manager supplies the IndexedDB adapter). */
 export type LoadPrivateRoomParams = Omit<PrivateRoomEngineParams, 'storage'>;
 
@@ -53,6 +81,7 @@ export type LoadPrivateRoomParams = Omit<PrivateRoomEngineParams, 'storage'>;
 export async function loadPrivateRoomEngine(
   params: LoadPrivateRoomParams,
 ): Promise<PrivateRoomEngine> {
+  await ensurePrivateBundleTrusted();
   const mod = await loadP2p();
   return mod.PrivateRoomEngine.load({
     ...params,
@@ -243,6 +272,7 @@ export class PrivateRoomSession {
 
   /** Found a new private room, persist its session, and author the genesis op. */
   static async create(params: CreatePrivateRoomSessionParams): Promise<PrivateRoomSession> {
+    await ensurePrivateBundleTrusted();
     const p2p = await loadP2p();
     const roomId = globalThis.crypto.randomUUID();
     const created = await p2p.createPrivateRoom({
@@ -301,6 +331,7 @@ export class PrivateRoomSession {
   ): Promise<PrivateRoomSession | null> {
     const session = await getRoomSession(roomId);
     if (!session) return null;
+    await ensurePrivateBundleTrusted();
     const p2p = await loadP2p();
     // Re-validate the persisted manifest through the schema (the manager owns the
     // dynamically-imported schema; this module's type-only import cannot).  A
