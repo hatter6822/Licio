@@ -187,6 +187,46 @@ describe('bundle import — typed rejection + summary (WS-R.15.1b)', () => {
   });
 });
 
+describe('bundle import — private-encrypted bundles are refused by the public path (WS-R.16.1 / §8)', () => {
+  it('refuses a contains_private_encrypted bundle with the typed private_bundle status', async () => {
+    // A `contains_private_encrypted` pack carries WS-S private-room ciphertext, which
+    // belongs ONLY in the device-local private engine — NEVER the public lcap_v2 store.
+    // The public read path must refuse it BEFORE summarizing or committing.
+    const ciphertext = new TextEncoder().encode('opaque private ciphertext bytes');
+    const blockCid = await cidFor('block', ciphertext);
+    const privateBundle = writePack({
+      objects: [
+        {
+          cid: blockCid,
+          cidKind: 'block',
+          frameKind: 'block',
+          payload: ciphertext,
+          lane: 'B4',
+          priority: 4,
+          flags: { encrypted: true, private_metadata: true },
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'contains_private_encrypted',
+      maxUncompressedBytes: 1 << 20,
+    });
+
+    const outcome = await readBundleForImport(privateBundle);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.status).toBe('private_bundle');
+  });
+
+  it('still accepts an ordinary public bundle (the guard is label-scoped, not blanket)', async () => {
+    await seedRecord('room-A', 'an ordinary public post');
+    const exportData = await gatherRoomExport(db, 'room-A');
+    const disclosure = await exportDisclosure(exportData.items);
+    const bundle = await buildBundle({ objects: exportData.objects, disclosure });
+    const outcome = await readBundleForImport(bundle);
+    expect(outcome.ok).toBe(true); // a public/in-room bundle is NOT refused
+  });
+});
+
 describe('bundle import — quarantine (WS-R.4.3)', () => {
   it('quarantines a record whose dependency is absent, recording the missing CID', async () => {
     const missingDep = await cidFor('block', new TextEncoder().encode('absent block'));

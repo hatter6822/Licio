@@ -10,6 +10,13 @@
 // the read path treats as not-yet-renderable.  A malformed/oversized/truncated file
 // fails cleanly with a typed status (no crash, no partial trusted render).
 //
+// Privacy-label routing (fail-closed, §8 / §28 cross-plane separation): this is the
+// PUBLIC availability-store import path.  A bundle whose pack `privacy_label` is
+// `contains_private_encrypted` carries WS-S private-room ciphertext that belongs ONLY in
+// the device-local private engine, never the shared `lcap_v2` store — so this path
+// REFUSES it with a typed `private_bundle` status BEFORE summarizing or committing, and
+// the caller routes it to the cross-plane bridge → the private engine instead.
+//
 // The `@licio/lcap` codec runs CLIENT-SIDE, loaded at call time via dynamic import
 // (the lazy chunk); types are `import type` (erased).
 
@@ -90,14 +97,25 @@ export function summarizeBundle(pack: ParsedPack): BundleSummary {
   };
 }
 
+/**
+ * A bundle whose privacy label routes it AWAY from the public store: a
+ * `contains_private_encrypted` pack belongs to the device-local private engine, not the
+ * shared `lcap_v2` availability store (§8 / §28 cross-plane separation).
+ */
+export type BundleRoutingStatus = PackReadStatus | 'private_bundle';
+
 export type BundleReadOutcome =
   | { readonly ok: true; readonly pack: ParsedPack; readonly summary: BundleSummary }
-  | { readonly ok: false; readonly status: PackReadStatus };
+  | { readonly ok: false; readonly status: BundleRoutingStatus };
 
 /**
  * Read + integrity-verify a bundle file under resource caps (WS-R.4.2 reader).  On
  * success, also returns the pre-render summary.  A malformed/oversized/truncated file
  * returns a typed `status` and NOTHING is rendered.
+ *
+ * FAIL-CLOSED privacy-label routing: a `contains_private_encrypted` bundle is refused
+ * here with the `private_bundle` status — its WS-S ciphertext must never land in the
+ * public `lcap_v2` store; the caller routes it to the cross-plane bridge instead.
  */
 export async function readBundleForImport(
   bytes: Uint8Array,
@@ -106,6 +124,10 @@ export async function readBundleForImport(
   const { readPack } = await import('@licio/lcap');
   const result = caps ? await readPack(bytes, caps) : await readPack(bytes);
   if (!result.ok) return { ok: false, status: result.status };
+  // §8 / §28: private-encrypted bundles do not belong in the public availability store.
+  if (result.pack.header.privacy_label === 'contains_private_encrypted') {
+    return { ok: false, status: 'private_bundle' };
+  }
   return { ok: true, pack: result.pack, summary: summarizeBundle(result.pack) };
 }
 

@@ -20,6 +20,21 @@
 //     one.  The `key_epoch_id` is a hint STRING (the envelope's already-public
 //     `room_epoch`), the nonce is opaque bytes, and `aad_context` is the envelope's
 //     `aad_hash` COMMITMENT — never the raw AAD inputs.
+//   * The §28.2 descriptor RIDES THE BUNDLE.  Each ciphertext block is paired with its
+//     descriptor, canonical-encoded to its own LCAP block frame and bound to the
+//     ciphertext by `descriptor.ciphertext_block_cid` + a `deps` edge.  On import the
+//     bridge DECODES the carried descriptor through the strict §28.2 schema and verifies
+//     it against the recovered block, so a block that passed the reader's generic CID
+//     check but is NOT a valid encrypted_payload carrier (wrong role, a malformed hint,
+//     a §10.6-forbidden plaintext hint on the group-keyed suite, or a descriptor whose
+//     `ciphertext_block_cid` does not bind the recovered block) is REJECTED — the verify
+//     is no longer a self-referential tautology over locally-fabricated placeholders.
+//   * Privacy-label routing is FAIL-CLOSED.  The bridge accepts encrypted_payload blocks
+//     ONLY from a bundle whose pack `privacy_label` is `contains_private_encrypted`; any
+//     other label throws before a single block is parsed (a public bundle never gets
+//     mis-extracted as private envelopes).  Symmetrically, the public LCAP import path
+//     (`bundle-import.ts`) REFUSES a `contains_private_encrypted` bundle, so private
+//     ciphertext never lands in the public `lcap_v2` availability store.
 //   * The bundle/container confers NO trust (§8.3).  Import re-hashes every block
 //     (CID/structure only) and re-parses each recovered ciphertext through the
 //     private-p2p envelope SCHEMA (fail-closed on a malformed one), then HANDS the
@@ -44,6 +59,11 @@ import type { PrivateEncryptedEnvelope } from '@licio/private-p2p';
 const ENCRYPTED_PAYLOAD_LANE = 'B4' as const;
 /** The pack priority for opaque encrypted payload (lowest organic, deferred to last). */
 const ENCRYPTED_PAYLOAD_PRIORITY = 4 as const;
+/**
+ * The pack privacy label that a private-encrypted bundle MUST carry.  The public import
+ * path refuses it and the bridge import requires it — the fail-closed routing boundary.
+ */
+const PRIVATE_PRIVACY_LABEL: PackHeaderV2['privacy_label'] = 'contains_private_encrypted';
 
 /** Options for {@link exportPrivateEnvelopesToBundle}. */
 export interface ExportPrivateEnvelopesOptions {
@@ -54,7 +74,7 @@ export interface ExportPrivateEnvelopesOptions {
   readonly transportProfile?: PackHeaderV2['transport_profile'];
   /**
    * Override the pack's `max_uncompressed_bytes` budget.  Defaults to the summed
-   * ciphertext size plus a small structural headroom.
+   * ciphertext + descriptor size plus a small structural headroom.
    */
   readonly maxUncompressedBytes?: number;
 }
@@ -67,6 +87,8 @@ export interface CarriedEnvelope {
   readonly block: BlockDescriptorV2;
   /** The §28.2 descriptor referencing that block by CID. */
   readonly descriptor: EncryptedPayloadDescriptorV2;
+  /** The CID of the descriptor's OWN carrier block (the frame the descriptor rides). */
+  readonly descriptorBlockCid: string;
 }
 
 /**
@@ -92,7 +114,7 @@ async function hintsFromEnvelope(envelope: PrivateEncryptedEnvelope): Promise<{
     suite: 'MLS-derived-AEAD',
     // A hint STRING identifying the key epoch — never a key.  The epoch is a public,
     // monotonically-bumped counter already present in the (signed) envelope metadata.
-    keyEpochId: `epoch:${envelope.room_epoch}`,
+    keyEpochId: keyEpochIdFor(envelope.room_epoch),
     // Opaque AEAD nonce bytes (never interpreted by LCAP).
     nonce: fromBase64Url(envelope.aead.nonce),
     // The envelope's `aad_hash` is exactly the §28.2 "opaque commitment to the AAD
@@ -101,16 +123,23 @@ async function hintsFromEnvelope(envelope: PrivateEncryptedEnvelope): Promise<{
   };
 }
 
+/** The §28.2 `key_epoch_id` hint string for a public room-epoch counter. */
+function keyEpochIdFor(roomEpoch: number): string {
+  return `epoch:${roomEpoch}`;
+}
+
 /**
  * Serialize each private-p2p `PrivateEncryptedEnvelope` to its canonical (DAG-CBOR)
- * bytes, wrap each as an LCAP `encrypted_payload` block carrying ONLY opaque hints, and
+ * bytes, wrap each as an LCAP `encrypted_payload` block carrying ONLY opaque hints, pair
+ * each with its §28.2 descriptor (also CID-addressed, riding its own block frame), and
  * assemble them into a single `.licio-bundle` byte array (the WS-R.4.1 pack writer).
  *
- * The returned `bundleBytes` are a fully-formed LCAP pack.  The LCAP layer treats the
- * private ciphertext as opaque payload — it never decodes the envelope — so the bundle
- * is safely transportable over any LCAP carrier (courier/relay/manual file) without
- * leaking plaintext.  `carried` exposes the per-envelope ciphertext + descriptors for a
- * caller that wants to verify or index the carriage.
+ * The returned `bundleBytes` are a fully-formed LCAP pack labelled
+ * `contains_private_encrypted`.  The LCAP layer treats the private ciphertext as opaque
+ * payload — it never decodes the envelope — so the bundle is safely transportable over
+ * any LCAP carrier (courier/relay/manual file) without leaking plaintext.  `carried`
+ * exposes the per-envelope ciphertext + descriptors for a caller that wants to verify or
+ * index the carriage.
  */
 export async function exportPrivateEnvelopesToBundle(
   envelopes: readonly PrivateEncryptedEnvelope[],
@@ -121,7 +150,7 @@ export async function exportPrivateEnvelopesToBundle(
 
   const carried: CarriedEnvelope[] = [];
   const objects: PackObject[] = [];
-  let totalCiphertextBytes = 0;
+  let totalBytes = 0;
 
   for (const envelope of envelopes) {
     // 1) The envelope is a closed, NFC-safe, string-keyed object → canonical DAG-CBOR.
@@ -129,16 +158,29 @@ export async function exportPrivateEnvelopesToBundle(
     //    over, so re-import reproduces byte-identical bytes.  We pass it as an opaque
     //    `CanonicalValue`; LCAP never sees the decoded shape.
     const ciphertextBytes = p2p.canonical(envelope as Parameters<typeof p2p.canonical>[0]);
-    totalCiphertextBytes += ciphertextBytes.length;
+    totalBytes += ciphertextBytes.length;
 
     // 2) Wrap as an LCAP encrypted_payload block + §28.2 descriptor (opaque hints only).
     //    `buildEncryptedPayloadBlock` hashes the bytes as opaque input — never decrypts.
     const hints = await hintsFromEnvelope(envelope);
     const { block, descriptor } = await lcap.buildEncryptedPayloadBlock(ciphertextBytes, hints);
-    carried.push({ ciphertextBytes, block, descriptor });
 
-    // 3) The pack object: a `block` frame keyed by the ciphertext CID, flagged
-    //    encrypted/private so a downstream peer routes it as opaque private content.
+    // 3) Canonical-encode the descriptor itself and CARRY it in a dedicated block frame
+    //    (CID over the descriptor bytes).  Binding it into the bundle (rather than
+    //    rebuilding it from placeholders on import) is what makes the import verification
+    //    meaningful: the recovered descriptor's `ciphertext_block_cid` + hints are the
+    //    EXPORTER's, so a tampered/mismatched descriptor is detectable.
+    const descriptorBytes = lcap.encodeWithSchema(
+      lcap.encryptedPayloadDescriptorV2Schema,
+      descriptor,
+    );
+    const descriptorBlockCid = await lcap.cidFor('block', descriptorBytes);
+    totalBytes += descriptorBytes.length;
+
+    carried.push({ ciphertextBytes, block, descriptor, descriptorBlockCid });
+
+    // 4a) The ciphertext object: a `block` frame keyed by the ciphertext CID, flagged
+    //     encrypted/private so a downstream peer routes it as opaque private content.
     objects.push({
       cid: block.block_cid,
       cidKind: 'block',
@@ -148,15 +190,28 @@ export async function exportPrivateEnvelopesToBundle(
       priority: ENCRYPTED_PAYLOAD_PRIORITY,
       flags: { encrypted: true, private_metadata: true },
     });
+    // 4b) The descriptor object: a sibling `block` frame flagged private_metadata (NOT
+    //     `encrypted` — it is the opaque hint metadata, not ciphertext) and bound to the
+    //     ciphertext block by a `deps` edge so the importer pairs them deterministically.
+    objects.push({
+      cid: descriptorBlockCid,
+      cidKind: 'block',
+      frameKind: 'block',
+      payload: descriptorBytes,
+      lane: ENCRYPTED_PAYLOAD_LANE,
+      priority: ENCRYPTED_PAYLOAD_PRIORITY,
+      deps: [block.block_cid],
+      flags: { private_metadata: true },
+    });
   }
 
   const bundleBytes = lcap.writePack({
     objects,
     transportProfile: options.transportProfile ?? 'manual_bundle',
     // The pack carries private ciphertext: the most conservative §28.2 privacy label.
-    privacyLabel: 'contains_private_encrypted',
-    maxUncompressedBytes:
-      options.maxUncompressedBytes ?? totalCiphertextBytes + objects.length * 1024 + 1024,
+    // The bridge import REQUIRES exactly this label; the public import REFUSES it.
+    privacyLabel: PRIVATE_PRIVACY_LABEL,
+    maxUncompressedBytes: options.maxUncompressedBytes ?? totalBytes + objects.length * 1024 + 1024,
   });
 
   return { bundleBytes, carried };
@@ -166,7 +221,10 @@ export async function exportPrivateEnvelopesToBundle(
 export type CrossPlaneImportRejection =
   | 'block_missing' // a table entry references a block with no frame (caught by the reader, defensive)
   | 'cid_unverified' // the frame payload's CID did not match its declared CID
+  | 'descriptor_missing' // the ciphertext block carries no §28.2 descriptor frame
+  | 'descriptor_malformed' // the carried descriptor did not parse through the strict §28.2 schema
   | 'block_verify_failed' // verifyEncryptedPayloadBlock rejected (wrong role / CID mismatch / structure)
+  | 'epoch_hint_mismatch' // the descriptor's key_epoch_id disagrees with the envelope's room_epoch
   | 'malformed_envelope'; // the recovered ciphertext did not parse as a PrivateEncryptedEnvelope
 
 /** One recovered private envelope, with the carrier descriptors that delivered it. */
@@ -189,7 +247,7 @@ export interface CrossPlaneImportResult {
   readonly rejected: readonly RejectedBlock[];
 }
 
-/** A bundle that failed to PARSE at the LCAP layer (not a per-block rejection). */
+/** A bundle that failed to PARSE at the LCAP layer, or that is not a private bundle. */
 export class CrossPlaneBundleError extends Error {
   override readonly name = 'CrossPlaneBundleError';
   constructor(readonly status: string) {
@@ -197,13 +255,25 @@ export class CrossPlaneBundleError extends Error {
   }
 }
 
+/** True iff the pack header marks the bundle as carrying private encrypted content. */
+function isPrivateBundleLabel(label: PackHeaderV2['privacy_label']): boolean {
+  return label === PRIVATE_PRIVACY_LABEL;
+}
+
 /**
  * Read an LCAP `.licio-bundle`, extract every `encrypted_payload` block, verify each
- * WITHOUT decrypting (CID + structure only, the §18.4 no-transport-trust re-hash),
- * recover the raw ciphertext bytes, and re-parse each through the private-p2p envelope
- * SCHEMA so a malformed one fails closed.  Returns the recovered opaque envelopes for
- * the caller to hand to the private-p2p engine's `ingest` / archive-import, which
- * performs the REAL trust projection (signature + AEAD).
+ * against the EXPORTER'S carried §28.2 descriptor WITHOUT decrypting (CID + role +
+ * structure + descriptor schema, the §18.4 no-transport-trust re-hash), recover the raw
+ * ciphertext bytes, and re-parse each through the private-p2p envelope SCHEMA so a
+ * malformed one fails closed.  Returns the recovered opaque envelopes for the caller to
+ * hand to the private-p2p engine's `ingest` / archive-import, which performs the REAL
+ * trust projection (signature + AEAD).
+ *
+ * Privacy-label routing (fail-closed): the bundle's pack `privacy_label` MUST be
+ * `contains_private_encrypted`.  Any other label throws a {@link CrossPlaneBundleError}
+ * BEFORE any block is parsed — a public bundle can never be mis-extracted into private
+ * envelopes, and only frames explicitly flagged `encrypted` (the ciphertext role) are
+ * considered, never every `block`-kind entry.
  *
  * §8.3 — the bundle confers NO trust: nothing here is decrypted, and a stale-epoch (or
  * forged) envelope round-trips opaquely and is quarantined LATER by the engine.  The
@@ -221,14 +291,35 @@ export async function importBundleToPrivateEnvelopes(
   const read = await lcap.readPack(bundleBytes, caps ?? lcap.DEFAULT_READER_CAPS);
   if (!read.ok) throw new CrossPlaneBundleError(read.status);
 
+  // Fail-closed privacy-label routing: only a `contains_private_encrypted` bundle may be
+  // routed into the private plane.  A public / in-room-metadata bundle is NOT ours — it
+  // belongs to the public LCAP import path — so refuse it WHOLESALE before parsing any
+  // block, rather than producing a flood of `malformed_envelope` rejections.
+  if (!isPrivateBundleLabel(read.pack.header.privacy_label)) {
+    throw new CrossPlaneBundleError('not_private_bundle');
+  }
+
   const envelopes: RecoveredEnvelope[] = [];
   const rejected: RejectedBlock[] = [];
 
-  // The table-before-frames layout: walk the table so we process only the entries the
-  // pack ADVERTISES (the reader already proved a strict 1:1 table↔frame correspondence,
-  // so an unadvertised hidden frame cannot exist).  We carry only `block`-kind entries.
+  // Index the table by CID so a ciphertext entry can locate its carried descriptor entry
+  // (bound by a `deps` edge).  The reader already proved a strict 1:1 table↔frame
+  // correspondence, so an entry's CID maps to exactly one frame.
+  const entryByCid = new Map(read.pack.entries.map((entry) => [entry.cid, entry]));
+  // The descriptor entry that DEPENDS ON a given ciphertext CID (the carrier pairing).
+  const descriptorEntryForCiphertext = new Map<string, string>();
+  for (const entry of read.pack.entries) {
+    for (const dep of entry.deps ?? []) descriptorEntryForCiphertext.set(dep, entry.cid);
+  }
+
   for (const entry of read.pack.entries) {
     if (entry.cid_kind !== 'block') continue;
+    // SELECT BY ROLE, not by blanket `block`-kind: an encrypted_payload ciphertext entry
+    // is the one flagged `encrypted`.  The descriptor sibling (private_metadata only) and
+    // any non-encrypted block are skipped here — a public block can never be mis-parsed
+    // as an envelope.
+    if (entry.flags?.encrypted !== true) continue;
+
     const frame = read.pack.frames.get(entry.cid);
     if (!frame) {
       rejected.push({ cid: entry.cid, reason: 'block_missing' });
@@ -241,19 +332,49 @@ export async function importBundleToPrivateEnvelopes(
     }
     const ciphertextBytes = frame.payload;
 
-    // Reconstruct the block descriptor over the recovered bytes and verify the
-    // encrypted-payload carrier (CID/role/structure — NEVER decrypt).  A descriptor is
-    // self-describing: it references its own block CID, which IS the frame CID.
+    // Locate + decode the EXPORTER's carried §28.2 descriptor for this ciphertext block.
+    const descriptorCid = descriptorEntryForCiphertext.get(entry.cid);
+    const descriptorFrame = descriptorCid ? read.pack.frames.get(descriptorCid) : undefined;
+    if (descriptorCid === undefined || !descriptorFrame || !entryByCid.has(descriptorCid)) {
+      rejected.push({ cid: entry.cid, reason: 'descriptor_missing' });
+      continue;
+    }
+    if (!descriptorFrame.cidVerified) {
+      rejected.push({ cid: entry.cid, reason: 'cid_unverified' });
+      continue;
+    }
+    let descriptor: EncryptedPayloadDescriptorV2;
+    try {
+      // The STRICT §28.2 schema rejects a wrong-version / malformed-hint / unknown-field
+      // descriptor AND a group-keyed-suite descriptor carrying a plaintext hint (§10.6).
+      descriptor = lcap.decodeWithSchema(
+        lcap.encryptedPayloadDescriptorV2Schema,
+        descriptorFrame.payload,
+      );
+    } catch {
+      rejected.push({ cid: entry.cid, reason: 'descriptor_malformed' });
+      continue;
+    }
+
+    // Reconstruct the block descriptor over the recovered bytes (CID/role/sha256/size),
+    // then verify the EXPORTER'S descriptor against it.  This is NOW meaningful: the
+    // carried `ciphertext_block_cid` must bind THIS recovered block, the role must be
+    // `encrypted_payload`, and any plaintext hint must not equal the ciphertext digest —
+    // a tampered descriptor (wrong CID binding, smuggled plaintext hint) is rejected.
     const block = await lcap.buildEncryptedPayloadBlock(ciphertextBytes, {
-      suite: 'MLS-derived-AEAD',
-      // These hints are not consumed by the verify path (it re-hashes the bytes); they
-      // are placeholders that satisfy the §28.2 schema (group-keyed → no plaintext hint).
-      keyEpochId: 'epoch:verify',
-      nonce: Uint8Array.of(0),
-      aadContext: Uint8Array.of(0),
+      suite: descriptor.suite,
+      keyEpochId: descriptor.key_epoch_id,
+      nonce: descriptor.nonce,
+      aadContext: descriptor.aad_context,
+      ...(descriptor.plaintext_sha256 !== undefined
+        ? { plaintextSha256: descriptor.plaintext_sha256 }
+        : {}),
+      ...(descriptor.plaintext_size !== undefined
+        ? { plaintextSize: descriptor.plaintext_size }
+        : {}),
     });
     const verification = await lcap.verifyEncryptedPayloadBlock(
-      block.descriptor,
+      descriptor,
       block.block,
       ciphertextBytes,
     );
@@ -274,7 +395,16 @@ export async function importBundleToPrivateEnvelopes(
       continue;
     }
 
-    envelopes.push({ envelope, block: block.block, descriptor: block.descriptor });
+    // Bind the OPAQUE epoch hint to the recovered envelope's already-public `room_epoch`.
+    // LCAP never trusts the hint — but a hint that DISAGREES with the ciphertext it labels
+    // is a sign the descriptor was paired to the wrong block, so reject it rather than let
+    // an epoch-bucketed downstream consumer be misled.
+    if (descriptor.key_epoch_id !== keyEpochIdFor(envelope.room_epoch)) {
+      rejected.push({ cid: entry.cid, reason: 'epoch_hint_mismatch' });
+      continue;
+    }
+
+    envelopes.push({ envelope, block: block.block, descriptor });
   }
 
   return { envelopes, rejected };

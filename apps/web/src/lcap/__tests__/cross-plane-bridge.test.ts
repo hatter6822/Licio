@@ -7,7 +7,12 @@
 //   (b) the bundle bytes contain NO plaintext (only ciphertext + opaque hints);
 //   (c) a tampered bundle fails closed (the encrypted-payload verify rejects);
 //   (d) a stale-epoch (but schema-valid) envelope round-trips OPAQUELY — the bridge
-//       never decrypts, so the private engine quarantines it LATER, not here.
+//       never decrypts, so the private engine quarantines it LATER, not here;
+//   (e) the import verification is MEANINGFUL — a CID-valid block whose CARRIED §28.2
+//       descriptor is malformed / mis-bound / smuggles a plaintext hint is REJECTED
+//       (the verify is no longer a self-referential tautology);
+//   (f) privacy-label routing is fail-closed — a non-private bundle is refused, and a
+//       public (non-encrypted) block is never mis-extracted as a private envelope.
 //
 // `@licio/private-p2p` (REAL MLS/HPKE/Ed25519 crypto) is loaded by dynamic import, the
 // same code-split discipline the bridge enforces.
@@ -142,6 +147,8 @@ describe('WS-R.16.1 cross-plane bundle bridge', () => {
       // The block plays the encrypted_payload role over the ciphertext CID.
       expect(c.block.role).toBe('encrypted_payload');
       expect(c.descriptor.ciphertext_block_cid).toBe(c.block.block_cid);
+      // The descriptor RIDES the bundle in its own carrier block (a distinct CID).
+      expect(c.descriptorBlockCid).not.toBe(c.block.block_cid);
     }
   });
 
@@ -217,6 +224,245 @@ describe('WS-R.16.1 cross-plane bundle bridge', () => {
     // Byte-identical opaque round-trip — the engine, not the bridge, judges trust.
     const original = p2p.canonical(staleEnvelope as Parameters<typeof p2p.canonical>[0]);
     const back = p2p.canonical(recovered as Parameters<typeof p2p.canonical>[0]);
+    expect(Array.from(back)).toEqual(Array.from(original));
+  });
+});
+
+describe('WS-R.16.1 — meaningful import verification (finding 17)', () => {
+  it('(e) rejects a CID-valid ciphertext block whose carried descriptor is BAD (wrong CID binding)', async () => {
+    const lcap = await import('@licio/lcap');
+    const p2p = await import('@licio/private-p2p');
+
+    // A genuine sealed envelope → its canonical ciphertext bytes (CID-valid block).
+    const sealed = await sealRealEnvelopes();
+    const envelope = sealed.envelopes[0] as PrivateEncryptedEnvelope;
+    const ciphertext = p2p.canonical(envelope as Parameters<typeof p2p.canonical>[0]);
+    const ciphertextCid = await lcap.cidFor('block', ciphertext);
+
+    // Forge a §28.2 descriptor whose `ciphertext_block_cid` points at the WRONG block
+    // (a different CID) — it is a schema-valid descriptor, but it does NOT bind the
+    // recovered ciphertext.  Under the old tautological verify (which rebuilt the
+    // descriptor over the same bytes) this could never be caught; now it must be.
+    const wrongCid = await lcap.cidFor('block', new TextEncoder().encode('a different block'));
+    const forged = lcap.encryptedPayloadDescriptorV2Schema.parse({
+      encryption_version: 2,
+      suite: 'MLS-derived-AEAD',
+      key_epoch_id: `epoch:${envelope.room_epoch}`,
+      nonce: p2p.fromBase64Url(envelope.aead.nonce),
+      aad_context: p2p.fromBase64Url(envelope.aead.aad_hash),
+      ciphertext_block_cid: wrongCid, // <-- mis-bound
+    });
+    const forgedBytes = lcap.encodeWithSchema(lcap.encryptedPayloadDescriptorV2Schema, forged);
+    const forgedDescriptorCid = await lcap.cidFor('block', forgedBytes);
+
+    // Hand-assemble a private bundle: the CID-VALID ciphertext block + the CID-VALID
+    // (but mis-bound) descriptor block bound to it by deps.  Every frame passes the
+    // reader's generic CID check; the bridge's encrypted-payload verify must still fail.
+    const bundle = lcap.writePack({
+      objects: [
+        {
+          cid: ciphertextCid,
+          cidKind: 'block',
+          frameKind: 'block',
+          payload: ciphertext,
+          lane: 'B4',
+          priority: 4,
+          flags: { encrypted: true, private_metadata: true },
+        },
+        {
+          cid: forgedDescriptorCid,
+          cidKind: 'block',
+          frameKind: 'block',
+          payload: forgedBytes,
+          lane: 'B4',
+          priority: 4,
+          deps: [ciphertextCid],
+          flags: { private_metadata: true },
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'contains_private_encrypted',
+      maxUncompressedBytes: 1 << 20,
+    });
+
+    const result = await importBundleToPrivateEnvelopes(bundle);
+    // The descriptor passed the reader CID check but does NOT verify against the block.
+    expect(result.envelopes).toHaveLength(0);
+    expect(result.rejected).toHaveLength(1);
+    expect(result.rejected[0]?.reason).toBe('block_verify_failed');
+  });
+
+  it('(e2) rejects a CID-valid ciphertext block whose descriptor is structurally malformed', async () => {
+    const lcap = await import('@licio/lcap');
+    const p2p = await import('@licio/private-p2p');
+
+    const sealed = await sealRealEnvelopes();
+    const envelope = sealed.envelopes[0] as PrivateEncryptedEnvelope;
+    const ciphertext = p2p.canonical(envelope as Parameters<typeof p2p.canonical>[0]);
+    const ciphertextCid = await lcap.cidFor('block', ciphertext);
+
+    // A descriptor frame whose BYTES are not a valid §28.2 descriptor at all (random
+    // canonical bytes).  It is CID-valid as a block (the reader passes it), but the
+    // strict schema decode must reject it → descriptor_malformed.
+    const garbage = new TextEncoder().encode('not a descriptor — arbitrary bytes');
+    const garbageCid = await lcap.cidFor('block', garbage);
+
+    const bundle = lcap.writePack({
+      objects: [
+        {
+          cid: ciphertextCid,
+          cidKind: 'block',
+          frameKind: 'block',
+          payload: ciphertext,
+          lane: 'B4',
+          priority: 4,
+          flags: { encrypted: true, private_metadata: true },
+        },
+        {
+          cid: garbageCid,
+          cidKind: 'block',
+          frameKind: 'block',
+          payload: garbage,
+          lane: 'B4',
+          priority: 4,
+          deps: [ciphertextCid],
+          flags: { private_metadata: true },
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'contains_private_encrypted',
+      maxUncompressedBytes: 1 << 20,
+    });
+
+    const result = await importBundleToPrivateEnvelopes(bundle);
+    expect(result.envelopes).toHaveLength(0);
+    expect(result.rejected[0]?.reason).toBe('descriptor_malformed');
+  });
+
+  it('(e3) rejects a ciphertext block carrying NO §28.2 descriptor at all', async () => {
+    const lcap = await import('@licio/lcap');
+    const p2p = await import('@licio/private-p2p');
+
+    const sealed = await sealRealEnvelopes();
+    const envelope = sealed.envelopes[0] as PrivateEncryptedEnvelope;
+    const ciphertext = p2p.canonical(envelope as Parameters<typeof p2p.canonical>[0]);
+    const ciphertextCid = await lcap.cidFor('block', ciphertext);
+
+    // A lone encrypted ciphertext block with no descriptor sibling — the bridge cannot
+    // verify it without the EXPORTER's descriptor, so it must reject (not fabricate one).
+    const bundle = lcap.writePack({
+      objects: [
+        {
+          cid: ciphertextCid,
+          cidKind: 'block',
+          frameKind: 'block',
+          payload: ciphertext,
+          lane: 'B4',
+          priority: 4,
+          flags: { encrypted: true, private_metadata: true },
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'contains_private_encrypted',
+      maxUncompressedBytes: 1 << 20,
+    });
+
+    const result = await importBundleToPrivateEnvelopes(bundle);
+    expect(result.envelopes).toHaveLength(0);
+    expect(result.rejected[0]?.reason).toBe('descriptor_missing');
+  });
+});
+
+describe('WS-R.16.1 — fail-closed privacy-label routing (finding 18)', () => {
+  it('(f) refuses a NON-private-labelled bundle wholesale (a public bundle is not ours)', async () => {
+    const lcap = await import('@licio/lcap');
+    // A perfectly valid PUBLIC bundle: one ordinary record.  Fed to the private-plane
+    // import, it must be refused by privacy-label routing BEFORE any block is parsed —
+    // not produce a flood of malformed_envelope rejections.
+    const body = new TextEncoder().encode('an ordinary public record');
+    const recordCid = await lcap.cidFor('record', body);
+    const publicBundle = lcap.writePack({
+      objects: [
+        {
+          cid: recordCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: body,
+          lane: 'T1',
+          priority: 1,
+          recordKind: 'contribution_event',
+          roomIdHash: new TextEncoder().encode('room-A'),
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: 1 << 20,
+    });
+
+    await expect(importBundleToPrivateEnvelopes(publicBundle)).rejects.toMatchObject({
+      name: 'CrossPlaneBundleError',
+      status: 'not_private_bundle',
+    });
+  });
+
+  it('(f2) does NOT mis-extract a public (non-encrypted) block from a private bundle', async () => {
+    const lcap = await import('@licio/lcap');
+    const p2p = await import('@licio/private-p2p');
+
+    // A private bundle that ALSO carries a non-encrypted block (not flagged encrypted).
+    // The bridge selects by the encrypted_payload ROLE/flag, so the public block is
+    // skipped — only the real ciphertext envelope is recovered.
+    const { envelopes: real } = await sealRealEnvelopes();
+    const { bundleBytes: privateBundle } = await exportPrivateEnvelopesToBundle([
+      real[0] as PrivateEncryptedEnvelope,
+    ]);
+
+    // Decode the existing private bundle, then re-pack it WITH an extra non-encrypted
+    // block, keeping the private label.  (Re-writing through writePack is the simplest
+    // faithful way to append a frame.)
+    const read = await lcap.readPack(privateBundle, lcap.DEFAULT_READER_CAPS);
+    expect(read.ok).toBe(true);
+    if (!read.ok) return;
+    const strayBytes = new TextEncoder().encode('a stray non-encrypted block — must be ignored');
+    const strayCid = await lcap.cidFor('block', strayBytes);
+    const objects = read.pack.entries.map((entry) => {
+      const frame = read.pack.frames.get(entry.cid);
+      return {
+        cid: entry.cid,
+        cidKind: entry.cid_kind,
+        frameKind: frame?.frameKind ?? 'block',
+        payload: frame?.payload ?? new Uint8Array(0),
+        lane: entry.lane,
+        priority: entry.priority,
+        ...(entry.deps ? { deps: [...entry.deps] } : {}),
+        ...(entry.flags ? { flags: entry.flags } : {}),
+      } as const;
+    });
+    const repacked = lcap.writePack({
+      objects: [
+        ...objects,
+        {
+          cid: strayCid,
+          cidKind: 'block',
+          frameKind: 'block',
+          payload: strayBytes,
+          lane: 'B4',
+          priority: 4,
+          flags: { private_metadata: true }, // NOT `encrypted` → not a ciphertext role
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'contains_private_encrypted',
+      maxUncompressedBytes: 1 << 20,
+    });
+
+    const result = await importBundleToPrivateEnvelopes(repacked);
+    // Exactly the one real envelope is recovered; the stray block is neither recovered
+    // nor rejected (it is simply not an encrypted_payload role to consider).
+    expect(result.envelopes).toHaveLength(1);
+    const recovered = result.envelopes[0]?.envelope;
+    const back = p2p.canonical(recovered as Parameters<typeof p2p.canonical>[0]);
+    const original = p2p.canonical(real[0] as Parameters<typeof p2p.canonical>[0]);
     expect(Array.from(back)).toEqual(Array.from(original));
   });
 });
