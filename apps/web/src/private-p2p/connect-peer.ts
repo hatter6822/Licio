@@ -297,7 +297,7 @@ export async function connectPrivatePeer(params: ConnectPrivatePeerParams): Prom
 
     // 4. §15.5 membership-proving handshake over the open data channel.  Any op frames
     //    a faster peer sends before we finish are stashed (returned) for the channel.
-    const opStash = await runHandshake({
+    const { opStash, sessionKey } = await runHandshake({
       p2p,
       dc,
       inbox,
@@ -310,8 +310,9 @@ export async function connectPrivatePeer(params: ConnectPrivatePeerParams): Prom
       sleep,
     });
 
-    // 5. Expose the post-handshake channel (binary frames only; handshake used strings).
-    return wrapDataChannel(dc, inbox, opStash, cleanup);
+    // 5. Expose the post-handshake channel (binary frames only, each AEAD-sealed under the
+    //    §15.5 step-4 session key; the handshake used strings).
+    return wrapDataChannel(dc, inbox, opStash, cleanup, p2p, sessionKey);
   } catch (error) {
     cleanup();
     throw error;
@@ -507,7 +508,9 @@ interface RunHandshakeParams {
 
 /** Runs the §15.5 handshake; resolves to any op frames a faster peer sent during it
  *  (so the caller can hand them to the op-exchange instead of losing them). */
-async function runHandshake(p: RunHandshakeParams): Promise<Uint8Array[]> {
+async function runHandshake(
+  p: RunHandshakeParams,
+): Promise<{ opStash: Uint8Array[]; sessionKey: Uint8Array }> {
   const { p2p, dc } = p;
   const ctx = {
     protocolVersion: HANDSHAKE_VERSION,
@@ -525,6 +528,10 @@ async function runHandshake(p: RunHandshakeParams): Promise<Uint8Array[]> {
 
   let remoteHello: HandshakeHello | undefined;
   let remoteProofSig: Uint8Array | undefined;
+  // §15.5 step 4 — the pairwise data-channel session key, derived from the handshake
+  // ephemeral ECDH + transcript once the remote device is verified (set before
+  // resolveDone, so it is defined whenever `done` resolves).
+  let sessionKey: Uint8Array | undefined;
   let proofSent = false;
   let settled = false;
   let resolveDone!: () => void;
@@ -571,6 +578,18 @@ async function runHandshake(p: RunHandshakeParams): Promise<Uint8Array[]> {
       );
       return;
     }
+    // §15.5 step 4 — derive the epoch-bound pairwise session key from the handshake
+    // ephemeral ECDH + the (canonicalized) transcript; post-handshake op frames are
+    // additionally AEAD-sealed under it (defence in depth over per-op AEAD + DTLS, and
+    // it hides the sync metadata from a DTLS-terminating relay).  Both peers derive the
+    // SAME key (the transcript sorts the ephemeral keys).
+    sessionKey = await p2p.deriveHandshakeSessionKey(
+      ephemeral.privateKey,
+      p2p.fromBase64Url(remoteHello.ephemeral_public_key),
+      selfHello,
+      remoteHello,
+      ctx,
+    );
     resolveDone();
   };
 
@@ -656,7 +675,12 @@ async function runHandshake(p: RunHandshakeParams): Promise<Uint8Array[]> {
   })();
 
   await done;
-  return opStash; // wrapDataChannel re-consumes the inbox for op frames
+  if (!sessionKey)
+    throw new ConnectPrivatePeerError(
+      'handshake_no_session_key',
+      'handshake settled without a session key',
+    );
+  return { opStash, sessionKey }; // wrapDataChannel re-consumes the inbox for op frames
 }
 
 // --- the post-handshake PeerChannel -------------------------------------------------
@@ -666,29 +690,51 @@ function toUint8(data: ArrayBuffer | ArrayBufferView): Uint8Array {
   return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
 }
 
+/** The AEAD AAD binding a post-handshake op frame's purpose under the session key
+ *  (§15.5 step 4); a frame sealed for another purpose/context cannot open here. */
+const OP_FRAME_AAD = new TextEncoder().encode('licio.private.op-frame.v1');
+
 function wrapDataChannel(
   dc: RtcDataChannelLike,
   inbox: MessageInbox,
   opStash: Uint8Array[],
   cleanup: () => void,
+  p2p: ConnectPrivatePeerParams['p2p'],
+  sessionKey: Uint8Array,
 ): PeerChannel {
-  const buffered: Uint8Array[] = [...opStash];
+  const buffered: Uint8Array[] = [];
   let listener: ((frame: Uint8Array) => void) | null = null;
   let closeListener: (() => void) | null = null;
 
+  // Open a sealed frame under the §15.5 step-4 session key, then deliver the plaintext.
+  // A frame that does not open (tampered, or not sealed by the session-key holder) is
+  // DROPPED fail-closed — a DTLS-terminating relay cannot inject or read op frames.
+  const deliver = (sealed: Uint8Array): void => {
+    void p2p
+      .aeadOpen(sessionKey, sealed, OP_FRAME_AAD)
+      .then((frame) => {
+        if (listener) listener(frame);
+        else buffered.push(frame);
+      })
+      .catch(() => {
+        /* not openable under the session key → drop (fail-closed) */
+      });
+  };
+
+  // The op frames a faster peer sent during our handshake are ALSO sealed (it sealed them
+  // after ITS handshake) — open them under the same session key.
+  for (const sealed of opStash) deliver(sealed);
   inbox.consume((data): void => {
     if (typeof data === 'string') return; // no string frames post-handshake
-    const frame = toUint8(data as ArrayBuffer | ArrayBufferView);
-    if (listener) listener(frame);
-    else buffered.push(frame); // buffer until the op-exchange attaches its listener
+    deliver(toUint8(data as ArrayBuffer | ArrayBufferView));
   });
   dc.onclose = (): void => closeListener?.();
 
   return {
-    send(frame: Uint8Array): void {
+    async send(frame: Uint8Array): Promise<void> {
+      const sealed = await p2p.aeadSeal(sessionKey, frame, OP_FRAME_AAD);
       // Copy into a standalone ArrayBuffer (the channel must own the bytes).
-      const copy = frame.slice();
-      dc.send(copy.buffer);
+      dc.send(sealed.slice().buffer);
     },
     onMessage(fn: (frame: Uint8Array) => void): void {
       listener = fn;
