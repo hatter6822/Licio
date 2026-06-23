@@ -30,6 +30,10 @@ const snapshotStateSchema = z
           role: privateRoleSchema,
           capabilities: z.array(privateCapabilitySchema),
           removed: z.boolean(),
+          // The §12.3/§14.3.3 display name participates in `roomStateCommitment`, so it
+          // MUST round-trip through the snapshot body or a compacted/bootstrapped device's
+          // state root diverges (the §14.5 verify-before-use check then rejects the body).
+          displayName: z.string().optional(),
         })
         .strict(),
     ),
@@ -128,6 +132,7 @@ export function serializeReducerState(state: RoomReducerState): Uint8Array {
       // diverge from the role); sorted for a stable body encoding.
       capabilities: [...m.capabilities].sort(),
       removed: m.removed,
+      ...(m.displayName === undefined ? {} : { displayName: m.displayName }),
     })),
     devices: [...state.devices.values()].map((d) => ({
       deviceId: d.deviceId,
@@ -202,6 +207,7 @@ export function deserializeReducerState(bytes: Uint8Array): RoomReducerState {
       // individually granted/revoked capability survives a snapshot round-trip.
       capabilities: new Set(m.capabilities),
       removed: m.removed,
+      ...(m.displayName === undefined ? {} : { displayName: m.displayName }),
     });
   }
   for (const d of body.devices) {
