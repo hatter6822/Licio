@@ -506,3 +506,92 @@ export function maintainConnection(
     status: () => status,
   };
 }
+
+/** A handle to a maintained mesh (multiple concurrent peer sessions). */
+export interface MeshController {
+  /** Stop the mesh + gracefully close every peer session. */
+  close(): void;
+  /** The currently-connected peer device ids. */
+  peers(): string[];
+}
+
+export interface MeshOptions {
+  /** Max concurrent peer sessions (bounded fan-out; default 4). */
+  readonly maxPeers?: number;
+  /** How often to re-poll for newly-online members to fill empty slots (default 15s). */
+  readonly rePollIntervalMs?: number;
+  readonly sleep?: (ms: number) => Promise<void>;
+  /** Observe the connected-peer set as it changes. */
+  readonly onMeshChange?: (peers: readonly string[]) => void;
+}
+
+/**
+ * Dial ONE new peer not already in `connected`, wiring `onDrop(peerId)` into the session
+ * it creates (so the mesh removes it on a drop).  Returns the connected peer + its session,
+ * or `null` when no new peer is currently available.  Injected so the mesh is testable
+ * without WebRTC.
+ */
+export type MeshDial = (
+  connected: ReadonlySet<string>,
+  onDrop: (peerId: string, graceful: boolean) => void,
+) => Promise<{ peerId: string; session: DialedSession } | null>;
+
+/**
+ * §15.6-15.8 — maintain a bounded mesh of peer sessions so the local engine converges with
+ * MULTIPLE online members, not just the first one dialed (a single 1:1 link only converges
+ * the union the one partner already holds).  Fills up to `maxPeers` distinct peers, removes
+ * a peer when its session drops, and re-polls on an interval to pick up members who come
+ * online later.  `close()` gracefully leaves every peer.
+ */
+export function maintainMesh(dial: MeshDial, options: MeshOptions = {}): MeshController {
+  const maxPeers = options.maxPeers ?? 4;
+  const rePollMs = options.rePollIntervalMs ?? 15_000;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let stopping = false;
+  const sessions = new Map<string, DialedSession>();
+  const notify = (): void => options.onMeshChange?.([...sessions.keys()]);
+  const onDrop = (peerId: string): void => {
+    if (sessions.delete(peerId)) notify();
+  };
+
+  const fill = async (): Promise<void> => {
+    while (!stopping && sessions.size < maxPeers) {
+      let result: { peerId: string; session: DialedSession } | null;
+      try {
+        result = await dial(new Set(sessions.keys()), onDrop);
+      } catch {
+        return; // a dial error — wait for the next poll cycle
+      }
+      if (!result) return; // no NEW peer available right now
+      if (stopping) {
+        result.session.close(true);
+        return;
+      }
+      // Skip a duplicate (a slow dial that returned an already-connected peer).
+      if (sessions.has(result.peerId)) {
+        result.session.close(true);
+        continue;
+      }
+      sessions.set(result.peerId, result.session);
+      notify();
+    }
+  };
+
+  const loop = async (): Promise<void> => {
+    while (!stopping) {
+      await fill();
+      if (stopping) return;
+      await sleep(rePollMs);
+    }
+  };
+  void loop();
+  return {
+    close(): void {
+      stopping = true;
+      for (const s of sessions.values()) s.close(true);
+      sessions.clear();
+      notify();
+    },
+    peers: () => [...sessions.keys()],
+  };
+}

@@ -289,10 +289,6 @@ slice is closed on the convergence side:
     converge byte-for-byte over `PrivateSyncSession`, and `apps/web/e2e/webrtc-loopback.spec.ts`
     proves a real Chromium datachannel on-host — so this adds hardware confidence over an
     already-proven protocol.  Needs the BFF e2e-server to serve `POST /v1/private-rendezvous/*`.
-  - **Connection resilience** (WP-7 / finding 11): a drop-recovery strategy
-    (`oniceconnectionstatechange` → `restartIce`, a bounded reconnect-on-close loop) + the
-    graceful `bye` teardown signal.  The carrier currently forms one connection per
-    `connect()`; a dropped link surfaces honestly and the user re-presses connect.
   - **Multi-peer mesh** (WP-7 / finding 14): dial multiple discovered members (bounded
     fan-out) + periodic re-poll, rather than the current single-best-peer link.  Single-peer
     convergence is complete when that peer holds the union; the mesh accelerates the
