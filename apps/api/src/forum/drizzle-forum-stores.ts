@@ -529,6 +529,8 @@ export class DrizzleRoomStore implements RoomStore {
       charterSummary: row.charterSummary,
       typeMetadata: row.typeMetadata,
       latestActivityAt: isoOrNull(row.latestActivityAt),
+      frozen: row.frozen,
+      migratedToRoomId: row.migratedToRoomId,
       createdAt: iso(row.createdAt),
       updatedAt: iso(row.updatedAt),
     };
@@ -571,6 +573,9 @@ export class DrizzleRoomStore implements RoomStore {
           typeMetadata: record.typeMetadata,
           latestActivityAt:
             record.latestActivityAt !== null ? new Date(record.latestActivityAt) : null,
+          // WS-S.9 — a new room is never read-only (mirrors the 0047 default).
+          frozen: record.frozen ?? false,
+          migratedToRoomId: record.migratedToRoomId ?? null,
           createdAt: now,
           updatedAt: now,
         })
@@ -661,6 +666,21 @@ export class DrizzleRoomStore implements RoomStore {
                 patch.latestActivityAt !== null ? new Date(patch.latestActivityAt) : null,
             }
           : {}),
+        updatedAt: new Date(),
+      })
+      .where(eq(roomsTable.roomId, roomId))
+      .returning();
+    return rows[0] ? this.#toRoom(rows[0]) : null;
+  }
+
+  async freeze(roomId: string, migratedToRoomId: string | null): Promise<RoomRecord | null> {
+    const rows = await this.#db
+      .update(roomsTable)
+      .set({
+        frozen: true,
+        // Only overwrite the destination when one is supplied (idempotent
+        // re-freeze keeps an already-recorded pointer).
+        ...(migratedToRoomId !== null ? { migratedToRoomId } : {}),
         updatedAt: new Date(),
       })
       .where(eq(roomsTable.roomId, roomId))

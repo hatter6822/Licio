@@ -13,7 +13,13 @@ import {
   DEFAULT_ROOM_NOTIFICATION_PREFERENCES,
   lensCreateRequestSchema,
   lensPublicSchema,
+  migrationExportResponseSchema,
+  migrationFreezeRequestSchema,
+  migrationFreezeResponseSchema,
+  migrationPurgeRequestSchema,
+  migrationPurgeResponseSchema,
   RESERVED_ROOM_SLUGS,
+  ROOM_CLASS_UI_LABELS,
   roomCreateRequestSchema,
   roomDetailSchema,
   roomGovernanceSettingsRequestSchema,
@@ -31,6 +37,11 @@ import {
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getEventPipelineServices } from '../events/services.js';
+import {
+  exportRoomForMigration,
+  freezeRoomForMigration,
+  purgeRoomForMigration,
+} from '../forum/migration-export.js';
 import { changeRoomVisibility, updateRoomGovernanceSettings } from '../forum/room-visibility.js';
 import {
   authorizeRoomCreate,
@@ -653,6 +664,113 @@ export function createRoomsRoutes() {
             visibility: c.req.valid('json').visibility,
             converted: outcome.converted,
           });
+        },
+      )
+
+      // --- WS-S.9 server-room → Private-P2P-room migration (PRIVATE_SPEC §24) ---
+      // The destructive steps (freeze/purge) are server-enforced; the client
+      // creates the P2P room + re-authors locally. Steward-only; outsiders 404.
+      //
+      // Phase 1/3 — export the old room's content for local re-encryption. The
+      // §24.3 blocking warning rides the response so the wizard always shows the
+      // honest "migration cannot make past server access impossible" disclosure.
+      .post(
+        '/rooms/:roomId/migration/export',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        zValidator('param', z.object({ roomId: uuidSchema })),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const { roomId } = c.req.valid('param');
+          const outcome = await exportRoomForMigration(
+            getForumServices(),
+            getIngestionServices(),
+            auth.userId,
+            auth.roles,
+            roomId,
+          );
+          if (!outcome.ok) return c.json(deny(outcome.code, outcome.message), outcome.status);
+          return c.json(
+            migrationExportResponseSchema.parse({
+              room_id: outcome.roomId,
+              room_name: outcome.roomName,
+              room_label: ROOM_CLASS_UI_LABELS.restricted_server,
+              items: outcome.items.map((item) => ({
+                id: item.id,
+                kind: item.kind,
+                ...(item.title !== undefined ? { title: item.title } : {}),
+                ...(item.summary !== undefined ? { summary: item.summary } : {}),
+                ...(item.body !== undefined ? { body: item.body } : {}),
+                ...(item.threadRef !== undefined ? { threadRef: item.threadRef } : {}),
+                ...(item.parentRef !== undefined ? { parentRef: item.parentRef } : {}),
+              })),
+              frozen: outcome.frozen,
+            }),
+          );
+        },
+      )
+
+      // Phase 5 — freeze the old server room READ-ONLY (fail-closed: writes are
+      // rejected) and record the OPAQUE P2P destination id.
+      .post(
+        '/rooms/:roomId/migration/freeze',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        zValidator('param', z.object({ roomId: uuidSchema })),
+        zValidator('json', migrationFreezeRequestSchema),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const { roomId } = c.req.valid('param');
+          const body = c.req.valid('json');
+          const outcome = await freezeRoomForMigration(
+            getForumServices(),
+            auth.userId,
+            auth.roles,
+            roomId,
+            body.migrated_to_room_id ?? null,
+          );
+          if (!outcome.ok) return c.json(deny(outcome.code, outcome.message), outcome.status);
+          return c.json(
+            migrationFreezeResponseSchema.parse({
+              room_id: outcome.roomId,
+              frozen: true,
+              migrated_to_room_id: outcome.migratedToRoomId,
+            }),
+          );
+        },
+      )
+
+      // Phase 6 — purge/minimize the old server content (gated on the room being
+      // frozen first, so the §8 disclosure stays honest).
+      .post(
+        '/rooms/:roomId/migration/purge',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        zValidator('param', z.object({ roomId: uuidSchema })),
+        zValidator('json', migrationPurgeRequestSchema),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const { roomId } = c.req.valid('param');
+          const { mode } = c.req.valid('json');
+          const outcome = await purgeRoomForMigration(
+            getForumServices(),
+            getIngestionServices(),
+            auth.userId,
+            auth.roles,
+            roomId,
+            mode,
+          );
+          if (!outcome.ok) return c.json(deny(outcome.code, outcome.message), outcome.status);
+          return c.json(
+            migrationPurgeResponseSchema.parse({
+              room_id: outcome.roomId,
+              mode: outcome.mode,
+              stories_affected: outcome.storiesAffected,
+            }),
+          );
         },
       )
 

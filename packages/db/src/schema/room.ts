@@ -10,6 +10,7 @@
 // transitions are owned by WS-L/M behind the §16.5 readiness checklist.
 import { sql } from 'drizzle-orm';
 import {
+  boolean,
   check,
   index,
   jsonb,
@@ -122,6 +123,15 @@ export const rooms = pgTable(
     typeMetadata: jsonb('type_metadata').$type<Record<string, unknown>>().notNull().default({}),
     /** Activity recency for listing — a timestamp, never a popularity count. */
     latestActivityAt: timestamp('latest_activity_at', { withTimezone: true }),
+    // WS-S.9 (PRIVATE_SPEC §24, phase 5) — a Members-only server room is FROZEN
+    // read-only during/after migration to a Private P2P replacement: all new
+    // submissions/contributions are rejected (fail-closed at the service layer),
+    // existing content stays readable until phase-6 purge. `frozen` defaults
+    // false (no existing room is read-only); `migratedToRoomId` is the OPAQUE
+    // client-side P2P room id (a UUID, never a server FK — a P2P room has no
+    // server row) the old room points at, surfaced honestly in the §8 disclosure.
+    frozen: boolean('frozen').notNull().default(false),
+    migratedToRoomId: text('migrated_to_room_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

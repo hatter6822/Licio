@@ -34,6 +34,7 @@ import { Route as ProfileOfflineRouteImport } from './routes/profile_.offline'
 import { Route as ProfileNoticesRouteImport } from './routes/profile_.notices'
 import { Route as ProfileModeRouteImport } from './routes/profile_.mode'
 import { Route as PrivateRoomIdRouteImport } from './routes/private_.$roomId'
+import { Route as PrivateMigrateRouteImport } from './routes/private.migrate'
 import { Route as StoriesStoryIdCommentsRouteImport } from './routes/stories.$storyId_.comments'
 import { Route as RoomsRoomIdGovernanceRouteImport } from './routes/rooms_.$roomId_.governance'
 
@@ -152,6 +153,11 @@ const PrivateRoomIdRoute = PrivateRoomIdRouteImport.update({
   path: '/private/$roomId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PrivateMigrateRoute = PrivateMigrateRouteImport.update({
+  id: '/migrate',
+  path: '/migrate',
+  getParentRoute: () => PrivateRoute,
+} as any)
 const StoriesStoryIdCommentsRoute = StoriesStoryIdCommentsRouteImport.update({
   id: '/stories/$storyId_/comments',
   path: '/stories/$storyId/comments',
@@ -167,12 +173,13 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/moderation': typeof ModerationRoute
-  '/private': typeof PrivateRoute
+  '/private': typeof PrivateRouteWithChildren
   '/profile': typeof ProfileRoute
   '/rooms': typeof RoomsRoute
   '/styleguide': typeof StyleguideRoute
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
+  '/private/migrate': typeof PrivateMigrateRoute
   '/private/$roomId': typeof PrivateRoomIdRoute
   '/profile/mode': typeof ProfileModeRoute
   '/profile/notices': typeof ProfileNoticesRoute
@@ -194,12 +201,13 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/moderation': typeof ModerationRoute
-  '/private': typeof PrivateRoute
+  '/private': typeof PrivateRouteWithChildren
   '/profile': typeof ProfileRoute
   '/rooms': typeof RoomsRoute
   '/styleguide': typeof StyleguideRoute
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
+  '/private/migrate': typeof PrivateMigrateRoute
   '/private/$roomId': typeof PrivateRoomIdRoute
   '/profile/mode': typeof ProfileModeRoute
   '/profile/notices': typeof ProfileNoticesRoute
@@ -222,12 +230,13 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/moderation': typeof ModerationRoute
-  '/private': typeof PrivateRoute
+  '/private': typeof PrivateRouteWithChildren
   '/profile': typeof ProfileRoute
   '/rooms': typeof RoomsRoute
   '/styleguide': typeof StyleguideRoute
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
+  '/private/migrate': typeof PrivateMigrateRoute
   '/private_/$roomId': typeof PrivateRoomIdRoute
   '/profile_/mode': typeof ProfileModeRoute
   '/profile_/notices': typeof ProfileNoticesRoute
@@ -257,6 +266,7 @@ export interface FileRouteTypes {
     | '/styleguide'
     | '/submit'
     | '/support'
+    | '/private/migrate'
     | '/private/$roomId'
     | '/profile/mode'
     | '/profile/notices'
@@ -284,6 +294,7 @@ export interface FileRouteTypes {
     | '/styleguide'
     | '/submit'
     | '/support'
+    | '/private/migrate'
     | '/private/$roomId'
     | '/profile/mode'
     | '/profile/notices'
@@ -311,6 +322,7 @@ export interface FileRouteTypes {
     | '/styleguide'
     | '/submit'
     | '/support'
+    | '/private/migrate'
     | '/private_/$roomId'
     | '/profile_/mode'
     | '/profile_/notices'
@@ -333,7 +345,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   LoginRoute: typeof LoginRoute
   ModerationRoute: typeof ModerationRoute
-  PrivateRoute: typeof PrivateRoute
+  PrivateRoute: typeof PrivateRouteWithChildren
   ProfileRoute: typeof ProfileRoute
   RoomsRoute: typeof RoomsRoute
   StyleguideRoute: typeof StyleguideRoute
@@ -520,6 +532,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PrivateRoomIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/private/migrate': {
+      id: '/private/migrate'
+      path: '/migrate'
+      fullPath: '/private/migrate'
+      preLoaderRoute: typeof PrivateMigrateRouteImport
+      parentRoute: typeof PrivateRoute
+    }
     '/stories/$storyId_/comments': {
       id: '/stories/$storyId_/comments'
       path: '/stories/$storyId/comments'
@@ -537,11 +556,22 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface PrivateRouteChildren {
+  PrivateMigrateRoute: typeof PrivateMigrateRoute
+}
+
+const PrivateRouteChildren: PrivateRouteChildren = {
+  PrivateMigrateRoute: PrivateMigrateRoute,
+}
+
+const PrivateRouteWithChildren =
+  PrivateRoute._addFileChildren(PrivateRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   LoginRoute: LoginRoute,
   ModerationRoute: ModerationRoute,
-  PrivateRoute: PrivateRoute,
+  PrivateRoute: PrivateRouteWithChildren,
   ProfileRoute: ProfileRoute,
   RoomsRoute: RoomsRoute,
   StyleguideRoute: StyleguideRoute,

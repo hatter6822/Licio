@@ -84,6 +84,14 @@ export interface RoomRecord {
   charterSummary: string | null;
   typeMetadata: Record<string, unknown>;
   latestActivityAt: string | null;
+  /** WS-S.9 (PRIVATE_SPEC §24, phase 5) — a frozen room is READ-ONLY: the
+   *  submission + contribution paths reject every write (fail-closed). Existing
+   *  content stays readable until the phase-6 purge. */
+  frozen: boolean;
+  /** WS-S.9 — the OPAQUE client-side P2P room id the old room migrated to (a
+   *  UUID; never a server FK, a Private P2P room has no server row). Null until
+   *  the freeze records it. */
+  migratedToRoomId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -303,8 +311,14 @@ export type RoomCreateOutcome =
  * to `'p2p'` explicitly.  `RoomRecord` itself keeps `storageMode` REQUIRED, so
  * every READ carries it (the WS-S.1.3/1.4 guards rely on it).
  */
-export type RoomInsertInput = Omit<RoomRecord, 'createdAt' | 'updatedAt' | 'storageMode'> & {
+export type RoomInsertInput = Omit<
+  RoomRecord,
+  'createdAt' | 'updatedAt' | 'storageMode' | 'frozen' | 'migratedToRoomId'
+> & {
   storageMode?: RoomStorageMode;
+  /** Defaults to `false` (a new room is never read-only). */
+  frozen?: boolean;
+  migratedToRoomId?: string | null;
 };
 
 export interface RoomStore {
@@ -334,6 +348,11 @@ export interface RoomStore {
       >
     >,
   ): Promise<RoomRecord | null>;
+  /** WS-S.9 (phase 5) — set the room READ-ONLY and record the OPAQUE P2P
+   *  destination id it migrated to (a UUID, never an FK). Idempotent: freezing
+   *  an already-frozen room keeps it frozen and updates the destination if
+   *  given. Returns null for an unknown id. */
+  freeze(roomId: string, migratedToRoomId: string | null): Promise<RoomRecord | null>;
   /** Bump latest_activity_at monotonically (never backwards). */
   touchActivity(roomId: string, atIso: string): Promise<void>;
   addSteward(record: RoomStewardRecord): Promise<void>;
@@ -750,6 +769,8 @@ export class InMemoryRoomStore implements RoomStore {
       charterSummary: null,
       typeMetadata: {},
       latestActivityAt: null,
+      frozen: false,
+      migratedToRoomId: null,
       createdAt: at,
       updatedAt: at,
     });
@@ -772,6 +793,9 @@ export class InMemoryRoomStore implements RoomStore {
       ...record,
       // Mirror the DB column default (PRIVATE_SPEC §23.2): omitted ⇒ `server`.
       storageMode: record.storageMode ?? 'server',
+      // WS-S.9 — a new room is never read-only (mirrors the 0047 column default).
+      frozen: record.frozen ?? false,
+      migratedToRoomId: record.migratedToRoomId ?? null,
       typeMetadata: { ...record.typeMetadata },
       createdAt: at,
       updatedAt: at,
@@ -824,6 +848,15 @@ export class InMemoryRoomStore implements RoomStore {
     const room = this.#rooms.get(roomId);
     if (!room) return null;
     Object.assign(room, patch);
+    room.updatedAt = iso(this.#now);
+    return room;
+  }
+
+  async freeze(roomId: string, migratedToRoomId: string | null): Promise<RoomRecord | null> {
+    const room = this.#rooms.get(roomId);
+    if (!room) return null;
+    room.frozen = true;
+    if (migratedToRoomId !== null) room.migratedToRoomId = migratedToRoomId;
     room.updatedAt = iso(this.#now);
     return room;
   }

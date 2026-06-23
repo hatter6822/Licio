@@ -86,6 +86,8 @@ describe.skipIf(!DB_URL)('atomic development seed transaction (live Postgres)', 
       charterSummary: null,
       typeMetadata: {},
       latestActivityAt: null,
+      frozen: false,
+      migratedToRoomId: null,
     };
   }
 

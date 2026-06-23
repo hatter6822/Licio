@@ -48,6 +48,7 @@ export type SubmissionRejection =
   | { status: 403; code: string; message: string }
   | { status: 400; code: string; message: string }
   | { status: 409; code: 'p2p_room_requires_client_sync'; message: string }
+  | { status: 409; code: 'room_frozen'; message: string }
   | { status: 409; code: 'duplicate_story'; message: string; existingStoryId: string };
 
 /** WS-Q.2.1a — an unknown room OR a private-room outsider/pending applicant get
@@ -189,6 +190,22 @@ export async function submitStory(
         status: 409,
         code: 'p2p_room_requires_client_sync',
         message: 'Private P2P rooms are created and synced locally.',
+      },
+    };
+  }
+  // 1b. WS-S.9 (PRIVATE_SPEC §24, phase 5) — a FROZEN (migrated) room is
+  //     READ-ONLY: reject every new submission BEFORE any side effect
+  //     (auto-join, rate-limit decrement, create). Fail-closed: a steward froze
+  //     the room because it migrated to a Private P2P replacement, so new
+  //     content belongs in the P2P room, never the read-only server shell.
+  if (room.frozen) {
+    ingestion.metrics.increment('submission.room_frozen_rejected');
+    return {
+      ok: false,
+      rejection: {
+        status: 409,
+        code: 'room_frozen',
+        message: 'This room is read-only — it has migrated to a Private P2P room.',
       },
     };
   }
