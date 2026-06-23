@@ -56,6 +56,15 @@ export interface CourierRadioControls {
   readonly advertisingEnabled: boolean;
   /** Discover + connect to nearby couriers (off by default). */
   readonly discoveryEnabled: boolean;
+  /**
+   * WS-R.15.4d — which native radio channels (`nearby` / `wifiDirect` / `bluetooth` /
+   * `usb`) the courier may drive.  An empty / absent list ⇒ Nearby only (the conservative
+   * default that has the proven verification).  A channel that is not resolvable in the
+   * current runtime is simply skipped; selecting one never claims it is available.  Stored
+   * as plain channel-name strings so this module declares no cross-import to the channels
+   * bridge (the strings are validated against the channel set at the controller seam).
+   */
+  readonly enabledChannels?: readonly string[];
   /** §22.5 who-can-exchange (default `anyone` for public content). */
   readonly exchangePeers?: CourierExchangePeers;
   /** §22.5 allowlist of opaque endpoint ids when `exchangePeers === 'known_only'`. */
@@ -79,6 +88,7 @@ export interface CourierRadioControls {
 export const DEFAULT_COURIER_CONTROLS: CourierRadioControls = {
   advertisingEnabled: false,
   discoveryEnabled: false,
+  enabledChannels: ['nearby'],
   exchangePeers: 'anyone',
   allowedEndpointIds: [],
   sharing: DEFAULT_SHARING_SELECTION,

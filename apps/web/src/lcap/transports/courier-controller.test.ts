@@ -8,7 +8,7 @@
 // exchanges are driven, and a malformed native event is dropped fail-closed.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CourierController } from './courier-controller.js';
+import { type CourierChannelPlugin, CourierController } from './courier-controller.js';
 import type { CourierRadioControls } from './courier-native.js';
 
 const ON: CourierRadioControls = { advertisingEnabled: true, discoveryEnabled: true };
@@ -96,7 +96,7 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
 
   it('starts the radios and drives ONE §16 exchange over a connected endpoint', async () => {
     const f = fakePlugin();
-    const outcomes: Array<{ endpointId: string; carriedBy: string | null }> = [];
+    const outcomes: Array<{ endpointId: string; channel: string; carriedBy: string | null }> = [];
     const request = new Uint8Array([9, 8, 7]);
     const controller = new CourierController({
       plugin: f.plugin,
@@ -104,12 +104,15 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       mode: 'courier',
       buildRequest: () => request,
       httpsConfig: { fetchFn: REJECTING_FETCH },
-      onOutcome: (o) => outcomes.push({ endpointId: o.endpointId, carriedBy: o.carriedBy }),
+      onOutcome: (o) =>
+        outcomes.push({ endpointId: o.endpointId, channel: o.channel, carriedBy: o.carriedBy }),
     });
 
     await controller.start();
     expect(f.calls).toContain('advertise');
     expect(f.calls).toContain('discover');
+    // A bare `plugin` drives the `nearby` channel only (back-compat).
+    expect(controller.activeChannels()).toEqual(['nearby']);
 
     // A peer connects; the controller drives the exchange. The loopback echoes the request
     // bytes back as the response, so the courier leg resolves.
@@ -118,7 +121,48 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
 
     expect(f.sent).toHaveLength(1);
     expect(f.sent[0]?.endpointId).toBe('ep-1');
-    expect(outcomes[0]).toEqual({ endpointId: 'ep-1', carriedBy: 'courier' });
+    expect(outcomes[0]).toEqual({ endpointId: 'ep-1', channel: 'nearby', carriedBy: 'courier' });
+  });
+
+  it('drives EACH selected native channel identically (WS-R.15.4d Wi-Fi Direct / Bluetooth)', async () => {
+    // Two distinct channels, each its own plugin; both advertise+discover and each drives
+    // ONE exchange over its own endpoint, tagged with the right channel.
+    const wifi = fakePlugin();
+    const bt = fakePlugin();
+    const channels: CourierChannelPlugin[] = [
+      { channel: 'wifiDirect', plugin: wifi.plugin },
+      { channel: 'bluetooth', plugin: bt.plugin },
+    ];
+    const outcomes: Array<{ channel: string; carriedBy: string | null }> = [];
+    const controller = new CourierController({
+      channels,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => new Uint8Array([5, 6]),
+      httpsConfig: { fetchFn: REJECTING_FETCH },
+      onOutcome: (o) => outcomes.push({ channel: o.channel, carriedBy: o.carriedBy }),
+    });
+
+    await controller.start();
+    expect(controller.activeChannels()).toEqual(['wifiDirect', 'bluetooth']);
+    // Every selected radio is started.
+    expect(wifi.calls).toEqual(expect.arrayContaining(['advertise', 'discover']));
+    expect(bt.calls).toEqual(expect.arrayContaining(['advertise', 'discover']));
+
+    // A peer connects on EACH channel (the same endpoint id namespace per channel is fine —
+    // the controller keys mediums by (channel, endpoint)).
+    wifi.emit('connectionResult', { endpointId: 'ep', connected: true });
+    bt.emit('connectionResult', { endpointId: 'ep', connected: true });
+    await vi.waitFor(() => expect(outcomes).toHaveLength(2));
+
+    expect(wifi.sent).toHaveLength(1);
+    expect(bt.sent).toHaveLength(1);
+    expect(outcomes.map((o) => o.channel).sort()).toEqual(['bluetooth', 'wifiDirect']);
+    for (const o of outcomes) expect(o.carriedBy).toBe('courier');
+
+    await controller.stop();
+    expect(wifi.plugin.stop).toHaveBeenCalled();
+    expect(bt.plugin.stop).toHaveBeenCalled();
   });
 
   it('drives at most ONE exchange per connection', async () => {

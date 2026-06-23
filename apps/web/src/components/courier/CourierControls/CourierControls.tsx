@@ -59,6 +59,12 @@ const PRIORITY_OPTIONS: ReadonlyArray<{ value: '0' | '1' | '2' | '3' | '4'; labe
 export interface CourierControlsProps {
   /** Notify a parent when the controls change (e.g. to re-evaluate the controller). */
   readonly onControlsChange?: (controls: CourierRadioControls) => void;
+  /**
+   * Notify a parent when the radio-metadata disclosure acknowledgment changes — so a
+   * runtime driver (e.g. `CourierRunner`) can enable/disable Start and stop a running
+   * courier fail-closed the moment the user revokes acknowledgment.
+   */
+  readonly onAcknowledgeChange?: (acknowledged: boolean) => void;
   readonly className?: string;
 }
 
@@ -69,6 +75,7 @@ export interface CourierControlsProps {
  */
 export function CourierControls({
   onControlsChange,
+  onAcknowledgeChange,
   className,
 }: CourierControlsProps): React.ReactElement {
   const t = useT();
@@ -88,12 +95,13 @@ export function CourierControls({
     (value: boolean) => {
       setRadioDisclosureAcknowledged(value);
       setAcknowledged(value);
+      onAcknowledgeChange?.(value);
       // Revoking the acknowledgment also turns the radios off (fail-closed).
       if (!value) {
         update({ ...controls, advertisingEnabled: false, discoveryEnabled: false });
       }
     },
-    [controls, update],
+    [controls, update, onAcknowledgeChange],
   );
 
   const storageBudgetMib = useMemo(

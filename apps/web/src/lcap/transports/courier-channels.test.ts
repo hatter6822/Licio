@@ -9,9 +9,12 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   COURIER_CHANNEL_INFO,
   COURIER_CHANNEL_PLUGINS,
+  COURIER_CHANNELS,
   type CourierChannel,
+  isCourierChannel,
   NativeChannelMedium,
   resolveCourierChannel,
+  resolveCourierChannels,
 } from './courier-channels.js';
 import type { NearbyCourierPlugin } from './courier-native.js';
 
@@ -90,5 +93,19 @@ describe('courier channel registry (WS-R.15.4d)', () => {
     for (const info of Object.values(COURIER_CHANNEL_INFO)) {
       expect(info.revealsSummary.length).toBeGreaterThan(10);
     }
+  });
+
+  it('lists every channel and validates a channel name', () => {
+    expect([...COURIER_CHANNELS].sort()).toEqual(['bluetooth', 'nearby', 'usb', 'wifiDirect']);
+    expect(isCourierChannel('wifiDirect')).toBe(true);
+    expect(isCourierChannel('not-a-channel')).toBe(false);
+  });
+
+  it('resolveCourierChannels yields the available plugins, fabricating none', () => {
+    // jsdom has no injected Capacitor, so NO native channel resolves — selecting a channel
+    // never fabricates availability.
+    expect(resolveCourierChannels(['nearby', 'wifiDirect'])).toEqual([]);
+    expect(resolveCourierChannels([])).toEqual([]); // empty ⇒ Nearby, still unresolvable here
+    expect(resolveCourierChannels(['not-a-channel', 'usb'])).toEqual([]);
   });
 });

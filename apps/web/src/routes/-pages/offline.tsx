@@ -12,6 +12,7 @@
 import { useEffect, useState } from 'react';
 import { OfflineBundlePanel } from '../../components/lcap/OfflineBundlePanel/index.js';
 import { ConflictWarning, OutboxStatus } from '../../components/lcap/OfflineStates/index.js';
+import { P2pSyncPanel } from '../../components/lcap/P2pSyncPanel/index.js';
 import { QrMicroBundle } from '../../components/lcap/QrMicroBundle/index.js';
 import { TransportStatus } from '../../components/lcap/TransportStatus/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
@@ -69,6 +70,19 @@ export function OfflineBundlePage(): React.ReactElement {
         ) : null}
 
         <OfflineBundlePanel />
+
+        <section className="flex flex-col gap-3" aria-labelledby="lcap-p2p-sync-section-heading">
+          <h2 id="lcap-p2p-sync-section-heading" className="text-base font-semibold text-ink">
+            {t('lcap.p2pSync.sectionHeading', 'Sync over a direct connection')}
+          </h2>
+          <p className="text-sm text-ink-muted">
+            {t(
+              'lcap.p2pSync.sectionIntro',
+              'Exchange a public room directly with another device, peer to peer, when the server is slow or unreachable — with the Licio server as the fallback.',
+            )}
+          </p>
+          <P2pSyncPanel />
+        </section>
 
         <section className="flex flex-col gap-3" aria-labelledby="lcap-qr-heading">
           <h2 id="lcap-qr-heading" className="text-base font-semibold text-ink">

@@ -10,6 +10,7 @@
 // (no `@licio/lcap` codec import), so this route is not on the lazy bundle-codec chunk.
 
 import { useState } from 'react';
+import { CourierRunner } from '../../components/courier/CourierRunner/index.js';
 import { OperationalModeSelector } from '../../components/lcap/OperationalModeSelector/index.js';
 import { TransportStatus } from '../../components/lcap/TransportStatus/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
@@ -43,6 +44,18 @@ export function OperationalModePage(): React.ReactElement {
             {t('lcap.transport.heading', 'How content moves')}
           </h2>
           <TransportStatus mode={mode} />
+        </section>
+        <section className="flex flex-col gap-3" aria-labelledby="lcap-courier-heading">
+          <h2 id="lcap-courier-heading" className="text-base font-semibold text-ink">
+            {t('courier.section.heading', 'Nearby courier')}
+          </h2>
+          <p className="text-sm text-ink-muted">
+            {t(
+              'courier.section.intro',
+              'Carry and re-share public content with devices around you when there is no connection. Off by default; you choose which radios to use and who to exchange with.',
+            )}
+          </p>
+          <CourierRunner />
         </section>
       </div>
     </>

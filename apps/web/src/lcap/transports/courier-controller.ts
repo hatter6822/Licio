@@ -1,25 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-R.15.4c/e — the courier ORCHESTRATION controller (OFFLINE_SPEC §22.5, §16, §22.6).
+// WS-R.15.4c/d/e — the courier ORCHESTRATION controller (OFFLINE_SPEC §22.5, §16, §22.6).
 //
-// Until now the native Nearby Connections plugin (`NearbyCourierPlugin.java`) and its TS
-// bridge (`NearbyEndpointMedium`, `decideCourierStart`) existed but had NO runtime caller
-// — the plugin was never DRIVEN through the app.  This controller closes that gap: it
+// Until now the native courier plugins (`NearbyCourierPlugin.java` + the WS-R.15.4d
+// `WifiDirectCourierPlugin`/`BluetoothCourierPlugin`/`UsbCourierPlugin`) and their TS
+// bridges (`NearbyEndpointMedium`/`NativeChannelMedium`, `decideCourierStart`) existed but
+// had NO runtime caller — the plugins were never DRIVEN through the app.  This controller
+// closes that gap: it
 //
-//   1. resolves the injected native plugin (or no-ops outside the courier shell);
+//   1. resolves one or more injected native channel plugins (or no-ops outside the courier
+//      shell) — EVERY §22.5 radio (Nearby + Wi-Fi Direct + Bluetooth + USB) rides the SAME
+//      orchestration, selected by `channels`; back-compat: a bare `plugin` ⇒ Nearby only;
 //   2. applies `decideCourierStart` (off by default; Stealth/Emergency force-off; the
-//      §22.5 battery floor + who-can-exchange gates) and starts advertising/discovery
-//      ONLY where allowed;
-//   3. listens to the plugin's connection-lifecycle + payload events; on each connected
-//      endpoint it constructs a `NearbyEndpointMedium`, wraps it in the seam's
+//      §22.5 battery floor + who-can-exchange gates) and starts advertising/discovery on
+//      EACH selected channel ONLY where allowed;
+//   3. listens to each channel plugin's connection-lifecycle + payload events; on each
+//      connected endpoint it constructs that channel's `CourierMedium` (a
+//      `NativeChannelMedium` tagged with the channel), wraps it in the seam's
 //      `CourierTransport`, and runs ONE §16 LCAP exchange through the registry's
 //      `offlineExchange` — PUBLIC-ONLY carriage (the courier seam refuses non-public
 //      packs structurally), the always-correct HTTPS anchor appended LAST so correctness
 //      never depends on the courier;
-//   4. routes each `payloadReceived` event to the right per-endpoint medium
+//   4. routes each `payloadReceived` event to the right per-(channel,endpoint) medium
 //      (`acceptNativeEvent`, fail-closed on a malformed native event);
 //   5. enforces the §22.5 who-can-exchange + storage-budget controls per connection;
-//   6. stops cleanly (removes every listener, stops the radios, drops the mediums).
+//   6. stops cleanly (removes every listener, stops every radio, drops the mediums).
 //
 // The bytes never gain trust from the radio: every frame the exchange receives is
 // re-validated downstream against its CIDs/COSE signatures (§18.4, no transport trust).
@@ -29,7 +34,9 @@
 // code-split P2P chunk (`check:lcap-p2p-split`).
 
 import type { LcapTransport } from '@licio/lcap';
+import type { CourierMedium } from './courier.js';
 import { CourierTransport } from './courier.js';
+import { type CourierChannel, NativeChannelMedium } from './courier-channels.js';
 import {
   type CourierMode,
   type CourierPowerState,
@@ -41,7 +48,6 @@ import {
   type NativeDisconnectEvent,
   type NativePayloadEvent,
   type NearbyCourierPlugin,
-  NearbyEndpointMedium,
   nativeConnectionEventSchema,
   nativeDisconnectEventSchema,
   nativePayloadEventSchema,
@@ -66,6 +72,8 @@ export type CourierRequestBuilder = (endpointId: string) => Uint8Array | null;
 /** Notified when a courier exchange over an endpoint completes (or fails / is skipped). */
 export interface CourierExchangeOutcome {
   readonly endpointId: string;
+  /** Which native radio channel the endpoint connected on (`nearby` by default). */
+  readonly channel: CourierChannel;
   /** The seam transport that carried it (`'courier'` when the peer answered; `'https'`
    *  when the courier peer produced nothing and the anchor answered), or `null`. */
   readonly carriedBy: 'courier' | 'https' | 'webtransport' | 'webrtc' | 'ipfs_bridge' | 'qr' | null;
@@ -80,9 +88,30 @@ export interface CourierExchangeOutcome {
     | 'exchange_failed';
 }
 
-export interface CourierControllerConfig {
-  /** The resolved native plugin (caller passes `resolveNearbyCourierPlugin()`). */
+/**
+ * One selected native courier RADIO CHANNEL: its `CourierChannel` tag (for observability +
+ * the per-channel medium) and its resolved native plugin.  WS-R.15.4d makes every radio
+ * (Nearby / Wi-Fi Direct / Bluetooth / USB) drive identically — the controller starts each
+ * one's radios and routes each one's events through the SAME orchestration.
+ */
+export interface CourierChannelPlugin {
+  readonly channel: CourierChannel;
   readonly plugin: NearbyCourierPlugin;
+}
+
+export interface CourierControllerConfig {
+  /**
+   * The resolved native plugin for the Nearby channel (back-compat: a bare `plugin` ⇒ the
+   * controller drives the `nearby` channel only).  Prefer {@link channels} to drive the
+   * WS-R.15.4d Wi-Fi Direct / Bluetooth / USB radios as well.  Exactly one of `plugin` /
+   * `channels` must be supplied.
+   */
+  readonly plugin?: NearbyCourierPlugin;
+  /**
+   * The selected native channels to drive (each its own resolved plugin).  The controller
+   * starts every channel's radios and routes every channel's events identically.
+   */
+  readonly channels?: readonly CourierChannelPlugin[];
   /** The §22.5 radio controls (off by default). */
   readonly controls: CourierRadioControls;
   /** The current §33 operational mode (Stealth/Emergency force the radios off). */
@@ -107,8 +136,11 @@ export interface CourierControllerConfig {
  * medium per live endpoint and a running ferried-byte total against the storage budget.
  */
 export class CourierController {
-  private readonly mediums = new Map<string, NearbyEndpointMedium>();
-  /** Endpoints we have already driven an exchange for (one per connection). */
+  /** The selected channels, each with its resolved plugin (Nearby-only by default). */
+  private readonly channels: readonly CourierChannelPlugin[];
+  /** A per-endpoint medium keyed by `channel\0endpointId` (channels share no namespace). */
+  private readonly mediums = new Map<string, NativeChannelMedium>();
+  /** `(channel,endpoint)` keys we have already driven an exchange for (one per connection). */
   private readonly exchanged = new Set<string>();
   private readonly handles: ListenerHandle[] = [];
   private sharedBytes = 0;
@@ -119,7 +151,15 @@ export class CourierController {
     blockedReason: 'disabled',
   };
 
-  constructor(private readonly config: CourierControllerConfig) {}
+  constructor(private readonly config: CourierControllerConfig) {
+    if (config.channels && config.channels.length > 0) {
+      this.channels = config.channels;
+    } else if (config.plugin) {
+      this.channels = [{ channel: 'nearby', plugin: config.plugin }];
+    } else {
+      this.channels = [];
+    }
+  }
 
   /** The decision computed at the most recent {@link start} (for the UI to surface). */
   startDecision(): CourierStartDecision {
@@ -131,11 +171,16 @@ export class CourierController {
     return this.running;
   }
 
+  /** The channels this controller drives (each its own native radio). */
+  activeChannels(): readonly CourierChannel[] {
+    return this.channels.map((c) => c.channel);
+  }
+
   /**
    * Start the courier: compute the §22.5/§33.5 decision, and — only if it permits —
-   * register the event listeners and start advertising/discovery.  A blocked decision is
-   * a clean no-op (no listeners, no radios).  Idempotent: a second call while running
-   * does nothing.
+   * register the event listeners and start advertising/discovery on EVERY selected
+   * channel.  A blocked decision (or no resolved channels) is a clean no-op (no listeners,
+   * no radios).  Idempotent: a second call while running does nothing.
    */
   async start(): Promise<CourierStartDecision> {
     if (this.running) return this.decision;
@@ -145,11 +190,19 @@ export class CourierController {
       this.config.power ?? {},
     );
     if (!this.decision.advertise && !this.decision.discover) return this.decision;
+    if (this.channels.length === 0) return this.decision; // nothing to drive
 
-    // Register listeners BEFORE starting the radios so no early event is missed.
-    await this.addListener('connectionResult', (raw) => this.onConnectionResult(raw));
-    await this.addListener('payloadReceived', (raw) => this.onPayloadReceived(raw));
-    await this.addListener('disconnected', (raw) => this.onDisconnected(raw));
+    // Register listeners on EVERY channel BEFORE starting any radio so no early event is
+    // missed.  Each listener carries its channel so an event routes to the right medium.
+    for (const { channel, plugin } of this.channels) {
+      await this.addListener(plugin, 'connectionResult', (raw) =>
+        this.onConnectionResult(channel, raw),
+      );
+      await this.addListener(plugin, 'payloadReceived', (raw) =>
+        this.onPayloadReceived(channel, raw),
+      );
+      await this.addListener(plugin, 'disconnected', (raw) => this.onDisconnected(channel, raw));
+    }
 
     const radioOptions = {
       ...(this.config.serviceId !== undefined ? { serviceId: this.config.serviceId } : {}),
@@ -157,8 +210,10 @@ export class CourierController {
     };
     this.running = true;
     try {
-      if (this.decision.advertise) await this.config.plugin.startAdvertising(radioOptions);
-      if (this.decision.discover) await this.config.plugin.startDiscovery(radioOptions);
+      for (const { plugin } of this.channels) {
+        if (this.decision.advertise) await plugin.startAdvertising(radioOptions);
+        if (this.decision.discover) await plugin.startDiscovery(radioOptions);
+      }
     } catch {
       // A radio that refuses to start is non-fatal — the seam still has the HTTPS anchor.
       await this.stop();
@@ -166,7 +221,7 @@ export class CourierController {
     return this.decision;
   }
 
-  /** Stop the radios, remove every listener, and drop the per-endpoint mediums. */
+  /** Stop every radio, remove every listener, and drop the per-endpoint mediums. */
   async stop(): Promise<void> {
     this.running = false;
     for (const handle of this.handles.splice(0)) {
@@ -176,87 +231,115 @@ export class CourierController {
         /* removing a listener must never throw out of teardown */
       }
     }
-    try {
-      await this.config.plugin.stop();
-    } catch {
-      /* stopping a radio that never started is fine */
+    for (const { plugin } of this.channels) {
+      try {
+        await plugin.stop();
+      } catch {
+        /* stopping a radio that never started is fine */
+      }
     }
     this.mediums.clear();
     this.exchanged.clear();
   }
 
-  private async addListener(event: string, listener: (raw: unknown) => void): Promise<void> {
-    const handle = await this.config.plugin.addListener(event, listener);
+  private async addListener(
+    plugin: NearbyCourierPlugin,
+    event: string,
+    listener: (raw: unknown) => void,
+  ): Promise<void> {
+    const handle = await plugin.addListener(event, listener);
     this.handles.push(handle);
   }
 
   /** A `connectionResult`: when an endpoint first connects, drive ONE exchange over it. */
-  private onConnectionResult(raw: unknown): void {
+  private onConnectionResult(channel: CourierChannel, raw: unknown): void {
     const parsed = nativeConnectionEventSchema.safeParse(raw);
     if (!parsed.success) return; // fail-closed on a malformed native event
     const event: NativeConnectionEvent = parsed.data;
     if (!event.connected) return;
-    if (this.exchanged.has(event.endpointId)) return; // one exchange per connection
-    void this.driveExchange(event.endpointId);
+    if (this.exchanged.has(this.key(channel, event.endpointId))) return; // one per connection
+    void this.driveExchange(channel, event.endpointId);
   }
 
-  /** A `payloadReceived`: route it to the right per-endpoint medium (fail-closed). */
-  private onPayloadReceived(raw: unknown): void {
+  /** A `payloadReceived`: route it to the right per-(channel,endpoint) medium (fail-closed). */
+  private onPayloadReceived(channel: CourierChannel, raw: unknown): void {
     const parsed = nativePayloadEventSchema.safeParse(raw);
     if (!parsed.success) return; // malformed — drop, never decode
     const event: NativePayloadEvent = parsed.data;
     // Lazily create the medium if a payload arrives before we observed the connection
-    // (Nearby may deliver a payload very promptly); the exchange driver reuses it.
-    const medium = this.mediumFor(event.endpointId);
+    // (a radio may deliver a payload very promptly); the exchange driver reuses it.
+    const plugin = this.pluginFor(channel);
+    if (!plugin) return;
+    const medium = this.mediumFor(channel, plugin, event.endpointId);
     medium.acceptNativeEvent(event);
   }
 
   /** A `disconnected`: drop the endpoint's medium so a later reconnect starts fresh. */
-  private onDisconnected(raw: unknown): void {
+  private onDisconnected(channel: CourierChannel, raw: unknown): void {
     const parsed = nativeDisconnectEventSchema.safeParse(raw);
     if (!parsed.success) return;
     const event: NativeDisconnectEvent = parsed.data;
-    this.mediums.delete(event.endpointId);
-    this.exchanged.delete(event.endpointId);
+    const key = this.key(channel, event.endpointId);
+    this.mediums.delete(key);
+    this.exchanged.delete(key);
   }
 
-  private mediumFor(endpointId: string): NearbyEndpointMedium {
-    let medium = this.mediums.get(endpointId);
+  private key(channel: CourierChannel, endpointId: string): string {
+    return `${channel} ${endpointId}`;
+  }
+
+  private pluginFor(channel: CourierChannel): NearbyCourierPlugin | undefined {
+    return this.channels.find((c) => c.channel === channel)?.plugin;
+  }
+
+  private mediumFor(
+    channel: CourierChannel,
+    plugin: NearbyCourierPlugin,
+    endpointId: string,
+  ): NativeChannelMedium {
+    const key = this.key(channel, endpointId);
+    let medium = this.mediums.get(key);
     if (!medium) {
-      medium = new NearbyEndpointMedium(this.config.plugin, endpointId);
-      this.mediums.set(endpointId, medium);
+      medium = new NativeChannelMedium(plugin, endpointId, channel);
+      this.mediums.set(key, medium);
     }
     return medium;
   }
 
   /**
-   * Construct a per-endpoint `CourierTransport` over the `NearbyEndpointMedium`, append
-   * the always-correct HTTPS anchor LAST, and run ONE §16 PUBLIC exchange through
+   * Construct a per-endpoint `CourierTransport` over the channel's `NativeChannelMedium`,
+   * append the always-correct HTTPS anchor LAST, and run ONE §16 PUBLIC exchange through
    * `offlineExchange`.  Applies the §22.5 who-can-exchange + storage-budget gates first.
    */
-  private async driveExchange(endpointId: string): Promise<void> {
-    if (this.exchanged.has(endpointId)) return;
-    this.exchanged.add(endpointId);
+  private async driveExchange(channel: CourierChannel, endpointId: string): Promise<void> {
+    const key = this.key(channel, endpointId);
+    if (this.exchanged.has(key)) return;
+    this.exchanged.add(key);
 
     if (!mayExchangeWithEndpoint(this.config.controls, endpointId)) {
-      this.emit(endpointId, null, null, 'not_allowed_peer');
+      this.emit(channel, endpointId, null, null, 'not_allowed_peer');
       return;
     }
 
     const request = this.config.buildRequest(endpointId);
     if (!request) {
-      this.emit(endpointId, null, null, 'nothing_to_request');
+      this.emit(channel, endpointId, null, null, 'nothing_to_request');
       return;
     }
 
     if (!withinStorageBudget(this.config.controls, this.sharedBytes, request.byteLength)) {
-      this.emit(endpointId, null, null, 'over_storage_budget');
+      this.emit(channel, endpointId, null, null, 'over_storage_budget');
       return;
     }
 
-    const medium = this.mediumFor(endpointId);
+    const plugin = this.pluginFor(channel);
+    if (!plugin) {
+      this.emit(channel, endpointId, null, null, 'exchange_failed');
+      return;
+    }
+    const medium = this.mediumFor(channel, plugin, endpointId);
     // The courier transport over THIS endpoint, then the always-correct HTTPS anchor.
-    const transports: LcapTransport[] = [new CourierTransport(medium)];
+    const transports: LcapTransport[] = [new CourierTransport(medium as CourierMedium)];
     for (const t of buildServerTransports(this.config.httpsConfig ?? {})) transports.push(t);
 
     let result: { transport: CourierExchangeOutcome['carriedBy']; response: Uint8Array } | null;
@@ -265,7 +348,7 @@ export class CourierController {
       // non-public pack, so the public label here is the only one a courier ever carries.
       result = await offlineExchange(transports, request, undefined, 'public');
     } catch {
-      this.emit(endpointId, null, null, 'exchange_failed');
+      this.emit(channel, endpointId, null, null, 'exchange_failed');
       return;
     }
 
@@ -273,19 +356,20 @@ export class CourierController {
     this.sharedBytes += medium.bytesSent();
 
     if (!result) {
-      this.emit(endpointId, null, null, 'exchange_failed');
+      this.emit(channel, endpointId, null, null, 'exchange_failed');
       return;
     }
-    this.emit(endpointId, result.transport, result.response, '');
+    this.emit(channel, endpointId, result.transport, result.response, '');
   }
 
   private emit(
+    channel: CourierChannel,
     endpointId: string,
     carriedBy: CourierExchangeOutcome['carriedBy'],
     response: Uint8Array | null,
     skippedReason: CourierExchangeOutcome['skippedReason'],
   ): void {
-    this.config.onOutcome?.({ endpointId, carriedBy, response, skippedReason });
+    this.config.onOutcome?.({ endpointId, channel, carriedBy, response, skippedReason });
   }
 }
 

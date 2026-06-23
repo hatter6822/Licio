@@ -20,11 +20,13 @@ import {
 } from './courier-native.js';
 
 const exchangePeersSchema = z.enum(['anyone', 'known_only', 'none']);
+const channelSchema = z.enum(['nearby', 'wifiDirect', 'bluetooth', 'usb']);
 
 const courierControlsSchema = z
   .object({
     advertisingEnabled: z.boolean(),
     discoveryEnabled: z.boolean(),
+    enabledChannels: z.array(channelSchema).max(8),
     exchangePeers: exchangePeersSchema,
     allowedEndpointIds: z.array(z.string().min(1).max(256)).max(256),
     sharing: z.object({
@@ -51,13 +53,17 @@ type PersistedCourierControls = z.infer<typeof courierControlsSchema>;
 const PERSIST: PersistConfig<PersistedCourierControls> = {
   key: 'lcap-courier-controls',
   schema: courierControlsSchema,
-  version: 1,
+  // v2 adds `enabledChannels` (WS-R.15.4d); a v1 slice is discarded → conservative default.
+  version: 2,
 };
 
-/** The canonical default (everything off) as the persisted shape. */
+const DEFAULT_CHANNELS = ['nearby'] as const;
+
+/** The canonical default (everything off, Nearby-only) as the persisted shape. */
 const DEFAULT_PERSISTED: PersistedCourierControls = {
   advertisingEnabled: DEFAULT_COURIER_CONTROLS.advertisingEnabled,
   discoveryEnabled: DEFAULT_COURIER_CONTROLS.discoveryEnabled,
+  enabledChannels: [...DEFAULT_CHANNELS],
   exchangePeers: DEFAULT_COURIER_CONTROLS.exchangePeers ?? 'anyone',
   allowedEndpointIds: [...(DEFAULT_COURIER_CONTROLS.allowedEndpointIds ?? [])],
   sharing: {
@@ -68,12 +74,24 @@ const DEFAULT_PERSISTED: PersistedCourierControls = {
   batteryFloor: DEFAULT_COURIER_CONTROLS.batteryFloor ?? 0,
 };
 
+function normalizeChannels(
+  channels: readonly string[] | undefined,
+): PersistedCourierControls['enabledChannels'] {
+  const parsed = z
+    .array(channelSchema)
+    .max(8)
+    .safeParse(channels ?? []);
+  const list = parsed.success && parsed.data.length > 0 ? parsed.data : [...DEFAULT_CHANNELS];
+  return list;
+}
+
 /** The current persisted §22.5 controls (the conservative default on any invalid slice). */
 export function getCourierControls(): CourierRadioControls {
   const loaded = loadPersisted(PERSIST) ?? DEFAULT_PERSISTED;
   return {
     advertisingEnabled: loaded.advertisingEnabled,
     discoveryEnabled: loaded.discoveryEnabled,
+    enabledChannels: loaded.enabledChannels,
     exchangePeers: loaded.exchangePeers as CourierExchangePeers,
     allowedEndpointIds: loaded.allowedEndpointIds,
     sharing: loaded.sharing,
@@ -87,6 +105,7 @@ export function setCourierControls(controls: CourierRadioControls): void {
   savePersisted(PERSIST, {
     advertisingEnabled: controls.advertisingEnabled,
     discoveryEnabled: controls.discoveryEnabled,
+    enabledChannels: normalizeChannels(controls.enabledChannels),
     exchangePeers: controls.exchangePeers ?? 'anyone',
     allowedEndpointIds: [...(controls.allowedEndpointIds ?? [])],
     sharing: {

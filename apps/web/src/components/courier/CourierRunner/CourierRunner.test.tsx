@@ -1,0 +1,133 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-R.15.4c/d/e — the courier RUNTIME driver UI.  Asserts: outside the native shell the
+// runtime control is honestly disabled (no Start, a "needs the app" explanation); the
+// per-channel selection persists; inside a faked native shell pressing Start constructs +
+// drives a `CourierController` (mocked) and reports the honest running state; a blocked
+// decision surfaces its reason, never a false "running"; and the copy never uses a false
+// trust word.
+
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getCourierControls } from '../../../lcap/transports/courier-controls-state.js';
+import { checkA11y } from '../../../test/axe.js';
+import { CourierRunner } from './CourierRunner.js';
+
+const FORBIDDEN = /\b(secure|trusted|safe|anonymous)\b/i;
+
+// Mock the dynamically-imported controller + channel resolver + frontier-request builder so
+// the test drives the runtime path without any native plugin or real codec.
+const controllerStart = vi.fn(async () => ({ advertise: true, discover: true, blockedReason: '' }));
+const controllerStop = vi.fn(async () => {});
+const activeChannels = vi.fn(() => ['nearby'] as const);
+const ControllerCtor = vi.fn(function (this: Record<string, unknown>) {
+  this.start = controllerStart;
+  this.stop = controllerStop;
+  this.activeChannels = activeChannels;
+});
+const resolveCourierChannels = vi.fn(() => [{ channel: 'nearby', plugin: {} }]);
+
+vi.mock('../../../lcap/transports/courier-controller.js', () => ({
+  CourierController: ControllerCtor,
+  readCourierPower: vi.fn(async () => ({})),
+}));
+vi.mock('../../../lcap/transports/courier-channels.js', async (importOriginal) => {
+  // Keep the real channel-info metadata + channel list; override only the resolver.
+  const real =
+    await importOriginal<typeof import('../../../lcap/transports/courier-channels.js')>();
+  return { ...real, resolveCourierChannels: (...a: unknown[]) => resolveCourierChannels(...a) };
+});
+vi.mock('../../../lcap/transports/frontier-request.js', () => ({
+  prepareCourierFrontierRequest: vi.fn(async () => () => new Uint8Array([1])),
+}));
+
+function injectNativeShell(): void {
+  (globalThis as { Capacitor?: unknown }).Capacitor = {
+    isNativePlatform: () => true,
+    registerPlugin: () => ({}),
+  };
+}
+
+function clearNativeShell(): void {
+  delete (globalThis as { Capacitor?: unknown }).Capacitor;
+}
+
+describe('CourierRunner (WS-R.15.4c/d/e)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    controllerStart.mockResolvedValue({ advertise: true, discover: true, blockedReason: '' });
+  });
+  afterEach(() => {
+    localStorage.clear();
+    clearNativeShell();
+  });
+
+  it('is honest outside the native shell: no Start, an explanation that the app is needed', () => {
+    render(<CourierRunner />);
+    expect(screen.getByText(/need the installed licio app/i)).toBeInTheDocument();
+    const start = screen.getByRole('button', { name: /start courier/i });
+    expect(start).toHaveAttribute('aria-disabled', 'true');
+  });
+
+  it('persists a per-channel selection once the disclosure is acknowledged', () => {
+    render(<CourierRunner />);
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /i understand what a nearby radio reveals/i }),
+    );
+    // The per-channel selection appears after acknowledgment.
+    const wifi = screen.getByRole('checkbox', { name: /wi-fi direct/i });
+    fireEvent.click(wifi);
+    expect(getCourierControls().enabledChannels).toContain('wifiDirect');
+  });
+
+  it('drives a CourierController inside the native shell and reports running honestly', async () => {
+    injectNativeShell();
+    render(<CourierRunner />);
+    // Acknowledge + enable advertising so a Start is permitted.
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /i understand what a nearby radio reveals/i }),
+    );
+    fireEvent.click(screen.getByRole('switch', { name: /advertise this device/i }));
+
+    const start = screen.getByRole('button', { name: /start courier/i });
+    expect(start).not.toHaveAttribute('aria-disabled');
+    fireEvent.click(start);
+
+    await waitFor(() => expect(ControllerCtor).toHaveBeenCalledOnce());
+    expect(controllerStart).toHaveBeenCalledOnce();
+    await waitFor(() => expect(screen.getByText(/^Running$/)).toBeInTheDocument());
+    // A Stop control now drives the controller teardown.
+    fireEvent.click(screen.getByRole('button', { name: /stop courier/i }));
+    await waitFor(() => expect(controllerStop).toHaveBeenCalled());
+  });
+
+  it('surfaces a blocked decision honestly (never a false "running")', async () => {
+    injectNativeShell();
+    controllerStart.mockResolvedValue({
+      advertise: false,
+      discover: false,
+      blockedReason: 'below_battery_floor',
+    });
+    render(<CourierRunner />);
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /i understand what a nearby radio reveals/i }),
+    );
+    fireEvent.click(screen.getByRole('switch', { name: /advertise this device/i }));
+    fireEvent.click(screen.getByRole('button', { name: /start courier/i }));
+
+    await waitFor(() => expect(controllerStop).toHaveBeenCalled());
+    expect(screen.getByText(/battery is below your courier floor/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Running$/)).not.toBeInTheDocument();
+  });
+
+  it('never uses a false trust word', () => {
+    render(<CourierRunner />);
+    expect(document.body.textContent ?? '').not.toMatch(FORBIDDEN);
+  });
+
+  it('has no axe violations', async () => {
+    const { container } = render(<CourierRunner />);
+    expect(await checkA11y(container)).toHaveNoViolations();
+  });
+});

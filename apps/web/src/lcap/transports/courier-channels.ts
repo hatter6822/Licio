@@ -62,9 +62,43 @@ export const COURIER_CHANNEL_PLUGINS = {
 
 export type CourierChannel = keyof typeof COURIER_CHANNEL_PLUGINS;
 
+/** Every known courier channel (the selection-completeness pin + the controls list). */
+export const COURIER_CHANNELS = Object.keys(COURIER_CHANNEL_PLUGINS) as readonly CourierChannel[];
+
+/** Whether a string is a known courier channel (validates a persisted controls slice). */
+export function isCourierChannel(value: string): value is CourierChannel {
+  return Object.hasOwn(COURIER_CHANNEL_PLUGINS, value);
+}
+
 /** Whether a given channel's plugin is resolvable in the current runtime. */
 export function resolveCourierChannel(channel: CourierChannel): NearbyCourierPlugin | null {
   return resolveNativeChannelPlugin(COURIER_CHANNEL_PLUGINS[channel]);
+}
+
+/** A resolved courier channel: its tag + the native plugin that drives it. */
+export interface ResolvedCourierChannel {
+  readonly channel: CourierChannel;
+  readonly plugin: NearbyCourierPlugin;
+}
+
+/**
+ * Resolve the requested channels to the ones actually available in this runtime.  An
+ * unknown channel name is ignored; a channel whose native plugin is not resolvable (e.g.
+ * in a normal browser, or a radio the device lacks) is simply absent from the result —
+ * selecting a channel never fabricates availability.  An empty / absent request falls back
+ * to the `nearby` channel (the proven default).  Order is preserved + de-duplicated.
+ */
+export function resolveCourierChannels(requested?: readonly string[]): ResolvedCourierChannel[] {
+  const names = requested && requested.length > 0 ? requested : ['nearby'];
+  const seen = new Set<CourierChannel>();
+  const out: ResolvedCourierChannel[] = [];
+  for (const name of names) {
+    if (!isCourierChannel(name) || seen.has(name)) continue;
+    seen.add(name);
+    const plugin = resolveCourierChannel(name);
+    if (plugin) out.push({ channel: name, plugin });
+  }
+  return out;
 }
 
 // --- the shared base64 boundary ----------------------------------------------------

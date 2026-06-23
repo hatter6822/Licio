@@ -313,11 +313,20 @@ headless emulators sharing the netsim virtual radio bus (RootCanal BLE/Bluetooth
 virtio-wifi) exchange a Nearby Connections payload offline, reproducibly, via
 `apps/courier/scripts/radio-e2e.sh` + the `NearbyConnectionsRadioTest` instrumentation test
 (needs KVM + a host GPU; `-gpu host` avoids the bundled-SwiftShader qemu crash).  The
-remaining courier cards are the WS-R.15.4d additional native radio channels (Wi-Fi Direct /
-Bluetooth / USB — additional plugins on the shipped Nearby pattern) and field confirmation
-on PHYSICAL phones (the emulated-radio E2E validates the full Nearby code path; real radios
-add hardware confidence).  The apps/web cross-plane bundle bridge (private-p2p ciphertext
-through an LCAP pack, WS-R.16.1 ↔ WS-S.6.5) is the tracked follow-up.
+WS-R.15.4d additional native radio channels (Wi-Fi Direct / Bluetooth / USB) ship as Java
+plugins on the Nearby pattern AND are now SELECTABLE + driven from TS: `CourierController`
+is channel-aware (`channels: CourierChannelPlugin[]`, each driven through the
+`NativeChannelMedium`), and the `CourierRunner` UI (mounted at `/profile/mode`) exposes
+per-channel toggles.  `syncRoomOverP2p` (the live LCAP WebRTC sync) is driven from the
+`P2pSyncPanel` at `/profile/offline`; both carriers stay off the initial bundle (the
+lcap-p2p chunk).  Remaining: the netsim radio E2E currently exercises only the Nearby
+channel (Wi-Fi Direct / Bluetooth are netsim-reachable but not yet scripted); **USB is
+TS-reachable but confirmable only on PHYSICAL OTG hardware** (no emulated USB bus —
+surfaced in the `CourierRunner` copy + `COURIER_CHANNEL_INFO.usb.verification ===
+'physical_only'`); and field confirmation on PHYSICAL phones (the emulated-radio E2E
+validates the full Nearby code path; real radios add hardware confidence).  The apps/web
+cross-plane bundle bridge (private-p2p ciphertext through an LCAP pack, WS-R.16.1 ↔
+WS-S.6.5) is wired into `OfflineBundlePanel`.
 
 ### Ingestion-path hardening (external review, June 2026)
 

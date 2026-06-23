@@ -45,6 +45,19 @@ describe('courier-controls-state (WS-R.15.4e)', () => {
     expect(reloaded.batteryFloor).toBe(0.25);
   });
 
+  it('defaults the enabled channels to Nearby only and persists a custom selection', () => {
+    expect(getCourierControls().enabledChannels).toEqual(['nearby']);
+    setCourierControls({
+      advertisingEnabled: false,
+      discoveryEnabled: false,
+      enabledChannels: ['nearby', 'wifiDirect', 'bluetooth'],
+    });
+    expect(getCourierControls().enabledChannels).toEqual(['nearby', 'wifiDirect', 'bluetooth']);
+    // An empty selection normalizes back to the conservative Nearby-only default.
+    setCourierControls({ advertisingEnabled: false, discoveryEnabled: false, enabledChannels: [] });
+    expect(getCourierControls().enabledChannels).toEqual(['nearby']);
+  });
+
   it('the radio-metadata disclosure acknowledgment round-trips (default false)', () => {
     expect(getRadioDisclosureAcknowledged()).toBe(false);
     setRadioDisclosureAcknowledged(true);
