@@ -40,7 +40,7 @@ async function makeRoomWithSecondDevice(): Promise<{
   });
   const fragment = inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length);
   const { request } = await prep.complete(fragment);
-  const verdict = await session.admitJoinRequest(invite, request);
+  const { verdict } = await session.admitJoinRequest(invite, request);
   expect(verdict.ok).toBe(true);
   const state = session.state();
   const devices: VerifiableDevice[] = [...state.devices.values()]

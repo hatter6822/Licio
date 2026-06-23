@@ -15,13 +15,139 @@ import type {
   InviteSecret,
   JoinRequest,
   JoinRequestVerdict,
+  KeyPackageBundle,
   PrivateEncryptedEnvelope,
   PrivateOpBodyInput,
   PrivateRoomEngine,
   PrivateRoomEngineParams,
+  PrivateRoomStorage,
   RoomReducerState,
   SafetyNumber,
 } from '@licio/private-p2p';
+
+/**
+ * The §12.3 join GRANT an admin returns from `admitJoinRequest` and the joiner feeds to
+ * `completeJoin`: the MLS Welcome, the room identity/manifest, the assigned member/device
+ * ids, the current device roster (the joiner's bootstrap trust set), and a §15.9 archive
+ * carrying a §14.5 snapshot sealed under the new epoch (the joiner's view of the existing
+ * state).  Delivered admin→joiner over the §10.3 channel; the bytes confer no trust.
+ */
+export interface JoinGrant {
+  readonly welcome: Uint8Array;
+  readonly roomId: string;
+  readonly roomIdCommitment: Uint8Array;
+  readonly manifest: unknown;
+  readonly manifestCommitment: Uint8Array;
+  readonly assignedMemberId: string;
+  readonly assignedDeviceId: string;
+  readonly bootstrapDevices: readonly {
+    readonly deviceId: string;
+    readonly signingPublicKey: string;
+  }[];
+  readonly archive: Uint8Array;
+}
+
+/** The result of `admitJoinRequest`: the verify verdict, plus (on success) the GRANT the
+ *  admin delivers to the joiner so it can `completeJoin`. */
+export interface AdmitResult {
+  readonly verdict: JoinRequestVerdict;
+  readonly grant?: JoinGrant;
+}
+
+function grantBytesToB64Url(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i] as number);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function grantB64UrlToBytes(b64url: string): Uint8Array {
+  const std = b64url.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = std.length % 4 === 0 ? std : std + '='.repeat(4 - (std.length % 4));
+  const binary = atob(padded);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+/** Serialize a {@link JoinGrant} to a transportable JSON blob (the admin sends this back
+ *  to the joiner over the §10.3 channel; the bytes confer no trust). */
+export function serializeJoinGrant(grant: JoinGrant): string {
+  return JSON.stringify({
+    v: 1,
+    welcome: grantBytesToB64Url(grant.welcome),
+    roomId: grant.roomId,
+    roomIdCommitment: grantBytesToB64Url(grant.roomIdCommitment),
+    manifest: grant.manifest,
+    manifestCommitment: grantBytesToB64Url(grant.manifestCommitment),
+    assignedMemberId: grant.assignedMemberId,
+    assignedDeviceId: grant.assignedDeviceId,
+    bootstrapDevices: grant.bootstrapDevices,
+    archive: grantBytesToB64Url(grant.archive),
+  });
+}
+
+/** Parse a serialized {@link JoinGrant} fail-closed (returns `null` on malformed JSON or a
+ *  structurally invalid payload).  Every field is re-validated; the engine re-verifies the
+ *  archive's snapshot + envelopes regardless (§8.3 — the blob confers no trust). */
+export function parseJoinGrant(json: string): JoinGrant | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (typeof value !== 'object' || value === null) return null;
+  const g = value as Record<string, unknown>;
+  const str = (k: string): string | null => (typeof g[k] === 'string' ? (g[k] as string) : null);
+  const roomId = str('roomId');
+  const assignedMemberId = str('assignedMemberId');
+  const assignedDeviceId = str('assignedDeviceId');
+  const welcome = str('welcome');
+  const roomIdCommitment = str('roomIdCommitment');
+  const manifestCommitment = str('manifestCommitment');
+  const archive = str('archive');
+  if (
+    roomId === null ||
+    assignedMemberId === null ||
+    assignedDeviceId === null ||
+    welcome === null ||
+    roomIdCommitment === null ||
+    manifestCommitment === null ||
+    archive === null ||
+    !('manifest' in g) ||
+    !Array.isArray(g['bootstrapDevices'])
+  ) {
+    return null;
+  }
+  const bootstrapDevices: { deviceId: string; signingPublicKey: string }[] = [];
+  for (const d of g['bootstrapDevices']) {
+    if (
+      typeof d !== 'object' ||
+      d === null ||
+      typeof (d as Record<string, unknown>)['deviceId'] !== 'string' ||
+      typeof (d as Record<string, unknown>)['signingPublicKey'] !== 'string'
+    ) {
+      return null;
+    }
+    const dev = d as { deviceId: string; signingPublicKey: string };
+    bootstrapDevices.push({ deviceId: dev.deviceId, signingPublicKey: dev.signingPublicKey });
+  }
+  try {
+    return {
+      welcome: grantB64UrlToBytes(welcome),
+      roomId,
+      roomIdCommitment: grantB64UrlToBytes(roomIdCommitment),
+      manifest: g['manifest'],
+      manifestCommitment: grantB64UrlToBytes(manifestCommitment),
+      assignedMemberId,
+      assignedDeviceId,
+      bootstrapDevices,
+      archive: grantB64UrlToBytes(archive),
+    };
+  } catch {
+    return null;
+  }
+}
+
 import { loadUpdateChannelConfig } from '../update/config.js';
 import { requirePrivateBundleTrusted } from '../update/gate.js';
 import { connectPrivatePeer, type RtcIceServerLike } from './connect-peer.js';
@@ -139,6 +265,9 @@ export interface CreatePrivateRoomSessionParams {
   readonly founderDeviceId: string;
   /** Override the §25.6 compaction cadence (default `DEFAULT_COMPACT_EVERY_OPS`). */
   readonly compactEveryOps?: number;
+  /** Storage factory (DI seam — defaults to the IndexedDB adapter; tests inject an
+   *  in-memory store so two same-room sessions stay isolated). */
+  readonly createStorage?: (roomId: string) => PrivateRoomStorage;
 }
 
 /**
@@ -262,6 +391,27 @@ export class PrivateRoomSession {
     return this.engine.ingest(envelopes);
   }
 
+  /**
+   * Export this room as a §15.9 ciphertext-only offline archive (a §14.5 sealed snapshot,
+   * if compacted, plus the retained envelopes) for offline sharing / device handoff.  The
+   * archive confers no trust — an importer re-validates every envelope (§8.3).
+   */
+  async exportArchive(): Promise<Uint8Array> {
+    return this.engine.exportArchive({
+      kind: 'encrypted_member_backup',
+      createdAtBucket: coarseBucket(),
+    });
+  }
+
+  /**
+   * Import a §15.9 offline archive into this room (bootstrap from its sealed snapshot if
+   * this engine is fresh, then ingest + re-validate every envelope — the container confers
+   * no trust).  Returns the accepted/quarantined report.
+   */
+  async importArchive(bytes: Uint8Array): Promise<IngestReport> {
+    return this.engine.importArchive(bytes);
+  }
+
   /** Map the manifest's §13.1 transport mode to the carrier's binary mode
    *  (anything other than `direct_allowed` is treated as relay-only for IP privacy). */
   private transportMode(): 'relay_only' | 'direct_allowed' {
@@ -343,7 +493,7 @@ export class PrivateRoomSession {
 
     const engine = await p2p.PrivateRoomEngine.load({
       ...created.engineParams,
-      storage: new IndexedDbPrivateRoomStorage(roomId),
+      storage: params.createStorage?.(roomId) ?? new IndexedDbPrivateRoomStorage(roomId),
     });
     await engine.applyLocalOp(created.genesisOp, created.sealParams);
 
@@ -624,12 +774,23 @@ export class PrivateRoomSession {
     readonly proposedDisplayName: string;
     /** A coarse time bucket (never an exact timestamp). */
     readonly requestedAtBucket?: string;
+    /** Storage factory (DI seam — see {@link CreatePrivateRoomSessionParams}). */
+    readonly createStorage?: (roomId: string) => PrivateRoomStorage;
   }): Promise<{
     readonly inviteePublicKey: string;
     complete(sealedInvite: string): Promise<{ invite: InviteSecret; request: JoinRequest }>;
+    /** §12.3 finish — once the admin returns the grant (Welcome + the current-state
+     *  bootstrap), join the MLS group and construct + persist a usable room session. */
+    completeJoin(grant: JoinGrant): Promise<PrivateRoomSession>;
   }> {
+    await ensurePrivateBundleTrusted();
     const p2p = await loadP2p();
     const hpke = await p2p.generateRecipientKeyPair();
+    // The joiner's LONG-TERM device signing key (Ed25519): the key it AUTHORS ops with,
+    // SEPARATE from the MLS leaf signature key (no cross-protocol reuse, symmetric with
+    // the founder).  Its public key rides the join request, proof-bound (§12.3).
+    const signing = await p2p.generateDeviceSigningKeyPair(false);
+    const deviceSigningPublicKey = p2p.toBase64Url(await p2p.exportPublicKeyRaw(signing.publicKey));
     const keyPackage = await p2p.generateMemberKeyPackage(p2p.utf8(globalThis.crypto.randomUUID()));
     const inviteePublicKey = p2p.toBase64Url(hpke.publicKey);
     const requestedAtBucket = params.requestedAtBucket ?? coarseBucket();
@@ -640,10 +801,21 @@ export class PrivateRoomSession {
         const request = await p2p.buildJoinRequest({
           invite,
           keyPackage: keyPackage.publicPackage,
+          deviceSigningPublicKey,
           proposedDisplayName: params.proposedDisplayName,
           requestedAtBucket,
         });
         return { invite, request };
+      },
+      completeJoin(grant: JoinGrant) {
+        return PrivateRoomSession.finishJoin(grant, {
+          bundle: keyPackage,
+          signingPrivateKey: signing.privateKey,
+          signingPublicKey: deviceSigningPublicKey,
+          hpkePrivateKey: hpke.privateKey,
+          hpkePublicKey: hpke.publicKey,
+          ...(params.createStorage ? { createStorage: params.createStorage } : {}),
+        });
       },
     };
   }
@@ -660,12 +832,12 @@ export class PrivateRoomSession {
     invite: InviteSecret,
     request: JoinRequest,
     options?: { readonly usesSoFar?: number; readonly now?: Date },
-  ): Promise<JoinRequestVerdict> {
+  ): Promise<AdmitResult> {
     const verdict = await this.p2p.verifyJoinRequest(invite, request, {
       now: options?.now ?? new Date(),
       ...(options?.usesSoFar === undefined ? {} : { usesSoFar: options.usesSoFar }),
     });
-    if (!verdict.ok) return verdict;
+    if (!verdict.ok) return { verdict };
 
     const group = await this.p2p.deserializeGroupState(this.session.mlsGroupState);
     const invited = await this.p2p.inviteDevice(group, verdict.keyPackage);
@@ -698,10 +870,10 @@ export class PrivateRoomSession {
         memberId: newMemberId,
         deviceId: newDeviceId,
         // The signed `member.add` records the joining device's LONG-TERM keys: its
-        // Ed25519 signing key (the MLS leaf's signature key) and its HPKE init key —
-        // both authenticated by the verified KeyPackage, so a relay cannot inject a
-        // different device key.
-        signingPublicKey: this.p2p.toBase64Url(verdict.keyPackage.leafNode.signaturePublicKey),
+        // dedicated Ed25519 op-signing key (proof-bound in the §12.3 request, so a relay
+        // cannot substitute it — and SEPARATE from the MLS leaf key, no cross-protocol
+        // reuse) and its HPKE init key (authenticated by the verified KeyPackage).
+        signingPublicKey: verdict.deviceSigningPublicKey,
         hpkePublicKey: this.p2p.toBase64Url(verdict.keyPackage.initKey),
         mlsKeyPackage: request.recipient_device_key_package,
         role: verdict.grantedRole,
@@ -726,10 +898,119 @@ export class PrivateRoomSession {
     await putRoomSession(this.session);
     // §10.9: deliver the epoch-rotating commit to every currently-connected member so
     // they advance to the new epoch and can open the new-epoch content (otherwise their
-    // engines would quarantine it no_epoch_key).  The joiner's Welcome is delivered
-    // out-of-band by the admin (the §10.3 invite channel) and consumed via completeJoin.
+    // engines would quarantine it no_epoch_key).
     this.broadcastCommit(this.p2p.encodeCommit(invited.commit), epoch);
-    return verdict;
+
+    // Build the joiner's bootstrap GRANT: a §14.5 snapshot sealed under the NEW epoch
+    // (the only epoch the joiner holds) carries the FULL reduced state — members,
+    // devices, content — so a fresh joiner sees the current room WITHOUT the historical
+    // epoch keys it never held (forward secrecy preserved).  commitSnapshot covers the
+    // just-applied member.add, so the snapshot already includes the joiner.
+    const snapshotBase = await this.engine.commitSnapshot({
+      epoch,
+      roomEpochSecret: newEpochState.roomEpochSecret,
+      contentWrapKey: newEpochState.keys.contentWrapKey,
+      author: {
+        memberId: this.session.memberId,
+        deviceId: this.session.deviceId,
+        signingKey: this.session.signingPrivateKey,
+      },
+      opId: globalThis.crypto.randomUUID(),
+      snapshotId: globalThis.crypto.randomUUID(),
+    });
+    if (snapshotBase) {
+      this.session = { ...this.session, snapshotBase };
+      await putRoomSession(this.session);
+    }
+    const archive = await this.engine.exportArchive({
+      kind: 'encrypted_member_backup',
+      createdAtBucket: coarseBucket(),
+    });
+    const grant: JoinGrant = {
+      welcome: this.p2p.encodeWelcomeMessage(invited.welcome),
+      roomId: this.session.roomId,
+      roomIdCommitment: this.session.roomIdCommitment,
+      manifest: this.session.manifest,
+      manifestCommitment: this.session.manifestCommitment,
+      assignedMemberId: newMemberId,
+      assignedDeviceId: newDeviceId,
+      // The current device roster (public keys) — the joiner's bootstrap trust set,
+      // authenticated by the admin it is joining through (the §10.3 channel).
+      bootstrapDevices: [...this.engine.state().devices.values()]
+        .filter((d) => !d.removed)
+        .map((d) => ({ deviceId: d.deviceId, signingPublicKey: d.signingPublicKey })),
+      archive,
+    };
+    return { verdict, grant };
+  }
+
+  /**
+   * §12.3 finish (joiner side) — process the admin's Welcome to join the MLS group at the
+   * current epoch, construct a fresh engine bootstrapped from the grant's §14.5 snapshot
+   * (so the joiner sees the existing members/devices/content without the historical epoch
+   * keys), persist the session, and return it.  The container confers NO trust (§8.3):
+   * importArchive re-validates the snapshot against its in-band commit and re-runs the
+   * §14.2 pre-pass + openOp on every envelope.
+   */
+  private static async finishJoin(
+    grant: JoinGrant,
+    joiner: {
+      readonly bundle: KeyPackageBundle;
+      readonly signingPrivateKey: CryptoKey;
+      readonly signingPublicKey: string;
+      readonly hpkePrivateKey: CryptoKey;
+      readonly hpkePublicKey: Uint8Array;
+      readonly createStorage?: (roomId: string) => PrivateRoomStorage;
+    },
+  ): Promise<PrivateRoomSession> {
+    await ensurePrivateBundleTrusted();
+    const p2p = await loadP2p();
+    const welcome = p2p.decodeWelcomeMessage(grant.welcome);
+    const joined = await p2p.joinRoom({
+      welcome,
+      bundle: joiner.bundle,
+      roomIdCommitment: grant.roomIdCommitment,
+      manifestCommitment: grant.manifestCommitment,
+    });
+    const epochState = joined.epochState;
+    const epochNum = Number(epochState.epoch);
+    const engine = await p2p.PrivateRoomEngine.load({
+      roomId: grant.roomId,
+      roomIdCommitment: grant.roomIdCommitment,
+      storage:
+        joiner.createStorage?.(grant.roomId) ?? new IndexedDbPrivateRoomStorage(grant.roomId),
+      epochs: new Map([[epochNum, p2p.heldKeysOf(epochState)]]),
+      bootstrapDevices: grant.bootstrapDevices,
+    });
+    // Bootstrap the current state from the grant's archive (snapshot sealed under the
+    // joined epoch + any post-snapshot envelopes), all re-validated.
+    await engine.importArchive(grant.archive);
+    const base = engine.exportBase();
+    const session: StoredRoomSession = {
+      roomId: grant.roomId,
+      roomIdCommitment: grant.roomIdCommitment,
+      memberId: grant.assignedMemberId,
+      deviceId: grant.assignedDeviceId,
+      signingPrivateKey: joiner.signingPrivateKey,
+      signingPublicKey: joiner.signingPublicKey,
+      hpkePrivateKey: joiner.hpkePrivateKey,
+      hpkePublicKey: joiner.hpkePublicKey,
+      mlsGroupState: p2p.serializeGroupState(joined.group),
+      epochs: [
+        {
+          epoch: epochNum,
+          roomEpochSecret: epochState.roomEpochSecret,
+          contentWrapKey: epochState.keys.contentWrapKey,
+        },
+      ],
+      manifest: grant.manifest,
+      manifestCommitment: grant.manifestCommitment,
+      bootstrapDevices: grant.bootstrapDevices,
+      ...(base ? { snapshotBase: base } : {}),
+      createdAtBucket: coarseBucket(),
+    };
+    await putRoomSession(session);
+    return new PrivateRoomSession(p2p, engine, session, DEFAULT_COMPACT_EVERY_OPS);
   }
 
   /**

@@ -17,7 +17,11 @@
 
 import { useId, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
-import { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
+import {
+  PrivateRoomSession,
+  parseJoinGrant,
+  serializeJoinGrant,
+} from '../../../private-p2p/room-manager.js';
 import { Button } from '../../ui/Button/index.js';
 import { Card } from '../../ui/Card/index.js';
 import { Input } from '../../ui/Input/index.js';
@@ -26,6 +30,9 @@ import { TextArea } from '../../ui/TextArea/index.js';
 export interface JoinPanelProps {
   /** When present, the ADMIT half is shown for this in-room admin session. */
   session?: PrivateRoomSession | undefined;
+  /** Called once the JOINER finishes `completeJoin` with the new room's id (so the
+   *  caller can navigate into it). */
+  onJoined?: (roomId: string) => void;
 }
 
 /** Map a §12.3 verify rejection to honest, user-facing copy (never silent). */
@@ -55,28 +62,35 @@ function rejectionMessage(
   }
 }
 
-export function JoinPanel({ session }: JoinPanelProps): React.ReactElement {
+export function JoinPanel({ session, onJoined }: JoinPanelProps): React.ReactElement {
   return (
     <Card>
       <div className="flex flex-col gap-6">
-        <JoinerSection />
+        <JoinerSection onJoined={onJoined} />
         {session ? <AdmitSection session={session} /> : null}
       </div>
     </Card>
   );
 }
 
-/** The JOINER half — produce a recipient key + a join-request blob. */
-function JoinerSection(): React.ReactElement {
+/** The JOINER half — produce a recipient key + a join-request blob, then finish the
+ *  join from the admin's grant. */
+function JoinerSection({
+  onJoined,
+}: {
+  onJoined: ((roomId: string) => void) | undefined;
+}): React.ReactElement {
   const t = useT();
   const headingId = useId();
   const [displayName, setDisplayName] = useState('');
   const [recipientKey, setRecipientKey] = useState<string | null>(null);
   const [sealedInvite, setSealedInvite] = useState('');
   const [requestJson, setRequestJson] = useState<string | null>(null);
+  const [grantJson, setGrantJson] = useState('');
+  const [joined, setJoined] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // The pending preparation: holds the joiner's keys + the `complete` step.
+  // The pending preparation: holds the joiner's keys + the `complete`/`completeJoin` steps.
   const [pending, setPending] = useState<Awaited<
     ReturnType<typeof PrivateRoomSession.prepareJoinRequest>
   > | null>(null);
@@ -114,6 +128,26 @@ function JoinerSection(): React.ReactElement {
           'That invite link could not be opened. It may be malformed or not for this device.',
         ),
       );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function finishJoin(): Promise<void> {
+    if (!pending || grantJson.trim().length === 0 || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const grant = parseJoinGrant(grantJson.trim());
+      if (grant === null) {
+        setError(t('privateRoom.join.badGrant', 'That join grant is not valid.'));
+        return;
+      }
+      const room = await pending.completeJoin(grant);
+      setJoined(true);
+      onJoined?.(room.roomId);
+    } catch {
+      setError(t('privateRoom.join.finishError', 'Could not finish joining the room.'));
     } finally {
       setBusy(false);
     }
@@ -190,6 +224,31 @@ function JoinerSection(): React.ReactElement {
           rows={3}
         />
       ) : null}
+
+      {requestJson !== null && !joined ? (
+        <div className="flex flex-col gap-2">
+          <TextArea
+            label={t('privateRoom.join.grantLabel', 'Paste the grant the admin sent back')}
+            value={grantJson}
+            onChange={(e) => setGrantJson(e.target.value)}
+            rows={3}
+          />
+          <Button
+            type="button"
+            variant="primary"
+            onClick={finishJoin}
+            disabled={busy || grantJson.trim().length === 0}
+          >
+            {t('privateRoom.join.finish', 'Finish joining')}
+          </Button>
+        </div>
+      ) : null}
+
+      {joined ? (
+        <p className="text-success-on-soft text-sm" role="status">
+          {t('privateRoom.join.joined', 'You have joined the room. It is now on your device.')}
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -200,6 +259,7 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
   const headingId = useId();
   const [inviteJson, setInviteJson] = useState('');
   const [requestJson, setRequestJson] = useState('');
+  const [grantJson, setGrantJson] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -222,11 +282,14 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
         setError(t('privateRoom.admit.badRequest', 'That join request is not valid.'));
         return;
       }
-      const verdict = await session.admitJoinRequest(invite, request);
+      const { verdict, grant } = await session.admitJoinRequest(invite, request);
       if (verdict.ok) {
         setStatus(
           t('privateRoom.admit.ok', 'Device admitted as {role}.', { role: verdict.grantedRole }),
         );
+        // The grant carries the MLS Welcome + the new device's current-state bootstrap;
+        // the admin sends it back to the joining device to finish the join.
+        if (grant) setGrantJson(serializeJoinGrant(grant));
         setInviteJson('');
         setRequestJson('');
       } else {
@@ -279,6 +342,17 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
         <p className="text-success-on-soft text-sm" role="status">
           {status}
         </p>
+      ) : null}
+      {grantJson !== null ? (
+        <TextArea
+          label={t(
+            'privateRoom.admit.grantLabel',
+            'Send this back to the new device to finish joining',
+          )}
+          value={grantJson}
+          readOnly
+          rows={3}
+        />
       ) : null}
     </section>
   );

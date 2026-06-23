@@ -67,7 +67,7 @@ describe('PrivateRoomView', () => {
     });
     const fragment = inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length);
     const { request } = await prep.complete(fragment);
-    expect((await session.admitJoinRequest(invite, request)).ok).toBe(true);
+    expect((await session.admitJoinRequest(invite, request)).verdict.ok).toBe(true);
 
     render(<PrivateRoomView roomId={session.roomId} />);
     await waitFor(() => expect(screen.getByText('You')).toBeInTheDocument());
