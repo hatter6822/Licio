@@ -14,7 +14,11 @@ import {
   RendezvousService,
   setRendezvousService,
 } from '../private-rendezvous/service.js';
-import { InMemoryRendezvousStore } from '../private-rendezvous/stores.js';
+import {
+  InMemoryRendezvousStore,
+  MAX_SIGNALS_PER_PEER,
+  MAX_SIGNALS_PER_SENDER,
+} from '../private-rendezvous/stores.js';
 import { createPrivateRendezvousRoutes } from '../routes/private-rendezvous.js';
 
 const ROOM_BLIND = 'cm9vbS1ibGluZA';
@@ -269,5 +273,37 @@ describe('full-app mount — CSRF-exempt + no existence oracle', () => {
       headers: { 'content-type': 'application/json', origin: 'http://localhost:5173' },
     });
     expect(res.status).toBe(202);
+  });
+});
+
+describe('InMemoryRendezvousStore — signal-queue DoS caps (§27, server-blind)', () => {
+  const sig = (sender: string, ciphertext: string) => ({
+    roomBlindId: 'r',
+    senderBlindId: sender,
+    recipientBlindId: 'victim',
+    ciphertext,
+    expiresAt: Date.now() + 60_000,
+  });
+
+  it('caps signals per SENDER so one flooder cannot fill a victim queue', async () => {
+    const store = new InMemoryRendezvousStore();
+    for (let i = 0; i < MAX_SIGNALS_PER_SENDER + 50; i++)
+      await store.putSignal(sig('flooder', `c${i}`));
+    const drained = await store.drainSignals('victim', Date.now(), MAX_SIGNALS_PER_PEER);
+    expect(drained.length).toBe(MAX_SIGNALS_PER_SENDER);
+  });
+
+  it('PRESERVES the earliest bootstrap offer against a later flood (drop-newest)', async () => {
+    const store = new InMemoryRendezvousStore();
+    await store.putSignal(sig('peerA', 'THE-OFFER')); // sent FIRST
+    // A flood from many distinct senders tries to fill the rest of the queue.
+    for (let s = 0; s < 20; s++) {
+      for (let i = 0; i < MAX_SIGNALS_PER_SENDER; i++)
+        await store.putSignal(sig(`flood-${s}`, `j${s}-${i}`));
+    }
+    const drained = await store.drainSignals('victim', Date.now(), MAX_SIGNALS_PER_PEER + 1_000);
+    expect(drained.length).toBeLessThanOrEqual(MAX_SIGNALS_PER_PEER);
+    // The earliest signal (the connection-bootstrapping offer) is never dropped.
+    expect(drained.some((d) => d.ciphertext === 'THE-OFFER')).toBe(true);
   });
 });

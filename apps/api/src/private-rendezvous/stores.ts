@@ -96,6 +96,13 @@ export interface RendezvousStore {
 /** Per-room presence cap + per-peer signal-queue cap (bounded memory, §27). */
 export const MAX_RECORDS_PER_ROOM = 512;
 export const MAX_SIGNALS_PER_PEER = 256;
+/**
+ * Per-SENDER sub-cap within one recipient's queue: one `sender_blind_id` may occupy at most
+ * this many of the `MAX_SIGNALS_PER_PEER` slots, so a single flooder cannot fill a victim's
+ * queue and starve the connection-bootstrapping offer of another peer.  256/32 = 8 distinct
+ * senders before the queue is full; a legitimate offer→answer→ICE exchange is well under 32.
+ */
+export const MAX_SIGNALS_PER_SENDER = 32;
 
 /**
  * The in-memory rendezvous store (local/dev default).  Records are keyed by room
@@ -140,9 +147,16 @@ export class InMemoryRendezvousStore implements RendezvousStore {
 
   putSignal(signal: StoredSignal): Promise<void> {
     const queue = this.signals.get(signal.recipientBlindId) ?? [];
+    // Per-SENDER bound: one sender_blind_id cannot occupy more than MAX_SIGNALS_PER_SENDER
+    // of the recipient's queue, so a single flooder cannot evict another peer's offer.
+    let fromSender = 0;
+    for (const s of queue) if (s.senderBlindId === signal.senderBlindId) fromSender += 1;
+    if (fromSender >= MAX_SIGNALS_PER_SENDER) return Promise.resolve(); // back-pressure the sender
+    // Overall bound: DROP-NEWEST (reject this signal) once full, so the EARLIEST signal — the
+    // connection-bootstrapping offer/answer, sent first — is PRESERVED against a later flood.
+    // (The recipient's `drainSignals` clears the queue, so capacity is restored each drain.)
+    if (queue.length >= MAX_SIGNALS_PER_PEER) return Promise.resolve();
     queue.push(signal);
-    // Cap the queue: drop the oldest once over the limit.
-    if (queue.length > MAX_SIGNALS_PER_PEER) queue.splice(0, queue.length - MAX_SIGNALS_PER_PEER);
     this.signals.set(signal.recipientBlindId, queue);
     return Promise.resolve();
   }

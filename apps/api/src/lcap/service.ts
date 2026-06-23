@@ -14,6 +14,10 @@ import {
   InMemoryPublishAuditStore,
   type PublishAuditStore,
 } from './publish-audit.js';
+import {
+  drizzlePublishEligibility,
+  type PublishEligibilityResolver,
+} from './publish-eligibility.js';
 import { LcapPublicPublisher } from './publisher.js';
 import {
   type BlockPublishReviewStore,
@@ -96,6 +100,31 @@ export function getLcapPublicPublisher(): LcapPublicPublisher | undefined {
 /** Replace the publisher singleton (tests / an explicit binding). */
 export function setLcapPublicPublisher(next: LcapPublicPublisher | undefined): void {
   publisher = next ?? null;
+}
+
+let eligibility: PublishEligibilityResolver | undefined | null;
+
+/**
+ * Gate-19 — the SERVER-SIDE publish-eligibility resolver: derives a content target's REAL
+ * visibility + storage mode from the live content model, so `handlePublish` never trusts
+ * caller-supplied visibility/encryption signals.  Configured (over the live DB) whenever a DB
+ * is available; `undefined` otherwise — and `handlePublish` treats an absent resolver as
+ * fail-closed (it derives non-publishable signals so the gateway-eligibility guard refuses).
+ */
+export function getPublishEligibilityResolver(): PublishEligibilityResolver | undefined {
+  if (eligibility !== undefined) return eligibility ?? undefined;
+  const dbUrl = process.env['DATABASE_URL'];
+  if (!dbUrl) {
+    eligibility = null;
+    return undefined;
+  }
+  eligibility = drizzlePublishEligibility(createDbClient(dbUrl));
+  return eligibility;
+}
+
+/** Replace the eligibility resolver (tests / an explicit binding). */
+export function setPublishEligibilityResolver(next: PublishEligibilityResolver | undefined): void {
+  eligibility = next ?? null;
 }
 
 /**

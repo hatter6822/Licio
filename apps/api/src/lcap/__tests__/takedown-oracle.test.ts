@@ -23,10 +23,12 @@ import { cidFor } from '@licio/lcap';
 import { describe, expect, it } from 'vitest';
 import { freshForumServices, seedUserWithSession } from '../../__tests__/forum-test-helpers.js';
 import { InMemoryPublishAuditStore } from '../publish-audit.js';
+import { aggregateEligibility, type PublishEligibilityResolver } from '../publish-eligibility.js';
 import { LcapPublicPublisher } from '../publisher.js';
 import { type BlockPublishReviewStore, InMemoryBlockPublishReviewStore } from '../review-gate.js';
 import { createLcapRoutes } from '../routes.js';
 import { LcapIngestServer } from '../server-ingest.js';
+import { setPublishEligibilityResolver } from '../service.js';
 import {
   InMemoryBlockProvenanceStore,
   InMemoryTakedownStatusReader,
@@ -390,6 +392,10 @@ describe('Gate-19 — the §29 public-bridge route (steward-authorized, audited,
   async function harness(
     takedown: (cid: string) => boolean | Promise<boolean>,
     review: BlockPublishReviewStore = approvedReviewStore(STORY),
+    // Default: a permissive eligibility resolver (the target is a public, server-room story).
+    // Tests pass a non-publishable resolver to exercise the server-side derivation refusals.
+    eligibility: PublishEligibilityResolver = () =>
+      Promise.resolve({ publishable: true, visibility: 'public', privateRoomCid: false }),
   ) {
     const forum = freshForumServices();
     const steward = await seedUserWithSession(forum.identity, { steward: true });
@@ -408,7 +414,7 @@ describe('Gate-19 — the §29 public-bridge route (steward-authorized, audited,
         return new Response(null, { status: 200 });
       },
     });
-    const app = createLcapRoutes(server, publisher, provenance, audit, review);
+    const app = createLcapRoutes(server, publisher, provenance, audit, review, eligibility);
     return { server, provenance, audit, review, app, steward, regular, pins: () => pinned };
   }
 
@@ -537,6 +543,66 @@ describe('Gate-19 — the §29 public-bridge route (steward-authorized, audited,
     expect(pins()).toBe(1);
   });
 
+  it('REFUSES a room_only target (server-derived visibility ≠ public), even when reviewed + the caller claims public', async () => {
+    // The resolver derives the REAL visibility from the content model: a room_only item is NOT
+    // publishable regardless of the caller's `visibility:'public'` claim in STORY_BODY.
+    const { server, app, steward, pins, audit } = await harness(
+      async () => false,
+      approvedReviewStore(STORY),
+      () => Promise.resolve({ publishable: false, visibility: 'in_room', privateRoomCid: false }),
+    );
+    const blockCid = await cidFor('block', enc.encode('actually room_only'));
+    await server.putObject(blockCid, 'block', enc.encode('actually room_only'));
+    const res = await app.request(STORY_BODY('/public-bridge/publish', steward.cookie, blockCid));
+    expect(await res.json()).toMatchObject({ ok: false });
+    expect(pins()).toBe(0);
+    expect(audit.all()[0]).toMatchObject({ published: false });
+  });
+
+  it('REFUSES a p2p-room target — a private-room CID can never reach the public DHT', async () => {
+    const { server, app, steward, pins } = await harness(
+      async () => false,
+      approvedReviewStore(STORY),
+      () => Promise.resolve({ publishable: false, visibility: 'public', privateRoomCid: true }),
+    );
+    const blockCid = await cidFor('block', enc.encode('p2p content'));
+    await server.putObject(blockCid, 'block', enc.encode('p2p content'));
+    const res = await app.request(STORY_BODY('/public-bridge/publish', steward.cookie, blockCid));
+    expect(await res.json()).toMatchObject({ ok: false });
+    expect(pins()).toBe(0);
+  });
+
+  it('FAIL-CLOSED: with NO eligibility resolver configured, a publish is refused (never pins)', async () => {
+    setPublishEligibilityResolver(undefined); // force the env-gated resolver to undefined
+    const forum = freshForumServices();
+    const steward = await seedUserWithSession(forum.identity, { steward: true });
+    const server = new LcapIngestServer('net');
+    let pinned = 0;
+    const publisher = new LcapPublicPublisher({
+      gatewayUrl: 'https://gw.test',
+      pinningUrl: 'https://pin.test/add',
+      takedownOracle: () => Promise.resolve(false),
+      reviewStore: approvedReviewStore(STORY),
+      fetchFn: () => {
+        pinned += 1;
+        return Promise.resolve(new Response(null, { status: 200 }));
+      },
+    });
+    // No 6th arg ⇒ eligibility() falls through to the undefined env-gated resolver.
+    const app = createLcapRoutes(
+      server,
+      publisher,
+      new InMemoryBlockProvenanceStore(),
+      new InMemoryPublishAuditStore(),
+      approvedReviewStore(STORY),
+    );
+    const blockCid = await cidFor('block', enc.encode('fail-closed'));
+    await server.putObject(blockCid, 'block', enc.encode('fail-closed'));
+    const res = await app.request(STORY_BODY('/public-bridge/publish', steward.cookie, blockCid));
+    expect(await res.json()).toMatchObject({ ok: false });
+    expect(pinned).toBe(0);
+  });
+
   it('the review route is steward-gated (403 for a non-steward)', async () => {
     const { app, regular } = await harness(async () => false);
     const res = await app.request('/public-bridge/review', {
@@ -569,7 +635,9 @@ describe('Gate-19 — the §29 public-bridge route (steward-authorized, audited,
         return new Response(null, { status: 200 });
       },
     });
-    const app = createLcapRoutes(server, publisher, provenance, audit, review);
+    const app = createLcapRoutes(server, publisher, provenance, audit, review, () =>
+      Promise.resolve({ publishable: true, visibility: 'public', privateRoomCid: false }),
+    );
 
     const payload = enc.encode('toctou public');
     const blockCid = await cidFor('block', payload);
@@ -641,5 +709,39 @@ describe('Gate-19 — the §29 public-bridge route (steward-authorized, audited,
     );
     // The CAS holds nothing under that CID → 404 (a well-formed CID, but not a held block).
     expect(wrongKind.status).toBe(404);
+  });
+});
+
+describe('Gate-19 — aggregateEligibility (multi-target derivation)', () => {
+  it('publishable ONLY if EVERY target is publishable', () => {
+    expect(
+      aggregateEligibility([
+        { publishable: true, visibility: 'public', privateRoomCid: false },
+        { publishable: true, visibility: 'public', privateRoomCid: false },
+      ]),
+    ).toMatchObject({ publishable: true, visibility: 'public', privateRoomCid: false });
+  });
+
+  it('a SINGLE room_only target flips the aggregate to non-public (refused)', () => {
+    const agg = aggregateEligibility([
+      { publishable: true, visibility: 'public', privateRoomCid: false },
+      { publishable: false, visibility: 'in_room', privateRoomCid: false, reason: 'room_only' },
+    ]);
+    expect(agg.publishable).toBe(false);
+    expect(agg.visibility).toBe('in_room');
+    expect(agg.reason).toBe('room_only');
+  });
+
+  it('a SINGLE p2p target sets privateRoomCid (a private CID never publishes)', () => {
+    const agg = aggregateEligibility([
+      { publishable: true, visibility: 'public', privateRoomCid: false },
+      { publishable: false, visibility: 'public', privateRoomCid: true, reason: 'p2p_room' },
+    ]);
+    expect(agg.publishable).toBe(false);
+    expect(agg.privateRoomCid).toBe(true);
+  });
+
+  it('an EMPTY target set is not publishable (fail-closed)', () => {
+    expect(aggregateEligibility([])).toMatchObject({ publishable: false, reason: 'no_targets' });
   });
 });

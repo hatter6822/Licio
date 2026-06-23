@@ -153,8 +153,13 @@ resolves a block CID to its content targets and reads the live takedown status
 through the single `takedownInForce` rule (fail-closed — a thrown query is treated
 as a halt, never as "no takedown"), and `publisher.ts` (`LcapPublicPublisher`)
 re-checks the live oracle at PUBLISH **and** republish behind
-`assertPublicGatewayEligible` + `decideBlockPublish`.  The env-gated
-`POST /api/lcap/v2/public-bridge/{publish,republish}` route (503
+`assertPublicGatewayEligible` + `decideBlockPublish`.  The publish path DERIVES the
+content's visibility/storage-mode SERVER-SIDE (`publish-eligibility.ts`:
+`drizzlePublishEligibility` resolves each content target to its story's room
+`storage_mode` + `visibility`; a source is a public catalog entry) rather than trusting
+caller-supplied signals — a block is publishable ONLY if EVERY target resolves to a
+`public` item in a `server`-storage room, and an absent resolver is fail-closed.  The
+env-gated `POST /api/lcap/v2/public-bridge/{publish,republish}` route (503
 `public_bridge_not_configured` unless `LCAP_IPFS_GATEWAY_URL` /
 `LCAP_IPFS_PINNING_URL` / `DATABASE_URL` are all set) is the real caller — so
 `@licio/lcap-p2p` is now an `apps/api` workspace dependency (the server-side binding

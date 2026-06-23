@@ -62,6 +62,7 @@ import { isSteward } from '../identity/rbac.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import type { PublishAuditInput, PublishAuditStore } from './publish-audit.js';
+import { aggregateEligibility, type PublishEligibilityResolver } from './publish-eligibility.js';
 import type { LcapPublicPublisher, ReviewedPublishOutcome } from './publisher.js';
 import { repackHeldObjects } from './repack.js';
 import type { BlockPublishReviewStore } from './review-gate.js';
@@ -72,6 +73,7 @@ import {
   getLcapIngestServer,
   getLcapPublicPublisher,
   getLcapPublishAuditStore,
+  getPublishEligibilityResolver,
 } from './service.js';
 import { frameBlobs, getSignalMailbox } from './signaling.js';
 import type { BlockProvenanceStore, ProvenanceTarget } from './takedown-oracle.js';
@@ -753,16 +755,20 @@ async function handleExport(server: LcapIngestServer, body: Uint8Array): Promise
 
 /**
  * Gate-19 (WS-R.15.7 / WS-S.4.4) — the public-block bridge publish request.  The caller
- * supplies the block CID + the content's REAL visibility/encryption/private-room signals
- * (these come from the room/content model, which the offline CAS does not carry); the
- * publisher applies the WS-S.4.4 eligibility guard + the §37.2 decision + the LIVE
- * takedown re-check before any pin.  `republish` (the §22.7 re-pin path) needs only the CID.
+ * supplies the block CID + the content target(s); the server DERIVES the real visibility /
+ * encryption / storage-mode from the content model (`publish-eligibility.ts`) and applies the
+ * WS-S.4.4 eligibility guard + the §37.2 decision + the §22.7 review gate + the LIVE takedown
+ * re-check before any pin.  `republish` (the §22.7 re-pin path) needs only the CID.
+ *
+ * The `visibility`/`encrypted`/`private_room_cid` fields are DEPRECATED + IGNORED: they were
+ * caller-asserted (a steward could otherwise claim a room_only/p2p item as public); the server
+ * no longer trusts them.  They remain optional for wire back-compat only.
  */
 const publishRequestSchema = z.object({
   block_cid: z.string().min(1),
-  visibility: z.enum(['public', 'in_room', 'private']),
-  encrypted: z.boolean(),
-  private_room_cid: z.boolean(),
+  visibility: z.enum(['public', 'in_room', 'private']).optional(),
+  encrypted: z.boolean().optional(),
+  private_room_cid: z.boolean().optional(),
   // The content entity this block was derived from (story/source/evidence) — the SAME
   // coordinate a WS-J takedown / the §22.7 review gate uses.  REQUIRED (Gate-19 finding #38):
   // the publish path records the `block_cid → (type, id)` provenance link UNCONDITIONALLY, so
@@ -872,6 +878,7 @@ async function handlePublish(
   publisher: LcapPublicPublisher | undefined,
   provenance: BlockProvenanceStore,
   audit: PublishAuditStore,
+  resolveEligibility: PublishEligibilityResolver | undefined,
   actorUserId: string | null,
   body: unknown,
 ): Promise<Response> {
@@ -894,12 +901,21 @@ async function handlePublish(
   // later republish resolve this block to its content entity: a takedown actioned at any
   // time after this point halts republication.
   for (const target of targets) await provenance.link(parsed.data.block_cid, target);
+  // SERVER-SIDE derivation (never trust the caller's visibility/encryption signals): a block
+  // is publishable ONLY if EVERY content target resolves to a `public` item in a `server`-
+  // storage room.  An ABSENT resolver is fail-closed — derive non-publishable signals so the
+  // gateway-eligibility guard inside `publish` refuses the pin.
+  const derived = resolveEligibility
+    ? aggregateEligibility(await Promise.all(targets.map((t) => resolveEligibility(t))))
+    : { publishable: false, visibility: 'in_room' as const, privateRoomCid: true };
   const reviewed = await publisher.publish({
     blockCid: parsed.data.block_cid,
     bytes: obj.bytes,
-    visibility: parsed.data.visibility satisfies BlockVisibility,
-    encrypted: parsed.data.encrypted,
-    privateRoomCid: parsed.data.private_room_cid,
+    visibility: derived.visibility satisfies BlockVisibility,
+    // LCAP server-room content is not E2E-encrypted; eligibility is governed by the DERIVED
+    // visibility + storage mode (a non-public/p2p target flips these so `publish` refuses).
+    encrypted: false,
+    privateRoomCid: derived.privateRoomCid,
     targets,
   });
   const { review, takedown } = auditVerdicts(reviewed);
@@ -970,6 +986,7 @@ export function createLcapRoutes(
   provenanceOverride?: BlockProvenanceStore,
   auditOverride?: PublishAuditStore,
   reviewOverride?: BlockPublishReviewStore,
+  eligibilityOverride?: PublishEligibilityResolver,
 ): Hono<AuthEnv> {
   const server = (): LcapIngestServer => override ?? getLcapIngestServer();
   // The publisher is OPT-IN (a node may not run the public bridge); resolved per request like
@@ -979,6 +996,10 @@ export function createLcapRoutes(
   const provenance = (): BlockProvenanceStore =>
     provenanceOverride ?? getLcapBlockProvenanceStore();
   const audit = (): PublishAuditStore => auditOverride ?? getLcapPublishAuditStore();
+  // The server-side publish-eligibility resolver (derives visibility/storage-mode from the
+  // content model); absent ⇒ handlePublish is fail-closed.
+  const eligibility = (): PublishEligibilityResolver | undefined =>
+    eligibilityOverride ?? getPublishEligibilityResolver();
   const review = (): BlockPublishReviewStore => reviewOverride ?? getLcapBlockPublishReviewStore();
   // Gate-19 (finding #39) — publishing onto the public DHT is a high-consequence moderation-
   // sensitive egress, so the two public-bridge routes require a steward role + active MFA
@@ -1068,6 +1089,7 @@ export function createLcapRoutes(
         publisher(),
         provenance(),
         audit(),
+        eligibility(),
         getAuth(c)?.userId ?? null,
         body,
       );
