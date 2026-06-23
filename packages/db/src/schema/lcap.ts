@@ -10,6 +10,7 @@
 import {
   bigint,
   bigserial,
+  index,
   integer,
   pgTable,
   primaryKey,
@@ -18,6 +19,7 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import { bytea } from './_custom.js';
+import { takedownTargetTypeEnum } from './takedown.js';
 
 /** Content-addressed objects (records / proofs / blocks / chunks), keyed by CID. */
 export const lcapObjects = pgTable('lcap_objects', {
@@ -94,9 +96,51 @@ export const lcapRecordClosure = pgTable(
   (t) => [primaryKey({ columns: [t.recordCid, t.relatedCid, t.relation] })],
 );
 
+/**
+ * Gate-19 (WS-R.15.7 / WS-S.4.4) — the `block_cid` ⇄ content-entity provenance map.
+ *
+ * A public LCAP `block_cid` (`CIDv1(raw, sha2-256)` over plaintext) carries no inherent
+ * pointer back to the WS-F content entity (a story / source / evidence card) it was
+ * derived from — yet a WS-J takedown targets exactly such an entity by
+ * `(target_type, target_id)` (see `takedown_requests`).  Without a linkage, the IPFS
+ * public-block bridge cannot answer the only question the §22.7 republication halt needs:
+ * "is THIS block's source content currently taken down?"  This table is that linkage: one
+ * row per `(block_cid, target_type, target_id)` so the `DrizzleTakedownOracle` joins a
+ * block CID to its content entity and then to the live `takedown_requests` status.
+ *
+ * `target_type` REUSES the `takedown_requests` enum (story / source / evidence) so the
+ * oracle's join is type-aligned (same enum, same uuid id) — a block's provenance target and
+ * a takedown's target are the same coordinate.  A block may derive from more than one
+ * entity (e.g. an evidence card embedded in a story), so the PK spans all three columns and
+ * the same `block_cid` may appear with multiple targets; ANY in-force takedown over ANY of
+ * its targets halts (re)publication (fail-closed union).  No FK into the content tables: the
+ * offline plane is CID-addressed and isolated from the relational model (matching the rest
+ * of `lcap.*`), and a content row's hard purge must never cascade-delete the provenance the
+ * takedown halt relies on — the entity id is the durable coordinate the takedown also keys.
+ */
+export const lcapBlockProvenance = pgTable(
+  'lcap_block_provenance',
+  {
+    blockCid: text('block_cid').notNull(),
+    targetType: takedownTargetTypeEnum('target_type').notNull(),
+    /** The content entity id (story/source/evidence) — the same coordinate a takedown targets. */
+    targetId: text('target_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.blockCid, t.targetType, t.targetId] }),
+    // The oracle's hot path: resolve a block CID to its targets, then join the takedowns.
+    index('lcap_block_provenance_block_idx').on(t.blockCid),
+    // The reverse direction: when a takedown is actioned, find every block it taints.
+    index('lcap_block_provenance_target_idx').on(t.targetType, t.targetId),
+  ],
+);
+
 export type LcapObjectRow = typeof lcapObjects.$inferSelect;
 export type LcapAcceptanceRow = typeof lcapAcceptance.$inferSelect;
 export type LcapCapabilityUsageRow = typeof lcapCapabilityUsage.$inferSelect;
 export type LcapDeviceSeqRow = typeof lcapDeviceSeq.$inferSelect;
 export type LcapForkEvidenceRow = typeof lcapForkEvidence.$inferSelect;
 export type LcapRecordClosureRow = typeof lcapRecordClosure.$inferSelect;
+export type LcapBlockProvenanceRow = typeof lcapBlockProvenance.$inferSelect;
+export type LcapBlockProvenanceInsert = typeof lcapBlockProvenance.$inferInsert;

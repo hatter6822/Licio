@@ -55,12 +55,20 @@ import {
   syncPulseV2Schema,
   type WantRequestV2,
 } from '@licio/lcap';
+import type { BlockVisibility } from '@licio/lcap-p2p';
 import { Hono } from 'hono';
+import { z } from 'zod';
 import { rateLimit } from '../lib/rate-limit.js';
+import type { LcapPublicPublisher } from './publisher.js';
 import { repackHeldObjects } from './repack.js';
 import type { CommitRecordInput, LcapIngestServer } from './server-ingest.js';
-import { getLcapIngestServer } from './service.js';
+import {
+  getLcapBlockProvenanceStore,
+  getLcapIngestServer,
+  getLcapPublicPublisher,
+} from './service.js';
 import { frameBlobs, getSignalMailbox } from './signaling.js';
+import type { BlockProvenanceStore } from './takedown-oracle.js';
 
 type ContentKind = 'record' | 'proof' | 'block' | 'chunk';
 
@@ -738,13 +746,114 @@ async function handleExport(server: LcapIngestServer, body: Uint8Array): Promise
 }
 
 /**
+ * Gate-19 (WS-R.15.7 / WS-S.4.4) — the public-block bridge publish request.  The caller
+ * supplies the block CID + the content's REAL visibility/encryption/private-room signals
+ * (these come from the room/content model, which the offline CAS does not carry); the
+ * publisher applies the WS-S.4.4 eligibility guard + the §37.2 decision + the LIVE
+ * takedown re-check before any pin.  `republish` (the §22.7 re-pin path) needs only the CID.
+ */
+const publishRequestSchema = z.object({
+  block_cid: z.string().min(1),
+  visibility: z.enum(['public', 'in_room', 'private']),
+  encrypted: z.boolean(),
+  private_room_cid: z.boolean(),
+  // The content entity this block was derived from (story/source/evidence) — the SAME
+  // coordinate a WS-J takedown targets.  When present, the publish path records the
+  // `block_cid → (type, id)` provenance link, so a later actioned takedown over that entity
+  // halts this block's republication.  Optional: a block with no known content target is
+  // still publishable (the oracle returns "not taken down" for an unknown block).
+  content_target: z
+    .object({
+      target_type: z.enum(['story', 'source', 'evidence']),
+      target_id: z.string().min(1),
+    })
+    .optional(),
+});
+const republishRequestSchema = z.object({ block_cid: z.string().min(1) });
+
+/**
+ * `POST /api/lcap/v2/public-bridge/{publish,republish}`: the REAL caller of the IPFS
+ * public-block bridge.  Resolves the block's held bytes from the CAS, then runs the
+ * defense-in-depth publish (or the strict re-pin), so a taken-down (or unreadable-state)
+ * block is NEVER (re)published.  Returns the bridge's auditable outcome.  503 when the
+ * bridge is not configured (no gateway/pinning/DB — the platform does not run a public
+ * bridge); 404 when the CAS does not hold the block; 400 on a malformed request.
+ */
+async function handlePublish(
+  server: LcapIngestServer,
+  publisher: LcapPublicPublisher | undefined,
+  provenance: BlockProvenanceStore,
+  body: unknown,
+): Promise<Response> {
+  if (!publisher) return json(503, { error: 'public_bridge_not_configured' });
+  const parsed = publishRequestSchema.safeParse(body);
+  if (!parsed.success) return json(400, { error: 'invalid_publish_request' });
+  try {
+    parseCid(parsed.data.block_cid);
+  } catch {
+    return json(400, { error: 'bad_cid' });
+  }
+  const obj = await server.getObject(parsed.data.block_cid);
+  if (obj?.kind !== 'block') return json(404, { error: 'not_found' });
+  // Record the block↔content provenance BEFORE the publish, so the publish-time takedown
+  // re-check (and every later republish) resolves this block to its content entity: a
+  // takedown actioned at any time after this point will halt republication.
+  const target = parsed.data.content_target;
+  if (target) {
+    await provenance.link(parsed.data.block_cid, {
+      targetType: target.target_type,
+      targetId: target.target_id,
+    });
+  }
+  const outcome = await publisher.publish({
+    blockCid: parsed.data.block_cid,
+    bytes: obj.bytes,
+    visibility: parsed.data.visibility satisfies BlockVisibility,
+    encrypted: parsed.data.encrypted,
+    privateRoomCid: parsed.data.private_room_cid,
+  });
+  // A refused publish is a well-formed 200 carrying the auditable reason (the bridge's gate
+  // is the decision, not an error); the only HTTP errors are the 503/404/400 above.
+  return json(200, outcome);
+}
+
+async function handleRepublish(
+  server: LcapIngestServer,
+  publisher: LcapPublicPublisher | undefined,
+  body: unknown,
+): Promise<Response> {
+  if (!publisher) return json(503, { error: 'public_bridge_not_configured' });
+  const parsed = republishRequestSchema.safeParse(body);
+  if (!parsed.success) return json(400, { error: 'invalid_republish_request' });
+  try {
+    parseCid(parsed.data.block_cid);
+  } catch {
+    return json(400, { error: 'bad_cid' });
+  }
+  const obj = await server.getObject(parsed.data.block_cid);
+  if (obj?.kind !== 'block') return json(404, { error: 'not_found' });
+  const outcome = await publisher.republish(parsed.data.block_cid, obj.bytes);
+  return json(200, outcome);
+}
+
+/**
  * The §29 LCAP routes.  Mounted at `/api/lcap/v2` (see `app.ts`).  The server is
  * resolved PER REQUEST (not at mount): the default singleton — which may bind a
  * Postgres client — is constructed only when a request actually arrives, so merely
  * building the app never opens a DB connection.  Tests pass an explicit override.
  */
-export function createLcapRoutes(override?: LcapIngestServer): Hono {
+export function createLcapRoutes(
+  override?: LcapIngestServer,
+  publisherOverride?: LcapPublicPublisher,
+  provenanceOverride?: BlockProvenanceStore,
+): Hono {
   const server = (): LcapIngestServer => override ?? getLcapIngestServer();
+  // The publisher is OPT-IN (a node may not run the public bridge); resolved per request like
+  // the server.  A test passes an explicit override; otherwise the env-gated factory decides.
+  const publisher = (): LcapPublicPublisher | undefined =>
+    publisherOverride ?? getLcapPublicPublisher();
+  const provenance = (): BlockProvenanceStore =>
+    provenanceOverride ?? getLcapBlockProvenanceStore();
   const app = new Hono();
   const read =
     (kind: ContentKind) =>
@@ -797,6 +906,28 @@ export function createLcapRoutes(override?: LcapIngestServer): Hono {
     if (declaredLengthExceeds(c, SERVER_CAPS.maxPackBytes))
       return json(413, { error: 'oversized_request' });
     return handleExchange(server(), new Uint8Array(await c.req.arrayBuffer()));
+  });
+  // Gate-19 (WS-R.15.7 / WS-S.4.4) — the REAL public-block bridge (re)publish entry points.
+  // A state-changing operator/review-gated POST (it pins a block onto the public DHT), so it
+  // is NOT in the CSRF-exempt set — a session-bearing flow keeps the double-submit token —
+  // and the publisher re-checks the LIVE takedown state on EVERY (re)publish (fail-closed).
+  app.post('/public-bridge/publish', rateLimit({ limit: 30, windowMs: 60_000 }), async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return json(400, { error: 'invalid_publish_request' });
+    }
+    return handlePublish(server(), publisher(), provenance(), body);
+  });
+  app.post('/public-bridge/republish', rateLimit({ limit: 30, windowMs: 60_000 }), async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return json(400, { error: 'invalid_republish_request' });
+    }
+    return handleRepublish(server(), publisher(), body);
   });
   // §29 WebRTC server-blind signaling rendezvous (WS-R.15.6a): route an OPAQUE sealed
   // blob to an opaque recipient key. The body is never decoded here (server-blindness);

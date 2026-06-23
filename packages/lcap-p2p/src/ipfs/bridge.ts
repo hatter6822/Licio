@@ -84,6 +84,15 @@ export type PublishOutcome =
         | 'no_takedown_oracle';
     };
 
+/**
+ * The `body` type `fetch` accepts in THIS lib set, derived from `typeof fetch` itself rather
+ * than the DOM-only literal `BodyInit`.  Under the DOM lib this resolves to `BodyInit`; under
+ * `@types/node` (a node-only consumer re-typechecking this source via `exports.types`) it
+ * resolves to undici's body type.  Deriving it keeps the pin body cast portable across both —
+ * neither the DOM-only name nor a shared-buffer mismatch crosses the workspace boundary.
+ */
+type FetchBody = NonNullable<NonNullable<Parameters<typeof fetch>[1]>['body']>;
+
 export class IpfsBridge {
   private readonly fetchFn: typeof fetch;
   constructor(private readonly config: IpfsBridgeConfig) {
@@ -182,9 +191,11 @@ export class IpfsBridge {
     if (!(await verifyCid(blockCid, bytes))) return { ok: false, reason: 'cid_mismatch' };
     const ipfsCid = ipfsCidForBlockCid(blockCid);
     try {
+      // `bytes` (a `Uint8Array`) is a valid `fetch` request body; cast to the lib-derived
+      // `FetchBody` so no DOM-only `BodyInit` name crosses the boundary (see its docstring).
       const response = await this.fetchFn(this.config.pinningUrl, {
         method: 'POST',
-        body: bytes as BodyInit,
+        body: bytes as unknown as FetchBody,
         headers: { 'content-type': 'application/octet-stream', 'x-ipfs-cid': ipfsCid },
       });
       if (!response.ok) return { ok: false, reason: 'pin_error' };

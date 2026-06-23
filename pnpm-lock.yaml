@@ -58,6 +58,9 @@ importers:
       '@licio/lcap':
         specifier: workspace:*
         version: link:../../packages/lcap
+      '@licio/lcap-p2p':
+        specifier: workspace:*
+        version: link:../../packages/lcap-p2p
       '@licio/ranking':
         specifier: workspace:*
         version: link:../../packages/ranking
