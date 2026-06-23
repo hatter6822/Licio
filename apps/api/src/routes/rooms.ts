@@ -706,6 +706,7 @@ export function createRoomsRoutes() {
                 ...(item.parentRef !== undefined ? { parentRef: item.parentRef } : {}),
               })),
               frozen: outcome.frozen,
+              migrated_to_room_id: outcome.migratedToRoomId,
             }),
           );
         },

@@ -294,6 +294,17 @@ export interface ContributionStore {
   ): Promise<ContributionRecord[]>;
   /** WS-D.2.4 anonymize hook: tombstone the author on every row. */
   anonymizeUser(userId: string): Promise<number>;
+  /**
+   * WS-S.9 (PRIVATE_SPEC §24.2, phase 6 — `purge`) — IRREVERSIBLY hard-delete
+   * EVERY contribution (any author, any moderation state) for the given threads,
+   * with its co-created evidence card, edit history, and `client_draft_id` dedup
+   * mapping (mirroring {@link ContributionStore.purgeForRollback} but room-wide).
+   * Unlike `anonymizeUser` (which detaches only ONE user's authorship), this
+   * removes ALL members' content for a migrated room — the §24.2 minimization the
+   * migration wizard promises. Returns the number of rows removed. Idempotent: a
+   * re-run over already-purged threads removes nothing and returns 0.
+   */
+  purgeByThreads(threadIds: readonly string[]): Promise<number>;
   /** Lens-tagged contributions for a set of threads (WS-G.2.4). */
   listLensTagged(threadIds: readonly string[], limit: number): Promise<ContributionRecord[]>;
   clear(): Promise<void>;
@@ -382,6 +393,9 @@ export interface LensStore {
   insert(record: Omit<LensRecord, 'createdAt' | 'updatedAt'>): Promise<LensCreateOutcome>;
   getById(lensId: string): Promise<LensRecord | null>;
   listByRoom(roomId: string): Promise<LensRecord[]>;
+  /** WS-S.9 (§24.2 phase 6 `purge`) — IRREVERSIBLY delete every lens of a room.
+   *  Returns the number removed; idempotent. */
+  deleteByRoom(roomId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -389,6 +403,10 @@ export interface SummaryStore {
   insert(record: Omit<SummaryRecord, 'createdAt' | 'updatedAt'>): Promise<SummaryRecord>;
   getById(summaryId: string): Promise<SummaryRecord | null>;
   listByThread(threadId: string): Promise<SummaryRecord[]>;
+  /** WS-S.9 (§24.2 phase 6 `purge`) — IRREVERSIBLY delete every derived summary
+   *  of the given threads (the §24.2 "derived summaries" category). Returns the
+   *  number removed; idempotent. */
+  deleteByThreads(threadIds: readonly string[]): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -408,6 +426,14 @@ export interface UploadStore {
   /** All of a user's upload records (DSAR export, §19.3/GDPR Art. 15). */
   listByOwner(userId: string): Promise<UploadRecord[]>;
   anonymizeUser(userId: string): Promise<void>;
+  /**
+   * WS-S.9 (§24.2 phase 6 `purge`) — IRREVERSIBLY remove the BYTES and the
+   * metadata record of every upload owned by the given stories (the §24.2 "media
+   * uploads" category). Unlike `anonymizeUser` (which only NULLs `ownerUserId`,
+   * leaving the bytes), this destroys the media itself. Returns the number of
+   * upload records removed; idempotent.
+   */
+  purgeByStories(storyIds: readonly string[]): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -715,6 +741,26 @@ export class InMemoryContributionStore implements ContributionStore {
     return count;
   }
 
+  async purgeByThreads(threadIds: readonly string[]): Promise<number> {
+    const wanted = new Set(threadIds);
+    if (wanted.size === 0) return 0;
+    const doomed = [...this.#rows.values()].filter((row) => wanted.has(row.threadId));
+    for (const row of doomed) {
+      // Reverse every trace of the contribution: the row, its edit history, the
+      // client_draft_id dedup mapping, and its co-created evidence card.
+      this.#rows.delete(row.contributionId);
+      this.#edits.delete(row.contributionId);
+      if (row.userId !== null) {
+        this.#byDraft.delete(this.#draftKey(row.userId, row.clientDraftId));
+      }
+      const evidenceId = row.metadata.evidence_id;
+      if (typeof evidenceId === 'string' && this.#evidenceSink) {
+        await this.#evidenceSink.removeForumCard(evidenceId);
+      }
+    }
+    return doomed.length;
+  }
+
   async listLensTagged(threadIds: readonly string[], limit: number): Promise<ContributionRecord[]> {
     const wanted = new Set(threadIds);
     return [...this.#rows.values()]
@@ -988,6 +1034,17 @@ export class InMemoryLensStore implements LensStore {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
+  async deleteByRoom(roomId: string): Promise<number> {
+    let count = 0;
+    for (const lens of [...this.#rows.values()]) {
+      if (lens.roomId === roomId) {
+        this.#rows.delete(lens.lensId);
+        count += 1;
+      }
+    }
+    return count;
+  }
+
   async clear(): Promise<void> {
     this.#rows.clear();
   }
@@ -1023,6 +1080,19 @@ export class InMemorySummaryStore implements SummaryStore {
     return [...this.#rows.values()]
       .filter((row) => row.threadId === threadId)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  async deleteByThreads(threadIds: readonly string[]): Promise<number> {
+    const wanted = new Set(threadIds);
+    if (wanted.size === 0) return 0;
+    let count = 0;
+    for (const row of [...this.#rows.values()]) {
+      if (wanted.has(row.threadId)) {
+        this.#rows.delete(row.summaryId);
+        count += 1;
+      }
+    }
+    return count;
   }
 
   async clear(): Promise<void> {
@@ -1081,6 +1151,21 @@ export class InMemoryUploadStore implements UploadStore {
     for (const record of this.#records.values()) {
       if (record.ownerUserId === userId) record.ownerUserId = null;
     }
+  }
+
+  async purgeByStories(storyIds: readonly string[]): Promise<number> {
+    const wanted = new Set(storyIds);
+    if (wanted.size === 0) return 0;
+    let count = 0;
+    for (const record of [...this.#records.values()]) {
+      if (record.ownerStoryId !== null && wanted.has(record.ownerStoryId)) {
+        // Destroy BOTH the metadata record and the bytes (the media itself).
+        this.#records.delete(record.uploadId);
+        this.#bytes.delete(record.uploadId);
+        count += 1;
+      }
+    }
+    return count;
   }
 
   async clear(): Promise<void> {

@@ -39,18 +39,21 @@ import { MigrationWizard } from './MigrationWizard.js';
 
 const SOURCE_ROOM = '00000000-0000-4000-8000-000000000001';
 
-function exportResponse() {
+function exportResponse(over: Record<string, unknown> = {}) {
   return {
     room_id: SOURCE_ROOM,
     room_name: 'Old Members Room',
     room_label: ROOM_CLASS_UI_LABELS.restricted_server,
     frozen: false,
+    migrated_to_room_id: null,
     items: [{ id: 'story-1', kind: 'story' as const, title: 'Reservoir bond', threadRef: 't1' }],
+    ...over,
   };
 }
 
 afterEach(async () => {
   vi.clearAllMocks();
+  globalThis.localStorage?.clear();
   await new Promise<void>((resolve) => {
     const req = indexedDB.deleteDatabase(PRIVATE_P2P_DB_NAME);
     req.onsuccess = () => resolve();
@@ -96,6 +99,7 @@ describe('MigrationWizard', () => {
     reauthorIntoPrivateRoom.mockResolvedValue({
       stories: 1,
       contributions: 0,
+      skipped: 0,
       disclosure: 'Imported history was previously server-hosted.',
     });
     freezeMigratedRoom.mockResolvedValue({
@@ -135,6 +139,49 @@ describe('MigrationWizard', () => {
     await user.click(screen.getByRole('button', { name: /finish migration/i }));
     await waitFor(() => expect(purgeMigratedRoom).toHaveBeenCalledWith(SOURCE_ROOM, 'anonymize'));
     await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
+  });
+
+  // --- WS-S.9 resumability (finding #54) -------------------------------------
+  it('surfaces an honest resume-elsewhere notice when the destination is on another device', async () => {
+    // The server says the source is frozen + points at a destination, but this
+    // device's local store has no copy (PrivateRoomSession.load → null), so the
+    // wizard must NOT create a second room — it shows the resume-elsewhere notice.
+    fetchMigrationExport.mockResolvedValue(
+      exportResponse({ frozen: true, migrated_to_room_id: '00000000-0000-4000-8000-0000000000aa' }),
+    );
+    render(<MigrationWizard sourceRoomId={SOURCE_ROOM} />);
+
+    expect(await screen.findByText(/started on another device/i)).toBeInTheDocument();
+    // The destructive freeze button is NOT offered (we never re-run phase 5/6).
+    expect(screen.queryByRole('button', { name: /freeze the old room/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /finish migration/i })).toBeNull();
+  });
+
+  it('resumes a pre-create flow from persisted progress (no re-acknowledge needed)', async () => {
+    // A reload after acknowledging but before creating the destination: the
+    // persisted progress restores the ack so the wizard resumes mid-flow.
+    globalThis.localStorage.setItem(
+      `licio:migration:progress:${SOURCE_ROOM}`,
+      JSON.stringify({
+        version: 1,
+        state: {
+          sourceRoomId: SOURCE_ROOM,
+          phase: 1,
+          destinationRoomId: null,
+          mode: 'full',
+          purgeMode: 'anonymize',
+          acked: true,
+        },
+      }),
+    );
+    fetchMigrationExport.mockResolvedValue(exportResponse());
+    render(<MigrationWizard sourceRoomId={SOURCE_ROOM} />);
+
+    // Resumed at phase 2 (create the destination) — the create button is shown,
+    // the phase-1 ack checkbox is not the current step.
+    expect(
+      await screen.findByRole('button', { name: /create private p2p room/i }),
+    ).toBeInTheDocument();
   });
 
   it('has no accessibility violations', async () => {

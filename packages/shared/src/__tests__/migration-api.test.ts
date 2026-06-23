@@ -39,16 +39,42 @@ describe('WS-S.9 migration wire contracts', () => {
     expect('score' in stripped).toBe(false);
   });
 
-  it('the export response carries the room label + items', () => {
+  it('the export response carries the room label + items + the resume destination', () => {
     const parsed = migrationExportResponseSchema.parse({
       room_id: '00000000-0000-4000-8000-000000000001',
       room_name: 'Old Room',
       room_label: 'Members-only server room',
       frozen: false,
+      migrated_to_room_id: null,
       items: [{ id: 's1', kind: 'story', title: 'T' }],
     });
     expect(parsed.items).toHaveLength(1);
     expect(parsed.frozen).toBe(false);
+    expect(parsed.migrated_to_room_id).toBe(null);
+  });
+
+  it('the export response carries the recorded resume destination once frozen', () => {
+    const dest = '00000000-0000-4000-8000-0000000000aa';
+    const parsed = migrationExportResponseSchema.parse({
+      room_id: '00000000-0000-4000-8000-000000000001',
+      room_name: 'Old Room',
+      room_label: 'Members-only server room',
+      frozen: true,
+      migrated_to_room_id: dest,
+      items: [],
+    });
+    expect(parsed.migrated_to_room_id).toBe(dest);
+    // The resume id is a UUID, never an arbitrary string (never an FK).
+    expect(
+      migrationExportResponseSchema.safeParse({
+        room_id: '00000000-0000-4000-8000-000000000001',
+        room_name: 'Old Room',
+        room_label: 'Members-only server room',
+        frozen: true,
+        migrated_to_room_id: 'not-a-uuid',
+        items: [],
+      }).success,
+    ).toBe(false);
   });
 
   it('the freeze response forces frozen=true', () => {

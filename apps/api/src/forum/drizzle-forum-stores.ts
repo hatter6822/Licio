@@ -479,6 +479,28 @@ export class DrizzleContributionStore implements ContributionStore {
     return rows.length;
   }
 
+  async purgeByThreads(threadIds: readonly string[]): Promise<number> {
+    if (threadIds.length === 0) return 0;
+    // IRREVERSIBLE room-wide purge (§24.2 phase 6): drop every contribution of
+    // the given threads (any author/state) WITH its co-created evidence card and
+    // edit history. Single transaction so a partial failure leaves nothing
+    // half-removed. Evidence cards reference the contribution by id (no FK
+    // cascade); edit-history rows DO cascade off the contribution delete.
+    return this.#db.transaction(async (tx) => {
+      const ids = await tx
+        .select({ id: contributionsTable.contributionId })
+        .from(contributionsTable)
+        .where(inArray(contributionsTable.threadId, [...threadIds]));
+      const contributionIds = ids.map((row) => row.id);
+      if (contributionIds.length === 0) return 0;
+      await tx.delete(evidenceTable).where(inArray(evidenceTable.contributionId, contributionIds));
+      await tx
+        .delete(contributionsTable)
+        .where(inArray(contributionsTable.threadId, [...threadIds]));
+      return contributionIds.length;
+    });
+  }
+
   async listLensTagged(threadIds: readonly string[], limit: number): Promise<ContributionRecord[]> {
     if (threadIds.length === 0) return [];
     const rows = await this.#db
@@ -923,6 +945,14 @@ export class DrizzleLensStore implements LensStore {
     return rows.map((row) => this.#toLens(row));
   }
 
+  async deleteByRoom(roomId: string): Promise<number> {
+    const rows = await this.#db
+      .delete(lensesTable)
+      .where(eq(lensesTable.roomId, roomId))
+      .returning({ id: lensesTable.lensId });
+    return rows.length;
+  }
+
   async clear(): Promise<void> {
     await this.#db.delete(lensesTable);
   }
@@ -997,6 +1027,15 @@ export class DrizzleSummaryStore implements SummaryStore {
       .where(eq(summariesTable.threadId, threadId))
       .orderBy(asc(summariesTable.createdAt));
     return rows.map((row) => this.#toSummary(row));
+  }
+
+  async deleteByThreads(threadIds: readonly string[]): Promise<number> {
+    if (threadIds.length === 0) return 0;
+    const rows = await this.#db
+      .delete(summariesTable)
+      .where(inArray(summariesTable.threadId, [...threadIds]))
+      .returning({ id: summariesTable.summaryId });
+    return rows.length;
   }
 
   async clear(): Promise<void> {
@@ -1145,6 +1184,34 @@ export class DrizzleUploadStore implements UploadStore {
       .update(uploadsTable)
       .set({ ownerUserId: null })
       .where(eq(uploadsTable.ownerUserId, userId));
+  }
+
+  async purgeByStories(storyIds: readonly string[]): Promise<number> {
+    if (storyIds.length === 0) return 0;
+    // Read the doomed upload rows first so the BYTES (S3 object or the
+    // restart-volatile in-memory fallback) are destroyed alongside the metadata.
+    const rows = await this.#db
+      .select()
+      .from(uploadsTable)
+      .where(inArray(uploadsTable.ownerStoryId, [...storyIds]));
+    if (rows.length === 0) return 0;
+    for (const row of rows) {
+      if (this.#s3) {
+        // A failed/absent object delete must not abort the purge; S3 DELETE is
+        // idempotent and a 404 is success-equivalent for our intent (bytes gone).
+        const res = await this.#s3Request('DELETE', this.#objectUrl(row.storageRef));
+        if (!res.ok && res.status !== 404) {
+          throw new Error(`S3 upload delete failed: ${res.status}`);
+        }
+      } else {
+        this.#memoryBytes.delete(row.uploadId);
+      }
+    }
+    const deleted = await this.#db
+      .delete(uploadsTable)
+      .where(inArray(uploadsTable.ownerStoryId, [...storyIds]))
+      .returning({ id: uploadsTable.uploadId });
+    return deleted.length;
   }
 
   async clear(): Promise<void> {

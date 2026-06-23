@@ -29,6 +29,7 @@ function exportFixture(): MigrationExportResponse {
     room_name: 'Old Members Room',
     room_label: 'Members-only server room',
     frozen: false,
+    migrated_to_room_id: null,
     items: [
       { id: 'story-1', kind: 'story', title: 'Reservoir bond', threadRef: 'thread-1' },
       {
@@ -105,5 +106,67 @@ describe('WS-S.9 reauthorIntoPrivateRoom', () => {
     expect(result.contributions).toBe(0);
     expect(session.state().contributions.size).toBe(0);
     expect(result.disclosure.length).toBeGreaterThan(0);
+  });
+
+  // --- WS-S.9 idempotency (finding #53) --------------------------------------
+  it('a plain re-run authors nothing new and keeps exactly one copy of each item', async () => {
+    const session = await freshSession();
+    const first = await reauthorIntoPrivateRoom({ session, export: exportFixture(), mode: 'full' });
+    expect(first.stories).toBe(2);
+    expect(first.contributions).toBe(1);
+
+    // Re-running the SAME migration (e.g. the steward re-clicks "Import") must
+    // converge to one copy — every item skipped, nothing duplicated.
+    const second = await reauthorIntoPrivateRoom({
+      session,
+      export: exportFixture(),
+      mode: 'full',
+    });
+    expect(second.stories).toBe(0);
+    expect(second.contributions).toBe(0);
+    expect(second.skipped).toBe(3);
+    expect(session.state().stories.size).toBe(2);
+    expect(session.state().contributions.size).toBe(1);
+  });
+
+  it('a mid-loop failure + retry converges to ONE copy of each item (not duplicates)', async () => {
+    const session = await freshSession();
+    // Inject a transient failure on the FIRST comment author (after both stories
+    // are already authored), simulating an IndexedDB/crypto hiccup mid-loop.
+    const realPostComment = session.postComment.bind(session);
+    let throwOnce = true;
+    session.postComment = async (input) => {
+      if (throwOnce) {
+        throwOnce = false;
+        throw new Error('transient mid-loop failure');
+      }
+      return realPostComment(input);
+    };
+
+    await expect(
+      reauthorIntoPrivateRoom({ session, export: exportFixture(), mode: 'full' }),
+    ).rejects.toThrow('transient mid-loop failure');
+
+    // The two stories landed; the comment did not. State must hold no duplicates.
+    expect(session.state().stories.size).toBe(2);
+    expect(session.state().contributions.size).toBe(0);
+
+    // Retry the WHOLE migration: stories are skipped (already present), and the
+    // comment is authored exactly once — never re-authoring the prefix.
+    const retry = await reauthorIntoPrivateRoom({ session, export: exportFixture(), mode: 'full' });
+    expect(retry.stories).toBe(0); // both skipped
+    expect(retry.skipped).toBe(2); // the two already-authored stories
+    expect(retry.contributions).toBe(1); // the comment, now authored
+    expect(session.state().stories.size).toBe(2);
+    expect(session.state().contributions.size).toBe(1);
+  });
+
+  it('the same source story maps to a STABLE thread id across runs (deterministic remap)', async () => {
+    const session = await freshSession();
+    await reauthorIntoPrivateRoom({ session, export: exportFixture(), mode: 'full' });
+    const threadIds = [...session.state().threads.keys()].sort();
+    // A second run reuses the SAME deterministic threads — none are recreated.
+    await reauthorIntoPrivateRoom({ session, export: exportFixture(), mode: 'full' });
+    expect([...session.state().threads.keys()].sort()).toStrictEqual(threadIds);
   });
 });

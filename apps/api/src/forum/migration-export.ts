@@ -18,8 +18,18 @@
 //     (fail-closed, enforced in ingestion/submission.ts + forum/contributions.ts).
 //
 //   • purgeRoomForMigration   (phase 6) — minimize the OLD server content per the
-//     chosen scope: `purge` takes the stories down + tombstones the steward's own
-//     contributions (the WS-Q DSAR machinery), `anonymize` detaches authors only.
+//     chosen scope.  `purge` IRREVERSIBLY removes the room's content across the
+//     §24.2 categories — stories (taken down + their archived body excerpt nulled),
+//     threads (terminally `archived`), ALL contributions of every member (hard-
+//     deleted with their evidence cards + edit history + draft-dedup keys), derived
+//     summaries (hard-deleted), media uploads (records AND bytes destroyed), lenses
+//     (hard-deleted), and — derived from those — the search documents (a hidden
+//     story + deleted contributions vanish from the index) — leaving only the
+//     server-retained historical/audit artifacts the §24.2 closing sentence
+//     mandates be disclosed (the immutable story id/title row, the append-only
+//     content events, the ranking decision logs, and the review-queue history,
+//     none of which can reconstruct the purged bodies).  `anonymize` keeps the
+//     content readable but detaches the steward's authorship (the WS-Q DSAR path).
 //     `purge` is GATED on the room already being frozen (phase 5 first) so the §8
 //     disclosure stays honest — content cannot vanish while the room still accepts
 //     writes.  A P2P room (no server content) and a non-existent room both refuse.
@@ -58,6 +68,8 @@ export type MigrationExportResult =
       roomId: string;
       roomName: string;
       frozen: boolean;
+      /** WS-S.9 resumability — the OPAQUE P2P destination recorded at freeze. */
+      migratedToRoomId: string | null;
       items: MigrationSourceItem[];
     }
   | { ok: false; status: 404; code: 'not_found'; message: string }
@@ -138,7 +150,14 @@ export async function exportRoomForMigration(
     story_count: stories.length,
     item_count: items.length,
   });
-  return { ok: true, roomId, roomName: room.name, frozen: room.frozen, items };
+  return {
+    ok: true,
+    roomId,
+    roomName: room.name,
+    frozen: room.frozen,
+    migratedToRoomId: room.migratedToRoomId,
+    items,
+  };
 }
 
 /** Read a thread's PUBLISHED contributions in causal (created-at) order. */
@@ -202,19 +221,65 @@ export async function freezeRoomForMigration(
   return { ok: true, roomId, migratedToRoomId: frozen.migratedToRoomId };
 }
 
+/** The §24.2 categories minimized by a `purge`, reported honestly to the
+ *  steward (counts only; never UGC bodies). */
+export interface MigrationPurgeCounts {
+  /** Stories taken down + their archived excerpt nulled. */
+  stories: number;
+  /** Threads terminally archived. */
+  threads: number;
+  /** Contributions hard-deleted (ALL members', any state). */
+  contributions: number;
+  /** Derived summaries hard-deleted. */
+  summaries: number;
+  /** Media uploads (records + bytes) destroyed. */
+  uploads: number;
+  /** Lenses hard-deleted. */
+  lenses: number;
+}
+
 export type MigrationPurgeResult =
-  | { ok: true; roomId: string; mode: 'purge' | 'anonymize'; storiesAffected: number }
+  | {
+      ok: true;
+      roomId: string;
+      mode: 'purge' | 'anonymize';
+      /** Backwards-compatible: the story count (taken down or anonymized). */
+      storiesAffected: number;
+      /** Per-category §24.2 minimization counts (purge mode; zeros for anonymize). */
+      counts: MigrationPurgeCounts;
+    }
   | { ok: false; status: 404; code: 'not_found'; message: string }
   | { ok: false; status: 409; code: 'room_not_frozen'; message: string }
   | { ok: false; status: 409; code: 'p2p_room_not_purgeable'; message: string };
 
+const EMPTY_COUNTS: MigrationPurgeCounts = {
+  stories: 0,
+  threads: 0,
+  contributions: 0,
+  summaries: 0,
+  uploads: 0,
+  lenses: 0,
+};
+
 /**
- * Phase 6 — minimize the old server content.  `purge` takes every story in the
- * room DOWN (the WS-Q takedown hidden_state, mirrored on the WS-G thread state is
- * the steward console's job; here the story-level `hiddenState='takedown'` is the
- * distribution + read kill) and tombstones the actor's own authored content;
- * `anonymize` detaches authors only.  Gated on the room being FROZEN first
- * (fail-closed) so the §8 disclosure stays honest.
+ * Phase 6 — minimize the old server content.
+ *
+ * `purge` IRREVERSIBLY removes the room's content across the §24.2 categories
+ * (stories taken down + body excerpt nulled; threads terminally archived; ALL
+ * members' contributions + their evidence cards + edit history hard-deleted;
+ * derived summaries hard-deleted; media uploads — records AND bytes — destroyed;
+ * lenses hard-deleted; the search index follows, since it is DERIVED from the
+ * now-hidden stories + deleted contributions).  What remains is only the
+ * server-retained historical/audit artifacts the §24.2 closing sentence requires
+ * be disclosed (the immutable story id/title row, the append-only content events,
+ * the ranking decision logs, and the review-queue history) — none of which can
+ * reconstruct the purged bodies.  `anonymize` keeps the content readable but
+ * detaches the steward's authorship only (the WS-Q DSAR path).
+ *
+ * GATED on the room being FROZEN first (fail-closed) so the §8 disclosure stays
+ * honest — content cannot vanish while the room still accepts writes.  Idempotent:
+ * a re-run over already-purged content removes nothing.  Paged over the room's
+ * stories so a large room is bounded.
  */
 export async function purgeRoomForMigration(
   forum: ForumServices,
@@ -248,35 +313,80 @@ export async function purgeRoomForMigration(
     };
   }
 
-  let storiesAffected = 0;
-  if (mode === 'purge') {
-    // Take every (non-already-hidden) story in the room down — removed from
-    // distribution + reads exactly like a takedown.  Paged + idempotent: a
-    // re-run skips already-hidden stories.
-    for (;;) {
-      const batch = await ingestion.stories.listByRoom(roomId, MIGRATION_SWEEP_LIMIT);
-      const live = batch.filter((story) => story.hiddenState === null);
-      if (live.length === 0) break;
-      for (const story of live) {
-        await ingestion.stories.update(story.storyId, { hiddenState: 'takedown' });
-        storiesAffected += 1;
-      }
-      if (batch.length < MIGRATION_SWEEP_LIMIT) break;
-    }
-    // Tombstone the steward's OWN authored content across both tiers (the WS-Q
-    // DSAR anonymize machinery): a steward purging the room they founded removes
-    // their authorship from what remains.  (Per-member purge is each member's own
-    // DSAR right — the steward cannot tombstone other members' authorship.)
+  if (mode === 'anonymize') {
+    // anonymize: detach the steward's authorship; all content stays readable.
     await anonymizeUserContent(ingestion, forum, actorUserId);
-    forum.metrics.increment('migration.purged');
-  } else {
-    // anonymize: detach the steward's authorship; stories stay readable.
-    await anonymizeUserContent(ingestion, forum, actorUserId);
-    storiesAffected = (await ingestion.stories.listByRoom(roomId, MIGRATION_SWEEP_LIMIT)).filter(
-      (story) => story.hiddenState === null,
-    ).length;
+    const storiesAffected = (
+      await ingestion.stories.listByRoom(roomId, MIGRATION_SWEEP_LIMIT)
+    ).filter((story) => story.hiddenState === null).length;
     forum.metrics.increment('migration.anonymized');
+    forum.log('forum.migration_purged', {
+      room_id: roomId,
+      mode,
+      stories_affected: storiesAffected,
+    });
+    return { ok: true, roomId, mode, storiesAffected, counts: { ...EMPTY_COUNTS } };
   }
-  forum.log('forum.migration_purged', { room_id: roomId, mode, stories_affected: storiesAffected });
-  return { ok: true, roomId, mode, storiesAffected };
+
+  // --- purge: irreversibly minimize EVERY §24.2 category for the room ---------
+  const counts: MigrationPurgeCounts = { ...EMPTY_COUNTS };
+
+  // Page over the room's stories.  Each pass collects the live stories' ids +
+  // thread ids, hard-deletes the per-thread / per-story forum content, archives
+  // the threads, and takes the stories down (nulling the archived body excerpt).
+  // Each pass strictly reduces the live-story set (a taken-down story is no
+  // longer `hiddenState === null`), so the loop terminates and is idempotent.
+  for (;;) {
+    const batch = await ingestion.stories.listByRoom(roomId, MIGRATION_SWEEP_LIMIT);
+    const live = batch.filter((story) => story.hiddenState === null);
+    if (live.length === 0) break;
+
+    // Resolve each live story's thread (a story owns at most one shell here).
+    const storyIds: string[] = [];
+    const threadIds: string[] = [];
+    for (const story of live) {
+      storyIds.push(story.storyId);
+      const thread = await ingestion.stories.getThreadByStoryId(story.storyId);
+      if (thread !== null) threadIds.push(thread.threadId);
+    }
+
+    // Forum-owned content (hard delete): contributions (ALL members'), derived
+    // summaries, and media uploads.  Order is irrelevant — each is independent.
+    if (threadIds.length > 0) {
+      counts.contributions += await forum.contributions.purgeByThreads(threadIds);
+      counts.summaries += await forum.summaries.deleteByThreads(threadIds);
+    }
+    counts.uploads += await forum.uploads.purgeByStories(storyIds);
+
+    // Threads: terminally archive (the WS-G conversation state's `archived` sink).
+    for (const threadId of threadIds) {
+      await ingestion.stories.updateThread(threadId, { conversationState: 'archived' });
+      counts.threads += 1;
+    }
+
+    // Stories: take down (distribution + read kill, removes from search) AND null
+    // the archived body excerpt so the indexed body content is gone too.
+    for (const story of live) {
+      await ingestion.stories.update(story.storyId, { hiddenState: 'takedown', excerpt: null });
+      counts.stories += 1;
+    }
+
+    if (batch.length < MIGRATION_SWEEP_LIMIT) break;
+  }
+
+  // Lenses are room-scoped (not per-thread): purge once.
+  counts.lenses += await forum.lenses.deleteByRoom(roomId);
+
+  forum.metrics.increment('migration.purged');
+  forum.log('forum.migration_purged', {
+    room_id: roomId,
+    mode,
+    stories_affected: counts.stories,
+    threads_archived: counts.threads,
+    contributions_deleted: counts.contributions,
+    summaries_deleted: counts.summaries,
+    uploads_deleted: counts.uploads,
+    lenses_deleted: counts.lenses,
+  });
+  return { ok: true, roomId, mode, storiesAffected: counts.stories, counts };
 }

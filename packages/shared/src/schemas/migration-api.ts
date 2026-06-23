@@ -50,6 +50,16 @@ export const migrationExportResponseSchema = z.object({
   items: z.array(migrationSourceItemSchema),
   /** True once the room is frozen (phase 5 already ran) — the wizard reflects it. */
   frozen: z.boolean(),
+  /**
+   * WS-S.9 (resumability) — the OPAQUE client-side P2P destination id the OLD
+   * room already points at (recorded at the phase-5 freeze; a UUID, never an
+   * FK).  Null until the freeze records it.  The wizard reads this on mount to
+   * RESUME an interrupted migration: a non-null id means a destination was
+   * already created + frozen, so the wizard re-opens that local room (on the
+   * same device) and skips back to the post-freeze phase instead of stranding
+   * the source frozen with no continuation.
+   */
+  migrated_to_room_id: uuidSchema.nullable(),
 });
 export type MigrationExportResponse = z.infer<typeof migrationExportResponseSchema>;
 
