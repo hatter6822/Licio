@@ -65,6 +65,16 @@ import {
   wantedHeads,
 } from '../sync/head-sync.js';
 
+/**
+ * §27 DoS bound on the recoverable-failure retention pool.  `unknown_device` is returned
+ * by `openOp` BEFORE the signature is verified (an unrecognised author-blind has no key to
+ * verify against), so an UNAUTHENTICATED peer can stream envelopes with random blinds +
+ * random signatures, each a fresh pool key — unbounded memory without a cap.  The pool is
+ * bounded here (never disable-able); on overflow the OLDEST entries are evicted first (an
+ * evicted legitimate pending op is simply re-fetched by the §15.7 sync walk).
+ */
+const MAX_PENDING_ENVELOPES = 4_096;
+
 /** The durable boundary for a room's encrypted envelopes (keyed by op id). */
 export interface PrivateRoomStorage {
   /** Persist an ACCEPTED envelope under its op id, LAST-WRITE-WINS: the engine
@@ -457,6 +467,15 @@ export class PrivateRoomEngine {
         quarantined.push({ envelope, reason });
       }
     }
+    // §27 DoS bound: cap the retention pool (an unauthenticated peer cannot verify-fail
+    // an `unknown_device` envelope, so it could otherwise flood the pool unbounded).
+    // Evict oldest-first (Map insertion order); an evicted legitimate pending op is
+    // re-fetched by the §15.7 walk, so eviction never loses content permanently.
+    while (this.pendingEnvelopes.size > MAX_PENDING_ENVELOPES) {
+      const oldest = this.pendingEnvelopes.keys().next().value;
+      if (oldest === undefined) break;
+      this.pendingEnvelopes.delete(oldest);
+    }
     return { accepted, quarantined };
   }
 
@@ -605,8 +624,12 @@ export class PrivateRoomEngine {
   }
 
   /**
-   * §15.7 — serve requested blocks up to `maxBytes` (the requester's budget); blocks not
-   * held, or that would exceed the budget, are refused so the requester backs off.
+   * §15.7 — serve requested blocks up to `maxBytes` (the requester's budget).  `refused`
+   * lists ONLY blocks held-but-over-budget (so the requester re-requests them on the next
+   * pass — the §15.8 multi-pass fetch of an attachment larger than one request's budget).
+   * A block this engine does NOT hold is OMITTED entirely (neither served nor refused), so
+   * the requester leaves it in its request guard and does not livelock re-asking for a
+   * block the peer will never have.
    */
   async serveBlocks(
     cids: readonly string[],
@@ -617,8 +640,9 @@ export class PrivateRoomEngine {
     let total = 0;
     for (const cid of cids) {
       const bytes = await this.storage.getBlock(cid);
-      if (!bytes || total + bytes.length > maxBytes) {
-        refused.push(cid);
+      if (!bytes) continue; // not held → omit (the requester keeps it guarded; no livelock)
+      if (total + bytes.length > maxBytes) {
+        refused.push(cid); // held but over budget → re-requestable next pass
         continue;
       }
       total += bytes.length;
@@ -917,10 +941,21 @@ export class PrivateRoomEngine {
   ): Promise<boolean> {
     const expectedRoot = toBase64Url(await sha256(roomStateCommitment(candidate)));
     const expectedHeads = [...bundle.coveredHeads].sort();
-    // Resolve the commit author against the body's OWN device registry (a later
-    // admin's device may not be known to the importer out of band).
+    // SECURITY (§14.5): anchor the commit author's AUTHORITY (its device cert + its
+    // `admin` capability) in state we ALREADY trust, NOT in the candidate body we are
+    // deciding whether to adopt.  The body is only AEAD-sealed under the per-epoch
+    // content-wrap key — which EVERY member holds — so the seal proves "a member made
+    // this", never "an admin".  A malicious member could otherwise craft a body naming
+    // itself admin + author a self-validating snapshot.commit, escalating privilege on
+    // the importer.  So we resolve the author against `this.currentState` (the importer's
+    // own reduced state — an established/reconnecting member knows the real admins); a
+    // forged author is then absent/non-admin there and rejected.  Only when the importer
+    // has NO prior membership (a FRESH completeJoin, where the snapshot arrived in a GRANT
+    // delivered + authenticated over the §10.3 channel of the admin being joined) do we
+    // fall back to the body — trust-by-delivery from the inviting admin.
+    const authority = this.currentState.members.size > 0 ? this.currentState : candidate;
     const ctx = await buildOpIntakeContext({
-      state: candidate,
+      state: authority,
       roomIdCommitment: this.roomIdCommitment,
       epochs: this.epochs,
       extraDevices: this.bootstrapDevices,
@@ -933,7 +968,7 @@ export class PrivateRoomEngine {
       if (body.snapshot_body_cid !== sealed.cid) continue;
       if (body.state_merkle_root !== expectedRoot) continue;
       if (!sameStrings([...body.includes_ops_up_to].sort(), expectedHeads)) continue;
-      const member = candidate.members.get(result.op.author_member_id);
+      const member = authority.members.get(result.op.author_member_id);
       if (!member || member.removed) continue;
       if (!member.capabilities.has(OP_REQUIRED_CAPABILITY['snapshot.commit'])) continue;
       return true;

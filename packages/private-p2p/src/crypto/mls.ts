@@ -334,6 +334,17 @@ export async function applyCommit(group: MlsGroup, commit: MLSMessage): Promise<
   if (result.kind !== 'newState') {
     throw new Error(`applyCommit: expected a newState transition, got ${result.kind}`);
   }
+  // Fail-closed: a real Commit advances EXACTLY one epoch.  A bare Proposal is also
+  // delivered as a handshake message (same wireformat) and `processMessage` returns a
+  // `newState` for it too — but at the SAME epoch (it is only stored in
+  // `unappliedProposals`).  Reject the proposal-as-commit so the documented "the epoch
+  // has advanced on success" contract holds at THIS boundary, not only in callers.
+  if (result.newState.groupContext.epoch !== group.state.groupContext.epoch + 1n) {
+    throw new Error(
+      `applyCommit: message did not advance the epoch (not a commit): ` +
+        `${group.state.groupContext.epoch} -> ${result.newState.groupContext.epoch}`,
+    );
+  }
   return { state: result.newState, cs: group.cs };
 }
 
