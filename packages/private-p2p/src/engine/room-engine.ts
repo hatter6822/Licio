@@ -186,6 +186,13 @@ export class PrivateRoomEngine {
    *  ignored, AND a post-snapshot op whose parent is covered is causality-checked
    *  against the RETAINED lamport (§14.3.1), identically to an uncompacted peer. */
   private readonly coveredOpLamports = new Map<string, string>();
+  /** Envelopes that OPENED-failed for a RECOVERABLE reason (`no_epoch_key` — the
+   *  epoch key is not held yet; `unknown_device` — the device cert is not folded
+   *  yet), keyed by signature.  Retained so they re-open automatically once the
+   *  missing material arrives (a later commit's epoch key via `addEpochKeys`, or an
+   *  earlier op that adds the device), instead of being dropped — the fix that lets
+   *  cross-epoch content converge and stops the sync session re-requesting forever. */
+  private readonly pendingEnvelopes = new Map<string, PrivateEncryptedEnvelope>();
   /** The max Lamport among compacted ops — so authored ops stay globally
    *  monotonic after pruning (a compacted + an uncompacted device must agree on
    *  canonical order, §14.3.1). */
@@ -348,8 +355,11 @@ export class PrivateRoomEngine {
    * Quarantines (never renders) what cannot be opened.
    */
   async ingest(envelopes: readonly PrivateEncryptedEnvelope[]): Promise<IngestReport> {
-    // Pending pool keyed by the envelope signature (unique per signed op).
-    const pending = new Map<string, PrivateEncryptedEnvelope>();
+    // Pending pool keyed by the envelope signature (unique per signed op).  Seed it
+    // with the RETAINED recoverable-failure envelopes so a newly-arrived epoch key or
+    // device cert re-opens them in the SAME fixpoint as the new batch (so `ingest([])`
+    // after `addEpochKeys` drains them — the cross-epoch self-heal).
+    const pending = new Map<string, PrivateEncryptedEnvelope>(this.pendingEnvelopes);
     for (const envelope of envelopes) pending.set(envelope.signature, envelope);
 
     const accepted: string[] = [];
@@ -373,6 +383,7 @@ export class PrivateRoomEngine {
           continue;
         }
         pending.delete(key);
+        this.pendingEnvelopes.delete(key); // resolved — no longer awaiting material
         progressed = true;
         const opId = result.op.op_id;
         // A re-received op already folded into the snapshot base is a no-op.
@@ -404,14 +415,34 @@ export class PrivateRoomEngine {
       if (progressed) this.refold();
     }
 
-    const quarantined: QuarantinedEnvelope[] = [
-      ...[...pending].map(([key, envelope]) => ({
-        envelope,
-        reason: lastResultByKey.get(key) ?? ('unknown_device' as IngestQuarantineReason),
-      })),
-      ...forks,
-    ];
+    // Partition the still-unopened: RECOVERABLE failures (missing epoch key / device
+    // cert) are RETAINED for automatic retry when the material arrives; everything else
+    // (bad signature, AEAD failure, schema reject, fork loser) is quarantined for good.
+    const quarantined: QuarantinedEnvelope[] = [...forks];
+    for (const [key, envelope] of pending) {
+      const reason = lastResultByKey.get(key) ?? ('unknown_device' as IngestQuarantineReason);
+      if (reason === 'no_epoch_key' || reason === 'unknown_device') {
+        this.pendingEnvelopes.set(key, envelope); // awaiting an epoch key / device cert
+      } else {
+        this.pendingEnvelopes.delete(key);
+        quarantined.push({ envelope, reason });
+      }
+    }
     return { accepted, quarantined };
+  }
+
+  /** Re-attempt the retained recoverable-failure envelopes (e.g. after `addEpochKeys`
+   *  delivers a new epoch key, or an earlier op folds a device cert).  A no-op when
+   *  nothing is pending.  Returns what newly opened. */
+  retryPending(): Promise<IngestReport> {
+    return this.ingest([]);
+  }
+
+  /** How many envelopes are held-but-not-yet-openable (awaiting an epoch key / device
+   *  cert).  A non-zero count after sync quiesces means "blocked on a key" — the live
+   *  session surfaces this rather than re-requesting forever. */
+  pendingCount(): number {
+    return this.pendingEnvelopes.size;
   }
 
   /**

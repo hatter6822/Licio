@@ -402,7 +402,17 @@ describe('membership removal — MLS Remove rotates the epoch (forward secrecy)'
       storage: new InMemoryPrivateRoomStorage(),
     });
     const bobReport = await bob.ingest([secretEnvelope]);
+    // Forward secrecy: Bob CANNOT open the epoch-2 content.  With the cross-epoch
+    // self-heal the unopenable envelope is RETAINED (no_epoch_key) rather than dropped —
+    // but the security guarantee is unchanged: it never enters Bob's state, and because
+    // Bob (removed) can NEVER receive the epoch-2 key, retryPending leaves it unreadable.
     expect(bobReport.accepted).toStrictEqual([]);
-    expect(bobReport.quarantined).toHaveLength(1);
+    expect(bobReport.quarantined).toHaveLength(0); // pended awaiting a key it will never get
+    expect(bob.pendingCount()).toBe(1);
+    expect(bob.state().stories.has('secret')).toBe(false);
+    const retried = await bob.retryPending();
+    expect(retried.accepted).toStrictEqual([]); // still no epoch-2 key ⇒ still unreadable
+    expect(bob.pendingCount()).toBe(1);
+    expect(bob.state().stories.has('secret')).toBe(false);
   });
 });
