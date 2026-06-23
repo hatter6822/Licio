@@ -245,4 +245,86 @@ describe('WP-1 cross-epoch sync over the live session (§10.9)', () => {
     sa.close();
     sb.close();
   });
+
+  it('fetches + decrypts §13.6 media over the live session (finding 3)', async () => {
+    const p2p = await import('@licio/private-p2p');
+    const roomId = 'room-media-sync';
+    const created = await p2p.createPrivateRoom({
+      roomId,
+      founderMemberId: 'founder',
+      founderDeviceId: 'founder-dev',
+      profile: PROFILE,
+    });
+    const { roomIdCommitment } = created;
+    const epoch = created.epochState;
+    const alice = await p2p.PrivateRoomEngine.load({
+      ...created.engineParams,
+      storage: new p2p.InMemoryPrivateRoomStorage(),
+    });
+    await alice.applyLocalOp(created.genesisOp, created.sealParams);
+
+    // Post a multi-chunk attachment on alice (blocks stored + an attachment.add op).
+    const media = new Uint8Array(30_000);
+    for (let i = 0; i < media.length; i++) media[i] = (i * 5 + 1) & 0xff;
+    const attachmentId = globalThis.crypto.randomUUID();
+    const encrypted = await p2p.encryptAttachment(media, {
+      attachmentId,
+      roomId,
+      roomIdCommitment,
+      roomEpoch: Number(epoch.epoch),
+      mediaKind: 'image',
+      contentType: 'image/png',
+      createdByMemberId: 'founder',
+      createdAt: '2026-06-23T00:00:00.000Z',
+      contentWrapKey: epoch.keys.contentWrapKey,
+      metadataStripped: true,
+      userConfirmedRightToShare: true,
+    });
+    await alice.storeAttachment(encrypted);
+    const built = await p2p.buildRoomOp(
+      {
+        roomId,
+        roomIdCommitment,
+        epochState: epoch,
+        author: {
+          memberId: 'founder',
+          deviceId: 'founder-dev',
+          signingKey: created.founder.signingKeyPair.privateKey,
+          seq: alice.nextAuthorSeq('founder-dev'),
+        },
+        opId: globalThis.crypto.randomUUID(),
+        parents: alice.heads(),
+        lamport: alice.nextLamport(),
+      },
+      {
+        type: 'attachment.add',
+        attachment_id: attachmentId,
+        manifest_cid: encrypted.manifestCid,
+        wrapped_object_key: p2p.toBase64Url(encrypted.wrappedObjectKey),
+      },
+    );
+    await alice.applyLocalOp(built.op, built.sealParams);
+
+    const bob = await p2p.PrivateRoomEngine.load({
+      ...created.engineParams,
+      storage: new p2p.InMemoryPrivateRoomStorage(),
+    });
+    const codec: SyncCodec = {
+      encodeSyncMessage: p2p.encodeSyncMessage,
+      decodeSyncMessage: p2p.decodeSyncMessage,
+    };
+    const { a, b, stats } = pairedChannels();
+    const sa = new PrivateSyncSession(alice, a, codec);
+    const sb = new PrivateSyncSession(bob, b, codec);
+    sa.start();
+    sb.start();
+    await settle(stats);
+
+    // bob synced the op AND lazily fetched the manifest + chunk blocks over the session,
+    // then decrypted the media — byte-identical, all without a full offline archive.
+    expect(bob.state().attachments.has(attachmentId)).toBe(true);
+    expect(await bob.openAttachment(attachmentId)).toEqual(media);
+    sa.close();
+    sb.close();
+  });
 });

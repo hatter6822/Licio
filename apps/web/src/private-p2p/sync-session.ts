@@ -19,6 +19,8 @@
 // the protocol terminates once both peers hold the union of their DAGs.
 
 import type {
+  BlockRequest,
+  BlockResponse,
   HeadAnnouncement,
   IngestReport,
   MlsCommitMessage,
@@ -27,6 +29,10 @@ import type {
   PrivateEncryptedEnvelope,
   SyncMessage,
 } from '@licio/private-p2p';
+
+/** The §15.7 byte budget a block request advertises (a media chunk is ≤ 16 KiB; this caps
+ *  a single request's served payload, bounded by the §27 DoS limits on both ends). */
+const MAX_BLOCK_REQUEST_BYTES = 4 * 1024 * 1024;
 
 function bytesToBase64Url(bytes: Uint8Array): string {
   let binary = '';
@@ -56,13 +62,26 @@ export interface SyncCodec {
   decodeSyncMessage(bytes: Uint8Array): SyncMessage;
 }
 
-/** The slice of `PrivateRoomEngine` the session drives (so it is mockable). */
+/** The slice of `PrivateRoomEngine` the session drives (so it is mockable).  The §13.6
+ *  block methods are OPTIONAL — a surface without media (a relay, a mock) simply skips
+ *  the block exchange. */
 export interface SyncEngineSurface {
   headAnnouncement(latestSnapshotId?: string): HeadAnnouncement;
   wantedFrom(announcement: HeadAnnouncement): string[];
   serveOps(opIds: readonly string[]): Promise<PrivateEncryptedEnvelope[]>;
   ingest(envelopes: readonly PrivateEncryptedEnvelope[]): Promise<IngestReport>;
   missingDependencies(): string[];
+  /** §15.8 — the CIDs this engine still needs for its attachments (two-phase). */
+  wantedBlockCids?(): Promise<string[]>;
+  /** §15.7 — serve requested blocks up to a byte budget. */
+  serveBlocks?(
+    cids: readonly string[],
+    maxBytes: number,
+  ): Promise<{ served: { cid: string; bytes: Uint8Array }[]; refused: string[] }>;
+  /** §15.7 — ingest fetched blocks (re-verifying each CID before storing). */
+  ingestBlocks?(
+    blocks: readonly { cid: string; bytes: Uint8Array }[],
+  ): Promise<{ accepted: string[]; rejected: string[] }>;
 }
 
 export interface PrivateSyncSessionOptions {
@@ -96,6 +115,10 @@ export class PrivateSyncSession {
    *  pending pool) is NOT re-requested.  Cleared when an MLS commit advances our epoch,
    *  so anything still genuinely wanted is re-requested once. */
   private readonly requested = new Set<string>();
+  /** Block CIDs already requested this session (the §15.8 block-fetch livelock guard):
+   *  a refused/not-held block is not re-requested.  Cleared when an MLS commit advances
+   *  the epoch (a newly-openable manifest may reveal chunk CIDs). */
+  private readonly requestedBlocks = new Set<string>();
 
   constructor(
     private readonly engine: SyncEngineSurface,
@@ -181,6 +204,12 @@ export class PrivateSyncSession {
       case 'licio.private.mls_commit.v1':
         await this.onMlsCommitMessage(message);
         return;
+      case 'licio.private.block_request.v1':
+        await this.onBlockRequest(message);
+        return;
+      case 'licio.private.block_response.v1':
+        await this.onBlockResponse(message);
+        return;
     }
   }
 
@@ -193,17 +222,20 @@ export class PrivateSyncSession {
     // DRIVE the walk for the newly-revealed ancestors (a frontier at the new epoch could
     // not be traversed until now).
     this.requested.clear();
+    this.requestedBlocks.clear(); // a new epoch may open a manifest revealing chunk CIDs
     this.announce();
     const next = [
       ...this.engine.missingDependencies(),
       ...(this.peerAnnouncement ? this.engine.wantedFrom(this.peerAnnouncement) : []),
     ];
     this.requestOps(next);
+    await this.requestBlocks();
   }
 
   private async onAnnouncement(announcement: HeadAnnouncement): Promise<void> {
     this.peerAnnouncement = announcement;
     this.requestOps(this.engine.wantedFrom(announcement));
+    await this.requestBlocks();
   }
 
   private async onRequest(request: OpRequest): Promise<void> {
@@ -222,8 +254,51 @@ export class PrivateSyncSession {
       ...(this.peerAnnouncement ? this.engine.wantedFrom(this.peerAnnouncement) : []),
     ];
     this.requestOps(next);
+    // Newly-accepted attachment.add ops may want blocks (the §15.8 lazy media fetch).
+    await this.requestBlocks();
     // Re-announce ONLY on genuine progress, so the peer can pull our new heads and the
     // protocol still terminates (no progress ⇒ no re-announce ⇒ quiescence).
     if (report.accepted.length > 0) this.announce();
+  }
+
+  /**
+   * §15.8 — request the §13.6 attachment blocks this engine still needs (manifest CIDs
+   * first; the chunk CIDs a manifest reveals are requested on the NEXT pass after the
+   * manifest arrives).  The `requestedBlocks` guard asks for each CID at most once, so a
+   * refused/not-held block never ping-pongs.  No-op if the surface has no media support.
+   */
+  private async requestBlocks(): Promise<void> {
+    if (this.closed || !this.engine.wantedBlockCids) return;
+    const cids = await this.engine.wantedBlockCids();
+    const fresh = [...new Set(cids)].filter((c) => !this.requestedBlocks.has(c)).sort();
+    if (fresh.length === 0) return;
+    for (const c of fresh) this.requestedBlocks.add(c);
+    for (let i = 0; i < fresh.length; i += this.maxOpIds) {
+      this.sendMessage({
+        schema: 'licio.private.block_request.v1',
+        cids: fresh.slice(i, i + this.maxOpIds),
+        priority: 'media',
+        max_bytes: MAX_BLOCK_REQUEST_BYTES,
+      });
+    }
+  }
+
+  private async onBlockRequest(request: BlockRequest): Promise<void> {
+    if (!this.engine.serveBlocks) return;
+    const { served, refused } = await this.engine.serveBlocks(request.cids, request.max_bytes);
+    this.sendMessage({
+      schema: 'licio.private.block_response.v1',
+      blocks: served.map((b) => ({ cid: b.cid, data: bytesToBase64Url(b.bytes) })),
+      refused_cids: refused,
+    });
+  }
+
+  private async onBlockResponse(response: BlockResponse): Promise<void> {
+    if (!this.engine.ingestBlocks || response.blocks.length === 0) return;
+    await this.engine.ingestBlocks(
+      response.blocks.map((b) => ({ cid: b.cid, bytes: base64UrlToBytes(b.data) })),
+    );
+    // A fetched manifest reveals its chunk CIDs → drive the next phase of the fetch.
+    await this.requestBlocks();
   }
 }
