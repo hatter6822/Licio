@@ -69,8 +69,13 @@ export function seededRandomScalars(seed: Uint8Array, dst: Uint8Array, count: nu
 const defaultRandomScalars = (count: number): bigint[] =>
   Array.from({ length: count }, () => randomScalar());
 
-/** `ProofChallengeCalculate`: c = H2S( serialize((R, i,msg_i …, Abar,Bbar,D,T1,T2,domain)) || ph ). */
-function proofChallenge(
+/**
+ * `ProofChallengeCalculate`: c = H2S( serialize((R, i,msg_i …, Abar,Bbar,D,T1,T2,domain))
+ * || extra || I2OSP(len(ph),8) || ph ). `extra` is empty for the base proof (so the IETF
+ * vectors are unchanged) and carries the pseudonym terms `serialize(OP, nym, U)` for the
+ * Tier-2 per-verifier-linkability extension (see pseudonym.ts).
+ */
+export function proofChallenge(
   aBar: G1Point,
   bBar: G1Point,
   d: G1Point,
@@ -80,6 +85,7 @@ function proofChallenge(
   disclosedScalars: readonly bigint[],
   disclosedIndexes: readonly number[],
   ph: Uint8Array,
+  extra: Uint8Array = new Uint8Array(0),
 ): bigint {
   const parts: Uint8Array[] = [i2osp(disclosedIndexes.length, 8)];
   for (let k = 0; k < disclosedIndexes.length; k++) {
@@ -93,15 +99,145 @@ function proofChallenge(
     g1Bytes(t2),
     scalarBytes(domain),
   );
-  const cOcts = concatBytes(concatBytes(...parts), i2osp(ph.length, 8), ph);
+  const cOcts = concatBytes(concatBytes(...parts), extra, i2osp(ph.length, 8), ph);
   return hashToScalar(cOcts, DST_H2S);
 }
 
-const complementIndexes = (l: number, disclosed: ReadonlySet<number>): number[] => {
+export const complementIndexes = (l: number, disclosed: ReadonlySet<number>): number[] => {
   const out: number[] = [];
   for (let i = 0; i < l; i++) if (!disclosed.has(i)) out.push(i);
   return out;
 };
+
+export interface ProofInit {
+  aBar: G1Point;
+  bBar: G1Point;
+  d: G1Point;
+  t1: G1Point;
+  t2: G1Point;
+  domain: bigint;
+  msgScalars: bigint[];
+  undisclosed: number[];
+  mTilde: bigint[];
+}
+
+/** Shared ProofGen initialization (ProofInit): blind the signature + undisclosed messages. */
+export function genInit(
+  pk: G2Point,
+  signature: BbsSignature,
+  messages: readonly Uint8Array[],
+  disclosedIndexes: readonly number[],
+  header: Uint8Array,
+  rs: bigint[],
+): ProofInit {
+  const l = messages.length;
+  const r = disclosedIndexes.length;
+  if (r > l) throw new Error('bbs proof: more disclosed than messages');
+  for (const i of disclosedIndexes)
+    if (i < 0 || i >= l) throw new Error('bbs proof: index out of range');
+  const u = l - r;
+  if (rs.length !== 5 + u) throw new Error('bbs proof: wrong random-scalar count');
+  const undisclosed = complementIndexes(l, new Set(disclosedIndexes));
+  const { q1, h, domain, msgScalars } = setup(pk, header, messages);
+  const [r1, r2, eTilde, r1Tilde, r3Tilde] = rs as [bigint, bigint, bigint, bigint, bigint];
+  const mTilde = rs.slice(5);
+
+  let b = P1.add(mul(q1, domain));
+  for (let i = 0; i < l; i++) b = b.add(mul(h[i] as G1Point, msgScalars[i] as bigint));
+  const d = mul(b, r2);
+  const aBar = mul(signature.a, mod(r1 * r2));
+  const bBar = mul(d, r1).subtract(mul(aBar, signature.e));
+  const t1 = mul(aBar, eTilde).add(mul(d, r1Tilde));
+  let t2 = mul(d, r3Tilde);
+  for (let k = 0; k < u; k++)
+    t2 = t2.add(mul(h[undisclosed[k] as number] as G1Point, mTilde[k] as bigint));
+  return { aBar, bBar, d, t1, t2, domain, msgScalars, undisclosed, mTilde };
+}
+
+/** Shared ProofFinalize: compute the responses + serialize the proof. */
+export function genFinalize(
+  signature: BbsSignature,
+  challenge: bigint,
+  rs: bigint[],
+  init: ProofInit,
+): Uint8Array {
+  const [r1, r2, eTilde, r1Tilde, r3Tilde] = rs as [bigint, bigint, bigint, bigint, bigint];
+  const eHat = mod(eTilde + signature.e * challenge);
+  const r1Hat = mod(r1Tilde - r1 * challenge);
+  const r3Hat = mod(r3Tilde - invScalar(r2) * challenge);
+  const commitments: bigint[] = [];
+  for (let k = 0; k < init.undisclosed.length; k++) {
+    commitments.push(
+      mod(
+        (init.mTilde[k] as bigint) +
+          (init.msgScalars[init.undisclosed[k] as number] as bigint) * challenge,
+      ),
+    );
+  }
+  return proofToBytes({
+    aBar: init.aBar,
+    bBar: init.bBar,
+    d: init.d,
+    eHat,
+    r1Hat,
+    r3Hat,
+    commitments,
+    challenge,
+  });
+}
+
+export interface VerifyRecompute {
+  t1: G1Point;
+  t2: G1Point;
+  domain: bigint;
+  q1: G1Point;
+  h: G1Point[];
+  undisclosed: number[];
+  disclosedScalars: bigint[];
+}
+
+/** Shared ProofVerifyInit: recompute T1/T2 from the proof + disclosed messages. Returns
+ *  null on a structurally-invalid disclosure (caller treats null as INVALID). */
+export function verifyRecompute(
+  pk: G2Point,
+  proof: BbsProof,
+  disclosedMessages: readonly Uint8Array[],
+  disclosedIndexes: readonly number[],
+  header: Uint8Array,
+): VerifyRecompute | null {
+  const r = disclosedIndexes.length;
+  const u = proof.commitments.length;
+  const l = r + u;
+  if (disclosedMessages.length !== r) return null;
+  for (let k = 0; k < r; k++) {
+    const idx = disclosedIndexes[k] as number;
+    if (idx < 0 || idx >= l) return null;
+    if (k > 0 && idx <= (disclosedIndexes[k - 1] as number)) return null; // ascending, distinct
+  }
+  const gens = createGenerators(l + 1);
+  const q1 = gens[0];
+  if (q1 === undefined) return null;
+  const h = gens.slice(1);
+  const disclosedScalars = disclosedMessages.map(messageToScalar);
+  const undisclosed = complementIndexes(l, new Set(disclosedIndexes));
+  const domain = calculateDomain(pk, q1, h, header);
+  const c = proof.challenge;
+  const t1 = mul(proof.bBar, c).add(mul(proof.aBar, proof.eHat)).add(mul(proof.d, proof.r1Hat));
+  let bv = P1.add(mul(q1, domain));
+  for (let k = 0; k < r; k++)
+    bv = bv.add(mul(h[disclosedIndexes[k] as number] as G1Point, disclosedScalars[k] as bigint));
+  let t2 = mul(bv, c).add(mul(proof.d, proof.r3Hat));
+  for (let k = 0; k < u; k++)
+    t2 = t2.add(mul(h[undisclosed[k] as number] as G1Point, proof.commitments[k] as bigint));
+  return { t1, t2, domain, q1, h, undisclosed, disclosedScalars };
+}
+
+/** The final BBS proof pairing check: e(Abar, W)·e(Bbar, -BP2) == 1_GT. */
+export function proofPairingHolds(proof: BbsProof, pk: G2Point): boolean {
+  const lhs = bls.pairing(proof.aBar, pk);
+  const rhs = bls.pairing(proof.bBar, G2.BASE.negate());
+  return bls.fields.Fp12.eql(bls.fields.Fp12.mul(lhs, rhs), bls.fields.Fp12.ONE);
+}
 
 /**
  * Generate a BBS proof disclosing `disclosedIndexes` of `messages`. `randomScalarsOverride`
@@ -116,55 +252,22 @@ export function proofGen(
   ph: Uint8Array = new Uint8Array(0),
   randomScalarsOverride?: (count: number) => bigint[],
 ): Uint8Array {
-  const l = messages.length;
-  const r = disclosedIndexes.length;
-  if (r > l) throw new Error('bbs proof: more disclosed than messages');
-  for (const i of disclosedIndexes)
-    if (i < 0 || i >= l) throw new Error('bbs proof: index out of range');
-  const u = l - r;
-  const disclosed = new Set(disclosedIndexes);
-  const undisclosed = complementIndexes(l, disclosed);
-  const { q1, h, domain, msgScalars } = setup(pk, header, messages);
-
+  const u = messages.length - disclosedIndexes.length;
   const rs = (randomScalarsOverride ?? defaultRandomScalars)(5 + u);
-  if (rs.length !== 5 + u) throw new Error('bbs proof: wrong random-scalar count');
-  const [r1, r2, eTilde, r1Tilde, r3Tilde] = rs as [bigint, bigint, bigint, bigint, bigint];
-  const mTilde = rs.slice(5);
-
-  let b = P1.add(mul(q1, domain));
-  for (let i = 0; i < l; i++) b = b.add(mul(h[i] as G1Point, msgScalars[i] as bigint));
-  const d = mul(b, r2);
-  const aBar = mul(signature.a, mod(r1 * r2));
-  const bBar = mul(d, r1).subtract(mul(aBar, signature.e));
-  const t1 = mul(aBar, eTilde).add(mul(d, r1Tilde));
-  let t2 = mul(d, r3Tilde);
-  for (let k = 0; k < u; k++)
-    t2 = t2.add(mul(h[undisclosed[k] as number] as G1Point, mTilde[k] as bigint));
-
-  const disclosedScalars = disclosedIndexes.map((i) => msgScalars[i] as bigint);
+  const init = genInit(pk, signature, messages, disclosedIndexes, header, rs);
+  const disclosedScalars = disclosedIndexes.map((i) => init.msgScalars[i] as bigint);
   const challenge = proofChallenge(
-    aBar,
-    bBar,
-    d,
-    t1,
-    t2,
-    domain,
+    init.aBar,
+    init.bBar,
+    init.d,
+    init.t1,
+    init.t2,
+    init.domain,
     disclosedScalars,
     disclosedIndexes,
     ph,
   );
-
-  const r3 = invScalar(r2);
-  const eHat = mod(eTilde + signature.e * challenge);
-  const r1Hat = mod(r1Tilde - r1 * challenge);
-  const r3Hat = mod(r3Tilde - r3 * challenge);
-  const commitments: bigint[] = [];
-  for (let k = 0; k < u; k++) {
-    commitments.push(
-      mod((mTilde[k] as bigint) + (msgScalars[undisclosed[k] as number] as bigint) * challenge),
-    );
-  }
-  return proofToBytes({ aBar, bBar, d, eHat, r1Hat, r3Hat, commitments, challenge });
+  return genFinalize(signature, challenge, rs, init);
 }
 
 /** Verify a BBS proof against the disclosed messages. */
@@ -183,49 +286,25 @@ export function proofVerify(
   } catch {
     return false;
   }
-  const r = disclosedIndexes.length;
-  const u = proof.commitments.length;
-  const l = r + u;
-  if (disclosedMessages.length !== r) return false;
-  for (let k = 0; k < r; k++) {
-    const idx = disclosedIndexes[k] as number;
-    if (idx < 0 || idx >= l) return false;
-    if (k > 0 && idx <= (disclosedIndexes[k - 1] as number)) return false; // ascending, distinct
-  }
-  const gens = createGenerators(l + 1);
-  const q1 = gens[0];
-  if (q1 === undefined) return false;
-  const h = gens.slice(1);
-  const disclosedScalars = disclosedMessages.map(messageToScalar);
-  const undisclosed = complementIndexes(l, new Set(disclosedIndexes));
-  const domain = calculateDomain(pk, q1, h, header);
-  const c = proof.challenge;
-
-  const t1 = mul(proof.bBar, c).add(mul(proof.aBar, proof.eHat)).add(mul(proof.d, proof.r1Hat));
-  let bv = P1.add(mul(q1, domain));
-  for (let k = 0; k < r; k++)
-    bv = bv.add(mul(h[disclosedIndexes[k] as number] as G1Point, disclosedScalars[k] as bigint));
-  let t2 = mul(bv, c).add(mul(proof.d, proof.r3Hat));
-  for (let k = 0; k < u; k++)
-    t2 = t2.add(mul(h[undisclosed[k] as number] as G1Point, proof.commitments[k] as bigint));
-
+  const rec = verifyRecompute(pk, proof, disclosedMessages, disclosedIndexes, header);
+  if (rec === null) return false;
   const challenge = proofChallenge(
     proof.aBar,
     proof.bBar,
     proof.d,
-    t1,
-    t2,
-    domain,
-    disclosedScalars,
+    rec.t1,
+    rec.t2,
+    rec.domain,
+    rec.disclosedScalars,
     disclosedIndexes,
     ph,
   );
-  if (challenge !== c) return false;
-  // e(Abar, W) * e(Bbar, -BP2) == 1_GT
-  const lhs = bls.pairing(proof.aBar, pk);
-  const rhs = bls.pairing(proof.bBar, G2.BASE.negate());
-  return bls.fields.Fp12.eql(bls.fields.Fp12.mul(lhs, rhs), bls.fields.Fp12.ONE);
+  if (challenge !== proof.challenge) return false;
+  return proofPairingHolds(proof, pk);
 }
+
+/** Scalar-multiply (zero-tolerant) — exported for the pseudonym extension. */
+export { mul as bbsMul };
 
 /** `proof_to_octets`: Abar||Bbar||D||e^||r1^||r3^||(m^_j…)||c. */
 export function proofToBytes(proof: BbsProof): Uint8Array {
