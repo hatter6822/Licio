@@ -63,14 +63,19 @@ export interface RtcIceServerLike {
   readonly username?: string;
   readonly credential?: string;
 }
-export type RtcPeerConnectionFactory = (config: {
+/** The RTCConfiguration subset the carrier sets.  `iceTransportPolicy: 'relay'` makes
+ *  the browser gather ONLY TURN-relayed candidates (so it never even learns/leaks a
+ *  host/srflx IP), the §15.4 relay-only posture — stronger than filtering after the fact. */
+export interface RtcConfigLike {
   iceServers?: RtcIceServerLike[];
-}) => RtcPeerConnectionLike;
+  iceTransportPolicy?: 'all' | 'relay';
+}
+export type RtcPeerConnectionFactory = (config: RtcConfigLike) => RtcPeerConnectionLike;
 
-function defaultRtcFactory(config: { iceServers?: RtcIceServerLike[] }): RtcPeerConnectionLike {
+function defaultRtcFactory(config: RtcConfigLike): RtcPeerConnectionLike {
   const Ctor = (
     globalThis as {
-      RTCPeerConnection?: new (c: { iceServers?: RtcIceServerLike[] }) => RtcPeerConnectionLike;
+      RTCPeerConnection?: new (c: RtcConfigLike) => RtcPeerConnectionLike;
     }
   ).RTCPeerConnection;
   if (!Ctor)
@@ -78,10 +83,21 @@ function defaultRtcFactory(config: { iceServers?: RtcIceServerLike[] }): RtcPeer
   return new Ctor(config);
 }
 
+/** Whether any configured ICE server is a TURN relay (`turn:`/`turns:`) — relay-only
+ *  mode is non-functional without one (no relay candidate would ever be gathered). */
+function hasTurnServer(iceServers: readonly RtcIceServerLike[] | undefined): boolean {
+  if (!iceServers) return false;
+  return iceServers.some((s) => {
+    const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+    return urls.some((u) => u.startsWith('turn:') || u.startsWith('turns:'));
+  });
+}
+
 // --- errors -------------------------------------------------------------------------
 
 export type ConnectPrivatePeerReason =
   | 'rtc_unavailable'
+  | 'relay_without_turn'
   | 'timeout'
   | 'aborted'
   | 'peer_not_found'
@@ -155,6 +171,15 @@ export async function connectPrivatePeer(params: ConnectPrivatePeerParams): Prom
   const sleep = params.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const deadline = nowMs() + timeoutMs;
   const factory = params.rtcFactory ?? defaultRtcFactory;
+  const relayOnly = params.transportMode === 'relay_only';
+  // §15.4 relay-only is non-functional without a TURN server (filtering the candidates
+  // post-gather would yield ZERO candidates → a silent timeout).  Fail FAST + typed.
+  if (relayOnly && !hasTurnServer(params.iceServers)) {
+    throw new ConnectPrivatePeerError(
+      'relay_without_turn',
+      'relay-only transport requires a TURN server in iceServers',
+    );
+  }
   const throwIfAborted = (): void => {
     if (params.signal?.aborted) throw new ConnectPrivatePeerError('aborted', 'connect aborted');
     if (nowMs() >= deadline) throw new ConnectPrivatePeerError('timeout', 'connect timed out');
@@ -226,7 +251,11 @@ export async function connectPrivatePeer(params: ConnectPrivatePeerParams): Prom
 
   // Deterministic role: the bytewise-smaller peer blind id offers (a stable tiebreak).
   const isOfferer = selfPeerBlindId < peer.peerBlindId;
-  const pc = factory({ ...(params.iceServers ? { iceServers: params.iceServers } : {}) });
+  const pc = factory({
+    ...(params.iceServers ? { iceServers: params.iceServers } : {}),
+    // relay-only ⇒ the browser gathers ONLY TURN candidates (never learns/leaks a host IP).
+    ...(relayOnly ? { iceTransportPolicy: 'relay' as const } : {}),
+  });
 
   let cleanedUp = false;
   let stopPolling = false;
@@ -564,7 +593,18 @@ async function runHandshake(p: RunHandshakeParams): Promise<Uint8Array[]> {
         return;
       }
       if (frame.t === 'hello' && frame.hello) {
-        remoteHello = frame.hello;
+        // Validate the inbound hello FAIL-FAST: a malformed hello (e.g. a regex-passing
+        // but non-base64url ephemeral key) would otherwise throw later inside
+        // signHandshakeProof and hang the connect to the deadline. Reject promptly +
+        // typed, symmetric with verifyPeerHandshake's own hardening.
+        const parsedHello = p2p.handshakeHelloSchema.safeParse(frame.hello);
+        if (!parsedHello.success) {
+          rejectDone(
+            new ConnectPrivatePeerError('handshake_malformed_hello', 'malformed remote hello'),
+          );
+          return;
+        }
+        remoteHello = parsedHello.data;
         const resolution = p.resolveDevice(remoteHello.author_device_id);
         if (resolution) {
           try {
@@ -588,8 +628,16 @@ async function runHandshake(p: RunHandshakeParams): Promise<Uint8Array[]> {
         }
         await tryVerify();
       }
-    })();
+    })().catch((error) => rejectDone(error)); // a thrown error fails fast, not via timeout
   });
+
+  // A data-channel close DURING the handshake fails the connect immediately (otherwise it
+  // would hang until the deadline); wrapDataChannel re-points onclose post-handshake.
+  p.dc.onclose = (): void => {
+    rejectDone(
+      new ConnectPrivatePeerError('handshake_channel_closed', 'data channel closed mid-handshake'),
+    );
+  };
 
   // Kick off: send our hello immediately.
   dc.send(JSON.stringify({ t: 'hello', hello: selfHello } satisfies HandshakeFrame));

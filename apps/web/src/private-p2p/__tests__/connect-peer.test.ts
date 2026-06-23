@@ -335,4 +335,32 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
       /handshake rejected|unknown_device|timed out|aborted/,
     );
   });
+
+  it('FAILS FAST (relay_without_turn) when relay-only mode has no TURN server', async () => {
+    const p2p = await import('@licio/private-p2p');
+    const created = await p2p.createPrivateRoom({
+      roomId: 'room-relay',
+      founderMemberId: 'founder',
+      founderDeviceId: 'founder-dev',
+      profile: PROFILE,
+    });
+    // relay-only with NO iceServers ⇒ no TURN ⇒ would gather zero candidates ⇒ silent
+    // timeout.  The carrier instead rejects immediately + typed (before any announce).
+    await expect(
+      connectPrivatePeer({
+        p2p,
+        rendezvous: inMemoryRendezvous(),
+        roomIdCommitment: created.roomIdCommitment,
+        epoch: Number(created.epochState.epoch),
+        rendezvousKey: created.epochState.keys.rendezvousKey,
+        selfDeviceId: 'founder-dev',
+        selfSigningKey: created.founder.signingKeyPair.privateKey,
+        resolveDevice: () => undefined,
+        transportMode: 'relay_only',
+        nowMs: () => Date.now(),
+        timeoutMs: 2_000,
+        rtcFactory: () => new FakePeer(new FakeLink()),
+      }),
+    ).rejects.toThrow(/requires a TURN server/);
+  });
 });
