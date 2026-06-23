@@ -6,7 +6,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { discoverPrivateBundleUrl } from './bundle-digest.js';
 import { withRotatedSigners } from './config.js';
 import { resetPrivateBundleGate } from './gate.js';
-import { activateVerifiedWorker, gateServiceWorkerActivation } from './sw-pinning.js';
+import {
+  activateVerifiedWorker,
+  gateServiceWorkerActivation,
+  installSwUpdatePinning,
+} from './sw-pinning.js';
 
 afterEach(() => {
   resetPrivateBundleGate();
@@ -85,5 +89,62 @@ describe('activateVerifiedWorker', () => {
     expect(() =>
       activateVerifiedWorker(null, { privateBundleGated: false, verified: true }),
     ).not.toThrow();
+  });
+});
+
+describe('installSwUpdatePinning (SW-update event wiring)', () => {
+  const mkReg = (): ServiceWorkerRegistration =>
+    ({ waiting: { postMessage: vi.fn() } }) as unknown as ServiceWorkerRegistration;
+
+  it('public fast path: no private rooms ⇒ onActivate, never gated/locked', async () => {
+    const onActivate = vi.fn();
+    const onLocked = vi.fn();
+    const dispose = installSwUpdatePinning({
+      eventName: 'test-sw-update-public',
+      onActivate,
+      onLocked,
+      hasPrivateRooms: () => false,
+    });
+    const reg = mkReg();
+    window.dispatchEvent(new CustomEvent('test-sw-update-public', { detail: reg }));
+    await Promise.resolve();
+    expect(onActivate).toHaveBeenCalledWith(reg);
+    expect(onLocked).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  it('private rooms + untrusted bundle ⇒ onLocked, NEVER onActivate', async () => {
+    const onActivate = vi.fn();
+    const onLocked = vi.fn();
+    const dispose = installSwUpdatePinning({
+      eventName: 'test-sw-update-locked',
+      onActivate,
+      onLocked,
+      hasPrivateRooms: () => true,
+      // Empty signer set + no resolvable bundle ⇒ the gate locks.
+      deps: {
+        config: { trustedSignerPublicKeys: [], logPublicKey: '' },
+        resolveBundleUrl: () => undefined,
+      },
+    });
+    window.dispatchEvent(new CustomEvent('test-sw-update-locked', { detail: mkReg() }));
+    await new Promise((r) => setTimeout(r, 0)); // gateServiceWorkerActivation is async
+    expect(onLocked).toHaveBeenCalled();
+    expect(onActivate).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  it('the disposer removes the listener', async () => {
+    const onActivate = vi.fn();
+    const dispose = installSwUpdatePinning({
+      eventName: 'test-sw-update-dispose',
+      onActivate,
+      onLocked: vi.fn(),
+      hasPrivateRooms: () => false,
+    });
+    dispose();
+    window.dispatchEvent(new CustomEvent('test-sw-update-dispose', { detail: mkReg() }));
+    await Promise.resolve();
+    expect(onActivate).not.toHaveBeenCalled();
   });
 });

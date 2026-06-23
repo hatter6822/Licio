@@ -55,23 +55,26 @@ describe('maintainConnection (§15.4 reconnect)', () => {
   });
 
   it('close() stops reconnecting and gracefully closes the current session', async () => {
+    let dials = 0;
     const closes: boolean[] = [];
     let lastOnClose: ((graceful: boolean) => void) | null = null;
     const dial = (onClose: (graceful: boolean) => void): Promise<DialedSession> => {
+      dials += 1;
       lastOnClose = onClose;
       return Promise.resolve({ close: (graceful = true) => closes.push(graceful) });
     };
     const ctrl = maintainConnection(dial, { backoffMs: 1, sleep: () => Promise.resolve() });
     await flush();
+    expect(dials).toBe(1);
     ctrl.close();
     expect(closes).toEqual([true]); // graceful close of the current session
     expect(ctrl.status()).toBe('closed');
 
-    // A drop AFTER close() must not reconnect.
-    const dialsAfter = 0;
+    // A drop AFTER close() must NOT reconnect — assert the REAL dial counter is unchanged.
+    const dialsAtClose = dials;
     lastOnClose?.(false);
     await flush();
-    expect(dialsAfter).toBe(0);
+    expect(dials).toBe(dialsAtClose);
   });
 
   it('a successful reconnect RESETS the backoff window', async () => {

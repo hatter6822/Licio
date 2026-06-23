@@ -152,4 +152,20 @@ export async function buildValidManifest(opts: BuildManifestOptions): Promise<Bu
   return { manifest, runningBundleDigest: digestB64 };
 }
 
+/**
+ * Re-sign a (possibly tampered) manifest body with the maintainer key, so a test can
+ * ISOLATE a post-signature check (the digest-binding, leaf-commitment, or inclusion
+ * guards) instead of tripping `signature_invalid` first.  Without this, a body-tamper test
+ * passes on the signature branch and would still pass if the later guard were deleted.
+ */
+export async function reSignManifest(
+  signer: Ed25519KeyPair,
+  manifest: UpdateManifest,
+): Promise<UpdateManifest> {
+  return {
+    ...manifest,
+    signature: await sign(signer.privateKey, canonicalManifestBody(manifest.body)),
+  };
+}
+
 export { toBase64Url };

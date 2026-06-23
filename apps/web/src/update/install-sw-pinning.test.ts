@@ -17,7 +17,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { UpdateChannelConfig } from './config.js';
 import { resetPrivateBundleGate } from './gate.js';
-import { gatedApplyUpdate } from './install-sw-pinning.js';
+import { deviceHasPrivateRooms, gatedApplyUpdate } from './install-sw-pinning.js';
 
 const LOG_LEAF_DOMAIN = new TextEncoder().encode('licio-update-v1:');
 const BUNDLE_BYTES = new TextEncoder().encode('the running private-mode chunk bytes');
@@ -157,5 +157,39 @@ describe('gatedApplyUpdate', () => {
     });
     expect(locked).toBe(true);
     expect(worker.posts).toEqual([]); // the verified flag is NEVER posted on a lock
+  });
+});
+
+describe('deviceHasPrivateRooms (fail-closed probe)', () => {
+  const realIdb = Object.getOwnPropertyDescriptor(globalThis, 'indexedDB');
+  const setIdb = (value: unknown): void => {
+    Object.defineProperty(globalThis, 'indexedDB', { value, configurable: true, writable: true });
+  };
+  afterEach(() => {
+    if (realIdb) Object.defineProperty(globalThis, 'indexedDB', realIdb);
+  });
+
+  it('fails CLOSED (true) when the platform cannot enumerate databases', async () => {
+    setIdb({}); // no databases() method
+    expect(await deviceHasPrivateRooms()).toBe(true);
+  });
+
+  it('fails CLOSED (true) when databases() throws', async () => {
+    setIdb({
+      databases: () => {
+        throw new Error('enumeration blocked');
+      },
+    });
+    expect(await deviceHasPrivateRooms()).toBe(true);
+  });
+
+  it('returns true when the isolated private-rooms DB is present', async () => {
+    setIdb({ databases: () => Promise.resolve([{ name: 'licio_private_p2p' }]) });
+    expect(await deviceHasPrivateRooms()).toBe(true);
+  });
+
+  it('returns false ONLY when enumeration succeeds and no private-rooms DB exists', async () => {
+    setIdb({ databases: () => Promise.resolve([{ name: 'licio' }, { name: 'licio-keys' }]) });
+    expect(await deviceHasPrivateRooms()).toBe(false);
   });
 });

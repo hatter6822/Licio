@@ -65,4 +65,36 @@ describe('maintainMesh (§15.6 multi-peer)', () => {
     expect(ctrl.peers().length).toBe(2);
     ctrl.close();
   });
+
+  it('does NOT re-dial a graceful leaver until the cooldown expires (no churn)', async () => {
+    let now = 1_000;
+    const online = ['p0', 'p1'];
+    const drops = new Map<string, (peerId: string, graceful: boolean) => void>();
+    const dial: MeshDial = (connected, onDrop) => {
+      const next = online.find((p) => !connected.has(p));
+      if (!next) return Promise.resolve(null);
+      drops.set(next, onDrop);
+      return Promise.resolve({ peerId: next, session: { close: () => {} } });
+    };
+    const ctrl = maintainMesh(dial, {
+      maxPeers: 2,
+      rePollIntervalMs: 2,
+      gracefulCooldownMs: 1_000,
+      nowMs: () => now,
+      sleep: (msv) => new Promise((r) => setTimeout(r, msv)),
+    });
+    await waitFor(() => ctrl.peers().length === 2);
+
+    // p1 leaves GRACEFULLY (sent bye) — still "online" (its record lingers), but the mesh
+    // must NOT re-dial it during the cooldown (the churn bug).
+    drops.get('p1')?.('p1', true);
+    await waitFor(() => !ctrl.peers().includes('p1'));
+    await new Promise((r) => setTimeout(r, 40)); // many re-poll cycles within the cooldown
+    expect(ctrl.peers().includes('p1')).toBe(false);
+
+    // After the cooldown expires, p1 is re-meshable (e.g. it came back online).
+    now += 5_000;
+    await waitFor(() => ctrl.peers().includes('p1'));
+    ctrl.close();
+  });
 });

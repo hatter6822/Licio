@@ -523,6 +523,16 @@ export interface MeshOptions {
   readonly sleep?: (ms: number) => Promise<void>;
   /** Observe the connected-peer set as it changes. */
   readonly onMeshChange?: (peers: readonly string[]) => void;
+  /**
+   * After a peer leaves GRACEFULLY (sent `bye`), do NOT re-dial it for this long (default
+   * 5 min) — its rendezvous presence record lingers until its TTL, so without a cooldown the
+   * mesh would rediscover the leaver, re-handshake, get another `bye`, and churn once per
+   * re-poll until the record expires.  The cooldown is time-bounded (NOT permanent) so a
+   * peer that comes back online + re-announces is re-meshable afterwards.
+   */
+  readonly gracefulCooldownMs?: number;
+  /** Injectable clock for the cooldown (tests pump it; defaults to `Date.now`). */
+  readonly nowMs?: () => number;
 }
 
 /**
@@ -547,18 +557,32 @@ export function maintainMesh(dial: MeshDial, options: MeshOptions = {}): MeshCon
   const maxPeers = options.maxPeers ?? 4;
   const rePollMs = options.rePollIntervalMs ?? 15_000;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const cooldownMs = options.gracefulCooldownMs ?? 5 * 60_000;
+  const nowMs = options.nowMs ?? (() => Date.now());
   let stopping = false;
   const sessions = new Map<string, DialedSession>();
+  // peerId → timestamp until which a graceful leaver is NOT re-dialed (see gracefulCooldownMs).
+  const gracefullyLeft = new Map<string, number>();
   const notify = (): void => options.onMeshChange?.([...sessions.keys()]);
-  const onDrop = (peerId: string): void => {
-    if (sessions.delete(peerId)) notify();
+  const onDrop = (peerId: string, graceful: boolean): void => {
+    const removed = sessions.delete(peerId);
+    // A deliberate leave: do not churn re-dialing the leaver while its rendezvous record
+    // lingers.  A network drop (graceful=false) is eligible for immediate re-dial.
+    if (graceful) gracefullyLeft.set(peerId, nowMs() + cooldownMs);
+    if (removed) notify();
   };
 
   const fill = async (): Promise<void> => {
     while (!stopping && sessions.size < maxPeers) {
+      // Prune expired cooldowns so a returned-online peer is re-meshable.
+      const now = nowMs();
+      for (const [peerId, until] of gracefullyLeft) {
+        if (now >= until) gracefullyLeft.delete(peerId);
+      }
+      const excluded = new Set([...sessions.keys(), ...gracefullyLeft.keys()]);
       let result: { peerId: string; session: DialedSession } | null;
       try {
-        result = await dial(new Set(sessions.keys()), onDrop);
+        result = await dial(excluded, onDrop);
       } catch {
         return; // a dial error — wait for the next poll cycle
       }

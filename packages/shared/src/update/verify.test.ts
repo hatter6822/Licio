@@ -10,6 +10,7 @@ import {
   buildValidManifest,
   type Ed25519KeyPair,
   generateKeyPair,
+  reSignManifest,
   toBase64Url,
 } from './test-helpers.js';
 import { decideUpdateActivation, verifyUpdateManifest } from './verify.js';
@@ -198,16 +199,45 @@ describe('verifyUpdateManifest — fail-closed lock reasons', () => {
       signer,
       log,
     });
-    const tampered = {
+    // Tamper the log_leaf AND re-sign with the real maintainer key, so the signature is
+    // valid and the LEAF-COMMITMENT guard (verify.ts step 5) is the DECIDING reject — not
+    // signature_invalid. Without the re-sign the test would pass on the signature branch and
+    // would still pass if the leaf-commitment guard were deleted.
+    const tampered = await reSignManifest(signer, {
       ...manifest,
       body: { ...manifest.body, log_leaf: toBase64Url(new Uint8Array(32).fill(7)) },
-    };
-    // The body changed, so the maintainer signature no longer matches; that is
-    // caught FIRST as signature_invalid — which is itself a lock. Re-sign to
-    // isolate the leaf-commitment check.
+    });
     const verdict = await verifyUpdateManifest(baseInput(tampered, runningBundleDigest));
-    expect(verdict.trusted).toBe(false);
-    if (verdict.trusted) throw new Error('expected untrusted');
-    expect(['signature_invalid', 'not_in_transparency_log']).toContain(verdict.reason);
+    expect(verdict).toEqual({ trusted: false, reason: 'not_in_transparency_log' });
+  });
+
+  it('not_in_transparency_log when body.log_id disagrees with the checkpoint', async () => {
+    const { manifest, runningBundleDigest } = await buildValidManifest({
+      bundleBytes,
+      signer,
+      log,
+    });
+    // Re-signed (valid signature + matching leaf), so the body.log_id ≠ checkpoint.log_id
+    // guard (verify.ts step 6) is the DECIDING reject.
+    const tampered = await reSignManifest(signer, {
+      ...manifest,
+      body: { ...manifest.body, log_id: 'a-different-log' },
+    });
+    const verdict = await verifyUpdateManifest(baseInput(tampered, runningBundleDigest));
+    expect(verdict).toEqual({ trusted: false, reason: 'not_in_transparency_log' });
+  });
+
+  it('malformed_manifest when the signer key is base64url-valid but not 32 bytes', async () => {
+    const { manifest, runningBundleDigest } = await buildValidManifest({
+      bundleBytes,
+      signer,
+      log,
+    });
+    // A schema-valid base64url string that decodes to 31 bytes: passes the schema but fails
+    // the Ed25519 public-key LENGTH check (verify.ts step 2) — which fires BEFORE the
+    // signer-trust/signature checks, so this is the deciding reject.
+    const malformed = { ...manifest, signer_public_key: toBase64Url(new Uint8Array(31).fill(1)) };
+    const verdict = await verifyUpdateManifest(baseInput(malformed, runningBundleDigest));
+    expect(verdict).toEqual({ trusted: false, reason: 'malformed_manifest' });
   });
 });

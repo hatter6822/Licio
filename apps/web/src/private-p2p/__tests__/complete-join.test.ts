@@ -27,7 +27,6 @@ beforeEach(() => {
 
 describe('WP-1 §12.3 completeJoin (finding 2)', () => {
   it('a joiner bootstraps the existing state, authors, and both converge', async () => {
-    const p2p = await import('@licio/private-p2p');
     const mkStore = await storeFactory();
 
     // Founder creates the room + posts an epoch-0 story (pre-join content).

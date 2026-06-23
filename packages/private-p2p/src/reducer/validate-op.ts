@@ -305,6 +305,7 @@ export async function openOp(
     op.epoch !== envelope.room_epoch ||
     op.author_seq !== envelope.author_seq ||
     op.schema !== envelope.plaintext_schema ||
+    op.created_at_bucket !== envelope.created_at_bucket ||
     objectTypeForOpBody(op.body.type) !== envelope.object_type ||
     op.author_device_id !== ctx.deviceIdForBlind(envelope.author_device_id_blind) ||
     !sameStringSet(sortParents(op.parents), envelope.parent_op_ids) ||
