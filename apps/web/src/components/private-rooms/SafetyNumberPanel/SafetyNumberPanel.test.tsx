@@ -72,7 +72,14 @@ describe('SafetyNumberPanel', () => {
     const [device] = devices;
     if (!device) throw new Error('expected a device');
     await user.click(screen.getByRole('button', { name: new RegExp(device.deviceId.slice(0, 8)) }));
-    await waitFor(() => expect(screen.getByLabelText(/safety number digits/i)).toBeInTheDocument());
+    // The Signal-style SAS is an async iterated hash; under full-suite CPU load it can take
+    // >1s, so allow a generous timeout (the default 1s flaked intermittently).
+    await waitFor(
+      () => expect(screen.getByLabelText(/safety number digits/i)).toBeInTheDocument(),
+      {
+        timeout: 5_000,
+      },
+    );
     const groups = screen.getByLabelText(/safety number digits/i);
     // 12 five-digit groups (60 digits).
     expect(groups.querySelectorAll('span').length).toBe(12);
