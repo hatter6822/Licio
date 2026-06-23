@@ -24,34 +24,108 @@ import type { CourierMedium } from './courier.js';
 
 // --- §22.5 / §33.5 control gating (pure) -------------------------------------------
 
+/**
+ * Which peers this device is willing to exchange with (the §22.5 "who can exchange"
+ * control).  `anyone` accepts any discovered courier; `known_only` accepts only an
+ * endpoint whose opaque endpoint id is in the user's allowlist (`allowedEndpointIds`);
+ * `none` refuses every endpoint (advertise/discover may run, but no exchange is driven).
+ */
+export type CourierExchangePeers = 'anyone' | 'known_only' | 'none';
+
+/**
+ * The §22.5 sharing selection: WHICH rooms/priorities this device offers to peers.  The
+ * courier is public-only at the seam, so this never widens beyond public content; it only
+ * NARROWS what a willing device shares.  `roomHashAllowlist` is empty ⇒ all public rooms;
+ * a non-empty allowlist shares only the listed opaque room hashes.  `maxPriorityClass`
+ * caps the §15.1.1 priority offered (P0 = most essential; default 4 = all lanes).
+ */
+export interface CourierSharingSelection {
+  /** Opaque room rendezvous hashes (hex) this device shares; empty ⇒ all public rooms. */
+  readonly roomHashAllowlist: readonly string[];
+  /** Highest (numerically largest) priority class offered (P0 most essential; 0..4). */
+  readonly maxPriorityClass: 0 | 1 | 2 | 3 | 4;
+}
+
+export const DEFAULT_SHARING_SELECTION: CourierSharingSelection = {
+  roomHashAllowlist: [],
+  maxPriorityClass: 4,
+};
+
 export interface CourierRadioControls {
   /** Advertise this device as a courier (off by default). */
   readonly advertisingEnabled: boolean;
   /** Discover + connect to nearby couriers (off by default). */
   readonly discoveryEnabled: boolean;
+  /** §22.5 who-can-exchange (default `anyone` for public content). */
+  readonly exchangePeers?: CourierExchangePeers;
+  /** §22.5 allowlist of opaque endpoint ids when `exchangePeers === 'known_only'`. */
+  readonly allowedEndpointIds?: readonly string[];
+  /** §22.5 sharing selection (rooms/priorities offered). */
+  readonly sharing?: CourierSharingSelection;
+  /**
+   * §22.5 storage budget: a hard ceiling on the TOTAL bytes this device will ferry to
+   * peers across the session.  `0` ⇒ unbounded (not recommended).  The controller refuses
+   * to drive an exchange once the running total would exceed this.
+   */
+  readonly storageBudgetBytes?: number;
+  /**
+   * §22.5 battery budget: refuse to advertise/discover when the device battery is below
+   * this floor (0..1).  `0` ⇒ no floor.  A device on charge bypasses the floor (the radio
+   * cost is acceptable while plugged in).
+   */
+  readonly batteryFloor?: number;
 }
 
 export const DEFAULT_COURIER_CONTROLS: CourierRadioControls = {
   advertisingEnabled: false,
   discoveryEnabled: false,
+  exchangePeers: 'anyone',
+  allowedEndpointIds: [],
+  sharing: DEFAULT_SHARING_SELECTION,
+  storageBudgetBytes: 0,
+  batteryFloor: 0,
 };
 
 export type CourierMode = 'minimal' | 'standard' | 'courier' | 'relay' | 'stealth' | 'emergency';
 
+export type CourierBlockedReason =
+  | ''
+  | 'forced_off_in_mode'
+  | 'disabled'
+  | 'below_battery_floor'
+  | 'no_peers';
+
 export interface CourierStartDecision {
   readonly advertise: boolean;
   readonly discover: boolean;
-  readonly blockedReason: '' | 'forced_off_in_mode' | 'disabled';
+  readonly blockedReason: CourierBlockedReason;
+}
+
+/** The live device-power reading the §22.5 battery budget gates on (all fields optional). */
+export interface CourierPowerState {
+  /** Battery level, 0..1 (the Battery Status API `level`); omit if unknown. */
+  readonly level?: number;
+  /** Whether the device is charging (omit if unknown — treated as not charging). */
+  readonly charging?: boolean;
 }
 
 /**
- * Decide whether the courier radios may advertise/discover.  Stealth and Emergency FORCE
- * both off regardless of the controls (no proximity radio reveals the device, §33.5);
- * otherwise the conservative defaults + the user's explicit controls decide.
+ * Decide whether the courier radios may advertise/discover.  The order of gates is:
+ *
+ *   1. Stealth/Emergency FORCE both off regardless of the controls (§33.5) — no proximity
+ *      radio ever reveals the device in a high-risk mode;
+ *   2. neither advertise nor discover is enabled ⇒ `disabled` (the conservative default);
+ *   3. `exchangePeers === 'none'` ⇒ `no_peers` (the user has explicitly opted to exchange
+ *      with nobody, so running the radios would reveal the device for no benefit);
+ *   4. the device battery is below the user's floor AND not charging ⇒ `below_battery_floor`
+ *      (the §22.5 battery budget — running radios on a low, unplugged battery is refused).
+ *
+ * Pure + total: given the same controls/mode/power it always returns the same decision.
  */
 export function decideCourierStart(
   controls: CourierRadioControls,
   mode: CourierMode,
+  power: CourierPowerState = {},
 ): CourierStartDecision {
   if (mode === 'stealth' || mode === 'emergency') {
     return { advertise: false, discover: false, blockedReason: 'forced_off_in_mode' };
@@ -60,7 +134,48 @@ export function decideCourierStart(
   const discover = controls.discoveryEnabled;
   if (!advertise && !discover)
     return { advertise: false, discover: false, blockedReason: 'disabled' };
+  if ((controls.exchangePeers ?? 'anyone') === 'none')
+    return { advertise: false, discover: false, blockedReason: 'no_peers' };
+  const floor = controls.batteryFloor ?? 0;
+  if (floor > 0 && !(power.charging ?? false) && typeof power.level === 'number') {
+    if (power.level < floor)
+      return { advertise: false, discover: false, blockedReason: 'below_battery_floor' };
+  }
   return { advertise, discover, blockedReason: '' };
+}
+
+/**
+ * Whether the controls permit driving an exchange with a specific discovered endpoint
+ * (the §22.5 who-can-exchange gate, applied per connection).  `anyone` ⇒ always; `none`
+ * ⇒ never; `known_only` ⇒ only when the endpoint id is in the allowlist.
+ */
+export function mayExchangeWithEndpoint(
+  controls: CourierRadioControls,
+  endpointId: string,
+): boolean {
+  switch (controls.exchangePeers ?? 'anyone') {
+    case 'anyone':
+      return true;
+    case 'none':
+      return false;
+    case 'known_only':
+      return (controls.allowedEndpointIds ?? []).includes(endpointId);
+  }
+}
+
+/**
+ * The §22.5 storage budget gate: whether ferrying `nextBytes` more would stay within the
+ * session storage budget given `alreadySharedBytes` already ferried.  `0` budget ⇒
+ * unbounded (always true).  The controller calls this before each exchange + accumulates.
+ */
+export function withinStorageBudget(
+  controls: CourierRadioControls,
+  alreadySharedBytes: number,
+  nextBytes: number,
+): boolean {
+  const budget = controls.storageBudgetBytes ?? 0;
+  if (budget <= 0) return true;
+  return alreadySharedBytes + nextBytes <= budget;
 }
 
 // --- the injected Capacitor bridge (no npm import) ---------------------------------
@@ -114,6 +229,26 @@ export const nativePayloadEventSchema = z
   .strict();
 export type NativePayloadEvent = z.infer<typeof nativePayloadEventSchema>;
 
+/**
+ * A `connectionResult` event: an endpoint id + whether the link is now open.  The
+ * controller drives ONE exchange when `connected` first becomes true.  No radio/peer
+ * identifier other than the live-connection endpoint id is read (it is a routing handle,
+ * never stored to an LCAP schema — the check:lcap-schema-egress doctrine).
+ */
+export const nativeConnectionEventSchema = z
+  .object({
+    endpointId: z.string().min(1).max(256),
+    connected: z.boolean(),
+  })
+  .strict();
+export type NativeConnectionEvent = z.infer<typeof nativeConnectionEventSchema>;
+
+/** A `disconnected` event: an endpoint id whose link has dropped. */
+export const nativeDisconnectEventSchema = z
+  .object({ endpointId: z.string().min(1).max(256) })
+  .strict();
+export type NativeDisconnectEvent = z.infer<typeof nativeDisconnectEventSchema>;
+
 function decodeBase64(b64: string): Uint8Array {
   const binary = atob(b64);
   const out = new Uint8Array(binary.length);
@@ -137,13 +272,20 @@ function encodeBase64(bytes: Uint8Array): string {
 export class NearbyEndpointMedium implements CourierMedium {
   private readonly inbox: Uint8Array[] = [];
   private listeners: Array<() => void> = [];
+  private sentBytes = 0;
 
   constructor(
     private readonly plugin: NearbyCourierPlugin,
     private readonly endpointId: string,
   ) {}
 
+  /** Total outbound bytes handed to the native ferry over this medium (storage budget). */
+  bytesSent(): number {
+    return this.sentBytes;
+  }
+
   enqueueOutbound(message: Uint8Array): void {
+    this.sentBytes += message.byteLength;
     void this.plugin
       .send({ endpointId: this.endpointId, message: encodeBase64(message) })
       .catch(() => {

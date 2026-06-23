@@ -67,4 +67,14 @@
         android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"
         android:maxSdkVersion="32" />
+
+    <!-- WS-R.15.4d Wi-Fi Direct courier (WifiP2pManager).  Wi-Fi Direct is OPTIONAL: a
+         device without it still couriers over the other channels. -->
+    <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
+
+    <!-- WS-R.15.4d USB courier (accessory mode; PHYSICAL OTG only).  Optional — a device
+         without USB host/accessory support simply does not expose the USB channel. -->
+    <uses-feature android:name="android.hardware.usb.accessory" android:required="false" />
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 </manifest>

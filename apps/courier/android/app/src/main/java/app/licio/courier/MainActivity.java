@@ -8,9 +8,14 @@ import com.getcapacitor.BridgeActivity;
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
-        // Register the WS-R.15.4c Nearby Connections courier transport BEFORE the bridge
-        // loads, so the TS `registerPlugin('NearbyCourier')` proxy resolves.
+        // Register the native courier transport plugins BEFORE the bridge loads, so the TS
+        // `registerPlugin('…')` proxies resolve.  Each radio channel is a separate plugin
+        // sharing the same JS event surface (WS-R.15.4c Nearby + WS-R.15.4d Wi-Fi Direct /
+        // Bluetooth / USB).
         registerPlugin(NearbyCourierPlugin.class);
+        registerPlugin(WifiDirectCourierPlugin.class);
+        registerPlugin(BluetoothCourierPlugin.class);
+        registerPlugin(UsbCourierPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }

@@ -8,9 +8,12 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   type CourierRadioControls,
   decideCourierStart,
+  mayExchangeWithEndpoint,
   type NearbyCourierPlugin,
   NearbyEndpointMedium,
+  nativeConnectionEventSchema,
   nativePayloadEventSchema,
+  withinStorageBudget,
 } from './courier-native.js';
 
 const ON: CourierRadioControls = { advertisingEnabled: true, discoveryEnabled: true };
@@ -44,6 +47,78 @@ describe('WS-R.15.4e courier control gating', () => {
         blockedReason: 'forced_off_in_mode',
       });
     }
+  });
+
+  it('refuses to advertise below the battery floor when unplugged (§22.5 battery budget)', () => {
+    const controls: CourierRadioControls = { ...ON, batteryFloor: 0.3 };
+    expect(decideCourierStart(controls, 'courier', { level: 0.2, charging: false })).toEqual({
+      advertise: false,
+      discover: false,
+      blockedReason: 'below_battery_floor',
+    });
+    // Above the floor → allowed.
+    expect(decideCourierStart(controls, 'courier', { level: 0.5, charging: false }).advertise).toBe(
+      true,
+    );
+    // On charge → the floor is bypassed (the radio cost is acceptable while plugged in).
+    expect(decideCourierStart(controls, 'courier', { level: 0.1, charging: true }).advertise).toBe(
+      true,
+    );
+    // Unknown level → the floor cannot fire (it requires a known level).
+    expect(decideCourierStart(controls, 'courier', {}).advertise).toBe(true);
+  });
+
+  it('blocks when the user has opted to exchange with no one (§22.5 who-can-exchange)', () => {
+    expect(decideCourierStart({ ...ON, exchangePeers: 'none' }, 'courier')).toEqual({
+      advertise: false,
+      discover: false,
+      blockedReason: 'no_peers',
+    });
+  });
+});
+
+describe('WS-R.15.4e who-can-exchange (per-endpoint)', () => {
+  it('anyone accepts every endpoint; none refuses every endpoint', () => {
+    expect(mayExchangeWithEndpoint({ ...ON, exchangePeers: 'anyone' }, 'ep-1')).toBe(true);
+    expect(mayExchangeWithEndpoint({ ...ON, exchangePeers: 'none' }, 'ep-1')).toBe(false);
+    // Default (unset) is `anyone` for public content.
+    expect(mayExchangeWithEndpoint(ON, 'ep-1')).toBe(true);
+  });
+
+  it('known_only accepts only an allowlisted endpoint id', () => {
+    const controls: CourierRadioControls = {
+      ...ON,
+      exchangePeers: 'known_only',
+      allowedEndpointIds: ['ep-allowed'],
+    };
+    expect(mayExchangeWithEndpoint(controls, 'ep-allowed')).toBe(true);
+    expect(mayExchangeWithEndpoint(controls, 'ep-other')).toBe(false);
+  });
+});
+
+describe('WS-R.15.4e storage budget', () => {
+  it('a zero budget is unbounded', () => {
+    expect(withinStorageBudget({ ...ON, storageBudgetBytes: 0 }, 1e9, 1e9)).toBe(true);
+  });
+
+  it('caps the total ferried bytes at the budget', () => {
+    const controls: CourierRadioControls = { ...ON, storageBudgetBytes: 1000 };
+    expect(withinStorageBudget(controls, 0, 1000)).toBe(true);
+    expect(withinStorageBudget(controls, 600, 400)).toBe(true);
+    expect(withinStorageBudget(controls, 600, 401)).toBe(false);
+    expect(withinStorageBudget(controls, 1000, 1)).toBe(false);
+  });
+});
+
+describe('WS-R.15.4c native connection-event schema', () => {
+  it('parses a strict connectionResult event', () => {
+    expect(
+      nativeConnectionEventSchema.safeParse({ endpointId: 'ep-1', connected: true }).success,
+    ).toBe(true);
+    expect(
+      nativeConnectionEventSchema.safeParse({ endpointId: 'ep-1', connected: true, extra: 1 })
+        .success,
+    ).toBe(false);
   });
 });
 
@@ -106,5 +181,13 @@ describe('WS-R.15.4c NearbyEndpointMedium (base64 bridge)', () => {
     expect(
       nativePayloadEventSchema.safeParse({ endpointId: 'a', message: 'b', extra: 1 }).success,
     ).toBe(false);
+  });
+
+  it('tracks the total outbound bytes ferried (storage-budget accounting)', () => {
+    const medium = new NearbyEndpointMedium(fakePlugin(), 'ep-1');
+    expect(medium.bytesSent()).toBe(0);
+    medium.enqueueOutbound(new Uint8Array([1, 2, 3]));
+    medium.enqueueOutbound(new Uint8Array([4, 5]));
+    expect(medium.bytesSent()).toBe(5);
   });
 });
