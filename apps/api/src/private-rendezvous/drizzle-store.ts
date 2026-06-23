@@ -13,7 +13,7 @@
 // mailbox; a multi-node deployment needs a shared transient store).
 
 import { type DbExecutor, privateRendezvousRecords } from '@licio/db';
-import { and, desc, eq, inArray, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, lte, sql } from 'drizzle-orm';
 import {
   InMemoryRendezvousStore,
   MAX_RECORDS_PER_ROOM,
@@ -87,7 +87,9 @@ export class DrizzleRendezvousStore implements RendezvousStore {
       .where(
         and(
           eq(privateRendezvousRecords.roomBlindId, roomBlindId),
-          sql`${privateRendezvousRecords.expiresAt} > ${new Date(nowMs)}`,
+          // drizzle's `gt` binds the Date as a proper param (a raw `sql` template
+          // rejects a Date under postgres@3.x); mirrors the `lte` in cleanup().
+          gt(privateRendezvousRecords.expiresAt, new Date(nowMs)),
         ),
       )
       .limit(limit);
