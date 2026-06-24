@@ -7,3 +7,4 @@
 // cap WITHOUT pulling the room engine / MLS. See docs/private-p2p/TIER2-RENDEZVOUS-CAP.md.
 
 export * from './credential.js';
+export * from './poll-filter.js';

@@ -44,6 +44,18 @@ const NID_INDEX = 0;
 /** Sentinel bucket selecting the `per-epoch` granularity (no per-bucket rotation). */
 export const PER_EPOCH_BUCKET = -1;
 
+/**
+ * The time-bucket width — the SSOT for the announcer, the server verifier, and the
+ * client poll-filter. ALL THREE must agree, or a valid announce lands out-of-window.
+ * (`apps/api`'s `DEFAULT_RENDEZVOUS_CONFIG.bucketWidthMs` mirrors this value.)
+ */
+export const DEFAULT_BUCKET_WIDTH_MS = 10 * 60 * 1000;
+
+/** The current time bucket index for `nowMs` (a per-bucket pseudonym rotates with it). */
+export function currentBucket(nowMs: number, widthMs: number = DEFAULT_BUCKET_WIDTH_MS): number {
+  return Math.floor(nowMs / widthMs);
+}
+
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 const lenPrefixed = (b: Uint8Array): Uint8Array => concatBytes(i2osp(b.length, 8), b);
 
