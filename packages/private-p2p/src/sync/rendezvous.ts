@@ -144,6 +144,13 @@ export const rendezvousAnnouncementSchema = z
     peer_device_id: privateIdSchema,
     signaling_public_key: base64UrlSchema,
     transport_hints: z.array(z.string().min(1).max(256)).max(16).default([]),
+    /**
+     * Tier-2 rendezvous cap (docs/private-p2p/TIER2-RENDEZVOUS-CAP.md §6.8) — the OPTIONAL
+     * anonymous-credential proof, sealed INSIDE the announcement (only a member who can open
+     * it sees the cap; the relay never does). A polling member verifies it under the room's
+     * per-epoch issuer key and dedups by the pseudonym — the serverless cap. Absent ⇒ Tier-1.
+     */
+    cap: z.object({ proof: base64UrlSchema, pseudonym: base64UrlSchema }).strict().optional(),
   })
   .strict();
 export type RendezvousAnnouncement = z.infer<typeof rendezvousAnnouncementSchema>;
@@ -165,12 +172,15 @@ function announcementAad(roomBlindId: string, peerBlindId: string, expiresAt: nu
 }
 
 function serializeAnnouncement(a: RendezvousAnnouncement): CanonicalValue {
-  return {
+  const out: Record<string, CanonicalValue> = {
     schema: a.schema,
     peer_device_id: a.peer_device_id,
     signaling_public_key: a.signaling_public_key,
     transport_hints: [...a.transport_hints],
   };
+  // Optional-omit the cap (so a Tier-1 announcement is byte-identical to before).
+  if (a.cap !== undefined) out['cap'] = { proof: a.cap.proof, pseudonym: a.cap.pseudonym };
+  return out;
 }
 
 /** §15.3 — the only thing the server stores for an unlisted/detached room: two
