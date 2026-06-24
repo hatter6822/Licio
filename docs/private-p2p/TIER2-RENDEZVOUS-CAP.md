@@ -89,13 +89,22 @@ rides the §14.3 op log with a MINIMAL converged footprint:
   every ingest + before each dial (connect AND mesh re-dial) and passes the hooks into
   `connectPrivatePeer` — fail-open to Tier-1 throughout. Proven end-to-end: a real session
   authors its `rendezvous.request` on ingest (folds into device state), idempotently.
+- The nid + issuer seed persist in a v4 `cap_secrets` store in the private-p2p IndexedDB (per
+  `(roomId, field)`) — the SAME trust boundary as the room epoch keys, off origin-wide
+  localStorage (round-trip + cross-room isolation tested).
+- The **flood adversary is tested through the real carrier**: a flooder enrolled under a
+  DIFFERENT issuer publishes 20 well-formed-but-unverifiable cap announcements; with the cap
+  hooks `connectPrivatePeer` skips every one and never reaches the dial path (`rtcFactory`
+  count 0), while without the cap a fake is dialed — the cap demonstrably protects the dial
+  budget.
 
-**Remaining (residual): hardening + a live-browser E2E** — move the nid/issuer-seed persistence
-from localStorage to the encrypted IndexedDB store; drive enrollment continuously during live
-sync (not only on connect/ingest); and confirm the cap on a two-browser WebRTC convergence run
-with a flood adversary. The server-side enforcement remains an available second layer (the
-announce can additionally carry the §6.7 server `cap` fields). Until then, clients ride Tier-1
-where unenrolled and the server runs Tier-1 (a strict superset).
+**Remaining (residual): two refinements + a live-browser run** — drive enrollment continuously
+during live sync (the `PrivateSyncSession`'s own ingests, not only on connect/explicit ingest);
+and confirm the cap on a two-browser WebRTC convergence run on real radios (the same real-device
+residual the rest of the WS-S carrier carries — the node carrier test already exercises the full
+code path). The server-side enforcement remains an available second layer (the announce can
+additionally carry the §6.7 server `cap` fields). Throughout, unenrolled clients and the server
+ride Tier-1 (a strict superset).
 This slice modifies the security-critical reducer/op model, so it is scoped as its own
 focused pass (the crypto + server enforcement + client dedup + session it builds on are all
 shipped + tested).
