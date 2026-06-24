@@ -35,11 +35,27 @@ soundness, unlinkability, blindness) — the strongest available short of fixtur
 official vectors when the drafts publish them. A `check:p2p-bbs-wrapper` gate (mirroring the
 MLS one) should fence deep `@noble/curves/bls12-381` imports to `bbs/`.
 
-**Remaining: the §11 cross-stack plumbing** — the device-record `ncommit`, issuance over
-MLS, the §8.2 wire/allowlist extension (`presence_proof`/`presence_nym` + the per-epoch
-`ipk_e`), the server verify/dedup/fail-open in `apps/api/src/private-rendezvous`, and the
-manifest opt-in flag. Until that lands, the implemented crypto is dormant and the
-rendezvous runs on Tier-1 (the sample-poll) — a strict superset, never a regression.
+**The SERVER-SIDE cap is also SHIPPED + ENFORCED** (`apps/api/src/private-rendezvous`,
+7 tests). The announce gains an optional `cap` proof; a Tier-2 `peer_blind_id` IS the
+base64url pseudonym, so **no new persisted column / migration was needed** (the §8.2
+allowlist is unchanged — the proof is verified then discarded; the pseudonym reuses the
+existing slot key). The service verifies the ZK proof via an injected verifier port
+(`cap-verifier.ts`, importing only the blindness-preserving `rendezvous-cap` subpath),
+keys the slot by the pseudonym (dedup = the cap), and FAILS OPEN to Tier-1 on an absent
+proof / unverifiable record / no verifier. SOUNDNESS additions over the bare design: the
+time bucket is validated against the server clock (a flooder cannot mint a fresh bucket ⇒
+fresh pseudonym ⇒ fresh slot), and the per-`(room, epoch)` issuer key is first-seen-pinned
+(verify runs against the pin, so a self-issued credential fails; a wrong pin only degrades
+to Tier-1, §8 net-zero).
+
+**Remaining: the CLIENT wiring** — at room join the device generates `nid` + a blind
+credential request; the per-epoch committing admin generates the BBS issuer keypair, issues
+each member a credential, and distributes the issuer public key over the MLS-protected
+channel (issuance riding the §6.2 MLS commit); the announce flow builds the Tier-2 `cap`
+fields via `proveRendezvousPresence` and retries WITHOUT a proof on a `cap_invalid`/`bucket`
+rejection (the §6.10 / §8 Tier-1 fall-back). Until that lands, clients announce Tier-1 and
+the server runs Tier-1 (a strict superset) — the cap activates per-room once members carry
+credentials.
 
 ---
 
