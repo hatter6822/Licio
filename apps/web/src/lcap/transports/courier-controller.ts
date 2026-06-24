@@ -56,6 +56,38 @@ import {
 import type { HttpsTransportConfig } from './https.js';
 import { buildServerTransports, offlineExchange } from './registry.js';
 
+/** The max wall-clock a single courier leg may block before the exchange falls through to the
+ *  HTTPS anchor.  A connected medium whose peer never sends a response must NOT stall sync
+ *  forever — the courier is delay-tolerant, but per-attempt it is bounded so the always-correct
+ *  server transports still get to run. */
+const COURIER_LEG_TIMEOUT_MS = 20_000;
+
+/**
+ * Bound a transport's BLOCKING ops (`open`/`receive`) with a deadline: a hung leg rejects (so
+ * `fallbackExchange` moves to the next transport) rather than waiting indefinitely.  `send` is
+ * fire-and-forget over the medium; `close` runs in the exchange's `finally`, which unblocks any
+ * pending `receive`.  Robust by construction — it does not depend on the inner transport
+ * honouring the `AbortSignal`.
+ */
+function withLegTimeout(inner: LcapTransport, ms: number): LcapTransport {
+  const race = <T>(op: Promise<T>): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('courier_leg_timeout')), ms);
+    });
+    return Promise.race([op, timeout]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
+  };
+  return {
+    capabilities: inner.capabilities,
+    open: (signal) => race(inner.open(signal)),
+    send: (message) => inner.send(message),
+    receive: (signal) => race(inner.receive(signal)),
+    close: () => inner.close(),
+  };
+}
+
 /** A Capacitor listener handle (returned by `addListener`). */
 interface ListenerHandle {
   remove(): Promise<void> | void;
@@ -338,8 +370,11 @@ export class CourierController {
       return;
     }
     const medium = this.mediumFor(channel, plugin, endpointId);
-    // The courier transport over THIS endpoint, then the always-correct HTTPS anchor.
-    const transports: LcapTransport[] = [new CourierTransport(medium as CourierMedium)];
+    // The courier transport over THIS endpoint (deadline-bounded so a non-responding peer
+    // cannot stall sync forever), then the always-correct HTTPS anchor.
+    const transports: LcapTransport[] = [
+      withLegTimeout(new CourierTransport(medium as CourierMedium), COURIER_LEG_TIMEOUT_MS),
+    ];
     for (const t of buildServerTransports(this.config.httpsConfig ?? {})) transports.push(t);
 
     let result: { transport: CourierExchangeOutcome['carriedBy']; response: Uint8Array } | null;

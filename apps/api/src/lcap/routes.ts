@@ -849,17 +849,22 @@ function auditVerdicts(reviewed: ReviewedPublishOutcome): {
   return { review, takedown };
 }
 
-/** Write ONE append-only audit record for a (re)publish decision (never blocks the path). */
+/**
+ * Write ONE append-only audit record for a (re)publish decision.  Returns `false` if the
+ * append failed.  Public-CID egress is accountability-critical: a decision the audit log could
+ * not durably record must FAIL CLOSED (the caller sees a 500 and retries, which re-pins
+ * idempotently and re-audits once the store recovers) rather than be reported as a clean
+ * outcome with no trail.
+ */
 async function writePublishAudit(
   audit: PublishAuditStore,
   input: PublishAuditInput,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await audit.append(input);
+    return true;
   } catch {
-    // The decision already happened; a degraded audit write must not turn a refusal into a
-    // success or vice versa.  (The store is append-only; an outage drops the trail row, which
-    // the operator's monitoring surfaces — never the request.)
+    return false;
   }
 }
 
@@ -919,7 +924,7 @@ async function handlePublish(
     targets,
   });
   const { review, takedown } = auditVerdicts(reviewed);
-  await writePublishAudit(audit, {
+  const audited = await writePublishAudit(audit, {
     action: 'publish',
     blockCid: parsed.data.block_cid,
     target: targets[0] ?? null,
@@ -930,8 +935,11 @@ async function handlePublish(
     outcomeReason: reviewed.outcome.ok ? '' : reviewed.outcome.reason,
     ipfsCid: reviewed.outcome.ok ? reviewed.outcome.ipfsCid : null,
   });
+  // FAIL CLOSED on an unrecorded decision (accountability): never report a publish outcome the
+  // audit log could not durably capture.  The retry re-pins idempotently and re-audits.
+  if (!audited) return json(500, { error: 'audit_unavailable' });
   // A refused publish is a well-formed 200 carrying the auditable reason (the gate's decision
-  // is the answer, not an error); the only HTTP errors are the 503/404/400 above.
+  // is the answer, not an error); the only HTTP errors are the 503/404/400/500 above.
   return json(200, reviewed.outcome);
 }
 
@@ -940,6 +948,7 @@ async function handleRepublish(
   publisher: LcapPublicPublisher | undefined,
   provenance: BlockProvenanceStore,
   audit: PublishAuditStore,
+  resolveEligibility: PublishEligibilityResolver | undefined,
   actorUserId: string | null,
   body: unknown,
 ): Promise<Response> {
@@ -957,9 +966,33 @@ async function handleRepublish(
   // re-check both key on them (a republish of a block with no recorded provenance resolves
   // to the empty target set, which the review gate refuses `review_required`).
   const targets = await provenance.targetsOf(parsed.data.block_cid);
+  // RE-DERIVE current visibility eligibility for the recorded targets (finding: republish must
+  // not re-pin a block whose content was later narrowed to `room_only` or moved off a `server`
+  // room — review staying approved is NOT sufficient).  Mirrors handlePublish; `derived.
+  // publishable` is exactly the §22.7 gateway guard over the aggregate signals.  Absent resolver
+  // ⇒ fail-closed.
+  const derived = resolveEligibility
+    ? aggregateEligibility(await Promise.all(targets.map((t) => resolveEligibility(t))))
+    : { publishable: false, visibility: 'in_room' as const, privateRoomCid: true };
+  if (!derived.publishable) {
+    const reason = 'reason' in derived && derived.reason ? derived.reason : 'not_public';
+    const audited = await writePublishAudit(audit, {
+      action: 'republish',
+      blockCid: parsed.data.block_cid,
+      target: targets[0] ?? null,
+      actorUserId,
+      reviewVerdict: 'skipped',
+      takedownVerdict: 'clear',
+      published: false,
+      outcomeReason: reason,
+      ipfsCid: null,
+    });
+    if (!audited) return json(500, { error: 'audit_unavailable' });
+    return json(200, { ok: false, reason });
+  }
   const reviewed = await publisher.republish(parsed.data.block_cid, obj.bytes, targets);
   const { review, takedown } = auditVerdicts(reviewed);
-  await writePublishAudit(audit, {
+  const audited = await writePublishAudit(audit, {
     action: 'republish',
     blockCid: parsed.data.block_cid,
     target: targets[0] ?? null,
@@ -970,8 +1003,9 @@ async function handleRepublish(
     outcomeReason: reviewed.outcome.ok ? '' : reviewed.outcome.reason,
     ipfsCid: reviewed.outcome.ok ? reviewed.outcome.ipfsCid : null,
   });
-  const outcome = reviewed.outcome;
-  return json(200, outcome);
+  // FAIL CLOSED on an unrecorded decision (accountability), as in handlePublish.
+  if (!audited) return json(500, { error: 'audit_unavailable' });
+  return json(200, reviewed.outcome);
 }
 
 /**
@@ -1112,6 +1146,7 @@ export function createLcapRoutes(
         publisher(),
         provenance(),
         audit(),
+        eligibility(),
         getAuth(c)?.userId ?? null,
         body,
       );

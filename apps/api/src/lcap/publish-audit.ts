@@ -12,15 +12,16 @@
 // the resolved content target, the §22.7 review-gate verdict, the takedown re-check verdict,
 // and the bridge's final outcome.
 //
-// Like the WS-J moderation audit (`apps/api/src/moderation/audit.ts`), the writer is the
-// single funnel and an audit-write failure is metered/logged but does NOT block the decision
-// path — EXCEPT that the audit write happens AFTER a refusal and AFTER a successful pin, so a
-// failure can never cause an unaudited publish to be reported as audited: the route writes the
-// audit BEFORE returning, and a write failure is surfaced to the operator as a degraded-audit
-// signal.  The record is append-only (no update/delete) — migration 0049 grants INSERT/SELECT
-// only, mirroring the moderation append-only trigger posture.
+// The writer is the single funnel.  Public-CID egress is accountability-critical, so the route
+// FAILS CLOSED on an audit-write failure: the audit is written AFTER the decision (a refusal or
+// a successful pin) but BEFORE the route returns, and if the append throws the route answers
+// 500 `audit_unavailable` rather than reporting a clean outcome with no durable trail — the
+// caller retries, the pin is idempotent, and the decision is re-audited once the store recovers.
+// The record is append-only (no update/delete) — migration 0049 grants INSERT/SELECT only,
+// mirroring the moderation append-only trigger posture.
 
 import { type DbExecutor, lcapPublishAudit } from '@licio/db';
+import { desc } from 'drizzle-orm';
 import type { ProvenanceTarget } from './takedown-oracle.js';
 
 /** What the §22.7 gate decided about the candidate. */
@@ -84,24 +85,22 @@ export class DrizzlePublishAuditStore implements PublishAuditStore {
     const rows = await this.#db
       .select()
       .from(lcapPublishAudit)
-      .orderBy(lcapPublishAudit.id)
+      .orderBy(desc(lcapPublishAudit.id)) // newest first — `recent()` returns the LATEST slice
       .limit(limit);
-    return rows
-      .map((r) => ({
-        action: r.action as PublishAuditAction,
-        blockCid: r.blockCid,
-        target:
-          r.targetType !== null && r.targetId !== null
-            ? ({ targetType: r.targetType, targetId: r.targetId } satisfies ProvenanceTarget)
-            : null,
-        actorUserId: r.actorUserId,
-        reviewVerdict: r.reviewVerdict as PublishAuditInput['reviewVerdict'],
-        takedownVerdict: r.takedownVerdict as PublishAuditInput['takedownVerdict'],
-        published: r.published,
-        outcomeReason: r.outcomeReason,
-        ipfsCid: r.ipfsCid,
-      }))
-      .reverse(); // newest first
+    return rows.map((r) => ({
+      action: r.action as PublishAuditAction,
+      blockCid: r.blockCid,
+      target:
+        r.targetType !== null && r.targetId !== null
+          ? ({ targetType: r.targetType, targetId: r.targetId } satisfies ProvenanceTarget)
+          : null,
+      actorUserId: r.actorUserId,
+      reviewVerdict: r.reviewVerdict as PublishAuditInput['reviewVerdict'],
+      takedownVerdict: r.takedownVerdict as PublishAuditInput['takedownVerdict'],
+      published: r.published,
+      outcomeReason: r.outcomeReason,
+      ipfsCid: r.ipfsCid,
+    }));
   }
 }
 

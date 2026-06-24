@@ -22,7 +22,7 @@
 import { cidFor } from '@licio/lcap';
 import { describe, expect, it } from 'vitest';
 import { freshForumServices, seedUserWithSession } from '../../__tests__/forum-test-helpers.js';
-import { InMemoryPublishAuditStore } from '../publish-audit.js';
+import { InMemoryPublishAuditStore, type PublishAuditStore } from '../publish-audit.js';
 import { aggregateEligibility, type PublishEligibilityResolver } from '../publish-eligibility.js';
 import { LcapPublicPublisher } from '../publisher.js';
 import { type BlockPublishReviewStore, InMemoryBlockPublishReviewStore } from '../review-gate.js';
@@ -396,13 +396,13 @@ describe('Gate-19 — the §29 public-bridge route (steward-authorized, audited,
     // Tests pass a non-publishable resolver to exercise the server-side derivation refusals.
     eligibility: PublishEligibilityResolver = () =>
       Promise.resolve({ publishable: true, visibility: 'public', privateRoomCid: false }),
+    audit: PublishAuditStore = new InMemoryPublishAuditStore(),
   ) {
     const forum = freshForumServices();
     const steward = await seedUserWithSession(forum.identity, { steward: true });
     const regular = await seedUserWithSession(forum.identity);
     const server = new LcapIngestServer('net');
     const provenance = new InMemoryBlockProvenanceStore();
-    const audit = new InMemoryPublishAuditStore();
     let pinned = 0;
     const publisher = new LcapPublicPublisher({
       gatewayUrl: 'https://gw.test',
@@ -429,6 +429,13 @@ describe('Gate-19 — the §29 public-bridge route (steward-authorized, audited,
         private_room_cid: false,
         content_targets: [{ target_type: 'story', target_id: 'story-1' }],
       }),
+    });
+
+  const REPUBLISH_BODY = (cookie: string, blockCid: string) =>
+    new Request('http://x/public-bridge/republish', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ block_cid: blockCid }),
     });
 
   it('401 for an anonymous caller (no session) — never reaches the bridge', async () => {
@@ -494,6 +501,67 @@ describe('Gate-19 — the §29 public-bridge route (steward-authorized, audited,
       published: true,
     });
     expect(rows[0]?.ipfsCid).not.toBeNull();
+  });
+
+  it('republish RE-DERIVES eligibility: a now-room_only target is REFUSED + NOT re-pinned', async () => {
+    // The block was public when first pinned; the story is later narrowed to `room_only`.
+    let publishable = true;
+    const resolver: PublishEligibilityResolver = () =>
+      Promise.resolve(
+        publishable
+          ? { publishable: true, visibility: 'public', privateRoomCid: false }
+          : {
+              publishable: false,
+              visibility: 'in_room',
+              privateRoomCid: false,
+              reason: 'room_only',
+            },
+      );
+    const { server, audit, app, steward, pins } = await harness(
+      async () => false,
+      approvedReviewStore(STORY),
+      resolver,
+    );
+    const payload = enc.encode('was public, now room_only');
+    const blockCid = await cidFor('block', payload);
+    await server.putObject(blockCid, 'block', payload);
+    // 1) Publish while public → pins + records provenance.
+    const pub = await app.request(STORY_BODY('/public-bridge/publish', steward.cookie, blockCid));
+    expect(await pub.json()).toMatchObject({ ok: true });
+    expect(pins()).toBe(1);
+    // 2) Narrowed; republish must REFUSE (review staying approved is NOT sufficient) + NOT re-pin.
+    publishable = false;
+    const re = await app.request(REPUBLISH_BODY(steward.cookie, blockCid));
+    expect(re.status).toBe(200);
+    expect(await re.json()).toEqual({ ok: false, reason: 'room_only' });
+    expect(pins()).toBe(1); // NOT re-pinned
+    expect((audit as InMemoryPublishAuditStore).all().at(-1)).toMatchObject({
+      action: 'republish',
+      published: false,
+      outcomeReason: 'room_only',
+    });
+  });
+
+  it('FAILS CLOSED (500) when the audit append throws — no clean outcome without a durable trail', async () => {
+    const failingAudit: PublishAuditStore = {
+      append: () => Promise.reject(new Error('audit store down')),
+      recent: () => Promise.resolve([]),
+    };
+    const { server, app, steward, pins } = await harness(
+      async () => false,
+      approvedReviewStore(STORY),
+      undefined,
+      failingAudit,
+    );
+    const payload = enc.encode('audit outage');
+    const blockCid = await cidFor('block', payload);
+    await server.putObject(blockCid, 'block', payload);
+    const res = await app.request(STORY_BODY('/public-bridge/publish', steward.cookie, blockCid));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'audit_unavailable' });
+    // The pin happened (the decision is real); the 500 signals the unrecorded trail so the caller
+    // retries (re-pin is idempotent) — never a success reported with no audit row.
+    expect(pins()).toBe(1);
   });
 
   it('an UNREVIEWED block is refused review_required at the route, AUDITED, and never pinned', async () => {

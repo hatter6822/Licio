@@ -20,6 +20,7 @@ import { Route as PrivateRouteImport } from './routes/private'
 import { Route as ModerationRouteImport } from './routes/moderation'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as PrivateIndexRouteImport } from './routes/private.index'
 import { Route as ThreadsThreadIdRouteImport } from './routes/threads_.$threadId'
 import { Route as StoriesStoryIdRouteImport } from './routes/stories.$storyId'
 import { Route as RoomsRoomIdRouteImport } from './routes/rooms_.$roomId'
@@ -82,6 +83,11 @@ const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
+} as any)
+const PrivateIndexRoute = PrivateIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => PrivateRoute,
 } as any)
 const ThreadsThreadIdRoute = ThreadsThreadIdRouteImport.update({
   id: '/threads_/$threadId',
@@ -194,6 +200,7 @@ export interface FileRoutesByFullPath {
   '/rooms/$roomId': typeof RoomsRoomIdRoute
   '/stories/$storyId': typeof StoriesStoryIdRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
+  '/private/': typeof PrivateIndexRoute
   '/rooms/$roomId/governance': typeof RoomsRoomIdGovernanceRoute
   '/stories/$storyId/comments': typeof StoriesStoryIdCommentsRoute
 }
@@ -201,7 +208,6 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/moderation': typeof ModerationRoute
-  '/private': typeof PrivateRouteWithChildren
   '/profile': typeof ProfileRoute
   '/rooms': typeof RoomsRoute
   '/styleguide': typeof StyleguideRoute
@@ -222,6 +228,7 @@ export interface FileRoutesByTo {
   '/rooms/$roomId': typeof RoomsRoomIdRoute
   '/stories/$storyId': typeof StoriesStoryIdRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
+  '/private': typeof PrivateIndexRoute
   '/rooms/$roomId/governance': typeof RoomsRoomIdGovernanceRoute
   '/stories/$storyId/comments': typeof StoriesStoryIdCommentsRoute
 }
@@ -251,6 +258,7 @@ export interface FileRoutesById {
   '/rooms_/$roomId': typeof RoomsRoomIdRoute
   '/stories/$storyId': typeof StoriesStoryIdRoute
   '/threads_/$threadId': typeof ThreadsThreadIdRoute
+  '/private/': typeof PrivateIndexRoute
   '/rooms_/$roomId_/governance': typeof RoomsRoomIdGovernanceRoute
   '/stories/$storyId_/comments': typeof StoriesStoryIdCommentsRoute
 }
@@ -281,6 +289,7 @@ export interface FileRouteTypes {
     | '/rooms/$roomId'
     | '/stories/$storyId'
     | '/threads/$threadId'
+    | '/private/'
     | '/rooms/$roomId/governance'
     | '/stories/$storyId/comments'
   fileRoutesByTo: FileRoutesByTo
@@ -288,7 +297,6 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/moderation'
-    | '/private'
     | '/profile'
     | '/rooms'
     | '/styleguide'
@@ -309,6 +317,7 @@ export interface FileRouteTypes {
     | '/rooms/$roomId'
     | '/stories/$storyId'
     | '/threads/$threadId'
+    | '/private'
     | '/rooms/$roomId/governance'
     | '/stories/$storyId/comments'
   id:
@@ -337,6 +346,7 @@ export interface FileRouteTypes {
     | '/rooms_/$roomId'
     | '/stories/$storyId'
     | '/threads_/$threadId'
+    | '/private/'
     | '/rooms_/$roomId_/governance'
     | '/stories/$storyId_/comments'
   fileRoutesById: FileRoutesById
@@ -433,6 +443,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/private/': {
+      id: '/private/'
+      path: '/'
+      fullPath: '/private/'
+      preLoaderRoute: typeof PrivateIndexRouteImport
+      parentRoute: typeof PrivateRoute
     }
     '/threads_/$threadId': {
       id: '/threads_/$threadId'
@@ -558,10 +575,12 @@ declare module '@tanstack/react-router' {
 
 interface PrivateRouteChildren {
   PrivateMigrateRoute: typeof PrivateMigrateRoute
+  PrivateIndexRoute: typeof PrivateIndexRoute
 }
 
 const PrivateRouteChildren: PrivateRouteChildren = {
   PrivateMigrateRoute: PrivateMigrateRoute,
+  PrivateIndexRoute: PrivateIndexRoute,
 }
 
 const PrivateRouteWithChildren =

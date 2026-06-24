@@ -169,6 +169,15 @@ const EXEMPT_PATHS = new Set([
   '/api/lcap/v2/packs',
   '/api/lcap/v2/pulse',
   '/api/lcap/v2/exchange',
+  // WS-R.15.6a — the server-blind WebRTC SIGNALING rendezvous: both POSTs route only an
+  // OPAQUE sealed blob to/from an opaque peer key (the server never decodes it, holds no keys,
+  // and runs no ACL — knowledge of the peer key IS the capability), and the syncRoomOverP2p
+  // browser flow holds no session cookie for these, so there is no session for CSRF to ride.
+  // Like the Private P2P rendezvous below, abuse is bounded by each endpoint's own rate limit.
+  // (Without this, the browser's tokenless fetch 403s and WebRTC setup always falls back to
+  // HTTPS — the cap/peer path is never exercised.)
+  '/api/lcap/v2/p2p/signal',
+  '/api/lcap/v2/p2p/signal/poll',
   // The §29.8 server export is gated by a device-signed, freshness-windowed `export_request`
   // (the requester must hold a non-revoked `may_export_bundle` capability for the room); the
   // signature IS the authentication, and a native peer holds no session cookie — so, like
