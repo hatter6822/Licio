@@ -295,6 +295,58 @@ describe('WS-S.9 purge — gated on the freeze; minimizes content', () => {
     expect(sc?.body).toBe("Steward's comment.");
     expect(mc?.body).toBe("Another member's comment.");
   });
+
+  it('anonymize is ROOM-SCOPED: the steward KEEPS authorship in their OTHER rooms', async () => {
+    const { userId: steward } = await seedUserWithSession(fixture.identity, { steward: true });
+    // The steward authors a comment in TWO distinct rooms; only one is migrated.
+    const migratingRoom = await makeServerRoom();
+    const otherRoom = await makeServerRoom();
+    const { threadId: migThread } = await seedThread(fixture, {
+      roomId: migratingRoom,
+      submittedBy: steward,
+    });
+    const { threadId: otherThread } = await seedThread(fixture, {
+      roomId: otherRoom,
+      submittedBy: steward,
+    });
+    const migComment = await createContribution(fixture, steward, `acct-${steward}`, {
+      type: 'comment',
+      thread_id: migThread,
+      client_draft_id: randomUUID(),
+      body: 'In the migrating room.',
+    });
+    const otherComment = await createContribution(fixture, steward, `acct-${steward}`, {
+      type: 'comment',
+      thread_id: otherThread,
+      client_draft_id: randomUUID(),
+      body: 'In the OTHER room.',
+    });
+    expect(migComment.ok && otherComment.ok).toBe(true);
+    if (!migComment.ok || !otherComment.ok) return;
+    await freezeRoomForMigration(
+      fixture.forum,
+      steward,
+      ['user', 'steward'],
+      migratingRoom,
+      randomUUID(),
+    );
+    const out = await purgeRoomForMigration(
+      fixture.forum,
+      fixture.ingestion,
+      steward,
+      ['user', 'steward'],
+      migratingRoom,
+      'anonymize',
+    );
+    expect(out.ok).toBe(true);
+    // The migrating room's authorship is detached...
+    const mc = await fixture.forum.contributions.getById(migComment.contribution.contributionId);
+    expect(mc?.userId).toBe(null);
+    // ...but the steward KEEPS their authorship in the OTHER room (the old account-wide
+    // anonymize wrongly detached it too — this is the regression guard).
+    const oc = await fixture.forum.contributions.getById(otherComment.contribution.contributionId);
+    expect(oc?.userId).toBe(steward);
+  });
 });
 
 /**

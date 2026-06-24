@@ -294,6 +294,10 @@ export interface ContributionStore {
   ): Promise<ContributionRecord[]>;
   /** WS-D.2.4 anonymize hook: tombstone the author on every row. */
   anonymizeUser(userId: string): Promise<number>;
+  /** WS-S.9 ROOM-SCOPED anonymize: tombstone the author ONLY on rows in the given threads
+   *  (the migrated room's threads).  Unlike {@link anonymizeUser} (account-wide), this leaves
+   *  the user's authorship in every OTHER room intact. Returns the number of rows detached. */
+  anonymizeUserByThreads(threadIds: readonly string[], userId: string): Promise<number>;
   /**
    * WS-S.9 (PRIVATE_SPEC §24.2, phase 6 — `purge`) — IRREVERSIBLY hard-delete
    * EVERY contribution (any author, any moderation state) for the given threads,
@@ -426,6 +430,10 @@ export interface UploadStore {
   /** All of a user's upload records (DSAR export, §19.3/GDPR Art. 15). */
   listByOwner(userId: string): Promise<UploadRecord[]>;
   anonymizeUser(userId: string): Promise<void>;
+  /** WS-S.9 ROOM-SCOPED anonymize: NULL `ownerUserId` ONLY on uploads owned by the given
+   *  stories (the migrated room's).  The bytes are kept (anonymize, not purge); other rooms'
+   *  uploads are untouched. Returns the number of records detached. */
+  anonymizeUserByStories(storyIds: readonly string[], userId: string): Promise<number>;
   /**
    * WS-S.9 (§24.2 phase 6 `purge`) — IRREVERSIBLY remove the BYTES and the
    * metadata record of every upload owned by the given stories (the §24.2 "media
@@ -734,6 +742,19 @@ export class InMemoryContributionStore implements ContributionStore {
     let count = 0;
     for (const row of this.#rows.values()) {
       if (row.userId === userId) {
+        row.userId = null;
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  async anonymizeUserByThreads(threadIds: readonly string[], userId: string): Promise<number> {
+    const wanted = new Set(threadIds);
+    if (wanted.size === 0) return 0;
+    let count = 0;
+    for (const row of this.#rows.values()) {
+      if (row.userId === userId && wanted.has(row.threadId)) {
         row.userId = null;
         count += 1;
       }
@@ -1151,6 +1172,23 @@ export class InMemoryUploadStore implements UploadStore {
     for (const record of this.#records.values()) {
       if (record.ownerUserId === userId) record.ownerUserId = null;
     }
+  }
+
+  async anonymizeUserByStories(storyIds: readonly string[], userId: string): Promise<number> {
+    const wanted = new Set(storyIds);
+    if (wanted.size === 0) return 0;
+    let count = 0;
+    for (const record of this.#records.values()) {
+      if (
+        record.ownerUserId === userId &&
+        record.ownerStoryId !== null &&
+        wanted.has(record.ownerStoryId)
+      ) {
+        record.ownerUserId = null;
+        count += 1;
+      }
+    }
+    return count;
   }
 
   async purgeByStories(storyIds: readonly string[]): Promise<number> {

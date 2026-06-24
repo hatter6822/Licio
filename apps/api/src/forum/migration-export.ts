@@ -41,7 +41,7 @@
 import type { Role } from '../identity/rbac.js';
 import { submissionText } from '../ingestion/pipeline.js';
 import type { IngestionServices } from '../ingestion/services.js';
-import { anonymizeUserContent } from './data-rights.js';
+import { anonymizeUserContentInRoom } from './data-rights.js';
 import { isRoomSteward } from './rooms.js';
 import type { ForumServices } from './services.js';
 import type { ContributionRecord } from './stores.js';
@@ -317,8 +317,9 @@ export async function purgeRoomForMigration(
   }
 
   if (mode === 'anonymize') {
-    // anonymize: detach the steward's authorship; all content stays readable.
-    await anonymizeUserContent(ingestion, forum, actorUserId);
+    // anonymize: detach the steward's authorship IN THIS ROOM ONLY; all content stays readable,
+    // and the steward's authorship in every other room is left intact (not the account-wide DSAR).
+    await anonymizeUserContentInRoom(ingestion, forum, actorUserId, roomId, sweepLimit);
     const storiesAffected = (await ingestion.stories.listLiveByRoom(roomId, sweepLimit)).length;
     forum.metrics.increment('migration.anonymized');
     forum.log('forum.migration_purged', {

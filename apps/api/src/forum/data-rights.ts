@@ -133,3 +133,33 @@ export async function anonymizeUserContent(
   await forum.uploads.anonymizeUser(userId);
   await forum.rooms.anonymizeUser(userId);
 }
+
+/**
+ * WS-S.9 (PRIVATE_SPEC §24.2 `anonymize`) — ROOM-SCOPED anonymize: detach `userId`'s authored
+ * content in ONE room only (the migrated room), leaving their authorship in EVERY OTHER room
+ * intact.  Resolves the room's stories + their thread ids, then tombstones the user's
+ * contributions (by thread) and evidence cards + media uploads (by story).  Unlike
+ * {@link anonymizeUserContent} (the account-wide DSAR path), this never reaches across rooms —
+ * a steward who migrates one of their rooms keeps their authorship everywhere else.  Room
+ * MEMBERSHIP is left untouched (the migrated room is frozen/purged, and membership is not
+ * authored content).  Rooms are bounded by content count, so a single `sweepLimit` page of
+ * stories covers the room.
+ */
+export async function anonymizeUserContentInRoom(
+  ingestion: IngestionServices,
+  forum: ForumServices,
+  userId: string,
+  roomId: string,
+  sweepLimit: number,
+): Promise<void> {
+  const stories = await ingestion.stories.listByRoom(roomId, sweepLimit);
+  const storyIds = stories.map((story) => story.storyId);
+  const threadIds: string[] = [];
+  for (const story of stories) {
+    const thread = await ingestion.stories.getThreadByStoryId(story.storyId);
+    if (thread !== null) threadIds.push(thread.threadId);
+  }
+  await forum.contributions.anonymizeUserByThreads(threadIds, userId);
+  await ingestion.evidence.anonymizeUserByStories(storyIds, userId);
+  await forum.uploads.anonymizeUserByStories(storyIds, userId);
+}

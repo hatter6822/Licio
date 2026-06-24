@@ -484,6 +484,9 @@ export interface EvidenceCardStore {
   listBySubmitter(userId: string): Promise<EvidenceCardRecord[]>;
   /** WS-D.2.4 anonymize hook: tombstone the submitter. */
   anonymizeUser(userId: string): Promise<void>;
+  /** WS-S.9 ROOM-SCOPED anonymize: tombstone the submitter ONLY on cards for the given stories
+   *  (the migrated room's). Other rooms' evidence is untouched. Returns the number detached. */
+  anonymizeUserByStories(storyIds: readonly string[], userId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -1224,6 +1227,19 @@ export class InMemoryEvidenceCardStore implements EvidenceCardStore {
     for (const card of this.#cards.values()) {
       if (card.submittedBy === userId) card.submittedBy = null;
     }
+  }
+
+  async anonymizeUserByStories(storyIds: readonly string[], userId: string): Promise<number> {
+    const wanted = new Set(storyIds);
+    if (wanted.size === 0) return 0;
+    let count = 0;
+    for (const card of this.#cards.values()) {
+      if (card.submittedBy === userId && card.storyId !== null && wanted.has(card.storyId)) {
+        card.submittedBy = null;
+        count += 1;
+      }
+    }
+    return count;
   }
 
   async getById(evidenceId: string): Promise<EvidenceCardRecord | null> {

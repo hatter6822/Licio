@@ -479,6 +479,21 @@ export class DrizzleContributionStore implements ContributionStore {
     return rows.length;
   }
 
+  async anonymizeUserByThreads(threadIds: readonly string[], userId: string): Promise<number> {
+    if (threadIds.length === 0) return 0;
+    const rows = await this.#db
+      .update(contributionsTable)
+      .set({ userId: null })
+      .where(
+        and(
+          eq(contributionsTable.userId, userId),
+          inArray(contributionsTable.threadId, [...threadIds]),
+        ),
+      )
+      .returning({ id: contributionsTable.contributionId });
+    return rows.length;
+  }
+
   async purgeByThreads(threadIds: readonly string[]): Promise<number> {
     if (threadIds.length === 0) return 0;
     // IRREVERSIBLE room-wide purge (§24.2 phase 6): drop every contribution of
@@ -1184,6 +1199,21 @@ export class DrizzleUploadStore implements UploadStore {
       .update(uploadsTable)
       .set({ ownerUserId: null })
       .where(eq(uploadsTable.ownerUserId, userId));
+  }
+
+  async anonymizeUserByStories(storyIds: readonly string[], userId: string): Promise<number> {
+    if (storyIds.length === 0) return 0;
+    const rows = await this.#db
+      .update(uploadsTable)
+      .set({ ownerUserId: null })
+      .where(
+        and(
+          eq(uploadsTable.ownerUserId, userId),
+          inArray(uploadsTable.ownerStoryId, [...storyIds]),
+        ),
+      )
+      .returning({ id: uploadsTable.uploadId });
+    return rows.length;
   }
 
   async purgeByStories(storyIds: readonly string[]): Promise<number> {

@@ -1056,6 +1056,18 @@ export class DrizzleEvidenceCardStore implements EvidenceCardStore {
       .where(eq(evidenceTable.submittedBy, userId));
   }
 
+  async anonymizeUserByStories(storyIds: readonly string[], userId: string): Promise<number> {
+    if (storyIds.length === 0) return 0;
+    const rows = await this.#db
+      .update(evidenceTable)
+      .set({ submittedBy: null })
+      .where(
+        and(eq(evidenceTable.submittedBy, userId), inArray(evidenceTable.storyId, [...storyIds])),
+      )
+      .returning({ id: evidenceTable.evidenceId });
+    return rows.length;
+  }
+
   async getById(evidenceId: string): Promise<EvidenceCardRecord | null> {
     const rows = await this.#db
       .select()
