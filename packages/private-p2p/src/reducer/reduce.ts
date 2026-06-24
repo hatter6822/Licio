@@ -64,6 +64,8 @@ function applyMemberAdd(state: RoomReducerState, body: OpOf<'member.add'>, epoch
       role: body.granted_role,
       capabilities: capabilitiesForRole(body.granted_role),
       removed: false,
+      // Non-cryptographic display name (never affects authority, §11.4).
+      ...(body.display_name !== undefined ? { displayName: body.display_name } : {}),
     });
   } else if (existing.removed) {
     // Re-admit a previously-removed member (e.g. the §12.6.1 threshold-recovery
@@ -73,6 +75,7 @@ function applyMemberAdd(state: RoomReducerState, body: OpOf<'member.add'>, epoch
     existing.removed = false;
     existing.role = body.granted_role;
     existing.capabilities = capabilitiesForRole(body.granted_role);
+    if (body.display_name !== undefined) existing.displayName = body.display_name;
   }
   // An existing, non-removed member is left untouched (idempotent — preserving any
   // role.grant/role.revoke deltas applied since the original add).
@@ -157,6 +160,7 @@ function applyStoryCreate(
     threadId: body.thread_id,
     authorMemberId: op.author_member_id,
     title: body.title,
+    bodyMarkdownLite: body.body_markdown_lite ?? '',
     submissionType: body.submission_type,
     topicIds: [...body.topic_ids],
     tombstoned: false,
@@ -184,6 +188,7 @@ function applyStoryEdit(
   // Latest valid edit wins by total-order position; the body is overwritten,
   // but a moderator tombstone (if any) keeps the display hidden.
   if (body.title !== undefined) story.title = body.title;
+  if (body.body_markdown_lite !== undefined) story.bodyMarkdownLite = body.body_markdown_lite;
   if (body.topic_ids !== undefined) story.topicIds = [...body.topic_ids];
   story.editCount += 1;
 }
@@ -306,12 +311,17 @@ function applySummaryCreate(
   });
 }
 
-function applyAttachmentAdd(state: RoomReducerState, body: OpOf<'attachment.add'>): void {
+function applyAttachmentAdd(
+  state: RoomReducerState,
+  body: OpOf<'attachment.add'>,
+  epoch: number,
+): void {
   if (!state.attachments.has(body.attachment_id)) {
     state.attachments.set(body.attachment_id, {
       attachmentId: body.attachment_id,
       manifestCid: body.manifest_cid,
       wrappedObjectKey: body.wrapped_object_key,
+      epoch,
     });
   }
 }
@@ -396,12 +406,37 @@ function applyOp(state: RoomReducerState, op: PrivateRoomOp): void {
       applySummaryCreate(state, op, body);
       return;
     case 'attachment.add':
-      applyAttachmentAdd(state, body);
+      applyAttachmentAdd(state, body, op.epoch);
       return;
     case 'snapshot.commit':
       state.snapshots.push(body.snapshot_id);
       return;
+    case 'rendezvous.request':
+      applyRendezvousRequest(state, op, body);
+      return;
+    case 'rendezvous.issue':
+      // Reached ONLY after `authorMayApply` confirmed the author is `admin` (the §11 issue
+      // capability) — so this records an AUTHORIZED issuance.  The engine installs credentials
+      // from THIS reduced list, never from raw accepted ops (where a non-admin's crypto-valid
+      // issue op would otherwise sit before the reducer rejects it).
+      state.rendezvousIssuances.push({
+        targetEpoch: body.target_epoch,
+        issuerPublicKey: body.issuer_public_key,
+        credentials: body.credentials,
+      });
+      return;
   }
+}
+
+/** Tier-2 rendezvous cap: the author device records its OWN blind credential commitment
+ *  (`read`-capable, validated active in applyOp). An admin re-signs it per epoch (§6.2). */
+function applyRendezvousRequest(
+  state: RoomReducerState,
+  op: PrivateRoomOp,
+  body: OpOf<'rendezvous.request'>,
+): void {
+  const device = state.devices.get(op.author_device_id);
+  if (device) device.rendezvousCommitment = body.commitment_with_proof;
 }
 
 /**

@@ -144,6 +144,13 @@ export const rendezvousAnnouncementSchema = z
     peer_device_id: privateIdSchema,
     signaling_public_key: base64UrlSchema,
     transport_hints: z.array(z.string().min(1).max(256)).max(16).default([]),
+    /**
+     * Tier-2 rendezvous cap (docs/private-p2p/TIER2-RENDEZVOUS-CAP.md §6.8) — the OPTIONAL
+     * anonymous-credential proof, sealed INSIDE the announcement (only a member who can open
+     * it sees the cap; the relay never does). A polling member verifies it under the room's
+     * per-epoch issuer key and dedups by the pseudonym — the serverless cap. Absent ⇒ Tier-1.
+     */
+    cap: z.object({ proof: base64UrlSchema, pseudonym: base64UrlSchema }).strict().optional(),
   })
   .strict();
 export type RendezvousAnnouncement = z.infer<typeof rendezvousAnnouncementSchema>;
@@ -165,22 +172,58 @@ function announcementAad(roomBlindId: string, peerBlindId: string, expiresAt: nu
 }
 
 function serializeAnnouncement(a: RendezvousAnnouncement): CanonicalValue {
-  return {
+  const out: Record<string, CanonicalValue> = {
     schema: a.schema,
     peer_device_id: a.peer_device_id,
     signaling_public_key: a.signaling_public_key,
     transport_hints: [...a.transport_hints],
   };
+  // Optional-omit the cap (so a Tier-1 announcement is byte-identical to before).
+  if (a.cap !== undefined) out['cap'] = { proof: a.cap.proof, pseudonym: a.cap.pseudonym };
+  return out;
 }
 
+/**
+ * WS-S Tier-2 — the OPTIONAL top-level cap a server (or relay) verifies WITHOUT the
+ * rendezvous key (`docs/private-p2p/TIER2-RENDEZVOUS-CAP.md`).  Unlike the cap SEALED inside the
+ * announcement (which only a member can open), this is the verifier-visible proof: the BBS
+ * pseudonym-bound proof + the per-epoch issuer key + the `(epoch, bucket)` context the proof is
+ * bound to.  When present, the record's `peer_blind_id` IS the proof pseudonym (the §15.3.1 dedup
+ * key) — the proof is ZK, so the verifier learns nothing beyond that pseudonym.  Field shape
+ * mirrors the server's `apps/api/src/private-rendezvous` cap schema EXACTLY.
+ */
+export const rendezvousCapSchema = z
+  .object({
+    proof: z
+      .string()
+      .min(1)
+      .max(4096)
+      .regex(/^[A-Za-z0-9_-]+$/, 'base64url'),
+    issuer_pubkey: z
+      .string()
+      .min(1)
+      .max(256)
+      .regex(/^[A-Za-z0-9_-]+$/, 'base64url'),
+    epoch: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[A-Za-z0-9_.-]+$/, 'epoch id'),
+    bucket: z.number().int().min(-1).max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type RendezvousCap = z.infer<typeof rendezvousCapSchema>;
+
 /** §15.3 — the only thing the server stores for an unlisted/detached room: two
- *  opaque blind ids, the sealed announcement, and a short expiry. */
+ *  opaque blind ids, the sealed announcement, a short expiry, and (Tier-2) an OPTIONAL
+ *  verifier-visible cap (absent ⇒ Tier-1 sample-poll, a strict superset). */
 export const blindRendezvousRecordSchema = z
   .object({
     room_blind_id: base64UrlSchema,
     peer_blind_id: base64UrlSchema,
     encrypted_announcement: base64UrlSchema,
     expires_at: z.number().int().nonnegative(),
+    cap: rendezvousCapSchema.optional(),
   })
   .strict();
 export type BlindRendezvousRecord = z.infer<typeof blindRendezvousRecordSchema>;
@@ -194,6 +237,15 @@ export interface BuildRendezvousRecordParams {
   readonly nowMs: number;
   /** Defaults to the §15.3.2 maximum (30 min); clamped into `[MIN, MAX]`. */
   readonly ttlMs?: number;
+  /**
+   * WS-S Tier-2 — the verifier-visible cap to carry at the TOP level (so a server/relay without
+   * the rendezvous key can verify + dedup).  When provided, the record's `peer_blind_id` is set
+   * to the cap's pseudonym (`capPseudonym`) — the §15.3.1 dedup key — instead of the derived
+   * per-device blind id, and the AAD that seals the announcement binds that same pseudonym.
+   */
+  readonly cap?: RendezvousCap;
+  /** The cap pseudonym used as `peer_blind_id` when `cap` is present (REQUIRED with `cap`). */
+  readonly capPseudonym?: string;
 }
 
 /**
@@ -210,12 +262,19 @@ export async function buildRendezvousRecord(
     params.epoch,
     params.timeBucket,
   );
-  const peerBlindId = await derivePeerBlindId(
-    params.rendezvousKey,
-    params.deviceId,
-    params.epoch,
-    params.timeBucket,
-  );
+  // WS-S Tier-2: when a verifier-visible cap is carried, the pseudonym IS the peer_blind_id (the
+  // §15.3.1 dedup key the server/relay caps by); otherwise the derived per-device blind id.
+  if (params.cap !== undefined && params.capPseudonym === undefined) {
+    throw new Error('buildRendezvousRecord: capPseudonym is required when cap is present');
+  }
+  const peerBlindId =
+    params.capPseudonym ??
+    (await derivePeerBlindId(
+      params.rendezvousKey,
+      params.deviceId,
+      params.epoch,
+      params.timeBucket,
+    ));
   const expiresAt = params.nowMs + clampRendezvousTtl(params.ttlMs ?? RENDEZVOUS_MAX_TTL_MS);
   const announceKey = await deriveAnnounceKey(params.rendezvousKey);
   const sealed = await aeadSeal(
@@ -228,6 +287,7 @@ export async function buildRendezvousRecord(
     peer_blind_id: peerBlindId,
     encrypted_announcement: toBase64Url(sealed),
     expires_at: expiresAt,
+    ...(params.cap !== undefined ? { cap: params.cap } : {}),
   });
 }
 

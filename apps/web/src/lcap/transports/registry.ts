@@ -8,8 +8,8 @@
 // protocol-heavy P2P code never enters the initial bundle (the WS-R.15.8 budget gate
 // asserts apps/web carries NO static `@licio/lcap-p2p` import).
 
-import type { LcapTransport } from '@licio/lcap';
-import { fallbackExchange } from '@licio/lcap';
+import type { LcapTransport, PackHeaderV2, TransportId } from '@licio/lcap';
+import { DEFAULT_TRANSPORT_PREFERENCE, fallbackExchange } from '@licio/lcap';
 import { HttpsTransport, type HttpsTransportConfig } from './https.js';
 import {
   isWebTransportSupported,
@@ -55,11 +55,23 @@ export async function loadWebrtcTransport(channel: {
  * Run one exchange over the available transports, in seam order (optional carriers
  * first, the server anchor last).  Returns which transport carried it + the response,
  * or `null` if every transport failed (offline with no reachable peer or server).
+ *
+ * When `privacyLabel` is supplied, the seam's carriage gate SKIPS any public-only
+ * transport (every peer carrier, e.g. WebRTC) for a non-`public` pack — so `in_room`/
+ * private bytes are never tried on a peer channel before the server anchor (§21.4/§26.4).
+ * Omit it for a public request (any transport may carry it).
  */
 export async function offlineExchange(
   transports: readonly LcapTransport[],
   requestMessage: Uint8Array,
   signal?: AbortSignal,
-): Promise<{ transport: string; response: Uint8Array } | null> {
-  return fallbackExchange(transports, requestMessage, undefined, signal);
+  privacyLabel?: PackHeaderV2['privacy_label'],
+): Promise<{ transport: TransportId; response: Uint8Array } | null> {
+  return fallbackExchange(
+    transports,
+    requestMessage,
+    DEFAULT_TRANSPORT_PREFERENCE,
+    signal,
+    privacyLabel,
+  );
 }

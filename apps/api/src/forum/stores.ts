@@ -84,6 +84,14 @@ export interface RoomRecord {
   charterSummary: string | null;
   typeMetadata: Record<string, unknown>;
   latestActivityAt: string | null;
+  /** WS-S.9 (PRIVATE_SPEC §24, phase 5) — a frozen room is READ-ONLY: the
+   *  submission + contribution paths reject every write (fail-closed). Existing
+   *  content stays readable until the phase-6 purge. */
+  frozen: boolean;
+  /** WS-S.9 — the OPAQUE client-side P2P room id the old room migrated to (a
+   *  UUID; never a server FK, a Private P2P room has no server row). Null until
+   *  the freeze records it. */
+  migratedToRoomId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -286,6 +294,21 @@ export interface ContributionStore {
   ): Promise<ContributionRecord[]>;
   /** WS-D.2.4 anonymize hook: tombstone the author on every row. */
   anonymizeUser(userId: string): Promise<number>;
+  /** WS-S.9 ROOM-SCOPED anonymize: tombstone the author ONLY on rows in the given threads
+   *  (the migrated room's threads).  Unlike {@link anonymizeUser} (account-wide), this leaves
+   *  the user's authorship in every OTHER room intact. Returns the number of rows detached. */
+  anonymizeUserByThreads(threadIds: readonly string[], userId: string): Promise<number>;
+  /**
+   * WS-S.9 (PRIVATE_SPEC §24.2, phase 6 — `purge`) — IRREVERSIBLY hard-delete
+   * EVERY contribution (any author, any moderation state) for the given threads,
+   * with its co-created evidence card, edit history, and `client_draft_id` dedup
+   * mapping (mirroring {@link ContributionStore.purgeForRollback} but room-wide).
+   * Unlike `anonymizeUser` (which detaches only ONE user's authorship), this
+   * removes ALL members' content for a migrated room — the §24.2 minimization the
+   * migration wizard promises. Returns the number of rows removed. Idempotent: a
+   * re-run over already-purged threads removes nothing and returns 0.
+   */
+  purgeByThreads(threadIds: readonly string[]): Promise<number>;
   /** Lens-tagged contributions for a set of threads (WS-G.2.4). */
   listLensTagged(threadIds: readonly string[], limit: number): Promise<ContributionRecord[]>;
   clear(): Promise<void>;
@@ -303,8 +326,14 @@ export type RoomCreateOutcome =
  * to `'p2p'` explicitly.  `RoomRecord` itself keeps `storageMode` REQUIRED, so
  * every READ carries it (the WS-S.1.3/1.4 guards rely on it).
  */
-export type RoomInsertInput = Omit<RoomRecord, 'createdAt' | 'updatedAt' | 'storageMode'> & {
+export type RoomInsertInput = Omit<
+  RoomRecord,
+  'createdAt' | 'updatedAt' | 'storageMode' | 'frozen' | 'migratedToRoomId'
+> & {
   storageMode?: RoomStorageMode;
+  /** Defaults to `false` (a new room is never read-only). */
+  frozen?: boolean;
+  migratedToRoomId?: string | null;
 };
 
 export interface RoomStore {
@@ -334,6 +363,11 @@ export interface RoomStore {
       >
     >,
   ): Promise<RoomRecord | null>;
+  /** WS-S.9 (phase 5) — set the room READ-ONLY and record the OPAQUE P2P
+   *  destination id it migrated to (a UUID, never an FK). Idempotent: freezing
+   *  an already-frozen room keeps it frozen and updates the destination if
+   *  given. Returns null for an unknown id. */
+  freeze(roomId: string, migratedToRoomId: string | null): Promise<RoomRecord | null>;
   /** Bump latest_activity_at monotonically (never backwards). */
   touchActivity(roomId: string, atIso: string): Promise<void>;
   addSteward(record: RoomStewardRecord): Promise<void>;
@@ -363,6 +397,9 @@ export interface LensStore {
   insert(record: Omit<LensRecord, 'createdAt' | 'updatedAt'>): Promise<LensCreateOutcome>;
   getById(lensId: string): Promise<LensRecord | null>;
   listByRoom(roomId: string): Promise<LensRecord[]>;
+  /** WS-S.9 (§24.2 phase 6 `purge`) — IRREVERSIBLY delete every lens of a room.
+   *  Returns the number removed; idempotent. */
+  deleteByRoom(roomId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -370,6 +407,10 @@ export interface SummaryStore {
   insert(record: Omit<SummaryRecord, 'createdAt' | 'updatedAt'>): Promise<SummaryRecord>;
   getById(summaryId: string): Promise<SummaryRecord | null>;
   listByThread(threadId: string): Promise<SummaryRecord[]>;
+  /** WS-S.9 (§24.2 phase 6 `purge`) — IRREVERSIBLY delete every derived summary
+   *  of the given threads (the §24.2 "derived summaries" category). Returns the
+   *  number removed; idempotent. */
+  deleteByThreads(threadIds: readonly string[]): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -389,6 +430,18 @@ export interface UploadStore {
   /** All of a user's upload records (DSAR export, §19.3/GDPR Art. 15). */
   listByOwner(userId: string): Promise<UploadRecord[]>;
   anonymizeUser(userId: string): Promise<void>;
+  /** WS-S.9 ROOM-SCOPED anonymize: NULL `ownerUserId` ONLY on uploads owned by the given
+   *  stories (the migrated room's).  The bytes are kept (anonymize, not purge); other rooms'
+   *  uploads are untouched. Returns the number of records detached. */
+  anonymizeUserByStories(storyIds: readonly string[], userId: string): Promise<number>;
+  /**
+   * WS-S.9 (§24.2 phase 6 `purge`) — IRREVERSIBLY remove the BYTES and the
+   * metadata record of every upload owned by the given stories (the §24.2 "media
+   * uploads" category). Unlike `anonymizeUser` (which only NULLs `ownerUserId`,
+   * leaving the bytes), this destroys the media itself. Returns the number of
+   * upload records removed; idempotent.
+   */
+  purgeByStories(storyIds: readonly string[]): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -696,6 +749,39 @@ export class InMemoryContributionStore implements ContributionStore {
     return count;
   }
 
+  async anonymizeUserByThreads(threadIds: readonly string[], userId: string): Promise<number> {
+    const wanted = new Set(threadIds);
+    if (wanted.size === 0) return 0;
+    let count = 0;
+    for (const row of this.#rows.values()) {
+      if (row.userId === userId && wanted.has(row.threadId)) {
+        row.userId = null;
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  async purgeByThreads(threadIds: readonly string[]): Promise<number> {
+    const wanted = new Set(threadIds);
+    if (wanted.size === 0) return 0;
+    const doomed = [...this.#rows.values()].filter((row) => wanted.has(row.threadId));
+    for (const row of doomed) {
+      // Reverse every trace of the contribution: the row, its edit history, the
+      // client_draft_id dedup mapping, and its co-created evidence card.
+      this.#rows.delete(row.contributionId);
+      this.#edits.delete(row.contributionId);
+      if (row.userId !== null) {
+        this.#byDraft.delete(this.#draftKey(row.userId, row.clientDraftId));
+      }
+      const evidenceId = row.metadata.evidence_id;
+      if (typeof evidenceId === 'string' && this.#evidenceSink) {
+        await this.#evidenceSink.removeForumCard(evidenceId);
+      }
+    }
+    return doomed.length;
+  }
+
   async listLensTagged(threadIds: readonly string[], limit: number): Promise<ContributionRecord[]> {
     const wanted = new Set(threadIds);
     return [...this.#rows.values()]
@@ -750,6 +836,8 @@ export class InMemoryRoomStore implements RoomStore {
       charterSummary: null,
       typeMetadata: {},
       latestActivityAt: null,
+      frozen: false,
+      migratedToRoomId: null,
       createdAt: at,
       updatedAt: at,
     });
@@ -772,6 +860,9 @@ export class InMemoryRoomStore implements RoomStore {
       ...record,
       // Mirror the DB column default (PRIVATE_SPEC §23.2): omitted ⇒ `server`.
       storageMode: record.storageMode ?? 'server',
+      // WS-S.9 — a new room is never read-only (mirrors the 0047 column default).
+      frozen: record.frozen ?? false,
+      migratedToRoomId: record.migratedToRoomId ?? null,
       typeMetadata: { ...record.typeMetadata },
       createdAt: at,
       updatedAt: at,
@@ -824,6 +915,15 @@ export class InMemoryRoomStore implements RoomStore {
     const room = this.#rooms.get(roomId);
     if (!room) return null;
     Object.assign(room, patch);
+    room.updatedAt = iso(this.#now);
+    return room;
+  }
+
+  async freeze(roomId: string, migratedToRoomId: string | null): Promise<RoomRecord | null> {
+    const room = this.#rooms.get(roomId);
+    if (!room) return null;
+    room.frozen = true;
+    if (migratedToRoomId !== null) room.migratedToRoomId = migratedToRoomId;
     room.updatedAt = iso(this.#now);
     return room;
   }
@@ -955,6 +1055,17 @@ export class InMemoryLensStore implements LensStore {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
+  async deleteByRoom(roomId: string): Promise<number> {
+    let count = 0;
+    for (const lens of [...this.#rows.values()]) {
+      if (lens.roomId === roomId) {
+        this.#rows.delete(lens.lensId);
+        count += 1;
+      }
+    }
+    return count;
+  }
+
   async clear(): Promise<void> {
     this.#rows.clear();
   }
@@ -990,6 +1101,19 @@ export class InMemorySummaryStore implements SummaryStore {
     return [...this.#rows.values()]
       .filter((row) => row.threadId === threadId)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  async deleteByThreads(threadIds: readonly string[]): Promise<number> {
+    const wanted = new Set(threadIds);
+    if (wanted.size === 0) return 0;
+    let count = 0;
+    for (const row of [...this.#rows.values()]) {
+      if (wanted.has(row.threadId)) {
+        this.#rows.delete(row.summaryId);
+        count += 1;
+      }
+    }
+    return count;
   }
 
   async clear(): Promise<void> {
@@ -1048,6 +1172,38 @@ export class InMemoryUploadStore implements UploadStore {
     for (const record of this.#records.values()) {
       if (record.ownerUserId === userId) record.ownerUserId = null;
     }
+  }
+
+  async anonymizeUserByStories(storyIds: readonly string[], userId: string): Promise<number> {
+    const wanted = new Set(storyIds);
+    if (wanted.size === 0) return 0;
+    let count = 0;
+    for (const record of this.#records.values()) {
+      if (
+        record.ownerUserId === userId &&
+        record.ownerStoryId !== null &&
+        wanted.has(record.ownerStoryId)
+      ) {
+        record.ownerUserId = null;
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  async purgeByStories(storyIds: readonly string[]): Promise<number> {
+    const wanted = new Set(storyIds);
+    if (wanted.size === 0) return 0;
+    let count = 0;
+    for (const record of [...this.#records.values()]) {
+      if (record.ownerStoryId !== null && wanted.has(record.ownerStoryId)) {
+        // Destroy BOTH the metadata record and the bytes (the media itself).
+        this.#records.delete(record.uploadId);
+        this.#bytes.delete(record.uploadId);
+        count += 1;
+      }
+    }
+    return count;
   }
 
   async clear(): Promise<void> {

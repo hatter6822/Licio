@@ -52,6 +52,35 @@ describe('PrivateRoomView', () => {
     await waitFor(() => expect(screen.getByText(/a reply/i)).toBeInTheDocument());
   });
 
+  it('reveals the manage panel and renders an admitted member with their display name', async () => {
+    const user = userEvent.setup();
+    const session = await PrivateRoomSession.create({
+      roomName: 'Quiet Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+    });
+    // Admit a second device named Bob end-to-end.
+    const prep = await PrivateRoomSession.prepareJoinRequest({ proposedDisplayName: 'Bob' });
+    const { invite, inviteUrl } = await session.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+    });
+    const fragment = inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length);
+    const { request } = await prep.complete(fragment);
+    expect((await session.admitJoinRequest(invite, request)).verdict.ok).toBe(true);
+
+    render(<PrivateRoomView roomId={session.roomId} />);
+    await waitFor(() => expect(screen.getByText('You')).toBeInTheDocument());
+
+    // The admitted member shows the display name (subordinate to the member id).
+    expect(screen.getByText('Bob')).toBeInTheDocument();
+
+    // The manage toggle reveals the verification + invite/join panels.
+    await user.click(screen.getByRole('button', { name: /manage members & verify devices/i }));
+    await waitFor(() => expect(screen.getByText(/verify a member’s device/i)).toBeInTheDocument());
+    expect(screen.getByText(/invite a device/i)).toBeInTheDocument();
+  });
+
   it('shows a not-found state for an unknown room', async () => {
     render(<PrivateRoomView roomId="00000000-0000-4000-8000-000000000000" />);
     await waitFor(() =>

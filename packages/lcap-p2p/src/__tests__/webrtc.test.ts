@@ -11,6 +11,8 @@ import { describe, expect, it } from 'vitest';
 import {
   type DataChannelLike,
   decideWebrtc,
+  FRAGMENT_HEADER_BYTES,
+  fragmentMessage,
   importSignalKey,
   openSignal,
   sealSignal,
@@ -99,9 +101,23 @@ describe('ICE / NAT-privacy policy (§26.4/§33.5)', () => {
   });
 });
 
-/** A minimal in-memory data channel pair for the transport test. */
-function fakeChannel(): DataChannelLike & { deliver(bytes: Uint8Array): void; fireClose(): void } {
-  const ch: DataChannelLike & { deliver(b: Uint8Array): void; fireClose(): void } = {
+/**
+ * A minimal in-memory data channel for the transport test.  `deliver` FRAGMENTS a whole
+ * message (the wire contract is fragmented since WS-R.15.6), feeding each fragment to
+ * `onmessage`; `deliverFragments` injects pre-built fragment frames (e.g. an ArrayBuffer-
+ * shaped one) for the coercion test.
+ */
+function fakeChannel(): DataChannelLike & {
+  deliver(bytes: Uint8Array): void;
+  deliverFragments(frames: Uint8Array[]): void;
+  fireClose(): void;
+} {
+  let nextId = 0;
+  const ch: DataChannelLike & {
+    deliver(b: Uint8Array): void;
+    deliverFragments(frames: Uint8Array[]): void;
+    fireClose(): void;
+  } = {
     readyState: 'open',
     send() {},
     close() {
@@ -110,7 +126,10 @@ function fakeChannel(): DataChannelLike & { deliver(bytes: Uint8Array): void; fi
     onmessage: null,
     onclose: null,
     deliver(bytes) {
-      ch.onmessage?.({ data: bytes });
+      for (const frame of fragmentMessage(bytes, nextId++)) ch.onmessage?.({ data: frame });
+    },
+    deliverFragments(frames) {
+      for (const frame of frames) ch.onmessage?.({ data: frame });
     },
     fireClose() {
       ch.readyState = 'closed';
@@ -146,16 +165,14 @@ describe('WebRTC data-channel transport (§22.6)', () => {
     expect(await pending).toBeNull();
   });
 
-  it('coerces ArrayBuffer and string payloads to bytes and ignores junk', async () => {
+  it('coerces an ArrayBuffer-shaped fragment frame and ignores non-coercible junk', async () => {
     const ch = fakeChannel();
     const t = new WebrtcTransport(ch);
-    // An ArrayBuffer (the real RTCDataChannel binaryType='arraybuffer' shape).
-    ch.deliver(new Uint8Array([5, 6, 7]).buffer as unknown as Uint8Array);
+    // The real RTCDataChannel (binaryType='arraybuffer') delivers fragments as ArrayBuffers.
+    const frame = fragmentMessage(new Uint8Array([5, 6, 7]), 0)[0] as Uint8Array;
+    ch.onmessage?.({ data: frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.length) });
     expect(await t.receive()).toEqual(new Uint8Array([5, 6, 7]));
-    // A string payload (a peer that sent text) is UTF-8 encoded.
-    ch.onmessage?.({ data: 'hi' });
-    expect(await t.receive()).toEqual(new TextEncoder().encode('hi'));
-    // A non-coercible payload (a number) is dropped, not buffered.
+    // A non-coercible payload (a number) is dropped, not fed to the reassembler.
     ch.onmessage?.({ data: 42 });
     const pending = t.receive();
     ch.deliver(new Uint8Array([8]));
@@ -170,13 +187,16 @@ describe('WebRTC data-channel transport (§22.6)', () => {
     await expect(t.open()).rejects.toThrow(/not open/);
   });
 
-  it('send() writes to an open channel and refuses once it has closed', async () => {
+  it('send() writes a framed fragment to an open channel and refuses once it has closed', async () => {
     const sent: Uint8Array[] = [];
     const ch = fakeChannel();
     ch.send = (b) => sent.push(b);
     const t = new WebrtcTransport(ch);
     await t.send(new Uint8Array([1, 2, 3]));
-    expect(sent).toEqual([new Uint8Array([1, 2, 3])]);
+    // A small message is one fragment: a 17-byte header + the 3-byte payload tail.
+    expect(sent.length).toBe(1);
+    expect(sent[0]?.length).toBe(FRAGMENT_HEADER_BYTES + 3);
+    expect(sent[0]?.subarray(FRAGMENT_HEADER_BYTES)).toEqual(new Uint8Array([1, 2, 3]));
     ch.readyState = 'closing';
     await expect(t.send(new Uint8Array([4]))).rejects.toThrow(/closed before send/);
   });

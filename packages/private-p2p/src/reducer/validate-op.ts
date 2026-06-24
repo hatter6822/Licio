@@ -53,6 +53,10 @@ export function objectTypeForOpBody(type: PrivateOpBody['type']): PrivateObjectT
     case 'role.revoke':
     case 'member.invite.create':
     case 'recovery.authorize':
+    // Tier-2 rendezvous-cap ops are device/membership-adjacent (the credential commitment
+    // + the admin's per-epoch issuance), so they share the membership object class.
+    case 'rendezvous.request':
+    case 'rendezvous.issue':
       return 'membership_op';
     case 'story.create':
     case 'story.edit':
@@ -305,6 +309,7 @@ export async function openOp(
     op.epoch !== envelope.room_epoch ||
     op.author_seq !== envelope.author_seq ||
     op.schema !== envelope.plaintext_schema ||
+    op.created_at_bucket !== envelope.created_at_bucket ||
     objectTypeForOpBody(op.body.type) !== envelope.object_type ||
     op.author_device_id !== ctx.deviceIdForBlind(envelope.author_device_id_blind) ||
     !sameStringSet(sortParents(op.parents), envelope.parent_op_ids) ||

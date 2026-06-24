@@ -20,6 +20,7 @@ import { Route as PrivateRouteImport } from './routes/private'
 import { Route as ModerationRouteImport } from './routes/moderation'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as PrivateIndexRouteImport } from './routes/private.index'
 import { Route as ThreadsThreadIdRouteImport } from './routes/threads_.$threadId'
 import { Route as StoriesStoryIdRouteImport } from './routes/stories.$storyId'
 import { Route as RoomsRoomIdRouteImport } from './routes/rooms_.$roomId'
@@ -32,7 +33,9 @@ import { Route as ProfileSafetyRouteImport } from './routes/profile_.safety'
 import { Route as ProfilePrivacyRouteImport } from './routes/profile_.privacy'
 import { Route as ProfileOfflineRouteImport } from './routes/profile_.offline'
 import { Route as ProfileNoticesRouteImport } from './routes/profile_.notices'
+import { Route as ProfileModeRouteImport } from './routes/profile_.mode'
 import { Route as PrivateRoomIdRouteImport } from './routes/private_.$roomId'
+import { Route as PrivateMigrateRouteImport } from './routes/private.migrate'
 import { Route as StoriesStoryIdCommentsRouteImport } from './routes/stories.$storyId_.comments'
 import { Route as RoomsRoomIdGovernanceRouteImport } from './routes/rooms_.$roomId_.governance'
 
@@ -80,6 +83,11 @@ const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
+} as any)
+const PrivateIndexRoute = PrivateIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => PrivateRoute,
 } as any)
 const ThreadsThreadIdRoute = ThreadsThreadIdRouteImport.update({
   id: '/threads_/$threadId',
@@ -141,10 +149,20 @@ const ProfileNoticesRoute = ProfileNoticesRouteImport.update({
   path: '/profile/notices',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProfileModeRoute = ProfileModeRouteImport.update({
+  id: '/profile_/mode',
+  path: '/profile/mode',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const PrivateRoomIdRoute = PrivateRoomIdRouteImport.update({
   id: '/private_/$roomId',
   path: '/private/$roomId',
   getParentRoute: () => rootRouteImport,
+} as any)
+const PrivateMigrateRoute = PrivateMigrateRouteImport.update({
+  id: '/migrate',
+  path: '/migrate',
+  getParentRoute: () => PrivateRoute,
 } as any)
 const StoriesStoryIdCommentsRoute = StoriesStoryIdCommentsRouteImport.update({
   id: '/stories/$storyId_/comments',
@@ -161,13 +179,15 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/moderation': typeof ModerationRoute
-  '/private': typeof PrivateRoute
+  '/private': typeof PrivateRouteWithChildren
   '/profile': typeof ProfileRoute
   '/rooms': typeof RoomsRoute
   '/styleguide': typeof StyleguideRoute
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
+  '/private/migrate': typeof PrivateMigrateRoute
   '/private/$roomId': typeof PrivateRoomIdRoute
+  '/profile/mode': typeof ProfileModeRoute
   '/profile/notices': typeof ProfileNoticesRoute
   '/profile/offline': typeof ProfileOfflineRoute
   '/profile/privacy': typeof ProfilePrivacyRoute
@@ -180,6 +200,7 @@ export interface FileRoutesByFullPath {
   '/rooms/$roomId': typeof RoomsRoomIdRoute
   '/stories/$storyId': typeof StoriesStoryIdRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
+  '/private/': typeof PrivateIndexRoute
   '/rooms/$roomId/governance': typeof RoomsRoomIdGovernanceRoute
   '/stories/$storyId/comments': typeof StoriesStoryIdCommentsRoute
 }
@@ -187,13 +208,14 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/moderation': typeof ModerationRoute
-  '/private': typeof PrivateRoute
   '/profile': typeof ProfileRoute
   '/rooms': typeof RoomsRoute
   '/styleguide': typeof StyleguideRoute
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
+  '/private/migrate': typeof PrivateMigrateRoute
   '/private/$roomId': typeof PrivateRoomIdRoute
+  '/profile/mode': typeof ProfileModeRoute
   '/profile/notices': typeof ProfileNoticesRoute
   '/profile/offline': typeof ProfileOfflineRoute
   '/profile/privacy': typeof ProfilePrivacyRoute
@@ -206,6 +228,7 @@ export interface FileRoutesByTo {
   '/rooms/$roomId': typeof RoomsRoomIdRoute
   '/stories/$storyId': typeof StoriesStoryIdRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
+  '/private': typeof PrivateIndexRoute
   '/rooms/$roomId/governance': typeof RoomsRoomIdGovernanceRoute
   '/stories/$storyId/comments': typeof StoriesStoryIdCommentsRoute
 }
@@ -214,13 +237,15 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/moderation': typeof ModerationRoute
-  '/private': typeof PrivateRoute
+  '/private': typeof PrivateRouteWithChildren
   '/profile': typeof ProfileRoute
   '/rooms': typeof RoomsRoute
   '/styleguide': typeof StyleguideRoute
   '/submit': typeof SubmitRoute
   '/support': typeof SupportRoute
+  '/private/migrate': typeof PrivateMigrateRoute
   '/private_/$roomId': typeof PrivateRoomIdRoute
+  '/profile_/mode': typeof ProfileModeRoute
   '/profile_/notices': typeof ProfileNoticesRoute
   '/profile_/offline': typeof ProfileOfflineRoute
   '/profile_/privacy': typeof ProfilePrivacyRoute
@@ -233,6 +258,7 @@ export interface FileRoutesById {
   '/rooms_/$roomId': typeof RoomsRoomIdRoute
   '/stories/$storyId': typeof StoriesStoryIdRoute
   '/threads_/$threadId': typeof ThreadsThreadIdRoute
+  '/private/': typeof PrivateIndexRoute
   '/rooms_/$roomId_/governance': typeof RoomsRoomIdGovernanceRoute
   '/stories/$storyId_/comments': typeof StoriesStoryIdCommentsRoute
 }
@@ -248,7 +274,9 @@ export interface FileRouteTypes {
     | '/styleguide'
     | '/submit'
     | '/support'
+    | '/private/migrate'
     | '/private/$roomId'
+    | '/profile/mode'
     | '/profile/notices'
     | '/profile/offline'
     | '/profile/privacy'
@@ -261,6 +289,7 @@ export interface FileRouteTypes {
     | '/rooms/$roomId'
     | '/stories/$storyId'
     | '/threads/$threadId'
+    | '/private/'
     | '/rooms/$roomId/governance'
     | '/stories/$storyId/comments'
   fileRoutesByTo: FileRoutesByTo
@@ -268,13 +297,14 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/moderation'
-    | '/private'
     | '/profile'
     | '/rooms'
     | '/styleguide'
     | '/submit'
     | '/support'
+    | '/private/migrate'
     | '/private/$roomId'
+    | '/profile/mode'
     | '/profile/notices'
     | '/profile/offline'
     | '/profile/privacy'
@@ -287,6 +317,7 @@ export interface FileRouteTypes {
     | '/rooms/$roomId'
     | '/stories/$storyId'
     | '/threads/$threadId'
+    | '/private'
     | '/rooms/$roomId/governance'
     | '/stories/$storyId/comments'
   id:
@@ -300,7 +331,9 @@ export interface FileRouteTypes {
     | '/styleguide'
     | '/submit'
     | '/support'
+    | '/private/migrate'
     | '/private_/$roomId'
+    | '/profile_/mode'
     | '/profile_/notices'
     | '/profile_/offline'
     | '/profile_/privacy'
@@ -313,6 +346,7 @@ export interface FileRouteTypes {
     | '/rooms_/$roomId'
     | '/stories/$storyId'
     | '/threads_/$threadId'
+    | '/private/'
     | '/rooms_/$roomId_/governance'
     | '/stories/$storyId_/comments'
   fileRoutesById: FileRoutesById
@@ -321,13 +355,14 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   LoginRoute: typeof LoginRoute
   ModerationRoute: typeof ModerationRoute
-  PrivateRoute: typeof PrivateRoute
+  PrivateRoute: typeof PrivateRouteWithChildren
   ProfileRoute: typeof ProfileRoute
   RoomsRoute: typeof RoomsRoute
   StyleguideRoute: typeof StyleguideRoute
   SubmitRoute: typeof SubmitRoute
   SupportRoute: typeof SupportRoute
   PrivateRoomIdRoute: typeof PrivateRoomIdRoute
+  ProfileModeRoute: typeof ProfileModeRoute
   ProfileNoticesRoute: typeof ProfileNoticesRoute
   ProfileOfflineRoute: typeof ProfileOfflineRoute
   ProfilePrivacyRoute: typeof ProfilePrivacyRoute
@@ -408,6 +443,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/private/': {
+      id: '/private/'
+      path: '/'
+      fullPath: '/private/'
+      preLoaderRoute: typeof PrivateIndexRouteImport
+      parentRoute: typeof PrivateRoute
     }
     '/threads_/$threadId': {
       id: '/threads_/$threadId'
@@ -493,12 +535,26 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProfileNoticesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/profile_/mode': {
+      id: '/profile_/mode'
+      path: '/profile/mode'
+      fullPath: '/profile/mode'
+      preLoaderRoute: typeof ProfileModeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/private_/$roomId': {
       id: '/private_/$roomId'
       path: '/private/$roomId'
       fullPath: '/private/$roomId'
       preLoaderRoute: typeof PrivateRoomIdRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/private/migrate': {
+      id: '/private/migrate'
+      path: '/migrate'
+      fullPath: '/private/migrate'
+      preLoaderRoute: typeof PrivateMigrateRouteImport
+      parentRoute: typeof PrivateRoute
     }
     '/stories/$storyId_/comments': {
       id: '/stories/$storyId_/comments'
@@ -517,17 +573,31 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface PrivateRouteChildren {
+  PrivateMigrateRoute: typeof PrivateMigrateRoute
+  PrivateIndexRoute: typeof PrivateIndexRoute
+}
+
+const PrivateRouteChildren: PrivateRouteChildren = {
+  PrivateMigrateRoute: PrivateMigrateRoute,
+  PrivateIndexRoute: PrivateIndexRoute,
+}
+
+const PrivateRouteWithChildren =
+  PrivateRoute._addFileChildren(PrivateRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   LoginRoute: LoginRoute,
   ModerationRoute: ModerationRoute,
-  PrivateRoute: PrivateRoute,
+  PrivateRoute: PrivateRouteWithChildren,
   ProfileRoute: ProfileRoute,
   RoomsRoute: RoomsRoute,
   StyleguideRoute: StyleguideRoute,
   SubmitRoute: SubmitRoute,
   SupportRoute: SupportRoute,
   PrivateRoomIdRoute: PrivateRoomIdRoute,
+  ProfileModeRoute: ProfileModeRoute,
   ProfileNoticesRoute: ProfileNoticesRoute,
   ProfileOfflineRoute: ProfileOfflineRoute,
   ProfilePrivacyRoute: ProfilePrivacyRoute,

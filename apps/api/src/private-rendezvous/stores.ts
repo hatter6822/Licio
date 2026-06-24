@@ -26,6 +26,40 @@ const announcementCiphertextSchema = z.string().min(1).max(16_384);
 /** An opaque sealed signaling blob (SDP/ICE, E2E-encrypted) — bounded ≤ 64 KiB. */
 const signalCiphertextSchema = z.string().min(1).max(65_536);
 
+/**
+ * Tier-2 per-announcer cap (docs/private-p2p/TIER2-RENDEZVOUS-CAP.md): the OPTIONAL
+ * anonymous-credential proof. When present, `peer_blind_id` IS the base64url BBS
+ * pseudonym `nym` (the dedup key); the server verifies the proof binds `nym` to
+ * `(room_blind_id, epoch, bucket)` under the per-epoch issuer key, then keys the
+ * presence slot by it — capping a device to one slot per `(epoch, bucket)`. All fields
+ * are opaque pseudonymous bytes; none is persisted (the proof is verified + discarded).
+ */
+const capSchema = z
+  .object({
+    /** The BBS pseudonym-bound proof (opaque, bounded ≤ 4 KiB). */
+    proof: z
+      .string()
+      .min(1)
+      .max(4096)
+      .regex(/^[A-Za-z0-9_-]+$/, 'base64url'),
+    /** The per-epoch issuer public key (base64url G2, ≤ 256). */
+    issuer_pubkey: z
+      .string()
+      .min(1)
+      .max(256)
+      .regex(/^[A-Za-z0-9_-]+$/, 'base64url'),
+    /** The room epoch id (an opaque pseudonymous counter, bounded). */
+    epoch: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[A-Za-z0-9_.-]+$/, 'epoch id'),
+    /** The time bucket index (server-validated against its clock), or -1 for per-epoch. */
+    bucket: z.number().int().min(-1).max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type CapProof = z.infer<typeof capSchema>;
+
 /** §15.3 announce: store a presence record under a room blind id. */
 export const announceRequestSchema = z
   .object({
@@ -35,6 +69,8 @@ export const announceRequestSchema = z
     /** Absolute ms expiry; AAD-bound in the sealed announcement, so the server
      *  stores it VERBATIM and instead REJECTS one beyond `now + maxTtlMs` (§15.3.2). */
     expires_at: z.number().int().positive(),
+    /** Tier-2 cap proof (optional; absent ⇒ Tier-1 sample-poll, a strict superset). */
+    cap: capSchema.optional(),
   })
   .strict();
 export type AnnounceRequest = z.infer<typeof announceRequestSchema>;
@@ -96,6 +132,32 @@ export interface RendezvousStore {
 /** Per-room presence cap + per-peer signal-queue cap (bounded memory, §27). */
 export const MAX_RECORDS_PER_ROOM = 512;
 export const MAX_SIGNALS_PER_PEER = 256;
+/**
+ * Per-SENDER sub-cap within one recipient's queue: one `sender_blind_id` may occupy at most
+ * this many of the `MAX_SIGNALS_PER_PEER` slots, so a single flooder cannot fill a victim's
+ * queue and starve the connection-bootstrapping offer of another peer.  256/32 = 8 distinct
+ * senders before the queue is full; a legitimate offer→answer→ICE exchange is well under 32.
+ */
+export const MAX_SIGNALS_PER_SENDER = 32;
+
+/**
+ * A UNIFORM random sample of `k` items from `items` (caller ensures `k < items.length`),
+ * via a partial Fisher–Yates shuffle: O(k), and each item is equally likely to be selected.
+ * `random` returns [0, 1); the index is clamped so an injected RNG that returns exactly 1
+ * cannot read past the array.  This is load-balancing/fairness randomness, NOT security
+ * randomness — predicting the sample yields no attacker advantage.
+ */
+export function sampleUniform<T>(items: readonly T[], k: number, random: () => number): T[] {
+  const arr = [...items];
+  const n = arr.length;
+  for (let i = 0; i < k; i++) {
+    const j = i + Math.min(n - i - 1, Math.floor(random() * (n - i)));
+    const tmp = arr[i] as T;
+    arr[i] = arr[j] as T;
+    arr[j] = tmp;
+  }
+  return arr.slice(0, k);
+}
 
 /**
  * The in-memory rendezvous store (local/dev default).  Records are keyed by room
@@ -105,6 +167,12 @@ export const MAX_SIGNALS_PER_PEER = 256;
 export class InMemoryRendezvousStore implements RendezvousStore {
   private readonly records = new Map<string, Map<string, StoredRendezvousRecord>>();
   private readonly signals = new Map<string, StoredSignal[]>();
+
+  /**
+   * `random` (default `Math.random`) drives the §27 sample-poll; injectable so tests are
+   * deterministic.  It is fairness randomness, not security randomness.
+   */
+  constructor(private readonly random: () => number = Math.random) {}
 
   announce(record: StoredRendezvousRecord): Promise<void> {
     let perRoom = this.records.get(record.roomBlindId);
@@ -135,14 +203,29 @@ export class InMemoryRendezvousStore implements RendezvousStore {
     for (const record of perRoom.values()) {
       if (record.expiresAt > nowMs) live.push(record);
     }
-    return Promise.resolve(live.slice(0, limit));
+    // §27 SAMPLE-POLL (Tier-1 flood dilution): when more live records exist than the poll
+    // window, return a UNIFORM RANDOM SAMPLE rather than the insertion-order front — so an
+    // insider flood under one room_blind_id cannot DETERMINISTICALLY crowd an honest peer out
+    // of every poll (each honest record appears with probability `limit/live` per poll; the
+    // client's repeated polls then discover it).  A genuine per-announcer cap is infeasible
+    // under server-blindness without an anonymous-credential layer (the documented closure
+    // target); this is the cheap mitigation that preserves §15.3.1 (no identity is learned).
+    if (live.length <= limit) return Promise.resolve(live);
+    return Promise.resolve(sampleUniform(live, limit, this.random));
   }
 
   putSignal(signal: StoredSignal): Promise<void> {
     const queue = this.signals.get(signal.recipientBlindId) ?? [];
+    // Per-SENDER bound: one sender_blind_id cannot occupy more than MAX_SIGNALS_PER_SENDER
+    // of the recipient's queue, so a single flooder cannot evict another peer's offer.
+    let fromSender = 0;
+    for (const s of queue) if (s.senderBlindId === signal.senderBlindId) fromSender += 1;
+    if (fromSender >= MAX_SIGNALS_PER_SENDER) return Promise.resolve(); // back-pressure the sender
+    // Overall bound: DROP-NEWEST (reject this signal) once full, so the EARLIEST signal — the
+    // connection-bootstrapping offer/answer, sent first — is PRESERVED against a later flood.
+    // (The recipient's `drainSignals` clears the queue, so capacity is restored each drain.)
+    if (queue.length >= MAX_SIGNALS_PER_PEER) return Promise.resolve();
     queue.push(signal);
-    // Cap the queue: drop the oldest once over the limit.
-    if (queue.length > MAX_SIGNALS_PER_PEER) queue.splice(0, queue.length - MAX_SIGNALS_PER_PEER);
     this.signals.set(signal.recipientBlindId, queue);
     return Promise.resolve();
   }

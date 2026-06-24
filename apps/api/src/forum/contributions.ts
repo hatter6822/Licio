@@ -323,6 +323,18 @@ export async function createContribution(
       forum.metrics.increment('contributions.p2p_room_rejected');
       return reject({ status: 404, code: 'not_found', message: 'Thread not found' });
     }
+    // 2b. WS-S.9 (PRIVATE_SPEC §24, phase 5) — a FROZEN (migrated) room is
+    //     READ-ONLY: reject every new contribution (fail-closed). New
+    //     conversation belongs in the Private P2P replacement, never the
+    //     read-only server shell.
+    if (threadRoom?.frozen === true) {
+      forum.metrics.increment('contributions.room_frozen_rejected');
+      return reject({
+        status: 409,
+        code: 'thread_archived',
+        message: 'This room is read-only — it has migrated to a Private P2P room.',
+      });
+    }
   }
   if (!(await threadVisibleToUser(bundle, thread, userId))) {
     return reject({ status: 404, code: 'not_found', message: 'Thread not found' });

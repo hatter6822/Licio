@@ -10,14 +10,19 @@
 import {
   bigint,
   bigserial,
+  boolean,
+  index,
   integer,
   pgTable,
   primaryKey,
   text,
   timestamp,
   uniqueIndex,
+  uuid,
 } from 'drizzle-orm/pg-core';
 import { bytea } from './_custom.js';
+import { takedownTargetTypeEnum } from './takedown.js';
+import { users } from './user.js';
 
 /** Content-addressed objects (records / proofs / blocks / chunks), keyed by CID. */
 export const lcapObjects = pgTable('lcap_objects', {
@@ -94,9 +99,125 @@ export const lcapRecordClosure = pgTable(
   (t) => [primaryKey({ columns: [t.recordCid, t.relatedCid, t.relation] })],
 );
 
+/**
+ * Gate-19 (WS-R.15.7 / WS-S.4.4) — the `block_cid` ⇄ content-entity provenance map.
+ *
+ * A public LCAP `block_cid` (`CIDv1(raw, sha2-256)` over plaintext) carries no inherent
+ * pointer back to the WS-F content entity (a story / source / evidence card) it was
+ * derived from — yet a WS-J takedown targets exactly such an entity by
+ * `(target_type, target_id)` (see `takedown_requests`).  Without a linkage, the IPFS
+ * public-block bridge cannot answer the only question the §22.7 republication halt needs:
+ * "is THIS block's source content currently taken down?"  This table is that linkage: one
+ * row per `(block_cid, target_type, target_id)` so the `DrizzleTakedownOracle` joins a
+ * block CID to its content entity and then to the live `takedown_requests` status.
+ *
+ * `target_type` REUSES the `takedown_requests` enum (story / source / evidence) so the
+ * oracle's join is type-aligned (same enum, same uuid id) — a block's provenance target and
+ * a takedown's target are the same coordinate.  A block may derive from more than one
+ * entity (e.g. an evidence card embedded in a story), so the PK spans all three columns and
+ * the same `block_cid` may appear with multiple targets; ANY in-force takedown over ANY of
+ * its targets halts (re)publication (fail-closed union).  No FK into the content tables: the
+ * offline plane is CID-addressed and isolated from the relational model (matching the rest
+ * of `lcap.*`), and a content row's hard purge must never cascade-delete the provenance the
+ * takedown halt relies on — the entity id is the durable coordinate the takedown also keys.
+ */
+export const lcapBlockProvenance = pgTable(
+  'lcap_block_provenance',
+  {
+    blockCid: text('block_cid').notNull(),
+    targetType: takedownTargetTypeEnum('target_type').notNull(),
+    /** The content entity id (story/source/evidence) — the same coordinate a takedown targets. */
+    targetId: text('target_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.blockCid, t.targetType, t.targetId] }),
+    // The oracle's hot path: resolve a block CID to its targets, then join the takedowns.
+    index('lcap_block_provenance_block_idx').on(t.blockCid),
+    // The reverse direction: when a takedown is actioned, find every block it taints.
+    index('lcap_block_provenance_target_idx').on(t.targetType, t.targetId),
+  ],
+);
+
+/**
+ * Gate-19 (WS-R.15.7b, OFFLINE_SPEC §22.7) — the privacy/moderation/abuse-review decision per
+ * content entity for PUBLIC-DHT publication.
+ *
+ * §22.7 requires a "required privacy/moderation/abuse-review gate before any block reaches the
+ * public DHT".  The takedown oracle answers "was this REMOVED?"; this table answers the prior,
+ * affirmative question "was this content REVIEWED and APPROVED for public-DHT egress?".  A
+ * public block is publishable only when its source content entity has an `approved` row here.
+ * Keyed by exactly the `(target_type, target_id)` coordinate the takedown / provenance use, so
+ * one durable review state covers a content entity regardless of how many blocks derive from
+ * it (PK = the coordinate; the latest decision replaces the prior via upsert).
+ *
+ * `state`: 'pending' (under review — refuses) / 'approved' (the ONLY publishable state) /
+ * 'rejected' (refuses).  `reviewer_user_id` is the steward who decided (kept for audit; the
+ * users FK `set null` on a hard purge so the decision row stays — accountability outlives the
+ * account, like `takedown_requests.actioned_by`).  No FK into the content tables: the offline
+ * plane is CID/coordinate-addressed and isolated from the relational model.
+ */
+export const lcapBlockPublishReview = pgTable(
+  'lcap_block_publish_review',
+  {
+    targetType: takedownTargetTypeEnum('target_type').notNull(),
+    targetId: text('target_id').notNull(),
+    state: text('state').notNull(), // 'pending' | 'approved' | 'rejected'
+    reviewerUserId: uuid('reviewer_user_id').references(() => users.userId, {
+      onDelete: 'set null',
+    }),
+    note: text('note'),
+    decidedAt: timestamp('decided_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.targetType, t.targetId] }),
+    index('lcap_block_publish_review_state_idx').on(t.state),
+  ],
+);
+
+/**
+ * Gate-19 (WS-R.15.7b) — the append-only audit of every public-DHT (re)publish DECISION.
+ *
+ * §22.7 requires "auditable provenance"; the acceptance criterion is "the gate decision is
+ * audited".  One row per publish/republish ATTEMPT (pinned OR refused), capturing the actor,
+ * the block, the resolved content target, the §22.7 review-gate verdict, the takedown
+ * re-check verdict, and the final outcome — the durable, queryable trail the
+ * `PublishOutcome.reason` HTTP response cannot provide.  Append-only: migration 0049 grants
+ * INSERT/SELECT only (no UPDATE/DELETE), mirroring the WS-J moderation append-only posture.
+ * `actor_user_id` is the steward who initiated it (users FK `set null` on a hard purge, so the
+ * decision record outlives the account, like the moderation audit).
+ */
+export const lcapPublishAudit = pgTable(
+  'lcap_publish_audit',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    action: text('action').notNull(), // 'publish' | 'republish'
+    blockCid: text('block_cid').notNull(),
+    targetType: takedownTargetTypeEnum('target_type'),
+    targetId: text('target_id'),
+    actorUserId: uuid('actor_user_id').references(() => users.userId, { onDelete: 'set null' }),
+    reviewVerdict: text('review_verdict').notNull(), // 'approved' | 'review_required' | 'skipped' | 'error'
+    takedownVerdict: text('takedown_verdict').notNull(), // 'clear' | 'halt' | 'unreadable'
+    published: boolean('published').notNull(),
+    outcomeReason: text('outcome_reason').notNull(),
+    ipfsCid: text('ipfs_cid'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('lcap_publish_audit_block_idx').on(t.blockCid),
+    index('lcap_publish_audit_created_idx').on(t.createdAt),
+  ],
+);
+
 export type LcapObjectRow = typeof lcapObjects.$inferSelect;
 export type LcapAcceptanceRow = typeof lcapAcceptance.$inferSelect;
 export type LcapCapabilityUsageRow = typeof lcapCapabilityUsage.$inferSelect;
 export type LcapDeviceSeqRow = typeof lcapDeviceSeq.$inferSelect;
 export type LcapForkEvidenceRow = typeof lcapForkEvidence.$inferSelect;
 export type LcapRecordClosureRow = typeof lcapRecordClosure.$inferSelect;
+export type LcapBlockProvenanceRow = typeof lcapBlockProvenance.$inferSelect;
+export type LcapBlockProvenanceInsert = typeof lcapBlockProvenance.$inferInsert;
+export type LcapBlockPublishReviewRow = typeof lcapBlockPublishReview.$inferSelect;
+export type LcapBlockPublishReviewInsert = typeof lcapBlockPublishReview.$inferInsert;
+export type LcapPublishAuditRow = typeof lcapPublishAudit.$inferSelect;
+export type LcapPublishAuditInsert = typeof lcapPublishAudit.$inferInsert;

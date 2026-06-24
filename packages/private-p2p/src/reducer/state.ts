@@ -14,6 +14,14 @@ export interface MemberState {
   role: PrivateRole;
   capabilities: Set<PrivateCapability>;
   removed: boolean;
+  /**
+   * A NON-cryptographic, admin-chosen display name carried in the signed
+   * `member.add` op (§12.3 / §14.3.3).  It converges across devices (it folds
+   * from the same signed op everywhere) but NEVER participates in authority —
+   * capability checks read `role`/`capabilities` keyed by `memberId` only.
+   * `undefined` when no name was provided (e.g. the founder genesis).
+   */
+  displayName?: string;
 }
 
 export interface DeviceState {
@@ -22,6 +30,9 @@ export interface DeviceState {
   readonly addedAtEpoch: number;
   removed: boolean;
   signingPublicKey: string;
+  /** Tier-2 rendezvous-cap: the device's blind credential commitment (set by a
+   *  `rendezvous.request` op; an admin re-signs it per epoch to issue, §6.2). */
+  rendezvousCommitment?: string;
 }
 
 export interface StoryState {
@@ -29,6 +40,8 @@ export interface StoryState {
   readonly threadId: string;
   readonly authorMemberId: string;
   title: string;
+  /** The story's UGC body (markdown-lite); `''` for a link/media story with no text. */
+  bodyMarkdownLite: string;
   submissionType: string;
   topicIds: string[];
   tombstoned: boolean;
@@ -66,6 +79,11 @@ export interface AttachmentState {
   /** The object key wrapped under the epoch `content_wrap_key` (§10.5) — the key
    *  material a member unwraps to open the sealed manifest + chunks. */
   readonly wrappedObjectKey: string;
+  /** The epoch the `attachment.add` op was authored under — i.e. the epoch whose
+   *  `content_wrap_key` the object key is wrapped under (§10.5).  A fetcher needs it
+   *  to unwrap the key + open the manifest/chunks (part of the §14.3.3 converged state,
+   *  so it is committed + snapshot-serialized like every other field). */
+  readonly epoch: number;
 }
 
 /** A recovery request's accumulated distinct admin authorizations (WS-S.3.6c). */
@@ -82,6 +100,17 @@ export interface RejectedOp {
   readonly reason: string;
 }
 
+/** Tier-2 (§11): an AUTHORIZED `rendezvous.issue` — the per-epoch BBS issuer key + the per-device
+ *  blind-credential signatures.  Recorded by the authority-enforcing fold ONLY when the issuer is
+ *  `admin`-capable, so a non-admin's crypto-valid issue op (which `openOp` stores in `acceptedOps`
+ *  before the reducer rejects it) NEVER reaches this — the engine sources installable issuances
+ *  from here, not from raw accepted ops. */
+export interface RendezvousIssuanceState {
+  readonly targetEpoch: number;
+  readonly issuerPublicKey: string;
+  readonly credentials: ReadonlyArray<{ readonly device_id: string; readonly signature: string }>;
+}
+
 export interface RoomReducerState {
   members: Map<string, MemberState>;
   devices: Map<string, DeviceState>;
@@ -91,6 +120,8 @@ export interface RoomReducerState {
   summaries: Map<string, SummaryState>;
   attachments: Map<string, AttachmentState>;
   recoveryRequests: Map<string, RecoveryRequestState>;
+  /** Tier-2 admin-authorized issuances in canonical fold order (latest-wins downstream). */
+  rendezvousIssuances: RendezvousIssuanceState[];
   /** `${deviceId}:${client_draft_id}` seen, for the §14.4 idempotent dedup. */
   seenClientDrafts: Set<string>;
   /** Accepted snapshot-commit op ids (optimization hints, §14.5). */
@@ -110,6 +141,7 @@ export function emptyRoomState(): RoomReducerState {
     summaries: new Map(),
     attachments: new Map(),
     recoveryRequests: new Map(),
+    rendezvousIssuances: [],
     seenClientDrafts: new Set(),
     snapshots: [],
     rejected: [],
@@ -141,6 +173,10 @@ export function cloneRoomState(state: RoomReducerState): RoomReducerState {
         { ...v, authorizingDeviceIds: new Set(v.authorizingDeviceIds) },
       ]),
     ),
+    rendezvousIssuances: state.rendezvousIssuances.map((i) => ({
+      ...i,
+      credentials: i.credentials.map((c) => ({ ...c })),
+    })),
     seenClientDrafts: new Set(state.seenClientDrafts),
     snapshots: [...state.snapshots],
     rejected: [...state.rejected],
@@ -171,6 +207,7 @@ export function roomStateCommitment(state: RoomReducerState): Uint8Array {
       role: m.role,
       capabilities: sortedStrings(m.capabilities),
       removed: m.removed,
+      displayName: m.displayName ?? null,
     })),
     devices: sortedEntries(state.devices).map(([id, d]) => ({
       deviceId: id,
@@ -184,6 +221,7 @@ export function roomStateCommitment(state: RoomReducerState): Uint8Array {
       threadId: s.threadId,
       authorMemberId: s.authorMemberId,
       title: s.title,
+      bodyMarkdownLite: s.bodyMarkdownLite,
       submissionType: s.submissionType,
       topicIds: s.topicIds,
       tombstoned: s.tombstoned,
@@ -215,11 +253,19 @@ export function roomStateCommitment(state: RoomReducerState): Uint8Array {
       attachmentId: id,
       manifestCid: a.manifestCid,
       wrappedObjectKey: a.wrappedObjectKey,
+      epoch: a.epoch,
     })),
     recoveryRequests: sortedEntries(state.recoveryRequests).map(([id, r]) => ({
       recoveryRequestId: id,
       recoveringMemberId: r.recoveringMemberId,
       authorizingDeviceIds: sortedStrings(r.authorizingDeviceIds),
+    })),
+    // Tier-2 issuances in fold order — so issuance divergence (a missing/extra authorized issue
+    // op) is reflected in the commitment, not just the DAG frontier.
+    rendezvousIssuances: state.rendezvousIssuances.map((i) => ({
+      targetEpoch: i.targetEpoch,
+      issuerPublicKey: i.issuerPublicKey,
+      credentials: i.credentials.map((c) => ({ deviceId: c.device_id, signature: c.signature })),
     })),
     snapshots: sortedStrings(state.snapshots),
   };

@@ -20,4 +20,5 @@ export * from './mls.js';
 export * from './record-encoding.js';
 export * from './recovery.js';
 export * from './runtime.js';
+export * from './safety-number.js';
 export * from './signatures.js';

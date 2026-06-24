@@ -1,6 +1,6 @@
 {
   "name": "licio",
-  "version": "0.4.20",
+  "version": "0.4.37",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "packageManager": "pnpm@9.15.4",
@@ -9,6 +9,7 @@
     "pnpm": ">=9"
   },
   "scripts": {
+    "prepare": "lefthook install || true",
     "dev": "pnpm --parallel --filter web --filter api dev",
     "build": "pnpm --filter @licio/shared build && pnpm --filter @licio/db --filter @licio/invariants build && pnpm --filter @licio/ranking --filter @licio/governance --filter @licio/lcap build && pnpm --filter web --filter api build",
     "test": "vitest run",
@@ -29,9 +30,12 @@
     "check:p2p-ranking-exclusion": "tsx scripts/check-p2p-ranking-exclusion.ts",
     "check:p2p-search-exclusion": "tsx scripts/check-p2p-search-exclusion.ts",
     "check:p2p-mls-wrapper": "tsx scripts/check-mls-wrapper.ts",
+    "gen:update-manifest": "tsx scripts/build-update-manifest.ts",
+    "check:update-channel": "tsx scripts/check-update-channel.ts",
     "check:sw": "tsx scripts/check-sw-security.ts",
     "lint:lockfile": "tsx scripts/check-lockfile.ts",
     "typecheck": "tsc -b",
+    "typecheck:ci": "tsc -b --force",
     "check:deps": "tsx scripts/check-dep-budget.ts",
     "check:workspace-deps": "tsx scripts/check-workspace-deps.ts",
     "check:policy": "tsx scripts/check-policy.ts",

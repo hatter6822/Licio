@@ -417,6 +417,16 @@ export class DrizzleStoryStore implements StoryStore {
     return rows.map((row) => this.#toRecord(row));
   }
 
+  async listLiveByRoom(roomId: string, limit: number): Promise<StoryRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(storiesTable)
+      .where(and(eq(storiesTable.roomId, roomId), isNull(storiesTable.hiddenState)))
+      .orderBy(desc(storiesTable.createdAt))
+      .limit(limit);
+    return rows.map((row) => this.#toRecord(row));
+  }
+
   async hasHiddenForUrl(canonicalUrl: string): Promise<boolean> {
     const rows = await this.#db
       .select({ id: storiesTable.storyId })
@@ -1044,6 +1054,18 @@ export class DrizzleEvidenceCardStore implements EvidenceCardStore {
       .update(evidenceTable)
       .set({ submittedBy: null })
       .where(eq(evidenceTable.submittedBy, userId));
+  }
+
+  async anonymizeUserByStories(storyIds: readonly string[], userId: string): Promise<number> {
+    if (storyIds.length === 0) return 0;
+    const rows = await this.#db
+      .update(evidenceTable)
+      .set({ submittedBy: null })
+      .where(
+        and(eq(evidenceTable.submittedBy, userId), inArray(evidenceTable.storyId, [...storyIds])),
+      )
+      .returning({ id: evidenceTable.evidenceId });
+    return rows.length;
   }
 
   async getById(evidenceId: string): Promise<EvidenceCardRecord | null> {

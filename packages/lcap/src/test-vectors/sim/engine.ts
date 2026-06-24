@@ -10,7 +10,7 @@
 // equivocating).  `run(seed, scenario)` is fully reproducible: the same pair yields the
 // identical trace and outcome.  It samples the §32.3 metrics and stores no IP/attention.
 
-import { defaultLane, type LcapPriority } from '../../priority.js';
+import { CONTROL_PRIORITY, defaultLane, type LcapPriority } from '../../priority.js';
 import { scheduleTransfer } from '../../scheduler/index.js';
 import type { ScheduledCandidate } from '../../scheduler/types.js';
 import type { TransportId } from '../../transport/index.js';
@@ -25,10 +25,31 @@ export interface SimObject {
   readonly requires?: readonly string[];
   /** Objects sharing a fork group are conflicting variants (equivocation); ≥2 held ⇒ fork. */
   readonly forkGroup?: string;
+  /**
+   * Marks a P0/C0 revocation control object (WS-R.15.4f).  Revocation propagation is a
+   * DISTINCT control flow from forks: it MUST reach every node (a fork must be DETECTED,
+   * a revocation must be HELD).  The `revocationGroup` is the metric key the
+   * `revocationPropagationContact` metric tracks — never reuse `forkGroup` for it.
+   */
+  readonly revocationGroup?: string;
 }
 
-/** A node behavior strategy (the §32.3 adversary plug-in points). */
-export type NodeBehavior = 'honest' | 'withholding' | 'flooding' | 'equivocating';
+/**
+ * A node behavior strategy (the §32.3 adversary plug-in points).
+ *
+ * `malicious-courier` is the WS-R.15.4f composite ferry adversary: it SELECTIVELY
+ * withholds part of what a receiver wants (it does not refuse outright like a
+ * `withholding` relay), and on what it DOES carry it bypasses the dependency closure
+ * and force-duplicates (like `flooding`).  Combined with a fork group on the objects it
+ * carries, this lets one courier withhold, flood, AND equivocate in a single contact —
+ * the worst-case untrusted ferry the receiver's real scheduler + closure must survive.
+ */
+export type NodeBehavior =
+  | 'honest'
+  | 'withholding'
+  | 'flooding'
+  | 'equivocating'
+  | 'malicious-courier';
 
 export interface SimNodeSpec {
   readonly id: string;
@@ -44,6 +65,17 @@ export interface ContactSpec {
   readonly b: string;
   /** Which transport carries this contact (for the §32.5 transport-independence test). */
   readonly transport?: TransportId;
+  /**
+   * Optional ASYMMETRIC per-direction byte budget for a radio ferry (WS-R.15.4f) — a
+   * real intermittent radio link is rarely symmetric (e.g. a Bluetooth peripheral's
+   * uplink is far narrower than its downlink).  `budgetBytesAToB` bounds the a→b leg,
+   * `budgetBytesBToA` the b→a leg; each is fed directly to the REAL scheduler as that
+   * direction's budget.  When a direction is OMITTED it falls back to the scenario's
+   * symmetric `contactBudgetBytes`, so a contact that sets neither is byte-identical to
+   * one written before this field existed.
+   */
+  readonly budgetBytesAToB?: number;
+  readonly budgetBytesBToA?: number;
 }
 
 export interface RunOptions {
@@ -58,6 +90,15 @@ export interface LinkModel {
   readonly dupProb?: number;
   /** Probability the whole contact is partitioned (no transfer). */
   readonly partitionProb?: number;
+  /**
+   * Radio-ferry intermittent-proximity probability (WS-R.15.4f).  When SET, every
+   * contact is additionally gated on the two peers being in proximity: with probability
+   * `1 - proximityProb` the contact does not happen even though it was scheduled (the
+   * nodes drifted out of radio range).  When LEFT UNDEFINED no proximity draw is taken,
+   * so the per-contact PRNG sequence is unchanged for every pre-existing scenario.  The
+   * draw is taken AFTER the partition draw and only on this new path.
+   */
+  readonly proximityProb?: number;
 }
 
 export interface SimScenario {
@@ -75,6 +116,8 @@ export interface ArrivalEvent {
   readonly cid: string;
   readonly priority: LcapPriority;
   readonly accepted: boolean; // false ⇒ quarantined (missing requires)
+  /** The index of the contact that produced this arrival (for contact-bounded metrics). */
+  readonly contactIndex: number;
 }
 
 export interface SimResult {
@@ -122,7 +165,23 @@ function offered(behavior: NodeBehavior, wanted: readonly SimObject[]): readonly
   // A withholding relay shares nothing; honest/flooding/equivocating all offer their
   // holdings (flooding's extra duplicates + equivocation's conflicting variants are a
   // property of the objects/link, surfaced as fork evidence — never suppressed).
-  return behavior === 'withholding' ? [] : wanted;
+  if (behavior === 'withholding') return [];
+  if (behavior === 'malicious-courier') {
+    // SELECTIVE withholding: the courier carries every control object (P0/C0 — it cannot
+    // suppress a revocation or fork variant without the receiver noticing the gap), but
+    // deterministically drops HALF of the remaining non-control wants (the even indices
+    // among them).  Deterministic (no PRNG) so the malicious path neither perturbs nor
+    // depends on the shared link-model draw sequence; the receiver's real closure +
+    // scheduler must still converge on whatever the honest peers later supply.
+    let nonControlSeen = 0;
+    return wanted.filter((object) => {
+      if (object.priority === CONTROL_PRIORITY) return true;
+      const keep = nonControlSeen % 2 === 1;
+      nonControlSeen += 1;
+      return keep;
+    });
+  }
+  return wanted;
 }
 
 /** Record an arrival into `receiver`, accepting iff the closure `requires` is met. */
@@ -141,6 +200,7 @@ function deliver(
     cid: object.cid,
     priority: object.priority,
     accepted: requiresMet,
+    contactIndex,
   });
   if (requiresMet) {
     receiver.held.add(object.cid);
@@ -168,7 +228,7 @@ function transferDirection(
   byCid: ReadonlyMap<string, SimObject>,
   budgetBytes: number,
   atMs: number,
-  link: Required<LinkModel>,
+  link: Required<Omit<LinkModel, 'proximityProb'>>,
   prng: ReturnType<typeof makePrng>,
   arrivals: ArrivalEvent[],
   contactIndex: number,
@@ -183,7 +243,11 @@ function transferDirection(
   const toOffer = offered(offerer.spec.behavior ?? 'honest', wanted);
   if (toOffer.length === 0) return;
 
-  const flooding = offerer.spec.behavior === 'flooding';
+  // A malicious courier floods on what it DOES carry — same closure-bypass + forced
+  // duplicate as a flooding peer (it dumps orphans and replays), in addition to the
+  // selective withholding `offered` already applied.
+  const flooding =
+    offerer.spec.behavior === 'flooding' || offerer.spec.behavior === 'malicious-courier';
   // The REAL scheduler decides the transfer order + what fits the budget (C0 first).
   const schedule = scheduleTransfer(
     toOffer.map((object) => toCandidate(object, receiver.held, flooding)),
@@ -222,11 +286,15 @@ function digest(arrivals: readonly ArrivalEvent[]): string {
 export function run(seed: number, scenario: SimScenario, options: RunOptions = {}): SimResult {
   const prng = makePrng(seed);
   const enabled = options.enabledTransports ? new Set(options.enabledTransports) : null;
-  const link: Required<LinkModel> = {
+  const link: Required<Omit<LinkModel, 'proximityProb'>> = {
     lossProb: scenario.link?.lossProb ?? 0,
     dupProb: scenario.link?.dupProb ?? 0,
     partitionProb: scenario.link?.partitionProb ?? 0,
   };
+  // `proximityProb` is intentionally NOT defaulted into `link`: a missing value means
+  // "take no proximity draw at all" (preserving every legacy trace), which a numeric
+  // default would erase.  It is read straight off the scenario only on the new path.
+  const proximityProb = scenario.link?.proximityProb;
   const byCid = new Map(scenario.objects.map((o) => [o.cid, o] as const));
   const nodes = new Map<string, NodeState>(
     scenario.nodes.map((spec) => [
@@ -250,30 +318,17 @@ export function run(seed: number, scenario: SimScenario, options: RunOptions = {
     const b = nodes.get(contact.b);
     if (!a || !b) continue;
     if (prng.bool(link.partitionProb)) continue; // contact partitioned away
-    transferDirection(
-      a,
-      b,
-      byCid,
-      scenario.contactBudgetBytes,
-      contact.atMs,
-      link,
-      prng,
-      arrivals,
-      index,
-      forks,
-    );
-    transferDirection(
-      b,
-      a,
-      byCid,
-      scenario.contactBudgetBytes,
-      contact.atMs,
-      link,
-      prng,
-      arrivals,
-      index,
-      forks,
-    );
+    // Radio-ferry proximity gate (WS-R.15.4f): only drawn when `proximityProb` is set,
+    // so a scenario without it takes the IDENTICAL per-contact draw sequence as before.
+    // The draw follows the partition draw and precedes either transfer direction.
+    if (proximityProb !== undefined && !prng.bool(proximityProb)) continue; // out of range
+    // Per-direction budget: fall back to the symmetric budget when a leg is unset, so a
+    // contact that sets neither asymmetric field feeds the scheduler the same budget as
+    // before (the real scheduler does all packing — asymmetry is just a smaller budget).
+    const budgetAToB = contact.budgetBytesAToB ?? scenario.contactBudgetBytes;
+    const budgetBToA = contact.budgetBytesBToA ?? scenario.contactBudgetBytes;
+    transferDirection(a, b, byCid, budgetAToB, contact.atMs, link, prng, arrivals, index, forks);
+    transferDirection(b, a, byCid, budgetBToA, contact.atMs, link, prng, arrivals, index, forks);
   }
 
   const held: Record<string, readonly string[]> = {};

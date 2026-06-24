@@ -47,6 +47,14 @@ export const memberAddOpSchema = z
     /** The MLS KeyPackage that the Add commit admits (§10.2). */
     mls_key_package: base64UrlSchema,
     granted_role: privateRoleSchema,
+    /**
+     * A NON-cryptographic, admin-chosen display name (carried into the signed
+     * op so it converges across devices, §14.3.3).  It NEVER affects authority
+     * (capability checks are by member id + role only, §11.3/§11.4); a UI MUST
+     * render it as distinct from — and subordinate to — the cryptographic
+     * member id.  Bounded like the §12.3 join `proposed_display_name`.
+     */
+    display_name: z.string().trim().min(1).max(100).optional(),
   })
   .strict();
 
@@ -129,6 +137,10 @@ export const storyCreateOpSchema = z
     story_id: privateIdSchema,
     thread_id: privateIdSchema,
     title: z.string().trim().min(1).max(300),
+    /** The story's UGC body (markdown-lite), for a text submission — OPTIONAL (a link/media
+     *  story has none).  Bound mirrors the WS-G server story body (`max(20_000)`); rendered
+     *  through the same sanitizing pipeline. */
+    body_markdown_lite: z.string().max(20_000).optional(),
     submission_type: submissionTypeSchema,
     topic_ids: z.array(z.string().min(1).max(64)).max(10),
     language: z.string().min(2).max(35).optional(),
@@ -148,6 +160,7 @@ export const storyEditOpSchema = z
     type: z.literal('story.edit'),
     story_id: privateIdSchema,
     title: z.string().trim().min(1).max(300).optional(),
+    body_markdown_lite: z.string().max(20_000).optional(),
     topic_ids: z.array(z.string().min(1).max(64)).max(10).optional(),
     sensitivity_labels: z.array(z.string().min(1).max(64)).max(16).optional(),
     language: z.string().min(2).max(35).optional(),
@@ -325,6 +338,36 @@ export const snapshotCommitOpSchema = z
   })
   .strict();
 
+/**
+ * Tier-2 rendezvous cap (docs/private-p2p/TIER2-RENDEZVOUS-CAP.md) — a device PUBLISHES its
+ * blind credential commitment (a Pedersen commitment + Schnorr PoK over its long-lived
+ * `nid`; it reveals NO `nid`, §6.2). Self-service: the authoring device sets its OWN
+ * commitment (`read`-capable). The admin re-signs it per epoch to issue credentials.
+ */
+export const rendezvousRequestOpSchema = z
+  .object({
+    type: z.literal('rendezvous.request'),
+    commitment_with_proof: base64UrlSchema,
+  })
+  .strict();
+
+/**
+ * Tier-2 rendezvous cap — an admin ISSUES per-epoch rendezvous credentials: the per-epoch
+ * BBS issuer public key + each device's blind signature on its published commitment. Carries
+ * NO converged content state — each device extracts ITS credential (others extract only the
+ * issuer key) via the engine rendezvous hook and persists it locally. Admin-only.
+ */
+export const rendezvousIssueOpSchema = z
+  .object({
+    type: z.literal('rendezvous.issue'),
+    target_epoch: z.number().int().min(0),
+    issuer_public_key: base64UrlSchema,
+    credentials: z
+      .array(z.object({ device_id: privateIdSchema, signature: base64UrlSchema }).strict())
+      .max(4_096),
+  })
+  .strict();
+
 /** The §13.2 op-body discriminated union (every op type, by `type`). */
 export const privateOpBodySchema = z.discriminatedUnion('type', [
   memberAddOpSchema,
@@ -344,6 +387,8 @@ export const privateOpBodySchema = z.discriminatedUnion('type', [
   summaryCreateOpSchema,
   attachmentAddOpSchema,
   snapshotCommitOpSchema,
+  rendezvousRequestOpSchema,
+  rendezvousIssueOpSchema,
 ]);
 export type PrivateOpBody = z.infer<typeof privateOpBodySchema>;
 

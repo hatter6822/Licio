@@ -66,6 +66,17 @@ const ALLOWED_WORKSPACE_DEPS: Record<string, string[]> = {
     '@licio/ai-governance',
     '@licio/governance',
     '@licio/lcap',
+    // Gate-19 (WS-R.15.7): the server-side public-block (re)publisher binds the IPFS bridge
+    // + the takedown oracle/republicationSet decision cores.  The code-split gates
+    // (`check:lcap-p2p-split`) constrain only apps/web's INITIAL bundle; a server-side
+    // static import is fine — apps/api is not bundle-budgeted.
+    '@licio/lcap-p2p',
+    // WS-S Tier-2 (rendezvous cap): the server-side BLINDNESS-PRESERVING presence verify
+    // binding imports ONLY `@licio/private-p2p/rendezvous-cap` (the BBS verify + context
+    // derivation — not the room engine/MLS).  Verifying a ZK proof reveals nothing beyond
+    // the pseudonym the server already stores (§15.3.1 preserved).  Server-side static
+    // import; apps/api is not bundle-budgeted.
+    '@licio/private-p2p',
   ],
 };
 

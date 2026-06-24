@@ -168,6 +168,40 @@ export function admitsPriority(
   return priority <= config.maxPriority;
 }
 
+/**
+ * Whether the mode prefetches media at all (§33).  A derived read the media/feed
+ * surfaces gate on so the Emergency/Minimal/Stealth "no media" posture is real, not
+ * cosmetic — a user action can still fetch one item, but automatic prefetch is off.
+ */
+export function mediaPrefetchAllowed(mode: OperationalMode): boolean {
+  return OPERATIONAL_MODES[mode].mediaAllowed;
+}
+
+/** Whether the mode permits automatic local-peer discovery (off in Stealth/Emergency). */
+export function discoveryAllowed(mode: OperationalMode): boolean {
+  return OPERATIONAL_MODES[mode].autoDiscovery;
+}
+
+/** The export posture a mode applies — the §26.2/§26.3 confirm + generic-filename flags. */
+export interface ExportPosture {
+  /** Require explicit confirmation before any export (Stealth/Emergency). */
+  readonly confirmBeforeExport: boolean;
+  /** Use a generic, room/topic-free export filename (Stealth/Emergency). */
+  readonly genericFilenames: boolean;
+  /** A high-risk mode whose export surface must show a clear trust warning. */
+  readonly highRisk: boolean;
+}
+
+/** The §26 export posture for a mode — consumed by the offline-bundle export surface. */
+export function exportPostureForMode(mode: OperationalMode): ExportPosture {
+  const config = OPERATIONAL_MODES[mode];
+  return {
+    confirmBeforeExport: config.confirmBeforeExport,
+    genericFilenames: config.genericFilenames,
+    highRisk: config.showTrustWarning,
+  };
+}
+
 /** Whether a sync/advertise channel is permitted under the mode (user action always is). */
 export function modeAllowsChannel(
   config: OperationalModeConfig,

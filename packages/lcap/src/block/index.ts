@@ -31,3 +31,12 @@ export {
   buildBlockDescriptor,
   verifyBlockDescriptor,
 } from './descriptor.js';
+export {
+  buildEncryptedPayloadBlock,
+  ENCRYPTED_PAYLOAD_MEDIA_TYPE,
+  type EncryptedPayloadBlock,
+  type EncryptedPayloadHints,
+  type EncryptedPayloadVerification,
+  type EncryptedPayloadVerifyStatus,
+  verifyEncryptedPayloadBlock,
+} from './encrypted-payload.js';

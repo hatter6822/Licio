@@ -119,3 +119,86 @@ export const PRIVATE_ROOM_PRIVACY_MATRIX: readonly PrivacyMatrixRow[] = [
     private_p2p: 'Forbidden',
   },
 ];
+
+// ---------------------------------------------------------------------------
+// WS-S.9 — server→private migration (PRIVATE_SPEC §24).  A Members-only server
+// room is NEVER silently upgraded: migration creates a NEW P2P room and
+// optionally re-imports history through a member's client.  This copy is the
+// SSOT for the migration wizard (pinned by the prohibited-language copy-lint —
+// it must never imply migration retroactively erases past server access).
+// ---------------------------------------------------------------------------
+
+/** §24.3 — the verbatim, blocking migration warning shown before any import. */
+export const PRIVATE_ROOM_MIGRATION_WARNING =
+  'This migration improves privacy from this point forward. Imported history was ' +
+  'previously stored on Licio servers, so migration cannot make past server access ' +
+  'impossible. You may start fresh instead.';
+
+/** The §24.2 Phase-3 import modes, each with its honest leakage disclosure. */
+export const PRIVATE_ROOM_IMPORT_MODES = [
+  {
+    id: 'fresh',
+    label: 'Fresh start',
+    description: 'No old content is imported.',
+    disclosure: 'Best privacy going forward — nothing previously on the server is carried over.',
+  },
+  {
+    id: 'selected',
+    label: 'Selected import',
+    description: 'You select threads/posts to re-encrypt locally.',
+    disclosure:
+      'The items you import were previously server-hosted; importing them does not undo that.',
+  },
+  {
+    id: 'full',
+    label: 'Full import',
+    description: 'The client fetches all old room content and re-encrypts it into the P2P room.',
+    disclosure:
+      'Highest convenience, but NOT retroactive privacy — all imported history was previously on the server.',
+  },
+  {
+    id: 'redacted',
+    label: 'Redacted import',
+    description: 'Titles/summaries only.',
+    disclosure:
+      'Lower leakage of old content, but the imported titles/summaries were still previously server-hosted.',
+  },
+] as const;
+
+export type PrivateRoomImportModeId = (typeof PRIVATE_ROOM_IMPORT_MODES)[number]['id'];
+
+/** §24.2 — the ordered migration phases (the wizard step model). */
+export const PRIVATE_ROOM_MIGRATION_PHASES = [
+  {
+    id: 'rename_disclose',
+    label: 'Rename & disclose',
+    detail: 'The old room is relabelled a Members-only server room.',
+  },
+  {
+    id: 'create_destination',
+    label: 'Create P2P destination',
+    detail: 'A new P2P room — keys + manifest generated on your device.',
+  },
+  {
+    id: 'choose_import',
+    label: 'Choose import mode',
+    detail: 'Fresh / Selected / Full / Redacted, each with its leakage disclosure.',
+  },
+  {
+    id: 'reinvite_members',
+    label: 'Re-invite members',
+    detail: 'Server membership does not grant P2P access; members rejoin via P2P invites.',
+  },
+  {
+    id: 'freeze_old',
+    label: 'Freeze old room',
+    detail: 'The old server room becomes read-only, pointing to the P2P replacement.',
+  },
+  {
+    id: 'purge_minimize',
+    label: 'Purge / minimize',
+    detail: 'Where policy + law permit, old server data is purged or minimized.',
+  },
+] as const;
+
+export type PrivateRoomMigrationPhaseId = (typeof PRIVATE_ROOM_MIGRATION_PHASES)[number]['id'];

@@ -9,6 +9,7 @@
 export * from './archive.js';
 export * from './handshake.js';
 export * from './head-sync.js';
+export * from './op-exchange.js';
 export * from './rendezvous.js';
 export * from './secure-channel.js';
 export * from './signaling.js';

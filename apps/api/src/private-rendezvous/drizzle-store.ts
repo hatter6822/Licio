@@ -13,7 +13,7 @@
 // mailbox; a multi-node deployment needs a shared transient store).
 
 import { type DbExecutor, privateRendezvousRecords } from '@licio/db';
-import { and, desc, eq, inArray, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, lte, sql } from 'drizzle-orm';
 import {
   InMemoryRendezvousStore,
   MAX_RECORDS_PER_ROOM,
@@ -87,9 +87,16 @@ export class DrizzleRendezvousStore implements RendezvousStore {
       .where(
         and(
           eq(privateRendezvousRecords.roomBlindId, roomBlindId),
-          sql`${privateRendezvousRecords.expiresAt} > ${new Date(nowMs)}`,
+          // drizzle's `gt` binds the Date as a proper param (a raw `sql` template
+          // rejects a Date under postgres@3.x); mirrors the `lte` in cleanup().
+          gt(privateRendezvousRecords.expiresAt, new Date(nowMs)),
         ),
       )
+      // §27 SAMPLE-POLL (Tier-1 flood dilution): a UNIFORM random sample of the live rows,
+      // not the storage-order front, so an insider presence flood under one room_blind_id
+      // cannot deterministically crowd honest peers out of the poll window.  The sort is
+      // bounded by the per-room cap (MAX_RECORDS_PER_ROOM), so `ORDER BY random()` is cheap.
+      .orderBy(sql`random()`)
       .limit(limit);
     return rows.map((r) => ({
       roomBlindId,

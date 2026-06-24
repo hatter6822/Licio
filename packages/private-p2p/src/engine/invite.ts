@@ -49,9 +49,15 @@ export async function deriveInviteIdBlind(
 export async function deriveJoinProof(
   inviteSecret: Uint8Array,
   recipientKeyPackageB64: string,
+  deviceSigningPublicKey: string,
   requestedAtBucket: string,
 ): Promise<string> {
-  const transcript = canonical([JOIN_PROOF_LABEL, recipientKeyPackageB64, requestedAtBucket]);
+  const transcript = canonical([
+    JOIN_PROOF_LABEL,
+    recipientKeyPackageB64,
+    deviceSigningPublicKey,
+    requestedAtBucket,
+  ]);
   return toBase64Url(await hmacSha256(inviteSecret, transcript));
 }
 
@@ -96,6 +102,9 @@ export interface BuildJoinRequestParams {
   readonly invite: InviteSecret;
   /** The invitee's MLS KeyPackage (public package) the Add commit will admit. */
   readonly keyPackage: KeyPackage;
+  /** The invitee's LONG-TERM device signing public key (Ed25519, raw, base64url) — the
+   *  key it authors ops with, bound into the proof (so a relay cannot substitute it). */
+  readonly deviceSigningPublicKey: string;
   readonly proposedDisplayName: string;
   /** A COARSE time bucket (never an exact timestamp). */
   readonly requestedAtBucket: string;
@@ -112,8 +121,14 @@ export async function buildJoinRequest(params: BuildJoinRequestParams): Promise<
     schema: 'licio.private.join_request.v1',
     invite_id_blind: await deriveInviteIdBlind(secret, params.invite.invite_id),
     recipient_device_key_package: keyPackageB64,
+    device_signing_public_key: params.deviceSigningPublicKey,
     proposed_display_name: params.proposedDisplayName,
-    proof_of_invite_secret: await deriveJoinProof(secret, keyPackageB64, params.requestedAtBucket),
+    proof_of_invite_secret: await deriveJoinProof(
+      secret,
+      keyPackageB64,
+      params.deviceSigningPublicKey,
+      params.requestedAtBucket,
+    ),
     requested_at_bucket: params.requestedAtBucket,
   } satisfies JoinRequest);
 }
@@ -123,6 +138,8 @@ export type JoinRequestVerdict =
   | {
       readonly ok: true;
       readonly keyPackage: KeyPackage;
+      /** The joiner's authenticated device signing public key (proof-bound). */
+      readonly deviceSigningPublicKey: string;
       readonly grantedRole: InviteSecret['granted_role'];
     }
   | {
@@ -177,6 +194,7 @@ export async function verifyJoinRequest(
   const expectedProof = await deriveJoinProof(
     secret,
     request.recipient_device_key_package,
+    request.device_signing_public_key,
     request.requested_at_bucket,
   );
   if (!timingSafeEqual(requestProof, fromBase64Url(expectedProof))) {
@@ -188,5 +206,10 @@ export async function verifyJoinRequest(
   } catch {
     return { ok: false, reason: 'malformed_key_package' };
   }
-  return { ok: true, keyPackage, grantedRole: invite.granted_role };
+  return {
+    ok: true,
+    keyPackage,
+    deviceSigningPublicKey: request.device_signing_public_key,
+    grantedRole: invite.granted_role,
+  };
 }

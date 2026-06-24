@@ -42,6 +42,10 @@ jobs:
       - run: pnpm check:p2p-ranking-exclusion
       - run: pnpm check:p2p-search-exclusion
       - run: pnpm check:p2p-mls-wrapper
+      # WS-S.10.2b — the structural verify-before-activate / lock-on-fail wiring
+      # half (no build needed); the build job additionally verifies the PRODUCED
+      # + signed + logged manifest cryptographically.
+      - run: pnpm check:update-channel
 
   typecheck:
     name: Type Check
@@ -54,7 +58,9 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile --ignore-scripts
-      - run: pnpm typecheck
+      # `typecheck:ci` (tsc -b --force) ignores any `.tsbuildinfo`, so a cached up-to-date
+      # marker can never mask a real compile error (matches the pre-push hook).
+      - run: pnpm typecheck:ci
 
   lockfile-lint:
     name: Lockfile Integrity
@@ -165,6 +171,13 @@ jobs:
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      # WS-S.10.1 — produce the SIGNED + transparency-logged update manifest over
+      # the built private-mode chunk, then verify the PRODUCED artifact end-to-end
+      # with the real verifier (the gate BITES on a missing/forged manifest).  A
+      # dev fixture signing key is used in CI (no LICIO_UPDATE_* env); a release
+      # build supplies the maintainer build-secret keys.
+      - run: pnpm gen:update-manifest
+      - run: pnpm check:update-channel
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: build-artifacts

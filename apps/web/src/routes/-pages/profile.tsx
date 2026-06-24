@@ -137,6 +137,8 @@ export function ProfilePage(): React.ReactElement {
     { to: '/profile/security', label: t('profile.security', 'Security') },
     { to: '/profile/wallet', label: t('profile.wallet', 'Wallet') },
     { to: '/private', label: t('profile.privateRooms', 'Private rooms') },
+    { to: '/profile/offline', label: t('profile.offline', 'Offline bundles') },
+    { to: '/profile/mode', label: t('profile.mode', 'Connection mode') },
   ];
 
   return (

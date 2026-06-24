@@ -55,3 +55,9 @@ provenance/
 
 # Local Redis artifacts (dev daemon writes to the repo root)
 dump.rdb
+
+# WS-S.10.1 update-channel local dev material (NEVER committed):
+#   - the generated dev signing/log keypair (a BUILD secret in prod; a local
+#     fixture here) and the local append-only transparency-log store.
+.licio-update-keys/
+.licio-update-log/

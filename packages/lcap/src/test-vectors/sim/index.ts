@@ -20,13 +20,17 @@ export {
   forkDetectionContact,
   mediaBeatingP0,
   quarantineRatio,
+  revocationPropagationContact,
 } from './metrics.js';
 export { makePrng, type Prng } from './prng.js';
 export {
   allMediaFlood,
   equivocationFork,
+  maliciousCourier,
   manualFerry,
   quarantineThenClear,
+  radioFerry,
+  revocationPropagation,
   transportIndependence,
   withholdingRelay,
 } from './scenarios.js';

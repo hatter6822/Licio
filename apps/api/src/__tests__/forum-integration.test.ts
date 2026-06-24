@@ -144,6 +144,8 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       charterSummary: null,
       typeMetadata: {},
       latestActivityAt: null,
+      frozen: false,
+      migratedToRoomId: null,
       ...over,
     };
     return record;

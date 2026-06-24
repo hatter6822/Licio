@@ -18,9 +18,15 @@
 // always converges regardless of delivery order; the unresolved remainder is
 // quarantined with its typed reason and never rendered.
 
+import {
+  decryptAttachment,
+  type EncryptedAttachment,
+  openAttachmentManifest,
+} from '../crypto/attachment.js';
 import { canonical } from '../crypto/canonical.js';
+import { PRIVATE_CID_CODEC, verifyPrivateCid } from '../crypto/cid.js';
 import { deriveAuthorDeviceIdBlind } from '../crypto/device-blind.js';
-import { sha256, toBase64Url } from '../crypto/runtime.js';
+import { fromBase64Url, sha256, toBase64Url } from '../crypto/runtime.js';
 import { OP_REQUIRED_CAPABILITY } from '../reducer/capabilities.js';
 import {
   type BootstrapDevice,
@@ -55,8 +61,19 @@ import {
   buildHeadAnnouncement,
   computeHeads,
   type HeadAnnouncement,
+  missingParents,
   wantedHeads,
 } from '../sync/head-sync.js';
+
+/**
+ * §27 DoS bound on the recoverable-failure retention pool.  `unknown_device` is returned
+ * by `openOp` BEFORE the signature is verified (an unrecognised author-blind has no key to
+ * verify against), so an UNAUTHENTICATED peer can stream envelopes with random blinds +
+ * random signatures, each a fresh pool key — unbounded memory without a cap.  The pool is
+ * bounded here (never disable-able); on overflow the OLDEST entries are evicted first (an
+ * evicted legitimate pending op is simply re-fetched by the §15.7 sync walk).
+ */
+const MAX_PENDING_ENVELOPES = 4_096;
 
 /** The durable boundary for a room's encrypted envelopes (keyed by op id). */
 export interface PrivateRoomStorage {
@@ -68,11 +85,21 @@ export interface PrivateRoomStorage {
   listEnvelopes(): Promise<ReadonlyArray<{ opId: string; envelope: PrivateEncryptedEnvelope }>>;
   /** Drop envelopes pruned by a §14.5 compaction (idempotent — absent ids no-op). */
   deleteEnvelopes(opIds: readonly string[]): Promise<void>;
+  /** §13.6 — persist a CID-addressed content-addressed block (an attachment manifest or
+   *  media chunk; the encrypted BYTES, opaque to storage).  The engine writes a block
+   *  only after verifying its CID, so storage need not re-verify. Idempotent. */
+  putBlock(cid: string, bytes: Uint8Array): Promise<void>;
+  /** A stored block's bytes, or `undefined` if absent.  The engine re-verifies the CID
+   *  on read where trust matters (storage confers no trust). */
+  getBlock(cid: string): Promise<Uint8Array | undefined>;
+  /** Whether a block is stored (drives the §15.8 want-list without fetching bytes). */
+  hasBlock(cid: string): Promise<boolean>;
 }
 
 /** An in-memory `PrivateRoomStorage` (local/dev + tests; apps/web uses IndexedDB). */
 export class InMemoryPrivateRoomStorage implements PrivateRoomStorage {
   private readonly envelopes = new Map<string, PrivateEncryptedEnvelope>();
+  private readonly blocks = new Map<string, Uint8Array>();
 
   putEnvelope(opId: string, envelope: PrivateEncryptedEnvelope): Promise<void> {
     this.envelopes.set(opId, envelope); // last-write-wins (the engine passes the fork winner)
@@ -86,6 +113,19 @@ export class InMemoryPrivateRoomStorage implements PrivateRoomStorage {
   deleteEnvelopes(opIds: readonly string[]): Promise<void> {
     for (const id of opIds) this.envelopes.delete(id);
     return Promise.resolve();
+  }
+
+  putBlock(cid: string, bytes: Uint8Array): Promise<void> {
+    this.blocks.set(cid, bytes);
+    return Promise.resolve();
+  }
+
+  getBlock(cid: string): Promise<Uint8Array | undefined> {
+    return Promise.resolve(this.blocks.get(cid));
+  }
+
+  hasBlock(cid: string): Promise<boolean> {
+    return Promise.resolve(this.blocks.has(cid));
   }
 }
 
@@ -185,6 +225,13 @@ export class PrivateRoomEngine {
    *  ignored, AND a post-snapshot op whose parent is covered is causality-checked
    *  against the RETAINED lamport (§14.3.1), identically to an uncompacted peer. */
   private readonly coveredOpLamports = new Map<string, string>();
+  /** Envelopes that OPENED-failed for a RECOVERABLE reason (`no_epoch_key` — the
+   *  epoch key is not held yet; `unknown_device` — the device cert is not folded
+   *  yet), keyed by signature.  Retained so they re-open automatically once the
+   *  missing material arrives (a later commit's epoch key via `addEpochKeys`, or an
+   *  earlier op that adds the device), instead of being dropped — the fix that lets
+   *  cross-epoch content converge and stops the sync session re-requesting forever. */
+  private readonly pendingEnvelopes = new Map<string, PrivateEncryptedEnvelope>();
   /** The max Lamport among compacted ops — so authored ops stay globally
    *  monotonic after pruning (a compacted + an uncompacted device must agree on
    *  canonical order, §14.3.1). */
@@ -301,7 +348,7 @@ export class PrivateRoomEngine {
 
   /** The latest accepted §14.5 snapshot id (the highest-Lamport `snapshot.commit`),
    *  surfaced in the head announcement so a peer can discover the retained frontier. */
-  private latestSnapshotId(): string | undefined {
+  latestSnapshotId(): string | undefined {
     let latest: { id: string; lamport: bigint } | undefined;
     for (const op of this.acceptedOps.values()) {
       if (op.body.type !== 'snapshot.commit') continue;
@@ -314,6 +361,41 @@ export class PrivateRoomEngine {
   /** Add/replace the keys for an epoch (e.g. after an MLS commit rotates them). */
   addEpochKeys(epoch: number, keys: HeldEpochKeys): void {
     this.epochs.set(epoch, keys);
+  }
+
+  /**
+   * Tier-2 rendezvous cap (§11): the published device commitments (the converged
+   * `rendezvous.request` state) — the input an admin issues from. Excludes removed devices.
+   */
+  rendezvousCommitments(): { deviceId: string; commitmentWithProof: string }[] {
+    const out: { deviceId: string; commitmentWithProof: string }[] = [];
+    for (const device of this.currentState.devices.values()) {
+      if (!device.removed && device.rendezvousCommitment !== undefined) {
+        out.push({ deviceId: device.deviceId, commitmentWithProof: device.rendezvousCommitment });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Tier-2 rendezvous cap (§11): the AUTHORIZED `rendezvous.issue` bodies — what a device installs
+   * its credential from (the carrier feeds these to the coordinator's `installFromIssuances`).
+   * Sourced from the AUTHORITY-ENFORCING reduced state (`rendezvousIssuances`), NOT raw
+   * `acceptedOps`: a non-admin running a modified client can seal a crypto-valid `rendezvous.issue`
+   * that `openOp` stores in `acceptedOps`, but the reducer rejects it for lacking `admin`, so it
+   * never appears here — an unauthorized issuer can no longer enroll devices / partition Tier-2.
+   * Returned in canonical fold order (latest-wins downstream).
+   */
+  rendezvousIssuances(): {
+    target_epoch: number;
+    issuer_public_key: string;
+    credentials: ReadonlyArray<{ device_id: string; signature: string }>;
+  }[] {
+    return this.currentState.rendezvousIssuances.map((i) => ({
+      target_epoch: i.targetEpoch,
+      issuer_public_key: i.issuerPublicKey,
+      credentials: i.credentials,
+    }));
   }
 
   /** The next Lamport stamp to author locally: `max(accepted) + 1` (a decimal
@@ -347,8 +429,11 @@ export class PrivateRoomEngine {
    * Quarantines (never renders) what cannot be opened.
    */
   async ingest(envelopes: readonly PrivateEncryptedEnvelope[]): Promise<IngestReport> {
-    // Pending pool keyed by the envelope signature (unique per signed op).
-    const pending = new Map<string, PrivateEncryptedEnvelope>();
+    // Pending pool keyed by the envelope signature (unique per signed op).  Seed it
+    // with the RETAINED recoverable-failure envelopes so a newly-arrived epoch key or
+    // device cert re-opens them in the SAME fixpoint as the new batch (so `ingest([])`
+    // after `addEpochKeys` drains them — the cross-epoch self-heal).
+    const pending = new Map<string, PrivateEncryptedEnvelope>(this.pendingEnvelopes);
     for (const envelope of envelopes) pending.set(envelope.signature, envelope);
 
     const accepted: string[] = [];
@@ -372,6 +457,7 @@ export class PrivateRoomEngine {
           continue;
         }
         pending.delete(key);
+        this.pendingEnvelopes.delete(key); // resolved — no longer awaiting material
         progressed = true;
         const opId = result.op.op_id;
         // A re-received op already folded into the snapshot base is a no-op.
@@ -403,14 +489,43 @@ export class PrivateRoomEngine {
       if (progressed) this.refold();
     }
 
-    const quarantined: QuarantinedEnvelope[] = [
-      ...[...pending].map(([key, envelope]) => ({
-        envelope,
-        reason: lastResultByKey.get(key) ?? ('unknown_device' as IngestQuarantineReason),
-      })),
-      ...forks,
-    ];
+    // Partition the still-unopened: RECOVERABLE failures (missing epoch key / device
+    // cert) are RETAINED for automatic retry when the material arrives; everything else
+    // (bad signature, AEAD failure, schema reject, fork loser) is quarantined for good.
+    const quarantined: QuarantinedEnvelope[] = [...forks];
+    for (const [key, envelope] of pending) {
+      const reason = lastResultByKey.get(key) ?? ('unknown_device' as IngestQuarantineReason);
+      if (reason === 'no_epoch_key' || reason === 'unknown_device') {
+        this.pendingEnvelopes.set(key, envelope); // awaiting an epoch key / device cert
+      } else {
+        this.pendingEnvelopes.delete(key);
+        quarantined.push({ envelope, reason });
+      }
+    }
+    // §27 DoS bound: cap the retention pool (an unauthenticated peer cannot verify-fail
+    // an `unknown_device` envelope, so it could otherwise flood the pool unbounded).
+    // Evict oldest-first (Map insertion order); an evicted legitimate pending op is
+    // re-fetched by the §15.7 walk, so eviction never loses content permanently.
+    while (this.pendingEnvelopes.size > MAX_PENDING_ENVELOPES) {
+      const oldest = this.pendingEnvelopes.keys().next().value;
+      if (oldest === undefined) break;
+      this.pendingEnvelopes.delete(oldest);
+    }
     return { accepted, quarantined };
+  }
+
+  /** Re-attempt the retained recoverable-failure envelopes (e.g. after `addEpochKeys`
+   *  delivers a new epoch key, or an earlier op folds a device cert).  A no-op when
+   *  nothing is pending.  Returns what newly opened. */
+  retryPending(): Promise<IngestReport> {
+    return this.ingest([]);
+  }
+
+  /** How many envelopes are held-but-not-yet-openable (awaiting an epoch key / device
+   *  cert).  A non-zero count after sync quiesces means "blocked on a key" — the live
+   *  session surfaces this rather than re-requesting forever. */
+  pendingCount(): number {
+    return this.pendingEnvelopes.size;
   }
 
   /**
@@ -446,6 +561,181 @@ export class PrivateRoomEngine {
     return wantedHeads(new Set(this.acceptedOps.keys()), announcement);
   }
 
+  /**
+   * The §15.7 frontier-first ancestor walk: op ids referenced as a parent by an
+   * OPENED op but NOT yet held (base-aware).  After ingesting a batch of heads, a
+   * structurally-invalid (parent-missing) op is RETAINED in `acceptedOps`, so its
+   * unmet parents surface here; the sync session requests them, ingests, and
+   * recomputes until this is empty — at which point the engine holds the causal
+   * closure and the retained ops fold into state.  Deterministic (sorted, deduped).
+   */
+  missingDependencies(): string[] {
+    const known = new Set<string>(this.acceptedOps.keys());
+    for (const id of this.coveredOpLamports.keys()) known.add(id);
+    const views = [...this.acceptedOps.values()].map((op) => ({
+      op_id: op.op_id,
+      parents: op.parents,
+    }));
+    return missingParents(known, views);
+  }
+
+  /**
+   * Serve the §15.7 op-exchange request: the WINNING envelopes the engine holds for
+   * the requested op ids (a peer fetches these, then runs them through its OWN
+   * `ingest` — storage confers no trust, §8.3).  Reads the persisted envelopes (the
+   * fork-resolution winner is the one stored), so a covered/compacted op the engine
+   * no longer stores is simply not served (the requester gets it via the snapshot
+   * base in an archive).  Bounded by the request set.
+   */
+  async serveOps(opIds: readonly string[]): Promise<PrivateEncryptedEnvelope[]> {
+    if (opIds.length === 0) return [];
+    const want = new Set(opIds);
+    const out: PrivateEncryptedEnvelope[] = [];
+    for (const { opId, envelope } of await this.storage.listEnvelopes()) {
+      if (want.has(opId)) out.push(envelope);
+    }
+    return out;
+  }
+
+  // --- §13.6 / §15.7 media block exchange -----------------------------------
+
+  /**
+   * Persist a freshly-encrypted §13.6 attachment's blocks (the sealed manifest + every
+   * sealed chunk, CID-addressed).  The author then issues an `attachment.add` op carrying
+   * `manifest_cid` + `wrapped_object_key`; peers fetch these blocks lazily by CID.
+   */
+  async storeAttachment(encrypted: EncryptedAttachment): Promise<void> {
+    await this.storage.putBlock(encrypted.manifestCid, encrypted.sealedManifest);
+    for (const [cid, bytes] of encrypted.chunks) await this.storage.putBlock(cid, bytes);
+  }
+
+  /** Open a stored attachment manifest under its wrapping epoch's key, or `undefined`
+   *  if the block is missing, the epoch key is unheld, or it fails to open. */
+  private async tryOpenManifest(att: {
+    readonly attachmentId: string;
+    readonly manifestCid: string;
+    readonly wrappedObjectKey: string;
+    readonly epoch: number;
+  }): Promise<Awaited<ReturnType<typeof openAttachmentManifest>> | undefined> {
+    const sealed = await this.storage.getBlock(att.manifestCid);
+    const epoch = this.epochs.get(att.epoch);
+    if (!sealed || !epoch) return undefined;
+    try {
+      return await openAttachmentManifest(
+        sealed,
+        att.attachmentId,
+        {
+          roomIdCommitment: this.roomIdCommitment,
+          roomEpoch: att.epoch,
+          contentWrapKey: epoch.contentWrapKey,
+        },
+        { wrappedObjectKey: fromBase64Url(att.wrappedObjectKey) },
+      );
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * §15.8 — the CIDs this engine still needs to render its attachments: every
+   * `attachment.add`'s manifest CID it lacks, then (once a manifest is held + opens) that
+   * manifest's chunk CIDs it lacks.  Two-phase, because chunk CIDs live INSIDE the
+   * encrypted manifest — so a peer first fetches manifests, then their chunks.
+   */
+  async wantedBlockCids(): Promise<string[]> {
+    const wanted: string[] = [];
+    for (const att of this.currentState.attachments.values()) {
+      if (!(await this.storage.hasBlock(att.manifestCid))) {
+        wanted.push(att.manifestCid);
+        continue; // chunk CIDs are unknown until the manifest is held + opened
+      }
+      const manifest = await this.tryOpenManifest(att);
+      if (!manifest) continue;
+      for (const chunk of manifest.encrypted_chunks) {
+        if (!(await this.storage.hasBlock(chunk.cid))) wanted.push(chunk.cid);
+      }
+    }
+    return wanted;
+  }
+
+  /**
+   * §15.7 — serve requested blocks up to `maxBytes` (the requester's budget).  `refused`
+   * lists ONLY blocks held-but-over-budget (so the requester re-requests them on the next
+   * pass — the §15.8 multi-pass fetch of an attachment larger than one request's budget).
+   * A block this engine does NOT hold is OMITTED entirely (neither served nor refused), so
+   * the requester leaves it in its request guard and does not livelock re-asking for a
+   * block the peer will never have.
+   */
+  async serveBlocks(
+    cids: readonly string[],
+    maxBytes: number,
+  ): Promise<{ served: { cid: string; bytes: Uint8Array }[]; refused: string[] }> {
+    const served: { cid: string; bytes: Uint8Array }[] = [];
+    const refused: string[] = [];
+    let total = 0;
+    for (const cid of cids) {
+      const bytes = await this.storage.getBlock(cid);
+      if (!bytes) continue; // not held → omit (the requester keeps it guarded; no livelock)
+      if (total + bytes.length > maxBytes) {
+        refused.push(cid); // held but over budget → re-requestable next pass
+        continue;
+      }
+      total += bytes.length;
+      served.push({ cid, bytes });
+    }
+    return { served, refused };
+  }
+
+  /**
+   * Ingest fetched blocks, VERIFYING each block's CID over its bytes BEFORE storing
+   * (§8.3 — the wire confers no trust; a wrong-CID block is rejected, never stored).
+   */
+  async ingestBlocks(
+    blocks: readonly { cid: string; bytes: Uint8Array }[],
+  ): Promise<{ accepted: string[]; rejected: string[] }> {
+    const accepted: string[] = [];
+    const rejected: string[] = [];
+    for (const { cid, bytes } of blocks) {
+      if (await verifyPrivateCid(bytes, cid, PRIVATE_CID_CODEC.raw)) {
+        await this.storage.putBlock(cid, bytes);
+        accepted.push(cid);
+      } else {
+        rejected.push(cid);
+      }
+    }
+    return { accepted, rejected };
+  }
+
+  /**
+   * Decrypt + reassemble a stored attachment into its plaintext media bytes, or
+   * `undefined` if the manifest or any chunk is not yet fetched / the epoch key is
+   * unheld.  Every chunk's ciphertext CID + AEAD + plaintext commitment is re-verified
+   * (decryptAttachment) — fail-closed on tamper.
+   */
+  async openAttachment(attachmentId: string): Promise<Uint8Array | undefined> {
+    const att = this.currentState.attachments.get(attachmentId);
+    if (!att) return undefined;
+    const manifest = await this.tryOpenManifest(att);
+    const epoch = this.epochs.get(att.epoch);
+    if (!manifest || !epoch) return undefined;
+    const chunksByCid = new Map<string, Uint8Array>();
+    for (const chunk of manifest.encrypted_chunks) {
+      const bytes = await this.storage.getBlock(chunk.cid);
+      if (!bytes) return undefined; // not all chunks fetched yet
+      chunksByCid.set(chunk.cid, bytes);
+    }
+    return decryptAttachment(
+      manifest,
+      chunksByCid,
+      {
+        roomIdCommitment: this.roomIdCommitment,
+        roomEpoch: att.epoch,
+        contentWrapKey: epoch.contentWrapKey,
+      },
+      { wrappedObjectKey: fromBase64Url(att.wrappedObjectKey) },
+    );
+  }
+
   // --- §15.9 offline archive (export / import) ------------------------------
 
   /**
@@ -472,6 +762,25 @@ export class PrivateRoomEngine {
   }
 
   /**
+   * §15.6 — serve this room's archive to a peer that requested a LIVE snapshot bootstrap
+   * (a compacted/lagging member that cannot fetch the pruned prefix op-by-op): the
+   * retained §14.5 sealed snapshot + post-snapshot envelopes, which the requester adopts
+   * via `importArchive` (re-verifying the in-band commit).  `undefined` when there is no
+   * compaction base to bootstrap from (a peer then just continues the op walk).
+   */
+  async snapshotArchive(): Promise<Uint8Array | undefined> {
+    if (this.sealedSnapshot === undefined) return undefined;
+    try {
+      return await this.exportArchive({
+        kind: 'encrypted_member_backup',
+        createdAtBucket: 'snapshot-serve',
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Import a §15.9 archive into this room: decode under caps, confirm it is for
    * THIS room, bootstrap from its §14.5 sealed snapshot if present (so a compacted
    * room imports without its pruned ops), then `ingest` every envelope (re-
@@ -483,14 +792,12 @@ export class PrivateRoomEngine {
     if (archive.room_id_hash !== toBase64Url(this.roomIdCommitment)) {
       throw new Error('importArchive: archive is for a different room');
     }
-    // Bootstrap from a sealed snapshot only when this engine has no base/ops yet
-    // (a fresh restore): adopt it ONLY if it verifies against its in-band commit.
-    if (
-      archive.sealed_snapshot &&
-      !this.sealedSnapshot &&
-      this.acceptedOps.size === 0 &&
-      this.coveredOpLamports.size === 0
-    ) {
+    // Bootstrap from a sealed snapshot when this engine holds no base yet (a fresh
+    // restore OR a lagging member that walked some post-snapshot ops but cannot reach the
+    // pruned prefix op-by-op) — adopt it ONLY if it verifies against its in-band commit;
+    // any already-accepted ops re-fold onto the new base.  A device that ALREADY has a
+    // base keeps it (it already holds a covered prefix).
+    if (archive.sealed_snapshot && !this.sealedSnapshot && this.coveredOpLamports.size === 0) {
       await this.bootstrapFromSnapshot(archive.sealed_snapshot, archive.envelopes);
     }
     return this.ingest(archive.envelopes);
@@ -654,7 +961,10 @@ export class PrivateRoomEngine {
     this.baseMaxLamport = BigInt(bundle.maxLamport);
     for (const [device, seq] of bundle.authorSeq) this.baseAuthorSeq.set(device, seq);
     this.sealedSnapshot = sealed;
-    this.currentState = reduceRoom([], this.baseState);
+    // Re-fold any ALREADY-accepted ops onto the new base (not just `reduceRoom([], base)`):
+    // a lagging member that walked some post-snapshot ops before adopting the snapshot
+    // must keep them, and they now resolve against the base's covered prefix.
+    this.refold();
   }
 
   /** Whether the imported sealed snapshot is backed by a valid in-band commit. */
@@ -666,10 +976,21 @@ export class PrivateRoomEngine {
   ): Promise<boolean> {
     const expectedRoot = toBase64Url(await sha256(roomStateCommitment(candidate)));
     const expectedHeads = [...bundle.coveredHeads].sort();
-    // Resolve the commit author against the body's OWN device registry (a later
-    // admin's device may not be known to the importer out of band).
+    // SECURITY (§14.5): anchor the commit author's AUTHORITY (its device cert + its
+    // `admin` capability) in state we ALREADY trust, NOT in the candidate body we are
+    // deciding whether to adopt.  The body is only AEAD-sealed under the per-epoch
+    // content-wrap key — which EVERY member holds — so the seal proves "a member made
+    // this", never "an admin".  A malicious member could otherwise craft a body naming
+    // itself admin + author a self-validating snapshot.commit, escalating privilege on
+    // the importer.  So we resolve the author against `this.currentState` (the importer's
+    // own reduced state — an established/reconnecting member knows the real admins); a
+    // forged author is then absent/non-admin there and rejected.  Only when the importer
+    // has NO prior membership (a FRESH completeJoin, where the snapshot arrived in a GRANT
+    // delivered + authenticated over the §10.3 channel of the admin being joined) do we
+    // fall back to the body — trust-by-delivery from the inviting admin.
+    const authority = this.currentState.members.size > 0 ? this.currentState : candidate;
     const ctx = await buildOpIntakeContext({
-      state: candidate,
+      state: authority,
       roomIdCommitment: this.roomIdCommitment,
       epochs: this.epochs,
       extraDevices: this.bootstrapDevices,
@@ -682,7 +1003,7 @@ export class PrivateRoomEngine {
       if (body.snapshot_body_cid !== sealed.cid) continue;
       if (body.state_merkle_root !== expectedRoot) continue;
       if (!sameStrings([...body.includes_ops_up_to].sort(), expectedHeads)) continue;
-      const member = candidate.members.get(result.op.author_member_id);
+      const member = authority.members.get(result.op.author_member_id);
       if (!member || member.removed) continue;
       if (!member.capabilities.has(OP_REQUIRED_CAPABILITY['snapshot.commit'])) continue;
       return true;

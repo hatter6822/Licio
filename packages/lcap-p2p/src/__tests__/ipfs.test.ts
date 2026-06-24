@@ -9,11 +9,17 @@
 import { cidFor } from '@licio/lcap';
 import { describe, expect, it } from 'vitest';
 import {
+  assertPublicGatewayEligible,
   decideBlockPublish,
   IpfsBridge,
   ipfsCidForBlockCid,
   ipfsCidV1FromDigest,
   multibaseBase32,
+  republicationSet,
+  TAKEDOWN_STATUSES,
+  type TakedownStatus,
+  takedownHaltsPublish,
+  takedownInForce,
 } from '../index.js';
 
 describe('CID mapping (§9.2/§22.7)', () => {
@@ -219,5 +225,187 @@ describe('gateway bridge — publish enforces the gate', () => {
     const res = await bridge.publishBlock(blockCid, payload, { publishable: true, reason: '' });
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.ipfsCid).toBe(ipfsCidForBlockCid(blockCid));
+  });
+});
+
+describe('Gate-19 — takedown status policy (§22.7, §36 gate 19)', () => {
+  it('mirrors the WS-J takedownStatusEnum membership (no drift)', () => {
+    // Pinned literally because @licio/lcap-p2p may not import @licio/db; this is the
+    // no-drift guard against the packages/db `takedownStatusEnum`.
+    expect([...TAKEDOWN_STATUSES]).toEqual(['received', 'under_review', 'actioned', 'rejected']);
+  });
+
+  it('halts republication ONLY for `actioned` (not pre-review or rejected)', () => {
+    expect(takedownInForce('actioned')).toBe(true);
+    // Halting earlier would weaponize the takedown intake (a censorship vector);
+    // halting on `rejected` would honor a dismissed claim.
+    for (const status of ['received', 'under_review', 'rejected'] satisfies TakedownStatus[]) {
+      expect(takedownInForce(status)).toBe(false);
+    }
+  });
+});
+
+describe('Gate-19 — fail-closed oracle re-check (takedownHaltsPublish)', () => {
+  it('halts when the oracle reports a takedown', async () => {
+    expect(await takedownHaltsPublish(async () => true, 'lcapb_x')).toBe(true);
+  });
+  it('allows when the oracle reports no takedown', async () => {
+    expect(await takedownHaltsPublish(async () => false, 'lcapb_x')).toBe(false);
+  });
+  it('treats a throwing oracle as a halt (fail-closed)', async () => {
+    expect(
+      await takedownHaltsPublish(() => {
+        throw new Error('db down');
+      }, 'lcapb_x'),
+    ).toBe(true);
+  });
+  it('accepts a synchronous predicate', async () => {
+    expect(await takedownHaltsPublish((cid) => cid === 'lcapb_bad', 'lcapb_bad')).toBe(true);
+    expect(await takedownHaltsPublish((cid) => cid === 'lcapb_bad', 'lcapb_ok')).toBe(false);
+  });
+});
+
+describe('Gate-19 — republicationSet decision core', () => {
+  it('excludes taken-down CIDs and keeps the rest, de-duplicating', async () => {
+    const takenDown = new Set(['lcapb_b']);
+    const result = await republicationSet(['lcapb_a', 'lcapb_b', 'lcapb_c', 'lcapb_a'], (cid) =>
+      takenDown.has(cid),
+    );
+    expect(result.eligible).toEqual(['lcapb_a', 'lcapb_c']);
+    expect(result.excluded).toEqual([
+      { blockCid: 'lcapb_b', eligible: false, reason: 'taken_down' },
+    ]);
+    // De-dup: the repeated 'lcapb_a' produces one verdict, not two.
+    expect(result.verdicts).toHaveLength(3);
+  });
+
+  it('excludes a CID whose oracle throws (oracle_error, fail-closed)', async () => {
+    const result = await republicationSet(['lcapb_a', 'lcapb_err'], (cid) => {
+      if (cid === 'lcapb_err') throw new Error('lookup failed');
+      return false;
+    });
+    expect(result.eligible).toEqual(['lcapb_a']);
+    expect(result.excluded).toEqual([
+      { blockCid: 'lcapb_err', eligible: false, reason: 'oracle_error' },
+    ]);
+  });
+
+  it('returns empty eligibility for an empty input', async () => {
+    const result = await republicationSet([], async () => false);
+    expect(result).toEqual({ eligible: [], excluded: [], verdicts: [] });
+  });
+});
+
+describe('WS-S.4.4 — public-gateway eligibility guard', () => {
+  const ok = {
+    visibility: 'public',
+    encrypted: false,
+    takenDown: false,
+    privateRoomCid: false,
+  } as const;
+
+  it('admits an unambiguously public, unencrypted, non-taken-down, non-private block', () => {
+    expect(assertPublicGatewayEligible(ok)).toEqual({ eligible: true, reason: '' });
+  });
+
+  it('refuses a private-room CID first (strongest confidentiality signal)', () => {
+    // Even with public visibility + plaintext, a private-room hint refuses.
+    expect(assertPublicGatewayEligible({ ...ok, privateRoomCid: true }).reason).toBe(
+      'private_room_cid',
+    );
+  });
+
+  it('refuses ciphertext, non-public visibility, and an in-force takedown', () => {
+    expect(assertPublicGatewayEligible({ ...ok, encrypted: true }).reason).toBe('encrypted');
+    expect(assertPublicGatewayEligible({ ...ok, visibility: 'in_room' }).reason).toBe('not_public');
+    expect(assertPublicGatewayEligible({ ...ok, visibility: 'private' }).reason).toBe('not_public');
+    expect(assertPublicGatewayEligible({ ...ok, takenDown: true }).reason).toBe('taken_down');
+  });
+});
+
+describe('Gate-19 + WS-S.4.4 — publish path defense-in-depth', () => {
+  const pinningBridge = (over: Partial<ConstructorParameters<typeof IpfsBridge>[0]> = {}) => {
+    let pinned = false;
+    const bridge = new IpfsBridge({
+      gatewayUrl: 'https://gw.test',
+      pinningUrl: 'https://pin.test/add',
+      fetchFn: async () => {
+        pinned = true;
+        return new Response(null, { status: 200 });
+      },
+      ...over,
+    });
+    return { bridge, pinned: () => pinned };
+  };
+
+  it('the publish-time oracle halts a stale `publishable:true` decision (no pin)', async () => {
+    const payload = new TextEncoder().encode('stale public');
+    const blockCid = await cidFor('block', payload);
+    const { bridge, pinned } = pinningBridge({ takedownOracle: async () => true });
+    const res = await bridge.publishBlock(blockCid, payload, { publishable: true, reason: '' });
+    expect(res).toEqual({ ok: false, reason: 'takedown_recheck_halt' });
+    expect(pinned()).toBe(false);
+  });
+
+  it('a throwing oracle halts publish (fail-closed)', async () => {
+    const payload = new TextEncoder().encode('oracle down');
+    const blockCid = await cidFor('block', payload);
+    const { bridge, pinned } = pinningBridge({
+      takedownOracle: () => {
+        throw new Error('db down');
+      },
+    });
+    const res = await bridge.publishBlock(blockCid, payload, { publishable: true, reason: '' });
+    expect(res).toEqual({ ok: false, reason: 'takedown_recheck_halt' });
+    expect(pinned()).toBe(false);
+  });
+
+  it('publishes when the oracle reports no takedown', async () => {
+    const payload = new TextEncoder().encode('clean public');
+    const blockCid = await cidFor('block', payload);
+    const { bridge, pinned } = pinningBridge({ takedownOracle: async () => false });
+    const res = await bridge.publishBlock(blockCid, payload, { publishable: true, reason: '' });
+    expect(res.ok).toBe(true);
+    expect(pinned()).toBe(true);
+  });
+
+  it('the WS-S.4.4 guard refuses a private-room CID even with a publishable decision', async () => {
+    const payload = new TextEncoder().encode('private leak attempt');
+    const blockCid = await cidFor('block', payload);
+    const { bridge, pinned } = pinningBridge();
+    const res = await bridge.publishBlock(
+      blockCid,
+      payload,
+      { publishable: true, reason: '' },
+      { visibility: 'public', encrypted: false, takenDown: false, privateRoomCid: true },
+    );
+    expect(res).toEqual({ ok: false, reason: 'private_room_cid' });
+    expect(pinned()).toBe(false);
+  });
+
+  it('republish REQUIRES an oracle (no_takedown_oracle without one)', async () => {
+    const payload = new TextEncoder().encode('republish');
+    const blockCid = await cidFor('block', payload);
+    const { bridge, pinned } = pinningBridge();
+    expect(await bridge.republish(blockCid, payload)).toEqual({
+      ok: false,
+      reason: 'no_takedown_oracle',
+    });
+    expect(pinned()).toBe(false);
+  });
+
+  it('republish halts a taken-down block and re-pins a clean one', async () => {
+    const payload = new TextEncoder().encode('republish clean');
+    const blockCid = await cidFor('block', payload);
+    const halted = pinningBridge({ takedownOracle: async () => true });
+    expect(await halted.bridge.republish(blockCid, payload)).toEqual({
+      ok: false,
+      reason: 'takedown_recheck_halt',
+    });
+    expect(halted.pinned()).toBe(false);
+    const clean = pinningBridge({ takedownOracle: async () => false });
+    const res = await clean.bridge.republish(blockCid, payload);
+    expect(res.ok).toBe(true);
+    expect(clean.pinned()).toBe(true);
   });
 });

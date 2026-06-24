@@ -10,9 +10,26 @@
 
 // Update lifecycle: activate the waiting worker when the client confirms.
 // Origin check: reject messages from cross-origin sources (defence in depth).
+//
+// WS-S.10.2b — private-mode update PINNING (PRIVATE_SPEC §20.6/§27.5). A waiting
+// worker carrying a new private-mode bundle must NOT silently take over for a
+// private-room user: the trusted client first verifies the incoming bundle
+// against the transparency log (apps/web/src/update/gate.ts) and only then asks
+// to activate. The worker enforces this structurally via the message contract:
+//   * `privateBundleGated: false` (or absent for a public-only client / device
+//     with no private rooms) ⇒ activate normally;
+//   * `privateBundleGated: true` ⇒ activate ONLY when `privateBundleVerified:
+//     true` is also present (the flag the client sets after a `trusted` verdict).
+// Fail-closed: a gated message missing the verified flag is REFUSED. No remote
+// code, no eval, no importScripts — the `check:sw` posture is unchanged.
 self.addEventListener('message', (event) => {
   if (event.origin && event.origin !== self.location.origin) return;
   if (event.data && event.data.type === 'SKIP_WAITING') {
+    // Refuse a silent takeover when the private surface is in play and the
+    // incoming bundle has NOT been verified (fail-closed: missing flag ⇒ refuse).
+    if (event.data.privateBundleGated === true && event.data.privateBundleVerified !== true) {
+      return;
+    }
     self.skipWaiting();
   }
 });

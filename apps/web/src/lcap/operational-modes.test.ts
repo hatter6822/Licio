@@ -8,6 +8,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   admitsPriority,
+  discoveryAllowed,
+  exportPostureForMode,
+  mediaPrefetchAllowed,
   modeAllowsChannel,
   OPERATIONAL_MODE_KEYS,
   operationalMode,
@@ -88,5 +91,33 @@ describe('Courier / Standard / Minimal policy', () => {
   it('non-high-risk modes do not force a trust warning', () => {
     expect(operationalMode('minimal').showTrustWarning).toBe(false);
     expect(operationalMode('standard').showTrustWarning).toBe(false);
+  });
+});
+
+describe('WS-R.17.2 derived consumer helpers', () => {
+  it('mediaPrefetchAllowed mirrors the mode config', () => {
+    expect(mediaPrefetchAllowed('courier')).toBe(true);
+    expect(mediaPrefetchAllowed('emergency')).toBe(false);
+    expect(mediaPrefetchAllowed('stealth')).toBe(false);
+  });
+
+  it('discoveryAllowed mirrors autoDiscovery', () => {
+    expect(discoveryAllowed('standard')).toBe(true);
+    expect(discoveryAllowed('stealth')).toBe(false);
+    expect(discoveryAllowed('emergency')).toBe(false);
+  });
+
+  it('exportPostureForMode reflects the §26.2/§26.3 export flags', () => {
+    expect(exportPostureForMode('standard')).toEqual({
+      confirmBeforeExport: false,
+      genericFilenames: false,
+      highRisk: false,
+    });
+    expect(exportPostureForMode('stealth')).toEqual({
+      confirmBeforeExport: true,
+      genericFilenames: true,
+      highRisk: true,
+    });
+    expect(exportPostureForMode('emergency').genericFilenames).toBe(true);
   });
 });

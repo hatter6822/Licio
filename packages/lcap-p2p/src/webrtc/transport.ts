@@ -1,17 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// The WebRTC `RTCDataChannel` LcapTransport (OFFLINE_SPEC §22.6, WS-R.15.6a).  Carries
+// The WebRTC `RTCDataChannel` LcapTransport (OFFLINE_SPEC §22.6, WS-R.15.6).  Carries
 // the §16 exchange between two browsers over a data channel; received frames go through
 // the SAME reader/validator as every other transport (source-independence).  The
 // adapter is written over a minimal `DataChannelLike` so it is unit-testable with a
 // fake channel; live establishment (`connectWebrtc`) wires a real RTCPeerConnection via
 // the server-blind signaling rendezvous + STUN and is exercised by the gated E2E.
 //
+// An LCAP exchange pack can be far larger than a single SCTP datachannel message, so
+// `send` FRAGMENTS the message into ≤ 16 KiB datachannel messages (the cross-browser
+// safe size) and the receiver REASSEMBLES the exact original bytes (`./fragment.js`).
+// Reassembly is fail-closed and DoS-bounded: a malformed, out-of-order, conflicting, or
+// over-cap fragment aborts the channel rather than mis-stitching bytes.
+//
 // A peer transport is public-only (`carriesPrivate: false`): the seam's
 // `transportMayCarry` gate keeps in_room/private packs off it (§21.4/§26.4).
 
 import type { LcapTransport, TransportCapabilities } from '@licio/lcap';
 import { TransportUnavailableError } from '@licio/lcap';
+import { FragmentReassembler, fragmentMessage, MAX_REASSEMBLY_BYTES } from './fragment.js';
 
 /** The slice of `RTCDataChannel` the transport needs (so a fake can stand in). */
 export interface DataChannelLike {
@@ -29,7 +36,9 @@ export const WEBRTC_CAPABILITIES: TransportCapabilities = {
   bidirectional: true,
   serverMediated: false,
   carriesPrivate: false, // public-only over P2P unless WS-S encryption + permission (R.11.5)
-  maxExchangeBytes: 16 * 1024 * 1024,
+  // The per-exchange ceiling equals the reassembly cap — a single inbound exchange can
+  // pin at most this many bytes before it reaches the validator (the §27 DoS bound).
+  maxExchangeBytes: MAX_REASSEMBLY_BYTES,
   latencyClass: 'low',
 };
 
@@ -48,31 +57,57 @@ function toBytes(data: unknown): Uint8Array | null {
  */
 export class WebrtcTransport implements LcapTransport {
   readonly capabilities = WEBRTC_CAPABILITIES;
+  /** Completed (reassembled) inbound messages awaiting a `receive`. */
   private readonly inbox: Uint8Array[] = [];
   private waiting: ((value: Uint8Array | null) => void) | null = null;
   private closed = false;
+  /** Reassembles fragmented inbound datachannel messages into whole exchange bodies. */
+  private readonly reassembler = new FragmentReassembler();
+  /** Monotonic per-send message id so the receiver can detect a message boundary. */
+  private nextMessageId = 0;
 
   constructor(private readonly channel: DataChannelLike) {
     channel.binaryType = 'arraybuffer';
     channel.onmessage = (event) => {
       const bytes = toBytes(event.data);
       if (!bytes) return;
+      let completed: Uint8Array | null;
+      try {
+        completed = this.reassembler.accept(bytes);
+      } catch {
+        // A malformed/out-of-order/over-cap fragment is fatal: a hostile peer must never
+        // be able to mis-stitch a partial message.  Tear the channel down fail-closed.
+        this.abort();
+        return;
+      }
+      if (!completed) return; // mid-message; wait for the remaining fragments
       if (this.waiting) {
         const resolve = this.waiting;
         this.waiting = null;
-        resolve(bytes);
+        resolve(completed);
       } else {
-        this.inbox.push(bytes);
+        this.inbox.push(completed);
       }
     };
     channel.onclose = () => {
       this.closed = true;
-      if (this.waiting) {
-        const resolve = this.waiting;
-        this.waiting = null;
-        resolve(null);
-      }
+      this.drainWaiterWithNull();
     };
+  }
+
+  private drainWaiterWithNull(): void {
+    if (this.waiting) {
+      const resolve = this.waiting;
+      this.waiting = null;
+      resolve(null);
+    }
+  }
+
+  /** Fail-closed teardown: mark closed, wake any waiter with `null`, close the channel. */
+  private abort(): void {
+    this.closed = true;
+    this.drainWaiterWithNull();
+    if (this.channel.readyState !== 'closed') this.channel.close();
   }
 
   async open(): Promise<void> {
@@ -85,7 +120,20 @@ export class WebrtcTransport implements LcapTransport {
     if (this.channel.readyState !== 'open') {
       throw new TransportUnavailableError('webrtc', 'data channel closed before send');
     }
-    this.channel.send(message);
+    if (message.length > MAX_REASSEMBLY_BYTES) {
+      throw new TransportUnavailableError(
+        'webrtc',
+        `message of ${message.length} bytes exceeds the ${MAX_REASSEMBLY_BYTES}-byte cap`,
+      );
+    }
+    const messageId = this.nextMessageId;
+    this.nextMessageId = (this.nextMessageId + 1) >>> 0; // wrap as a u32 (id need not be unique forever)
+    for (const fragment of fragmentMessage(message, messageId)) {
+      if (this.channel.readyState !== 'open') {
+        throw new TransportUnavailableError('webrtc', 'data channel closed mid-send');
+      }
+      this.channel.send(fragment);
+    }
   }
 
   async receive(signal?: AbortSignal): Promise<Uint8Array | null> {

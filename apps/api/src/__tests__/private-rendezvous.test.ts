@@ -14,7 +14,11 @@ import {
   RendezvousService,
   setRendezvousService,
 } from '../private-rendezvous/service.js';
-import { InMemoryRendezvousStore } from '../private-rendezvous/stores.js';
+import {
+  InMemoryRendezvousStore,
+  MAX_SIGNALS_PER_PEER,
+  MAX_SIGNALS_PER_SENDER,
+} from '../private-rendezvous/stores.js';
 import { createPrivateRendezvousRoutes } from '../routes/private-rendezvous.js';
 
 const ROOM_BLIND = 'cm9vbS1ibGluZA';
@@ -133,6 +137,8 @@ describe('RendezvousService — signals (§15.4)', () => {
     expect(m.signalsDrained).toBe(1);
     expect(Object.keys(m).sort()).toStrictEqual([
       'announces',
+      'capAccepted',
+      'capRejected',
       'polls',
       'signalsDrained',
       'signalsPosted',
@@ -188,7 +194,7 @@ describe('routes — shape validation + bounds', () => {
   it('announce → 202 then poll → 200 with the record', async () => {
     const a = await post('/announce', announceBody());
     expect(a.status).toBe(202);
-    expect(await a.json()).toStrictEqual({ stored: true });
+    expect(await a.json()).toStrictEqual({ stored: true, mode: 'tier1' });
 
     const p = await post('/poll', { room_blind_id: ROOM_BLIND });
     expect(p.status).toBe(200);
@@ -269,5 +275,89 @@ describe('full-app mount — CSRF-exempt + no existence oracle', () => {
       headers: { 'content-type': 'application/json', origin: 'http://localhost:5173' },
     });
     expect(res.status).toBe(202);
+  });
+});
+
+describe('InMemoryRendezvousStore — signal-queue DoS caps (§27, server-blind)', () => {
+  const sig = (sender: string, ciphertext: string) => ({
+    roomBlindId: 'r',
+    senderBlindId: sender,
+    recipientBlindId: 'victim',
+    ciphertext,
+    expiresAt: Date.now() + 60_000,
+  });
+
+  it('caps signals per SENDER so one flooder cannot fill a victim queue', async () => {
+    const store = new InMemoryRendezvousStore();
+    for (let i = 0; i < MAX_SIGNALS_PER_SENDER + 50; i++)
+      await store.putSignal(sig('flooder', `c${i}`));
+    const drained = await store.drainSignals('victim', Date.now(), MAX_SIGNALS_PER_PEER);
+    expect(drained.length).toBe(MAX_SIGNALS_PER_SENDER);
+  });
+
+  it('PRESERVES the earliest bootstrap offer against a later flood (drop-newest)', async () => {
+    const store = new InMemoryRendezvousStore();
+    await store.putSignal(sig('peerA', 'THE-OFFER')); // sent FIRST
+    // A flood from many distinct senders tries to fill the rest of the queue.
+    for (let s = 0; s < 20; s++) {
+      for (let i = 0; i < MAX_SIGNALS_PER_SENDER; i++)
+        await store.putSignal(sig(`flood-${s}`, `j${s}-${i}`));
+    }
+    const drained = await store.drainSignals('victim', Date.now(), MAX_SIGNALS_PER_PEER + 1_000);
+    expect(drained.length).toBeLessThanOrEqual(MAX_SIGNALS_PER_PEER);
+    // The earliest signal (the connection-bootstrapping offer) is never dropped.
+    expect(drained.some((d) => d.ciphertext === 'THE-OFFER')).toBe(true);
+  });
+});
+
+describe('InMemoryRendezvousStore — sample-poll dilutes a presence flood (§27 Tier-1)', () => {
+  // A small deterministic PRNG (mulberry32) so the sampling is reproducible + non-flaky.
+  function mulberry32(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const rec = (peer: string) => ({
+    roomBlindId: 'room',
+    peerBlindId: peer,
+    encryptedAnnouncement: 'a',
+    expiresAt: Date.now() + 60_000,
+  });
+
+  it('an honest record at the BACK of a flood is still reachable + roughly uniform (slice would evict it)', async () => {
+    const store = new InMemoryRendezvousStore(mulberry32(0x5eed));
+    const LIMIT = 4;
+    const FLOOD = 8;
+    // Flood announced FIRST, honest LAST: at insertion position FLOOD ≥ LIMIT, so the old
+    // `slice(0, LIMIT)` would NEVER return the honest record in any poll window.
+    for (let i = 0; i < FLOOD; i++) await store.announce(rec(`flood-${i}`));
+    await store.announce(rec('HONEST'));
+
+    let honestSeen = 0;
+    const POLLS = 300;
+    for (let p = 0; p < POLLS; p++) {
+      const sample = await store.poll('room', Date.now(), LIMIT);
+      expect(sample).toHaveLength(LIMIT);
+      // Every returned record is distinct + a real live record (no duplicates from sampling).
+      expect(new Set(sample.map((r) => r.peerBlindId)).size).toBe(LIMIT);
+      if (sample.some((r) => r.peerBlindId === 'HONEST')) honestSeen += 1;
+    }
+    // Reachable (the old slice would give 0) AND roughly uniform (≈ LIMIT/total = 4/9 ≈ 44%).
+    expect(honestSeen).toBeGreaterThan(0);
+    const rate = honestSeen / POLLS;
+    expect(rate).toBeGreaterThan(0.3);
+    expect(rate).toBeLessThan(0.6);
+  });
+
+  it('returns ALL live records (no sampling / no drop) when at or under the poll limit', async () => {
+    const store = new InMemoryRendezvousStore(mulberry32(1));
+    await store.announce(rec('a'));
+    await store.announce(rec('b'));
+    const all = await store.poll('room', Date.now(), 4);
+    expect(all.map((r) => r.peerBlindId).sort()).toEqual(['a', 'b']);
   });
 });

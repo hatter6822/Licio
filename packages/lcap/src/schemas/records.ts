@@ -241,6 +241,96 @@ export const chunkDescriptorV2Schema = z
 export type ChunkDescriptorV2 = z.infer<typeof chunkDescriptorV2Schema>;
 
 // ---------------------------------------------------------------------------
+// Encrypted-payload descriptor (§28.2) — the LCAP-side carrier for a private
+// (E2EE) room's ciphertext block (WS-R.16.1).
+//
+// LCAP transports CIPHERTEXT + OPAQUE hints only.  It never owns the key
+// schedule (that authority is PRIVATE_SPEC §10 / `@licio/private-p2p`), never
+// imports the private plane, and MUST NOT decode the referenced block.  Every
+// field here is opaque to LCAP:
+//
+//   * `key_epoch_id`   — a hint STRING (never a key);
+//   * `nonce`          — opaque bytes, never interpreted;
+//   * `aad_context`    — an opaque COMMITMENT (a hash of the §28.2 AAD inputs,
+//                        e.g. the envelope's `aad_hash`), NEVER the raw AAD
+//                        field inputs — bounding it to a hash size structurally
+//                        prevents smuggling room ids / op-heads / plaintext
+//                        through this field;
+//   * `ciphertext_block_cid` — a CID over CIPHERTEXT (§28.1: a plaintext CID
+//                        MUST never exist for private-room content).
+//
+// The schema is closed (`.strict()`), so a real room id, an op-head
+// (`parent_op_ids`), plaintext, or key material can NEVER appear (there is no
+// field for them and an unknown key is `rejected_bad_schema`, §9.1.4).  For a
+// group-keyed suite the optional plaintext hints are structurally FORBIDDEN: a
+// per-byte plaintext hash or exact size would reintroduce the §10.6
+// plaintext-equality / convergent-encryption leak the private plane bans.
+// Forward compatibility bumps `encryption_version`, never adds keys.
+
+export const encryptedPayloadSuiteSchema = z.enum(['AES-256-GCM', 'MLS-derived-AEAD']);
+export type EncryptedPayloadSuite = z.infer<typeof encryptedPayloadSuiteSchema>;
+
+/**
+ * Suites whose plaintext-equality leak (PRIVATE_SPEC §10.6) forbids carrying
+ * any plaintext hint.  A group-keyed (member-hosted) private room uses
+ * `MLS-derived-AEAD`; the convergent-encryption hazard is real there, so the
+ * carrier may reveal neither a plaintext digest nor an exact plaintext size.
+ */
+export const GROUP_KEYED_ENCRYPTION_SUITES: readonly EncryptedPayloadSuite[] = ['MLS-derived-AEAD'];
+
+/** A key-epoch hint never exceeds this many characters (§27 DoS bound). */
+export const MAX_KEY_EPOCH_ID_LEN = 256;
+/** An AEAD nonce is small (AES-GCM uses 12 bytes); this is a generous §27 cap. */
+export const MAX_ENCRYPTED_NONCE_BYTES = 32;
+/**
+ * `aad_context` is a fixed-size COMMITMENT (SHA-256 = 32, SHA-512 = 64), never
+ * the raw AAD inputs; capping it at a hash size structurally forbids carrying
+ * the §28.2 AAD field inputs (room id, op-head, sender context) in the clear.
+ */
+export const MAX_AAD_CONTEXT_BYTES = 64;
+
+export const encryptedPayloadDescriptorV2Schema = z
+  .object({
+    encryption_version: z.literal(2),
+    suite: encryptedPayloadSuiteSchema,
+    key_epoch_id: z.string().min(1).max(MAX_KEY_EPOCH_ID_LEN),
+    nonce: bytesSchema.refine((b) => b.length > 0 && b.length <= MAX_ENCRYPTED_NONCE_BYTES, {
+      message: `nonce must be 1..${MAX_ENCRYPTED_NONCE_BYTES} bytes`,
+    }),
+    aad_context: bytesSchema.refine((b) => b.length > 0 && b.length <= MAX_AAD_CONTEXT_BYTES, {
+      message: `aad_context must be an opaque commitment of 1..${MAX_AAD_CONTEXT_BYTES} bytes`,
+    }),
+    ciphertext_block_cid: blockCidSchema,
+    plaintext_sha256: bytesSchema
+      .refine((b) => b.length === 32, { message: 'plaintext_sha256 must be 32 bytes' })
+      .optional(),
+    plaintext_size: uintSchema.optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (GROUP_KEYED_ENCRYPTION_SUITES.includes(value.suite)) {
+      if (value.plaintext_sha256 !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['plaintext_sha256'],
+          message:
+            'plaintext_sha256 is forbidden for a group-keyed suite (§10.6 plaintext-equality leak)',
+        });
+      }
+      if (value.plaintext_size !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['plaintext_size'],
+          message:
+            'plaintext_size is forbidden for a group-keyed suite (§10.6 plaintext-equality leak)',
+        });
+      }
+    }
+  });
+
+export type EncryptedPayloadDescriptorV2 = z.infer<typeof encryptedPayloadDescriptorV2Schema>;
+
+// ---------------------------------------------------------------------------
 // Fork evidence (§12.2 device-sequence fork, §19.6 checkpoint fork)
 // ---------------------------------------------------------------------------
 

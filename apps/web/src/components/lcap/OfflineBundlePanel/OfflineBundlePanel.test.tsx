@@ -8,7 +8,7 @@
 // §34 integrity-only trust badge renders for the records it imported.
 import 'fake-indexeddb/auto';
 import { cidFor } from '@licio/lcap';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildBundle, exportDisclosure, gatherRoomExport } from '../../../lcap/bundle-export.js';
@@ -103,5 +103,87 @@ describe('OfflineBundlePanel — import to done (WS-R.17.1 honest trust badge)',
     // never a claim the trust projection has not granted (WS-R.8.3 / §34).
     expect(await screen.findByText(/cannot verify yet/i)).toBeInTheDocument();
     expect(screen.getByText(/imported 1 posts and 1 proofs/i)).toBeInTheDocument();
+  });
+});
+
+describe('OfflineBundlePanel — WS-R.16.1 cross-plane private-room bridge', () => {
+  afterEach(() => {
+    resetLcapDbConnection();
+  });
+
+  /** Found a REAL device-local private room (the shipped MLS/HPKE/Ed25519 crypto) so the
+   *  panel's private export + private import surfaces have something to act on. */
+  async function foundPrivateRoom(name: string): Promise<string> {
+    const { PrivateRoomSession } = await import('../../../private-p2p/room-manager.js');
+    const session = await PrivateRoomSession.create({
+      roomName: name,
+      roomType: 'global_topic',
+      founderMemberId: `member-${Math.random().toString(36).slice(2)}`,
+      founderDeviceId: `device-${Math.random().toString(36).slice(2)}`,
+    });
+    return session.roomId;
+  }
+
+  it('shows the private-room export section once a private room exists', async () => {
+    await foundPrivateRoom('My Secret Room');
+    render(<OfflineBundlePanel />);
+    // The discovery effect resolves async; the private export heading then appears.
+    expect(
+      await screen.findByRole('heading', { name: /export a private room/i }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole('button', { name: /export encrypted file/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('hides the private surface when enablePrivateRooms is false', async () => {
+    await foundPrivateRoom('Hidden Room');
+    render(<OfflineBundlePanel enablePrivateRooms={false} />);
+    // Give the (skipped) discovery effect a tick; the heading must never appear.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(
+      screen.queryByRole('heading', { name: /export a private room/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('routes a contains_private_encrypted bundle to the private engine (not the public store)', async () => {
+    // Found a room, author a post, then export it as a private (ciphertext-only) bundle
+    // via the REAL cross-plane bridge over the room's stored envelopes.
+    const roomId = await foundPrivateRoom('Routed Room');
+    const { PrivateRoomSession } = await import('../../../private-p2p/room-manager.js');
+    const session = await PrivateRoomSession.load(roomId);
+    if (!session) throw new Error('room not found');
+    await session.postStory({ title: 'an offline private post' });
+
+    const { IndexedDbPrivateRoomStorage } = await import('../../../private-p2p/storage.js');
+    const stored = await new IndexedDbPrivateRoomStorage(roomId).listEnvelopes();
+    expect(stored.length).toBeGreaterThan(0);
+    const { exportPrivateEnvelopesToBundle } = await import('../../../lcap/cross-plane-bridge.js');
+    const { bundleBytes } = await exportPrivateEnvelopesToBundle(stored.map((s) => s.envelope));
+
+    const user = userEvent.setup();
+    render(<OfflineBundlePanel />);
+    // Wait for the discovery effect so the panel knows a private room exists to route to.
+    await screen.findByRole('heading', { name: /export a private room/i });
+
+    const file = new File([bundleBytes as BlobPart], 'private.licio-bundle', {
+      type: 'application/vnd.licio.lcap-pack',
+    });
+    await user.upload(screen.getByLabelText('Choose a bundle file'), file);
+
+    // The public path REFUSED it (private label) and routed it to the private surface:
+    // the "Encrypted bundle" target picker appears — NOT the public summary/Import button.
+    expect(
+      await screen.findByText(/end-to-end-encrypted private room bundle/i),
+    ).toBeInTheDocument();
+    const target = await screen.findByRole('combobox', { name: /add to private room/i });
+    expect(target).toBeInTheDocument();
+
+    // Add it to the chosen room → the private engine re-verifies + accepts (same room).
+    await user.click(screen.getByRole('button', { name: /^add to room$/i }));
+    await waitFor(
+      () => expect(screen.getByText(/encrypted items to the room/i)).toBeInTheDocument(),
+      { timeout: 10_000 },
+    );
   });
 });

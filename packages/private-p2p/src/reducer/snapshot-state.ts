@@ -30,6 +30,10 @@ const snapshotStateSchema = z
           role: privateRoleSchema,
           capabilities: z.array(privateCapabilitySchema),
           removed: z.boolean(),
+          // The §12.3/§14.3.3 display name participates in `roomStateCommitment`, so it
+          // MUST round-trip through the snapshot body or a compacted/bootstrapped device's
+          // state root diverges (the §14.5 verify-before-use check then rejects the body).
+          displayName: z.string().optional(),
         })
         .strict(),
     ),
@@ -41,6 +45,7 @@ const snapshotStateSchema = z
           addedAtEpoch: z.number().int().min(0),
           removed: z.boolean(),
           signingPublicKey: z.string(),
+          rendezvousCommitment: z.string().optional(),
         })
         .strict(),
     ),
@@ -51,6 +56,7 @@ const snapshotStateSchema = z
           threadId: z.string(),
           authorMemberId: z.string(),
           title: z.string(),
+          bodyMarkdownLite: z.string(),
           submissionType: z.string(),
           topicIds: z.array(z.string()),
           tombstoned: z.boolean(),
@@ -98,6 +104,7 @@ const snapshotStateSchema = z
           attachmentId: z.string(),
           manifestCid: z.string(),
           wrappedObjectKey: z.string(),
+          epoch: z.number().int().min(0),
         })
         .strict(),
     ),
@@ -107,6 +114,15 @@ const snapshotStateSchema = z
           recoveryRequestId: z.string(),
           recoveringMemberId: z.string(),
           authorizingDeviceIds: z.array(z.string()),
+        })
+        .strict(),
+    ),
+    rendezvousIssuances: z.array(
+      z
+        .object({
+          targetEpoch: z.number().int().min(0),
+          issuerPublicKey: z.string(),
+          credentials: z.array(z.object({ device_id: z.string(), signature: z.string() }).strict()),
         })
         .strict(),
     ),
@@ -128,6 +144,7 @@ export function serializeReducerState(state: RoomReducerState): Uint8Array {
       // diverge from the role); sorted for a stable body encoding.
       capabilities: [...m.capabilities].sort(),
       removed: m.removed,
+      ...(m.displayName === undefined ? {} : { displayName: m.displayName }),
     })),
     devices: [...state.devices.values()].map((d) => ({
       deviceId: d.deviceId,
@@ -135,12 +152,16 @@ export function serializeReducerState(state: RoomReducerState): Uint8Array {
       addedAtEpoch: d.addedAtEpoch,
       removed: d.removed,
       signingPublicKey: d.signingPublicKey,
+      ...(d.rendezvousCommitment === undefined
+        ? {}
+        : { rendezvousCommitment: d.rendezvousCommitment }),
     })),
     stories: [...state.stories.values()].map((s) => ({
       storyId: s.storyId,
       threadId: s.threadId,
       authorMemberId: s.authorMemberId,
       title: s.title,
+      bodyMarkdownLite: s.bodyMarkdownLite,
       submissionType: s.submissionType,
       topicIds: [...s.topicIds],
       tombstoned: s.tombstoned,
@@ -174,11 +195,17 @@ export function serializeReducerState(state: RoomReducerState): Uint8Array {
       attachmentId: a.attachmentId,
       manifestCid: a.manifestCid,
       wrappedObjectKey: a.wrappedObjectKey,
+      epoch: a.epoch,
     })),
     recoveryRequests: [...state.recoveryRequests.values()].map((r) => ({
       recoveryRequestId: r.recoveryRequestId,
       recoveringMemberId: r.recoveringMemberId,
       authorizingDeviceIds: [...r.authorizingDeviceIds],
+    })),
+    rendezvousIssuances: state.rendezvousIssuances.map((i) => ({
+      targetEpoch: i.targetEpoch,
+      issuerPublicKey: i.issuerPublicKey,
+      credentials: i.credentials.map((c) => ({ device_id: c.device_id, signature: c.signature })),
     })),
     seenClientDrafts: [...state.seenClientDrafts],
     snapshots: [...state.snapshots],
@@ -202,6 +229,7 @@ export function deserializeReducerState(bytes: Uint8Array): RoomReducerState {
       // individually granted/revoked capability survives a snapshot round-trip.
       capabilities: new Set(m.capabilities),
       removed: m.removed,
+      ...(m.displayName === undefined ? {} : { displayName: m.displayName }),
     });
   }
   for (const d of body.devices) {
@@ -211,6 +239,9 @@ export function deserializeReducerState(bytes: Uint8Array): RoomReducerState {
       addedAtEpoch: d.addedAtEpoch,
       removed: d.removed,
       signingPublicKey: d.signingPublicKey,
+      ...(d.rendezvousCommitment === undefined
+        ? {}
+        : { rendezvousCommitment: d.rendezvousCommitment }),
     });
   }
   for (const s of body.stories) {
@@ -219,6 +250,7 @@ export function deserializeReducerState(bytes: Uint8Array): RoomReducerState {
       threadId: s.threadId,
       authorMemberId: s.authorMemberId,
       title: s.title,
+      bodyMarkdownLite: s.bodyMarkdownLite,
       submissionType: s.submissionType,
       topicIds: [...s.topicIds],
       tombstoned: s.tombstoned,
@@ -258,6 +290,7 @@ export function deserializeReducerState(bytes: Uint8Array): RoomReducerState {
       attachmentId: a.attachmentId,
       manifestCid: a.manifestCid,
       wrappedObjectKey: a.wrappedObjectKey,
+      epoch: a.epoch,
     });
   }
   for (const r of body.recoveryRequests) {
@@ -267,6 +300,11 @@ export function deserializeReducerState(bytes: Uint8Array): RoomReducerState {
       authorizingDeviceIds: new Set(r.authorizingDeviceIds),
     });
   }
+  state.rendezvousIssuances = body.rendezvousIssuances.map((i) => ({
+    targetEpoch: i.targetEpoch,
+    issuerPublicKey: i.issuerPublicKey,
+    credentials: i.credentials.map((c) => ({ device_id: c.device_id, signature: c.signature })),
+  }));
   for (const draft of body.seenClientDrafts) state.seenClientDrafts.add(draft);
   state.snapshots = [...body.snapshots];
   return state;

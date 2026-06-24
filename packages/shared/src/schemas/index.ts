@@ -21,6 +21,7 @@ export * from './forum-api.js';
 export * from './governance-api.js';
 export * from './identity-records.js';
 export * from './invariants-api.js';
+export * from './migration-api.js';
 export * from './moderation-api.js';
 export * from './moderation-console-api.js';
 export * from './notifications.js';

@@ -3,7 +3,12 @@
   "compilerOptions": {
     "composite": true,
     "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": "src",
+    // The WS-S.10 update-channel core (`src/update/`) calls the platform
+    // WebCrypto + text-encoding globals (`crypto.subtle`, `TextEncoder`,
+    // `CryptoKey`).  DOM provides these as ambient declarations with no package
+    // dependency, keeping `@licio/shared` a zero-runtime-dep leaf.
+    "lib": ["ES2022", "DOM"]
   },
   "include": ["src/**/*"]
 }

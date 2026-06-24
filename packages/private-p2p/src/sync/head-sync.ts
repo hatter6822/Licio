@@ -17,7 +17,7 @@
 //     snapshots, so a usable thread list arrives before media (media is lazy).
 
 import { z } from 'zod';
-import { privateCidSchema, privateIdSchema } from '../schemas/common.js';
+import { ciphertextBase64Schema, privateCidSchema, privateIdSchema } from '../schemas/common.js';
 
 // --- §15.6 head announcement ------------------------------------------------
 
@@ -193,12 +193,16 @@ export const blockRequestSchema = z
   .strict();
 export type BlockRequest = z.infer<typeof blockRequestSchema>;
 
-/** A peer's response: served CIDs (verified-before-use by the importer) +
- *  refused CIDs (too large / throttled), so the requester can back off. */
+/** A peer's response: the served BLOCKS (each CID-addressed encrypted bytes, base64;
+ *  the importer re-verifies the CID over the bytes before storing — the wire confers no
+ *  trust, §8.3) + refused CIDs (too large / throttled / not held), so the requester can
+ *  back off. */
 export const blockResponseSchema = z
   .object({
     schema: z.literal('licio.private.block_response.v1'),
-    served_cids: z.array(privateCidSchema).max(MAX_CIDS_PER_BLOCK_REQUEST),
+    blocks: z
+      .array(z.object({ cid: privateCidSchema, data: ciphertextBase64Schema }).strict())
+      .max(MAX_CIDS_PER_BLOCK_REQUEST),
     refused_cids: z.array(privateCidSchema).max(MAX_CIDS_PER_BLOCK_REQUEST),
     retry_after_ms: z.number().int().nonnegative().optional(),
   })

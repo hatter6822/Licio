@@ -19,6 +19,8 @@
     "@licio/governance": "workspace:*",
     "@licio/invariants": "workspace:*",
     "@licio/lcap": "workspace:*",
+    "@licio/lcap-p2p": "workspace:*",
+    "@licio/private-p2p": "workspace:*",
     "@licio/ranking": "workspace:*",
     "@licio/shared": "workspace:*",
     "@simplewebauthn/server": "^13.3.1",

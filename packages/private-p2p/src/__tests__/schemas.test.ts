@@ -331,6 +331,7 @@ describe('WS-S.2.3 invite + join + attachment + search + report', () => {
       schema: 'licio.private.join_request.v1',
       invite_id_blind: B64,
       recipient_device_key_package: B64,
+      device_signing_public_key: B64,
       proposed_display_name: 'Alex',
       proof_of_invite_secret: B64,
       requested_at_bucket: '2026-06-22T00',

@@ -55,12 +55,28 @@ import {
   syncPulseV2Schema,
   type WantRequestV2,
 } from '@licio/lcap';
-import { Hono } from 'hono';
+import type { BlockVisibility } from '@licio/lcap-p2p';
+import { Hono, type MiddlewareHandler } from 'hono';
+import { z } from 'zod';
+import { isSteward } from '../identity/rbac.js';
 import { rateLimit } from '../lib/rate-limit.js';
+import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
+import type { PublishAuditInput, PublishAuditStore } from './publish-audit.js';
+import { aggregateEligibility, type PublishEligibilityResolver } from './publish-eligibility.js';
+import type { LcapPublicPublisher, ReviewedPublishOutcome } from './publisher.js';
 import { repackHeldObjects } from './repack.js';
+import type { BlockPublishReviewStore } from './review-gate.js';
 import type { CommitRecordInput, LcapIngestServer } from './server-ingest.js';
-import { getLcapIngestServer } from './service.js';
+import {
+  getLcapBlockProvenanceStore,
+  getLcapBlockPublishReviewStore,
+  getLcapIngestServer,
+  getLcapPublicPublisher,
+  getLcapPublishAuditStore,
+  getPublishEligibilityResolver,
+} from './service.js';
 import { frameBlobs, getSignalMailbox } from './signaling.js';
+import type { BlockProvenanceStore, ProvenanceTarget } from './takedown-oracle.js';
 
 type ContentKind = 'record' | 'proof' | 'block' | 'chunk';
 
@@ -738,14 +754,300 @@ async function handleExport(server: LcapIngestServer, body: Uint8Array): Promise
 }
 
 /**
+ * Gate-19 (WS-R.15.7 / WS-S.4.4) — the public-block bridge publish request.  The caller
+ * supplies the block CID + the content target(s); the server DERIVES the real visibility /
+ * encryption / storage-mode from the content model (`publish-eligibility.ts`) and applies the
+ * WS-S.4.4 eligibility guard + the §37.2 decision + the §22.7 review gate + the LIVE takedown
+ * re-check before any pin.  `republish` (the §22.7 re-pin path) needs only the CID.
+ *
+ * The `visibility`/`encrypted`/`private_room_cid` fields are DEPRECATED + IGNORED: they were
+ * caller-asserted (a steward could otherwise claim a room_only/p2p item as public); the server
+ * no longer trusts them.  They remain optional for wire back-compat only.
+ */
+const publishRequestSchema = z.object({
+  block_cid: z.string().min(1),
+  visibility: z.enum(['public', 'in_room', 'private']).optional(),
+  encrypted: z.boolean().optional(),
+  private_room_cid: z.boolean().optional(),
+  // The content entity this block was derived from (story/source/evidence) — the SAME
+  // coordinate a WS-J takedown / the §22.7 review gate uses.  REQUIRED (Gate-19 finding #38):
+  // the publish path records the `block_cid → (type, id)` provenance link UNCONDITIONALLY, so
+  // a later actioned takedown over that entity halts republication, and the §22.7 review gate
+  // resolves the block to a reviewable source — a block with no content target can never be
+  // reviewed/approved, so it can never reach the public DHT (it would be refused
+  // `review_required`).  Multiple targets are supported (e.g. evidence embedded in a story).
+  content_targets: z
+    .array(
+      z.object({
+        target_type: z.enum(['story', 'source', 'evidence']),
+        target_id: z.string().min(1),
+      }),
+    )
+    .min(1),
+});
+const republishRequestSchema = z.object({ block_cid: z.string().min(1) });
+
+/**
+ * Gate-19 (WS-R.15.7b, §22.7) — the steward review-decision request.  A steward records the
+ * affirmative privacy/moderation/abuse-review outcome for a content entity here; only an
+ * `approved` decision lets the publish path pin a block derived from it.  Keyed by the same
+ * `(type, id)` coordinate the takedown / provenance use.
+ */
+const reviewRequestSchema = z.object({
+  target_type: z.enum(['story', 'source', 'evidence']),
+  target_id: z.string().min(1),
+  state: z.enum(['pending', 'approved', 'rejected']),
+  note: z.string().max(2000).optional(),
+});
+
+/**
+ * Record a §22.7 review decision.  STEWARD-AUTHORIZED (the route middleware gates it).  The
+ * decision is upserted (the latest decision per content entity wins) and is what the publish
+ * path's review gate reads.  Returns 200 on success; 400 on a malformed body.
+ */
+async function handleReview(
+  reviewStore: BlockPublishReviewStore,
+  reviewerUserId: string | null,
+  body: unknown,
+): Promise<Response> {
+  const parsed = reviewRequestSchema.safeParse(body);
+  if (!parsed.success) return json(400, { error: 'invalid_review_request' });
+  await reviewStore.record(
+    { targetType: parsed.data.target_type, targetId: parsed.data.target_id },
+    parsed.data.state,
+    reviewerUserId,
+    parsed.data.note ?? null,
+  );
+  return json(200, {
+    ok: true,
+    target_type: parsed.data.target_type,
+    target_id: parsed.data.target_id,
+    state: parsed.data.state,
+  });
+}
+
+/**
+ * Map a `ReviewedPublishOutcome` to the audit record's review/takedown verdicts.  The §22.7
+ * review verdict is `approved` / `review_required` / `skipped` (an earlier eligibility refusal
+ * never reached the gate).  The takedown verdict is read from the bridge outcome: a
+ * `takedown_recheck_halt` reason is a `halt`; a successful pin or any non-takedown refusal is
+ * `clear` (the §22.7 gate / eligibility refused before the oracle ran, so it never reports
+ * `unreadable` here — the bridge maps a thrown oracle to `takedown_recheck_halt`).
+ */
+function auditVerdicts(reviewed: ReviewedPublishOutcome): {
+  review: PublishAuditInput['reviewVerdict'];
+  takedown: PublishAuditInput['takedownVerdict'];
+} {
+  const review: PublishAuditInput['reviewVerdict'] =
+    reviewed.review.approved === 'skipped'
+      ? 'skipped'
+      : reviewed.review.approved
+        ? 'approved'
+        : 'review_required';
+  const takedown: PublishAuditInput['takedownVerdict'] =
+    !reviewed.outcome.ok && reviewed.outcome.reason === 'takedown_recheck_halt' ? 'halt' : 'clear';
+  return { review, takedown };
+}
+
+/**
+ * Write ONE append-only audit record for a (re)publish decision.  Returns `false` if the
+ * append failed.  Public-CID egress is accountability-critical: a decision the audit log could
+ * not durably record must FAIL CLOSED (the caller sees a 500 and retries, which re-pins
+ * idempotently and re-audits once the store recovers) rather than be reported as a clean
+ * outcome with no trail.
+ */
+async function writePublishAudit(
+  audit: PublishAuditStore,
+  input: PublishAuditInput,
+): Promise<boolean> {
+  try {
+    await audit.append(input);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `POST /api/lcap/v2/public-bridge/{publish,republish}`: the REAL caller of the IPFS
+ * public-block bridge — STEWARD-AUTHORIZED (Gate-19 finding #39): publishing onto the public
+ * DHT is a high-consequence moderation-sensitive egress, so the route middleware requires a
+ * steward role + active MFA.  Resolves the block's held bytes from the CAS, records the
+ * block↔content provenance UNCONDITIONALLY (finding #38), runs the §22.7 review gate + the
+ * defense-in-depth publish (or the strict re-pin), and writes ONE append-only audit record
+ * for the decision (finding #37).  503 when the bridge is not configured; 404 when the CAS
+ * does not hold the block; 400 on a malformed request.
+ */
+async function handlePublish(
+  server: LcapIngestServer,
+  publisher: LcapPublicPublisher | undefined,
+  provenance: BlockProvenanceStore,
+  audit: PublishAuditStore,
+  resolveEligibility: PublishEligibilityResolver | undefined,
+  actorUserId: string | null,
+  body: unknown,
+): Promise<Response> {
+  if (!publisher) return json(503, { error: 'public_bridge_not_configured' });
+  const parsed = publishRequestSchema.safeParse(body);
+  if (!parsed.success) return json(400, { error: 'invalid_publish_request' });
+  try {
+    parseCid(parsed.data.block_cid);
+  } catch {
+    return json(400, { error: 'bad_cid' });
+  }
+  const obj = await server.getObject(parsed.data.block_cid);
+  if (obj?.kind !== 'block') return json(404, { error: 'not_found' });
+  const targets: ProvenanceTarget[] = parsed.data.content_targets.map((t) => ({
+    targetType: t.target_type,
+    targetId: t.target_id,
+  }));
+  // Record the block↔content provenance BEFORE the publish (finding #38: mandatory, not
+  // caller-optional), so the publish-time takedown re-check + the §22.7 review gate + every
+  // later republish resolve this block to its content entity: a takedown actioned at any
+  // time after this point halts republication.
+  for (const target of targets) await provenance.link(parsed.data.block_cid, target);
+  // SERVER-SIDE derivation (never trust the caller's visibility/encryption signals): a block
+  // is publishable ONLY if EVERY content target resolves to a `public` item in a `server`-
+  // storage room.  An ABSENT resolver is fail-closed — derive non-publishable signals so the
+  // gateway-eligibility guard inside `publish` refuses the pin.
+  const derived = resolveEligibility
+    ? aggregateEligibility(await Promise.all(targets.map((t) => resolveEligibility(t))))
+    : { publishable: false, visibility: 'in_room' as const, privateRoomCid: true };
+  const reviewed = await publisher.publish({
+    blockCid: parsed.data.block_cid,
+    bytes: obj.bytes,
+    visibility: derived.visibility satisfies BlockVisibility,
+    // LCAP server-room content is not E2E-encrypted; eligibility is governed by the DERIVED
+    // visibility + storage mode (a non-public/p2p target flips these so `publish` refuses).
+    encrypted: false,
+    privateRoomCid: derived.privateRoomCid,
+    targets,
+  });
+  const { review, takedown } = auditVerdicts(reviewed);
+  const audited = await writePublishAudit(audit, {
+    action: 'publish',
+    blockCid: parsed.data.block_cid,
+    target: targets[0] ?? null,
+    actorUserId,
+    reviewVerdict: review,
+    takedownVerdict: takedown,
+    published: reviewed.outcome.ok,
+    outcomeReason: reviewed.outcome.ok ? '' : reviewed.outcome.reason,
+    ipfsCid: reviewed.outcome.ok ? reviewed.outcome.ipfsCid : null,
+  });
+  // FAIL CLOSED on an unrecorded decision (accountability): never report a publish outcome the
+  // audit log could not durably capture.  The retry re-pins idempotently and re-audits.
+  if (!audited) return json(500, { error: 'audit_unavailable' });
+  // A refused publish is a well-formed 200 carrying the auditable reason (the gate's decision
+  // is the answer, not an error); the only HTTP errors are the 503/404/400/500 above.
+  return json(200, reviewed.outcome);
+}
+
+async function handleRepublish(
+  server: LcapIngestServer,
+  publisher: LcapPublicPublisher | undefined,
+  provenance: BlockProvenanceStore,
+  audit: PublishAuditStore,
+  resolveEligibility: PublishEligibilityResolver | undefined,
+  actorUserId: string | null,
+  body: unknown,
+): Promise<Response> {
+  if (!publisher) return json(503, { error: 'public_bridge_not_configured' });
+  const parsed = republishRequestSchema.safeParse(body);
+  if (!parsed.success) return json(400, { error: 'invalid_republish_request' });
+  try {
+    parseCid(parsed.data.block_cid);
+  } catch {
+    return json(400, { error: 'bad_cid' });
+  }
+  const obj = await server.getObject(parsed.data.block_cid);
+  if (obj?.kind !== 'block') return json(404, { error: 'not_found' });
+  // Resolve the block's recorded content targets — the §22.7 review gate + the takedown
+  // re-check both key on them (a republish of a block with no recorded provenance resolves
+  // to the empty target set, which the review gate refuses `review_required`).
+  const targets = await provenance.targetsOf(parsed.data.block_cid);
+  // RE-DERIVE current visibility eligibility for the recorded targets (finding: republish must
+  // not re-pin a block whose content was later narrowed to `room_only` or moved off a `server`
+  // room — review staying approved is NOT sufficient).  Mirrors handlePublish; `derived.
+  // publishable` is exactly the §22.7 gateway guard over the aggregate signals.  Absent resolver
+  // ⇒ fail-closed.
+  const derived = resolveEligibility
+    ? aggregateEligibility(await Promise.all(targets.map((t) => resolveEligibility(t))))
+    : { publishable: false, visibility: 'in_room' as const, privateRoomCid: true };
+  if (!derived.publishable) {
+    const reason = 'reason' in derived && derived.reason ? derived.reason : 'not_public';
+    const audited = await writePublishAudit(audit, {
+      action: 'republish',
+      blockCid: parsed.data.block_cid,
+      target: targets[0] ?? null,
+      actorUserId,
+      reviewVerdict: 'skipped',
+      takedownVerdict: 'clear',
+      published: false,
+      outcomeReason: reason,
+      ipfsCid: null,
+    });
+    if (!audited) return json(500, { error: 'audit_unavailable' });
+    return json(200, { ok: false, reason });
+  }
+  const reviewed = await publisher.republish(parsed.data.block_cid, obj.bytes, targets);
+  const { review, takedown } = auditVerdicts(reviewed);
+  const audited = await writePublishAudit(audit, {
+    action: 'republish',
+    blockCid: parsed.data.block_cid,
+    target: targets[0] ?? null,
+    actorUserId,
+    reviewVerdict: review,
+    takedownVerdict: takedown,
+    published: reviewed.outcome.ok,
+    outcomeReason: reviewed.outcome.ok ? '' : reviewed.outcome.reason,
+    ipfsCid: reviewed.outcome.ok ? reviewed.outcome.ipfsCid : null,
+  });
+  // FAIL CLOSED on an unrecorded decision (accountability), as in handlePublish.
+  if (!audited) return json(500, { error: 'audit_unavailable' });
+  return json(200, reviewed.outcome);
+}
+
+/**
  * The §29 LCAP routes.  Mounted at `/api/lcap/v2` (see `app.ts`).  The server is
  * resolved PER REQUEST (not at mount): the default singleton — which may bind a
  * Postgres client — is constructed only when a request actually arrives, so merely
  * building the app never opens a DB connection.  Tests pass an explicit override.
  */
-export function createLcapRoutes(override?: LcapIngestServer): Hono {
+export function createLcapRoutes(
+  override?: LcapIngestServer,
+  publisherOverride?: LcapPublicPublisher,
+  provenanceOverride?: BlockProvenanceStore,
+  auditOverride?: PublishAuditStore,
+  reviewOverride?: BlockPublishReviewStore,
+  eligibilityOverride?: PublishEligibilityResolver,
+): Hono<AuthEnv> {
   const server = (): LcapIngestServer => override ?? getLcapIngestServer();
-  const app = new Hono();
+  // The publisher is OPT-IN (a node may not run the public bridge); resolved per request like
+  // the server.  A test passes an explicit override; otherwise the env-gated factory decides.
+  const publisher = (): LcapPublicPublisher | undefined =>
+    publisherOverride ?? getLcapPublicPublisher();
+  const provenance = (): BlockProvenanceStore =>
+    provenanceOverride ?? getLcapBlockProvenanceStore();
+  const audit = (): PublishAuditStore => auditOverride ?? getLcapPublishAuditStore();
+  // The server-side publish-eligibility resolver (derives visibility/storage-mode from the
+  // content model); absent ⇒ handlePublish is fail-closed.
+  const eligibility = (): PublishEligibilityResolver | undefined =>
+    eligibilityOverride ?? getPublishEligibilityResolver();
+  const review = (): BlockPublishReviewStore => reviewOverride ?? getLcapBlockPublishReviewStore();
+  // Gate-19 (finding #39) — publishing onto the public DHT is a high-consequence moderation-
+  // sensitive egress, so the two public-bridge routes require a steward role + active MFA
+  // (the WS-D session + the WS-J doctrine-role posture, fail-closed: an unauthenticated /
+  // unverified / non-steward caller is denied BEFORE any block reaches the bridge).
+  const requireBridgePublisher: MiddlewareHandler<AuthEnv> = async (c, next) => {
+    const auth = getAuth(c);
+    if (!auth) return c.json({ error: 'unauthenticated' }, 401);
+    if (!auth.mfaActive || !auth.mfaVerified) return c.json({ error: 'mfa_required' }, 403);
+    if (!isSteward(auth.roles)) return c.json({ error: 'forbidden' }, 403);
+    await next();
+    return;
+  };
+  const app = new Hono<AuthEnv>();
   const read =
     (kind: ContentKind) =>
     (c: { req: { param: (k: string) => string; header: (k: string) => string | undefined } }) =>
@@ -798,6 +1100,77 @@ export function createLcapRoutes(override?: LcapIngestServer): Hono {
       return json(413, { error: 'oversized_request' });
     return handleExchange(server(), new Uint8Array(await c.req.arrayBuffer()));
   });
+  // Gate-19 (WS-R.15.7 / WS-S.4.4) — the REAL public-block bridge (re)publish entry points.
+  // STEWARD-AUTHORIZED + MFA-verified (finding #39): the session middleware runs FIRST, then
+  // the steward gate, then the rate limiter; the POST is NOT in the CSRF-exempt set (a
+  // session-bearing flow keeps the double-submit token).  The handler records mandatory
+  // provenance, runs the §22.7 review gate + the LIVE takedown re-check (fail-closed), and
+  // writes ONE append-only audit record per decision.
+  app.post(
+    '/public-bridge/publish',
+    authMiddleware(),
+    requireBridgePublisher,
+    rateLimit({ limit: 30, windowMs: 60_000 }),
+    async (c) => {
+      let body: unknown;
+      try {
+        body = await c.req.json();
+      } catch {
+        return json(400, { error: 'invalid_publish_request' });
+      }
+      return handlePublish(
+        server(),
+        publisher(),
+        provenance(),
+        audit(),
+        eligibility(),
+        getAuth(c)?.userId ?? null,
+        body,
+      );
+    },
+  );
+  app.post(
+    '/public-bridge/republish',
+    authMiddleware(),
+    requireBridgePublisher,
+    rateLimit({ limit: 30, windowMs: 60_000 }),
+    async (c) => {
+      let body: unknown;
+      try {
+        body = await c.req.json();
+      } catch {
+        return json(400, { error: 'invalid_republish_request' });
+      }
+      return handleRepublish(
+        server(),
+        publisher(),
+        provenance(),
+        audit(),
+        eligibility(),
+        getAuth(c)?.userId ?? null,
+        body,
+      );
+    },
+  );
+  // Gate-19 (WS-R.15.7b, §22.7) — the steward review-decision entry point: record the
+  // affirmative privacy/moderation/abuse review of a content entity for public-DHT egress.
+  // Only an `approved` decision lets the publish path pin a block derived from it.
+  // STEWARD-AUTHORIZED + MFA-verified (the same gate as publish).
+  app.post(
+    '/public-bridge/review',
+    authMiddleware(),
+    requireBridgePublisher,
+    rateLimit({ limit: 60, windowMs: 60_000 }),
+    async (c) => {
+      let body: unknown;
+      try {
+        body = await c.req.json();
+      } catch {
+        return json(400, { error: 'invalid_review_request' });
+      }
+      return handleReview(review(), getAuth(c)?.userId ?? null, body);
+    },
+  );
   // §29 WebRTC server-blind signaling rendezvous (WS-R.15.6a): route an OPAQUE sealed
   // blob to an opaque recipient key. The body is never decoded here (server-blindness);
   // session-bound + CSRF-protected (NOT in the CSRF-exempt set) — a browser P2P flow
