@@ -125,7 +125,20 @@ export function issueCredential(
   request: CredentialRequest,
   epoch: Uint8Array,
 ): Uint8Array {
-  return blindSign(issuer, request.commitmentWithProof, 1, [], epochHeader(epoch));
+  return issueCredentialForCommitment(issuer, request.commitmentWithProof, epoch);
+}
+
+/**
+ * Admin, step 2 (op flow): blind-sign a device's PUBLISHED commitment for `epoch`. The
+ * admin holds only the commitment (from the converged `rendezvous.request` state), never the
+ * device's `secret_prover_blind` — exactly what blind issuance needs.
+ */
+export function issueCredentialForCommitment(
+  issuer: BbsKeyPair,
+  commitmentWithProof: Uint8Array,
+  epoch: Uint8Array,
+): Uint8Array {
+  return blindSign(issuer, commitmentWithProof, 1, [], epochHeader(epoch));
 }
 
 /** Assemble the device-held credential from its request + the admin's signature. */

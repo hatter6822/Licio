@@ -21,10 +21,9 @@ const ROOM = enc('room-blind-id');
 const NOW = 1_700_000_000_000;
 const BUCKET = currentBucket(NOW);
 
-/** Enroll a member under `admin` for `epoch` (request → blind-sign → install). */
+/** Enroll a member under `admin` for `epoch` (publish commitment → blind-sign → install). */
 function enroll(member: RendezvousMember, admin: RendezvousIssuer, epoch: string): void {
-  const request = member.beginEnrollment(epoch);
-  member.completeEnrollment(epoch, admin.issue(request), admin.publicKey);
+  member.installCredential(epoch, admin.issueForCommitment(member.commitment), admin.publicKey);
 }
 
 describe('Tier-2 rendezvous-cap session', () => {
@@ -58,13 +57,12 @@ describe('Tier-2 rendezvous-cap session', () => {
     expect(verified.map((v) => v.value)).toEqual(['alice']);
   });
 
-  it('issuance is BLIND — the admin signs a request, never the device nid', () => {
-    // RendezvousIssuer.issue accepts a CredentialRequest (the blind commitment) only; there
-    // is no parameter through which `nid` could reach it.
+  it('issuance is BLIND — the admin signs a commitment, never the device nid', () => {
+    // issueForCommitment accepts the device's PUBLISHED commitment only; there is no
+    // parameter through which `nid` or `secret_prover_blind` could reach the admin.
     const admin = RendezvousIssuer.generate(EPOCH);
     const member = new RendezvousMember();
-    const request = member.beginEnrollment(EPOCH);
-    expect(() => admin.issue(request)).not.toThrow();
+    expect(() => admin.issueForCommitment(member.commitment)).not.toThrow();
     // the issuer public key is a stable 96-byte G2 encoding
     expect(admin.publicKey).toHaveLength(96);
   });

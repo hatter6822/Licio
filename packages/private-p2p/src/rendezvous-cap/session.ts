@@ -2,18 +2,19 @@
 //
 // WS-S Tier-2 — the rendezvous-cap SESSION orchestration (the device + admin lifecycle).
 //
-// Pure, stateful wrappers that tie the credential primitives into the per-epoch flow,
-// WITHOUT yet threading them through the MLS commit (the room engine plugs into these):
+// Pure, stateful wrappers that tie the credential primitives into the per-epoch flow the
+// room engine drives (the `rendezvous.request` / `rendezvous.issue` ops):
 //
 //   • RendezvousIssuer — the per-epoch committing admin. Holds the BBS issuer secret key,
-//     blind-signs each member's request, and exposes the issuer PUBLIC key to distribute
-//     over the MLS-protected channel + to the relay (first-seen pin).
-//   • RendezvousMember — a device. Holds the long-lived `nid` secret; per epoch it creates
-//     a blind credential request (→ the admin), installs the returned credential, and then
-//     builds presence announcements + the issuer key for poll-filtering.
+//     blind-signs each device's PUBLISHED commitment (it never holds the device's
+//     `secret_prover_blind`), and exposes the issuer PUBLIC key to distribute.
+//   • RendezvousMember — a device. Holds the long-lived `nid` + ONE blind credential request
+//     (commitment + `s'`); it publishes the commitment ONCE (a `rendezvous.request`), then
+//     installs the admin's per-epoch signature (from a `rendezvous.issue`) and builds
+//     presence announcements + exposes the issuer key for client-side poll-filtering.
 //
-// Issuance is BLIND: the issuer never learns `nid` (§6.2/§7). A device not yet enrolled for
-// an epoch simply announces nothing here (the caller rides Tier-1 — fail-open, §6.10).
+// Issuance is BLIND: the issuer never learns `nid` (§6.2/§7). A device not enrolled for an
+// epoch announces nothing here (the caller rides Tier-1 — fail-open, §6.10).
 
 import type { BbsKeyPair } from '../crypto/bbs/signature.js';
 import {
@@ -22,7 +23,7 @@ import {
   createCredentialRequest,
   generateIssuerKeyPair,
   generateNidSecret,
-  issueCredential,
+  issueCredentialForCommitment,
   issuerKeyFromBytes,
   issuerKeyToBytes,
   proveRendezvousPresence,
@@ -53,9 +54,9 @@ export class RendezvousIssuer {
     return issuerKeyToBytes(this.keyPair.pk);
   }
 
-  /** Blind-sign a member's credential request → the 80-byte credential. Never sees `nid`. */
-  issue(request: CredentialRequest): Uint8Array {
-    return issueCredential(this.keyPair, request, enc(this.epoch));
+  /** Blind-sign a device's PUBLISHED commitment → the 80-byte credential. Never sees `nid`. */
+  issueForCommitment(commitmentWithProof: Uint8Array): Uint8Array {
+    return issueCredentialForCommitment(this.keyPair, commitmentWithProof, enc(this.epoch));
   }
 }
 
@@ -66,36 +67,30 @@ interface EpochEnrollment {
 }
 
 /**
- * A device's rendezvous-cap state: the long-lived `nid` + its per-epoch credentials. Drives
- * enrollment (request → install) and produces presence announcements + the issuer key for
- * client-side poll-filtering.
+ * A device's rendezvous-cap state: the long-lived `nid` + ONE blind credential request,
+ * plus the per-epoch credentials installed from the admin's signatures.
  */
 export class RendezvousMember {
-  private readonly pending = new Map<string, CredentialRequest>();
+  private readonly request: CredentialRequest;
   private readonly enrolled = new Map<string, EpochEnrollment>();
 
-  /** `nid` persists for the life of the device across epochs. */
-  constructor(private readonly nidSecret: Uint8Array = generateNidSecret()) {}
-
-  /** Create + remember a blind credential request for `epoch` (send the commitment to the
-   *  admin). The commitment reveals no `nid`. */
-  beginEnrollment(epoch: string): CredentialRequest {
-    const request = createCredentialRequest(this.nidSecret);
-    this.pending.set(epoch, request);
-    return request;
+  /** `nid` (and thus the commitment + `s'`) persist for the life of the device. */
+  constructor(private readonly nidSecret: Uint8Array = generateNidSecret()) {
+    this.request = createCredentialRequest(nidSecret);
   }
 
-  /** Install the admin's blind signature + the issuer key for `epoch`. */
-  completeEnrollment(epoch: string, signature: Uint8Array, issuerPubKey: Uint8Array): void {
-    const request = this.pending.get(epoch);
-    if (request === undefined) throw new Error('rendezvous-cap: no pending request for epoch');
-    // Validate the issuer key encoding up front (throws on a malformed key).
-    issuerKeyFromBytes(issuerPubKey);
+  /** The blind commitment to publish ONCE in a `rendezvous.request` op (reveals no `nid`). */
+  get commitment(): Uint8Array {
+    return this.request.commitmentWithProof;
+  }
+
+  /** Install the admin's per-epoch blind signature + the issuer key for `epoch`. */
+  installCredential(epoch: string, signature: Uint8Array, issuerPubKey: Uint8Array): void {
+    issuerKeyFromBytes(issuerPubKey); // validate the key encoding (throws if malformed)
     this.enrolled.set(epoch, {
       issuerPubKey,
-      credential: assembleCredential(this.nidSecret, request, signature),
+      credential: assembleCredential(this.nidSecret, this.request, signature),
     });
-    this.pending.delete(epoch);
   }
 
   /** Whether this device holds a credential for `epoch`. */
@@ -124,9 +119,8 @@ export class RendezvousMember {
     return this.enrolled.get(epoch)?.issuerPubKey ?? null;
   }
 
-  /** Drop the credential + pending request for an epoch (on rotation/eviction cleanup). */
+  /** Drop the credential for an epoch (on rotation/eviction cleanup). */
   forgetEpoch(epoch: string): void {
     this.enrolled.delete(epoch);
-    this.pending.delete(epoch);
   }
 }
