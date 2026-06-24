@@ -22,7 +22,7 @@
 import { cidFor } from '@licio/lcap';
 import { describe, expect, it } from 'vitest';
 import { freshForumServices, seedUserWithSession } from '../../__tests__/forum-test-helpers.js';
-import { InMemoryPublishAuditStore, type PublishAuditStore } from '../publish-audit.js';
+import { InMemoryPublishAuditStore } from '../publish-audit.js';
 import { aggregateEligibility, type PublishEligibilityResolver } from '../publish-eligibility.js';
 import { LcapPublicPublisher } from '../publisher.js';
 import { type BlockPublishReviewStore, InMemoryBlockPublishReviewStore } from '../review-gate.js';
@@ -396,7 +396,7 @@ describe('Gate-19 — the §29 public-bridge route (steward-authorized, audited,
     // Tests pass a non-publishable resolver to exercise the server-side derivation refusals.
     eligibility: PublishEligibilityResolver = () =>
       Promise.resolve({ publishable: true, visibility: 'public', privateRoomCid: false }),
-    audit: PublishAuditStore = new InMemoryPublishAuditStore(),
+    audit: InMemoryPublishAuditStore = new InMemoryPublishAuditStore(),
   ) {
     const forum = freshForumServices();
     const steward = await seedUserWithSession(forum.identity, { steward: true });
@@ -535,7 +535,7 @@ describe('Gate-19 — the §29 public-bridge route (steward-authorized, audited,
     expect(re.status).toBe(200);
     expect(await re.json()).toEqual({ ok: false, reason: 'room_only' });
     expect(pins()).toBe(1); // NOT re-pinned
-    expect((audit as InMemoryPublishAuditStore).all().at(-1)).toMatchObject({
+    expect(audit.all().at(-1)).toMatchObject({
       action: 'republish',
       published: false,
       outcomeReason: 'room_only',
@@ -543,15 +543,18 @@ describe('Gate-19 — the §29 public-bridge route (steward-authorized, audited,
   });
 
   it('FAILS CLOSED (500) when the audit append throws — no clean outcome without a durable trail', async () => {
-    const failingAudit: PublishAuditStore = {
-      append: () => Promise.reject(new Error('audit store down')),
-      recent: () => Promise.resolve([]),
-    };
+    // A store whose append always throws (still an InMemoryPublishAuditStore so the harness type
+    // holds) — simulates an audit-store outage at the moment of a (re)publish decision.
+    class FailingAuditStore extends InMemoryPublishAuditStore {
+      override append(): Promise<void> {
+        return Promise.reject(new Error('audit store down'));
+      }
+    }
     const { server, app, steward, pins } = await harness(
       async () => false,
       approvedReviewStore(STORY),
       undefined,
-      failingAudit,
+      new FailingAuditStore(),
     );
     const payload = enc.encode('audit outage');
     const blockCid = await cidFor('block', payload);
