@@ -363,6 +363,47 @@ export class PrivateRoomEngine {
     this.epochs.set(epoch, keys);
   }
 
+  /**
+   * Tier-2 rendezvous cap (§11): the published device commitments (the converged
+   * `rendezvous.request` state) — the input an admin issues from. Excludes removed devices.
+   */
+  rendezvousCommitments(): { deviceId: string; commitmentWithProof: string }[] {
+    const out: { deviceId: string; commitmentWithProof: string }[] = [];
+    for (const device of this.currentState.devices.values()) {
+      if (!device.removed && device.rendezvousCommitment !== undefined) {
+        out.push({ deviceId: device.deviceId, commitmentWithProof: device.rendezvousCommitment });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Tier-2 rendezvous cap (§11): the accepted `rendezvous.issue` op bodies — what a device
+   * installs its credential from (the carrier feeds these to the coordinator's
+   * `installFromIssuances`). Returned in acceptance order (latest-wins downstream).
+   */
+  rendezvousIssuances(): {
+    target_epoch: number;
+    issuer_public_key: string;
+    credentials: ReadonlyArray<{ device_id: string; signature: string }>;
+  }[] {
+    const out: {
+      target_epoch: number;
+      issuer_public_key: string;
+      credentials: ReadonlyArray<{ device_id: string; signature: string }>;
+    }[] = [];
+    for (const op of this.acceptedOps.values()) {
+      if (op.body.type === 'rendezvous.issue') {
+        out.push({
+          target_epoch: op.body.target_epoch,
+          issuer_public_key: op.body.issuer_public_key,
+          credentials: op.body.credentials,
+        });
+      }
+    }
+    return out;
+  }
+
   /** The next Lamport stamp to author locally: `max(accepted) + 1` (a decimal
    *  string, big-int-safe, §14.3.1) so a new op strictly succeeds every op the
    *  device has seen. */

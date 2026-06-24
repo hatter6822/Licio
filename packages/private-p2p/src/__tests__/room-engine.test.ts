@@ -168,6 +168,54 @@ describe('PrivateRoomEngine — create + author lifecycle', () => {
     expect(engine.state().rejected).toHaveLength(0);
     expect(engine.heads()).toStrictEqual(['add-bob']);
   });
+
+  it('surfaces Tier-2 rendezvous-cap commitments + issuances to the carrier', async () => {
+    const r = await room();
+    const storage = new InMemoryPrivateRoomStorage();
+    const engine = await PrivateRoomEngine.load(r.engineParams(storage));
+    const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
+
+    await engine.applyLocalOp(
+      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+        op_id: 'genesis',
+        lamport: '1',
+      }),
+      founderSeal,
+    );
+    // The founder device publishes its blind commitment (rendezvous.request).
+    await engine.applyLocalOp(
+      mkOp(
+        { type: 'rendezvous.request', commitment_with_proof: 'Q29tbWl0bWVudA' },
+        { op_id: 'req', author_seq: 1, lamport: '2', parents: ['genesis'] },
+      ),
+      founderSeal,
+    );
+    // The admin issues (rendezvous.issue).
+    await engine.applyLocalOp(
+      mkOp(
+        {
+          type: 'rendezvous.issue',
+          target_epoch: 0,
+          issuer_public_key: 'AAAA',
+          credentials: [{ device_id: 'founder-dev', signature: 'BBBB' }],
+        },
+        { op_id: 'issue', author_seq: 2, lamport: '3', parents: ['req'] },
+      ),
+      founderSeal,
+    );
+
+    expect(engine.rendezvousCommitments()).toStrictEqual([
+      { deviceId: 'founder-dev', commitmentWithProof: 'Q29tbWl0bWVudA' },
+    ]);
+    expect(engine.rendezvousIssuances()).toStrictEqual([
+      {
+        target_epoch: 0,
+        issuer_public_key: 'AAAA',
+        credentials: [{ device_id: 'founder-dev', signature: 'BBBB' }],
+      },
+    ]);
+    expect(engine.state().rejected).toHaveLength(0);
+  });
 });
 
 describe('PrivateRoomEngine — persistence + verify-on-load', () => {
