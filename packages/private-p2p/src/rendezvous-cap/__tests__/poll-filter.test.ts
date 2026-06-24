@@ -52,20 +52,26 @@ describe('Tier-2 client-side verified-dedup (serverless cap)', () => {
     const issuer = generateIssuerKeyPair();
     const a = enroll(issuer);
     const b = enroll(issuer);
+    const aReal = presence(issuer, a, BUCKET, 'A'); // a's genuine proof + a's genuine nym
 
     const records: VerifiablePresence<string>[] = [
-      presence(issuer, a, BUCKET, 'A'),
+      aReal,
       presence(issuer, a, BUCKET, 'A-again'), // SAME device, same bucket → dup
       presence(issuer, b, BUCKET, 'B'),
-      // forged: a valid G1 point as the pseudonym + junk proof bytes (no valid proof)
+      // SLOT-MULTIPLICATION: a's REAL, well-formed proof presented with a FAKE pseudonym
+      // its credential does not bind. This must fail CRYPTOGRAPHICALLY (the proof's
+      // pseudonym terms were bound to a's real nym; verify recomputes with the fake nym →
+      // challenge mismatch), not merely at the parser.
+      { ...aReal, pseudonym: G1.BASE.multiply(0xdeadn).toBytes(), value: 'FAKE-NYM' },
+      // NON-MEMBER garbage: a well-formed pseudonym + bytes that are not a valid proof.
       {
         pseudonym: G1.BASE.multiply(99n).toBytes(),
         proof: new Uint8Array(272).fill(7),
         epoch: EPOCH,
         bucket: BUCKET,
-        value: 'FORGED',
+        value: 'GARBAGE',
       },
-      // wrong issuer: a credential from a DIFFERENT room/issuer
+      // wrong issuer: a genuine proof under a DIFFERENT room/issuer key
       (() => {
         const other = generateIssuerKeyPair();
         return presence(other, enroll(other), BUCKET, 'WRONG-ISSUER');
@@ -76,20 +82,22 @@ describe('Tier-2 client-side verified-dedup (serverless cap)', () => {
 
     const verified = filterVerifiedPresence(records, issuer.pk, ROOM, { nowMs: NOW });
     const values = verified.map((v) => v.value).sort();
-    expect(values).toEqual(['A', 'B']); // a deduped to one; b; all junk dropped
+    expect(values).toEqual(['A', 'B']); // a deduped to one; b; every forgery dropped
   });
 
-  it('a flood of forged records collapses to the honest members only', () => {
+  it('a flood of FAKE-PSEUDONYM records collapses to the honest members only', () => {
     const issuer = generateIssuerKeyPair();
     const honest = enroll(issuer);
-    // Cheap forged records: any valid G1 point as the "pseudonym" + junk proof bytes (no
-    // credential). The filter rejects each at proof verification.
+    const attacker = enroll(issuer); // a real member with ONE credential
+    const attackerProof = presence(issuer, attacker, BUCKET, '').proof;
+    // The attacker tries to multiply its slots: its one real proof re-presented with 50
+    // DIFFERENT fabricated pseudonyms it cannot prove. Each must fail verification.
     const flood: VerifiablePresence<string>[] = Array.from({ length: 50 }, (_, i) => ({
       pseudonym: G1.BASE.multiply(BigInt(i + 2)).toBytes(),
-      proof: new Uint8Array(272).fill((i % 250) + 1),
+      proof: attackerProof,
       epoch: EPOCH,
       bucket: BUCKET,
-      value: `forged-${i}`,
+      value: `fake-${i}`,
     }));
     const records = [presence(issuer, honest, BUCKET, 'real'), ...flood];
     const verified = filterVerifiedPresence(records, issuer.pk, ROOM, { nowMs: NOW });

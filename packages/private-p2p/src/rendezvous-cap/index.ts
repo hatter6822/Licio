@@ -8,3 +8,4 @@
 
 export * from './credential.js';
 export * from './poll-filter.js';
+export * from './session.js';
