@@ -16,7 +16,7 @@
   <a href="https://github.com/hatter6822/Licio/actions/workflows/ci.yml">
     <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/hatter6822/Licio/ci.yml?branch=main&label=CI" />
   </a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.2.5-blue" />
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.5.0-blue" />
   <img alt="Node.js" src="https://img.shields.io/badge/Node.js-22-339933" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-6.0-3178c6" />
   <img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0--or--later-informational" />
@@ -31,26 +31,51 @@ pay-to-rank — is enforced by the type system, runtime guards, and CI gates.
 
 - **No applause mechanics** — no likes, upvotes, karma, reaction bars, or follower counts anywhere; the absence is type-level, runtime-guarded, and CI-gated (`check:no-applause`).
 - **In-browser attention processing** — raw engagement (scrolls, touches, dwell) is bucketed in the browser and discarded; only coarse `AttentionAggregate`s ever reach the network (SPEC §19.2; runtime egress guard + the `check:no-raw-egress` gate).
-- **PWAtt shadow scoring** — Participation-Weighted Attention (v0 + guardrailed v1) rewards source-opening, evidence, corrections, synthesis, and bridge-building; anti-signals only ever subtract; scores carry zero ranking power until the SPEC §30.5 review lifts shadow by an explicit code change.
+- **Participation-Weighted Attention (PWAtt)** — v0 + guardrailed v1 rewards source-opening, evidence, corrections, synthesis, and bridge-building; anti-signals and penalties only ever subtract. The SPEC §30.5 shadow stage has been **lifted** (a code change, `PWATT_V0_SHADOW_MODE = false`): PWAtt is now a bounded ranking input whose penalties and constraints apply only through the WS-H promotion gate, and the runtime kill switch instantly restores the score-blind chronological fallback.
 - **Inline comment-first conversation** — each story embeds a lightly nested comment section; comments can carry text and media, with evidence/correction as typed enrichments and legacy contribution types retained for backward-compatible reads. The old `/threads` directory/branch routes are retired behind story redirects; every piece of user content still reaches the DOM through a single sanctioned Markdown-lite → DOMPurify → Trusted Types sink with an external-link safety interstitial.
 - **A hardened event pipeline** — a strict topic registry of zod envelopes, authenticated replay-protected ingestion, a retention-tier-partitioned event store with sweeps, a real-time HyperLogLog layer, boot recovery + dead-letter redrive, and a pay-to-rank firewall at the consumer router.
 - **Passwordless identity** — WebAuthn-first with email-OTP and SIWE; there is no password column anywhere; RBAC with object-level authorization, an append-only audit log, steward TOTP MFA.
 - **Privacy by construction** — the client address and location are never read (statically tested); rate limiting is identity-free; DSAR export ships an encrypted signed-URL archive; account deletion has a 30-day grace then hard purge.
 - **Defense-in-depth web security** — Trusted Types + DOMPurify, a strict CSP with no `unsafe-inline`/`unsafe-eval`, serialized single-use CSRF tokens, `__Host-` session cookies, and a post-build service-worker scan.
 - **An offline-first, accessible PWA** — IndexedDB integrity layer with AES-256-GCM draft encryption (non-extractable key), background sync, push with a per-day notification budget, a token-driven design system with WCAG-validated palettes and a soft **neumorphic fabric theme** (theme-adaptive brand, paired-shadow surfaces, accessibility-flattened under high-contrast/forced-colors), axe-core assertions in E2E.
+- **A decentralized data plane (nearing completion)** — offline-first content availability over the content-addressed, signed LCAP v0.2 protocol (the zero-dependency [`@licio/lcap`](docs/lcap/README.md) core: deterministic CBOR, CIDs, COSE-ES256 detached proofs, packfiles, an anti-starvation lane scheduler, and a live WebRTC / native-courier / IPFS-gateway / QR transport plane) and end-to-end-encrypted private P2P rooms ([`@licio/private-p2p`](docs/private-p2p/README.md): MLS/HPKE/Ed25519, a Lamport-ordered op-log reducer, blind rendezvous) that the server **structurally cannot store** — enforced by seven CI gates and a database trigger.
 
 ## Current state
 
 | Attribute | Value |
 |-----------|-------|
-| Version | `v0.2.3` |
+| Version | `v0.5.0` |
 | Specification | [`docs/SPEC.md`](docs/SPEC.md) `v0.7` |
+| Implementation plan | [`docs/planning/00-index.md`](docs/planning/00-index.md) `v4.8` (~992 atomic tasks across 22 workstreams) |
 | Node.js | `22` (pinned in [`.nvmrc`](.nvmrc)) |
 | pnpm | `9.15.4` via Corepack (pinned in `package.json`) |
 | Language | TypeScript `6.0.3`, strict everywhere (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) |
-| Milestone | WS-0 – WS-I and **WS-Q (content–room ownership/visibility) complete** — rooms own content, binary room visibility + join/posting axes, public/`room_only` content with private-room forcing, native image/video posts, always-on two-tier containment, the full client surface (story composer, media rendering, room shell/feed/create, author visibility control), and a gated migration-validation harness; **WS-J (trust, safety, and abuse operations) complete** — reports/blocks/mutes/appeals, the role-gated steward moderation console (queue, full-context review, action palette, appeals, append-only audit + transparency export), the automated pre-check math, base-rate-conditioned coordinated-report detection, and the production wiring (durable Postgres adapters with a right-to-erasure-safe append-only audit, the real WS-D/E/F/G/H ports, block/mute + pre-check enforcement); residuals — the BFF E2E for the safety flows and the beyond-DoD SPEC enhancements — tracked in `docs/planning/11`; **WS-K (AI and model governance) complete** — the new browser-safe `@licio/ai-governance` domain package + the `apps/api/src/ai-governance` services: the model registry whose deployment GATE is the single chokepoint (a passing evaluation-harness decision — bias two-proportion z-test, source-grounded hallucination detection, safety/privacy suite, red-team gate — plus a resolved NIST/ISO risk assessment), the pre-execution prohibited-use guard (the five platform prohibitions + the §24.5 governance matrix, every block audited), immutable data lineage (the §24.2 privacy-review precondition) and audit-sensitive `AIOutputRecord` logging, the content pipelines (topic classification, claim extraction, the §24.3-quality/grounding-gated automated summary, consistency-checked translation), human-in-the-loop correction, runtime monitoring with a human-approved rollback recommendation, the §24.5 governance summaries/advisories, and the persistent provenance labels — the governed models being deterministic providers so a real backend swaps in behind the unchanged surface; residuals (gated Drizzle adapters, deeper client render-path integration, WS-M proposal-data wiring, a real model backend, the WS-P experiment-log consumer) tracked in `docs/ai-governance/README.md`; **WS-U (AI-governed-rooms redesign) doctrine ratified (Stage 0)** — the maintainer's binding inversion of AI's role into *bounded autonomy*: a three-layer authority model (room sovereignty → Knomosis-bounded AI agent → non-overridable platform legal floor), an **elected room steward** with exactly two member-ratified powers (propose an AI model; propose its prompt), and an **in-room AI agent** that moderates, manages the room treasury, and facilitates lawmaking within community-voted, kernel-enforced bounds while holding no keys — landed as SPEC §16.6/§24.6 + the `docs/policy/` register + `docs/planning/22-ai-governed-rooms.md`, re-scoping WS-K and amending WS-J/L/M with the pay-to-rank firewall and fail-closed crypto preserved in full (runtime Stages 1-3 & 5-core shipped — the `@licio/governance` pure domain (policy DSL, proof-carrying kernel, capabilities, elections), the `knomosis` schema + migration `0035` (isolation-proven), the `GovernanceService` (seat/elections, model admission, bounded moderation agent, kernel-backed treasury), and the `/v1/rooms/*` routes; residuals (Stages 4/6, web surfaces, gated adapters) in `docs/governance/README.md`) |
 | Test gate | 80% cross-workspace coverage (lines, functions, branches, statements) |
 | Bundle budgets | initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz (CI-enforced) |
+
+The core social product (WS-0 – WS-Q) is complete, the WS-T comment model has
+shipped, and the WS-U AI-governed-rooms redesign has landed its doctrine plus
+runtime Stages 1-4 & 5-core. The **decentralized data plane is nearing
+completion**: its pure protocol cores, the server I/O, the live transports, and
+the E2EE private-room engine have shipped, with physical-radio field confirmation
+and the live two-browser convergence E2E the remaining slices.
+
+| Workstream | Status |
+|---|---|
+| WS-0 – WS-C — foundation, doctrine, design system, PWA client | Complete |
+| WS-D — identity and privacy | Complete |
+| WS-E — event pipeline and PWAtt | Complete (§30.5 shadow lifted; PWAtt is a bounded, gated ranking input) |
+| WS-F — ingestion, sources, and search | Complete |
+| WS-G / WS-T — forum and conversation-as-comments | Complete |
+| WS-H — invariant services (MERI, MFCI, SCOI, GWEI, PHI + 6 supporting) | Complete (shadow) |
+| WS-I — ranking and distribution | Complete |
+| WS-J — trust, safety, and abuse operations | Complete |
+| WS-K — AI and model governance | Complete (re-scoped by WS-U) |
+| WS-Q — content–room ownership and visibility | Complete |
+| WS-U — AI-governed rooms (redesign) | Doctrine ratified + runtime Stages 1-4 & 5-core shipped |
+| WS-R — offline content availability (LCAP v0.2) | In progress — protocol core, server I/O, and live transports shipped; physical-radio field confirmation remaining |
+| WS-S — private P2P rooms (E2EE) | In progress — foundation, crypto/reducer/sync, live WebRTC carrier, update channel, and migration shipped; two-browser convergence E2E remaining |
+| WS-L / M / N / O / P — Knomosis & wallets, treasury, compliance, security, launch | Planned (WS-O.4.5 adversarial suite shipped) |
 
 > Local Postgres now runs the `pgvector/pgvector:pg16` image (a drop-in
 > pgvector-enabled build of Postgres 16): the WS-F migration chain installs
@@ -125,8 +150,8 @@ the contribution checklist.
 │ consumer router (pay-to-rank firewall, crypto-flag gate) →       │  (events/)
 │ real-time HLL → retention sweeps, recovery, dead-letter redrive  │
 ├──────────────────────────────────────────────────────────────────┤
-│ PWAtt scoring (shadow mode): aggregation windows → anti-signals  │  invariants
-│ → v0 + v1 scores → invariant outputs + private Signal Ledger     │  + apps/api
+│ PWAtt scoring: aggregation windows → anti-signals → v0 + v1      │  invariants
+│ scores → bounded, gated ranking input + private Signal Ledger    │  + apps/api
 ├─────────────────────────────────┬────────────────────────────────┤
 │ PostgreSQL (Drizzle)            │ Redis                          │  packages/db
 │ identity · audit · event log    │ sessions · replay nonces ·     │
@@ -140,15 +165,29 @@ the trust boundary in both directions, and production adapters (Postgres,
 Redis, S3, SES) sit behind the same interfaces as the in-memory stores the
 tests use — partial configuration fails boot rather than degrading silently.
 
+Two **decentralization planes** extend this core without weakening it: the LCAP
+v0.2 offline-availability protocol ([`@licio/lcap`](docs/lcap/README.md)) and the
+E2EE private P2P rooms ([`@licio/private-p2p`](docs/private-p2p/README.md)) live in
+code-split, browser-safe packages with their own crypto suites (ES256/COSE vs.
+MLS/HPKE/Ed25519) and no `@licio/db` access — a private room's content can never
+reach the server, proven by seven CI gates and a database trigger.
+
 ## Workspace
 
 | Package | Role | Workspace deps |
 |---------|------|----------------|
-| `apps/web` | React 19 PWA — routes, offline store, signals, push, design system | `shared`, `invariants` |
-| `apps/api` | Hono BFF — identity, event pipeline, PWAtt scoring, ingestion, forum + rooms, schedulers | `shared`, `db`, `invariants` |
+| `apps/web` | React 19 PWA — routes, offline store, signals, push, design system, LCAP + private-P2P clients (dynamic-import) | `shared`, `invariants`, `ai-governance`, `lcap`, `lcap-p2p`, `private-p2p` |
+| `apps/api` | Hono BFF — identity, events, PWAtt, ingestion, forum + rooms, ranking, AI/room governance, LCAP server, schedulers | `shared`, `db`, `invariants`, `ranking`, `ai-governance`, `governance`, `lcap`, `lcap-p2p`, `private-p2p` |
+| `apps/courier` | native Android Capacitor courier shell (serves the `apps/web` build; no web fork) | — (consumes `apps/web/dist`) |
 | `packages/shared` | zod schemas, types, enums, constants (the wire SSOT) | none (leaf) |
 | `packages/db` | Drizzle ORM schema + SQL migrations (PostgreSQL) | `shared` |
 | `packages/invariants` | pure invariant + scoring mathematics (PWAtt v0/v1) | `shared` |
+| `packages/ranking` | pure WS-I ranking domain (no I/O; never `db`) | `shared`, `invariants` |
+| `packages/ai-governance` | pure WS-K AI-governance domain (browser-safe; never `db`) | `shared` |
+| `packages/governance` | pure WS-U AI-governed-rooms domain (browser-safe; never `db`) | `shared` |
+| `packages/lcap` | WS-R LCAP v0.2 protocol core (deterministic CBOR/CID/COSE; zero-dep core) | `shared` |
+| `packages/lcap-p2p` | WS-R optional WebRTC/IPFS transports (code-split) | `shared`, `lcap` |
+| `packages/private-p2p` | WS-S private-P2P rooms domain (DAG-CBOR + MLS/HPKE/Ed25519; code-split) | `shared` |
 
 Supporting directories: `scripts/` (the build-validation and security gates CI
 runs) and `docs/` (specification, planning, policy, per-workstream references).
@@ -167,13 +206,17 @@ block the merge.
 **Fail-closed posture:** production boot fails on missing or partial secret
 groups; the crypto feature flag withholds every Knomosis topic from every
 consumer while off; the ingestion rate limiter degrades to a stricter
-in-memory budget when Redis is unreachable; and shadow mode is lifted only by
-an explicit code change (`PWATT_V0_SHADOW_MODE`), never by configuration.
+in-memory budget when Redis is unreachable; and the §30.5 PWAtt shadow lift is a
+code-level change (`PWATT_V0_SHADOW_MODE = false`) — reverting it, or engaging the
+ranking kill switch, restores the score-blind chronological fallback.
 
 **Static gates (every PR):**
 
-- `check:no-applause` — no like/vote/karma/reaction affordances in components
-- `check:no-raw-egress` — no raw attention traces or forbidden network primitives in the signals layer
+- `check:no-applause` — no like/vote/karma/reaction affordances in components, routes, or the LCAP / private-p2p planes
+- `check:no-raw-egress` — no raw attention traces or forbidden network primitives in the signals layer (and the decentralization planes)
+- `check:neutrality` — the ten WS-I ranking-neutrality tests (the pay-to-rank gate)
+- `check:no-p2p-server-content` — a Private P2P room places no content on the server
+- `check:update-channel` — the private-mode bundle is signature + transparency-log + digest verified before activation
 - `lint:security` — `innerHTML`, `eval()`, `new Function()`, `javascript:` URLs
 - `check:workspace-deps` / `check:deps` — boundary and budget enforcement
 - `check:policy` — doctrine/policy document validation (counts, ID disjointness, severity–SLA consistency)
@@ -185,12 +228,13 @@ an explicit code change (`PWATT_V0_SHADOW_MODE`), never by configuration.
 | Property | Where |
 |----------|-------|
 | Only bucketed aggregates egress; raw traces throw before upload | `apps/web/src/signals/privacy.ts` + `check:no-raw-egress` |
-| Shadow PWAtt scores have zero distribution power | ranking-equivalence test over `apps/api/src/pwatt/shadow.ts` |
+| The chronological fallback ignores every PWAtt output (the kill switch restores the pre-§30.5 posture) | score-blind guard `apps/api/src/pwatt/shadow.ts` |
 | §5.5 weight guardrails (integer percents, sum exactly 100) | `packages/invariants/src/pwatt/profiles.ts` |
 | Anti-signals and penalties can only reduce a score | `packages/invariants/src/pwatt/penalties.ts` |
 | Knomosis events can never reach a scoring consumer | pay-to-rank firewall, `apps/api/src/events/router.ts` |
 | No code path reads the client address or location | static test (`no-client-address`) |
 | Wallet tables are unreachable from ranking context | undirected-BFS isolation test, `packages/db/src/isolation.ts` |
+| A Private P2P room places no content on the server | `check:no-p2p-server-content` + the migration-`0045` DB trigger |
 | Passwordless by construction — no password column exists | `packages/db/src/schema/` |
 
 The cryptography is validated against external vectors where they exist:
@@ -203,7 +247,7 @@ references.
 ## Testing
 
 ```sh
-pnpm test                  # Vitest — seven projects (shared, db, invariants, ranking, api, web, policy)
+pnpm test                  # Vitest — twelve projects (shared, db, invariants, ranking, ai-governance, governance, lcap, lcap-p2p, private-p2p, api, web, policy)
 pnpm test -- --coverage    # adds the 80% cross-workspace coverage gate
 pnpm test:e2e              # Playwright + axe-core (Chromium, Firefox, WebKit)
 pnpm --filter web test:e2e:bff  # authenticated BFF-in-the-loop E2E (in-memory API)
@@ -230,14 +274,21 @@ Database workflow: `pnpm db:generate` (create migrations from schema),
 ## Repository layout
 
 ```text
-apps/web/             React 19 PWA — routes, offline store, signals, push, design system
-apps/api/             Hono BFF — identity, event pipeline, PWAtt scoring, ingestion, forum + rooms
-packages/shared/      zod schemas, types, enums, constants (the wire SSOT; leaf)
-packages/db/          Drizzle ORM schema + hand-tuned SQL migrations (PostgreSQL)
-packages/invariants/  pure invariant + scoring mathematics (PWAtt v0/v1, guardrails)
-scripts/              build validation + the CI security/doctrine gates
-docs/                 SPEC.md, planning/ (~971 tasks), policy/ (9 documents), per-WS references
-.github/workflows/    CI (8 jobs), CodeQL, Dependabot auto-merge
+apps/web/                React 19 PWA — routes, offline store, signals, push, design system, LCAP + private-p2p clients
+apps/api/                Hono BFF — identity, events, PWAtt, ingestion, forum + rooms, ranking, AI/room governance, LCAP server
+apps/courier/            native Android Capacitor courier shell (serves the apps/web build; no web fork)
+packages/shared/         zod schemas, types, enums, constants (the wire SSOT; leaf)
+packages/db/             Drizzle ORM schema + hand-tuned SQL migrations (PostgreSQL)
+packages/invariants/     pure invariant + scoring mathematics (PWAtt v0/v1, guardrails)
+packages/ranking/        pure WS-I ranking domain (no I/O; never @licio/db)
+packages/ai-governance/  pure WS-K AI-governance domain (browser-safe; never @licio/db)
+packages/governance/     pure WS-U AI-governed-rooms domain (browser-safe; never @licio/db)
+packages/lcap/           WS-R LCAP v0.2 protocol core (deterministic CBOR/CID/COSE; zero-dep core)
+packages/lcap-p2p/       WS-R optional WebRTC/IPFS transports (code-split)
+packages/private-p2p/    WS-S private-P2P rooms domain (DAG-CBOR + MLS/HPKE/Ed25519; code-split)
+scripts/                 build validation + the CI security/doctrine gates
+docs/                    SPEC.md, planning/ (~992 tasks), policy/ (9 documents), per-WS references
+.github/workflows/       CI (8 jobs), CodeQL, Dependabot auto-merge
 ```
 
 Per-file purpose lives in each file's leading comment block.
@@ -259,9 +310,9 @@ licenses are checked for AGPL compatibility at SBOM time (`pnpm sbom`).
 ## Planning & design
 
 - **Specification:** [`docs/SPEC.md`](docs/SPEC.md) — the canonical design spec (v0.7).
-- **Implementation plan:** [`docs/planning/00-index.md`](docs/planning/00-index.md) — 22 workstream documents (WS-0 – WS-T; WS-R/WS-S are post-M3 offline/private extensions, WS-T remodels conversation as comments, and the cross-cutting [WS-U AI-governed-rooms redesign](docs/planning/22-ai-governed-rooms.md) re-scopes WS-K and amends WS-J/L/M with 49 decomposed cards), ~971 atomic tasks.
+- **Implementation plan:** [`docs/planning/00-index.md`](docs/planning/00-index.md) (`v4.8`) — 21 planning documents covering 22 workstreams (WS-0 and WS-A – WS-U; WS-R and WS-S are unified in [`19-decentralized-data-plane.md`](docs/planning/19-decentralized-data-plane.md) as the post-M3 offline/private extensions, WS-T remodels conversation as comments, and the cross-cutting [WS-U AI-governed-rooms redesign](docs/planning/22-ai-governed-rooms.md) re-scopes WS-K and amends WS-J/L/M with 49 decomposed cards), ~992 atomic tasks.
 - **Extension specs (post-M3):** [`docs/OFFLINE_SPEC.md`](docs/OFFLINE_SPEC.md) (LCAP v0.2 offline content availability — WS-R; its **entire pure-protocol core** ships as the zero-dependency [`@licio/lcap`](docs/lcap/README.md) package: deterministic CBOR/CIDs/COSE-ES256 proofs, the identity chain, the record graph, blocks/chunking/compression, the packfile/`.licio-bundle` format, the anti-starvation lane scheduler, the sync-decision plane (pulse/exchange/reconciliation/`minimalClosure`), the `validate()` trust projection, RFC 9162 Merkle checkpoints, liveness/receipts, and conflict dispatch.  The **I/O integration has since shipped**: the server ingestion engine + the §29 sync routes (pack import, `/pulse`, `/exchange`, checkpoint/inclusion/consistency reads, bundle import/export) with server-issued signed checkpoints + receipts, the `lcap_v2` IndexedDB client store + the C0-first service-worker sync hooks, the transport plane over one seam (HTTPS / WebTransport / courier / WebRTC / IPFS gateway / QR) — now DRIVEN LIVE (the LCAP P2P transport over a real WebRTC channel with ≤16 KiB SCTP fragmentation; the native courier driven end-to-end with Wi-Fi-Direct/Bluetooth/USB plugins re-verified on emulated radios), the cross-plane bundle bridge (a private-p2p ciphertext riding inside an LCAP `.licio-bundle`, never decrypted), the public-block (re)publisher wired to live takedown state (Gate-19), the browser↔Node crypto-interop suite, the §36 acceptance-gate checklist, and the native Android Capacitor courier shell.  The remaining cards need radio-capable Android hardware (field confirmation on physical phones) or the live two-browser convergence E2E) and [`docs/PRIVATE_SPEC.md`](docs/PRIVATE_SPEC.md) (E2EE private P2P rooms — WS-S; its **foundation has shipped** as the browser-safe [`@licio/private-p2p`](docs/private-p2p/README.md) package + the server non-storage contract: the room-class model (the three §4.1 axes + coherence), the zero-dependency canonical DAG-CBOR encoder + the strict §10/§13/§19 private schemas, the §8.2 stub/rendezvous column allowlist, the submission/contribution/feed rejection guards, the retriever/search/event-pipeline exclusion, the seven §23.10 CI gates, and the honest-limits + Appendix E privacy-matrix copy SSOT — so a partially-built P2P client can never write server content; the crypto/reducer/sync plane (MLS/HPKE, the Lamport reducer, the transport-independent sync core) and the live private-p2p WebRTC carrier, the hardened verify-before-unlock update channel, the functional server→private migration, and the WS-S.11 audit suite have since shipped — the live two-browser create→invite→join→connect→converge E2E is the remaining slice).
-- **Completed-workstream references:** [`docs/design-system/`](docs/design-system/README.md), [`docs/pwa-client/`](docs/pwa-client/README.md), [`docs/identity/`](docs/identity/README.md), [`docs/events/`](docs/events/README.md), [`docs/ingestion/`](docs/ingestion/README.md), [`docs/forum/`](docs/forum/README.md), [`docs/invariants/`](docs/invariants/README.md), [`docs/ranking/`](docs/ranking/README.md), [`docs/trust-safety/`](docs/trust-safety/README.md), [`docs/ai-governance/`](docs/ai-governance/README.md), and the policy corpus under [`docs/policy/`](docs/policy/).
+- **Completed-workstream references:** [`docs/design-system/`](docs/design-system/README.md), [`docs/pwa-client/`](docs/pwa-client/README.md), [`docs/identity/`](docs/identity/README.md), [`docs/events/`](docs/events/README.md), [`docs/ingestion/`](docs/ingestion/README.md), [`docs/forum/`](docs/forum/README.md), [`docs/invariants/`](docs/invariants/README.md), [`docs/ranking/`](docs/ranking/README.md), [`docs/trust-safety/`](docs/trust-safety/README.md), [`docs/ai-governance/`](docs/ai-governance/README.md), [`docs/governance/`](docs/governance/README.md), and the policy corpus under [`docs/policy/`](docs/policy/).
 - **Conventions:** [`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md) (kept byte-identical).
 
 ## Security
