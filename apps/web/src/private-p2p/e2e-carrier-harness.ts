@@ -12,6 +12,10 @@
 // it is tree-shaken out of the production build.
 
 export { connectPrivatePeer } from './connect-peer.js';
+// `PrivateSyncSession` drives the §15.7 op-exchange over the carrier's `PeerChannel`; its
+// `@licio/private-p2p` imports are type-only/erased, so re-exporting it keeps
+// `check:private-p2p-split` green and the heavy chunk out of the initial bundle.
+export { PrivateSyncSession, type SyncCodec } from './sync-session.js';
 
 /** Dynamically load the code-split `@licio/private-p2p` chunk for the E2E harness. */
 export function loadP2p(): Promise<typeof import('@licio/private-p2p')> {

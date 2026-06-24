@@ -355,8 +355,15 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
       selfSigningKey: devB.privateKey,
       resolveDevice: () => undefined, // 'founder-dev' is unknown to bob ⇒ reject
     });
-    await expect(Promise.all([aliceConnect, bobConnect])).rejects.toThrow(
-      /handshake rejected|unknown_device|timed out|aborted/,
+    // Bob's `resolveDevice` cannot resolve founder-dev, so his membership verification of alice
+    // FAILS CLOSED with a typed handshake rejection (NOT a generic timeout/abort, which would
+    // let this pass even if verification never ran).  Alice legitimately verifies bob (a real
+    // device-b) and resolves — but to a peer that has already torn the link down.
+    const settled = await Promise.allSettled([aliceConnect, bobConnect]);
+    const bobResult = settled[1];
+    expect(bobResult.status).toBe('rejected');
+    expect(String((bobResult as PromiseRejectedResult).reason)).toMatch(
+      /handshake rejected: unknown_device|handshake_unknown_device/,
     );
   });
 
