@@ -68,6 +68,34 @@ describe('WS-S.9 reauthorIntoPrivateRoom', () => {
     expect(bodies).toContain('The vote passed 7 to 2.');
   });
 
+  it('preserves reply structure: a reply is re-authored UNDER its remapped parent', async () => {
+    const session = await freshSession();
+    const exp: MigrationExportResponse = {
+      ...exportFixture(),
+      items: [
+        { id: 'story-1', kind: 'story', title: 'Reservoir bond', threadRef: 'thread-1' },
+        { id: 'parent-c', kind: 'contribution', body: 'Top-level take.', threadRef: 'thread-1' },
+        {
+          id: 'reply-c',
+          kind: 'contribution',
+          body: 'A reply to it.',
+          threadRef: 'thread-1',
+          parentRef: 'parent-c',
+        },
+      ],
+    };
+    const result = await reauthorIntoPrivateRoom({ session, export: exp, mode: 'full' });
+    expect(result.contributions).toBe(2);
+    const byBody = new Map(
+      [...session.state().contributions.values()].map((c) => [c.bodyMarkdownLite, c]),
+    );
+    const parent = byBody.get('Top-level take.');
+    const reply = byBody.get('A reply to it.');
+    expect(parent).toBeDefined();
+    // The reply points at the PARENT's NEW id (structure preserved, not flattened top-level).
+    expect(reply?.parentContributionId).toBe(parent?.contributionId);
+  });
+
   it('fresh import authors NOTHING (best privacy going forward)', async () => {
     const session = await freshSession();
     const result = await reauthorIntoPrivateRoom({

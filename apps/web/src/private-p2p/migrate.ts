@@ -74,13 +74,11 @@ export interface ReauthorResult {
  * (`destinationRoomId`) + the source id, formatted as a v4-shaped UUID.  Pure
  * (no `crypto.randomUUID`), so it is deterministic across attempts.
  */
-async function deterministicThreadId(
-  destinationRoomId: string,
-  sourceStoryId: string,
-): Promise<string> {
-  const data = new TextEncoder().encode(
-    `licio-migrate-thread:${destinationRoomId}:${sourceStoryId}`,
-  );
+/** A deterministic v4-shaped UUID from a namespaced key — so a re-run (after a crash, manifest
+ *  lost) reproduces the SAME id, which lets the live reduced state act as the idempotency SSOT
+ *  AND lets a reply remap its parent to the parent's stable new id without a persisted map. */
+async function deterministicUuid(...parts: readonly string[]): Promise<string> {
+  const data = new TextEncoder().encode(parts.join(':'));
   const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', data));
   // Take the first 16 bytes and force the version (4) + variant (8/9/a/b) nibbles
   // so the result is a structurally valid v4-shaped UUID the schema layer accepts.
@@ -91,6 +89,15 @@ async function deterministicThreadId(
   for (const byte of bytes) h += byte.toString(16).padStart(2, '0');
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
 }
+
+const deterministicThreadId = (destinationRoomId: string, sourceStoryId: string): Promise<string> =>
+  deterministicUuid('licio-migrate-thread', destinationRoomId, sourceStoryId);
+
+const deterministicContributionId = (
+  destinationRoomId: string,
+  sourceContributionId: string,
+): Promise<string> =>
+  deterministicUuid('licio-migrate-contribution', destinationRoomId, sourceContributionId);
 
 /**
  * Phase 3 — plan the import for `mode` over the exported items, then re-author
@@ -164,6 +171,19 @@ export async function reauthorIntoPrivateRoom(params: {
 
   // Then contributions, into the remapped thread.  Redacted/fresh plans carry no
   // bodies, so a body-less contribution is skipped (nothing to re-author).
+  //
+  // Preserve the §13.5 reply structure: map each source contribution id → its DETERMINISTIC
+  // new id, and re-author each reply UNDER its remapped parent (the export lists contributions
+  // in CAUSAL order, so a parent precedes its replies and already exists in reduced state when
+  // the reply lands).  A reply lands top-level only if its parent is not among the migrated
+  // (body-carrying) set — never a dangling parent ref.
+  const contribRemap = new Map<string, string>();
+  const willAuthor = new Set<string>();
+  for (const item of plan.items) {
+    if (item.kind !== 'contribution') continue;
+    contribRemap.set(item.id, await deterministicContributionId(destinationRoomId, item.id));
+    if (item.body !== undefined && item.body.length > 0) willAuthor.add(item.id);
+  }
   for (const item of plan.items) {
     if (item.kind !== 'contribution') continue;
     if (item.body === undefined || item.body.length === 0) continue;
@@ -174,7 +194,17 @@ export async function reauthorIntoPrivateRoom(params: {
       skipped += 1;
       continue;
     }
-    await params.session.postComment({ threadId, body: item.body });
+    const contributionId = contribRemap.get(item.id);
+    const parentContributionId =
+      item.parentRef !== undefined && willAuthor.has(item.parentRef)
+        ? contribRemap.get(item.parentRef)
+        : undefined;
+    await params.session.postComment({
+      threadId,
+      body: item.body,
+      ...(contributionId !== undefined ? { contributionId } : {}),
+      ...(parentContributionId !== undefined ? { parentContributionId } : {}),
+    });
     recordAuthoredItems(destinationRoomId, [item.id]);
     contributions += 1;
   }

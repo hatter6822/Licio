@@ -912,9 +912,16 @@ export class PrivateRoomSession {
     return storyId;
   }
 
-  /** Post a comment to a thread. */
-  async postComment(input: { threadId: string; body: string }): Promise<string> {
-    const contributionId = globalThis.crypto.randomUUID();
+  /** Post a comment to a thread.  `contributionId` lets a caller (the migration import) pass a
+   *  DETERMINISTIC id so re-authoring is idempotent and replies can remap their parent;
+   *  `parentContributionId` preserves nested-reply structure (§13.5 `parent_contribution_id`). */
+  async postComment(input: {
+    threadId: string;
+    body: string;
+    contributionId?: string;
+    parentContributionId?: string;
+  }): Promise<string> {
+    const contributionId = input.contributionId ?? globalThis.crypto.randomUUID();
     await this.authorOp({
       type: 'contribution.create',
       contribution_id: contributionId,
@@ -922,6 +929,9 @@ export class PrivateRoomSession {
       contribution_type: 'comment',
       body_markdown_lite: input.body,
       client_draft_id: globalThis.crypto.randomUUID(),
+      ...(input.parentContributionId !== undefined
+        ? { parent_contribution_id: input.parentContributionId }
+        : {}),
     });
     return contributionId;
   }
