@@ -26,6 +26,40 @@ const announcementCiphertextSchema = z.string().min(1).max(16_384);
 /** An opaque sealed signaling blob (SDP/ICE, E2E-encrypted) — bounded ≤ 64 KiB. */
 const signalCiphertextSchema = z.string().min(1).max(65_536);
 
+/**
+ * Tier-2 per-announcer cap (docs/private-p2p/TIER2-RENDEZVOUS-CAP.md): the OPTIONAL
+ * anonymous-credential proof. When present, `peer_blind_id` IS the base64url BBS
+ * pseudonym `nym` (the dedup key); the server verifies the proof binds `nym` to
+ * `(room_blind_id, epoch, bucket)` under the per-epoch issuer key, then keys the
+ * presence slot by it — capping a device to one slot per `(epoch, bucket)`. All fields
+ * are opaque pseudonymous bytes; none is persisted (the proof is verified + discarded).
+ */
+const capSchema = z
+  .object({
+    /** The BBS pseudonym-bound proof (opaque, bounded ≤ 4 KiB). */
+    proof: z
+      .string()
+      .min(1)
+      .max(4096)
+      .regex(/^[A-Za-z0-9_-]+$/, 'base64url'),
+    /** The per-epoch issuer public key (base64url G2, ≤ 256). */
+    issuer_pubkey: z
+      .string()
+      .min(1)
+      .max(256)
+      .regex(/^[A-Za-z0-9_-]+$/, 'base64url'),
+    /** The room epoch id (an opaque pseudonymous counter, bounded). */
+    epoch: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[A-Za-z0-9_.-]+$/, 'epoch id'),
+    /** The time bucket index (server-validated against its clock), or -1 for per-epoch. */
+    bucket: z.number().int().min(-1).max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type CapProof = z.infer<typeof capSchema>;
+
 /** §15.3 announce: store a presence record under a room blind id. */
 export const announceRequestSchema = z
   .object({
@@ -35,6 +69,8 @@ export const announceRequestSchema = z
     /** Absolute ms expiry; AAD-bound in the sealed announcement, so the server
      *  stores it VERBATIM and instead REJECTS one beyond `now + maxTtlMs` (§15.3.2). */
     expires_at: z.number().int().positive(),
+    /** Tier-2 cap proof (optional; absent ⇒ Tier-1 sample-poll, a strict superset). */
+    cap: capSchema.optional(),
   })
   .strict();
 export type AnnounceRequest = z.infer<typeof announceRequestSchema>;

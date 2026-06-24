@@ -71,6 +71,12 @@ const ALLOWED_WORKSPACE_DEPS: Record<string, string[]> = {
     // (`check:lcap-p2p-split`) constrain only apps/web's INITIAL bundle; a server-side
     // static import is fine — apps/api is not bundle-budgeted.
     '@licio/lcap-p2p',
+    // WS-S Tier-2 (rendezvous cap): the server-side BLINDNESS-PRESERVING presence verify
+    // binding imports ONLY `@licio/private-p2p/rendezvous-cap` (the BBS verify + context
+    // derivation — not the room engine/MLS).  Verifying a ZK proof reveals nothing beyond
+    // the pseudonym the server already stores (§15.3.1 preserved).  Server-side static
+    // import; apps/api is not bundle-budgeted.
+    '@licio/private-p2p',
   ],
 };
 

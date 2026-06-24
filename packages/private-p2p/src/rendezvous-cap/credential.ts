@@ -28,7 +28,15 @@ import {
   verifyWithPseudonymPrepared,
 } from '../crypto/bbs/pseudonym.js';
 import { type BbsKeyPair, bbsKeyGen, signatureFromBytes } from '../crypto/bbs/signature.js';
-import { concatBytes, G1, type G1Point, i2osp, messageToScalar } from '../crypto/bbs/suite.js';
+import {
+  concatBytes,
+  G1,
+  type G1Point,
+  G2,
+  type G2Point,
+  i2osp,
+  messageToScalar,
+} from '../crypto/bbs/suite.js';
 import { randomBytes } from '../crypto/runtime.js';
 
 /** The fixed index of `nid` in the one-committed-message rendezvous credential. */
@@ -178,3 +186,18 @@ export function pseudonymFromBytes(bytes: Uint8Array): G1Point {
   p.assertValidity();
   return p;
 }
+
+/** The 96-byte wire encoding of a per-epoch issuer public key (BBS G2). */
+export function issuerKeyToBytes(pk: G2Point): Uint8Array {
+  return pk.toBytes();
+}
+
+/** Parse a 96-byte issuer public key; throws on a malformed/identity encoding. */
+export function issuerKeyFromBytes(bytes: Uint8Array): G2Point {
+  const pk = G2.fromBytes(bytes);
+  if (pk.is0()) throw new Error('rendezvous-cap: identity issuer key');
+  pk.assertValidity();
+  return pk;
+}
+
+export type { G2Point };

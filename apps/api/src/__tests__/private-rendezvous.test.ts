@@ -137,6 +137,8 @@ describe('RendezvousService — signals (§15.4)', () => {
     expect(m.signalsDrained).toBe(1);
     expect(Object.keys(m).sort()).toStrictEqual([
       'announces',
+      'capAccepted',
+      'capRejected',
       'polls',
       'signalsDrained',
       'signalsPosted',
@@ -192,7 +194,7 @@ describe('routes — shape validation + bounds', () => {
   it('announce → 202 then poll → 200 with the record', async () => {
     const a = await post('/announce', announceBody());
     expect(a.status).toBe(202);
-    expect(await a.json()).toStrictEqual({ stored: true });
+    expect(await a.json()).toStrictEqual({ stored: true, mode: 'tier1' });
 
     const p = await post('/poll', { room_blind_id: ROOM_BLIND });
     expect(p.status).toBe(200);

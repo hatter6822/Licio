@@ -8,6 +8,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./rendezvous-cap": {
+      "types": "./src/rendezvous-cap/index.ts",
+      "default": "./src/rendezvous-cap/index.ts"
     }
   },
   "scripts": {

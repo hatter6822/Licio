@@ -29,7 +29,8 @@ describe('Blind BBS — commitment proof of knowledge', () => {
     expect(verifyCommitment(commitmentWithProof, 1)).toBe(true);
     // a flipped byte breaks the proof
     const tampered = Uint8Array.from(commitmentWithProof);
-    tampered[tampered.length - 1] ^= 0x01;
+    const li = tampered.length - 1;
+    tampered[li] = (tampered[li] ?? 0) ^ 0x01;
     expect(verifyCommitment(tampered, 1)).toBe(false);
     // wrong committed-count is rejected (length mismatch)
     expect(verifyCommitment(commitmentWithProof, 2)).toBe(false);
@@ -78,7 +79,8 @@ describe('Blind BBS — issuance composes with the vetted base (the anchor)', ()
     expect(() => blindSign(issuer, commitmentWithProof, 1, [], enc('e'))).not.toThrow();
     // a forged commitment (bad PoK) is refused
     const bad = Uint8Array.from(commitmentWithProof);
-    bad[bad.length - 1] ^= 0x01;
+    const bi = bad.length - 1;
+    bad[bi] = (bad[bi] ?? 0) ^ 0x01;
     expect(() => blindSign(issuer, bad, 1, [], enc('e'))).toThrow();
   });
 });

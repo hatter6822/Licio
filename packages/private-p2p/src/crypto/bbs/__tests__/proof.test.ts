@@ -72,8 +72,8 @@ function checkFixture(fx: ProofFixture): void {
 describe('BBS ProofGen/ProofVerify — vector-pinned', () => {
   it('proof001 — all messages disclosed (U=0)', () => {
     // also pin the mocked random scalars themselves
-    const tr = proof001.trace.random_scalars as Record<string, string>;
-    const expected = [tr.r1, tr.r2, tr.e_tilde, tr.r1_tilde, tr.r3_tilde];
+    const tr = proof001.trace.random_scalars as unknown as Record<string, string>;
+    const expected = [tr['r1'], tr['r2'], tr['e_tilde'], tr['r1_tilde'], tr['r3_tilde']];
     const got = mock(5).map((s) =>
       hex(Uint8Array.from(Buffer.from(s.toString(16).padStart(64, '0'), 'hex'))),
     );
