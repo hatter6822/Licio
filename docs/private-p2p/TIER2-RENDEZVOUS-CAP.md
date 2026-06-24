@@ -74,15 +74,28 @@ rides the §14.3 op log with a MINIMAL converged footprint:
   `rendezvousIssuances()` so the carrier drives it over the live engine. All convergent +
   authority-tested (a non-admin issue is rejected; the fold is order-independent).
 
-**Remaining: the apps/web CARRIER hookup only** — a thin transport-wiring slice now that the
-engine API is complete: on room load the carrier authors a `rendezvous.request` (the member's
-commitment) and, if admin, periodically authors `rendezvous.issue` from `rendezvousCommitments()`;
-each device runs `installFromIssuances(rendezvousIssuances())`; and `connect-peer.ts` builds the
-announce's `cap` fields from the member + applies `filterVerifiedPresence` on poll, retrying
-Tier-1 on rejection (§6.10 / §8). Best landed + validated with the live WebRTC carrier + the
-BFF/E2E harness (it is transport plumbing, not new crypto). Until it lands, clients announce
-Tier-1 and the server runs Tier-1 (a strict superset) — the cap activates per-room once the
-carrier drives the coordinator.
+**The apps/web CARRIER hookup is also SHIPPED** — the cap now runs in the live room:
+- The §15.3 rendezvous announcement carries an OPTIONAL `cap` ({proof, pseudonym}) sealed
+  INSIDE the announcement (`sync/rendezvous.ts`), so only a member who opens it sees the cap;
+  the relay never does. `buildAnnouncementCap`/`verifyAnnouncementCap` are the carrier glue
+  (epoch + bucket come from the record context, so announce + verify agree by construction).
+- `connect-peer.ts` takes optional `rendezvousCap` hooks — the announce seals the cap, and the
+  poll SKIPS any opened announcement whose cap is present-but-invalid (a fake flood record) while
+  a cap-less peer rides Tier-1 (the §15.5 handshake remains the membership auth).
+- `RendezvousCapManager` (apps/web) loads the `rendezvous-cap` subpath LAZILY (split-gate clean),
+  holds the device's `RendezvousMember` (nid persisted) + the admin's issuer SEED (persisted;
+  `RendezvousIssuer.fromSeed` derives a STABLE per-epoch issuer key), and drives publish →
+  install → issue over the engine reads. `PrivateRoomSession.syncCap` advances the cap after
+  every ingest + before each dial (connect AND mesh re-dial) and passes the hooks into
+  `connectPrivatePeer` — fail-open to Tier-1 throughout. Proven end-to-end: a real session
+  authors its `rendezvous.request` on ingest (folds into device state), idempotently.
+
+**Remaining (residual): hardening + a live-browser E2E** — move the nid/issuer-seed persistence
+from localStorage to the encrypted IndexedDB store; drive enrollment continuously during live
+sync (not only on connect/ingest); and confirm the cap on a two-browser WebRTC convergence run
+with a flood adversary. The server-side enforcement remains an available second layer (the
+announce can additionally carry the §6.7 server `cap` fields). Until then, clients ride Tier-1
+where unenrolled and the server runs Tier-1 (a strict superset).
 This slice modifies the security-critical reducer/op model, so it is scoped as its own
 focused pass (the crypto + server enforcement + client dedup + session it builds on are all
 shipped + tested).
