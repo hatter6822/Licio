@@ -48,14 +48,31 @@ fresh pseudonym ⇒ fresh slot), and the per-`(room, epoch)` issuer key is first
 (verify runs against the pin, so a self-issued credential fails; a wrong pin only degrades
 to Tier-1, §8 net-zero).
 
-**Remaining: the CLIENT wiring** — at room join the device generates `nid` + a blind
-credential request; the per-epoch committing admin generates the BBS issuer keypair, issues
-each member a credential, and distributes the issuer public key over the MLS-protected
-channel (issuance riding the §6.2 MLS commit); the announce flow builds the Tier-2 `cap`
-fields via `proveRendezvousPresence` and retries WITHOUT a proof on a `cap_invalid`/`bucket`
-rejection (the §6.10 / §8 Tier-1 fall-back). Until that lands, clients announce Tier-1 and
-the server runs Tier-1 (a strict superset) — the cap activates per-room once members carry
-credentials.
+**The CLIENT-SIDE cap is also SHIPPED** (`src/rendezvous-cap`, 15 tests). Two pieces:
+- **Client-side verified-dedup** (`poll-filter.ts`, §6.8) — `filterVerifiedPresence(...)`: a
+  polling member keeps ONLY records whose proof verifies under the room issuer key, deduped
+  by the verified pseudonym, bounded to its OWN clock's bucket. The relay is NOT trusted for
+  the cap — the member enforces it locally, so even a malicious relay cannot crowd a client's
+  view or make it connect to an unverifiable record (the "serverless cap"). Soundness tested
+  against the real slot-multiplication attack (a real proof re-presented with fake pseudonyms
+  fails at *verification*, not the parser).
+- **Session orchestration** (`session.ts`) — `RendezvousIssuer` (the per-epoch admin:
+  blind-signs requests, exposes the public key) + `RendezvousMember` (a device: holds `nid`,
+  begins/completes enrollment, builds announces, exposes the issuer key for filtering). The
+  device/admin lifecycle the live room flow plugs into.
+
+**Remaining: the MLS DISTRIBUTION + carrier wiring** — the one deep piece left is threading
+the session into the live E2EE room engine: a credential-request channel (device → admin,
+e.g. carried in `member.add` / a `rendezvous.request` op) and a credential-distribution op
+(`rendezvous.cap`, sealed under the epoch key, carrying the issuer public key + each device's
+blind signature) folded by the §14.3 reducer with the authority check; then the apps/web
+carrier (`rendezvous-client.ts` / `connect-peer.ts`) builds the `cap` fields from the member
+session on announce and applies `filterVerifiedPresence` on poll, retrying Tier-1 on
+rejection (§6.10 / §8). Until that lands, clients announce Tier-1 and the server runs Tier-1
+(a strict superset) — the cap activates per-room once the engine distributes credentials.
+This slice modifies the security-critical reducer/op model, so it is scoped as its own
+focused pass (the crypto + server enforcement + client dedup + session it builds on are all
+shipped + tested).
 
 ---
 
