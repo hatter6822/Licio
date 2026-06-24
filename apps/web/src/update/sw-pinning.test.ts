@@ -3,7 +3,7 @@
 // WS-S.10.2b — SW-pinning + rotation + bundle-discovery client tests.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { discoverPrivateBundleUrl } from './bundle-digest.js';
+import { discoverPrivateBundleUrl, discoverPrivateBundleUrlInHtml } from './bundle-digest.js';
 import { withRotatedSigners } from './config.js';
 import { resetPrivateBundleGate } from './gate.js';
 import {
@@ -51,6 +51,21 @@ describe('discoverPrivateBundleUrl', () => {
     expect(discoverPrivateBundleUrl(document)).toBeUndefined();
   });
 
+  it('discoverPrivateBundleUrlInHtml parses the PENDING chunk from a fetched index.html', () => {
+    const html =
+      '<!doctype html><html><head>' +
+      '<link rel="modulepreload" href="/assets/private-p2p-NEWHASH.js">' +
+      '<script type="module" src="/assets/index-xyz.js"></script>' +
+      '</head><body></body></html>';
+    expect(discoverPrivateBundleUrlInHtml(html)).toContain('private-p2p-NEWHASH.js');
+  });
+
+  it('discoverPrivateBundleUrlInHtml returns undefined when the chunk is absent', () => {
+    expect(
+      discoverPrivateBundleUrlInHtml('<!doctype html><html><head></head></html>'),
+    ).toBeUndefined();
+  });
+
   it('ignores a cross-origin script that matches the name', () => {
     const script = document.createElement('script');
     script.type = 'module';
@@ -64,9 +79,31 @@ describe('gateServiceWorkerActivation', () => {
   it('refuses activation on an untrusted bundle (empty signer set ⇒ lock)', async () => {
     const decision = await gateServiceWorkerActivation({
       config: { trustedSignerPublicKeys: [], logPublicKey: '' },
-      // No bundle resolvable ⇒ digest cannot be proven ⇒ lock.
-      resolveBundleUrl: () => undefined,
+      // No PENDING bundle resolvable ⇒ digest cannot be proven ⇒ lock.
+      resolvePendingBundleUrl: () => Promise.resolve(undefined),
     });
+    expect(decision.allowActivate).toBe(false);
+  });
+
+  it('verifies the PENDING (waiting-worker) bundle, NOT the running DOM chunk', async () => {
+    // The fix for the P1: a trusted CURRENT build must never wave through an unverified update.
+    // The SW gate must resolve the PENDING bundle (the build the waiting worker serves) and must
+    // NOT fall back to the running chunk — even when a running resolver is also provided.
+    let pendingResolved = false;
+    let runningResolved = false;
+    const decision = await gateServiceWorkerActivation({
+      config: { trustedSignerPublicKeys: [], logPublicKey: '' },
+      resolvePendingBundleUrl: () => {
+        pendingResolved = true;
+        return Promise.resolve(undefined);
+      },
+      resolveBundleUrl: () => {
+        runningResolved = true;
+        return 'https://localhost/assets/private-p2p-RUNNING.js';
+      },
+    });
+    expect(pendingResolved).toBe(true); // the gate verified the PENDING build…
+    expect(runningResolved).toBe(false); // …and never the already-running chunk
     expect(decision.allowActivate).toBe(false);
   });
 });
@@ -121,10 +158,10 @@ describe('installSwUpdatePinning (SW-update event wiring)', () => {
       onActivate,
       onLocked,
       hasPrivateRooms: () => true,
-      // Empty signer set + no resolvable bundle ⇒ the gate locks.
+      // Empty signer set + no resolvable PENDING bundle ⇒ the gate locks.
       deps: {
         config: { trustedSignerPublicKeys: [], logPublicKey: '' },
-        resolveBundleUrl: () => undefined,
+        resolvePendingBundleUrl: () => Promise.resolve(undefined),
       },
     });
     window.dispatchEvent(new CustomEvent('test-sw-update-locked', { detail: mkReg() }));

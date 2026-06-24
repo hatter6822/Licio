@@ -26,7 +26,11 @@ import {
   verifyUpdateManifest,
 } from '@licio/shared';
 import { recordTrustedSequence } from './anti-rollback.js';
-import { computeRunningBundleDigest, discoverPrivateBundleUrl } from './bundle-digest.js';
+import {
+  computeRunningBundleDigest,
+  discoverPrivateBundleUrl,
+  fetchPendingPrivateBundleUrl,
+} from './bundle-digest.js';
 import {
   loadUpdateChannelConfig,
   UPDATE_MANIFEST_PATH,
@@ -89,8 +93,11 @@ function verdictToState(verdict: TrustedBundleVerdict): PrivateBundleGateState {
 export interface AssertTrustedDeps {
   readonly config?: UpdateChannelConfig;
   readonly fetchImpl?: typeof fetch;
-  /** Resolve the running private-mode chunk URL (default: DOM discovery). */
+  /** Resolve the RUNNING private-mode chunk URL (default: DOM discovery). */
   readonly resolveBundleUrl?: () => string | undefined;
+  /** Resolve the PENDING (waiting-worker) private-mode chunk URL for the SW-activation gate
+   *  (default: fetch + parse the latest `index.html`). */
+  readonly resolvePendingBundleUrl?: () => Promise<string | undefined>;
 }
 
 async function fetchManifest(fetchImpl: typeof fetch): Promise<unknown> {
@@ -103,6 +110,59 @@ async function fetchManifest(fetchImpl: typeof fetch): Promise<unknown> {
 }
 
 /**
+ * Resolve the target chunk's digest, fetch the signed manifest, run the pure verifier, and
+ * publish the gate state.  `pending: false` verifies the RUNNING bundle (DOM-discovered,
+ * `force-cache`) — the bootstrap path; `pending: true` verifies the WAITING worker's bundle
+ * (latest `index.html` → chunk, `no-store`) — the SW-activation path.  Fail-closed at every step.
+ *
+ * Only an ACTIVATED (running) trusted build records the anti-rollback floor: recording a
+ * not-yet-activated PENDING build's sequence would falsely `stale`-lock the still-current build
+ * if the activation never happens (the user keeps the verified controller).
+ */
+async function runVerification(
+  deps: AssertTrustedDeps,
+  pending: boolean,
+): Promise<TrustedBundleVerdict> {
+  const config = deps.config ?? loadUpdateChannelConfig();
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  let verdict: TrustedBundleVerdict;
+  try {
+    const bundleUrl = pending
+      ? await (deps.resolvePendingBundleUrl ?? (() => fetchPendingPrivateBundleUrl(fetchImpl)))()
+      : (deps.resolveBundleUrl ?? (() => discoverPrivateBundleUrl()))();
+    if (!bundleUrl) {
+      // Cannot locate the target chunk ⇒ cannot prove its digest ⇒ lock.
+      verdict = { trusted: false, reason: 'digest_mismatch' };
+    } else {
+      const bundleDigest = await computeRunningBundleDigest(
+        bundleUrl,
+        fetchImpl,
+        pending ? 'no-store' : 'force-cache',
+      );
+      const manifest = await fetchManifest(fetchImpl);
+      verdict = await verifyUpdateManifest({
+        manifest,
+        runningBundleDigest: bundleDigest,
+        trustedSignerPublicKeys: config.trustedSignerPublicKeys,
+        logPublicKey: config.logPublicKey,
+        ...(config.lastTrustedSequence !== undefined
+          ? { lastTrustedSequence: config.lastTrustedSequence }
+          : {}),
+      });
+    }
+  } catch {
+    // A network/parse/crypto failure is UNTRUSTED, never a soft pass (§20.6
+    // "a log/network read failure is untrusted (fail-closed)").
+    verdict = { trusted: false, reason: 'not_in_transparency_log' };
+  }
+  // Anti-rollback (§27.5): persist the trusted release sequence as the new floor (monotonic) so a
+  // later validly-signed OLDER bundle is `stale` — RUNNING builds only (see the doc above).
+  if (verdict.trusted && !pending) recordTrustedSequence(verdict.releaseSequence);
+  publish(verdictToState(verdict));
+  return verdict;
+}
+
+/**
  * Verify the running private-mode bundle and publish the gate state.  Pure
  * orchestration over the shared verifier; fail-closed at every step.  Memoized
  * per process (call `resetPrivateBundleGate()` to force a re-check, e.g. after a
@@ -112,46 +172,27 @@ export async function assertPrivateBundleTrusted(
   deps: AssertTrustedDeps = {},
 ): Promise<TrustedBundleVerdict> {
   if (inflight) return inflight;
-  const run = (async (): Promise<TrustedBundleVerdict> => {
-    const config = deps.config ?? loadUpdateChannelConfig();
-    const fetchImpl = deps.fetchImpl ?? fetch;
-    const resolveUrl = deps.resolveBundleUrl ?? (() => discoverPrivateBundleUrl());
-    let verdict: TrustedBundleVerdict;
-    try {
-      const bundleUrl = resolveUrl();
-      if (!bundleUrl) {
-        // Cannot locate the running chunk ⇒ cannot prove its digest ⇒ lock.
-        verdict = { trusted: false, reason: 'digest_mismatch' };
-      } else {
-        const runningBundleDigest = await computeRunningBundleDigest(bundleUrl, fetchImpl);
-        const manifest = await fetchManifest(fetchImpl);
-        verdict = await verifyUpdateManifest({
-          manifest,
-          runningBundleDigest,
-          trustedSignerPublicKeys: config.trustedSignerPublicKeys,
-          logPublicKey: config.logPublicKey,
-          ...(config.lastTrustedSequence !== undefined
-            ? { lastTrustedSequence: config.lastTrustedSequence }
-            : {}),
-        });
-      }
-    } catch {
-      // A network/parse/crypto failure is UNTRUSTED, never a soft pass (§20.6
-      // "a log/network read failure is untrusted (fail-closed)").
-      verdict = { trusted: false, reason: 'not_in_transparency_log' };
-    }
-    // Anti-rollback (§27.5): persist the trusted release sequence as the new
-    // floor (monotonic) so a later validly-signed OLDER bundle is `stale`.
-    if (verdict.trusted) recordTrustedSequence(verdict.releaseSequence);
-    publish(verdictToState(verdict));
-    return verdict;
-  })();
+  const run = runVerification(deps, false);
   inflight = run;
   try {
     return await run;
   } finally {
     inflight = undefined;
   }
+}
+
+/**
+ * Verify the PENDING (waiting-worker) private-mode bundle for the SW-activation gate.  Hashes the
+ * build the server serves NOW (the one a `SKIP_WAITING` would activate) — NOT the already-running
+ * chunk — against the latest signed manifest, so a trusted current build can never wave through
+ * an unverified update (and an advanced manifest no longer falsely locks a valid one).  Not
+ * memoized via `inflight` (that guards the once-per-boot running check); each SW-update event
+ * runs a fresh pending verification.
+ */
+export async function assertPendingBundleTrusted(
+  deps: AssertTrustedDeps = {},
+): Promise<TrustedBundleVerdict> {
+  return runVerification(deps, true);
 }
 
 /** Reset the gate to `checking` (e.g. before a post-incident rotated re-check). */

@@ -85,9 +85,14 @@ async function buildManifest() {
   return { manifest, signerB64: signer.b64, logB64: log.b64 };
 }
 
+// The latest index.html the SW gate fetches to discover the PENDING bundle URL.
+const INDEX_HTML = `<!doctype html><html><head><link rel="modulepreload" href="${BUNDLE_URL}"></head><body></body></html>`;
+
 function makeFetch(manifest: unknown): typeof fetch {
   return (async (input: RequestInfo | URL): Promise<Response> => {
     const url = typeof input === 'string' ? input : input.toString();
+    if (url.includes('index.html'))
+      return new Response(INDEX_HTML, { status: 200, headers: { 'content-type': 'text/html' } });
     if (url.includes('private-p2p-')) return new Response(BUNDLE_BYTES, { status: 200 });
     if (url.includes('update-manifest.json'))
       return new Response(JSON.stringify(manifest), { status: 200 });
@@ -145,6 +150,10 @@ describe('gatedApplyUpdate', () => {
     let locked = false;
     const swappedFetch = (async (input: RequestInfo | URL): Promise<Response> => {
       const url = typeof input === 'string' ? input : input.toString();
+      // Serve the real index.html so the PENDING discovery finds the chunk — but the chunk's
+      // bytes are SWAPPED, so the pending digest no longer matches the signed manifest.
+      if (url.includes('index.html'))
+        return new Response(INDEX_HTML, { status: 200, headers: { 'content-type': 'text/html' } });
       if (url.includes('private-p2p-')) return new Response(new TextEncoder().encode('SWAPPED'));
       return new Response(JSON.stringify(built.manifest), { status: 200 });
     }) as typeof fetch;

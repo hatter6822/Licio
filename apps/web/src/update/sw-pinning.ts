@@ -3,9 +3,10 @@
 // WS-S.10.2b — service-worker update PINNING for the private-mode bundle
 // (PRIVATE_SPEC §20.6, §27.5).  A new service worker reaching `waiting` must NOT
 // silently take over for private-room users: before the app activates it
-// (`SKIP_WAITING` → `controllerchange` → reload), the incoming build's
-// private-mode bundle is verified against the transparency log
-// (`assertPrivateBundleTrusted`).  An UNVERIFIED update is gated:
+// (`SKIP_WAITING` → `controllerchange` → reload), the PENDING build's private-mode
+// bundle — the one the waiting worker would serve, fetched fresh, NOT the running
+// chunk — is verified against the transparency log (`assertPendingBundleTrusted`).
+// An UNVERIFIED update is gated:
 //
 //   * private rooms LOCK (keys stay sealed) with the exact §20.6 copy, and
 //   * the waiting worker is NOT activated by the private surface (the user keeps
@@ -20,7 +21,7 @@
 import type { TrustedBundleVerdict } from '@licio/shared';
 import {
   type AssertTrustedDeps,
-  assertPrivateBundleTrusted,
+  assertPendingBundleTrusted,
   resetPrivateBundleGate,
 } from './gate.js';
 
@@ -42,9 +43,12 @@ export type UpdateActivationGate =
 export async function gateServiceWorkerActivation(
   deps: AssertTrustedDeps = {},
 ): Promise<UpdateActivationGate> {
-  // Force a fresh verification of the (potentially new) bundle.
+  // Re-verify the PENDING (waiting-worker) bundle — the build a `SKIP_WAITING` would actually
+  // activate — NOT the already-running chunk.  Hashing the running build would let a trusted
+  // current bundle wave through an unverified update (and falsely lock a valid one once the
+  // signed manifest has advanced).
   resetPrivateBundleGate();
-  const verdict = await assertPrivateBundleTrusted(deps);
+  const verdict = await assertPendingBundleTrusted(deps);
   if (verdict.trusted) return { allowActivate: true };
   return { allowActivate: false, verdict };
 }
