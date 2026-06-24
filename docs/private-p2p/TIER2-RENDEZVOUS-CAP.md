@@ -57,19 +57,32 @@ to Tier-1, §8 net-zero).
   against the real slot-multiplication attack (a real proof re-presented with fake pseudonyms
   fails at *verification*, not the parser).
 - **Session orchestration** (`session.ts`) — `RendezvousIssuer` (the per-epoch admin:
-  blind-signs requests, exposes the public key) + `RendezvousMember` (a device: holds `nid`,
-  begins/completes enrollment, builds announces, exposes the issuer key for filtering). The
-  device/admin lifecycle the live room flow plugs into.
+  blind-signs a device's published commitment, exposes the public key) + `RendezvousMember`
+  (a device: holds `nid` + one commitment, installs per-epoch credentials, builds announces,
+  exposes the issuer key for filtering).
 
-**Remaining: the MLS DISTRIBUTION + carrier wiring** — the one deep piece left is threading
-the session into the live E2EE room engine: a credential-request channel (device → admin,
-e.g. carried in `member.add` / a `rendezvous.request` op) and a credential-distribution op
-(`rendezvous.cap`, sealed under the epoch key, carrying the issuer public key + each device's
-blind signature) folded by the §14.3 reducer with the authority check; then the apps/web
-carrier (`rendezvous-client.ts` / `connect-peer.ts`) builds the `cap` fields from the member
-session on announce and applies `filterVerifiedPresence` on poll, retrying Tier-1 on
-rejection (§6.10 / §8). Until that lands, clients announce Tier-1 and the server runs Tier-1
-(a strict superset) — the cap activates per-room once the engine distributes credentials.
+**The MLS DISTRIBUTION (reducer ops) is also SHIPPED** (10 tests). Credential distribution
+rides the §14.3 op log with a MINIMAL converged footprint:
+- `rendezvous.request` (read-capable, self-service) — a device publishes its blind
+  commitment; folds to one converged field `DeviceState.rendezvousCommitment` (snapshotted),
+  so any admin can issue from state + it survives compaction.
+- `rendezvous.issue` (admin-only) — carries the per-epoch issuer key + each device's blind
+  signature as an authenticated, authority-checked op-log EVENT with NO converged content
+  state; the ephemeral cap material is extracted device-locally.
+- `coordinator.ts` bridges the ops ↔ the session: `buildIssuanceOpBody` (admin) +
+  `installFromIssuances` (device). The engine exposes `rendezvousCommitments()` /
+  `rendezvousIssuances()` so the carrier drives it over the live engine. All convergent +
+  authority-tested (a non-admin issue is rejected; the fold is order-independent).
+
+**Remaining: the apps/web CARRIER hookup only** — a thin transport-wiring slice now that the
+engine API is complete: on room load the carrier authors a `rendezvous.request` (the member's
+commitment) and, if admin, periodically authors `rendezvous.issue` from `rendezvousCommitments()`;
+each device runs `installFromIssuances(rendezvousIssuances())`; and `connect-peer.ts` builds the
+announce's `cap` fields from the member + applies `filterVerifiedPresence` on poll, retrying
+Tier-1 on rejection (§6.10 / §8). Best landed + validated with the live WebRTC carrier + the
+BFF/E2E harness (it is transport plumbing, not new crypto). Until it lands, clients announce
+Tier-1 and the server runs Tier-1 (a strict superset) — the cap activates per-room once the
+carrier drives the coordinator.
 This slice modifies the security-critical reducer/op model, so it is scoped as its own
 focused pass (the crypto + server enforcement + client dedup + session it builds on are all
 shipped + tested).
