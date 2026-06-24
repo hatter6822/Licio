@@ -12,7 +12,6 @@ import {
   pseudonymToBytes,
   RendezvousIssuer,
   RendezvousMember,
-  rendezvousContext,
   type VerifiablePresence,
 } from '../index.js';
 

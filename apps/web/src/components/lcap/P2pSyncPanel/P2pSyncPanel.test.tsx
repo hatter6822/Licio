@@ -58,11 +58,11 @@ describe('P2pSyncPanel (WS-R.15.6)', () => {
 
     await waitFor(() => expect(syncRoomOverP2p).toHaveBeenCalledOnce());
     const call = syncRoomOverP2p.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(call.selfPeerKey).toBe('alice');
-    expect(call.remotePeerKey).toBe('bob');
-    expect((call.roomIdHash as Uint8Array).length).toBe(32);
+    expect(call['selfPeerKey']).toBe('alice');
+    expect(call['remotePeerKey']).toBe('bob');
+    expect((call['roomIdHash'] as Uint8Array).length).toBe(32);
     // The user pressing Sync is the explicit WebRTC opt-in.
-    expect(call.privacy).toEqual({ mode: 'standard', userEnabled: true });
+    expect(call['privacy']).toEqual({ mode: 'standard', userEnabled: true });
 
     await waitFor(() =>
       expect(screen.getByText(/synced directly with the other device/i)).toBeInTheDocument(),

@@ -40,25 +40,27 @@ describe('Tier-2 rendezvous-cap coordinator (full client flow)', () => {
 
     // ADMIN: blind-sign all commitments → the rendezvous.issue op body.
     const issuance = buildIssuanceOpBody(admin, EPOCH, commitments);
-    expect(issuance?.credentials).toHaveLength(2);
+    if (!issuance) throw new Error('expected an issuance');
+    expect(issuance.credentials).toHaveLength(2);
 
     // DEVICES: install from the issuance.
-    expect(installFromIssuances(alice, 'alice-dev', EPOCH, [issuance!])).toBe(true);
-    expect(installFromIssuances(bob, 'bob-dev', EPOCH, [issuance!])).toBe(true);
+    expect(installFromIssuances(alice, 'alice-dev', EPOCH, [issuance])).toBe(true);
+    expect(installFromIssuances(bob, 'bob-dev', EPOCH, [issuance])).toBe(true);
     expect(alice.isEnrolled(String(EPOCH))).toBe(true);
 
     // Alice announces; Bob (a peer holding the same issuer key) verifies it.
     const presence = alice.announce(ROOM, String(EPOCH), BUCKET);
-    expect(presence).not.toBeNull();
+    if (!presence) throw new Error('expected a presence announcement');
     const record: VerifiablePresence<string> = {
-      pseudonym: pseudonymToBytes(presence!.pseudonym),
-      proof: presence!.proof,
+      pseudonym: pseudonymToBytes(presence.pseudonym),
+      proof: presence.proof,
       epoch: String(EPOCH),
       bucket: BUCKET,
       value: 'alice',
     };
     const bobIssuerKey = bob.issuerKey(String(EPOCH));
-    const verified = filterVerifiedPresence([record], issuerKeyFromBytes(bobIssuerKey!), ROOM, {
+    if (!bobIssuerKey) throw new Error('expected bob enrolled');
+    const verified = filterVerifiedPresence([record], issuerKeyFromBytes(bobIssuerKey), ROOM, {
       nowMs: NOW,
     });
     expect(verified.map((v) => v.value)).toEqual(['alice']);
@@ -70,9 +72,10 @@ describe('Tier-2 rendezvous-cap coordinator (full client flow)', () => {
     const issuance = buildIssuanceOpBody(admin, EPOCH, [
       { deviceId: 'alice-dev', commitmentWithProof: toBase64Url(alice.commitment) },
     ]);
+    if (!issuance) throw new Error('expected an issuance');
     // a different device is not in the issuance
     const stranger = new RendezvousMember();
-    expect(installFromIssuances(stranger, 'stranger-dev', EPOCH, [issuance!])).toBe(false);
+    expect(installFromIssuances(stranger, 'stranger-dev', EPOCH, [issuance])).toBe(false);
     expect(stranger.isEnrolled(String(EPOCH))).toBe(false);
   });
 

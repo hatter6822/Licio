@@ -21,11 +21,11 @@ const controllerStart = vi.fn(async () => ({ advertise: true, discover: true, bl
 const controllerStop = vi.fn(async () => {});
 const activeChannels = vi.fn(() => ['nearby'] as const);
 const ControllerCtor = vi.fn(function (this: Record<string, unknown>) {
-  this.start = controllerStart;
-  this.stop = controllerStop;
-  this.activeChannels = activeChannels;
+  this['start'] = controllerStart;
+  this['stop'] = controllerStop;
+  this['activeChannels'] = activeChannels;
 });
-const resolveCourierChannels = vi.fn(() => [{ channel: 'nearby', plugin: {} }]);
+const resolveCourierChannels = vi.fn((..._a: unknown[]) => [{ channel: 'nearby', plugin: {} }]);
 
 vi.mock('../../../lcap/transports/courier-controller.js', () => ({
   CourierController: ControllerCtor,

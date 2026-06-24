@@ -39,7 +39,9 @@ export async function buildPublicFrontierRequest(
   const pulse = buildPulse({
     nodeId: `lcap-${transportProfile}`,
     sessionNonce,
-    transportProfile,
+    // WebRTC is a relay-class §15.1.1 transport for the pulse's `transport_profile` enum
+    // (SyncTransportProfile has no `webrtc` member); the nodeId still records the carrier.
+    transportProfile: transportProfile === 'webrtc' ? 'relay' : transportProfile,
     // PUBLIC-ONLY: every public peer carrier (`carriesPrivate:false`) structurally refuses
     // anything else; the request mode matches so the carriage gate never has to skip it.
     privacyMode: 'public',

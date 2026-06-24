@@ -13,10 +13,10 @@ const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 describe('maintainConnection (§15.4 reconnect)', () => {
   it('reconnects on a non-graceful drop but NOT on a graceful one', async () => {
     let dials = 0;
-    let lastOnClose: ((graceful: boolean) => void) | null = null;
+    const onCloseRef: { current: ((graceful: boolean) => void) | null } = { current: null };
     const dial = (onClose: (graceful: boolean) => void): Promise<DialedSession> => {
       dials += 1;
-      lastOnClose = onClose;
+      onCloseRef.current = onClose;
       return Promise.resolve({ close: () => {} });
     };
     const ctrl = maintainConnection(dial, { backoffMs: 1, sleep: () => Promise.resolve() });
@@ -25,13 +25,13 @@ describe('maintainConnection (§15.4 reconnect)', () => {
     expect(ctrl.status()).toBe('connected');
 
     // A network drop (no bye) → reconnect.
-    lastOnClose?.(false);
+    onCloseRef.current?.(false);
     await flush();
     expect(dials).toBe(2);
     expect(ctrl.status()).toBe('connected');
 
     // A graceful drop (peer said bye) → do NOT reconnect.
-    lastOnClose?.(true);
+    onCloseRef.current?.(true);
     await flush();
     expect(dials).toBe(2);
     expect(ctrl.status()).toBe('closed');
@@ -57,10 +57,10 @@ describe('maintainConnection (§15.4 reconnect)', () => {
   it('close() stops reconnecting and gracefully closes the current session', async () => {
     let dials = 0;
     const closes: boolean[] = [];
-    let lastOnClose: ((graceful: boolean) => void) | null = null;
+    const onCloseRef: { current: ((graceful: boolean) => void) | null } = { current: null };
     const dial = (onClose: (graceful: boolean) => void): Promise<DialedSession> => {
       dials += 1;
-      lastOnClose = onClose;
+      onCloseRef.current = onClose;
       return Promise.resolve({ close: (graceful = true) => closes.push(graceful) });
     };
     const ctrl = maintainConnection(dial, { backoffMs: 1, sleep: () => Promise.resolve() });
@@ -72,17 +72,17 @@ describe('maintainConnection (§15.4 reconnect)', () => {
 
     // A drop AFTER close() must NOT reconnect — assert the REAL dial counter is unchanged.
     const dialsAtClose = dials;
-    lastOnClose?.(false);
+    onCloseRef.current?.(false);
     await flush();
     expect(dials).toBe(dialsAtClose);
   });
 
   it('a successful reconnect RESETS the backoff window', async () => {
     let dials = 0;
-    let lastOnClose: ((graceful: boolean) => void) | null = null;
+    const onCloseRef: { current: ((graceful: boolean) => void) | null } = { current: null };
     const dial = (onClose: (graceful: boolean) => void): Promise<DialedSession> => {
       dials += 1;
-      lastOnClose = onClose;
+      onCloseRef.current = onClose;
       return Promise.resolve({ close: () => {} });
     };
     const ctrl = maintainConnection(dial, {
@@ -94,7 +94,7 @@ describe('maintainConnection (§15.4 reconnect)', () => {
     // Three separate drops, each reconnecting successfully — never exhausts maxAttempts=1
     // because each success resets the counter.
     for (let i = 0; i < 3; i++) {
-      lastOnClose?.(false);
+      onCloseRef.current?.(false);
       await flush();
     }
     expect(dials).toBe(4); // initial + 3 reconnects

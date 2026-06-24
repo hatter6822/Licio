@@ -336,7 +336,6 @@ describe('InMemoryRendezvousStore — sample-poll dilutes a presence flood (§27
     // `slice(0, LIMIT)` would NEVER return the honest record in any poll window.
     for (let i = 0; i < FLOOD; i++) await store.announce(rec(`flood-${i}`));
     await store.announce(rec('HONEST'));
-    const total = FLOOD + 1;
 
     let honestSeen = 0;
     const POLLS = 300;

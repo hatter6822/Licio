@@ -58,7 +58,9 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile --ignore-scripts
-      - run: pnpm typecheck
+      # `typecheck:ci` (tsc -b --force) ignores any `.tsbuildinfo`, so a cached up-to-date
+      # marker can never mask a real compile error (matches the pre-push hook).
+      - run: pnpm typecheck:ci
 
   lockfile-lint:
     name: Lockfile Integrity

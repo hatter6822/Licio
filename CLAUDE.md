@@ -433,10 +433,20 @@ Biome 2.5.0.
 Before committing any source file, run the relevant checks:
 
 ```bash
-pnpm typecheck                      # strict-mode compilation
-pnpm lint                           # Biome format + lint
+pnpm typecheck                      # strict-mode compilation (fast, incremental)
+pnpm lint                           # Biome format + lint (WHOLE repo, not just staged)
 pnpm test                           # Vitest (80% coverage threshold)
 ```
+
+**`tsc -b` caches — do not trust a green `pnpm typecheck` before pushing.**  `pnpm typecheck`
+is `tsc -b`, which keys off `.tsbuildinfo`; a stale cache can report **`0 errors` for code that
+actually fails to compile** (this has reached the remote before — the cached local check passed
+while clean CI failed).  The AUTHORITATIVE typecheck is **`pnpm typecheck:ci`** (`tsc -b --force`,
+cache-independent) — it is what the `pre-push` hook and the CI Type-Check job run.  Run
+`pnpm typecheck:ci` (or `find . -name '*.tsbuildinfo' -not -path '*/node_modules/*' -delete`
+first) before declaring a branch green, and run the FULL `pnpm lint` (the `pre-commit` hook
+only lints the *staged* files, so an unused import/var created in an unstaged file slips past
+it until `pre-push` / CI).
 
 After any source change, also run:
 

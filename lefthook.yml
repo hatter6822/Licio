@@ -51,8 +51,16 @@ pre-commit:
 pre-push:
   parallel: true
   commands:
+    # `typecheck:ci` is `tsc -b --force` — it IGNORES the `.tsbuildinfo` incremental cache,
+    # which can otherwise report a stale "0 errors" for files that actually fail to compile
+    # (a real bug that once reached the remote: the cached `tsc -b` here passed while the
+    # clean CI build failed).  Authoritative typecheck == CI's clean build, by construction.
     typecheck:
-      run: pnpm typecheck
+      run: pnpm typecheck:ci
+    # Full-repo lint (NOT just the staged set the pre-commit biome-check sees — a change that
+    # makes ANOTHER file's import/var unused would otherwise slip past until CI).
+    lint:
+      run: pnpm lint
     lockfile-lint:
       run: pnpm lint:lockfile
     policy-doctrine:

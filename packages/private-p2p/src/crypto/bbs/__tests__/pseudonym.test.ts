@@ -13,7 +13,7 @@ import {
   verifyWithPseudonym,
 } from '../pseudonym.js';
 import { bbsKeyGen, bbsSign } from '../signature.js';
-import { G1, g1Bytes, messageToScalar } from '../suite.js';
+import { G1, messageToScalar } from '../suite.js';
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 const hex = (p: { toBytes(): Uint8Array }): string => Buffer.from(p.toBytes()).toString('hex');
