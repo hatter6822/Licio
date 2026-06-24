@@ -28,6 +28,12 @@ const TEST_FILE = /\.(?:test|spec)\.tsx?$/;
 // Directories never worth walking (deps, test trees, generated native/build output).
 const SKIP_DIRS = new Set(['node_modules', '__tests__', 'build', '.gradle', 'dist']);
 
+// The Capacitor `cap sync` copies the WEB build (apps/web/dist) into the courier's
+// `assets/public` — gitignored, generated, and a redundant copy of `apps/web` (scanned at
+// source), so a local run after a courier build must not re-scan it (it carries the web app's
+// `durationMs` Web-Vitals field, forbidden only in the LCAP plane, not the web app).
+const SKIP_PATHS = new Set([resolve(ROOT, 'apps/courier/android/app/src/main/assets/public')]);
+
 /**
  * Forbidden field-name tokens. Each must never appear (outside comments) in an LCAP
  * schema: raw attention traces, network/location identifiers, and applause fields.
@@ -101,7 +107,7 @@ function collect(dir: string): string[] {
   if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) return out;
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
-    if (entry.isDirectory() && !SKIP_DIRS.has(entry.name)) {
+    if (entry.isDirectory() && !SKIP_DIRS.has(entry.name) && !SKIP_PATHS.has(full)) {
       out.push(...collect(full));
     } else if (entry.isFile() && /\.ts$/.test(entry.name) && !TEST_FILE.test(entry.name)) {
       out.push(full);

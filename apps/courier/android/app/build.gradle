@@ -22,6 +22,14 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
+    // Layer-2 of the courier test pyramid: JVM unit tests of the plugin↔Android-API glue via
+    // Robolectric (shadowed Bluetooth/Wi-Fi-P2P) — no device, no radio, no root.
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+            returnDefaultValues = true
+        }
+    }
 }
 
 repositories {
@@ -40,6 +48,9 @@ dependencies {
     implementation "com.google.android.gms:play-services-nearby:19.3.0"
     implementation project(':capacitor-android')
     testImplementation "junit:junit:$junitVersion"
+    // Robolectric — shadowed Android framework on the JVM (Layer-2 plugin↔API tests).
+    testImplementation "org.robolectric:robolectric:4.14.1"
+    testImplementation "androidx.test:core:1.6.1"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
     implementation project(':capacitor-cordova-android-plugins')

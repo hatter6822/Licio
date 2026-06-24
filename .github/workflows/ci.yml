@@ -365,6 +365,11 @@ jobs:
             echo "ANDROID_SDK_ROOT=$ANDROID_HOME"
           } >> "$GITHUB_ENV"
           echo "sdk.dir=$ANDROID_HOME" > apps/courier/android/local.properties
+      - name: Courier unit tests (Layer-1 pure framing + Layer-2 Robolectric — no emulator/radio/root)
+        # The humble-object courier: CourierFraming (framing/flow-control) + the per-radio drivers
+        # are JVM-tested via shadowed Android; the real-radio matrix (radio-e2e.sh) is the optional
+        # hardware-confidence Layer-3 and is NOT run here.
+        run: pnpm --filter courier test:unit
       - name: Build the debug APK (runs the no-fork integrity gate first)
         run: pnpm --filter courier build
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
