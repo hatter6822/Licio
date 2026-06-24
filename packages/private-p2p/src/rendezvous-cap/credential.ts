@@ -34,6 +34,7 @@ import {
   type G1Point,
   G2,
   type G2Point,
+  hashToScalar,
   i2osp,
   messageToScalar,
 } from '../crypto/bbs/suite.js';
@@ -67,6 +68,21 @@ export function generateNidSecret(): Uint8Array {
 /** Generate a per-epoch issuer key pair (the committing admin's BBS keys for one epoch). */
 export function generateIssuerKeyPair(): BbsKeyPair {
   return bbsKeyGen();
+}
+
+/** Generate a long-lived issuer SEED (32 bytes). The admin persists ONE seed device-locally;
+ *  the per-epoch issuer key derives from it, so its public key is STABLE across reloads (and
+ *  across re-issuances within an epoch) without storing a key per epoch. */
+export function generateIssuerSeed(): Uint8Array {
+  return randomBytes(32);
+}
+
+const ISSUER_DERIVE_PREFIX = new TextEncoder().encode('licio.tier2.rendezvous.issuer.v1');
+
+/** Derive the per-epoch BBS issuer key pair deterministically from a stable seed + epoch. */
+export function deriveIssuerKeyPair(seed: Uint8Array, epoch: Uint8Array): BbsKeyPair {
+  const sk = hashToScalar(concatBytes(ISSUER_DERIVE_PREFIX, lenPrefixed(seed), lenPrefixed(epoch)));
+  return { sk, pk: G2.BASE.multiply(sk) };
 }
 
 /** Bind the epoch into the BBS header so a credential is valid for exactly one epoch. */

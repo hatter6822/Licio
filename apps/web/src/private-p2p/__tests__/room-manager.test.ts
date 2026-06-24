@@ -123,6 +123,30 @@ describe('loadPrivateRoomEngine — persists to IndexedDB + re-verifies on reloa
   });
 });
 
+describe('PrivateRoomSession — Tier-2 rendezvous cap (WS-S)', () => {
+  it('drives the cap on ingest — the device publishes its blind commitment (once)', async () => {
+    const founderDeviceId = globalThis.crypto.randomUUID();
+    const session = await PrivateRoomSession.create({
+      roomName: 'Cap Room',
+      roomType: 'global_topic',
+      founderMemberId: globalThis.crypto.randomUUID(),
+      founderDeviceId,
+    });
+    // Before any sync: no rendezvous commitment.
+    expect(session.state().devices.get(founderDeviceId)?.rendezvousCommitment).toBeUndefined();
+
+    // An ingest drives syncCap → the device authors a rendezvous.request (best-effort wiring
+    // that MUST actually fire — if it silently failed, the commitment would stay undefined).
+    await session.ingest([]);
+    const commitment = session.state().devices.get(founderDeviceId)?.rendezvousCommitment;
+    expect(commitment).toBeDefined();
+
+    // Idempotent: a second sync does not re-publish (the converged state already has it).
+    await session.ingest([]);
+    expect(session.state().devices.get(founderDeviceId)?.rendezvousCommitment).toBe(commitment);
+  });
+});
+
 describe('PrivateRoomSession — §14.5 compaction persistence (WS-S.7)', () => {
   it('compacts on cadence, prunes the pruned envelopes, and reloads from the base', async () => {
     // A low cadence so a few posts trigger compaction within the test.

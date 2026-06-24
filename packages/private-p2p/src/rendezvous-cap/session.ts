@@ -21,6 +21,7 @@ import {
   assembleCredential,
   type CredentialRequest,
   createCredentialRequest,
+  deriveIssuerKeyPair,
   generateIssuerKeyPair,
   generateNidSecret,
   issueCredentialForCommitment,
@@ -47,6 +48,13 @@ export class RendezvousIssuer {
   /** Generate a fresh per-epoch issuer key pair for `epoch`. */
   static generate(epoch: string): RendezvousIssuer {
     return new RendezvousIssuer(generateIssuerKeyPair(), epoch);
+  }
+
+  /** Derive the per-epoch issuer DETERMINISTICALLY from a stable seed — so the admin's issuer
+   *  public key is reproducible across reloads + re-issuances (persist ONE seed, not a key
+   *  per epoch). */
+  static fromSeed(seed: Uint8Array, epoch: string): RendezvousIssuer {
+    return new RendezvousIssuer(deriveIssuerKeyPair(seed, enc(epoch)), epoch);
   }
 
   /** The issuer PUBLIC key `ipk_e` (96-byte G2) — distribute to members + the relay. */

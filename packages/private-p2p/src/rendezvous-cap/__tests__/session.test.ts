@@ -119,3 +119,39 @@ describe('Tier-2 rendezvous-cap session', () => {
     expect(member.isEnrolled(e2)).toBe(true);
   });
 });
+
+describe('Tier-2 issuer fromSeed (deterministic)', () => {
+  const seed = new Uint8Array(32).fill(7);
+  it('same seed+epoch → same public key; different epoch → different; and it works end-to-end', () => {
+    const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
+    const hex = (b: Uint8Array): string => Buffer.from(b).toString('hex');
+    const a1 = RendezvousIssuer.fromSeed(seed, '5');
+    const a2 = RendezvousIssuer.fromSeed(seed, '5');
+    const a3 = RendezvousIssuer.fromSeed(seed, '6');
+    expect(hex(a1.publicKey)).toBe(hex(a2.publicKey));
+    expect(hex(a1.publicKey)).not.toBe(hex(a3.publicKey));
+    // a derived issuer issues a usable credential
+    const member = new RendezvousMember();
+    member.installCredential('5', a1.issueForCommitment(member.commitment), a1.publicKey);
+    const presence = member.announce(enc('room'), '5', currentBucket(1_700_000_000_000));
+    expect(presence).not.toBeNull();
+    expect(
+      filterVerifiedPresence(
+        [
+          {
+            // biome-ignore lint/style/noNonNullAssertion: asserted not-null
+            pseudonym: pseudonymToBytes(presence!.pseudonym),
+            // biome-ignore lint/style/noNonNullAssertion: asserted not-null
+            proof: presence!.proof,
+            epoch: '5',
+            bucket: currentBucket(1_700_000_000_000),
+            value: 'ok',
+          },
+        ],
+        issuerKeyFromBytes(a1.publicKey),
+        enc('room'),
+        { nowMs: 1_700_000_000_000 },
+      ).map((v) => v.value),
+    ).toEqual(['ok']);
+  });
+});

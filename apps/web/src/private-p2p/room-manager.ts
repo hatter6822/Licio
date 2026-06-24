@@ -150,7 +150,16 @@ export function parseJoinGrant(json: string): JoinGrant | null {
 
 import { loadUpdateChannelConfig } from '../update/config.js';
 import { requirePrivateBundleTrusted } from '../update/gate.js';
-import { connectPrivatePeer, type RtcIceServerLike } from './connect-peer.js';
+import {
+  connectPrivatePeer,
+  type RendezvousCapHooks,
+  type RtcIceServerLike,
+} from './connect-peer.js';
+import {
+  type CapIssuanceOpBody,
+  RendezvousCapManager,
+  type RendezvousCapStorage,
+} from './rendezvous-cap-manager.js';
 import { type FetchLike, httpRendezvousTransport } from './rendezvous-client.js';
 import {
   deleteRoomSession,
@@ -332,6 +341,68 @@ export class PrivateRoomSession {
     return this.engine.state();
   }
 
+  // --- Tier-2 rendezvous cap (docs/private-p2p/TIER2-RENDEZVOUS-CAP.md §11) ----------------
+  private capManager: RendezvousCapManager | undefined;
+  private capSyncing = false;
+
+  /** Device-local persistence for the cap `nid` + issuer seed (32-byte pseudonym secrets,
+   *  keyed by room) via localStorage. Hardening: move to the encrypted IndexedDB store. */
+  private capStorage(): RendezvousCapStorage {
+    const key = (s: string): string => `licio.p2p.cap.${this.session.roomId}.${s}`;
+    const load = (s: string): Uint8Array | undefined => {
+      if (typeof localStorage === 'undefined') return undefined;
+      const v = localStorage.getItem(key(s));
+      return v === null ? undefined : this.p2p.fromBase64Url(v);
+    };
+    const save = (s: string, b: Uint8Array): void => {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(key(s), this.p2p.toBase64Url(b));
+      }
+    };
+    return {
+      loadNid: async () => load('nid'),
+      saveNid: async (n) => save('nid', n),
+      loadIssuerSeed: async () => load('issuer-seed'),
+      saveIssuerSeed: async (s) => save('issuer-seed', s),
+    };
+  }
+
+  /** Drive one round of the cap protocol (publish our commitment / install our credential /
+   *  issue as admin). Best-effort + fail-open: any failure leaves the rendezvous on Tier-1.
+   *  Re-entrancy-guarded (authoring ops re-enters ingest). */
+  private async syncCap(): Promise<void> {
+    if (this.capSyncing) return;
+    this.capSyncing = true;
+    try {
+      this.capManager ??= new RendezvousCapManager(this.capStorage());
+      const isAdmin =
+        this.engine.state().members.get(this.session.memberId)?.capabilities.has('admin') ?? false;
+      await this.capManager.sync({
+        engine: this.engine,
+        deviceId: this.session.deviceId,
+        epoch: this.currentEpoch().epoch,
+        isAdmin,
+        authorRequest: (commitmentWithProof) =>
+          this.authorOp({ type: 'rendezvous.request', commitment_with_proof: commitmentWithProof }),
+        authorIssue: (body: CapIssuanceOpBody) =>
+          this.authorOp({
+            type: 'rendezvous.issue',
+            target_epoch: body.target_epoch,
+            issuer_public_key: body.issuer_public_key,
+            credentials: body.credentials.map((c) => ({ ...c })),
+          }),
+      });
+    } finally {
+      this.capSyncing = false;
+    }
+  }
+
+  /** The connect-peer cap hooks for `epoch` (or undefined ⇒ this device rides Tier-1). */
+  private async capHooks(epoch: number): Promise<RendezvousCapHooks | undefined> {
+    this.capManager ??= new RendezvousCapManager(this.capStorage());
+    return this.capManager.hooks(epoch);
+  }
+
   /**
    * Begin §15.6/§15.7 sync over an ALREADY-ESTABLISHED, post-handshake duplex
    * `PeerChannel` (a live WebRTC channel from `connectPrivatePeer`, an offline-archive
@@ -414,7 +485,10 @@ export class PrivateRoomSession {
    * quarantined so a UI can surface sync/quarantine status.
    */
   async ingest(envelopes: readonly PrivateEncryptedEnvelope[]): Promise<IngestReport> {
-    return this.engine.ingest(envelopes);
+    const report = await this.engine.ingest(envelopes);
+    // Advance the Tier-2 cap (publish/install/issue) after new ops land; fail-open to Tier-1.
+    await this.syncCap().catch(() => {});
+    return report;
   }
 
   /**
@@ -474,6 +548,9 @@ export class PrivateRoomSession {
     );
     const fetchImpl: FetchLike =
       options?.fetchImpl ?? ((url, init) => fetch(url, init as RequestInit | undefined));
+    // Advance enrollment, then fetch the Tier-2 cap hooks (undefined ⇒ ride Tier-1).
+    await this.syncCap().catch(() => {});
+    const rendezvousCap = await this.capHooks(epoch.epoch).catch(() => undefined);
     const { channel } = await connectPrivatePeer({
       p2p: this.p2p,
       rendezvous: httpRendezvousTransport(fetchImpl),
@@ -492,6 +569,7 @@ export class PrivateRoomSession {
       },
       transportMode: options?.transportMode ?? this.transportMode(),
       nowMs: () => Date.now(),
+      ...(rendezvousCap ? { rendezvousCap } : {}),
       ...(options?.iceServers ? { iceServers: options.iceServers } : {}),
       ...(options?.signal ? { signal: options.signal } : {}),
       ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
@@ -567,6 +645,8 @@ export class PrivateRoomSession {
         epoch.roomEpochSecret,
         this.session.roomIdCommitment,
       );
+      await this.syncCap().catch(() => {});
+      const rendezvousCap = await this.capHooks(epoch.epoch).catch(() => undefined);
       let result: { channel: PeerChannel; peerDeviceId: string };
       try {
         result = await connectPrivatePeer({
@@ -589,6 +669,7 @@ export class PrivateRoomSession {
           transportMode: options?.transportMode ?? this.transportMode(),
           nowMs: () => Date.now(),
           timeoutMs: dialTimeoutMs,
+          ...(rendezvousCap ? { rendezvousCap } : {}),
           ...(options?.iceServers ? { iceServers: options.iceServers } : {}),
         });
       } catch {
