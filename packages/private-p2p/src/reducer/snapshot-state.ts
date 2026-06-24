@@ -45,6 +45,7 @@ const snapshotStateSchema = z
           addedAtEpoch: z.number().int().min(0),
           removed: z.boolean(),
           signingPublicKey: z.string(),
+          rendezvousCommitment: z.string().optional(),
         })
         .strict(),
     ),
@@ -141,6 +142,9 @@ export function serializeReducerState(state: RoomReducerState): Uint8Array {
       addedAtEpoch: d.addedAtEpoch,
       removed: d.removed,
       signingPublicKey: d.signingPublicKey,
+      ...(d.rendezvousCommitment === undefined
+        ? {}
+        : { rendezvousCommitment: d.rendezvousCommitment }),
     })),
     stories: [...state.stories.values()].map((s) => ({
       storyId: s.storyId,
@@ -219,6 +223,9 @@ export function deserializeReducerState(bytes: Uint8Array): RoomReducerState {
       addedAtEpoch: d.addedAtEpoch,
       removed: d.removed,
       signingPublicKey: d.signingPublicKey,
+      ...(d.rendezvousCommitment === undefined
+        ? {}
+        : { rendezvousCommitment: d.rendezvousCommitment }),
     });
   }
   for (const s of body.stories) {

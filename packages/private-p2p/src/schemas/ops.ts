@@ -333,6 +333,36 @@ export const snapshotCommitOpSchema = z
   })
   .strict();
 
+/**
+ * Tier-2 rendezvous cap (docs/private-p2p/TIER2-RENDEZVOUS-CAP.md) — a device PUBLISHES its
+ * blind credential commitment (a Pedersen commitment + Schnorr PoK over its long-lived
+ * `nid`; it reveals NO `nid`, §6.2). Self-service: the authoring device sets its OWN
+ * commitment (`read`-capable). The admin re-signs it per epoch to issue credentials.
+ */
+export const rendezvousRequestOpSchema = z
+  .object({
+    type: z.literal('rendezvous.request'),
+    commitment_with_proof: base64UrlSchema,
+  })
+  .strict();
+
+/**
+ * Tier-2 rendezvous cap — an admin ISSUES per-epoch rendezvous credentials: the per-epoch
+ * BBS issuer public key + each device's blind signature on its published commitment. Carries
+ * NO converged content state — each device extracts ITS credential (others extract only the
+ * issuer key) via the engine rendezvous hook and persists it locally. Admin-only.
+ */
+export const rendezvousIssueOpSchema = z
+  .object({
+    type: z.literal('rendezvous.issue'),
+    target_epoch: z.number().int().min(0),
+    issuer_public_key: base64UrlSchema,
+    credentials: z
+      .array(z.object({ device_id: privateIdSchema, signature: base64UrlSchema }).strict())
+      .max(4_096),
+  })
+  .strict();
+
 /** The §13.2 op-body discriminated union (every op type, by `type`). */
 export const privateOpBodySchema = z.discriminatedUnion('type', [
   memberAddOpSchema,
@@ -352,6 +382,8 @@ export const privateOpBodySchema = z.discriminatedUnion('type', [
   summaryCreateOpSchema,
   attachmentAddOpSchema,
   snapshotCommitOpSchema,
+  rendezvousRequestOpSchema,
+  rendezvousIssueOpSchema,
 ]);
 export type PrivateOpBody = z.infer<typeof privateOpBodySchema>;
 

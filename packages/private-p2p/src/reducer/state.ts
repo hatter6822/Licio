@@ -30,6 +30,9 @@ export interface DeviceState {
   readonly addedAtEpoch: number;
   removed: boolean;
   signingPublicKey: string;
+  /** Tier-2 rendezvous-cap: the device's blind credential commitment (set by a
+   *  `rendezvous.request` op; an admin re-signs it per epoch to issue, §6.2). */
+  rendezvousCommitment?: string;
 }
 
 export interface StoryState {

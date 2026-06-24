@@ -38,7 +38,9 @@ export type PrivateOpType =
   | 'contribution.tombstone'
   | 'summary.create'
   | 'attachment.add'
-  | 'snapshot.commit';
+  | 'snapshot.commit'
+  | 'rendezvous.request'
+  | 'rendezvous.issue';
 
 /**
  * The capability an op type REQUIRES of its author (§11.3 / §14.2 step 11).
@@ -66,4 +68,7 @@ export const OP_REQUIRED_CAPABILITY: Readonly<Record<PrivateOpType, PrivateCapab
   'summary.create': 'summarize',
   'attachment.add': 'post',
   'snapshot.commit': 'admin',
+  // A member self-publishes its rendezvous commitment; an admin issues credentials.
+  'rendezvous.request': 'read',
+  'rendezvous.issue': 'admin',
 };

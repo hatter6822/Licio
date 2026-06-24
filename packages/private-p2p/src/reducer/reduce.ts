@@ -409,7 +409,27 @@ function applyOp(state: RoomReducerState, op: PrivateRoomOp): void {
     case 'snapshot.commit':
       state.snapshots.push(body.snapshot_id);
       return;
+    case 'rendezvous.request':
+      applyRendezvousRequest(state, op, body);
+      return;
+    case 'rendezvous.issue':
+      // No converged content state: the per-epoch BBS issuer key + the per-device
+      // credentials are extracted DEVICE-LOCALLY via the engine rendezvous hook. The op
+      // still lives in the log (authority-checked = `admin`, sealed) so it converges as an
+      // EVENT and is authenticated; only the ephemeral cap material stays out of state.
+      return;
   }
+}
+
+/** Tier-2 rendezvous cap: the author device records its OWN blind credential commitment
+ *  (`read`-capable, validated active in applyOp). An admin re-signs it per epoch (§6.2). */
+function applyRendezvousRequest(
+  state: RoomReducerState,
+  op: PrivateRoomOp,
+  body: OpOf<'rendezvous.request'>,
+): void {
+  const device = state.devices.get(op.author_device_id);
+  if (device) device.rendezvousCommitment = body.commitment_with_proof;
 }
 
 /**
