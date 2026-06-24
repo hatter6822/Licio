@@ -345,25 +345,16 @@ export class PrivateRoomSession {
   private capManager: RendezvousCapManager | undefined;
   private capSyncing = false;
 
-  /** Device-local persistence for the cap `nid` + issuer seed (32-byte pseudonym secrets,
-   *  keyed by room) via localStorage. Hardening: move to the encrypted IndexedDB store. */
+  /** Device-local persistence for the cap `nid` + issuer seed (32-byte pseudonym secrets) in
+   *  the private-p2p IndexedDB store — the SAME trust boundary as the room's epoch keys, off
+   *  the origin-wide localStorage. */
   private capStorage(): RendezvousCapStorage {
-    const key = (s: string): string => `licio.p2p.cap.${this.session.roomId}.${s}`;
-    const load = (s: string): Uint8Array | undefined => {
-      if (typeof localStorage === 'undefined') return undefined;
-      const v = localStorage.getItem(key(s));
-      return v === null ? undefined : this.p2p.fromBase64Url(v);
-    };
-    const save = (s: string, b: Uint8Array): void => {
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(key(s), this.p2p.toBase64Url(b));
-      }
-    };
+    const store = new IndexedDbPrivateRoomStorage(this.session.roomId);
     return {
-      loadNid: async () => load('nid'),
-      saveNid: async (n) => save('nid', n),
-      loadIssuerSeed: async () => load('issuer-seed'),
-      saveIssuerSeed: async (s) => save('issuer-seed', s),
+      loadNid: () => store.getCapSecret('nid'),
+      saveNid: (n) => store.putCapSecret('nid', n),
+      loadIssuerSeed: () => store.getCapSecret('issuer-seed'),
+      saveIssuerSeed: (s) => store.putCapSecret('issuer-seed', s),
     };
   }
 

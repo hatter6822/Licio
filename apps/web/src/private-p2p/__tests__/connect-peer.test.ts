@@ -387,4 +387,102 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
       }),
     ).rejects.toThrow(/requires a TURN server/);
   });
+
+  it('Tier-2 cap SKIPS a flood of fake-cap announcements (no dial is ever attempted)', async () => {
+    const p2p = await import('@licio/private-p2p');
+    const cap = await import('@licio/private-p2p/rendezvous-cap');
+    const created = await p2p.createPrivateRoom({
+      roomId: 'room-flood',
+      founderMemberId: 'founder',
+      founderDeviceId: 'founder-dev',
+      profile: PROFILE,
+    });
+    const epoch = Number(created.epochState.epoch);
+    const rendezvousKey = created.epochState.keys.rendezvousKey;
+
+    // The legit member's hooks verify under the LEGIT issuer key.
+    const legitIssuer = cap.RendezvousIssuer.generate(String(epoch));
+    const legitMember = new cap.RendezvousMember();
+    legitMember.installCredential(
+      String(epoch),
+      legitIssuer.issueForCommitment(legitMember.commitment),
+      legitIssuer.publicKey,
+    );
+    const issuerKey = legitMember.issuerKey(String(epoch));
+    if (!issuerKey) throw new Error('member not enrolled');
+    const hooks = {
+      build: (rb: string, e: number, b: number) => cap.buildAnnouncementCap(legitMember, rb, e, b),
+      verify: (c: { proof: string; pseudonym: string }, rb: string, e: number, b: number) =>
+        cap.verifyAnnouncementCap(c, issuerKey, rb, e, b),
+    };
+
+    // A FLOODER enrolled under a DIFFERENT issuer → its (well-formed) caps never verify under
+    // the legit issuer key, so every one of its announcements is skipped.
+    const floodIssuer = cap.RendezvousIssuer.generate(String(epoch));
+    const floodMember = new cap.RendezvousMember();
+    floodMember.installCredential(
+      String(epoch),
+      floodIssuer.issueForCommitment(floodMember.commitment),
+      floodIssuer.publicKey,
+    );
+    const timeBucket = p2p.rendezvousTimeBucket(Date.now());
+    const roomBlindId = await p2p.deriveRoomBlindId(rendezvousKey, epoch, timeBucket);
+    const floodCap = cap.buildAnnouncementCap(floodMember, roomBlindId, epoch, timeBucket);
+    if (!floodCap) throw new Error('flood cap not built');
+
+    const sig = p2p.toBase64Url((await p2p.generateX25519KeyPair()).publicKey);
+    const rendezvous = inMemoryRendezvous();
+    for (let i = 0; i < 20; i++) {
+      await rendezvous.announce(
+        await p2p.buildRendezvousRecord({
+          rendezvousKey,
+          epoch,
+          timeBucket,
+          deviceId: `flood-${i}`,
+          announcement: {
+            schema: 'licio.private.rendezvous_announcement.v1',
+            peer_device_id: `flood-${i}`,
+            signaling_public_key: sig,
+            transport_hints: [],
+            cap: floodCap,
+          },
+          nowMs: Date.now(),
+        }),
+      );
+    }
+
+    let rtcCreated = 0;
+    const base = {
+      p2p,
+      rendezvous,
+      roomIdCommitment: created.roomIdCommitment,
+      epoch,
+      rendezvousKey,
+      selfDeviceId: 'founder-dev',
+      selfSigningKey: created.founder.signingKeyPair.privateKey,
+      resolveDevice: (id: string) =>
+        id.startsWith('flood-') ? { signingPublicKey: sig, activeAtEpoch: true } : undefined,
+      transportMode: 'direct_allowed' as const,
+      nowMs: () => Date.now(),
+      pollIntervalMs: 1,
+      timeoutMs: 400,
+      rtcFactory: () => {
+        rtcCreated++;
+        return new FakePeer(new FakeLink());
+      },
+    } satisfies Partial<ConnectPrivatePeerParams>;
+
+    // WITH the cap hooks: every fake is rejected at verify → no peer is ever chosen → the
+    // dial path (rtcFactory) is NEVER reached.
+    await expect(connectPrivatePeer({ ...base, rendezvousCap: hooks })).rejects.toThrow(
+      /timed out/,
+    );
+    expect(rtcCreated).toBe(0);
+
+    // WITHOUT the cap: the carrier would pick a fake and attempt to dial it — the cap is
+    // exactly what prevents the flooder from consuming the dial budget.
+    rtcCreated = 0;
+    await expect(connectPrivatePeer({ ...base })).rejects.toThrow();
+    expect(rtcCreated).toBeGreaterThan(0);
+  });
 });

@@ -18,11 +18,14 @@ export const PRIVATE_P2P_DB_NAME = 'licio_private_p2p';
 /** v2 adds the `room_sessions` store (the device keys + MLS group + epoch keys a
  *  room needs to survive a reload — a private room is local-only).  v3 adds the
  *  `blocks` store: CID-addressed §13.6 attachment manifest + media-chunk ciphertext,
- *  fetched lazily over the §15.7 block exchange. */
-export const PRIVATE_P2P_DB_VERSION = 3;
+ *  fetched lazily over the §15.7 block exchange.  v4 adds `cap_secrets`: the Tier-2
+ *  rendezvous-cap `nid` + issuer seed — device-local secrets held at the SAME trust
+ *  boundary as the room epoch keys (off origin-wide localStorage). */
+export const PRIVATE_P2P_DB_VERSION = 4;
 const ENVELOPE_STORE = 'envelopes';
 export const ROOM_SESSION_STORE = 'room_sessions';
 const BLOCK_STORE = 'blocks';
+const CAP_SECRET_STORE = 'cap_secrets';
 const ROOM_INDEX = 'by_room';
 
 interface StoredRow {
@@ -34,6 +37,12 @@ interface StoredRow {
 interface StoredBlockRow {
   readonly roomId: string;
   readonly cid: string;
+  readonly bytes: Uint8Array;
+}
+
+interface StoredCapSecretRow {
+  readonly roomId: string;
+  readonly field: string;
   readonly bytes: Uint8Array;
 }
 
@@ -75,6 +84,10 @@ export function openPrivateP2pDb(): Promise<IDBDatabase> {
         // CID-addressed attachment blocks, compound (roomId, cid) key (idempotent
         // per room+CID — a content-addressed block is immutable, so re-put is a no-op).
         db.createObjectStore(BLOCK_STORE, { keyPath: ['roomId', 'cid'] });
+      }
+      if (!db.objectStoreNames.contains(CAP_SECRET_STORE)) {
+        // One row per (roomId, field) — the Tier-2 cap `nid` + issuer seed.
+        db.createObjectStore(CAP_SECRET_STORE, { keyPath: ['roomId', 'field'] });
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -166,6 +179,33 @@ export class IndexedDbPrivateRoomStorage implements PrivateRoomStorage {
         | IDBValidKey
         | undefined;
       return key !== undefined;
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Read a Tier-2 cap secret (`nid` / `issuer-seed`) for this room, or undefined. */
+  async getCapSecret(field: string): Promise<Uint8Array | undefined> {
+    const db = await openPrivateP2pDb();
+    try {
+      const tx = db.transaction(CAP_SECRET_STORE, 'readonly');
+      const row = (await promisify(tx.objectStore(CAP_SECRET_STORE).get([this.roomId, field]))) as
+        | StoredCapSecretRow
+        | undefined;
+      return row?.bytes;
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Persist a Tier-2 cap secret for this room (idempotent on the (roomId, field) key). */
+  async putCapSecret(field: string, bytes: Uint8Array): Promise<void> {
+    const db = await openPrivateP2pDb();
+    try {
+      const tx = db.transaction(CAP_SECRET_STORE, 'readwrite');
+      const row: StoredCapSecretRow = { roomId: this.roomId, field, bytes };
+      tx.objectStore(CAP_SECRET_STORE).put(row);
+      await txDone(tx);
     } finally {
       db.close();
     }
