@@ -66,6 +66,7 @@ export function installFromIssuances(
   epoch: number,
   issuances: readonly IssuanceOpBody[],
 ): boolean {
+  if (member.isEnrolled(String(epoch))) return true; // idempotent: verified once, then cached
   for (let i = issuances.length - 1; i >= 0; i--) {
     const issuance = issuances[i];
     if (issuance === undefined || issuance.target_epoch !== epoch) continue;
@@ -79,7 +80,8 @@ export function installFromIssuances(
       );
       return true;
     } catch {
-      return false; // a malformed signature/key ⇒ stay unenrolled (ride Tier-1)
+      // a malformed/stale credential (fails verification) ⇒ try an EARLIER issuance; if none
+      // verify for this device's current nid, stay unenrolled (ride Tier-1).
     }
   }
   return false;

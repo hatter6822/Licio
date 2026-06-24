@@ -117,16 +117,31 @@ export class RendezvousCapManager {
   /**
    * The connect-peer cap hooks for `epoch`, or `undefined` if this device is not yet enrolled
    * (⇒ the carrier rides Tier-1 — fail-open). When enrolled, `build` produces the device's cap
-   * and `verify` filters peers under the room issuer key.
+   * and `filterVerified` runs the §6.8 serverless cap (`filterVerifiedPresence`) over the
+   * polled candidates under the room issuer key.
    */
   async hooks(epoch: number): Promise<RendezvousCapHooks | undefined> {
     const { cap, member } = await this.load();
-    const issuerKey = member.issuerKey(String(epoch));
-    if (issuerKey === null) return undefined;
+    const issuerKeyBytes = member.issuerKey(String(epoch));
+    if (issuerKeyBytes === null) return undefined;
+    const issuerKey = cap.issuerKeyFromBytes(issuerKeyBytes); // parse once, reuse per poll
     return {
       build: (roomBlindId, e, bucket) => cap.buildAnnouncementCap(member, roomBlindId, e, bucket),
-      verify: (capData, roomBlindId, e, bucket) =>
-        cap.verifyAnnouncementCap(capData, issuerKey, roomBlindId, e, bucket),
+      filterVerified: (caps, roomBlindId, e, bucket, nowMs) =>
+        cap
+          .filterVerifiedPresence(
+            caps.map((c, i) => ({
+              pseudonym: cap.fromBase64Url(c.pseudonym),
+              proof: cap.fromBase64Url(c.proof),
+              epoch: String(e),
+              bucket,
+              value: i,
+            })),
+            issuerKey,
+            new TextEncoder().encode(roomBlindId),
+            { nowMs },
+          )
+          .map((v) => v.value),
     };
   }
 }

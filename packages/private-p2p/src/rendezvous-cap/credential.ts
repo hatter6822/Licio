@@ -22,6 +22,7 @@ import {
   blindSign,
   credentialLayout,
   credentialScalars,
+  verifyBlindCredential,
 } from '../crypto/bbs/blind.js';
 import {
   proveWithPseudonymPrepared,
@@ -39,6 +40,7 @@ import {
   messageToScalar,
 } from '../crypto/bbs/suite.js';
 import { randomBytes } from '../crypto/runtime.js';
+import { RENDEZVOUS_DEFAULT_BUCKET_MS } from '../sync/rendezvous.js';
 
 /** The fixed index of `nid` in the one-committed-message rendezvous credential. */
 const NID_INDEX = 0;
@@ -46,11 +48,14 @@ const NID_INDEX = 0;
 export const PER_EPOCH_BUCKET = -1;
 
 /**
- * The time-bucket width — the SSOT for the announcer, the server verifier, and the
- * client poll-filter. ALL THREE must agree, or a valid announce lands out-of-window.
+ * The cap time-bucket width — the SSOT for the announcer, the server verifier, and the client
+ * poll-filter. ALL THREE must agree, or a valid announce lands out-of-window. It is PINNED to
+ * the §15.3.2 rendezvous discovery bucket (`RENDEZVOUS_DEFAULT_BUCKET_MS`) BY CONSTRUCTION,
+ * because the carrier derives the cap bucket AND the `room_blind_id` bucket from the same
+ * `rendezvousTimeBucket(now)` — so the cap bucket IS the discovery bucket, not a second clock.
  * (`apps/api`'s `DEFAULT_RENDEZVOUS_CONFIG.bucketWidthMs` mirrors this value.)
  */
-export const DEFAULT_BUCKET_WIDTH_MS = 10 * 60 * 1000;
+export const DEFAULT_BUCKET_WIDTH_MS = RENDEZVOUS_DEFAULT_BUCKET_MS;
 
 /** The current time bucket index for `nowMs` (a per-bucket pseudonym rotates with it). */
 export function currentBucket(nowMs: number, widthMs: number = DEFAULT_BUCKET_WIDTH_MS): number {
@@ -164,6 +169,34 @@ export function assembleCredential(
   signature: Uint8Array,
 ): RendezvousCredential {
   return { credential: signature, nidSecret, secretProverBlind: request.secretProverBlind };
+}
+
+/**
+ * Verify a device's OWN blind-issued credential against the per-epoch issuer key BEFORE
+ * relying on it. Catches a credential issued for a STALE commitment (e.g. the device rotated
+ * its `nid` and the op log still carries an issuance for the old commitment) or any
+ * corrupt/mismatched issuance — so the device stays on Tier-1 instead of building shows that
+ * silently fail at peers. Composition-anchored: this is the vetted base `bbsVerifyScalars`.
+ */
+export function verifyRendezvousCredential(
+  issuerPk: G2Point,
+  signature: Uint8Array,
+  nidSecret: Uint8Array,
+  secretProverBlind: bigint,
+  epoch: Uint8Array,
+): boolean {
+  try {
+    return verifyBlindCredential(
+      issuerPk,
+      signature,
+      [],
+      [messageToScalar(nidSecret)],
+      secretProverBlind,
+      epochHeader(epoch),
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** A device's presence announcement: the ZK show + the pseudonym (dedup key). */

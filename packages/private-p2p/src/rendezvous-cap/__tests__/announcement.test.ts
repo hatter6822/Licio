@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-S Tier-2 — the announcement cap end-to-end with the REAL sealed rendezvous record: an
-// enrolled member builds a cap, it is sealed INSIDE the announcement, a peer opens the
-// record and verifies the cap under the issuer key (and dedups by the pseudonym). Proves the
-// cap survives the seal, a forged cap is rejected, and a Tier-1 announcement carries none.
+// enrolled member builds a cap, it is sealed INSIDE the announcement, and a peer opens the
+// record and verifies the cap (the core `verifyRendezvousPresence` that the §6.8
+// `filterVerifiedPresence` serverless cap runs per record). Proves the cap survives the seal,
+// a forged/cross-context cap is rejected, and a Tier-1 announcement carries none.
 
 import { describe, expect, it } from 'vitest';
 import { randomBytes } from '../../crypto/runtime.js';
@@ -14,14 +15,19 @@ import {
 } from '../../sync/rendezvous.js';
 import {
   buildAnnouncementCap,
+  fromBase64Url,
+  issuerKeyFromBytes,
+  pseudonymFromBytes,
   RendezvousIssuer,
   RendezvousMember,
-  verifyAnnouncementCap,
+  rendezvousContext,
+  verifyRendezvousPresence,
 } from '../index.js';
 
 const EPOCH = 4;
 const BUCKET = 12345;
 const NOW = 1_700_000_000_000;
+const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 
 function enroll(member: RendezvousMember, admin: RendezvousIssuer): void {
   member.installCredential(
@@ -29,6 +35,31 @@ function enroll(member: RendezvousMember, admin: RendezvousIssuer): void {
     admin.issueForCommitment(member.commitment),
     admin.publicKey,
   );
+}
+
+/** The per-record verify the §6.8 serverless cap runs (the bucket-window lives in
+ *  filterVerifiedPresence — covered by poll-filter.test.ts): verify the opened cap binds its
+ *  pseudonym to (roomBlindId, epoch, bucket) under the issuer key. */
+function capVerifies(
+  cap: { proof: string; pseudonym: string },
+  issuerKeyBytes: Uint8Array,
+  roomBlindId: string,
+  epoch: number,
+  bucket: number,
+): boolean {
+  try {
+    const epochBytes = enc(String(epoch));
+    const context = rendezvousContext(enc(roomBlindId), epochBytes, bucket);
+    return verifyRendezvousPresence(
+      issuerKeyFromBytes(issuerKeyBytes),
+      fromBase64Url(cap.proof),
+      pseudonymFromBytes(fromBase64Url(cap.pseudonym)),
+      epochBytes,
+      context,
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Seal `cap` (if any) into a member's announcement record, then open it back. */
@@ -67,17 +98,8 @@ describe('Tier-2 announcement cap (sealed, end-to-end)', () => {
 
     const { opened } = await roundTrip(rendezvousKey, 'alice-dev', cap);
     expect(opened.cap).toBeDefined();
-
-    // a peer holding the issuer key verifies the opened cap
-    const nym = verifyAnnouncementCap(
-      // biome-ignore lint/style/noNonNullAssertion: asserted defined above
-      opened.cap!,
-      admin.publicKey,
-      roomBlindId,
-      EPOCH,
-      BUCKET,
-    );
-    expect(nym).not.toBeNull();
+    // biome-ignore lint/style/noNonNullAssertion: asserted defined above
+    expect(capVerifies(opened.cap!, admin.publicKey, roomBlindId, EPOCH, BUCKET)).toBe(true);
   });
 
   it('rejects a forged cap (wrong issuer key) and a wrong-context verify', async () => {
@@ -88,22 +110,13 @@ describe('Tier-2 announcement cap (sealed, end-to-end)', () => {
     const roomBlindId = await deriveRoomBlindId(rendezvousKey, EPOCH, BUCKET);
     const cap = buildAnnouncementCap(alice, roomBlindId, EPOCH, BUCKET);
     const { opened } = await roundTrip(rendezvousKey, 'alice-dev', cap);
-
     const wrongIssuer = RendezvousIssuer.generate(String(EPOCH));
     // biome-ignore lint/style/noNonNullAssertion: cap present
-    expect(
-      verifyAnnouncementCap(opened.cap!, wrongIssuer.publicKey, roomBlindId, EPOCH, BUCKET),
-    ).toBeNull();
-    // wrong room blind id (cross-room replay)
+    expect(capVerifies(opened.cap!, wrongIssuer.publicKey, roomBlindId, EPOCH, BUCKET)).toBe(false);
     // biome-ignore lint/style/noNonNullAssertion: cap present
-    expect(
-      verifyAnnouncementCap(opened.cap!, admin.publicKey, 'other-room', EPOCH, BUCKET),
-    ).toBeNull();
-    // wrong bucket
+    expect(capVerifies(opened.cap!, admin.publicKey, 'other-room', EPOCH, BUCKET)).toBe(false);
     // biome-ignore lint/style/noNonNullAssertion: cap present
-    expect(
-      verifyAnnouncementCap(opened.cap!, admin.publicKey, roomBlindId, EPOCH, BUCKET + 1),
-    ).toBeNull();
+    expect(capVerifies(opened.cap!, admin.publicKey, roomBlindId, EPOCH, BUCKET + 1)).toBe(false);
   });
 
   it('a non-enrolled member produces no cap; a Tier-1 announcement carries none', async () => {

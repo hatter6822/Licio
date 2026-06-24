@@ -127,8 +127,8 @@ export type DeviceResolver = (
  * Tier-2 cap hooks, bound to a device's `RendezvousMember` + the room issuer key by the
  * carrier (the room manager constructs these from the lazily-loaded `rendezvous-cap`
  * subpath). `build` returns the cap to seal into an announcement (or `null` if the device is
- * not enrolled ⇒ Tier-1); `verify` checks an OPENED announcement's cap and returns the
- * pseudonym (the dedup key) or `null` for a fake.
+ * not enrolled ⇒ Tier-1); `filterVerified` is the §6.8 serverless cap (`filterVerifiedPresence`)
+ * over the OPENED capped candidates.
  */
 export interface RendezvousCapHooks {
   build(
@@ -136,12 +136,19 @@ export interface RendezvousCapHooks {
     epoch: number,
     bucket: number,
   ): { proof: string; pseudonym: string } | null;
-  verify(
-    cap: { proof: string; pseudonym: string },
+  /**
+   * Verify + DEDUP a batch of opened announcement caps under the room's per-epoch issuer key.
+   * Returns the INDICES of `caps` whose proof verifies, deduped by the verified pseudonym
+   * (one slot per device per `(epoch, bucket)`) — so a fake-cap flooder is dropped and a
+   * device cannot occupy two verified slots, all WITHOUT trusting the relay.
+   */
+  filterVerified(
+    caps: ReadonlyArray<{ proof: string; pseudonym: string }>,
     roomBlindId: string,
     epoch: number,
     bucket: number,
-  ): Uint8Array | null;
+    nowMs: number,
+  ): number[];
 }
 
 export interface ConnectPrivatePeerParams {
@@ -246,37 +253,55 @@ export async function connectPrivatePeer(
     }),
   );
 
-  // 2. Discover a peer (poll until a non-self announcement opens, or time out).
+  // 2. Discover a peer. Open every candidate announcement (skipping self / unopenable / a
+  //    peer we are already connected to), then — Tier-2 — keep only the verified + deduped
+  //    capped peers via the §6.8 serverless cap (`filterVerified`), with cap-less peers riding
+  //    Tier-1 (the §15.5 handshake remains the membership auth). A fake-cap flooder is dropped
+  //    before any dial; nothing here trusts the relay.
+  type OpenedAnn = Awaited<ReturnType<typeof p2p.openRendezvousAnnouncement>>;
+  type PolledRecord = Awaited<ReturnType<typeof rendezvous.poll>>[number];
   let peer: DiscoveredPeer | undefined;
   while (!peer) {
     throwIfAborted();
     const records = await rendezvous.poll(roomBlindId);
+    const opened: { record: PolledRecord; ann: OpenedAnn }[] = [];
     for (const record of records) {
       if (record.peer_blind_id === selfPeerBlindId) continue;
       try {
         const ann = await p2p.openRendezvousAnnouncement(record, rendezvousKey);
         if (ann.peer_device_id === selfDeviceId) continue;
-        // Mesh: skip a peer we are already connected to, so each dial finds a NEW member.
         if (params.excludePeerDeviceIds?.has(ann.peer_device_id)) continue;
-        // Tier-2: a present-but-INVALID cap is a fake flood record (a member cannot prove a
-        // pseudonym it has no credential for) — skip it. A missing cap is Tier-1 (still
-        // considered; the §15.5 handshake auths membership before any data is served).
-        if (params.rendezvousCap && ann.cap !== undefined) {
-          if (params.rendezvousCap.verify(ann.cap, roomBlindId, epoch, timeBucket) === null) {
-            continue;
-          }
-        }
-        peer = {
-          peerBlindId: record.peer_blind_id,
-          peerDeviceId: ann.peer_device_id,
-          peerSignalingPublicKey: p2p.fromBase64Url(ann.signaling_public_key),
-        };
-        break;
+        opened.push({ record, ann });
       } catch {
         // A §15.3.2 cover record or a record sealed for a different key: skip it.
       }
     }
-    if (!peer) await sleep(pollIntervalMs);
+    let candidates = opened;
+    if (params.rendezvousCap) {
+      const capped = opened.filter((o) => o.ann.cap !== undefined);
+      const uncapped = opened.filter((o) => o.ann.cap === undefined);
+      const survivors = params.rendezvousCap.filterVerified(
+        capped.map((o) => o.ann.cap as { proof: string; pseudonym: string }),
+        roomBlindId,
+        epoch,
+        timeBucket,
+        nowMs(),
+      );
+      candidates = [
+        ...survivors.map((i) => capped[i] as { record: PolledRecord; ann: OpenedAnn }),
+        ...uncapped,
+      ];
+    }
+    const chosen = candidates[0];
+    if (chosen) {
+      peer = {
+        peerBlindId: chosen.record.peer_blind_id,
+        peerDeviceId: chosen.ann.peer_device_id,
+        peerSignalingPublicKey: p2p.fromBase64Url(chosen.ann.signaling_public_key),
+      };
+      break;
+    }
+    await sleep(pollIntervalMs);
   }
 
   // 3. Derive the pairwise signaling channel key (transcript-bound; both peers agree).

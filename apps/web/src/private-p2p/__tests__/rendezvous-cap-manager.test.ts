@@ -77,17 +77,19 @@ describe('RendezvousCapManager (carrier orchestration)', () => {
     // round 3: the member installs its credential
     await memberMgr.sync(ctxFor(engine, 'member-dev', false));
 
-    // the member is now enrolled → hooks present, build + verify work
+    // the member is now enrolled → hooks present, build + filterVerified work
     const hooks = await memberMgr.hooks(EPOCH);
     expect(hooks).toBeDefined();
+    // Per-epoch bucket (-1) so the verify is clock-independent (the time-bucket window is
+    // covered by poll-filter.test.ts). filterVerified returns the surviving candidate indices.
     // biome-ignore lint/style/noNonNullAssertion: asserted defined
-    const cap = hooks!.build('room-blind', EPOCH, 99);
+    const cap = hooks!.build('room-blind', EPOCH, -1);
     expect(cap).not.toBeNull();
     // biome-ignore lint/style/noNonNullAssertion: cap built
-    expect(hooks!.verify(cap!, 'room-blind', EPOCH, 99)).not.toBeNull();
-    // a wrong-context verify fails (the proof binds the room blind id)
+    expect(hooks!.filterVerified([cap!], 'room-blind', EPOCH, -1, 0)).toEqual([0]);
+    // a wrong-context verify drops it (the proof binds the room blind id)
     // biome-ignore lint/style/noNonNullAssertion: cap built
-    expect(hooks!.verify(cap!, 'other-room', EPOCH, 99)).toBeNull();
+    expect(hooks!.filterVerified([cap!], 'other-room', EPOCH, -1, 0)).toEqual([]);
   });
 
   it('a non-enrolled device gets no hooks (rides Tier-1)', async () => {

@@ -77,18 +77,27 @@ rides the §14.3 op log with a MINIMAL converged footprint:
 **The apps/web CARRIER hookup is also SHIPPED** — the cap now runs in the live room:
 - The §15.3 rendezvous announcement carries an OPTIONAL `cap` ({proof, pseudonym}) sealed
   INSIDE the announcement (`sync/rendezvous.ts`), so only a member who opens it sees the cap;
-  the relay never does. `buildAnnouncementCap`/`verifyAnnouncementCap` are the carrier glue
-  (epoch + bucket come from the record context, so announce + verify agree by construction).
+  the relay never does. `buildAnnouncementCap` is the announce-side glue; the VERIFY side is
+  the §6.8 serverless cap `filterVerifiedPresence` itself — there is ONE verify path, not a
+  parallel single-record helper (epoch + bucket come from the record context, so announce +
+  verify agree by construction).
 - `connect-peer.ts` takes optional `rendezvousCap` hooks — the announce seals the cap, and the
-  poll SKIPS any opened announcement whose cap is present-but-invalid (a fake flood record) while
-  a cap-less peer rides Tier-1 (the §15.5 handshake remains the membership auth).
+  poll runs `filterVerified` (→ `filterVerifiedPresence`) over the opened capped candidates:
+  it drops any cap that fails verification (a fake flood record) AND dedups verified peers by
+  pseudonym, while a cap-less peer rides Tier-1 (the §15.5 handshake remains the membership
+  auth). The cap bucket the carrier uses is `rendezvousTimeBucket(now)` — the SAME bucket as
+  the `room_blind_id`, and the cap width (`DEFAULT_BUCKET_WIDTH_MS`) is PINNED to that
+  discovery width (`RENDEZVOUS_DEFAULT_BUCKET_MS`) so the filter's window never drops a valid
+  cap (a regression test asserts the equality + a live round-trip).
 - `RendezvousCapManager` (apps/web) loads the `rendezvous-cap` subpath LAZILY (split-gate clean),
   holds the device's `RendezvousMember` (nid persisted) + the admin's issuer SEED (persisted;
   `RendezvousIssuer.fromSeed` derives a STABLE per-epoch issuer key), and drives publish →
-  install → issue over the engine reads. `PrivateRoomSession.syncCap` advances the cap after
-  every ingest + before each dial (connect AND mesh re-dial) and passes the hooks into
-  `connectPrivatePeer` — fail-open to Tier-1 throughout. Proven end-to-end: a real session
-  authors its `rendezvous.request` on ingest (folds into device state), idempotently.
+  install → issue over the engine reads. A device VERIFIES its own blind credential against the
+  per-epoch issuer key BEFORE relying on it (a stale post-`nid`-rotation or corrupt issuance
+  leaves it on Tier-1 rather than building shows that fail at peers); enrollment is idempotent.
+  `PrivateRoomSession.syncCap` advances the cap after every ingest + before each dial (connect
+  AND mesh re-dial) and passes the hooks into `connectPrivatePeer` — fail-open to Tier-1
+  throughout. Proven end-to-end: a real session authors its `rendezvous.request` on ingest.
 - The nid + issuer seed persist in a v4 `cap_secrets` store in the private-p2p IndexedDB (per
   `(roomId, field)`) — the SAME trust boundary as the room epoch keys, off origin-wide
   localStorage (round-trip + cross-room isolation tested).

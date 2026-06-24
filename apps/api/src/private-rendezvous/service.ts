@@ -57,7 +57,10 @@ export const DEFAULT_RENDEZVOUS_CONFIG: RendezvousServiceConfig = {
   maxTtlMs: 30 * 60 * 1000,
   maxRecordsPerPoll: 256,
   clockSkewToleranceMs: 5 * 60 * 1000,
-  bucketWidthMs: 10 * 60 * 1000,
+  // Mirrors `@licio/private-p2p`'s DEFAULT_BUCKET_WIDTH_MS === RENDEZVOUS_DEFAULT_BUCKET_MS
+  // (15 min): the client derives the cap bucket from `rendezvousTimeBucket`, so the server's
+  // bucket-window MUST use the same width or it rejects every valid capped announce.
+  bucketWidthMs: 15 * 60 * 1000,
   bucketGrace: 1,
 };
 

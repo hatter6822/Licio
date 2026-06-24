@@ -155,3 +155,19 @@ describe('Tier-2 issuer fromSeed (deterministic)', () => {
     ).toEqual(['ok']);
   });
 });
+
+describe('Tier-2 install-time credential verification (stale/mismatch guard)', () => {
+  it('rejects a credential issued for a DIFFERENT nid; the device stays unenrolled', () => {
+    const admin = RendezvousIssuer.generate('5');
+    const mine = new RendezvousMember();
+    const other = new RendezvousMember();
+    // The admin correctly blind-signs OTHER's commitment; installing that on MINE must FAIL
+    // (the signature is over other's nid, not mine) — so isEnrolled stays accurate.
+    const sigForOther = admin.issueForCommitment(other.commitment);
+    expect(() => mine.installCredential('5', sigForOther, admin.publicKey)).toThrow();
+    expect(mine.isEnrolled('5')).toBe(false);
+    // mine's OWN credential installs + verifies
+    mine.installCredential('5', admin.issueForCommitment(mine.commitment), admin.publicKey);
+    expect(mine.isEnrolled('5')).toBe(true);
+  });
+});

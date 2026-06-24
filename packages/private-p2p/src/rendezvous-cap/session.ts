@@ -31,6 +31,7 @@ import {
   type RendezvousCredential,
   type RendezvousPresence,
   rendezvousContext,
+  verifyRendezvousCredential,
 } from './credential.js';
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
@@ -92,9 +93,23 @@ export class RendezvousMember {
     return this.request.commitmentWithProof;
   }
 
-  /** Install the admin's per-epoch blind signature + the issuer key for `epoch`. */
+  /** Install the admin's per-epoch blind signature + the issuer key for `epoch`. Verifies the
+   *  credential against THIS device's current `nid` first — a stale (post-`nid`-rotation) or
+   *  corrupt issuance throws, so the caller stays unenrolled (rides Tier-1) rather than
+   *  building shows that fail at peers. */
   installCredential(epoch: string, signature: Uint8Array, issuerPubKey: Uint8Array): void {
-    issuerKeyFromBytes(issuerPubKey); // validate the key encoding (throws if malformed)
+    const issuerPk = issuerKeyFromBytes(issuerPubKey); // validates the key encoding
+    if (
+      !verifyRendezvousCredential(
+        issuerPk,
+        signature,
+        this.nidSecret,
+        this.request.secretProverBlind,
+        enc(epoch),
+      )
+    ) {
+      throw new Error('rendezvous-cap: credential failed verification for this device');
+    }
     this.enrolled.set(epoch, {
       issuerPubKey,
       credential: assembleCredential(this.nidSecret, this.request, signature),

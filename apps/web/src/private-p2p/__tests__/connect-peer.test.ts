@@ -410,10 +410,30 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     );
     const issuerKey = legitMember.issuerKey(String(epoch));
     if (!issuerKey) throw new Error('member not enrolled');
+    const issuerPk = cap.issuerKeyFromBytes(issuerKey);
     const hooks = {
       build: (rb: string, e: number, b: number) => cap.buildAnnouncementCap(legitMember, rb, e, b),
-      verify: (c: { proof: string; pseudonym: string }, rb: string, e: number, b: number) =>
-        cap.verifyAnnouncementCap(c, issuerKey, rb, e, b),
+      filterVerified: (
+        caps: ReadonlyArray<{ proof: string; pseudonym: string }>,
+        rb: string,
+        e: number,
+        b: number,
+        now: number,
+      ): number[] =>
+        cap
+          .filterVerifiedPresence(
+            caps.map((c, i) => ({
+              pseudonym: cap.fromBase64Url(c.pseudonym),
+              proof: cap.fromBase64Url(c.proof),
+              epoch: String(e),
+              bucket: b,
+              value: i,
+            })),
+            issuerPk,
+            new TextEncoder().encode(rb),
+            { nowMs: now },
+          )
+          .map((v) => v.value),
     };
 
     // A FLOODER enrolled under a DIFFERENT issuer → its (well-formed) caps never verify under
