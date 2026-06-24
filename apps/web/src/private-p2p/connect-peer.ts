@@ -123,6 +123,27 @@ export type DeviceResolver = (
   deviceId: string,
 ) => { readonly signingPublicKey: string; readonly activeAtEpoch: boolean } | undefined;
 
+/**
+ * Tier-2 cap hooks, bound to a device's `RendezvousMember` + the room issuer key by the
+ * carrier (the room manager constructs these from the lazily-loaded `rendezvous-cap`
+ * subpath). `build` returns the cap to seal into an announcement (or `null` if the device is
+ * not enrolled ⇒ Tier-1); `verify` checks an OPENED announcement's cap and returns the
+ * pseudonym (the dedup key) or `null` for a fake.
+ */
+export interface RendezvousCapHooks {
+  build(
+    roomBlindId: string,
+    epoch: number,
+    bucket: number,
+  ): { proof: string; pseudonym: string } | null;
+  verify(
+    cap: { proof: string; pseudonym: string },
+    roomBlindId: string,
+    epoch: number,
+    bucket: number,
+  ): Uint8Array | null;
+}
+
 export interface ConnectPrivatePeerParams {
   /** The dynamically-imported `@licio/private-p2p` module (its crypto + sync fns). */
   readonly p2p: P2pModule;
@@ -138,6 +159,11 @@ export interface ConnectPrivatePeerParams {
   /** §15.6 mesh — device ids to skip in discovery (already-connected peers), so each dial
    *  finds a NEW member rather than re-connecting the first one found. */
   readonly excludePeerDeviceIds?: ReadonlySet<string>;
+  /** Tier-2 rendezvous cap hooks (docs/private-p2p/TIER2-RENDEZVOUS-CAP.md §6.8). When
+   *  present, the announce embeds a cap from `build`, and the poll SKIPS any opened
+   *  announcement whose cap is present-but-INVALID (a fake flood record). A peer with no cap
+   *  is treated as Tier-1 — still considered; the §15.5 handshake remains the real auth. */
+  readonly rendezvousCap?: RendezvousCapHooks;
   /** §15.4 transport mode (relay-only suppresses IP-revealing ICE candidates). */
   readonly transportMode: 'relay_only' | 'direct_allowed';
   readonly iceServers?: RtcIceServerLike[];
@@ -199,8 +225,10 @@ export async function connectPrivatePeer(
     timeBucket,
   );
 
-  // 1. Announce our presence with an ephemeral X25519 signaling key.
+  // 1. Announce our presence with an ephemeral X25519 signaling key. If a Tier-2 cap hook is
+  //    configured and this device is enrolled, seal the cap proof INSIDE the announcement.
   const ephemeral = await p2p.generateX25519KeyPair();
+  const cap = params.rendezvousCap?.build(roomBlindId, epoch, timeBucket) ?? undefined;
   await rendezvous.announce(
     await p2p.buildRendezvousRecord({
       rendezvousKey,
@@ -212,6 +240,7 @@ export async function connectPrivatePeer(
         peer_device_id: selfDeviceId,
         signaling_public_key: p2p.toBase64Url(ephemeral.publicKey),
         transport_hints: [],
+        ...(cap ? { cap } : {}),
       },
       nowMs: nowMs(),
     }),
@@ -229,6 +258,14 @@ export async function connectPrivatePeer(
         if (ann.peer_device_id === selfDeviceId) continue;
         // Mesh: skip a peer we are already connected to, so each dial finds a NEW member.
         if (params.excludePeerDeviceIds?.has(ann.peer_device_id)) continue;
+        // Tier-2: a present-but-INVALID cap is a fake flood record (a member cannot prove a
+        // pseudonym it has no credential for) — skip it. A missing cap is Tier-1 (still
+        // considered; the §15.5 handshake auths membership before any data is served).
+        if (params.rendezvousCap && ann.cap !== undefined) {
+          if (params.rendezvousCap.verify(ann.cap, roomBlindId, epoch, timeBucket) === null) {
+            continue;
+          }
+        }
         peer = {
           peerBlindId: record.peer_blind_id,
           peerDeviceId: ann.peer_device_id,
