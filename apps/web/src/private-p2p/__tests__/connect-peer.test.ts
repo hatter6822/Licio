@@ -412,7 +412,17 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     if (!issuerKey) throw new Error('member not enrolled');
     const issuerPk = cap.issuerKeyFromBytes(issuerKey);
     const hooks = {
-      build: (rb: string, e: number, b: number) => cap.buildAnnouncementCap(legitMember, rb, e, b),
+      build: (rb: string, e: number, b: number) => {
+        const built = cap.buildAnnouncementCap(legitMember, rb, e, b);
+        if (built === null) return null;
+        const key = legitMember.issuerKey(String(e));
+        if (key === null) return null;
+        return {
+          proof: built.proof,
+          pseudonym: built.pseudonym,
+          issuerPubKey: cap.toBase64Url(key),
+        };
+      },
       filterVerified: (
         caps: ReadonlyArray<{ proof: string; pseudonym: string }>,
         rb: string,

@@ -126,7 +126,19 @@ export class RendezvousCapManager {
     if (issuerKeyBytes === null) return undefined;
     const issuerKey = cap.issuerKeyFromBytes(issuerKeyBytes); // parse once, reuse per poll
     return {
-      build: (roomBlindId, e, bucket) => cap.buildAnnouncementCap(member, roomBlindId, e, bucket),
+      build: (roomBlindId, e, bucket) => {
+        const built = cap.buildAnnouncementCap(member, roomBlindId, e, bucket);
+        if (built === null) return null;
+        // The per-epoch issuer public key the TOP-LEVEL cap carries so a key-less verifier
+        // (server/relay) can check the proof. Computed for build's OWN epoch `e`.
+        const keyForEpoch = member.issuerKey(String(e));
+        if (keyForEpoch === null) return null;
+        return {
+          proof: built.proof,
+          pseudonym: built.pseudonym,
+          issuerPubKey: cap.toBase64Url(keyForEpoch),
+        };
+      },
       filterVerified: (caps, roomBlindId, e, bucket, nowMs) =>
         cap
           .filterVerifiedPresence(

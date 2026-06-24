@@ -126,16 +126,18 @@ export type DeviceResolver = (
 /**
  * Tier-2 cap hooks, bound to a device's `RendezvousMember` + the room issuer key by the
  * carrier (the room manager constructs these from the lazily-loaded `rendezvous-cap`
- * subpath). `build` returns the cap to seal into an announcement (or `null` if the device is
- * not enrolled ⇒ Tier-1); `filterVerified` is the §6.8 serverless cap (`filterVerifiedPresence`)
- * over the OPENED capped candidates.
+ * subpath). `build` returns the cap (sealed INSIDE the announcement for a member-only verifier
+ * AND carried at the top level so the server/relay Tier-2 path can verify it) — or `null` if the
+ * device is not enrolled ⇒ Tier-1; `filterVerified` is the §6.8 serverless cap
+ * (`filterVerifiedPresence`) over the OPENED capped candidates.  `issuerPubKey` is the per-epoch
+ * issuer public key (base64url) the top-level cap carries so a key-less verifier can check it.
  */
 export interface RendezvousCapHooks {
   build(
     roomBlindId: string,
     epoch: number,
     bucket: number,
-  ): { proof: string; pseudonym: string } | null;
+  ): { proof: string; pseudonym: string; issuerPubKey: string } | null;
   /**
    * Verify + DEDUP a batch of opened announcement caps under the room's per-epoch issuer key.
    * Returns the INDICES of `caps` whose proof verifies, deduped by the verified pseudonym
@@ -225,17 +227,18 @@ export async function connectPrivatePeer(
 
   const timeBucket = p2p.rendezvousTimeBucket(nowMs());
   const roomBlindId = await p2p.deriveRoomBlindId(rendezvousKey, epoch, timeBucket);
-  const selfPeerBlindId = await p2p.derivePeerBlindId(
-    rendezvousKey,
-    selfDeviceId,
-    epoch,
-    timeBucket,
-  );
 
-  // 1. Announce our presence with an ephemeral X25519 signaling key. If a Tier-2 cap hook is
-  //    configured and this device is enrolled, seal the cap proof INSIDE the announcement.
+  // 1. Announce our presence with an ephemeral X25519 signaling key. Build the Tier-2 cap FIRST
+  //    (if a hook is configured and this device is enrolled): the cap proof is sealed INSIDE the
+  //    announcement (a member-only, anti-strip verifier path) AND carried at the TOP LEVEL so the
+  //    server/relay Tier-2 path can verify + dedup it WITHOUT the rendezvous key. When capped, the
+  //    cap pseudonym IS our peer_blind_id — the §15.3.1 dedup key (one presence slot per device
+  //    per (epoch, bucket)); a ZK proof reveals nothing beyond that pseudonym.
   const ephemeral = await p2p.generateX25519KeyPair();
   const cap = params.rendezvousCap?.build(roomBlindId, epoch, timeBucket) ?? undefined;
+  const selfPeerBlindId = cap
+    ? cap.pseudonym
+    : await p2p.derivePeerBlindId(rendezvousKey, selfDeviceId, epoch, timeBucket);
   await rendezvous.announce(
     await p2p.buildRendezvousRecord({
       rendezvousKey,
@@ -247,9 +250,20 @@ export async function connectPrivatePeer(
         peer_device_id: selfDeviceId,
         signaling_public_key: p2p.toBase64Url(ephemeral.publicKey),
         transport_hints: [],
-        ...(cap ? { cap } : {}),
+        ...(cap ? { cap: { proof: cap.proof, pseudonym: cap.pseudonym } } : {}),
       },
       nowMs: nowMs(),
+      ...(cap
+        ? {
+            cap: {
+              proof: cap.proof,
+              issuer_pubkey: cap.issuerPubKey,
+              epoch: String(epoch),
+              bucket: timeBucket,
+            },
+            capPseudonym: cap.pseudonym,
+          }
+        : {}),
     }),
   );
 
