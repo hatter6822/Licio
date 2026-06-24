@@ -415,10 +415,15 @@ function applyOp(state: RoomReducerState, op: PrivateRoomOp): void {
       applyRendezvousRequest(state, op, body);
       return;
     case 'rendezvous.issue':
-      // No converged content state: the per-epoch BBS issuer key + the per-device
-      // credentials are extracted DEVICE-LOCALLY via the engine rendezvous hook. The op
-      // still lives in the log (authority-checked = `admin`, sealed) so it converges as an
-      // EVENT and is authenticated; only the ephemeral cap material stays out of state.
+      // Reached ONLY after `authorMayApply` confirmed the author is `admin` (the §11 issue
+      // capability) — so this records an AUTHORIZED issuance.  The engine installs credentials
+      // from THIS reduced list, never from raw accepted ops (where a non-admin's crypto-valid
+      // issue op would otherwise sit before the reducer rejects it).
+      state.rendezvousIssuances.push({
+        targetEpoch: body.target_epoch,
+        issuerPublicKey: body.issuer_public_key,
+        credentials: body.credentials,
+      });
       return;
   }
 }

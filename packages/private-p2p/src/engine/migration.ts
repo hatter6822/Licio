@@ -95,9 +95,27 @@ export function planMigration(params: PlanMigrationParams): MigrationPlan {
       };
     case 'selected': {
       const chosen = new Set(params.selectedIds ?? []);
+      // The wizard selects STORY ids, but a selected story carries its whole conversation: also
+      // include every contribution whose `threadRef` is a selected story's thread.  Without this a
+      // selected thread migrates as a story SHELL with its comments silently dropped (§24 history
+      // loss).  A contribution may also be chosen directly (defensive — supports future
+      // contribution-level selection).
+      const selectedStoryThreads = new Set(
+        params.items
+          .filter((i) => i.kind === 'story' && chosen.has(i.id) && i.threadRef !== undefined)
+          .map((i) => i.threadRef as string),
+      );
       return {
         mode: 'selected',
-        items: params.items.filter((i) => chosen.has(i.id)).map((i) => ({ ...i })),
+        items: params.items
+          .filter(
+            (i) =>
+              chosen.has(i.id) ||
+              (i.kind === 'contribution' &&
+                i.threadRef !== undefined &&
+                selectedStoryThreads.has(i.threadRef)),
+          )
+          .map((i) => ({ ...i })),
         disclosure,
         carriesPlaintextBodies: true,
       };

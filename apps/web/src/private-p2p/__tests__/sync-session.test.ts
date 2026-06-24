@@ -68,6 +68,21 @@ class FakeEngine implements SyncEngineSurface {
   }
 }
 
+/** A block-capable fake engine: `blockWants` are the CIDs it wants, and it ALWAYS refuses to
+ *  serve (the §13.6 oversized/never-held case the spin guard must not loop on). */
+class FakeBlockEngine extends FakeEngine {
+  blockWants: string[] = [];
+  async wantedBlockCids(): Promise<string[]> {
+    return this.blockWants;
+  }
+  async serveBlocks(cids: readonly string[]) {
+    return { served: [] as { cid: string; bytes: Uint8Array }[], refused: [...cids] };
+  }
+  async ingestBlocks(): Promise<{ accepted: string[]; rejected: string[] }> {
+    return { accepted: [], rejected: [] }; // never reached in these refusal tests
+  }
+}
+
 // --- a fake JSON codec (the real codec is tested in the package) -------------------
 const fakeCodec: SyncCodec = {
   encodeSyncMessage: (m) => new TextEncoder().encode(JSON.stringify(m)),
@@ -175,5 +190,57 @@ describe('WS-S.4.3 PrivateSyncSession orchestration', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(errors.length).toBeGreaterThan(0);
     expect(engine.ops.has('g')).toBe(true); // engine intact
+  });
+
+  it('chunks media block-requests by the 1024-CID block cap, not the larger op-id cap', async () => {
+    // 1025 wanted block CIDs MUST split into ≤1024-CID requests; a single 1025-CID block_request
+    // would exceed the schema cap and throw before sending (media sync would stall).
+    const engine = new FakeBlockEngine();
+    engine.blockWants = Array.from({ length: 1025 }, (_, i) => `blk-${i}`);
+    const sent: import('@licio/private-p2p').SyncMessage[] = [];
+    const ref: { handler: ((f: Uint8Array) => void) | null } = { handler: null };
+    const channel: PeerChannel = {
+      send: (frame) => {
+        sent.push(fakeCodec.decodeSyncMessage(frame.slice()));
+      },
+      onMessage: (l) => {
+        ref.handler = l;
+      },
+      onClose: () => {},
+      close: () => {},
+    };
+    new PrivateSyncSession(engine, channel, fakeCodec).start();
+    // A peer head-announcement drives requestBlocks().
+    ref.handler?.(
+      fakeCodec.encodeSyncMessage({
+        schema: 'licio.private.head_announcement.v1',
+        heads: [],
+        op_count_bucket: 0,
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    const reqs = sent.filter(
+      (m): m is Extract<typeof m, { schema: 'licio.private.block_request.v1' }> =>
+        m.schema === 'licio.private.block_request.v1',
+    );
+    expect(reqs.length).toBe(2); // 1024 + 1, never one 1025-CID request
+    for (const r of reqs) expect(r.cids.length).toBeLessThanOrEqual(1024);
+    expect(new Set(reqs.flatMap((r) => r.cids)).size).toBe(1025); // every want covered
+  });
+
+  it('does NOT spin on a refused-only block response (bounded, no livelock)', async () => {
+    // Alice wants a block Bob will only ever REFUSE.  The old code re-drove requestBlocks() on the
+    // non-empty refused list, spinning block_request/block_response forever; now a refused-only
+    // response makes no progress and the exchange goes quiescent.
+    const alice = new FakeBlockEngine();
+    alice.blockWants = ['blk-x'];
+    const bob = new FakeBlockEngine(); // serveBlocks refuses everything
+    const { a, b, stats } = pairedChannels();
+    new PrivateSyncSession(alice, a, fakeCodec).start();
+    new PrivateSyncSession(bob, b, fakeCodec).start();
+    await settle(stats);
+    // A spin would never quiesce (settle would cap at 200 rounds with deliveries still climbing);
+    // the fix bounds it to a tiny handshake.
+    expect(stats.delivered).toBeLessThan(20);
   });
 });

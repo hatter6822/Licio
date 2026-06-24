@@ -378,30 +378,24 @@ export class PrivateRoomEngine {
   }
 
   /**
-   * Tier-2 rendezvous cap (§11): the accepted `rendezvous.issue` op bodies — what a device
-   * installs its credential from (the carrier feeds these to the coordinator's
-   * `installFromIssuances`). Returned in acceptance order (latest-wins downstream).
+   * Tier-2 rendezvous cap (§11): the AUTHORIZED `rendezvous.issue` bodies — what a device installs
+   * its credential from (the carrier feeds these to the coordinator's `installFromIssuances`).
+   * Sourced from the AUTHORITY-ENFORCING reduced state (`rendezvousIssuances`), NOT raw
+   * `acceptedOps`: a non-admin running a modified client can seal a crypto-valid `rendezvous.issue`
+   * that `openOp` stores in `acceptedOps`, but the reducer rejects it for lacking `admin`, so it
+   * never appears here — an unauthorized issuer can no longer enroll devices / partition Tier-2.
+   * Returned in canonical fold order (latest-wins downstream).
    */
   rendezvousIssuances(): {
     target_epoch: number;
     issuer_public_key: string;
     credentials: ReadonlyArray<{ device_id: string; signature: string }>;
   }[] {
-    const out: {
-      target_epoch: number;
-      issuer_public_key: string;
-      credentials: ReadonlyArray<{ device_id: string; signature: string }>;
-    }[] = [];
-    for (const op of this.acceptedOps.values()) {
-      if (op.body.type === 'rendezvous.issue') {
-        out.push({
-          target_epoch: op.body.target_epoch,
-          issuer_public_key: op.body.issuer_public_key,
-          credentials: op.body.credentials,
-        });
-      }
-    }
-    return out;
+    return this.currentState.rendezvousIssuances.map((i) => ({
+      target_epoch: i.targetEpoch,
+      issuer_public_key: i.issuerPublicKey,
+      credentials: i.credentials,
+    }));
   }
 
   /** The next Lamport stamp to author locally: `max(accepted) + 1` (a decimal

@@ -117,6 +117,15 @@ const snapshotStateSchema = z
         })
         .strict(),
     ),
+    rendezvousIssuances: z.array(
+      z
+        .object({
+          targetEpoch: z.number().int().min(0),
+          issuerPublicKey: z.string(),
+          credentials: z.array(z.object({ device_id: z.string(), signature: z.string() }).strict()),
+        })
+        .strict(),
+    ),
     seenClientDrafts: z.array(z.string()),
     snapshots: z.array(z.string()),
   })
@@ -192,6 +201,11 @@ export function serializeReducerState(state: RoomReducerState): Uint8Array {
       recoveryRequestId: r.recoveryRequestId,
       recoveringMemberId: r.recoveringMemberId,
       authorizingDeviceIds: [...r.authorizingDeviceIds],
+    })),
+    rendezvousIssuances: state.rendezvousIssuances.map((i) => ({
+      targetEpoch: i.targetEpoch,
+      issuerPublicKey: i.issuerPublicKey,
+      credentials: i.credentials.map((c) => ({ device_id: c.device_id, signature: c.signature })),
     })),
     seenClientDrafts: [...state.seenClientDrafts],
     snapshots: [...state.snapshots],
@@ -286,6 +300,11 @@ export function deserializeReducerState(bytes: Uint8Array): RoomReducerState {
       authorizingDeviceIds: new Set(r.authorizingDeviceIds),
     });
   }
+  state.rendezvousIssuances = body.rendezvousIssuances.map((i) => ({
+    targetEpoch: i.targetEpoch,
+    issuerPublicKey: i.issuerPublicKey,
+    credentials: i.credentials.map((c) => ({ device_id: c.device_id, signature: c.signature })),
+  }));
   for (const draft of body.seenClientDrafts) state.seenClientDrafts.add(draft);
   state.snapshots = [...body.snapshots];
   return state;

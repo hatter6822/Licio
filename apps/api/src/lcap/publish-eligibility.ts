@@ -36,17 +36,27 @@ const notFound = (reason: string): TargetEligibility => ({
   reason,
 });
 
-function fromStory(
-  row: { storageMode: 'server' | 'p2p'; visibility: 'public' | 'room_only' } | undefined,
+/** Derive a story target's eligibility from its room storage mode, visibility, AND hidden state
+ *  (exported for unit coverage of the fail-closed matrix). */
+export function fromStory(
+  row:
+    | { storageMode: 'server' | 'p2p'; visibility: 'public' | 'room_only'; hiddenState: unknown }
+    | undefined,
 ): TargetEligibility {
   if (!row) return notFound('target_not_found');
   const isServer = row.storageMode === 'server';
   const isPublic = row.visibility === 'public';
+  // A story hidden for takedown OR safety is no longer publicly readable (`storyReadableByUser`
+  // is false) even though its stored `visibility` may still be `public` — so it must NEVER be
+  // pinned to the public DHT.  This complements the takedown oracle, which catches a takedown but
+  // NOT a safety hide; the eligibility refuses BOTH.  (`hidden_state IS NULL` ⇒ live.)
+  const isLive = row.hiddenState === null;
+  const reason = !isServer ? 'p2p_room' : !isLive ? 'hidden' : !isPublic ? 'room_only' : undefined;
   return {
-    publishable: isServer && isPublic,
-    visibility: isPublic ? 'public' : 'in_room',
+    publishable: isServer && isPublic && isLive,
+    visibility: isPublic && isLive ? 'public' : 'in_room',
     privateRoomCid: !isServer,
-    ...(isServer && isPublic ? {} : { reason: isServer ? 'room_only' : 'p2p_room' }),
+    ...(reason ? { reason } : {}),
   };
 }
 
@@ -58,7 +68,11 @@ function fromStory(
 export function drizzlePublishEligibility(db: DbExecutor): PublishEligibilityResolver {
   const resolveStory = async (storyId: string): Promise<TargetEligibility> => {
     const rows = await db
-      .select({ storageMode: rooms.storageMode, visibility: stories.visibility })
+      .select({
+        storageMode: rooms.storageMode,
+        visibility: stories.visibility,
+        hiddenState: stories.hiddenState,
+      })
       .from(stories)
       .innerJoin(rooms, eq(stories.roomId, rooms.roomId))
       .where(eq(stories.storyId, storyId))

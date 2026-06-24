@@ -117,6 +117,12 @@ export interface PrivateSyncSessionOptions {
 /** The §15.7 op-id request cap (mirrors `MAX_OP_IDS_PER_REQUEST` in the package). */
 const DEFAULT_MAX_OP_IDS_PER_REQUEST = 4_096;
 
+/** The §13.6 block-request CID cap (mirrors `MAX_CIDS_PER_BLOCK_REQUEST` in the package — a value
+ *  import would breach the `check:private-p2p-split` dynamic-only boundary).  A `block_request`
+ *  rejects > this many CIDs at the zod boundary, so the media-want loop chunks by THIS, not the
+ *  larger op-id cap — otherwise an attachment with > 1024 missing chunks throws before sending. */
+const MAX_CIDS_PER_BLOCK_REQUEST = 1_024;
+
 export class PrivateSyncSession {
   private peerAnnouncement: HeadAnnouncement | null = null;
   private closed = false;
@@ -322,10 +328,10 @@ export class PrivateSyncSession {
     const fresh = [...new Set(cids)].filter((c) => !this.requestedBlocks.has(c)).sort();
     if (fresh.length === 0) return;
     for (const c of fresh) this.requestedBlocks.add(c);
-    for (let i = 0; i < fresh.length; i += this.maxOpIds) {
+    for (let i = 0; i < fresh.length; i += MAX_CIDS_PER_BLOCK_REQUEST) {
       this.sendMessage({
         schema: 'licio.private.block_request.v1',
-        cids: fresh.slice(i, i + this.maxOpIds),
+        cids: fresh.slice(i, i + MAX_CIDS_PER_BLOCK_REQUEST),
         priority: 'media',
         max_bytes: MAX_BLOCK_REQUEST_BYTES,
       });
@@ -355,9 +361,12 @@ export class PrivateSyncSession {
         response.blocks.map((b) => ({ cid: b.cid, bytes: base64UrlToBytes(b.data) })),
       );
     }
-    // A fetched manifest reveals its chunk CIDs, and budget-refused chunks are now
-    // re-requestable → drive the next phase of the fetch (only if progress was possible).
-    if (response.blocks.length > 0 || response.refused_cids.length > 0) {
+    // Re-drive ONLY on accepted-block progress.  A budget-refused chunk is un-guarded above, so it
+    // is retried by a re-drive that ACTUAL progress (an accepted block here, or a later MLS commit)
+    // triggers — never by the refusal alone.  Re-driving on a refused-ONLY response would spin
+    // `block_request`/`block_response` forever (an oversized/never-served CID stays wanted), so a
+    // peer that only refuses cannot livelock the exchange; it simply makes no progress this round.
+    if (response.blocks.length > 0) {
       await this.requestBlocks();
     }
   }

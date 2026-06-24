@@ -94,6 +94,30 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     }
   });
 
+  it('reports radio_unavailable (NOT running) when a radio fails to start', async () => {
+    const f = fakePlugin();
+    // The radio rejects startAdvertising (permission denied / unavailable).
+    f.plugin.startAdvertising = vi.fn(async () => {
+      throw new Error('permission denied');
+    });
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => new Uint8Array([1]),
+    });
+    const decision = await controller.start();
+    // NOT a false "running": the decision is blocked with the honest typed reason, and the
+    // controller tore everything down.
+    expect(decision).toMatchObject({
+      advertise: false,
+      discover: false,
+      blockedReason: 'radio_unavailable',
+    });
+    expect(controller.isRunning()).toBe(false);
+    expect(f.calls).toContain('stop'); // radios/listeners torn down
+  });
+
   it('starts the radios and drives ONE §16 exchange over a connected endpoint', async () => {
     const f = fakePlugin();
     const outcomes: Array<{ endpointId: string; channel: string; carriedBy: string | null }> = [];

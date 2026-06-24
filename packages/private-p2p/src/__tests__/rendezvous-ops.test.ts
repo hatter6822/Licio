@@ -97,7 +97,7 @@ describe('Tier-2 rendezvous-cap reducer ops', () => {
     expect(roomStateCommitment(restored)).toEqual(roomStateCommitment(state));
   });
 
-  it('rendezvous.issue from an ADMIN is accepted (no content-state change)', () => {
+  it('rendezvous.issue from an ADMIN is accepted and RECORDED in authorized issuances', () => {
     const issue = mkOp(
       {
         type: 'rendezvous.issue',
@@ -109,8 +109,18 @@ describe('Tier-2 rendezvous-cap reducer ops', () => {
     );
     const state = reduceRoom([genesis, issue]);
     expect(state.rejected.find((r) => r.opId === 'issue')).toBeUndefined(); // accepted
-    // it changes no content state — the device-local cap material is extracted by the engine
-    expect(roomStateCommitment(state)).toEqual(roomStateCommitment(reduceRoom([genesis])));
+    // The AUTHORIZED issuance is recorded in reduced state — the engine sources installable
+    // credentials from HERE, never from raw accepted ops (a non-admin's crypto-valid issue op
+    // would otherwise be installable before the reducer rejects it).
+    expect(state.rendezvousIssuances).toEqual([
+      {
+        targetEpoch: 0,
+        issuerPublicKey: KEY,
+        credentials: [{ device_id: 'bob-dev', signature: KEY }],
+      },
+    ]);
+    // It now participates in the converged commitment (authority-checked Tier-2 state).
+    expect(roomStateCommitment(state)).not.toEqual(roomStateCommitment(reduceRoom([genesis])));
   });
 
   it('rendezvous.issue from a NON-admin member is REJECTED (authority)', () => {
@@ -132,6 +142,9 @@ describe('Tier-2 rendezvous-cap reducer ops', () => {
     );
     const state = reduceRoom([genesis, member('bob', 'member', 1, '2'), issue]);
     expect(state.rejected.find((r) => r.opId === 'issue')?.reason).toBe('not_authorized');
+    // The crux of the fix: an unauthorized (crypto-valid) issue op is NOT recorded as an
+    // installable issuance, so the engine can never enroll devices from it.
+    expect(state.rendezvousIssuances).toEqual([]);
   });
 
   it('the fold is order-independent (convergence)', () => {

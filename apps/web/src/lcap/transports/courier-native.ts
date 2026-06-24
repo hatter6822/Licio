@@ -103,7 +103,11 @@ export type CourierBlockedReason =
   | 'forced_off_in_mode'
   | 'disabled'
   | 'below_battery_floor'
-  | 'no_peers';
+  | 'no_peers'
+  // A selected native radio rejected startAdvertising/startDiscovery (permission denied or the
+  // radio is unavailable); the controller tore the listeners/radios down, so this is reported in
+  // place of a false "running" decision.
+  | 'radio_unavailable';
 
 export interface CourierStartDecision {
   readonly advertise: boolean;

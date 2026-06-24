@@ -247,8 +247,12 @@ export class CourierController {
         if (this.decision.discover) await plugin.startDiscovery(radioOptions);
       }
     } catch {
-      // A radio that refuses to start is non-fatal — the seam still has the HTTPS anchor.
+      // A radio that refuses to start (permission denied / unavailable) is non-fatal — the seam
+      // still has the HTTPS anchor — but `stop()` removed every listener/radio, so we must NOT
+      // return the original allow decision (the UI would falsely show a dead courier as running).
+      // Report a blocked decision instead so `CourierRunner` surfaces the honest typed reason.
       await this.stop();
+      this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
     }
     return this.decision;
   }

@@ -100,6 +100,17 @@ export interface RejectedOp {
   readonly reason: string;
 }
 
+/** Tier-2 (§11): an AUTHORIZED `rendezvous.issue` — the per-epoch BBS issuer key + the per-device
+ *  blind-credential signatures.  Recorded by the authority-enforcing fold ONLY when the issuer is
+ *  `admin`-capable, so a non-admin's crypto-valid issue op (which `openOp` stores in `acceptedOps`
+ *  before the reducer rejects it) NEVER reaches this — the engine sources installable issuances
+ *  from here, not from raw accepted ops. */
+export interface RendezvousIssuanceState {
+  readonly targetEpoch: number;
+  readonly issuerPublicKey: string;
+  readonly credentials: ReadonlyArray<{ readonly device_id: string; readonly signature: string }>;
+}
+
 export interface RoomReducerState {
   members: Map<string, MemberState>;
   devices: Map<string, DeviceState>;
@@ -109,6 +120,8 @@ export interface RoomReducerState {
   summaries: Map<string, SummaryState>;
   attachments: Map<string, AttachmentState>;
   recoveryRequests: Map<string, RecoveryRequestState>;
+  /** Tier-2 admin-authorized issuances in canonical fold order (latest-wins downstream). */
+  rendezvousIssuances: RendezvousIssuanceState[];
   /** `${deviceId}:${client_draft_id}` seen, for the §14.4 idempotent dedup. */
   seenClientDrafts: Set<string>;
   /** Accepted snapshot-commit op ids (optimization hints, §14.5). */
@@ -128,6 +141,7 @@ export function emptyRoomState(): RoomReducerState {
     summaries: new Map(),
     attachments: new Map(),
     recoveryRequests: new Map(),
+    rendezvousIssuances: [],
     seenClientDrafts: new Set(),
     snapshots: [],
     rejected: [],
@@ -159,6 +173,10 @@ export function cloneRoomState(state: RoomReducerState): RoomReducerState {
         { ...v, authorizingDeviceIds: new Set(v.authorizingDeviceIds) },
       ]),
     ),
+    rendezvousIssuances: state.rendezvousIssuances.map((i) => ({
+      ...i,
+      credentials: i.credentials.map((c) => ({ ...c })),
+    })),
     seenClientDrafts: new Set(state.seenClientDrafts),
     snapshots: [...state.snapshots],
     rejected: [...state.rejected],
@@ -241,6 +259,13 @@ export function roomStateCommitment(state: RoomReducerState): Uint8Array {
       recoveryRequestId: id,
       recoveringMemberId: r.recoveringMemberId,
       authorizingDeviceIds: sortedStrings(r.authorizingDeviceIds),
+    })),
+    // Tier-2 issuances in fold order — so issuance divergence (a missing/extra authorized issue
+    // op) is reflected in the commitment, not just the DAG frontier.
+    rendezvousIssuances: state.rendezvousIssuances.map((i) => ({
+      targetEpoch: i.targetEpoch,
+      issuerPublicKey: i.issuerPublicKey,
+      credentials: i.credentials.map((c) => ({ deviceId: c.device_id, signature: c.signature })),
     })),
     snapshots: sortedStrings(state.snapshots),
   };

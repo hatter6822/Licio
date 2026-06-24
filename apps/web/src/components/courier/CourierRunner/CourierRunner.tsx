@@ -394,6 +394,11 @@ function blockedMessage(reason: CourierBlockedReason, t: ReturnType<typeof useT>
         'courier.runner.blocked.noPeers',
         'You chose to exchange with no one, so the radios stay idle.',
       );
+    case 'radio_unavailable':
+      return t(
+        'courier.runner.blocked.radioUnavailable',
+        'A radio could not start (permission denied or unavailable). The courier is stopped; sync still uses the network when online.',
+      );
     case 'disabled':
     case '':
       return t('courier.runner.blocked.disabled', 'No radio is enabled.');

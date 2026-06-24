@@ -34,6 +34,14 @@ describe('WS-S.9 planMigration', () => {
     expect(plan.carriesPlaintextBodies).toBe(true);
   });
 
+  it('selecting a STORY also brings its thread comments (no shell-without-conversation)', () => {
+    // The wizard only checks story ids; selecting `s1` must carry `c1` (its thread `t1` comment),
+    // but NOT `s2`/its thread.
+    const plan = planMigration({ mode: 'selected', items, selectedIds: ['s1'] });
+    expect(plan.items.map((i) => i.id).sort()).toEqual(['c1', 's1']);
+    expect(plan.items.find((i) => i.id === 'c1')?.body).toBe('reply body');
+  });
+
   it('selected with no selection imports nothing', () => {
     expect(planMigration({ mode: 'selected', items }).items).toEqual([]);
   });
