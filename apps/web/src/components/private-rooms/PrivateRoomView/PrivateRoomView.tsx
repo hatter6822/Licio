@@ -256,7 +256,7 @@ export function PrivateRoomView({ roomId }: PrivateRoomViewProps): React.ReactEl
 
 interface StoryCardWithCommentsProps {
   session: PrivateRoomSession;
-  story: { storyId: string; threadId: string; title: string };
+  story: { storyId: string; threadId: string; title: string; bodyMarkdownLite: string };
   contributions: ReadonlyArray<{
     contributionId: string;
     threadId: string;
@@ -295,6 +295,9 @@ function StoryCardWithComments({
   return (
     <Card>
       <h3 className="font-semibold">{story.title}</h3>
+      {story.bodyMarkdownLite.length > 0 ? (
+        <p className="mt-1 whitespace-pre-wrap text-sm">{story.bodyMarkdownLite}</p>
+      ) : null}
       <ul className="mt-2 flex flex-col gap-1">
         {comments.map((c) => (
           <li key={c.contributionId} className="text-sm">

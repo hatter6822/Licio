@@ -137,6 +137,10 @@ export const storyCreateOpSchema = z
     story_id: privateIdSchema,
     thread_id: privateIdSchema,
     title: z.string().trim().min(1).max(300),
+    /** The story's UGC body (markdown-lite), for a text submission — OPTIONAL (a link/media
+     *  story has none).  Bound mirrors the WS-G server story body (`max(20_000)`); rendered
+     *  through the same sanitizing pipeline. */
+    body_markdown_lite: z.string().max(20_000).optional(),
     submission_type: submissionTypeSchema,
     topic_ids: z.array(z.string().min(1).max(64)).max(10),
     language: z.string().min(2).max(35).optional(),
@@ -156,6 +160,7 @@ export const storyEditOpSchema = z
     type: z.literal('story.edit'),
     story_id: privateIdSchema,
     title: z.string().trim().min(1).max(300).optional(),
+    body_markdown_lite: z.string().max(20_000).optional(),
     topic_ids: z.array(z.string().min(1).max(64)).max(10).optional(),
     sensitivity_labels: z.array(z.string().min(1).max(64)).max(16).optional(),
     language: z.string().min(2).max(35).optional(),

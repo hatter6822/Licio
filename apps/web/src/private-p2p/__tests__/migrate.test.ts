@@ -96,6 +96,27 @@ describe('WS-S.9 reauthorIntoPrivateRoom', () => {
     expect(reply?.parentContributionId).toBe(parent?.contributionId);
   });
 
+  it('preserves a text story BODY, not just the title', async () => {
+    const session = await freshSession();
+    const exp: MigrationExportResponse = {
+      ...exportFixture(),
+      items: [
+        {
+          id: 'story-1',
+          kind: 'story',
+          title: 'Reservoir bond',
+          body: 'The full briefing text that must survive migration.',
+          threadRef: 'thread-1',
+        },
+      ],
+    };
+    const result = await reauthorIntoPrivateRoom({ session, export: exp, mode: 'full' });
+    expect(result.stories).toBe(1);
+    // The body is re-authored into the P2P story (NOT dropped to a title-only story).
+    const story = [...session.state().stories.values()].find((s) => s.title === 'Reservoir bond');
+    expect(story?.bodyMarkdownLite).toBe('The full briefing text that must survive migration.');
+  });
+
   it('fresh import authors NOTHING (best privacy going forward)', async () => {
     const session = await freshSession();
     const result = await reauthorIntoPrivateRoom({

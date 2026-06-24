@@ -164,7 +164,13 @@ export async function reauthorIntoPrivateRoom(params: {
       skipped += 1;
       continue;
     }
-    await params.session.postStory({ title, threadId: newThreadId });
+    // Preserve the story's user-authored text (a text submission); a link/media story has none
+    // (and a redacted/fresh plan strips bodies, so `item.body` is absent → a title-only story).
+    await params.session.postStory({
+      title,
+      threadId: newThreadId,
+      ...(item.body !== undefined && item.body.length > 0 ? { body: item.body } : {}),
+    });
     recordAuthoredItems(destinationRoomId, [item.id]);
     stories += 1;
   }

@@ -898,13 +898,17 @@ export class PrivateRoomSession {
   }
 
   /** Post a story (a top-level content item) into the room. */
-  async postStory(input: { title: string; threadId?: string }): Promise<string> {
+  async postStory(input: { title: string; threadId?: string; body?: string }): Promise<string> {
     const storyId = globalThis.crypto.randomUUID();
     await this.authorOp({
       type: 'story.create',
       story_id: storyId,
       thread_id: input.threadId ?? globalThis.crypto.randomUUID(),
       title: input.title,
+      // A text story carries its UGC body; a link/media story omits it (no empty field on the wire).
+      ...(input.body !== undefined && input.body.length > 0
+        ? { body_markdown_lite: input.body }
+        : {}),
       submission_type: 'original_brief',
       topic_ids: [],
       submission_metadata: {},

@@ -160,6 +160,7 @@ function applyStoryCreate(
     threadId: body.thread_id,
     authorMemberId: op.author_member_id,
     title: body.title,
+    bodyMarkdownLite: body.body_markdown_lite ?? '',
     submissionType: body.submission_type,
     topicIds: [...body.topic_ids],
     tombstoned: false,
@@ -187,6 +188,7 @@ function applyStoryEdit(
   // Latest valid edit wins by total-order position; the body is overwritten,
   // but a moderator tombstone (if any) keeps the display hidden.
   if (body.title !== undefined) story.title = body.title;
+  if (body.body_markdown_lite !== undefined) story.bodyMarkdownLite = body.body_markdown_lite;
   if (body.topic_ids !== undefined) story.topicIds = [...body.topic_ids];
   story.editCount += 1;
 }

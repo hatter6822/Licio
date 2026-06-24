@@ -40,6 +40,8 @@ export interface StoryState {
   readonly threadId: string;
   readonly authorMemberId: string;
   title: string;
+  /** The story's UGC body (markdown-lite); `''` for a link/media story with no text. */
+  bodyMarkdownLite: string;
   submissionType: string;
   topicIds: string[];
   tombstoned: boolean;
@@ -201,6 +203,7 @@ export function roomStateCommitment(state: RoomReducerState): Uint8Array {
       threadId: s.threadId,
       authorMemberId: s.authorMemberId,
       title: s.title,
+      bodyMarkdownLite: s.bodyMarkdownLite,
       submissionType: s.submissionType,
       topicIds: s.topicIds,
       tombstoned: s.tombstoned,
