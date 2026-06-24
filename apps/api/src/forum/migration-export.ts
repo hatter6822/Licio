@@ -288,6 +288,9 @@ export async function purgeRoomForMigration(
   actorRoles: readonly Role[],
   roomId: string,
   mode: 'purge' | 'anonymize',
+  /** The per-pass page size (defaulted; injectable so a test can prove the pagination drains a
+   *  room with MORE than one page of stories). */
+  sweepLimit: number = MIGRATION_SWEEP_LIMIT,
 ): Promise<MigrationPurgeResult> {
   const room = await forum.rooms.getById(roomId);
   if (room === null) return notAuthorized();
@@ -316,9 +319,7 @@ export async function purgeRoomForMigration(
   if (mode === 'anonymize') {
     // anonymize: detach the steward's authorship; all content stays readable.
     await anonymizeUserContent(ingestion, forum, actorUserId);
-    const storiesAffected = (
-      await ingestion.stories.listByRoom(roomId, MIGRATION_SWEEP_LIMIT)
-    ).filter((story) => story.hiddenState === null).length;
+    const storiesAffected = (await ingestion.stories.listLiveByRoom(roomId, sweepLimit)).length;
     forum.metrics.increment('migration.anonymized');
     forum.log('forum.migration_purged', {
       room_id: roomId,
@@ -331,14 +332,15 @@ export async function purgeRoomForMigration(
   // --- purge: irreversibly minimize EVERY §24.2 category for the room ---------
   const counts: MigrationPurgeCounts = { ...EMPTY_COUNTS };
 
-  // Page over the room's stories.  Each pass collects the live stories' ids +
+  // Page over the room's LIVE stories.  Each pass collects the live stories' ids +
   // thread ids, hard-deletes the per-thread / per-story forum content, archives
   // the threads, and takes the stories down (nulling the archived body excerpt).
-  // Each pass strictly reduces the live-story set (a taken-down story is no
-  // longer `hiddenState === null`), so the loop terminates and is idempotent.
+  // `listLiveByRoom` (not `listByRoom`+a JS filter) is essential: each pass hides a
+  // batch, which DROPS OUT of the next query, so the window advances and the loop
+  // drains EVERY live story — a plain `listByRoom` re-reads the same newest rows and
+  // exits early once they are hidden, leaving older live stories published.
   for (;;) {
-    const batch = await ingestion.stories.listByRoom(roomId, MIGRATION_SWEEP_LIMIT);
-    const live = batch.filter((story) => story.hiddenState === null);
+    const live = await ingestion.stories.listLiveByRoom(roomId, sweepLimit);
     if (live.length === 0) break;
 
     // Resolve each live story's thread (a story owns at most one shell here).
@@ -371,7 +373,9 @@ export async function purgeRoomForMigration(
       counts.stories += 1;
     }
 
-    if (batch.length < MIGRATION_SWEEP_LIMIT) break;
+    // A short page means there were fewer than a full page of LIVE stories left — the next
+    // query would return none, so stop here (the top-of-loop empty check is the real terminator).
+    if (live.length < sweepLimit) break;
   }
 
   // Lenses are room-scoped (not per-thread): purge once.

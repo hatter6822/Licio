@@ -417,6 +417,16 @@ export class DrizzleStoryStore implements StoryStore {
     return rows.map((row) => this.#toRecord(row));
   }
 
+  async listLiveByRoom(roomId: string, limit: number): Promise<StoryRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(storiesTable)
+      .where(and(eq(storiesTable.roomId, roomId), isNull(storiesTable.hiddenState)))
+      .orderBy(desc(storiesTable.createdAt))
+      .limit(limit);
+    return rows.map((row) => this.#toRecord(row));
+  }
+
   async hasHiddenForUrl(canonicalUrl: string): Promise<boolean> {
     const rows = await this.#db
       .select({ id: storiesTable.storyId })

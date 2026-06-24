@@ -273,6 +273,12 @@ export interface StoryStore {
   /** WS-Q.3.4a — stories in a room (the room-visibility cascade sweep input),
    *  most-recent first, bounded. */
   listByRoom(roomId: string, limit: number, visibility?: StoryVisibility): Promise<StoryRecord[]>;
+  /** WS-S.9 — the LIVE (`hidden_state IS NULL`) stories in a room, most-recent first, bounded.
+   *  The migration purge loop pages with THIS (not `listByRoom`+a JS filter): each pass hides a
+   *  batch, which drops out of the next query, so the window advances and the loop drains every
+   *  live story — a plain `listByRoom` re-reads the same newest rows and exits early once they
+   *  are hidden, leaving older live stories published. */
+  listLiveByRoom(roomId: string, limit: number): Promise<StoryRecord[]>;
   /** WS-Q.2.3a — the story (if any) already anchored to a media upload (a
    *  media upload anchors at most one story; claim-uniqueness). */
   getByMediaUploadRef(uploadId: string): Promise<StoryRecord | null>;
@@ -732,6 +738,13 @@ export class InMemoryStoryStore implements StoryStore {
       .filter(
         (s) => s.roomId === roomId && (visibility === undefined || s.visibility === visibility),
       )
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit);
+  }
+
+  async listLiveByRoom(roomId: string, limit: number): Promise<StoryRecord[]> {
+    return [...this.#stories.values()]
+      .filter((s) => s.roomId === roomId && s.hiddenState === null)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit);
   }

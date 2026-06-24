@@ -217,6 +217,36 @@ describe('WS-S.9 purge — gated on the freeze; minimizes content', () => {
     expect(story?.hiddenState).toBe('takedown');
   });
 
+  it('purge PAGES past the first batch: EVERY live story is taken down (multi-page sweep)', async () => {
+    const { userId } = await seedUserWithSession(fixture.identity, { steward: true });
+    const roomId = await makeServerRoom();
+    // THREE stories — more than the injected one-page sweep limit of 2.  With the old
+    // `listByRoom`+JS-filter, pass 2 re-read the now-hidden newest page, `live` went empty, and
+    // the loop exited leaving the third (older) story PUBLISHED.  `listLiveByRoom` advances.
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const { storyId } = await seedThread(fixture, { roomId, submittedBy: userId });
+      ids.push(storyId);
+    }
+    await freezeRoomForMigration(fixture.forum, userId, ['user', 'steward'], roomId, randomUUID());
+    const out = await purgeRoomForMigration(
+      fixture.forum,
+      fixture.ingestion,
+      userId,
+      ['user', 'steward'],
+      roomId,
+      'purge',
+      2, // sweepLimit: force a multi-page drain
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.storiesAffected).toBe(3);
+    for (const id of ids) {
+      const story = await fixture.ingestion.stories.getById(id);
+      expect(story?.hiddenState).toBe('takedown');
+    }
+  });
+
   it('anonymize detaches ONLY the steward authorship; other members keep theirs (non-vacuous)', async () => {
     // Two distinct members author in the room — the steward AND a second member.
     const { userId: steward } = await seedUserWithSession(fixture.identity, { steward: true });
