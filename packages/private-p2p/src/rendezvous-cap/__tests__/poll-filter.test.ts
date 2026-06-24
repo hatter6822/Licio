@@ -102,7 +102,8 @@ describe('Tier-2 client-side verified-dedup (serverless cap)', () => {
     const records = [presence(issuer, honest, BUCKET, 'real'), ...flood];
     const verified = filterVerifiedPresence(records, issuer.pk, ROOM, { nowMs: NOW });
     expect(verified.map((v) => v.value)).toEqual(['real']);
-  });
+    // 51 BBS pairing verifications; generous timeout for CI under V8 coverage instrumentation.
+  }, 30_000);
 
   it('cross-room replay is rejected (the context binds the room blind id)', () => {
     const issuer = generateIssuerKeyPair();

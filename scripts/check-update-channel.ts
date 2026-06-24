@@ -212,9 +212,13 @@ export interface ProducedArtifactIO {
 export async function verifyProducedManifest(
   io: ProducedArtifactIO,
 ): Promise<UpdateGateViolation[]> {
-  // Dynamic import of the BUILT shared package (it is built before this runs in
-  // the build job; the lint job skips this branch because dist is absent).
-  const shared = (await import('../packages/shared/dist/update/index.js')) as {
+  // The shipped verify code lives in the BUILT shared package (the build job runs this
+  // after `pnpm build`).  In a context WITHOUT a prior build — the vitest Test job runs
+  // `pnpm test` with no build — fall back to the SOURCE: the verify logic is byte-identical,
+  // so the gate's behaviour (and the tests that drive it) hold either way.
+  const shared = (await import('../packages/shared/dist/update/index.js').catch(
+    () => import('../packages/shared/src/update/index.js'),
+  )) as {
     sha256Concat: (...parts: Uint8Array[]) => Promise<Uint8Array>;
     verifyUpdateManifest: (input: {
       manifest: unknown;
