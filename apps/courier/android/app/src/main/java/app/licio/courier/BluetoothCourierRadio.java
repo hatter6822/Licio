@@ -568,8 +568,15 @@ public class BluetoothCourierRadio implements CourierRadio {
             BluetoothGattCharacteristic ch = svc.getCharacteristic(BLE_CHAR_UUID);
             if (ch == null) return;
             bleClientChars.put(endpointId, ch);
-            // Enable notifications so the peripheral can send back (duplex).
-            gatt.setCharacteristicNotification(ch, true);
+            // Enable LOCAL notification delivery (distinct from the remote CCC subscription written
+            // below).  If Android refuses, the peripheral's notify replies would never reach us, so
+            // fail the connection + tear down rather than reporting a link that can't receive.
+            if (!gatt.setCharacteristicNotification(ch, true)) {
+                forgetBleClient(endpointId);
+                gatt.close();
+                events.onConnectionResult(endpointId, false);
+                return;
+            }
             BluetoothGattDescriptor ccc = ch.getDescriptor(CCC_UUID);
             if (ccc != null) {
                 // The CCC write is ASYNC — defer onConnectionResult to onDescriptorWrite, since the

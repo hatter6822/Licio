@@ -21,6 +21,7 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattDescriptor;
+import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
 import android.bluetooth.BluetoothServerSocket;
@@ -141,8 +142,15 @@ public class BluetoothCourierRadioTest {
         BluetoothGatt gatt = device.connectGatt(
                 ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
         // Robolectric doesn't simulate GATT discovery but can hold a discoverable service — inject
-        // the courier service so the radio's onServicesDiscovered resolves the characteristic.
-        shadowOf(gatt).addDiscoverableService(BluetoothCourierRadio.buildCourierGattService());
+        // the courier service so the radio's onServicesDiscovered resolves the characteristic.  The
+        // shadow's requestMtu→discoverServices AUTO-fires onServicesDiscovered during the connection
+        // state change, and the radio fails the link if setCharacteristicNotification returns false
+        // — which the shadow does until the characteristic is allowed — so allow it BEFORE connecting
+        // (real Android returns true on a connected GATT; this only works around the shadow).
+        BluetoothGattService courierService = BluetoothCourierRadio.buildCourierGattService();
+        shadowOf(gatt).addDiscoverableService(courierService);
+        shadowOf(gatt).allowCharacteristicNotification(
+                courierService.getCharacteristic(BluetoothCourierRadio.BLE_CHAR_UUID));
 
         radio.gattClientCallback.onConnectionStateChange(
                 gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
@@ -200,6 +208,27 @@ public class BluetoothCourierRadioTest {
         // A failed subscription must TEAR DOWN the half-open client (close the GATT) so the scan
         // dedup doesn't leave the peer permanently undialable until the whole radio is stopped.
         assertTrue("a failed CCC subscription closes the GATT", shadowOf(gatt).isClosed());
+        radio.stop();
+    }
+
+    @Test
+    public void bleClientFailsWhenLocalNotificationEnablementIsRejected() {
+        // setCharacteristicNotification can return false (Android refused to route notifications to
+        // us) — the radio must FAIL + tear down rather than report a link that can't receive the
+        // peripheral's replies.  The Robolectric shadow refuses unless allowCharacteristicNotification
+        // is called, so simply NOT allowing it exercises the rejected path.
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        BluetoothGatt gatt = peerDevice().connectGatt(
+                ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
+        shadowOf(gatt).addDiscoverableService(BluetoothCourierRadio.buildCourierGattService());
+        radio.gattClientCallback.onConnectionStateChange(
+                gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
+
+        radio.gattClientCallback.onServicesDiscovered(gatt, BluetoothGatt.GATT_SUCCESS);
+        assertEquals("a refused local notify enablement fails the connection",
+                Boolean.FALSE, rec.connectedFlag);
+        assertTrue("and tears the half-open client down", shadowOf(gatt).isClosed());
         radio.stop();
     }
 

@@ -44,6 +44,9 @@ public class WifiDirectRadio implements CourierRadio {
     private final WifiP2pManager manager;
     private final WifiP2pManager.Channel channel;
     private final AtomicBoolean running = new AtomicBoolean(false);
+    // Claimed when a formed group's socket is set up; blocks duplicate CONNECTION_CHANGED callbacks
+    // for the SAME group from racing a second server/client socket.  Reset when the group dissolves.
+    private final AtomicBoolean groupActive = new AtomicBoolean(false);
     private BroadcastReceiver receiver;
     // endpointId (the peer host) -> the connected data socket's output stream.
     private final ConcurrentHashMap<String, DataOutputStream> outbound = new ConcurrentHashMap<>();
@@ -100,6 +103,7 @@ public class WifiDirectRadio implements CourierRadio {
     @Override
     public void stop() {
         running.set(false);
+        groupActive.set(false); // a fresh start must be able to set up the group's sockets again
         if (manager != null && channel != null) {
             // Best-effort teardown — the framework can throw if the channel is mid-operation;
             // a stop must never propagate (it runs on a PluginCall + in cleanup paths).
@@ -180,11 +184,22 @@ public class WifiDirectRadio implements CourierRadio {
      *  this thin role decision + the bind/accept/connect socket setup are exercised on real radios
      *  (a unit test would have to bind the fixed `DATA_PORT`, which the no-fixed-port policy avoids). */
     void onConnectionInfo(WifiP2pInfo info) {
-        if (info == null || !info.groupFormed) return;
+        if (info == null || !info.groupFormed) {
+            // The group dissolved — allow the NEXT formation to set up its sockets again.
+            groupActive.set(false);
+            return;
+        }
+        // Android may deliver CONNECTION_CHANGED more than once for the SAME formed group; claim the
+        // setup atomically and only ONCE per group, so the owner doesn't reopen its server socket and
+        // the client doesn't dial twice (duplicate links/events).  The claim happens only when a
+        // socket is actually started, so a client callback whose owner address isn't known yet does
+        // not consume the slot — a later callback with the address can still dial.
         if (info.isGroupOwner) {
-            startServerSocket();
+            if (groupActive.compareAndSet(false, true)) startServerSocket();
         } else if (info.groupOwnerAddress != null) {
-            connectClientSocket(info.groupOwnerAddress.getHostAddress());
+            if (groupActive.compareAndSet(false, true)) {
+                connectClientSocket(info.groupOwnerAddress.getHostAddress());
+            }
         }
     }
 

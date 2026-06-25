@@ -56,6 +56,16 @@ public class UsbCourierPlugin extends Plugin {
                 ev.put("endpointId", endpointId);
                 notifyListeners("disconnected", ev);
             }
+
+            @Override
+            public void onStartFailed(String operation, Exception cause) {
+                // Forward a radio start failure (e.g. no accessory attached / open failed) so the
+                // web controller's startFailed listener fires instead of a dead "running" state.
+                JSObject ev = new JSObject();
+                ev.put("operation", operation);
+                ev.put("error", cause != null ? cause.getMessage() : "start_failed");
+                notifyListeners("startFailed", ev);
+            }
         });
     }
 

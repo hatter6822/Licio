@@ -71,6 +71,16 @@ public class BluetoothCourierPlugin extends Plugin {
                 ev.put("endpointId", endpointId);
                 notifyListeners("disconnected", ev);
             }
+
+            @Override
+            public void onStartFailed(String operation, Exception cause) {
+                // Forward a radio start failure so the web controller's startFailed listener fires
+                // (symmetric with the other courier plugins; the default Events impl is a no-op).
+                JSObject ev = new JSObject();
+                ev.put("operation", operation);
+                ev.put("error", cause != null ? cause.getMessage() : "start_failed");
+                notifyListeners("startFailed", ev);
+            }
         });
     }
 

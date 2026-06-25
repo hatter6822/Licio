@@ -70,6 +70,16 @@ public class WifiDirectCourierPlugin extends Plugin {
                 ev.put("endpointId", endpointId);
                 notifyListeners("disconnected", ev);
             }
+
+            @Override
+            public void onStartFailed(String operation, Exception cause) {
+                // Forward a radio start failure (e.g. discoverPeers refused) so the web controller's
+                // startFailed listener fires — else it shows a running courier with no discovery.
+                JSObject ev = new JSObject();
+                ev.put("operation", operation);
+                ev.put("error", cause != null ? cause.getMessage() : "start_failed");
+                notifyListeners("startFailed", ev);
+            }
         });
     }
 

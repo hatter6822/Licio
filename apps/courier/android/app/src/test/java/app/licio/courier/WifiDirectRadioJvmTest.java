@@ -15,8 +15,14 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
+import android.net.wifi.p2p.WifiP2pInfo;
 
 import androidx.test.core.app.ApplicationProvider;
+
+import java.net.InetAddress;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -45,6 +51,40 @@ public class WifiDirectRadioJvmTest {
     @Test
     public void wifiP2pIsAvailableUnderRobolectric() {
         assertTrue(new WifiDirectRadio(ctx(), new Recorder()).isAvailable());
+    }
+
+    @Test
+    public void duplicateConnectionInfoForOneGroupStartsTheClientDialOnce() throws Exception {
+        // Android can deliver CONNECTION_CHANGED more than once for ONE formed group; the radio must
+        // dial the group owner only ONCE (a second dispatch races a duplicate link/event).  The one
+        // dial to a refused loopback port fails fast → exactly one onConnectionResult(false).
+        AtomicInteger results = new AtomicInteger();
+        CountDownLatch firstResult = new CountDownLatch(1);
+        WifiDirectRadio radio = new WifiDirectRadio(ctx(), new CourierRadio.Events() {
+            @Override
+            public void onConnectionResult(String endpointId, boolean connected) {
+                results.incrementAndGet();
+                firstResult.countDown();
+            }
+
+            @Override
+            public void onPayload(String endpointId, byte[] bytes) {}
+
+            @Override
+            public void onDisconnected(String endpointId) {}
+        });
+
+        WifiP2pInfo info = new WifiP2pInfo();
+        info.groupFormed = true;
+        info.isGroupOwner = false; // the CLIENT dials the owner — an observable single dial
+        info.groupOwnerAddress = InetAddress.getByName("127.0.0.1");
+
+        radio.onConnectionInfo(info);
+        radio.onConnectionInfo(info); // duplicate for the SAME group — must NOT dial again
+        assertTrue("the one client dial reported a result", firstResult.await(5, TimeUnit.SECONDS));
+        Thread.sleep(300); // give a (wrongly) second dial time to also fail, were the guard broken
+        assertEquals("one formed group ⇒ exactly one client dial", 1, results.get());
+        radio.stop();
     }
 
     @Test
