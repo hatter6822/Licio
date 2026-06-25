@@ -175,11 +175,13 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
       const [
         { CourierController: Controller, readCourierPower },
         { resolveCourierChannels },
-        { prepareCourierFrontierRequest },
+        { buildClientExchangeRequest, respondToClientExchange, ingestClientExchangeResponse },
+        { getLcapDb },
       ] = await Promise.all([
         import('../../../lcap/transports/courier-controller.js'),
         import('../../../lcap/transports/courier-channels.js'),
-        import('../../../lcap/transports/frontier-request.js'),
+        import('../../../lcap/exchange.js'),
+        import('../../../lcap/db.js'),
       ]);
       const channels = resolveCourierChannels(controls.enabledChannels);
       if (channels.length === 0) {
@@ -187,15 +189,22 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
         setPhase({ kind: 'unavailable' });
         return;
       }
-      const buildRequest = await prepareCourierFrontierRequest();
+      // The local `lcap_v2` store is BOTH the responder's content source and the requester's
+      // ingestion sink — a fully bidirectional §16 courier exchange (serve wants + ingest served).
+      const db = await getLcapDb();
       const power = await readCourierPower();
       const controller = new Controller({
         channels,
         controls,
         mode: mode as CourierMode,
         power,
-        buildRequest,
+        // Advertise our gaps (quarantined missing deps) so a peer serves them.
+        buildRequest: () => buildClientExchangeRequest(db, 'courier'),
+        // Serve a peer's inbound request from what we hold (the bidirectional responder).
+        buildResponse: (request) => respondToClientExchange(db, request),
         onOutcome: (outcome) => {
+          // INGEST a served response into the local store (CID-verified; fills our gaps).
+          if (outcome.response) void ingestClientExchangeResponse(db, outcome.response);
           setActivity((prev) => [
             ...prev.slice(-19),
             {

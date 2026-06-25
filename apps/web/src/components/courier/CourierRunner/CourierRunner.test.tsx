@@ -29,12 +29,21 @@ const controllerStartDecision = vi.fn(() => ({
   blockedReason: 'radio_unavailable',
 }));
 // The last config the controller was constructed with — lets a test fire the async
-// onDecisionChange callback (a late radio start-failure) the controller would invoke.
-let lastControllerConfig: { onDecisionChange?: (d: unknown) => void } | undefined;
-const ControllerCtor = vi.fn(function (
-  this: Record<string, unknown>,
-  config: { onDecisionChange?: (d: unknown) => void },
-) {
+// onDecisionChange callback (a late radio start-failure) the controller would invoke, and assert
+// the bidirectional wiring (a real responder + a response-ingestion onOutcome).
+interface CapturedConfig {
+  onDecisionChange?: (d: unknown) => void;
+  buildRequest?: (endpointId: string) => unknown;
+  buildResponse?: (request: Uint8Array, endpointId: string) => unknown;
+  onOutcome?: (o: {
+    response: Uint8Array | null;
+    channel: string;
+    carriedBy: string | null;
+    skippedReason: string;
+  }) => void;
+}
+let lastControllerConfig: CapturedConfig | undefined;
+const ControllerCtor = vi.fn(function (this: Record<string, unknown>, config: CapturedConfig) {
   lastControllerConfig = config;
   this['start'] = controllerStart;
   this['stop'] = controllerStop;
@@ -55,9 +64,20 @@ vi.mock('../../../lcap/transports/courier-channels.js', async (importOriginal) =
     await importOriginal<typeof import('../../../lcap/transports/courier-channels.js')>();
   return { ...real, resolveCourierChannels: (...a: unknown[]) => resolveCourierChannels(...a) };
 });
-vi.mock('../../../lcap/transports/frontier-request.js', () => ({
-  prepareCourierFrontierRequest: vi.fn(async () => () => new Uint8Array([1])),
+// The §16 exchange engine + the lcap_v2 db handle (stubbed: this suite drives the runtime UI, not
+// the real store).  Keep the real db module but stub `getLcapDb` so no IndexedDB is touched.
+const buildClientExchangeRequest = vi.fn(async () => new Uint8Array([1]));
+const respondToClientExchange = vi.fn(async () => new Uint8Array([2]));
+const ingestClientExchangeResponse = vi.fn(async () => null);
+vi.mock('../../../lcap/exchange.js', () => ({
+  buildClientExchangeRequest: (...a: unknown[]) => buildClientExchangeRequest(...(a as [])),
+  respondToClientExchange: (...a: unknown[]) => respondToClientExchange(...(a as [])),
+  ingestClientExchangeResponse: (...a: unknown[]) => ingestClientExchangeResponse(...(a as [])),
 }));
+vi.mock('../../../lcap/db.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../../lcap/db.js')>();
+  return { ...real, getLcapDb: vi.fn(async () => ({}) as IDBDatabase) };
+});
 
 function injectNativeShell(): void {
   (globalThis as { Capacitor?: unknown }).Capacitor = {
@@ -118,6 +138,35 @@ describe('CourierRunner (WS-R.15.4c/d/e)', () => {
     // A Stop control now drives the controller teardown.
     fireEvent.click(screen.getByRole('button', { name: /stop courier/i }));
     await waitFor(() => expect(controllerStop).toHaveBeenCalled());
+  });
+
+  it('wires a BIDIRECTIONAL courier: a real responder + response-ingestion', async () => {
+    injectNativeShell();
+    render(<CourierRunner />);
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /i understand what a nearby radio reveals/i }),
+    );
+    fireEvent.click(screen.getByRole('switch', { name: /advertise this device/i }));
+    fireEvent.click(screen.getByRole('button', { name: /start courier/i }));
+    await waitFor(() => expect(ControllerCtor).toHaveBeenCalledOnce());
+
+    // The controller is constructed with a real responder (serves a peer's request)...
+    expect(typeof lastControllerConfig?.buildResponse).toBe('function');
+    await lastControllerConfig?.buildResponse?.(new Uint8Array([7]), 'ep');
+    expect(respondToClientExchange).toHaveBeenCalled();
+
+    // ...a request builder (advertises our gaps)...
+    await lastControllerConfig?.buildRequest?.('ep');
+    expect(buildClientExchangeRequest).toHaveBeenCalled();
+
+    // ...and an onOutcome that INGESTS a served response into the local store.
+    lastControllerConfig?.onOutcome?.({
+      response: new Uint8Array([9]),
+      channel: 'nearby',
+      carriedBy: 'courier',
+      skippedReason: '',
+    });
+    expect(ingestClientExchangeResponse).toHaveBeenCalled();
   });
 
   it('reconciles a RUNNING courier when the operational mode changes (§33.5 forced-off)', async () => {

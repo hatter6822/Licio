@@ -130,7 +130,9 @@ interface ListenerHandle {
  * controller is transport-only and never assembles content itself.  Returns `null` to
  * skip driving an exchange with this endpoint (e.g. nothing to reconcile).
  */
-export type CourierRequestBuilder = (endpointId: string) => Uint8Array | null;
+export type CourierRequestBuilder = (
+  endpointId: string,
+) => Uint8Array | null | Promise<Uint8Array | null>;
 
 /** Notified when a courier exchange over an endpoint completes (or fails / is skipped). */
 export interface CourierExchangeOutcome {
@@ -184,11 +186,11 @@ export interface CourierControllerConfig {
   /** Build the §16 exchange request for a connected peer. */
   readonly buildRequest: CourierRequestBuilder;
   /**
-   * Optional RESPONDER: build a §16 exchange RESPONSE for a peer's inbound exchange REQUEST
-   * (the app serves the peer's wants from local content).  Without it the courier is
-   * request-only — a peer's request is dropped (never mistaken for our own response, so the UI
-   * never reports a bogus "exchange"), and content moves only when the peer answers OUR request.
-   * Wiring a content-serving responder is the tracked WS-R.15.6 follow-up.
+   * The §16 RESPONDER: build a §16 exchange RESPONSE for a peer's inbound exchange REQUEST,
+   * serving the peer's wants from local content (CourierRunner wires `respondToClientExchange`
+   * over the `lcap_v2` store).  A fully bidirectional courier sets this so a peer that asks for
+   * content it lacks is actually served; when absent, a peer's request is dropped (never mistaken
+   * for our own response).  The bytes are re-verified by CID downstream — no transport trust.
    */
   readonly buildResponse?: (
     request: Uint8Array,
@@ -626,7 +628,7 @@ export class CourierController {
       return;
     }
 
-    const request = this.config.buildRequest(endpointId);
+    const request = await this.config.buildRequest(endpointId);
     if (!request) {
       this.emit(channel, endpointId, null, null, 'nothing_to_request');
       return;
