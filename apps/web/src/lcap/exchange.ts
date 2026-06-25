@@ -20,6 +20,7 @@
 // trust projection (§8.3).  The heavy `@licio/lcap` codec is loaded by DYNAMIC import (like
 // `bundle-import`), so this module stays off the initial bundle.
 
+import type { HeldObject } from '@licio/lcap';
 import {
   type CommitCounts,
   commitImportedBundle,
@@ -29,6 +30,8 @@ import {
 } from './bundle-import.js';
 import { LCAP_STORE } from './db.js';
 import { collectByCursor, getHeldObject } from './store.js';
+
+export type { CommitCounts };
 
 /** The §16 response budget we serve up to when the peer advertises none (kept small per the
  *  courier/battery doctrine; a held want dropped for budget stays fetchable elsewhere). */
@@ -141,12 +144,30 @@ export async function respondToClientExchange(
     await ingestPackIntoStore(db, request.push_pack);
   }
 
-  // Serve the peer's explicit wants from what we hold, within its advertised response budget.
+  // Serve the peer's explicit wants from what we hold, within its advertised response budget —
+  // PUBLIC-ONLY: the courier + WebRTC are public-plane carriers (§22.6), so the responder NEVER
+  // serves a non-public contribution.  Wrap the reader to drop an `in_room`/`private` record
+  // (control + proof + block objects are public trust material; only a contribution carries a
+  // restricted visibility scope) — defense in depth even though `lcap_v2` is the public store.
+  const publicOnlyReader = async (cid: string): Promise<HeldObject | undefined> => {
+    const held = await getHeldObject(db, cid);
+    if (held?.kind === 'record') {
+      try {
+        const record = lcap.decodeAndRouteRecord(held.bytes);
+        if (record.kind === 'contribution_event' && record.visibility_scope !== 'public') {
+          return undefined; // non-public — refuse to serve over the public plane
+        }
+      } catch {
+        return undefined; // undecodable — never serve
+      }
+    }
+    return held;
+  };
   const wantCids = (request.want ?? []).map((w) => w.cid);
   const budget = request.pulse.budgets.max_response_bytes || DEFAULT_RESPONSE_BUDGET;
   const repacked =
     wantCids.length > 0
-      ? await lcap.repackHeldObjects((cid) => getHeldObject(db, cid), wantCids, budget)
+      ? await lcap.repackHeldObjects(publicOnlyReader, wantCids, budget)
       : { served: [], truncated: false, pack: undefined };
 
   const pulse = await publicPulse(lcap, 'courier');
@@ -156,6 +177,34 @@ export async function respondToClientExchange(
     ...(repacked.pack !== undefined ? { responsePack: repacked.pack } : {}),
   });
   return lcap.encodeWithSchema(lcap.exchangeResponseV2Schema, response);
+}
+
+/** The outcome of handling one inbound exchange message over a duplex channel. */
+export interface InboundExchangeOutcome {
+  /** True when the message was a peer REQUEST (we built a `reply` to send back). */
+  readonly wasRequest: boolean;
+  /** The §16 response to ferry back, when the message was a request; else `null`. */
+  readonly reply: Uint8Array | null;
+  /** The commit counts when the message was a RESPONSE we ingested; else `null`. */
+  readonly ingested: CommitCounts | null;
+}
+
+/**
+ * Handle ONE inbound §16 message on a DUPLEX channel (the WebRTC carrier): classify it as a peer
+ * REQUEST (respond — serve their wants + ingest their push) or our RESPONSE (ingest the served
+ * pack).  Returns what to send back (a reply when it was a request) so the caller drives a fully
+ * bidirectional exchange over one channel without mistaking a peer's request for our response.
+ */
+export async function handleInboundExchangeMessage(
+  db: IDBDatabase,
+  bytes: Uint8Array,
+): Promise<InboundExchangeOutcome> {
+  // respondToClientExchange returns null for anything that is NOT a valid request, so it doubles
+  // as the classifier — a non-null reply means it WAS a request (and its push was ingested).
+  const reply = await respondToClientExchange(db, bytes);
+  if (reply !== null) return { wasRequest: true, reply, ingested: null };
+  const ingested = await ingestClientExchangeResponse(db, bytes);
+  return { wasRequest: false, reply: null, ingested };
 }
 
 /**

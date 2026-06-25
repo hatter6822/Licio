@@ -16,7 +16,7 @@ import { CourierRunner } from './CourierRunner.js';
 
 const FORBIDDEN = /\b(secure|trusted|safe|anonymous)\b/i;
 
-// Mock the dynamically-imported controller + channel resolver + frontier-request builder so
+// Mock the dynamically-imported controller + channel resolver + §16 exchange engine so
 // the test drives the runtime path without any native plugin or real codec.
 const controllerStart = vi.fn(async () => ({ advertise: true, discover: true, blockedReason: '' }));
 const controllerStop = vi.fn(async () => {});

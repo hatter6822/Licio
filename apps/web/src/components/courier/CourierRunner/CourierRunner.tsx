@@ -17,7 +17,7 @@
 //     why it was skipped) — the radio confers NO trust; every received frame is re-checked
 //     downstream against its CIDs/COSE signatures (§18.4).
 //
-// The `CourierController` + the channel resolvers + the frontier-request builder load the
+// The `CourierController` + the channel resolvers + the §16 exchange engine load the
 // `@licio/lcap` codec only through a dynamic import (kept off the initial bundle); this
 // component imports the controls editor + the channel-info metadata statically (both are
 // always-available local surfaces with no codec import).  No `@licio/lcap-p2p` import at all

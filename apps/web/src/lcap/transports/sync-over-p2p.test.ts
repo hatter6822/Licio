@@ -1,21 +1,33 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-R.15.6 — the runtime consumer (`syncRoomOverP2p`) that drives a live WebRTC exchange.
-// A paired fake `RTCPeerConnection` + an in-memory server-blind signaling relay (over the
-// injected fetch) let two `syncRoomOverP2p` calls converge on a data channel, exchange a
-// MULTI-BLOCK / LARGE (multi-fragment) LCAP pack through the registry + the §22.6 anchor-
-// last selection, and prove the public-only carriage gate refuses a private pack here.
+// WS-R.15.10 — `syncRoomOverP2p` drives a fully BIDIRECTIONAL §16 exchange that MOVES content:
+// a paired fake `RTCPeerConnection` + an in-memory server-blind signaling relay let an initiator
+// and a responder converge on a data channel; the responder SERVES the block the initiator wants
+// and the initiator INGESTS it.  When WebRTC is off, it back-stops at the HTTPS anchor and ingests
+// the served response.  Two isolated fake-indexeddb stores stand in for the two devices.
 
-import { writeUvarint } from '@licio/lcap';
+import 'fake-indexeddb/auto';
+import {
+  buildExchangeResponse,
+  buildPulse,
+  cidFor,
+  DEFAULT_BUDGET,
+  encodeWithSchema,
+  exchangeResponseV2Schema,
+  repackHeldObjects,
+  writeUvarint,
+} from '@licio/lcap';
 import type {
   ConnectableDataChannel,
   RtcIceCandidateInit,
   RtcPeerConnectionLike,
   RtcSessionDescriptionInit,
 } from '@licio/lcap-p2p';
-import { describe, expect, it } from 'vitest';
-import { derivePublicSignalKeyBytes } from './signal-key.js';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { LCAP_DB_VERSION, LCAP_MIGRATIONS, LCAP_STORE, openLcapDb } from '../db.js';
+import { putBlock, readBlockBytes } from '../store.js';
 import { syncRoomOverP2p } from './sync-over-p2p.js';
+import { runWebrtcBidirectionalExchange } from './webrtc-sync.js';
 
 // --- a paired fake data channel (mirrors connect.test.ts in @licio/lcap-p2p) --------
 class FakeChannel implements ConnectableDataChannel {
@@ -100,8 +112,6 @@ class FakePeer implements RtcPeerConnectionLike {
 }
 
 // --- an in-memory server-blind signaling relay over the injected fetch --------------
-// Models POST /api/lcap/v2/p2p/signal?to=<peer> (store the opaque body) and
-// POST /api/lcap/v2/p2p/signal/poll?peer=<self> (drain, framed as the server does).
 function makeRelayFetch(): typeof fetch {
   const mailboxes = new Map<string, Uint8Array[]>();
   const frame = (blobs: Uint8Array[]): Uint8Array => {
@@ -139,143 +149,87 @@ function makeRelayFetch(): typeof fetch {
 
 const ROOM = new Uint8Array(32).fill(11);
 
-describe('WS-R.15.6 signal-key provisioning (public)', () => {
-  it('derives a deterministic 32-byte key from the public room hash (both peers agree)', async () => {
-    const k1 = await derivePublicSignalKeyBytes(ROOM);
-    const k2 = await derivePublicSignalKeyBytes(ROOM);
-    expect(k1.length).toBe(32);
-    expect(k1).toEqual(k2); // any participant derives the SAME key from the public hash
-    const other = await derivePublicSignalKeyBytes(new Uint8Array(32).fill(12));
-    expect(other).not.toEqual(k1); // a different room → a different key
-  });
+let initiatorDb: IDBDatabase;
+let responderDb: IDBDatabase;
+
+beforeEach(async () => {
+  const s = Math.random().toString(36).slice(2);
+  initiatorDb = await openLcapDb(`lcap_v2-syncp2p-A-${s}`, LCAP_DB_VERSION, LCAP_MIGRATIONS);
+  responderDb = await openLcapDb(`lcap_v2-syncp2p-B-${s}`, LCAP_DB_VERSION, LCAP_MIGRATIONS);
+});
+afterEach(() => {
+  initiatorDb.close();
+  responderDb.close();
 });
 
-describe('WS-R.15.6 syncRoomOverP2p (runtime consumer)', () => {
-  it('exchanges a MULTI-BLOCK / large pack end-to-end over the live transport + selection', async () => {
-    const link = new FakeLink();
-
-    // The responder runs first, parking on its poll loop; it will receive the offer and
-    // answer it.  Its `requestMessage` is what flows back to the initiator as the response
-    // (the responder's exchange round: open → send the request → receive → close).
-    // We model the §16 round as: initiator sends its pack → responder's WebrtcTransport
-    // receives it; the responder sends a large response pack the initiator's round returns.
-    //
-    // `syncRoomOverP2p` uses `runExchangeRound` semantics (send the request, await the
-    // response).  To exercise BOTH directions we run the responder as a manual peer that
-    // echoes a large response after receiving the initiator's request.
-
-    const relay = makeRelayFetch();
-
-    // Build the responder transport directly via the lcap-p2p connect path so we can drive
-    // its receive→send (the registry consumer only models the initiator's round).
-    const p2p = await import('@licio/lcap-p2p');
-    const signalKeyBytes = await derivePublicSignalKeyBytes(ROOM);
-    const signalKey = await p2p.importSignalKey(signalKeyBytes);
-    const { createSignalClient } = await import('./p2p-signaling.js');
-    const responderSignals = createSignalClient({ apiBase: 'http://relay.test', fetchFn: relay });
-
-    const responderChannelP = p2p.connectWebrtc({
-      decision: p2p.decideWebrtc({ mode: 'standard', userEnabled: true }),
-      signalKey,
-      roomIdHash: ROOM,
-      selfPeerKey: 'bob',
-      remotePeerKey: 'alice',
-      initiator: false,
-      postSignal: responderSignals.postSignal,
-      pollSignal: responderSignals.pollSignal,
-      pollIntervalMs: 1,
-      timeoutMs: 5000,
-      rtcFactory: () => new FakePeer(link, 'responder'),
-    });
-
-    const largeResponse = new Uint8Array(40 * 1024);
-    for (let i = 0; i < largeResponse.length; i++) largeResponse[i] = (i * 13 + 5) & 0xff;
-
-    // Once the responder channel opens, wrap it and echo a large response upon receiving.
-    const responderDone = responderChannelP.then(async (ch) => {
-      const t = new p2p.WebrtcTransport(ch);
-      await t.open();
-      const incoming = await t.receive();
-      expect(incoming).not.toBeNull();
-      await t.send(largeResponse);
-      // keep the channel open long enough for the initiator to read the response
-      return incoming;
-    });
-
-    const requestPack = new Uint8Array(20 * 1024); // multi-fragment request
-    for (let i = 0; i < requestPack.length; i++) requestPack[i] = (i * 7 + 1) & 0xff;
-
-    const result = await syncRoomOverP2p({
-      roomIdHash: ROOM,
-      selfPeerKey: 'alice',
-      remotePeerKey: 'bob',
-      initiator: true,
-      requestMessage: requestPack,
-      privacy: { mode: 'standard', userEnabled: true },
-      apiBase: 'http://relay.test',
-      fetchFn: relay,
-      rtcFactory: () => new FakePeer(link, 'initiator'),
-      pollIntervalMs: 1,
-      timeoutMs: 5000,
-    });
-
-    const incoming = await responderDone;
-    expect(incoming).toEqual(requestPack); // the responder received the full request pack
-    expect(result).not.toBeNull();
-    expect(result?.transport).toBe('webrtc'); // the live peer carried it (not the anchor)
-    expect(result?.response).toEqual(largeResponse); // large multi-fragment response intact
+async function quarantineMissing(db: IDBDatabase, missing: string[]): Promise<void> {
+  const tx = db.transaction(LCAP_STORE.quarantine, 'readwrite');
+  tx.objectStore(LCAP_STORE.quarantine).put({
+    cid: 'parent',
+    reason: 'missing_dependency',
+    firstSeen: 1,
+    missingDeps: missing,
+    byteSize: 0,
   });
-
-  it('falls back to the HTTPS anchor when WebRTC is off by default', async () => {
-    // WebRTC is off by default (userEnabled: false), so the consumer must use the anchor.
-    const anchorBody = new Uint8Array([9, 9, 9]);
-    const httpsFetch = (async (input: string | URL | Request) => {
-      const url = String(input);
-      if (url.includes('/exchange')) return new Response(anchorBody as BodyInit, { status: 200 });
-      // signaling endpoints are never hit because WebRTC is refused before connecting
-      return new Response(null, { status: 404 });
-    }) as unknown as typeof fetch;
-
-    const result = await syncRoomOverP2p({
-      roomIdHash: ROOM,
-      selfPeerKey: 'alice',
-      remotePeerKey: 'bob',
-      initiator: true,
-      requestMessage: new Uint8Array([1, 2]),
-      privacy: { mode: 'standard', userEnabled: false }, // off by default
-      httpsConfig: { fetchFn: httpsFetch },
-      rtcFactory: () => new FakePeer(new FakeLink(), 'initiator'),
-      timeoutMs: 50,
-    });
-    expect(result?.transport).toBe('https'); // anchor-last fallback carried it
-    expect(result?.response).toEqual(anchorBody);
+  await new Promise<void>((res, rej) => {
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
   });
+}
 
-  it('the public-only carriage gate refuses a private pack over the WebRTC transport', async () => {
-    // A non-public pack must NEVER ride the public-only WebRTC peer transport: the carriage
-    // gate skips it, so the exchange falls back to the HTTPS anchor (which may carry it).
+/** A §16 exchange response whose `response_pack` serves `cids` from `held` (the anchor's reply). */
+async function anchorResponseServing(
+  held: Map<string, Uint8Array>,
+  cids: string[],
+): Promise<Uint8Array> {
+  const repacked = await repackHeldObjects(
+    async (cid) => {
+      const bytes = held.get(cid);
+      return bytes ? { kind: 'block', bytes } : undefined;
+    },
+    cids,
+    1 << 20,
+  );
+  const pulse = buildPulse({
+    nodeId: 'anchor',
+    sessionNonce: new Uint8Array(16),
+    transportProfile: 'https',
+    privacyMode: 'public',
+    budgets: { ...DEFAULT_BUDGET },
+    supportedSuites: ['ES256'],
+    supportedCompression: ['none'],
+    supportedPackVersions: [2],
+    checkpointFrontier: [],
+    revocationFrontier: [{ scope: 'global', revocation_epoch: 0 }],
+  });
+  const response = buildExchangeResponse({
+    pulse,
+    status: 'ok',
+    ...(repacked.pack !== undefined ? { responsePack: repacked.pack } : {}),
+  });
+  return encodeWithSchema(exchangeResponseV2Schema, response);
+}
+
+describe('WS-R.15.10 syncRoomOverP2p (bidirectional)', () => {
+  it('moves content over WebRTC: the responder serves the block the initiator wants', async () => {
+    const bytes = new Uint8Array([2, 4, 6, 8, 10, 12]);
+    const blockCid = await cidFor('block', bytes);
+    await putBlock(responderDb, { blockCid, state: 'integrity_verified', size: bytes.length }, [
+      bytes,
+    ]);
+    await quarantineMissing(initiatorDb, [blockCid]);
+
     const link = new FakeLink();
-    const anchorBody = new Uint8Array([7]);
-    // ONE shared relay so the two peers' signaling actually routes (a fresh relay per call
-    // would lose every message); the same fetch answers the HTTPS /exchange anchor.
     const relay = makeRelayFetch();
-    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
-      const url = new URL(String(input), 'http://relay.test');
-      if (url.pathname.includes('/exchange')) {
-        return new Response(anchorBody as BodyInit, { status: 200 });
-      }
-      // The signaling relay (so the WebRTC channel still OPENS — the gate, not connectivity,
-      // is what keeps the private pack off it).
-      return relay(input, init);
-    }) as unknown as typeof fetch;
-
-    // Open a responder so the WebRTC channel is genuinely established and would be tried
-    // first if the gate did not skip it.
     const p2p = await import('@licio/lcap-p2p');
-    const signalKey = await p2p.importSignalKey(await derivePublicSignalKeyBytes(ROOM));
+    const signalKey = await p2p.importSignalKey(
+      await (await import('./signal-key.js')).derivePublicSignalKeyBytes(ROOM),
+    );
     const { createSignalClient } = await import('./p2p-signaling.js');
-    const respSignals = createSignalClient({ apiBase: 'http://relay.test', fetchFn });
-    const responderP: Promise<InstanceType<typeof p2p.WebrtcTransport>> = p2p
+    const respSignals = createSignalClient({ apiBase: 'http://relay.test', fetchFn: relay });
+
+    // The responder converges on the channel and runs the driver, serving from responderDb.
+    const responderDone = p2p
       .connectWebrtc({
         decision: p2p.decideWebrtc({ mode: 'standard', userEnabled: true }),
         signalKey,
@@ -289,28 +243,57 @@ describe('WS-R.15.6 syncRoomOverP2p (runtime consumer)', () => {
         timeoutMs: 5000,
         rtcFactory: () => new FakePeer(link, 'responder'),
       })
-      .then((ch) => new p2p.WebrtcTransport(ch));
+      .then((channel) =>
+        runWebrtcBidirectionalExchange({ db: responderDb, channel, timeoutMs: 5000 }),
+      );
+
+    const [result] = await Promise.all([
+      syncRoomOverP2p({
+        db: initiatorDb,
+        roomIdHash: ROOM,
+        selfPeerKey: 'alice',
+        remotePeerKey: 'bob',
+        initiator: true,
+        privacy: { mode: 'standard', userEnabled: true },
+        apiBase: 'http://relay.test',
+        fetchFn: relay,
+        rtcFactory: () => new FakePeer(link, 'initiator'),
+        pollIntervalMs: 1,
+        timeoutMs: 5000,
+      }),
+      responderDone,
+    ]);
+
+    expect(result?.transport).toBe('webrtc'); // the live peer carried it
+    expect(result?.ingested?.blocks).toBe(1);
+    expect(await readBlockBytes(initiatorDb, blockCid)).toEqual(bytes); // the initiator HOLDS it
+  });
+
+  it('falls back to the HTTPS anchor when WebRTC is off, and ingests the served response', async () => {
+    const bytes = new Uint8Array([3, 1, 4, 1, 5, 9]);
+    const blockCid = await cidFor('block', bytes);
+    await quarantineMissing(initiatorDb, [blockCid]);
+    const anchorBody = await anchorResponseServing(new Map([[blockCid, bytes]]), [blockCid]);
+
+    const httpsFetch = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/exchange')) return new Response(anchorBody as BodyInit, { status: 200 });
+      return new Response(null, { status: 404 });
+    }) as unknown as typeof fetch;
 
     const result = await syncRoomOverP2p({
+      db: initiatorDb,
       roomIdHash: ROOM,
       selfPeerKey: 'alice',
       remotePeerKey: 'bob',
       initiator: true,
-      requestMessage: new Uint8Array([1, 2, 3]),
-      privacyLabel: 'contains_private_encrypted', // NON-public → gate skips WebRTC
-      privacy: { mode: 'standard', userEnabled: true },
-      apiBase: 'http://relay.test',
-      httpsConfig: { fetchFn, exchangeUrl: 'http://relay.test/api/lcap/v2/exchange' },
-      fetchFn,
-      rtcFactory: () => new FakePeer(link, 'initiator'),
-      pollIntervalMs: 1,
-      timeoutMs: 5000,
+      privacy: { mode: 'standard', userEnabled: false }, // off by default → anchor
+      httpsConfig: { fetchFn: httpsFetch },
+      rtcFactory: () => new FakePeer(new FakeLink(), 'initiator'),
+      timeoutMs: 50,
     });
-
-    const responderTransport = await responderP;
-    await responderTransport.close();
-    // The private pack rode the HTTPS anchor, NOT the public-only WebRTC peer transport.
     expect(result?.transport).toBe('https');
-    expect(result?.response).toEqual(anchorBody);
+    expect(result?.ingested?.blocks).toBe(1);
+    expect(await readBlockBytes(initiatorDb, blockCid)).toEqual(bytes); // ingested from the anchor
   });
 });
