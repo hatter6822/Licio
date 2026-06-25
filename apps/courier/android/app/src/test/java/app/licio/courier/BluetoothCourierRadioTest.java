@@ -13,6 +13,7 @@ package app.licio.courier;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.robolectric.Shadows.shadowOf;
 
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
@@ -87,12 +88,54 @@ public class BluetoothCourierRadioTest {
         assertTrue(new BluetoothCourierRadio(ctx(), new Recorder()).isAvailable());
     }
 
-    // NOTE on the BLE SEND path: the entire send state machine (serialized chunking, per-write
-    // ack advance, write-rejection, timeout, disconnect, concurrent-enqueue ordering) is the pure
-    // `BleSendPump`, covered DETERMINISTICALLY in `BleSendPumpTest` (no Android/threads).  The
-    // only remaining radio glue is the ~10-line `writeBleChunk` (the raw GATT write/notify call),
-    // which Robolectric's GATT-server shadow cannot drive to success — so it is exercised on real
-    // radios by the netsim `BleGattRadioTest`.  No brittle shadow-dependent send test is added.
+    @Test
+    @Config(sdk = 31) // pre-33 boolean writeCharacteristic, which Robolectric's GATT shadow honours
+    public void bleClientSendDrivesAMultiChunkFrameToCompletion() {
+        // The BLE SEND glue end-to-end on a connected GATT CLIENT: send() → the per-endpoint
+        // BleSendPump → gatt.writeCharacteristic → the radio's onCharacteristicWrite callback →
+        // pump.onAck → the NEXT chunk → … → completion → result.onSuccess.  Robolectric's GATT
+        // shadow acks each writeCharacteristic with SUCCESS, so the send self-drives through the
+        // radio's REAL callback wiring — and that works ONLY because the send is callback-driven:
+        // the old blocking design's worker thread would block on a queue poll, untestable here.
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        BluetoothDevice device = peerDevice();
+        BluetoothGatt gatt = device.connectGatt(
+                ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
+        // Robolectric doesn't simulate GATT discovery but can hold a discoverable service — inject
+        // the courier service so the radio's onServicesDiscovered resolves the characteristic.
+        shadowOf(gatt).addDiscoverableService(BluetoothCourierRadio.buildCourierGattService());
+
+        radio.gattClientCallback.onConnectionStateChange(
+                gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
+        radio.gattClientCallback.onServicesDiscovered(gatt, BluetoothGatt.GATT_SUCCESS);
+        assertEquals("the link is announced after services resolve", Boolean.TRUE, rec.connectedFlag);
+
+        // 2000 bytes ⇒ a genuinely multi-chunk send at any MTU (the chunk size is capped at 512).
+        byte[] payload = new byte[2000];
+        new Random(9).nextBytes(payload);
+        final String[] outcome = {null};
+        radio.send(PEER, payload, new CourierRadio.SendResult() {
+            @Override
+            public void onSuccess() {
+                outcome[0] = "ok";
+            }
+
+            @Override
+            public void onError(String reason, Exception cause) {
+                outcome[0] = "err:" + reason;
+            }
+        });
+        // The shadow's per-write acks drive every chunk through the radio's callback wiring to
+        // completion — synchronously, before send() returns.
+        assertEquals("the multi-chunk BLE client send completed", "ok", outcome[0]);
+
+        // A stray ack with nothing in flight is a safe no-op (no double-report / crash).
+        radio.gattClientCallback.onCharacteristicWrite(
+                gatt, courierCharacteristic(), BluetoothGatt.GATT_SUCCESS);
+        assertEquals("ok", outcome[0]);
+        radio.stop();
+    }
 
     @Test
     public void gattServerConnectThenChunkedWritesReassembleToOnePayload() {
