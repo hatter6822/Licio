@@ -88,6 +88,42 @@ public class WifiDirectRadioJvmTest {
     }
 
     @Test
+    public void aFailedClientDialReleasesTheGroupClaimSoAlaterCallbackRetries() throws Exception {
+        // The client dial to a refused loopback port FAILS → the per-group claim is RELEASED, so a
+        // later CONNECTION_CHANGED for the still-formed group dials AGAIN (not skipped until dissolve).
+        AtomicInteger results = new AtomicInteger();
+        WifiDirectRadio radio = new WifiDirectRadio(ctx(), new CourierRadio.Events() {
+            @Override
+            public void onConnectionResult(String endpointId, boolean connected) {
+                results.incrementAndGet();
+            }
+
+            @Override
+            public void onPayload(String endpointId, byte[] bytes) {}
+
+            @Override
+            public void onDisconnected(String endpointId) {}
+        });
+        WifiP2pInfo info = new WifiP2pInfo();
+        info.groupFormed = true;
+        info.isGroupOwner = false;
+        info.groupOwnerAddress = InetAddress.getByName("127.0.0.1");
+
+        radio.onConnectionInfo(info);
+        waitForCount(results, 1); // the first dial failed (refused) → claim released
+        radio.onConnectionInfo(info); // RETRY for the same formed group — must dial again
+        waitForCount(results, 2);
+        radio.stop();
+    }
+
+    private static void waitForCount(AtomicInteger counter, int target) throws InterruptedException {
+        for (int i = 0; i < 50 && counter.get() < target; i++) {
+            Thread.sleep(100);
+        }
+        assertEquals(target, counter.get());
+    }
+
+    @Test
     public void sendToAnUnknownEndpointFailsClosed() {
         WifiDirectRadio radio = new WifiDirectRadio(ctx(), new Recorder());
         final String[] error = {null};

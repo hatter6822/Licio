@@ -12,6 +12,7 @@ package app.licio.courier;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.robolectric.Shadows.shadowOf;
@@ -39,6 +40,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
@@ -58,11 +60,17 @@ public class BluetoothCourierRadioTest {
         byte[] payload;
         String disconnectedEndpoint;
         int payloadCount;
+        String startFailedOp;
 
         @Override
         public void onConnectionResult(String endpointId, boolean connected) {
             connectedEndpoint = endpointId;
             connectedFlag = connected;
+        }
+
+        @Override
+        public void onStartFailed(String operation, Exception cause) {
+            startFailedOp = operation;
         }
 
         @Override
@@ -122,6 +130,67 @@ public class BluetoothCourierRadioTest {
         }
     }
 
+    @Before
+    public void enableAdapter() {
+        // Robolectric's Bluetooth adapter is DISABLED by default; isAvailable() + the start paths now
+        // require it ON, so enable it for these radio-setup tests.
+        shadowOf(adapter()).setEnabled(true);
+    }
+
+    /** Drive a BLE CLIENT GATT to a fully-connected courier link (service discovered + the CCC
+     *  notification subscription written), returning the connected gatt — mirroring the real
+     *  onConnectionStateChange → discovery → setCharacteristicNotification → CCC-write flow.  The
+     *  shadow refuses local notification + auto-fires onServicesDiscovered during the connection
+     *  state change, so allow the characteristic BEFORE connecting (real Android returns true). */
+    private static BluetoothGatt connectBleClient(BluetoothCourierRadio radio) {
+        BluetoothGatt gatt = peerDevice().connectGatt(
+                ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
+        BluetoothGattService courierService = BluetoothCourierRadio.buildCourierGattService();
+        shadowOf(gatt).addDiscoverableService(courierService);
+        shadowOf(gatt).allowCharacteristicNotification(
+                courierService.getCharacteristic(BluetoothCourierRadio.BLE_CHAR_UUID));
+        radio.gattClientCallback.onConnectionStateChange(
+                gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
+        radio.gattClientCallback.onServicesDiscovered(gatt, BluetoothGatt.GATT_SUCCESS);
+        return gatt;
+    }
+
+    @Test
+    public void bleClientWithoutCccDescriptorIsAFailedPeer() {
+        // A peripheral exposing the courier service/characteristic but OMITTING the CCC cannot
+        // notify back — duplex is impossible — so it is a FAILED peer, not a write-only link.
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        BluetoothGatt gatt = peerDevice().connectGatt(
+                ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
+        BluetoothGattService noCcc = new BluetoothGattService(
+                BluetoothCourierRadio.BLE_SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY);
+        noCcc.addCharacteristic(new BluetoothGattCharacteristic(
+                BluetoothCourierRadio.BLE_CHAR_UUID,
+                BluetoothGattCharacteristic.PROPERTY_WRITE | BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+                BluetoothGattCharacteristic.PERMISSION_WRITE)); // no CCC descriptor
+        shadowOf(gatt).addDiscoverableService(noCcc);
+        radio.gattClientCallback.onConnectionStateChange(
+                gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
+        radio.gattClientCallback.onServicesDiscovered(gatt, BluetoothGatt.GATT_SUCCESS);
+        assertEquals("a peripheral with no CCC is a failed peer", Boolean.FALSE, rec.connectedFlag);
+        assertTrue("and is torn down so the dedup can re-dial it", shadowOf(gatt).isClosed());
+        radio.stop();
+    }
+
+    @Test
+    public void aDisabledAdapterIsUnavailableAndStartSurfacesAFailure() {
+        // Bluetooth hardware present but turned OFF: the radio is NOT available, and a start attempt
+        // surfaces a start failure (so the controller shows radio_unavailable, not a dead "running").
+        shadowOf(adapter()).setEnabled(false);
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        assertFalse("a disabled adapter is not available", radio.isAvailable());
+        radio.startAdvertising();
+        assertEquals("starting with Bluetooth off surfaces a start failure", "advertise",
+                rec.startFailedOp);
+    }
+
     @Test
     public void adapterIsAvailableUnderRobolectric() {
         assertTrue(new BluetoothCourierRadio(ctx(), new Recorder()).isAvailable());
@@ -138,23 +207,7 @@ public class BluetoothCourierRadioTest {
         // the old blocking design's worker thread would block on a queue poll, untestable here.
         Recorder rec = new Recorder();
         BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
-        BluetoothDevice device = peerDevice();
-        BluetoothGatt gatt = device.connectGatt(
-                ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
-        // Robolectric doesn't simulate GATT discovery but can hold a discoverable service — inject
-        // the courier service so the radio's onServicesDiscovered resolves the characteristic.  The
-        // shadow's requestMtu→discoverServices AUTO-fires onServicesDiscovered during the connection
-        // state change, and the radio fails the link if setCharacteristicNotification returns false
-        // — which the shadow does until the characteristic is allowed — so allow it BEFORE connecting
-        // (real Android returns true on a connected GATT; this only works around the shadow).
-        BluetoothGattService courierService = BluetoothCourierRadio.buildCourierGattService();
-        shadowOf(gatt).addDiscoverableService(courierService);
-        shadowOf(gatt).allowCharacteristicNotification(
-                courierService.getCharacteristic(BluetoothCourierRadio.BLE_CHAR_UUID));
-
-        radio.gattClientCallback.onConnectionStateChange(
-                gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
-        radio.gattClientCallback.onServicesDiscovered(gatt, BluetoothGatt.GATT_SUCCESS);
+        BluetoothGatt gatt = connectBleClient(radio);
         // The connection is announced only once the CCC notify-subscription write completes (the
         // shadow acks the descriptor write synchronously → onDescriptorWrite → connectionResult).
         assertEquals("the link is announced after the CCC subscription completes",
@@ -356,29 +409,28 @@ public class BluetoothCourierRadioTest {
     }
 
     @Test
+    @Config(sdk = 31) // a full successful connection needs the legacy CCC write the shadow honours
+    // (the API-33 writeDescriptor is not shadowed → returns an error → the radio correctly fails it)
     public void gattClientNotificationsReassembleToOnePayload() {
-        // The CENTRAL (GATT client) receive path: a connected peripheral NOTIFIES chunks back,
-        // delivered via gattClientCallback.onCharacteristicChanged — the per-endpoint reassembler
-        // must emit ONE exact payload.  (This is the duplex direction the server test does not cover.)
+        // The CENTRAL (GATT client) RECEIVE path: a connected peripheral NOTIFIES chunks back via
+        // gattClientCallback.onCharacteristicChanged → feedNotification → the per-endpoint reassembler
+        // must emit ONE exact payload from MULTIPLE chunks + ignore a foreign characteristic.  Driven
+        // through the 2-arg overload (the only one dispatchable at sdk=31); the API-33 3-arg overload
+        // is a one-line wrapper over the SAME feedNotification, covered on real radios by the netsim
+        // BleGattRadioTest.  (This is the duplex direction the server test does not cover.)
         Recorder rec = new Recorder();
         BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
-        BluetoothDevice device = peerDevice();
-        BluetoothGatt gatt = device.connectGatt(
-                ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
-
-        // Connect ⇒ the client creates the per-endpoint reassembler.
-        radio.gattClientCallback.onConnectionStateChange(
-                gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
+        BluetoothGatt gatt = connectBleClient(radio); // full setup ⇒ the per-endpoint reassembler exists
 
         byte[] payload = new byte[600];
         new Random(23).nextBytes(payload);
         byte[] framed = CourierFraming.framePrefixed(payload);
         BluetoothGattCharacteristic ch = courierCharacteristic();
-        radio.gattClientCallback.onCharacteristicChanged(
-                gatt, ch, Arrays.copyOfRange(framed, 0, 250));
+        ch.setValue(Arrays.copyOfRange(framed, 0, 250));
+        radio.gattClientCallback.onCharacteristicChanged(gatt, ch);
         assertEquals("no frame yet from a partial notification", 0, rec.payloadCount);
-        radio.gattClientCallback.onCharacteristicChanged(
-                gatt, ch, Arrays.copyOfRange(framed, 250, framed.length));
+        ch.setValue(Arrays.copyOfRange(framed, 250, framed.length));
+        radio.gattClientCallback.onCharacteristicChanged(gatt, ch);
         assertEquals("exactly one reassembled frame", 1, rec.payloadCount);
         assertEquals(PEER, rec.payloadEndpoint);
         assertArrayEquals("the reassembled payload is byte-exact", payload, rec.payload);
@@ -388,7 +440,8 @@ public class BluetoothCourierRadioTest {
                 UUID.randomUUID(),
                 BluetoothGattCharacteristic.PROPERTY_NOTIFY,
                 BluetoothGattCharacteristic.PERMISSION_READ);
-        radio.gattClientCallback.onCharacteristicChanged(gatt, foreign, new byte[] {9, 9, 9, 9, 9});
+        foreign.setValue(new byte[] {9, 9, 9, 9, 9});
+        radio.gattClientCallback.onCharacteristicChanged(gatt, foreign);
         assertEquals("a notification on a non-courier characteristic emits nothing",
                 1, rec.payloadCount);
 
@@ -407,11 +460,7 @@ public class BluetoothCourierRadioTest {
         // would otherwise ship silently (every other test pins sdk=34).
         Recorder rec = new Recorder();
         BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
-        BluetoothDevice device = peerDevice();
-        BluetoothGatt gatt = device.connectGatt(
-                ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
-        radio.gattClientCallback.onConnectionStateChange(
-                gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
+        BluetoothGatt gatt = connectBleClient(radio); // full setup ⇒ the per-endpoint reassembler exists
 
         byte[] payload = "pre-tiramisu-frame".getBytes();
         BluetoothGattCharacteristic ch = courierCharacteristic();

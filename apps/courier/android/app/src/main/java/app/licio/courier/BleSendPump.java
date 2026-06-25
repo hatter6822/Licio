@@ -113,7 +113,12 @@ public final class BleSendPump {
         if (framed == null || epoch != timeoutEpoch) {
             return;
         }
-        finish(false, "ble_ack_timeout");
+        // A timed-out write may STILL be pending in the GATT — if its callback arrives later it
+        // would be applied (onAck) to whatever send started next.  So don't just finish-and-advance:
+        // FAIL the in-flight send AND DRAIN the queue, leaving the pump idle so a late stale callback
+        // hits framed==null (a no-op).  A 30s BLE write stall means the link is effectively dead;
+        // the caller re-enqueues onto a fresh connection.
+        failAll("ble_ack_timeout");
     }
 
     /** The endpoint dropped: fail the in-flight send AND everything still queued. */

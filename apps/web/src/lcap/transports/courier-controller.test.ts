@@ -149,6 +149,31 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     );
   });
 
+  it('stops launching further channels once a startFailed tears everything down mid-start', async () => {
+    // Two channels.  The FIRST channel's startAdvertising fires a `startFailed` event DURING the
+    // start loop, which stops the controller (running=false).  The loop must then break — the
+    // SECOND channel must NOT be started (else it would advertise with no listeners after teardown).
+    const a = fakePlugin();
+    const b = fakePlugin();
+    a.plugin.startAdvertising = vi.fn(async () => {
+      a.emit('startFailed', { operation: 'advertise', error: 'nearby_disabled' });
+    });
+    const controller = new CourierController({
+      channels: [
+        { channel: 'nearby', plugin: a.plugin },
+        { channel: 'bluetooth', plugin: b.plugin },
+      ],
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => new Uint8Array([1]),
+    });
+
+    await controller.start();
+    await vi.waitFor(() => expect(controller.isRunning()).toBe(false));
+    expect(b.calls).not.toContain('advertise');
+    expect(b.calls).not.toContain('discover');
+  });
+
   it('starts the radios and drives ONE §16 exchange over a connected endpoint', async () => {
     const f = fakePlugin();
     const outcomes: Array<{ endpointId: string; channel: string; carriedBy: string | null }> = [];

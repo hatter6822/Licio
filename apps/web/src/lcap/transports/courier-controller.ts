@@ -253,7 +253,12 @@ export class CourierController {
     this.running = true;
     try {
       for (const { plugin } of this.channels) {
+        // A `startFailed` event can fire DURING these awaits and call stop() (clearing `running`
+        // + tearing down every listener).  If that happened, STOP launching further radios — else
+        // a later plugin would be left advertising/discovering with no listeners after teardown.
+        if (!this.running) break;
         if (this.decision.advertise) await plugin.startAdvertising(radioOptions);
+        if (!this.running) break;
         if (this.decision.discover) await plugin.startDiscovery(radioOptions);
       }
     } catch (error) {

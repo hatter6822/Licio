@@ -212,6 +212,31 @@ public class BleSendPumpTest {
     }
 
     @Test
+    public void aTimeoutDrainsQueuedSendsSoAStaleAckCannotAdvanceThem() {
+        // A timed-out write may STILL be pending in the GATT; if its callback arrives later it would
+        // be applied (onAck) to whatever send started next.  So a timeout DRAINS the endpoint (fails
+        // the in-flight AND every queued send) and leaves the pump idle — a late stale ack is a no-op.
+        RecordingWriter w = new RecordingWriter();
+        CountingTimeout t = new CountingTimeout();
+        BleSendPump pump = new BleSendPump(512, w, t);
+        Result r1 = new Result();
+        Result r2 = new Result();
+        pump.enqueue(new byte[] {1}, r1.sink()); // in-flight
+        pump.enqueue(new byte[] {2}, r2.sink()); // queued behind it
+
+        pump.onTimeout(t.lastEpoch); // the in-flight write times out
+        assertEquals(Boolean.FALSE, r1.ok);
+        assertEquals("ble_ack_timeout", r1.reason);
+        assertEquals("the queued send is drained, not advanced", Boolean.FALSE, r2.ok);
+        assertEquals("ble_ack_timeout", r2.reason);
+
+        // A late stale callback for the timed-out write hits an idle pump → a no-op (no extra report).
+        int before = r1.count + r2.count;
+        pump.onAck(0);
+        assertEquals("a late stale ack does nothing", before, r1.count + r2.count);
+    }
+
+    @Test
     public void failAllFailsTheInFlightAndQueuedSends() {
         RecordingWriter w = new RecordingWriter();
         BleSendPump pump = new BleSendPump(512, w, null);

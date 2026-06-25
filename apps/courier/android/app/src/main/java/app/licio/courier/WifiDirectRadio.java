@@ -78,8 +78,12 @@ public class WifiDirectRadio implements CourierRadio {
     @SuppressWarnings("MissingPermission") // declared per-API in the manifest; runtime-granted by the gate
     public void startDiscovery() {
         if (manager == null || channel == null) return;
+        // Idempotent: the controller may call startAdvertising() AND startDiscovery(), and advertise
+        // delegates here — without this guard a second discoverPeers is issued, which Android can
+        // reject as busy, and the onStartFailed path would then tear down the discovery the first
+        // call already started.
+        if (running.getAndSet(true)) return;
         registerReceiver();
-        running.set(true);
         // A discovery failure (async onFailure, or a framework throw — SecurityException /
         // DeadObjectException / IllegalStateException — for missing permission, Wi-Fi Direct
         // disabled, or framework state) means no discovery is running, so SURFACE it via
@@ -228,6 +232,10 @@ public class WifiDirectRadio implements CourierRadio {
                 socket.connect(new InetSocketAddress(host, DATA_PORT), SOCKET_TIMEOUT_MS);
                 handleSocket(socket, host);
             } catch (IOException e) {
+                // No socket was established (owner not listening yet / connect refused) — RELEASE the
+                // per-group claim so a later CONNECTION_CHANGED for the still-formed group can retry
+                // the dial instead of being skipped until the group dissolves.
+                groupActive.set(false);
                 events.onConnectionResult(host, false);
             }
         }).start();

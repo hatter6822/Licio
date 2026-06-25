@@ -29,6 +29,7 @@ import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
 import android.bluetooth.BluetoothServerSocket;
 import android.bluetooth.BluetoothSocket;
+import android.bluetooth.BluetoothStatusCodes;
 import android.bluetooth.le.AdvertiseCallback;
 import android.bluetooth.le.AdvertiseData;
 import android.bluetooth.le.AdvertiseSettings;
@@ -130,10 +131,11 @@ public class BluetoothCourierRadio implements CourierRadio {
         this.adapter = bm != null ? bm.getAdapter() : null;
     }
 
-    /** Whether the device has a usable Bluetooth adapter. */
+    /** Whether the device has a usable Bluetooth adapter that is turned ON.  A present-but-disabled
+     *  adapter is NOT available — its RFCOMM/BLE setup would fail silently with no active radio. */
     @Override
     public boolean isAvailable() {
-        return adapter != null;
+        return adapter != null && adapter.isEnabled();
     }
 
     // --- §22.5 advertise / discover -------------------------------------------------
@@ -142,7 +144,10 @@ public class BluetoothCourierRadio implements CourierRadio {
     @SuppressWarnings("MissingPermission") // declared per-API in the manifest; runtime-granted by the gate
     @Override
     public void startAdvertising() {
-        if (adapter == null) return;
+        if (adapter == null || !adapter.isEnabled()) {
+            events.onStartFailed("advertise", new IllegalStateException("bluetooth_off"));
+            return;
+        }
         running.set(true);
         startServerSocket();
         startBleGattServer();
@@ -152,7 +157,10 @@ public class BluetoothCourierRadio implements CourierRadio {
     @SuppressWarnings("MissingPermission")
     @Override
     public void startDiscovery() {
-        if (adapter == null) return;
+        if (adapter == null || !adapter.isEnabled()) {
+            events.onStartFailed("discover", new IllegalStateException("bluetooth_off"));
+            return;
+        }
         running.set(true);
         for (BluetoothDevice device : adapter.getBondedDevices()) {
             connectClient(device);
@@ -289,10 +297,10 @@ public class BluetoothCourierRadio implements CourierRadio {
     }
 
     @SuppressWarnings({"MissingPermission", "deprecation"})
-    private static void writeDescriptorLegacy(BluetoothGatt gatt, BluetoothGattDescriptor ccc,
+    private static boolean writeDescriptorLegacy(BluetoothGatt gatt, BluetoothGattDescriptor ccc,
             byte[] value) {
         ccc.setValue(value);
-        gatt.writeDescriptor(ccc);
+        return gatt.writeDescriptor(ccc); // false ⇒ the write was not initiated (no callback follows)
     }
 
     /** Fail + drop an endpoint's send pump (its in-flight + queued sends report failure). */
@@ -313,6 +321,20 @@ public class BluetoothCourierRadio implements CourierRadio {
         assemblers.remove(endpointId);
         bleMtu.remove(endpointId);
         failPump(endpointId);
+    }
+
+    /** A BLE CLIENT-setup step failed (rejected MTU/discovery/CCC, missing service, bad status):
+     *  forget + close the half-open GATT and report the FAILED connection.  Without this the peer
+     *  lingers in bleClients and the scan dedup makes it permanently undialable until stop(). */
+    @SuppressWarnings("MissingPermission")
+    private void failBleClient(BluetoothGatt gatt, String endpointId) {
+        forgetBleClient(endpointId);
+        try {
+            gatt.close();
+        } catch (Exception ignored) {
+            // already closed
+        }
+        events.onConnectionResult(endpointId, false);
     }
 
     /** The BLE per-write chunk size for an endpoint's negotiated MTU (pure {@link CourierFraming}). */
@@ -544,7 +566,12 @@ public class BluetoothCourierRadio implements CourierRadio {
                 blePendingClients.remove(endpointId); // promoted from dialing to connected
                 bleClients.put(endpointId, gatt);
                 assemblers.put(endpointId, new CourierFraming.FrameAssembler());
-                gatt.requestMtu(247);
+                // requestMtu is an OPTIMIZATION; if it isn't initiated (returns false), onMtuChanged
+                // never fires, so fall back to discovery at the default MTU.  If neither starts, the
+                // setup is stuck — tear down so the peer can be re-dialed instead of lingering.
+                if (!gatt.requestMtu(247) && !gatt.discoverServices()) {
+                    failBleClient(gatt, endpointId);
+                }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 forgetBleClient(endpointId); // frees the dial slot to re-dial
                 gatt.close();
@@ -555,42 +582,61 @@ public class BluetoothCourierRadio implements CourierRadio {
         @Override
         @SuppressWarnings("MissingPermission")
         public void onMtuChanged(BluetoothGatt gatt, int mtu, int status) {
-            if (status == BluetoothGatt.GATT_SUCCESS) bleMtu.put(gatt.getDevice().getAddress(), mtu);
-            gatt.discoverServices();
+            String endpointId = gatt.getDevice().getAddress();
+            if (status == BluetoothGatt.GATT_SUCCESS) bleMtu.put(endpointId, mtu);
+            // Discovery is required to resolve the courier characteristic — if it won't start, the
+            // connection can't progress, so fail rather than leaving the peer stuck in bleClients.
+            if (!gatt.discoverServices()) failBleClient(gatt, endpointId);
         }
 
         @Override
         @SuppressWarnings("MissingPermission")
         public void onServicesDiscovered(BluetoothGatt gatt, int status) {
             String endpointId = gatt.getDevice().getAddress();
+            // Any of these means the peer is not a usable courier — tear down + report failure so
+            // the scan dedup doesn't leave it undialable (a bad status, no courier service, no
+            // characteristic, or — the courier needs DUPLEX — no CCC to notify replies back).
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                failBleClient(gatt, endpointId);
+                return;
+            }
             BluetoothGattService svc = gatt.getService(BLE_SERVICE_UUID);
-            if (svc == null) return;
+            if (svc == null) {
+                failBleClient(gatt, endpointId);
+                return;
+            }
             BluetoothGattCharacteristic ch = svc.getCharacteristic(BLE_CHAR_UUID);
-            if (ch == null) return;
+            if (ch == null) {
+                failBleClient(gatt, endpointId);
+                return;
+            }
+            BluetoothGattDescriptor ccc = ch.getDescriptor(CCC_UUID);
+            if (ccc == null) {
+                // No CCC ⇒ the peripheral cannot notify back: a write-only link can only time out.
+                failBleClient(gatt, endpointId);
+                return;
+            }
             bleClientChars.put(endpointId, ch);
             // Enable LOCAL notification delivery (distinct from the remote CCC subscription written
             // below).  If Android refuses, the peripheral's notify replies would never reach us, so
             // fail the connection + tear down rather than reporting a link that can't receive.
             if (!gatt.setCharacteristicNotification(ch, true)) {
-                forgetBleClient(endpointId);
-                gatt.close();
-                events.onConnectionResult(endpointId, false);
+                failBleClient(gatt, endpointId);
                 return;
             }
-            BluetoothGattDescriptor ccc = ch.getDescriptor(CCC_UUID);
-            if (ccc != null) {
-                // The CCC write is ASYNC — defer onConnectionResult to onDescriptorWrite, since the
-                // peer's notifications aren't actually received until the subscription completes.
-                // Reporting connected here would let the exchange start (and the peer answer by
-                // notification) before notifications are enabled → a dropped first reply.
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    gatt.writeDescriptor(ccc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-                } else {
-                    writeDescriptorLegacy(gatt, ccc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-                }
+            // The CCC write is ASYNC — defer onConnectionResult to onDescriptorWrite, since the
+            // peer's notifications aren't actually received until the subscription completes.  But
+            // if the write isn't INITIATED (sync rejection), no callback follows — tear down now.
+            boolean written;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                written = gatt.writeDescriptor(ccc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                        == BluetoothStatusCodes.SUCCESS;
             } else {
-                // No CCC ⇒ no notify subscription to await (write-only path) — report connected now.
-                events.onConnectionResult(endpointId, true);
+                written = writeDescriptorLegacy(
+                        gatt, ccc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+            }
+            if (!written) {
+                failBleClient(gatt, endpointId);
             }
         }
 
@@ -606,9 +652,7 @@ public class BluetoothCourierRadio implements CourierRadio {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 events.onConnectionResult(endpointId, true);
             } else {
-                forgetBleClient(endpointId);
-                gatt.close();
-                events.onConnectionResult(endpointId, false);
+                failBleClient(gatt, endpointId);
             }
         }
 
