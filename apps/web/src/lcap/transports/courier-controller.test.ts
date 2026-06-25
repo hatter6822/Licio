@@ -121,11 +121,13 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
   it('consumes a LATE async startFailed event → stops + reports radio_unavailable', async () => {
     // The radios start cleanly (the sync start resolves), so the controller is running...
     const f = fakePlugin();
+    const decisionChanges: Array<{ blockedReason?: string }> = [];
     const controller = new CourierController({
       plugin: f.plugin,
       controls: ON,
       mode: 'courier',
       buildRequest: () => new Uint8Array([1]),
+      onDecisionChange: (d) => decisionChanges.push(d),
     });
     await controller.start();
     expect(controller.isRunning()).toBe(true);
@@ -140,6 +142,11 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       discover: false,
       blockedReason: 'radio_unavailable',
     });
+    // The UI is notified of the async decision change (start() already returned, so a private
+    // mutation alone would leave the runner showing a dead courier as running).
+    expect(decisionChanges).toContainEqual(
+      expect.objectContaining({ blockedReason: 'radio_unavailable' }),
+    );
   });
 
   it('starts the radios and drives ONE §16 exchange over a connected endpoint', async () => {

@@ -157,6 +157,11 @@ export interface CourierControllerConfig {
   readonly httpsConfig?: HttpsTransportConfig;
   /** Notified after each per-endpoint exchange outcome (observability / UI). */
   readonly onOutcome?: (outcome: CourierExchangeOutcome) => void;
+  /** Notified when the start decision changes ASYNCHRONOUSLY after {@link start} resolved — a
+   *  radio whose native start Task rejects late stops the radios and flips the decision to
+   *  radio_unavailable, which the caller's `start()` return value cannot reflect.  The UI uses
+   *  this to drop a now-dead courier from "running" instead of showing a stale state. */
+  readonly onDecisionChange?: (decision: CourierStartDecision) => void;
   /** Optional service id / endpoint name passed to the radios. */
   readonly serviceId?: string;
   readonly endpointName?: string;
@@ -338,6 +343,9 @@ export class CourierController {
     // stale allow decision.
     this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
     await this.stop();
+    // Notify the caller (the UI) of the async decision change — its start() already resolved, so
+    // a private mutation alone would leave it showing a dead courier as running.
+    this.config.onDecisionChange?.(this.decision);
   }
 
   private key(channel: CourierChannel, endpointId: string): string {

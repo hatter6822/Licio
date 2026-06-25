@@ -7,7 +7,7 @@
 // decision surfaces its reason, never a false "running"; and the copy never uses a false
 // trust word.
 
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getCourierControls } from '../../../lcap/transports/courier-controls-state.js';
 import { checkA11y } from '../../../test/axe.js';
@@ -20,10 +20,25 @@ const FORBIDDEN = /\b(secure|trusted|safe|anonymous)\b/i;
 const controllerStart = vi.fn(async () => ({ advertise: true, discover: true, blockedReason: '' }));
 const controllerStop = vi.fn(async () => {});
 const activeChannels = vi.fn(() => ['nearby'] as const);
-const ControllerCtor = vi.fn(function (this: Record<string, unknown>) {
+const controllerIsRunning = vi.fn(() => true);
+const controllerStartDecision = vi.fn(() => ({
+  advertise: false,
+  discover: false,
+  blockedReason: 'radio_unavailable',
+}));
+// The last config the controller was constructed with — lets a test fire the async
+// onDecisionChange callback (a late radio start-failure) the controller would invoke.
+let lastControllerConfig: { onDecisionChange?: (d: unknown) => void } | undefined;
+const ControllerCtor = vi.fn(function (
+  this: Record<string, unknown>,
+  config: { onDecisionChange?: (d: unknown) => void },
+) {
+  lastControllerConfig = config;
   this['start'] = controllerStart;
   this['stop'] = controllerStop;
   this['activeChannels'] = activeChannels;
+  this['isRunning'] = controllerIsRunning;
+  this['startDecision'] = controllerStartDecision;
 });
 const resolveCourierChannels = vi.fn((..._a: unknown[]) => [{ channel: 'nearby', plugin: {} }]);
 
@@ -100,6 +115,30 @@ describe('CourierRunner (WS-R.15.4c/d/e)', () => {
     // A Stop control now drives the controller teardown.
     fireEvent.click(screen.getByRole('button', { name: /stop courier/i }));
     await waitFor(() => expect(controllerStop).toHaveBeenCalled());
+  });
+
+  it('drops a RUNNING courier to blocked when a radio fails to start asynchronously', async () => {
+    injectNativeShell();
+    render(<CourierRunner />);
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /i understand what a nearby radio reveals/i }),
+    );
+    fireEvent.click(screen.getByRole('switch', { name: /advertise this device/i }));
+    fireEvent.click(screen.getByRole('button', { name: /start courier/i }));
+    await waitFor(() => expect(screen.getByText(/^Running$/)).toBeInTheDocument());
+
+    // The radio's native start Task rejects LATE — the controller invokes onDecisionChange, which
+    // the runner must consume (it cannot see this via start()'s already-resolved return value).
+    expect(lastControllerConfig?.onDecisionChange).toBeDefined();
+    act(() => {
+      lastControllerConfig?.onDecisionChange?.({
+        advertise: false,
+        discover: false,
+        blockedReason: 'radio_unavailable',
+      });
+    });
+    await waitFor(() => expect(screen.queryByText(/^Running$/)).not.toBeInTheDocument());
+    expect(screen.getByText(/a radio could not start/i)).toBeInTheDocument();
   });
 
   it('surfaces a blocked decision honestly (never a false "running")', async () => {

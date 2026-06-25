@@ -42,9 +42,12 @@ public class UsbCourierRadioTest {
         final CountDownLatch payloadLatch = new CountDownLatch(1);
         final CountDownLatch disconnected = new CountDownLatch(1);
         final AtomicReference<byte[]> payload = new AtomicReference<>();
+        final AtomicReference<String> startFailedOp = new AtomicReference<>();
+        boolean anyConnectionResult;
 
         @Override
         public void onConnectionResult(String endpointId, boolean isConnected) {
+            anyConnectionResult = true;
             if (isConnected) connected.countDown();
         }
 
@@ -57,6 +60,11 @@ public class UsbCourierRadioTest {
         @Override
         public void onDisconnected(String endpointId) {
             disconnected.countDown();
+        }
+
+        @Override
+        public void onStartFailed(String operation, Exception cause) {
+            startFailedOp.set(operation);
         }
     }
 
@@ -219,5 +227,16 @@ public class UsbCourierRadioTest {
     @Test
     public void usbManagerIsAvailableUnderRobolectric() {
         assertTrue(new UsbCourierRadio(ctx(), new Recorder()).isAvailable());
+    }
+
+    @Test
+    public void startDiscoveryWithNoAccessoryReportsAStartFailureNotAConnectionEvent() {
+        // No accessory attached + no attach watcher that could connect later ⇒ a START FAILURE
+        // (so the controller surfaces radio_unavailable), NOT a negative connectionResult it ignores.
+        Recorder rec = new Recorder();
+        UsbCourierRadio radio = new UsbCourierRadio(ctx(), rec);
+        radio.startDiscovery();
+        assertEquals("discover", rec.startFailedOp.get());
+        assertEquals("no (false) connection result is emitted", false, rec.anyConnectionResult);
     }
 }

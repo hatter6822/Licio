@@ -303,6 +303,18 @@ public class BluetoothCourierRadio implements CourierRadio {
         }
     }
 
+    /** Drop ALL per-endpoint BLE CLIENT state (so a later scan can re-dial the address — the scan
+     *  dedup keys on bleClients/blePendingClients) and fail any in-flight send.  The caller closes
+     *  the GATT + fires the appropriate event. */
+    private void forgetBleClient(String endpointId) {
+        blePendingClients.remove(endpointId);
+        bleClients.remove(endpointId);
+        bleClientChars.remove(endpointId);
+        assemblers.remove(endpointId);
+        bleMtu.remove(endpointId);
+        failPump(endpointId);
+    }
+
     /** The BLE per-write chunk size for an endpoint's negotiated MTU (pure {@link CourierFraming}). */
     private int chunkSize(String endpointId) {
         return CourierFraming.chunkSize(bleMtu.getOrDefault(endpointId, CourierFraming.DEFAULT_ATT_MTU));
@@ -402,8 +414,14 @@ public class BluetoothCourierRadio implements CourierRadio {
         if (gattServer == null) return;
         BluetoothGattService service = buildCourierGattService();
         gattCharacteristic = service.getCharacteristic(BLE_CHAR_UUID);
+        // addService is ASYNC (completes via onServiceAdded).  Advertising is started ONLY from
+        // that callback — otherwise a fast scanner could connect off the advertisement before the
+        // service is registered, hit svc==null in discovery, and stall with no failed-connect event.
         gattServer.addService(service);
+    }
 
+    @SuppressWarnings("MissingPermission")
+    private void startBleAdvertising() {
         advertiser = adapter.getBluetoothLeAdvertiser();
         if (advertiser == null) return; // controller cannot advertise — RFCOMM remains
         advertiseCallback = new AdvertiseCallback() {};
@@ -417,6 +435,16 @@ public class BluetoothCourierRadio implements CourierRadio {
     }
 
     final BluetoothGattServerCallback gattServerCallback = new BluetoothGattServerCallback() {
+        @Override
+        public void onServiceAdded(int status, BluetoothGattService service) {
+            // The courier service is now registered — only NOW is it safe to advertise (a scanner
+            // that connects can resolve the service).  A failed registration ⇒ no advertising (the
+            // BLE peripheral path is unavailable; RFCOMM remains).
+            if (status == BluetoothGatt.GATT_SUCCESS && BLE_SERVICE_UUID.equals(service.getUuid())) {
+                startBleAdvertising();
+            }
+        }
+
         @Override
         @SuppressWarnings("MissingPermission")
         public void onConnectionStateChange(BluetoothDevice device, int status, int newState) {
@@ -518,12 +546,7 @@ public class BluetoothCourierRadio implements CourierRadio {
                 assemblers.put(endpointId, new CourierFraming.FrameAssembler());
                 gatt.requestMtu(247);
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                blePendingClients.remove(endpointId); // a failed/closed dial frees the slot to re-dial
-                bleClients.remove(endpointId);
-                bleClientChars.remove(endpointId);
-                assemblers.remove(endpointId);
-                bleMtu.remove(endpointId);
-                failPump(endpointId);
+                forgetBleClient(endpointId); // frees the dial slot to re-dial
                 gatt.close();
                 events.onDisconnected(endpointId);
             }
@@ -565,12 +588,21 @@ public class BluetoothCourierRadio implements CourierRadio {
         }
 
         @Override
+        @SuppressWarnings("MissingPermission")
         public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
             if (!CCC_UUID.equals(descriptor.getUuid())) return;
+            String endpointId = gatt.getDevice().getAddress();
             // The notify subscription is now established (or failed) — ONLY now is the duplex link
-            // ready, so report the connection result reflecting whether it succeeded.
-            events.onConnectionResult(gatt.getDevice().getAddress(),
-                    status == BluetoothGatt.GATT_SUCCESS);
+            // ready.  On SUCCESS, report connected.  On FAILURE, tear the half-open client down
+            // FIRST (else it lingers in bleClients and the scan dedup makes the peer permanently
+            // undialable until the whole radio is stopped), then report the failed result.
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                events.onConnectionResult(endpointId, true);
+            } else {
+                forgetBleClient(endpointId);
+                gatt.close();
+                events.onConnectionResult(endpointId, false);
+            }
         }
 
         @Override

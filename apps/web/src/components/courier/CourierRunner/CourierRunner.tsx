@@ -177,12 +177,25 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
             },
           ]);
         },
+        // A radio whose native start fails ASYNCHRONOUSLY (the common GMS-Task timing) stops the
+        // controller after start() resolved — drop it from "running" instead of showing a stale,
+        // already-stopped courier.
+        onDecisionChange: (decision) => {
+          controllerRef.current = null;
+          setPhase({ kind: 'blocked', reason: decision.blockedReason });
+        },
       });
       const decision = await controller.start();
       if (!decision.advertise && !decision.discover) {
         // The controls/mode disallowed the radios — surface the typed reason, never "running".
         await controller.stop();
         setPhase({ kind: 'blocked', reason: decision.blockedReason });
+        return;
+      }
+      if (!controller.isRunning()) {
+        // A late start-failure already stopped the controller DURING start() (onDecisionChange set
+        // the blocked phase) — don't overwrite it with "running".
+        setPhase({ kind: 'blocked', reason: controller.startDecision().blockedReason });
         return;
       }
       controllerRef.current = controller;

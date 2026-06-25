@@ -19,6 +19,7 @@ import android.hardware.usb.UsbAccessory;
 import android.hardware.usb.UsbManager;
 import android.os.ParcelFileDescriptor;
 
+import java.io.Closeable;
 import java.io.DataOutputStream;
 import java.io.FileDescriptor;
 import java.io.FileInputStream;
@@ -72,12 +73,15 @@ public class UsbCourierRadio implements CourierRadio {
         if (descriptor != null) return;
         UsbAccessory[] accessories = usbManager.getAccessoryList();
         if (accessories == null || accessories.length == 0) {
-            events.onConnectionResult(USB_ENDPOINT_ID, false); // nothing attached
+            // No accessory + no attach watcher that could connect later ⇒ this is a START FAILURE,
+            // not a (negative) connection result the controller would ignore — so the UI surfaces
+            // radio_unavailable instead of a dead "running" courier.
+            events.onStartFailed("discover", new IllegalStateException("no_usb_accessory"));
             return;
         }
         descriptor = usbManager.openAccessory(accessories[0]);
         if (descriptor == null) {
-            events.onConnectionResult(USB_ENDPOINT_ID, false);
+            events.onStartFailed("discover", new IllegalStateException("usb_accessory_open_failed"));
             return;
         }
         FileDescriptor fd = descriptor.getFileDescriptor();
@@ -92,10 +96,29 @@ public class UsbCourierRadio implements CourierRadio {
     void attach(InputStream in, OutputStream out, String endpointId) {
         running.set(true);
         readStream = in; // tracked so stop() can close it and unblock the read below
-        // The shared blocking-stream data-path (CourierStreamLinkTest covers it via pipes); the
-        // input stream is the Closeable, so an EOF / stop() tears the link down.
+        // The shared blocking-stream data-path (CourierStreamLinkTest covers it via pipes).  On
+        // link exit (EOF / error / stop()) close the accessory DESCRIPTOR too and clear it — closing
+        // only `in` would leave `descriptor` non-null, so after an unplug/replug the idempotency
+        // guard in startDiscovery() would refuse to reopen and the ParcelFileDescriptor would leak.
+        Closeable onExit = () -> {
+            try {
+                in.close();
+            } catch (IOException ignored) {
+                // already closed
+            }
+            ParcelFileDescriptor d = descriptor;
+            if (d != null) {
+                try {
+                    d.close();
+                } catch (IOException ignored) {
+                    // already closed
+                }
+            }
+            descriptor = null;
+            readStream = null;
+        };
         new Thread(() ->
-                CourierStreamLink.run(in, out, in, endpointId, outbound, events, running::get))
+                CourierStreamLink.run(in, out, onExit, endpointId, outbound, events, running::get))
                 .start();
     }
 

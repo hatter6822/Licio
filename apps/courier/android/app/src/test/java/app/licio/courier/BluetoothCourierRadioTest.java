@@ -197,6 +197,9 @@ public class BluetoothCourierRadioTest {
         radio.gattClientCallback.onDescriptorWrite(gatt, ccc, BluetoothGatt.GATT_FAILURE);
         assertEquals("a failed CCC write reports a failed connection",
                 Boolean.FALSE, rec.connectedFlag);
+        // A failed subscription must TEAR DOWN the half-open client (close the GATT) so the scan
+        // dedup doesn't leave the peer permanently undialable until the whole radio is stopped.
+        assertTrue("a failed CCC subscription closes the GATT", shadowOf(gatt).isClosed());
         radio.stop();
     }
 
