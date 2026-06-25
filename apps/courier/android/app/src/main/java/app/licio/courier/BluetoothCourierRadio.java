@@ -49,6 +49,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -212,6 +213,7 @@ public class BluetoothCourierRadio implements CourierRadio {
     /** The per-endpoint BLE send pump, created on first use against the endpoint's negotiated
      *  MTU.  The chunk write + the ack timeout are the only I/O; the pump is pure. */
     private BleSendPump blePumpFor(String endpointId) {
+        bleScheduler(); // eagerly create the timeout scheduler ON THE SEND PATH (never from arm())
         return blePumps.computeIfAbsent(endpointId, ep -> {
             BleSendPump[] self = new BleSendPump[1];
             BleSendPump.Timeout timeout = new BleSendPump.Timeout() {
@@ -220,9 +222,19 @@ public class BluetoothCourierRadio implements CourierRadio {
                 @Override
                 public void arm() {
                     cancel();
-                    ScheduledExecutorService exec = bleScheduler();
-                    future = exec.schedule(() -> self[0].onTimeout(),
-                            BLE_ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                    // A PLAIN read — never lazily re-create the scheduler (that would resurrect one
+                    // stopBle() just shut down, leaking a thread); and tolerate the stop()/disconnect
+                    // race where it is being torn down (the in-flight send is failAll'd anyway).
+                    ScheduledExecutorService exec = bleScheduler;
+                    if (exec == null) {
+                        return;
+                    }
+                    try {
+                        future = exec.schedule(() -> self[0].onTimeout(),
+                                BLE_ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                    } catch (RejectedExecutionException shuttingDown) {
+                        // scheduler shut down mid-send — no timeout armed; failAll fails the send
+                    }
                 }
 
                 @Override
@@ -272,9 +284,7 @@ public class BluetoothCourierRadio implements CourierRadio {
                 return gatt.writeCharacteristic(ch, chunk, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
                         == BluetoothGatt.GATT_SUCCESS;
             }
-            ch.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-            ch.setValue(chunk);
-            return gatt.writeCharacteristic(ch);
+            return writeCharacteristicLegacy(gatt, ch, chunk);
         }
         BluetoothDevice central = bleCentrals.get(endpointId);
         if (central != null && gattServer != null && gattCharacteristic != null) {
@@ -282,10 +292,37 @@ public class BluetoothCourierRadio implements CourierRadio {
                 return gattServer.notifyCharacteristicChanged(central, gattCharacteristic, false, chunk)
                         == BluetoothGatt.GATT_SUCCESS;
             }
-            gattCharacteristic.setValue(chunk);
-            return gattServer.notifyCharacteristicChanged(central, gattCharacteristic, false);
+            return notifyCharacteristicChangedLegacy(central, chunk);
         }
         return false;
+    }
+
+    // --- pre-33 (API 23..32) BLE compatibility shims ---------------------------------
+    // On Android < 13 the value-carrying writeCharacteristic/notifyCharacteristicChanged/
+    // writeDescriptor overloads do not exist; the older set-value-then-write methods are the
+    // ONLY API available (the 33+ replacements are used directly above).  Each shim is the
+    // minimal isolation of one unavoidable deprecated call, so the surrounding methods stay
+    // fully deprecation-checked.  Delete these (and the SDK_INT branches) only if minSdk ≥ 33.
+
+    @SuppressWarnings({"MissingPermission", "deprecation"})
+    private static boolean writeCharacteristicLegacy(BluetoothGatt gatt,
+            BluetoothGattCharacteristic ch, byte[] chunk) {
+        ch.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+        ch.setValue(chunk);
+        return gatt.writeCharacteristic(ch);
+    }
+
+    @SuppressWarnings({"MissingPermission", "deprecation"})
+    private boolean notifyCharacteristicChangedLegacy(BluetoothDevice central, byte[] chunk) {
+        gattCharacteristic.setValue(chunk);
+        return gattServer.notifyCharacteristicChanged(central, gattCharacteristic, false);
+    }
+
+    @SuppressWarnings({"MissingPermission", "deprecation"})
+    private static void writeDescriptorLegacy(BluetoothGatt gatt, BluetoothGattDescriptor ccc,
+            byte[] value) {
+        ccc.setValue(value);
+        gatt.writeDescriptor(ccc);
     }
 
     /** Fail + drop an endpoint's send pump (its in-flight + queued sends report failure). */
@@ -351,8 +388,10 @@ public class BluetoothCourierRadio implements CourierRadio {
         }).start();
     }
 
+    /** Drive a connected RFCOMM socket as a courier link (the accept-loop + client connect call
+     *  this).  Package-visible so the Layer-2 test drives it over a Robolectric shadow socket. */
     @SuppressWarnings("MissingPermission")
-    private void handleSocket(BluetoothSocket socket) {
+    void handleSocket(BluetoothSocket socket) {
         String endpointId = socket.getRemoteDevice().getAddress();
         liveSockets.add(socket); // tracked so stop() can unblock the read below
         try {
@@ -526,8 +565,7 @@ public class BluetoothCourierRadio implements CourierRadio {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     gatt.writeDescriptor(ccc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
                 } else {
-                    ccc.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-                    gatt.writeDescriptor(ccc);
+                    writeDescriptorLegacy(gatt, ccc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
                 }
             }
             events.onConnectionResult(endpointId, true);

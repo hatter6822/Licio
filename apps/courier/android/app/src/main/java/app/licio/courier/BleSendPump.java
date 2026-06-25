@@ -24,6 +24,7 @@ package app.licio.courier;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Deque;
+import java.util.Objects;
 
 public final class BleSendPump {
 
@@ -69,12 +70,14 @@ public final class BleSendPump {
     public BleSendPump(int chunkSize, ChunkWriter writer, Timeout timeout) {
         if (chunkSize <= 0) throw new IllegalArgumentException("non_positive_chunk_size");
         this.chunkSize = chunkSize;
-        this.writer = writer;
+        this.writer = Objects.requireNonNull(writer, "writer");
         this.timeout = timeout != null ? timeout : NO_TIMEOUT;
     }
 
     /** Queue one frame for this endpoint; starts it immediately if the pump is idle. */
     public synchronized void enqueue(byte[] payload, Completion completion) {
+        Objects.requireNonNull(payload, "payload");
+        Objects.requireNonNull(completion, "completion");
         queue.add(new Pending(CourierFraming.framePrefixed(payload), completion));
         if (framed == null) {
             startNext();

@@ -178,8 +178,10 @@ public class WifiDirectRadio implements CourierRadio {
         }
     }
 
-    /** Decide the role once the group forms: owner runs the server, the client dials it.
-     *  Package-private so the Layer-2 test drives it with a fabricated {@link WifiP2pInfo}. */
+    /** Decide the role once the group forms: owner runs the server, the client dials it.  The
+     *  socket data path both branches dispatch to is unit-tested via `CourierStreamLink` (pipes);
+     *  this thin role decision + the bind/accept/connect socket setup are exercised on real radios
+     *  (a unit test would have to bind the fixed `DATA_PORT`, which the no-fixed-port policy avoids). */
     void onConnectionInfo(WifiP2pInfo info) {
         if (info == null || !info.groupFormed) return;
         if (info.isGroupOwner) {

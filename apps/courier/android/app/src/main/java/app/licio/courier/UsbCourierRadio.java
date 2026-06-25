@@ -37,6 +37,9 @@ public class UsbCourierRadio implements CourierRadio {
     private final CourierRadio.Events events;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private volatile ParcelFileDescriptor descriptor;
+    // The stream the read loop blocks on — closed by stop() to UNBLOCK it (closing the accessory
+    // descriptor does not reliably interrupt a FileInputStream built from getFileDescriptor()).
+    private volatile InputStream readStream;
     // A single accessory link, but keyed (one entry) so the SHARED CourierStreamLink data-path
     // routes outbound exactly as it does for the multi-endpoint socket transports.
     private final ConcurrentHashMap<String, DataOutputStream> outbound = new ConcurrentHashMap<>();
@@ -81,8 +84,9 @@ public class UsbCourierRadio implements CourierRadio {
      */
     void attach(InputStream in, OutputStream out, String endpointId) {
         running.set(true);
+        readStream = in; // tracked so stop() can close it and unblock the read below
         // The shared blocking-stream data-path (CourierStreamLinkTest covers it via pipes); the
-        // input stream is the Closeable, so a stop()/EOF tears the link down.
+        // input stream is the Closeable, so an EOF / stop() tears the link down.
         new Thread(() ->
                 CourierStreamLink.run(in, out, in, endpointId, outbound, events, running::get))
                 .start();
@@ -111,9 +115,20 @@ public class UsbCourierRadio implements CourierRadio {
     @Override
     public void stop() {
         running.set(false);
+        // Close the READ stream first — this is what unblocks a thread parked in readFramedStream
+        // (so CourierStreamLink's finally runs: drop outbound + fire onDisconnected).
+        InputStream rs = readStream;
+        if (rs != null) {
+            try {
+                rs.close();
+            } catch (IOException ignored) {
+                // already closed
+            }
+            readStream = null;
+        }
         if (descriptor != null) {
             try {
-                descriptor.close(); // closes the accessory streams → the read loop unblocks
+                descriptor.close(); // release the kernel handle
             } catch (IOException ignored) {
                 // already closed
             }

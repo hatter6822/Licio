@@ -21,13 +21,20 @@ import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
+import android.bluetooth.BluetoothServerSocket;
+import android.bluetooth.BluetoothSocket;
 import android.content.Context;
 
 import androidx.test.core.app.ApplicationProvider;
 
+import java.io.DataInputStream;
+import java.io.OutputStream;
 import java.util.Arrays;
 import java.util.Random;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -83,6 +90,35 @@ public class BluetoothCourierRadioTest {
                 .getCharacteristic(BluetoothCourierRadio.BLE_CHAR_UUID);
     }
 
+    private static BluetoothAdapter adapter() {
+        BluetoothManager bm = (BluetoothManager) ctx().getSystemService(Context.BLUETOOTH_SERVICE);
+        return bm.getAdapter();
+    }
+
+    /** A latch-based Events recorder for the async (threaded) socket tests. */
+    private static final class LatchRecorder implements CourierRadio.Events {
+        final CountDownLatch connected = new CountDownLatch(1);
+        final CountDownLatch payloadLatch = new CountDownLatch(1);
+        final CountDownLatch disconnected = new CountDownLatch(1);
+        final AtomicReference<byte[]> payload = new AtomicReference<>();
+
+        @Override
+        public void onConnectionResult(String endpointId, boolean isConnected) {
+            if (isConnected) connected.countDown();
+        }
+
+        @Override
+        public void onPayload(String endpointId, byte[] bytes) {
+            payload.set(bytes);
+            payloadLatch.countDown();
+        }
+
+        @Override
+        public void onDisconnected(String endpointId) {
+            disconnected.countDown();
+        }
+    }
+
     @Test
     public void adapterIsAvailableUnderRobolectric() {
         assertTrue(new BluetoothCourierRadio(ctx(), new Recorder()).isAvailable());
@@ -134,6 +170,88 @@ public class BluetoothCourierRadioTest {
         radio.gattClientCallback.onCharacteristicWrite(
                 gatt, courierCharacteristic(), BluetoothGatt.GATT_SUCCESS);
         assertEquals("ok", outcome[0]);
+        radio.stop();
+    }
+
+    @Test
+    public void rfcommSocketDrivesTheCourierDataPathOverARealBluetoothSocket() throws Exception {
+        // The full RFCOMM data path over a REAL (shadow) BluetoothSocket — not just pipes: a
+        // server socket's deviceConnected(device) yields a connected socket whose streams we
+        // drive (the feeder is what the socket receives; the sink is what it sends).  This proves
+        // handleSocket correctly wraps a Bluetooth socket's streams (inbound framing + outbound).
+        LatchRecorder rec = new LatchRecorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        radio.startDiscovery(); // running = true (no bonded devices under Robolectric)
+
+        BluetoothServerSocket ss = adapter().listenUsingInsecureRfcommWithServiceRecord(
+                "courier-test", UUID.fromString("9f1c1e10-5c11-4f2a-9b3d-1a2b3c4d5e6f"));
+        BluetoothSocket peer = shadowOf(ss).deviceConnected(peerDevice());
+        peer.connect(); // mark the shadow socket connected (handleSocket reads while isConnected())
+        OutputStream feeder = shadowOf(peer).getInputStreamFeeder();
+
+        Thread link = new Thread(() -> radio.handleSocket(peer));
+        link.start();
+        assertTrue("the RFCOMM link is announced", rec.connected.await(5, TimeUnit.SECONDS));
+
+        // Inbound: feed a length-prefixed frame over the real socket → the radio emits the payload.
+        byte[] inbound = "rfcomm-inbound-frame".getBytes();
+        feeder.write(CourierFraming.framePrefixed(inbound));
+        feeder.flush();
+        assertTrue("the framed payload arrived", rec.payloadLatch.await(5, TimeUnit.SECONDS));
+        assertArrayEquals(inbound, rec.payload.get());
+
+        // Outbound: send() writes a length-prefixed frame onto the socket's output stream.
+        byte[] outbound = {7, 8, 9, 10};
+        radio.send(PEER, outbound, new CourierRadio.SendResult() {
+            @Override
+            public void onSuccess() {}
+
+            @Override
+            public void onError(String reason, Exception cause) {}
+        });
+        DataInputStream sent = new DataInputStream(shadowOf(peer).getOutputStreamSink());
+        int len = sent.readInt();
+        byte[] got = new byte[len];
+        sent.readFully(got);
+        assertArrayEquals("the outbound frame appears on the socket", outbound, got);
+
+        // (Teardown-unblock is not asserted here: the shadow socket's streams are pipe-backed, and
+        // a PipedInputStream read does not unblock on close with the write end open — a Robolectric
+        // limit, not the production behaviour where a real socket close throws.  stop()'s
+        // close-the-read-stream unblock is verified deterministically in UsbCourierRadioTest.)
+        radio.stop();
+        link.interrupt();
+        link.join(2000);
+    }
+
+    @Test
+    public void bleCentralSendFailsClosedWhenTheFrameworkRejectsTheNotify() {
+        // The central (peripheral→central NOTIFY) send branch of writeBleChunk: Robolectric's GATT
+        // server returns a non-success status for notifyCharacteristicChanged, so the radio must
+        // FAIL CLOSED — proving the central send branch + the pump→result error wiring.  (The
+        // central RECEIVE path is covered by the GATT-server tests; a SUCCESSFUL central notify is
+        // not simulable in Robolectric and is exercised on real radios by BleGattRadioTest.)
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        radio.startAdvertising(); // opens the GATT server + resolves the courier characteristic
+        BluetoothDevice central = peerDevice();
+        radio.gattServerCallback.onConnectionStateChange(
+                central, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
+
+        final String[] outcome = {null};
+        radio.send(PEER, new byte[] {1, 2, 3}, new CourierRadio.SendResult() {
+            @Override
+            public void onSuccess() {
+                outcome[0] = "ok";
+            }
+
+            @Override
+            public void onError(String reason, Exception cause) {
+                outcome[0] = "err:" + reason;
+            }
+        });
+        assertEquals("the central send fails closed when the notify is rejected",
+                "err:write_rejected", outcome[0]);
         radio.stop();
     }
 

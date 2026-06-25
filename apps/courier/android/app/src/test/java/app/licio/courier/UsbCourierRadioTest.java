@@ -17,6 +17,8 @@ import androidx.test.core.app.ApplicationProvider;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
 import java.util.ArrayList;
@@ -38,6 +40,7 @@ public class UsbCourierRadioTest {
     private static final class Recorder implements CourierRadio.Events {
         final CountDownLatch connected = new CountDownLatch(1);
         final CountDownLatch payloadLatch = new CountDownLatch(1);
+        final CountDownLatch disconnected = new CountDownLatch(1);
         final AtomicReference<byte[]> payload = new AtomicReference<>();
 
         @Override
@@ -52,7 +55,9 @@ public class UsbCourierRadioTest {
         }
 
         @Override
-        public void onDisconnected(String endpointId) {}
+        public void onDisconnected(String endpointId) {
+            disconnected.countDown();
+        }
     }
 
     private static Context ctx() {
@@ -154,6 +159,43 @@ public class UsbCourierRadioTest {
         assertTrue("both payloads present + uncorrupted (order is nondeterministic)", has1 && has2);
         radio.stop();
         keepOpen.close();
+    }
+
+    /** An InputStream that PARKS in read() until closed, then throws — modelling a real
+     *  accessory fd/socket whose blocking read IS interrupted by close() (a PipedInputStream is
+     *  not, so it cannot model this).  Lets us verify stop() closes the read stream to unblock it. */
+    private static final class BlockingClosableStream extends InputStream {
+        private final CountDownLatch closed = new CountDownLatch(1);
+
+        @Override
+        public int read() throws IOException {
+            try {
+                closed.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            throw new IOException("stream closed");
+        }
+
+        @Override
+        public void close() {
+            closed.countDown();
+        }
+    }
+
+    @Test
+    public void stopClosesTheReadStreamToUnblockTheReadThreadAndFireDisconnect() throws Exception {
+        // The read thread is PARKED in read() (no data, no EOF).  stop() must close the READ stream
+        // to unblock it — closing only the accessory descriptor would leak the thread + never fire
+        // onDisconnected.  This catches the regression where stop() closed the wrong Closeable.
+        Recorder rec = new Recorder();
+        UsbCourierRadio radio = new UsbCourierRadio(ctx(), rec);
+        radio.attach(new BlockingClosableStream(), new ByteArrayOutputStream(), "usb-test");
+        assertTrue("link announced", rec.connected.await(5, TimeUnit.SECONDS));
+
+        radio.stop();
+        assertTrue("stop() closed the read stream → unblocked the read → onDisconnected fired",
+                rec.disconnected.await(5, TimeUnit.SECONDS));
     }
 
     @Test

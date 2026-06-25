@@ -33,14 +33,17 @@ final class CourierStreamLink {
     static void run(InputStream in, OutputStream out, Closeable conn, String endpointId,
             Map<String, DataOutputStream> outbound, CourierRadio.Events events,
             BooleanSupplier alive) {
-        outbound.put(endpointId, new DataOutputStream(out));
+        DataOutputStream dos = new DataOutputStream(out);
+        outbound.put(endpointId, dos);
         events.onConnectionResult(endpointId, true);
         try {
             CourierFraming.readFramedStream(in, frame -> events.onPayload(endpointId, frame), alive);
         } catch (IOException ignored) {
             // peer closed / read error — fall through to the disconnect cleanup
         } finally {
-            outbound.remove(endpointId);
+            // Remove BY VALUE: if the same endpoint reconnected on another link, that link's
+            // newer outbound entry must NOT be clobbered by this (older) link's teardown.
+            outbound.remove(endpointId, dos);
             try {
                 conn.close();
             } catch (IOException ignored) {

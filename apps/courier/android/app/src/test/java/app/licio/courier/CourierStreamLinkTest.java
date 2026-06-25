@@ -11,6 +11,8 @@ package app.licio.courier;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import java.io.ByteArrayOutputStream;
@@ -107,6 +109,43 @@ public class CourierStreamLinkTest {
         assertTrue("disconnect still announced", rec.disconnected.await(1, TimeUnit.SECONDS));
         assertTrue("connection closed", closed.get());
         assertFalse(outbound.containsKey("ep"));
+    }
+
+    @Test
+    public void aReconnectingEndpointKeepsItsNewerOutboundEntry() throws Exception {
+        // Two links for the SAME endpoint id (a reconnect).  When the OLDER link tears down, its
+        // by-value remove must NOT clobber the newer link's outbound entry — otherwise send()
+        // would route to a dead/absent stream.  (A remove-by-KEY would clobber it.)
+        Map<String, DataOutputStream> outbound = new ConcurrentHashMap<>();
+
+        Recorder recA = new Recorder(1);
+        PipedInputStream inA = new PipedInputStream();
+        PipedOutputStream peerA = new PipedOutputStream(inA);
+        Thread linkA = new Thread(() -> CourierStreamLink.run(
+                inA, new ByteArrayOutputStream(), () -> {}, "ep", outbound, recA, () -> true));
+        linkA.start();
+        assertTrue(recA.connected.await(5, TimeUnit.SECONDS));
+        DataOutputStream streamA = outbound.get("ep");
+
+        Recorder recB = new Recorder(1);
+        PipedInputStream inB = new PipedInputStream();
+        PipedOutputStream peerB = new PipedOutputStream(inB);
+        Thread linkB = new Thread(() -> CourierStreamLink.run(
+                inB, new ByteArrayOutputStream(), () -> {}, "ep", outbound, recB, () -> true));
+        linkB.start();
+        assertTrue(recB.connected.await(5, TimeUnit.SECONDS));
+        DataOutputStream streamB = outbound.get("ep");
+        assertNotSame("the reconnect registered a fresh outbound stream", streamA, streamB);
+
+        // Tear the OLDER link (A) down — its finally must remove only its own stale entry.
+        peerA.close();
+        assertTrue(recA.disconnected.await(5, TimeUnit.SECONDS));
+        assertSame("the reconnected link's outbound entry survived the old link's teardown",
+                streamB, outbound.get("ep"));
+
+        peerB.close();
+        linkA.join(2000);
+        linkB.join(2000);
     }
 
     @Test
