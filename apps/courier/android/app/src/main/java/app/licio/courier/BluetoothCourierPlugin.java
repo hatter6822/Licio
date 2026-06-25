@@ -16,16 +16,19 @@
 package app.licio.courier;
 
 import android.Manifest;
+import android.os.Build;
 import android.util.Base64;
 
 import androidx.annotation.NonNull;
 
 import com.getcapacitor.JSObject;
+import com.getcapacitor.PermissionState;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 
 /**
  * Bluetooth courier bridge.  Permissions: the modern (API 31+) BLUETOOTH_ADVERTISE /
@@ -86,6 +89,10 @@ public class BluetoothCourierPlugin extends Plugin {
 
     @PluginMethod
     public void startAdvertising(PluginCall call) {
+        if (needsBtPermission()) {
+            requestPermissionForAlias("bluetooth", call, "btPermissionCallback");
+            return;
+        }
         if (!radio.isAvailable()) {
             call.reject("bluetooth_unavailable");
             return;
@@ -96,12 +103,38 @@ public class BluetoothCourierPlugin extends Plugin {
 
     @PluginMethod
     public void startDiscovery(PluginCall call) {
+        if (needsBtPermission()) {
+            requestPermissionForAlias("bluetooth", call, "btPermissionCallback");
+            return;
+        }
         if (!radio.isAvailable()) {
             call.reject("bluetooth_unavailable");
             return;
         }
         radio.startDiscovery();
         call.resolve();
+    }
+
+    /** Whether the API-31+ Bluetooth runtime permissions must be REQUESTED before starting.  On
+     *  pre-31 the legacy BLUETOOTH/BLUETOOTH_ADMIN are install-time (auto-granted), so no prompt. */
+    private boolean needsBtPermission() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                && getPermissionState("bluetooth") != PermissionState.GRANTED;
+    }
+
+    /** After the runtime prompt, re-dispatch the original start (now permitted) or reject — so the
+     *  user is asked, instead of the radio failing silently into radio_unavailable. */
+    @PermissionCallback
+    private void btPermissionCallback(PluginCall call) {
+        if (getPermissionState("bluetooth") != PermissionState.GRANTED) {
+            call.reject("bluetooth_permission_denied");
+            return;
+        }
+        if ("startDiscovery".equals(call.getMethodName())) {
+            startDiscovery(call);
+        } else {
+            startAdvertising(call);
+        }
     }
 
     @PluginMethod

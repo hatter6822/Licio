@@ -162,7 +162,27 @@ public class WifiDirectRadio implements CourierRadio {
                         // Connect to the first discovered peer (single-group transport).
                         WifiP2pConfig config = new WifiP2pConfig();
                         config.deviceAddress = peers.getDeviceList().iterator().next().deviceAddress;
-                        manager.connect(channel, config, null);
+                        manager.connect(channel, config, new WifiP2pManager.ActionListener() {
+                            @Override
+                            @SuppressWarnings("MissingPermission")
+                            public void onSuccess() {
+                                // The connect REQUEST was accepted; the group forms asynchronously.
+                                // The CONNECTION_CHANGED broadcast is the primary trigger, but pull
+                                // the connection info now too so an ALREADY-formed group (or a missed
+                                // broadcast) still drives onConnectionInfo → the socket setup.
+                                manager.requestConnectionInfo(
+                                        channel, WifiDirectRadio.this::onConnectionInfo);
+                            }
+
+                            @Override
+                            public void onFailure(int reason) {
+                                // The connect was rejected (peer gone / BUSY / ERROR) — surface it
+                                // instead of swallowing the async failure, so the courier doesn't
+                                // stay "running" with no socket setup and no retry.
+                                events.onStartFailed("connect",
+                                        new IllegalStateException("wifi_p2p_connect_failed_" + reason));
+                            }
+                        });
                     });
                 } else if (WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION.equals(action)) {
                     manager.requestConnectionInfo(channel, WifiDirectRadio.this::onConnectionInfo);

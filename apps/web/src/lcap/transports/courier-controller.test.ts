@@ -149,10 +149,10 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     );
   });
 
-  it('stops launching further channels once a startFailed tears everything down mid-start', async () => {
-    // Two channels.  The FIRST channel's startAdvertising fires a `startFailed` event DURING the
-    // start loop, which stops the controller (running=false).  The loop must then break — the
-    // SECOND channel must NOT be started (else it would advertise with no listeners after teardown).
+  it('isolates a failing channel — one radio refusing does NOT stop the others', async () => {
+    // Two channels.  The FIRST channel's startAdvertising fires a `startFailed` (an async refusal).
+    // With per-channel teardown, ONLY that channel is torn down — the SECOND keeps running, and the
+    // courier is NOT reported unavailable (the working radio + the HTTPS anchor still carry).
     const a = fakePlugin();
     const b = fakePlugin();
     a.plugin.startAdvertising = vi.fn(async () => {
@@ -168,10 +168,39 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
       buildRequest: () => new Uint8Array([1]),
     });
 
-    await controller.start();
-    await vi.waitFor(() => expect(controller.isRunning()).toBe(false));
-    expect(b.calls).not.toContain('advertise');
-    expect(b.calls).not.toContain('discover');
+    const decision = await controller.start();
+    expect(controller.isRunning()).toBe(true); // still running on the working channel
+    expect(controller.activeChannels()).toEqual(['bluetooth']); // only the failing one was dropped
+    expect(b.calls).toContain('advertise');
+    expect(decision.blockedReason).not.toBe('radio_unavailable');
+    expect(a.calls).toContain('stop'); // the failing channel WAS torn down
+  });
+
+  it('reports radio_unavailable only when EVERY channel fails to start', async () => {
+    const a = fakePlugin();
+    const b = fakePlugin();
+    const changes: Array<{ blockedReason?: string }> = [];
+    a.plugin.startAdvertising = vi.fn(async () => {
+      throw new Error('nearby_unavailable');
+    });
+    b.plugin.startAdvertising = vi.fn(async () => {
+      throw new Error('bluetooth_unavailable');
+    });
+    const controller = new CourierController({
+      channels: [
+        { channel: 'nearby', plugin: a.plugin },
+        { channel: 'bluetooth', plugin: b.plugin },
+      ],
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => new Uint8Array([1]),
+      onDecisionChange: (d) => changes.push(d),
+    });
+
+    const decision = await controller.start();
+    expect(decision).toMatchObject({ blockedReason: 'radio_unavailable' });
+    expect(controller.isRunning()).toBe(false);
+    expect(controller.activeChannels()).toEqual([]);
   });
 
   it('starts the radios and drives ONE §16 exchange over a connected endpoint', async () => {

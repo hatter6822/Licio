@@ -15,16 +15,22 @@
 package app.licio.courier;
 
 import android.Manifest;
+import android.os.Build;
 import android.util.Base64;
 
 import androidx.annotation.NonNull;
 
 import com.getcapacitor.JSObject;
+import com.getcapacitor.PermissionState;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Wi-Fi Direct courier bridge.  Permissions: the modern NEARBY_WIFI_DEVICES (API 33+,
@@ -85,6 +91,11 @@ public class WifiDirectCourierPlugin extends Plugin {
 
     @PluginMethod
     public void startAdvertising(PluginCall call) {
+        String[] needed = missingAliases();
+        if (needed.length > 0) {
+            requestPermissionForAliases(needed, call, "permissionCallback");
+            return;
+        }
         if (!radio.isAvailable()) {
             call.reject("wifi_direct_unavailable");
             return;
@@ -95,12 +106,41 @@ public class WifiDirectCourierPlugin extends Plugin {
 
     @PluginMethod
     public void startDiscovery(PluginCall call) {
+        String[] needed = missingAliases();
+        if (needed.length > 0) {
+            requestPermissionForAliases(needed, call, "permissionCallback");
+            return;
+        }
         if (!radio.isAvailable()) {
             call.reject("wifi_direct_unavailable");
             return;
         }
         radio.startDiscovery();
         call.resolve();
+    }
+
+    /** The runtime-permission aliases REQUIRED at this API level that are not yet granted:
+     *  NEARBY_WIFI_DEVICES (API 33+) OR fine location (pre-33, for the P2P scan).  Requested before
+     *  starting so the user is prompted instead of the radio failing silently. */
+    private String[] missingAliases() {
+        String alias = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ? "nearbyWifi" : "location";
+        List<String> missing = new ArrayList<>();
+        if (getPermissionState(alias) != PermissionState.GRANTED) missing.add(alias);
+        return missing.toArray(new String[0]);
+    }
+
+    /** After the runtime prompt, re-dispatch the original start (now permitted) or reject. */
+    @PermissionCallback
+    private void permissionCallback(PluginCall call) {
+        if (missingAliases().length > 0) {
+            call.reject("wifi_direct_permission_denied");
+            return;
+        }
+        if ("startDiscovery".equals(call.getMethodName())) {
+            startDiscovery(call);
+        } else {
+            startAdvertising(call);
+        }
     }
 
     @PluginMethod

@@ -180,9 +180,16 @@ export class CourierController {
   private readonly mediums = new Map<string, NativeChannelMedium>();
   /** `(channel,endpoint)` keys we have already driven an exchange for (one per connection). */
   private readonly exchanged = new Set<string>();
-  private readonly handles: ListenerHandle[] = [];
+  /** Per-channel listener handles, so ONE channel can be torn down without touching the others. */
+  private readonly handlesByChannel = new Map<CourierChannel, ListenerHandle[]>();
+  /** Channels whose radios are currently running — a single radio's failure removes only its own
+   *  channel; the courier is "running" while ANY channel is active, and only blocks when NONE are. */
+  private readonly runningChannels = new Set<CourierChannel>();
   private sharedBytes = 0;
-  private running = false;
+  private started = false;
+  /** True only while {@link start} is still launching radios — an async startFailed during this
+   *  window tears down only its own channel and defers the all-failed verdict to start()'s end. */
+  private launching = false;
   private decision: CourierStartDecision = {
     advertise: false,
     discover: false,
@@ -204,14 +211,15 @@ export class CourierController {
     return this.decision;
   }
 
-  /** Whether the radios are currently running. */
+  /** Whether ANY selected radio is currently running. */
   isRunning(): boolean {
-    return this.running;
+    return this.runningChannels.size > 0;
   }
 
-  /** The channels this controller drives (each its own native radio). */
+  /** The channels whose radios are CURRENTLY running (a failed channel is dropped) — what the UI
+   *  shows as "Running on", in the order they came up. */
   activeChannels(): readonly CourierChannel[] {
-    return this.channels.map((c) => c.channel);
+    return this.channels.map((c) => c.channel).filter((c) => this.runningChannels.has(c));
   }
 
   /**
@@ -221,7 +229,7 @@ export class CourierController {
    * no radios).  Idempotent: a second call while running does nothing.
    */
   async start(): Promise<CourierStartDecision> {
-    if (this.running) return this.decision;
+    if (this.started) return this.decision;
     this.decision = decideCourierStart(
       this.config.controls,
       this.config.mode,
@@ -230,78 +238,96 @@ export class CourierController {
     if (!this.decision.advertise && !this.decision.discover) return this.decision;
     if (this.channels.length === 0) return this.decision; // nothing to drive
 
-    // Register listeners on EVERY channel BEFORE starting any radio so no early event is
-    // missed.  Each listener carries its channel so an event routes to the right medium.
+    this.started = true;
+    // Register listeners on EVERY channel BEFORE starting any radio so no early event is missed.
     for (const { channel, plugin } of this.channels) {
-      await this.addListener(plugin, 'connectionResult', (raw) =>
-        this.onConnectionResult(channel, raw),
-      );
-      await this.addListener(plugin, 'payloadReceived', (raw) =>
-        this.onPayloadReceived(channel, raw),
-      );
-      await this.addListener(plugin, 'disconnected', (raw) => this.onDisconnected(channel, raw));
-      // A radio's start is ASYNC: GMS/Wi-Fi Direct may reject it AFTER startAdvertising/Discovery
-      // resolves (the sync try/catch below can't see that).  Consume the native `startFailed`
-      // event so a late refusal is not believed-running but surfaced as radio_unavailable.
-      await this.addListener(plugin, 'startFailed', (raw) => void this.onStartFailed(channel, raw));
+      await this.registerListeners(channel, plugin);
     }
 
     const radioOptions = {
       ...(this.config.serviceId !== undefined ? { serviceId: this.config.serviceId } : {}),
       ...(this.config.endpointName !== undefined ? { endpointName: this.config.endpointName } : {}),
     };
-    this.running = true;
-    try {
-      for (const { plugin } of this.channels) {
-        // A `startFailed` event can fire DURING these awaits and call stop() (clearing `running`
-        // + tearing down every listener).  If that happened, STOP launching further radios — else
-        // a later plugin would be left advertising/discovering with no listeners after teardown.
-        if (!this.running) break;
+    // Start each channel INDEPENDENTLY: one radio refusing (sync throw OR an async startFailed that
+    // fires during these awaits) tears down ONLY that channel, never the others.
+    this.launching = true;
+    for (const { channel, plugin } of this.channels) {
+      try {
         if (this.decision.advertise) await plugin.startAdvertising(radioOptions);
-        if (!this.running) break;
         if (this.decision.discover) await plugin.startDiscovery(radioOptions);
+        // Only mark active if an async startFailed did NOT already tear this channel down mid-await
+        // (stopChannel deletes its handles), so a dead channel is never counted as running.
+        if (this.handlesByChannel.has(channel)) this.runningChannels.add(channel);
+      } catch (error) {
+        devWarn(`a courier radio '${channel}' refused to start`, error);
+        await this.stopChannel(channel);
       }
-    } catch (error) {
-      // A radio that refuses to start (permission denied / unavailable) is non-fatal — the seam
-      // still has the HTTPS anchor — but `stop()` removed every listener/radio, so we must NOT
-      // return the original allow decision (the UI would falsely show a dead courier as running).
-      // Report a blocked decision instead so `CourierRunner` surfaces the honest typed reason
-      // (and surface the underlying error in dev rather than swallowing it).
-      devWarn('a courier radio refused to start', error);
-      await this.stop();
+    }
+    this.launching = false;
+    // The courier is unavailable only if NO channel could start (the HTTPS anchor still carries).
+    if (this.runningChannels.size === 0) {
+      this.started = false;
       this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
     }
     return this.decision;
   }
 
-  /** Stop every radio, remove every listener, and drop the per-endpoint mediums. */
+  /** Stop EVERY channel's radio, remove its listeners, and drop the per-endpoint mediums. */
   async stop(): Promise<void> {
-    this.running = false;
-    for (const handle of this.handles.splice(0)) {
+    this.started = false;
+    for (const { channel } of this.channels) {
+      await this.stopChannel(channel);
+    }
+    this.mediums.clear();
+    this.exchanged.clear();
+  }
+
+  /** Tear down ONE channel — remove its listeners, stop its plugin, drop its mediums + exchange
+   *  marks, mark it inactive — so a single radio's failure never affects the other channels. */
+  private async stopChannel(channel: CourierChannel): Promise<void> {
+    // Drop the running mark AND the handle list SYNCHRONOUSLY (before any await), so the start
+    // loop's `handlesByChannel.has(channel)` guard reliably observes an in-progress teardown and
+    // never counts a torn-down channel as running.
+    this.runningChannels.delete(channel);
+    const handles = this.handlesByChannel.get(channel) ?? [];
+    this.handlesByChannel.delete(channel);
+    for (const handle of handles) {
       try {
         await handle.remove();
       } catch {
         /* removing a listener must never throw out of teardown */
       }
     }
-    for (const { plugin } of this.channels) {
+    const plugin = this.pluginFor(channel);
+    if (plugin) {
       try {
         await plugin.stop();
       } catch {
         /* stopping a radio that never started is fine */
       }
     }
-    this.mediums.clear();
-    this.exchanged.clear();
+    const prefix = `${channel} `;
+    for (const k of [...this.mediums.keys()]) if (k.startsWith(prefix)) this.mediums.delete(k);
+    for (const k of [...this.exchanged]) if (k.startsWith(prefix)) this.exchanged.delete(k);
   }
 
-  private async addListener(
+  /** Register a channel's four event listeners under its own handle list (so it can be torn down
+   *  independently).  Done BEFORE the radio starts, so no early event is missed. */
+  private async registerListeners(
+    channel: CourierChannel,
     plugin: NearbyCourierPlugin,
-    event: string,
-    listener: (raw: unknown) => void,
   ): Promise<void> {
-    const handle = await plugin.addListener(event, listener);
-    this.handles.push(handle);
+    const handles: ListenerHandle[] = [];
+    const add = async (event: string, listener: (raw: unknown) => void): Promise<void> => {
+      handles.push(await plugin.addListener(event, listener));
+    };
+    await add('connectionResult', (raw) => this.onConnectionResult(channel, raw));
+    await add('payloadReceived', (raw) => this.onPayloadReceived(channel, raw));
+    await add('disconnected', (raw) => this.onDisconnected(channel, raw));
+    // A radio's start is ASYNC: GMS/Wi-Fi Direct may reject it AFTER start* resolves — consume the
+    // native startFailed so a late refusal tears down THIS channel (not believed-running).
+    await add('startFailed', (raw) => void this.onStartFailed(channel, raw));
+    this.handlesByChannel.set(channel, handles);
   }
 
   /** A `connectionResult`: when an endpoint first connects, drive ONE exchange over it. */
@@ -338,19 +364,19 @@ export class CourierController {
   }
 
   /** A radio reported an ASYNC start failure (e.g. GMS refused advertising after the start Task
-   *  resolved).  Surface it in dev, then stop + mark the courier unavailable so the polled
-   *  decision the UI reads no longer shows a dead radio as running (mirrors the sync start catch). */
+   *  resolved).  Tear down ONLY that channel — a different working radio keeps the courier running —
+   *  and report radio_unavailable to the UI only when the LAST working channel is gone. */
   private async onStartFailed(channel: CourierChannel, raw: unknown): Promise<void> {
     devWarn(`courier radio '${channel}' reported a start failure`, raw);
-    if (!this.running) return;
-    // Set the blocked decision BEFORE tearing down: stop() flips isRunning() synchronously, so a
-    // reader observing the stop must already see the honest radio_unavailable reason, not the
-    // stale allow decision.
-    this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
-    await this.stop();
-    // Notify the caller (the UI) of the async decision change — its start() already resolved, so
-    // a private mutation alone would leave it showing a dead courier as running.
-    this.config.onDecisionChange?.(this.decision);
+    if (!this.handlesByChannel.has(channel)) return; // already torn down
+    await this.stopChannel(channel);
+    // Defer the all-failed verdict while start() is still launching (its end-of-loop check owns it);
+    // once running, only the LAST channel going down makes the courier unavailable.
+    if (!this.launching && this.started && this.runningChannels.size === 0) {
+      this.started = false;
+      this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
+      this.config.onDecisionChange?.(this.decision);
+    }
   }
 
   private key(channel: CourierChannel, endpointId: string): string {

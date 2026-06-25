@@ -14,16 +14,22 @@
 package app.licio.courier;
 
 import android.Manifest;
+import android.os.Build;
 import android.util.Base64;
 
 import androidx.annotation.NonNull;
 
 import com.getcapacitor.JSObject;
+import com.getcapacitor.PermissionState;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * The Nearby Connections bridge.  Permissions per API level: the API 31+ Bluetooth runtime
@@ -89,6 +95,11 @@ public class NearbyCourierPlugin extends Plugin {
 
     @PluginMethod
     public void startAdvertising(PluginCall call) {
+        String[] needed = missingAliases();
+        if (needed.length > 0) {
+            requestPermissionForAliases(needed, call, "permissionCallback");
+            return;
+        }
         radio.applyConfig(call.getString("serviceId"), call.getString("endpointName"));
         radio.startAdvertising();
         call.resolve();
@@ -96,9 +107,43 @@ public class NearbyCourierPlugin extends Plugin {
 
     @PluginMethod
     public void startDiscovery(PluginCall call) {
+        String[] needed = missingAliases();
+        if (needed.length > 0) {
+            requestPermissionForAliases(needed, call, "permissionCallback");
+            return;
+        }
         radio.applyConfig(call.getString("serviceId"), call.getString("endpointName"));
         radio.startDiscovery();
         call.resolve();
+    }
+
+    /** The runtime-permission aliases REQUIRED at this API level that are not yet granted: BLUETOOTH
+     *  (API 31+ for the Nearby BLE leg), and NEARBY_WIFI_DEVICES (API 33+) OR fine location (pre-33,
+     *  for the scan).  Requesting them before starting prompts the user instead of failing silently. */
+    private String[] missingAliases() {
+        List<String> required = new ArrayList<>();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) required.add("bluetooth");
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) required.add("nearbyWifi");
+        else required.add("location");
+        List<String> missing = new ArrayList<>();
+        for (String alias : required) {
+            if (getPermissionState(alias) != PermissionState.GRANTED) missing.add(alias);
+        }
+        return missing.toArray(new String[0]);
+    }
+
+    /** After the runtime prompt, re-dispatch the original start (now permitted) or reject. */
+    @PermissionCallback
+    private void permissionCallback(PluginCall call) {
+        if (missingAliases().length > 0) {
+            call.reject("nearby_permission_denied");
+            return;
+        }
+        if ("startDiscovery".equals(call.getMethodName())) {
+            startDiscovery(call);
+        } else {
+            startAdvertising(call);
+        }
     }
 
     @PluginMethod
