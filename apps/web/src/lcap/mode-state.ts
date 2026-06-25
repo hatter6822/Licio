@@ -37,9 +37,24 @@ export function getOperationalMode(): OperationalMode {
   return loadPersisted(PERSIST)?.mode ?? 'standard';
 }
 
-/** Persist the current operational mode (the write seam the future §33 selector calls). */
+/** Listeners notified synchronously whenever the operational mode changes (e.g. the courier
+ *  runtime stops live radios when the user switches into Stealth/Emergency). */
+const modeListeners = new Set<(mode: OperationalMode) => void>();
+
+/** Subscribe to operational-mode changes; returns an unsubscribe.  Lets a live §33 consumer
+ *  (e.g. a running courier) react to a mode switch instead of reading the mode only at start. */
+export function subscribeOperationalMode(listener: (mode: OperationalMode) => void): () => void {
+  modeListeners.add(listener);
+  return () => {
+    modeListeners.delete(listener);
+  };
+}
+
+/** Persist the current operational mode (the write seam the §33 selector calls) and notify
+ *  subscribers so a running consumer can reconcile immediately. */
 export function setOperationalMode(mode: OperationalMode): void {
   savePersisted(PERSIST, { mode });
+  for (const listener of modeListeners) listener(mode);
 }
 
 /**

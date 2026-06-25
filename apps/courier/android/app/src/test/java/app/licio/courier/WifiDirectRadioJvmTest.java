@@ -77,6 +77,7 @@ public class WifiDirectRadioJvmTest {
             public void onDisconnected(String endpointId) {}
         });
 
+        radio.startDiscovery(); // onConnectionInfo only fires while the radio is running
         WifiP2pInfo info = new WifiP2pInfo();
         info.groupFormed = true;
         info.isGroupOwner = false; // the CLIENT dials the owner — an observable single dial
@@ -107,6 +108,7 @@ public class WifiDirectRadioJvmTest {
             @Override
             public void onDisconnected(String endpointId) {}
         });
+        radio.startDiscovery(); // onConnectionInfo only fires while the radio is running
         WifiP2pInfo info = new WifiP2pInfo();
         info.groupFormed = true;
         info.isGroupOwner = false;
@@ -204,6 +206,7 @@ public class WifiDirectRadioJvmTest {
                 if ("server_bind".equals(operation)) bindFailures.incrementAndGet();
             }
         });
+        radio.startDiscovery(); // onConnectionInfo only fires while the radio is running
         WifiP2pInfo owner = new WifiP2pInfo();
         owner.groupFormed = true;
         owner.isGroupOwner = true; // this device is the group owner → it binds the server socket
@@ -218,6 +221,36 @@ public class WifiDirectRadioJvmTest {
             radio.stop();
             occupy.close();
         }
+    }
+
+    @Test
+    public void connectionInfoDeliveredAfterStopDoesNotDial() throws Exception {
+        // A queued requestConnectionInfo callback delivered after stop() must NOT claim the group or
+        // start any socket setup — running is false, so onConnectionInfo returns early (no dial,
+        // no peer-visible link, and no stale groupActive claim blocking the next start).
+        AtomicInteger results = new AtomicInteger();
+        WifiDirectRadio radio = new WifiDirectRadio(ctx(), new CourierRadio.Events() {
+            @Override
+            public void onConnectionResult(String endpointId, boolean connected) {
+                results.incrementAndGet();
+            }
+
+            @Override
+            public void onPayload(String endpointId, byte[] bytes) {}
+
+            @Override
+            public void onDisconnected(String endpointId) {}
+        });
+        radio.startDiscovery(); // running = true
+        radio.stop();           // running = false
+
+        WifiP2pInfo info = new WifiP2pInfo();
+        info.groupFormed = true;
+        info.isGroupOwner = false; // would otherwise dial the owner
+        info.groupOwnerAddress = InetAddress.getByName("127.0.0.1");
+        radio.onConnectionInfo(info); // a late callback after stop — must be ignored
+        Thread.sleep(300);            // give a (wrongly) issued dial time to fail, were the guard gone
+        assertEquals("no dial after stop", 0, results.get());
     }
 
     private static void waitForCount(AtomicInteger counter, int target) throws InterruptedException {

@@ -381,6 +381,18 @@ public class BluetoothCourierRadio implements CourierRadio {
             try {
                 while (running.get()) {
                     BluetoothSocket socket = server.accept();
+                    if (!running.get()) {
+                        // stop() raced this accept() — close the just-accepted socket instead of
+                        // handing it to the stream link (CourierStreamLink.run emits
+                        // connectionResult(true) BEFORE its alive predicate is checked, so a stopped
+                        // courier would otherwise briefly announce a peer-visible link).
+                        try {
+                            socket.close();
+                        } catch (IOException ignored) {
+                            // already closed
+                        }
+                        break;
+                    }
                     handleSocket(socket);
                 }
             } catch (IOException ignored) {
@@ -631,6 +643,14 @@ public class BluetoothCourierRadio implements CourierRadio {
         public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
             String endpointId = gatt.getDevice().getAddress();
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                if (!running.get()) {
+                    // stopBle() ran while this connectGatt was pending — a late STATE_CONNECTED must
+                    // NOT promote the (already-closed) GATT into bleClients / start discovery / emit a
+                    // connection for a stopped radio.  Close it and drop it.
+                    blePendingClients.remove(endpointId);
+                    gatt.close();
+                    return;
+                }
                 blePendingClients.remove(endpointId); // promoted from dialing to connected
                 bleClients.put(endpointId, gatt);
                 assemblers.put(endpointId, new CourierFraming.FrameAssembler());

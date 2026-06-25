@@ -21,8 +21,9 @@
 //      `offlineExchange` — PUBLIC-ONLY carriage (the courier seam refuses non-public
 //      packs structurally), the always-correct HTTPS anchor appended LAST so correctness
 //      never depends on the courier;
-//   4. routes each `payloadReceived` event to the right per-(channel,endpoint) medium
-//      (`acceptNativeEvent`, fail-closed on a malformed native event);
+//   4. CLASSIFIES each `payloadReceived` event (a peer's exchange REQUEST vs. our RESPONSE) and
+//      routes it: a response feeds the requester's medium inbox; a request goes to the responder
+//      seam (or is dropped) so it is NEVER mistaken for our response — fail-closed on malformed;
 //   5. enforces the §22.5 who-can-exchange + storage-budget controls per connection;
 //   6. stops cleanly (removes every listener, stops every radio, drops the mediums).
 //
@@ -33,7 +34,12 @@
 // imports `@licio/lcap` types/values only (NEVER `@licio/lcap-p2p`), so it stays off the
 // code-split P2P chunk (`check:lcap-p2p-split`).
 
-import type { LcapTransport } from '@licio/lcap';
+import {
+  decodeWithSchema,
+  exchangeRequestV2Schema,
+  exchangeResponseV2Schema,
+  type LcapTransport,
+} from '@licio/lcap';
 import { devWarn } from '../../lib/dev-log.js';
 import type { CourierMedium } from './courier.js';
 import { CourierTransport } from './courier.js';
@@ -87,6 +93,30 @@ function withLegTimeout(inner: LcapTransport, ms: number): LcapTransport {
     receive: (signal) => race(inner.receive(signal)),
     close: () => inner.close(),
   };
+}
+
+/**
+ * Classify an inbound courier message: the peer's exchange REQUEST (it is asking US), our
+ * exchange RESPONSE (the answer to our request), or unknown.  The strict §16 schemas are
+ * MUTUALLY EXCLUSIVE (a request has `interests` and no `status`; a response the reverse), so a
+ * peer's request can never be mistaken for our response — which is exactly the bug this guards:
+ * with two couriers both sending requests, the first inbound bytes must NOT be reported as a
+ * successful exchange.
+ */
+function classifyExchangeMessage(bytes: Uint8Array): 'request' | 'response' | 'unknown' {
+  try {
+    decodeWithSchema(exchangeResponseV2Schema, bytes);
+    return 'response';
+  } catch {
+    /* not a response — try a request */
+  }
+  try {
+    decodeWithSchema(exchangeRequestV2Schema, bytes);
+    return 'request';
+  } catch {
+    /* not a request either */
+  }
+  return 'unknown';
 }
 
 /** A Capacitor listener handle (returned by `addListener`). */
@@ -153,6 +183,17 @@ export interface CourierControllerConfig {
   readonly power?: CourierPowerState;
   /** Build the §16 exchange request for a connected peer. */
   readonly buildRequest: CourierRequestBuilder;
+  /**
+   * Optional RESPONDER: build a §16 exchange RESPONSE for a peer's inbound exchange REQUEST
+   * (the app serves the peer's wants from local content).  Without it the courier is
+   * request-only — a peer's request is dropped (never mistaken for our own response, so the UI
+   * never reports a bogus "exchange"), and content moves only when the peer answers OUR request.
+   * Wiring a content-serving responder is the tracked WS-R.15.6 follow-up.
+   */
+  readonly buildResponse?: (
+    request: Uint8Array,
+    endpointId: string,
+  ) => Promise<Uint8Array | null> | Uint8Array | null;
   /** HTTPS anchor config (exchange URL + injectable fetch) for the fallback leg. */
   readonly httpsConfig?: HttpsTransportConfig;
   /** Notified after each per-endpoint exchange outcome (observability / UI). */
@@ -189,6 +230,9 @@ export class CourierController {
    *  (the who-can-exchange + storage-budget gates read this at exchange time, and
    *  {@link applyControls} re-evaluates the radios), not only at the next Start. */
   private controls: CourierRadioControls;
+  /** The LIVE §33 operational mode — mutable so switching INTO Stealth/Emergency on a running
+   *  courier stops the radios immediately (the mode is otherwise captured at construction). */
+  private mode: CourierMode;
   private sharedBytes = 0;
   private started = false;
   /** True only while a launch (start OR a live restart) is still bringing radios up — an async
@@ -207,6 +251,7 @@ export class CourierController {
 
   constructor(private readonly config: CourierControllerConfig) {
     this.controls = config.controls;
+    this.mode = config.mode;
     if (config.channels && config.channels.length > 0) {
       this.channels = config.channels;
     } else if (config.plugin) {
@@ -240,7 +285,7 @@ export class CourierController {
    */
   async start(): Promise<CourierStartDecision> {
     if (this.started) return this.decision;
-    this.decision = decideCourierStart(this.controls, this.config.mode, this.config.power ?? {});
+    this.decision = decideCourierStart(this.controls, this.mode, this.config.power ?? {});
     if (!this.decision.advertise && !this.decision.discover) return this.decision;
     if (this.channels.length === 0) return this.decision; // nothing to drive
 
@@ -329,16 +374,23 @@ export class CourierController {
    * Re-enabling a channel takes effect on the next Start (a deselected radio's plugin is not
    * retained) — only RESTRICTIONS are enforced live, never loosened silently.
    */
-  async applyControls(next: CourierRadioControls, power?: CourierPowerState): Promise<void> {
+  async applyControls(
+    next: CourierRadioControls,
+    opts: { power?: CourierPowerState; mode?: CourierMode } = {},
+  ): Promise<void> {
     this.controls = next;
+    if (opts.mode !== undefined) this.mode = opts.mode; // a mode switch must reconcile too (§33.5)
     if (!this.started) return; // not running — start() will read the latest controls
     if (this.launching) {
       // A start/restart is mid-flight (a native start or permission prompt is pending); remember
       // this change and apply it once the radios settle, so the restriction is not lost.
-      this.pendingControls = { controls: next, ...(power !== undefined ? { power } : {}) };
+      this.pendingControls = {
+        controls: next,
+        ...(opts.power !== undefined ? { power: opts.power } : {}),
+      };
       return;
     }
-    await this.reconcileRadios(next, power);
+    await this.reconcileRadios(next, opts.power);
   }
 
   /** Re-evaluate the radios for a control change on a RUNNING courier — using a FRESH `power`
@@ -348,7 +400,7 @@ export class CourierController {
     power: CourierPowerState | undefined,
   ): Promise<void> {
     if (!this.started) return;
-    const decision = decideCourierStart(next, this.config.mode, power ?? this.config.power ?? {});
+    const decision = decideCourierStart(next, this.mode, power ?? this.config.power ?? {});
     if (!decision.advertise && !decision.discover) {
       // The new controls/mode/power turn the courier off entirely — stop every radio now.
       await this.stop();
@@ -408,7 +460,7 @@ export class CourierController {
         /* stopping a radio that never started is fine */
       }
     }
-    const prefix = `${channel} `;
+    const prefix = this.channelKeyPrefix(channel);
     for (const k of [...this.mediums.keys()]) if (k.startsWith(prefix)) this.mediums.delete(k);
     for (const k of [...this.exchanged]) if (k.startsWith(prefix)) this.exchanged.delete(k);
   }
@@ -442,7 +494,10 @@ export class CourierController {
     void this.driveExchange(channel, event.endpointId);
   }
 
-  /** A `payloadReceived`: route it to the right per-(channel,endpoint) medium (fail-closed). */
+  /** A `payloadReceived`: CLASSIFY the inbound message and route it (fail-closed).  A peer's
+   *  exchange REQUEST goes to the responder (or is dropped) — it is NEVER delivered to our inbox,
+   *  so it can't be mistaken for our exchange response; only a valid RESPONSE feeds the inbox the
+   *  requester's `CourierTransport.receive()` reads. */
   private onPayloadReceived(channel: CourierChannel, raw: unknown): void {
     const parsed = nativePayloadEventSchema.safeParse(raw);
     if (!parsed.success) return; // malformed — drop, never decode
@@ -452,7 +507,43 @@ export class CourierController {
     const plugin = this.pluginFor(channel);
     if (!plugin) return;
     const medium = this.mediumFor(channel, plugin, event.endpointId);
-    medium.acceptNativeEvent(event);
+    const bytes = medium.nativeEventToBytes(event);
+    if (!bytes) return; // malformed base64 / wrong endpoint
+    switch (classifyExchangeMessage(bytes)) {
+      case 'response':
+        // The answer to OUR request — feed the requester's receive().
+        medium.deliverInbound(bytes);
+        return;
+      case 'request':
+        // The PEER is asking US.  Respond if a responder is configured; otherwise drop it (do NOT
+        // inbox it — that is the bug this fixes: a request must never be reported as our response).
+        void this.respondToRequest(channel, event.endpointId, bytes, medium);
+        return;
+      default:
+        // Unparseable as either — drop (no transport trust; fail-closed).
+        return;
+    }
+  }
+
+  /** Serve a peer's inbound exchange REQUEST: build a §16 response (when a responder is
+   *  configured) and ferry it back over the medium.  A no-op when no responder is wired. */
+  private async respondToRequest(
+    channel: CourierChannel,
+    endpointId: string,
+    request: Uint8Array,
+    medium: NativeChannelMedium,
+  ): Promise<void> {
+    if (!this.config.buildResponse) return; // request-only courier — drop the peer's request
+    if (!mayExchangeWithEndpoint(this.controls, endpointId)) return; // the same who-can-exchange gate
+    try {
+      const response = await this.config.buildResponse(request, endpointId);
+      if (!response) return;
+      if (!withinStorageBudget(this.controls, this.sharedBytes, response.byteLength)) return;
+      medium.enqueueOutbound(response);
+      this.sharedBytes += response.byteLength; // count the bytes we ferried back
+    } catch (error) {
+      devWarn(`failed to build a courier response for '${channel}'`, error);
+    }
   }
 
   /** A `disconnected`: drop the endpoint's medium so a later reconnect starts fresh. */
@@ -482,7 +573,14 @@ export class CourierController {
   }
 
   private key(channel: CourierChannel, endpointId: string): string {
-    return `${channel} ${endpointId}`;
+    return `${channel}\0${endpointId}`;
+  }
+
+  /** The `channel\0` key PREFIX — the SAME delimiter `key()` uses, so a channel teardown matches
+   *  its own mediums/exchanged marks.  (A space prefix never matched the NUL-delimited keys, so a
+   *  reconnecting endpoint after a restart/deselect stayed in `exchanged` and was skipped.) */
+  private channelKeyPrefix(channel: CourierChannel): string {
+    return `${channel}\0`;
   }
 
   private pluginFor(channel: CourierChannel): NearbyCourierPlugin | undefined {

@@ -222,11 +222,18 @@ public class WifiDirectRadio implements CourierRadio {
      *  this thin role decision + the bind/accept/connect socket setup are exercised on real radios
      *  (a unit test would have to bind the fixed `DATA_PORT`, which the no-fixed-port policy avoids). */
     void onConnectionInfo(WifiP2pInfo info) {
+        // A queued requestConnectionInfo callback delivered AFTER stop() must not claim groupActive
+        // or start any socket setup — stop() already cleared the claims, and a late claim here would
+        // block the next start until Android reports the group dissolved.
+        if (!running.get()) return;
         if (info == null || !info.groupFormed) {
-            // The group dissolved — allow the NEXT formation to set up its sockets again, and the
-            // next PEERS_CHANGED to issue a fresh connect.
-            groupActive.set(false);
-            connectPending.set(false);
+            // Release the per-group claim, AND clear the connect claim ONLY if a group had actually
+            // formed (this is a dissolve).  An EARLY post-connect snapshot (groupFormed not yet true,
+            // never been active — common WHILE formation is still in progress) must KEEP
+            // connectPending, or a PEERS_CHANGED refresh would issue a duplicate connect (BUSY →
+            // startFailed) that tears down the forming courier.
+            boolean wasActive = groupActive.getAndSet(false);
+            if (wasActive) connectPending.set(false);
             return;
         }
         // Android may deliver CONNECTION_CHANGED more than once for the SAME formed group; claim the
@@ -275,6 +282,13 @@ public class WifiDirectRadio implements CourierRadio {
             try {
                 while (running.get()) {
                     Socket socket = server.accept();
+                    if (!running.get()) {
+                        // stop() raced this accept() — close the just-accepted socket instead of
+                        // handing it to the stream link (which would announce a peer-visible link
+                        // after the courier was stopped).
+                        socket.close();
+                        break;
+                    }
                     handleSocket(socket, socket.getInetAddress().getHostAddress());
                 }
             } catch (IOException ignored) {

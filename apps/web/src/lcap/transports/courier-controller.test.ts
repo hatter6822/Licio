@@ -7,11 +7,52 @@
 // gate WHETHER the radios run, the who-can-exchange + storage-budget controls gate WHICH
 // exchanges are driven, and a malformed native event is dropped fail-closed.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type CourierChannelPlugin, CourierController } from './courier-controller.js';
 import type { CourierRadioControls } from './courier-native.js';
 
 const ON: CourierRadioControls = { advertisingEnabled: true, discoveryEnabled: true };
+
+// Real §16 exchange messages (built once via the lcap codec), so the fake peer answers with a
+// VALID exchange RESPONSE (not an echo of the request) — the controller now classifies inbound
+// messages and only a real response counts as a courier exchange.
+let REQUEST_BYTES: Uint8Array;
+let RESPONSE_BYTES: Uint8Array;
+let RESPONSE_B64: string;
+let REQUEST_B64: string;
+
+function toB64(bytes: Uint8Array): string {
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
+}
+
+beforeAll(async () => {
+  const lcap = await import('@licio/lcap');
+  const sessionNonce = new Uint8Array(16);
+  const pulse = lcap.buildPulse({
+    nodeId: 'lcap-courier',
+    sessionNonce,
+    transportProfile: 'courier',
+    privacyMode: 'public',
+    budgets: { ...lcap.DEFAULT_BUDGET, minimal_mode: true },
+    supportedSuites: ['ES256'],
+    supportedCompression: ['none', 'gzip', 'deflate'],
+    supportedPackVersions: [2],
+    checkpointFrontier: [],
+    revocationFrontier: [{ scope: 'global', revocation_epoch: 0 }],
+  });
+  REQUEST_BYTES = lcap.encodeWithSchema(
+    lcap.exchangeRequestV2Schema,
+    lcap.buildExchangeRequest({ pulse, interests: [] }),
+  );
+  RESPONSE_BYTES = lcap.encodeWithSchema(
+    lcap.exchangeResponseV2Schema,
+    lcap.buildExchangeResponse({ pulse, status: 'ok' }),
+  );
+  RESPONSE_B64 = toB64(RESPONSE_BYTES);
+  REQUEST_B64 = toB64(REQUEST_BYTES);
+});
 
 interface FakeListener {
   event: string;
@@ -19,9 +60,9 @@ interface FakeListener {
 }
 
 /**
- * A fake native plugin that records radio calls and LOOPS a sent payload straight back as
- * an inbound `payloadReceived` (a same-process echo), so the courier `receive` resolves and
- * the exchange completes over the medium.
+ * A fake native plugin that records radio calls and, on send, answers with a VALID §16 exchange
+ * RESPONSE as an inbound `payloadReceived` (a loopback peer), so the courier `receive` resolves
+ * with a real response and the exchange completes over the medium.
  */
 function fakePlugin() {
   const listeners: FakeListener[] = [];
@@ -42,8 +83,9 @@ function fakePlugin() {
     }),
     send: vi.fn(async (o: { endpointId: string; message: string }) => {
       sent.push(o);
-      // Echo the bytes back as an inbound payload for this endpoint (loopback peer).
-      emit('payloadReceived', { endpointId: o.endpointId, message: o.message });
+      // Answer with a real §16 RESPONSE (not an echo of the request — that would now be classified
+      // as a peer request and dropped), so the requester's receive() resolves successfully.
+      emit('payloadReceived', { endpointId: o.endpointId, message: RESPONSE_B64 });
     }),
     addListener: (event: string, fn: (raw: unknown) => void) => {
       const handle = { remove: vi.fn() };
@@ -336,7 +378,10 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     await controller.start();
     expect(controller.isRunning()).toBe(true);
 
-    await controller.applyControls({ ...ON, batteryFloor: 0.5 }, { level: 0.2, charging: false });
+    await controller.applyControls(
+      { ...ON, batteryFloor: 0.5 },
+      { power: { level: 0.2, charging: false } },
+    );
     expect(controller.isRunning()).toBe(false);
     expect(f.plugin.stop).toHaveBeenCalled();
     expect(changes.some((d) => d.blockedReason === 'below_battery_floor')).toBe(true);
@@ -374,6 +419,106 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     expect(controller.isRunning()).toBe(false);
     expect(f.plugin.stop).toHaveBeenCalled();
     expect(changes.some((d) => d.blockedReason === 'disabled')).toBe(true);
+  });
+
+  it('switching into a forced-off mode stops a RUNNING courier immediately (§33.5)', async () => {
+    const f = fakePlugin();
+    const changes: Array<{ blockedReason?: string }> = [];
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => REQUEST_BYTES,
+      onDecisionChange: (d) => changes.push(d),
+    });
+    await controller.start();
+    expect(controller.isRunning()).toBe(true);
+
+    // The user switches into Stealth on the running courier — the mode must be enforced NOW.
+    await controller.applyControls(ON, { mode: 'stealth' });
+    expect(controller.isRunning()).toBe(false);
+    expect(f.plugin.stop).toHaveBeenCalled();
+    expect(changes.some((d) => d.blockedReason === 'forced_off_in_mode')).toBe(true);
+  });
+
+  it('does NOT report a courier exchange when it only received the PEER’S request', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fakePlugin();
+      // The "peer" answers our request with its OWN exchange REQUEST (the two-courier case) — which
+      // must NOT be mistaken for our response and reported as a successful courier exchange.
+      f.plugin.send = vi.fn(async (o: { endpointId: string; message: string }) => {
+        f.sent.push(o);
+        f.emit('payloadReceived', { endpointId: o.endpointId, message: REQUEST_B64 });
+      });
+      const outcomes: Array<{ carriedBy: string | null; skippedReason: string }> = [];
+      const controller = new CourierController({
+        plugin: f.plugin,
+        controls: ON,
+        mode: 'courier',
+        buildRequest: () => REQUEST_BYTES,
+        httpsConfig: { fetchFn: REJECTING_FETCH },
+        onOutcome: (o) => outcomes.push({ carriedBy: o.carriedBy, skippedReason: o.skippedReason }),
+      });
+      await controller.start();
+      f.emit('connectionResult', { endpointId: 'ep-1', connected: true });
+      // The peer's request is dropped (not inboxed), so the courier leg times out and falls through
+      // to the anchor (which also fails here) — an HONEST exchange_failed, never a false 'courier'.
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(outcomes).toHaveLength(1);
+      expect(outcomes[0]?.carriedBy).toBe(null);
+      expect(outcomes[0]?.skippedReason).toBe('exchange_failed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('answers a peer’s inbound exchange REQUEST via the responder seam', async () => {
+    const f = fakePlugin();
+    const requestsServed: number[] = [];
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => REQUEST_BYTES,
+      // The responder serves the peer's request with a real §16 response.
+      buildResponse: (request) => {
+        requestsServed.push(request.byteLength);
+        return RESPONSE_BYTES;
+      },
+    });
+    await controller.start();
+    // The peer sends US a request (no connectionResult → our own driveExchange is not involved).
+    f.emit('payloadReceived', { endpointId: 'ep-1', message: REQUEST_B64 });
+    await vi.waitFor(() => expect(f.sent).toHaveLength(1));
+    expect(requestsServed).toEqual([REQUEST_BYTES.byteLength]); // buildResponse saw the request
+    // The response was ferried back to the peer (base64 of our response bytes).
+    expect(f.sent[0]?.endpointId).toBe('ep-1');
+    expect(f.sent[0]?.message).toBe(toB64(RESPONSE_BYTES));
+  });
+
+  it('clears per-channel exchanged marks on teardown so a reconnect re-exchanges (key delimiter)', async () => {
+    // A direction toggle restarts the radio (stopChannel → relaunch), which must CLEAR the
+    // channel's `exchanged` marks using the SAME `channel\0` delimiter `key()` uses — else a stale
+    // mark (a space prefix never matched) would skip a reconnecting endpoint forever.
+    const f = fakePlugin();
+    const outcomes: string[] = [];
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => REQUEST_BYTES,
+      httpsConfig: { fetchFn: REJECTING_FETCH },
+      onOutcome: (o) => outcomes.push(o.endpointId),
+    });
+    await controller.start();
+    f.emit('connectionResult', { endpointId: 'ep-1', connected: true });
+    await vi.waitFor(() => expect(outcomes).toHaveLength(1));
+
+    await controller.applyControls({ advertisingEnabled: true, discoveryEnabled: false });
+    f.emit('connectionResult', { endpointId: 'ep-1', connected: true });
+    await vi.waitFor(() => expect(outcomes).toHaveLength(2)); // hangs if the stale mark were kept
+    expect(outcomes).toEqual(['ep-1', 'ep-1']);
   });
 
   it('charges bytes already ferried even when the exchange yields nothing (no budget bypass)', async () => {

@@ -25,7 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
-import { getOperationalMode } from '../../../lcap/mode-state.js';
+import { getOperationalMode, subscribeOperationalMode } from '../../../lcap/mode-state.js';
 import type { OperationalMode } from '../../../lcap/operational-modes.js';
 import {
   COURIER_CHANNEL_INFO,
@@ -89,9 +89,15 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
   const [activity, setActivity] = useState<readonly ActivityEntry[]>([]);
   const controllerRef = useRef<CourierController | null>(null);
   const activitySeq = useRef(0);
-  // The §33 operational mode (read non-reactively, like the other §33 consumers).
-  const mode = getOperationalMode();
+  // The §33 operational mode — REACTIVE here (unlike the non-reactive sync consumers): switching
+  // into Stealth/Emergency must stop a running courier immediately, so we subscribe (below) and
+  // re-render on a change.
+  const [mode, setRunnerMode] = useState<OperationalMode>(() => getOperationalMode());
   const forcedOff = isForcedOff(mode);
+
+  // Keep `mode` in sync with the persisted §33 mode (the OperationalModeSelector writes it); a
+  // change re-renders + re-runs the live-reconcile effect below.
+  useEffect(() => subscribeOperationalMode(setRunnerMode), []);
 
   // Native radios resolve only inside the installed courier shell (the injected Capacitor
   // bridge); a normal browser has none, so the runtime control is honestly disabled.
@@ -114,10 +120,10 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
     }
   }, [acknowledged]);
 
-  // Apply a live control change to a RUNNING controller, so a privacy restriction (radios off, a
-  // deselected channel, or peers→none) takes effect IMMEDIATELY instead of only at the next
-  // Stop/Start — the controls captured at construction would otherwise keep the radios + exchange
-  // policy active until the user stopped or left the page.
+  // Apply a live control OR mode change to a RUNNING controller, so a privacy restriction (radios
+  // off, a deselected channel, peers→none, or switching into Stealth/Emergency) takes effect
+  // IMMEDIATELY instead of only at the next Stop/Start — the controls + mode captured at
+  // construction would otherwise keep the radios + exchange policy active until Stop.
   useEffect(() => {
     const controller = controllerRef.current;
     if (!controller) return;
@@ -128,14 +134,14 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
       // initial bundle.
       const { readCourierPower } = await import('../../../lcap/transports/courier-controller.js');
       const power = await readCourierPower();
-      await controller.applyControls(controls, power);
+      await controller.applyControls(controls, { power, mode: mode as CourierMode });
       // If applyControls stopped the courier, onDecisionChange already nulled the ref + set the
       // blocked phase; otherwise reflect any live direction/channel change in the running list.
       if (controllerRef.current === controller && controller.isRunning()) {
         setPhase({ kind: 'running', channels: controller.activeChannels() });
       }
     })();
-  }, [controls]);
+  }, [controls, mode]);
 
   const onControlsChange = useCallback((next: CourierRadioControls) => {
     setControls(next);

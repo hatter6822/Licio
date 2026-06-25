@@ -143,6 +143,9 @@ public class BluetoothCourierRadioTest {
      *  shadow refuses local notification + auto-fires onServicesDiscovered during the connection
      *  state change, so allow the characteristic BEFORE connecting (real Android returns true). */
     private static BluetoothGatt connectBleClient(BluetoothCourierRadio radio) {
+        // A client GATT callback only fires after startDiscovery() initiated the dial — set running
+        // so the (post-stop) STATE_CONNECTED guard does not drop this LIVE connection.
+        radio.startDiscovery();
         BluetoothGatt gatt = peerDevice().connectGatt(
                 ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
         BluetoothGattService courierService = BluetoothCourierRadio.buildCourierGattService();
@@ -161,6 +164,7 @@ public class BluetoothCourierRadioTest {
         // notify back — duplex is impossible — so it is a FAILED peer, not a write-only link.
         Recorder rec = new Recorder();
         BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        radio.startDiscovery(); // a LIVE client dial — running so the STATE_CONNECTED guard passes
         BluetoothGatt gatt = peerDevice().connectGatt(
                 ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
         BluetoothGattService noCcc = new BluetoothGattService(
@@ -176,6 +180,24 @@ public class BluetoothCourierRadioTest {
         assertEquals("a peripheral with no CCC is a failed peer", Boolean.FALSE, rec.connectedFlag);
         assertTrue("and is torn down so the dedup can re-dial it", shadowOf(gatt).isClosed());
         radio.stop();
+    }
+
+    @Test
+    public void aLateBleClientConnectAfterStopIsClosedAndIgnored() {
+        // If stopBle() runs while a BLE connectGatt is still pending, a late STATE_CONNECTED must
+        // NOT promote the (now-closed) GATT into bleClients / start discovery / announce a
+        // connection for a STOPPED radio — it is closed and dropped instead.
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        radio.startDiscovery(); // running = true
+        BluetoothGatt gatt = peerDevice().connectGatt(
+                ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
+        radio.stop(); // running = false; stopBle clears the maps
+
+        radio.gattClientCallback.onConnectionStateChange(
+                gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
+        assertTrue("the late client gatt was closed", shadowOf(gatt).isClosed());
+        assertNull("no connection announced for a stopped radio", rec.connectedFlag);
     }
 
     @Test

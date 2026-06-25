@@ -9,6 +9,7 @@
 
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setOperationalMode } from '../../../lcap/mode-state.js';
 import { getCourierControls } from '../../../lcap/transports/courier-controls-state.js';
 import { checkA11y } from '../../../test/axe.js';
 import { CourierRunner } from './CourierRunner.js';
@@ -21,6 +22,7 @@ const controllerStart = vi.fn(async () => ({ advertise: true, discover: true, bl
 const controllerStop = vi.fn(async () => {});
 const activeChannels = vi.fn(() => ['nearby'] as const);
 const controllerIsRunning = vi.fn(() => true);
+const controllerApplyControls = vi.fn(async () => {});
 const controllerStartDecision = vi.fn(() => ({
   advertise: false,
   discover: false,
@@ -39,6 +41,7 @@ const ControllerCtor = vi.fn(function (
   this['activeChannels'] = activeChannels;
   this['isRunning'] = controllerIsRunning;
   this['startDecision'] = controllerStartDecision;
+  this['applyControls'] = controllerApplyControls;
 });
 const resolveCourierChannels = vi.fn((..._a: unknown[]) => [{ channel: 'nearby', plugin: {} }]);
 
@@ -115,6 +118,27 @@ describe('CourierRunner (WS-R.15.4c/d/e)', () => {
     // A Stop control now drives the controller teardown.
     fireEvent.click(screen.getByRole('button', { name: /stop courier/i }));
     await waitFor(() => expect(controllerStop).toHaveBeenCalled());
+  });
+
+  it('reconciles a RUNNING courier when the operational mode changes (§33.5 forced-off)', async () => {
+    injectNativeShell();
+    render(<CourierRunner />);
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /i understand what a nearby radio reveals/i }),
+    );
+    fireEvent.click(screen.getByRole('switch', { name: /advertise this device/i }));
+    fireEvent.click(screen.getByRole('button', { name: /start courier/i }));
+    await waitFor(() => expect(screen.getByText(/^Running$/)).toBeInTheDocument());
+
+    // Switching the §33 mode while running must reach the live controller with the NEW mode, so it
+    // can enforce a forced-off mode immediately (the controller-level test proves it then stops).
+    controllerApplyControls.mockClear();
+    await act(async () => {
+      setOperationalMode('stealth');
+    });
+    await waitFor(() => expect(controllerApplyControls).toHaveBeenCalled());
+    const lastCall = controllerApplyControls.mock.calls.at(-1) as unknown[] | undefined;
+    expect((lastCall?.[1] as { mode?: string } | undefined)?.mode).toBe('stealth');
   });
 
   it('drops a RUNNING courier to blocked when a radio fails to start asynchronously', async () => {

@@ -157,23 +157,35 @@ export class NativeChannelMedium implements CourierMedium {
     this.listeners.push(listener);
   }
 
-  /** Feed a raw native `payloadReceived` event; fail-closed on anything malformed. */
-  acceptNativeEvent(raw: unknown): void {
+  /** Decode a raw native `payloadReceived` event to its bytes (fail-closed on anything
+   *  malformed / wrong-endpoint), WITHOUT delivering it — the caller classifies the message
+   *  (a peer's exchange request vs. our response) and routes it. */
+  nativeEventToBytes(raw: unknown): Uint8Array | null {
     const parsed = nativePayloadEventSchema.safeParse(raw);
-    if (!parsed.success || parsed.data.endpointId !== this.endpointId) return;
-    let bytes: Uint8Array;
+    if (!parsed.success || parsed.data.endpointId !== this.endpointId) return null;
     try {
-      bytes = decodeBase64(parsed.data.message);
+      return decodeBase64(parsed.data.message);
     } catch (error) {
       // The native bridge base64-encodes every payload, so a decode failure is a real bug, not
       // expected input — surface it in dev rather than dropping the frame silently.
       devWarn('dropped a courier payload with malformed base64', error);
-      return;
+      return null;
     }
+  }
+
+  /** Deliver decoded inbound bytes to the INBOX (our exchange RESPONSE) + wake any waiter. */
+  deliverInbound(bytes: Uint8Array): void {
     this.inbox.push(bytes);
     const listeners = this.listeners;
     this.listeners = [];
     for (const listener of listeners) listener();
+  }
+
+  /** Feed a raw native `payloadReceived` event straight to the inbox; fail-closed on anything
+   *  malformed.  (Back-compat: callers that do not classify request-vs-response use this.) */
+  acceptNativeEvent(raw: unknown): void {
+    const bytes = this.nativeEventToBytes(raw);
+    if (bytes) this.deliverInbound(bytes);
   }
 }
 
