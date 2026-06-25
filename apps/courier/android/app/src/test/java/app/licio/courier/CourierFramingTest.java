@@ -147,73 +147,8 @@ public class CourierFramingTest {
 
     // --- the pure serialize-on-ack send state machine ------------------------------
 
-    /** A fake ChunkSender that records the chunks and returns a scripted ack per chunk. */
-    private static final class FakeSender implements CourierFraming.ChunkSender {
-        final List<byte[]> sent = new ArrayList<>();
-        final int[] acks; // ack to return for the Nth awaitAck
-        int sendThrowAt = -1; // index at which sendChunk throws (or -1)
-        int i = 0;
-
-        FakeSender(int... acks) {
-            this.acks = acks;
-        }
-
-        @Override
-        public void sendChunk(byte[] chunk) throws CourierFraming.CourierIoException {
-            if (sent.size() == sendThrowAt) throw new CourierFraming.CourierIoException("send_failed");
-            sent.add(chunk);
-        }
-
-        @Override
-        public int awaitAck() {
-            return acks[i++];
-        }
-    }
-
-    @Test
-    public void sendChunked_splitsAFrameIntoAckGatedChunksReassemblingExactly() throws Exception {
-        byte[] payload = new byte[2500];
-        new Random(7).nextBytes(payload);
-        byte[] expectedFramed = CourierFraming.framePrefixed(payload);
-        int chunkSize = 244;
-        int expectedChunks = (expectedFramed.length + chunkSize - 1) / chunkSize;
-        FakeSender s = new FakeSender(new int[expectedChunks]); // all ACK_OK (0)
-        CourierFraming.sendChunked(payload, chunkSize, s);
-        assertEquals(expectedChunks, s.sent.size());
-        ByteArrayOutputStream reassembled = new ByteArrayOutputStream();
-        for (byte[] c : s.sent) {
-            assertTrue("chunk within size bound", c.length <= chunkSize);
-            reassembled.write(c, 0, c.length);
-        }
-        assertArrayEquals("the sent chunks reassemble to the exact framed payload",
-                expectedFramed, reassembled.toByteArray());
-    }
-
-    @Test
-    public void sendChunked_emptyPayloadStillSendsThePrefixFrame() throws Exception {
-        FakeSender s = new FakeSender(0);
-        CourierFraming.sendChunked(new byte[0], 512, s);
-        assertEquals(1, s.sent.size());
-        assertEquals(4, s.sent.get(0).length); // just the 4-byte length prefix
-    }
-
-    @Test(expected = CourierFraming.CourierIoException.class)
-    public void sendChunked_failsClosedOnANonSuccessAck() throws Exception {
-        // First chunk acks OK, second returns a non-success status → abort.
-        CourierFraming.sendChunked(new byte[1000], 244, new FakeSender(0, 7));
-    }
-
-    @Test(expected = CourierFraming.CourierIoException.class)
-    public void sendChunked_propagatesAWriteFailure() throws Exception {
-        FakeSender s = new FakeSender(0, 0, 0, 0, 0);
-        s.sendThrowAt = 1; // the second sendChunk throws
-        CourierFraming.sendChunked(new byte[1000], 244, s);
-    }
-
-    @Test(expected = CourierFraming.CourierIoException.class)
-    public void sendChunked_rejectsANonPositiveChunkSize() throws Exception {
-        CourierFraming.sendChunked(new byte[10], 0, new FakeSender(0));
-    }
+    // NOTE: the BLE chunked-SEND state machine moved to the callback-driven `BleSendPump`
+    // (see `BleSendPumpTest`); the old blocking `sendChunked` loop + its tests were removed.
 
     // --- the blocking-stream length-prefixed reader (RFCOMM / Wi-Fi socket path) ----
 

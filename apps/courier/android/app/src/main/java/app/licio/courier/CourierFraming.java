@@ -95,49 +95,9 @@ public final class CourierFraming {
         }
     }
 
-    /** A transport I/O failure raised by the pure send state machine (radio-agnostic). */
-    public static final class CourierIoException extends Exception {
-        public CourierIoException(String message) {
-            super(message);
-        }
-    }
-
-    /**
-     * The injected I/O for {@link #sendChunked}: write one chunk over the radio, then block
-     * for its delivery ack.  Both may fail (a write rejection, an ack timeout, a non-success
-     * ack status) — the implementation raises {@link CourierIoException}; the loop in
-     * {@code sendChunked} is otherwise pure and testable with a fake sender (no radio/root).
-     */
-    public interface ChunkSender {
-        /** A successful per-chunk ack status (== BluetoothGatt.GATT_SUCCESS). */
-        int ACK_OK = 0;
-
-        /** Transmit one chunk; raise on an immediate write failure. */
-        void sendChunk(byte[] chunk) throws CourierIoException;
-
-        /** Block for THIS chunk's delivery ack; raise on timeout; return the ack status. */
-        int awaitAck() throws CourierIoException;
-    }
-
-    /**
-     * Send one length-prefixed frame as serialized, ack-gated chunks of at most {@code
-     * chunkSize} bytes — split the framed payload, send each chunk, wait for its ack before
-     * the next (so a large pack never overruns the controller's queue), and fail closed on a
-     * write failure, an ack timeout, or a non-success ack.  This is PURE control flow; the
-     * radio write + the ack wait are the injected {@link ChunkSender}, so the loop is fully
-     * unit-testable on the JVM with a fake sender (no radio, no root).
-     */
-    public static void sendChunked(byte[] payload, int chunkSize, ChunkSender sender)
-            throws CourierIoException {
-        if (chunkSize <= 0) throw new CourierIoException("non_positive_chunk_size");
-        byte[] framed = framePrefixed(payload);
-        for (int off = 0; off < framed.length; off += chunkSize) {
-            byte[] chunk = Arrays.copyOfRange(framed, off, Math.min(off + chunkSize, framed.length));
-            sender.sendChunk(chunk);
-            int ack = sender.awaitAck();
-            if (ack != ChunkSender.ACK_OK) throw new CourierIoException("ack_status_" + ack);
-        }
-    }
+    // NOTE: BLE chunked SEND lives in `BleSendPump` (callback-driven, not a blocking loop), the
+    // outbound counterpart of `FrameAssembler` below.  `framePrefixed` + `chunkSize` here are the
+    // pure framing it builds on.
 
     /**
      * Reassembles the length-prefixed frame stream delivered as a sequence of ARBITRARY-sized

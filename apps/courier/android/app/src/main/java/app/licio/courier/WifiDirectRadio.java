@@ -49,21 +49,6 @@ public class WifiDirectRadio implements CourierRadio {
     private volatile ServerSocket serverSocket;
     // Live data sockets, closed on stop() so a thread blocked in a socket read unblocks.
     private final Set<Socket> liveSockets = ConcurrentHashMap.newKeySet();
-    // The data port — the fixed `DATA_PORT` in production; a test overrides it (e.g. 0/ephemeral
-    // for the group-owner role, or the test server's port for the client role) to avoid binding
-    // a fixed port that could collide with another process/test.
-    private volatile int dataPort = DATA_PORT;
-
-    /** Test seam: override the data port (defaults to {@link #DATA_PORT}). */
-    void setDataPortForTest(int port) {
-        this.dataPort = port;
-    }
-
-    /** Test seam: the actual bound group-owner server port (or -1 if not listening). */
-    int boundServerPort() {
-        ServerSocket s = serverSocket;
-        return s != null ? s.getLocalPort() : -1;
-    }
 
     public WifiDirectRadio(Context ctx, CourierRadio.Events events) {
         this.ctx = ctx;
@@ -209,7 +194,7 @@ public class WifiDirectRadio implements CourierRadio {
         new Thread(() -> {
             try {
                 closeServerSocket();
-                serverSocket = new ServerSocket(dataPort);
+                serverSocket = new ServerSocket(DATA_PORT);
                 while (running.get()) {
                     Socket socket = serverSocket.accept();
                     handleSocket(socket, socket.getInetAddress().getHostAddress());
@@ -226,7 +211,7 @@ public class WifiDirectRadio implements CourierRadio {
             try {
                 Socket socket = new Socket();
                 socket.bind(null);
-                socket.connect(new InetSocketAddress(host, dataPort), SOCKET_TIMEOUT_MS);
+                socket.connect(new InetSocketAddress(host, DATA_PORT), SOCKET_TIMEOUT_MS);
                 handleSocket(socket, host);
             } catch (IOException e) {
                 events.onConnectionResult(host, false);
@@ -237,24 +222,19 @@ public class WifiDirectRadio implements CourierRadio {
     private void handleSocket(Socket socket, String endpointId) {
         liveSockets.add(socket); // tracked so stop() can unblock the read below
         try {
-            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
-            outbound.put(endpointId, out);
-            events.onConnectionResult(endpointId, true);
-            // The PURE, JVM-tested length-prefixed stream reader (CourierFramingTest covers it).
-            CourierFraming.readFramedStream(socket.getInputStream(),
-                    frame -> events.onPayload(endpointId, frame),
-                    () -> running.get() && !socket.isClosed());
-        } catch (IOException ignored) {
-            // peer closed — fall through to disconnect
-        } finally {
-            liveSockets.remove(socket);
-            outbound.remove(endpointId);
+            // The shared blocking-stream data-path (CourierStreamLinkTest covers it via pipes).
+            CourierStreamLink.run(socket.getInputStream(), socket.getOutputStream(), socket,
+                    endpointId, outbound, events, () -> running.get() && !socket.isClosed());
+        } catch (IOException e) {
+            // opening the streams failed before the link ran — still announce the drop
             try {
                 socket.close();
             } catch (IOException ignored) {
                 // already closed
             }
             events.onDisconnected(endpointId);
+        } finally {
+            liveSockets.remove(socket);
         }
     }
 

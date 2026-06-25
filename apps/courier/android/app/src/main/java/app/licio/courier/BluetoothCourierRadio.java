@@ -42,15 +42,15 @@ import android.content.Context;
 import android.os.Build;
 import android.os.ParcelUuid;
 
-import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -110,10 +110,12 @@ public class BluetoothCourierRadio implements CourierRadio {
     private final ConcurrentHashMap<String, BluetoothGattCharacteristic> bleClientChars = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Integer> bleMtu = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CourierFraming.FrameAssembler> assemblers = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, BlockingQueue<Integer>> bleAcks = new ConcurrentHashMap<>();
-    // Per-endpoint send lock: serializes concurrent sends to ONE BLE endpoint so they cannot
-    // race on the shared `bleAcks` queue slot (overwrite / mis-route / premature removal).
-    private final ConcurrentHashMap<String, Object> bleSendLocks = new ConcurrentHashMap<>();
+    // Per-endpoint callback-driven send engine: enqueue writes the first chunk, the GATT
+    // write-complete callback (onCharacteristicWrite / onNotificationSent) drives onAck, a
+    // scheduled timeout fails a stalled write.  No worker thread, no blocking queue, no poll.
+    private final ConcurrentHashMap<String, BleSendPump> blePumps = new ConcurrentHashMap<>();
+    // Backs the per-write ack timeouts (lazily created; shut down in stopBle).
+    private volatile ScheduledExecutorService bleScheduler;
 
     public BluetoothCourierRadio(Context ctx, CourierRadio.Events events) {
         this.ctx = ctx;
@@ -193,17 +195,105 @@ public class BluetoothCourierRadio implements CourierRadio {
             return;
         }
         if (bleClients.containsKey(endpointId) || bleCentrals.containsKey(endpointId)) {
-            new Thread(() -> {
-                try {
-                    sendBleFramed(endpointId, payload);
+            // BLE is async + one-op-at-a-time: hand the frame to the per-endpoint pump, which
+            // writes chunk-by-chunk driven by the write-complete callback (no thread/blocking).
+            blePumpFor(endpointId).enqueue(payload, (ok, reason) -> {
+                if (ok) {
                     result.onSuccess();
-                } catch (Exception e) {
-                    result.onError("send_failed", e);
+                } else {
+                    result.onError(reason != null ? reason : "send_failed", null);
                 }
-            }).start();
+            });
             return;
         }
         result.onError("endpoint_not_connected", null);
+    }
+
+    /** The per-endpoint BLE send pump, created on first use against the endpoint's negotiated
+     *  MTU.  The chunk write + the ack timeout are the only I/O; the pump is pure. */
+    private BleSendPump blePumpFor(String endpointId) {
+        return blePumps.computeIfAbsent(endpointId, ep -> {
+            BleSendPump[] self = new BleSendPump[1];
+            BleSendPump.Timeout timeout = new BleSendPump.Timeout() {
+                private volatile ScheduledFuture<?> future;
+
+                @Override
+                public void arm() {
+                    cancel();
+                    ScheduledExecutorService exec = bleScheduler();
+                    future = exec.schedule(() -> self[0].onTimeout(),
+                            BLE_ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                }
+
+                @Override
+                public void cancel() {
+                    ScheduledFuture<?> f = future;
+                    if (f != null) {
+                        f.cancel(false);
+                    }
+                }
+            };
+            BleSendPump pump = new BleSendPump(
+                    chunkSize(ep), chunk -> writeBleChunk(ep, chunk), timeout);
+            self[0] = pump;
+            return pump;
+        });
+    }
+
+    private ScheduledExecutorService bleScheduler() {
+        ScheduledExecutorService exec = bleScheduler;
+        if (exec == null) {
+            synchronized (this) {
+                exec = bleScheduler;
+                if (exec == null) {
+                    exec = Executors.newSingleThreadScheduledExecutor(r -> {
+                        Thread t = new Thread(r, "ble-ack-timeout");
+                        t.setDaemon(true);
+                        return t;
+                    });
+                    bleScheduler = exec;
+                }
+            }
+        }
+        return exec;
+    }
+
+    /** Write ONE chunk to a BLE endpoint (a connected client gatt, or a subscribed central via
+     *  notify); returns false if the framework rejects the write synchronously (no ack follows). */
+    @SuppressWarnings("MissingPermission")
+    private boolean writeBleChunk(String endpointId, byte[] chunk) {
+        BluetoothGatt gatt = bleClients.get(endpointId);
+        if (gatt != null) {
+            BluetoothGattCharacteristic ch = bleClientChars.get(endpointId);
+            if (ch == null) {
+                return false;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                return gatt.writeCharacteristic(ch, chunk, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+                        == BluetoothGatt.GATT_SUCCESS;
+            }
+            ch.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+            ch.setValue(chunk);
+            return gatt.writeCharacteristic(ch);
+        }
+        BluetoothDevice central = bleCentrals.get(endpointId);
+        if (central != null && gattServer != null && gattCharacteristic != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                return gattServer.notifyCharacteristicChanged(central, gattCharacteristic, false, chunk)
+                        == BluetoothGatt.GATT_SUCCESS;
+            }
+            gattCharacteristic.setValue(chunk);
+            return gattServer.notifyCharacteristicChanged(central, gattCharacteristic, false);
+        }
+        return false;
+    }
+
+    /** Fail + drop an endpoint's send pump (its in-flight + queued sends report failure). */
+    private void failPump(String endpointId) {
+        BleSendPump pump = blePumps.remove(endpointId);
+        if (pump != null) {
+            pump.failAll("disconnected");
+        }
     }
 
     /** The BLE per-write chunk size for an endpoint's negotiated MTU (pure {@link CourierFraming}). */
@@ -266,24 +356,19 @@ public class BluetoothCourierRadio implements CourierRadio {
         String endpointId = socket.getRemoteDevice().getAddress();
         liveSockets.add(socket); // tracked so stop() can unblock the read below
         try {
-            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
-            DataInputStream in = new DataInputStream(socket.getInputStream());
-            outbound.put(endpointId, out);
-            events.onConnectionResult(endpointId, true);
-            // The PURE, JVM-tested length-prefixed stream reader (CourierFramingTest covers it).
-            CourierFraming.readFramedStream(in, frame -> events.onPayload(endpointId, frame),
-                    () -> running.get() && socket.isConnected());
-        } catch (IOException ignored) {
-            // peer closed — fall through to disconnect
-        } finally {
-            liveSockets.remove(socket);
-            outbound.remove(endpointId);
+            // The shared blocking-stream data-path (CourierStreamLinkTest covers it via pipes).
+            CourierStreamLink.run(socket.getInputStream(), socket.getOutputStream(), socket,
+                    endpointId, outbound, events, () -> running.get() && socket.isConnected());
+        } catch (IOException e) {
+            // opening the streams failed before the link ran — still announce the drop
             try {
                 socket.close();
             } catch (IOException ignored) {
                 // already closed
             }
             events.onDisconnected(endpointId);
+        } finally {
+            liveSockets.remove(socket);
         }
     }
 
@@ -335,6 +420,7 @@ public class BluetoothCourierRadio implements CourierRadio {
                 bleCentrals.remove(endpointId);
                 assemblers.remove(endpointId);
                 bleMtu.remove(endpointId);
+                failPump(endpointId);
                 events.onDisconnected(endpointId);
             }
         }
@@ -370,8 +456,8 @@ public class BluetoothCourierRadio implements CourierRadio {
 
         @Override
         public void onNotificationSent(BluetoothDevice device, int status) {
-            BlockingQueue<Integer> q = bleAcks.get(device.getAddress());
-            if (q != null) q.offer(status);
+            BleSendPump pump = blePumps.get(device.getAddress());
+            if (pump != null) pump.onAck(status);
         }
     };
 
@@ -411,6 +497,7 @@ public class BluetoothCourierRadio implements CourierRadio {
                 bleClientChars.remove(endpointId);
                 assemblers.remove(endpointId);
                 bleMtu.remove(endpointId);
+                failPump(endpointId);
                 gatt.close();
                 events.onDisconnected(endpointId);
             }
@@ -449,8 +536,8 @@ public class BluetoothCourierRadio implements CourierRadio {
         @Override
         public void onCharacteristicWrite(BluetoothGatt gatt,
                 BluetoothGattCharacteristic characteristic, int status) {
-            BlockingQueue<Integer> q = bleAcks.get(gatt.getDevice().getAddress());
-            if (q != null) q.offer(status);
+            BleSendPump pump = blePumps.get(gatt.getDevice().getAddress());
+            if (pump != null) pump.onAck(status);
         }
 
         // API 33+ delivers the value as a parameter.
@@ -476,76 +563,6 @@ public class BluetoothCourierRadio implements CourierRadio {
             byte[] value) {
         if (BLE_CHAR_UUID.equals(characteristic.getUuid()) && value != null) {
             feedAssembler(gatt.getDevice().getAddress(), value);
-        }
-    }
-
-    // --- BLE GATT fallback: chunked, serialized, length-prefixed send ----------------
-
-    @SuppressWarnings("MissingPermission")
-    private void sendBleFramed(String endpointId, byte[] payload) throws Exception {
-        // Serialize sends to ONE endpoint: the per-write ack flows through the single
-        // `bleAcks` slot for this endpoint, so two concurrent sends would overwrite/mis-route
-        // each other's queue.  The lock makes the put → serialize-on-ack loop → remove atomic.
-        synchronized (bleSendLocks.computeIfAbsent(endpointId, k -> new Object())) {
-            sendBleFramedLocked(endpointId, payload);
-        }
-    }
-
-    @SuppressWarnings("MissingPermission")
-    private void sendBleFramedLocked(String endpointId, byte[] payload) throws Exception {
-        final BlockingQueue<Integer> acks = new LinkedBlockingQueue<>();
-        bleAcks.put(endpointId, acks);
-        try {
-            final BluetoothGatt gatt = bleClients.get(endpointId);
-            final BluetoothDevice central = bleCentrals.get(endpointId);
-            // The PURE, JVM-tested serialize-on-ack loop drives the chunking + flow control; the
-            // GATT write/notify + the ack wait are the only I/O (this anonymous ChunkSender).
-            CourierFraming.sendChunked(payload, chunkSize(endpointId), new CourierFraming.ChunkSender() {
-                @Override
-                public void sendChunk(byte[] chunk) throws CourierFraming.CourierIoException {
-                    acks.clear();
-                    if (gatt != null) {
-                        BluetoothGattCharacteristic ch = bleClientChars.get(endpointId);
-                        if (ch == null) throw new CourierFraming.CourierIoException("ble_characteristic_unresolved");
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            int rc = gatt.writeCharacteristic(ch, chunk,
-                                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-                            if (rc != BluetoothGatt.GATT_SUCCESS) {
-                                throw new CourierFraming.CourierIoException("write_rc_" + rc);
-                            }
-                        } else {
-                            ch.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-                            ch.setValue(chunk);
-                            if (!gatt.writeCharacteristic(ch)) {
-                                throw new CourierFraming.CourierIoException("write_rejected");
-                            }
-                        }
-                    } else if (central != null && gattServer != null && gattCharacteristic != null) {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            gattServer.notifyCharacteristicChanged(central, gattCharacteristic, false, chunk);
-                        } else {
-                            gattCharacteristic.setValue(chunk);
-                            gattServer.notifyCharacteristicChanged(central, gattCharacteristic, false);
-                        }
-                    } else {
-                        throw new CourierFraming.CourierIoException("endpoint_not_connected");
-                    }
-                }
-
-                @Override
-                public int awaitAck() throws CourierFraming.CourierIoException {
-                    try {
-                        Integer ack = acks.poll(BLE_ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-                        if (ack == null) throw new CourierFraming.CourierIoException("ble_ack_timeout");
-                        return ack;
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        throw new CourierFraming.CourierIoException("ble_send_interrupted");
-                    }
-                }
-            });
-        } finally {
-            bleAcks.remove(endpointId);
         }
     }
 
@@ -586,7 +603,15 @@ public class BluetoothCourierRadio implements CourierRadio {
         bleCentrals.clear();
         assemblers.clear();
         bleMtu.clear();
-        bleAcks.clear();
-        bleSendLocks.clear();
+        // Fail any sends still in flight, then drop the pumps + the ack-timeout scheduler.
+        for (BleSendPump pump : blePumps.values()) {
+            pump.failAll("stopped");
+        }
+        blePumps.clear();
+        ScheduledExecutorService exec = bleScheduler;
+        if (exec != null) {
+            exec.shutdownNow();
+            bleScheduler = null;
+        }
     }
 }

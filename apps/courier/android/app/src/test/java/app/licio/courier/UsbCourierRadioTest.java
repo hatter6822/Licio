@@ -87,11 +87,15 @@ public class UsbCourierRadioTest {
 
     @Test
     public void sendWritesAFramedPayloadToTheAccessoryStream() throws Exception {
-        UsbCourierRadio radio = new UsbCourierRadio(ctx(), new Recorder());
+        Recorder rec = new Recorder();
+        UsbCourierRadio radio = new UsbCourierRadio(ctx(), rec);
         PipedInputStream radioIn = new PipedInputStream();
         new PipedOutputStream(radioIn); // keep the pipe open
         ByteArrayOutputStream radioOut = new ByteArrayOutputStream();
         radio.attach(radioIn, radioOut, "usb-test");
+        // Send only AFTER the link is announced (as production does) — the outbound stream is
+        // registered by the link thread before onConnectionResult fires.
+        assertTrue(rec.connected.await(5, TimeUnit.SECONDS));
 
         byte[] payload = {5, 6, 7, 8};
         CountDownLatch sent = new CountDownLatch(1);
@@ -114,11 +118,13 @@ public class UsbCourierRadioTest {
     public void concurrentSendsToOneEndpointAreNotInterleaved() throws Exception {
         // Two overlapping sends to one stream: the `synchronized (out)` guard must keep each
         // length-prefixed frame ATOMIC on the wire (no byte interleaving / corruption).
-        UsbCourierRadio radio = new UsbCourierRadio(ctx(), new Recorder());
+        Recorder rec = new Recorder();
+        UsbCourierRadio radio = new UsbCourierRadio(ctx(), rec);
         PipedInputStream radioIn = new PipedInputStream();
         PipedOutputStream keepOpen = new PipedOutputStream(radioIn);
         ByteArrayOutputStream radioOut = new ByteArrayOutputStream();
         radio.attach(radioIn, radioOut, "usb-test");
+        assertTrue(rec.connected.await(5, TimeUnit.SECONDS)); // outbound registered before send
 
         byte[] p1 = new byte[2000];
         Arrays.fill(p1, (byte) 0x11);

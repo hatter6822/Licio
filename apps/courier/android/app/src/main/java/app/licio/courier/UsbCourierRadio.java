@@ -26,6 +26,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class UsbCourierRadio implements CourierRadio {
@@ -36,7 +37,9 @@ public class UsbCourierRadio implements CourierRadio {
     private final CourierRadio.Events events;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private volatile ParcelFileDescriptor descriptor;
-    private volatile DataOutputStream outbound;
+    // A single accessory link, but keyed (one entry) so the SHARED CourierStreamLink data-path
+    // routes outbound exactly as it does for the multi-endpoint socket transports.
+    private final ConcurrentHashMap<String, DataOutputStream> outbound = new ConcurrentHashMap<>();
 
     public UsbCourierRadio(Context ctx, CourierRadio.Events events) {
         this.events = events;
@@ -78,23 +81,16 @@ public class UsbCourierRadio implements CourierRadio {
      */
     void attach(InputStream in, OutputStream out, String endpointId) {
         running.set(true);
-        outbound = new DataOutputStream(out);
-        events.onConnectionResult(endpointId, true);
-        new Thread(() -> {
-            try {
-                CourierFraming.readFramedStream(in, frame -> events.onPayload(endpointId, frame),
-                        running::get);
-            } catch (IOException ignored) {
-                // accessory detached — fall through to disconnect
-            } finally {
-                events.onDisconnected(endpointId);
-            }
-        }).start();
+        // The shared blocking-stream data-path (CourierStreamLinkTest covers it via pipes); the
+        // input stream is the Closeable, so a stop()/EOF tears the link down.
+        new Thread(() ->
+                CourierStreamLink.run(in, out, in, endpointId, outbound, events, running::get))
+                .start();
     }
 
     @Override
     public void send(String endpointId, byte[] payload, CourierRadio.SendResult result) {
-        final DataOutputStream out = outbound;
+        final DataOutputStream out = outbound.get(endpointId);
         if (out == null) {
             result.onError("endpoint_not_connected", null);
             return;
@@ -117,12 +113,12 @@ public class UsbCourierRadio implements CourierRadio {
         running.set(false);
         if (descriptor != null) {
             try {
-                descriptor.close();
+                descriptor.close(); // closes the accessory streams → the read loop unblocks
             } catch (IOException ignored) {
                 // already closed
             }
             descriptor = null;
         }
-        outbound = null;
+        outbound.clear();
     }
 }

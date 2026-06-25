@@ -87,6 +87,13 @@ public class BluetoothCourierRadioTest {
         assertTrue(new BluetoothCourierRadio(ctx(), new Recorder()).isAvailable());
     }
 
+    // NOTE on the BLE SEND path: the entire send state machine (serialized chunking, per-write
+    // ack advance, write-rejection, timeout, disconnect, concurrent-enqueue ordering) is the pure
+    // `BleSendPump`, covered DETERMINISTICALLY in `BleSendPumpTest` (no Android/threads).  The
+    // only remaining radio glue is the ~10-line `writeBleChunk` (the raw GATT write/notify call),
+    // which Robolectric's GATT-server shadow cannot drive to success — so it is exercised on real
+    // radios by the netsim `BleGattRadioTest`.  No brittle shadow-dependent send test is added.
+
     @Test
     public void gattServerConnectThenChunkedWritesReassembleToOnePayload() {
         Recorder rec = new Recorder();
