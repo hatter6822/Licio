@@ -185,6 +185,10 @@ export class CourierController {
   /** Channels whose radios are currently running — a single radio's failure removes only its own
    *  channel; the courier is "running" while ANY channel is active, and only blocks when NONE are. */
   private readonly runningChannels = new Set<CourierChannel>();
+  /** The LIVE §22.5 radio controls — mutable so a control change applies to a RUNNING courier
+   *  (the who-can-exchange + storage-budget gates read this at exchange time, and
+   *  {@link applyControls} re-evaluates the radios), not only at the next Start. */
+  private controls: CourierRadioControls;
   private sharedBytes = 0;
   private started = false;
   /** True only while {@link start} is still launching radios — an async startFailed during this
@@ -197,6 +201,7 @@ export class CourierController {
   };
 
   constructor(private readonly config: CourierControllerConfig) {
+    this.controls = config.controls;
     if (config.channels && config.channels.length > 0) {
       this.channels = config.channels;
     } else if (config.plugin) {
@@ -230,11 +235,7 @@ export class CourierController {
    */
   async start(): Promise<CourierStartDecision> {
     if (this.started) return this.decision;
-    this.decision = decideCourierStart(
-      this.config.controls,
-      this.config.mode,
-      this.config.power ?? {},
-    );
+    this.decision = decideCourierStart(this.controls, this.config.mode, this.config.power ?? {});
     if (!this.decision.advertise && !this.decision.discover) return this.decision;
     if (this.channels.length === 0) return this.decision; // nothing to drive
 
@@ -285,6 +286,41 @@ export class CourierController {
     }
     this.mediums.clear();
     this.exchanged.clear();
+  }
+
+  /**
+   * Apply a §22.5 control change to the ALREADY-RUNNING courier immediately (a privacy control
+   * must take effect now, not at the next Stop/Start).  The who-can-exchange + storage-budget
+   * gates read the new controls on the next exchange automatically; for the RADIOS this:
+   *   - stops EVERY radio if the new controls/mode disallow the courier (off / no peers / forced
+   *     off / below the battery floor), flipping the decision to that typed reason; else
+   *   - stops any RUNNING channel the user just DESELECTED (live channel removal).
+   * Re-enabling a channel or loosening a gate that was off takes effect on the next Start (a
+   * deselected radio's plugin is not retained) — only RESTRICTIONS are enforced live, never
+   * loosened silently.  A no-op before {@link start} (Start reads the latest controls).
+   */
+  async applyControls(next: CourierRadioControls): Promise<void> {
+    this.controls = next;
+    if (!this.started) return; // not running — start() will read the latest controls
+    const decision = decideCourierStart(next, this.config.mode, this.config.power ?? {});
+    if (!decision.advertise && !decision.discover) {
+      // The new controls/mode turn the courier off entirely — stop every radio now.
+      await this.stop();
+      this.decision = decision;
+      this.config.onDecisionChange?.(decision);
+      return;
+    }
+    // Stop any running channel the user just deselected, so a removed radio goes silent at once.
+    const stillEnabled = new Set(next.enabledChannels ?? ['nearby']);
+    for (const channel of [...this.runningChannels]) {
+      if (!stillEnabled.has(channel)) await this.stopChannel(channel);
+    }
+    if (this.runningChannels.size === 0) {
+      // Every selected radio was deselected — the courier is now off; surface it honestly.
+      this.started = false;
+      this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
+      this.config.onDecisionChange?.(this.decision);
+    }
   }
 
   /** Tear down ONE channel — remove its listeners, stop its plugin, drop its mediums + exchange
@@ -416,7 +452,7 @@ export class CourierController {
     if (this.exchanged.has(key)) return;
     this.exchanged.add(key);
 
-    if (!mayExchangeWithEndpoint(this.config.controls, endpointId)) {
+    if (!mayExchangeWithEndpoint(this.controls, endpointId)) {
       this.emit(channel, endpointId, null, null, 'not_allowed_peer');
       return;
     }
@@ -427,7 +463,7 @@ export class CourierController {
       return;
     }
 
-    if (!withinStorageBudget(this.config.controls, this.sharedBytes, request.byteLength)) {
+    if (!withinStorageBudget(this.controls, this.sharedBytes, request.byteLength)) {
       this.emit(channel, endpointId, null, null, 'over_storage_budget');
       return;
     }
@@ -445,18 +481,22 @@ export class CourierController {
     ];
     for (const t of buildServerTransports(this.config.httpsConfig ?? {})) transports.push(t);
 
-    let result: { transport: CourierExchangeOutcome['carriedBy']; response: Uint8Array } | null;
+    let result: { transport: CourierExchangeOutcome['carriedBy']; response: Uint8Array } | null =
+      null;
     try {
       // PUBLIC-ONLY: the courier seam (`carriesPrivate:false`) structurally refuses any
       // non-public pack, so the public label here is the only one a courier ever carries.
       result = await offlineExchange(transports, request, undefined, 'public');
     } catch {
-      this.emit(channel, endpointId, null, null, 'exchange_failed');
-      return;
+      // Swallowed: the bytes already ferried are still charged in the finally below, and the
+      // outcome is reported as exchange_failed after.
+    } finally {
+      // Account the bytes ACTUALLY ferried to the peer against the storage budget — even when the
+      // exchange threw or returned nothing.  A peer that received the request but never answered
+      // (while the HTTPS anchor was unreachable) STILL consumed those bytes; charging them only on
+      // success would let repeated FAILED courier attempts bypass the budget on bytes already sent.
+      this.sharedBytes += medium.bytesSent();
     }
-
-    // Account the bytes actually ferried over the medium against the storage budget.
-    this.sharedBytes += medium.bytesSent();
 
     if (!result) {
       this.emit(channel, endpointId, null, null, 'exchange_failed');

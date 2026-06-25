@@ -229,6 +229,116 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     expect(controller.activeChannels()).toEqual([]);
   });
 
+  it('applyControls stops a running courier immediately when the new controls disable it', async () => {
+    // A privacy control change must take effect NOW on the running courier, not only at the next
+    // Stop — turning both radios off stops the native radios and flips the decision honestly.
+    const f = fakePlugin();
+    const changes: Array<{ blockedReason?: string }> = [];
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => new Uint8Array([1]),
+      onDecisionChange: (d) => changes.push(d),
+    });
+    await controller.start();
+    expect(controller.isRunning()).toBe(true);
+
+    await controller.applyControls({ advertisingEnabled: false, discoveryEnabled: false });
+    expect(controller.isRunning()).toBe(false);
+    expect(f.plugin.stop).toHaveBeenCalled(); // the radio was stopped live
+    expect(changes.some((d) => d.blockedReason === 'disabled')).toBe(true);
+  });
+
+  it('applyControls tightens the who-can-exchange policy live (a now-disallowed peer is refused)', async () => {
+    // The exchange gates must read the LIVE controls — after restricting to known peers, a peer
+    // that was fine a moment ago is refused without ever being ferried to.
+    const f = fakePlugin();
+    const outcomes: Array<{ skippedReason: string }> = [];
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => new Uint8Array([1]),
+      httpsConfig: { fetchFn: REJECTING_FETCH },
+      onOutcome: (o) => outcomes.push({ skippedReason: o.skippedReason }),
+    });
+    await controller.start();
+    await controller.applyControls({
+      ...ON,
+      exchangePeers: 'known_only',
+      allowedEndpointIds: ['ep-allowed'],
+    });
+    expect(controller.isRunning()).toBe(true); // radios stay up; only the policy tightened
+    f.emit('connectionResult', { endpointId: 'ep-blocked', connected: true });
+    await vi.waitFor(() => expect(outcomes).toHaveLength(1));
+    expect(outcomes[0]?.skippedReason).toBe('not_allowed_peer');
+    expect(f.sent).toHaveLength(0); // nothing was ferried under the new policy
+  });
+
+  it('applyControls stops a DESELECTED channel live and keeps the others running', async () => {
+    const a = fakePlugin();
+    const b = fakePlugin();
+    const controller = new CourierController({
+      channels: [
+        { channel: 'nearby', plugin: a.plugin },
+        { channel: 'bluetooth', plugin: b.plugin },
+      ],
+      controls: { ...ON, enabledChannels: ['nearby', 'bluetooth'] },
+      mode: 'courier',
+      buildRequest: () => new Uint8Array([1]),
+    });
+    await controller.start();
+    expect(controller.activeChannels()).toEqual(['nearby', 'bluetooth']);
+
+    await controller.applyControls({ ...ON, enabledChannels: ['nearby'] });
+    expect(controller.activeChannels()).toEqual(['nearby']); // bluetooth dropped live
+    expect(b.plugin.stop).toHaveBeenCalled();
+    expect(a.plugin.stop).not.toHaveBeenCalled();
+    expect(controller.isRunning()).toBe(true);
+  });
+
+  it('charges bytes already ferried even when the exchange yields nothing (no budget bypass)', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fakePlugin();
+      // A peer that connects but never answers: the courier leg sends the request then times out,
+      // the HTTPS anchor is unreachable → the exchange yields nothing, but the request bytes were
+      // already ferried to the peer.
+      f.plugin.send = vi.fn(async (o: { endpointId: string; message: string }) => {
+        f.sent.push(o); // NO echo back
+      });
+      const outcomes: Array<{ endpointId: string; skippedReason: string }> = [];
+      const controller = new CourierController({
+        plugin: f.plugin,
+        controls: { ...ON, storageBudgetBytes: 8 },
+        mode: 'courier',
+        buildRequest: () => new Uint8Array([1, 2, 3, 4, 5]), // 5 bytes ferried per attempt
+        httpsConfig: { fetchFn: REJECTING_FETCH },
+        onOutcome: (o) =>
+          outcomes.push({ endpointId: o.endpointId, skippedReason: o.skippedReason }),
+      });
+      await controller.start();
+
+      f.emit('connectionResult', { endpointId: 'ep-1', connected: true });
+      // Advance past the courier leg deadline so it fails fast (no real 20s wait); the anchor then
+      // fails too → offlineExchange yields null → the finally still charges the ferried bytes.
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(outcomes).toHaveLength(1);
+      expect(outcomes[0]?.skippedReason).toBe('exchange_failed');
+      expect(f.sent).toHaveLength(1); // the request WAS ferried to the peer
+
+      // A second peer's 5-byte request now exceeds the 8-byte budget BECAUSE the first failed
+      // ferry's bytes were charged — without the fix sharedBytes would still be 0 and this proceeds.
+      f.emit('connectionResult', { endpointId: 'ep-2', connected: true });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(outcomes).toHaveLength(2);
+      expect(outcomes[1]).toEqual({ endpointId: 'ep-2', skippedReason: 'over_storage_budget' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('starts the radios and drives ONE §16 exchange over a connected endpoint', async () => {
     const f = fakePlugin();
     const outcomes: Array<{ endpointId: string; channel: string; carriedBy: string | null }> = [];

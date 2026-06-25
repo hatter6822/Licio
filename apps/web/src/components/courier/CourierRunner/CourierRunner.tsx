@@ -114,6 +114,23 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
     }
   }, [acknowledged]);
 
+  // Apply a live control change to a RUNNING controller, so a privacy restriction (radios off, a
+  // deselected channel, or peers→none) takes effect IMMEDIATELY instead of only at the next
+  // Stop/Start — the controls captured at construction would otherwise keep the radios + exchange
+  // policy active until the user stopped or left the page.
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    void (async () => {
+      await controller.applyControls(controls);
+      // If applyControls stopped the courier, onDecisionChange already nulled the ref + set the
+      // blocked phase; otherwise reflect any live channel removal in the running list.
+      if (controllerRef.current === controller && controller.isRunning()) {
+        setPhase({ kind: 'running', channels: controller.activeChannels() });
+      }
+    })();
+  }, [controls]);
+
   const onControlsChange = useCallback((next: CourierRadioControls) => {
     setControls(next);
   }, []);
