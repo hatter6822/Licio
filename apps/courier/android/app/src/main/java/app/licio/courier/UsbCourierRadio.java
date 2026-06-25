@@ -66,6 +66,10 @@ public class UsbCourierRadio implements CourierRadio {
     @Override
     public void startDiscovery() {
         if (usbManager == null) return;
+        // Idempotent: the controller may call startAdvertising() AND startDiscovery() (both toggles)
+        // and startAdvertising() delegates here — without this guard the SAME accessory would be
+        // opened twice, the second open overwriting descriptor/readStream and leaking the first.
+        if (descriptor != null) return;
         UsbAccessory[] accessories = usbManager.getAccessoryList();
         if (accessories == null || accessories.length == 0) {
             events.onConnectionResult(USB_ENDPOINT_ID, false); // nothing attached

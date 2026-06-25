@@ -44,6 +44,7 @@ import android.os.ParcelUuid;
 
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Set;
 import java.util.UUID;
@@ -423,7 +424,9 @@ public class BluetoothCourierRadio implements CourierRadio {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 bleCentrals.put(endpointId, device);
                 assemblers.put(endpointId, new CourierFraming.FrameAssembler());
-                events.onConnectionResult(endpointId, true);
+                // Do NOT announce the link yet: the central has not subscribed to notifications, so
+                // a peripheral→central notify would be dropped.  The connection is reported from
+                // onDescriptorWriteRequest once the central enables the CCC (subscribes).
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 bleCentrals.remove(endpointId);
                 assemblers.remove(endpointId);
@@ -459,6 +462,12 @@ public class BluetoothCourierRadio implements CourierRadio {
             // The central enabling/disabling notifications (CCC) — accept it.
             if (responseNeeded && gattServer != null) {
                 gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null);
+            }
+            // The central has now SUBSCRIBED (enabled the CCC) — only now can the peripheral notify,
+            // so this is when the duplex link is actually ready.  Announce it here, not on connect.
+            if (CCC_UUID.equals(descriptor.getUuid())
+                    && Arrays.equals(value, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
+                events.onConnectionResult(device.getAddress(), true);
             }
         }
 

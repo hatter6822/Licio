@@ -23,6 +23,7 @@
 // browser `RTCPeerConnection` + the live rendezvous endpoint in the E2E.
 
 import type { HandshakeHello, SignalingPayload } from '@licio/private-p2p';
+import { devWarn } from '../lib/dev-log.js';
 import type { PeerChannel } from './sync-session.js';
 
 type P2pModule = typeof import('@licio/private-p2p');
@@ -720,7 +721,16 @@ async function establishDataChannel(
     if (payload.kind === 'offer' && payload.sdp !== undefined && !p.isOfferer) {
       await pc.setRemoteDescription({ type: 'offer', sdp: payload.sdp });
       remoteDescriptionSet = true;
-      for (const cand of pendingIce.splice(0)) await pc.addIceCandidate(cand);
+      for (const cand of pendingIce.splice(0)) {
+        try {
+          await pc.addIceCandidate(cand);
+        } catch (error) {
+          // A buffered candidate that STILL can't attach to the freshly-applied description is
+          // unexpected (it should have matched) — report it (the helper logs no candidate data:
+          // it can carry an IP) and drop it as genuinely stale rather than swallowing it silently.
+          devWarn('ICE candidate did not apply after renegotiation', error);
+        }
+      }
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       await sendSignal({
@@ -731,15 +741,36 @@ async function establishDataChannel(
     } else if (payload.kind === 'answer' && payload.sdp !== undefined && p.isOfferer) {
       await pc.setRemoteDescription({ type: 'answer', sdp: payload.sdp });
       remoteDescriptionSet = true;
-      for (const cand of pendingIce.splice(0)) await pc.addIceCandidate(cand);
+      for (const cand of pendingIce.splice(0)) {
+        try {
+          await pc.addIceCandidate(cand);
+        } catch (error) {
+          // A buffered candidate that STILL can't attach to the freshly-applied description is
+          // unexpected (it should have matched) — report it (the helper logs no candidate data:
+          // it can carry an IP) and drop it as genuinely stale rather than swallowing it silently.
+          devWarn('ICE candidate did not apply after renegotiation', error);
+        }
+      }
     } else if (payload.kind === 'ice' && payload.ice_candidate !== undefined) {
       const candidate: RtcIceCandidateInit = {
         candidate: payload.ice_candidate,
         sdpMid: payload.sdp_mid ?? null,
         sdpMLineIndex: payload.sdp_mline_index ?? null,
       };
-      if (remoteDescriptionSet) await pc.addIceCandidate(candidate);
-      else pendingIce.push(candidate); // can't add before the remote description is set
+      if (remoteDescriptionSet) {
+        try {
+          await pc.addIceCandidate(candidate);
+        } catch {
+          // The candidate outran its (re-)offer: an ICE-restart re-offer's candidates can be
+          // signalled before the re-offer itself, and `remoteDescriptionSet` stays latched true
+          // from the initial negotiation — so they can't attach to the current description.  Buffer
+          // them (as the initial negotiation does via the else-branch) to retry after the next
+          // setRemoteDescription, instead of dropping them and stranding the restart.
+          pendingIce.push(candidate);
+        }
+      } else {
+        pendingIce.push(candidate); // can't add before the remote description is set
+      }
     }
   };
 
@@ -789,14 +820,17 @@ async function establishDataChannel(
       let signals: Awaited<ReturnType<typeof p.rendezvous.signalPoll>>;
       try {
         signals = await p.rendezvous.signalPoll(p.selfBlindId);
-      } catch {
-        signals = [];
+      } catch (error) {
+        signals = []; // a transient poll failure → retry next loop, but surface it in dev
+        devWarn('rendezvous signal poll failed', error);
       }
       for (const signal of signals) {
         try {
           await applyPayload(await p2p.openSignal(signal, p.channelKey));
-        } catch {
-          // A signal we can't open (foreign/tampered) fails closed — skip it.
+        } catch (error) {
+          // A signal we can't open (foreign/tampered) fails closed — skip it, but surface it in
+          // dev: a persistent failure here is a real bug (bad key/codec), not just a probe.
+          devWarn('skipped a signal that failed to open or apply', error);
         }
       }
       if (stopped) return;
@@ -948,7 +982,8 @@ async function runHandshake(
       try {
         const parsed: unknown = JSON.parse(data);
         frame = parsed as HandshakeFrame;
-      } catch {
+      } catch (error) {
+        devWarn('dropped a non-JSON handshake frame', error);
         return;
       }
       if (frame.t === 'hello' && frame.hello) {
@@ -973,8 +1008,9 @@ async function runHandshake(
               ),
               activeAtEpoch: resolution.activeAtEpoch,
             };
-          } catch {
+          } catch (error) {
             resolvedDevice = undefined;
+            devWarn('could not import the resolved device public key', error);
           }
         }
         await sendSelfProofIfReady();
@@ -982,7 +1018,8 @@ async function runHandshake(
       } else if (frame.t === 'proof' && frame.sig) {
         try {
           remoteProofSig = p2p.fromBase64Url(frame.sig);
-        } catch {
+        } catch (error) {
+          devWarn('dropped a malformed handshake proof signature', error);
           return;
         }
         await tryVerify();

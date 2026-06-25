@@ -23,6 +23,7 @@
 // verified-only; the TS bridge here is identical in shape and fail-closed regardless.
 
 import type { z } from 'zod';
+import { devWarn } from '../../lib/dev-log.js';
 import type { CourierMedium } from './courier.js';
 import { type NearbyCourierPlugin, nativePayloadEventSchema } from './courier-native.js';
 
@@ -163,7 +164,10 @@ export class NativeChannelMedium implements CourierMedium {
     let bytes: Uint8Array;
     try {
       bytes = decodeBase64(parsed.data.message);
-    } catch {
+    } catch (error) {
+      // The native bridge base64-encodes every payload, so a decode failure is a real bug, not
+      // expected input — surface it in dev rather than dropping the frame silently.
+      devWarn('dropped a courier payload with malformed base64', error);
       return;
     }
     this.inbox.push(bytes);

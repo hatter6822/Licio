@@ -118,6 +118,30 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     expect(f.calls).toContain('stop'); // radios/listeners torn down
   });
 
+  it('consumes a LATE async startFailed event → stops + reports radio_unavailable', async () => {
+    // The radios start cleanly (the sync start resolves), so the controller is running...
+    const f = fakePlugin();
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => new Uint8Array([1]),
+    });
+    await controller.start();
+    expect(controller.isRunning()).toBe(true);
+
+    // ...but GMS/Wi-Fi Direct rejects the start Task ASYNCHRONOUSLY afterwards (a `startFailed`
+    // event the sync try/catch can't see).  The controller must consume it, not stay "running".
+    f.emit('startFailed', { operation: 'advertise', error: 'nearby_disabled' });
+    await vi.waitFor(() => expect(f.calls).toContain('stop')); // teardown ran to completion
+    expect(controller.isRunning()).toBe(false);
+    expect(controller.startDecision()).toMatchObject({
+      advertise: false,
+      discover: false,
+      blockedReason: 'radio_unavailable',
+    });
+  });
+
   it('starts the radios and drives ONE §16 exchange over a connected endpoint', async () => {
     const f = fakePlugin();
     const outcomes: Array<{ endpointId: string; channel: string; carriedBy: string | null }> = [];

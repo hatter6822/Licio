@@ -12,6 +12,7 @@ package app.licio.courier;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.robolectric.Shadows.shadowOf;
 
@@ -287,9 +288,17 @@ public class BluetoothCourierRadioTest {
         BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
         BluetoothDevice device = peerDevice();
 
-        // A central connects → the radio registers it + creates the reassembler + fires connect.
+        // A central connects → the radio registers it + creates the reassembler, but does NOT
+        // announce the link yet (the central has not subscribed to notifications).
         radio.gattServerCallback.onConnectionStateChange(
                 device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
+        assertNull("not announced before the central subscribes (CCC)", rec.connectedFlag);
+
+        // The central ENABLES the CCC (subscribes) → only now is the duplex link announced.
+        BluetoothGattDescriptor ccc = new BluetoothGattDescriptor(
+                BluetoothCourierRadio.CCC_UUID, BluetoothGattDescriptor.PERMISSION_WRITE);
+        radio.gattServerCallback.onDescriptorWriteRequest(
+                device, 3, ccc, false, false, 0, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
         assertEquals(PEER, rec.connectedEndpoint);
         assertEquals(Boolean.TRUE, rec.connectedFlag);
 

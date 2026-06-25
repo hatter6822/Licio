@@ -34,6 +34,7 @@
 // code-split P2P chunk (`check:lcap-p2p-split`).
 
 import type { LcapTransport } from '@licio/lcap';
+import { devWarn } from '../../lib/dev-log.js';
 import type { CourierMedium } from './courier.js';
 import { CourierTransport } from './courier.js';
 import { type CourierChannel, NativeChannelMedium } from './courier-channels.js';
@@ -234,6 +235,10 @@ export class CourierController {
         this.onPayloadReceived(channel, raw),
       );
       await this.addListener(plugin, 'disconnected', (raw) => this.onDisconnected(channel, raw));
+      // A radio's start is ASYNC: GMS/Wi-Fi Direct may reject it AFTER startAdvertising/Discovery
+      // resolves (the sync try/catch below can't see that).  Consume the native `startFailed`
+      // event so a late refusal is not believed-running but surfaced as radio_unavailable.
+      await this.addListener(plugin, 'startFailed', (raw) => void this.onStartFailed(channel, raw));
     }
 
     const radioOptions = {
@@ -246,11 +251,13 @@ export class CourierController {
         if (this.decision.advertise) await plugin.startAdvertising(radioOptions);
         if (this.decision.discover) await plugin.startDiscovery(radioOptions);
       }
-    } catch {
+    } catch (error) {
       // A radio that refuses to start (permission denied / unavailable) is non-fatal — the seam
       // still has the HTTPS anchor — but `stop()` removed every listener/radio, so we must NOT
       // return the original allow decision (the UI would falsely show a dead courier as running).
-      // Report a blocked decision instead so `CourierRunner` surfaces the honest typed reason.
+      // Report a blocked decision instead so `CourierRunner` surfaces the honest typed reason
+      // (and surface the underlying error in dev rather than swallowing it).
+      devWarn('a courier radio refused to start', error);
       await this.stop();
       this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
     }
@@ -318,6 +325,19 @@ export class CourierController {
     const key = this.key(channel, event.endpointId);
     this.mediums.delete(key);
     this.exchanged.delete(key);
+  }
+
+  /** A radio reported an ASYNC start failure (e.g. GMS refused advertising after the start Task
+   *  resolved).  Surface it in dev, then stop + mark the courier unavailable so the polled
+   *  decision the UI reads no longer shows a dead radio as running (mirrors the sync start catch). */
+  private async onStartFailed(channel: CourierChannel, raw: unknown): Promise<void> {
+    devWarn(`courier radio '${channel}' reported a start failure`, raw);
+    if (!this.running) return;
+    // Set the blocked decision BEFORE tearing down: stop() flips isRunning() synchronously, so a
+    // reader observing the stop must already see the honest radio_unavailable reason, not the
+    // stale allow decision.
+    this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
+    await this.stop();
   }
 
   private key(channel: CourierChannel, endpointId: string): string {

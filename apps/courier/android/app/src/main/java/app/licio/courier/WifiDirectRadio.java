@@ -77,19 +77,23 @@ public class WifiDirectRadio implements CourierRadio {
         if (manager == null || channel == null) return;
         registerReceiver();
         running.set(true);
-        // Best-effort: a discovery failure (async onFailure, or a framework throw —
-        // SecurityException / DeadObjectException / IllegalStateException) just means no group
-        // forms (the TS layer times out); the receiver still picks up a group formed by the peer.
+        // A discovery failure (async onFailure, or a framework throw — SecurityException /
+        // DeadObjectException / IllegalStateException — for missing permission, Wi-Fi Direct
+        // disabled, or framework state) means no discovery is running, so SURFACE it via
+        // onStartFailed rather than dropping it (else the caller believes the radio is running).
         try {
             manager.discoverPeers(channel, new WifiP2pManager.ActionListener() {
                 @Override
                 public void onSuccess() {}
 
                 @Override
-                public void onFailure(int reason) {}
+                public void onFailure(int reason) {
+                    events.onStartFailed("discover",
+                            new IllegalStateException("wifi_p2p_discover_failed_" + reason));
+                }
             });
-        } catch (RuntimeException ignored) {
-            // framework state — non-fatal
+        } catch (RuntimeException e) {
+            events.onStartFailed("discover", e);
         }
     }
 
