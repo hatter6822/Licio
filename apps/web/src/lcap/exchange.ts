@@ -29,9 +29,66 @@ import {
   readBundleForImport,
 } from './bundle-import.js';
 import { LCAP_STORE } from './db.js';
-import { collectByCursor, getHeldObject } from './store.js';
+import { collectByCursor, getHeldObject, proofCidsForRecord, type RecordRow } from './store.js';
 
 export type { CommitCounts };
+
+/** Cap on how many local records a content PUSH enumerates (bounded device CPU + wire). */
+const MAX_PUSH_RECORDS = 64;
+
+/**
+ * A held-object reader that serves PUBLIC content only — the public P2P plane (courier + WebRTC)
+ * NEVER carries a non-public contribution.  Control/proof/block objects are public trust material;
+ * only a `contribution_event` carries a restricted visibility scope.  Defense in depth even though
+ * `lcap_v2` is the public store; the receiver re-verifies every CID regardless.
+ */
+function publicHeldReader(
+  db: IDBDatabase,
+  lcap: typeof import('@licio/lcap'),
+): (cid: string) => Promise<HeldObject | undefined> {
+  return async (cid: string): Promise<HeldObject | undefined> => {
+    const held = await getHeldObject(db, cid);
+    if (held?.kind === 'record') {
+      try {
+        const record = lcap.decodeAndRouteRecord(held.bytes);
+        if (record.kind === 'contribution_event' && record.visibility_scope !== 'public') {
+          return undefined; // non-public — refuse to serve over the public plane
+        }
+      } catch {
+        return undefined; // undecodable — never serve
+      }
+    }
+    return held;
+  };
+}
+
+/**
+ * Build a PUBLIC content PUSH pack from local content (gossip-out): up to {@link MAX_PUSH_RECORDS}
+ * public records + their proofs + referenced blocks, budget-bounded, public-only.  Lets a peer
+ * proactively SEED content others don't yet know to want (epidemic distribution), not only fetch
+ * its own gaps.  Returns `undefined` when nothing public is held.
+ */
+async function buildPushPack(
+  db: IDBDatabase,
+  lcap: typeof import('@licio/lcap'),
+  budget: number,
+): Promise<Uint8Array | undefined> {
+  const records = await collectByCursor<RecordRow>(db, LCAP_STORE.records, MAX_PUSH_RECORDS);
+  const cids: string[] = [];
+  for (const row of records) {
+    try {
+      const decoded = lcap.decodeAndRouteRecord(row.body);
+      if (decoded.kind === 'contribution_event' && decoded.visibility_scope !== 'public') continue;
+    } catch {
+      continue; // undecodable — never push
+    }
+    cids.push(row.recordCid, ...(await proofCidsForRecord(db, row.recordCid)), ...(row.deps ?? []));
+  }
+  if (cids.length === 0) return undefined;
+  // The public-only reader drops any non-public dep, so the push can never leak restricted content.
+  const repacked = await lcap.repackHeldObjects(publicHeldReader(db, lcap), cids, budget);
+  return repacked.pack;
+}
 
 /** The §16 response budget we serve up to when the peer advertises none (kept small per the
  *  courier/battery doctrine; a held want dropped for budget stays fetchable elsewhere). */
@@ -115,7 +172,15 @@ export async function buildClientExchangeRequest(
   const lcap = await import('@licio/lcap');
   const pulse = await publicPulse(lcap, transportProfile);
   const want = await collectQuarantineWants(db);
-  const request = lcap.buildExchangeRequest({ pulse, interests: [], want });
+  // PUSH our public content too (gossip-out) so a peer can ingest content it didn't know to want
+  // (bounded by the request budget, which the push rides in).
+  const pushPack = await buildPushPack(db, lcap, pulse.budgets.max_request_bytes);
+  const request = lcap.buildExchangeRequest({
+    pulse,
+    interests: [],
+    want,
+    ...(pushPack !== undefined ? { pushPack } : {}),
+  });
   return lcap.encodeWithSchema(lcap.exchangeRequestV2Schema, request);
 }
 
@@ -145,29 +210,13 @@ export async function respondToClientExchange(
   }
 
   // Serve the peer's explicit wants from what we hold, within its advertised response budget —
-  // PUBLIC-ONLY: the courier + WebRTC are public-plane carriers (§22.6), so the responder NEVER
-  // serves a non-public contribution.  Wrap the reader to drop an `in_room`/`private` record
-  // (control + proof + block objects are public trust material; only a contribution carries a
-  // restricted visibility scope) — defense in depth even though `lcap_v2` is the public store.
-  const publicOnlyReader = async (cid: string): Promise<HeldObject | undefined> => {
-    const held = await getHeldObject(db, cid);
-    if (held?.kind === 'record') {
-      try {
-        const record = lcap.decodeAndRouteRecord(held.bytes);
-        if (record.kind === 'contribution_event' && record.visibility_scope !== 'public') {
-          return undefined; // non-public — refuse to serve over the public plane
-        }
-      } catch {
-        return undefined; // undecodable — never serve
-      }
-    }
-    return held;
-  };
+  // PUBLIC-ONLY (the courier + WebRTC are public-plane carriers, §22.6): the responder never
+  // serves a non-public contribution (the shared public-only reader drops it).
   const wantCids = (request.want ?? []).map((w) => w.cid);
   const budget = request.pulse.budgets.max_response_bytes || DEFAULT_RESPONSE_BUDGET;
   const repacked =
     wantCids.length > 0
-      ? await lcap.repackHeldObjects(publicOnlyReader, wantCids, budget)
+      ? await lcap.repackHeldObjects(publicHeldReader(db, lcap), wantCids, budget)
       : { served: [], truncated: false, pack: undefined };
 
   const pulse = await publicPulse(lcap, 'courier');

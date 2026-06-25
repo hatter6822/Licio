@@ -273,6 +273,29 @@ export async function getHeldObject(db: IDBDatabase, cid: string): Promise<HeldO
   return undefined;
 }
 
+/** The proof CIDs attesting `recordCid` (via the `proofs.recordCid` index) — so a content PUSH
+ *  can ferry a record together with its proofs (the receiver re-verifies every CID regardless). */
+export async function proofCidsForRecord(db: IDBDatabase, recordCid: string): Promise<string[]> {
+  const tx = db.transaction(LCAP_STORE.proofs, 'readonly');
+  const index = tx.objectStore(LCAP_STORE.proofs).index('recordCid');
+  const out: string[] = [];
+  await new Promise<void>((resolve, reject) => {
+    const request = index.openCursor(IDBKeyRange.only(recordCid));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve();
+        return;
+      }
+      out.push((cursor.value as ProofRow).proofCid);
+      cursor.continue();
+    };
+    request.onerror = () => reject(request.error ?? new Error('proof index cursor failed'));
+  });
+  await txComplete(tx);
+  return out;
+}
+
 // --- Capped transactions (§23.2 old-phone safety). --------------------------------
 
 /** Split `items` into batches of at most `cap` (pure). */

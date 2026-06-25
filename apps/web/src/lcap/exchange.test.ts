@@ -51,6 +51,48 @@ async function quarantineMissing(
   });
 }
 
+/** Put a real, decodable contribution_event record (the given visibility) into `db`'s records. */
+async function putPublicRecord(
+  db: IDBDatabase,
+  lcap: typeof import('@licio/lcap'),
+  visibility: 'public' | 'in_room' | 'private',
+): Promise<string> {
+  const capabilityCid = await lcap.cidFor('record', new Uint8Array([0]));
+  const body = lcap.encodeContributionEvent({
+    record_version: 2,
+    kind: 'contribution_event',
+    event_type: 'post',
+    home_room_id: 'room-1',
+    visibility_scope: visibility,
+    author_account_id: 'acct',
+    author_device_id: 'dev',
+    author_device_key_id: 'key',
+    device_seq: 1,
+    capability_cid: capabilityCid,
+    policy_epoch_claim: 0,
+    revocation_epoch_claim: 0,
+    client_nonce: new Uint8Array([1, 2, 3]),
+    priority: 2,
+  });
+  const recordCid = await lcap.cidFor('record', body);
+  const tx = db.transaction(LCAP_STORE.records, 'readwrite');
+  tx.objectStore(LCAP_STORE.records).put({
+    recordCid,
+    body,
+    kind: 'contribution_event',
+    lane: 'C0',
+    priority: 2,
+    roomHash: '',
+    state: 'integrity_verified',
+    size: body.length,
+  });
+  await new Promise<void>((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  return recordCid;
+}
+
 describe('client §16 exchange engine', () => {
   it('moves content: A wants a quarantined dep → B serves it → A ingests + holds it', async () => {
     // B holds a block A is missing.
@@ -79,6 +121,22 @@ describe('client §16 exchange engine', () => {
     expect(response).not.toBeNull();
     // A valid response with no response_pack ⇒ nothing to ingest.
     expect(await ingestClientExchangeResponse(peerA, response as Uint8Array)).toBeNull();
+  });
+
+  it('PUSH (gossip-out): a request includes a push_pack of our PUBLIC content', async () => {
+    const lcap = await import('@licio/lcap');
+    await putPublicRecord(peerA, lcap, 'public');
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+    const decoded = lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, request);
+    expect(decoded.push_pack).toBeDefined(); // our public record is gossiped out
+  });
+
+  it('PUSH is PUBLIC-ONLY: a non-public record is NEVER pushed', async () => {
+    const lcap = await import('@licio/lcap');
+    await putPublicRecord(peerA, lcap, 'in_room'); // the ONLY record A holds is non-public
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+    const decoded = lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, request);
+    expect(decoded.push_pack).toBeUndefined(); // nothing public to push → no leak
   });
 
   it('respondToClientExchange returns null for bytes that are not an exchange request', async () => {
