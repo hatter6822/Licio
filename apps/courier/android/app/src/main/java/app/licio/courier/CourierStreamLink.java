@@ -17,7 +17,6 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -56,24 +55,30 @@ final class CourierStreamLink {
      * Send one length-prefixed frame to a connected endpoint's outbound stream on {@code exec},
      * serialized per-stream by {@code synchronized(out)} (so concurrent sends to ONE endpoint
      * never interleave their frames), reporting via {@code result}.
+     *
+     * <p>The executor uses {@code CallerRunsPolicy}, which runs the task INLINE under saturation
+     * (never rejecting) but SILENTLY DISCARDS after shutdown — so the explicit {@code isShutdown}
+     * guard is what makes a post-shutdown send report a terminal result instead of leaking the
+     * {@code SendResult}/PluginCall.  (The executor is radio-lifetime + never shut down, so this
+     * is defensive; the guard keeps it correct if a shutdown is ever introduced.)
      */
     static void send(ExecutorService exec, DataOutputStream out, byte[] payload,
             CourierRadio.SendResult result) {
-        try {
-            exec.execute(() -> {
-                try {
-                    synchronized (out) {
-                        out.write(CourierFraming.framePrefixed(payload)); // wire ≡ writeInt(len)+bytes
-                        out.flush();
-                    }
-                    result.onSuccess();
-                } catch (IOException e) {
-                    result.onError("send_failed", e);
-                }
-            });
-        } catch (RejectedExecutionException stopped) {
-            result.onError("radio_stopped", null); // only if the executor was shut down
+        if (exec.isShutdown()) {
+            result.onError("radio_stopped", null);
+            return;
         }
+        exec.execute(() -> {
+            try {
+                synchronized (out) {
+                    out.write(CourierFraming.framePrefixed(payload)); // wire ≡ writeInt(len)+bytes
+                    out.flush();
+                }
+                result.onSuccess();
+            } catch (IOException e) {
+                result.onError("send_failed", e);
+            }
+        });
     }
 
     /**

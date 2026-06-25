@@ -253,4 +253,28 @@ public class CourierStreamLinkTest {
             exec.shutdownNow();
         }
     }
+
+    @Test
+    public void sendOnAShutDownExecutorReportsFailureNotASilentDrop() {
+        // CallerRunsPolicy SILENTLY DISCARDS a task after shutdown (no run, no throw) — so without
+        // the isShutdown guard a send after a (future) shutdown would never report a terminal
+        // result, leaking the SendResult/PluginCall.  The guard must report onError instead.
+        ExecutorService exec = CourierStreamLink.newSendExecutor("test-send");
+        exec.shutdownNow();
+        final String[] outcome = {null};
+        CourierStreamLink.send(exec, new DataOutputStream(new ByteArrayOutputStream()),
+                new byte[] {1, 2, 3}, new CourierRadio.SendResult() {
+                    @Override
+                    public void onSuccess() {
+                        outcome[0] = "ok";
+                    }
+
+                    @Override
+                    public void onError(String reason, Exception cause) {
+                        outcome[0] = "err:" + reason;
+                    }
+                });
+        assertEquals("a send on a shut-down executor reports failure (no leaked call)",
+                "err:radio_stopped", outcome[0]);
+    }
 }

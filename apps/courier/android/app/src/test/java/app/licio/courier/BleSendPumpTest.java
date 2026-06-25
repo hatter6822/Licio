@@ -35,14 +35,17 @@ public class BleSendPumpTest {
         }
     }
 
-    /** Records arm/cancel so we can assert the timeout is armed per write + cancelled on ack. */
+    /** Records arm/cancel + the armed epochs, so we can assert the timeout is armed per write,
+     *  cancelled on ack, and fire a SPECIFIC (current or stale) epoch back at the pump. */
     private static final class CountingTimeout implements BleSendPump.Timeout {
         int armed;
         int cancelled;
+        long lastEpoch = -1;
 
         @Override
-        public void arm() {
+        public void arm(long epoch) {
             armed++;
+            lastEpoch = epoch;
         }
 
         @Override
@@ -168,14 +171,43 @@ public class BleSendPumpTest {
     @Test
     public void aTimeoutFailsTheStalledSend() {
         RecordingWriter w = new RecordingWriter();
-        BleSendPump pump = new BleSendPump(512, w, null);
+        CountingTimeout t = new CountingTimeout();
+        BleSendPump pump = new BleSendPump(512, w, t);
         Result r = new Result();
         pump.enqueue(new byte[] {1, 2, 3}, r.sink());
-        pump.onTimeout();
+        pump.onTimeout(t.lastEpoch); // the CURRENT chunk's timeout fired
         assertEquals(Boolean.FALSE, r.ok);
         assertEquals("ble_ack_timeout", r.reason);
         // A late ack after the timeout is a no-op (does not double-report).
         pump.onAck(0);
+        assertEquals(1, r.count);
+    }
+
+    @Test
+    public void aStaleTimeoutDoesNotFailAnAdvancedSend() {
+        // The race: chunk N's 30s timeout had ALREADY started running when its ack arrived and the
+        // pump advanced to chunk N+1 (cancel cannot stop a running task).  The stale timeout's
+        // captured epoch ≠ the current one, so it MUST be a no-op — not fail the still-progressing
+        // send.  (Without the epoch guard this fails the send spuriously.)
+        RecordingWriter w = new RecordingWriter();
+        CountingTimeout t = new CountingTimeout();
+        BleSendPump pump = new BleSendPump(20, w, t); // 20-byte chunks
+        Result r = new Result();
+
+        byte[] payload = new byte[50]; // framed 54 bytes → 3 chunks
+        pump.enqueue(payload, r.sink());
+        long staleEpoch = t.lastEpoch; // chunk 0's epoch
+        pump.onAck(0); // chunk 0 acked → chunk 1 written, the timeout re-armed with a NEW epoch
+        assertTrue("the send advanced to a new epoch", t.lastEpoch != staleEpoch);
+
+        // The STALE chunk-0 timeout fires now (it was already running when chunk 1 re-armed):
+        pump.onTimeout(staleEpoch);
+        assertEquals("a stale timeout does not report a result", 0, r.count);
+
+        // The send completes normally on its remaining acks.
+        pump.onAck(0); // chunk 2
+        pump.onAck(0); // final
+        assertEquals(Boolean.TRUE, r.ok);
         assertEquals(1, r.count);
     }
 

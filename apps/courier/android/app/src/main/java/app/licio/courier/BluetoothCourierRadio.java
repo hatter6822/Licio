@@ -208,8 +208,8 @@ public class BluetoothCourierRadio implements CourierRadio {
         ScheduledExecutorService scheduler = bleScheduler();
         return blePumps.computeIfAbsent(endpointId, ep -> {
             BleSendPump[] self = new BleSendPump[1];
-            BleSendPump.Timeout timeout =
-                    new ScheduledAckTimeout(scheduler, BLE_ACK_TIMEOUT_MS, () -> self[0].onTimeout());
+            BleSendPump.Timeout timeout = new ScheduledAckTimeout(
+                    scheduler, BLE_ACK_TIMEOUT_MS, epoch -> self[0].onTimeout(epoch));
             BleSendPump pump = new BleSendPump(
                     chunkSize(ep), chunk -> writeBleChunk(ep, chunk), timeout);
             self[0] = pump;

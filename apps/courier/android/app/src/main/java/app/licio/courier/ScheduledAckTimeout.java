@@ -18,25 +18,28 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongConsumer;
 
 final class ScheduledAckTimeout implements BleSendPump.Timeout {
 
     private final ScheduledExecutorService scheduler;
     private final long delayMs;
-    private final Runnable onTimeout;
+    // Invoked with the armed EPOCH when the timeout fires (the pump no-ops a stale epoch, so a
+    // task that started running before a re-arm cancelled it cannot fail the advanced send).
+    private final LongConsumer onTimeout;
     private volatile ScheduledFuture<?> future;
 
-    ScheduledAckTimeout(ScheduledExecutorService scheduler, long delayMs, Runnable onTimeout) {
+    ScheduledAckTimeout(ScheduledExecutorService scheduler, long delayMs, LongConsumer onTimeout) {
         this.scheduler = scheduler;
         this.delayMs = delayMs;
         this.onTimeout = onTimeout;
     }
 
     @Override
-    public void arm() {
+    public void arm(long epoch) {
         cancel();
         try {
-            future = scheduler.schedule(onTimeout, delayMs, TimeUnit.MILLISECONDS);
+            future = scheduler.schedule(() -> onTimeout.accept(epoch), delayMs, TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException shuttingDown) {
             // scheduler shut down mid-send (stop()/disconnect race) — no timeout armed; the
             // in-flight send is failed by the pump's failAll on teardown.

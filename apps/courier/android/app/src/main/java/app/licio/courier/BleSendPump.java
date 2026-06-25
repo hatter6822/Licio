@@ -40,18 +40,21 @@ public final class BleSendPump {
     }
 
     /** The per-write ack timeout (the radio backs this with a scheduler; pure tests pass
-     *  {@code null} → no timeout, and drive {@link #onTimeout()} explicitly).  {@link #arm()}
-     *  RE-ARMS — it cancels any pending timeout before scheduling a fresh one — so a multi-chunk
-     *  send never leaves a stale timeout from the previous chunk pending. */
+     *  {@code null} → no timeout, and drive {@link #onTimeout(long)} explicitly).  {@link
+     *  #arm(long)} RE-ARMS — it cancels any pending timeout before scheduling a fresh one with the
+     *  given epoch — so a multi-chunk send never leaves a stale timeout from the previous chunk
+     *  pending; the epoch is echoed back to {@link #onTimeout(long)} so a STALE timeout that was
+     *  already RUNNING when the next chunk re-armed (cancel cannot stop a running task) is a
+     *  no-op instead of failing the advanced send. */
     public interface Timeout {
-        void arm();
+        void arm(long epoch);
 
         void cancel();
     }
 
     private static final Timeout NO_TIMEOUT = new Timeout() {
         @Override
-        public void arm() {}
+        public void arm(long epoch) {}
 
         @Override
         public void cancel() {}
@@ -66,6 +69,9 @@ public final class BleSendPump {
     private byte[] framed;
     private int offset;
     private Completion done;
+    // Bumped on every armed write; a fired timeout whose captured epoch ≠ this is STALE (the
+    // chunk it guarded was already acked / the send advanced) and must not fail the send.
+    private long timeoutEpoch;
 
     public BleSendPump(int chunkSize, ChunkWriter writer, Timeout timeout) {
         if (chunkSize <= 0) throw new IllegalArgumentException("non_positive_chunk_size");
@@ -100,9 +106,11 @@ public final class BleSendPump {
         writeChunk(); // arms a fresh timeout (re-arm cancels the prior chunk's)
     }
 
-    /** The armed ack timeout expired (the write stalled with no completion). */
-    public synchronized void onTimeout() {
-        if (framed == null) {
+    /** The ack timeout armed for {@code epoch} expired.  Fails the in-flight send ONLY if that
+     *  epoch is still current — a stale timeout (its chunk was already acked and the send
+     *  advanced, but it had already started running when the next chunk re-armed) is a no-op. */
+    public synchronized void onTimeout(long epoch) {
+        if (framed == null || epoch != timeoutEpoch) {
             return;
         }
         finish(false, "ble_ack_timeout");
@@ -144,7 +152,8 @@ public final class BleSendPump {
             finish(false, "write_rejected");
             return;
         }
-        timeout.arm();
+        // A fresh epoch invalidates any prior chunk's timeout that may already be running.
+        timeout.arm(++timeoutEpoch);
     }
 
     private void finish(boolean ok, String reason) {
