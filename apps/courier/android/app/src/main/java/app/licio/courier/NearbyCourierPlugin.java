@@ -74,6 +74,16 @@ public class NearbyCourierPlugin extends Plugin {
                 ev.put("endpointId", endpointId);
                 notifyListeners("disconnected", ev);
             }
+
+            @Override
+            public void onStartFailed(String operation, Exception cause) {
+                // Surface a refused advertise/discover start (GMS rejected the Task) so the TS
+                // layer learns no start is running, instead of silently believing it succeeded.
+                JSObject ev = new JSObject();
+                ev.put("operation", operation);
+                ev.put("error", cause != null ? cause.getMessage() : "start_failed");
+                notifyListeners("startFailed", ev);
+            }
         });
     }
 

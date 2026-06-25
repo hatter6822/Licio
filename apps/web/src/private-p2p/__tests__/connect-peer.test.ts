@@ -521,5 +521,7 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     rtcCreated = 0;
     await expect(connectPrivatePeer({ ...base })).rejects.toThrow();
     expect(rtcCreated).toBeGreaterThan(0);
-  });
+    // Real BBS verification over a 20-announcement flood, polled across the timeout window, is
+    // legitimately CPU-heavy — give it ample headroom over the 5s default so slower CI isn't flaky.
+  }, 30_000);
 });

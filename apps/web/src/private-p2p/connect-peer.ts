@@ -515,6 +515,12 @@ function installIceRestartWatcher(p: IceRestartWatcherParams): void {
   const isDisconnected = (): boolean =>
     iceState() === 'disconnected' || connState() === 'disconnected';
   const isRecovered = (): boolean => {
+    // A BAD state on EITHER machine takes precedence over a healthy one on the other: an
+    // ICE-only `failed`/`disconnected` (while `connectionState` still reads `connected`) is the
+    // exact signal ICE-restart exists for, so it must NOT be masked as "recovered" — otherwise
+    // `onStateChange` short-circuits and the offerer never re-offers, stranding the live data
+    // channel on a dead path.  Recovered ⇔ neither machine is bad AND at least one reads healthy.
+    if (isFailed() || isDisconnected()) return false;
     const i = iceState();
     const c = connState();
     return i === 'connected' || i === 'completed' || c === 'connected' || c === 'completed';

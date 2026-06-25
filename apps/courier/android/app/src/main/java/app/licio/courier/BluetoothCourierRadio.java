@@ -108,6 +108,10 @@ public class BluetoothCourierRadio implements CourierRadio {
     private BluetoothLeScanner scanner;
     private ScanCallback scanCallback;
     private final ConcurrentHashMap<String, BluetoothGatt> bleClients = new ConcurrentHashMap<>();
+    // Dials in flight (connectGatt issued, not yet STATE_CONNECTED): repeated scan results for the
+    // same advertiser would otherwise each start ANOTHER connectGatt, leaking untracked GATTs that
+    // emit duplicate connection events and survive stop(); this dedups them + lets stop() close them.
+    private final ConcurrentHashMap<String, BluetoothGatt> blePendingClients = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, BluetoothGattCharacteristic> bleClientChars = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Integer> bleMtu = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CourierFraming.FrameAssembler> assemblers = new ConcurrentHashMap<>();
@@ -476,8 +480,15 @@ public class BluetoothCourierRadio implements CourierRadio {
             @SuppressWarnings("MissingPermission")
             public void onScanResult(int callbackType, ScanResult result) {
                 BluetoothDevice device = result.getDevice();
-                if (device == null || bleClients.containsKey(device.getAddress())) return;
-                device.connectGatt(ctx, false, gattClientCallback, BluetoothDevice.TRANSPORT_LE);
+                if (device == null) return;
+                String addr = device.getAddress();
+                // Skip if already connected OR a dial is already in flight — onScanResult repeats for
+                // the same advertiser well before STATE_CONNECTED populates bleClients.  Claim the
+                // dial slot atomically (putIfAbsent) so concurrent scan results can't double-dial.
+                if (bleClients.containsKey(addr) || blePendingClients.containsKey(addr)) return;
+                BluetoothGatt gatt =
+                        device.connectGatt(ctx, false, gattClientCallback, BluetoothDevice.TRANSPORT_LE);
+                if (gatt != null) blePendingClients.put(addr, gatt);
             }
         };
         scanner.startScan(
@@ -493,10 +504,12 @@ public class BluetoothCourierRadio implements CourierRadio {
         public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
             String endpointId = gatt.getDevice().getAddress();
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                blePendingClients.remove(endpointId); // promoted from dialing to connected
                 bleClients.put(endpointId, gatt);
                 assemblers.put(endpointId, new CourierFraming.FrameAssembler());
                 gatt.requestMtu(247);
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                blePendingClients.remove(endpointId); // a failed/closed dial frees the slot to re-dial
                 bleClients.remove(endpointId);
                 bleClientChars.remove(endpointId);
                 assemblers.remove(endpointId);
@@ -527,13 +540,28 @@ public class BluetoothCourierRadio implements CourierRadio {
             gatt.setCharacteristicNotification(ch, true);
             BluetoothGattDescriptor ccc = ch.getDescriptor(CCC_UUID);
             if (ccc != null) {
+                // The CCC write is ASYNC — defer onConnectionResult to onDescriptorWrite, since the
+                // peer's notifications aren't actually received until the subscription completes.
+                // Reporting connected here would let the exchange start (and the peer answer by
+                // notification) before notifications are enabled → a dropped first reply.
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     gatt.writeDescriptor(ccc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
                 } else {
                     writeDescriptorLegacy(gatt, ccc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
                 }
+            } else {
+                // No CCC ⇒ no notify subscription to await (write-only path) — report connected now.
+                events.onConnectionResult(endpointId, true);
             }
-            events.onConnectionResult(endpointId, true);
+        }
+
+        @Override
+        public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
+            if (!CCC_UUID.equals(descriptor.getUuid())) return;
+            // The notify subscription is now established (or failed) — ONLY now is the duplex link
+            // ready, so report the connection result reflecting whether it succeeded.
+            events.onConnectionResult(gatt.getDevice().getAddress(),
+                    status == BluetoothGatt.GATT_SUCCESS);
         }
 
         @Override
@@ -593,6 +621,15 @@ public class BluetoothCourierRadio implements CourierRadio {
                 // already closed
             }
         }
+        // Close dials that never reached STATE_CONNECTED too — they are not in bleClients yet.
+        for (BluetoothGatt gatt : blePendingClients.values()) {
+            try {
+                gatt.disconnect();
+                gatt.close();
+            } catch (Exception ignored) {
+                // already closed
+            }
+        }
         if (gattServer != null) {
             try {
                 gattServer.close();
@@ -602,6 +639,7 @@ public class BluetoothCourierRadio implements CourierRadio {
             gattServer = null;
         }
         bleClients.clear();
+        blePendingClients.clear();
         bleClientChars.clear();
         bleCentrals.clear();
         assemblers.clear();

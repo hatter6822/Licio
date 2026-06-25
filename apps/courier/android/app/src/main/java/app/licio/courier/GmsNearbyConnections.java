@@ -50,14 +50,23 @@ public class GmsNearbyConnections implements NearbyConnections {
 
     @Override
     public void startAdvertising(String localName, String serviceId) {
+        // The start Task fails when GMS refuses (missing runtime permission, disabled Nearby/Play
+        // Services, radio off) — surface that instead of dropping it, so the caller is not told a
+        // start succeeded when no advertising is actually running.
         client.startAdvertising(localName, serviceId, lifecycle,
-                new AdvertisingOptions.Builder().setStrategy(STRATEGY).build());
+                        new AdvertisingOptions.Builder().setStrategy(STRATEGY).build())
+                .addOnFailureListener(e -> {
+                    if (listener != null) listener.onStartFailed("advertise", e);
+                });
     }
 
     @Override
     public void startDiscovery(String serviceId) {
         client.startDiscovery(serviceId, discovery,
-                new DiscoveryOptions.Builder().setStrategy(STRATEGY).build());
+                        new DiscoveryOptions.Builder().setStrategy(STRATEGY).build())
+                .addOnFailureListener(e -> {
+                    if (listener != null) listener.onStartFailed("discover", e);
+                });
     }
 
     @Override

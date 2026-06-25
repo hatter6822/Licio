@@ -83,6 +83,8 @@ public class NearbyCourierRadioTest {
         String payloadEndpoint;
         byte[] payload;
         String disconnectedEndpoint;
+        String startFailedOperation;
+        Exception startFailedCause;
 
         @Override
         public void onConnectionResult(String endpointId, boolean connected) {
@@ -99,6 +101,12 @@ public class NearbyCourierRadioTest {
         @Override
         public void onDisconnected(String endpointId) {
             disconnectedEndpoint = endpointId;
+        }
+
+        @Override
+        public void onStartFailed(String operation, Exception cause) {
+            startFailedOperation = operation;
+            startFailedCause = cause;
         }
     }
 
@@ -213,5 +221,19 @@ public class NearbyCourierRadioTest {
         FakeNearby fake = new FakeNearby();
         new NearbyCourierRadio(fake, new Recorder()).stop();
         assertEquals(Boolean.TRUE, (Boolean) fake.stopped);
+    }
+
+    @Test
+    public void aRefusedStartIsPropagatedToTheEventsNotDropped() {
+        // GMS delivers an advertise/discover refusal asynchronously via the start Task; the seam
+        // surfaces it as onStartFailed, which the radio must forward (not swallow) so the caller
+        // learns no start is running rather than believing it succeeded.
+        FakeNearby fake = new FakeNearby();
+        Recorder rec = new Recorder();
+        new NearbyCourierRadio(fake, rec);
+        Exception cause = new IllegalStateException("nearby_disabled");
+        fake.listener.onStartFailed("advertise", cause);
+        assertEquals("advertise", rec.startFailedOperation);
+        assertEquals(cause, rec.startFailedCause);
     }
 }

@@ -19,6 +19,7 @@ import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCharacteristic;
+import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
 import android.bluetooth.BluetoothServerSocket;
@@ -145,7 +146,10 @@ public class BluetoothCourierRadioTest {
         radio.gattClientCallback.onConnectionStateChange(
                 gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
         radio.gattClientCallback.onServicesDiscovered(gatt, BluetoothGatt.GATT_SUCCESS);
-        assertEquals("the link is announced after services resolve", Boolean.TRUE, rec.connectedFlag);
+        // The connection is announced only once the CCC notify-subscription write completes (the
+        // shadow acks the descriptor write synchronously → onDescriptorWrite → connectionResult).
+        assertEquals("the link is announced after the CCC subscription completes",
+                Boolean.TRUE, rec.connectedFlag);
 
         // 2000 bytes ⇒ a genuinely multi-chunk send at any MTU (the chunk size is capped at 512).
         byte[] payload = new byte[2000];
@@ -170,6 +174,28 @@ public class BluetoothCourierRadioTest {
         radio.gattClientCallback.onCharacteristicWrite(
                 gatt, courierCharacteristic(), BluetoothGatt.GATT_SUCCESS);
         assertEquals("ok", outcome[0]);
+        radio.stop();
+    }
+
+    @Test
+    public void bleClientReportsTheConnectionFromTheCccDescriptorWrite() {
+        // Fix: the connection is reported from the CCC notify-subscription write completing (NOT
+        // eagerly in onServicesDiscovered), so the exchange never starts before notifications are
+        // enabled.  A SUCCESS reports connected; a FAILURE reports a failed connection.
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        BluetoothGatt gatt = peerDevice().connectGatt(
+                ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
+        BluetoothGattDescriptor ccc = new BluetoothGattDescriptor(
+                BluetoothCourierRadio.CCC_UUID, BluetoothGattDescriptor.PERMISSION_WRITE);
+
+        radio.gattClientCallback.onDescriptorWrite(gatt, ccc, BluetoothGatt.GATT_SUCCESS);
+        assertEquals("a successful CCC write announces the duplex link",
+                Boolean.TRUE, rec.connectedFlag);
+
+        radio.gattClientCallback.onDescriptorWrite(gatt, ccc, BluetoothGatt.GATT_FAILURE);
+        assertEquals("a failed CCC write reports a failed connection",
+                Boolean.FALSE, rec.connectedFlag);
         radio.stop();
     }
 

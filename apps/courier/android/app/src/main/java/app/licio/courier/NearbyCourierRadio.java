@@ -91,4 +91,10 @@ public class NearbyCourierRadio implements CourierRadio, NearbyConnections.Liste
     public void onPayloadReceived(String endpointId, byte[] bytes) {
         events.onPayload(endpointId, bytes);
     }
+
+    @Override
+    public void onStartFailed(String operation, Exception cause) {
+        // GMS refused to start advertising/discovery — surface it (the seam delivers it async).
+        events.onStartFailed(operation, cause);
+    }
 }

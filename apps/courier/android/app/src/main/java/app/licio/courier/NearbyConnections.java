@@ -27,6 +27,11 @@ public interface NearbyConnections {
 
         /** A BYTES payload arrived (null/non-BYTES payloads are filtered by the impl). */
         void onPayloadReceived(String endpointId, byte[] bytes);
+
+        /** A start request ({@code "advertise"}/{@code "discover"}) FAILED — GMS delivers this
+         *  asynchronously via the start Task, so it must be surfaced (not dropped) or the caller
+         *  would believe a start succeeded when no advertising/discovery is actually running. */
+        void onStartFailed(String operation, Exception cause);
     }
 
     void setListener(Listener listener);

@@ -20,6 +20,11 @@ public interface CourierRadio {
         void onPayload(String endpointId, byte[] bytes);
 
         void onDisconnected(String endpointId);
+
+        /** An advertise/discover START failed asynchronously (e.g. GMS refused the request).
+         *  Default no-op: the synchronous-start radios (RFCOMM/Wi-Fi/USB) never fire it; Nearby,
+         *  whose GMS start is an async Task, surfaces a refused start here. */
+        default void onStartFailed(String operation, Exception cause) {}
     }
 
     /** Async result of a {@link #send}; the shim resolves/rejects the PluginCall from it. */

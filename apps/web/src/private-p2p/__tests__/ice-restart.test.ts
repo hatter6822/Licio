@@ -82,6 +82,7 @@ class FakePeer implements RtcPeerConnectionLike {
   onconnectionstatechange: (() => void) | null = null;
   oniceconnectionstatechange: (() => void) | null = null;
   connectionState = 'new';
+  iceConnectionState = 'new';
   // Instrumentation the tests assert on.
   isOfferer = false;
   restartIceCalls = 0;
@@ -136,8 +137,12 @@ class FakePeer implements RtcPeerConnectionLike {
       this.link.answerExchanged = true;
       this.link.maybeOpen();
       // Applying an answer brings (or restores) the offerer to a live connection — unless this
-      // peer is modelling a path that never heals (the bounded-retry test).
-      if (this.healOnRestart) this.setConnectionState('connected');
+      // peer is modelling a path that never heals (the bounded-retry test).  A successful restart
+      // restores BOTH state machines (the ICE path AND the connection).
+      if (this.healOnRestart) {
+        this.iceConnectionState = 'connected';
+        this.setConnectionState('connected');
+      }
     }
   }
   async addIceCandidate(): Promise<void> {
@@ -152,6 +157,12 @@ class FakePeer implements RtcPeerConnectionLike {
       this.onconnectionstatechange?.();
       this.oniceconnectionstatechange?.();
     });
+  }
+  /** Drive ONLY the ICE state machine — `connectionState` is left as-is, modelling the real case
+   *  where ICE flips to `failed`/`disconnected` while the connection-level state still lags. */
+  setIceConnectionState(state: string): void {
+    this.iceConnectionState = state;
+    queueMicrotask(() => this.oniceconnectionstatechange?.());
   }
   close(): void {
     this.closed = true;
@@ -352,6 +363,30 @@ describe('WS-S.4.3 connectPrivatePeer — §15.4 ICE-restart recovery', () => {
     await waitFor(() => off.iceRestartOffers > 0, 'offerer re-offers');
     // The answerer must not have created an iceRestart offer of its own.
     expect(answerer.iceRestartOffers).toBe(0);
+
+    a.channel.close();
+    b.channel.close();
+  });
+
+  it('an ICE-only failure (connectionState still `connected`) is NOT masked as recovered', async () => {
+    // The exact case ICE-restart exists for: `iceConnectionState` flips to `failed` while
+    // `connectionState` still reads `connected`.  isRecovered() must treat the bad ICE state as
+    // a real failure (not mask it via the healthy connectionState), so the offerer re-offers.
+    const { a, b, offerer } = await connectPair();
+    const off = offerer();
+    expect(off.connectionState).toBe('connected');
+
+    off.setIceConnectionState('failed'); // connectionState stays 'connected'
+    await waitFor(
+      () => off.iceRestartOffers > 0,
+      'an ICE-restart re-offer for the ICE-only failure',
+    );
+    // The restart restores both machines; the connection is recovered in place, not torn down.
+    await waitFor(
+      () => off.iceConnectionState === 'connected' && off.connectionState === 'connected',
+      'recovery of both state machines',
+    );
+    expect(off.closed).toBe(false);
 
     a.channel.close();
     b.channel.close();
