@@ -31,6 +31,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class WifiDirectRadio implements CourierRadio {
@@ -49,6 +50,8 @@ public class WifiDirectRadio implements CourierRadio {
     private volatile ServerSocket serverSocket;
     // Live data sockets, closed on stop() so a thread blocked in a socket read unblocks.
     private final Set<Socket> liveSockets = ConcurrentHashMap.newKeySet();
+    // Bounded daemon executor for sends (replaces unbounded thread-per-send).
+    private final ExecutorService sendExecutor = CourierStreamLink.newSendExecutor("wifi-direct-send");
 
     public WifiDirectRadio(Context ctx, CourierRadio.Events events) {
         this.ctx = ctx;
@@ -125,17 +128,7 @@ public class WifiDirectRadio implements CourierRadio {
             result.onError("endpoint_not_connected", null);
             return;
         }
-        new Thread(() -> {
-            try {
-                synchronized (out) {
-                    out.write(CourierFraming.framePrefixed(payload)); // wire ≡ writeInt(len)+bytes
-                    out.flush();
-                }
-                result.onSuccess();
-            } catch (IOException e) {
-                result.onError("send_failed", e);
-            }
-        }).start();
+        CourierStreamLink.send(sendExecutor, out, payload, result); // bounded executor (not thread-per-send)
     }
 
     // --- Wi-Fi Direct connection plumbing -------------------------------------------

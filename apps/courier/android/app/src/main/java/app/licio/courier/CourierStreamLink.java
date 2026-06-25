@@ -16,11 +16,65 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
 final class CourierStreamLink {
 
+    /** Max concurrent blocking-stream sends per radio before backpressure kicks in. */
+    private static final int MAX_SEND_THREADS = 8;
+
     private CourierStreamLink() {}
+
+    /**
+     * A BOUNDED, daemon send executor shared by one blocking-stream radio's sends — replaces
+     * thread-per-send (which was unbounded under a send flood).  Scales from 0 to
+     * {@link #MAX_SEND_THREADS} threads on demand, reaps idle threads after 30s
+     * ({@code allowCoreThreadTimeOut}), and applies CALLER-RUNS backpressure when saturated
+     * (a flood runs inline on the caller rather than spawning threads or dropping sends).  Daemon
+     * + self-reaping, so it lives with the radio and never blocks JVM exit; no shutdown needed.
+     */
+    static ExecutorService newSendExecutor(String name) {
+        ThreadPoolExecutor exec = new ThreadPoolExecutor(
+                1, MAX_SEND_THREADS, 30L, TimeUnit.SECONDS,
+                new SynchronousQueue<>(),
+                r -> {
+                    Thread t = new Thread(r, name);
+                    t.setDaemon(true);
+                    return t;
+                },
+                new ThreadPoolExecutor.CallerRunsPolicy());
+        exec.allowCoreThreadTimeOut(true);
+        return exec;
+    }
+
+    /**
+     * Send one length-prefixed frame to a connected endpoint's outbound stream on {@code exec},
+     * serialized per-stream by {@code synchronized(out)} (so concurrent sends to ONE endpoint
+     * never interleave their frames), reporting via {@code result}.
+     */
+    static void send(ExecutorService exec, DataOutputStream out, byte[] payload,
+            CourierRadio.SendResult result) {
+        try {
+            exec.execute(() -> {
+                try {
+                    synchronized (out) {
+                        out.write(CourierFraming.framePrefixed(payload)); // wire ≡ writeInt(len)+bytes
+                        out.flush();
+                    }
+                    result.onSuccess();
+                } catch (IOException e) {
+                    result.onError("send_failed", e);
+                }
+            });
+        } catch (RejectedExecutionException stopped) {
+            result.onError("radio_stopped", null); // only if the executor was shut down
+        }
+    }
 
     /**
      * Drive one connected blocking stream pair as a courier link.  Registers {@code out} under

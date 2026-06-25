@@ -48,11 +48,9 @@ import java.util.Collections;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class BluetoothCourierRadio implements CourierRadio {
@@ -98,6 +96,8 @@ public class BluetoothCourierRadio implements CourierRadio {
     private final ConcurrentHashMap<String, DataOutputStream> outbound = new ConcurrentHashMap<>();
     // Live RFCOMM sockets, closed on stop() so a thread blocked in a socket read unblocks.
     private final Set<BluetoothSocket> liveSockets = ConcurrentHashMap.newKeySet();
+    // Bounded daemon executor for RFCOMM sends (replaces unbounded thread-per-send).
+    private final ExecutorService sendExecutor = CourierStreamLink.newSendExecutor("rfcomm-send");
 
     // --- BLE GATT fallback state ----------------------------------------------------
     private volatile BluetoothGattServer gattServer;
@@ -182,17 +182,7 @@ public class BluetoothCourierRadio implements CourierRadio {
     public void send(String endpointId, byte[] payload, CourierRadio.SendResult result) {
         DataOutputStream out = outbound.get(endpointId);
         if (out != null) {
-            new Thread(() -> {
-                try {
-                    synchronized (out) {
-                        out.write(CourierFraming.framePrefixed(payload)); // wire ≡ writeInt(len)+bytes
-                        out.flush();
-                    }
-                    result.onSuccess();
-                } catch (IOException e) {
-                    result.onError("send_failed", e);
-                }
-            }).start();
+            CourierStreamLink.send(sendExecutor, out, payload, result); // RFCOMM (bounded executor)
             return;
         }
         if (bleClients.containsKey(endpointId) || bleCentrals.containsKey(endpointId)) {
@@ -213,38 +203,13 @@ public class BluetoothCourierRadio implements CourierRadio {
     /** The per-endpoint BLE send pump, created on first use against the endpoint's negotiated
      *  MTU.  The chunk write + the ack timeout are the only I/O; the pump is pure. */
     private BleSendPump blePumpFor(String endpointId) {
-        bleScheduler(); // eagerly create the timeout scheduler ON THE SEND PATH (never from arm())
+        // Eagerly create the timeout scheduler ON THE SEND PATH and capture it (never lazily from
+        // ScheduledAckTimeout.arm() — that would resurrect a scheduler stopBle() just shut down).
+        ScheduledExecutorService scheduler = bleScheduler();
         return blePumps.computeIfAbsent(endpointId, ep -> {
             BleSendPump[] self = new BleSendPump[1];
-            BleSendPump.Timeout timeout = new BleSendPump.Timeout() {
-                private volatile ScheduledFuture<?> future;
-
-                @Override
-                public void arm() {
-                    cancel();
-                    // A PLAIN read — never lazily re-create the scheduler (that would resurrect one
-                    // stopBle() just shut down, leaking a thread); and tolerate the stop()/disconnect
-                    // race where it is being torn down (the in-flight send is failAll'd anyway).
-                    ScheduledExecutorService exec = bleScheduler;
-                    if (exec == null) {
-                        return;
-                    }
-                    try {
-                        future = exec.schedule(() -> self[0].onTimeout(),
-                                BLE_ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-                    } catch (RejectedExecutionException shuttingDown) {
-                        // scheduler shut down mid-send — no timeout armed; failAll fails the send
-                    }
-                }
-
-                @Override
-                public void cancel() {
-                    ScheduledFuture<?> f = future;
-                    if (f != null) {
-                        f.cancel(false);
-                    }
-                }
-            };
+            BleSendPump.Timeout timeout =
+                    new ScheduledAckTimeout(scheduler, BLE_ACK_TIMEOUT_MS, () -> self[0].onTimeout());
             BleSendPump pump = new BleSendPump(
                     chunkSize(ep), chunk -> writeBleChunk(ep, chunk), timeout);
             self[0] = pump;

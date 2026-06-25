@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class UsbCourierRadio implements CourierRadio {
@@ -43,6 +44,8 @@ public class UsbCourierRadio implements CourierRadio {
     // A single accessory link, but keyed (one entry) so the SHARED CourierStreamLink data-path
     // routes outbound exactly as it does for the multi-endpoint socket transports.
     private final ConcurrentHashMap<String, DataOutputStream> outbound = new ConcurrentHashMap<>();
+    // Bounded daemon executor for sends (replaces unbounded thread-per-send).
+    private final ExecutorService sendExecutor = CourierStreamLink.newSendExecutor("usb-send");
 
     public UsbCourierRadio(Context ctx, CourierRadio.Events events) {
         this.events = events;
@@ -99,17 +102,7 @@ public class UsbCourierRadio implements CourierRadio {
             result.onError("endpoint_not_connected", null);
             return;
         }
-        new Thread(() -> {
-            try {
-                synchronized (out) {
-                    out.write(CourierFraming.framePrefixed(payload)); // wire ≡ writeInt(len)+bytes
-                    out.flush();
-                }
-                result.onSuccess();
-            } catch (IOException e) {
-                result.onError("send_failed", e);
-            }
-        }).start();
+        CourierStreamLink.send(sendExecutor, out, payload, result); // bounded executor (not thread-per-send)
     }
 
     @Override
