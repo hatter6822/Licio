@@ -302,11 +302,7 @@ single `validate()` trust-projection entry point over the §18.2 state lattice
 proofs, witnesses, fork evidence (WS-R.9); the liveness / receipts /
 durable-outbox model (WS-R.10); and the §25.1 conflict-table dispatch + the
 trust/safety-aware visible-thread projection (WS-R.13) — all I/O-free,
-exhaustively tested, and conformance-vector-pinned (`docs/lcap/README.md`).  The
-remaining WS-R cards are predominantly **I/O integration** (the `lcap_v2`
-IndexedDB store, the server ingestion/reconciliation routes + DB schema, the sync
-wire orchestration, the DoS/privacy controls, the transport profiles, the client
-surface, and the network simulator).  The **WS-S private-rooms (E2EE) plane has
+exhaustively tested, and conformance-vector-pinned (`docs/lcap/README.md`).  The WS-R I/O integration has since shipped (the `lcap_v2` client store, the server ingestion/reconciliation + §29 sync routes, the DoS/privacy controls, the transport profiles + network simulator, and the client surface); the remaining WS-R work is field confirmation on PHYSICAL phones and the live two-browser WebRTC convergence E2E (see WS-S).  The **WS-S private-rooms (E2EE) plane has
 shipped its foundation** — the new browser-safe `@licio/private-p2p` package
 (the zero-dependency canonical DAG-CBOR encoder + the strict §10/§13/§19 private
 schemas), the room-class model (the three §4.1 axes + coherence in
@@ -344,11 +340,7 @@ endpoint is also shipped** (`POST /v1/private-rendezvous/{announce,poll,signal,
 signal/poll}` in `apps/api` — opaque-only blind ids + ciphertext + a clamped TTL,
 the §15.3.1 no-existence-oracle, aggregate-only metrics, IP-free rate limits,
 CSRF-exempt; presence persists to the migration-`0044` table behind a gated
-Postgres adapter, signals are transient).  The remaining WS-S plane (the §9 P2P
-block-exchange transport — full Helia vetted at 580 transitive packages, so the
-WebRTC/IPFS-bridge path over `@licio/lcap-p2p` is the chosen direction — the live
-`RTCPeerConnection` carrier consuming the WS-S.6.2/6.3 cores, WS-S.7–11
-UI/media/migration/update channel) is the next slice.  See "Implementation
+Postgres adapter, signals are transient).  The WS-S live `RTCPeerConnection` carrier (the WebRTC/IPFS-bridge path over `@licio/lcap-p2p`, chosen over full Helia), the hardened update channel, the server→private migration, and the WS-S.11 audit suite have since shipped; the remaining WS-S work is the live two-browser create→invite→join→connect→converge E2E (with multi-peer mesh fan-out) and the grant-delivery/media room-UI affordances.  See "Implementation
 roadmap" below.
 
 ## Build and run
