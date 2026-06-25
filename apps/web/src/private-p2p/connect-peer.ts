@@ -572,6 +572,12 @@ function installIceRestartWatcher(p: IceRestartWatcherParams): void {
 
   pc.onconnectionstatechange = onStateChange;
   pc.oniceconnectionstatechange = onStateChange;
+  // The watcher is armed only AFTER the data-channel handshake; if the ICE/connection state
+  // already reached `disconnected`/`failed` DURING that handshake, the state-change event has
+  // already fired and assigning the handlers above will not re-invoke it.  Drive it once now so
+  // an already-bad path starts recovery (or tears down) immediately instead of waiting for the
+  // next transition — which a stuck `disconnected` path may never deliver.
+  onStateChange();
 }
 
 // --- a buffering message inbox (no frame is lost before a consumer attaches) --------

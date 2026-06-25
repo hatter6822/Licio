@@ -357,15 +357,33 @@ public class BluetoothCourierRadio implements CourierRadio {
     @SuppressWarnings("MissingPermission")
     private void startServerSocket() {
         new Thread(() -> {
+            closeServerSocket();
+            BluetoothServerSocket server;
             try {
+                server = adapter.listenUsingRfcommWithServiceRecord(SERVICE_NAME, SERVICE_UUID);
+            } catch (IOException e) {
+                // RFCOMM unavailable — the BLE GATT path remains
+                return;
+            }
+            serverSocket = server;
+            // stop() may have run (and found a null serverSocket) between its running flip and the
+            // assignment above; if a stop has already happened, close the freshly-created listener
+            // now so the RFCOMM service/listener doesn't stay registered after the courier stopped.
+            if (!running.get()) {
                 closeServerSocket();
-                serverSocket = adapter.listenUsingRfcommWithServiceRecord(SERVICE_NAME, SERVICE_UUID);
+                return;
+            }
+            try {
                 while (running.get()) {
-                    BluetoothSocket socket = serverSocket.accept();
+                    BluetoothSocket socket = server.accept();
                     handleSocket(socket);
                 }
             } catch (IOException ignored) {
-                // socket closed on stop, or RFCOMM unavailable — the BLE GATT path remains
+                // socket closed on stop — non-fatal
+            } finally {
+                // Close whatever we created, even if `running` flipped false right after the
+                // post-creation check above (so the listener never leaks past stop()).
+                closeServerSocket();
             }
         }).start();
     }

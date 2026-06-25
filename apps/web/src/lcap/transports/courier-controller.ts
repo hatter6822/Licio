@@ -254,6 +254,11 @@ export class CourierController {
     for (const { channel, plugin } of this.channels) {
       try {
         if (this.decision.advertise) await plugin.startAdvertising(radioOptions);
+        // If an async startFailed tore THIS channel down during the advertise await (stopChannel
+        // deletes its handles synchronously), do NOT also start discovery on it — that would leave
+        // a native radio running with no listeners and no running mark (the UI would then report
+        // blocked/unavailable while the radio is still live).
+        if (!this.handlesByChannel.has(channel)) continue;
         if (this.decision.discover) await plugin.startDiscovery(radioOptions);
         // Only mark active if an async startFailed did NOT already tear this channel down mid-await
         // (stopChannel deletes its handles), so a dead channel is never counted as running.

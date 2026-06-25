@@ -93,6 +93,12 @@ class FakePeer implements RtcPeerConnectionLike {
    *  real RTCPeerConnection does when a restart attempt fails to reconnect), so the watcher's
    *  bounded-retry cap is exercised. */
   healOnRestart = true;
+  /** When true, the FIRST applied answer silently flips the connection to `disconnected` WITHOUT
+   *  dispatching a state-change event — modelling a path that goes bad DURING the §15.5 handshake,
+   *  so by the time the ICE-restart watcher installs the event has already fired.  One-shot: the
+   *  restart's re-answer heals normally. */
+  silentDisconnectOnFirstAnswer = false;
+  private answersApplied = 0;
   constructor(private readonly link: FakeLink) {}
   createDataChannel(): RtcDataChannelLike {
     const ch = new FakeChannel();
@@ -136,6 +142,14 @@ class FakePeer implements RtcPeerConnectionLike {
     } else if (description.type === 'answer') {
       this.link.answerExchanged = true;
       this.link.maybeOpen();
+      this.answersApplied += 1;
+      if (this.silentDisconnectOnFirstAnswer && this.answersApplied === 1) {
+        // The path went bad mid-handshake: be `disconnected` by watcher-install time, with NO
+        // state-change event fired afterward (so only a self-driven install-time check recovers it).
+        this.connectionState = 'disconnected';
+        this.iceConnectionState = 'disconnected';
+        return;
+      }
       // Applying an answer brings (or restores) the offerer to a live connection — unless this
       // peer is modelling a path that never heals (the bounded-retry test).  A successful restart
       // restores BOTH state machines (the ICE path AND the connection).
@@ -215,6 +229,7 @@ interface ConnectedPair {
 
 async function connectPair(
   overrides: Partial<ConnectPrivatePeerParams> = {},
+  prepPeer?: (pc: FakePeer) => void,
 ): Promise<ConnectedPair> {
   const p2p = await import('@licio/private-p2p');
   const created = await p2p.createPrivateRoom({
@@ -254,6 +269,7 @@ async function connectPair(
     timeoutMs: 4_000,
     rtcFactory: () => {
       const pc = new FakePeer(link);
+      prepPeer?.(pc);
       peers.push(pc);
       return pc;
     },
@@ -363,6 +379,27 @@ describe('WS-S.4.3 connectPrivatePeer — §15.4 ICE-restart recovery', () => {
     await waitFor(() => off.iceRestartOffers > 0, 'offerer re-offers');
     // The answerer must not have created an iceRestart offer of its own.
     expect(answerer.iceRestartOffers).toBe(0);
+
+    a.channel.close();
+    b.channel.close();
+  });
+
+  it('recovers a path that was ALREADY bad when the watcher installed (no later event)', async () => {
+    // If the connection went `disconnected` DURING the §15.5 handshake, the state-change event has
+    // already fired by the time the watcher installs; merely assigning the handlers would never
+    // invoke recovery.  The watcher must self-drive once on install, so an already-bad path starts
+    // an ICE restart immediately rather than stranding the live signaling pump until some later
+    // transition (which a stuck `disconnected` path may never deliver).
+    const { a, b, offerer } = await connectPair({ iceRestartGraceMs: 2 }, (pc) => {
+      pc.silentDisconnectOnFirstAnswer = true;
+    });
+    const off = offerer();
+    // No state-change event fired after install — yet recovery still starts (the re-offer), driven
+    // solely by the install-time self-check.  Without it this would hang at 0 forever.
+    await waitFor(() => off.iceRestartOffers > 0, 'recovery started from the already-bad state');
+    // The one-shot disconnect heals on the restart answer, so the connection comes back in place.
+    await waitFor(() => off.connectionState === 'connected', 'recovery to connected in place');
+    expect(off.closed).toBe(false);
 
     a.channel.close();
     b.channel.close();

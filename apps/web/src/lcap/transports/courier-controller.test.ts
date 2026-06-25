@@ -149,6 +149,32 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     );
   });
 
+  it('does NOT start discovery on a channel whose advertise already tore it down (race)', async () => {
+    // startAdvertising fires an async `startFailed` that tears THIS channel down mid-await (its
+    // listeners are removed synchronously).  start() must re-check the channel is still registered
+    // BEFORE starting discovery — else it would (re)start a native radio with no listeners and no
+    // running mark, so the UI shows blocked/unavailable while the radio is left live.
+    const f = fakePlugin();
+    f.plugin.startAdvertising = vi.fn(async () => {
+      f.calls.push('advertise');
+      f.emit('startFailed', { operation: 'advertise', error: 'nearby_disabled' });
+    });
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => new Uint8Array([1]),
+    });
+    const decision = await controller.start();
+    // Discovery was NOT started on the torn-down channel.
+    expect(f.calls).not.toContain('discover');
+    expect(f.plugin.startDiscovery).not.toHaveBeenCalled();
+    // With its only channel down, the courier is honestly unavailable (not falsely running).
+    expect(controller.isRunning()).toBe(false);
+    expect(decision.blockedReason).toBe('radio_unavailable');
+    await vi.waitFor(() => expect(f.calls).toContain('stop')); // the channel was torn down
+  });
+
   it('isolates a failing channel — one radio refusing does NOT stop the others', async () => {
     // Two channels.  The FIRST channel's startAdvertising fires a `startFailed` (an async refusal).
     // With per-channel teardown, ONLY that channel is torn down — the SECOND keeps running, and the

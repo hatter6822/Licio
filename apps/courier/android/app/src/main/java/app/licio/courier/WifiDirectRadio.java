@@ -47,6 +47,10 @@ public class WifiDirectRadio implements CourierRadio {
     // Claimed when a formed group's socket is set up; blocks duplicate CONNECTION_CHANGED callbacks
     // for the SAME group from racing a second server/client socket.  Reset when the group dissolves.
     private final AtomicBoolean groupActive = new AtomicBoolean(false);
+    // Held while a manager.connect() request is outstanding so a PEERS_CHANGED refresh during group
+    // formation does not issue a duplicate connect (which Android rejects BUSY, whose failure handler
+    // would tear down the forming courier).  Cleared once the connection state resolves.
+    private final AtomicBoolean connectPending = new AtomicBoolean(false);
     private BroadcastReceiver receiver;
     // endpointId (the peer host) -> the connected data socket's output stream.
     private final ConcurrentHashMap<String, DataOutputStream> outbound = new ConcurrentHashMap<>();
@@ -108,6 +112,7 @@ public class WifiDirectRadio implements CourierRadio {
     public void stop() {
         running.set(false);
         groupActive.set(false); // a fresh start must be able to set up the group's sockets again
+        connectPending.set(false); // drop any in-flight connect claim so a restart can connect
         if (manager != null && channel != null) {
             // Best-effort teardown — the framework can throw if the channel is mid-operation;
             // a stop must never propagate (it runs on a PluginCall + in cleanup paths).
@@ -159,6 +164,12 @@ public class WifiDirectRadio implements CourierRadio {
                 if (WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION.equals(action)) {
                     manager.requestPeers(channel, peers -> {
                         if (!running.get() || peers.getDeviceList().isEmpty()) return;
+                        // Skip a fresh connect while a group/socket is already set up (a harmless
+                        // peer-list refresh must not tear down a working courier) or a connect is
+                        // already in flight — either case would issue a duplicate connect Android
+                        // rejects BUSY, whose failure handler reports startFailed.
+                        if (groupActive.get()) return;
+                        if (!connectPending.compareAndSet(false, true)) return;
                         // Connect to the first discovered peer (single-group transport).
                         WifiP2pConfig config = new WifiP2pConfig();
                         config.deviceAddress = peers.getDeviceList().iterator().next().deviceAddress;
@@ -169,16 +180,19 @@ public class WifiDirectRadio implements CourierRadio {
                                 // The connect REQUEST was accepted; the group forms asynchronously.
                                 // The CONNECTION_CHANGED broadcast is the primary trigger, but pull
                                 // the connection info now too so an ALREADY-formed group (or a missed
-                                // broadcast) still drives onConnectionInfo → the socket setup.
+                                // broadcast) still drives onConnectionInfo → the socket setup (which
+                                // clears connectPending once the connection state resolves).
                                 manager.requestConnectionInfo(
                                         channel, WifiDirectRadio.this::onConnectionInfo);
                             }
 
                             @Override
                             public void onFailure(int reason) {
-                                // The connect was rejected (peer gone / BUSY / ERROR) — surface it
+                                // The connect was rejected (peer gone / BUSY / ERROR) — release the
+                                // in-flight claim so a later refresh can retry, and surface it
                                 // instead of swallowing the async failure, so the courier doesn't
                                 // stay "running" with no socket setup and no retry.
+                                connectPending.set(false);
                                 events.onStartFailed("connect",
                                         new IllegalStateException("wifi_p2p_connect_failed_" + reason));
                             }
@@ -209,8 +223,10 @@ public class WifiDirectRadio implements CourierRadio {
      *  (a unit test would have to bind the fixed `DATA_PORT`, which the no-fixed-port policy avoids). */
     void onConnectionInfo(WifiP2pInfo info) {
         if (info == null || !info.groupFormed) {
-            // The group dissolved — allow the NEXT formation to set up its sockets again.
+            // The group dissolved — allow the NEXT formation to set up its sockets again, and the
+            // next PEERS_CHANGED to issue a fresh connect.
             groupActive.set(false);
+            connectPending.set(false);
             return;
         }
         // Android may deliver CONNECTION_CHANGED more than once for the SAME formed group; claim the
@@ -220,25 +236,47 @@ public class WifiDirectRadio implements CourierRadio {
         // not consume the slot — a later callback with the address can still dial.
         if (info.isGroupOwner) {
             if (groupActive.compareAndSet(false, true)) startServerSocket();
+            connectPending.set(false); // the group is up — no client connect is in flight
         } else if (info.groupOwnerAddress != null) {
             if (groupActive.compareAndSet(false, true)) {
                 connectClientSocket(info.groupOwnerAddress.getHostAddress());
             }
+            connectPending.set(false); // the owner address is known — the connect has resolved
         }
+        // else: groupFormed but the client's owner address is not known yet — leave connectPending
+        // set; a later CONNECTION_CHANGED re-fires onConnectionInfo with the address.
     }
 
     /** The group owner accepts inbound data sockets and reads length-prefixed frames. */
     private void startServerSocket() {
         new Thread(() -> {
+            closeServerSocket();
+            ServerSocket server;
             try {
+                server = new ServerSocket(DATA_PORT);
+            } catch (IOException e) {
+                // bind failed (port busy / no interface) — non-fatal
+                return;
+            }
+            serverSocket = server;
+            // stop() may have run (and found a null serverSocket) between its running flip and the
+            // assignment above; if a stop has already happened, close the freshly-bound listener now
+            // so the Wi-Fi Direct data port doesn't stay bound after the courier stopped.
+            if (!running.get()) {
                 closeServerSocket();
-                serverSocket = new ServerSocket(DATA_PORT);
+                return;
+            }
+            try {
                 while (running.get()) {
-                    Socket socket = serverSocket.accept();
+                    Socket socket = server.accept();
                     handleSocket(socket, socket.getInetAddress().getHostAddress());
                 }
             } catch (IOException ignored) {
                 // socket closed on stop — non-fatal
+            } finally {
+                // Close whatever we bound, even if `running` flipped false right after the
+                // post-creation check above (so the bound port never leaks past stop()).
+                closeServerSocket();
             }
         }).start();
     }
@@ -250,13 +288,16 @@ public class WifiDirectRadio implements CourierRadio {
                 Socket socket = new Socket();
                 socket.bind(null);
                 socket.connect(new InetSocketAddress(host, DATA_PORT), SOCKET_TIMEOUT_MS);
-                handleSocket(socket, host);
+                handleSocket(socket, host); // returns when the data socket EOFs / errors / is stopped
             } catch (IOException e) {
-                // No socket was established (owner not listening yet / connect refused) — RELEASE the
-                // per-group claim so a later CONNECTION_CHANGED for the still-formed group can retry
-                // the dial instead of being skipped until the group dissolves.
-                groupActive.set(false);
+                // No socket was established (owner not listening yet / connect refused).
                 events.onConnectionResult(host, false);
+            } finally {
+                // The client data socket has closed (connect failed, OR a live session ended by
+                // EOF/error/stop) while the P2P group may STILL be formed.  Release the per-group
+                // claim so a later CONNECTION_CHANGED for the still-formed group can redial, instead
+                // of being skipped (compareAndSet failing) until the group dissolves.
+                groupActive.set(false);
             }
         }).start();
     }

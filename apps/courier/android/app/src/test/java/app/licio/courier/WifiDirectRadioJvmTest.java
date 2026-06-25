@@ -19,7 +19,10 @@ import android.net.wifi.p2p.WifiP2pInfo;
 
 import androidx.test.core.app.ApplicationProvider;
 
+import java.io.IOException;
 import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -114,6 +117,63 @@ public class WifiDirectRadioJvmTest {
         radio.onConnectionInfo(info); // RETRY for the same formed group — must dial again
         waitForCount(results, 2);
         radio.stop();
+    }
+
+    @Test
+    public void aClosedClientSessionReleasesTheGroupClaimSoAlaterCallbackRedials() throws Exception {
+        // A LIVE client session that ENDS (the owner closes the data socket → the client link EOFs)
+        // must release the per-group claim, so a later CONNECTION_CHANGED for the STILL-formed group
+        // redials.  A `finally` that left groupActive set would strand the courier disconnected until
+        // the group dissolved.  Stand up a throwaway "owner" on DATA_PORT that accepts each dial and
+        // immediately closes it, so each client session connects (onConnectionResult(true)) then EOFs.
+        AtomicInteger connects = new AtomicInteger();
+        AtomicInteger disconnects = new AtomicInteger();
+        WifiDirectRadio radio = new WifiDirectRadio(ctx(), new CourierRadio.Events() {
+            @Override
+            public void onConnectionResult(String endpointId, boolean connected) {
+                if (connected) connects.incrementAndGet();
+            }
+
+            @Override
+            public void onPayload(String endpointId, byte[] bytes) {}
+
+            @Override
+            public void onDisconnected(String endpointId) {
+                disconnects.incrementAndGet();
+            }
+        });
+
+        ServerSocket owner = new ServerSocket(WifiDirectRadio.DATA_PORT);
+        Thread acceptLoop = new Thread(() -> {
+            try {
+                while (true) {
+                    Socket s = owner.accept();
+                    s.close(); // end the session immediately → the client's link EOFs
+                }
+            } catch (IOException ignored) {
+                // owner closed on teardown
+            }
+        });
+        acceptLoop.setDaemon(true);
+        acceptLoop.start();
+
+        WifiP2pInfo info = new WifiP2pInfo();
+        info.groupFormed = true;
+        info.isGroupOwner = false; // the CLIENT dials the owner
+        info.groupOwnerAddress = InetAddress.getByName("127.0.0.1");
+
+        try {
+            radio.onConnectionInfo(info);  // first dial: connects, then the owner closes → EOF
+            waitForCount(connects, 1);
+            waitForCount(disconnects, 1); // the session ended (onDisconnected emitted)
+            Thread.sleep(200);            // let connectClientSocket's finally release the claim
+            radio.onConnectionInfo(info);  // redial for the SAME still-formed group must be ALLOWED
+            waitForCount(connects, 2);     // hangs here if the claim were not released
+            assertEquals("exactly the two dials we triggered", 2, connects.get());
+        } finally {
+            radio.stop();
+            owner.close();
+        }
     }
 
     private static void waitForCount(AtomicInteger counter, int target) throws InterruptedException {
