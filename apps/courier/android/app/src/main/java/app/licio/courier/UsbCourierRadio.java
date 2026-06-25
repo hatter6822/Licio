@@ -14,9 +14,14 @@
 
 package app.licio.courier;
 
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.hardware.usb.UsbAccessory;
 import android.hardware.usb.UsbManager;
+import android.os.Build;
 import android.os.ParcelFileDescriptor;
 
 import java.io.Closeable;
@@ -34,11 +39,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class UsbCourierRadio implements CourierRadio {
 
     static final String USB_ENDPOINT_ID = "usb-accessory";
+    private static final String ACTION_USB_PERMISSION = "app.licio.courier.USB_PERMISSION";
 
+    private final Context ctx;
     private final UsbManager usbManager;
     private final CourierRadio.Events events;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private volatile ParcelFileDescriptor descriptor;
+    // A pending accessory-permission request's receiver, so stop() can unregister an in-flight prompt.
+    private volatile BroadcastReceiver permissionReceiver;
     // The stream the read loop blocks on — closed by stop() to UNBLOCK it (closing the accessory
     // descriptor does not reliably interrupt a FileInputStream built from getFileDescriptor()).
     private volatile InputStream readStream;
@@ -49,6 +58,7 @@ public class UsbCourierRadio implements CourierRadio {
     private final ExecutorService sendExecutor = CourierStreamLink.newSendExecutor("usb-send");
 
     public UsbCourierRadio(Context ctx, CourierRadio.Events events) {
+        this.ctx = ctx;
         this.events = events;
         this.usbManager = (UsbManager) ctx.getSystemService(Context.USB_SERVICE);
     }
@@ -79,13 +89,75 @@ public class UsbCourierRadio implements CourierRadio {
             events.onStartFailed("discover", new IllegalStateException("no_usb_accessory"));
             return;
         }
-        descriptor = usbManager.openAccessory(accessories[0]);
+        UsbAccessory accessory = accessories[0];
+        // First-use path: an accessory attached while the app was launched manually carries NO grant.
+        // openAccessory() would then throw / fail-unavailable, so REQUEST the grant (the system prompt)
+        // and open from the result, instead of failing before the user can authorise the courier.
+        if (!usbManager.hasPermission(accessory)) {
+            requestAccessoryPermission(accessory);
+            return;
+        }
+        openAccessory(accessory);
+    }
+
+    /** Open an already-permitted accessory and wire the courier over its fd streams. */
+    private void openAccessory(UsbAccessory accessory) {
+        descriptor = usbManager.openAccessory(accessory);
         if (descriptor == null) {
             events.onStartFailed("discover", new IllegalStateException("usb_accessory_open_failed"));
             return;
         }
         FileDescriptor fd = descriptor.getFileDescriptor();
         attach(new FileInputStream(fd), new FileOutputStream(fd), USB_ENDPOINT_ID);
+    }
+
+    /** Register a one-shot receiver and ask the system for accessory permission; on grant, open the
+     *  accessory, on denial surface a typed start failure so the controller stops showing it running. */
+    private void requestAccessoryPermission(UsbAccessory accessory) {
+        if (permissionReceiver != null) return; // a prompt is already in flight
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
+                unregisterPermissionReceiver();
+                boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                        && usbManager.hasPermission(accessory);
+                if (!running.get()) return; // stopped while the prompt was open — do not open
+                if (granted) {
+                    openAccessory(accessory);
+                } else {
+                    events.onStartFailed("discover",
+                            new IllegalStateException("usb_permission_denied"));
+                }
+            }
+        };
+        permissionReceiver = receiver;
+        IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
+        // The receiver is internal (an explicit-package broadcast from the USB framework); mark it
+        // not-exported on API 33+ where a flag is required.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ctx.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            ctx.registerReceiver(receiver, filter);
+        }
+        // The framework fills the grant result into the broadcast, so the PendingIntent must be
+        // MUTABLE on API 31+; target our own package so it is an explicit, non-exported broadcast.
+        int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ? PendingIntent.FLAG_MUTABLE : 0;
+        Intent intent = new Intent(ACTION_USB_PERMISSION).setPackage(ctx.getPackageName());
+        PendingIntent pi = PendingIntent.getBroadcast(ctx, 0, intent, flags);
+        usbManager.requestPermission(accessory, pi);
+    }
+
+    private void unregisterPermissionReceiver() {
+        BroadcastReceiver receiver = permissionReceiver;
+        if (receiver != null) {
+            try {
+                ctx.unregisterReceiver(receiver);
+            } catch (IllegalArgumentException ignored) {
+                // not registered
+            }
+            permissionReceiver = null;
+        }
     }
 
     /**
@@ -135,6 +207,7 @@ public class UsbCourierRadio implements CourierRadio {
     @Override
     public void stop() {
         running.set(false);
+        unregisterPermissionReceiver(); // drop an in-flight accessory-permission prompt
         // Close the READ stream first — this is what unblocks a thread parked in readFramedStream
         // (so CourierStreamLink's finally runs: drop outbound + fire onDisconnected).
         InputStream rs = readStream;

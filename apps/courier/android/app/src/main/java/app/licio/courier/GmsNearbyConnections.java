@@ -12,6 +12,11 @@ import android.content.Context;
 
 import androidx.annotation.NonNull;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+
 import com.google.android.gms.nearby.Nearby;
 import com.google.android.gms.nearby.connection.AdvertisingOptions;
 import com.google.android.gms.nearby.connection.ConnectionInfo;
@@ -30,6 +35,8 @@ import com.google.android.gms.nearby.connection.Strategy;
 public class GmsNearbyConnections implements NearbyConnections {
 
     private static final Strategy STRATEGY = Strategy.P2P_CLUSTER;
+    // The §27 LCAP DoS cap — a received STREAM payload is buffered only up to this size.
+    private static final int MAX_STREAM_BYTES = 64 * 1024 * 1024;
 
     private final ConnectionsClient client;
     private Listener listener;
@@ -71,7 +78,15 @@ public class GmsNearbyConnections implements NearbyConnections {
 
     @Override
     public void requestConnection(String localName, String endpointId) {
-        client.requestConnection(localName, endpointId, lifecycle);
+        // The request Task fails asynchronously if the endpoint vanished or GMS is busy/errored.
+        // Without a failure listener the lifecycle callback never fires for this endpoint, so the
+        // radio would never learn the dial failed (discovery stays "running" while the only found
+        // peer is never exchanged with).  Report a negative connectionResult so the orchestration
+        // is free to dial again on the next endpoint-found.
+        client.requestConnection(localName, endpointId, lifecycle)
+                .addOnFailureListener(e -> {
+                    if (listener != null) listener.onConnectionResult(endpointId, false);
+                });
     }
 
     @Override
@@ -81,7 +96,12 @@ public class GmsNearbyConnections implements NearbyConnections {
 
     @Override
     public void sendBytes(String endpointId, byte[] bytes, CourierRadio.SendResult result) {
-        client.sendPayload(endpointId, Payload.fromBytes(bytes))
+        // A Nearby BYTES payload is capped at Connections.MAX_BYTES_DATA_SIZE (~1 MiB), but an LCAP
+        // exchange can reach the §27 64 MiB cap.  Send a STREAM payload (an ordered, unbounded byte
+        // stream) so a large offline exchange is ferried WHOLE instead of being rejected.  The
+        // receiver reassembles it on transfer completion (see payloadCallback).
+        Payload payload = Payload.fromStream(new ByteArrayInputStream(bytes));
+        client.sendPayload(endpointId, payload)
                 .addOnSuccessListener(unused -> result.onSuccess())
                 .addOnFailureListener(e -> result.onError("send_failed", e));
     }
@@ -127,18 +147,56 @@ public class GmsNearbyConnections implements NearbyConnections {
         }
     };
 
+    // STREAM payloads in flight, by payload id — read to bytes only once the transfer completes.
+    private final java.util.Map<Long, Payload> incomingStreams = new java.util.concurrent.ConcurrentHashMap<>();
+
     private final PayloadCallback payloadCallback = new PayloadCallback() {
         @Override
         public void onPayloadReceived(@NonNull String endpointId, @NonNull Payload payload) {
+            if (payload.getType() == Payload.Type.STREAM) {
+                // A STREAM is delivered incrementally — hold it until onPayloadTransferUpdate reports
+                // SUCCESS, then read the full ordered byte stream (matches the sender's fromStream).
+                incomingStreams.put(payload.getId(), payload);
+                return;
+            }
             byte[] bytes = payload.asBytes();
             if (bytes != null && listener != null) {
-                listener.onPayloadReceived(endpointId, bytes); // only BYTES payloads carry frames
+                listener.onPayloadReceived(endpointId, bytes); // a small BYTES payload carries frames too
             }
         }
 
         @Override
         public void onPayloadTransferUpdate(@NonNull String endpointId, @NonNull PayloadTransferUpdate update) {
-            // Bounded BYTES payloads complete atomically; no chunk reassembly here.
+            int status = update.getStatus();
+            if (status == PayloadTransferUpdate.Status.IN_PROGRESS) return;
+            Payload payload = incomingStreams.remove(update.getPayloadId());
+            if (status != PayloadTransferUpdate.Status.SUCCESS) return; // FAILURE/CANCELED → dropped
+            if (payload == null) return; // a BYTES payload (handled on receipt) or already consumed
+            Payload.Stream stream = payload.asStream();
+            if (stream == null || listener == null) return;
+            try (InputStream in = stream.asInputStream()) {
+                byte[] bytes = readStreamBounded(in);
+                if (bytes != null) listener.onPayloadReceived(endpointId, bytes);
+            } catch (IOException e) {
+                // a truncated / failed stream — drop it; the exchange re-syncs on a later pass
+            }
         }
     };
+
+    /** Read a completed Nearby stream fully into memory, bounded by the §27 LCAP cap so a hostile
+     *  peer cannot exhaust memory (the bytes are re-validated against their CIDs/COSE on the TS side). */
+    private static byte[] readStreamBounded(InputStream in) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        byte[] chunk = new byte[64 * 1024];
+        int total = 0;
+        int n;
+        while ((n = in.read(chunk)) != -1) {
+            total += n;
+            if (total > MAX_STREAM_BYTES) {
+                return null; // over the cap — refuse rather than buffer an unbounded payload
+            }
+            buffer.write(chunk, 0, n);
+        }
+        return buffer.toByteArray();
+    }
 }

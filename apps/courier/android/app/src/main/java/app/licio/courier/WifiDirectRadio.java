@@ -255,7 +255,13 @@ public class WifiDirectRadio implements CourierRadio {
             try {
                 server = new ServerSocket(DATA_PORT);
             } catch (IOException e) {
-                // bind failed (port busy / no interface) — non-fatal
+                // The data port could not be bound (a stale listener / another process holds 8989).
+                // groupActive was claimed by onConnectionInfo BEFORE this thread ran, so RELEASE it
+                // (a later connection-info callback for the same group can retry) and SURFACE the
+                // failure — otherwise the controller would show Wi-Fi Direct as running with no
+                // server socket while the stale claim blocks every retry.
+                groupActive.set(false);
+                events.onStartFailed("server_bind", e);
                 return;
             }
             serverSocket = server;
@@ -284,13 +290,33 @@ public class WifiDirectRadio implements CourierRadio {
     /** The client dials the group-owner host and reads length-prefixed frames. */
     private void connectClientSocket(String host) {
         new Thread(() -> {
+            Socket socket = null;
             try {
-                Socket socket = new Socket();
+                socket = new Socket();
+                // Track BEFORE the blocking connect() so a concurrent stop() can close the socket and
+                // interrupt the dial — otherwise a connect that completes AFTER stop() would open a
+                // peer-visible link (and emit connectionResult(true)) once the courier is stopped.
+                liveSockets.add(socket);
                 socket.bind(null);
                 socket.connect(new InetSocketAddress(host, DATA_PORT), SOCKET_TIMEOUT_MS);
+                if (!running.get()) {
+                    // Stopped DURING the dial — do not hand a connected socket to the stream link
+                    // (which would announce the endpoint connected after stop()).
+                    liveSockets.remove(socket);
+                    socket.close();
+                    return;
+                }
                 handleSocket(socket, host); // returns when the data socket EOFs / errors / is stopped
             } catch (IOException e) {
-                // No socket was established (owner not listening yet / connect refused).
+                // No socket was established (owner not listening yet / connect refused / stop closed it).
+                if (socket != null) {
+                    liveSockets.remove(socket);
+                    try {
+                        socket.close();
+                    } catch (IOException ignored) {
+                        // already closed
+                    }
+                }
                 events.onConnectionResult(host, false);
             } finally {
                 // The client data socket has closed (connect failed, OR a live session ended by

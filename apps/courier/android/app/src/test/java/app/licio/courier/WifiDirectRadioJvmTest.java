@@ -162,6 +162,10 @@ public class WifiDirectRadioJvmTest {
         info.isGroupOwner = false; // the CLIENT dials the owner
         info.groupOwnerAddress = InetAddress.getByName("127.0.0.1");
 
+        // In production onConnectionInfo only fires after startDiscovery() set running=true; mirror
+        // that precondition so the post-connect running-check (which aborts a dial that completes
+        // after stop()) does not abort this LIVE session.
+        radio.startDiscovery();
         try {
             radio.onConnectionInfo(info);  // first dial: connects, then the owner closes → EOF
             waitForCount(connects, 1);
@@ -173,6 +177,46 @@ public class WifiDirectRadioJvmTest {
         } finally {
             radio.stop();
             owner.close();
+        }
+    }
+
+    @Test
+    public void aServerBindFailureReleasesTheGroupClaimAndReportsStartFailed() throws Exception {
+        // Occupy DATA_PORT so the group OWNER's ServerSocket bind fails.  The owner claim is taken
+        // (groupActive) BEFORE startServerSocket() runs, so a bind failure must RELEASE it AND surface
+        // onStartFailed("server_bind") — else the controller shows Wi-Fi Direct running with no server
+        // socket and the stale claim blocks every retry.  Proof of release: a second owner callback
+        // can re-claim and bind-fail again ONLY if the first failure cleared the claim.
+        ServerSocket occupy = new ServerSocket(WifiDirectRadio.DATA_PORT);
+        AtomicInteger bindFailures = new AtomicInteger();
+        WifiDirectRadio radio = new WifiDirectRadio(ctx(), new CourierRadio.Events() {
+            @Override
+            public void onConnectionResult(String endpointId, boolean connected) {}
+
+            @Override
+            public void onPayload(String endpointId, byte[] bytes) {}
+
+            @Override
+            public void onDisconnected(String endpointId) {}
+
+            @Override
+            public void onStartFailed(String operation, Exception cause) {
+                if ("server_bind".equals(operation)) bindFailures.incrementAndGet();
+            }
+        });
+        WifiP2pInfo owner = new WifiP2pInfo();
+        owner.groupFormed = true;
+        owner.isGroupOwner = true; // this device is the group owner → it binds the server socket
+
+        try {
+            radio.onConnectionInfo(owner);   // claim → startServerSocket → bind fails → release + fail
+            waitForCount(bindFailures, 1);
+            radio.onConnectionInfo(owner);   // re-claim is possible ONLY if the first failure released it
+            waitForCount(bindFailures, 2);
+            assertEquals("each owner callback bind-failed (claim released between)", 2, bindFailures.get());
+        } finally {
+            radio.stop();
+            occupy.close();
         }
     }
 

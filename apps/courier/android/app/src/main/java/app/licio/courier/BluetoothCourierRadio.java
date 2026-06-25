@@ -162,10 +162,15 @@ public class BluetoothCourierRadio implements CourierRadio {
             return;
         }
         running.set(true);
-        for (BluetoothDevice device : adapter.getBondedDevices()) {
+        Set<BluetoothDevice> bonded = adapter.getBondedDevices();
+        for (BluetoothDevice device : bonded) {
             connectClient(device);
         }
-        startBleScan();
+        // When there are NO bonded peers to dial over RFCOMM, the BLE scan is the ONLY discovery
+        // path, so a scan-start failure must be surfaced (else the channel shows running with no
+        // active discovery).  With bonded dials in flight, a BLE failure is non-escalating (RFCOMM
+        // carries) — escalating it would wrongly tear the whole channel down.
+        startBleScan(bonded.isEmpty());
     }
 
     @Override
@@ -394,18 +399,30 @@ public class BluetoothCourierRadio implements CourierRadio {
             BluetoothSocket socket = null;
             try {
                 socket = device.createRfcommSocketToServiceRecord(SERVICE_UUID);
+                // Track BEFORE the blocking connect() so a concurrent stop() can close the socket and
+                // interrupt the dial — otherwise a connect that completes AFTER stop() would open a
+                // peer-visible Bluetooth link (and emit connectionResult(true)) post-stop.
+                liveSockets.add(socket);
                 adapter.cancelDiscovery(); // discovery slows the connect handshake
                 socket.connect();
+                if (!running.get()) {
+                    // Stopped DURING the dial — do not hand a connected socket to the stream link
+                    // (which would announce the endpoint connected after stop()).
+                    liveSockets.remove(socket);
+                    socket.close();
+                    return;
+                }
                 handleSocket(socket);
             } catch (IOException e) {
-                events.onConnectionResult(device.getAddress(), false);
                 if (socket != null) {
+                    liveSockets.remove(socket);
                     try {
                         socket.close();
                     } catch (IOException ignored) {
                         // already closed
                     }
                 }
+                events.onConnectionResult(device.getAddress(), false);
             }
         }).start();
     }
@@ -549,9 +566,17 @@ public class BluetoothCourierRadio implements CourierRadio {
     // --- BLE GATT fallback: central (scan + GATT client) ----------------------------
 
     @SuppressWarnings("MissingPermission")
-    private void startBleScan() {
+    private void startBleScan(boolean bleIsOnlyDiscoveryPath) {
         scanner = adapter.getBluetoothLeScanner();
-        if (scanner == null) return;
+        if (scanner == null) {
+            // No BLE scanner on this controller — surface it ONLY when BLE was the sole discovery
+            // avenue (else the bonded RFCOMM dials carry discovery and a startFailed would wrongly
+            // tear the channel down).
+            if (bleIsOnlyDiscoveryPath) {
+                events.onStartFailed("discover", new IllegalStateException("ble_scanner_unavailable"));
+            }
+            return;
+        }
         scanCallback = new ScanCallback() {
             @Override
             @SuppressWarnings("MissingPermission")
@@ -567,12 +592,29 @@ public class BluetoothCourierRadio implements CourierRadio {
                         device.connectGatt(ctx, false, gattClientCallback, BluetoothDevice.TRANSPORT_LE);
                 if (gatt != null) blePendingClients.put(addr, gatt);
             }
+
+            @Override
+            public void onScanFailed(int errorCode) {
+                // Android rejected the scan (already-started / app-registration / internal error).
+                // Surface it when BLE is the only discovery path so the controller doesn't show the
+                // channel running with no active discovery.
+                if (bleIsOnlyDiscoveryPath) {
+                    events.onStartFailed("discover",
+                            new IllegalStateException("ble_scan_failed_" + errorCode));
+                }
+            }
         };
-        scanner.startScan(
-                Collections.singletonList(
-                        new ScanFilter.Builder().setServiceUuid(BLE_SERVICE_PUUID).build()),
-                new ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(),
-                scanCallback);
+        try {
+            scanner.startScan(
+                    Collections.singletonList(
+                            new ScanFilter.Builder().setServiceUuid(BLE_SERVICE_PUUID).build()),
+                    new ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(),
+                    scanCallback);
+        } catch (RuntimeException e) {
+            // A synchronous throw (SecurityException for a missing runtime permission, or a framework
+            // IllegalStateException) means no scan is running — surface it on the BLE-only path.
+            if (bleIsOnlyDiscoveryPath) events.onStartFailed("discover", e);
+        }
     }
 
     final BluetoothGattCallback gattClientCallback = new BluetoothGattCallback() {
