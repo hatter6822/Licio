@@ -191,9 +191,14 @@ export class CourierController {
   private controls: CourierRadioControls;
   private sharedBytes = 0;
   private started = false;
-  /** True only while {@link start} is still launching radios — an async startFailed during this
-   *  window tears down only its own channel and defers the all-failed verdict to start()'s end. */
+  /** True only while a launch (start OR a live restart) is still bringing radios up — an async
+   *  startFailed during this window tears down only its own channel and defers the all-failed
+   *  verdict to the launch's end. */
   private launching = false;
+  /** A control change that arrived DURING a launch (a native start / permission prompt was still
+   *  pending) — deferred and applied once the radios settle, so a restriction is never lost. */
+  private pendingControls: { controls: CourierRadioControls; power?: CourierPowerState } | null =
+    null;
   private decision: CourierStartDecision = {
     advertise: false,
     discover: false,
@@ -240,29 +245,52 @@ export class CourierController {
     if (this.channels.length === 0) return this.decision; // nothing to drive
 
     this.started = true;
-    // Register listeners on EVERY channel BEFORE starting any radio so no early event is missed.
-    for (const { channel, plugin } of this.channels) {
-      await this.registerListeners(channel, plugin);
+    await this.launch(this.decision, this.channels);
+    // The courier is unavailable only if NO channel could start (the HTTPS anchor still carries) —
+    // unless a control change deferred during the launch already turned it off (handled in launch).
+    if (this.started && this.runningChannels.size === 0) {
+      this.started = false;
+      this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
     }
+    return this.decision;
+  }
 
-    const radioOptions = {
+  /** The per-radio start options (service id / endpoint name) from config. */
+  private radioOptions(): { serviceId?: string; endpointName?: string } {
+    return {
       ...(this.config.serviceId !== undefined ? { serviceId: this.config.serviceId } : {}),
       ...(this.config.endpointName !== undefined ? { endpointName: this.config.endpointName } : {}),
     };
-    // Start each channel INDEPENDENTLY: one radio refusing (sync throw OR an async startFailed that
-    // fires during these awaits) tears down ONLY that channel, never the others.
+  }
+
+  /**
+   * Register listeners + start advertising/discovery (per `decision`) on each given channel,
+   * INDEPENDENTLY — one radio refusing (sync throw OR an async startFailed mid-await) tears down
+   * ONLY that channel.  Holds `launching` for its duration (a late startFailed defers the
+   * all-failed verdict), and applies a control change that arrived during the launch once it
+   * settles.  Shared by {@link start} and the live restart path.
+   */
+  private async launch(
+    decision: CourierStartDecision,
+    channels: readonly CourierChannelPlugin[],
+  ): Promise<void> {
+    // Set synchronously (before the first await) so a control change that races the launch always
+    // observes `launching` and DEFERS, never interleaving with listener registration / radio start.
     this.launching = true;
-    for (const { channel, plugin } of this.channels) {
+    // Register listeners on EVERY channel BEFORE starting any radio so no early event is missed.
+    for (const { channel, plugin } of channels) {
+      await this.registerListeners(channel, plugin);
+    }
+    const options = this.radioOptions();
+    for (const { channel, plugin } of channels) {
       try {
-        if (this.decision.advertise) await plugin.startAdvertising(radioOptions);
+        if (decision.advertise) await plugin.startAdvertising(options);
         // If an async startFailed tore THIS channel down during the advertise await (stopChannel
         // deletes its handles synchronously), do NOT also start discovery on it — that would leave
-        // a native radio running with no listeners and no running mark (the UI would then report
-        // blocked/unavailable while the radio is still live).
+        // a native radio running with no listeners and no running mark.
         if (!this.handlesByChannel.has(channel)) continue;
-        if (this.decision.discover) await plugin.startDiscovery(radioOptions);
-        // Only mark active if an async startFailed did NOT already tear this channel down mid-await
-        // (stopChannel deletes its handles), so a dead channel is never counted as running.
+        if (decision.discover) await plugin.startDiscovery(options);
+        // Only mark active if an async startFailed did NOT already tear this channel down mid-await.
         if (this.handlesByChannel.has(channel)) this.runningChannels.add(channel);
       } catch (error) {
         devWarn(`a courier radio '${channel}' refused to start`, error);
@@ -270,12 +298,14 @@ export class CourierController {
       }
     }
     this.launching = false;
-    // The courier is unavailable only if NO channel could start (the HTTPS anchor still carries).
-    if (this.runningChannels.size === 0) {
-      this.started = false;
-      this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
+    // A control change that arrived DURING the launch (the user disabled a radio / changed policy
+    // while a native start or permission prompt was pending) was deferred — apply it now so the
+    // restriction takes effect even though it raced the radios coming up.
+    if (this.pendingControls) {
+      const pending = this.pendingControls;
+      this.pendingControls = null;
+      await this.reconcileRadios(pending.controls, pending.power);
     }
-    return this.decision;
   }
 
   /** Stop EVERY channel's radio, remove its listeners, and drop the per-endpoint mediums. */
@@ -291,32 +321,63 @@ export class CourierController {
   /**
    * Apply a §22.5 control change to the ALREADY-RUNNING courier immediately (a privacy control
    * must take effect now, not at the next Stop/Start).  The who-can-exchange + storage-budget
-   * gates read the new controls on the next exchange automatically; for the RADIOS this:
-   *   - stops EVERY radio if the new controls/mode disallow the courier (off / no peers / forced
-   *     off / below the battery floor), flipping the decision to that typed reason; else
-   *   - stops any RUNNING channel the user just DESELECTED (live channel removal).
-   * Re-enabling a channel or loosening a gate that was off takes effect on the next Start (a
-   * deselected radio's plugin is not retained) — only RESTRICTIONS are enforced live, never
-   * loosened silently.  A no-op before {@link start} (Start reads the latest controls).
+   * gates read the new controls on the next exchange automatically; the RADIOS are reconciled by
+   * {@link reconcileRadios} (stop everything when disallowed; RESTART the still-enabled channels
+   * when a direction was toggled, since a native radio can only stop wholesale; else drop a
+   * deselected channel).  `power` should be a FRESH reading so the §22.5 battery floor is enforced
+   * against the current level, not the snapshot captured at Start.  A no-op before {@link start}.
+   * Re-enabling a channel takes effect on the next Start (a deselected radio's plugin is not
+   * retained) — only RESTRICTIONS are enforced live, never loosened silently.
    */
-  async applyControls(next: CourierRadioControls): Promise<void> {
+  async applyControls(next: CourierRadioControls, power?: CourierPowerState): Promise<void> {
     this.controls = next;
     if (!this.started) return; // not running — start() will read the latest controls
-    const decision = decideCourierStart(next, this.config.mode, this.config.power ?? {});
+    if (this.launching) {
+      // A start/restart is mid-flight (a native start or permission prompt is pending); remember
+      // this change and apply it once the radios settle, so the restriction is not lost.
+      this.pendingControls = { controls: next, ...(power !== undefined ? { power } : {}) };
+      return;
+    }
+    await this.reconcileRadios(next, power);
+  }
+
+  /** Re-evaluate the radios for a control change on a RUNNING courier — using a FRESH `power`
+   *  reading (§22.5 battery floor enforced against the current level).  See {@link applyControls}. */
+  private async reconcileRadios(
+    next: CourierRadioControls,
+    power: CourierPowerState | undefined,
+  ): Promise<void> {
+    if (!this.started) return;
+    const decision = decideCourierStart(next, this.config.mode, power ?? this.config.power ?? {});
     if (!decision.advertise && !decision.discover) {
-      // The new controls/mode turn the courier off entirely — stop every radio now.
+      // The new controls/mode/power turn the courier off entirely — stop every radio now.
       await this.stop();
       this.decision = decision;
       this.config.onDecisionChange?.(decision);
       return;
     }
-    // Stop any running channel the user just deselected, so a removed radio goes silent at once.
-    const stillEnabled = new Set(next.enabledChannels ?? ['nearby']);
-    for (const channel of [...this.runningChannels]) {
-      if (!stillEnabled.has(channel)) await this.stopChannel(channel);
+    const enabled = new Set(next.enabledChannels ?? ['nearby']);
+    const directionChanged =
+      decision.advertise !== this.decision.advertise ||
+      decision.discover !== this.decision.discover;
+    if (directionChanged) {
+      // A direction (advertise/discover) was toggled.  The native plugins expose stop() for the
+      // WHOLE radio only, so to actually silence the disabled direction we STOP every channel and
+      // RESTART the still-enabled ones with the new advertise/discover set.
+      for (const { channel } of this.channels) await this.stopChannel(channel);
+      this.decision = decision;
+      await this.launch(
+        decision,
+        this.channels.filter((c) => enabled.has(c.channel)),
+      );
+    } else {
+      // Same directions — just drop any channel the user deselected, so it goes silent at once.
+      for (const channel of [...this.runningChannels]) {
+        if (!enabled.has(channel)) await this.stopChannel(channel);
+      }
     }
-    if (this.runningChannels.size === 0) {
-      // Every selected radio was deselected — the courier is now off; surface it honestly.
+    if (this.started && this.runningChannels.size === 0) {
+      // Every selected radio is now off — surface it honestly.
       this.started = false;
       this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
       this.config.onDecisionChange?.(this.decision);

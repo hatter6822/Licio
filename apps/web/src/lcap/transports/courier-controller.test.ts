@@ -298,6 +298,84 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     expect(controller.isRunning()).toBe(true);
   });
 
+  it('applyControls restarts the radio to silence a toggled-off direction (native stop is wholesale)', async () => {
+    // The native plugins expose stop() for the WHOLE radio only, so turning discovery off while
+    // advertising stays on must STOP + RESTART the radio with advertise-only — otherwise the scan
+    // keeps running until a full Stop.
+    const f = fakePlugin();
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => new Uint8Array([1]),
+    });
+    await controller.start();
+    expect(f.plugin.startAdvertising).toHaveBeenCalledTimes(1);
+    expect(f.plugin.startDiscovery).toHaveBeenCalledTimes(1);
+
+    await controller.applyControls({ advertisingEnabled: true, discoveryEnabled: false });
+    expect(f.plugin.stop).toHaveBeenCalled(); // stopped to actually silence discovery
+    expect(f.plugin.startAdvertising).toHaveBeenCalledTimes(2); // re-advertised
+    expect(f.plugin.startDiscovery).toHaveBeenCalledTimes(1); // NOT scanned again
+    expect(controller.isRunning()).toBe(true);
+  });
+
+  it('applyControls enforces the battery floor against the FRESH power reading', async () => {
+    // A stale start-snapshot would still permit the radios; a fresh reading below the floor must
+    // stop them (the §22.5 battery budget enforced against the current level).
+    const f = fakePlugin();
+    const changes: Array<{ blockedReason?: string }> = [];
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: { ...ON, batteryFloor: 0.5 },
+      mode: 'courier',
+      power: { level: 0.9, charging: false }, // healthy at Start
+      buildRequest: () => new Uint8Array([1]),
+      onDecisionChange: (d) => changes.push(d),
+    });
+    await controller.start();
+    expect(controller.isRunning()).toBe(true);
+
+    await controller.applyControls({ ...ON, batteryFloor: 0.5 }, { level: 0.2, charging: false });
+    expect(controller.isRunning()).toBe(false);
+    expect(f.plugin.stop).toHaveBeenCalled();
+    expect(changes.some((d) => d.blockedReason === 'below_battery_floor')).toBe(true);
+  });
+
+  it('applies a control change that arrives WHILE start is still launching (deferred, not lost)', async () => {
+    // A native start / permission prompt can keep start() pending; a restriction made during that
+    // window must be deferred and applied once the radios settle, not silently lost.
+    const f = fakePlugin();
+    let releaseStart = (): void => {};
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    f.plugin.startAdvertising = vi.fn(async () => {
+      f.calls.push('advertise');
+      await startGate; // a pending native start / permission prompt
+    });
+    const changes: Array<{ blockedReason?: string }> = [];
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => new Uint8Array([1]),
+      onDecisionChange: (d) => changes.push(d),
+    });
+
+    const startPromise = controller.start(); // do NOT await — the radio is mid-start (blocked)
+    // The user disables the radios while the start is still pending — this must DEFER (launching).
+    await controller.applyControls({ advertisingEnabled: false, discoveryEnabled: false });
+    expect(f.plugin.stop).not.toHaveBeenCalled(); // nothing applied yet — the start is still blocked
+
+    releaseStart();
+    await startPromise;
+    // Once the launch settled, the deferred restriction was applied: the courier is OFF.
+    expect(controller.isRunning()).toBe(false);
+    expect(f.plugin.stop).toHaveBeenCalled();
+    expect(changes.some((d) => d.blockedReason === 'disabled')).toBe(true);
+  });
+
   it('charges bytes already ferried even when the exchange yields nothing (no budget bypass)', async () => {
     vi.useFakeTimers();
     try {

@@ -494,6 +494,10 @@ public class BluetoothCourierRadio implements CourierRadio {
     final BluetoothGattServerCallback gattServerCallback = new BluetoothGattServerCallback() {
         @Override
         public void onServiceAdded(int status, BluetoothGattService service) {
+            // A late onServiceAdded delivered AFTER stop() (addService was still pending when
+            // stopBle() ran) must NOT begin advertising — a stopped courier cannot become
+            // discoverable again.
+            if (!running.get()) return;
             // The courier service is now registered — only NOW is it safe to advertise (a scanner
             // that connects can resolve the service).  A failed registration ⇒ no advertising (the
             // BLE peripheral path is unavailable; RFCOMM remains).
@@ -581,6 +585,10 @@ public class BluetoothCourierRadio implements CourierRadio {
             @Override
             @SuppressWarnings("MissingPermission")
             public void onScanResult(int callbackType, ScanResult result) {
+                // Android may deliver a queued scan result after stopBle() stopped scanning and
+                // cleared the maps — a fresh connectGatt here would not be closed by the finished
+                // stop and could later report a connection with no web listeners.
+                if (!running.get()) return;
                 BluetoothDevice device = result.getDevice();
                 if (device == null) return;
                 String addr = device.getAddress();

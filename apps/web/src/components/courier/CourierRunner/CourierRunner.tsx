@@ -122,9 +122,15 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
     const controller = controllerRef.current;
     if (!controller) return;
     void (async () => {
-      await controller.applyControls(controls);
+      // A FRESH power reading so the §22.5 battery floor is enforced against the current level
+      // (not the snapshot captured at Start).  The controller module is already loaded (the
+      // controller exists), so this dynamic import is a cache hit and keeps the codec off the
+      // initial bundle.
+      const { readCourierPower } = await import('../../../lcap/transports/courier-controller.js');
+      const power = await readCourierPower();
+      await controller.applyControls(controls, power);
       // If applyControls stopped the courier, onDecisionChange already nulled the ref + set the
-      // blocked phase; otherwise reflect any live channel removal in the running list.
+      // blocked phase; otherwise reflect any live direction/channel change in the running list.
       if (controllerRef.current === controller && controller.isRunning()) {
         setPhase({ kind: 'running', channels: controller.activeChannels() });
       }
@@ -202,22 +208,33 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
           setPhase({ kind: 'blocked', reason: decision.blockedReason });
         },
       });
+      // Make the controller reachable BEFORE awaiting start(), so an unmount, a disclosure
+      // revocation, or a live-control change DURING the start (e.g. a pending native start / USB
+      // permission prompt) can stop or reconcile it instead of being lost against a stale start.
+      controllerRef.current = controller;
       const decision = await controller.start();
       if (!decision.advertise && !decision.discover) {
         // The controls/mode disallowed the radios — surface the typed reason, never "running".
         await controller.stop();
+        if (controllerRef.current === controller) controllerRef.current = null;
         setPhase({ kind: 'blocked', reason: decision.blockedReason });
         return;
       }
       if (!controller.isRunning()) {
         // A late start-failure already stopped the controller DURING start() (onDecisionChange set
         // the blocked phase) — don't overwrite it with "running".
+        if (controllerRef.current === controller) controllerRef.current = null;
         setPhase({ kind: 'blocked', reason: controller.startDecision().blockedReason });
         return;
       }
       controllerRef.current = controller;
       setPhase({ kind: 'running', channels: controller.activeChannels() });
     } catch {
+      // Never leak a partially-constructed controller (a throw mid-start).
+      if (controllerRef.current) {
+        void controllerRef.current.stop();
+        controllerRef.current = null;
+      }
       setPhase({ kind: 'error' });
     }
   }, [controls, mode, nativeAvailable]);

@@ -14,12 +14,18 @@
 
 package app.licio.courier;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 public class NearbyCourierRadio implements CourierRadio, NearbyConnections.Listener {
 
     static final String DEFAULT_SERVICE_ID = "app.licio.courier.lcap.v2";
 
     private final NearbyConnections nearby;
     private final CourierRadio.Events events;
+    // Gates the connection-INITIATING callbacks: a queued onEndpointFound / onConnectionInitiated
+    // delivered AFTER stop() must NOT start/accept a fresh link (the web listeners are gone and no
+    // later stop would tear it down).  Set on start, cleared on stop.
+    private final AtomicBoolean running = new AtomicBoolean(false);
     private String serviceId = DEFAULT_SERVICE_ID;
     private String localName = "licio-courier";
 
@@ -42,16 +48,19 @@ public class NearbyCourierRadio implements CourierRadio, NearbyConnections.Liste
 
     @Override
     public void startAdvertising() {
+        running.set(true);
         nearby.startAdvertising(localName, serviceId);
     }
 
     @Override
     public void startDiscovery() {
+        running.set(true);
         nearby.startDiscovery(serviceId);
     }
 
     @Override
     public void stop() {
+        running.set(false);
         nearby.stop();
     }
 
@@ -64,6 +73,8 @@ public class NearbyCourierRadio implements CourierRadio, NearbyConnections.Liste
 
     @Override
     public void onEndpointFound(String endpointId, String foundServiceId) {
+        // A queued callback after stop() must not open a fresh link (the courier is stopped).
+        if (!running.get()) return;
         // Request a connection only to a courier advertising OUR service id.
         if (serviceId.equals(foundServiceId)) {
             nearby.requestConnection(localName, endpointId);
@@ -72,6 +83,8 @@ public class NearbyCourierRadio implements CourierRadio, NearbyConnections.Liste
 
     @Override
     public void onConnectionInitiated(String endpointId) {
+        // A queued initiation after stop() must not be accepted (no later stop would tear it down).
+        if (!running.get()) return;
         // The courier moves PUBLIC bytes; content trust is enforced by validate() on the TS
         // side, so we accept the link and gate WHAT is offered above (WS-R.15.4e).
         nearby.acceptConnection(endpointId);

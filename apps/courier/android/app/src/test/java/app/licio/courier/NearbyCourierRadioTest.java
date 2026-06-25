@@ -132,7 +132,8 @@ public class NearbyCourierRadioTest {
     @Test
     public void aPeerOnTheMatchingServiceTriggersAConnectionRequest() {
         FakeNearby fake = new FakeNearby();
-        new NearbyCourierRadio(fake, new Recorder());
+        NearbyCourierRadio radio = new NearbyCourierRadio(fake, new Recorder());
+        radio.startDiscovery(); // a found-endpoint callback only fires while discovery is running
         fake.listener.onEndpointFound("ep-1", NearbyCourierRadio.DEFAULT_SERVICE_ID);
         assertEquals(1, fake.requested.size());
         assertEquals("ep-1", fake.requested.get(0));
@@ -141,7 +142,8 @@ public class NearbyCourierRadioTest {
     @Test
     public void aPeerOnADifferentServiceIsIgnored() {
         FakeNearby fake = new FakeNearby();
-        new NearbyCourierRadio(fake, new Recorder());
+        NearbyCourierRadio radio = new NearbyCourierRadio(fake, new Recorder());
+        radio.startDiscovery();
         fake.listener.onEndpointFound("ep-x", "some.other.app.service");
         assertEquals("no connection requested to a foreign service", 0, fake.requested.size());
     }
@@ -149,10 +151,25 @@ public class NearbyCourierRadioTest {
     @Test
     public void anInitiatedConnectionIsAccepted() {
         FakeNearby fake = new FakeNearby();
-        new NearbyCourierRadio(fake, new Recorder());
+        NearbyCourierRadio radio = new NearbyCourierRadio(fake, new Recorder());
+        radio.startAdvertising(); // an initiated connection only arrives while the radio is running
         fake.listener.onConnectionInitiated("ep-2");
         assertEquals(1, fake.accepted.size());
         assertEquals("ep-2", fake.accepted.get(0));
+    }
+
+    @Test
+    public void lateNearbyCallbacksAfterStopDoNotOpenAFreshLink() {
+        // Android can deliver a queued discovery / initiation callback after stop(); a running guard
+        // must drop it so no peer-visible link is opened with the web listeners already gone.
+        FakeNearby fake = new FakeNearby();
+        NearbyCourierRadio radio = new NearbyCourierRadio(fake, new Recorder());
+        radio.startDiscovery();
+        radio.stop();
+        fake.listener.onEndpointFound("ep-late", NearbyCourierRadio.DEFAULT_SERVICE_ID);
+        assertEquals("no connection requested after stop", 0, fake.requested.size());
+        fake.listener.onConnectionInitiated("ep-late");
+        assertEquals("no connection accepted after stop", 0, fake.accepted.size());
     }
 
     @Test

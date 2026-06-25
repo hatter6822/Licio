@@ -94,6 +94,10 @@ public class UsbCourierRadio implements CourierRadio {
         // openAccessory() would then throw / fail-unavailable, so REQUEST the grant (the system prompt)
         // and open from the result, instead of failing before the user can authorise the courier.
         if (!usbManager.hasPermission(accessory)) {
+            // Mark the radio starting BEFORE the async grant prompt: the permission callback checks
+            // running to detect a stop() DURING the prompt, and running is otherwise set only in
+            // attach() (after a successful open), so the callback would always abort on grant.
+            running.set(true);
             requestAccessoryPermission(accessory);
             return;
         }
@@ -126,6 +130,7 @@ public class UsbCourierRadio implements CourierRadio {
                 if (granted) {
                     openAccessory(accessory);
                 } else {
+                    running.set(false); // a denied grant did not start the radio
                     events.onStartFailed("discover",
                             new IllegalStateException("usb_permission_denied"));
                 }
