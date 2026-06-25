@@ -484,8 +484,17 @@ export class CourierController {
     this.handlesByChannel.set(channel, handles);
   }
 
+  /** Whether a channel is still ACTIVE — its listeners are registered and not torn down.  A native
+   *  event QUEUED before stop()/stopChannel() removed the listeners can still invoke a handler, so
+   *  every inbound handler gates on this to avoid driving/answering an exchange after teardown.
+   *  (`handlesByChannel` is deleted SYNCHRONOUSLY by stopChannel, before any await.) */
+  private isChannelActive(channel: CourierChannel): boolean {
+    return this.handlesByChannel.has(channel);
+  }
+
   /** A `connectionResult`: when an endpoint first connects, drive ONE exchange over it. */
   private onConnectionResult(channel: CourierChannel, raw: unknown): void {
+    if (!this.isChannelActive(channel)) return; // a late event after stop/deselect — don't exchange
     const parsed = nativeConnectionEventSchema.safeParse(raw);
     if (!parsed.success) return; // fail-closed on a malformed native event
     const event: NativeConnectionEvent = parsed.data;
@@ -499,6 +508,7 @@ export class CourierController {
    *  so it can't be mistaken for our exchange response; only a valid RESPONSE feeds the inbox the
    *  requester's `CourierTransport.receive()` reads. */
   private onPayloadReceived(channel: CourierChannel, raw: unknown): void {
+    if (!this.isChannelActive(channel)) return; // a late event after stop/deselect — don't respond
     const parsed = nativePayloadEventSchema.safeParse(raw);
     if (!parsed.success) return; // malformed — drop, never decode
     const event: NativePayloadEvent = parsed.data;

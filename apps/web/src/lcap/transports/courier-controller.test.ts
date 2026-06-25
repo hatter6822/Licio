@@ -521,6 +521,26 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     expect(outcomes).toEqual(['ep-1', 'ep-1']);
   });
 
+  it('ignores a native connection event delivered AFTER the channel was torn down', async () => {
+    // A Capacitor event queued before stop() removed the listeners can still invoke the handler;
+    // it must NOT drive an exchange (send a courier request) for a stopped channel.  The fake's
+    // remove() is a no-op, so emit still reaches the handler — exactly the queued-event case.
+    const f = fakePlugin();
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => REQUEST_BYTES,
+      httpsConfig: { fetchFn: REJECTING_FETCH },
+    });
+    await controller.start();
+    await controller.stop();
+
+    f.emit('connectionResult', { endpointId: 'ep-late', connected: true });
+    await Promise.resolve();
+    expect(f.sent).toHaveLength(0); // no courier request sent after stop
+  });
+
   it('charges bytes already ferried even when the exchange yields nothing (no budget bypass)', async () => {
     vi.useFakeTimers();
     try {
