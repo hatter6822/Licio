@@ -15,6 +15,7 @@
 //   - transient-quota retry: on `QuotaExceededError`, shed P4 ambient cache per §21.2
 //     (`selectForEviction`) and retry once, surfacing residual pressure honestly.
 
+import type { HeldObject } from '@licio/lcap';
 import { LCAP_STORE, type LcapStoreName } from './db.js';
 import { type GcCandidate, selectForEviction } from './gc.js';
 
@@ -252,6 +253,24 @@ export async function readBlockBytes(
     offset += part.length;
   }
   return out;
+}
+
+/**
+ * Read a HELD object by CID for the §16 content responder — probing the record / proof / block
+ * stores (CIDs are content-addressed + globally unique, so at most one store holds any CID).
+ * Returns the verifiable bytes + kind, or `undefined` when not held.  The kind is derived from
+ * WHICH store holds it; the receiver re-verifies `cidFor(kind, bytes)` regardless, so a rare
+ * standalone-chunk stored as a block self-corrects (it fails the receiver's CID check, never a
+ * trust bypass).  Records/proofs read raw bytes (`body`/`proofBody`); blocks reassemble.
+ */
+export async function getHeldObject(db: IDBDatabase, cid: string): Promise<HeldObject | undefined> {
+  const record = await getByKey<RecordRow>(db, LCAP_STORE.records, cid);
+  if (record) return { kind: 'record', bytes: record.body };
+  const proof = await getByKey<ProofRow>(db, LCAP_STORE.proofs, cid);
+  if (proof) return { kind: 'proof', bytes: proof.proofBody };
+  const block = await readBlockBytes(db, cid);
+  if (block) return { kind: 'block', bytes: block };
+  return undefined;
 }
 
 // --- Capped transactions (§23.2 old-phone safety). --------------------------------
