@@ -10,10 +10,10 @@
 // op is returned for the structural pass + reduce, so a tampered or foreign
 // envelope is quarantined exactly as a wire-fetched block would be.
 //
-// The optional standard-IPLD-CAR / WS-R `.licio-bundle` carriage (§15.9) is the
-// cross-plane apps/web follow-up (it imports BOTH planes); `@licio/private-p2p`
+// The optional WS-R `.licio-bundle` carriage (§15.9) SHIPS cross-plane in
+// `apps/web/src/lcap/cross-plane-bridge.ts` (it imports BOTH planes); `@licio/private-p2p`
 // never imports `@licio/lcap`, so this package ships the self-contained
-// ciphertext container + the re-validating import that any carrier reuses.  The
+// ciphertext container + the re-validating import that the bridge reuses.  The
 // third UI export — the user's PLAINTEXT "decrypted personal archive" — is a
 // WS-S.7/8 concern and is intentionally NOT a kind of this ciphertext container.
 
@@ -39,7 +39,7 @@ export const PRIVATE_ARCHIVE_KINDS = ['encrypted_member_backup', 'voluntary_repo
 export type PrivateArchiveKind = (typeof PRIVATE_ARCHIVE_KINDS)[number];
 
 /** The eager-archive envelope cap (very large exports use the streaming
- *  `.licio-bundle` carrier — the cross-plane follow-up). */
+ *  `.licio-bundle` carrier — the cross-plane `apps/web/src/lcap/cross-plane-bridge.ts`). */
 export const PRIVATE_ARCHIVE_MAX_ENVELOPES = 4_096;
 
 /** §15.9 — a self-contained, re-importable archive of encrypted envelopes for ONE

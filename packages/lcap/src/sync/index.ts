@@ -56,6 +56,12 @@ export {
   reconciliationRank,
   wantCategory,
 } from './reconcile.js';
+export {
+  type HeldObject,
+  type HeldObjectReader,
+  type RepackResult,
+  repackHeldObjects,
+} from './repack.js';
 export { roomIdHash } from './room-hash.js';
 export {
   type IngestionInput,

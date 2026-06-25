@@ -73,8 +73,10 @@ interface MutableUsage {
  * There is deliberately NO accept/commit/room-log surface.
  */
 export class LcapRelay {
-  // Per-peer + per-room + per-lane usage (in-memory; a persistent relay store is a
-  // follow-up).  Opaque peer/room keys only — never a network address (§19.1).
+  // Per-peer + per-room + per-lane usage.  In-memory BY DESIGN: the relay is an ephemeral,
+  // untrusted content-addressed cache (§15.3) with no accept/commit surface, so its admission
+  // quotas are simply a fresh budget per process — there is no durable state to keep.  Opaque
+  // peer/room keys only — never a network address (§19.1).
   private readonly peer = new Map<string, MutableUsage>();
   private readonly roomBytes = new Map<string, number>();
   private readonly laneBytes: Partial<Record<LcapLane, number>> = {};
