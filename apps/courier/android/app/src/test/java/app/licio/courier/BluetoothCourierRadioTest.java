@@ -549,6 +549,57 @@ public class BluetoothCourierRadioTest {
     }
 
     @Test
+    public void aStaleBleAdvertiseFailureFromASupersededSessionIsDropped() {
+        // After a quick Stop→Start, `running` is true again — but an OLD AdvertiseCallback's late
+        // onStartFailure from the stopped session must NOT tear the fresh courier down (the session
+        // generation gate drops it) (#H).
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        radio.startAdvertising();
+        radio.gattServerCallback.onServiceAdded(
+                BluetoothGatt.GATT_SUCCESS, BluetoothCourierRadio.buildCourierGattService());
+        AdvertiseCallback oldCb = radio.advertiseCallback;
+
+        radio.stop();
+        radio.startAdvertising(); // a fresh session — bleStartGeneration bumped past oldCb's
+        radio.gattServerCallback.onServiceAdded(
+                BluetoothGatt.GATT_SUCCESS, BluetoothCourierRadio.buildCourierGattService());
+
+        // The OLD session's advertiser fails now — dropped (the courier is freshly up).
+        oldCb.onStartFailure(AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE);
+        assertNull("a stale advertise failure from a superseded session is dropped", rec.startFailedOp);
+
+        // The CURRENT session's failure IS surfaced.
+        radio.advertiseCallback.onStartFailure(AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE);
+        assertEquals("advertise", rec.startFailedOp);
+    }
+
+    @Test
+    @Config(sdk = 31) // the 2-arg deprecated onCharacteristicChanged overload the shadow honours
+    public void aNotificationFromASupersededClientGattIsDropped() {
+        // The SAME address is re-dialed (a fresh BluetoothGatt owns the endpoint + its assembler); a
+        // late notification on the OLD gatt must NOT feed the fresh assembler / emit a payload under
+        // the new connection (#J).  `connectBleClient` establishes the fresh client (registered in
+        // bleClients with its assembler); a separate older gatt for the same address is superseded.
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        BluetoothGatt newGatt = connectBleClient(radio); // the CURRENT client for PEER (+ assembler)
+        BluetoothGatt oldGatt = peerDevice().connectGatt(
+                ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
+
+        // A late notification on the OLD (superseded) gatt must be dropped.
+        BluetoothGattCharacteristic ch = courierCharacteristic();
+        ch.setValue(CourierFraming.framePrefixed("stale".getBytes()));
+        radio.gattClientCallback.onCharacteristicChanged(oldGatt, ch);
+        assertEquals("a notification from a superseded gatt is dropped", 0, rec.payloadCount);
+
+        // The CURRENT gatt's notification IS reassembled (proves the assembler is live).
+        ch.setValue(CourierFraming.framePrefixed("fresh".getBytes()));
+        radio.gattClientCallback.onCharacteristicChanged(newGatt, ch);
+        assertEquals("the current gatt's notification is reassembled", 1, rec.payloadCount);
+    }
+
+    @Test
     @Config(sdk = 31) // a full successful connection needs the legacy CCC write the shadow honours
     // (the API-33 writeDescriptor is not shadowed → returns an error → the radio correctly fails it)
     public void gattClientNotificationsReassembleToOnePayload() {

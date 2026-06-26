@@ -116,6 +116,12 @@ public class BluetoothCourierRadio implements CourierRadio {
     // fresh central / writing stale state (#C).  Package-private so the Robolectric test can drive it.
     BluetoothGattServerCallback gattServerCallback;
     private volatile long bleServerGeneration = 0;
+    // A per-SESSION generation (bumped only on stop, NOT on each advertise/discover within a session)
+    // captured by the advertise + scan failure callbacks: after a quick Stop→Start, `running` is true
+    // again, so an OLD AdvertiseCallback.onStartFailure / ScanCallback.onScanFailed could tear down
+    // the fresh courier — the generation gate drops a failure from a superseded session (#H).
+    // Package-private so the Robolectric test can read it.
+    volatile long bleStartGeneration = 0;
     private final ConcurrentHashMap<String, BluetoothDevice> bleCentrals = new ConcurrentHashMap<>();
     private BluetoothLeScanner scanner;
     private ScanCallback scanCallback;
@@ -515,13 +521,15 @@ public class BluetoothCourierRadio implements CourierRadio {
             }
             return;
         }
+        final long gen = bleStartGeneration;
         advertiseCallback = new AdvertiseCallback() {
             @Override
             public void onStartFailure(int errorCode) {
                 // Android REJECTED the advertise (advertiser quota / unsupported parameters) — a
-                // late/async failure the synchronous start could not see.  Surface it (guarded on
-                // running so a failure after stop does not tear a stopped courier down).
-                if (running.get()) {
+                // late/async failure the synchronous start could not see.  Surface it, but DROP a
+                // failure from a stopped (running=false) OR superseded (a Stop→Start bumped the
+                // session generation) advertiser so it cannot tear down a freshly-started courier (#H).
+                if (running.get() && gen == bleStartGeneration) {
                     events.onStartFailed("advertise",
                             new IllegalStateException("ble_advertise_failed_" + errorCode));
                 }
@@ -652,14 +660,16 @@ public class BluetoothCourierRadio implements CourierRadio {
             }
             return;
         }
+        final long gen = bleStartGeneration;
         scanCallback = new ScanCallback() {
             @Override
             @SuppressWarnings("MissingPermission")
             public void onScanResult(int callbackType, ScanResult result) {
                 // Android may deliver a queued scan result after stopBle() stopped scanning and
-                // cleared the maps — a fresh connectGatt here would not be closed by the finished
-                // stop and could later report a connection with no web listeners.
-                if (!running.get()) return;
+                // cleared the maps, or from a SUPERSEDED session after a Stop→Start — a fresh
+                // connectGatt here would not be closed by the finished stop and could later report a
+                // connection with no/stale web listeners.
+                if (!running.get() || gen != bleStartGeneration) return;
                 BluetoothDevice device = result.getDevice();
                 if (device == null) return;
                 String addr = device.getAddress();
@@ -676,8 +686,9 @@ public class BluetoothCourierRadio implements CourierRadio {
             public void onScanFailed(int errorCode) {
                 // Android rejected the scan (already-started / app-registration / internal error).
                 // Surface it when BLE is the only discovery path so the controller doesn't show the
-                // channel running with no active discovery.
-                if (bleIsOnlyDiscoveryPath) {
+                // channel running with no active discovery — but DROP a failure from a stopped or
+                // SUPERSEDED session (a Stop→Start) so it cannot tear down the fresh courier (#H).
+                if (bleIsOnlyDiscoveryPath && running.get() && gen == bleStartGeneration) {
                     events.onStartFailed("discover",
                             new IllegalStateException("ble_scan_failed_" + errorCode));
                 }
@@ -694,6 +705,17 @@ public class BluetoothCourierRadio implements CourierRadio {
             // IllegalStateException) means no scan is running — surface it on the BLE-only path.
             if (bleIsOnlyDiscoveryPath) events.onStartFailed("discover", e);
         }
+    }
+
+    /** True iff a DIFFERENT BluetoothGatt now owns `endpointId` (a re-dial of the same address
+     *  established/pending a fresh connection) — so a callback from the SUPERSEDED old gatt is
+     *  dropped instead of acking the fresh pump / feeding stale bytes into the fresh assembler (#J).
+     *  (A callback whose endpoint is no longer tracked at all is NOT treated as superseded — the
+     *  fresh connection owns the slot or nothing does; only a genuine REPLACEMENT is stale.) */
+    private boolean isSupersededClient(String endpointId, BluetoothGatt gatt) {
+        BluetoothGatt established = bleClients.get(endpointId);
+        BluetoothGatt pending = blePendingClients.get(endpointId);
+        return (established != null && established != gatt) || (pending != null && pending != gatt);
     }
 
     final BluetoothGattCallback gattClientCallback = new BluetoothGattCallback() {
@@ -738,6 +760,7 @@ public class BluetoothCourierRadio implements CourierRadio {
         @SuppressWarnings("MissingPermission")
         public void onMtuChanged(BluetoothGatt gatt, int mtu, int status) {
             String endpointId = gatt.getDevice().getAddress();
+            if (isSupersededClient(endpointId, gatt)) return; // a callback from a superseded GATT (#J)
             if (status == BluetoothGatt.GATT_SUCCESS) bleMtu.put(endpointId, mtu);
             // Discovery is required to resolve the courier characteristic — if it won't start, the
             // connection can't progress, so fail rather than leaving the peer stuck in bleClients.
@@ -748,6 +771,7 @@ public class BluetoothCourierRadio implements CourierRadio {
         @SuppressWarnings("MissingPermission")
         public void onServicesDiscovered(BluetoothGatt gatt, int status) {
             String endpointId = gatt.getDevice().getAddress();
+            if (isSupersededClient(endpointId, gatt)) return; // a callback from a superseded GATT (#J)
             // Any of these means the peer is not a usable courier — tear down + report failure so
             // the scan dedup doesn't leave it undialable (a bad status, no courier service, no
             // characteristic, or — the courier needs DUPLEX — no CCC to notify replies back).
@@ -804,6 +828,7 @@ public class BluetoothCourierRadio implements CourierRadio {
             // native event is forwarded to the new JS listener) — gate on running first (#8).
             if (!running.get()) return;
             String endpointId = gatt.getDevice().getAddress();
+            if (isSupersededClient(endpointId, gatt)) return; // a stale CCC write from a superseded GATT (#J)
             // The notify subscription is now established (or failed) — ONLY now is the duplex link
             // ready.  On SUCCESS, report connected.  On FAILURE, tear the half-open client down
             // FIRST (else it lingers in bleClients and the scan dedup makes the peer permanently
@@ -818,7 +843,9 @@ public class BluetoothCourierRadio implements CourierRadio {
         @Override
         public void onCharacteristicWrite(BluetoothGatt gatt,
                 BluetoothGattCharacteristic characteristic, int status) {
-            BleSendPump pump = blePumps.get(gatt.getDevice().getAddress());
+            String endpointId = gatt.getDevice().getAddress();
+            if (isSupersededClient(endpointId, gatt)) return; // a stale ACK must not drive the fresh pump (#J)
+            BleSendPump pump = blePumps.get(endpointId);
             if (pump != null) pump.onAck(status);
         }
 
@@ -826,6 +853,8 @@ public class BluetoothCourierRadio implements CourierRadio {
         @Override
         public void onCharacteristicChanged(BluetoothGatt gatt,
                 BluetoothGattCharacteristic characteristic, byte[] value) {
+            // A stale notification from a superseded GATT must not feed the fresh assembler (#J).
+            if (isSupersededClient(gatt.getDevice().getAddress(), gatt)) return;
             feedNotification(gatt, characteristic, value);
         }
 
@@ -834,6 +863,7 @@ public class BluetoothCourierRadio implements CourierRadio {
         @SuppressWarnings("deprecation")
         public void onCharacteristicChanged(BluetoothGatt gatt,
                 BluetoothGattCharacteristic characteristic) {
+            if (isSupersededClient(gatt.getDevice().getAddress(), gatt)) return; // stale notify (#J)
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
                 feedNotification(gatt, characteristic, characteristic.getValue());
             }
@@ -892,6 +922,9 @@ public class BluetoothCourierRadio implements CourierRadio {
         // Invalidate the current GATT-server callback: a delayed event from this (now-closed) server
         // is dropped by its generation guard rather than mutating a later session's state (#C).
         bleServerGeneration++;
+        // Invalidate this session's advertise/scan callbacks: a late onStartFailure/onScanFailed from
+        // the stopped session is dropped rather than tearing down a freshly-restarted courier (#H).
+        bleStartGeneration++;
         bleClients.clear();
         blePendingClients.clear();
         bleClientChars.clear();

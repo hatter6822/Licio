@@ -112,15 +112,22 @@ final class CourierStreamLink {
         } catch (IOException ignored) {
             // peer closed / read error — fall through to the disconnect cleanup
         } finally {
-            // Remove BY VALUE: if the same endpoint reconnected on another link, that link's
-            // newer outbound entry must NOT be clobbered by this (older) link's teardown.
-            outbound.remove(endpointId, dos);
+            // A newer link for the SAME endpoint (a quick re-dial) replaces our outbound entry; only
+            // the CURRENT owner announces the disconnect.  Capture whether a DIFFERENT link now owns
+            // the endpoint BEFORE removing our own (stale) entry by value.
+            DataOutputStream current = outbound.get(endpointId);
+            boolean replaced = current != null && current != dos;
+            outbound.remove(endpointId, dos); // drop only our own entry — never clobber the newer one
             try {
                 conn.close();
             } catch (IOException ignored) {
                 // already closed
             }
-            events.onDisconnected(endpointId);
+            // Suppress the disconnect ONLY when a newer link replaced us: if a quick Stop→restart
+            // re-dialed this endpoint on a fresh link before this old read thread reached here,
+            // announcing a disconnect now would tear down that NEW medium (#L).  A plain stop (no
+            // relink) still announces, so the JS learns the link ended.
+            if (!replaced) events.onDisconnected(endpointId);
         }
     }
 }

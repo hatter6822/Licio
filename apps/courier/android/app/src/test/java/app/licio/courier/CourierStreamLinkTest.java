@@ -143,14 +143,19 @@ public class CourierStreamLinkTest {
         DataOutputStream streamB = outbound.get("ep");
         assertNotSame("the reconnect registered a fresh outbound stream", streamA, streamB);
 
-        // Tear the OLDER link (A) down — its finally must remove only its own stale entry.
+        // Tear the OLDER link (A) down — its finally removes only its own stale entry AND does NOT
+        // announce a disconnect, because B now owns "ep": a stale disconnect from the replaced link
+        // would tear down B's medium for the same endpoint (#L).
         peerA.close();
-        assertTrue(recA.disconnected.await(5, TimeUnit.SECONDS));
+        linkA.join(2000);
         assertSame("the reconnected link's outbound entry survived the old link's teardown",
                 streamB, outbound.get("ep"));
+        assertEquals("the replaced (older) link must NOT announce a disconnect for B's endpoint",
+                1, recA.disconnected.getCount());
 
+        // When the OWNER (B) tears down, IT announces the disconnect.
         peerB.close();
-        linkA.join(2000);
+        assertTrue(recB.disconnected.await(5, TimeUnit.SECONDS));
         linkB.join(2000);
     }
 
