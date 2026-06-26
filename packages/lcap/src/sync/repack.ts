@@ -170,11 +170,18 @@ export async function repackHeldObjects(
   getObject: HeldObjectReader,
   wants: readonly string[],
   maxBytes: number,
-  /** The peer's SELECTION floor (#BF): an object over `priorityFloor`, or media when the peer declined
-   *  media, is withheld.  Meaningful only when the peer advertises a SELECTION-minimal budget (stealth /
-   *  emergency); a DEFAULT (full) budget passes `priorityFloor: 4` + `allowMedia: true`, so a courier
-   *  ferrying full content is never starved of its explicit wants.  Omit for byte-cap-only serving. */
-  selection?: { readonly priorityFloor?: number; readonly allowMedia?: boolean },
+  /** The peer's FULL advertised budget BEYOND the byte cap (#BF/#BH): the SELECTION floor
+   *  (`priorityFloor`, `allowMedia`) AND the per-kind COUNT caps (`maxRecords`, `maxBlocks`,
+   *  `maxObjects` = max_pack_table_entries).  Meaningful only when the peer advertises a constrained
+   *  budget; a DEFAULT (full) budget passes the maxima, so a courier ferrying full content is never
+   *  starved of its explicit wants.  Omit for byte-cap-only serving. */
+  selection?: {
+    readonly priorityFloor?: number;
+    readonly allowMedia?: boolean;
+    readonly maxRecords?: number;
+    readonly maxBlocks?: number;
+    readonly maxObjects?: number;
+  },
 ): Promise<RepackResult> {
   const objects: PackObject[] = [];
   const served: string[] = [];
@@ -182,6 +189,8 @@ export async function repackHeldObjects(
   let bytes = 0;
   let truncated = false;
   let sensitive = false;
+  let recordCount = 0;
+  let blockCount = 0; // blocks + chunks (media blobs)
   for (const cid of wants) {
     if (seen.has(cid)) continue;
     seen.add(cid);
@@ -189,6 +198,8 @@ export async function repackHeldObjects(
     if (!held) continue; // not held — the peer fetches it elsewhere
     const derived = packObjectFor(cid, held);
     if (!derived) continue; // undecodable — never repacked
+    const kind = derived.object.frameKind;
+    const isBlock = kind === 'block' || kind === 'chunk';
     // Honor the peer's SELECTION floor — a withheld held want marks the exchange partial (the peer
     // re-requests it on a less-constrained pass) (#BF).
     if (
@@ -198,10 +209,24 @@ export async function repackHeldObjects(
       truncated = true;
       continue;
     }
+    if (selection?.allowMedia === false && isBlock) {
+      truncated = true;
+      continue;
+    }
+    // Honor the per-kind COUNT caps + the total pack-table entry cap (#BH).
+    if (selection?.maxObjects !== undefined && objects.length >= selection.maxObjects) {
+      truncated = true;
+      break;
+    }
     if (
-      selection?.allowMedia === false &&
-      (derived.object.frameKind === 'block' || derived.object.frameKind === 'chunk')
+      selection?.maxRecords !== undefined &&
+      kind === 'record_body' &&
+      recordCount >= selection.maxRecords
     ) {
+      truncated = true;
+      continue;
+    }
+    if (selection?.maxBlocks !== undefined && isBlock && blockCount >= selection.maxBlocks) {
       truncated = true;
       continue;
     }
@@ -214,6 +239,8 @@ export async function repackHeldObjects(
       break;
     }
     objects.push(derived.object);
+    if (kind === 'record_body') recordCount += 1;
+    if (isBlock) blockCount += 1;
     served.push(cid);
     bytes = projected;
     if (derived.sensitive) sensitive = true;

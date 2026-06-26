@@ -64,6 +64,35 @@ describe('repackHeldObjects (pure §16.4 content push)', () => {
     expect(oneFit.truncated).toBe(true);
   });
 
+  it('honors the peer’s SELECTION floor + per-kind count caps, beyond the byte cap (#BF/#BH)', async () => {
+    const a = await block(new Uint8Array([1]));
+    const b = await block(new Uint8Array([2]));
+    const reader = readerOf(a, b);
+    // maxBlocks: 1 → only the FIRST block is served (a second is withheld + marks partial).
+    const capped = await repackHeldObjects(reader, [a.cid, b.cid], 1_000_000, { maxBlocks: 1 });
+    expect(capped.served).toEqual([a.cid]);
+    expect(capped.truncated).toBe(true);
+    // allow_media false → a block (B4 media) is withheld entirely.
+    const noMedia = await repackHeldObjects(reader, [a.cid, b.cid], 1_000_000, {
+      allowMedia: false,
+    });
+    expect(noMedia.served).toEqual([]);
+    expect(noMedia.truncated).toBe(true);
+    // priority_floor 0 → a B4 (priority-4) block is over the floor and withheld.
+    const lowPrio = await repackHeldObjects(reader, [a.cid, b.cid], 1_000_000, {
+      priorityFloor: 0,
+    });
+    expect(lowPrio.served).toEqual([]);
+    // A FULL budget (the maxima) serves both — a courier ferrying content is never starved.
+    const full = await repackHeldObjects(reader, [a.cid, b.cid], 1_000_000, {
+      priorityFloor: 4,
+      allowMedia: true,
+      maxBlocks: 99,
+      maxObjects: 99,
+    });
+    expect([...full.served].sort()).toEqual([a.cid, b.cid].sort());
+  });
+
   it('returns an empty, pack-less result when no want is held', async () => {
     const result = await repackHeldObjects(readerOf(), ['x', 'y'], 1_000_000);
     expect(result).toEqual({ served: [], truncated: false });

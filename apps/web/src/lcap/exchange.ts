@@ -358,6 +358,9 @@ export async function respondToClientExchange(
       ? await lcap.repackHeldObjects((cid) => getHeldObject(db, cid), wantCids, budget, {
           priorityFloor: budgets.priority_floor,
           allowMedia: budgets.allow_media,
+          maxRecords: budgets.max_records,
+          maxBlocks: budgets.max_blocks,
+          maxObjects: budgets.max_pack_table_entries,
         })
       : { served: [], truncated: false, pack: undefined };
 

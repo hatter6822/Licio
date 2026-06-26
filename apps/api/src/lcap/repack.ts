@@ -20,6 +20,14 @@ export async function repackHeldObjects(
   server: LcapIngestServer,
   wants: readonly string[],
   maxBytes: number,
+  /** The peer's full advertised budget BEYOND the byte cap (#BH): selection floor + per-kind counts. */
+  selection?: {
+    readonly priorityFloor?: number;
+    readonly allowMedia?: boolean;
+    readonly maxRecords?: number;
+    readonly maxBlocks?: number;
+    readonly maxObjects?: number;
+  },
 ): Promise<RepackResult> {
   return repackHeldObjectsPure(
     async (cid) => {
@@ -36,5 +44,6 @@ export async function repackHeldObjects(
     },
     wants,
     maxBytes,
+    selection,
   );
 }

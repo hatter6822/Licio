@@ -593,10 +593,22 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
   let responsePack: Uint8Array | undefined;
   let status: 'ok' | 'partial' = 'ok';
   if (request.want !== undefined && request.want.length > 0) {
+    const b = request.pulse.budgets;
+    // Honor the FULL advertised budget (#BH), not just the byte cap: the selection floor
+    // (priority_floor / allow_media) AND the per-kind / table-entry count caps — so a constrained
+    // (minimal/low-storage) client is never served over-priority, media, or over-count objects that
+    // merely fit the byte cap.  A full budget passes the maxima, so a normal client gets all it wants.
     const repacked = await repackHeldObjects(
       server,
       request.want.map((w) => w.cid),
-      request.pulse.budgets.max_response_bytes,
+      b.max_response_bytes,
+      {
+        priorityFloor: b.priority_floor,
+        allowMedia: b.allow_media,
+        maxRecords: b.max_records,
+        maxBlocks: b.max_blocks,
+        maxObjects: b.max_pack_table_entries,
+      },
     );
     if (repacked.pack !== undefined) responsePack = repacked.pack;
     if (repacked.truncated) status = 'partial';
