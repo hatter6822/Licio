@@ -104,4 +104,21 @@ describe('P2pSyncPanel (WS-R.15.6)', () => {
     const { container } = render(<P2pSyncPanel roomHash={ROOM_HASH} />);
     expect(await checkA11y(container)).toHaveNoViolations();
   });
+
+  it('aborts an in-flight sync when the panel unmounts (#G)', async () => {
+    let captured: AbortSignal | undefined;
+    syncRoomOverP2p.mockImplementation((opts: { signal?: AbortSignal }) => {
+      captured = opts.signal;
+      return new Promise(() => {}); // hang — so the only thing that ends it is the abort
+    });
+    const { unmount } = render(<P2pSyncPanel roomHash={ROOM_HASH} />);
+    fireEvent.change(screen.getByLabelText(/your peer code/i), { target: { value: 'alice' } });
+    fireEvent.change(screen.getByLabelText(/their peer code/i), { target: { value: 'bob' } });
+    fireEvent.click(screen.getByRole('button', { name: /sync over a direct connection/i }));
+    await waitFor(() => expect(captured).toBeDefined());
+    expect(captured?.aborted).toBe(false);
+    // Navigating away (unmount) must abort the in-flight request + any pending push_pack.
+    unmount();
+    expect(captured?.aborted).toBe(true);
+  });
 });

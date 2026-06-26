@@ -70,12 +70,13 @@ describe('repackHeldObjects (pure §16.4 content push)', () => {
     expect(result.pack).toBeUndefined();
   });
 
-  it('threads a record’s ROOM + dep CIDs onto the repacked PackObject (#5)', async () => {
-    // A record repacked from bytes alone must still carry its room (from the signed body) + its dep
-    // CIDs — else the receiver lands it with roomHash:'' (invisible to room sync/export) + no
-    // missing-dependency detection.
+  it('threads a record’s ROOM (from the reader metadata) + dep CIDs onto the PackObject (#5)', async () => {
+    // The canonical room_id_hash is STORE METADATA (the reader supplies it via held.roomIdHash) — it
+    // is NOT re-derived from the body — and is stamped verbatim so the receiver lands the record with
+    // its real room key (not ''); the body's dep CIDs are threaded for missing-dependency detection.
     const capabilityCid = await cidFor('record', new Uint8Array([0]));
     const bodyBlockCid = await cidFor('block', new Uint8Array([9, 9, 9]));
+    const roomIdHash = new Uint8Array(32).fill(7); // the canonical 32-byte room hash (metadata)
     const body = encodeContributionEvent({
       record_version: 2,
       kind: 'contribution_event',
@@ -95,7 +96,7 @@ describe('repackHeldObjects (pure §16.4 content push)', () => {
     });
     const recordCid = await cidFor('record', body);
     const result = await repackHeldObjects(
-      readerOf({ cid: recordCid, held: { kind: 'record', bytes: body } }),
+      readerOf({ cid: recordCid, held: { kind: 'record', bytes: body, roomIdHash } }),
       [recordCid],
       1_000_000,
     );
@@ -104,8 +105,8 @@ describe('repackHeldObjects (pure §16.4 content push)', () => {
     if (!read.ok) return;
     const entry = read.pack.entries.find((e) => e.cid === recordCid);
     expect(entry).toBeDefined();
-    // The room round-trips (the receiver decodes room_id_hash → roomHash 'room-target', not '').
-    expect(new TextDecoder().decode(entry?.room_id_hash)).toBe('room-target');
+    // The canonical room hash is stamped verbatim (so the receiver stores it, not '').
+    expect(entry?.room_id_hash).toEqual(roomIdHash);
     // The body's BLOCK dep is present so a missing block quarantines on the receiver; the capability
     // is NOT a dep (it is resolved by §18.3 validation, not required as a prerequisite record).
     expect(entry?.deps).toContain(bodyBlockCid);

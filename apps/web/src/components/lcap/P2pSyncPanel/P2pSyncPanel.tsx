@@ -24,7 +24,7 @@
 // `syncRoomOverP2p` (and through it `@licio/lcap-p2p`) loads via a DYNAMIC import only, so
 // the WebRTC/codec core stays off the initial bundle (`check:lcap-p2p-split`).
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
 import { Button } from '../../ui/Button/index.js';
@@ -125,6 +125,10 @@ export function P2pSyncPanel({
       abortRef.current = null;
     }
   }, [roomHash, selfPeerKey, remotePeerKey, initiator, t]);
+
+  // Abort an in-flight sync if the panel UNMOUNTS — else the request + any push_pack could still be
+  // transmitted (WebRTC, or the HTTPS fallback) after the UI owner is gone (#G).
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();

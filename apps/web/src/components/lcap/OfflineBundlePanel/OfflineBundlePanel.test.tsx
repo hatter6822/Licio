@@ -13,6 +13,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildBundle, exportDisclosure, gatherRoomExport } from '../../../lcap/bundle-export.js';
 import {
+  getLcapDb,
   LCAP_DB_VERSION,
   LCAP_MIGRATIONS,
   LCAP_STORE,
@@ -40,6 +41,51 @@ describe('OfflineBundlePanel', () => {
   it('passes the accessibility audit', async () => {
     const { container } = render(<OfflineBundlePanel roomHash="room-abc" />);
     await checkA11y(container);
+  });
+});
+
+describe('OfflineBundlePanel — public-room export reachability (offline-page picker)', () => {
+  afterEach(() => {
+    resetLcapDbConnection();
+  });
+
+  it('discovers rooms held offline and a picker drives the export (no room context needed)', async () => {
+    // Seed the DEFAULT lcap_v2 with two rooms so the panel's discovery offers them.
+    const db = await getLcapDb();
+    let n = 0;
+    const seed = async (roomHash: string): Promise<void> => {
+      const body = new TextEncoder().encode(`r-${roomHash}-${n++}`);
+      const recordCid = await cidFor('record', body);
+      await new Promise<void>((res, rej) => {
+        const tx = db.transaction(LCAP_STORE.records, 'readwrite');
+        tx.objectStore(LCAP_STORE.records).put({
+          recordCid,
+          body,
+          kind: 'contribution_event',
+          lane: 'T1',
+          priority: 1,
+          roomHash,
+          state: 'integrity_verified',
+          size: body.length,
+        });
+        tx.oncomplete = () => res();
+        tx.onerror = () => rej(tx.error);
+      });
+    };
+    await seed('a1a1a1a1a1a1a1a1');
+    await seed('b2b2b2b2b2b2b2b2');
+
+    render(<OfflineBundlePanel enablePrivateRooms={false} />);
+    // The picker appears (no room passed in context); no export section until a room is chosen.
+    expect(
+      await screen.findByRole('heading', { name: /choose a room to export/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /export this room/i })).not.toBeInTheDocument();
+
+    // Choosing a room reveals the export section + its prepare action.
+    await userEvent.click(screen.getAllByRole('radio')[0] as HTMLElement);
+    expect(await screen.findByRole('heading', { name: /export this room/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /prepare export/i })).toBeInTheDocument();
   });
 });
 

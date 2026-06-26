@@ -21,5 +21,20 @@ export async function repackHeldObjects(
   wants: readonly string[],
   maxBytes: number,
 ): Promise<RepackResult> {
-  return repackHeldObjectsPure((cid) => server.getObject(cid), wants, maxBytes);
+  return repackHeldObjectsPure(
+    async (cid) => {
+      const obj = await server.getObject(cid);
+      if (!obj) return undefined;
+      // Stamp a served RECORD with its canonical room_id_hash (computed from the signed room id over
+      // the server's network) — the room is store metadata, not in the body, so the receiver would
+      // otherwise land it with roomHash:''.  Other kinds (proof/block) carry no room.
+      if (obj.kind === 'record') {
+        const roomIdHash = await server.roomIdHashForRecord(obj.bytes);
+        if (roomIdHash) return { ...obj, roomIdHash };
+      }
+      return obj;
+    },
+    wants,
+    maxBytes,
+  );
 }

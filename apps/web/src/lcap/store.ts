@@ -265,7 +265,12 @@ export async function readBlockBytes(
  */
 export async function getHeldObject(db: IDBDatabase, cid: string): Promise<HeldObject | undefined> {
   const record = await getByKey<RecordRow>(db, LCAP_STORE.records, cid);
-  if (record) return { kind: 'record', bytes: record.body };
+  if (record) {
+    // Thread the record's canonical room_id_hash (decoded from its hex `roomHash`) so a repacked
+    // response/push stamps the room — the receiver lands it with its real room, not roomHash:''.
+    const roomIdHash = roomHashToBytes(record.roomHash);
+    return { kind: 'record', bytes: record.body, ...(roomIdHash ? { roomIdHash } : {}) };
+  }
   const proof = await getByKey<ProofRow>(db, LCAP_STORE.proofs, cid);
   if (proof) return { kind: 'proof', bytes: proof.proofBody };
   const block = await readBlockBytes(db, cid);
@@ -296,12 +301,39 @@ export async function proofCidsForRecord(db: IDBDatabase, recordCid: string): Pr
   return out;
 }
 
+/** Canonicalize a room key so the two sides of a room scope compare equal regardless of casing /
+ *  surrounding whitespace / a `0x` prefix — the UI's room-hash text vs. the stored `roomHash`. */
+export function normalizeRoomKey(key: string): string {
+  return key.trim().replace(/^0x/i, '').toLowerCase();
+}
+
+/** Lowercase hex of bytes — the canonical, LOSSLESS string form of a `room_id_hash` (vs. the old
+ *  lossy `TextDecoder`); this is what `RecordRow.roomHash` stores so the UI hex + the room frontier
+ *  all compare equal. */
+export function bytesToHex(bytes: Uint8Array): string {
+  let hex = '';
+  for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+  return hex;
+}
+
+/** Decode a canonical hex `roomHash` back to its `room_id_hash` bytes, or `undefined` if it is not
+ *  valid even-length hex (so legacy/garbage values yield no hash rather than a corrupt one). */
+export function roomHashToBytes(roomHash: string): Uint8Array | undefined {
+  const clean = normalizeRoomKey(roomHash);
+  if (clean.length === 0 || clean.length % 2 !== 0 || !/^[0-9a-f]+$/.test(clean)) return undefined;
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
 /**
- * Collect up to `limit` record rows for which `isShareable` returns true.  When `rooms` is
- * non-empty the scan walks ONLY those rooms via the `roomHash` index (so a room's records are
- * found regardless of how many unrelated rows precede them in the store); otherwise it cursors the
- * whole store.  Crucially the cap counts SHAREABLE rows, not raw rows — so a long-lived store whose
- * in-scope records appear after thousands of unrelated/over-priority rows still yields them.
+ * Collect up to `limit` record rows for which `isShareable` returns true.  When `rooms` is non-empty
+ * the scan keeps only rows whose `roomHash` (CANONICALIZED) is in the allowlist — comparing both
+ * sides through {@link normalizeRoomKey}, so the user's room-hash text and the stored representation
+ * match despite casing / `0x` / whitespace differences.  The cap counts SHAREABLE rows, not raw rows
+ * — so a long-lived store whose in-scope records appear after thousands of unrelated/over-priority
+ * rows still yields them (a normalized compare cannot use the exact `roomHash` index, so this scans
+ * the store, bounded by the shareable cap).
  */
 export async function collectShareableRecordRows(
   db: IDBDatabase,
@@ -309,35 +341,46 @@ export async function collectShareableRecordRows(
   limit: number,
   isShareable: (row: RecordRow) => boolean,
 ): Promise<RecordRow[]> {
+  const allow =
+    rooms && rooms.length > 0 ? new Set(rooms.map((r) => normalizeRoomKey(r))) : undefined;
   const out: RecordRow[] = [];
   const tx = db.transaction(LCAP_STORE.records, 'readonly');
-  const store = tx.objectStore(LCAP_STORE.records);
-  const walk = (source: IDBObjectStore | IDBIndex, query: IDBKeyRange | null): Promise<void> =>
-    new Promise<void>((resolve, reject) => {
-      const request = source.openCursor(query);
-      request.onsuccess = () => {
-        const cursor = request.result;
-        if (!cursor || out.length >= limit) {
-          resolve();
-          return;
-        }
-        const row = cursor.value as RecordRow;
-        if (isShareable(row)) out.push(row);
-        cursor.continue();
-      };
-      request.onerror = () => reject(request.error ?? new Error('record cursor failed'));
-    });
-  if (rooms && rooms.length > 0) {
-    const index = store.index('roomHash');
-    for (const room of rooms) {
-      if (out.length >= limit) break;
-      await walk(index, IDBKeyRange.only(room));
-    }
-  } else {
-    await walk(store, null);
-  }
+  await new Promise<void>((resolve, reject) => {
+    const request = tx.objectStore(LCAP_STORE.records).openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor || out.length >= limit) {
+        resolve();
+        return;
+      }
+      const row = cursor.value as RecordRow;
+      if ((!allow || allow.has(normalizeRoomKey(row.roomHash))) && isShareable(row)) out.push(row);
+      cursor.continue();
+    };
+    request.onerror = () => reject(request.error ?? new Error('record cursor failed'));
+  });
   await txComplete(tx);
   return out;
+}
+
+/** A public room held in `lcap_v2`, identified by its canonical `roomHash` + how many records it
+ *  holds — so the offline UI can offer the rooms a user actually has, without a room-name store. */
+export interface LocalRoom {
+  readonly roomHash: string;
+  readonly recordCount: number;
+}
+
+/** Enumerate the distinct public rooms held in `lcap_v2` (one cursor pass, bounded memory), most
+ *  records first — the offline page lists these for export (it has no room-name source, so rooms
+ *  are identified by their canonical hash).  Records with no room (`roomHash: ''`) are skipped. */
+export async function listLocalRooms(db: IDBDatabase): Promise<LocalRoom[]> {
+  const counts = new Map<string, number>();
+  await forEachByCursor<RecordRow>(db, LCAP_STORE.records, (row) => {
+    if (row.roomHash) counts.set(row.roomHash, (counts.get(row.roomHash) ?? 0) + 1);
+  });
+  return [...counts.entries()]
+    .map(([roomHash, recordCount]) => ({ roomHash, recordCount }))
+    .sort((a, b) => b.recordCount - a.recordCount || a.roomHash.localeCompare(b.roomHash));
 }
 
 // --- Capped transactions (§23.2 old-phone safety). --------------------------------

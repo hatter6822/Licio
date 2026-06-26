@@ -23,10 +23,12 @@ import type {
 import { getLcapDb, LCAP_STORE } from './db.js';
 import {
   forEachByCursor,
+  normalizeRoomKey,
   type ProofRow,
   type RecordRow,
   readBlockBytes,
   readBlockDescriptor,
+  roomHashToBytes,
 } from './store.js';
 
 const LANES: readonly LcapLane[] = ['C0', 'T1', 'E2', 'M3', 'B4'];
@@ -62,13 +64,18 @@ export interface RoomExport {
  * the material that matters (§15.2).
  */
 export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promise<RoomExport> {
-  const roomHashBytes = new TextEncoder().encode(roomHash);
+  // The exported pack's room_id_hash is the ACTUAL hash bytes (hex → bytes), so a re-import lands
+  // each record with the same canonical room key.  (A legacy non-hex `roomHash` falls back to its
+  // UTF-8 bytes — those records re-sync to the canonical form anyway.)
+  const roomHashBytes = roomHashToBytes(roomHash) ?? new TextEncoder().encode(roomHash);
+  const wantRoom = normalizeRoomKey(roomHash);
 
-  // 1) Records for the room (one cursor pass, filtered in JS — bounded memory).
+  // 1) Records for the room (one cursor pass, filtered in JS — bounded memory).  Compare on the
+  // CANONICAL key so casing / `0x` differences between the UI hash and the stored value still match.
   const records: RecordRow[] = [];
   const recordCids = new Set<string>();
   await forEachByCursor<RecordRow>(db, LCAP_STORE.records, (row) => {
-    if (row.roomHash === roomHash) {
+    if (normalizeRoomKey(row.roomHash) === wantRoom) {
       records.push(row);
       recordCids.add(row.recordCid);
     }

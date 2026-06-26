@@ -16,7 +16,13 @@ import {
   respondToClientExchange,
 } from './exchange.js';
 import type { RecordRow } from './store.js';
-import { collectShareableRecordRows, getHeldObject, putBlock, readBlockBytes } from './store.js';
+import {
+  collectShareableRecordRows,
+  getHeldObject,
+  putBlock,
+  readBlockBytes,
+  roomHashToBytes,
+} from './store.js';
 
 let peerA: IDBDatabase;
 let peerB: IDBDatabase;
@@ -106,6 +112,7 @@ async function putCapabilityRecord(
   db: IDBDatabase,
   lcap: typeof import('@licio/lcap'),
   visibility: 'public' | 'in_room' | 'private',
+  roomHash = '',
 ): Promise<string> {
   const body = lcap.encodeWithSchema(lcap.capabilityRecordV2Schema, {
     record_version: 2,
@@ -142,7 +149,7 @@ async function putCapabilityRecord(
     kind: 'room_capability',
     lane: 'C0',
     priority: 0,
-    roomHash: '',
+    roomHash,
     state: 'integrity_verified',
     size: body.length,
   });
@@ -245,6 +252,19 @@ describe('client §16 exchange engine', () => {
     const request = await buildClientExchangeRequest(peerA, 'courier');
     const decoded = lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, request);
     expect(decoded.push_pack).toBeUndefined(); // nothing public to push → no leak
+  });
+
+  it('getHeldObject threads a record’s CANONICAL room hash (hex → bytes) for the repack (#6)', async () => {
+    const lcap = await import('@licio/lcap');
+    const roomHex = 'a1a1a1a1a1a1a1a1';
+    const capCid = await putCapabilityRecord(peerA, lcap, 'public', roomHex);
+    const held = await getHeldObject(peerA, capCid);
+    // The reader supplies the canonical room_id_hash bytes so the repack stamps the served record's
+    // room — losslessly decoded from the stored hex (not the old lossy TextDecoder).
+    expect(held?.roomIdHash).toEqual(roomHashToBytes(roomHex));
+    // A legacy / non-hex roomHash yields NO room hash (rather than a corrupt one).
+    const legacyCid = await putCapabilityRecord(peerB, lcap, 'public', 'not-hex!');
+    expect((await getHeldObject(peerB, legacyCid))?.roomIdHash).toBeUndefined();
   });
 
   it('SECURITY: a NON-PUBLIC room_capability is never pushed/shared (#5, not just contributions)', async () => {

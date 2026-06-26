@@ -88,11 +88,14 @@ async function seedRecord(
 
 describe('bundle export → import round-trip (WS-R.15.1a/b)', () => {
   it('re-imports an exported room with no semantic change, at integrity-only trust', async () => {
-    const a1 = await seedRecord('room-A', 'first in A');
-    const a2 = await seedRecord('room-A', 'second in A');
-    await seedRecord('room-B', 'only in B'); // must NOT be exported
+    // Room keys are the CANONICAL hex of the room_id_hash bytes (lossless) — so they round-trip.
+    const roomA = 'a1a1a1a1a1a1a1a1';
+    const roomB = 'b2b2b2b2b2b2b2b2';
+    const a1 = await seedRecord(roomA, 'first in A');
+    const a2 = await seedRecord(roomA, 'second in A');
+    await seedRecord(roomB, 'only in B'); // must NOT be exported
 
-    const exportData = await gatherRoomExport(db, 'room-A');
+    const exportData = await gatherRoomExport(db, roomA);
     expect(exportData.recordCount).toBe(2);
     expect(exportData.proofCount).toBe(2);
 
@@ -109,7 +112,7 @@ describe('bundle export → import round-trip (WS-R.15.1a/b)', () => {
     expect(read.ok).toBe(true);
     if (!read.ok) return;
     expect(read.summary.byKind.record).toBe(2);
-    expect(read.summary.rooms).toEqual(['room-A']);
+    expect(read.summary.rooms).toEqual([roomA]);
     expect(read.summary.integrityFailed).toBe(0);
 
     const importResult = await importBundleObjects(read.pack);
@@ -123,7 +126,7 @@ describe('bundle export → import round-trip (WS-R.15.1a/b)', () => {
       const row = storedByCid.get(seeded.recordCid);
       expect(row).toBeDefined();
       expect(row?.body).toEqual(seeded.body); // payload preserved byte-for-byte
-      expect(row?.roomHash).toBe('room-A'); // room round-trips
+      expect(row?.roomHash).toBe(roomA); // room round-trips (canonical hex)
       expect(row?.state).toBe('integrity_verified'); // NOT authorized — no overclaim
     }
     db2.close();

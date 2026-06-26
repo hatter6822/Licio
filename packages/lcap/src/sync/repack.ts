@@ -5,15 +5,15 @@
 // the server (`apps/api/src/lcap/repack.ts`) AND the client P2P transports (the courier + the
 // WebRTC responder) reuse ONE implementation rather than each re-deriving lane/priority/privacy.
 //
-// Lane/priority are re-derived from each object's decoded content + the §15.1.1 kind conventions
-// — receiver-re-derived scheduling HINTS (§16.7), NOT trust: the importer re-verifies every CID
-// and re-derives trust regardless.  Everything is derived from the object's BYTES alone (no
-// store/table metadata): for a record that includes its ROOM (`home_room_id`/`room_id`) and its
-// dep CIDs (parents / capability / body+attachment blocks), threaded onto the PackObject so the
-// receiver lands the record with its real `roomHash` (not '') and quarantines on a missing
-// prerequisite — otherwise a just-synced record is invisible to "Sync this room" / room export and
-// its block share-closure is empty.  The pack `privacy_label` is derived conservatively from the
-// served records' own `visibility_scope` (any non-public record upgrades it).
+// Lane/priority + the dep CIDs are re-derived from each object's decoded BYTES + the §15.1.1 kind
+// conventions — receiver-re-derived scheduling HINTS (§16.7), NOT trust: the importer re-verifies
+// every CID and re-derives trust regardless.  The record's ROOM is the one piece that is NOT in the
+// signed body — `room_id_hash` is the hashed `roomIdHash(networkId, roomId)` metadata the STORE
+// holds — so the reader threads it through {@link HeldObject.roomIdHash} and the repack stamps it
+// verbatim, letting the receiver land the record with its real room key (matching the room frontier
+// + the "Sync this room" scope + room export) instead of `roomHash: ''`.  The pack `privacy_label`
+// is derived conservatively from the served records' own `visibility_scope` (any non-public record
+// upgrades it).
 
 import type { CidKind } from '../cid/index.js';
 import { type PackObject, writePack } from '../pack/index.js';
@@ -21,10 +21,15 @@ import { defaultLane, type LcapPriority } from '../priority.js';
 import { decodeAndRouteRecord, decodeProof } from '../schemas/codec.js';
 import type { PackHeaderV2 } from '../schemas/pack.js';
 
-/** A held content object served from a store: its CID kind + verifiable bytes. */
+/** A held content object served from a store: its CID kind + verifiable bytes, plus — for a
+ *  record — its canonical `room_id_hash` (the 32-byte `roomIdHash(networkId, roomId)` METADATA the
+ *  store already holds; it is NOT in the signed body, so the reader threads it through rather than
+ *  the repack re-deriving it).  Carrying it lets the receiver land the record with its real room. */
 export interface HeldObject {
   readonly kind: CidKind;
   readonly bytes: Uint8Array;
+  /** The canonical `room_id_hash` bytes for a record (the reader supplies it from store metadata). */
+  readonly roomIdHash?: Uint8Array;
 }
 
 /** Reads a held object by CID, or `undefined` when not held — the only I/O `repackHeldObjects`
@@ -49,12 +54,10 @@ interface DerivedObject {
   readonly sensitive: boolean;
 }
 
-/** The room + dep CIDs a record references, from its SIGNED body — so the repacked PackObject lands
- *  the record with its real room + prerequisites (a missing one then quarantines on the receiver). */
-function recordRefs(record: ReturnType<typeof decodeAndRouteRecord>): {
-  roomId?: string;
-  deps: string[];
-} {
+/** The dep CIDs a record structurally references, from its SIGNED body — so a missing prerequisite
+ *  quarantines on the receiver.  (The ROOM is NOT derived here: `room_id_hash` is the hashed
+ *  metadata the reader threads via {@link HeldObject.roomIdHash}, not the plaintext `home_room_id`.) */
+function recordDeps(record: ReturnType<typeof decodeAndRouteRecord>): string[] {
   const deps: string[] = [];
   if (record.kind === 'contribution_event') {
     // NOTE: `capability_cid` is deliberately NOT a dep — the §18.3 validator resolves the capability
@@ -70,10 +73,8 @@ function recordRefs(record: ReturnType<typeof decodeAndRouteRecord>): {
     if (record.attachment_manifest_cid) deps.push(record.attachment_manifest_cid);
     for (const snapshot of record.source_snapshot_cids ?? []) deps.push(snapshot);
     if (record.target_source_snapshot_cid) deps.push(record.target_source_snapshot_cid);
-    return { roomId: record.home_room_id, deps };
   }
-  if (record.kind === 'room_capability') return { roomId: record.room_id, deps };
-  return { deps };
+  return deps;
 }
 
 /** Re-derive a servable PackObject from a held object's bytes (undefined if undecodable). */
@@ -92,7 +93,7 @@ function packObjectFor(cid: string, held: HeldObject): DerivedObject | undefined
       // ANY record kind with a non-public visibility_scope (contribution_event AND room_capability)
       // upgrades the pack privacy label — never label restricted content as plain public.
       const sensitive = 'visibility_scope' in record && record.visibility_scope !== 'public';
-      const { roomId, deps } = recordRefs(record);
+      const deps = recordDeps(record);
       return {
         object: {
           cid,
@@ -103,7 +104,9 @@ function packObjectFor(cid: string, held: HeldObject): DerivedObject | undefined
           priority,
           recordKind: record.kind,
           ...(deps.length > 0 ? { deps } : {}),
-          ...(roomId !== undefined ? { roomIdHash: new TextEncoder().encode(roomId) } : {}),
+          // The canonical room_id_hash bytes (store metadata), NOT a re-derivation — so the receiver
+          // stores the record's real room key, matching the room frontier + the "Sync this room" scope.
+          ...(held.roomIdHash !== undefined ? { roomIdHash: held.roomIdHash } : {}),
         },
         sensitive,
       };

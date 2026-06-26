@@ -31,6 +31,7 @@ import type {
 } from '@licio/lcap';
 import { LCAP_STORE } from './db.js';
 import {
+  bytesToHex,
   filterPresentKeys,
   importInCappedTransactions,
   type ProofRow,
@@ -72,7 +73,7 @@ export function summarizeBundle(pack: ParsedPack): BundleSummary {
     byLane[entry.lane] += 1;
     totalPayloadBytes += entry.length;
     if (entry.priority === 0) criticalCount += 1;
-    if (entry.room_id_hash !== undefined) rooms.add(new TextDecoder().decode(entry.room_id_hash));
+    if (entry.room_id_hash !== undefined) rooms.add(bytesToHex(entry.room_id_hash));
   }
 
   let integrityVerified = 0;
@@ -216,8 +217,9 @@ export async function commitImportedBundle(
   for (const [cid, frame] of importResult.imported) {
     const entry = entryByCid.get(cid);
     if (frame.frameKind === 'record_body') {
-      const roomHash =
-        entry?.room_id_hash !== undefined ? new TextDecoder().decode(entry.room_id_hash) : '';
+      // Store the room key as the LOSSLESS canonical hex of the room_id_hash bytes (not a lossy
+      // TextDecoder), so it compares equal to the room frontier + the "Sync this room" UI hash.
+      const roomHash = entry?.room_id_hash !== undefined ? bytesToHex(entry.room_id_hash) : '';
       recordRows.push({
         recordCid: cid,
         body: frame.payload,
