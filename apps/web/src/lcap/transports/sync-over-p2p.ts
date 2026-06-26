@@ -135,6 +135,11 @@ export async function syncRoomOverP2p(
     }
   }
 
+  // If the user CANCELLED while the WebRTC leg was failing, do NOT fall through to the anchor: the
+  // HTTPS transport does not thread the AbortSignal into fetch, so a cancelled sync could otherwise
+  // still upload the request + push_pack to the server.
+  if (params.signal?.aborted) return null;
+
   // 2) Anchor back-stop: a requester-only exchange against the always-correct server, then INGEST
   //    the served response.  (`offlineExchange` over the server transports preserves anchor-last.)
   const anchor = await offlineExchange(

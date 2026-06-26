@@ -147,6 +147,10 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
   useEffect(() => {
     const controller = controllerRef.current;
     if (!controller) return;
+    // A newer controls/mode change supersedes this effect — its cleanup sets `cancelled` so a slow
+    // power read here cannot re-apply STALE controls (e.g. radios-on) AFTER a newer restriction
+    // already narrowed/stopped the courier.
+    let cancelled = false;
     void (async () => {
       // A FRESH power reading so the §22.5 battery floor is enforced against the current level
       // (not the snapshot captured at Start).  The controller module is already loaded (the
@@ -154,13 +158,17 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
       // initial bundle.
       const { readCourierPower } = await import('../../../lcap/transports/courier-controller.js');
       const power = await readCourierPower();
+      if (cancelled || controllerRef.current !== controller) return; // superseded — don't re-apply stale controls
       await controller.applyControls(controls, { power, mode: mode as CourierMode });
       // If applyControls stopped the courier, onDecisionChange already nulled the ref + set the
       // blocked phase; otherwise reflect any live direction/channel change in the running list.
-      if (controllerRef.current === controller && controller.isRunning()) {
+      if (!cancelled && controllerRef.current === controller && controller.isRunning()) {
         setPhase({ kind: 'running', channels: controller.activeChannels() });
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [controls, mode]);
 
   const onControlsChange = useCallback((next: CourierRadioControls) => {
@@ -261,6 +269,11 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
         onDecisionChange: (decision) => {
           controllerRef.current = null;
           setPhase({ kind: 'blocked', reason: decision.blockedReason });
+        },
+        // ONE of several radios failed but others still run — refresh the "Running on" list so the
+        // UI stops showing the dead radio as running (a full loss flips to blocked above instead).
+        onActiveChannelsChanged: (channels) => {
+          setPhase((prev) => (prev.kind === 'running' ? { kind: 'running', channels } : prev));
         },
       });
       // Make the controller reachable BEFORE awaiting start(), so an unmount, a disclosure

@@ -476,6 +476,29 @@ public class BluetoothCourierRadioTest {
     }
 
     @Test
+    @Config(sdk = 31) // the legacy CCC write is shadowed here, so connectBleClient leaves the gatt tracked
+    public void aStaleDisconnectFromAnOldGattDoesNotDropTheFreshLink() {
+        // The same address re-dials after a Stop→Start; a DELAYED STATE_DISCONNECTED from the OLD
+        // BluetoothGatt must NOT remove the FRESH gatt's entries or emit a spurious disconnect (#4).
+        Recorder rec = new Recorder();
+        BluetoothCourierRadio radio = new BluetoothCourierRadio(ctx(), rec);
+        BluetoothGatt freshGatt = connectBleClient(radio); // bleClients[PEER] = freshGatt
+        // An OLD gatt for the SAME address fires a late disconnect.
+        BluetoothGatt staleGatt = peerDevice().connectGatt(
+                ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
+        assertNotNull(staleGatt);
+        rec.disconnectedEndpoint = null;
+        radio.gattClientCallback.onConnectionStateChange(
+                staleGatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED);
+        assertNull("a stale gatt's disconnect did not drop the fresh link", rec.disconnectedEndpoint);
+
+        // The CURRENT gatt's disconnect IS honored.
+        radio.gattClientCallback.onConnectionStateChange(
+                freshGatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED);
+        assertEquals(PEER, rec.disconnectedEndpoint);
+    }
+
+    @Test
     public void aBleAdvertisingFailureIsSurfacedNotSilent() {
         // Android can reject the advertise asynchronously (advertiser quota / unsupported params);
         // the empty callback used to swallow it while the plugin call had resolved + the controller

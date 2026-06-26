@@ -10,6 +10,7 @@ package app.licio.courier;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -24,6 +25,8 @@ public class NearbyCourierRadioTest {
         String advertisedName;
         String advertisedService;
         String discoveredService;
+        long lastAdvertiseGen;
+        long lastDiscoverGen;
         final List<String> requested = new ArrayList<>();
         final List<String> accepted = new ArrayList<>();
         String sentEndpoint;
@@ -43,14 +46,16 @@ public class NearbyCourierRadioTest {
         }
 
         @Override
-        public void startAdvertising(String localName, String serviceId) {
+        public void startAdvertising(String localName, String serviceId, long generation) {
             advertisedName = localName;
             advertisedService = serviceId;
+            lastAdvertiseGen = generation;
         }
 
         @Override
-        public void startDiscovery(String serviceId) {
+        public void startDiscovery(String serviceId, long generation) {
             discoveredService = serviceId;
+            lastDiscoverGen = generation;
         }
 
         @Override
@@ -247,10 +252,30 @@ public class NearbyCourierRadioTest {
         // learns no start is running rather than believing it succeeded.
         FakeNearby fake = new FakeNearby();
         Recorder rec = new Recorder();
-        new NearbyCourierRadio(fake, rec);
+        NearbyCourierRadio radio = new NearbyCourierRadio(fake, rec);
+        radio.startAdvertising(); // generation bumped + captured by the seam
         Exception cause = new IllegalStateException("nearby_disabled");
-        fake.listener.onStartFailed("advertise", cause);
+        fake.listener.onStartFailed("advertise", fake.lastAdvertiseGen, cause);
         assertEquals("advertise", rec.startFailedOperation);
         assertEquals(cause, rec.startFailedCause);
+    }
+
+    @Test
+    public void aStaleStartFailureFromASupersededStartIsDropped() {
+        // A GMS start-failure Task from a PREVIOUS run can reject after a quick Stop→Start; forwarding
+        // it would tear the freshly-started Nearby courier down.  The generation gate drops it (#2).
+        FakeNearby fake = new FakeNearby();
+        Recorder rec = new Recorder();
+        NearbyCourierRadio radio = new NearbyCourierRadio(fake, rec);
+        radio.startAdvertising();
+        long staleGen = fake.lastAdvertiseGen; // the first run's generation
+        radio.stop();
+        radio.startAdvertising(); // a fresh run — a NEW generation
+        // The OLD run's failure Task fires now — it must NOT be forwarded (the courier is freshly up).
+        fake.listener.onStartFailed("advertise", staleGen, new IllegalStateException("nearby_disabled"));
+        assertNull("a stale superseded failure is dropped", rec.startFailedOperation);
+        // A failure for the CURRENT run IS forwarded.
+        fake.listener.onStartFailed("advertise", fake.lastAdvertiseGen, new IllegalStateException("x"));
+        assertEquals("advertise", rec.startFailedOperation);
     }
 }

@@ -258,8 +258,15 @@ public class WifiDirectRadio implements CourierRadio {
                 String action = intent.getAction();
                 if (action == null || manager == null || channel == null) return;
                 if (WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION.equals(action)) {
+                    // Capture the generation when the discovery request is ISSUED: a peers result for
+                    // an OLD discovery run can be delivered after a Stop→Start (even an advertise-only
+                    // restart) — gate on it so a superseded run cannot initiate a connect() under the
+                    // new session (the `running` flag alone cannot distinguish the old native task).
+                    final long peersGen = startGeneration;
                     manager.requestPeers(channel, peers -> {
-                        if (!running.get() || peers.getDeviceList().isEmpty()) return;
+                        if (!running.get() || isStale(peersGen) || peers.getDeviceList().isEmpty()) {
+                            return;
+                        }
                         // Skip a fresh connect while a group/socket is already set up (a harmless
                         // peer-list refresh must not tear down a working courier) or a connect is
                         // already in flight — either case would issue a duplicate connect Android

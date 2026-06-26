@@ -335,4 +335,30 @@ describe('WS-R.15.10 syncRoomOverP2p (bidirectional)', () => {
     expect(result?.ingested?.blocks).toBe(1);
     expect(await readBlockBytes(initiatorDb, blockCid)).toEqual(bytes); // ingested from the anchor
   });
+
+  it('does NOT upload to the HTTPS anchor after the sync is CANCELLED (#6)', async () => {
+    const controller = new AbortController();
+    controller.abort(); // the user cancelled before/while the WebRTC leg failed
+    const urls: string[] = [];
+    const httpsFetch = (async (input: string | URL | Request) => {
+      urls.push(String(input));
+      return new Response(new Uint8Array([0]) as BodyInit, { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const result = await syncRoomOverP2p({
+      db: initiatorDb,
+      roomIdHash: ROOM,
+      selfPeerKey: 'alice',
+      remotePeerKey: 'bob',
+      initiator: true,
+      privacy: { mode: 'standard', userEnabled: false },
+      httpsConfig: { fetchFn: httpsFetch },
+      rtcFactory: () => new FakePeer(new FakeLink(), 'initiator'),
+      signal: controller.signal,
+      timeoutMs: 50,
+    });
+    expect(result).toBeNull();
+    // The cancelled sync uploaded NOTHING to the server (the anchor fetch was never reached).
+    expect(urls.some((u) => u.includes('/exchange'))).toBe(false);
+  });
 });

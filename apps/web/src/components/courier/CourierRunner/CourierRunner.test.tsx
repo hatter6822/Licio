@@ -235,6 +235,47 @@ describe('CourierRunner (WS-R.15.4c/d/e)', () => {
     expect((lastCall?.[1] as { mode?: string } | undefined)?.mode).toBe('stealth');
   });
 
+  it('drops a SUPERSEDED control-apply effect (a stale power read does not re-apply) (#7)', async () => {
+    injectNativeShell();
+    render(<CourierRunner />);
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /i understand what a nearby radio reveals/i }),
+    );
+    fireEvent.click(screen.getByRole('switch', { name: /advertise this device/i }));
+    fireEvent.click(screen.getByRole('button', { name: /start courier/i }));
+    await waitFor(() => expect(screen.getByText(/^Running$/)).toBeInTheDocument());
+
+    // The reconcile effect parks on a CONTROLLED battery read; queue each resolver so two rapid mode
+    // changes interleave (the FIRST effect resolves AFTER the second has already superseded it).
+    const powerResolvers: Array<() => void> = [];
+    readCourierPower.mockImplementation(
+      () =>
+        new Promise<object>((res) => {
+          powerResolvers.push(() => res({}));
+        }),
+    );
+    controllerApplyControls.mockClear();
+    await act(async () => {
+      setOperationalMode('minimal'); // effect A — parks on the battery read
+    });
+    await act(async () => {
+      setOperationalMode('standard'); // effect B — its mount cancels effect A
+    });
+    await waitFor(() => expect(powerResolvers.length).toBe(2));
+    await act(async () => {
+      powerResolvers[0]?.(); // effect A resolves LATE — must NOT apply the stale 'minimal'
+      powerResolvers[1]?.(); // effect B resolves — applies 'standard'
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(controllerApplyControls).toHaveBeenCalled());
+    const modes = controllerApplyControls.mock.calls.map(
+      (c) => ((c as unknown[])[1] as { mode?: string } | undefined)?.mode,
+    );
+    expect(modes).not.toContain('minimal'); // the superseded effect never re-applied
+    expect(modes.at(-1)).toBe('standard');
+    readCourierPower.mockImplementation(async () => ({})); // restore for later tests
+  });
+
   it('drops a RUNNING courier to blocked when a radio fails to start asynchronously', async () => {
     injectNativeShell();
     render(<CourierRunner />);

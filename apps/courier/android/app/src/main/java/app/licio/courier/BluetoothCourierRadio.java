@@ -693,6 +693,14 @@ public class BluetoothCourierRadio implements CourierRadio {
                     failBleClient(gatt, endpointId);
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                // A DELAYED disconnect from an OLD BluetoothGatt (the same address was re-dialed /
+                // reconnected after a Stop→Start or quick redial) must NOT remove the FRESH gatt's
+                // entries or emit a spurious disconnect for the current link — only forget if the
+                // maps STILL point at THIS callback's gatt (#4).
+                if (bleClients.get(endpointId) != gatt && blePendingClients.get(endpointId) != gatt) {
+                    gatt.close(); // a stale old gatt — close it, but leave the fresh client intact
+                    return;
+                }
                 forgetBleClient(endpointId); // frees the dial slot to re-dial
                 gatt.close();
                 events.onDisconnected(endpointId);

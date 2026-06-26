@@ -30,8 +30,10 @@ public interface NearbyConnections {
 
         /** A start request ({@code "advertise"}/{@code "discover"}) FAILED — GMS delivers this
          *  asynchronously via the start Task, so it must be surfaced (not dropped) or the caller
-         *  would believe a start succeeded when no advertising/discovery is actually running. */
-        void onStartFailed(String operation, Exception cause);
+         *  would believe a start succeeded when no advertising/discovery is actually running.  The
+         *  {@code generation} is the value passed to the start call that failed, so the radio can
+         *  DROP a stale failure from a superseded start (a quick Stop→Start / live restart). */
+        void onStartFailed(String operation, long generation, Exception cause);
     }
 
     void setListener(Listener listener);
@@ -39,9 +41,11 @@ public interface NearbyConnections {
     /** Whether Nearby Connections is usable on this device. */
     boolean isAvailable();
 
-    void startAdvertising(String localName, String serviceId);
+    /** {@code generation} tags this start so a late failure Task can be matched to it (and dropped
+     *  when a newer start has superseded it). */
+    void startAdvertising(String localName, String serviceId, long generation);
 
-    void startDiscovery(String serviceId);
+    void startDiscovery(String serviceId, long generation);
 
     void requestConnection(String localName, String endpointId);
 

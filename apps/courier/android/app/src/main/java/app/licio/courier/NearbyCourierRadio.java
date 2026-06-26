@@ -26,6 +26,9 @@ public class NearbyCourierRadio implements CourierRadio, NearbyConnections.Liste
     // delivered AFTER stop() must NOT start/accept a fresh link (the web listeners are gone and no
     // later stop would tear it down).  Set on start, cleared on stop.
     private final AtomicBoolean running = new AtomicBoolean(false);
+    // Bumped on every start + stop; a start passes its generation to the seam, which echoes it on a
+    // late start-failure so a stale failure from a superseded start is dropped (#2).
+    private volatile long startGeneration = 0;
     private String serviceId = DEFAULT_SERVICE_ID;
     private String localName = "licio-courier";
 
@@ -49,18 +52,19 @@ public class NearbyCourierRadio implements CourierRadio, NearbyConnections.Liste
     @Override
     public void startAdvertising() {
         running.set(true);
-        nearby.startAdvertising(localName, serviceId);
+        nearby.startAdvertising(localName, serviceId, ++startGeneration);
     }
 
     @Override
     public void startDiscovery() {
         running.set(true);
-        nearby.startDiscovery(serviceId);
+        nearby.startDiscovery(serviceId, ++startGeneration);
     }
 
     @Override
     public void stop() {
         running.set(false);
+        startGeneration++; // invalidate any in-flight start so a late failure Task is dropped
         nearby.stop();
     }
 
@@ -106,8 +110,11 @@ public class NearbyCourierRadio implements CourierRadio, NearbyConnections.Liste
     }
 
     @Override
-    public void onStartFailed(String operation, Exception cause) {
+    public void onStartFailed(String operation, long generation, Exception cause) {
         // GMS refused to start advertising/discovery — surface it (the seam delivers it async).
+        // DROP a stale failure from a SUPERSEDED start: a previous run's GMS Task can reject after a
+        // quick Stop→Start, and forwarding it would tear the freshly-started Nearby courier down (#2).
+        if (generation != startGeneration) return;
         events.onStartFailed(operation, cause);
     }
 }

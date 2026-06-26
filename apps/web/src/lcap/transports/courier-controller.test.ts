@@ -896,6 +896,53 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     expect(buildRequest).not.toHaveBeenCalled();
   });
 
+  it('does NOT send a request if the channel is torn down during buildRequest (#1-followon)', async () => {
+    let resolveReq: ((b: Uint8Array) => void) | undefined;
+    const f = fakePlugin();
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () =>
+        new Promise<Uint8Array>((res) => {
+          resolveReq = res;
+        }),
+      httpsConfig: { fetchFn: REJECTING_FETCH },
+    });
+    await controller.start();
+    f.emit('connectionResult', { endpointId: 'ep1', connected: true }); // → awaits buildRequest
+    await Promise.resolve();
+    await controller.stop(); // the courier stops WHILE the request is being built
+    resolveReq?.(REQUEST_BYTES);
+    // Give the (buggy) send path ample time to reach plugin.send, were the liveness guard missing.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(f.sent.some((s) => s.message === REQUEST_B64)).toBe(false); // a stopped courier transmits nothing
+  });
+
+  it('notifies the runner when ONE of several channels fails but others remain (#3)', async () => {
+    const a = fakePlugin();
+    const b = fakePlugin();
+    const channelLists: string[][] = [];
+    const controller = new CourierController({
+      channels: [
+        { channel: 'nearby', plugin: a.plugin },
+        { channel: 'bluetooth', plugin: b.plugin },
+      ] as unknown as CourierChannelPlugin[],
+      controls: ON,
+      mode: 'courier',
+      buildRequest: () => REQUEST_BYTES,
+      onActiveChannelsChanged: (ch) => channelLists.push([...ch]),
+    });
+    await controller.start();
+    expect(controller.isRunning()).toBe(true);
+    // Nearby fails ASYNCHRONOUSLY; Bluetooth keeps running — the runner must be told the active set
+    // shrank (else it shows the dead radio as running).
+    a.emit('startFailed', { operation: 'advertise', error: 'nearby_disabled' });
+    await vi.waitFor(() => expect(channelLists.length).toBeGreaterThan(0));
+    expect(channelLists.at(-1)).toEqual(['bluetooth']); // the refreshed list excludes the dead radio
+    expect(controller.isRunning()).toBe(true); // still up on Bluetooth
+  });
+
   it('re-checks the who-can-exchange policy AFTER the async request build (#C)', async () => {
     // The peer passes the gate, then the user removes it from the allowlist DURING the async build.
     const outcomes: string[] = [];
@@ -915,8 +962,13 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     await controller.start();
     f.emit('connectionResult', { endpointId: 'ep1', connected: true }); // drive → awaits buildRequest
     await Promise.resolve();
-    // Tighten the policy mid-build: ep1 is no longer permitted.
-    void controller.applyControls({ ...ON, exchangePeers: 'none' });
+    // Tighten the policy mid-build: restrict to a DIFFERENT endpoint (the courier STAYS up — a
+    // `known_only` allowlist excluding ep1 — so we exercise the per-peer re-check, not a full stop).
+    void controller.applyControls({
+      ...ON,
+      exchangePeers: 'known_only',
+      allowedEndpointIds: ['someone-else'],
+    });
     resolveReq?.(REQUEST_BYTES); // the build completes AFTER the policy tightened
     await vi.waitFor(() => expect(outcomes).toContain('not_allowed_peer'));
     expect(f.sent.some((s) => s.message === REQUEST_B64)).toBe(false); // never sent to the removed peer

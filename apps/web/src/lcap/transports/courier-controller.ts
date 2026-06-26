@@ -205,6 +205,11 @@ export interface CourierControllerConfig {
    *  radio_unavailable, which the caller's `start()` return value cannot reflect.  The UI uses
    *  this to drop a now-dead courier from "running" instead of showing a stale state. */
   readonly onDecisionChange?: (decision: CourierStartDecision) => void;
+  /** Notified when the set of RUNNING channels changes while the courier stays up — e.g. ONE of
+   *  several radios fails to start asynchronously.  The all-failed case flips the decision via
+   *  {@link onDecisionChange}; this fires for PARTIAL loss so the UI refreshes its "Running on" list
+   *  instead of showing a dead radio as running until some unrelated control changes. */
+  readonly onActiveChannelsChanged?: (channels: readonly CourierChannel[]) => void;
   /** Optional service id / endpoint name passed to the radios. */
   readonly serviceId?: string;
   readonly endpointName?: string;
@@ -556,7 +561,7 @@ export class CourierController {
     const event: NativeConnectionEvent = parsed.data;
     if (!event.connected) return;
     if (this.exchanged.has(this.key(channel, event.endpointId))) return; // one per connection
-    void this.driveExchange(channel, event.endpointId);
+    void this.driveExchange(channel, generation, event.endpointId);
   }
 
   /** A `payloadReceived`: CLASSIFY the inbound message and route it (fail-closed).  A peer's
@@ -663,10 +668,15 @@ export class CourierController {
     await this.stopChannel(channel);
     // Defer the all-failed verdict while start() is still launching (its end-of-loop check owns it);
     // once running, only the LAST channel going down makes the courier unavailable.
-    if (!this.launching && this.started && this.runningChannels.size === 0) {
+    if (this.launching || !this.started) return;
+    if (this.runningChannels.size === 0) {
       this.started = false;
       this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
       this.config.onDecisionChange?.(this.decision);
+    } else {
+      // PARTIAL loss — one channel failed but others still run.  Tell the UI so it refreshes the
+      // "Running on" list instead of showing the dead radio as running.
+      this.config.onActiveChannelsChanged?.(this.activeChannels());
     }
   }
 
@@ -704,7 +714,11 @@ export class CourierController {
    * append the always-correct HTTPS anchor LAST, and run ONE §16 PUBLIC exchange through
    * `offlineExchange`.  Applies the §22.5 who-can-exchange + storage-budget gates first.
    */
-  private async driveExchange(channel: CourierChannel, endpointId: string): Promise<void> {
+  private async driveExchange(
+    channel: CourierChannel,
+    generation: number,
+    endpointId: string,
+  ): Promise<void> {
     const key = this.key(channel, endpointId);
     if (this.exchanged.has(key)) return;
     this.exchanged.add(key);
@@ -720,7 +734,12 @@ export class CourierController {
       return;
     }
 
-    // Re-check the LIVE who-can-exchange policy: the user may have removed this peer from the
+    // Re-check LIVENESS after the async build: a Stop / disclosure revocation / forced-off mode /
+    // channel deselection may have torn this channel down WHILE buildRequest awaited — a stopped or
+    // deselected courier must never transmit, even though pluginFor() still resolves the plugin and
+    // the medium would call plugin.send before native teardown completes.
+    if (!this.started || !this.isChannelActive(channel, generation)) return;
+    // Re-check the LIVE who-can-exchange policy too: the user may have removed this peer from the
     // allowlist (or set peers→none) DURING the async request build — never send to it now.
     if (!mayExchangeWithEndpoint(this.controls, endpointId)) {
       this.emit(channel, endpointId, null, null, 'not_allowed_peer');
