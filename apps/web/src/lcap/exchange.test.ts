@@ -56,8 +56,10 @@ async function putPublicRecord(
   db: IDBDatabase,
   lcap: typeof import('@licio/lcap'),
   visibility: 'public' | 'in_room' | 'private',
+  opts: { deps?: string[]; priority?: 0 | 1 | 2 | 3 | 4; roomHash?: string } = {},
 ): Promise<string> {
   const capabilityCid = await lcap.cidFor('record', new Uint8Array([0]));
+  const priority = opts.priority ?? 2;
   const body = lcap.encodeContributionEvent({
     record_version: 2,
     kind: 'contribution_event',
@@ -72,7 +74,7 @@ async function putPublicRecord(
     policy_epoch_claim: 0,
     revocation_epoch_claim: 0,
     client_nonce: new Uint8Array([1, 2, 3]),
-    priority: 2,
+    priority,
   });
   const recordCid = await lcap.cidFor('record', body);
   const tx = db.transaction(LCAP_STORE.records, 'readwrite');
@@ -81,10 +83,11 @@ async function putPublicRecord(
     body,
     kind: 'contribution_event',
     lane: 'C0',
-    priority: 2,
-    roomHash: '',
+    priority,
+    roomHash: opts.roomHash ?? '',
     state: 'integrity_verified',
     size: body.length,
+    ...(opts.deps ? { deps: opts.deps } : {}),
   });
   await new Promise<void>((resolve, reject) => {
     tx.oncomplete = () => resolve();
@@ -95,10 +98,13 @@ async function putPublicRecord(
 
 describe('client §16 exchange engine', () => {
   it('moves content: A wants a quarantined dep → B serves it → A ingests + holds it', async () => {
-    // B holds a block A is missing.
+    // B holds a block A is missing — reachable from a PUBLIC record B holds (so it is shareable;
+    // an orphan block with no public record referencing it is correctly NOT served).
     const bytes = new Uint8Array([10, 20, 30, 40, 50]);
     const blockCid = await cidFor('block', bytes);
     await putBlock(peerB, { blockCid, state: 'integrity_verified', size: bytes.length }, [bytes]);
+    const lcap = await import('@licio/lcap');
+    await putPublicRecord(peerB, lcap, 'public', { deps: [blockCid] });
 
     // A has quarantined some parent record awaiting that block.
     await quarantineMissing(peerA, 'parent-record-cid', [blockCid]);
@@ -112,6 +118,51 @@ describe('client §16 exchange engine', () => {
 
     expect(counts?.blocks).toBe(1); // the served block was committed
     expect(await readBlockBytes(peerA, blockCid)).toEqual(bytes); // A now HOLDS the content
+  });
+
+  it('SECURITY: never serves a block that belongs to a NON-PUBLIC record (even if wanted)', async () => {
+    const bytes = new Uint8Array([1, 1, 2, 3, 5]);
+    const blockCid = await cidFor('block', bytes);
+    await putBlock(peerB, { blockCid, state: 'integrity_verified', size: bytes.length }, [bytes]);
+    const lcap = await import('@licio/lcap');
+    await putPublicRecord(peerB, lcap, 'in_room', { deps: [blockCid] }); // the block's record is in_room
+    await quarantineMissing(peerA, 'parent', [blockCid]);
+
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+    const response = await respondToClientExchange(peerB, request);
+    const counts = await ingestClientExchangeResponse(peerA, response as Uint8Array);
+    expect(counts).toBeNull(); // nothing served — the in-room block never leaves the device
+    expect(await readBlockBytes(peerA, blockCid)).toBeUndefined();
+  });
+
+  it('SECURITY: a priority cap keeps over-priority content from being served', async () => {
+    const bytes = new Uint8Array([9, 9, 9, 9]);
+    const blockCid = await cidFor('block', bytes);
+    await putBlock(peerB, { blockCid, state: 'integrity_verified', size: bytes.length }, [bytes]);
+    const lcap = await import('@licio/lcap');
+    await putPublicRecord(peerB, lcap, 'public', { deps: [blockCid], priority: 4 }); // P4
+    await quarantineMissing(peerA, 'parent', [blockCid]);
+
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+    // The responder caps sharing at P1 — the P4 record (+ its block) is NOT served.
+    const response = await respondToClientExchange(peerB, request, { maxPriorityClass: 1 });
+    expect(await ingestClientExchangeResponse(peerA, response as Uint8Array)).toBeNull();
+  });
+
+  it('SECURITY: a room allowlist keeps other rooms’ content from being served', async () => {
+    const bytes = new Uint8Array([7, 7, 7]);
+    const blockCid = await cidFor('block', bytes);
+    await putBlock(peerB, { blockCid, state: 'integrity_verified', size: bytes.length }, [bytes]);
+    const lcap = await import('@licio/lcap');
+    await putPublicRecord(peerB, lcap, 'public', { deps: [blockCid], roomHash: 'room-X' });
+    await quarantineMissing(peerA, 'parent', [blockCid]);
+
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+    // The responder shares only `room-Y` — `room-X`'s content (+ its block) is NOT served.
+    const response = await respondToClientExchange(peerB, request, {
+      roomHashAllowlist: ['room-Y'],
+    });
+    expect(await ingestClientExchangeResponse(peerA, response as Uint8Array)).toBeNull();
   });
 
   it('serves nothing (empty response) when the peer holds none of the wants', async () => {

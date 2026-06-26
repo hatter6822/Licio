@@ -15,6 +15,7 @@ import type { DataChannelLike } from '@licio/lcap-p2p';
 import {
   buildClientExchangeRequest,
   type CommitCounts,
+  type ExchangeScope,
   handleInboundExchangeMessage,
 } from '../exchange.js';
 
@@ -32,6 +33,8 @@ export interface WebrtcExchangeParams {
   readonly channel: DataChannelLike;
   /** A pre-built request (else one is built from the local quarantine gaps). */
   readonly request?: Uint8Array;
+  /** The §22.5 sharing scope — what we may serve/push (public-only, room/priority filtered). */
+  readonly scope?: ExchangeScope;
   readonly signal?: AbortSignal;
   /** Wall-clock cap on waiting for our response before resolving (the peer may answer slowly). */
   readonly timeoutMs?: number;
@@ -54,9 +57,16 @@ export async function runWebrtcBidirectionalExchange(
 ): Promise<WebrtcExchangeResult> {
   const p2p = await import('@licio/lcap-p2p');
   const reassembler = new p2p.FragmentReassembler();
+  // After the FIRST direction completes, give the OTHER this long to request/answer before we
+  // settle + close — so a peer that answers our request BEFORE sending its own still gets served
+  // (the carrier stays genuinely bidirectional under asymmetric timing).
+  const GRACE_MS = 1_500;
   let messageId = 0;
   let served = false;
+  let gotResponse = false;
+  let ingestedResult: CommitCounts | null = null;
   let settled = false;
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
   let resolveResult!: (r: WebrtcExchangeResult) => void;
   const done = new Promise<WebrtcExchangeResult>((resolve) => {
     resolveResult = resolve;
@@ -64,10 +74,20 @@ export async function runWebrtcBidirectionalExchange(
   const settle = (ingested: CommitCounts | null): void => {
     if (settled) return;
     settled = true;
+    if (graceTimer !== undefined) clearTimeout(graceTimer);
     resolveResult({ ingested, served });
   };
+  // Settle once BOTH directions have run; else open a grace window after the first completes.
+  const maybeSettle = (): void => {
+    if (settled) return;
+    if (gotResponse && served) settle(ingestedResult);
+    else if (graceTimer === undefined)
+      graceTimer = setTimeout(() => settle(ingestedResult), GRACE_MS);
+  };
 
+  const aborted = (): boolean => params.signal?.aborted ?? false;
   const sendMessage = (bytes: Uint8Array): void => {
+    if (settled || aborted()) return; // never transmit after a cancel/settle
     for (const fragment of p2p.fragmentMessage(bytes, messageId++)) {
       if (params.channel.readyState !== 'open') return;
       params.channel.send(fragment);
@@ -84,27 +104,30 @@ export async function runWebrtcBidirectionalExchange(
       return; // a fragmentation/bomb violation — drop (fail-closed, §27)
     }
     if (!complete) return; // mid-message
-    void handleInboundExchangeMessage(params.db, complete).then((out) => {
+    void handleInboundExchangeMessage(params.db, complete, params.scope).then((out) => {
       if (out.wasRequest) {
         served = true;
         if (out.reply) sendMessage(out.reply); // serve the peer
       } else {
-        settle(out.ingested); // the peer's response to OUR request — ingested + done
+        gotResponse = true; // the peer's response to OUR request — ingested
+        ingestedResult = out.ingested;
       }
+      maybeSettle();
     });
   };
 
-  const onClose = (): void => settle(null);
-  params.channel.onclose = onClose;
+  params.channel.onclose = (): void => settle(ingestedResult);
   if (params.signal) {
     if (params.signal.aborted) settle(null);
     else params.signal.addEventListener('abort', () => settle(null), { once: true });
   }
-  const timer = setTimeout(() => settle(null), params.timeoutMs ?? 20_000);
+  const timer = setTimeout(() => settle(ingestedResult), params.timeoutMs ?? 20_000);
 
-  // Send our request advertising our gaps so the peer serves them.
-  const request = params.request ?? (await buildClientExchangeRequest(params.db, 'relay'));
-  sendMessage(request);
+  // Send our request advertising our gaps so the peer serves them — but NOT if a cancel fired
+  // while the request was being built (page unload / mode change), so no payload leaves post-abort.
+  const request =
+    params.request ?? (await buildClientExchangeRequest(params.db, 'relay', params.scope));
+  if (!settled && !aborted()) sendMessage(request);
 
   const result = await done;
   clearTimeout(timer);

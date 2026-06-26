@@ -177,6 +177,44 @@ async function quarantineMissing(db: IDBDatabase, missing: string[]): Promise<vo
   });
 }
 
+/** Put a PUBLIC record referencing `blockCid` so the block is shareable (an orphan block is not). */
+async function putPublicRecordWithBlock(db: IDBDatabase, blockCid: string): Promise<void> {
+  const lcap = await import('@licio/lcap');
+  const body = lcap.encodeContributionEvent({
+    record_version: 2,
+    kind: 'contribution_event',
+    event_type: 'post',
+    home_room_id: 'room-1',
+    visibility_scope: 'public',
+    author_account_id: 'a',
+    author_device_id: 'd',
+    author_device_key_id: 'k',
+    device_seq: 1,
+    capability_cid: await lcap.cidFor('record', new Uint8Array([0])),
+    policy_epoch_claim: 0,
+    revocation_epoch_claim: 0,
+    client_nonce: new Uint8Array([1]),
+    priority: 2,
+  });
+  const recordCid = await lcap.cidFor('record', body);
+  const tx = db.transaction(LCAP_STORE.records, 'readwrite');
+  tx.objectStore(LCAP_STORE.records).put({
+    recordCid,
+    body,
+    kind: 'contribution_event',
+    lane: 'C0',
+    priority: 2,
+    roomHash: '',
+    state: 'integrity_verified',
+    size: body.length,
+    deps: [blockCid],
+  });
+  await new Promise<void>((res, rej) => {
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  });
+}
+
 /** A §16 exchange response whose `response_pack` serves `cids` from `held` (the anchor's reply). */
 async function anchorResponseServing(
   held: Map<string, Uint8Array>,
@@ -217,6 +255,7 @@ describe('WS-R.15.10 syncRoomOverP2p (bidirectional)', () => {
     await putBlock(responderDb, { blockCid, state: 'integrity_verified', size: bytes.length }, [
       bytes,
     ]);
+    await putPublicRecordWithBlock(responderDb, blockCid); // block reachable from a public record
     await quarantineMissing(initiatorDb, [blockCid]);
 
     const link = new FakeLink();

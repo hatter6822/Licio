@@ -25,6 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
+import type { ExchangeScope } from '../../../lcap/exchange.js';
 import { getOperationalMode, subscribeOperationalMode } from '../../../lcap/mode-state.js';
 import type { OperationalMode } from '../../../lcap/operational-modes.js';
 import {
@@ -89,6 +90,18 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
   const [activity, setActivity] = useState<readonly ActivityEntry[]>([]);
   const controllerRef = useRef<CourierController | null>(null);
   const activitySeq = useRef(0);
+  // The §22.5 sharing scope (room allowlist + priority cap) the exchange helpers serve/push within,
+  // kept in a ref so the responder/push honor a LIVE change to the sharing selection (the controller
+  // outlives the start()-time closure).  Empty allowlist ⇒ all public rooms; absent cap ⇒ all lanes.
+  const scopeRef = useRef<ExchangeScope>({});
+  scopeRef.current = {
+    ...(controls.sharing?.roomHashAllowlist !== undefined
+      ? { roomHashAllowlist: controls.sharing.roomHashAllowlist }
+      : {}),
+    ...(controls.sharing?.maxPriorityClass !== undefined
+      ? { maxPriorityClass: controls.sharing.maxPriorityClass }
+      : {}),
+  };
   // The §33 operational mode — REACTIVE here (unlike the non-reactive sync consumers): switching
   // into Stealth/Emergency must stop a running courier immediately, so we subscribe (below) and
   // re-render on a change.
@@ -198,10 +211,12 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
         controls,
         mode: mode as CourierMode,
         power,
-        // Advertise our gaps (quarantined missing deps) so a peer serves them.
-        buildRequest: () => buildClientExchangeRequest(db, 'courier'),
-        // Serve a peer's inbound request from what we hold (the bidirectional responder).
-        buildResponse: (request) => respondToClientExchange(db, request),
+        // Advertise our gaps (quarantined missing deps) so a peer serves them; the push rides the
+        // CURRENT sharing scope (room allowlist + priority cap), read live from the ref.
+        buildRequest: () => buildClientExchangeRequest(db, 'courier', scopeRef.current),
+        // Serve a peer's inbound request from what we hold (the bidirectional responder), filtered
+        // by the CURRENT sharing scope so a peer never receives over-priority / other-room content.
+        buildResponse: (request) => respondToClientExchange(db, request, scopeRef.current),
         onOutcome: (outcome) => {
           // INGEST a served response into the local store (CID-verified; fills our gaps).
           if (outcome.response) void ingestClientExchangeResponse(db, outcome.response);

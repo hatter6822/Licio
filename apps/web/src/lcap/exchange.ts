@@ -20,7 +20,6 @@
 // trust projection (§8.3).  The heavy `@licio/lcap` codec is loaded by DYNAMIC import (like
 // `bundle-import`), so this module stays off the initial bundle.
 
-import type { HeldObject } from '@licio/lcap';
 import {
   type CommitCounts,
   commitImportedBundle,
@@ -29,70 +28,94 @@ import {
   readBundleForImport,
 } from './bundle-import.js';
 import { LCAP_STORE } from './db.js';
-import { collectByCursor, getHeldObject, proofCidsForRecord, type RecordRow } from './store.js';
+import {
+  collectByCursor,
+  getHeldObject,
+  proofCidsForRecord,
+  type RecordRow,
+  readBlockDescriptor,
+} from './store.js';
 
 export type { CommitCounts };
 
-/** Cap on how many local records a content PUSH enumerates (bounded device CPU + wire). */
-const MAX_PUSH_RECORDS = 64;
+/** Cap on how many local records the share-closure enumerates (bounded device CPU + wire). */
+const MAX_SHARE_RECORDS = 256;
 
 /**
- * A held-object reader that serves PUBLIC content only — the public P2P plane (courier + WebRTC)
- * NEVER carries a non-public contribution.  Control/proof/block objects are public trust material;
- * only a `contribution_event` carries a restricted visibility scope.  Defense in depth even though
- * `lcap_v2` is the public store; the receiver re-verifies every CID regardless.
+ * The §22.5 sharing scope — WHAT this device may serve/push over the public P2P plane.  Narrows
+ * (never widens) public content: an optional room allowlist (opaque hashes) + a priority cap.
  */
-function publicHeldReader(
-  db: IDBDatabase,
-  lcap: typeof import('@licio/lcap'),
-): (cid: string) => Promise<HeldObject | undefined> {
-  return async (cid: string): Promise<HeldObject | undefined> => {
-    const held = await getHeldObject(db, cid);
-    if (held?.kind === 'record') {
-      try {
-        const record = lcap.decodeAndRouteRecord(held.bytes);
-        if (record.kind === 'contribution_event' && record.visibility_scope !== 'public') {
-          return undefined; // non-public — refuse to serve over the public plane
-        }
-      } catch {
-        return undefined; // undecodable — never serve
-      }
-    }
-    return held;
-  };
+export interface ExchangeScope {
+  /** Opaque room hashes to share; empty/absent ⇒ all public rooms. */
+  readonly roomHashAllowlist?: readonly string[];
+  /** Highest priority class shared (P0 most essential; 0..4; absent ⇒ 4 = all lanes). */
+  readonly maxPriorityClass?: number;
 }
 
 /**
- * Build a PUBLIC content PUSH pack from local content (gossip-out): up to {@link MAX_PUSH_RECORDS}
- * public records + their proofs + referenced blocks, budget-bounded, public-only.  Lets a peer
- * proactively SEED content others don't yet know to want (epidemic distribution), not only fetch
- * its own gaps.  Returns `undefined` when nothing public is held.
+ * The CIDs this device may SHARE over the public plane — ONE trust-sensitive place computes it for
+ * BOTH the responder and the push.  For each held record that is PUBLIC, in an allowed room, AND
+ * within the priority cap, include the record + its proofs + its HELD BLOCK deps (the public
+ * record's own body/attachment bytes).  A record dep (a parent / a capability) is NEVER pulled in
+ * here — it is shared only on its OWN shareable merit (via enumeration), so an in-room parent or a
+ * non-public block can never ride a public record (closes the §22.6 non-public-dependency leak).
+ * Returned in record order so the push fills its budget deterministically.
+ */
+async function collectShareableCids(
+  db: IDBDatabase,
+  lcap: typeof import('@licio/lcap'),
+  scope: ExchangeScope | undefined,
+): Promise<string[]> {
+  const rooms = scope?.roomHashAllowlist;
+  const maxPriority = scope?.maxPriorityClass ?? 4;
+  const records = await collectByCursor<RecordRow>(db, LCAP_STORE.records, MAX_SHARE_RECORDS);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (cid: string): void => {
+    if (!seen.has(cid)) {
+      seen.add(cid);
+      out.push(cid);
+    }
+  };
+  for (const row of records) {
+    if (rooms && rooms.length > 0 && !rooms.includes(row.roomHash)) continue; // room scope
+    let decoded: ReturnType<typeof lcap.decodeAndRouteRecord>;
+    try {
+      decoded = lcap.decodeAndRouteRecord(row.body);
+    } catch {
+      continue; // undecodable — never share
+    }
+    if (decoded.kind === 'contribution_event' && decoded.visibility_scope !== 'public') continue;
+    const priority = decoded.kind === 'contribution_event' ? decoded.priority : 0;
+    if (priority > maxPriority) continue; // priority cap
+    add(row.recordCid);
+    for (const proofCid of await proofCidsForRecord(db, row.recordCid)) add(proofCid);
+    for (const dep of row.deps ?? []) {
+      // Only HELD BLOCK deps (the public record's OWN bytes); a record dep is shared only on its
+      // own merit (via enumeration), so an in-room parent can never ride a public record.
+      if (await readBlockDescriptor(db, dep)) add(dep);
+    }
+  }
+  return out;
+}
+
+/**
+ * Build a PUBLIC content PUSH pack from the shareable closure (scope-filtered: public-only,
+ * room-allowlisted, priority-capped), budget-bounded.  Lets a peer proactively SEED content others
+ * don't yet know to want, never leaking restricted content.  `undefined` when nothing is shareable.
  */
 async function buildPushPack(
   db: IDBDatabase,
   lcap: typeof import('@licio/lcap'),
   budget: number,
+  scope: ExchangeScope | undefined,
 ): Promise<Uint8Array | undefined> {
-  const records = await collectByCursor<RecordRow>(db, LCAP_STORE.records, MAX_PUSH_RECORDS);
-  const cids: string[] = [];
-  for (const row of records) {
-    try {
-      const decoded = lcap.decodeAndRouteRecord(row.body);
-      if (decoded.kind === 'contribution_event' && decoded.visibility_scope !== 'public') continue;
-    } catch {
-      continue; // undecodable — never push
-    }
-    cids.push(row.recordCid, ...(await proofCidsForRecord(db, row.recordCid)), ...(row.deps ?? []));
-  }
+  const cids = await collectShareableCids(db, lcap, scope);
   if (cids.length === 0) return undefined;
-  // The public-only reader drops any non-public dep, so the push can never leak restricted content.
-  const repacked = await lcap.repackHeldObjects(publicHeldReader(db, lcap), cids, budget);
+  const repacked = await lcap.repackHeldObjects((cid) => getHeldObject(db, cid), cids, budget);
   return repacked.pack;
 }
 
-/** The §16 response budget we serve up to when the peer advertises none (kept small per the
- *  courier/battery doctrine; a held want dropped for budget stays fetchable elsewhere). */
-const DEFAULT_RESPONSE_BUDGET = 1 << 20; // 1 MiB
 /** Cap on how many `want`s we advertise per request (bounded wire + bounded peer work). */
 const MAX_WANTS = 256;
 
@@ -168,13 +191,15 @@ async function publicPulse(
 export async function buildClientExchangeRequest(
   db: IDBDatabase,
   transportProfile: 'courier' | 'relay' = 'courier',
+  scope?: ExchangeScope,
 ): Promise<Uint8Array> {
   const lcap = await import('@licio/lcap');
   const pulse = await publicPulse(lcap, transportProfile);
   const want = await collectQuarantineWants(db);
-  // PUSH our public content too (gossip-out) so a peer can ingest content it didn't know to want
-  // (bounded by the request budget, which the push rides in).
-  const pushPack = await buildPushPack(db, lcap, pulse.budgets.max_request_bytes);
+  // PUSH our shareable content too (gossip-out) so a peer can ingest content it didn't know to want
+  // — scope-filtered (public-only, room-allowlisted, priority-capped), bounded by the request
+  // budget the push rides in.
+  const pushPack = await buildPushPack(db, lcap, pulse.budgets.max_request_bytes, scope);
   const request = lcap.buildExchangeRequest({
     pulse,
     interests: [],
@@ -193,6 +218,7 @@ export async function buildClientExchangeRequest(
 export async function respondToClientExchange(
   db: IDBDatabase,
   requestBytes: Uint8Array,
+  scope?: ExchangeScope,
 ): Promise<Uint8Array | null> {
   const lcap = await import('@licio/lcap');
   const request = ((): import('@licio/lcap').ExchangeRequestV2 | null => {
@@ -209,14 +235,16 @@ export async function respondToClientExchange(
     await ingestPackIntoStore(db, request.push_pack);
   }
 
-  // Serve the peer's explicit wants from what we hold, within its advertised response budget —
-  // PUBLIC-ONLY (the courier + WebRTC are public-plane carriers, §22.6): the responder never
-  // serves a non-public contribution (the shared public-only reader drops it).
-  const wantCids = (request.want ?? []).map((w) => w.cid);
-  const budget = request.pulse.budgets.max_response_bytes || DEFAULT_RESPONSE_BUDGET;
+  // Serve ONLY what the peer wants AND we may share: intersect the peer's wants with our SHAREABLE
+  // closure (public-only, room-allowlisted, priority-capped) — so a peer can never receive a
+  // non-public/in-room/over-priority object even if it knows the CID (§22.6).  The peer's
+  // advertised response budget bounds it; a zero budget is HONORED (serve nothing), not defaulted.
+  const shareable = new Set(await collectShareableCids(db, lcap, scope));
+  const wantCids = (request.want ?? []).map((w) => w.cid).filter((cid) => shareable.has(cid));
+  const budget = request.pulse.budgets.max_response_bytes;
   const repacked =
-    wantCids.length > 0
-      ? await lcap.repackHeldObjects(publicHeldReader(db, lcap), wantCids, budget)
+    wantCids.length > 0 && budget > 0
+      ? await lcap.repackHeldObjects((cid) => getHeldObject(db, cid), wantCids, budget)
       : { served: [], truncated: false, pack: undefined };
 
   const pulse = await publicPulse(lcap, 'courier');
@@ -247,10 +275,11 @@ export interface InboundExchangeOutcome {
 export async function handleInboundExchangeMessage(
   db: IDBDatabase,
   bytes: Uint8Array,
+  scope?: ExchangeScope,
 ): Promise<InboundExchangeOutcome> {
   // respondToClientExchange returns null for anything that is NOT a valid request, so it doubles
   // as the classifier — a non-null reply means it WAS a request (and its push was ingested).
-  const reply = await respondToClientExchange(db, bytes);
+  const reply = await respondToClientExchange(db, bytes, scope);
   if (reply !== null) return { wasRequest: true, reply, ingested: null };
   const ingested = await ingestClientExchangeResponse(db, bytes);
   return { wasRequest: false, reply: null, ingested };

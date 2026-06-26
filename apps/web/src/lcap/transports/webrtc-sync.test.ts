@@ -19,7 +19,9 @@ class FakeDuplex implements DataChannelLike {
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onclose: (() => void) | null = null;
   peer: FakeDuplex | null = null;
+  sentCount = 0;
   send(data: Uint8Array): void {
+    this.sentCount++;
     const peer = this.peer;
     if (peer?.readyState !== 'open') return;
     const copy = data.slice();
@@ -45,6 +47,44 @@ afterEach(() => {
   peerB.close();
 });
 
+/** Put a PUBLIC record referencing `blockCid` so the block is shareable (an orphan block is not). */
+async function putPublicRecordWithBlock(db: IDBDatabase, blockCid: string): Promise<void> {
+  const lcap = await import('@licio/lcap');
+  const body = lcap.encodeContributionEvent({
+    record_version: 2,
+    kind: 'contribution_event',
+    event_type: 'post',
+    home_room_id: 'room-1',
+    visibility_scope: 'public',
+    author_account_id: 'a',
+    author_device_id: 'd',
+    author_device_key_id: 'k',
+    device_seq: 1,
+    capability_cid: await lcap.cidFor('record', new Uint8Array([0])),
+    policy_epoch_claim: 0,
+    revocation_epoch_claim: 0,
+    client_nonce: new Uint8Array([1]),
+    priority: 2,
+  });
+  const recordCid = await lcap.cidFor('record', body);
+  const tx = db.transaction(LCAP_STORE.records, 'readwrite');
+  tx.objectStore(LCAP_STORE.records).put({
+    recordCid,
+    body,
+    kind: 'contribution_event',
+    lane: 'C0',
+    priority: 2,
+    roomHash: '',
+    state: 'integrity_verified',
+    size: body.length,
+    deps: [blockCid],
+  });
+  await new Promise<void>((res, rej) => {
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  });
+}
+
 async function quarantineMissing(db: IDBDatabase, missing: string[]): Promise<void> {
   const tx = db.transaction(LCAP_STORE.quarantine, 'readwrite');
   tx.objectStore(LCAP_STORE.quarantine).put({
@@ -65,6 +105,7 @@ describe('runWebrtcBidirectionalExchange', () => {
     const bytes = new Uint8Array([5, 6, 7, 8, 9, 10]);
     const blockCid = await cidFor('block', bytes);
     await putBlock(peerB, { blockCid, state: 'integrity_verified', size: bytes.length }, [bytes]);
+    await putPublicRecordWithBlock(peerB, blockCid); // the block is reachable from a public record
     await quarantineMissing(peerA, [blockCid]);
 
     const a = new FakeDuplex();
@@ -90,5 +131,47 @@ describe('runWebrtcBidirectionalExchange', () => {
       timeoutMs: 100,
     });
     expect(result.ingested).toBeNull();
+  });
+
+  it('sends NO payload when the signal is already aborted (page-unload / mode-change cancel)', async () => {
+    const channel = new FakeDuplex();
+    const controller = new AbortController();
+    controller.abort(); // cancelled before we even start
+    const result = await runWebrtcBidirectionalExchange({
+      db: peerA,
+      channel,
+      signal: controller.signal,
+      timeoutMs: 1000,
+    });
+    expect(channel.sentCount).toBe(0); // nothing transmitted after the cancel
+    expect(result.ingested).toBeNull();
+  });
+
+  it('stays bidirectional under the grace window: BOTH peers’ wants are served', async () => {
+    // A wants X (B holds), B wants Y (A holds) — both must end up holding the other's content.
+    const x = new Uint8Array([1, 2, 3, 4]);
+    const y = new Uint8Array([5, 6, 7, 8]);
+    const xCid = await cidFor('block', x);
+    const yCid = await cidFor('block', y);
+    await putBlock(peerB, { blockCid: xCid, state: 'integrity_verified', size: x.length }, [x]);
+    await putPublicRecordWithBlock(peerB, xCid);
+    await putBlock(peerA, { blockCid: yCid, state: 'integrity_verified', size: y.length }, [y]);
+    await putPublicRecordWithBlock(peerA, yCid);
+    await quarantineMissing(peerA, [xCid]);
+    await quarantineMissing(peerB, [yCid]);
+
+    const a = new FakeDuplex();
+    const b = new FakeDuplex();
+    a.peer = b;
+    b.peer = a;
+    await Promise.all([
+      runWebrtcBidirectionalExchange({ db: peerA, channel: a, timeoutMs: 3000 }),
+      runWebrtcBidirectionalExchange({ db: peerB, channel: b, timeoutMs: 3000 }),
+    ]);
+
+    // Both directions completed: A holds X and B holds Y (the content may arrive via either the
+    // gossip push in the request OR the served response — the grace window keeps BOTH alive).
+    expect(await readBlockBytes(peerA, xCid)).toEqual(x); // A got X
+    expect(await readBlockBytes(peerB, yCid)).toEqual(y); // B got Y
   });
 });

@@ -27,6 +27,7 @@ import type { WebrtcDecision, WebrtcPrivacyOptions } from '@licio/lcap-p2p';
 import {
   buildClientExchangeRequest,
   type CommitCounts,
+  type ExchangeScope,
   ingestClientExchangeResponse,
 } from '../exchange.js';
 import { type ConnectLcapWebrtcParams, connectLcapWebrtcChannel } from './connect-webrtc.js';
@@ -47,6 +48,9 @@ export interface SyncRoomOverP2pParams {
   readonly remotePeerKey: string;
   /** The initiator creates the offer + data channel; the responder answers. */
   readonly initiator: boolean;
+  /** The §22.5 sharing scope — what we may serve/push (public-only; room/priority filtered).  A
+   *  room sync passes `{ roomHashAllowlist: [thisRoom] }` so it never gossips unrelated rooms. */
+  readonly scope?: ExchangeScope;
   /** §26.4 ICE/privacy options (off by default; the user must opt into WebRTC). */
   readonly privacy?: WebrtcPrivacyOptions;
   /** A precomputed §26.4 decision (overrides `privacy`). */
@@ -83,14 +87,15 @@ export async function syncRoomOverP2p(
 ): Promise<SyncRoomOverP2pResult | null> {
   // The public P2P plane builds a PUBLIC request (and the responder serves public-only), so the
   // exchange is structurally public — the §22.6 carriage gate is inherent, not a per-call flag.
-  const request = await buildClientExchangeRequest(params.db, 'relay');
+  const request = await buildClientExchangeRequest(params.db, 'relay', params.scope);
 
   // 1) Prefer the live WebRTC peer — a real bidirectional exchange over one duplex channel.
+  let channel: Awaited<ReturnType<typeof connectLcapWebrtcChannel>> | null = null;
   try {
     // Public content: derive the shared signaling key from the public room hash so any public
     // peer can join the rendezvous (signaling secrecy is not the trust root here).
     const signalKeyBytes = await derivePublicSignalKeyBytes(params.roomIdHash);
-    const channel = await connectLcapWebrtcChannel({
+    channel = await connectLcapWebrtcChannel({
       signalKeyBytes,
       roomIdHash: params.roomIdHash,
       selfPeerKey: params.selfPeerKey,
@@ -109,19 +114,25 @@ export async function syncRoomOverP2p(
       db: params.db,
       channel,
       request,
+      ...(params.scope !== undefined ? { scope: params.scope } : {}),
       ...(params.signal !== undefined ? { signal: params.signal } : {}),
       ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
     });
-    try {
-      channel.close();
-    } catch {
-      // already closed
-    }
     // The peer served us content ⇒ a successful WebRTC exchange.  If it served nothing (peer had
     // none / unresponsive), fall through to the authoritative anchor below.
     if (out.ingested !== null) return { transport: 'webrtc', ingested: out.ingested };
   } catch {
     // WebRTC unavailable (off, force-off, unreachable, timeout) — fall back to the anchor.
+  } finally {
+    // ALWAYS close an established channel — even if the exchange threw — so the live
+    // RTCPeerConnection / signaling loop never leaks before the HTTPS fall-back.
+    if (channel) {
+      try {
+        channel.close();
+      } catch {
+        // already closed
+      }
+    }
   }
 
   // 2) Anchor back-stop: a requester-only exchange against the always-correct server, then INGEST

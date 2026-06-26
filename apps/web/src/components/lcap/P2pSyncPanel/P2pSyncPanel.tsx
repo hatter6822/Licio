@@ -106,6 +106,9 @@ export function P2pSyncPanel({
         selfPeerKey: selfPeerKey.trim(),
         remotePeerKey: remotePeerKey.trim(),
         initiator,
+        // Scope sharing to THIS room only — a targeted room sync never gossips unrelated rooms'
+        // content to the manually-entered peer (the responder/push filter by `roomHashAllowlist`).
+        scope: { roomHashAllowlist: [roomHash.trim()] },
         // The user pressed Sync — opt WebRTC in explicitly (off by default otherwise).
         privacy: { mode: 'standard', userEnabled: true },
         signal: controller.signal,
