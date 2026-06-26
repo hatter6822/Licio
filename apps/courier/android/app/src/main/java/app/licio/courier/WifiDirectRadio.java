@@ -211,14 +211,24 @@ public class WifiDirectRadio implements CourierRadio {
         advertiseRequested.set(false);
         discoverRequested.set(false);
         if (manager != null && channel != null) {
-            // Best-effort teardown — the framework can throw if the channel is mid-operation;
-            // a stop must never propagate (it runs on a PluginCall + in cleanup paths).
+            // Best-effort teardown — the framework can throw if the channel is mid-operation; a stop
+            // must never propagate (it runs on a PluginCall + in cleanup paths).  Each call is wrapped
+            // INDEPENDENTLY so one best-effort failure (e.g. stopPeerDiscovery throwing) never skips
+            // cancelConnect / removeGroup and leaves the group or discoverability alive (#AL).
             try {
                 manager.stopPeerDiscovery(channel, null);
+            } catch (RuntimeException ignored) {
+                // not discovering / framework state — non-fatal
+            }
+            try {
                 manager.cancelConnect(channel, null);
+            } catch (RuntimeException ignored) {
+                // no connect in flight / framework state — non-fatal
+            }
+            try {
                 manager.removeGroup(channel, null);
             } catch (RuntimeException ignored) {
-                // channel not fully established / framework state — non-fatal
+                // no group formed / framework state — non-fatal
             }
         }
         closeServerSocket();
@@ -390,9 +400,14 @@ public class WifiDirectRadio implements CourierRadio {
                 // groupActive was claimed by onConnectionInfo BEFORE this thread ran, so RELEASE it
                 // (a later connection-info callback for the same group can retry) and SURFACE the
                 // failure — otherwise the controller would show Wi-Fi Direct as running with no
-                // server socket while the stale claim blocks every retry.
-                groupActive.set(false);
-                if (!isStale(serverGen)) events.onStartFailed("server_bind", e);
+                // server socket while the stale claim blocks every retry.  But ONLY when this thread is
+                // still current: a stale-generation bind failure (an old group after a Stop→Start) must
+                // NOT release the FRESH session's claim, or later broadcasts could start duplicate
+                // listeners/dials against the current courier (#AI).
+                if (!isStale(serverGen)) {
+                    groupActive.set(false);
+                    events.onStartFailed("server_bind", e);
+                }
                 return;
             }
             serverSocket = server;

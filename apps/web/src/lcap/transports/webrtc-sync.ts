@@ -109,7 +109,15 @@ export async function runWebrtcBidirectionalExchange(
       return; // a fragmentation/bomb violation — drop (fail-closed, §27)
     }
     if (!complete) return; // mid-message
-    void handleInboundExchangeMessage(params.db, complete, params.scope)
+    // Gate BOTH store writes (the responder's push ingest AND the requester's response ingest) on a
+    // LIVE check, so a cancel/timeout that fires mid-handle does not still commit the peer's pack —
+    // the post-await check below can only suppress counting/replying, not undo a commit (#AH).
+    void handleInboundExchangeMessage(
+      params.db,
+      complete,
+      params.scope,
+      () => !settled && !aborted(),
+    )
       .then((out) => {
         if (settled || aborted()) return; // settled WHILE ingesting — don't reply / count the result
         if (out.wasRequest) {

@@ -125,7 +125,10 @@ public class BluetoothCourierRadio implements CourierRadio {
     private final ConcurrentHashMap<String, BluetoothDevice> bleCentrals = new ConcurrentHashMap<>();
     private BluetoothLeScanner scanner;
     private ScanCallback scanCallback;
-    private final ConcurrentHashMap<String, BluetoothGatt> bleClients = new ConcurrentHashMap<>();
+    // Package-private so the Robolectric test can mirror the real post-promotion state (the gatt is the
+    // established client when MTU/service/CCC setup callbacks fire) — the setup callbacks REQUIRE
+    // current ownership (#AJ), which the shadow's failBleClient/unsequenced drives would otherwise drop.
+    final ConcurrentHashMap<String, BluetoothGatt> bleClients = new ConcurrentHashMap<>();
     // Dials in flight (connectGatt issued, not yet STATE_CONNECTED): repeated scan results for the
     // same advertiser would otherwise each start ANOTHER connectGatt, leaking untracked GATTs that
     // emit duplicate connection events and survive stop(); this dedups them + lets stop() close them.
@@ -791,7 +794,11 @@ public class BluetoothCourierRadio implements CourierRadio {
         @SuppressWarnings("MissingPermission")
         public void onMtuChanged(BluetoothGatt gatt, int mtu, int status) {
             String endpointId = gatt.getDevice().getAddress();
-            if (isSupersededClient(endpointId, gatt)) return; // a callback from a superseded GATT (#J)
+            // Require CURRENT established ownership: a setup callback fires only AFTER STATE_CONNECTED
+            // promoted this gatt into bleClients, so a delayed callback from an OLD-session gatt (a
+            // Stop→Start cleared bleClients before a replacement was promoted, where isSupersededClient
+            // can't yet see a replacement) is rejected instead of mutating the fresh session (#AJ/#J).
+            if (bleClients.get(endpointId) != gatt) return;
             if (status == BluetoothGatt.GATT_SUCCESS) bleMtu.put(endpointId, mtu);
             // Discovery is required to resolve the courier characteristic — if it won't start, the
             // connection can't progress, so fail rather than leaving the peer stuck in bleClients.
@@ -802,7 +809,9 @@ public class BluetoothCourierRadio implements CourierRadio {
         @SuppressWarnings("MissingPermission")
         public void onServicesDiscovered(BluetoothGatt gatt, int status) {
             String endpointId = gatt.getDevice().getAddress();
-            if (isSupersededClient(endpointId, gatt)) return; // a callback from a superseded GATT (#J)
+            // Require CURRENT established ownership (post-promotion) so a stale old-session callback is
+            // rejected even before a replacement is in the maps (#AJ).
+            if (bleClients.get(endpointId) != gatt) return;
             // Any of these means the peer is not a usable courier — tear down + report failure so
             // the scan dedup doesn't leave it undialable (a bad status, no courier service, no
             // characteristic, or — the courier needs DUPLEX — no CCC to notify replies back).
@@ -859,7 +868,9 @@ public class BluetoothCourierRadio implements CourierRadio {
             // native event is forwarded to the new JS listener) — gate on running first (#8).
             if (!running.get()) return;
             String endpointId = gatt.getDevice().getAddress();
-            if (isSupersededClient(endpointId, gatt)) return; // a stale CCC write from a superseded GATT (#J)
+            // Require CURRENT established ownership (post-promotion): a stale CCC-write completion from
+            // an old-session gatt is rejected even before a replacement is in the maps (#AJ).
+            if (bleClients.get(endpointId) != gatt) return;
             // The notify subscription is now established (or failed) — ONLY now is the duplex link
             // ready.  On SUCCESS, report connected.  On FAILURE, tear the half-open client down
             // FIRST (else it lingers in bleClients and the scan dedup makes the peer permanently

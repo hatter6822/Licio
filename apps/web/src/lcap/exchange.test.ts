@@ -259,6 +259,20 @@ describe('client §16 exchange engine', () => {
     expect(wantCids).not.toContain(depX); // an unrelated room's gap is never advertised
   });
 
+  it('a courier request never exceeds its advertised max_request_bytes, even with many wants (#AK)', async () => {
+    const lcap = await import('@licio/lcap');
+    // Seed far more distinct quarantine gaps than fit a minimal-mode budget.
+    for (let i = 0; i < 300; i++) {
+      await quarantineMissing(peerA, `parent-${i}`, [
+        await cidFor('record', new Uint8Array([i & 0xff, (i >> 8) & 0xff])),
+      ]);
+    }
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+    const decoded = lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, request);
+    // The WHOLE encoded request (pulse + wants + push + wrapper), not just the push, fits the budget.
+    expect(request.length).toBeLessThanOrEqual(decoded.pulse.budgets.max_request_bytes);
+  });
+
   it('SECURITY: a NON-PUBLIC quarantine row never advertises its wants on the public plane (#NN)', async () => {
     const lcap = await import('@licio/lcap');
     const publicWant = await cidFor('record', new Uint8Array([7]));

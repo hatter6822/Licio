@@ -120,7 +120,13 @@ function formatBytes(bytes: number): string {
 type ExportState =
   | { readonly phase: 'idle' }
   | { readonly phase: 'preparing' }
-  | { readonly phase: 'ready'; readonly data: RoomExport & { disclosure: ExportDisclosure } }
+  | {
+      readonly phase: 'ready';
+      readonly data: RoomExport & { disclosure: ExportDisclosure };
+      // The room this bundle was prepared for, so the download's filename matches its CONTENTS even if
+      // the picker moved on while preparing (#AM).
+      readonly roomHash: string;
+    }
   | { readonly phase: 'done'; readonly filename: string }
   | { readonly phase: 'error'; readonly message: string };
 
@@ -236,13 +242,22 @@ export function OfflineBundlePanel({
   const effectiveHighRisk = highRisk ?? posture.highRisk;
   const mediaPrefetch = mediaPrefetchAllowed(mode);
 
+  // Track the LATEST requested room so a slow prepare for a now-abandoned room can be ignored (#AM).
+  const latestRoomRef = useRef<string | undefined>(effectiveRoomHash);
+  useEffect(() => {
+    latestRoomRef.current = effectiveRoomHash;
+  }, [effectiveRoomHash]);
+
   const prepareExport = useCallback(async () => {
-    if (!effectiveRoomHash) return;
+    const preparingRoom = effectiveRoomHash;
+    if (!preparingRoom) return;
     setExportState({ phase: 'preparing' });
     try {
-      const data = await prepareRoomExport(effectiveRoomHash);
-      setExportState({ phase: 'ready', data });
+      const data = await prepareRoomExport(preparingRoom);
+      if (latestRoomRef.current !== preparingRoom) return; // picker moved on mid-prepare — drop stale (#AM)
+      setExportState({ phase: 'ready', data, roomHash: preparingRoom });
     } catch {
+      if (latestRoomRef.current !== preparingRoom) return;
       setExportState({
         phase: 'error',
         message: t('lcap.bundle.exportError', 'Could not prepare the export.'),
@@ -251,15 +266,17 @@ export function OfflineBundlePanel({
   }, [effectiveRoomHash, t]);
 
   const doExport = useCallback(async () => {
-    if (exportState.phase !== 'ready' || !effectiveRoomHash) return;
+    if (exportState.phase !== 'ready') return;
     try {
       const bytes = await buildBundle({
         objects: exportState.data.objects,
         disclosure: exportState.data.disclosure,
       });
+      // Name the file for the room the bundle was PREPARED for (its actual contents), never the
+      // possibly-changed current selection (#AM).
       const filename = await bundleFilename({
         highRisk: effectiveHighRisk,
-        roomHash: effectiveRoomHash,
+        roomHash: exportState.roomHash,
       });
       await downloadBundle(bytes, filename);
       setExportState({ phase: 'done', filename });
@@ -269,7 +286,7 @@ export function OfflineBundlePanel({
         message: t('lcap.bundle.exportError', 'Could not prepare the export.'),
       });
     }
-  }, [exportState, effectiveRoomHash, effectiveHighRisk, t]);
+  }, [exportState, effectiveHighRisk, t]);
 
   // Picking a different room resets any prepared/finished export so it can't apply to the wrong room.
   const pickRoom = useCallback((next: string) => {

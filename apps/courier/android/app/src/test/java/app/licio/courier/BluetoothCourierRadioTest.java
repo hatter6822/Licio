@@ -180,6 +180,7 @@ public class BluetoothCourierRadioTest {
         shadowOf(gatt).addDiscoverableService(noCcc);
         radio.gattClientCallback.onConnectionStateChange(
                 gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
+        radio.bleClients.put(PEER, gatt); // the established client when services resolve (#AJ)
         radio.gattClientCallback.onServicesDiscovered(gatt, BluetoothGatt.GATT_SUCCESS);
         assertEquals("a peripheral with no CCC is a failed peer", Boolean.FALSE, rec.connectedFlag);
         assertTrue("and is torn down so the dedup can re-dial it", shadowOf(gatt).isClosed());
@@ -277,6 +278,7 @@ public class BluetoothCourierRadioTest {
                 ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
         BluetoothGattDescriptor ccc = new BluetoothGattDescriptor(
                 BluetoothCourierRadio.CCC_UUID, BluetoothGattDescriptor.PERMISSION_WRITE);
+        radio.bleClients.put(PEER, gatt); // the established client when the CCC write completes (#AJ)
 
         radio.gattClientCallback.onDescriptorWrite(gatt, ccc, BluetoothGatt.GATT_SUCCESS);
         assertEquals("a successful CCC write announces the duplex link",
@@ -304,6 +306,7 @@ public class BluetoothCourierRadioTest {
         shadowOf(gatt).addDiscoverableService(BluetoothCourierRadio.buildCourierGattService());
         radio.gattClientCallback.onConnectionStateChange(
                 gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED);
+        radio.bleClients.put(PEER, gatt); // the established client when services resolve (#AJ)
 
         radio.gattClientCallback.onServicesDiscovered(gatt, BluetoothGatt.GATT_SUCCESS);
         assertEquals("a refused local notify enablement fails the connection",

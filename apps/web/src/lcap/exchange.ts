@@ -256,18 +256,42 @@ export async function buildClientExchangeRequest(
 ): Promise<Uint8Array> {
   const lcap = await import('@licio/lcap');
   const pulse = await publicPulse(lcap, transportProfile);
-  const want = await collectQuarantineWants(db, scope);
-  // PUSH our shareable content too (gossip-out) so a peer can ingest content it didn't know to want
-  // — scope-filtered (public-only, room-allowlisted, priority-capped), bounded by the request
-  // budget the push rides in.
-  const pushPack = await buildPushPack(db, lcap, pulse.budgets.max_request_bytes, scope);
-  const request = lcap.buildExchangeRequest({
-    pulse,
-    interests: [],
-    want,
-    ...(pushPack !== undefined ? { pushPack } : {}),
-  });
-  return lcap.encodeWithSchema(lcap.exchangeRequestV2Schema, request);
+  const maxRequestBytes = pulse.budgets.max_request_bytes;
+  let want = await collectQuarantineWants(db, scope);
+
+  const encode = (w: typeof want, push: Uint8Array | undefined): Uint8Array =>
+    lcap.encodeWithSchema(
+      lcap.exchangeRequestV2Schema,
+      lcap.buildExchangeRequest({
+        pulse,
+        interests: [],
+        want: w,
+        ...(push !== undefined ? { pushPack: push } : {}),
+      }),
+    );
+
+  // The advertised budget bounds the WHOLE encoded request, not just the push_pack: reserve the
+  // encoded overhead of the pulse + wants + CBOR wrapper, then give the gossip-out push only what
+  // remains — so in minimal mode (16 KiB) or with many wants the request never exceeds the budget we
+  // advertise to constrained peers (#AK).
+  const baseBytes = encode(want, undefined).length;
+  const pushBudget = maxRequestBytes - baseBytes;
+  // PUSH our shareable content too (gossip-out) — scope-filtered (public-only, room-allowlisted,
+  // priority-capped), bounded by the budget left AFTER the pulse + wants.
+  let pushPack = pushBudget > 256 ? await buildPushPack(db, lcap, pushBudget, scope) : undefined;
+  let encoded = encode(want, pushPack);
+  // Drop the (optional) push if its wrapper still tips the request over budget — the wants are essential.
+  if (encoded.length > maxRequestBytes && pushPack !== undefined) {
+    pushPack = undefined;
+    encoded = encode(want, undefined);
+  }
+  // If the wants alone still exceed (many gaps in minimal mode), trim the least-essential tail until
+  // the request fits — the dropped gaps are re-advertised on a later, less-constrained pass.
+  while (encoded.length > maxRequestBytes && want.length > 0) {
+    want = want.slice(0, Math.max(0, want.length - 8));
+    encoded = encode(want, undefined);
+  }
+  return encoded;
 }
 
 /**
@@ -343,13 +367,17 @@ export async function handleInboundExchangeMessage(
   db: IDBDatabase,
   bytes: Uint8Array,
   scope?: ExchangeScope,
+  /** Re-evaluated right before EITHER store write (the responder's push ingest OR the requester's
+   *  response ingest): a cancelled/settled WebRTC exchange must not commit the peer's pack after the
+   *  fact — the caller's post-await check can only suppress counting/replying, not undo a commit (#AH). */
+  shouldCommit?: () => boolean,
 ): Promise<InboundExchangeOutcome> {
   // respondToClientExchange returns null for anything that is NOT a valid request, so it doubles
   // as the classifier — a non-null reply means it WAS a request (and its push was ingested).
-  const reply = await respondToClientExchange(db, bytes, scope);
+  const reply = await respondToClientExchange(db, bytes, scope, shouldCommit);
   if (reply !== null) return { wasRequest: true, reply, ingested: null };
   // A RESPONSE we ingest is room-scoped too — a peer's response_pack cannot land unrelated rooms.
-  const ingested = await ingestClientExchangeResponse(db, bytes, scope);
+  const ingested = await ingestClientExchangeResponse(db, bytes, scope, shouldCommit);
   return { wasRequest: false, reply: null, ingested };
 }
 
@@ -362,6 +390,7 @@ export async function ingestClientExchangeResponse(
   db: IDBDatabase,
   responseBytes: Uint8Array,
   scope?: ExchangeScope,
+  shouldCommit?: () => boolean,
 ): Promise<CommitCounts | null> {
   const lcap = await import('@licio/lcap');
   const response = ((): import('@licio/lcap').ExchangeResponseV2 | null => {
@@ -372,6 +401,7 @@ export async function ingestClientExchangeResponse(
     }
   })();
   if (response === null || response.response_pack === undefined) return null;
+  if (shouldCommit && !shouldCommit()) return null; // cancelled/settled before the store write (#AH)
   // Room-scoped: a peer cannot fill our store with unrelated rooms via a valid-but-off-scope pack.
   return ingestPackIntoStore(db, response.response_pack, scope);
 }

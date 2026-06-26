@@ -342,17 +342,18 @@ export async function commitImportedBundle(
         }
       }
     } else if (frame.frameKind === 'proof') {
+      // Bind the proof to its DECODED record_cid, NEVER the unauthenticated pack table — else a crafted
+      // bundle could table a proof whose body attests an off-scope/non-public record under an in-scope
+      // public record's `provides_proof_for`, get it indexed under that public record, and have the
+      // public courier/WebRTC push later ferry the proof body (proofCidsForRecord keys off this index),
+      // leaking the real record_cid + signature (#WW scoped; #AG the unscoped manual-import path too).
       let proofRecordCid = entry?.provides_proof_for ?? '';
-      if (scopeFiltered) {
-        // Bind the proof to its DECODED record_cid, NOT the unauthenticated pack table — else a
-        // crafted bundle could table a proof whose body attests an off-scope/non-public record under
-        // an in-scope public record's `provides_proof_for`, get it committed (the closure indexes by
-        // this CID), and export it over public courier/WebRTC, leaking the real record_cid (#WW).
-        try {
-          proofRecordCid = lcapCodec.decodeProof(frame.payload).record_cid;
-        } catch {
-          continue; // undecodable proof on a scoped ingress → never commit
-        }
+      try {
+        proofRecordCid = lcapCodec.decodeProof(frame.payload).record_cid;
+      } catch {
+        // A scoped/public ingress NEVER commits an undecodable proof; an unscoped FULL import (the
+        // user's own bundle, which may carry legacy/plain proofs) keeps the table value.
+        if (scopeFiltered) continue;
       }
       tentativeProofs.push({ cid, payload: frame.payload, recordCid: proofRecordCid });
     } else if (frame.frameKind === 'block') {
