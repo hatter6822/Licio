@@ -106,12 +106,25 @@ public class UsbCourierRadio implements CourierRadio {
 
     /** Open an already-permitted accessory and wire the courier over its fd streams. */
     private void openAccessory(UsbAccessory accessory) {
-        descriptor = usbManager.openAccessory(accessory);
-        if (descriptor == null) {
+        ParcelFileDescriptor opened = usbManager.openAccessory(accessory);
+        if (opened == null) {
             events.onStartFailed("discover", new IllegalStateException("usb_accessory_open_failed"));
             return;
         }
-        FileDescriptor fd = descriptor.getFileDescriptor();
+        // A stop()/unmount can land AFTER the permission callback's running check but BEFORE this open
+        // (the grant prompt is async) — stop() then had no descriptor/read stream to close.  Re-check
+        // liveness here and CLOSE what we just opened, rather than letting attach() flip running back to
+        // true and start a read loop under a stopped controller (#AS).
+        if (!running.get()) {
+            try {
+                opened.close();
+            } catch (IOException ignored) {
+                // already closed
+            }
+            return;
+        }
+        descriptor = opened;
+        FileDescriptor fd = opened.getFileDescriptor();
         attach(new FileInputStream(fd), new FileOutputStream(fd), USB_ENDPOINT_ID);
     }
 

@@ -34,6 +34,7 @@ import {
   bytesToHex,
   filterPresentKeys,
   forEachByCursor,
+  getByKey,
   importInCappedTransactions,
   normalizeRoomKey,
   type ProofRow,
@@ -371,6 +372,10 @@ export async function commitImportedBundle(
   // wanted CIDs into the closure too, so a "Sync this room" response can complete our records (#GG).
   if (scopeFiltered) {
     await forEachByCursor<QuarantineRow>(db, LCAP_STORE.quarantine, (row) => {
+      // A NON-PUBLIC gap (a manual in_room/private import) must NOT pull a block into the public-plane
+      // closure: collectQuarantineWants already refuses to advertise it (#NN), and admitting its CID
+      // here would let a public courier/WebRTC push write that block to lcap_v2 anyway (#AO).
+      if (row.public === false) return;
       // Under a ROOM allowlist, admit a wanted dep into the closure ONLY for an allowed room's gap —
       // otherwise a "Sync this room" peer could land a block whose CID happens to match an UNRELATED
       // room's existing quarantine gap, past the scope (#UU).
@@ -383,15 +388,30 @@ export async function commitImportedBundle(
   // A proof may attest a record ALREADY in `lcap_v2` (heldCidsFor reported it `already_have`, so it
   // never entered `committedRecordCids`) — admit those held records into the proof closure so a peer
   // push/export of `record + proof` can upgrade an existing integrity-only record missing its proof (#AD).
-  const heldProofRecords = scopeFiltered
-    ? await filterPresentKeys(
-        db,
-        LCAP_STORE.records,
+  // But the held record must STILL be in scope: PUBLIC (decoded body) AND, under a room allowlist, in an
+  // allowed room — else a peer could ferry a new proof for any already-held off-scope/private record on
+  // the public plane (#AP).
+  const heldProofRecords = new Set<string>();
+  if (scopeFiltered) {
+    const candidates = [
+      ...new Set(
         tentativeProofs
           .map((p) => p.recordCid)
           .filter((c) => c !== '' && !committedRecordCids.has(c)),
-      )
-    : new Set<string>();
+      ),
+    ];
+    await Promise.all(
+      candidates.map(async (rc) => {
+        const row = await getByKey<RecordRow>(db, LCAP_STORE.records, rc);
+        if (!row) return; // not held
+        if (allow && (row.roomHash === undefined || !allow.has(normalizeRoomKey(row.roomHash)))) {
+          return; // a held record outside the allowed room(s)
+        }
+        if (!isPublicRecordBody(row.body)) return; // a held non-public record
+        heldProofRecords.add(rc);
+      }),
+    );
+  }
 
   // Apply the in-scope closure (#GG): under a scoped ingest, a proof commits only if it attests a
   // COMMITTED (or already-held, #AD) record, and a block/chunk only if a committed record's signed

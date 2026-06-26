@@ -16,6 +16,7 @@
 //     (`selectForEviction`) and retry once, surfacing residual pressure honestly.
 
 import type { HeldObject } from '@licio/lcap';
+import { parseCid } from '@licio/lcap';
 import { LCAP_STORE, type LcapStoreName } from './db.js';
 import { type GcCandidate, selectForEviction } from './gc.js';
 
@@ -83,7 +84,7 @@ function txComplete(tx: IDBTransaction): Promise<void> {
   });
 }
 
-async function getByKey<T>(
+export async function getByKey<T>(
   db: IDBDatabase,
   store: LcapStoreName,
   key: IDBValidKey,
@@ -274,7 +275,20 @@ export async function getHeldObject(db: IDBDatabase, cid: string): Promise<HeldO
   const proof = await getByKey<ProofRow>(db, LCAP_STORE.proofs, cid);
   if (proof) return { kind: 'proof', bytes: proof.proofBody };
   const block = await readBlockBytes(db, cid);
-  if (block) return { kind: 'block', bytes: block };
+  if (block) {
+    // The blocks store holds BOTH `block` and standalone `chunk` blobs.  Derive the real cid_kind from
+    // the CID's kind prefix so the repack emits the matching frame kind — a chunk served as a `block`
+    // frame would recompute to a DIFFERENT CID on the receiver and be rejected, so the chunk dependency
+    // could never be satisfied over courier/WebRTC/anchor (#AN).
+    let kind: HeldObject['kind'] = 'block';
+    try {
+      const parsed = parseCid(cid).kind;
+      if (parsed === 'chunk' || parsed === 'block') kind = parsed;
+    } catch {
+      // unparseable (should not happen for a stored CID) — fall back to block
+    }
+    return { kind, bytes: block };
+  }
   return undefined;
 }
 

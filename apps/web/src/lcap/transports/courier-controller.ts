@@ -346,17 +346,29 @@ export class CourierController {
     // observes `launching` and DEFERS, never interleaving with listener registration / radio start.
     this.launching = true;
     // Register listeners on EVERY channel BEFORE starting any radio so no early event is missed.
-    for (const { channel, plugin } of channels) {
-      await this.registerListeners(channel, plugin);
-      // A stop() can win the race WHILE an addListener promise is pending: stopChannel() then saw no
-      // handle list to remove, but registerListeners stored the handles afterward — leaving stale
-      // closures that satisfy isChannelActive() and could drive/answer a later native event under a
-      // stopped controller.  If a stop landed, tear down EVERY registered channel and abort.
-      if (!this.started) {
-        for (const c of channels) await this.stopChannel(c.channel);
-        this.launching = false;
-        return;
+    try {
+      for (const { channel, plugin } of channels) {
+        await this.registerListeners(channel, plugin);
+        // A stop() can win the race WHILE an addListener promise is pending: stopChannel() then saw no
+        // handle list to remove, but registerListeners stored the handles afterward — leaving stale
+        // closures that satisfy isChannelActive() and could drive/answer a later native event under a
+        // stopped controller.  If a stop landed, tear down EVERY registered channel and abort.
+        if (!this.started) {
+          for (const c of channels) await this.stopChannel(c.channel);
+          this.launching = false;
+          return;
+        }
       }
+    } catch (error) {
+      // A later channel's addListener REJECTED after EARLIER channels were already registered — tear
+      // down every channel registered so far and CLEAR the launch/started state, so no listener handle
+      // lingers with no radio active and a later Start is not a no-op (the controller would otherwise
+      // still think it is started) (#AQ).
+      devWarn('courier listener registration failed mid-launch', error);
+      for (const c of channels) await this.stopChannel(c.channel);
+      this.started = false;
+      this.launching = false;
+      return;
     }
     const options = this.radioOptions();
     for (const { channel, plugin } of channels) {

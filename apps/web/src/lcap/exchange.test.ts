@@ -397,6 +397,35 @@ describe('client §16 exchange engine', () => {
     expect(counts?.quarantined).toBeGreaterThan(0); // R's gap is now tracked as a want
   });
 
+  it('serves a held CHUNK as a chunk frame — its CID kind is preserved, not reported as block (#AN)', async () => {
+    const lcap = await import('@licio/lcap');
+    const bytes = new Uint8Array([5, 6, 7, 8]);
+    const chunkCid = await lcap.cidFor('chunk', bytes); // a CHUNK CID (distinct kind prefix)
+    await putBlock(peerB, { blockCid: chunkCid, state: 'integrity_verified', size: bytes.length }, [
+      bytes,
+    ]);
+    const held = await getHeldObject(peerB, chunkCid);
+    expect(held?.kind).toBe('chunk'); // derived from the CID prefix, NOT reported as 'block' (#AN)
+  });
+
+  it('SECURITY: a NON-PUBLIC quarantine gap does not admit a block on the public plane (#AO)', async () => {
+    const bytes = new Uint8Array([8, 8, 8, 1]);
+    const blockCid = await cidFor('block', bytes);
+    // A NON-PUBLIC quarantine row (an in_room/private file import) whose missing dep is this block.
+    await quarantineMissing(peerA, 'privrec', [blockCid], undefined, false);
+    // A public pack that happens to carry that block (no record references it).
+    await putBlock(peerB, { blockCid, state: 'integrity_verified', size: bytes.length }, [bytes]);
+    const lcap = await import('@licio/lcap');
+    const pack = await lcap.repackHeldObjects(
+      (cid) => getHeldObject(peerB, cid),
+      [blockCid],
+      1_000_000,
+    );
+    await ingestPackIntoStore(peerA, pack.pack as Uint8Array);
+    // The non-public gap must NOT pull the block into the public-plane closure (#AO).
+    expect(await readBlockBytes(peerA, blockCid)).toBeUndefined();
+  });
+
   it('SECURITY: re-quarantines a record whose body needs a block the pack TABLE omits (#AC)', async () => {
     const lcap = await import('@licio/lcap');
     const missingBlock = await cidFor('block', new Uint8Array([7, 7, 7, 2])); // NOT in pack, NOT held

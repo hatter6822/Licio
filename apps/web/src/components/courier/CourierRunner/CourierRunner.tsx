@@ -46,6 +46,7 @@ import {
   nearbyCourierAvailable,
 } from '../../../lcap/transports/courier-native.js';
 import { cn } from '../../../lib/cn.js';
+import { devWarn } from '../../../lib/dev-log.js';
 import { Badge } from '../../ui/Badge/index.js';
 import { Button } from '../../ui/Button/index.js';
 import { Checkbox } from '../../ui/Checkbox/index.js';
@@ -282,19 +283,26 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
           return respondToClientExchange(db, request, scopeRef.current, shouldIngestPush);
         },
         onOutcome: (outcome) => {
+          const record = (carried: boolean, skippedReason: string): void =>
+            setActivity((prev) => [
+              ...prev.slice(-19),
+              { id: activitySeq.current++, channel: outcome.channel, carried, skippedReason },
+            ]);
           // INGEST a served response into the local store (CID-verified; fills our gaps) — ROOM-SCOPED
-          // so a peer's response cannot land unrelated rooms past the current allowlist (#M).
-          if (outcome.response)
-            void ingestClientExchangeResponse(db, outcome.response, scopeRef.current);
-          setActivity((prev) => [
-            ...prev.slice(-19),
-            {
-              id: activitySeq.current++,
-              channel: outcome.channel,
-              carried: outcome.carriedBy === 'courier',
-              skippedReason: outcome.skippedReason,
-            },
-          ]);
+          // so a peer's response cannot land unrelated rooms past the current allowlist (#M).  Mark the
+          // exchange CARRIED only AFTER the ingest actually commits: a rejected ingest (IndexedDB
+          // quota/transaction failure) records a FAILURE instead of an unhandled rejection + a false
+          // "carried" log entry whose content was never stored (#AR).
+          if (outcome.response) {
+            void ingestClientExchangeResponse(db, outcome.response, scopeRef.current)
+              .then(() => record(outcome.carriedBy === 'courier', outcome.skippedReason))
+              .catch((error) => {
+                devWarn('courier response ingest failed', error);
+                record(false, 'ingest_failed');
+              });
+          } else {
+            record(outcome.carriedBy === 'courier', outcome.skippedReason);
+          }
         },
         // A radio whose native start fails ASYNCHRONOUSLY (the common GMS-Task timing) stops the
         // controller after start() resolved — drop it from "running" instead of showing a stale,
