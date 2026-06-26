@@ -15,6 +15,8 @@
 //   - transient-quota retry: on `QuotaExceededError`, shed P4 ambient cache per §21.2
 //     (`selectForEviction`) and retry once, surfacing residual pressure honestly.
 
+import type { HeldObject } from '@licio/lcap';
+import { parseCid } from '@licio/lcap';
 import { LCAP_STORE, type LcapStoreName } from './db.js';
 import { type GcCandidate, selectForEviction } from './gc.js';
 
@@ -82,7 +84,7 @@ function txComplete(tx: IDBTransaction): Promise<void> {
   });
 }
 
-async function getByKey<T>(
+export async function getByKey<T>(
   db: IDBDatabase,
   store: LcapStoreName,
   key: IDBValidKey,
@@ -252,6 +254,147 @@ export async function readBlockBytes(
     offset += part.length;
   }
   return out;
+}
+
+/**
+ * Read a HELD object by CID for the §16 content responder — probing the record / proof / block
+ * stores (CIDs are content-addressed + globally unique, so at most one store holds any CID).
+ * Returns the verifiable bytes + kind, or `undefined` when not held.  The kind is derived from
+ * WHICH store holds it; the receiver re-verifies `cidFor(kind, bytes)` regardless, so a rare
+ * standalone-chunk stored as a block self-corrects (it fails the receiver's CID check, never a
+ * trust bypass).  Records/proofs read raw bytes (`body`/`proofBody`); blocks reassemble.
+ */
+export async function getHeldObject(db: IDBDatabase, cid: string): Promise<HeldObject | undefined> {
+  const record = await getByKey<RecordRow>(db, LCAP_STORE.records, cid);
+  if (record) {
+    // Thread the record's canonical room_id_hash (decoded from its hex `roomHash`) so a repacked
+    // response/push stamps the room — the receiver lands it with its real room, not roomHash:''.
+    const roomIdHash = roomHashToBytes(record.roomHash);
+    return { kind: 'record', bytes: record.body, ...(roomIdHash ? { roomIdHash } : {}) };
+  }
+  const proof = await getByKey<ProofRow>(db, LCAP_STORE.proofs, cid);
+  if (proof) return { kind: 'proof', bytes: proof.proofBody };
+  const block = await readBlockBytes(db, cid);
+  if (block) {
+    // The blocks store holds BOTH `block` and standalone `chunk` blobs.  Derive the real cid_kind from
+    // the CID's kind prefix so the repack emits the matching frame kind — a chunk served as a `block`
+    // frame would recompute to a DIFFERENT CID on the receiver and be rejected, so the chunk dependency
+    // could never be satisfied over courier/WebRTC/anchor (#AN).
+    let kind: HeldObject['kind'] = 'block';
+    try {
+      const parsed = parseCid(cid).kind;
+      if (parsed === 'chunk' || parsed === 'block') kind = parsed;
+    } catch {
+      // unparseable (should not happen for a stored CID) — fall back to block
+    }
+    return { kind, bytes: block };
+  }
+  return undefined;
+}
+
+/** The proof CIDs attesting `recordCid` (via the `proofs.recordCid` index) — so a content PUSH
+ *  can ferry a record together with its proofs (the receiver re-verifies every CID regardless). */
+export async function proofCidsForRecord(db: IDBDatabase, recordCid: string): Promise<string[]> {
+  const tx = db.transaction(LCAP_STORE.proofs, 'readonly');
+  const index = tx.objectStore(LCAP_STORE.proofs).index('recordCid');
+  const out: string[] = [];
+  await new Promise<void>((resolve, reject) => {
+    const request = index.openCursor(IDBKeyRange.only(recordCid));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve();
+        return;
+      }
+      out.push((cursor.value as ProofRow).proofCid);
+      cursor.continue();
+    };
+    request.onerror = () => reject(request.error ?? new Error('proof index cursor failed'));
+  });
+  await txComplete(tx);
+  return out;
+}
+
+/** Canonicalize a room key so the two sides of a room scope compare equal regardless of casing /
+ *  surrounding whitespace / a `0x` prefix — the UI's room-hash text vs. the stored `roomHash`. */
+export function normalizeRoomKey(key: string): string {
+  return key.trim().replace(/^0x/i, '').toLowerCase();
+}
+
+/** Lowercase hex of bytes — the canonical, LOSSLESS string form of a `room_id_hash` (vs. the old
+ *  lossy `TextDecoder`); this is what `RecordRow.roomHash` stores so the UI hex + the room frontier
+ *  all compare equal. */
+export function bytesToHex(bytes: Uint8Array): string {
+  let hex = '';
+  for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+  return hex;
+}
+
+/** Decode a canonical hex `roomHash` back to its `room_id_hash` bytes, or `undefined` if it is not
+ *  valid even-length hex (so legacy/garbage values yield no hash rather than a corrupt one). */
+export function roomHashToBytes(roomHash: string): Uint8Array | undefined {
+  const clean = normalizeRoomKey(roomHash);
+  if (clean.length === 0 || clean.length % 2 !== 0 || !/^[0-9a-f]+$/.test(clean)) return undefined;
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+/**
+ * Collect up to `limit` record rows for which `isShareable` returns true.  When `rooms` is non-empty
+ * the scan keeps only rows whose `roomHash` (CANONICALIZED) is in the allowlist — comparing both
+ * sides through {@link normalizeRoomKey}, so the user's room-hash text and the stored representation
+ * match despite casing / `0x` / whitespace differences.  The cap counts SHAREABLE rows, not raw rows
+ * — so a long-lived store whose in-scope records appear after thousands of unrelated/over-priority
+ * rows still yields them (a normalized compare cannot use the exact `roomHash` index, so this scans
+ * the store, bounded by the shareable cap).
+ */
+export async function collectShareableRecordRows(
+  db: IDBDatabase,
+  rooms: readonly string[] | undefined,
+  limit: number,
+  isShareable: (row: RecordRow) => boolean,
+): Promise<RecordRow[]> {
+  const allow =
+    rooms && rooms.length > 0 ? new Set(rooms.map((r) => normalizeRoomKey(r))) : undefined;
+  const out: RecordRow[] = [];
+  const tx = db.transaction(LCAP_STORE.records, 'readonly');
+  await new Promise<void>((resolve, reject) => {
+    const request = tx.objectStore(LCAP_STORE.records).openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor || out.length >= limit) {
+        resolve();
+        return;
+      }
+      const row = cursor.value as RecordRow;
+      if ((!allow || allow.has(normalizeRoomKey(row.roomHash))) && isShareable(row)) out.push(row);
+      cursor.continue();
+    };
+    request.onerror = () => reject(request.error ?? new Error('record cursor failed'));
+  });
+  await txComplete(tx);
+  return out;
+}
+
+/** A public room held in `lcap_v2`, identified by its canonical `roomHash` + how many records it
+ *  holds — so the offline UI can offer the rooms a user actually has, without a room-name store. */
+export interface LocalRoom {
+  readonly roomHash: string;
+  readonly recordCount: number;
+}
+
+/** Enumerate the distinct public rooms held in `lcap_v2` (one cursor pass, bounded memory), most
+ *  records first — the offline page lists these for export (it has no room-name source, so rooms
+ *  are identified by their canonical hash).  Records with no room (`roomHash: ''`) are skipped. */
+export async function listLocalRooms(db: IDBDatabase): Promise<LocalRoom[]> {
+  const counts = new Map<string, number>();
+  await forEachByCursor<RecordRow>(db, LCAP_STORE.records, (row) => {
+    if (row.roomHash) counts.set(row.roomHash, (counts.get(row.roomHash) ?? 0) + 1);
+  });
+  return [...counts.entries()]
+    .map(([roomHash, recordCount]) => ({ roomHash, recordCount }))
+    .sort((a, b) => b.recordCount - a.recordCount || a.roomHash.localeCompare(b.roomHash));
 }
 
 // --- Capped transactions (§23.2 old-phone safety). --------------------------------

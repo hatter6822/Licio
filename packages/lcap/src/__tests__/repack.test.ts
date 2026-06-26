@@ -1,0 +1,184 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// The PURE §16.4 content-push repack (`repackHeldObjects`) — the shared assembly the server AND
+// the client P2P responder reuse.  Drives it over an in-memory held-object reader (block frames,
+// which need no record decode) to assert: served-in-request-order, skip-unheld, dedup, the
+// budget-truncation boundary, the empty result, and a readPack round-trip (every served frame
+// CID-verifies).
+
+import { describe, expect, it } from 'vitest';
+import { cidFor } from '../cid/index.js';
+import { readPack } from '../pack/index.js';
+import { encodeContributionEvent } from '../records/index.js';
+import { type HeldObject, repackHeldObjects } from '../sync/repack.js';
+
+async function block(bytes: Uint8Array): Promise<{ cid: string; held: HeldObject }> {
+  const cid = await cidFor('block', bytes);
+  return { cid, held: { kind: 'block', bytes } };
+}
+
+function readerOf(...entries: Array<{ cid: string; held: HeldObject }>) {
+  const map = new Map(entries.map((e) => [e.cid, e.held]));
+  return async (cid: string): Promise<HeldObject | undefined> => map.get(cid);
+}
+
+describe('repackHeldObjects (pure §16.4 content push)', () => {
+  it('serves held wants in request order, skips unheld + dedups, and round-trips via readPack', async () => {
+    const a = await block(new Uint8Array([1, 2, 3]));
+    const b = await block(new Uint8Array([4, 5, 6, 7]));
+    const getObject = readerOf(a, b);
+
+    const result = await repackHeldObjects(
+      getObject,
+      [a.cid, 'cid-not-held', b.cid, a.cid /* dup */],
+      1_000_000,
+    );
+    expect(result.served).toEqual([a.cid, b.cid]); // request order, unheld skipped, dup ignored
+    expect(result.truncated).toBe(false);
+    expect(result.pack).toBeInstanceOf(Uint8Array);
+
+    const read = await readPack(result.pack as Uint8Array);
+    expect(read.ok).toBe(true);
+    if (!read.ok) return;
+    expect([...read.pack.frames.keys()].sort()).toEqual([a.cid, b.cid].sort());
+    for (const [cid, frame] of read.pack.frames) {
+      expect(frame.cidVerified).toBe(true); // every served frame integrity-verifies on read
+      expect(frame.frameKind).toBe('block');
+      const want = cid === a.cid ? a.held.bytes : b.held.bytes;
+      expect(frame.payload).toEqual(want);
+    }
+  });
+
+  it('respects the byte budget (truncated) — even for a single oversized first want', async () => {
+    const big = await block(new Uint8Array(4096).fill(9));
+    const small = await block(new Uint8Array([1]));
+    // A budget below the first object's size truncates immediately with nothing served.
+    const none = await repackHeldObjects(readerOf(big, small), [big.cid, small.cid], 16);
+    expect(none.served).toEqual([]);
+    expect(none.truncated).toBe(true);
+    expect(none.pack).toBeUndefined();
+
+    // A budget that fits exactly one stops after it and marks the rest truncated.
+    const oneFit = await repackHeldObjects(readerOf(small, big), [small.cid, big.cid], 512);
+    expect(oneFit.served).toEqual([small.cid]);
+    expect(oneFit.truncated).toBe(true);
+  });
+
+  it('honors the peer’s SELECTION floor + per-kind count caps, beyond the byte cap (#BF/#BH)', async () => {
+    const a = await block(new Uint8Array([1]));
+    const b = await block(new Uint8Array([2]));
+    const reader = readerOf(a, b);
+    // maxBlocks: 1 → only the FIRST block is served (a second is withheld + marks partial).
+    const capped = await repackHeldObjects(reader, [a.cid, b.cid], 1_000_000, { maxBlocks: 1 });
+    expect(capped.served).toEqual([a.cid]);
+    expect(capped.truncated).toBe(true);
+    // allow_media false → a block (B4 media) is withheld entirely.
+    const noMedia = await repackHeldObjects(reader, [a.cid, b.cid], 1_000_000, {
+      allowMedia: false,
+    });
+    expect(noMedia.served).toEqual([]);
+    expect(noMedia.truncated).toBe(true);
+    // priority_floor 0 → a B4 (priority-4) block is over the floor and withheld.
+    const lowPrio = await repackHeldObjects(reader, [a.cid, b.cid], 1_000_000, {
+      priorityFloor: 0,
+    });
+    expect(lowPrio.served).toEqual([]);
+    // A FULL budget (the maxima) serves both — a courier ferrying content is never starved.
+    const full = await repackHeldObjects(reader, [a.cid, b.cid], 1_000_000, {
+      priorityFloor: 4,
+      allowMedia: true,
+      maxBlocks: 99,
+      maxObjects: 99,
+    });
+    expect([...full.served].sort()).toEqual([a.cid, b.cid].sort());
+  });
+
+  it('returns an empty, pack-less result when no want is held', async () => {
+    const result = await repackHeldObjects(readerOf(), ['x', 'y'], 1_000_000);
+    expect(result).toEqual({ served: [], truncated: false });
+    expect(result.pack).toBeUndefined();
+  });
+
+  it('trims the pack to its REAL serialized size, not the payload estimate (#VV)', async () => {
+    const capabilityCid = await cidFor('record', new Uint8Array([0]));
+    const roomIdHash = new Uint8Array(32).fill(3);
+    // A record with MANY parent deps — the per-entry dep list inflates the SERIALIZED pack table well
+    // beyond the greedy "payload + fixed overhead" estimate the loop projects.
+    const parents = await Promise.all(
+      Array.from({ length: 40 }, (_, i) => cidFor('record', new Uint8Array([i, i + 1]))),
+    );
+    const body = encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-vv',
+      visibility_scope: 'public',
+      author_account_id: 'acct',
+      author_device_id: 'dev',
+      author_device_key_id: 'key',
+      device_seq: 1,
+      capability_cid: capabilityCid,
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([1, 2, 3]),
+      priority: 2,
+      parent_record_cids: parents,
+    });
+    const recordCid = await cidFor('record', body);
+    const small = await block(new Uint8Array([1, 2]));
+    // A budget the GREEDY estimate (payload + fixed overhead) thinks fits BOTH, but the real pack
+    // (header + object table + the 40-CID dep list) exceeds — so without the trim the served pack
+    // would overrun maxBytes.
+    const maxBytes = body.length + small.held.bytes.length + 1024;
+    const result = await repackHeldObjects(
+      readerOf(small, { cid: recordCid, held: { kind: 'record', bytes: body, roomIdHash } }),
+      [small.cid, recordCid],
+      maxBytes,
+    );
+    expect((result.pack as Uint8Array | undefined)?.length ?? 0).toBeLessThanOrEqual(maxBytes);
+    expect(result.truncated).toBe(true); // the many-dep record was trimmed to fit the true wire size
+  });
+
+  it('threads a record’s ROOM (from the reader metadata) + dep CIDs onto the PackObject (#5)', async () => {
+    // The canonical room_id_hash is STORE METADATA (the reader supplies it via held.roomIdHash) — it
+    // is NOT re-derived from the body — and is stamped verbatim so the receiver lands the record with
+    // its real room key (not ''); the body's dep CIDs are threaded for missing-dependency detection.
+    const capabilityCid = await cidFor('record', new Uint8Array([0]));
+    const bodyBlockCid = await cidFor('block', new Uint8Array([9, 9, 9]));
+    const roomIdHash = new Uint8Array(32).fill(7); // the canonical 32-byte room hash (metadata)
+    const body = encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-target',
+      visibility_scope: 'public',
+      author_account_id: 'acct',
+      author_device_id: 'dev',
+      author_device_key_id: 'key',
+      device_seq: 1,
+      capability_cid: capabilityCid,
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([1, 2, 3]),
+      priority: 2,
+      body_block_cid: bodyBlockCid,
+    });
+    const recordCid = await cidFor('record', body);
+    const result = await repackHeldObjects(
+      readerOf({ cid: recordCid, held: { kind: 'record', bytes: body, roomIdHash } }),
+      [recordCid],
+      1_000_000,
+    );
+    const read = await readPack(result.pack as Uint8Array);
+    expect(read.ok).toBe(true);
+    if (!read.ok) return;
+    const entry = read.pack.entries.find((e) => e.cid === recordCid);
+    expect(entry).toBeDefined();
+    // The canonical room hash is stamped verbatim (so the receiver stores it, not '').
+    expect(entry?.room_id_hash).toEqual(roomIdHash);
+    // The body's BLOCK dep is present so a missing block quarantines on the receiver; the capability
+    // is NOT a dep (it is resolved by §18.3 validation, not required as a prerequisite record).
+    expect(entry?.deps).toContain(bodyBlockCid);
+    expect(entry?.deps).not.toContain(capabilityCid);
+  });
+});

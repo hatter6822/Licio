@@ -16,9 +16,12 @@ const syncRoomOverP2p = vi.fn();
 vi.mock('../../../lcap/transports/sync-over-p2p.js', () => ({
   syncRoomOverP2p: (...args: unknown[]) => syncRoomOverP2p(...args),
 }));
-vi.mock('../../../lcap/transports/frontier-request.js', () => ({
-  buildPublicFrontierRequest: vi.fn(async () => new Uint8Array([1, 2, 3])),
-}));
+// The lcap_v2 db handle is stubbed (this suite drives the UI + the syncRoomOverP2p call, not the
+// real store); keep the real db module but stub `getLcapDb` so no IndexedDB is touched.
+vi.mock('../../../lcap/db.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../../lcap/db.js')>();
+  return { ...real, getLcapDb: vi.fn(async () => ({}) as IDBDatabase) };
+});
 
 const FORBIDDEN = /\b(secure|trusted|safe|anonymous|encrypted)\b/i;
 const ROOM_HASH = '00'.repeat(32); // 32-byte hex
@@ -50,7 +53,7 @@ describe('P2pSyncPanel (WS-R.15.6)', () => {
   });
 
   it('drives syncRoomOverP2p and reports a direct (webrtc) sync honestly', async () => {
-    syncRoomOverP2p.mockResolvedValue({ transport: 'webrtc', response: new Uint8Array([9]) });
+    syncRoomOverP2p.mockResolvedValue({ transport: 'webrtc', ingested: null });
     render(<P2pSyncPanel roomHash={ROOM_HASH} />);
     fireEvent.change(screen.getByLabelText(/your peer code/i), { target: { value: 'alice' } });
     fireEvent.change(screen.getByLabelText(/their peer code/i), { target: { value: 'bob' } });
@@ -70,7 +73,7 @@ describe('P2pSyncPanel (WS-R.15.6)', () => {
   });
 
   it('reports the anchor fallback honestly when WebRTC was not the carrier', async () => {
-    syncRoomOverP2p.mockResolvedValue({ transport: 'https', response: new Uint8Array([0]) });
+    syncRoomOverP2p.mockResolvedValue({ transport: 'https', ingested: null });
     render(<P2pSyncPanel roomHash={ROOM_HASH} />);
     fireEvent.change(screen.getByLabelText(/your peer code/i), { target: { value: 'a' } });
     fireEvent.change(screen.getByLabelText(/their peer code/i), { target: { value: 'b' } });
@@ -100,5 +103,22 @@ describe('P2pSyncPanel (WS-R.15.6)', () => {
   it('has no axe violations', async () => {
     const { container } = render(<P2pSyncPanel roomHash={ROOM_HASH} />);
     expect(await checkA11y(container)).toHaveNoViolations();
+  });
+
+  it('aborts an in-flight sync when the panel unmounts (#G)', async () => {
+    let captured: AbortSignal | undefined;
+    syncRoomOverP2p.mockImplementation((opts: { signal?: AbortSignal }) => {
+      captured = opts.signal;
+      return new Promise(() => {}); // hang — so the only thing that ends it is the abort
+    });
+    const { unmount } = render(<P2pSyncPanel roomHash={ROOM_HASH} />);
+    fireEvent.change(screen.getByLabelText(/your peer code/i), { target: { value: 'alice' } });
+    fireEvent.change(screen.getByLabelText(/their peer code/i), { target: { value: 'bob' } });
+    fireEvent.click(screen.getByRole('button', { name: /sync over a direct connection/i }));
+    await waitFor(() => expect(captured).toBeDefined());
+    expect(captured?.aborted).toBe(false);
+    // Navigating away (unmount) must abort the in-flight request + any pending push_pack.
+    unmount();
+    expect(captured?.aborted).toBe(true);
   });
 });

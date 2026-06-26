@@ -5,13 +5,14 @@
 // suppressed in Stealth (§23.3): the operational mode maps to its `StorageMode`, and
 // `shouldAutoSync` treats `stealth` as suppress.  Default `standard`.
 //
-// This is the persisted source-of-truth a future mode SELECTOR writes and every §33
-// posture consumer reads.  Deliberately NOT a user-facing toggle yet: a Stealth control
-// must land WITH the full §33 posture integration (media / export / discovery / storage),
-// or it would imply a protection the rest of the client does not yet deliver — that
-// surface is the tracked WS-R.17.2 follow-up (`docs/lcap/README.md`).  It is a plain
-// persisted module, not a Zustand store, so the documented client store-count (auth, ui,
-// feature-flags) is unchanged; the sync reads it non-reactively.
+// This is the persisted source-of-truth the WS-R.17.2 `OperationalModeSelector`
+// (`/profile/mode`) writes and every §33 posture consumer reads — the full posture is
+// integrated (media / export / discovery / storage / priority), so the user-facing control
+// ships.  Most consumers read it non-reactively (e.g. the C0-first sync gate); a running
+// consumer that must react to a switch subscribes via `subscribeOperationalMode` (the
+// courier runtime stops its radios when the mode goes forced-off).  It is a plain persisted
+// module, not a Zustand store, so the documented client store-count (auth, ui,
+// feature-flags) is unchanged.
 
 import { z } from 'zod';
 import { loadPersisted, type PersistConfig, savePersisted } from '../stores/persist.js';
@@ -37,9 +38,24 @@ export function getOperationalMode(): OperationalMode {
   return loadPersisted(PERSIST)?.mode ?? 'standard';
 }
 
-/** Persist the current operational mode (the write seam the future §33 selector calls). */
+/** Listeners notified synchronously whenever the operational mode changes (e.g. the courier
+ *  runtime stops live radios when the user switches into Stealth/Emergency). */
+const modeListeners = new Set<(mode: OperationalMode) => void>();
+
+/** Subscribe to operational-mode changes; returns an unsubscribe.  Lets a live §33 consumer
+ *  (e.g. a running courier) react to a mode switch instead of reading the mode only at start. */
+export function subscribeOperationalMode(listener: (mode: OperationalMode) => void): () => void {
+  modeListeners.add(listener);
+  return () => {
+    modeListeners.delete(listener);
+  };
+}
+
+/** Persist the current operational mode (the write seam the §33 selector calls) and notify
+ *  subscribers so a running consumer can reconcile immediately. */
 export function setOperationalMode(mode: OperationalMode): void {
   savePersisted(PERSIST, { mode });
+  for (const listener of modeListeners) listener(mode);
 }
 
 /**

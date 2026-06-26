@@ -24,7 +24,7 @@
 // `syncRoomOverP2p` (and through it `@licio/lcap-p2p`) loads via a DYNAMIC import only, so
 // the WebRTC/codec core stays off the initial bundle (`check:lcap-p2p-split`).
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
 import { Button } from '../../ui/Button/index.js';
@@ -95,17 +95,20 @@ export function P2pSyncPanel({
     try {
       // Dynamic imports: the WebRTC carrier (`@licio/lcap-p2p`) + the `@licio/lcap` codec
       // stay off the initial bundle.  Pressing Sync is the explicit WebRTC opt-in.
-      const [{ syncRoomOverP2p }, { buildPublicFrontierRequest }] = await Promise.all([
+      const [{ syncRoomOverP2p }, { getLcapDb }] = await Promise.all([
         import('../../../lcap/transports/sync-over-p2p.js'),
-        import('../../../lcap/transports/frontier-request.js'),
+        import('../../../lcap/db.js'),
       ]);
-      const requestMessage = await buildPublicFrontierRequest('webrtc');
+      const db = await getLcapDb();
       const result = await syncRoomOverP2p({
+        db,
         roomIdHash: bytes,
         selfPeerKey: selfPeerKey.trim(),
         remotePeerKey: remotePeerKey.trim(),
         initiator,
-        requestMessage,
+        // Scope sharing to THIS room only — a targeted room sync never gossips unrelated rooms'
+        // content to the manually-entered peer (the responder/push filter by `roomHashAllowlist`).
+        scope: { roomHashAllowlist: [roomHash.trim()] },
         // The user pressed Sync — opt WebRTC in explicitly (off by default otherwise).
         privacy: { mode: 'standard', userEnabled: true },
         signal: controller.signal,
@@ -122,6 +125,10 @@ export function P2pSyncPanel({
       abortRef.current = null;
     }
   }, [roomHash, selfPeerKey, remotePeerKey, initiator, t]);
+
+  // Abort an in-flight sync if the panel UNMOUNTS — else the request + any push_pack could still be
+  // transmitted (WebRTC, or the HTTPS fallback) after the UI owner is gone (#G).
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();

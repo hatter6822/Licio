@@ -30,6 +30,7 @@ import {
   cidFor,
   DEFAULT_BUDGET,
   type DetachedProofV2,
+  decodeAndRouteRecord,
   detachedProofV2Schema,
   type ExportAuthorizationResult,
   type ExportRequestV2,
@@ -204,6 +205,29 @@ export class LcapIngestServer {
   /** Read a held object's bytes + kind by CID (§29 content fetch), or undefined. */
   getObject(cid: string): Promise<StoredObject | undefined> {
     return this.store.getObject(cid);
+  }
+
+  /**
+   * The canonical `room_id_hash` for a record's bytes — `roomIdHash(networkId, roomId)` over the
+   * record's signed room id (`home_room_id` / `room_id`).  The repack stamps it onto a served
+   * record (the room is NOT in the body it could re-derive from), so the receiver lands the record
+   * with its real room key (matching the room frontier + the client "Sync this room" scope).
+   * Returns `undefined` for a record kind that carries no room (certificate / revocation / fork).
+   */
+  async roomIdHashForRecord(bytes: Uint8Array): Promise<Uint8Array | undefined> {
+    let record: ReturnType<typeof decodeAndRouteRecord>;
+    try {
+      record = decodeAndRouteRecord(bytes);
+    } catch {
+      return undefined;
+    }
+    const roomId =
+      record.kind === 'contribution_event'
+        ? record.home_room_id
+        : record.kind === 'room_capability'
+          ? record.room_id
+          : undefined;
+    return roomId === undefined ? undefined : roomIdHash(this.networkId, roomId);
   }
 
   isAccepted(cid: string): Promise<boolean> {

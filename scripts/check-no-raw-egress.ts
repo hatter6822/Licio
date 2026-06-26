@@ -38,6 +38,13 @@ const LCAP_DIRS = [
 // Directories never worth walking (deps + generated native/build output).
 const SKIP_DIRS = new Set(['node_modules', 'build', '.gradle', 'dist']);
 
+// Specific generated/synced trees to skip by absolute path: the Capacitor `cap sync` copies
+// the WEB build (apps/web/dist) into the courier's `assets/public` — gitignored, generated,
+// and a redundant copy of `apps/web` (already scanned at source), so a local run after a
+// courier build must not re-scan it (it legitimately carries the web app's `durationMs` Web-
+// Vitals field, which is forbidden only in the LCAP/attention plane, not the web app).
+const SKIP_PATHS = new Set([resolve(ROOT, 'apps/courier/android/app/src/main/assets/public')]);
+
 const TEST_FILE = /\.(?:test|spec)\.tsx?$/;
 
 /** Network-egress primitives that must never appear in the signal layer. */
@@ -100,8 +107,9 @@ function collect(dir: string): string[] {
   if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) return out;
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
-    if (entry.isDirectory() && !SKIP_DIRS.has(entry.name)) out.push(...collect(full));
-    else if (entry.isFile() && /\.tsx?$/.test(entry.name) && !TEST_FILE.test(entry.name)) {
+    if (entry.isDirectory() && !SKIP_DIRS.has(entry.name) && !SKIP_PATHS.has(full)) {
+      out.push(...collect(full));
+    } else if (entry.isFile() && /\.tsx?$/.test(entry.name) && !TEST_FILE.test(entry.name)) {
       out.push(full);
     }
   }

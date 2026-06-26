@@ -9,6 +9,7 @@
 
 import type { LcapTransport } from '@licio/lcap';
 import type {
+  DataChannelLike,
   RtcPeerConnectionFactory,
   WebrtcDecision,
   WebrtcPrivacyOptions,
@@ -42,7 +43,9 @@ export interface ConnectLcapWebrtcParams {
  * rendezvous.  Rejects (so the registry falls back to the anchor) if WebRTC is
  * disallowed by the §26.4 decision or the channel never opens.
  */
-export async function connectLcapWebrtc(params: ConnectLcapWebrtcParams): Promise<LcapTransport> {
+export async function connectLcapWebrtcChannel(
+  params: ConnectLcapWebrtcParams,
+): Promise<DataChannelLike> {
   const p2p = await import('@licio/lcap-p2p');
   const decision =
     params.decision ?? p2p.decideWebrtc(params.privacy ?? { mode: 'standard', userEnabled: true });
@@ -51,7 +54,7 @@ export async function connectLcapWebrtc(params: ConnectLcapWebrtcParams): Promis
     ...(params.apiBase !== undefined ? { apiBase: params.apiBase } : {}),
     ...(params.fetchFn !== undefined ? { fetchFn: params.fetchFn } : {}),
   });
-  const channel = await p2p.connectWebrtc({
+  return p2p.connectWebrtc({
     decision,
     signalKey,
     roomIdHash: params.roomIdHash,
@@ -65,5 +68,12 @@ export async function connectLcapWebrtc(params: ConnectLcapWebrtcParams): Promis
     ...(params.pollIntervalMs !== undefined ? { pollIntervalMs: params.pollIntervalMs } : {}),
     ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
   });
+}
+
+/** Establish a live WebRTC `LcapTransport` (the requester-only wrapper over the raw channel —
+ *  used by the anchor-fallback path; the bidirectional driver uses the raw channel directly). */
+export async function connectLcapWebrtc(params: ConnectLcapWebrtcParams): Promise<LcapTransport> {
+  const p2p = await import('@licio/lcap-p2p');
+  const channel = await connectLcapWebrtcChannel(params);
   return new p2p.WebrtcTransport(channel);
 }

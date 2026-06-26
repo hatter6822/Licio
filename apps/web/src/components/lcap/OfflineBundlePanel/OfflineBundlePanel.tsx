@@ -44,6 +44,7 @@ import {
 import { getLcapDb } from '../../../lcap/db.js';
 import { getOperationalMode } from '../../../lcap/mode-state.js';
 import { exportPostureForMode, mediaPrefetchAllowed } from '../../../lcap/operational-modes.js';
+import { type LocalRoom, listLocalRooms } from '../../../lcap/store.js';
 import { cn } from '../../../lib/cn.js';
 import { Badge } from '../../ui/Badge/index.js';
 import { Button } from '../../ui/Button/index.js';
@@ -119,7 +120,13 @@ function formatBytes(bytes: number): string {
 type ExportState =
   | { readonly phase: 'idle' }
   | { readonly phase: 'preparing' }
-  | { readonly phase: 'ready'; readonly data: RoomExport & { disclosure: ExportDisclosure } }
+  | {
+      readonly phase: 'ready';
+      readonly data: RoomExport & { disclosure: ExportDisclosure };
+      // The room this bundle was prepared for, so the download's filename matches its CONTENTS even if
+      // the picker moved on while preparing (#AM).
+      readonly roomHash: string;
+    }
   | { readonly phase: 'done'; readonly filename: string }
   | { readonly phase: 'error'; readonly message: string };
 
@@ -180,7 +187,13 @@ export function OfflineBundlePanel({
   const [privateExport, setPrivateExport] = useState<PrivateExportState>({ phase: 'idle' });
   // The private room a recovered private bundle is routed into (chosen by the user).
   const [privateTargetRoomId, setPrivateTargetRoomId] = useState<string>('');
+  // The PUBLIC rooms held offline (discovered from lcap_v2) + the one the user picked to export —
+  // so the export is reachable from the offline page (no room-context prop needed).
+  const [localRooms, setLocalRooms] = useState<readonly LocalRoom[]>([]);
+  const [pickedRoom, setPickedRoom] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // The room being exported: the explicit prop (mounted FROM a room) overrides the offline-page pick.
+  const effectiveRoomHash = roomHash ?? (pickedRoom || undefined);
 
   // Discover the device's WS-S private rooms (lazily; the room manager pulls the
   // private-p2p core off the synchronous path).  A failure leaves the list empty, so the
@@ -202,6 +215,25 @@ export function OfflineBundlePanel({
     };
   }, [enablePrivateRooms]);
 
+  // Discover the PUBLIC rooms held offline so the offline page can offer them for export (only when
+  // no room was passed in context).  A failure leaves the list empty — the picker simply hides.
+  useEffect(() => {
+    if (roomHash !== undefined) return; // an explicit room context — no picker needed
+    let active = true;
+    void (async () => {
+      try {
+        const db = await getLcapDb();
+        const rooms = await listLocalRooms(db);
+        if (active) setLocalRooms(rooms);
+      } catch {
+        if (active) setLocalRooms([]);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [roomHash]);
+
   // The §26 export posture: the explicit prop overrides; otherwise the current §33 mode
   // decides (Stealth/Emergency → generic filename + confirm).  Read once per render from
   // the persisted mode (a non-reactive module, like the sync gate reads it).
@@ -210,28 +242,42 @@ export function OfflineBundlePanel({
   const effectiveHighRisk = highRisk ?? posture.highRisk;
   const mediaPrefetch = mediaPrefetchAllowed(mode);
 
+  // Track the LATEST requested room so a slow prepare for a now-abandoned room can be ignored (#AM).
+  const latestRoomRef = useRef<string | undefined>(effectiveRoomHash);
+  useEffect(() => {
+    latestRoomRef.current = effectiveRoomHash;
+  }, [effectiveRoomHash]);
+
   const prepareExport = useCallback(async () => {
-    if (!roomHash) return;
+    const preparingRoom = effectiveRoomHash;
+    if (!preparingRoom) return;
     setExportState({ phase: 'preparing' });
     try {
-      const data = await prepareRoomExport(roomHash);
-      setExportState({ phase: 'ready', data });
+      const data = await prepareRoomExport(preparingRoom);
+      if (latestRoomRef.current !== preparingRoom) return; // picker moved on mid-prepare — drop stale (#AM)
+      setExportState({ phase: 'ready', data, roomHash: preparingRoom });
     } catch {
+      if (latestRoomRef.current !== preparingRoom) return;
       setExportState({
         phase: 'error',
         message: t('lcap.bundle.exportError', 'Could not prepare the export.'),
       });
     }
-  }, [roomHash, t]);
+  }, [effectiveRoomHash, t]);
 
   const doExport = useCallback(async () => {
-    if (exportState.phase !== 'ready' || !roomHash) return;
+    if (exportState.phase !== 'ready') return;
     try {
       const bytes = await buildBundle({
         objects: exportState.data.objects,
         disclosure: exportState.data.disclosure,
       });
-      const filename = await bundleFilename({ highRisk: effectiveHighRisk, roomHash });
+      // Name the file for the room the bundle was PREPARED for (its actual contents), never the
+      // possibly-changed current selection (#AM).
+      const filename = await bundleFilename({
+        highRisk: effectiveHighRisk,
+        roomHash: exportState.roomHash,
+      });
       await downloadBundle(bytes, filename);
       setExportState({ phase: 'done', filename });
     } catch {
@@ -240,7 +286,13 @@ export function OfflineBundlePanel({
         message: t('lcap.bundle.exportError', 'Could not prepare the export.'),
       });
     }
-  }, [exportState, roomHash, effectiveHighRisk, t]);
+  }, [exportState, effectiveHighRisk, t]);
+
+  // Picking a different room resets any prepared/finished export so it can't apply to the wrong room.
+  const pickRoom = useCallback((next: string) => {
+    setPickedRoom(next);
+    setExportState({ phase: 'idle' });
+  }, []);
 
   const onFileChosen = useCallback(
     async (file: File) => {
@@ -323,7 +375,40 @@ export function OfflineBundlePanel({
 
   return (
     <div className={cn('flex flex-col gap-6', className)}>
-      {roomHash ? (
+      {/* Offline-page room PICKER: when no room was passed in context, let the user choose one of the
+          rooms they hold offline to export (identified by its canonical hash — there is no name store). */}
+      {roomHash === undefined && localRooms.length > 0 ? (
+        <section
+          className="flex flex-col gap-2 rounded-lg bg-surface-sunken p-4"
+          aria-labelledby="lcap-room-picker-heading"
+        >
+          <h3 id="lcap-room-picker-heading" className="text-base font-semibold text-ink">
+            {t('lcap.bundle.pickRoomHeading', 'Choose a room to export')}
+          </h3>
+          <div
+            role="radiogroup"
+            aria-labelledby="lcap-room-picker-heading"
+            className="flex flex-col gap-1"
+          >
+            {localRooms.map((room) => (
+              <label key={room.roomHash} className="flex items-center gap-2 text-sm text-ink">
+                <input
+                  type="radio"
+                  name="lcap-export-room"
+                  checked={pickedRoom === room.roomHash}
+                  onChange={() => pickRoom(room.roomHash)}
+                />
+                <span className="font-mono">{room.roomHash.slice(0, 8)}…</span>
+                <span className="text-ink-muted">
+                  {t('lcap.bundle.roomItemCount', '({count} items)', { count: room.recordCount })}
+                </span>
+              </label>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {effectiveRoomHash ? (
         <section
           className="flex flex-col gap-3 rounded-lg bg-surface-sunken p-4"
           aria-labelledby="lcap-export-heading"

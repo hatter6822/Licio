@@ -21,8 +21,9 @@
 //      `offlineExchange` — PUBLIC-ONLY carriage (the courier seam refuses non-public
 //      packs structurally), the always-correct HTTPS anchor appended LAST so correctness
 //      never depends on the courier;
-//   4. routes each `payloadReceived` event to the right per-(channel,endpoint) medium
-//      (`acceptNativeEvent`, fail-closed on a malformed native event);
+//   4. CLASSIFIES each `payloadReceived` event (a peer's exchange REQUEST vs. our RESPONSE) and
+//      routes it: a response feeds the requester's medium inbox; a request goes to the responder
+//      seam (or is dropped) so it is NEVER mistaken for our response — fail-closed on malformed;
 //   5. enforces the §22.5 who-can-exchange + storage-budget controls per connection;
 //   6. stops cleanly (removes every listener, stops every radio, drops the mediums).
 //
@@ -33,7 +34,13 @@
 // imports `@licio/lcap` types/values only (NEVER `@licio/lcap-p2p`), so it stays off the
 // code-split P2P chunk (`check:lcap-p2p-split`).
 
-import type { LcapTransport } from '@licio/lcap';
+import {
+  decodeWithSchema,
+  exchangeRequestV2Schema,
+  exchangeResponseV2Schema,
+  type LcapTransport,
+} from '@licio/lcap';
+import { devWarn } from '../../lib/dev-log.js';
 import type { CourierMedium } from './courier.js';
 import { CourierTransport } from './courier.js';
 import { type CourierChannel, NativeChannelMedium } from './courier-channels.js';
@@ -88,6 +95,30 @@ function withLegTimeout(inner: LcapTransport, ms: number): LcapTransport {
   };
 }
 
+/**
+ * Classify an inbound courier message: the peer's exchange REQUEST (it is asking US), our
+ * exchange RESPONSE (the answer to our request), or unknown.  The strict §16 schemas are
+ * MUTUALLY EXCLUSIVE (a request has `interests` and no `status`; a response the reverse), so a
+ * peer's request can never be mistaken for our response — which is exactly the bug this guards:
+ * with two couriers both sending requests, the first inbound bytes must NOT be reported as a
+ * successful exchange.
+ */
+function classifyExchangeMessage(bytes: Uint8Array): 'request' | 'response' | 'unknown' {
+  try {
+    decodeWithSchema(exchangeResponseV2Schema, bytes);
+    return 'response';
+  } catch {
+    /* not a response — try a request */
+  }
+  try {
+    decodeWithSchema(exchangeRequestV2Schema, bytes);
+    return 'request';
+  } catch {
+    /* not a request either */
+  }
+  return 'unknown';
+}
+
 /** A Capacitor listener handle (returned by `addListener`). */
 interface ListenerHandle {
   remove(): Promise<void> | void;
@@ -99,7 +130,9 @@ interface ListenerHandle {
  * controller is transport-only and never assembles content itself.  Returns `null` to
  * skip driving an exchange with this endpoint (e.g. nothing to reconcile).
  */
-export type CourierRequestBuilder = (endpointId: string) => Uint8Array | null;
+export type CourierRequestBuilder = (
+  endpointId: string,
+) => Uint8Array | null | Promise<Uint8Array | null>;
 
 /** Notified when a courier exchange over an endpoint completes (or fails / is skipped). */
 export interface CourierExchangeOutcome {
@@ -152,10 +185,35 @@ export interface CourierControllerConfig {
   readonly power?: CourierPowerState;
   /** Build the §16 exchange request for a connected peer. */
   readonly buildRequest: CourierRequestBuilder;
+  /**
+   * The §16 RESPONDER: build a §16 exchange RESPONSE for a peer's inbound exchange REQUEST,
+   * serving the peer's wants from local content (CourierRunner wires `respondToClientExchange`
+   * over the `lcap_v2` store).  A fully bidirectional courier sets this so a peer that asks for
+   * content it lacks is actually served; when absent, a peer's request is dropped (never mistaken
+   * for our own response).  The bytes are re-verified by CID downstream — no transport trust.
+   */
+  readonly buildResponse?: (
+    request: Uint8Array,
+    endpointId: string,
+    /** Re-evaluated right before the peer's push_pack is INGESTED (a side effect inside the
+     *  responder): the controller passes a LIVE liveness/allowlist check, so a Stop / disclosure
+     *  revocation / peers→none during the async build does not commit the push after the fact (#OO). */
+    shouldIngestPush?: () => boolean,
+  ) => Promise<Uint8Array | null> | Uint8Array | null;
   /** HTTPS anchor config (exchange URL + injectable fetch) for the fallback leg. */
   readonly httpsConfig?: HttpsTransportConfig;
   /** Notified after each per-endpoint exchange outcome (observability / UI). */
   readonly onOutcome?: (outcome: CourierExchangeOutcome) => void;
+  /** Notified when the start decision changes ASYNCHRONOUSLY after {@link start} resolved — a
+   *  radio whose native start Task rejects late stops the radios and flips the decision to
+   *  radio_unavailable, which the caller's `start()` return value cannot reflect.  The UI uses
+   *  this to drop a now-dead courier from "running" instead of showing a stale state. */
+  readonly onDecisionChange?: (decision: CourierStartDecision) => void;
+  /** Notified when the set of RUNNING channels changes while the courier stays up — e.g. ONE of
+   *  several radios fails to start asynchronously.  The all-failed case flips the decision via
+   *  {@link onDecisionChange}; this fires for PARTIAL loss so the UI refreshes its "Running on" list
+   *  instead of showing a dead radio as running until some unrelated control changes. */
+  readonly onActiveChannelsChanged?: (channels: readonly CourierChannel[]) => void;
   /** Optional service id / endpoint name passed to the radios. */
   readonly serviceId?: string;
   readonly endpointName?: string;
@@ -174,9 +232,40 @@ export class CourierController {
   private readonly mediums = new Map<string, NativeChannelMedium>();
   /** `(channel,endpoint)` keys we have already driven an exchange for (one per connection). */
   private readonly exchanged = new Set<string>();
-  private readonly handles: ListenerHandle[] = [];
+  /** Per-channel listener handles, so ONE channel can be torn down without touching the others. */
+  private readonly handlesByChannel = new Map<CourierChannel, ListenerHandle[]>();
+  /** The CURRENT listener generation per channel — bumped on each (re)registration so a stale
+   *  native callback captured in an older session's closure is dropped after a restart. */
+  private readonly channelGeneration = new Map<CourierChannel, number>();
+  /** A monotonic source for the per-registration generation (never reused). */
+  private nextGeneration = 0;
+  /** The cumulative `bytesSent()` already CHARGED per medium — so each ferried byte is counted
+   *  against the §22.5 storage budget EXACTLY once (the request leg AND every responder reply
+   *  charge only their delta, never the whole cumulative twice). */
+  private readonly chargedBytes = new WeakMap<NativeChannelMedium, number>();
+  /** Bytes RESERVED by in-flight exchanges (not yet charged) — a concurrent send sees these in its
+   *  budget check, so simultaneous exchanges cannot jointly exceed the §22.5 storage ceiling. */
+  private reservedBytes = 0;
+  /** Channels whose radios are currently running — a single radio's failure removes only its own
+   *  channel; the courier is "running" while ANY channel is active, and only blocks when NONE are. */
+  private readonly runningChannels = new Set<CourierChannel>();
+  /** The LIVE §22.5 radio controls — mutable so a control change applies to a RUNNING courier
+   *  (the who-can-exchange + storage-budget gates read this at exchange time, and
+   *  {@link applyControls} re-evaluates the radios), not only at the next Start. */
+  private controls: CourierRadioControls;
+  /** The LIVE §33 operational mode — mutable so switching INTO Stealth/Emergency on a running
+   *  courier stops the radios immediately (the mode is otherwise captured at construction). */
+  private mode: CourierMode;
   private sharedBytes = 0;
-  private running = false;
+  private started = false;
+  /** True only while a launch (start OR a live restart) is still bringing radios up — an async
+   *  startFailed during this window tears down only its own channel and defers the all-failed
+   *  verdict to the launch's end. */
+  private launching = false;
+  /** A control change that arrived DURING a launch (a native start / permission prompt was still
+   *  pending) — deferred and applied once the radios settle, so a restriction is never lost. */
+  private pendingControls: { controls: CourierRadioControls; power?: CourierPowerState } | null =
+    null;
   private decision: CourierStartDecision = {
     advertise: false,
     discover: false,
@@ -184,6 +273,8 @@ export class CourierController {
   };
 
   constructor(private readonly config: CourierControllerConfig) {
+    this.controls = config.controls;
+    this.mode = config.mode;
     if (config.channels && config.channels.length > 0) {
       this.channels = config.channels;
     } else if (config.plugin) {
@@ -198,14 +289,15 @@ export class CourierController {
     return this.decision;
   }
 
-  /** Whether the radios are currently running. */
+  /** Whether ANY selected radio is currently running. */
   isRunning(): boolean {
-    return this.running;
+    return this.runningChannels.size > 0;
   }
 
-  /** The channels this controller drives (each its own native radio). */
+  /** The channels whose radios are CURRENTLY running (a failed channel is dropped) — what the UI
+   *  shows as "Running on", in the order they came up. */
   activeChannels(): readonly CourierChannel[] {
-    return this.channels.map((c) => c.channel);
+    return this.channels.map((c) => c.channel).filter((c) => this.runningChannels.has(c));
   }
 
   /**
@@ -215,90 +307,290 @@ export class CourierController {
    * no radios).  Idempotent: a second call while running does nothing.
    */
   async start(): Promise<CourierStartDecision> {
-    if (this.running) return this.decision;
-    this.decision = decideCourierStart(
-      this.config.controls,
-      this.config.mode,
-      this.config.power ?? {},
-    );
+    if (this.started) return this.decision;
+    this.decision = decideCourierStart(this.controls, this.mode, this.config.power ?? {});
     if (!this.decision.advertise && !this.decision.discover) return this.decision;
     if (this.channels.length === 0) return this.decision; // nothing to drive
 
-    // Register listeners on EVERY channel BEFORE starting any radio so no early event is
-    // missed.  Each listener carries its channel so an event routes to the right medium.
-    for (const { channel, plugin } of this.channels) {
-      await this.addListener(plugin, 'connectionResult', (raw) =>
-        this.onConnectionResult(channel, raw),
-      );
-      await this.addListener(plugin, 'payloadReceived', (raw) =>
-        this.onPayloadReceived(channel, raw),
-      );
-      await this.addListener(plugin, 'disconnected', (raw) => this.onDisconnected(channel, raw));
-    }
-
-    const radioOptions = {
-      ...(this.config.serviceId !== undefined ? { serviceId: this.config.serviceId } : {}),
-      ...(this.config.endpointName !== undefined ? { endpointName: this.config.endpointName } : {}),
-    };
-    this.running = true;
-    try {
-      for (const { plugin } of this.channels) {
-        if (this.decision.advertise) await plugin.startAdvertising(radioOptions);
-        if (this.decision.discover) await plugin.startDiscovery(radioOptions);
-      }
-    } catch {
-      // A radio that refuses to start (permission denied / unavailable) is non-fatal — the seam
-      // still has the HTTPS anchor — but `stop()` removed every listener/radio, so we must NOT
-      // return the original allow decision (the UI would falsely show a dead courier as running).
-      // Report a blocked decision instead so `CourierRunner` surfaces the honest typed reason.
-      await this.stop();
+    this.started = true;
+    await this.launch(this.decision, this.channels);
+    // The courier is unavailable only if NO channel could start (the HTTPS anchor still carries) —
+    // unless a control change deferred during the launch already turned it off (handled in launch).
+    if (this.started && this.runningChannels.size === 0) {
+      this.started = false;
       this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
     }
     return this.decision;
   }
 
-  /** Stop every radio, remove every listener, and drop the per-endpoint mediums. */
+  /** The per-radio start options (service id / endpoint name) from config. */
+  private radioOptions(): { serviceId?: string; endpointName?: string } {
+    return {
+      ...(this.config.serviceId !== undefined ? { serviceId: this.config.serviceId } : {}),
+      ...(this.config.endpointName !== undefined ? { endpointName: this.config.endpointName } : {}),
+    };
+  }
+
+  /**
+   * Register listeners + start advertising/discovery (per `decision`) on each given channel,
+   * INDEPENDENTLY — one radio refusing (sync throw OR an async startFailed mid-await) tears down
+   * ONLY that channel.  Holds `launching` for its duration (a late startFailed defers the
+   * all-failed verdict), and applies a control change that arrived during the launch once it
+   * settles.  Shared by {@link start} and the live restart path.
+   */
+  private async launch(
+    decision: CourierStartDecision,
+    channels: readonly CourierChannelPlugin[],
+  ): Promise<void> {
+    // Set synchronously (before the first await) so a control change that races the launch always
+    // observes `launching` and DEFERS, never interleaving with listener registration / radio start.
+    this.launching = true;
+    // Register listeners on EVERY channel BEFORE starting any radio so no early event is missed.
+    try {
+      for (const { channel, plugin } of channels) {
+        await this.registerListeners(channel, plugin);
+        // A stop() can win the race WHILE an addListener promise is pending: stopChannel() then saw no
+        // handle list to remove, but registerListeners stored the handles afterward — leaving stale
+        // closures that satisfy isChannelActive() and could drive/answer a later native event under a
+        // stopped controller.  If a stop landed, tear down EVERY registered channel and abort.
+        if (!this.started) {
+          for (const c of channels) await this.stopChannel(c.channel);
+          this.launching = false;
+          return;
+        }
+      }
+    } catch (error) {
+      // A later channel's addListener REJECTED after EARLIER channels were already registered — tear
+      // down every channel registered so far and CLEAR the launch/started state, so no listener handle
+      // lingers with no radio active and a later Start is not a no-op (the controller would otherwise
+      // still think it is started) (#AQ).
+      devWarn('courier listener registration failed mid-launch', error);
+      for (const c of channels) await this.stopChannel(c.channel);
+      // Surface radio_unavailable: clearing `started` here makes start()'s post-launch
+      // runningChannels===0 branch skip, so without setting the decision the caller would receive the
+      // original ALLOW decision while no radio is running (#BC).
+      this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
+      this.started = false;
+      this.launching = false;
+      this.config.onDecisionChange?.(this.decision);
+      return;
+    }
+    const options = this.radioOptions();
+    for (const { channel, plugin } of channels) {
+      // A stop() (unmount / disclosure revocation / Stealth) may have run while a PRIOR channel's
+      // native start was awaiting — abort the launch rather than bring more radios up with no owner.
+      if (!this.started) break;
+      try {
+        if (decision.advertise) await plugin.startAdvertising(options);
+        // If a stop() ran DURING the advertise await, undo this channel's radio (the medium may now
+        // be advertising though stop() already passed it) and abort — never leave an orphan radio.
+        if (!this.started) {
+          await this.stopChannel(channel);
+          break;
+        }
+        // If an async startFailed tore THIS channel down during the advertise await (stopChannel
+        // deletes its handles synchronously), do NOT also start discovery on it — that would leave
+        // a native radio running with no listeners and no running mark.
+        if (!this.handlesByChannel.has(channel)) continue;
+        if (decision.discover) await plugin.startDiscovery(options);
+        if (!this.started) {
+          await this.stopChannel(channel);
+          break;
+        }
+        // Only mark active if an async startFailed did NOT already tear this channel down mid-await.
+        if (this.handlesByChannel.has(channel)) this.runningChannels.add(channel);
+      } catch (error) {
+        devWarn(`a courier radio '${channel}' refused to start`, error);
+        await this.stopChannel(channel);
+      }
+    }
+    this.launching = false;
+    // A control change that arrived DURING the launch (the user disabled a radio / changed policy
+    // while a native start or permission prompt was pending) was deferred — apply it now so the
+    // restriction takes effect even though it raced the radios coming up.
+    if (this.pendingControls) {
+      const pending = this.pendingControls;
+      this.pendingControls = null;
+      await this.reconcileRadios(pending.controls, pending.power);
+    }
+  }
+
+  /** Stop EVERY channel's radio, remove its listeners, and drop the per-endpoint mediums. */
   async stop(): Promise<void> {
-    this.running = false;
-    for (const handle of this.handles.splice(0)) {
+    this.started = false;
+    for (const { channel } of this.channels) {
+      await this.stopChannel(channel);
+    }
+    this.mediums.clear();
+    this.exchanged.clear();
+  }
+
+  /**
+   * Apply a §22.5 control change to the ALREADY-RUNNING courier immediately (a privacy control
+   * must take effect now, not at the next Stop/Start).  The who-can-exchange + storage-budget
+   * gates read the new controls on the next exchange automatically; the RADIOS are reconciled by
+   * {@link reconcileRadios} (stop everything when disallowed; RESTART the still-enabled channels
+   * when a direction was toggled, since a native radio can only stop wholesale; else drop a
+   * deselected channel).  `power` should be a FRESH reading so the §22.5 battery floor is enforced
+   * against the current level, not the snapshot captured at Start.  A no-op before {@link start}.
+   * Re-enabling a channel takes effect on the next Start (a deselected radio's plugin is not
+   * retained) — only RESTRICTIONS are enforced live, never loosened silently.
+   */
+  async applyControls(
+    next: CourierRadioControls,
+    opts: { power?: CourierPowerState; mode?: CourierMode } = {},
+  ): Promise<void> {
+    this.controls = next;
+    if (opts.mode !== undefined) this.mode = opts.mode; // a mode switch must reconcile too (§33.5)
+    if (!this.started) return; // not running — start() will read the latest controls
+    if (this.launching) {
+      // A start/restart is mid-flight (a native start or permission prompt is pending); remember
+      // this change and apply it once the radios settle, so the restriction is not lost.
+      this.pendingControls = {
+        controls: next,
+        ...(opts.power !== undefined ? { power: opts.power } : {}),
+      };
+      return;
+    }
+    await this.reconcileRadios(next, opts.power);
+  }
+
+  /** Re-evaluate the radios for a control change on a RUNNING courier — using a FRESH `power`
+   *  reading (§22.5 battery floor enforced against the current level).  See {@link applyControls}. */
+  private async reconcileRadios(
+    next: CourierRadioControls,
+    power: CourierPowerState | undefined,
+  ): Promise<void> {
+    if (!this.started) return;
+    const decision = decideCourierStart(next, this.mode, power ?? this.config.power ?? {});
+    if (!decision.advertise && !decision.discover) {
+      // The new controls/mode/power turn the courier off entirely — stop every radio now.
+      await this.stop();
+      this.decision = decision;
+      this.config.onDecisionChange?.(decision);
+      return;
+    }
+    const enabled = new Set(next.enabledChannels ?? ['nearby']);
+    const directionChanged =
+      decision.advertise !== this.decision.advertise ||
+      decision.discover !== this.decision.discover;
+    if (directionChanged) {
+      // A direction (advertise/discover) was toggled.  The native plugins expose stop() for the
+      // WHOLE radio only, so to actually silence the disabled direction we STOP every channel and
+      // RESTART the still-enabled ones with the new advertise/discover set.
+      for (const { channel } of this.channels) await this.stopChannel(channel);
+      this.decision = decision;
+      await this.launch(
+        decision,
+        this.channels.filter((c) => enabled.has(c.channel)),
+      );
+    } else {
+      // Same directions — just drop any channel the user deselected, so it goes silent at once.
+      for (const channel of [...this.runningChannels]) {
+        if (!enabled.has(channel)) await this.stopChannel(channel);
+      }
+    }
+    if (this.started && this.runningChannels.size === 0) {
+      // Every selected radio is now off — surface it honestly.
+      this.started = false;
+      this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
+      this.config.onDecisionChange?.(this.decision);
+    }
+  }
+
+  /** Tear down ONE channel — remove its listeners, stop its plugin, drop its mediums + exchange
+   *  marks, mark it inactive — so a single radio's failure never affects the other channels. */
+  private async stopChannel(channel: CourierChannel): Promise<void> {
+    // Drop the running mark AND the handle list SYNCHRONOUSLY (before any await), so the start
+    // loop's `handlesByChannel.has(channel)` guard reliably observes an in-progress teardown and
+    // never counts a torn-down channel as running.
+    this.runningChannels.delete(channel);
+    const handles = this.handlesByChannel.get(channel) ?? [];
+    this.handlesByChannel.delete(channel);
+    for (const handle of handles) {
       try {
         await handle.remove();
       } catch {
         /* removing a listener must never throw out of teardown */
       }
     }
-    for (const { plugin } of this.channels) {
+    const plugin = this.pluginFor(channel);
+    if (plugin) {
       try {
         await plugin.stop();
       } catch {
         /* stopping a radio that never started is fine */
       }
     }
-    this.mediums.clear();
-    this.exchanged.clear();
+    const prefix = this.channelKeyPrefix(channel);
+    for (const k of [...this.mediums.keys()]) if (k.startsWith(prefix)) this.mediums.delete(k);
+    for (const k of [...this.exchanged]) if (k.startsWith(prefix)) this.exchanged.delete(k);
   }
 
-  private async addListener(
+  /** Register a channel's four event listeners under its own handle list (so it can be torn down
+   *  independently).  Done BEFORE the radio starts, so no early event is missed.  Each registration
+   *  gets a fresh GENERATION captured in the listener closures — so a native callback QUEUED before
+   *  a stop, that arrives after a quick Stop→Start / live-restart RE-registered the same channel,
+   *  is dropped (its generation no longer matches), never driving/answering under the new session. */
+  private async registerListeners(
+    channel: CourierChannel,
     plugin: NearbyCourierPlugin,
-    event: string,
-    listener: (raw: unknown) => void,
   ): Promise<void> {
-    const handle = await plugin.addListener(event, listener);
-    this.handles.push(handle);
+    const generation = ++this.nextGeneration;
+    this.channelGeneration.set(channel, generation);
+    const handles: ListenerHandle[] = [];
+    const add = async (event: string, listener: (raw: unknown) => void): Promise<void> => {
+      handles.push(await plugin.addListener(event, listener));
+    };
+    try {
+      await add('connectionResult', (raw) => this.onConnectionResult(channel, generation, raw));
+      await add('payloadReceived', (raw) => this.onPayloadReceived(channel, generation, raw));
+      await add('disconnected', (raw) => this.onDisconnected(channel, generation, raw));
+      // A radio's start is ASYNC: GMS/Wi-Fi Direct may reject it AFTER start* resolves — consume the
+      // native startFailed so a late refusal tears down THIS channel (not believed-running).
+      await add('startFailed', (raw) => void this.onStartFailed(channel, generation, raw));
+    } catch (error) {
+      // An addListener REJECTED after earlier listeners were already installed.  handlesByChannel
+      // is not populated yet, so the launch's catch → stop() has no handle list to remove; tear the
+      // accumulated handles down HERE so a failed registration leaves NO live native listeners.
+      for (const handle of handles) {
+        try {
+          await handle.remove();
+        } catch {
+          /* removing a listener must never throw out of cleanup */
+        }
+      }
+      throw error;
+    }
+    this.handlesByChannel.set(channel, handles);
+  }
+
+  /** Whether a channel is still ACTIVE for the given listener GENERATION — its listeners are
+   *  registered AND belong to the current session.  A native event QUEUED before stop()/stopChannel()
+   *  (or before a restart re-registered the channel) can still invoke a handler, so every inbound
+   *  handler gates on this to avoid driving/answering an exchange after teardown OR under a newer
+   *  session.  (`handlesByChannel` is deleted SYNCHRONOUSLY by stopChannel, before any await.) */
+  private isChannelActive(channel: CourierChannel, generation: number): boolean {
+    return this.handlesByChannel.has(channel) && this.channelGeneration.get(channel) === generation;
   }
 
   /** A `connectionResult`: when an endpoint first connects, drive ONE exchange over it. */
-  private onConnectionResult(channel: CourierChannel, raw: unknown): void {
+  private onConnectionResult(channel: CourierChannel, generation: number, raw: unknown): void {
+    if (!this.isChannelActive(channel, generation)) return; // a late/stale event — don't exchange
     const parsed = nativeConnectionEventSchema.safeParse(raw);
     if (!parsed.success) return; // fail-closed on a malformed native event
     const event: NativeConnectionEvent = parsed.data;
     if (!event.connected) return;
     if (this.exchanged.has(this.key(channel, event.endpointId))) return; // one per connection
-    void this.driveExchange(channel, event.endpointId);
+    void this.driveExchange(channel, generation, event.endpointId);
   }
 
-  /** A `payloadReceived`: route it to the right per-(channel,endpoint) medium (fail-closed). */
-  private onPayloadReceived(channel: CourierChannel, raw: unknown): void {
+  /** A `payloadReceived`: CLASSIFY the inbound message and route it (fail-closed).  A peer's
+   *  exchange REQUEST goes to the responder (or is dropped) — it is NEVER delivered to our inbox,
+   *  so it can't be mistaken for our exchange response; only a valid RESPONSE feeds the inbox the
+   *  requester's `CourierTransport.receive()` reads. */
+  private onPayloadReceived(channel: CourierChannel, generation: number, raw: unknown): void {
+    if (!this.isChannelActive(channel, generation)) return; // a late/stale event — don't respond
     const parsed = nativePayloadEventSchema.safeParse(raw);
     if (!parsed.success) return; // malformed — drop, never decode
     const event: NativePayloadEvent = parsed.data;
@@ -307,11 +599,82 @@ export class CourierController {
     const plugin = this.pluginFor(channel);
     if (!plugin) return;
     const medium = this.mediumFor(channel, plugin, event.endpointId);
-    medium.acceptNativeEvent(event);
+    const bytes = medium.nativeEventToBytes(event);
+    if (!bytes) return; // malformed base64 / wrong endpoint
+    switch (classifyExchangeMessage(bytes)) {
+      case 'response':
+        // The answer to OUR request — feed the requester's receive().
+        medium.deliverInbound(bytes);
+        return;
+      case 'request':
+        // The PEER is asking US.  Respond if a responder is configured; otherwise drop it (do NOT
+        // inbox it — that is the bug this fixes: a request must never be reported as our response).
+        void this.respondToRequest(channel, generation, event.endpointId, bytes, medium);
+        return;
+      default:
+        // Unparseable as either — drop (no transport trust; fail-closed).
+        return;
+    }
+  }
+
+  /** Serve a peer's inbound exchange REQUEST: build a §16 response (when a responder is
+   *  configured) and ferry it back over the medium.  A no-op when no responder is wired. */
+  private async respondToRequest(
+    channel: CourierChannel,
+    generation: number,
+    endpointId: string,
+    request: Uint8Array,
+    medium: NativeChannelMedium,
+  ): Promise<void> {
+    if (!this.config.buildResponse) return; // request-only courier — drop the peer's request
+    if (!mayExchangeWithEndpoint(this.controls, endpointId)) return; // the same who-can-exchange gate
+    try {
+      // The responder INGESTS the peer's push_pack as a side effect; gate that ingest on a LIVE
+      // check so a Stop / disclosure revocation / peers→none during the async build doesn't commit
+      // the push after the fact (the post-await checks below only stop the REPLY, not the ingest) (#OO).
+      const stillLive = (): boolean =>
+        this.started &&
+        this.isChannelActive(channel, generation) &&
+        mayExchangeWithEndpoint(this.controls, endpointId);
+      const response = await this.config.buildResponse(request, endpointId, stillLive);
+      if (!response) return;
+      // Re-check LIVENESS after the async build: a Stop / disclosure revocation / forced-off mode /
+      // channel deselection may have torn this channel down WHILE buildResponse awaited — a stopped
+      // courier must never serve a response even if the native endpoint is not fully torn down yet.
+      if (!this.started || !this.isChannelActive(channel, generation)) return;
+      // Re-check the LIVE who-can-exchange policy too: the user may have removed this peer from the
+      // allowlist (or set peers→none) DURING the async build — never serve a now-disallowed peer.
+      if (!mayExchangeWithEndpoint(this.controls, endpointId)) return;
+      // RESERVE the response bytes (seen by concurrent budget checks) before enqueueing, accounting
+      // for bytes already reserved by in-flight exchanges — so simultaneous replies/requests cannot
+      // jointly exceed the hard §22.5 storage ceiling.
+      if (
+        !withinStorageBudget(
+          this.controls,
+          this.sharedBytes + this.reservedBytes,
+          response.byteLength,
+        )
+      ) {
+        return;
+      }
+      this.reservedBytes += response.byteLength;
+      try {
+        medium.enqueueOutbound(response);
+        // Charge only the DELTA of the medium's cumulative bytesSent() — the same metric
+        // driveExchange's finally charges — so these responder bytes are counted exactly once, not
+        // also re-added there (which would prematurely trip `over_storage_budget` on later exchanges).
+        this.chargeMediumBytes(medium);
+      } finally {
+        this.reservedBytes -= response.byteLength; // release (actual bytes now charged)
+      }
+    } catch (error) {
+      devWarn(`failed to build a courier response for '${channel}'`, error);
+    }
   }
 
   /** A `disconnected`: drop the endpoint's medium so a later reconnect starts fresh. */
-  private onDisconnected(channel: CourierChannel, raw: unknown): void {
+  private onDisconnected(channel: CourierChannel, generation: number, raw: unknown): void {
+    if (!this.isChannelActive(channel, generation)) return; // a stale disconnect must not drop a fresh medium
     const parsed = nativeDisconnectEventSchema.safeParse(raw);
     if (!parsed.success) return;
     const event: NativeDisconnectEvent = parsed.data;
@@ -320,8 +683,40 @@ export class CourierController {
     this.exchanged.delete(key);
   }
 
+  /** A radio reported an ASYNC start failure (e.g. GMS refused advertising after the start Task
+   *  resolved).  Tear down ONLY that channel — a different working radio keeps the courier running —
+   *  and report radio_unavailable to the UI only when the LAST working channel is gone. */
+  private async onStartFailed(
+    channel: CourierChannel,
+    generation: number,
+    raw: unknown,
+  ): Promise<void> {
+    devWarn(`courier radio '${channel}' reported a start failure`, raw);
+    if (!this.isChannelActive(channel, generation)) return; // already torn down OR a stale/older session
+    await this.stopChannel(channel);
+    // Defer the all-failed verdict while start() is still launching (its end-of-loop check owns it);
+    // once running, only the LAST channel going down makes the courier unavailable.
+    if (this.launching || !this.started) return;
+    if (this.runningChannels.size === 0) {
+      this.started = false;
+      this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
+      this.config.onDecisionChange?.(this.decision);
+    } else {
+      // PARTIAL loss — one channel failed but others still run.  Tell the UI so it refreshes the
+      // "Running on" list instead of showing the dead radio as running.
+      this.config.onActiveChannelsChanged?.(this.activeChannels());
+    }
+  }
+
   private key(channel: CourierChannel, endpointId: string): string {
-    return `${channel} ${endpointId}`;
+    return `${channel}\0${endpointId}`;
+  }
+
+  /** The `channel\0` key PREFIX — the SAME delimiter `key()` uses, so a channel teardown matches
+   *  its own mediums/exchanged marks.  (A space prefix never matched the NUL-delimited keys, so a
+   *  reconnecting endpoint after a restart/deselect stayed in `exchanged` and was skipped.) */
+  private channelKeyPrefix(channel: CourierChannel): string {
+    return `${channel}\0`;
   }
 
   private pluginFor(channel: CourierChannel): NearbyCourierPlugin | undefined {
@@ -347,58 +742,142 @@ export class CourierController {
    * append the always-correct HTTPS anchor LAST, and run ONE §16 PUBLIC exchange through
    * `offlineExchange`.  Applies the §22.5 who-can-exchange + storage-budget gates first.
    */
-  private async driveExchange(channel: CourierChannel, endpointId: string): Promise<void> {
+  private async driveExchange(
+    channel: CourierChannel,
+    generation: number,
+    endpointId: string,
+  ): Promise<void> {
     const key = this.key(channel, endpointId);
     if (this.exchanged.has(key)) return;
     this.exchanged.add(key);
 
-    if (!mayExchangeWithEndpoint(this.config.controls, endpointId)) {
+    if (!mayExchangeWithEndpoint(this.controls, endpointId)) {
       this.emit(channel, endpointId, null, null, 'not_allowed_peer');
       return;
     }
 
-    const request = this.config.buildRequest(endpointId);
+    let request: Uint8Array | null;
+    try {
+      request = await this.config.buildRequest(endpointId);
+    } catch {
+      // The async builder can REJECT (e.g. IndexedDB / repack failure while assembling the push
+      // pack).  Since driveExchange is invoked fire-and-forget, an unhandled rejection would leave
+      // the endpoint silently marked `exchanged` with no outcome — the live connection would never
+      // retry or report.  Clear the mark (so a later event can retry) and report the failure (#CC).
+      this.exchanged.delete(key);
+      this.emit(channel, endpointId, null, null, 'exchange_failed');
+      return;
+    }
     if (!request) {
       this.emit(channel, endpointId, null, null, 'nothing_to_request');
       return;
     }
 
-    if (!withinStorageBudget(this.config.controls, this.sharedBytes, request.byteLength)) {
-      this.emit(channel, endpointId, null, null, 'over_storage_budget');
+    // Re-check LIVENESS after the async build: a Stop / disclosure revocation / forced-off mode /
+    // channel deselection may have torn this channel down WHILE buildRequest awaited — a stopped or
+    // deselected courier must never transmit, even though pluginFor() still resolves the plugin and
+    // the medium would call plugin.send before native teardown completes.
+    if (!this.started || !this.isChannelActive(channel, generation)) return;
+    // Re-check the LIVE who-can-exchange policy too: the user may have removed this peer from the
+    // allowlist (or set peers→none) DURING the async request build — never send to it now.
+    if (!mayExchangeWithEndpoint(this.controls, endpointId)) {
+      this.emit(channel, endpointId, null, null, 'not_allowed_peer');
       return;
     }
 
+    // Reserve the request bytes against the §22.5 storage budget BEFORE the async exchange, counting
+    // bytes already RESERVED by concurrent driveExchange()s — so two endpoints connecting at once
+    // cannot both pass the check against the same `sharedBytes` and jointly blow the hard ceiling.
+    if (
+      !withinStorageBudget(this.controls, this.sharedBytes + this.reservedBytes, request.byteLength)
+    ) {
+      this.emit(channel, endpointId, null, null, 'over_storage_budget');
+      return;
+    }
+    this.reservedBytes += request.byteLength;
+
     const plugin = this.pluginFor(channel);
     if (!plugin) {
+      this.reservedBytes -= request.byteLength; // release — no send happened
       this.emit(channel, endpointId, null, null, 'exchange_failed');
       return;
     }
     const medium = this.mediumFor(channel, plugin, endpointId);
-    // The courier transport over THIS endpoint (deadline-bounded so a non-responding peer
-    // cannot stall sync forever), then the always-correct HTTPS anchor.
-    const transports: LcapTransport[] = [
-      withLegTimeout(new CourierTransport(medium as CourierMedium), COURIER_LEG_TIMEOUT_MS),
-    ];
-    for (const t of buildServerTransports(this.config.httpsConfig ?? {})) transports.push(t);
 
-    let result: { transport: CourierExchangeOutcome['carriedBy']; response: Uint8Array } | null;
+    let result: { transport: CourierExchangeOutcome['carriedBy']; response: Uint8Array } | null =
+      null;
     try {
-      // PUBLIC-ONLY: the courier seam (`carriesPrivate:false`) structurally refuses any
-      // non-public pack, so the public label here is the only one a courier ever carries.
-      result = await offlineExchange(transports, request, undefined, 'public');
+      // The courier leg over THIS endpoint FIRST (deadline-bounded so a non-responding peer cannot
+      // stall sync forever).  PUBLIC-ONLY: the courier seam (`carriesPrivate:false`) structurally
+      // refuses any non-public pack, so the public label is the only one a courier ever carries.
+      result = await offlineExchange(
+        [withLegTimeout(new CourierTransport(medium as CourierMedium), COURIER_LEG_TIMEOUT_MS)],
+        request,
+        undefined,
+        'public',
+      );
+      // Fall back to the always-correct HTTPS anchor ONLY if this courier is STILL live: a Stop /
+      // disclosure revocation / deselection / forced-off mode DURING the (possibly slow) courier leg
+      // must not then let the already-built request + push_pack reach the server (#X).  The LIVE
+      // who-can-exchange policy is re-checked too: if the user removed this peer from the allowlist (or
+      // set peers→none) while the courier leg was timing out, the request must not ride the anchor for
+      // a now-disallowed peer (#AW).
+      if (
+        !result &&
+        this.started &&
+        this.isChannelActive(channel, generation) &&
+        mayExchangeWithEndpoint(this.controls, endpointId)
+      ) {
+        result = await offlineExchange(
+          buildServerTransports(this.config.httpsConfig ?? {}),
+          request,
+          undefined,
+          'public',
+        );
+      }
     } catch {
-      this.emit(channel, endpointId, null, null, 'exchange_failed');
-      return;
+      // Swallowed: the bytes already ferried are still charged in the finally below, and the
+      // outcome is reported as exchange_failed after.
+    } finally {
+      // Account the bytes ACTUALLY ferried to the peer against the storage budget — even when the
+      // exchange threw or returned nothing.  A peer that received the request but never answered
+      // (while the HTTPS anchor was unreachable) STILL consumed those bytes; charging them only on
+      // success would let repeated FAILED courier attempts bypass the budget on bytes already sent.
+      // The DELTA charge avoids double-counting any responder bytes already charged above.
+      this.chargeMediumBytes(medium);
+      this.reservedBytes -= request.byteLength; // release the reservation (actual bytes now charged)
     }
-
-    // Account the bytes actually ferried over the medium against the storage budget.
-    this.sharedBytes += medium.bytesSent();
 
     if (!result) {
       this.emit(channel, endpointId, null, null, 'exchange_failed');
       return;
     }
+    // The HTTPS anchor leg has no abort signal, so it can COMPLETE after a Stop / disclosure
+    // revocation / channel deselect that happened while the server request was in flight — re-check
+    // liveness before emitting, since emitting drives the runner's onOutcome to INGEST the response
+    // into IndexedDB after the courier was stopped (#TT).  The LIVE who-can-exchange policy is
+    // re-checked too: a mid-exchange allowlist revocation / peers→none must not still ingest a
+    // now-disallowed peer's served response (#AW).
+    if (
+      !this.started ||
+      !this.isChannelActive(channel, generation) ||
+      !mayExchangeWithEndpoint(this.controls, endpointId)
+    ) {
+      return;
+    }
     this.emit(channel, endpointId, result.transport, result.response, '');
+  }
+
+  /** Charge a medium's NEWLY-sent bytes (the delta since we last charged it) to the §22.5 storage
+   *  budget — so a byte the medium ferried is counted exactly once, no matter how many call sites
+   *  (the request leg + each responder reply) observe its cumulative `bytesSent()`. */
+  private chargeMediumBytes(medium: NativeChannelMedium): void {
+    const sent = medium.bytesSent();
+    const already = this.chargedBytes.get(medium) ?? 0;
+    if (sent > already) {
+      this.sharedBytes += sent - already;
+      this.chargedBytes.set(medium, sent);
+    }
   }
 
   private emit(

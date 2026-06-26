@@ -32,7 +32,7 @@ import {
   openLcapDb,
   resetLcapDbConnection,
 } from './db.js';
-import { collectByCursor, type RecordRow, readBlockBytes } from './store.js';
+import { collectByCursor, putBlock, type RecordRow, readBlockBytes } from './store.js';
 
 let db: IDBDatabase;
 
@@ -88,11 +88,14 @@ async function seedRecord(
 
 describe('bundle export → import round-trip (WS-R.15.1a/b)', () => {
   it('re-imports an exported room with no semantic change, at integrity-only trust', async () => {
-    const a1 = await seedRecord('room-A', 'first in A');
-    const a2 = await seedRecord('room-A', 'second in A');
-    await seedRecord('room-B', 'only in B'); // must NOT be exported
+    // Room keys are the CANONICAL hex of the room_id_hash bytes (lossless) — so they round-trip.
+    const roomA = 'a1a1a1a1a1a1a1a1';
+    const roomB = 'b2b2b2b2b2b2b2b2';
+    const a1 = await seedRecord(roomA, 'first in A');
+    const a2 = await seedRecord(roomA, 'second in A');
+    await seedRecord(roomB, 'only in B'); // must NOT be exported
 
-    const exportData = await gatherRoomExport(db, 'room-A');
+    const exportData = await gatherRoomExport(db, roomA);
     expect(exportData.recordCount).toBe(2);
     expect(exportData.proofCount).toBe(2);
 
@@ -109,7 +112,7 @@ describe('bundle export → import round-trip (WS-R.15.1a/b)', () => {
     expect(read.ok).toBe(true);
     if (!read.ok) return;
     expect(read.summary.byKind.record).toBe(2);
-    expect(read.summary.rooms).toEqual(['room-A']);
+    expect(read.summary.rooms).toEqual([roomA]);
     expect(read.summary.integrityFailed).toBe(0);
 
     const importResult = await importBundleObjects(read.pack);
@@ -123,10 +126,101 @@ describe('bundle export → import round-trip (WS-R.15.1a/b)', () => {
       const row = storedByCid.get(seeded.recordCid);
       expect(row).toBeDefined();
       expect(row?.body).toEqual(seeded.body); // payload preserved byte-for-byte
-      expect(row?.roomHash).toBe('room-A'); // room round-trips
+      expect(row?.roomHash).toBe(roomA); // room round-trips (canonical hex)
       expect(row?.state).toBe('integrity_verified'); // NOT authorized — no overclaim
     }
     db2.close();
+  });
+
+  it('SECURITY: export derives table deps from the signed body, dropping stale row.deps (#AE)', async () => {
+    const lcap = await import('@licio/lcap');
+    const bodyBlock = await cidFor('block', new Uint8Array([1, 1]));
+    const staleBlock = await cidFor('block', new Uint8Array([2, 2]));
+    const body = lcap.encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-ae',
+      visibility_scope: 'public',
+      author_account_id: 'a',
+      author_device_id: 'd',
+      author_device_key_id: 'k',
+      device_seq: 1,
+      capability_cid: await cidFor('record', new Uint8Array([0])),
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([5]),
+      priority: 2,
+      body_block_cid: bodyBlock,
+    });
+    const recordCid = await cidFor('record', body);
+    await put(LCAP_STORE.records, {
+      recordCid,
+      body,
+      kind: 'contribution_event',
+      lane: 'C0',
+      priority: 2,
+      roomHash: 'room-ae',
+      state: 'integrity_verified',
+      size: body.length,
+      deps: [bodyBlock, staleBlock], // a STALE extra dep in the table metadata, not in the body
+    });
+
+    const exportData = await gatherRoomExport(db, 'room-ae');
+    const recObj = exportData.objects.find((o) => o.cid === recordCid);
+    expect(recObj?.deps).toContain(bodyBlock); // the authentic signed-body ref is carried
+    expect(recObj?.deps ?? []).not.toContain(staleBlock); // the stale row.dep is dropped (#AE)
+  });
+
+  it('SECURITY: export derives block deps from the signed body, not row.deps metadata (#HH)', async () => {
+    const lcap = await import('@licio/lcap');
+    const roomHex = 'cccccccccccccccc';
+    const ownBytes = new Uint8Array([3, 3, 3]);
+    const ownBlockCid = await cidFor('block', ownBytes);
+    const foreignBytes = new Uint8Array([4, 4, 4]);
+    const foreignBlockCid = await cidFor('block', foreignBytes);
+    await putBlock(db, { blockCid: ownBlockCid, state: 'integrity_verified', size: 3 }, [ownBytes]);
+    await putBlock(db, { blockCid: foreignBlockCid, state: 'integrity_verified', size: 3 }, [
+      foreignBytes,
+    ]);
+    // A real record whose SIGNED body references ONLY ownBlockCid; its row.deps ALSO lists the
+    // foreign block (as pack-table metadata copied from an imported bundle would).
+    const body = lcap.encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-1',
+      visibility_scope: 'public',
+      author_account_id: 'a',
+      author_device_id: 'd',
+      author_device_key_id: 'k',
+      device_seq: 1,
+      capability_cid: await cidFor('record', new Uint8Array([0])),
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([1]),
+      priority: 2,
+      body_block_cid: ownBlockCid,
+    });
+    const recordCid = await cidFor('record', body);
+    await put(LCAP_STORE.records, {
+      recordCid,
+      body,
+      kind: 'contribution_event',
+      lane: 'C0',
+      priority: 2,
+      roomHash: roomHex,
+      state: 'integrity_verified',
+      size: body.length,
+      deps: [ownBlockCid, foreignBlockCid], // unauthenticated metadata lists BOTH
+    });
+
+    const exportData = await gatherRoomExport(db, roomHex);
+    const exportedBlocks = exportData.objects
+      .filter((o) => o.cidKind === 'block')
+      .map((o) => o.cid);
+    expect(exportedBlocks).toContain(ownBlockCid); // referenced by the SIGNED body → exported
+    expect(exportedBlocks).not.toContain(foreignBlockCid); // only in row.deps → NOT exported (#HH)
   });
 
   it('computes the §26.2 disclosure (rooms, media, size) before producing a file', async () => {
@@ -229,8 +323,40 @@ describe('bundle import — private-encrypted bundles are refused by the public 
 
 describe('bundle import — quarantine (WS-R.4.3)', () => {
   it('quarantines a record whose dependency is absent, recording the missing CID', async () => {
+    const lcap = await import('@licio/lcap');
     const missingDep = await cidFor('block', new TextEncoder().encode('absent block'));
-    await seedRecord('room-A', 'needs a block', { deps: [missingDep] });
+    // A REAL contribution whose SIGNED body references the (un-held) block — so the export carries
+    // the AUTHENTIC dep (#AE: deps are derived from the body, not stale table metadata) and the
+    // importer quarantines on it.
+    const body = lcap.encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-A',
+      visibility_scope: 'public',
+      author_account_id: 'a',
+      author_device_id: 'd',
+      author_device_key_id: 'k',
+      device_seq: 1,
+      capability_cid: await cidFor('record', new Uint8Array([0])),
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([9]),
+      priority: 1,
+      body_block_cid: missingDep,
+    });
+    const recordCid = await cidFor('record', body);
+    await put(LCAP_STORE.records, {
+      recordCid,
+      body,
+      kind: 'contribution_event',
+      lane: 'T1',
+      priority: 1,
+      roomHash: 'room-A',
+      state: 'integrity_verified',
+      size: body.length,
+      deps: [missingDep],
+    });
     const exportData = await gatherRoomExport(db, 'room-A');
     // The dep block is NOT held, so it is not in the pack — the record must quarantine.
     const disclosure = await exportDisclosure(exportData.items);

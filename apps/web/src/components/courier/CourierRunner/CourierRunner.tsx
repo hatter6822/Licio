@@ -17,7 +17,7 @@
 //     why it was skipped) — the radio confers NO trust; every received frame is re-checked
 //     downstream against its CIDs/COSE signatures (§18.4).
 //
-// The `CourierController` + the channel resolvers + the frontier-request builder load the
+// The `CourierController` + the channel resolvers + the §16 exchange engine load the
 // `@licio/lcap` codec only through a dynamic import (kept off the initial bundle); this
 // component imports the controls editor + the channel-info metadata statically (both are
 // always-available local surfaces with no codec import).  No `@licio/lcap-p2p` import at all
@@ -25,7 +25,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
-import { getOperationalMode } from '../../../lcap/mode-state.js';
+import type { ExchangeScope } from '../../../lcap/exchange.js';
+import { getOperationalMode, subscribeOperationalMode } from '../../../lcap/mode-state.js';
 import type { OperationalMode } from '../../../lcap/operational-modes.js';
 import {
   COURIER_CHANNEL_INFO,
@@ -45,6 +46,7 @@ import {
   nearbyCourierAvailable,
 } from '../../../lcap/transports/courier-native.js';
 import { cn } from '../../../lib/cn.js';
+import { devWarn } from '../../../lib/dev-log.js';
 import { Badge } from '../../ui/Badge/index.js';
 import { Button } from '../../ui/Button/index.js';
 import { Checkbox } from '../../ui/Checkbox/index.js';
@@ -89,17 +91,52 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
   const [activity, setActivity] = useState<readonly ActivityEntry[]>([]);
   const controllerRef = useRef<CourierController | null>(null);
   const activitySeq = useRef(0);
-  // The §33 operational mode (read non-reactively, like the other §33 consumers).
-  const mode = getOperationalMode();
+  // The §22.5 sharing scope (room allowlist + priority cap) the exchange helpers serve/push within,
+  // kept in a ref so the responder/push honor a LIVE change to the sharing selection (the controller
+  // outlives the start()-time closure).  Empty allowlist ⇒ all public rooms; absent cap ⇒ all lanes.
+  const scopeRef = useRef<ExchangeScope>({});
+  scopeRef.current = {
+    ...(controls.sharing?.roomHashAllowlist !== undefined
+      ? { roomHashAllowlist: controls.sharing.roomHashAllowlist }
+      : {}),
+    ...(controls.sharing?.maxPriorityClass !== undefined
+      ? { maxPriorityClass: controls.sharing.maxPriorityClass }
+      : {}),
+  };
+  // VERSION the sharing scope so an async pack build can detect a mid-flight change and rebuild with
+  // the current scope before sending (#N) — a slow IndexedDB/repack must never transmit a push_pack /
+  // response_pack containing rooms/priorities the user has since EXCLUDED.
+  const scopeKey = JSON.stringify(scopeRef.current);
+  const scopeVersionRef = useRef(0);
+  const prevScopeKeyRef = useRef(scopeKey);
+  if (prevScopeKeyRef.current !== scopeKey) {
+    prevScopeKeyRef.current = scopeKey;
+    scopeVersionRef.current += 1;
+  }
+  // The §33 operational mode — REACTIVE here (unlike the non-reactive sync consumers): switching
+  // into Stealth/Emergency must stop a running courier immediately, so we subscribe (below) and
+  // re-render on a change.
+  const [mode, setRunnerMode] = useState<OperationalMode>(() => getOperationalMode());
   const forcedOff = isForcedOff(mode);
+
+  // Keep `mode` in sync with the persisted §33 mode (the OperationalModeSelector writes it); a
+  // change re-renders + re-runs the live-reconcile effect below.
+  useEffect(() => subscribeOperationalMode(setRunnerMode), []);
 
   // Native radios resolve only inside the installed courier shell (the injected Capacitor
   // bridge); a normal browser has none, so the runtime control is honestly disabled.
   const nativeAvailable = useMemo(() => nearbyCourierAvailable(), []);
 
+  // A monotonic generation bumped on unmount — an in-flight start() captures it and aborts if it
+  // changes, so a start whose async init (imports / IDB / battery) is still pending when the page
+  // unmounts does NOT construct + run a controller after its UI owner is gone (the persisted
+  // controls alone don't represent "unmounted", so the live re-read can't catch this case).
+  const startGenRef = useRef(0);
+
   // Stop the controller on unmount so a left page never leaves a radio advertising.
   useEffect(() => {
     return () => {
+      startGenRef.current += 1; // cancel any in-flight start()
       void controllerRef.current?.stop();
       controllerRef.current = null;
     };
@@ -113,6 +150,37 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
       setPhase({ kind: 'idle' });
     }
   }, [acknowledged]);
+
+  // Apply a live control OR mode change to a RUNNING controller, so a privacy restriction (radios
+  // off, a deselected channel, peers→none, or switching into Stealth/Emergency) takes effect
+  // IMMEDIATELY instead of only at the next Stop/Start — the controls + mode captured at
+  // construction would otherwise keep the radios + exchange policy active until Stop.
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    // A newer controls/mode change supersedes this effect — its cleanup sets `cancelled` so a slow
+    // power read here cannot re-apply STALE controls (e.g. radios-on) AFTER a newer restriction
+    // already narrowed/stopped the courier.
+    let cancelled = false;
+    void (async () => {
+      // A FRESH power reading so the §22.5 battery floor is enforced against the current level
+      // (not the snapshot captured at Start).  The controller module is already loaded (the
+      // controller exists), so this dynamic import is a cache hit and keeps the codec off the
+      // initial bundle.
+      const { readCourierPower } = await import('../../../lcap/transports/courier-controller.js');
+      const power = await readCourierPower();
+      if (cancelled || controllerRef.current !== controller) return; // superseded — don't re-apply stale controls
+      await controller.applyControls(controls, { power, mode: mode as CourierMode });
+      // If applyControls stopped the courier, onDecisionChange already nulled the ref + set the
+      // blocked phase; otherwise reflect any live direction/channel change in the running list.
+      if (!cancelled && controllerRef.current === controller && controller.isRunning()) {
+        setPhase({ kind: 'running', channels: controller.activeChannels() });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [controls, mode]);
 
   const onControlsChange = useCallback((next: CourierRadioControls) => {
     setControls(next);
@@ -140,57 +208,157 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
       return;
     }
     if (controllerRef.current) return; // already running
+    const startGen = startGenRef.current; // captured so an unmount during the async init cancels us
     setPhase({ kind: 'starting' });
     setActivity([]);
     try {
       const [
         { CourierController: Controller, readCourierPower },
         { resolveCourierChannels },
-        { prepareCourierFrontierRequest },
+        { buildClientExchangeRequest, respondToClientExchange, ingestClientExchangeResponse },
+        { getLcapDb },
       ] = await Promise.all([
         import('../../../lcap/transports/courier-controller.js'),
         import('../../../lcap/transports/courier-channels.js'),
-        import('../../../lcap/transports/frontier-request.js'),
+        import('../../../lcap/exchange.js'),
+        import('../../../lcap/db.js'),
       ]);
-      const channels = resolveCourierChannels(controls.enabledChannels);
-      if (channels.length === 0) {
-        // The shell is present but no SELECTED radio resolves (e.g. the device lacks it).
+      // The local `lcap_v2` store is BOTH the responder's content source and the requester's
+      // ingestion sink — a fully bidirectional §16 courier exchange (serve wants + ingest served).
+      const db = await getLcapDb();
+      const power = await readCourierPower();
+      // Re-read the LIVEST controls/ack/mode: the user may have revoked the disclosure, disabled the
+      // radios, or switched into a forced-off mode DURING the async imports / IDB open / battery read
+      // above — and `controllerRef.current` is not assigned yet, so the live-reconcile effects have
+      // no controller to stop.  Abort instead of bringing radios up after the UI forced them off, and
+      // construct the controller from the LIVE state (not the snapshot captured when Start was clicked).
+      // The component UNMOUNTED during the async init — abort before constructing radios that would
+      // have no UI owner to stop them (the persisted controls can't represent "unmounted").
+      if (startGenRef.current !== startGen) return;
+      const liveControls = getCourierControls();
+      const liveMode = getOperationalMode();
+      if (
+        !getRadioDisclosureAcknowledged() ||
+        isForcedOff(liveMode) ||
+        (!liveControls.advertisingEnabled && !liveControls.discoveryEnabled)
+      ) {
+        setPhase({ kind: 'idle' });
+        return;
+      }
+      const liveChannels = resolveCourierChannels(liveControls.enabledChannels);
+      if (liveChannels.length === 0) {
         setPhase({ kind: 'unavailable' });
         return;
       }
-      const buildRequest = await prepareCourierFrontierRequest();
-      const power = await readCourierPower();
       const controller = new Controller({
-        channels,
-        controls,
-        mode: mode as CourierMode,
+        channels: liveChannels,
+        controls: liveControls,
+        mode: liveMode as CourierMode,
         power,
-        buildRequest,
+        // Advertise our gaps (quarantined missing deps) so a peer serves them; the push rides the
+        // CURRENT sharing scope (room allowlist + priority cap).  If the scope changes WHILE the pack
+        // builds, rebuild with the new scope before returning, so a narrowed selection is honored (#N).
+        buildRequest: async () => {
+          for (let i = 0; i < 4; i++) {
+            const v = scopeVersionRef.current;
+            const bytes = await buildClientExchangeRequest(db, 'courier', scopeRef.current);
+            if (scopeVersionRef.current === v) return bytes; // scope stable through the build
+          }
+          return buildClientExchangeRequest(db, 'courier', scopeRef.current);
+        },
+        // Serve a peer's inbound request from what we hold (the bidirectional responder), filtered by
+        // the CURRENT sharing scope so a peer never receives over-priority / other-room content — and
+        // rebuilt if the scope changed mid-build (#N).
+        buildResponse: async (request, _endpointId, shouldIngestPush) => {
+          // The peer's push_pack is INGESTED with the scope captured at the call; gate that ingest on
+          // the scope NOT having changed since (as well as the controller's live check), so a stale
+          // attempt — the scope switched from all-rooms/room-A to room-B mid-await — cannot commit the
+          // peer's push under the OLD allowlist.  The retry below then rebuilds + re-ingests under the
+          // new scope (#AT).
+          const gatedFor = (v: number) => (): boolean =>
+            scopeVersionRef.current === v && (shouldIngestPush?.() ?? true);
+          for (let i = 0; i < 4; i++) {
+            const v = scopeVersionRef.current;
+            const bytes = await respondToClientExchange(db, request, scopeRef.current, gatedFor(v));
+            if (scopeVersionRef.current === v) return bytes;
+          }
+          const v = scopeVersionRef.current;
+          return respondToClientExchange(db, request, scopeRef.current, gatedFor(v));
+        },
         onOutcome: (outcome) => {
-          setActivity((prev) => [
-            ...prev.slice(-19),
-            {
-              id: activitySeq.current++,
-              channel: outcome.channel,
-              carried: outcome.carriedBy === 'courier',
-              skippedReason: outcome.skippedReason,
-            },
-          ]);
+          const record = (carried: boolean, skippedReason: string): void =>
+            setActivity((prev) => [
+              ...prev.slice(-19),
+              { id: activitySeq.current++, channel: outcome.channel, carried, skippedReason },
+            ]);
+          // INGEST a served response into the local store (CID-verified; fills our gaps) — ROOM-SCOPED
+          // so a peer's response cannot land unrelated rooms past the current allowlist (#M).  Mark the
+          // exchange CARRIED only AFTER the ingest actually commits: a rejected ingest (IndexedDB
+          // quota/transaction failure) records a FAILURE instead of an unhandled rejection + a false
+          // "carried" log entry whose content was never stored (#AR).  The SCOPE VERSION captured here
+          // is threaded as `shouldCommit` (to the leaf, #BA): if the user stops the courier or changes
+          // the room allowlist while the read/import/IndexedDB writes await, the stale response is NOT
+          // committed under the old scope (#BD).
+          if (outcome.response) {
+            const v = scopeVersionRef.current;
+            void ingestClientExchangeResponse(
+              db,
+              outcome.response,
+              scopeRef.current,
+              () => scopeVersionRef.current === v,
+            )
+              .then(() => record(outcome.carriedBy === 'courier', outcome.skippedReason))
+              .catch((error) => {
+                devWarn('courier response ingest failed', error);
+                record(false, 'ingest_failed');
+              });
+          } else {
+            record(outcome.carriedBy === 'courier', outcome.skippedReason);
+          }
+        },
+        // A radio whose native start fails ASYNCHRONOUSLY (the common GMS-Task timing) stops the
+        // controller after start() resolved — drop it from "running" instead of showing a stale,
+        // already-stopped courier.
+        onDecisionChange: (decision) => {
+          controllerRef.current = null;
+          setPhase({ kind: 'blocked', reason: decision.blockedReason });
+        },
+        // ONE of several radios failed but others still run — refresh the "Running on" list so the
+        // UI stops showing the dead radio as running (a full loss flips to blocked above instead).
+        onActiveChannelsChanged: (channels) => {
+          setPhase((prev) => (prev.kind === 'running' ? { kind: 'running', channels } : prev));
         },
       });
+      // Make the controller reachable BEFORE awaiting start(), so an unmount, a disclosure
+      // revocation, or a live-control change DURING the start (e.g. a pending native start / USB
+      // permission prompt) can stop or reconcile it instead of being lost against a stale start.
+      controllerRef.current = controller;
       const decision = await controller.start();
       if (!decision.advertise && !decision.discover) {
         // The controls/mode disallowed the radios — surface the typed reason, never "running".
         await controller.stop();
+        if (controllerRef.current === controller) controllerRef.current = null;
         setPhase({ kind: 'blocked', reason: decision.blockedReason });
+        return;
+      }
+      if (!controller.isRunning()) {
+        // A late start-failure already stopped the controller DURING start() (onDecisionChange set
+        // the blocked phase) — don't overwrite it with "running".
+        if (controllerRef.current === controller) controllerRef.current = null;
+        setPhase({ kind: 'blocked', reason: controller.startDecision().blockedReason });
         return;
       }
       controllerRef.current = controller;
       setPhase({ kind: 'running', channels: controller.activeChannels() });
     } catch {
+      // Never leak a partially-constructed controller (a throw mid-start).
+      if (controllerRef.current) {
+        void controllerRef.current.stop();
+        controllerRef.current = null;
+      }
       setPhase({ kind: 'error' });
     }
-  }, [controls, mode, nativeAvailable]);
+  }, [nativeAvailable]);
 
   const stop = useCallback(async () => {
     await controllerRef.current?.stop();
@@ -209,7 +377,11 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
       className={cn('flex flex-col gap-5', className)}
       aria-label={t('courier.runner.title', 'Courier')}
     >
-      <CourierControls onControlsChange={onControlsChange} onAcknowledgeChange={setAcknowledged} />
+      <CourierControls
+        controls={controls}
+        onControlsChange={onControlsChange}
+        onAcknowledgeChange={setAcknowledged}
+      />
 
       {/* Per-channel selection — only meaningful once the disclosure is acknowledged. */}
       {acknowledged ? (

@@ -1,0 +1,203 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-R.15.10 — the BIDIRECTIONAL WebRTC §16 driver moves content over one duplex channel: peer A
+// (which wants a quarantined dep) and peer B (which holds it) each run the driver; A's request is
+// SERVED by B's responder half and A INGESTS the served block.  A fake in-memory duplex channel
+// pair + two isolated fake-indexeddb stores stand in for the live data channel + the two devices.
+
+import 'fake-indexeddb/auto';
+import { cidFor } from '@licio/lcap';
+import type { DataChannelLike } from '@licio/lcap-p2p';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { LCAP_DB_VERSION, LCAP_MIGRATIONS, LCAP_STORE, openLcapDb } from '../db.js';
+import { buildClientExchangeRequest, respondToClientExchange } from '../exchange.js';
+import { putBlock, readBlockBytes } from '../store.js';
+import { runWebrtcBidirectionalExchange } from './webrtc-sync.js';
+
+/** A fake duplex data channel: `send` delivers (a copy of) the bytes to the peer's `onmessage`. */
+class FakeDuplex implements DataChannelLike {
+  readyState: 'connecting' | 'open' | 'closing' | 'closed' = 'open';
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  peer: FakeDuplex | null = null;
+  sentCount = 0;
+  send(data: Uint8Array): void {
+    this.sentCount++;
+    const peer = this.peer;
+    if (peer?.readyState !== 'open') return;
+    const copy = data.slice();
+    queueMicrotask(() => peer.onmessage?.({ data: copy.buffer }));
+  }
+  close(): void {
+    if (this.readyState === 'closed') return;
+    this.readyState = 'closed';
+    queueMicrotask(() => this.onclose?.());
+  }
+}
+
+let peerA: IDBDatabase;
+let peerB: IDBDatabase;
+
+beforeEach(async () => {
+  const s = Math.random().toString(36).slice(2);
+  peerA = await openLcapDb(`lcap_v2-rtc-A-${s}`, LCAP_DB_VERSION, LCAP_MIGRATIONS);
+  peerB = await openLcapDb(`lcap_v2-rtc-B-${s}`, LCAP_DB_VERSION, LCAP_MIGRATIONS);
+});
+afterEach(() => {
+  peerA.close();
+  peerB.close();
+});
+
+/** Put a PUBLIC record referencing `blockCid` so the block is shareable (an orphan block is not). */
+async function putPublicRecordWithBlock(db: IDBDatabase, blockCid: string): Promise<void> {
+  const lcap = await import('@licio/lcap');
+  const body = lcap.encodeContributionEvent({
+    record_version: 2,
+    kind: 'contribution_event',
+    event_type: 'post',
+    home_room_id: 'room-1',
+    visibility_scope: 'public',
+    author_account_id: 'a',
+    author_device_id: 'd',
+    author_device_key_id: 'k',
+    device_seq: 1,
+    capability_cid: await lcap.cidFor('record', new Uint8Array([0])),
+    policy_epoch_claim: 0,
+    revocation_epoch_claim: 0,
+    client_nonce: new Uint8Array([1]),
+    priority: 2,
+    body_block_cid: blockCid, // referenced in the SIGNED body so the share closure derives it (#O)
+  });
+  const recordCid = await lcap.cidFor('record', body);
+  const tx = db.transaction(LCAP_STORE.records, 'readwrite');
+  tx.objectStore(LCAP_STORE.records).put({
+    recordCid,
+    body,
+    kind: 'contribution_event',
+    lane: 'C0',
+    priority: 2,
+    roomHash: '',
+    state: 'integrity_verified',
+    size: body.length,
+    deps: [blockCid],
+  });
+  await new Promise<void>((res, rej) => {
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  });
+}
+
+async function quarantineMissing(db: IDBDatabase, missing: string[]): Promise<void> {
+  const tx = db.transaction(LCAP_STORE.quarantine, 'readwrite');
+  tx.objectStore(LCAP_STORE.quarantine).put({
+    cid: 'parent',
+    reason: 'missing_dependency',
+    firstSeen: 1,
+    missingDeps: missing,
+    byteSize: 0,
+  });
+  await new Promise<void>((res, rej) => {
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  });
+}
+
+describe('runWebrtcBidirectionalExchange', () => {
+  it('moves content bidirectionally: A wants a block, B serves it, A ingests + holds it', async () => {
+    const bytes = new Uint8Array([5, 6, 7, 8, 9, 10]);
+    const blockCid = await cidFor('block', bytes);
+    await putBlock(peerB, { blockCid, state: 'integrity_verified', size: bytes.length }, [bytes]);
+    await putPublicRecordWithBlock(peerB, blockCid); // the block is reachable from a public record
+    await quarantineMissing(peerA, [blockCid]);
+
+    const a = new FakeDuplex();
+    const b = new FakeDuplex();
+    a.peer = b;
+    b.peer = a;
+
+    // Both peers drive the exchange over the SAME duplex channel pair, concurrently.
+    const [resultA] = await Promise.all([
+      runWebrtcBidirectionalExchange({ db: peerA, channel: a, timeoutMs: 2000 }),
+      runWebrtcBidirectionalExchange({ db: peerB, channel: b, timeoutMs: 2000 }),
+    ]);
+
+    expect(resultA.ingested?.blocks).toBe(1); // A ingested the served block
+    expect(await readBlockBytes(peerA, blockCid)).toEqual(bytes); // A now HOLDS it
+  });
+
+  it('does NOT commit a peer response delivered AFTER the exchange settled (#W)', async () => {
+    const bytes = new Uint8Array([3, 1, 4, 1, 5, 9]);
+    const blockCid = await cidFor('block', bytes);
+    await putBlock(peerB, { blockCid, state: 'integrity_verified', size: bytes.length }, [bytes]);
+    await putPublicRecordWithBlock(peerB, blockCid);
+    await quarantineMissing(peerA, [blockCid]);
+    // What B would serve in response to A's request (a real served pack carrying the block).
+    const aReq = await buildClientExchangeRequest(peerA, 'relay');
+    const bResp = await respondToClientExchange(peerB, aReq);
+    expect(bResp).not.toBeNull();
+
+    // A's exchange settles with NO peer (timeout) — nothing ingested.
+    const channel = new FakeDuplex();
+    const result = await runWebrtcBidirectionalExchange({ db: peerA, channel, timeoutMs: 100 });
+    expect(result.ingested).toBeNull();
+
+    // A late response arrives AFTER settle (delivered as fragments to the still-set onmessage); it
+    // must be dropped — committing it now would mutate local state after the UI owner is gone.
+    const { fragmentMessage } = await import('@licio/lcap-p2p'); // dynamic: keep the p2p chunk lazy
+    for (const frag of fragmentMessage(bResp as Uint8Array, 0)) channel.onmessage?.({ data: frag });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(await readBlockBytes(peerA, blockCid)).toBeUndefined(); // never committed post-settle
+  });
+
+  it('resolves (no ingest) on timeout when the channel has no peer', async () => {
+    const lonely = new FakeDuplex(); // no `.peer` — nothing answers
+    const result = await runWebrtcBidirectionalExchange({
+      db: peerA,
+      channel: lonely,
+      timeoutMs: 100,
+    });
+    expect(result.ingested).toBeNull();
+  });
+
+  it('sends NO payload when the signal is already aborted (page-unload / mode-change cancel)', async () => {
+    const channel = new FakeDuplex();
+    const controller = new AbortController();
+    controller.abort(); // cancelled before we even start
+    const result = await runWebrtcBidirectionalExchange({
+      db: peerA,
+      channel,
+      signal: controller.signal,
+      timeoutMs: 1000,
+    });
+    expect(channel.sentCount).toBe(0); // nothing transmitted after the cancel
+    expect(result.ingested).toBeNull();
+  });
+
+  it('stays bidirectional under the grace window: BOTH peers’ wants are served', async () => {
+    // A wants X (B holds), B wants Y (A holds) — both must end up holding the other's content.
+    const x = new Uint8Array([1, 2, 3, 4]);
+    const y = new Uint8Array([5, 6, 7, 8]);
+    const xCid = await cidFor('block', x);
+    const yCid = await cidFor('block', y);
+    await putBlock(peerB, { blockCid: xCid, state: 'integrity_verified', size: x.length }, [x]);
+    await putPublicRecordWithBlock(peerB, xCid);
+    await putBlock(peerA, { blockCid: yCid, state: 'integrity_verified', size: y.length }, [y]);
+    await putPublicRecordWithBlock(peerA, yCid);
+    await quarantineMissing(peerA, [xCid]);
+    await quarantineMissing(peerB, [yCid]);
+
+    const a = new FakeDuplex();
+    const b = new FakeDuplex();
+    a.peer = b;
+    b.peer = a;
+    await Promise.all([
+      runWebrtcBidirectionalExchange({ db: peerA, channel: a, timeoutMs: 3000 }),
+      runWebrtcBidirectionalExchange({ db: peerB, channel: b, timeoutMs: 3000 }),
+    ]);
+
+    // Both directions completed: A holds X and B holds Y (the content may arrive via either the
+    // gossip push in the request OR the served response — the grace window keeps BOTH alive).
+    expect(await readBlockBytes(peerA, xCid)).toEqual(x); // A got X
+    expect(await readBlockBytes(peerB, yCid)).toEqual(y); // B got Y
+  });
+});

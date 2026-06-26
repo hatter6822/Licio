@@ -1,0 +1,273 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// §16.4 / §29.4 content-push repacking (PURE).  Assemble a `response_pack` / `critical_pack`
+// of HELD objects for a peer's explicit wants, from a caller-supplied content reader — so BOTH
+// the server (`apps/api/src/lcap/repack.ts`) AND the client P2P transports (the courier + the
+// WebRTC responder) reuse ONE implementation rather than each re-deriving lane/priority/privacy.
+//
+// Lane/priority + the dep CIDs are re-derived from each object's decoded BYTES + the §15.1.1 kind
+// conventions — receiver-re-derived scheduling HINTS (§16.7), NOT trust: the importer re-verifies
+// every CID and re-derives trust regardless.  The record's ROOM is the one piece that is NOT in the
+// signed body — `room_id_hash` is the hashed `roomIdHash(networkId, roomId)` metadata the STORE
+// holds — so the reader threads it through {@link HeldObject.roomIdHash} and the repack stamps it
+// verbatim, letting the receiver land the record with its real room key (matching the room frontier
+// + the "Sync this room" scope + room export) instead of `roomHash: ''`.  The pack `privacy_label`
+// is derived conservatively from the served records' own `visibility_scope` (any non-public record
+// upgrades it).
+
+import type { CidKind } from '../cid/index.js';
+import { type PackObject, writePack } from '../pack/index.js';
+import { defaultLane, type LcapPriority } from '../priority.js';
+import { decodeAndRouteRecord, decodeProof } from '../schemas/codec.js';
+import type { PackHeaderV2 } from '../schemas/pack.js';
+
+/** A held content object served from a store: its CID kind + verifiable bytes, plus — for a
+ *  record — its canonical `room_id_hash` (the 32-byte `roomIdHash(networkId, roomId)` METADATA the
+ *  store already holds; it is NOT in the signed body, so the reader threads it through rather than
+ *  the repack re-deriving it).  Carrying it lets the receiver land the record with its real room. */
+export interface HeldObject {
+  readonly kind: CidKind;
+  readonly bytes: Uint8Array;
+  /** The canonical `room_id_hash` bytes for a record (the reader supplies it from store metadata). */
+  readonly roomIdHash?: Uint8Array;
+}
+
+/** Reads a held object by CID, or `undefined` when not held — the only I/O `repackHeldObjects`
+ *  performs, so the same pure assembly serves the server CAS and the client `lcap_v2` store. */
+export type HeldObjectReader = (cid: string) => Promise<HeldObject | undefined>;
+
+export interface RepackResult {
+  /** The assembled pack, or undefined when no wanted object was held + decodable. */
+  readonly pack?: Uint8Array;
+  /** The CIDs actually included (a prefix of the held wants, budget-bounded). */
+  readonly served: readonly string[];
+  /** True iff a held, decodable want was dropped to fit the byte budget. */
+  readonly truncated: boolean;
+}
+
+// A coarse per-frame overhead allowance (frame header + table entry) for budgeting.
+const FRAME_OVERHEAD_BYTES = 256;
+
+interface DerivedObject {
+  readonly object: PackObject;
+  /** True iff this object is a non-public record (drives the pack privacy label). */
+  readonly sensitive: boolean;
+}
+
+/** The dep CIDs a record structurally references, from its SIGNED body — so a missing prerequisite
+ *  quarantines on the receiver.  (The ROOM is NOT derived here: `room_id_hash` is the hashed
+ *  metadata the reader threads via {@link HeldObject.roomIdHash}, not the plaintext `home_room_id`.) */
+function recordDeps(record: ReturnType<typeof decodeAndRouteRecord>): string[] {
+  const deps: string[] = [];
+  if (record.kind === 'contribution_event') {
+    // NOTE: `capability_cid` is deliberately NOT a dep — the §18.3 validator resolves the capability
+    // from registered identity state, not as a `requires` prerequisite record; declaring it as a dep
+    // would make the server import require the capability be ACCEPTED first (it never is), stranding
+    // the contribution.  Parents/prev/replaces/target + the body's blocks ARE the structural deps.
+    if (record.prev_device_record_cid) deps.push(record.prev_device_record_cid);
+    if (record.replaces_record_cid) deps.push(record.replaces_record_cid);
+    if (record.target_record_cid) deps.push(record.target_record_cid);
+    if (record.thread_root_cid) deps.push(record.thread_root_cid);
+    for (const parent of record.parent_record_cids ?? []) deps.push(parent);
+    if (record.body_block_cid) deps.push(record.body_block_cid);
+    if (record.attachment_manifest_cid) deps.push(record.attachment_manifest_cid);
+    for (const snapshot of record.source_snapshot_cids ?? []) deps.push(snapshot);
+    if (record.target_source_snapshot_cid) deps.push(record.target_source_snapshot_cid);
+  }
+  return deps;
+}
+
+/** Re-derive a servable PackObject from a held object's bytes (undefined if undecodable). */
+function packObjectFor(cid: string, held: HeldObject): DerivedObject | undefined {
+  switch (held.kind) {
+    case 'record': {
+      let record: ReturnType<typeof decodeAndRouteRecord>;
+      try {
+        record = decodeAndRouteRecord(held.bytes);
+      } catch {
+        return undefined;
+      }
+      // Contribution events carry a priority + visibility; control records
+      // (certificate/capability/revocation) are P0/C0 trust material.
+      const priority: LcapPriority = record.kind === 'contribution_event' ? record.priority : 0;
+      // ANY record kind with a non-public visibility_scope (contribution_event AND room_capability)
+      // upgrades the pack privacy label — never label restricted content as plain public.
+      const sensitive = 'visibility_scope' in record && record.visibility_scope !== 'public';
+      const deps = recordDeps(record);
+      return {
+        object: {
+          cid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: held.bytes,
+          lane: defaultLane(priority),
+          priority,
+          recordKind: record.kind,
+          ...(deps.length > 0 ? { deps } : {}),
+          // The canonical room_id_hash bytes (store metadata), NOT a re-derivation — so the receiver
+          // stores the record's real room key, matching the room frontier + the "Sync this room" scope.
+          ...(held.roomIdHash !== undefined ? { roomIdHash: held.roomIdHash } : {}),
+        },
+        sensitive,
+      };
+    }
+    case 'proof': {
+      let proof: ReturnType<typeof decodeProof>;
+      try {
+        proof = decodeProof(held.bytes);
+      } catch {
+        return undefined;
+      }
+      // Proofs ride the trust lane (T1/P1) and link to the record they attest.
+      return {
+        object: {
+          cid,
+          cidKind: 'proof',
+          frameKind: 'proof',
+          payload: held.bytes,
+          lane: 'T1',
+          priority: 1,
+          providesProofFor: proof.record_cid,
+        },
+        sensitive: false,
+      };
+    }
+    case 'block':
+      return {
+        object: {
+          cid,
+          cidKind: 'block',
+          frameKind: 'block',
+          payload: held.bytes,
+          lane: 'B4',
+          priority: 4,
+        },
+        sensitive: false,
+      };
+    case 'chunk':
+      return {
+        object: {
+          cid,
+          cidKind: 'chunk',
+          frameKind: 'chunk',
+          payload: held.bytes,
+          lane: 'B4',
+          priority: 4,
+        },
+        sensitive: false,
+      };
+  }
+}
+
+/**
+ * Assemble a pack of the `wants` the reader holds, in request order, greedily up to `maxBytes`
+ * (the peer's response budget).  Skips wants the reader lacks or cannot decode; reports
+ * truncation when a held, decodable want was dropped for budget so the caller can mark the
+ * exchange `partial`.  The privacy label is upgraded to `contains_in_room_metadata` if any served
+ * record is non-public.
+ */
+export async function repackHeldObjects(
+  getObject: HeldObjectReader,
+  wants: readonly string[],
+  maxBytes: number,
+  /** The peer's FULL advertised budget BEYOND the byte cap (#BF/#BH): the SELECTION floor
+   *  (`priorityFloor`, `allowMedia`) AND the per-kind COUNT caps (`maxRecords`, `maxBlocks`,
+   *  `maxObjects` = max_pack_table_entries).  Meaningful only when the peer advertises a constrained
+   *  budget; a DEFAULT (full) budget passes the maxima, so a courier ferrying full content is never
+   *  starved of its explicit wants.  Omit for byte-cap-only serving. */
+  selection?: {
+    readonly priorityFloor?: number;
+    readonly allowMedia?: boolean;
+    readonly maxRecords?: number;
+    readonly maxBlocks?: number;
+    readonly maxObjects?: number;
+  },
+): Promise<RepackResult> {
+  const objects: PackObject[] = [];
+  const served: string[] = [];
+  const seen = new Set<string>();
+  let bytes = 0;
+  let truncated = false;
+  let sensitive = false;
+  let recordCount = 0;
+  let blockCount = 0; // blocks + chunks (media blobs)
+  for (const cid of wants) {
+    if (seen.has(cid)) continue;
+    seen.add(cid);
+    const held = await getObject(cid);
+    if (!held) continue; // not held — the peer fetches it elsewhere
+    const derived = packObjectFor(cid, held);
+    if (!derived) continue; // undecodable — never repacked
+    const kind = derived.object.frameKind;
+    const isBlock = kind === 'block' || kind === 'chunk';
+    // Honor the peer's SELECTION floor — a withheld held want marks the exchange partial (the peer
+    // re-requests it on a less-constrained pass) (#BF).
+    if (
+      selection?.priorityFloor !== undefined &&
+      derived.object.priority > selection.priorityFloor
+    ) {
+      truncated = true;
+      continue;
+    }
+    if (selection?.allowMedia === false && isBlock) {
+      truncated = true;
+      continue;
+    }
+    // Honor the per-kind COUNT caps + the total pack-table entry cap (#BH).
+    if (selection?.maxObjects !== undefined && objects.length >= selection.maxObjects) {
+      truncated = true;
+      break;
+    }
+    if (
+      selection?.maxRecords !== undefined &&
+      kind === 'record_body' &&
+      recordCount >= selection.maxRecords
+    ) {
+      truncated = true;
+      continue;
+    }
+    if (selection?.maxBlocks !== undefined && isBlock && blockCount >= selection.maxBlocks) {
+      truncated = true;
+      continue;
+    }
+    const projected = bytes + derived.object.payload.length + FRAME_OVERHEAD_BYTES;
+    if (projected > maxBytes) {
+      // Respect the peer's response budget even for the FIRST want: a tiny advertised budget must
+      // not be overrun by a single large held object (it stays fetchable via the resumable GET
+      // range routes).  Mark the exchange partial and stop.
+      truncated = true;
+      break;
+    }
+    objects.push(derived.object);
+    if (kind === 'record_body') recordCount += 1;
+    if (isBlock) blockCount += 1;
+    served.push(cid);
+    bytes = projected;
+    if (derived.sensitive) sensitive = true;
+  }
+  if (objects.length === 0) return { served: [], truncated };
+  const privacyLabel: PackHeaderV2['privacy_label'] = sensitive
+    ? 'contains_in_room_metadata'
+    : 'public';
+  const serialize = (): Uint8Array =>
+    writePack({
+      objects,
+      transportProfile: 'https',
+      privacyLabel,
+      maxUncompressedBytes: Math.max(maxBytes, bytes) + 1024,
+    });
+  let pack = serialize();
+  // The greedy loop above projected only payload bytes + a fixed per-frame estimate, but the
+  // SERIALIZED pack ALSO carries the header, object table, CIDs, and per-object dep lists — so it can
+  // still exceed the peer's advertised `maxBytes` (e.g. records with many deps).  Trim trailing
+  // objects + re-serialize until the pack TRULY fits the budget, so the route's bounded-pack promise
+  // holds against the real wire size, not an estimate (#VV).
+  while (pack.length > maxBytes && objects.length > 0) {
+    objects.pop();
+    served.pop();
+    truncated = true;
+    if (objects.length === 0) return { served: [], truncated };
+    pack = serialize();
+  }
+  return { pack, served, truncated };
+}

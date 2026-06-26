@@ -23,6 +23,7 @@
 // browser `RTCPeerConnection` + the live rendezvous endpoint in the E2E.
 
 import type { HandshakeHello, SignalingPayload } from '@licio/private-p2p';
+import { devWarn } from '../lib/dev-log.js';
 import type { PeerChannel } from './sync-session.js';
 
 type P2pModule = typeof import('@licio/private-p2p');
@@ -47,15 +48,31 @@ export interface RtcDataChannelLike {
   send(data: string | ArrayBuffer | ArrayBufferView): void;
   close(): void;
 }
+/** The RTCOfferOptions subset the carrier sets — only `iceRestart` (§15.4 recovery). */
+export interface RtcOfferOptionsLike {
+  readonly iceRestart?: boolean;
+}
 export interface RtcPeerConnectionLike {
   createDataChannel(label: string): RtcDataChannelLike;
-  createOffer(): Promise<RtcSessionDescriptionInit>;
+  createOffer(options?: RtcOfferOptionsLike): Promise<RtcSessionDescriptionInit>;
   createAnswer(): Promise<RtcSessionDescriptionInit>;
   setLocalDescription(description: RtcSessionDescriptionInit): Promise<void>;
   setRemoteDescription(description: RtcSessionDescriptionInit): Promise<void>;
   addIceCandidate(candidate: RtcIceCandidateInit): Promise<void>;
   onicecandidate: ((event: { candidate: RtcIceCandidateInit | null }) => void) | null;
   ondatachannel: ((event: { channel: RtcDataChannelLike }) => void) | null;
+  /** §15.4 ICE-restart recovery — re-gather ICE on a LIVE connection without re-running the
+   *  membership handshake.  Optional: a browser `RTCPeerConnection` has `restartIce()`; when
+   *  absent the carrier falls back to an `iceRestart` re-offer.  The connection/ICE-state
+   *  fields + change handlers let the carrier observe a transient path failure and recover
+   *  the SAME data channel (preserving the §15.5 session key) before it escalates to a hard
+   *  drop that forces a full re-dial.  A fake/legacy pc that omits them simply never
+   *  ICE-restarts (the watcher stays dormant). */
+  restartIce?(): void;
+  readonly connectionState?: string;
+  readonly iceConnectionState?: string;
+  onconnectionstatechange?: (() => void) | null;
+  oniceconnectionstatechange?: (() => void) | null;
   close(): void;
 }
 export interface RtcIceServerLike {
@@ -181,6 +198,23 @@ export interface ConnectPrivatePeerParams {
   readonly timeoutMs?: number;
   /** Rendezvous/signal poll interval (default 250ms). */
   readonly pollIntervalMs?: number;
+  /** §15.4 — recover a TRANSIENT ICE path failure by ICE-restart on the SAME connection
+   *  (preserving the membership-proven session key + the open data channel) instead of a
+   *  full re-dial.  Default on; the offerer initiates (the answerer reacts to the re-offer
+   *  over the still-live sealed signaling).  A hard drop still falls back to a re-dial. */
+  readonly enableIceRestart?: boolean;
+  /** How long a `disconnected` ICE state must persist before an ICE-restart is triggered
+   *  (a brief blip often self-heals); a `failed` state restarts immediately.  Default 3000ms. */
+  readonly iceRestartGraceMs?: number;
+  /** Max ICE-restart attempts per failure episode before giving up (→ the channel closes and
+   *  `maintainConnection` re-dials); reset once the connection returns to `connected`.
+   *  Default 3. */
+  readonly maxIceRestarts?: number;
+  /** Rendezvous signal-poll cadence once the channel is OPEN — the maintenance loop that
+   *  carries ICE-restart renegotiation.  Slower than `pollIntervalMs` so a long-lived
+   *  connection does not hammer the rendezvous; the loop polls fast again for a short window
+   *  whenever a renegotiation is in flight.  Default 2000ms. */
+  readonly maintenancePollMs?: number;
   readonly rtcFactory?: RtcPeerConnectionFactory;
   readonly signal?: AbortSignal;
   /** A sleep primitive (injectable so tests can pump a fake clock). */
@@ -341,11 +375,17 @@ export async function connectPrivatePeer(
   });
 
   let cleanedUp = false;
-  let stopPolling = false;
+  let signalingController: SignalingController | undefined;
   const cleanup = (): void => {
     if (cleanedUp) return;
     cleanedUp = true;
-    stopPolling = true;
+    signalingController?.stop(); // halt the maintenance signaling loop
+    try {
+      pc.onconnectionstatechange = null;
+      pc.oniceconnectionstatechange = null;
+    } catch {
+      /* not settable on this pc */
+    }
     try {
       pc.close();
     } catch {
@@ -354,7 +394,7 @@ export async function connectPrivatePeer(
   };
 
   try {
-    const { dc, inbox } = await establishDataChannel({
+    const established = await establishDataChannel({
       p2p,
       pc,
       rendezvous,
@@ -370,13 +410,15 @@ export async function connectPrivatePeer(
       nowMs,
       ttlMs: SIGNAL_TTL_MS,
       pollIntervalMs,
+      maintenancePollMs: params.maintenancePollMs ?? 2_000,
       sleep,
       throwIfAborted,
-      shouldStop: () => stopPolling,
-      stop: () => {
-        stopPolling = true;
-      },
+      // Post-open the pump must NOT die at the connect DEADLINE (it carries ICE-restart for
+      // the channel's whole lifetime); it ends only on abort or cleanup.
+      isAborted: () => params.signal?.aborted === true,
     });
+    const { dc, inbox } = established;
+    signalingController = established.signaling;
 
     // 4. §15.5 membership-proving handshake over the open data channel.  Any op frames
     //    a faster peer sends before we finish are stashed (returned) for the channel.
@@ -393,6 +435,28 @@ export async function connectPrivatePeer(
       sleep,
     });
 
+    // 4b. §15.4 ICE-restart recovery (post-handshake).  The sealed signaling channel stays
+    //     live, so a TRANSIENT path failure (NAT rebinding, a Wi-Fi↔cellular handover) is
+    //     recovered IN PLACE — the offerer re-offers with `iceRestart`, the answerer reacts —
+    //     keeping the SAME data channel + the membership-proven session key, never re-running
+    //     the handshake.  A `failed` (hard) drop instead closes the channel → `maintainConnection`
+    //     re-dials.  The offerer initiates (avoiding offer glare); the answerer only polls fast
+    //     on a blip so it applies the re-offer promptly.
+    installIceRestartWatcher({
+      pc,
+      isOfferer,
+      signaling: signalingController,
+      sleep,
+      enabled: params.enableIceRestart ?? true,
+      graceMs: params.iceRestartGraceMs ?? 3_000,
+      maxRestarts: params.maxIceRestarts ?? 3,
+      isCleanedUp: () => cleanedUp,
+      // On exhaustion, tear the connection down so the channel's `onclose` fires and
+      // `maintainConnection`/`maintainMesh` re-dial — never leak the pump + pc on a
+      // `disconnected`-that-never-`failed` path.
+      onExhausted: cleanup,
+    });
+
     // 5. Expose the post-handshake channel (binary frames only, each AEAD-sealed under the
     //    §15.5 step-4 session key; the handshake used strings).
     return {
@@ -403,6 +467,117 @@ export async function connectPrivatePeer(
     cleanup();
     throw error;
   }
+}
+
+// --- §15.4 ICE-restart recovery watcher --------------------------------------------
+
+interface IceRestartWatcherParams {
+  readonly pc: RtcPeerConnectionLike;
+  readonly isOfferer: boolean;
+  readonly signaling: SignalingController;
+  readonly sleep: (ms: number) => Promise<void>;
+  readonly enabled: boolean;
+  readonly graceMs: number;
+  readonly maxRestarts: number;
+  readonly isCleanedUp: () => boolean;
+  /** Tear the connection down when ICE-restart attempts are exhausted on a still-failed path,
+   *  so the channel's `onclose` fires and the caller re-dials. */
+  readonly onExhausted: () => void;
+}
+
+/**
+ * Observe the live `RTCPeerConnection`'s connection/ICE state and recover a transient path
+ * failure by ICE-restart, before it escalates to a hard drop.  Only the OFFERER re-offers
+ * (the answerer reacts to the re-offer via the still-live sealed signaling); the answerer
+ * still arms the watcher purely to poll the rendezvous fast on a blip.  The recovery is a
+ * SELF-DRIVING loop (it re-checks after each attempt rather than waiting for the ICE state to
+ * re-fire, which a stuck `disconnected` path may never do): attempts are bounded per episode
+ * and reset once the connection returns to `connected`/`completed`; on exhaustion it calls
+ * `onExhausted` to tear the connection down so the caller re-dials (never leaving a dead
+ * connection — and its signaling pump — to leak).
+ */
+function installIceRestartWatcher(p: IceRestartWatcherParams): void {
+  if (!p.enabled) return;
+  const { pc } = p;
+  let attempts = 0;
+  // A monotonically-increasing token cancelling a pending scheduled re-check when the state
+  // changes (e.g. a recovery), so a stale re-check never fires.
+  let generation = 0;
+  // Whether a recovery chain is currently in flight — prevents concurrent chains; the chain
+  // self-drives rather than relying on the ICE state machine to re-fire `disconnected`.
+  let recovering = false;
+
+  // The ICE and the connection state machines DIFFER: an ICE-only `disconnected`/`failed` can
+  // occur while `connectionState` still reads `connected`, so the restart trigger must see
+  // BOTH (reading only `connectionState` would mask the exact signal ICE-restart exists for).
+  const iceState = (): string => pc.iceConnectionState ?? '';
+  const connState = (): string => pc.connectionState ?? '';
+  const isFailed = (): boolean => iceState() === 'failed' || connState() === 'failed';
+  const isDisconnected = (): boolean =>
+    iceState() === 'disconnected' || connState() === 'disconnected';
+  const isRecovered = (): boolean => {
+    // A BAD state on EITHER machine takes precedence over a healthy one on the other: an
+    // ICE-only `failed`/`disconnected` (while `connectionState` still reads `connected`) is the
+    // exact signal ICE-restart exists for, so it must NOT be masked as "recovered" — otherwise
+    // `onStateChange` short-circuits and the offerer never re-offers, stranding the live data
+    // channel on a dead path.  Recovered ⇔ neither machine is bad AND at least one reads healthy.
+    if (isFailed() || isDisconnected()) return false;
+    const i = iceState();
+    const c = connState();
+    return i === 'connected' || i === 'completed' || c === 'connected' || c === 'completed';
+  };
+
+  const driveRecovery = (delayMs: number): void => {
+    const gen = ++generation;
+    void p.sleep(delayMs).then(async () => {
+      if (p.isCleanedUp() || gen !== generation || !recovering) return; // superseded / torn down
+      if (isRecovered()) {
+        recovering = false;
+        attempts = 0;
+        return;
+      }
+      if (attempts >= p.maxRestarts) {
+        // Exhausted on a still-bad path: hand off to teardown so the caller re-dials.
+        recovering = false;
+        p.onExhausted();
+        return;
+      }
+      attempts += 1;
+      await p.signaling.triggerIceRestart().catch(() => {
+        /* a failed re-offer just leaves the path bad; the next re-check escalates */
+      });
+      // Self-drive the next re-check whether or not the ICE state re-fires `disconnected`.
+      if (!p.isCleanedUp() && recovering) driveRecovery(p.graceMs);
+    });
+  };
+
+  const onStateChange = (): void => {
+    if (p.isCleanedUp()) return;
+    p.signaling.noteActivity(); // poll the rendezvous fast so a renegotiation completes quickly
+    if (isRecovered()) {
+      attempts = 0;
+      recovering = false;
+      generation += 1; // cancel any pending re-check — the path recovered on its own
+      return;
+    }
+    if (!p.isOfferer || recovering) return; // the answerer only fast-polls; one chain at a time
+    if (isFailed()) {
+      recovering = true;
+      driveRecovery(0);
+    } else if (isDisconnected()) {
+      recovering = true;
+      driveRecovery(p.graceMs);
+    }
+  };
+
+  pc.onconnectionstatechange = onStateChange;
+  pc.oniceconnectionstatechange = onStateChange;
+  // The watcher is armed only AFTER the data-channel handshake; if the ICE/connection state
+  // already reached `disconnected`/`failed` DURING that handshake, the state-change event has
+  // already fired and assigning the handlers above will not re-invoke it.  Drive it once now so
+  // an already-bad path starts recovery (or tears down) immediately instead of waiting for the
+  // next transition — which a stuck `disconnected` path may never deliver.
+  onStateChange();
 }
 
 // --- a buffering message inbox (no frame is lost before a consumer attaches) --------
@@ -442,19 +617,52 @@ interface EstablishParams {
   readonly nowMs: () => number;
   readonly ttlMs: number;
   readonly pollIntervalMs: number;
+  /** Slow signal-poll cadence once the channel is open (the maintenance loop). */
+  readonly maintenancePollMs: number;
   readonly sleep: (ms: number) => Promise<void>;
+  /** Deadline-bounded abort, used PRE-open only (a stuck dial must time out). */
   readonly throwIfAborted: () => void;
-  readonly shouldStop: () => boolean;
-  readonly stop: () => void;
+  /** Abort-signal-only check, used POST-open (the maintenance loop must outlive the
+   *  connect deadline — it ends only on an explicit abort or `signaling.stop()`). */
+  readonly isAborted: () => boolean;
 }
+
+/** Controls the long-lived sealed-signaling loop after the channel is open. */
+interface SignalingController {
+  /** Offerer-only: re-negotiate ICE on the live connection via an `iceRestart` re-offer
+   *  (and `pc.restartIce()` when available) — the data channel + session key survive. */
+  triggerIceRestart(): Promise<void>;
+  /** Poll the rendezvous fast for a short window (so a renegotiation completes promptly). */
+  noteActivity(): void;
+  /** Stop the maintenance loop (called by `cleanup`). */
+  stop(): void;
+}
+
+/** While a renegotiation is in flight, poll the rendezvous at the fast cadence for this long. */
+const FAST_POLL_WINDOW_MS = 15_000;
 
 async function establishDataChannel(
   p: EstablishParams,
-): Promise<{ dc: RtcDataChannelLike; inbox: MessageInbox }> {
+): Promise<{ dc: RtcDataChannelLike; inbox: MessageInbox; signaling: SignalingController }> {
   const { p2p, pc } = p;
   const inbox = new MessageInbox();
   let remoteDescriptionSet = false;
   const pendingIce: RtcIceCandidateInit[] = [];
+  // Cap the out-of-order ICE buffer: a buggy/malicious member can send sealed ICE candidates that
+  // ALWAYS reject, and without a bound they would accumulate for the connection's lifetime + be replayed
+  // on every later renegotiation.  Beyond the cap we drop (a real negotiation needs only a handful) (#AZ).
+  const MAX_PENDING_ICE = 64;
+  const bufferIce = (candidate: RtcIceCandidateInit): void => {
+    if (pendingIce.length < MAX_PENDING_ICE) pendingIce.push(candidate);
+  };
+  let stopped = false;
+  let channelOpen = false;
+  // Poll fast (pollIntervalMs) until nowMs() >= fastUntil, then drop to maintenancePollMs.
+  // Seeded so the whole establishment + the first window after open polls fast.
+  let fastUntil = p.nowMs() + FAST_POLL_WINDOW_MS;
+  const noteActivity = (): void => {
+    fastUntil = p.nowMs() + FAST_POLL_WINDOW_MS;
+  };
 
   const sendSignal = async (payload: SignalingPayload): Promise<void> => {
     const sealed = await p2p.sealSignal(payload, p.channelKey, {
@@ -491,15 +699,19 @@ async function establishDataChannel(
     resolveChannel = resolve;
     rejectChannel = reject;
   });
+  const markOpen = (dc: RtcDataChannelLike): void => {
+    channelOpen = true;
+    resolveChannel(dc);
+  };
   const armChannel = (dc: RtcDataChannelLike): void => {
     dc.binaryType = 'arraybuffer';
     // Attach the inbox NOW (before open) so the peer's first frame is never dropped.
     dc.onmessage = (event): void => inbox.push(event.data);
     if (dc.readyState === 'open') {
-      resolveChannel(dc);
+      markOpen(dc);
       return;
     }
-    dc.onopen = (): void => resolveChannel(dc);
+    dc.onopen = (): void => markOpen(dc);
   };
 
   if (p.isOfferer) {
@@ -516,12 +728,29 @@ async function establishDataChannel(
   }
 
   const applyPayload = async (payload: SignalingPayload): Promise<void> => {
+    // Any inbound signaling may be a renegotiation (an ICE-restart re-offer/answer) — keep
+    // polling fast so the round-trip completes promptly before the cadence drops to slow.
+    noteActivity();
     if (payload.kind === 'offer' && payload.sdp !== undefined && !p.isOfferer) {
       await pc.setRemoteDescription({ type: 'offer', sdp: payload.sdp });
       remoteDescriptionSet = true;
-      for (const cand of pendingIce.splice(0)) await pc.addIceCandidate(cand);
+      for (const cand of pendingIce.splice(0)) {
+        try {
+          await pc.addIceCandidate(cand);
+        } catch (error) {
+          // A buffered candidate that STILL can't attach to the freshly-applied description is
+          // unexpected (it should have matched) — report it (the helper logs no candidate data:
+          // it can carry an IP) and drop it as genuinely stale rather than swallowing it silently.
+          devWarn('ICE candidate did not apply after renegotiation', error);
+        }
+      }
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
+      // The channel may have been torn down (stop / abort) WHILE setRemoteDescription / createAnswer /
+      // setLocalDescription awaited — re-check before publishing the answer, or a dead link would emit
+      // a sealed answer for an ICE-restart offer and make the peer renegotiate a connection that is
+      // already gone (the answer-side counterpart of #ZZ) (#BB).
+      if (stopped || p.isAborted()) return;
       await sendSignal({
         schema: 'licio.private.signaling_payload.v1',
         kind: 'answer',
@@ -530,52 +759,124 @@ async function establishDataChannel(
     } else if (payload.kind === 'answer' && payload.sdp !== undefined && p.isOfferer) {
       await pc.setRemoteDescription({ type: 'answer', sdp: payload.sdp });
       remoteDescriptionSet = true;
-      for (const cand of pendingIce.splice(0)) await pc.addIceCandidate(cand);
+      for (const cand of pendingIce.splice(0)) {
+        try {
+          await pc.addIceCandidate(cand);
+        } catch (error) {
+          // A buffered candidate that STILL can't attach to the freshly-applied description is
+          // unexpected (it should have matched) — report it (the helper logs no candidate data:
+          // it can carry an IP) and drop it as genuinely stale rather than swallowing it silently.
+          devWarn('ICE candidate did not apply after renegotiation', error);
+        }
+      }
     } else if (payload.kind === 'ice' && payload.ice_candidate !== undefined) {
       const candidate: RtcIceCandidateInit = {
         candidate: payload.ice_candidate,
         sdpMid: payload.sdp_mid ?? null,
         sdpMLineIndex: payload.sdp_mline_index ?? null,
       };
-      if (remoteDescriptionSet) await pc.addIceCandidate(candidate);
-      else pendingIce.push(candidate); // can't add before the remote description is set
+      if (remoteDescriptionSet) {
+        try {
+          await pc.addIceCandidate(candidate);
+        } catch {
+          // The candidate outran its (re-)offer: an ICE-restart re-offer's candidates can be
+          // signalled before the re-offer itself, and `remoteDescriptionSet` stays latched true
+          // from the initial negotiation — so they can't attach to the current description.  Buffer
+          // them (as the initial negotiation does via the else-branch) to retry after the next
+          // setRemoteDescription, instead of dropping them and stranding the restart — bounded (#AZ).
+          bufferIce(candidate);
+        }
+      } else {
+        bufferIce(candidate); // can't add before the remote description is set — bounded (#AZ)
+      }
     }
   };
 
-  // Drain queued signals until the channel opens (or we stop / abort / time out).
-  const pumpSignals = async (): Promise<void> => {
-    while (!p.shouldStop()) {
+  // §15.4 offerer-only ICE-restart: re-gather ICE on the LIVE connection (the data channel +
+  // session key survive).  `restartIce()` (when the pc exposes it) re-gathers without a manual
+  // re-offer, but we ALSO send an `iceRestart` re-offer so the answerer renegotiates — both
+  // peers must agree, and `restartIce()` alone does not generate the SDP the answerer needs.
+  const triggerIceRestart = async (): Promise<void> => {
+    if (stopped || !p.isOfferer) return;
+    noteActivity();
+    if (typeof pc.restartIce === 'function') {
       try {
-        p.throwIfAborted();
-      } catch (error) {
-        rejectChannel(error);
-        return;
+        pc.restartIce();
+      } catch {
+        /* fall through to the re-offer, which is sufficient on its own */
+      }
+    }
+    const offer = await pc.createOffer({ iceRestart: true });
+    await pc.setLocalDescription(offer);
+    // The channel may have been torn down (stop / abort) WHILE createOffer/setLocalDescription
+    // awaited — re-check before publishing the restart offer, or a dead link would emit fresh sealed
+    // signaling after cleanup and make the peer renegotiate a connection that is already gone (#ZZ).
+    if (stopped || p.isAborted()) return;
+    await sendSignal({
+      schema: 'licio.private.signaling_payload.v1',
+      kind: 'offer',
+      sdp: offer.sdp ?? '',
+    });
+  };
+
+  // Drain queued signals.  PRE-open the loop is bounded by the connect deadline (a stuck dial
+  // must time out → reject).  POST-open it is the long-lived MAINTENANCE loop carrying any
+  // ICE-restart renegotiation: it outlives the connect deadline and ends only on abort or
+  // `stop()`, polling at the slow cadence when quiescent and the fast cadence in a renegotiation
+  // window (so a recovery completes quickly without hammering the rendezvous when idle).
+  const pumpSignals = async (): Promise<void> => {
+    while (!stopped) {
+      if (channelOpen) {
+        if (p.isAborted()) {
+          stopped = true;
+          return;
+        }
+      } else {
+        try {
+          p.throwIfAborted();
+        } catch (error) {
+          rejectChannel(error);
+          return;
+        }
       }
       let signals: Awaited<ReturnType<typeof p.rendezvous.signalPoll>>;
       try {
         signals = await p.rendezvous.signalPoll(p.selfBlindId);
-      } catch {
-        signals = [];
+      } catch (error) {
+        signals = []; // a transient poll failure → retry next loop, but surface it in dev
+        devWarn('rendezvous signal poll failed', error);
       }
       for (const signal of signals) {
         try {
           await applyPayload(await p2p.openSignal(signal, p.channelKey));
-        } catch {
-          // A signal we can't open (foreign/tampered) fails closed — skip it.
+        } catch (error) {
+          // A signal we can't open (foreign/tampered) fails closed — skip it, but surface it in
+          // dev: a persistent failure here is a real bug (bad key/codec), not just a probe.
+          devWarn('skipped a signal that failed to open or apply', error);
         }
       }
-      if (p.shouldStop()) return;
-      await p.sleep(p.pollIntervalMs);
+      if (stopped) return;
+      const cadence =
+        channelOpen && p.nowMs() >= fastUntil ? p.maintenancePollMs : p.pollIntervalMs;
+      await p.sleep(cadence);
     }
   };
   void pumpSignals();
 
+  const signaling: SignalingController = {
+    triggerIceRestart,
+    noteActivity,
+    stop: () => {
+      stopped = true;
+    },
+  };
+
   try {
     const dc = await channelReady;
-    p.stop();
-    return { dc, inbox };
+    // Do NOT stop the pump — it carries ICE-restart renegotiation for the channel's lifetime.
+    return { dc, inbox, signaling };
   } catch (error) {
-    p.stop();
+    stopped = true; // establishment failed → halt the pump
     throw error;
   }
 }
@@ -690,59 +991,76 @@ async function runHandshake(
 
   // Pre-import the remote device key (verifyPeerHandshake's resolveDevice is sync).
   let resolvedDevice: { publicKey: CryptoKey; activeAtEpoch: boolean } | undefined;
-  // Op frames a faster peer sends before our handshake finishes — handed to the channel.
+  // Op frames a faster peer sends before our handshake finishes — handed to the channel.  CAPPED:
+  // before the remote proves membership it is UNTRUSTED, so a peer that reaches the channel but
+  // slowplays/fails the proof cannot grow renderer memory by streaming frames for the whole handshake
+  // timeout — frames beyond the cap are dropped (the op-exchange re-requests anything dropped) (#YY).
   const opStash: Uint8Array[] = [];
+  const MAX_PRE_HANDSHAKE_STASH_BYTES = 1_048_576; // 1 MiB — ample for a few op frames, bounded
+  let opStashBytes = 0;
 
+  // Process handshake frames STRICTLY SEQUENTIALLY: a proof frame must never run while a prior
+  // hello's async device-key import is still pending, or tryVerify would see remoteHello +
+  // remoteProofSig but resolvedDevice still undefined and reject a valid member as unknown (#FF).
+  let handshakeChain: Promise<void> = Promise.resolve();
   p.inbox.consume((data): void => {
     if (typeof data !== 'string') {
-      opStash.push(toUint8(data as ArrayBuffer | ArrayBufferView)); // not a handshake frame
+      const bytes = toUint8(data as ArrayBuffer | ArrayBufferView); // not a handshake frame
+      if (opStashBytes + bytes.byteLength > MAX_PRE_HANDSHAKE_STASH_BYTES) return; // cap — drop (#YY)
+      opStashBytes += bytes.byteLength;
+      opStash.push(bytes);
       return;
     }
-    void (async (): Promise<void> => {
-      let frame: HandshakeFrame;
-      try {
-        const parsed: unknown = JSON.parse(data);
-        frame = parsed as HandshakeFrame;
-      } catch {
-        return;
-      }
-      if (frame.t === 'hello' && frame.hello) {
-        // Validate the inbound hello FAIL-FAST: a malformed hello (e.g. a regex-passing
-        // but non-base64url ephemeral key) would otherwise throw later inside
-        // signHandshakeProof and hang the connect to the deadline. Reject promptly +
-        // typed, symmetric with verifyPeerHandshake's own hardening.
-        const parsedHello = p2p.handshakeHelloSchema.safeParse(frame.hello);
-        if (!parsedHello.success) {
-          rejectDone(
-            new ConnectPrivatePeerError('handshake_malformed_hello', 'malformed remote hello'),
-          );
-          return;
-        }
-        remoteHello = parsedHello.data;
-        const resolution = p.resolveDevice(remoteHello.author_device_id);
-        if (resolution) {
-          try {
-            resolvedDevice = {
-              publicKey: await p2p.importPublicKeyRaw(
-                p2p.fromBase64Url(resolution.signingPublicKey),
-              ),
-              activeAtEpoch: resolution.activeAtEpoch,
-            };
-          } catch {
-            resolvedDevice = undefined;
-          }
-        }
-        await sendSelfProofIfReady();
-        await tryVerify();
-      } else if (frame.t === 'proof' && frame.sig) {
+    handshakeChain = handshakeChain
+      .then(async (): Promise<void> => {
+        let frame: HandshakeFrame;
         try {
-          remoteProofSig = p2p.fromBase64Url(frame.sig);
-        } catch {
+          const parsed: unknown = JSON.parse(data);
+          frame = parsed as HandshakeFrame;
+        } catch (error) {
+          devWarn('dropped a non-JSON handshake frame', error);
           return;
         }
-        await tryVerify();
-      }
-    })().catch((error) => rejectDone(error)); // a thrown error fails fast, not via timeout
+        if (frame.t === 'hello' && frame.hello) {
+          // Validate the inbound hello FAIL-FAST: a malformed hello (e.g. a regex-passing
+          // but non-base64url ephemeral key) would otherwise throw later inside
+          // signHandshakeProof and hang the connect to the deadline. Reject promptly +
+          // typed, symmetric with verifyPeerHandshake's own hardening.
+          const parsedHello = p2p.handshakeHelloSchema.safeParse(frame.hello);
+          if (!parsedHello.success) {
+            rejectDone(
+              new ConnectPrivatePeerError('handshake_malformed_hello', 'malformed remote hello'),
+            );
+            return;
+          }
+          remoteHello = parsedHello.data;
+          const resolution = p.resolveDevice(remoteHello.author_device_id);
+          if (resolution) {
+            try {
+              resolvedDevice = {
+                publicKey: await p2p.importPublicKeyRaw(
+                  p2p.fromBase64Url(resolution.signingPublicKey),
+                ),
+                activeAtEpoch: resolution.activeAtEpoch,
+              };
+            } catch (error) {
+              resolvedDevice = undefined;
+              devWarn('could not import the resolved device public key', error);
+            }
+          }
+          await sendSelfProofIfReady();
+          await tryVerify();
+        } else if (frame.t === 'proof' && frame.sig) {
+          try {
+            remoteProofSig = p2p.fromBase64Url(frame.sig);
+          } catch (error) {
+            devWarn('dropped a malformed handshake proof signature', error);
+            return;
+          }
+          await tryVerify();
+        }
+      })
+      .catch((error) => rejectDone(error)); // a thrown error fails fast, not via timeout
   });
 
   // A data-channel close DURING the handshake fails the connect immediately (otherwise it
@@ -823,7 +1141,15 @@ function wrapDataChannel(
     if (typeof data === 'string') return; // no string frames post-handshake
     deliver(toUint8(data as ArrayBuffer | ArrayBufferView));
   });
-  dc.onclose = (): void => closeListener?.();
+  // A remote drop (the data channel closes underneath us) both notifies the session AND runs
+  // cleanup — closing the pc + halting the long-lived maintenance signaling loop so it does
+  // not leak past the connection.  An in-place ICE-restart does NOT close the data channel
+  // (the SCTP/DTLS association survives), so this fires only on a genuine, unrecoverable drop;
+  // the session's onClose then drives `maintainConnection` to re-dial.
+  dc.onclose = (): void => {
+    closeListener?.();
+    cleanup();
+  };
 
   return {
     async send(frame: Uint8Array): Promise<void> {

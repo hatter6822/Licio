@@ -22,14 +22,24 @@
 // unreachable, timeout) the establishment rejects; the consumer falls back to exchanging
 // over the HTTPS anchor alone, so correctness never depends on the optional peer carrier.
 
-import type { LcapTransport, PackHeaderV2, TransportId } from '@licio/lcap';
+import type { TransportId } from '@licio/lcap';
 import type { WebrtcDecision, WebrtcPrivacyOptions } from '@licio/lcap-p2p';
-import { type ConnectLcapWebrtcParams, connectLcapWebrtc } from './connect-webrtc.js';
+import {
+  buildClientExchangeRequest,
+  type CommitCounts,
+  type ExchangeScope,
+  ingestClientExchangeResponse,
+} from '../exchange.js';
+import { type ConnectLcapWebrtcParams, connectLcapWebrtcChannel } from './connect-webrtc.js';
 import type { HttpsTransportConfig } from './https.js';
 import { buildServerTransports, offlineExchange } from './registry.js';
 import { derivePublicSignalKeyBytes } from './signal-key.js';
+import { runWebrtcBidirectionalExchange } from './webrtc-sync.js';
 
 export interface SyncRoomOverP2pParams {
+  /** The local `lcap_v2` store — BOTH the responder's content source and the requester's
+   *  ingestion sink (a fully bidirectional §16 exchange: serve the peer's wants + ingest ours). */
+  readonly db: IDBDatabase;
   /** The PUBLIC room rendezvous hash (an opaque one-way hash; never a real room id). */
   readonly roomIdHash: Uint8Array;
   /** This device's opaque peer key (a device-key hash; never an IP, §19.1). */
@@ -38,14 +48,9 @@ export interface SyncRoomOverP2pParams {
   readonly remotePeerKey: string;
   /** The initiator creates the offer + data channel; the responder answers. */
   readonly initiator: boolean;
-  /** The encoded §16 exchange request body (a PUBLIC pack) to send. */
-  readonly requestMessage: Uint8Array;
-  /**
-   * The request pack's privacy label.  This consumer is the PUBLIC path, so it must be
-   * `'public'`; the carriage gate would in any case skip the public-only WebRTC transport
-   * for a non-public pack.  Defaults to `'public'`.
-   */
-  readonly privacyLabel?: PackHeaderV2['privacy_label'];
+  /** The §22.5 sharing scope — what we may serve/push (public-only; room/priority filtered).  A
+   *  room sync passes `{ roomHashAllowlist: [thisRoom] }` so it never gossips unrelated rooms. */
+  readonly scope?: ExchangeScope;
   /** §26.4 ICE/privacy options (off by default; the user must opt into WebRTC). */
   readonly privacy?: WebrtcPrivacyOptions;
   /** A precomputed §26.4 decision (overrides `privacy`). */
@@ -66,32 +71,35 @@ export interface SyncRoomOverP2pParams {
 export interface SyncRoomOverP2pResult {
   /** Which transport actually carried the exchange (`'webrtc'` when the peer was reachable). */
   readonly transport: TransportId;
-  /** The peer's §16 exchange response body. */
-  readonly response: Uint8Array;
+  /** The commit counts when the exchange served us content, or `null` (nothing ingested). */
+  readonly ingested: CommitCounts | null;
 }
 
 /**
- * Drive one live §16 exchange for a PUBLIC room, preferring the WebRTC peer transport but
- * always ending the fallback at the HTTPS anchor.  Returns the carrying transport + the
- * response, or `null` if every transport failed (offline with no reachable peer or
- * server).  The WebRTC channel, when established, is closed by `offlineExchange`'s
- * exchange round (`runExchangeRound` always closes the transport).
+ * Drive ONE fully BIDIRECTIONAL §16 exchange for a PUBLIC room: prefer the live WebRTC peer
+ * (both peers serve + ingest over the one channel), and back-stop at the always-correct HTTPS
+ * anchor when WebRTC is unreachable OR returned nothing for us.  Returns the carrying transport +
+ * the ingest counts, or `null` if every path failed.  Content actually MOVES — a served pack is
+ * CID-verified + committed into the local store (no transport trust).
  */
 export async function syncRoomOverP2p(
   params: SyncRoomOverP2pParams,
 ): Promise<SyncRoomOverP2pResult | null> {
-  const privacyLabel = params.privacyLabel ?? 'public';
+  // The public P2P plane builds a PUBLIC request (and the responder serves public-only), so the
+  // exchange is structurally public — the §22.6 carriage gate is inherent, not a per-call flag.
+  const request = await buildClientExchangeRequest(params.db, 'relay', params.scope);
 
-  // The always-correct anchor is always present; the optional WebRTC peer transport is
-  // prepended when it can be established.
-  const transports: LcapTransport[] = [];
-
-  let webrtc: LcapTransport | null = null;
+  // 1) Prefer the live WebRTC peer — a real bidirectional exchange over one duplex channel.
+  let channel: Awaited<ReturnType<typeof connectLcapWebrtcChannel>> | null = null;
   try {
-    // Public content: derive the shared signaling key from the public room hash so any
-    // public peer can join the rendezvous (signaling secrecy is not the trust root here).
+    // Public content: derive the shared signaling key from the public room hash so any public
+    // peer can join the rendezvous (signaling secrecy is not the trust root here).
     const signalKeyBytes = await derivePublicSignalKeyBytes(params.roomIdHash);
-    webrtc = await connectLcapWebrtc({
+    // Cancel / unmount may have fired WHILE buildClientExchangeRequest + the signal-key derivation
+    // awaited; `connectWebrtc` only ATTACHES an abort listener, so an already-fired abort would not
+    // be observed before the initiator POSTs its sealed offer — bail before any signaling (#V).
+    if (params.signal?.aborted) return null;
+    channel = await connectLcapWebrtcChannel({
       signalKeyBytes,
       roomIdHash: params.roomIdHash,
       selfPeerKey: params.selfPeerKey,
@@ -106,16 +114,56 @@ export async function syncRoomOverP2p(
       ...(params.pollIntervalMs !== undefined ? { pollIntervalMs: params.pollIntervalMs } : {}),
       ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
     });
+    const out = await runWebrtcBidirectionalExchange({
+      db: params.db,
+      channel,
+      request,
+      ...(params.scope !== undefined ? { scope: params.scope } : {}),
+      ...(params.signal !== undefined ? { signal: params.signal } : {}),
+      ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
+    });
+    // A successful WebRTC exchange is one where the peer was REACHABLE — either it served us content
+    // (`ingested`) OR we served it ours (`served`, e.g. a direct sync where only the OTHER device was
+    // missing our records).  Either way the P2P round happened, so do NOT fall through to the
+    // authoritative anchor (which would needlessly re-upload our request + push_pack to the server).
+    // Only a round that moved nothing (peer unreachable / unresponsive) falls through.
+    if (out.ingested !== null || out.served) {
+      return { transport: 'webrtc', ingested: out.ingested };
+    }
   } catch {
     // WebRTC unavailable (off, force-off, unreachable, timeout) — fall back to the anchor.
-    webrtc = null;
+  } finally {
+    // ALWAYS close an established channel — even if the exchange threw — so the live
+    // RTCPeerConnection / signaling loop never leaks before the HTTPS fall-back.
+    if (channel) {
+      try {
+        channel.close();
+      } catch {
+        // already closed
+      }
+    }
   }
-  if (webrtc) transports.push(webrtc);
 
-  // The HTTPS anchor is appended LAST in the registry set; `selectTransports` (inside
-  // `offlineExchange`) re-asserts that server-mediated transports terminate the order, so
-  // even though we prepend WebRTC the anchor-last policy is structurally preserved.
-  for (const t of buildServerTransports(params.httpsConfig ?? {})) transports.push(t);
+  // If the user CANCELLED while the WebRTC leg was failing, do NOT fall through to the anchor: the
+  // HTTPS transport does not thread the AbortSignal into fetch, so a cancelled sync could otherwise
+  // still upload the request + push_pack to the server.
+  if (params.signal?.aborted) return null;
 
-  return offlineExchange(transports, params.requestMessage, params.signal, privacyLabel);
+  // 2) Anchor back-stop: a requester-only exchange against the always-correct server, then INGEST
+  //    the served response.  (`offlineExchange` over the server transports preserves anchor-last.)
+  const anchor = await offlineExchange(
+    buildServerTransports(params.httpsConfig ?? {}),
+    request,
+    params.signal,
+    'public',
+  );
+  if (!anchor) return null;
+  // The HTTPS transport does not thread the AbortSignal into fetch, so the anchor request can still
+  // COMPLETE after a Cancel/unmount fired mid-flight — re-check before COMMITTING its response, so a
+  // cancelled sync never mutates the local store after the UI owner is gone (#JJ).
+  if (params.signal?.aborted) return null;
+  // Room-scoped on the fallback too: the server serves explicit wants by CID with no room scope, so
+  // a scoped sync must filter the anchor's response to the allowlisted rooms before commit (#M).
+  const ingested = await ingestClientExchangeResponse(params.db, anchor.response, params.scope);
+  return { transport: anchor.transport, ingested };
 }

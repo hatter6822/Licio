@@ -282,22 +282,34 @@ slice is closed on the convergence side:
   - **§14.5 live snapshot fetch** — a compacted/lagging member that cannot fetch the
     pruned prefix op-by-op requests the peer's snapshot archive over
     `snapshot_request`/`snapshot_response` and bootstraps from it.
-- **Tracked residuals (closure target: the WS-S two-browser E2E + resilience slice).**
+- **Tracked residuals (closure target: physical-radio field confirmation).**
   - **Real-browser carrier convergence** (WP-9 / finding 13) is **shipped**:
     `apps/web/e2e/private-carrier.realwebrtc.spec.ts` runs the REAL `connectPrivatePeer`
     carrier over a real Chromium `RTCPeerConnection` (against the Vite dev server, via the
-    `e2e-carrier-harness` re-export), and two members complete the §15.5 handshake + exchange
-    a frame through the session-key-sealed channel — and it surfaced + fixed a live-ICE bug
-    (the signaling payload dropped `sdpMid`/`sdpMLineIndex`, which a real `addIceCandidate`
-    rejects).  What REMAINS: the full TWO-CONTEXT `create→invite→join→connect→converge` over
-    the live BFF rendezvous endpoint (`POST /v1/private-rendezvous/*`) — the current spec uses
-    an in-page rendezvous bridge and shares epoch keys directly (the §12.3 join is proven
-    separately).
+    `e2e-carrier-harness` re-export).  It now proves THREE legs over real WebRTC: two members
+    complete the §15.5 handshake + exchange a frame through the session-key-sealed channel; a
+    FRESH member walks the §15.7 DAG to **byte-identical** reduced state (`roomStateCommitment`
+    parity); and a real **§15.4 ICE-restart** re-offer keeps the channel alive (a frame still
+    flows afterwards — the data channel + session key survived).  It earlier surfaced + fixed a
+    live-ICE bug (the signaling payload dropped `sdpMid`/`sdpMLineIndex`, which a real
+    `addIceCandidate` rejects).  What REMAINS: the full TWO-CONTEXT
+    `create→invite→join→connect→converge` over the live BFF rendezvous endpoint
+    (`POST /v1/private-rendezvous/*`) — the current spec uses an in-page rendezvous bridge and
+    shares epoch keys directly (the §12.3 join is proven separately).
+  - **Carrier resilience** (§15.4) is **shipped**: ICE-restart recovers a TRANSIENT path
+    failure IN PLACE on the live `RTCPeerConnection` — a connection/ICE-state watcher debounces
+    a `disconnected` blip (and restarts immediately on `failed`), the OFFERER re-offers with
+    `iceRestart` over the still-live sealed signaling (calling `pc.restartIce()` when available)
+    while the answerer renegotiates, the SAME data channel + the membership-proven session key
+    are preserved (no re-handshake), restart attempts are BOUNDED per episode and reset on
+    recovery, and on exhaustion the channel drops → `maintainConnection` re-dials.  The
+    deterministic state machine is unit-covered (`src/private-p2p/__tests__/ice-restart.test.ts`:
+    in-place recovery, bounded retries, offerer-initiates, disabled).
   - **Multi-peer mesh** (WP-7 / finding 14): the implementation is **shipped + unit-proven**
     (`maintainMesh` + `PrivateRoomSession.connectMesh` — fill-to-`maxPeers`, remove-on-drop,
     re-poll; `connectPrivatePeer` skips already-connected peers + returns the verified peer id).
-    What REMAINS: the end-to-end multi-browser mesh proof (the unit tests cover the logic; the
-    live 3-peer fan-out is part of the two-browser E2E slice).
+    What REMAINS: the end-to-end multi-browser mesh proof under real loss (the unit tests cover
+    the logic; the live 3-peer fan-out is part of the physical-radio field slice).
   - Mounting the grant-delivery + media affordances on the room UI beyond the copy-paste
     `InvitePanel`/`JoinPanel`.
 

@@ -30,6 +30,7 @@ import type {
   SnapshotResponse,
   SyncMessage,
 } from '@licio/private-p2p';
+import { devWarn } from '../lib/dev-log.js';
 
 /** The §15.7 byte budget a block request advertises (a media chunk is ≤ 16 KiB; this caps
  *  a single request's served payload, bounded by the §27 DoS limits on both ends). */
@@ -592,8 +593,11 @@ export function maintainMesh(dial: MeshDial, options: MeshOptions = {}): MeshCon
       let result: { peerId: string; session: DialedSession } | null;
       try {
         result = await dial(excluded, onDrop);
-      } catch {
-        return; // a dial error — wait for the next poll cycle
+      } catch (error) {
+        // A dial error → wait for the next poll cycle, but surface it in dev (a persistent dial
+        // failure here is a real problem, not just a peer that briefly went away).
+        devWarn('peer dial failed; will retry next poll cycle', error);
+        return;
       }
       if (!result) return; // no NEW peer available right now
       if (stopping) {

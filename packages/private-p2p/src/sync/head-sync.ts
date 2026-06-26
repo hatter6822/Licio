@@ -2,8 +2,9 @@
 //
 // WS-S.6.4 — head announcement + missing-block protocol + sync priority
 // (PRIVATE_SPEC §15.6, §15.7, §15.8).  The PURE decision plane that runs over
-// the pairwise channel (the encrypted carriage is WS-S.6.2; the live transport
-// is the browser follow-up):
+// the pairwise channel (the encrypted carriage is WS-S.6.2; the live browser
+// transport SHIPS in `apps/web/src/private-p2p/connect-peer.ts` +
+// `sync-session.ts`, which drive this plane over a real `RTCPeerConnection`):
 //
 //   • §15.6 head announcement — a peer announces its accepted-DAG heads, latest
 //     verified snapshot, and a COARSE op-count bucket (never an exact count).
