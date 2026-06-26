@@ -153,6 +153,8 @@ interface QuarantineRow {
   readonly cid: string;
   readonly missingDeps?: readonly string[];
   readonly roomHash?: string;
+  /** Whether the quarantined record is PUBLIC — `false` keeps its wants off the public plane (#NN). */
+  readonly public?: boolean;
 }
 
 /**
@@ -200,6 +202,11 @@ async function collectQuarantineWants(
   // gaps from being advertised (#I).  A room-scoped sync advertises ONLY its rooms' gaps, so "Sync
   // this room" never leaks/fetches an unrelated room's missing CIDs (#K).
   await forEachByCursor<QuarantineRow>(db, LCAP_STORE.quarantine, (row) => {
+    // buildClientExchangeRequest is ALWAYS the PUBLIC plane (courier / WebRTC) — never advertise an
+    // in_room/private record's missing prerequisite CIDs over it (a manual non-public file import
+    // tags such rows `public:false`); skip them so the gap never leaks/fetches on the public P2P
+    // plane (#NN).  Untagged legacy rows stay advertised (they predate the tag).
+    if (row.public === false) return;
     if (allow && (row.roomHash === undefined || !allow.has(normalizeRoomKey(row.roomHash)))) {
       return; // not a room we are syncing — skip its gaps
     }
@@ -271,6 +278,7 @@ export async function respondToClientExchange(
   db: IDBDatabase,
   requestBytes: Uint8Array,
   scope?: ExchangeScope,
+  shouldIngestPush?: () => boolean,
 ): Promise<Uint8Array | null> {
   const lcap = await import('@licio/lcap');
   const request = ((): import('@licio/lcap').ExchangeRequestV2 | null => {
@@ -285,8 +293,10 @@ export async function respondToClientExchange(
   // Ingest the peer's pushed content (gossip-in), CID-verified AND ROOM-SCOPED into the local store:
   // a room-scoped sync ("Sync this room") commits only the allowlisted rooms' records (the scope
   // filter drops a peer's UNRELATED public rooms — so ambient gossip can't pollute `lcap_v2` past
-  // the allowlist), while an unscoped sync accepts all public gossip.
-  if (request.push_pack !== undefined) {
+  // the allowlist), while an unscoped sync accepts all public gossip.  The push ingest is a SIDE
+  // EFFECT, so it is skipped when the caller's liveness check has gone false (a Stop / revocation /
+  // peers→none during this async build), so a stopped courier never commits the push (#OO).
+  if (request.push_pack !== undefined && (shouldIngestPush?.() ?? true)) {
     await ingestPackIntoStore(db, request.push_pack, scope);
   }
 

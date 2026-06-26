@@ -44,6 +44,7 @@ async function quarantineMissing(
   parentCid: string,
   missing: string[],
   roomHash?: string,
+  publicFlag?: boolean,
 ): Promise<void> {
   const tx = db.transaction(LCAP_STORE.quarantine, 'readwrite');
   tx.objectStore(LCAP_STORE.quarantine).put({
@@ -53,6 +54,7 @@ async function quarantineMissing(
     missingDeps: missing,
     byteSize: 0,
     ...(roomHash !== undefined ? { roomHash } : {}),
+    ...(publicFlag !== undefined ? { public: publicFlag } : {}),
   });
   await new Promise<void>((resolve, reject) => {
     tx.oncomplete = () => resolve();
@@ -67,7 +69,12 @@ async function putPublicRecord(
   db: IDBDatabase,
   lcap: typeof import('@licio/lcap'),
   visibility: 'public' | 'in_room' | 'private',
-  opts: { deps?: string[]; priority?: 0 | 1 | 2 | 3 | 4; roomHash?: string } = {},
+  opts: {
+    deps?: string[];
+    recordDeps?: string[];
+    priority?: 0 | 1 | 2 | 3 | 4;
+    roomHash?: string;
+  } = {},
 ): Promise<string> {
   const capabilityCid = await lcap.cidFor('record', new Uint8Array([0]));
   const priority = opts.priority ?? 2;
@@ -90,6 +97,9 @@ async function putPublicRecord(
     // The record's content block in the SIGNED body — so the share closure derives it from the body
     // (#O), not from unauthenticated row.deps metadata.  Tests pass the block as the single dep.
     ...(opts.deps?.[0] !== undefined ? { body_block_cid: opts.deps[0] } : {}),
+    // RECORD prerequisites in the SIGNED body (#RR test) — the repack derives the pack-entry deps the
+    // peer's importPack resolves over from these, so a dropped one re-quarantines this record.
+    ...(opts.recordDeps !== undefined ? { parent_record_cids: opts.recordDeps } : {}),
   });
   const recordCid = await lcap.cidFor('record', body);
   const tx = db.transaction(LCAP_STORE.records, 'readwrite');
@@ -249,6 +259,22 @@ describe('client §16 exchange engine', () => {
     expect(wantCids).not.toContain(depX); // an unrelated room's gap is never advertised
   });
 
+  it('SECURITY: a NON-PUBLIC quarantine row never advertises its wants on the public plane (#NN)', async () => {
+    const lcap = await import('@licio/lcap');
+    const publicWant = await cidFor('record', new Uint8Array([7]));
+    const privateWant = await cidFor('record', new Uint8Array([8]));
+    // A PUBLIC quarantine row (gap safe to advertise) and a NON-PUBLIC one (an in_room/private record
+    // from a manual contains_in_room_metadata file import) — only the public want may leave (#NN).
+    await quarantineMissing(peerA, 'pubrec', [publicWant], undefined, true);
+    await quarantineMissing(peerA, 'privrec', [privateWant], undefined, false);
+
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+    const decoded = lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, request);
+    const wantCids = (decoded.want ?? []).map((w) => w.cid);
+    expect(wantCids).toContain(publicWant);
+    expect(wantCids).not.toContain(privateWant); // the in_room gap never leaks on the courier plane
+  });
+
   it('counts WANTS after de-dup so a distinct gap is not starved by many shared rows (#I)', async () => {
     const lcap = await import('@licio/lcap');
     const depShared = await cidFor('record', new Uint8Array([3]));
@@ -303,6 +329,44 @@ describe('client §16 exchange engine', () => {
     expect(counts?.records).toBe(1); // only roomB's record committed
     expect(await getHeldObject(peerA, capB)).toBeDefined();
     expect(await getHeldObject(peerA, capA)).toBeUndefined(); // roomA dropped past the scope
+  });
+
+  it('SECURITY: a public record requiring a DROPPED (non-public) dep is re-quarantined, not committed (#RR)', async () => {
+    const lcap = await import('@licio/lcap');
+    // D: a NON-PUBLIC record the public ingress will drop.  R: a PUBLIC record that DECLARES D as a
+    // dep.  importPack resolves R's dep over every CID-verified frame (D is present in the pack), so
+    // without #RR R would commit even though D is filtered out and absent from the store.
+    const depRecord = await putPublicRecord(peerB, lcap, 'in_room');
+    const publicRecord = await putPublicRecord(peerB, lcap, 'public', { recordDeps: [depRecord] });
+    const pack = await lcap.repackHeldObjects(
+      (cid) => getHeldObject(peerB, cid),
+      [publicRecord, depRecord],
+      1_000_000,
+    );
+
+    const counts = await ingestPackIntoStore(peerA, pack.pack as Uint8Array);
+    expect(counts?.records).toBe(0); // R was NOT committed — its dropped dep re-quarantined it (#RR)
+    expect(await getHeldObject(peerA, publicRecord)).toBeUndefined(); // R is not in the records store
+    expect(await getHeldObject(peerA, depRecord)).toBeUndefined(); // D was dropped (non-public)
+    expect(counts?.quarantined).toBeGreaterThan(0); // R's gap is now tracked as a want
+  });
+
+  it('SECURITY: the responder SKIPS the push ingest when liveness has gone false mid-build (#OO)', async () => {
+    const lcap = await import('@licio/lcap');
+    const bytes = new Uint8Array([5, 5, 5, 5]);
+    const blockCid = await cidFor('block', bytes);
+    await putBlock(peerB, { blockCid, state: 'integrity_verified', size: bytes.length }, [bytes]);
+    await putPublicRecord(peerB, lcap, 'public', { deps: [blockCid] });
+    // peerB builds a request that PUSHES its shareable content (the record + its block).
+    const request = await buildClientExchangeRequest(peerB, 'courier');
+
+    // The courier was STOPPED while this responder was awaiting → the push must NOT be committed.
+    await respondToClientExchange(peerA, request, undefined, () => false);
+    expect(await readBlockBytes(peerA, blockCid)).toBeUndefined(); // push ingest gated off (#OO)
+
+    // A LIVE check ingests the same push.
+    await respondToClientExchange(peerA, request, undefined, () => true);
+    expect(await readBlockBytes(peerA, blockCid)).toEqual(bytes);
   });
 
   it('SECURITY: a block listed only in row.deps metadata (not the signed body) is NOT shared (#O)', async () => {

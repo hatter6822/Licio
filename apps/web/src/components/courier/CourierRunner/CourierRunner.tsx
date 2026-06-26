@@ -268,13 +268,18 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
         // Serve a peer's inbound request from what we hold (the bidirectional responder), filtered by
         // the CURRENT sharing scope so a peer never receives over-priority / other-room content — and
         // rebuilt if the scope changed mid-build (#N).
-        buildResponse: async (request) => {
+        buildResponse: async (request, _endpointId, shouldIngestPush) => {
           for (let i = 0; i < 4; i++) {
             const v = scopeVersionRef.current;
-            const bytes = await respondToClientExchange(db, request, scopeRef.current);
+            const bytes = await respondToClientExchange(
+              db,
+              request,
+              scopeRef.current,
+              shouldIngestPush,
+            );
             if (scopeVersionRef.current === v) return bytes;
           }
-          return respondToClientExchange(db, request, scopeRef.current);
+          return respondToClientExchange(db, request, scopeRef.current, shouldIngestPush);
         },
         onOutcome: (outcome) => {
           // INGEST a served response into the local store (CID-verified; fills our gaps) — ROOM-SCOPED

@@ -151,6 +151,7 @@ public class BluetoothCourierRadioTest {
         radio.startDiscovery();
         BluetoothGatt gatt = peerDevice().connectGatt(
                 ctx(), false, radio.gattClientCallback, BluetoothDevice.TRANSPORT_LE);
+        radio.blePendingClients.put(PEER, gatt); // mirror the real scan-dial (promotion needs this, #LL)
         BluetoothGattService courierService = BluetoothCourierRadio.buildCourierGattService();
         shadowOf(gatt).addDiscoverableService(courierService);
         shadowOf(gatt).allowCharacteristicNotification(

@@ -195,6 +195,10 @@ export interface CourierControllerConfig {
   readonly buildResponse?: (
     request: Uint8Array,
     endpointId: string,
+    /** Re-evaluated right before the peer's push_pack is INGESTED (a side effect inside the
+     *  responder): the controller passes a LIVE liveness/allowlist check, so a Stop / disclosure
+     *  revocation / peers→none during the async build does not commit the push after the fact (#OO). */
+    shouldIngestPush?: () => boolean,
   ) => Promise<Uint8Array | null> | Uint8Array | null;
   /** HTTPS anchor config (exchange URL + injectable fetch) for the fallback leg. */
   readonly httpsConfig?: HttpsTransportConfig;
@@ -608,7 +612,14 @@ export class CourierController {
     if (!this.config.buildResponse) return; // request-only courier — drop the peer's request
     if (!mayExchangeWithEndpoint(this.controls, endpointId)) return; // the same who-can-exchange gate
     try {
-      const response = await this.config.buildResponse(request, endpointId);
+      // The responder INGESTS the peer's push_pack as a side effect; gate that ingest on a LIVE
+      // check so a Stop / disclosure revocation / peers→none during the async build doesn't commit
+      // the push after the fact (the post-await checks below only stop the REPLY, not the ingest) (#OO).
+      const stillLive = (): boolean =>
+        this.started &&
+        this.isChannelActive(channel, generation) &&
+        mayExchangeWithEndpoint(this.controls, endpointId);
+      const response = await this.config.buildResponse(request, endpointId, stillLive);
       if (!response) return;
       // Re-check LIVENESS after the async build: a Stop / disclosure revocation / forced-off mode /
       // channel deselection may have torn this channel down WHILE buildResponse awaited — a stopped
@@ -816,6 +827,11 @@ export class CourierController {
       this.emit(channel, endpointId, null, null, 'exchange_failed');
       return;
     }
+    // The HTTPS anchor leg has no abort signal, so it can COMPLETE after a Stop / disclosure
+    // revocation / channel deselect that happened while the server request was in flight — re-check
+    // liveness before emitting, since emitting drives the runner's onOutcome to INGEST the response
+    // into IndexedDB after the courier was stopped (#TT).
+    if (!this.started || !this.isChannelActive(channel, generation)) return;
     this.emit(channel, endpointId, result.transport, result.response, '');
   }
 

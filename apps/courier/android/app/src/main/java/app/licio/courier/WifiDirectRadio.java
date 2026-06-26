@@ -380,6 +380,7 @@ public class WifiDirectRadio implements CourierRadio {
     private void startServerSocket() {
         final long serverGen = startGeneration; // a stop/restart invalidates this server setup
         new Thread(() -> {
+            if (isStale(serverGen)) return; // a newer start superseded this thread before it ran (#KK)
             closeServerSocket();
             ServerSocket server;
             try {
@@ -400,7 +401,7 @@ public class WifiDirectRadio implements CourierRadio {
             // session, so the running flag alone can't tell), close the freshly-bound listener now so
             // the OLD group's data port never opens under the fresh controller (#U).
             if (!running.get() || isStale(serverGen)) {
-                closeServerSocket();
+                closeServerSocket(server); // by value — never the fresh start's listener (#KK)
                 return;
             }
             try {
@@ -418,9 +419,9 @@ public class WifiDirectRadio implements CourierRadio {
             } catch (IOException ignored) {
                 // socket closed on stop — non-fatal
             } finally {
-                // Close whatever we bound, even if `running` flipped false right after the
-                // post-creation check above (so the bound port never leaks past stop()).
-                closeServerSocket();
+                // Close THIS thread's listener by value, so an old group-owner thread reaching here
+                // after a Stop→Start never closes/nulls the fresh start's new listener (#KK).
+                closeServerSocket(server);
             }
         }).start();
     }
@@ -461,9 +462,11 @@ public class WifiDirectRadio implements CourierRadio {
             } finally {
                 // The client data socket has closed (connect failed, OR a live session ended by
                 // EOF/error/stop) while the P2P group may STILL be formed.  Release the per-group
-                // claim so a later CONNECTION_CHANGED for the still-formed group can redial, instead
-                // of being skipped (compareAndSet failing) until the group dissolves.
-                groupActive.set(false);
+                // claim so a later CONNECTION_CHANGED for the still-formed group can redial — but
+                // ONLY if this thread still belongs to the CURRENT session: a client thread from a
+                // SUPERSEDED group (after a Stop→Start) must not release the FRESH group's claim,
+                // which would let later connection-info broadcasts start duplicate dials (#PP).
+                if (!isStale(connectGen)) groupActive.set(false);
             }
         }).start();
     }
@@ -496,5 +499,16 @@ public class WifiDirectRadio implements CourierRadio {
             }
             serverSocket = null;
         }
+    }
+
+    /** Close THIS thread's bound listener, clearing the field only if it STILL points at it — a fresh
+     *  start may have already replaced it, and that new listener must not be closed/nulled (#KK). */
+    private void closeServerSocket(ServerSocket server) {
+        try {
+            server.close();
+        } catch (IOException ignored) {
+            // already closed
+        }
+        if (serverSocket == server) serverSocket = null;
     }
 }

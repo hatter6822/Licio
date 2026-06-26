@@ -195,6 +195,10 @@ interface QuarantineRow {
   /** The quarantined record's canonical room key (hex room_id_hash), so a room-scoped sync can
    *  advertise wants ONLY for the rooms it is syncing (an unrelated room's gaps never leak). */
   readonly roomHash?: string;
+  /** Whether the quarantined record's SIGNED body is PUBLIC — so the public courier/WebRTC plane
+   *  never advertises an in_room/private record's missing prerequisite CIDs (#NN).  `false` is set
+   *  for a non-public record (e.g. from a manual contains_in_room_metadata file import). */
+  readonly public?: boolean;
 }
 
 /**
@@ -229,14 +233,28 @@ export async function commitImportedBundle(
   // SIGNED bodies and commits ONLY what an in-scope, PUBLIC record authenticates — its body's block
   // CIDs (#GG) and its proofs.  An UNSCOPED full import (a user's own file) commits everything.
   const scopeFiltered = allow !== undefined || opts.publicOnly === true;
-  const decode = scopeFiltered ? (await import('@licio/lcap')).decodeAndRouteRecord : undefined;
+  // The codec is already loaded by readBundleForImport; resolve it up front — it tags each quarantine
+  // row's visibility (#NN) on EVERY path, while `decode` (the record-branch #P/#GG filter) stays
+  // SCOPE-gated so an unscoped file import never drops a non-contribution / plain body it can't decode.
+  const codec = (await import('@licio/lcap')).decodeAndRouteRecord;
+  const decode = scopeFiltered ? codec : undefined;
+  // True iff a record body decodes to PUBLIC visibility (or carries no visibility_scope).  A body
+  // that does NOT decode is treated as NON-public for want-advertising (fail-closed, never leak).
+  const isPublicRecordBody = (body: Uint8Array): boolean => {
+    try {
+      const r = codec(body);
+      return !('visibility_scope' in r) || r.visibility_scope === 'public';
+    } catch {
+      return false;
+    }
+  };
   // On a PUBLIC ingress, commit ONLY records whose SIGNED body decodes to PUBLIC visibility —
   // `readBundleForImport` only refuses `contains_private_encrypted`, so an `in_room`/`private`
   // record (or one under a misleading public header) would otherwise land in the public store (#P).
   const isPublicBody = (body: Uint8Array): boolean => {
-    if (!opts.publicOnly || !decode) return true;
+    if (!opts.publicOnly) return true;
     try {
-      const r = decode(body);
+      const r = codec(body);
       return !('visibility_scope' in r) || r.visibility_scope === 'public';
     } catch {
       return false; // undecodable on a public ingress → never commit
@@ -248,6 +266,11 @@ export async function commitImportedBundle(
   // otherwise valid pack and have those bytes land in `lcap_v2` while the off-scope record is skipped.
   const committedRecordCids = new Set<string>();
   const allowedBlocks = new Set<string>();
+  // CIDs of pack frames this ingest DROPS (off-scope / non-public records, off-closure blocks/proofs/
+  // chunks).  importPack counted every CID-verified frame as "present" BEFORE these filters ran, so a
+  // committed record that DECLARES a now-dropped dep must be re-quarantined, not left committed with an
+  // absent prerequisite (#RR).
+  const droppedCids = new Set<string>();
 
   const recordRows: RecordRow[] = [];
   const proofRows: ProofRow[] = [];
@@ -265,7 +288,10 @@ export async function commitImportedBundle(
   for (const [cid, frame] of importResult.imported) {
     const entry = entryByCid.get(cid);
     if (frame.frameKind === 'record_body') {
-      if (!inScope(cid)) continue; // out-of-scope room — never committed under a room-scoped ingest
+      if (!inScope(cid)) {
+        droppedCids.add(cid); // out-of-scope room — never committed under a room-scoped ingest (#RR)
+        continue;
+      }
       // Decode the SIGNED body once (scoped ingest): enforce public-only (#P) AND derive the in-scope
       // block closure (#GG) from the authenticated body, never the pack-table metadata.
       let decoded: ReturnType<NonNullable<typeof decode>> | undefined;
@@ -273,9 +299,13 @@ export async function commitImportedBundle(
         try {
           decoded = decode(frame.payload);
         } catch {
-          continue; // undecodable on a scoped ingress → never commit
+          droppedCids.add(cid); // undecodable on a scoped ingress → never commit (#RR)
+          continue;
         }
-        if ('visibility_scope' in decoded && decoded.visibility_scope !== 'public') continue; // #P
+        if ('visibility_scope' in decoded && decoded.visibility_scope !== 'public') {
+          droppedCids.add(cid); // #P non-public record dropped on a public ingress (#RR)
+          continue;
+        }
       }
       // Store the room key as the LOSSLESS canonical hex of the room_id_hash bytes (not a lossy
       // TextDecoder), so it compares equal to the room frontier + the "Sync this room" UI hash.
@@ -336,7 +366,10 @@ export async function commitImportedBundle(
   // COMMITTED record, and a block/chunk only if a committed record's signed body (or our own
   // quarantine want) references it.
   for (const p of tentativeProofs) {
-    if (scopeFiltered && !committedRecordCids.has(p.recordCid)) continue;
+    if (scopeFiltered && !committedRecordCids.has(p.recordCid)) {
+      droppedCids.add(p.cid); // off-closure proof (#RR)
+      continue;
+    }
     proofRows.push({
       proofCid: p.cid,
       proofBody: p.payload,
@@ -346,12 +379,28 @@ export async function commitImportedBundle(
     });
   }
   for (const b of tentativeBlocks) {
-    if (scopeFiltered && !allowedBlocks.has(b.cid)) continue; // a block no in-scope record references
+    if (scopeFiltered && !allowedBlocks.has(b.cid)) {
+      droppedCids.add(b.cid); // a block no in-scope record references (#RR)
+      continue;
+    }
     blockWrites.push(b);
   }
   for (const c of tentativeChunks) {
-    if (scopeFiltered && !allowedBlocks.has(c.cid)) continue; // a chunk outside the in-scope closure
+    if (scopeFiltered && !allowedBlocks.has(c.cid)) {
+      droppedCids.add(c.cid); // a chunk outside the in-scope closure (#RR)
+      continue;
+    }
     chunkWrites.push(c);
+  }
+
+  // #RR: re-quarantine any committed record that DECLARES a dep this ingest dropped.  importPack
+  // resolved deps over EVERY CID-verified frame (counting a now-dropped frame as present), so without
+  // this a public record requiring a filtered-out (non-public / off-scope) prerequisite would be
+  // committed with that prerequisite absent from the store instead of waiting for it.
+  const reQuarantined = new Map<string, string[]>(); // recordCid → the dropped deps it still needs
+  for (const r of recordRows) {
+    const droppedDeps = (r.deps ?? []).filter((d) => droppedCids.has(d));
+    if (droppedDeps.length > 0) reQuarantined.set(r.recordCid, droppedDeps);
   }
 
   // Quarantine rows from the per-object statuses (the precise missing prerequisites).
@@ -369,12 +418,17 @@ export async function commitImportedBundle(
       const qEntry = entryByCid.get(status.cid);
       const qRoom =
         qEntry?.room_id_hash !== undefined ? bytesToHex(qEntry.room_id_hash) : undefined;
+      // Tag the row's visibility (#NN) so the public courier/WebRTC plane never advertises an
+      // in_room/private record's missing prerequisite CIDs (a non-public file import quarantines
+      // such records).  A body that does not decode is treated as non-public (fail-closed).
+      const qPublic = qBody !== undefined ? isPublicRecordBody(qBody) : true;
       quarantineRows.push({
         cid: status.cid,
         reason: 'missing_dependency',
         firstSeen: nowMs,
         missingDeps: missingCids,
         byteSize: pack.frames.get(status.cid)?.payload.length ?? 0,
+        public: qPublic,
         ...(qRoom !== undefined ? { roomHash: qRoom } : {}),
       });
     } else if (status.status === 'rejected_bad_cid') {
@@ -384,13 +438,37 @@ export async function commitImportedBundle(
     }
   }
 
+  // #RR: turn each committed-but-dependency-dropped record into a quarantine row (so the gap is
+  // tracked + advertised as a want) and exclude it from the committed rows below.  A record that
+  // passed the commit filters is PUBLIC, so its want is safe on the public plane (#NN).
+  for (const [recCid, droppedDeps] of reQuarantined) {
+    for (const dep of droppedDeps) missing.add(dep);
+    const r = recordRows.find((x) => x.recordCid === recCid);
+    quarantineRows.push({
+      cid: recCid,
+      reason: 'missing_dependency',
+      firstSeen: nowMs,
+      missingDeps: droppedDeps,
+      byteSize: r?.size ?? 0,
+      public: true,
+      ...(r?.roomHash ? { roomHash: r.roomHash } : {}),
+    });
+  }
+  const commitRecords =
+    reQuarantined.size > 0 ? recordRows.filter((r) => !reQuarantined.has(r.recordCid)) : recordRows;
+  const commitTrust =
+    reQuarantined.size > 0 ? trustRows.filter((r) => !reQuarantined.has(r.recordCid)) : trustRows;
+  const commitLiveness =
+    reQuarantined.size > 0 ? livenessRows.filter((r) => !reQuarantined.has(r.cid)) : livenessRows;
+
   // Persist (capped transactions; blocks metadata↔blob separated).
-  if (recordRows.length > 0) await importInCappedTransactions(db, LCAP_STORE.records, recordRows);
+  if (commitRecords.length > 0)
+    await importInCappedTransactions(db, LCAP_STORE.records, commitRecords);
   if (proofRows.length > 0) await importInCappedTransactions(db, LCAP_STORE.proofs, proofRows);
-  if (trustRows.length > 0)
-    await importInCappedTransactions(db, LCAP_STORE.trustProjection, trustRows);
-  if (livenessRows.length > 0)
-    await importInCappedTransactions(db, LCAP_STORE.liveness, livenessRows);
+  if (commitTrust.length > 0)
+    await importInCappedTransactions(db, LCAP_STORE.trustProjection, commitTrust);
+  if (commitLiveness.length > 0)
+    await importInCappedTransactions(db, LCAP_STORE.liveness, commitLiveness);
   if (quarantineRows.length > 0)
     await importInCappedTransactions(db, LCAP_STORE.quarantine, quarantineRows);
   for (const block of blockWrites) {
@@ -409,7 +487,7 @@ export async function commitImportedBundle(
   }
 
   return {
-    records: recordRows.length,
+    records: commitRecords.length,
     proofs: proofRows.length,
     blocks: blockWrites.length,
     chunks: chunkWrites.length,

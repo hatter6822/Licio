@@ -81,8 +81,8 @@ public class GmsNearbyConnections implements NearbyConnections {
 
     @Override
     public void startDiscovery(String serviceId, long generation) {
-        currentGeneration = generation; // tag connections initiated under this start (#E)
-        client.startDiscovery(serviceId, discovery,
+        currentGeneration = generation; // the current session generation (#E/#R)
+        client.startDiscovery(serviceId, discoveryFor(generation),
                         new DiscoveryOptions.Builder().setStrategy(STRATEGY).build())
                 .addOnFailureListener(e -> {
                     if (listener != null) listener.onStartFailed("discover", generation, e);
@@ -163,28 +163,53 @@ public class GmsNearbyConnections implements NearbyConnections {
         };
     }
 
-    private final EndpointDiscoveryCallback discovery = new EndpointDiscoveryCallback() {
-        @Override
-        public void onEndpointFound(@NonNull String endpointId, @NonNull DiscoveredEndpointInfo info) {
-            if (listener != null) listener.onEndpointFound(endpointId, info.getServiceId(), currentGeneration);
-        }
+    /** A discovery callback bound to the start `generation` it was registered under (#MM): a found
+     *  event is tagged with THAT generation (captured at registration), not the mutable current one
+     *  — so an onEndpointFound queued by an OLD discovery run, delivered after a Stop→Start, carries
+     *  the old generation and is dropped by the radio's guard instead of requesting a fresh dial. */
+    private EndpointDiscoveryCallback discoveryFor(final long generation) {
+        return new EndpointDiscoveryCallback() {
+            @Override
+            public void onEndpointFound(@NonNull String endpointId, @NonNull DiscoveredEndpointInfo info) {
+                if (listener != null) listener.onEndpointFound(endpointId, info.getServiceId(), generation);
+            }
 
-        @Override
-        public void onEndpointLost(@NonNull String endpointId) {
-            // A lost-before-connect endpoint needs no courier action.
+            @Override
+            public void onEndpointLost(@NonNull String endpointId) {
+                // A lost-before-connect endpoint needs no courier action.
+            }
+        };
+    }
+
+    /** A STREAM payload in flight + the connection generation it was RECEIVED under — so a large
+     *  stream that completes after a Stop→Start (when `endpointGeneration` may already hold the FRESH
+     *  generation for a reconnected endpoint) is still tagged with the OLD generation and dropped by
+     *  the radio's guard, not delivered to the new controller (#QQ). */
+    private static final class IncomingStream {
+        final Payload payload;
+        final long generation;
+
+        IncomingStream(Payload payload, long generation) {
+            this.payload = payload;
+            this.generation = generation;
         }
-    };
+    }
 
     // STREAM payloads in flight, by payload id — read to bytes only once the transfer completes.
-    private final java.util.Map<Long, Payload> incomingStreams = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Map<Long, IncomingStream> incomingStreams =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     private final PayloadCallback payloadCallback = new PayloadCallback() {
         @Override
         public void onPayloadReceived(@NonNull String endpointId, @NonNull Payload payload) {
             if (payload.getType() == Payload.Type.STREAM) {
-                // A STREAM is delivered incrementally — hold it until onPayloadTransferUpdate reports
-                // SUCCESS, then read the full ordered byte stream (matches the sender's fromStream).
-                incomingStreams.put(payload.getId(), payload);
+                // A STREAM is delivered incrementally — hold it (with the generation it arrived under)
+                // until onPayloadTransferUpdate reports SUCCESS, then read the full ordered byte
+                // stream (matches the sender's fromStream).
+                incomingStreams.put(
+                        payload.getId(),
+                        new IncomingStream(
+                                payload, endpointGeneration.getOrDefault(endpointId, currentGeneration)));
                 return;
             }
             byte[] bytes = payload.asBytes();
@@ -199,16 +224,17 @@ public class GmsNearbyConnections implements NearbyConnections {
         public void onPayloadTransferUpdate(@NonNull String endpointId, @NonNull PayloadTransferUpdate update) {
             int status = update.getStatus();
             if (status == PayloadTransferUpdate.Status.IN_PROGRESS) return;
-            Payload payload = incomingStreams.remove(update.getPayloadId());
+            IncomingStream entry = incomingStreams.remove(update.getPayloadId());
             if (status != PayloadTransferUpdate.Status.SUCCESS) return; // FAILURE/CANCELED → dropped
-            if (payload == null) return; // a BYTES payload (handled on receipt) or already consumed
-            Payload.Stream stream = payload.asStream();
+            if (entry == null) return; // a BYTES payload (handled on receipt) or already consumed
+            Payload.Stream stream = entry.payload.asStream();
             if (stream == null || listener == null) return;
             try (InputStream in = stream.asInputStream()) {
                 byte[] bytes = readStreamBounded(in);
                 if (bytes != null) {
-                    listener.onPayloadReceived(endpointId, bytes,
-                            endpointGeneration.getOrDefault(endpointId, currentGeneration));
+                    // Tag with the generation the stream was RECEIVED under (#QQ), not the mutable
+                    // current map — a stale stream completing after a reconnect stays old-gen.
+                    listener.onPayloadReceived(endpointId, bytes, entry.generation);
                 }
             } catch (IOException e) {
                 // a truncated / failed stream — drop it; the exchange re-syncs on a later pass

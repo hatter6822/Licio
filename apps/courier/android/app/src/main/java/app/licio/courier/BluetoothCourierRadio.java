@@ -129,7 +129,9 @@ public class BluetoothCourierRadio implements CourierRadio {
     // Dials in flight (connectGatt issued, not yet STATE_CONNECTED): repeated scan results for the
     // same advertiser would otherwise each start ANOTHER connectGatt, leaking untracked GATTs that
     // emit duplicate connection events and survive stop(); this dedups them + lets stop() close them.
-    private final ConcurrentHashMap<String, BluetoothGatt> blePendingClients = new ConcurrentHashMap<>();
+    // Package-private so the Robolectric test can mirror the real dial (register a pending GATT before
+    // driving STATE_CONNECTED — promotion REQUIRES a current pending entry, #LL).
+    final ConcurrentHashMap<String, BluetoothGatt> blePendingClients = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, BluetoothGattCharacteristic> bleClientChars = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Integer> bleMtu = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CourierFraming.FrameAssembler> assemblers = new ConcurrentHashMap<>();
@@ -383,6 +385,7 @@ public class BluetoothCourierRadio implements CourierRadio {
         // leaving a stale RFCOMM server active under the fresh controller (#T).
         final long serverGen = bleStartGeneration;
         new Thread(() -> {
+            if (serverGen != bleStartGeneration) return; // superseded before this thread ran (#SS)
             closeServerSocket();
             BluetoothServerSocket server;
             try {
@@ -395,7 +398,7 @@ public class BluetoothCourierRadio implements CourierRadio {
             // A stop OR a Stop→Start (running true again for the NEW session) must close this freshly-
             // created listener so the OLD session's RFCOMM service never stays registered (#T).
             if (!running.get() || serverGen != bleStartGeneration) {
-                closeServerSocket();
+                closeServerSocket(server); // by value — never the fresh start's listener (#SS)
                 return;
             }
             try {
@@ -418,9 +421,9 @@ public class BluetoothCourierRadio implements CourierRadio {
             } catch (IOException ignored) {
                 // socket closed on stop — non-fatal
             } finally {
-                // Close whatever we created, even if `running` flipped false right after the
-                // post-creation check above (so the listener never leaks past stop()).
-                closeServerSocket();
+                // Close THIS thread's listener by value, so an old RFCOMM server thread unwinding
+                // after a Stop→Start never closes/nulls the fresh start's new listener (#SS).
+                closeServerSocket(server);
             }
         }).start();
     }
@@ -493,6 +496,17 @@ public class BluetoothCourierRadio implements CourierRadio {
             }
             serverSocket = null;
         }
+    }
+
+    /** Close THIS thread's RFCOMM listener, clearing the field only if it STILL points at it — a
+     *  fresh start may have already assigned its own listener, which must not be closed/nulled (#SS). */
+    private void closeServerSocket(BluetoothServerSocket server) {
+        try {
+            server.close();
+        } catch (IOException ignored) {
+            // already closed
+        }
+        if (serverSocket == server) serverSocket = null;
     }
 
     // --- BLE GATT fallback: peripheral (GATT server + advertiser) --------------------
@@ -739,11 +753,12 @@ public class BluetoothCourierRadio implements CourierRadio {
                     gatt.close();
                     return;
                 }
-                if (isSupersededClient(endpointId, gatt)) {
-                    // A DIFFERENT gatt already owns this endpoint (a Stop→Start / quick re-dial put a
-                    // FRESH pending/established gatt for the same address) — a delayed connect from
-                    // THIS old gatt must NOT remove the fresh pending one and install itself.  Close
-                    // this stale gatt without disturbing the current one (#Y).
+                if (isSupersededClient(endpointId, gatt) || blePendingClients.get(endpointId) != gatt) {
+                    // Promote ONLY a gatt that is the CURRENT pending dial.  A delayed STATE_CONNECTED
+                    // from an OLD-session gatt (a Stop→Start cleared the pending map before the new
+                    // scan re-dialed) has no current pending entry — and isSupersededClient can't see
+                    // it because nothing replaced it yet — so requiring a by-value pending entry
+                    // rejects it instead of promoting the stale/closed previous-session gatt (#LL/#Y).
                     blePendingClients.remove(endpointId, gatt); // by VALUE — never the fresh pending
                     gatt.close();
                     return;

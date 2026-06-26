@@ -158,6 +158,10 @@ export async function syncRoomOverP2p(
     'public',
   );
   if (!anchor) return null;
+  // The HTTPS transport does not thread the AbortSignal into fetch, so the anchor request can still
+  // COMPLETE after a Cancel/unmount fired mid-flight — re-check before COMMITTING its response, so a
+  // cancelled sync never mutates the local store after the UI owner is gone (#JJ).
+  if (params.signal?.aborted) return null;
   // Room-scoped on the fallback too: the server serves explicit wants by CID with no room scope, so
   // a scoped sync must filter the anchor's response to the allowlisted rooms before commit (#M).
   const ingested = await ingestClientExchangeResponse(params.db, anchor.response, params.scope);
