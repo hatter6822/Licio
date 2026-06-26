@@ -226,11 +226,19 @@ async function collectQuarantineWants(
   }));
 }
 
-/** Build a minimal PUBLIC §16 pulse (we advertise no frontier — a conservative "behind on
- *  everything" so the carriage gate + privacy label stay public-only). */
+/** Build a PUBLIC §16 pulse (we advertise no frontier — a conservative "behind on everything" so the
+ *  carriage gate + privacy label stay public-only).
+ *
+ *  Budget separation (the architectural fix): the DEFAULT is an HONEST FULL budget — a courier/relay
+ *  FERRIES content, so it must be able to fetch the priority-2 / media blocks it explicitly wants, and
+ *  advertising `minimal_mode` with full numerics (or shrinking the budget so it can't fetch its own
+ *  wants) is the bug (#XX/#BF).  `minimal: true` is the SELECTION-mode budget (stealth/emergency): the
+ *  numeric fields AND the `priority_floor`/`allow_media` floor shrink together, and the responder
+ *  HONORS that floor for PROACTIVE selection (#BF) — explicit wants stay bounded only by the byte cap. */
 async function publicPulse(
   lcap: typeof import('@licio/lcap'),
   transportProfile: 'courier' | 'relay',
+  minimal = false,
 ): Promise<ReturnType<typeof lcap.buildPulse>> {
   const sessionNonce = new Uint8Array(16);
   globalThis.crypto.getRandomValues(sessionNonce);
@@ -239,9 +247,7 @@ async function publicPulse(
     sessionNonce,
     transportProfile,
     privacyMode: 'public',
-    // minimalBudget ALSO shrinks the numeric fields (max_response_bytes, priority_floor, media) — not
-    // just the flag — so a "minimal" public pulse cannot still solicit full-priority/media responses (#XX).
-    budgets: lcap.minimalBudget(lcap.DEFAULT_BUDGET),
+    budgets: minimal ? lcap.minimalBudget(lcap.DEFAULT_BUDGET) : lcap.DEFAULT_BUDGET,
     supportedSuites: ['ES256'],
     supportedCompression: ['none', 'gzip', 'deflate'],
     supportedPackVersions: [2],
@@ -258,9 +264,12 @@ export async function buildClientExchangeRequest(
   db: IDBDatabase,
   transportProfile: 'courier' | 'relay' = 'courier',
   scope?: ExchangeScope,
+  /** Advertise the SELECTION-minimal budget (stealth / emergency): shrinks the numeric caps AND the
+   *  priority/media floor.  Default false — a courier/relay ferries full content (#XX/#BF). */
+  minimal = false,
 ): Promise<Uint8Array> {
   const lcap = await import('@licio/lcap');
-  const pulse = await publicPulse(lcap, transportProfile);
+  const pulse = await publicPulse(lcap, transportProfile, minimal);
   const maxRequestBytes = pulse.budgets.max_request_bytes;
   let want = await collectQuarantineWants(db, scope);
 
@@ -339,10 +348,17 @@ export async function respondToClientExchange(
   // advertised response budget bounds it; a zero budget is HONORED (serve nothing), not defaulted.
   const shareable = new Set(await collectShareableCids(db, lcap, scope));
   const wantCids = (request.want ?? []).map((w) => w.cid).filter((cid) => shareable.has(cid));
-  const budget = request.pulse.budgets.max_response_bytes;
+  const budgets = request.pulse.budgets;
+  const budget = budgets.max_response_bytes;
+  // Honor the peer's advertised SELECTION floor (priority_floor / allow_media) — a peer that advertises
+  // a stealth/minimal budget is not served over-priority/media objects even if a stale want lists them;
+  // a DEFAULT (full) courier/relay budget allows everything, so it always fetches its explicit wants (#BF).
   const repacked =
     wantCids.length > 0 && budget > 0
-      ? await lcap.repackHeldObjects((cid) => getHeldObject(db, cid), wantCids, budget)
+      ? await lcap.repackHeldObjects((cid) => getHeldObject(db, cid), wantCids, budget, {
+          priorityFloor: budgets.priority_floor,
+          allowMedia: budgets.allow_media,
+        })
       : { served: [], truncated: false, pack: undefined };
 
   const pulse = await publicPulse(lcap, 'courier');

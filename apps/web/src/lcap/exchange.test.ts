@@ -17,12 +17,20 @@ import {
 } from './exchange.js';
 import type { RecordRow } from './store.js';
 import {
+  bytesToHex,
   collectShareableRecordRows,
   getHeldObject,
   putBlock,
   readBlockBytes,
   roomHashToBytes,
 } from './store.js';
+
+/** The AUTHENTIC room key for a roomId — `hex(roomIdHash('licio', roomId))` — matching the client's
+ *  #BG derivation (default networkId 'licio'), so a fixture's stored room hash is the one a record's
+ *  signed body authenticates to. */
+async function roomKeyHex(lcap: typeof import('@licio/lcap'), roomId: string): Promise<string> {
+  return bytesToHex(await lcap.roomIdHash('licio', roomId));
+}
 
 let peerA: IDBDatabase;
 let peerB: IDBDatabase;
@@ -127,16 +135,16 @@ async function putCapabilityRecord(
   db: IDBDatabase,
   lcap: typeof import('@licio/lcap'),
   visibility: 'public' | 'in_room' | 'private',
-  roomHash = '',
+  roomId = 'room-1',
 ): Promise<string> {
   const body = lcap.encodeWithSchema(lcap.capabilityRecordV2Schema, {
     record_version: 2,
     kind: 'room_capability',
-    capability_id: `cap-${visibility}-${roomHash || 'room-1'}`,
+    capability_id: `cap-${visibility}-${roomId}`,
     subject_account_id: 'acct',
     subject_device_id: 'dev',
     subject_device_key_id: 'key',
-    room_id: roomHash || 'room-1',
+    room_id: roomId,
     visibility_scope: visibility,
     operations: [],
     policy_epoch: 0,
@@ -157,6 +165,9 @@ async function putCapabilityRecord(
     },
   });
   const recordCid = await lcap.cidFor('record', body);
+  // Store the AUTHENTIC room hash the body authenticates to, so the repack stamps a table room_id_hash
+  // the importer's #BG cross-check accepts.
+  const roomHash = await roomKeyHex(lcap, roomId);
   const tx = db.transaction(LCAP_STORE.records, 'readwrite');
   tx.objectStore(LCAP_STORE.records).put({
     recordCid,
@@ -259,7 +270,7 @@ describe('client §16 exchange engine', () => {
     expect(wantCids).not.toContain(depX); // an unrelated room's gap is never advertised
   });
 
-  it('a courier request never exceeds its advertised max_request_bytes, even with many wants (#AK)', async () => {
+  it('a request never exceeds its advertised max_request_bytes, even with many wants (#AK)', async () => {
     const lcap = await import('@licio/lcap');
     // Seed far more distinct quarantine gaps than fit a minimal-mode budget.
     for (let i = 0; i < 300; i++) {
@@ -267,7 +278,8 @@ describe('client §16 exchange engine', () => {
         await cidFor('record', new Uint8Array([i & 0xff, (i >> 8) & 0xff])),
       ]);
     }
-    const request = await buildClientExchangeRequest(peerA, 'courier');
+    // The MINIMAL (stealth) budget is tight enough that 300 wants exercise the trim.
+    const request = await buildClientExchangeRequest(peerA, 'courier', undefined, true);
     const decoded = lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, request);
     // The WHOLE encoded request (pulse + wants + push + wrapper), not just the push, fits the budget.
     expect(request.length).toBeLessThanOrEqual(decoded.pulse.budgets.max_request_bytes);
@@ -289,15 +301,50 @@ describe('client §16 exchange engine', () => {
     expect(wantCids).not.toContain(privateWant); // the in_room gap never leaks on the courier plane
   });
 
-  it('a public courier pulse advertises a SHRUNK minimal budget, not just the flag (#XX)', async () => {
+  it('a courier pulse is HONEST: full budget by default, a shrunk SELECTION budget only when minimal (#XX)', async () => {
     const lcap = await import('@licio/lcap');
-    const request = await buildClientExchangeRequest(peerA, 'courier');
-    const decoded = lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, request);
-    expect(decoded.pulse.budgets.minimal_mode).toBe(true);
-    // The numeric fields are shrunk too — a "minimal" pulse cannot solicit full-size responses (#XX).
-    expect(decoded.pulse.budgets.max_response_bytes).toBeLessThan(
+    // Default courier: an HONEST FULL budget — a courier FERRIES content, so it must be able to fetch
+    // the priority-2 / media blocks it wants; it must NOT falsely claim minimal_mode (#XX).
+    const full = lcap.decodeWithSchema(
+      lcap.exchangeRequestV2Schema,
+      await buildClientExchangeRequest(peerA, 'courier'),
+    );
+    expect(full.pulse.budgets.minimal_mode).not.toBe(true);
+    expect(full.pulse.budgets.allow_media).toBe(true);
+    expect(full.pulse.budgets.max_response_bytes).toBe(lcap.DEFAULT_BUDGET.max_response_bytes);
+    // Explicit SELECTION-minimal (stealth / emergency): the numerics AND the priority/media floor
+    // shrink TOGETHER — not just the flag.
+    const min = lcap.decodeWithSchema(
+      lcap.exchangeRequestV2Schema,
+      await buildClientExchangeRequest(peerA, 'courier', undefined, true),
+    );
+    expect(min.pulse.budgets.minimal_mode).toBe(true);
+    expect(min.pulse.budgets.max_response_bytes).toBeLessThan(
       lcap.DEFAULT_BUDGET.max_response_bytes,
     );
+    expect(min.pulse.budgets.allow_media).toBe(false);
+  });
+
+  it('SECURITY: a responder honors the peer’s SELECTION floor for media (minimal request) but serves it on a full one (#BF)', async () => {
+    const lcap = await import('@licio/lcap');
+    // B holds a media block reachable from a PUBLIC record (so it is shareable).
+    const bytes = new Uint8Array([4, 4, 4, 4]);
+    const blockCid = await cidFor('block', bytes);
+    await putBlock(peerB, { blockCid, state: 'integrity_verified', size: bytes.length }, [bytes]);
+    await putPublicRecord(peerB, lcap, 'public', { deps: [blockCid] });
+    await quarantineMissing(peerA, 'parent', [blockCid]);
+
+    // A MINIMAL (stealth) request: allow_media false → the responder WITHHOLDS the media block.
+    const minReq = await buildClientExchangeRequest(peerA, 'courier', undefined, true);
+    const minResp = await respondToClientExchange(peerB, minReq);
+    if (minResp) await ingestClientExchangeResponse(peerA, minResp);
+    expect(await readBlockBytes(peerA, blockCid)).toBeUndefined(); // withheld for the minimal selection (#BF)
+
+    // A DEFAULT (full) courier request: the same block IS served (a courier ferries full content).
+    const fullReq = await buildClientExchangeRequest(peerA, 'courier');
+    const fullResp = await respondToClientExchange(peerB, fullReq);
+    if (fullResp) await ingestClientExchangeResponse(peerA, fullResp);
+    expect(await readBlockBytes(peerA, blockCid)).toEqual(bytes);
   });
 
   it('SECURITY: a scoped INGEST does not admit a block matching an UNRELATED room’s gap (#UU)', async () => {
@@ -370,7 +417,7 @@ describe('client §16 exchange engine', () => {
       1_000_000,
     );
     const counts = await ingestPackIntoStore(peerA, pack.pack as Uint8Array, {
-      roomHashAllowlist: [roomB],
+      roomHashAllowlist: [await roomKeyHex(lcap, roomB)],
     });
     expect(counts?.records).toBe(1); // only roomB's record committed
     expect(await getHeldObject(peerA, capB)).toBeDefined();
@@ -479,7 +526,7 @@ describe('client §16 exchange engine', () => {
           payload: body,
           lane: 'C0',
           priority: 2,
-          roomIdHash: new Uint8Array(32).fill(1),
+          roomIdHash: await lcap.roomIdHash('licio', 'room-1'), // AUTHENTIC (matches the body's room, #BG)
           deps: [],
         },
       ],
@@ -562,6 +609,50 @@ describe('client §16 exchange engine', () => {
     expect(await ingestClientExchangeResponse(peerA, response as Uint8Array)).toBeNull();
   });
 
+  it('SECURITY: a record stamped with an allowed room hash but a DIFFERENT body room is dropped (#BG)', async () => {
+    const lcap = await import('@licio/lcap');
+    const body = lcap.encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'roomA', // the SIGNED body authenticates to roomA
+      visibility_scope: 'public',
+      author_account_id: 'a',
+      author_device_id: 'd',
+      author_device_key_id: 'k',
+      device_seq: 1,
+      capability_cid: await cidFor('record', new Uint8Array([0])),
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([2]),
+      priority: 2,
+    });
+    const recordCid = await cidFor('record', body);
+    // The pack TABLE stamps roomB's (allowed) hash even though the signed body says roomA.
+    const pack = await lcap.writePack({
+      objects: [
+        {
+          cid: recordCid,
+          cidKind: 'record',
+          frameKind: 'record_body',
+          payload: body,
+          lane: 'C0',
+          priority: 2,
+          roomIdHash: await lcap.roomIdHash('licio', 'roomB'),
+          deps: [],
+        },
+      ],
+      transportProfile: 'manual_bundle',
+      privacyLabel: 'public',
+      maxUncompressedBytes: body.length + 1024,
+    });
+    const counts = await ingestPackIntoStore(peerA, pack as Uint8Array, {
+      roomHashAllowlist: [await roomKeyHex(lcap, 'roomB')],
+    });
+    expect(counts?.records).toBe(0); // the spoofed record is NOT committed as roomB (#BG)
+    expect(await getHeldObject(peerA, recordCid)).toBeUndefined();
+  });
+
   it('SECURITY: a non-public record is NOT committed on the public ingress (#P)', async () => {
     const lcap = await import('@licio/lcap');
     const inRoomCid = await putCapabilityRecord(peerB, lcap, 'in_room', 'aaaaaaaa');
@@ -632,16 +723,34 @@ describe('client §16 exchange engine', () => {
   });
 
   it('getHeldObject threads a record’s CANONICAL room hash (hex → bytes) for the repack (#6)', async () => {
-    const lcap = await import('@licio/lcap');
     const roomHex = 'a1a1a1a1a1a1a1a1';
-    const capCid = await putCapabilityRecord(peerA, lcap, 'public', roomHex);
-    const held = await getHeldObject(peerA, capCid);
+    const capCid = await cidFor('record', new Uint8Array([1, 2, 3]));
+    // The hex→bytes threading is a STORAGE concern, independent of the #BG room authentication — store a
+    // record with a KNOWN stored roomHash directly.
+    const storeRec = async (db: IDBDatabase, roomHash: string): Promise<void> => {
+      const tx = db.transaction(LCAP_STORE.records, 'readwrite');
+      tx.objectStore(LCAP_STORE.records).put({
+        recordCid: capCid,
+        body: new Uint8Array([1, 2, 3]),
+        kind: 'room_capability',
+        lane: 'C0',
+        priority: 0,
+        roomHash,
+        state: 'integrity_verified',
+        size: 3,
+      });
+      await new Promise<void>((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    };
+    await storeRec(peerA, roomHex);
     // The reader supplies the canonical room_id_hash bytes so the repack stamps the served record's
     // room — losslessly decoded from the stored hex (not the old lossy TextDecoder).
-    expect(held?.roomIdHash).toEqual(roomHashToBytes(roomHex));
+    expect((await getHeldObject(peerA, capCid))?.roomIdHash).toEqual(roomHashToBytes(roomHex));
     // A legacy / non-hex roomHash yields NO room hash (rather than a corrupt one).
-    const legacyCid = await putCapabilityRecord(peerB, lcap, 'public', 'not-hex!');
-    expect((await getHeldObject(peerB, legacyCid))?.roomIdHash).toBeUndefined();
+    await storeRec(peerB, 'not-hex!');
+    expect((await getHeldObject(peerB, capCid))?.roomIdHash).toBeUndefined();
   });
 
   it('SECURITY: a NON-PUBLIC room_capability is never pushed/shared (#5, not just contributions)', async () => {

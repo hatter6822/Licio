@@ -246,6 +246,30 @@ export async function commitImportedBundle(
   const lcapCodec = await import('@licio/lcap');
   const codec = lcapCodec.decodeAndRouteRecord;
   const decode = scopeFiltered ? codec : undefined;
+  // The deployment network id (matches the server's LCAP_NETWORK_ID default) — used to derive a
+  // record's AUTHENTICATED room hash from its signed body, so the unauthenticated pack-table
+  // room_id_hash can't be trusted for scope admission (#BG).
+  const networkId =
+    (import.meta as { env?: Record<string, string | undefined> }).env?.['VITE_LCAP_NETWORK_ID'] ??
+    'licio';
+  // The room a record's SIGNED body authenticates to, as the canonical room key (or undefined for a
+  // roomless kind / undecodable body).
+  const authedRoomKey = async (body: Uint8Array): Promise<string | undefined> => {
+    let r: ReturnType<typeof codec>;
+    try {
+      r = codec(body);
+    } catch {
+      return undefined;
+    }
+    const roomId =
+      r.kind === 'contribution_event'
+        ? r.home_room_id
+        : r.kind === 'room_capability'
+          ? r.room_id
+          : undefined;
+    if (roomId === undefined) return undefined;
+    return normalizeRoomKey(bytesToHex(await lcapCodec.roomIdHash(networkId, roomId)));
+  };
   // True iff a record body decodes to PUBLIC visibility (or carries no visibility_scope).  A body
   // that does NOT decode is treated as NON-public for want-advertising (fail-closed, never leak).
   const isPublicRecordBody = (body: Uint8Array): boolean => {
@@ -316,6 +340,19 @@ export async function commitImportedBundle(
         if ('visibility_scope' in decoded && decoded.visibility_scope !== 'public') {
           droppedCids.add(cid); // #P non-public record dropped on a public ingress (#RR)
           continue;
+        }
+        // #BG: the pack-table room_id_hash is UNAUTHENTICATED — when the table CLAIMS a room for this
+        // record, require the record's SIGNED body to hash to the SAME room (over the deployment
+        // networkId), so a peer can't stamp a room-A record with an allowed room-B hash and have it
+        // committed / exported / re-shared as room B.  A roomless kind (device certificate / revocation)
+        // has no body room to cross-check.
+        const tableKey = roomOf(cid);
+        if (tableKey !== undefined) {
+          const authKey = await authedRoomKey(frame.payload);
+          if (authKey !== undefined && authKey !== tableKey) {
+            droppedCids.add(cid);
+            continue;
+          }
         }
       }
       // Store the room key as the LOSSLESS canonical hex of the room_id_hash bytes (not a lossy
@@ -462,6 +499,19 @@ export async function commitImportedBundle(
   // importPack resolves over the (unauthenticated) table deps, so a peer can drop a body_block_cid from
   // the table and have the record committed without a want for the absent block.  A body block dep is
   // satisfied only if it is committed in THIS pack or already held — else the record must wait.
+  // #BE: a record importPack QUARANTINED (it has its OWN missing dep) that THIS ingest then SKIPS
+  // (non-public / off-scope) never entered the committed-frame loop, so it is not yet in droppedCids —
+  // but a COMMITTED record whose table deps reference it must still be re-quarantined (importPack
+  // counted that quarantined frame as present).  Mark those skipped quarantined CIDs as dropped first.
+  for (const status of importResult.statuses) {
+    if (status.status !== 'quarantined_missing_dependency') continue;
+    if (!inScope(status.cid)) {
+      droppedCids.add(status.cid);
+      continue;
+    }
+    const qBody = pack.frames.get(status.cid)?.payload;
+    if (qBody !== undefined && !isPublicBody(qBody)) droppedCids.add(status.cid);
+  }
   const blockWritesCids = new Set(blockWrites.map((b) => b.cid));
   const unwrittenBodyDeps = [
     ...new Set([...recordBodyBlockDeps.values()].flat().filter((d) => !blockWritesCids.has(d))),

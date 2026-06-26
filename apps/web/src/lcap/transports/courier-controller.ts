@@ -366,8 +366,13 @@ export class CourierController {
       // still think it is started) (#AQ).
       devWarn('courier listener registration failed mid-launch', error);
       for (const c of channels) await this.stopChannel(c.channel);
+      // Surface radio_unavailable: clearing `started` here makes start()'s post-launch
+      // runningChannels===0 branch skip, so without setting the decision the caller would receive the
+      // original ALLOW decision while no radio is running (#BC).
+      this.decision = { advertise: false, discover: false, blockedReason: 'radio_unavailable' };
       this.started = false;
       this.launching = false;
+      this.config.onDecisionChange?.(this.decision);
       return;
     }
     const options = this.radioOptions();

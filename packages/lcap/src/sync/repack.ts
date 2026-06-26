@@ -170,6 +170,11 @@ export async function repackHeldObjects(
   getObject: HeldObjectReader,
   wants: readonly string[],
   maxBytes: number,
+  /** The peer's SELECTION floor (#BF): an object over `priorityFloor`, or media when the peer declined
+   *  media, is withheld.  Meaningful only when the peer advertises a SELECTION-minimal budget (stealth /
+   *  emergency); a DEFAULT (full) budget passes `priorityFloor: 4` + `allowMedia: true`, so a courier
+   *  ferrying full content is never starved of its explicit wants.  Omit for byte-cap-only serving. */
+  selection?: { readonly priorityFloor?: number; readonly allowMedia?: boolean },
 ): Promise<RepackResult> {
   const objects: PackObject[] = [];
   const served: string[] = [];
@@ -184,6 +189,22 @@ export async function repackHeldObjects(
     if (!held) continue; // not held — the peer fetches it elsewhere
     const derived = packObjectFor(cid, held);
     if (!derived) continue; // undecodable — never repacked
+    // Honor the peer's SELECTION floor — a withheld held want marks the exchange partial (the peer
+    // re-requests it on a less-constrained pass) (#BF).
+    if (
+      selection?.priorityFloor !== undefined &&
+      derived.object.priority > selection.priorityFloor
+    ) {
+      truncated = true;
+      continue;
+    }
+    if (
+      selection?.allowMedia === false &&
+      (derived.object.frameKind === 'block' || derived.object.frameKind === 'chunk')
+    ) {
+      truncated = true;
+      continue;
+    }
     const projected = bytes + derived.object.payload.length + FRAME_OVERHEAD_BYTES;
     if (projected > maxBytes) {
       // Respect the peer's response budget even for the FIRST want: a tiny advertised budget must

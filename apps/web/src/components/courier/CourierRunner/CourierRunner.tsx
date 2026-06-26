@@ -295,9 +295,18 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
           // so a peer's response cannot land unrelated rooms past the current allowlist (#M).  Mark the
           // exchange CARRIED only AFTER the ingest actually commits: a rejected ingest (IndexedDB
           // quota/transaction failure) records a FAILURE instead of an unhandled rejection + a false
-          // "carried" log entry whose content was never stored (#AR).
+          // "carried" log entry whose content was never stored (#AR).  The SCOPE VERSION captured here
+          // is threaded as `shouldCommit` (to the leaf, #BA): if the user stops the courier or changes
+          // the room allowlist while the read/import/IndexedDB writes await, the stale response is NOT
+          // committed under the old scope (#BD).
           if (outcome.response) {
-            void ingestClientExchangeResponse(db, outcome.response, scopeRef.current)
+            const v = scopeVersionRef.current;
+            void ingestClientExchangeResponse(
+              db,
+              outcome.response,
+              scopeRef.current,
+              () => scopeVersionRef.current === v,
+            )
               .then(() => record(outcome.carriedBy === 'courier', outcome.skippedReason))
               .catch((error) => {
                 devWarn('courier response ingest failed', error);
