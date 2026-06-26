@@ -70,6 +70,46 @@ describe('repackHeldObjects (pure §16.4 content push)', () => {
     expect(result.pack).toBeUndefined();
   });
 
+  it('trims the pack to its REAL serialized size, not the payload estimate (#VV)', async () => {
+    const capabilityCid = await cidFor('record', new Uint8Array([0]));
+    const roomIdHash = new Uint8Array(32).fill(3);
+    // A record with MANY parent deps — the per-entry dep list inflates the SERIALIZED pack table well
+    // beyond the greedy "payload + fixed overhead" estimate the loop projects.
+    const parents = await Promise.all(
+      Array.from({ length: 40 }, (_, i) => cidFor('record', new Uint8Array([i, i + 1]))),
+    );
+    const body = encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-vv',
+      visibility_scope: 'public',
+      author_account_id: 'acct',
+      author_device_id: 'dev',
+      author_device_key_id: 'key',
+      device_seq: 1,
+      capability_cid: capabilityCid,
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([1, 2, 3]),
+      priority: 2,
+      parent_record_cids: parents,
+    });
+    const recordCid = await cidFor('record', body);
+    const small = await block(new Uint8Array([1, 2]));
+    // A budget the GREEDY estimate (payload + fixed overhead) thinks fits BOTH, but the real pack
+    // (header + object table + the 40-CID dep list) exceeds — so without the trim the served pack
+    // would overrun maxBytes.
+    const maxBytes = body.length + small.held.bytes.length + 1024;
+    const result = await repackHeldObjects(
+      readerOf(small, { cid: recordCid, held: { kind: 'record', bytes: body, roomIdHash } }),
+      [small.cid, recordCid],
+      maxBytes,
+    );
+    expect((result.pack as Uint8Array | undefined)?.length ?? 0).toBeLessThanOrEqual(maxBytes);
+    expect(result.truncated).toBe(true); // the many-dep record was trimmed to fit the true wire size
+  });
+
   it('threads a record’s ROOM (from the reader metadata) + dep CIDs onto the PackObject (#5)', async () => {
     // The canonical room_id_hash is STORE METADATA (the reader supplies it via held.roomIdHash) — it
     // is NOT re-derived from the body — and is stamped verbatim so the receiver lands the record with

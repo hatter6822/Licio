@@ -201,11 +201,25 @@ export async function repackHeldObjects(
   const privacyLabel: PackHeaderV2['privacy_label'] = sensitive
     ? 'contains_in_room_metadata'
     : 'public';
-  const pack = writePack({
-    objects,
-    transportProfile: 'https',
-    privacyLabel,
-    maxUncompressedBytes: Math.max(maxBytes, bytes) + 1024,
-  });
+  const serialize = (): Uint8Array =>
+    writePack({
+      objects,
+      transportProfile: 'https',
+      privacyLabel,
+      maxUncompressedBytes: Math.max(maxBytes, bytes) + 1024,
+    });
+  let pack = serialize();
+  // The greedy loop above projected only payload bytes + a fixed per-frame estimate, but the
+  // SERIALIZED pack ALSO carries the header, object table, CIDs, and per-object dep lists — so it can
+  // still exceed the peer's advertised `maxBytes` (e.g. records with many deps).  Trim trailing
+  // objects + re-serialize until the pack TRULY fits the budget, so the route's bounded-pack promise
+  // holds against the real wire size, not an estimate (#VV).
+  while (pack.length > maxBytes && objects.length > 0) {
+    objects.pop();
+    served.pop();
+    truncated = true;
+    if (objects.length === 0) return { served: [], truncated };
+    pack = serialize();
+  }
   return { pack, served, truncated };
 }

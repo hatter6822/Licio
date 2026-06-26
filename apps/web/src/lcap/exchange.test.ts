@@ -275,6 +275,38 @@ describe('client §16 exchange engine', () => {
     expect(wantCids).not.toContain(privateWant); // the in_room gap never leaks on the courier plane
   });
 
+  it('a public courier pulse advertises a SHRUNK minimal budget, not just the flag (#XX)', async () => {
+    const lcap = await import('@licio/lcap');
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+    const decoded = lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, request);
+    expect(decoded.pulse.budgets.minimal_mode).toBe(true);
+    // The numeric fields are shrunk too — a "minimal" pulse cannot solicit full-size responses (#XX).
+    expect(decoded.pulse.budgets.max_response_bytes).toBeLessThan(
+      lcap.DEFAULT_BUDGET.max_response_bytes,
+    );
+  });
+
+  it('SECURITY: a scoped INGEST does not admit a block matching an UNRELATED room’s gap (#UU)', async () => {
+    const roomA = 'aaaaaaaaaaaaaaaa';
+    const roomB = 'bbbbbbbbbbbbbbbb';
+    const bytes = new Uint8Array([7, 7, 7, 1]);
+    const blockCid = await cidFor('block', bytes);
+    // A holds a quarantine gap for that block in room A — UNRELATED to the room-B sync below.
+    await quarantineMissing(peerA, 'parent', [blockCid], roomA);
+    // B serves a pack that happens to carry that block; A ingests it SCOPED to room B only.
+    await putBlock(peerB, { blockCid, state: 'integrity_verified', size: bytes.length }, [bytes]);
+    const lcap = await import('@licio/lcap');
+    const pack = await lcap.repackHeldObjects(
+      (cid) => getHeldObject(peerB, cid),
+      [blockCid],
+      1_000_000,
+    );
+    await ingestPackIntoStore(peerA, pack.pack as Uint8Array, { roomHashAllowlist: [roomB] });
+
+    // room A's gap must NOT admit the block into the room-B-scoped closure (#UU).
+    expect(await readBlockBytes(peerA, blockCid)).toBeUndefined();
+  });
+
   it('counts WANTS after de-dup so a distinct gap is not starved by many shared rows (#I)', async () => {
     const lcap = await import('@licio/lcap');
     const depShared = await cidFor('record', new Uint8Array([3]));

@@ -236,7 +236,8 @@ export async function commitImportedBundle(
   // The codec is already loaded by readBundleForImport; resolve it up front — it tags each quarantine
   // row's visibility (#NN) on EVERY path, while `decode` (the record-branch #P/#GG filter) stays
   // SCOPE-gated so an unscoped file import never drops a non-contribution / plain body it can't decode.
-  const codec = (await import('@licio/lcap')).decodeAndRouteRecord;
+  const lcapCodec = await import('@licio/lcap');
+  const codec = lcapCodec.decodeAndRouteRecord;
   const decode = scopeFiltered ? codec : undefined;
   // True iff a record body decodes to PUBLIC visibility (or carries no visibility_scope).  A body
   // that does NOT decode is treated as NON-public for want-advertising (fail-closed, never leak).
@@ -338,11 +339,19 @@ export async function commitImportedBundle(
         }
       }
     } else if (frame.frameKind === 'proof') {
-      tentativeProofs.push({
-        cid,
-        payload: frame.payload,
-        recordCid: entry?.provides_proof_for ?? '',
-      });
+      let proofRecordCid = entry?.provides_proof_for ?? '';
+      if (scopeFiltered) {
+        // Bind the proof to its DECODED record_cid, NOT the unauthenticated pack table — else a
+        // crafted bundle could table a proof whose body attests an off-scope/non-public record under
+        // an in-scope public record's `provides_proof_for`, get it committed (the closure indexes by
+        // this CID), and export it over public courier/WebRTC, leaking the real record_cid (#WW).
+        try {
+          proofRecordCid = lcapCodec.decodeProof(frame.payload).record_cid;
+        } catch {
+          continue; // undecodable proof on a scoped ingress → never commit
+        }
+      }
+      tentativeProofs.push({ cid, payload: frame.payload, recordCid: proofRecordCid });
     } else if (frame.frameKind === 'block') {
       tentativeBlocks.push({ cid, bytes: frame.payload });
     } else if (frame.frameKind === 'chunk') {
@@ -358,6 +367,11 @@ export async function commitImportedBundle(
   // wanted CIDs into the closure too, so a "Sync this room" response can complete our records (#GG).
   if (scopeFiltered) {
     await forEachByCursor<QuarantineRow>(db, LCAP_STORE.quarantine, (row) => {
+      // Under a ROOM allowlist, admit a wanted dep into the closure ONLY for an allowed room's gap —
+      // otherwise a "Sync this room" peer could land a block whose CID happens to match an UNRELATED
+      // room's existing quarantine gap, past the scope (#UU).
+      if (allow && (row.roomHash === undefined || !allow.has(normalizeRoomKey(row.roomHash))))
+        return;
       for (const dep of row.missingDeps ?? []) allowedBlocks.add(dep);
     });
   }

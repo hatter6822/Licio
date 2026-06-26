@@ -12,6 +12,7 @@
 // ingest path (§18.4); content is PUBLIC-only; reassembly is bounded by the §27 DoS cap.
 
 import type { DataChannelLike } from '@licio/lcap-p2p';
+import { devWarn } from '../../lib/dev-log.js';
 import {
   buildClientExchangeRequest,
   type CommitCounts,
@@ -108,17 +109,25 @@ export async function runWebrtcBidirectionalExchange(
       return; // a fragmentation/bomb violation — drop (fail-closed, §27)
     }
     if (!complete) return; // mid-message
-    void handleInboundExchangeMessage(params.db, complete, params.scope).then((out) => {
-      if (settled || aborted()) return; // settled WHILE ingesting — don't reply / count the result
-      if (out.wasRequest) {
-        served = true;
-        if (out.reply) sendMessage(out.reply); // serve the peer
-      } else {
-        gotResponse = true; // the peer's response to OUR request — ingested
-        ingestedResult = out.ingested;
-      }
-      maybeSettle();
-    });
+    void handleInboundExchangeMessage(params.db, complete, params.scope)
+      .then((out) => {
+        if (settled || aborted()) return; // settled WHILE ingesting — don't reply / count the result
+        if (out.wasRequest) {
+          served = true;
+          if (out.reply) sendMessage(out.reply); // serve the peer
+        } else {
+          gotResponse = true; // the peer's response to OUR request — ingested
+          ingestedResult = out.ingested;
+        }
+        maybeSettle();
+      })
+      .catch((error) => {
+        // Serving/ingesting can reject (IndexedDB quota/transaction failure, repacking error).  A
+        // fire-and-forget promise with no handler would surface an UNHANDLED rejection AND leave the
+        // round hanging to the timeout — record it and let maybeSettle finish the round promptly (#AB).
+        devWarn('inbound WebRTC exchange message failed', error);
+        if (!settled && !aborted()) maybeSettle();
+      });
   };
 
   params.channel.onclose = (): void => settle(ingestedResult);

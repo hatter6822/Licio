@@ -234,7 +234,9 @@ async function publicPulse(
     sessionNonce,
     transportProfile,
     privacyMode: 'public',
-    budgets: { ...lcap.DEFAULT_BUDGET, minimal_mode: true },
+    // minimalBudget ALSO shrinks the numeric fields (max_response_bytes, priority_floor, media) — not
+    // just the flag — so a "minimal" public pulse cannot still solicit full-priority/media responses (#XX).
+    budgets: lcap.minimalBudget(lcap.DEFAULT_BUDGET),
     supportedSuites: ['ES256'],
     supportedCompression: ['none', 'gzip', 'deflate'],
     supportedPackVersions: [2],

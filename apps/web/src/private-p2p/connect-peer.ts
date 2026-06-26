@@ -796,6 +796,10 @@ async function establishDataChannel(
     }
     const offer = await pc.createOffer({ iceRestart: true });
     await pc.setLocalDescription(offer);
+    // The channel may have been torn down (stop / abort) WHILE createOffer/setLocalDescription
+    // awaited — re-check before publishing the restart offer, or a dead link would emit fresh sealed
+    // signaling after cleanup and make the peer renegotiate a connection that is already gone (#ZZ).
+    if (stopped || p.isAborted()) return;
     await sendSignal({
       schema: 'licio.private.signaling_payload.v1',
       kind: 'offer',
@@ -975,8 +979,13 @@ async function runHandshake(
 
   // Pre-import the remote device key (verifyPeerHandshake's resolveDevice is sync).
   let resolvedDevice: { publicKey: CryptoKey; activeAtEpoch: boolean } | undefined;
-  // Op frames a faster peer sends before our handshake finishes — handed to the channel.
+  // Op frames a faster peer sends before our handshake finishes — handed to the channel.  CAPPED:
+  // before the remote proves membership it is UNTRUSTED, so a peer that reaches the channel but
+  // slowplays/fails the proof cannot grow renderer memory by streaming frames for the whole handshake
+  // timeout — frames beyond the cap are dropped (the op-exchange re-requests anything dropped) (#YY).
   const opStash: Uint8Array[] = [];
+  const MAX_PRE_HANDSHAKE_STASH_BYTES = 1_048_576; // 1 MiB — ample for a few op frames, bounded
+  let opStashBytes = 0;
 
   // Process handshake frames STRICTLY SEQUENTIALLY: a proof frame must never run while a prior
   // hello's async device-key import is still pending, or tryVerify would see remoteHello +
@@ -984,7 +993,10 @@ async function runHandshake(
   let handshakeChain: Promise<void> = Promise.resolve();
   p.inbox.consume((data): void => {
     if (typeof data !== 'string') {
-      opStash.push(toUint8(data as ArrayBuffer | ArrayBufferView)); // not a handshake frame
+      const bytes = toUint8(data as ArrayBuffer | ArrayBufferView); // not a handshake frame
+      if (opStashBytes + bytes.byteLength > MAX_PRE_HANDSHAKE_STASH_BYTES) return; // cap — drop (#YY)
+      opStashBytes += bytes.byteLength;
+      opStash.push(bytes);
       return;
     }
     handshakeChain = handshakeChain
