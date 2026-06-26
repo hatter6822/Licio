@@ -54,9 +54,10 @@ const ControllerCtor = vi.fn(function (this: Record<string, unknown>, config: Ca
 });
 const resolveCourierChannels = vi.fn((..._a: unknown[]) => [{ channel: 'nearby', plugin: {} }]);
 
+const readCourierPower = vi.fn(async () => ({}));
 vi.mock('../../../lcap/transports/courier-controller.js', () => ({
   CourierController: ControllerCtor,
-  readCourierPower: vi.fn(async () => ({})),
+  readCourierPower: (...a: unknown[]) => readCourierPower(...(a as [])),
 }));
 vi.mock('../../../lcap/transports/courier-channels.js', async (importOriginal) => {
   // Keep the real channel-info metadata + channel list; override only the resolver.
@@ -167,6 +168,26 @@ describe('CourierRunner (WS-R.15.4c/d/e)', () => {
       skippedReason: '',
     });
     expect(ingestClientExchangeResponse).toHaveBeenCalled();
+  });
+
+  it('aborts the start if a forced-off mode lands DURING the async init (#A)', async () => {
+    injectNativeShell();
+    render(<CourierRunner />);
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /i understand what a nearby radio reveals/i }),
+    );
+    fireEvent.click(screen.getByRole('switch', { name: /advertise this device/i }));
+    // The user switches into Stealth (radios forced off) WHILE the async imports / IDB open /
+    // battery read are still pending — the live re-check must abort before constructing the radios.
+    readCourierPower.mockImplementationOnce(async () => {
+      setOperationalMode('stealth');
+      return {};
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /start courier/i }));
+    });
+    await waitFor(() => expect(readCourierPower).toHaveBeenCalled());
+    expect(ControllerCtor).not.toHaveBeenCalled(); // never brought radios up after the forced-off mode
   });
 
   it('reconciles a RUNNING courier when the operational mode changes (§33.5 forced-off)', async () => {

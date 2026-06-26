@@ -88,9 +88,8 @@ function fakePlugin() {
       emit('payloadReceived', { endpointId: o.endpointId, message: RESPONSE_B64 });
     }),
     addListener: (event: string, fn: (raw: unknown) => void) => {
-      const handle = { remove: vi.fn() };
       listeners.push({ event, fn });
-      return handle;
+      return Promise.resolve({ remove: vi.fn() }); // the real plugin's addListener is async
     },
   };
   return { plugin, listeners, calls, sent, emit };
@@ -853,5 +852,94 @@ describe('CourierController (WS-R.15.4c orchestration)', () => {
     // The launch aborted after the stop — channel B's radio was NEVER brought up with no owner.
     expect(b.plugin.startAdvertising).not.toHaveBeenCalled();
     expect(controller.isRunning()).toBe(false);
+  });
+
+  it('tears down listeners registered after a stop races registration (#B)', async () => {
+    // A stop() can win WHILE an addListener promise is pending: the handles get stored afterward,
+    // even though `started` is false — leaving stale closures that satisfy isChannelActive().  The
+    // launch must tear them down.  Drive the race with a gated addListener.
+    const f = fakePlugin();
+    let releaseAdd: (() => void) | undefined;
+    let addCount = 0;
+    const addEntered = new Promise<void>((resolve) => {
+      f.plugin.addListener = (event: string, fn: (raw: unknown) => void) => {
+        f.listeners.push({ event, fn });
+        addCount += 1;
+        const handle = { remove: vi.fn() };
+        if (addCount === 1) {
+          resolve(); // the FIRST addListener parks until released — the window the stop races
+          return new Promise<typeof handle>((res) => {
+            releaseAdd = () => res(handle);
+          });
+        }
+        return Promise.resolve(handle); // the rest resolve immediately
+      };
+    });
+    const buildRequest = vi.fn(() => REQUEST_BYTES);
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: ON,
+      mode: 'courier',
+      buildRequest,
+      httpsConfig: { fetchFn: REJECTING_FETCH },
+    });
+    const startP = controller.start(); // parks in the first addListener await
+    await addEntered;
+    await controller.stop(); // stop wins the race
+    releaseAdd?.(); // the addListener resolves AFTER the stop
+    await startP;
+
+    expect(controller.isRunning()).toBe(false);
+    expect(f.calls).toContain('stop'); // the registered channel was torn down
+    // A queued native event for the registered-then-removed channel drives NOTHING.
+    f.emit('connectionResult', { endpointId: 'late', connected: true });
+    expect(buildRequest).not.toHaveBeenCalled();
+  });
+
+  it('re-checks the who-can-exchange policy AFTER the async request build (#C)', async () => {
+    // The peer passes the gate, then the user removes it from the allowlist DURING the async build.
+    const outcomes: string[] = [];
+    let resolveReq: ((b: Uint8Array) => void) | undefined;
+    const f = fakePlugin();
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: { ...ON, exchangePeers: 'anyone' },
+      mode: 'courier',
+      buildRequest: () =>
+        new Promise<Uint8Array>((res) => {
+          resolveReq = res;
+        }),
+      httpsConfig: { fetchFn: REJECTING_FETCH },
+      onOutcome: (o) => outcomes.push(o.skippedReason),
+    });
+    await controller.start();
+    f.emit('connectionResult', { endpointId: 'ep1', connected: true }); // drive → awaits buildRequest
+    await Promise.resolve();
+    // Tighten the policy mid-build: ep1 is no longer permitted.
+    void controller.applyControls({ ...ON, exchangePeers: 'none' });
+    resolveReq?.(REQUEST_BYTES); // the build completes AFTER the policy tightened
+    await vi.waitFor(() => expect(outcomes).toContain('not_allowed_peer'));
+    expect(f.sent.some((s) => s.message === REQUEST_B64)).toBe(false); // never sent to the removed peer
+  });
+
+  it('reserves budget so concurrent exchanges cannot jointly exceed the ceiling (#D)', async () => {
+    // Budget fits exactly ONE request.  Two endpoints connect at once → both driveExchange evaluate
+    // the budget before either charges; the reservation must make the second hit over_storage_budget.
+    const outcomes: string[] = [];
+    const f = fakePlugin();
+    const controller = new CourierController({
+      plugin: f.plugin,
+      controls: { ...ON, storageBudgetBytes: REQUEST_BYTES.length + 8 },
+      mode: 'courier',
+      buildRequest: () => REQUEST_BYTES,
+      httpsConfig: { fetchFn: REJECTING_FETCH },
+      onOutcome: (o) => outcomes.push(o.skippedReason),
+    });
+    await controller.start();
+    f.emit('connectionResult', { endpointId: 'ep1', connected: true });
+    f.emit('connectionResult', { endpointId: 'ep2', connected: true });
+    await vi.waitFor(() => expect(outcomes).toContain('over_storage_budget'));
+    // Exactly ONE request was ferried (the other was refused before sending).
+    expect(f.sent.filter((s) => s.message === REQUEST_B64).length).toBe(1);
   });
 });

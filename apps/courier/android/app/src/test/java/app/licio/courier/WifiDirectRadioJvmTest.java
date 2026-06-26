@@ -57,6 +57,38 @@ public class WifiDirectRadioJvmTest {
     }
 
     @Test
+    public void advertiseOnlyBecomesAGroupOwner_neverScanning() {
+        // Advertise-only must NOT scan (Wi-Fi Direct discoverPeers scans): it becomes a GROUP owner.
+        WifiDirectRadio radio = new WifiDirectRadio(ctx(), new Recorder());
+        radio.startAdvertising();
+        assertEquals(WifiDirectRadio.WifiMode.GROUP, radio.currentMode);
+        radio.stop();
+        assertEquals(WifiDirectRadio.WifiMode.NONE, radio.currentMode);
+    }
+
+    @Test
+    public void discoveryArrivingSecondUpgradesTheGroupOwnerToScanning() {
+        // The controller sends advertise + discover as SEPARATE async PluginCalls: advertise lands
+        // first (GROUP, no scan), then discovery lands — it must UPGRADE to DISCOVER (scanning),
+        // never leave the courier as a non-scanning group owner.
+        WifiDirectRadio radio = new WifiDirectRadio(ctx(), new Recorder());
+        radio.startAdvertising();
+        assertEquals(WifiDirectRadio.WifiMode.GROUP, radio.currentMode);
+        radio.startDiscovery(); // arrives second
+        assertEquals("discovery upgrades the radio to scanning", WifiDirectRadio.WifiMode.DISCOVER,
+                radio.currentMode);
+        radio.stop();
+    }
+
+    @Test
+    public void discoveryAloneScans() {
+        WifiDirectRadio radio = new WifiDirectRadio(ctx(), new Recorder());
+        radio.startDiscovery();
+        assertEquals(WifiDirectRadio.WifiMode.DISCOVER, radio.currentMode);
+        radio.stop();
+    }
+
+    @Test
     public void duplicateConnectionInfoForOneGroupStartsTheClientDialOnce() throws Exception {
         // Android can deliver CONNECTION_CHANGED more than once for ONE formed group; the radio must
         // dial the group owner only ONCE (a second dispatch races a duplicate link/event).  The one

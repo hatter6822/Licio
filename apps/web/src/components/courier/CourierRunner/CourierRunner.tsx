@@ -196,20 +196,34 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
         import('../../../lcap/exchange.js'),
         import('../../../lcap/db.js'),
       ]);
-      const channels = resolveCourierChannels(controls.enabledChannels);
-      if (channels.length === 0) {
-        // The shell is present but no SELECTED radio resolves (e.g. the device lacks it).
-        setPhase({ kind: 'unavailable' });
-        return;
-      }
       // The local `lcap_v2` store is BOTH the responder's content source and the requester's
       // ingestion sink — a fully bidirectional §16 courier exchange (serve wants + ingest served).
       const db = await getLcapDb();
       const power = await readCourierPower();
+      // Re-read the LIVEST controls/ack/mode: the user may have revoked the disclosure, disabled the
+      // radios, or switched into a forced-off mode DURING the async imports / IDB open / battery read
+      // above — and `controllerRef.current` is not assigned yet, so the live-reconcile effects have
+      // no controller to stop.  Abort instead of bringing radios up after the UI forced them off, and
+      // construct the controller from the LIVE state (not the snapshot captured when Start was clicked).
+      const liveControls = getCourierControls();
+      const liveMode = getOperationalMode();
+      if (
+        !getRadioDisclosureAcknowledged() ||
+        isForcedOff(liveMode) ||
+        (!liveControls.advertisingEnabled && !liveControls.discoveryEnabled)
+      ) {
+        setPhase({ kind: 'idle' });
+        return;
+      }
+      const liveChannels = resolveCourierChannels(liveControls.enabledChannels);
+      if (liveChannels.length === 0) {
+        setPhase({ kind: 'unavailable' });
+        return;
+      }
       const controller = new Controller({
-        channels,
-        controls,
-        mode: mode as CourierMode,
+        channels: liveChannels,
+        controls: liveControls,
+        mode: liveMode as CourierMode,
         power,
         // Advertise our gaps (quarantined missing deps) so a peer serves them; the push rides the
         // CURRENT sharing scope (room allowlist + priority cap), read live from the ref.
@@ -267,7 +281,7 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
       }
       setPhase({ kind: 'error' });
     }
-  }, [controls, mode, nativeAvailable]);
+  }, [nativeAvailable]);
 
   const stop = useCallback(async () => {
     await controllerRef.current?.stop();

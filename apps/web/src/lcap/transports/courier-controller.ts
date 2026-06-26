@@ -234,6 +234,9 @@ export class CourierController {
    *  against the §22.5 storage budget EXACTLY once (the request leg AND every responder reply
    *  charge only their delta, never the whole cumulative twice). */
   private readonly chargedBytes = new WeakMap<NativeChannelMedium, number>();
+  /** Bytes RESERVED by in-flight exchanges (not yet charged) — a concurrent send sees these in its
+   *  budget check, so simultaneous exchanges cannot jointly exceed the §22.5 storage ceiling. */
+  private reservedBytes = 0;
   /** Channels whose radios are currently running — a single radio's failure removes only its own
    *  channel; the courier is "running" while ANY channel is active, and only blocks when NONE are. */
   private readonly runningChannels = new Set<CourierChannel>();
@@ -336,6 +339,15 @@ export class CourierController {
     // Register listeners on EVERY channel BEFORE starting any radio so no early event is missed.
     for (const { channel, plugin } of channels) {
       await this.registerListeners(channel, plugin);
+      // A stop() can win the race WHILE an addListener promise is pending: stopChannel() then saw no
+      // handle list to remove, but registerListeners stored the handles afterward — leaving stale
+      // closures that satisfy isChannelActive() and could drive/answer a later native event under a
+      // stopped controller.  If a stop landed, tear down EVERY registered channel and abort.
+      if (!this.started) {
+        for (const c of channels) await this.stopChannel(c.channel);
+        this.launching = false;
+        return;
+      }
     }
     const options = this.radioOptions();
     for (const { channel, plugin } of channels) {
@@ -578,7 +590,20 @@ export class CourierController {
     try {
       const response = await this.config.buildResponse(request, endpointId);
       if (!response) return;
-      if (!withinStorageBudget(this.controls, this.sharedBytes, response.byteLength)) return;
+      // Re-check the LIVE who-can-exchange policy: the user may have removed this peer from the
+      // allowlist (or set peers→none) DURING the async build — never serve a now-disallowed peer.
+      if (!mayExchangeWithEndpoint(this.controls, endpointId)) return;
+      // Account for bytes RESERVED by in-flight driveExchange()s too, so concurrent sends cannot
+      // jointly exceed the hard §22.5 storage ceiling.
+      if (
+        !withinStorageBudget(
+          this.controls,
+          this.sharedBytes + this.reservedBytes,
+          response.byteLength,
+        )
+      ) {
+        return;
+      }
       medium.enqueueOutbound(response);
       // Charge only the DELTA of the medium's cumulative bytesSent() — the same metric
       // driveExchange's finally charges — so these responder bytes are counted exactly once, not
@@ -670,13 +695,27 @@ export class CourierController {
       return;
     }
 
-    if (!withinStorageBudget(this.controls, this.sharedBytes, request.byteLength)) {
-      this.emit(channel, endpointId, null, null, 'over_storage_budget');
+    // Re-check the LIVE who-can-exchange policy: the user may have removed this peer from the
+    // allowlist (or set peers→none) DURING the async request build — never send to it now.
+    if (!mayExchangeWithEndpoint(this.controls, endpointId)) {
+      this.emit(channel, endpointId, null, null, 'not_allowed_peer');
       return;
     }
 
+    // Reserve the request bytes against the §22.5 storage budget BEFORE the async exchange, counting
+    // bytes already RESERVED by concurrent driveExchange()s — so two endpoints connecting at once
+    // cannot both pass the check against the same `sharedBytes` and jointly blow the hard ceiling.
+    if (
+      !withinStorageBudget(this.controls, this.sharedBytes + this.reservedBytes, request.byteLength)
+    ) {
+      this.emit(channel, endpointId, null, null, 'over_storage_budget');
+      return;
+    }
+    this.reservedBytes += request.byteLength;
+
     const plugin = this.pluginFor(channel);
     if (!plugin) {
+      this.reservedBytes -= request.byteLength; // release — no send happened
       this.emit(channel, endpointId, null, null, 'exchange_failed');
       return;
     }
@@ -704,6 +743,7 @@ export class CourierController {
       // success would let repeated FAILED courier attempts bypass the budget on bytes already sent.
       // The DELTA charge avoids double-counting any responder bytes already charged above.
       this.chargeMediumBytes(medium);
+      this.reservedBytes -= request.byteLength; // release the reservation (actual bytes now charged)
     }
 
     if (!result) {
