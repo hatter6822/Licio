@@ -29,9 +29,10 @@ import {
 } from './bundle-import.js';
 import { LCAP_STORE } from './db.js';
 import {
-  collectByCursor,
   collectShareableRecordRows,
+  forEachByCursor,
   getHeldObject,
+  normalizeRoomKey,
   proofCidsForRecord,
   type RecordRow,
   readBlockDescriptor,
@@ -134,6 +135,7 @@ const MAX_WANTS = 256;
 interface QuarantineRow {
   readonly cid: string;
   readonly missingDeps?: readonly string[];
+  readonly roomHash?: string;
 }
 
 /**
@@ -145,29 +147,51 @@ interface QuarantineRow {
 export async function ingestPackIntoStore(
   db: IDBDatabase,
   packBytes: Uint8Array,
+  scope?: ExchangeScope,
 ): Promise<CommitCounts | null> {
   const read = await readBundleForImport(packBytes);
   if (!read.ok) return null; // malformed / truncated / private-labelled → refuse, commit nothing
   const alreadyHave = await heldCidsFor(db, read.pack);
   const imported = await importBundleObjects(read.pack, { alreadyHave });
-  return commitImportedBundle(db, read.pack, imported);
+  // A room-scoped sync commits ONLY the allowlisted rooms' records — a peer cannot push unrelated
+  // public rooms' content into `lcap_v2` past the scope (#M).  An unscoped sync commits all public.
+  const roomAllowlist =
+    (scope?.roomHashAllowlist?.length ?? 0) > 0
+      ? new Set((scope as ExchangeScope).roomHashAllowlist?.map(normalizeRoomKey))
+      : undefined;
+  return commitImportedBundle(
+    db,
+    read.pack,
+    imported,
+    Date.now(),
+    roomAllowlist !== undefined ? { roomAllowlist } : {},
+  );
 }
 
 /** The CIDs we are MISSING (quarantined prerequisites), as §16 `want`s — so a peer can serve our
  *  gaps.  `cid_kind` is a wire hint only; the responder serves by CID regardless of kind. */
 async function collectQuarantineWants(
   db: IDBDatabase,
+  scope?: ExchangeScope,
 ): Promise<Array<{ cid: string; cid_kind: 'record'; reason: 'missing_dependency' }>> {
-  const rows = await collectByCursor<QuarantineRow>(db, LCAP_STORE.quarantine, MAX_WANTS);
+  const allow =
+    (scope?.roomHashAllowlist?.length ?? 0) > 0
+      ? new Set((scope as ExchangeScope).roomHashAllowlist?.map(normalizeRoomKey))
+      : undefined;
   const wantCids = new Set<string>();
-  for (const row of rows) {
-    for (const dep of row.missingDeps ?? []) {
-      wantCids.add(dep);
-      if (wantCids.size >= MAX_WANTS) break;
+  // Cursor the WHOLE quarantine store, accumulating UNIQUE missing CIDs until MAX_WANTS — counting
+  // unique WANTS, not raw rows, so many rows sharing one missing prerequisite never starve distinct
+  // gaps from being advertised (#I).  A room-scoped sync advertises ONLY its rooms' gaps, so "Sync
+  // this room" never leaks/fetches an unrelated room's missing CIDs (#K).
+  await forEachByCursor<QuarantineRow>(db, LCAP_STORE.quarantine, (row) => {
+    if (allow && (row.roomHash === undefined || !allow.has(normalizeRoomKey(row.roomHash)))) {
+      return; // not a room we are syncing — skip its gaps
     }
-    if (wantCids.size >= MAX_WANTS) break;
-  }
-  return [...wantCids].map((cid) => ({
+    for (const dep of row.missingDeps ?? []) wantCids.add(dep);
+    if (wantCids.size >= MAX_WANTS) return false; // enough unique wants — stop the scan
+    return;
+  });
+  return [...wantCids].slice(0, MAX_WANTS).map((cid) => ({
     cid,
     cid_kind: 'record' as const,
     reason: 'missing_dependency' as const,
@@ -207,7 +231,7 @@ export async function buildClientExchangeRequest(
 ): Promise<Uint8Array> {
   const lcap = await import('@licio/lcap');
   const pulse = await publicPulse(lcap, transportProfile);
-  const want = await collectQuarantineWants(db);
+  const want = await collectQuarantineWants(db, scope);
   // PUSH our shareable content too (gossip-out) so a peer can ingest content it didn't know to want
   // — scope-filtered (public-only, room-allowlisted, priority-capped), bounded by the request
   // budget the push rides in.
@@ -242,13 +266,12 @@ export async function respondToClientExchange(
   })();
   if (request === null) return null;
 
-  // Ingest the peer's pushed content (gossip-in), CID-verified into the local store — but ONLY in
-  // an UNSCOPED exchange.  A ROOM-SCOPED sync ("Sync this room") must not accept ambient gossip: a
-  // peer could otherwise push public records for UNRELATED rooms and pollute `lcap_v2` despite the
-  // room allowlist.  The scoped room's content still flows in via our explicit `want`s.
-  const roomScoped = (scope?.roomHashAllowlist?.length ?? 0) > 0;
-  if (request.push_pack !== undefined && !roomScoped) {
-    await ingestPackIntoStore(db, request.push_pack);
+  // Ingest the peer's pushed content (gossip-in), CID-verified AND ROOM-SCOPED into the local store:
+  // a room-scoped sync ("Sync this room") commits only the allowlisted rooms' records (the scope
+  // filter drops a peer's UNRELATED public rooms — so ambient gossip can't pollute `lcap_v2` past
+  // the allowlist), while an unscoped sync accepts all public gossip.
+  if (request.push_pack !== undefined) {
+    await ingestPackIntoStore(db, request.push_pack, scope);
   }
 
   // Serve ONLY what the peer wants AND we may share: intersect the peer's wants with our SHAREABLE
@@ -297,7 +320,8 @@ export async function handleInboundExchangeMessage(
   // as the classifier — a non-null reply means it WAS a request (and its push was ingested).
   const reply = await respondToClientExchange(db, bytes, scope);
   if (reply !== null) return { wasRequest: true, reply, ingested: null };
-  const ingested = await ingestClientExchangeResponse(db, bytes);
+  // A RESPONSE we ingest is room-scoped too — a peer's response_pack cannot land unrelated rooms.
+  const ingested = await ingestClientExchangeResponse(db, bytes, scope);
   return { wasRequest: false, reply: null, ingested };
 }
 
@@ -309,6 +333,7 @@ export async function handleInboundExchangeMessage(
 export async function ingestClientExchangeResponse(
   db: IDBDatabase,
   responseBytes: Uint8Array,
+  scope?: ExchangeScope,
 ): Promise<CommitCounts | null> {
   const lcap = await import('@licio/lcap');
   const response = ((): import('@licio/lcap').ExchangeResponseV2 | null => {
@@ -319,5 +344,6 @@ export async function ingestClientExchangeResponse(
     }
   })();
   if (response === null || response.response_pack === undefined) return null;
-  return ingestPackIntoStore(db, response.response_pack);
+  // Room-scoped: a peer cannot fill our store with unrelated rooms via a valid-but-off-scope pack.
+  return ingestPackIntoStore(db, response.response_pack, scope);
 }

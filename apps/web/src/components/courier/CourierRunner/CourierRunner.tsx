@@ -102,6 +102,16 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
       ? { maxPriorityClass: controls.sharing.maxPriorityClass }
       : {}),
   };
+  // VERSION the sharing scope so an async pack build can detect a mid-flight change and rebuild with
+  // the current scope before sending (#N) — a slow IndexedDB/repack must never transmit a push_pack /
+  // response_pack containing rooms/priorities the user has since EXCLUDED.
+  const scopeKey = JSON.stringify(scopeRef.current);
+  const scopeVersionRef = useRef(0);
+  const prevScopeKeyRef = useRef(scopeKey);
+  if (prevScopeKeyRef.current !== scopeKey) {
+    prevScopeKeyRef.current = scopeKey;
+    scopeVersionRef.current += 1;
+  }
   // The §33 operational mode — REACTIVE here (unlike the non-reactive sync consumers): switching
   // into Stealth/Emergency must stop a running courier immediately, so we subscribe (below) and
   // re-render on a change.
@@ -245,14 +255,32 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
         mode: liveMode as CourierMode,
         power,
         // Advertise our gaps (quarantined missing deps) so a peer serves them; the push rides the
-        // CURRENT sharing scope (room allowlist + priority cap), read live from the ref.
-        buildRequest: () => buildClientExchangeRequest(db, 'courier', scopeRef.current),
-        // Serve a peer's inbound request from what we hold (the bidirectional responder), filtered
-        // by the CURRENT sharing scope so a peer never receives over-priority / other-room content.
-        buildResponse: (request) => respondToClientExchange(db, request, scopeRef.current),
+        // CURRENT sharing scope (room allowlist + priority cap).  If the scope changes WHILE the pack
+        // builds, rebuild with the new scope before returning, so a narrowed selection is honored (#N).
+        buildRequest: async () => {
+          for (let i = 0; i < 4; i++) {
+            const v = scopeVersionRef.current;
+            const bytes = await buildClientExchangeRequest(db, 'courier', scopeRef.current);
+            if (scopeVersionRef.current === v) return bytes; // scope stable through the build
+          }
+          return buildClientExchangeRequest(db, 'courier', scopeRef.current);
+        },
+        // Serve a peer's inbound request from what we hold (the bidirectional responder), filtered by
+        // the CURRENT sharing scope so a peer never receives over-priority / other-room content — and
+        // rebuilt if the scope changed mid-build (#N).
+        buildResponse: async (request) => {
+          for (let i = 0; i < 4; i++) {
+            const v = scopeVersionRef.current;
+            const bytes = await respondToClientExchange(db, request, scopeRef.current);
+            if (scopeVersionRef.current === v) return bytes;
+          }
+          return respondToClientExchange(db, request, scopeRef.current);
+        },
         onOutcome: (outcome) => {
-          // INGEST a served response into the local store (CID-verified; fills our gaps).
-          if (outcome.response) void ingestClientExchangeResponse(db, outcome.response);
+          // INGEST a served response into the local store (CID-verified; fills our gaps) — ROOM-SCOPED
+          // so a peer's response cannot land unrelated rooms past the current allowlist (#M).
+          if (outcome.response)
+            void ingestClientExchangeResponse(db, outcome.response, scopeRef.current);
           setActivity((prev) => [
             ...prev.slice(-19),
             {

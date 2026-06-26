@@ -43,6 +43,7 @@ async function quarantineMissing(
   db: IDBDatabase,
   parentCid: string,
   missing: string[],
+  roomHash?: string,
 ): Promise<void> {
   const tx = db.transaction(LCAP_STORE.quarantine, 'readwrite');
   tx.objectStore(LCAP_STORE.quarantine).put({
@@ -51,6 +52,7 @@ async function quarantineMissing(
     firstSeen: 1,
     missingDeps: missing,
     byteSize: 0,
+    ...(roomHash !== undefined ? { roomHash } : {}),
   });
   await new Promise<void>((resolve, reject) => {
     tx.oncomplete = () => resolve();
@@ -117,11 +119,11 @@ async function putCapabilityRecord(
   const body = lcap.encodeWithSchema(lcap.capabilityRecordV2Schema, {
     record_version: 2,
     kind: 'room_capability',
-    capability_id: `cap-${visibility}`,
+    capability_id: `cap-${visibility}-${roomHash || 'room-1'}`,
     subject_account_id: 'acct',
     subject_device_id: 'dev',
     subject_device_key_id: 'key',
-    room_id: 'room-1',
+    room_id: roomHash || 'room-1',
     visibility_scope: visibility,
     operations: [],
     policy_epoch: 0,
@@ -227,6 +229,77 @@ describe('client §16 exchange engine', () => {
       roomHashAllowlist: ['room-Y'],
     });
     expect(await ingestClientExchangeResponse(peerA, response as Uint8Array)).toBeNull();
+  });
+
+  it('a room-scoped REQUEST advertises ONLY the scoped room’s gaps (#K)', async () => {
+    const lcap = await import('@licio/lcap');
+    const depY = await cidFor('record', new Uint8Array([1]));
+    const depX = await cidFor('record', new Uint8Array([2]));
+    await quarantineMissing(peerA, 'parentY', [depY], 'bbbbbbbb');
+    await quarantineMissing(peerA, 'parentX', [depX], 'aaaaaaaa');
+    const request = await buildClientExchangeRequest(peerA, 'courier', {
+      roomHashAllowlist: ['bbbbbbbb'],
+    });
+    const decoded = lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, request);
+    const wantCids = (decoded.want ?? []).map((w) => w.cid);
+    expect(wantCids).toContain(depY);
+    expect(wantCids).not.toContain(depX); // an unrelated room's gap is never advertised
+  });
+
+  it('counts WANTS after de-dup so a distinct gap is not starved by many shared rows (#I)', async () => {
+    const lcap = await import('@licio/lcap');
+    const depShared = await cidFor('record', new Uint8Array([3]));
+    const depDistinct = await cidFor('record', new Uint8Array([4]));
+    // 260 rows (> the 256 want cap) all share ONE missing dep; ONE later-sorting row has a DISTINCT
+    // dep.  Capping by raw rows would read only the 256 shared rows and never advertise the distinct
+    // gap; counting UNIQUE wants reaches it.
+    const tx = peerA.transaction(LCAP_STORE.quarantine, 'readwrite');
+    const store = tx.objectStore(LCAP_STORE.quarantine);
+    for (let i = 0; i < 260; i++) {
+      store.put({
+        cid: `a-shared-${i}`,
+        reason: 'missing_dependency',
+        firstSeen: 1,
+        missingDeps: [depShared],
+        byteSize: 0,
+      });
+    }
+    store.put({
+      cid: 'z-distinct',
+      reason: 'missing_dependency',
+      firstSeen: 1,
+      missingDeps: [depDistinct],
+      byteSize: 0,
+    });
+    await new Promise<void>((res, rej) => {
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+    });
+    const request = await buildClientExchangeRequest(peerA, 'courier');
+    const decoded = lcap.decodeWithSchema(lcap.exchangeRequestV2Schema, request);
+    const wantCids = new Set((decoded.want ?? []).map((w) => w.cid));
+    expect(wantCids.has(depShared)).toBe(true);
+    expect(wantCids.has(depDistinct)).toBe(true); // not starved by the 260 shared rows
+  });
+
+  it('SECURITY: a room-scoped INGEST commits ONLY the allowlisted room’s records (#M)', async () => {
+    const lcap = await import('@licio/lcap');
+    const roomA = 'aaaaaaaaaaaaaaaa';
+    const roomB = 'bbbbbbbbbbbbbbbb';
+    const capA = await putCapabilityRecord(peerB, lcap, 'public', roomA);
+    const capB = await putCapabilityRecord(peerB, lcap, 'public', roomB);
+    // A pack carrying BOTH rooms' records, as a (possibly hostile) peer's response_pack would.
+    const pack = await lcap.repackHeldObjects(
+      (cid) => getHeldObject(peerB, cid),
+      [capA, capB],
+      1_000_000,
+    );
+    const counts = await ingestPackIntoStore(peerA, pack.pack as Uint8Array, {
+      roomHashAllowlist: [roomB],
+    });
+    expect(counts?.records).toBe(1); // only roomB's record committed
+    expect(await getHeldObject(peerA, capB)).toBeDefined();
+    expect(await getHeldObject(peerA, capA)).toBeUndefined(); // roomA dropped past the scope
   });
 
   it('serves nothing (empty response) when the peer holds none of the wants', async () => {

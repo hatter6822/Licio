@@ -149,6 +149,8 @@ export async function syncRoomOverP2p(
     'public',
   );
   if (!anchor) return null;
-  const ingested = await ingestClientExchangeResponse(params.db, anchor.response);
+  // Room-scoped on the fallback too: the server serves explicit wants by CID with no room scope, so
+  // a scoped sync must filter the anchor's response to the allowlisted rooms before commit (#M).
+  const ingested = await ingestClientExchangeResponse(params.db, anchor.response, params.scope);
   return { transport: anchor.transport, ingested };
 }

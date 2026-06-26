@@ -34,6 +34,7 @@ import {
   bytesToHex,
   filterPresentKeys,
   importInCappedTransactions,
+  normalizeRoomKey,
   type ProofRow,
   putBlock,
   type RecordRow,
@@ -190,6 +191,9 @@ interface QuarantineRow {
   readonly firstSeen: number;
   readonly missingDeps: readonly string[];
   readonly byteSize: number;
+  /** The quarantined record's canonical room key (hex room_id_hash), so a room-scoped sync can
+   *  advertise wants ONLY for the rooms it is syncing (an unrelated room's gaps never leak). */
+  readonly roomHash?: string;
 }
 
 /**
@@ -204,8 +208,22 @@ export async function commitImportedBundle(
   pack: ParsedPack,
   importResult: ImportResult,
   nowMs: number = Date.now(),
+  opts: { readonly roomAllowlist?: ReadonlySet<string> } = {},
 ): Promise<CommitCounts> {
   const entryByCid = new Map(pack.entries.map((entry) => [entry.cid, entry]));
+  // A room-scoped ingest (a "Sync this room" response) commits ONLY records in the allowlisted
+  // rooms — so a peer cannot slip unrelated public rooms' content into `lcap_v2` past the scope
+  // (#M).  A record's room is the canonical hex of its entry's room_id_hash.
+  const allow = opts.roomAllowlist;
+  const roomOf = (cid: string): string | undefined => {
+    const rih = entryByCid.get(cid)?.room_id_hash;
+    return rih !== undefined ? normalizeRoomKey(bytesToHex(rih)) : undefined;
+  };
+  const inScope = (cid: string): boolean => {
+    if (!allow) return true;
+    const room = roomOf(cid);
+    return room !== undefined && allow.has(room);
+  };
 
   const recordRows: RecordRow[] = [];
   const proofRows: ProofRow[] = [];
@@ -217,6 +235,7 @@ export async function commitImportedBundle(
   for (const [cid, frame] of importResult.imported) {
     const entry = entryByCid.get(cid);
     if (frame.frameKind === 'record_body') {
+      if (!inScope(cid)) continue; // out-of-scope room — never committed under a room-scoped ingest
       // Store the room key as the LOSSLESS canonical hex of the room_id_hash bytes (not a lossy
       // TextDecoder), so it compares equal to the room frontier + the "Sync this room" UI hash.
       const roomHash = entry?.room_id_hash !== undefined ? bytesToHex(entry.room_id_hash) : '';
@@ -259,14 +278,19 @@ export async function commitImportedBundle(
   let alreadyHave = 0;
   for (const status of importResult.statuses) {
     if (status.status === 'quarantined_missing_dependency') {
+      if (!inScope(status.cid)) continue; // out-of-scope room — do not quarantine / advertise its gaps
       const missingCids = quarantineMissing(status);
       for (const dep of missingCids) missing.add(dep);
+      const qEntry = entryByCid.get(status.cid);
+      const qRoom =
+        qEntry?.room_id_hash !== undefined ? bytesToHex(qEntry.room_id_hash) : undefined;
       quarantineRows.push({
         cid: status.cid,
         reason: 'missing_dependency',
         firstSeen: nowMs,
         missingDeps: missingCids,
         byteSize: pack.frames.get(status.cid)?.payload.length ?? 0,
+        ...(qRoom !== undefined ? { roomHash: qRoom } : {}),
       });
     } else if (status.status === 'rejected_bad_cid') {
       rejected += 1;
