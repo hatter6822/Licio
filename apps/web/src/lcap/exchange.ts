@@ -167,6 +167,7 @@ export async function ingestPackIntoStore(
   db: IDBDatabase,
   packBytes: Uint8Array,
   scope?: ExchangeScope,
+  shouldCommit?: () => boolean,
 ): Promise<CommitCounts | null> {
   const read = await readBundleForImport(packBytes);
   if (!read.ok) return null; // malformed / truncated / private-labelled → refuse, commit nothing
@@ -180,9 +181,13 @@ export async function ingestPackIntoStore(
       : undefined;
   // This is the PUBLIC plane ingress (courier / WebRTC / anchor) — commit ONLY public records, so a
   // peer cannot push in_room/private records (or a misleading public-header pack) into lcap_v2 (#P).
+  // `shouldCommit` is threaded to the LEAF (commitImportedBundle re-checks it immediately before the
+  // store writes), so a Stop/abort/scope-revocation DURING the read/import awaits above still prevents
+  // the commit — not just the count/reply at the boundary (#BA).
   return commitImportedBundle(db, read.pack, imported, Date.now(), {
     publicOnly: true,
     ...(roomAllowlist !== undefined ? { roomAllowlist } : {}),
+    ...(shouldCommit ? { shouldCommit } : {}),
   });
 }
 
@@ -321,9 +326,11 @@ export async function respondToClientExchange(
   // filter drops a peer's UNRELATED public rooms — so ambient gossip can't pollute `lcap_v2` past
   // the allowlist), while an unscoped sync accepts all public gossip.  The push ingest is a SIDE
   // EFFECT, so it is skipped when the caller's liveness check has gone false (a Stop / revocation /
-  // peers→none during this async build), so a stopped courier never commits the push (#OO).
+  // peers→none during this async build), so a stopped courier never commits the push (#OO).  The
+  // predicate is ALSO threaded into the ingest so it is re-checked at the LEAF, right before the store
+  // writes — not just here before the (awaited) read/import (#BA).
   if (request.push_pack !== undefined && (shouldIngestPush?.() ?? true)) {
-    await ingestPackIntoStore(db, request.push_pack, scope);
+    await ingestPackIntoStore(db, request.push_pack, scope, shouldIngestPush);
   }
 
   // Serve ONLY what the peer wants AND we may share: intersect the peer's wants with our SHAREABLE
@@ -403,5 +410,7 @@ export async function ingestClientExchangeResponse(
   if (response === null || response.response_pack === undefined) return null;
   if (shouldCommit && !shouldCommit()) return null; // cancelled/settled before the store write (#AH)
   // Room-scoped: a peer cannot fill our store with unrelated rooms via a valid-but-off-scope pack.
-  return ingestPackIntoStore(db, response.response_pack, scope);
+  // The predicate is threaded to the LEAF so it is re-checked right before the writes, not only here
+  // before the (awaited) read/import (#BA).
+  return ingestPackIntoStore(db, response.response_pack, scope, shouldCommit);
 }

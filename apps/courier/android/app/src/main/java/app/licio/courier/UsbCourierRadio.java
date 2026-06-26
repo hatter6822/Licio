@@ -101,6 +101,10 @@ public class UsbCourierRadio implements CourierRadio {
             requestAccessoryPermission(accessory);
             return;
         }
+        // Already-permitted DIRECT open: mark the radio live BEFORE opening, so openAccessory's
+        // post-open liveness guard (which exists to drop a stale async permission grant, #AS) does not
+        // immediately close this fresh, synchronous open and silently fail the USB courier (#AY).
+        running.set(true);
         openAccessory(accessory);
     }
 

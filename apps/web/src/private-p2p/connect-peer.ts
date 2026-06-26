@@ -648,6 +648,13 @@ async function establishDataChannel(
   const inbox = new MessageInbox();
   let remoteDescriptionSet = false;
   const pendingIce: RtcIceCandidateInit[] = [];
+  // Cap the out-of-order ICE buffer: a buggy/malicious member can send sealed ICE candidates that
+  // ALWAYS reject, and without a bound they would accumulate for the connection's lifetime + be replayed
+  // on every later renegotiation.  Beyond the cap we drop (a real negotiation needs only a handful) (#AZ).
+  const MAX_PENDING_ICE = 64;
+  const bufferIce = (candidate: RtcIceCandidateInit): void => {
+    if (pendingIce.length < MAX_PENDING_ICE) pendingIce.push(candidate);
+  };
   let stopped = false;
   let channelOpen = false;
   // Poll fast (pollIntervalMs) until nowMs() >= fastUntil, then drop to maintenancePollMs.
@@ -739,6 +746,11 @@ async function establishDataChannel(
       }
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
+      // The channel may have been torn down (stop / abort) WHILE setRemoteDescription / createAnswer /
+      // setLocalDescription awaited — re-check before publishing the answer, or a dead link would emit
+      // a sealed answer for an ICE-restart offer and make the peer renegotiate a connection that is
+      // already gone (the answer-side counterpart of #ZZ) (#BB).
+      if (stopped || p.isAborted()) return;
       await sendSignal({
         schema: 'licio.private.signaling_payload.v1',
         kind: 'answer',
@@ -771,11 +783,11 @@ async function establishDataChannel(
           // signalled before the re-offer itself, and `remoteDescriptionSet` stays latched true
           // from the initial negotiation — so they can't attach to the current description.  Buffer
           // them (as the initial negotiation does via the else-branch) to retry after the next
-          // setRemoteDescription, instead of dropping them and stranding the restart.
-          pendingIce.push(candidate);
+          // setRemoteDescription, instead of dropping them and stranding the restart — bounded (#AZ).
+          bufferIce(candidate);
         }
       } else {
-        pendingIce.push(candidate); // can't add before the remote description is set
+        bufferIce(candidate); // can't add before the remote description is set — bounded (#AZ)
       }
     }
   };

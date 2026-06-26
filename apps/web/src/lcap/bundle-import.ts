@@ -214,7 +214,13 @@ export async function commitImportedBundle(
   pack: ParsedPack,
   importResult: ImportResult,
   nowMs: number = Date.now(),
-  opts: { readonly roomAllowlist?: ReadonlySet<string>; readonly publicOnly?: boolean } = {},
+  opts: {
+    readonly roomAllowlist?: ReadonlySet<string>;
+    readonly publicOnly?: boolean;
+    /** Re-checked at the LEAF — immediately before the store writes — so a Stop/abort/scope-revocation
+     *  that landed during the (awaited) decode/closure work above still prevents the commit (#BA). */
+    readonly shouldCommit?: () => boolean;
+  } = {},
 ): Promise<CommitCounts> {
   const entryByCid = new Map(pack.entries.map((entry) => [entry.cid, entry]));
   // A room-scoped ingest (a "Sync this room" response) commits ONLY records in the allowlisted
@@ -531,6 +537,23 @@ export async function commitImportedBundle(
     reQuarantined.size > 0 ? trustRows.filter((r) => !reQuarantined.has(r.recordCid)) : trustRows;
   const commitLiveness =
     reQuarantined.size > 0 ? livenessRows.filter((r) => !reQuarantined.has(r.cid)) : livenessRows;
+
+  // LEAF liveness check (#BA): re-evaluate the caller's predicate IMMEDIATELY before the first store
+  // write — a Stop / abort / scope-revocation that landed during the (awaited) decode + closure work
+  // above must PREVENT the commit, not merely be caught at the boundary after the bytes are already in
+  // `lcap_v2`.  This is the threaded-to-the-leaf counterpart of the boundary check in the callers.
+  if (opts.shouldCommit && !opts.shouldCommit()) {
+    return {
+      records: 0,
+      proofs: 0,
+      blocks: 0,
+      chunks: 0,
+      quarantined: 0,
+      rejected: 0,
+      alreadyHave: 0,
+      missingCids: [],
+    };
+  }
 
   // Persist (capped transactions; blocks metadata↔blob separated).
   if (commitRecords.length > 0)

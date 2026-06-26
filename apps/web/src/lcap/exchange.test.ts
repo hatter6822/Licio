@@ -426,6 +426,27 @@ describe('client §16 exchange engine', () => {
     expect(await readBlockBytes(peerA, blockCid)).toBeUndefined();
   });
 
+  it('SECURITY: ingest re-checks shouldCommit at the LEAF (before the store write), not just the boundary (#BA)', async () => {
+    const lcap = await import('@licio/lcap');
+    const cap = await putCapabilityRecord(peerB, lcap, 'public', 'roomba');
+    const pack = await lcap.repackHeldObjects((cid) => getHeldObject(peerB, cid), [cap], 1_000_000);
+
+    // shouldCommit() FALSE — even though the read/import/closure all ran (awaits), nothing is written.
+    const aborted = await ingestPackIntoStore(
+      peerA,
+      pack.pack as Uint8Array,
+      undefined,
+      () => false,
+    );
+    expect(aborted?.records).toBe(0);
+    expect(await getHeldObject(peerA, cap)).toBeUndefined();
+
+    // shouldCommit() TRUE — the same pack commits.
+    const live = await ingestPackIntoStore(peerA, pack.pack as Uint8Array, undefined, () => true);
+    expect(live?.records).toBe(1);
+    expect(await getHeldObject(peerA, cap)).toBeDefined();
+  });
+
   it('SECURITY: re-quarantines a record whose body needs a block the pack TABLE omits (#AC)', async () => {
     const lcap = await import('@licio/lcap');
     const missingBlock = await cidFor('block', new Uint8Array([7, 7, 7, 2])); // NOT in pack, NOT held
