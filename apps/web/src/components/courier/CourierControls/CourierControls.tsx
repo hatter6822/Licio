@@ -57,6 +57,13 @@ const PRIORITY_OPTIONS: ReadonlyArray<{ value: '0' | '1' | '2' | '3' | '4'; labe
 ];
 
 export interface CourierControlsProps {
+  /**
+   * Optional CONTROLLED controls: when provided, this component renders + edits THIS object and the
+   * parent owns the state (via `onControlsChange`), so a sibling (e.g. CourierRunner's channel
+   * picker) and this editor never diverge into two `controls` states that overwrite each other's
+   * fields (#EE).  Omitted ⇒ the component self-manages from the persisted store.
+   */
+  readonly controls?: CourierRadioControls;
   /** Notify a parent when the controls change (e.g. to re-evaluate the controller). */
   readonly onControlsChange?: (controls: CourierRadioControls) => void;
   /**
@@ -74,21 +81,27 @@ export interface CourierControlsProps {
  * acknowledged.
  */
 export function CourierControls({
+  controls: controlsProp,
   onControlsChange,
   onAcknowledgeChange,
   className,
 }: CourierControlsProps): React.ReactElement {
   const t = useT();
-  const [controls, setControls] = useState<CourierRadioControls>(() => getCourierControls());
+  // CONTROLLED when a `controls` prop is given (the parent is the single source of truth, #EE);
+  // otherwise self-manage from the persisted store.
+  const [internalControls, setInternalControls] = useState<CourierRadioControls>(() =>
+    getCourierControls(),
+  );
+  const controls = controlsProp ?? internalControls;
   const [acknowledged, setAcknowledged] = useState<boolean>(() => getRadioDisclosureAcknowledged());
 
   const update = useCallback(
     (next: CourierRadioControls) => {
-      setCourierControls(next);
-      setControls(next);
+      setCourierControls(next); // always persist
+      if (controlsProp === undefined) setInternalControls(next); // self-manage only when uncontrolled
       onControlsChange?.(next);
     },
-    [onControlsChange],
+    [controlsProp, onControlsChange],
   );
 
   const acknowledge = useCallback(

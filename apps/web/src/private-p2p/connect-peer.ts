@@ -978,59 +978,65 @@ async function runHandshake(
   // Op frames a faster peer sends before our handshake finishes — handed to the channel.
   const opStash: Uint8Array[] = [];
 
+  // Process handshake frames STRICTLY SEQUENTIALLY: a proof frame must never run while a prior
+  // hello's async device-key import is still pending, or tryVerify would see remoteHello +
+  // remoteProofSig but resolvedDevice still undefined and reject a valid member as unknown (#FF).
+  let handshakeChain: Promise<void> = Promise.resolve();
   p.inbox.consume((data): void => {
     if (typeof data !== 'string') {
       opStash.push(toUint8(data as ArrayBuffer | ArrayBufferView)); // not a handshake frame
       return;
     }
-    void (async (): Promise<void> => {
-      let frame: HandshakeFrame;
-      try {
-        const parsed: unknown = JSON.parse(data);
-        frame = parsed as HandshakeFrame;
-      } catch (error) {
-        devWarn('dropped a non-JSON handshake frame', error);
-        return;
-      }
-      if (frame.t === 'hello' && frame.hello) {
-        // Validate the inbound hello FAIL-FAST: a malformed hello (e.g. a regex-passing
-        // but non-base64url ephemeral key) would otherwise throw later inside
-        // signHandshakeProof and hang the connect to the deadline. Reject promptly +
-        // typed, symmetric with verifyPeerHandshake's own hardening.
-        const parsedHello = p2p.handshakeHelloSchema.safeParse(frame.hello);
-        if (!parsedHello.success) {
-          rejectDone(
-            new ConnectPrivatePeerError('handshake_malformed_hello', 'malformed remote hello'),
-          );
-          return;
-        }
-        remoteHello = parsedHello.data;
-        const resolution = p.resolveDevice(remoteHello.author_device_id);
-        if (resolution) {
-          try {
-            resolvedDevice = {
-              publicKey: await p2p.importPublicKeyRaw(
-                p2p.fromBase64Url(resolution.signingPublicKey),
-              ),
-              activeAtEpoch: resolution.activeAtEpoch,
-            };
-          } catch (error) {
-            resolvedDevice = undefined;
-            devWarn('could not import the resolved device public key', error);
-          }
-        }
-        await sendSelfProofIfReady();
-        await tryVerify();
-      } else if (frame.t === 'proof' && frame.sig) {
+    handshakeChain = handshakeChain
+      .then(async (): Promise<void> => {
+        let frame: HandshakeFrame;
         try {
-          remoteProofSig = p2p.fromBase64Url(frame.sig);
+          const parsed: unknown = JSON.parse(data);
+          frame = parsed as HandshakeFrame;
         } catch (error) {
-          devWarn('dropped a malformed handshake proof signature', error);
+          devWarn('dropped a non-JSON handshake frame', error);
           return;
         }
-        await tryVerify();
-      }
-    })().catch((error) => rejectDone(error)); // a thrown error fails fast, not via timeout
+        if (frame.t === 'hello' && frame.hello) {
+          // Validate the inbound hello FAIL-FAST: a malformed hello (e.g. a regex-passing
+          // but non-base64url ephemeral key) would otherwise throw later inside
+          // signHandshakeProof and hang the connect to the deadline. Reject promptly +
+          // typed, symmetric with verifyPeerHandshake's own hardening.
+          const parsedHello = p2p.handshakeHelloSchema.safeParse(frame.hello);
+          if (!parsedHello.success) {
+            rejectDone(
+              new ConnectPrivatePeerError('handshake_malformed_hello', 'malformed remote hello'),
+            );
+            return;
+          }
+          remoteHello = parsedHello.data;
+          const resolution = p.resolveDevice(remoteHello.author_device_id);
+          if (resolution) {
+            try {
+              resolvedDevice = {
+                publicKey: await p2p.importPublicKeyRaw(
+                  p2p.fromBase64Url(resolution.signingPublicKey),
+                ),
+                activeAtEpoch: resolution.activeAtEpoch,
+              };
+            } catch (error) {
+              resolvedDevice = undefined;
+              devWarn('could not import the resolved device public key', error);
+            }
+          }
+          await sendSelfProofIfReady();
+          await tryVerify();
+        } else if (frame.t === 'proof' && frame.sig) {
+          try {
+            remoteProofSig = p2p.fromBase64Url(frame.sig);
+          } catch (error) {
+            devWarn('dropped a malformed handshake proof signature', error);
+            return;
+          }
+          await tryVerify();
+        }
+      })
+      .catch((error) => rejectDone(error)); // a thrown error fails fast, not via timeout
   });
 
   // A data-channel close DURING the handshake fails the connect immediately (otherwise it

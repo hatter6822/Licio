@@ -372,6 +372,34 @@ describe('client §16 exchange engine', () => {
     expect(await getHeldObject(peerA, inRoomCid)).toBeUndefined(); // the in_room record dropped (#P)
   });
 
+  it('SECURITY: a scoped ingress drops a block no committed record / want references (#GG)', async () => {
+    const lcap = await import('@licio/lcap');
+    const wantedBytes = new Uint8Array([1, 1, 1]);
+    const wantedCid = await cidFor('block', wantedBytes);
+    const foreignBytes = new Uint8Array([2, 2, 2]);
+    const foreignCid = await cidFor('block', foreignBytes);
+    await putBlock(
+      peerB,
+      { blockCid: wantedCid, state: 'integrity_verified', size: wantedBytes.length },
+      [wantedBytes],
+    );
+    await putBlock(
+      peerB,
+      { blockCid: foreignCid, state: 'integrity_verified', size: foreignBytes.length },
+      [foreignBytes],
+    );
+    // A WANTS the wanted block; a hostile peer's pack ALSO attaches an unrelated foreign block.
+    await quarantineMissing(peerA, 'parent', [wantedCid]);
+    const pack = await lcap.repackHeldObjects(
+      (cid) => getHeldObject(peerB, cid),
+      [wantedCid, foreignCid],
+      1_000_000,
+    );
+    await ingestPackIntoStore(peerA, pack.pack as Uint8Array);
+    expect(await readBlockBytes(peerA, wantedCid)).toEqual(wantedBytes); // our WANT is committed
+    expect(await readBlockBytes(peerA, foreignCid)).toBeUndefined(); // the foreign block is dropped
+  });
+
   it('serves nothing (empty response) when the peer holds none of the wants', async () => {
     await quarantineMissing(peerA, 'parent', [await cidFor('block', new Uint8Array([9]))]);
     const request = await buildClientExchangeRequest(peerA, 'courier');

@@ -352,7 +352,11 @@ export function CourierRunner({ className }: CourierRunnerProps): React.ReactEle
       className={cn('flex flex-col gap-5', className)}
       aria-label={t('courier.runner.title', 'Courier')}
     >
-      <CourierControls onControlsChange={onControlsChange} onAcknowledgeChange={setAcknowledged} />
+      <CourierControls
+        controls={controls}
+        onControlsChange={onControlsChange}
+        onAcknowledgeChange={setAcknowledged}
+      />
 
       {/* Per-channel selection — only meaningful once the disclosure is acknowledged. */}
       {acknowledged ? (

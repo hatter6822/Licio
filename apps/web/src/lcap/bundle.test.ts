@@ -32,7 +32,7 @@ import {
   openLcapDb,
   resetLcapDbConnection,
 } from './db.js';
-import { collectByCursor, type RecordRow, readBlockBytes } from './store.js';
+import { collectByCursor, putBlock, type RecordRow, readBlockBytes } from './store.js';
 
 let db: IDBDatabase;
 
@@ -130,6 +130,57 @@ describe('bundle export → import round-trip (WS-R.15.1a/b)', () => {
       expect(row?.state).toBe('integrity_verified'); // NOT authorized — no overclaim
     }
     db2.close();
+  });
+
+  it('SECURITY: export derives block deps from the signed body, not row.deps metadata (#HH)', async () => {
+    const lcap = await import('@licio/lcap');
+    const roomHex = 'cccccccccccccccc';
+    const ownBytes = new Uint8Array([3, 3, 3]);
+    const ownBlockCid = await cidFor('block', ownBytes);
+    const foreignBytes = new Uint8Array([4, 4, 4]);
+    const foreignBlockCid = await cidFor('block', foreignBytes);
+    await putBlock(db, { blockCid: ownBlockCid, state: 'integrity_verified', size: 3 }, [ownBytes]);
+    await putBlock(db, { blockCid: foreignBlockCid, state: 'integrity_verified', size: 3 }, [
+      foreignBytes,
+    ]);
+    // A real record whose SIGNED body references ONLY ownBlockCid; its row.deps ALSO lists the
+    // foreign block (as pack-table metadata copied from an imported bundle would).
+    const body = lcap.encodeContributionEvent({
+      record_version: 2,
+      kind: 'contribution_event',
+      event_type: 'post',
+      home_room_id: 'room-1',
+      visibility_scope: 'public',
+      author_account_id: 'a',
+      author_device_id: 'd',
+      author_device_key_id: 'k',
+      device_seq: 1,
+      capability_cid: await cidFor('record', new Uint8Array([0])),
+      policy_epoch_claim: 0,
+      revocation_epoch_claim: 0,
+      client_nonce: new Uint8Array([1]),
+      priority: 2,
+      body_block_cid: ownBlockCid,
+    });
+    const recordCid = await cidFor('record', body);
+    await put(LCAP_STORE.records, {
+      recordCid,
+      body,
+      kind: 'contribution_event',
+      lane: 'C0',
+      priority: 2,
+      roomHash: roomHex,
+      state: 'integrity_verified',
+      size: body.length,
+      deps: [ownBlockCid, foreignBlockCid], // unauthenticated metadata lists BOTH
+    });
+
+    const exportData = await gatherRoomExport(db, roomHex);
+    const exportedBlocks = exportData.objects
+      .filter((o) => o.cidKind === 'block')
+      .map((o) => o.cid);
+    expect(exportedBlocks).toContain(ownBlockCid); // referenced by the SIGNED body → exported
+    expect(exportedBlocks).not.toContain(foreignBlockCid); // only in row.deps → NOT exported (#HH)
   });
 
   it('computes the §26.2 disclosure (rooms, media, size) before producing a file', async () => {

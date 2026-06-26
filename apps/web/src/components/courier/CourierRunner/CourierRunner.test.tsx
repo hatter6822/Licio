@@ -120,6 +120,21 @@ describe('CourierRunner (WS-R.15.4c/d/e)', () => {
     expect(getCourierControls().enabledChannels).toContain('wifiDirect');
   });
 
+  it('keeps the channel selection when a CourierControls field is toggled (#EE)', () => {
+    render(<CourierRunner />);
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /i understand what a nearby radio reveals/i }),
+    );
+    // Enable Wi-Fi Direct via the runner's channel picker.
+    fireEvent.click(screen.getByRole('checkbox', { name: /wi-fi direct/i }));
+    expect(getCourierControls().enabledChannels).toContain('wifiDirect');
+    // Now toggle advertising in the sibling CourierControls editor — the channel selection MUST
+    // survive (a divergent CourierControls `controls` state would overwrite enabledChannels).
+    fireEvent.click(screen.getByRole('switch', { name: /advertise this device/i }));
+    expect(getCourierControls().advertisingEnabled).toBe(true); // the toggle took effect
+    expect(getCourierControls().enabledChannels).toContain('wifiDirect'); // not overwritten (#EE)
+  });
+
   it('drives a CourierController inside the native shell and reports running honestly', async () => {
     injectNativeShell();
     render(<CourierRunner />);

@@ -87,10 +87,25 @@ export async function gatherRoomExport(db: IDBDatabase, roomHash: string): Promi
     if (recordCids.has(row.recordCid)) proofs.push(row);
   });
 
-  // 3) Blocks the records reference (targeted lookups — a dep that resolves to a held
-  //    block descriptor is included; a dep we don't hold is simply omitted).
+  // 3) Blocks the records reference — re-derived from each record's SIGNED body (body/attachment/
+  //    source-snapshot CIDs), NOT `record.deps`, which can be unauthenticated pack-table metadata a
+  //    crafted record copied from an imported bundle to point at another room's held block (#HH).  A
+  //    dep that resolves to a held block descriptor is included; one we don't hold is omitted.
+  const { decodeAndRouteRecord } = await import('@licio/lcap');
   const depCids = new Set<string>();
-  for (const record of records) for (const dep of record.deps ?? []) depCids.add(dep);
+  for (const record of records) {
+    let decoded: ReturnType<typeof decodeAndRouteRecord>;
+    try {
+      decoded = decodeAndRouteRecord(record.body);
+    } catch {
+      continue; // undecodable — export nothing further for it
+    }
+    if (decoded.kind !== 'contribution_event') continue;
+    if (decoded.body_block_cid) depCids.add(decoded.body_block_cid);
+    if (decoded.attachment_manifest_cid) depCids.add(decoded.attachment_manifest_cid);
+    for (const s of decoded.source_snapshot_cids ?? []) depCids.add(s);
+    if (decoded.target_source_snapshot_cid) depCids.add(decoded.target_source_snapshot_cid);
+  }
   const blocks: Array<{ cid: string; bytes: Uint8Array }> = [];
   for (const cid of depCids) {
     const descriptor = await readBlockDescriptor(db, cid);
