@@ -57,8 +57,11 @@ function recordRefs(record: ReturnType<typeof decodeAndRouteRecord>): {
 } {
   const deps: string[] = [];
   if (record.kind === 'contribution_event') {
+    // NOTE: `capability_cid` is deliberately NOT a dep — the §18.3 validator resolves the capability
+    // from registered identity state, not as a `requires` prerequisite record; declaring it as a dep
+    // would make the server import require the capability be ACCEPTED first (it never is), stranding
+    // the contribution.  Parents/prev/replaces/target + the body's blocks ARE the structural deps.
     if (record.prev_device_record_cid) deps.push(record.prev_device_record_cid);
-    deps.push(record.capability_cid);
     if (record.replaces_record_cid) deps.push(record.replaces_record_cid);
     if (record.target_record_cid) deps.push(record.target_record_cid);
     if (record.thread_root_cid) deps.push(record.thread_root_cid);

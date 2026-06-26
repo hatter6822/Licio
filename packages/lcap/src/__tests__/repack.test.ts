@@ -106,8 +106,9 @@ describe('repackHeldObjects (pure §16.4 content push)', () => {
     expect(entry).toBeDefined();
     // The room round-trips (the receiver decodes room_id_hash → roomHash 'room-target', not '').
     expect(new TextDecoder().decode(entry?.room_id_hash)).toBe('room-target');
-    // The body's dep CIDs are present so a missing prerequisite quarantines on the receiver.
-    expect(entry?.deps).toContain(capabilityCid);
+    // The body's BLOCK dep is present so a missing block quarantines on the receiver; the capability
+    // is NOT a dep (it is resolved by §18.3 validation, not required as a prerequisite record).
     expect(entry?.deps).toContain(bodyBlockCid);
+    expect(entry?.deps).not.toContain(capabilityCid);
   });
 });
