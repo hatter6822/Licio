@@ -259,10 +259,14 @@ public class WifiDirectRadio implements CourierRadio {
                 String action = intent.getAction();
                 if (action == null || manager == null || channel == null) return;
                 if (WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION.equals(action)) {
-                    // Capture the generation when the discovery request is ISSUED: a peers result for
-                    // an OLD discovery run can be delivered after a Stop→Start (even an advertise-only
-                    // restart) — gate on it so a superseded run cannot initiate a connect() under the
-                    // new session (the `running` flag alone cannot distinguish the old native task).
+                    // A peer list is only actionable while DISCOVERING.  A delayed PEERS_CHANGED for an
+                    // OLD discovery run can arrive after a Stop→Start into advertise-only GROUP mode;
+                    // since `peersGen` is captured at broadcast time it would NOT look stale, so it
+                    // could call connect() and violate the discovery-off mode — drop it unless we are
+                    // currently in DISCOVER mode (#S).
+                    if (currentMode != WifiMode.DISCOVER) return;
+                    // Capture the current generation: a peers result delivered after a same-mode
+                    // Stop→Start is still dropped by the isStale gate below.
                     final long peersGen = startGeneration;
                     manager.requestPeers(channel, peers -> {
                         if (!running.get() || isStale(peersGen) || peers.getDeviceList().isEmpty()) {
@@ -386,20 +390,21 @@ public class WifiDirectRadio implements CourierRadio {
                 return;
             }
             serverSocket = server;
-            // stop() may have run (and found a null serverSocket) between its running flip and the
-            // assignment above; if a stop has already happened, close the freshly-bound listener now
-            // so the Wi-Fi Direct data port doesn't stay bound after the courier stopped.
-            if (!running.get()) {
+            // stop()/restart may have run between its running flip and the assignment above; if a stop
+            // has happened OR a Stop→Start SUPERSEDED this setup (running is true again for the NEW
+            // session, so the running flag alone can't tell), close the freshly-bound listener now so
+            // the OLD group's data port never opens under the fresh controller (#U).
+            if (!running.get() || isStale(serverGen)) {
                 closeServerSocket();
                 return;
             }
             try {
-                while (running.get()) {
+                while (running.get() && !isStale(serverGen)) {
                     Socket socket = server.accept();
-                    if (!running.get()) {
-                        // stop() raced this accept() — close the just-accepted socket instead of
-                        // handing it to the stream link (which would announce a peer-visible link
-                        // after the courier was stopped).
+                    if (!running.get() || isStale(serverGen)) {
+                        // stop()/restart raced this accept() — close the just-accepted socket instead
+                        // of handing it to the stream link (which would announce a peer-visible link
+                        // for the OLD group after a stop / under a fresh session).
                         socket.close();
                         break;
                     }
@@ -417,6 +422,7 @@ public class WifiDirectRadio implements CourierRadio {
 
     /** The client dials the group-owner host and reads length-prefixed frames. */
     private void connectClientSocket(String host) {
+        final long connectGen = startGeneration; // a stop/restart invalidates this client setup (#U)
         new Thread(() -> {
             Socket socket = null;
             try {
@@ -427,9 +433,10 @@ public class WifiDirectRadio implements CourierRadio {
                 liveSockets.add(socket);
                 socket.bind(null);
                 socket.connect(new InetSocketAddress(host, DATA_PORT), SOCKET_TIMEOUT_MS);
-                if (!running.get()) {
-                    // Stopped DURING the dial — do not hand a connected socket to the stream link
-                    // (which would announce the endpoint connected after stop()).
+                if (!running.get() || isStale(connectGen)) {
+                    // Stopped DURING the dial, OR a Stop→Start superseded this connect (running is true
+                    // again for the NEW session) — do not hand the OLD group's socket to the stream
+                    // link (which would announce the endpoint connected for a superseded session) (#U).
                     liveSockets.remove(socket);
                     socket.close();
                     return;

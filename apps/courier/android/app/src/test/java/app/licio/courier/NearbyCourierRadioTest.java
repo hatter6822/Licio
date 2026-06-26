@@ -308,4 +308,24 @@ public class NearbyCourierRadioTest {
         fake.listener.onStartFailed("advertise", fake.lastAdvertiseGen, new IllegalStateException("x"));
         assertEquals("advertise", rec.startFailedOperation);
     }
+
+    @Test
+    public void bothDirectionStartsShareOneSessionGenerationSoALateAdvertiseFailureIsNotStale() {
+        // When both directions are enabled the controller calls startAdvertising() THEN
+        // startDiscovery() for the SAME session.  Both must use ONE session generation — a per-start
+        // bump would make a late advertise failure from the first call look stale and be dropped,
+        // leaving the UI reporting a bidirectional courier while advertising never started (#R).
+        FakeNearby fake = new FakeNearby();
+        Recorder rec = new Recorder();
+        NearbyCourierRadio radio = new NearbyCourierRadio(fake, rec);
+        radio.startAdvertising();
+        long advertiseGen = fake.lastAdvertiseGen;
+        radio.startDiscovery(); // the SECOND direction start in the same session
+        assertEquals("both direction starts share one session generation", advertiseGen,
+                fake.lastDiscoverGen);
+
+        // A late advertise failure for THIS live session is surfaced, NOT dropped as stale.
+        fake.listener.onStartFailed("advertise", advertiseGen, new IllegalStateException("nearby_disabled"));
+        assertEquals("advertise", rec.startFailedOperation);
+    }
 }

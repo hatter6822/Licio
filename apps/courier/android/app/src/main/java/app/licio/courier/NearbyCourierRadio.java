@@ -26,8 +26,12 @@ public class NearbyCourierRadio implements CourierRadio, NearbyConnections.Liste
     // delivered AFTER stop() must NOT start/accept a fresh link (the web listeners are gone and no
     // later stop would tear it down).  Set on start, cleared on stop.
     private final AtomicBoolean running = new AtomicBoolean(false);
-    // Bumped on every start + stop; a start passes its generation to the seam, which echoes it on a
-    // late start-failure so a stale failure from a superseded start is dropped (#2).
+    // A per-SESSION generation bumped ONLY on stop — NOT on each direction start.  When both
+    // directions are enabled the controller calls startAdvertising() THEN startDiscovery() for the
+    // SAME session; bumping per start would make a late startAdvertising failure from the first call
+    // look stale (dropped) even though it belongs to the live session (#R).  The seam echoes this
+    // generation on a late start-failure / lifecycle callback so a failure from a SUPERSEDED session
+    // (a quick Stop→Start) is dropped (#2).
     private volatile long startGeneration = 0;
     private String serviceId = DEFAULT_SERVICE_ID;
     private String localName = "licio-courier";
@@ -52,19 +56,19 @@ public class NearbyCourierRadio implements CourierRadio, NearbyConnections.Liste
     @Override
     public void startAdvertising() {
         running.set(true);
-        nearby.startAdvertising(localName, serviceId, ++startGeneration);
+        nearby.startAdvertising(localName, serviceId, startGeneration); // the SESSION generation (#R)
     }
 
     @Override
     public void startDiscovery() {
         running.set(true);
-        nearby.startDiscovery(serviceId, ++startGeneration);
+        nearby.startDiscovery(serviceId, startGeneration); // the SAME session generation (#R)
     }
 
     @Override
     public void stop() {
         running.set(false);
-        startGeneration++; // invalidate any in-flight start so a late failure Task is dropped
+        startGeneration++; // a NEW session — invalidate any in-flight start/lifecycle from the old one
         nearby.stop();
     }
 

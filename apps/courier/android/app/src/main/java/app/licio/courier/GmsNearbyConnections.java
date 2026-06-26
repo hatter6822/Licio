@@ -64,12 +64,15 @@ public class GmsNearbyConnections implements NearbyConnections {
 
     @Override
     public void startAdvertising(String localName, String serviceId, long generation) {
-        currentGeneration = generation; // tag connections initiated under this start (#E)
+        currentGeneration = generation; // the current session generation (#E/#R)
         // The start Task fails when GMS refuses (missing runtime permission, disabled Nearby/Play
         // Services, radio off) — surface that instead of dropping it, so the caller is not told a
         // start succeeded when no advertising is actually running.  Echo the generation so the radio
-        // can drop a stale failure from a superseded start.
-        client.startAdvertising(localName, serviceId, lifecycle,
+        // can drop a stale failure from a superseded start.  The lifecycle CAPTURES this start's
+        // generation (not the mutable field), so a connection initiated under it is tagged with the
+        // start it belongs to — a stale initiation delivered after a Stop→Start records the OLD
+        // generation and is dropped, not re-tagged with the new session (#Q).
+        client.startAdvertising(localName, serviceId, lifecycleFor(generation),
                         new AdvertisingOptions.Builder().setStrategy(STRATEGY).build())
                 .addOnFailureListener(e -> {
                     if (listener != null) listener.onStartFailed("advertise", generation, e);
@@ -93,9 +96,12 @@ public class GmsNearbyConnections implements NearbyConnections {
         // radio would never learn the dial failed (discovery stays "running" while the only found
         // peer is never exchanged with).  Report a negative connectionResult so the orchestration
         // is free to dial again on the next endpoint-found.
-        client.requestConnection(localName, endpointId, lifecycle)
+        // The dial is issued in the CURRENT session (the radio drops a stale endpoint-found before it
+        // requests a connection), so the lifecycle captures `currentGeneration` (#Q).
+        final long generation = currentGeneration;
+        client.requestConnection(localName, endpointId, lifecycleFor(generation))
                 .addOnFailureListener(e -> {
-                    if (listener != null) listener.onConnectionResult(endpointId, false, currentGeneration);
+                    if (listener != null) listener.onConnectionResult(endpointId, false, generation);
                 });
     }
 
@@ -125,31 +131,37 @@ public class GmsNearbyConnections implements NearbyConnections {
 
     // --- GMS callbacks → the seam Listener ------------------------------------------
 
-    private final ConnectionLifecycleCallback lifecycle = new ConnectionLifecycleCallback() {
-        @Override
-        public void onConnectionInitiated(@NonNull String endpointId, @NonNull ConnectionInfo info) {
-            // Record the generation this connection is born under; every later callback for it
-            // carries that generation so the radio can drop one from a superseded start (#E).
-            endpointGeneration.put(endpointId, currentGeneration);
-            if (listener != null) listener.onConnectionInitiated(endpointId, currentGeneration);
-        }
-
-        @Override
-        public void onConnectionResult(@NonNull String endpointId, @NonNull ConnectionResolution resolution) {
-            long generation = endpointGeneration.getOrDefault(endpointId, currentGeneration);
-            boolean ok = resolution.getStatus().getStatusCode() == ConnectionsStatusCodes.STATUS_OK;
-            if (!ok) endpointGeneration.remove(endpointId); // failed connection — stop tracking it
-            if (listener != null) listener.onConnectionResult(endpointId, ok, generation);
-        }
-
-        @Override
-        public void onDisconnected(@NonNull String endpointId) {
-            Long generation = endpointGeneration.remove(endpointId);
-            if (listener != null) {
-                listener.onDisconnected(endpointId, generation != null ? generation : currentGeneration);
+    /** A lifecycle callback bound to the start `generation` it was registered under (#Q): a connection
+     *  it initiates is tagged with THAT generation (captured at registration), not the mutable current
+     *  one — so a stale initiation delivered after a Stop→Start records the OLD generation and the
+     *  radio drops it, instead of it being re-tagged with the fresh session and accepted. */
+    private ConnectionLifecycleCallback lifecycleFor(final long generation) {
+        return new ConnectionLifecycleCallback() {
+            @Override
+            public void onConnectionInitiated(@NonNull String endpointId, @NonNull ConnectionInfo info) {
+                // Record the generation this connection is born under; every later callback for it
+                // carries that generation so the radio can drop one from a superseded start.
+                endpointGeneration.put(endpointId, generation);
+                if (listener != null) listener.onConnectionInitiated(endpointId, generation);
             }
-        }
-    };
+
+            @Override
+            public void onConnectionResult(@NonNull String endpointId, @NonNull ConnectionResolution resolution) {
+                long gen = endpointGeneration.getOrDefault(endpointId, generation);
+                boolean ok = resolution.getStatus().getStatusCode() == ConnectionsStatusCodes.STATUS_OK;
+                if (!ok) endpointGeneration.remove(endpointId); // failed connection — stop tracking it
+                if (listener != null) listener.onConnectionResult(endpointId, ok, gen);
+            }
+
+            @Override
+            public void onDisconnected(@NonNull String endpointId) {
+                Long gen = endpointGeneration.remove(endpointId);
+                if (listener != null) {
+                    listener.onDisconnected(endpointId, gen != null ? gen : generation);
+                }
+            }
+        };
+    }
 
     private final EndpointDiscoveryCallback discovery = new EndpointDiscoveryCallback() {
         @Override

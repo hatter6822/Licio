@@ -377,6 +377,11 @@ public class BluetoothCourierRadio implements CourierRadio {
 
     @SuppressWarnings("MissingPermission")
     private void startServerSocket() {
+        // The SESSION generation: if a Stop→Start runs while listenUsingRfcommWithServiceRecord is
+        // still pending (before serverSocket is assigned, so stop() cannot close it), `running` is
+        // true again for the NEW session — the generation lets us close the OLD listener instead of
+        // leaving a stale RFCOMM server active under the fresh controller (#T).
+        final long serverGen = bleStartGeneration;
         new Thread(() -> {
             closeServerSocket();
             BluetoothServerSocket server;
@@ -387,17 +392,16 @@ public class BluetoothCourierRadio implements CourierRadio {
                 return;
             }
             serverSocket = server;
-            // stop() may have run (and found a null serverSocket) between its running flip and the
-            // assignment above; if a stop has already happened, close the freshly-created listener
-            // now so the RFCOMM service/listener doesn't stay registered after the courier stopped.
-            if (!running.get()) {
+            // A stop OR a Stop→Start (running true again for the NEW session) must close this freshly-
+            // created listener so the OLD session's RFCOMM service never stays registered (#T).
+            if (!running.get() || serverGen != bleStartGeneration) {
                 closeServerSocket();
                 return;
             }
             try {
-                while (running.get()) {
+                while (running.get() && serverGen == bleStartGeneration) {
                     BluetoothSocket socket = server.accept();
-                    if (!running.get()) {
+                    if (!running.get() || serverGen != bleStartGeneration) {
                         // stop() raced this accept() — close the just-accepted socket instead of
                         // handing it to the stream link (CourierStreamLink.run emits
                         // connectionResult(true) BEFORE its alive predicate is checked, so a stopped
@@ -423,6 +427,7 @@ public class BluetoothCourierRadio implements CourierRadio {
 
     @SuppressWarnings("MissingPermission")
     private void connectClient(BluetoothDevice device) {
+        final long connectGen = bleStartGeneration; // a stop/restart invalidates this dial (#T)
         new Thread(() -> {
             BluetoothSocket socket = null;
             try {
@@ -433,9 +438,10 @@ public class BluetoothCourierRadio implements CourierRadio {
                 liveSockets.add(socket);
                 adapter.cancelDiscovery(); // discovery slows the connect handshake
                 socket.connect();
-                if (!running.get()) {
-                    // Stopped DURING the dial — do not hand a connected socket to the stream link
-                    // (which would announce the endpoint connected after stop()).
+                if (!running.get() || connectGen != bleStartGeneration) {
+                    // Stopped DURING the dial, OR a Stop→Start superseded it (running true again for
+                    // the NEW session) — do not hand the OLD session's socket to the stream link
+                    // (which would announce the endpoint connected for a superseded session) (#T).
                     liveSockets.remove(socket);
                     socket.close();
                     return;
